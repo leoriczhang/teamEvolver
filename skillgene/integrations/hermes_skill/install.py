@@ -15,9 +15,9 @@ with a sensible default. Re-running is idempotent (updates in place).
 
 Usage::
 
-    python install.py --user alice --url http://evolve-host:8787
-    python install.py --user alice --url http://evolve-host:8787 --api-key <api-key>
-    python install.py --user alice --url http://evolve-host:8787 --hermes-home /custom/.hermes
+    python install.py --user alice --url http://evolve-host:52010
+    python install.py --user alice --url http://evolve-host:52010 --api-key <api-key>
+    python install.py --user alice --url http://evolve-host:52010 --hermes-home /custom/.hermes
 
 The approval is scoped to exactly our ``(on_session_end, command)`` pair — it is
 NOT a blanket auto-accept, so no other hook is affected. Verify with
@@ -196,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--url",
         required=True,
-        help="SkillGene Evolve Server base URL, e.g. http://<host>:8787 (no default — must be provided)",
+        help="SkillGene Evolve Server base URL, e.g. http://<host>:52010 (no default — must be provided)",
     )
     parser.add_argument("--api-key", default="", help="EVOLVE_INGEST_API_KEY, only if the server requires one")
     parser.add_argument("--hermes-home", default=None, help="Hermes home (default $HERMES_HOME or ~/.hermes)")

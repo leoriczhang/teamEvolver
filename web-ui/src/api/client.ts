@@ -1,8 +1,8 @@
 // API client for the SkillGene unified console.
 //
-// All requests are same-origin: the 8787 evolve server hosts this SPA and
+// All requests are same-origin: the 52010 evolve server hosts this SPA and
 // serves dashboard, auth, user, skill, model-config and session-ingest endpoints natively.
-// In dev, vite.config.ts proxies these paths to 127.0.0.1:8787.
+// In dev, vite.config.ts proxies these paths to 127.0.0.1:52010.
 
 export class ApiError extends Error {}
 
@@ -23,7 +23,7 @@ export async function api<T = any>(path: string, opts?: RequestInit): Promise<T>
   return data as T;
 }
 
-// ---- Dashboard (evolve server, native on 8787) --------------------------- //
+// ---- Dashboard (evolve server, native on 52010) --------------------------- //
 
 export interface StatusResp {
   running: boolean;

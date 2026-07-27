@@ -154,7 +154,7 @@ def test_feed_installer_replaces_same_script_with_new_python(tmp_path: Path) -> 
         "--user",
         "tester",
         "--url",
-        "http://127.0.0.1:8787",
+        "http://127.0.0.1:52010",
         "--hermes-home",
         str(home),
     ]

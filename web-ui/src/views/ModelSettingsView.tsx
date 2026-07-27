@@ -231,7 +231,7 @@ export default function ModelSettingsView({
           )}
 
           <div className="rounded-lg border border-border bg-background/60 p-3 text-xs leading-relaxed text-muted-foreground">
-            这些参数只影响 SkillGene 8787 服务自身的技能进化流程；不会配置 Hermes，也不会暴露本机路径或明文 Key。
+            这些参数只影响 SkillGene 52010 服务自身的技能进化流程；不会配置 Hermes，也不会暴露本机路径或明文 Key。
           </div>
         </div>
       </Panel>

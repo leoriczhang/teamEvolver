@@ -27,21 +27,21 @@ metadata:
 第一次使用时，**MUST 先向用户询问两个必填项**（都没有默认值，不要擅自假设）：
 
 1. **用户名** `user_alias`——会显示在 SkillGene 看板“会话历史”里，标明会话是谁发的；
-2. **SkillGene 服务地址** `base_url`——形如 `http://<host>:8787`，本机部署可能是
-   `http://127.0.0.1:8787`，远程则填对应主机。**服务地址必须问用户确认，不要写死成本机。**
+2. **SkillGene 服务地址** `base_url`——形如 `http://<host>:52010`，本机部署可能是
+   `http://127.0.0.1:52010`，远程则填对应主机。**服务地址必须问用户确认，不要写死成本机。**
 
 然后运行安装脚本（它会拷贝文件、写 `feed.json`、把 hook 并入 `config.yaml`，
 并写入一条**仅针对本 hook 的授权**，使其无需 TTY 交互即可生效）：
 
 ```bash
 # --user 和 --url 都是必填
-python3 install.py --user <USERNAME> --url http://<host>:8787
+python3 install.py --user <USERNAME> --url http://<host>:52010
 
 # 服务端设了 EVOLVE_INGEST_API_KEY 时再加 --api-key
-python3 install.py --user <USERNAME> --url http://<host>:8787 --api-key <KEY>
+python3 install.py --user <USERNAME> --url http://<host>:52010 --api-key <KEY>
 
 # 自定义 Hermes home（默认 $HERMES_HOME 或 ~/.hermes）
-python3 install.py --user <USERNAME> --url http://<host>:8787 --hermes-home /path/to/.hermes
+python3 install.py --user <USERNAME> --url http://<host>:52010 --hermes-home /path/to/.hermes
 ```
 
 > ⚠️ **为什么必须授权**：Hermes 会把每个 shell hook 用
@@ -62,7 +62,7 @@ python3 install.py --user <USERNAME> --url http://<host>:8787 --hermes-home /pat
    ```json
    {
      "user_alias": "<USERNAME>",
-     "base_url": "http://<host>:8787",
+     "base_url": "http://<host>:52010",
      "api_key": ""
    }
    ```

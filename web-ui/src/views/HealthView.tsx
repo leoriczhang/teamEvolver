@@ -87,7 +87,7 @@ export default function HealthView({
     {
       name: "控制台服务",
       ok: health?.status === "ok",
-      detail: health?.status === "ok" ? "8787 服务正常响应" : "无法确认 /health 状态",
+      detail: health?.status === "ok" ? "52010 服务正常响应" : "无法确认 /health 状态",
     },
     {
       name: "对象存储",

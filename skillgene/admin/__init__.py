@@ -1,2 +1,2 @@
-"""Admin helpers used by the single 8787 console service."""
+"""Admin helpers used by the single 52010 console service."""
 

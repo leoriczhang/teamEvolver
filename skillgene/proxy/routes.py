@@ -84,6 +84,20 @@ def _check_ingest_api_key(request: Request) -> None:
         raise HTTPException(status_code=401, detail="invalid ingest api key")
 
 
+def _is_embedded_evolve_path(path: str) -> bool:
+    if path in {"/trigger", "/status", "/sessions", "/conversations", "/storage/status", "/trigger-dreamcycle"}:
+        return True
+    return path.startswith(
+        (
+            "/conversations/",
+            "/storage/",
+            "/validation/",
+            "/skills/",
+            "/trigger-dreamcycle/",
+        )
+    )
+
+
 def _max_session_body_bytes() -> int:
     try:
         value = int(os.environ.get("SKILLGENE_MAX_SESSION_BODY_BYTES", str(8 * 1024 * 1024)) or 0)
@@ -473,6 +487,7 @@ class RoutesMixin:
         async def lifespan(_app: FastAPI):
             owner._ready_event.set()
             owner._start_skill_reload_polling()
+            owner._start_embedded_evolve()
             try:
                 yield
             finally:
@@ -513,6 +528,14 @@ class RoutesMixin:
         def _users_empty() -> bool:
             data = _load_registry(_registry_path(owner.config))
             return not bool(data.get("users"))
+
+        @app.middleware("http")
+        async def embedded_evolve_routes(request: Request, call_next):
+            if _is_embedded_evolve_path(request.url.path):
+                response = await owner._dispatch_embedded_evolve_request(request)
+                if response is not None:
+                    return response
+            return await call_next(request)
 
         @app.middleware("http")
         async def require_console_auth(request: Request, call_next):
