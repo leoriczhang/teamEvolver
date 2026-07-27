@@ -60,10 +60,33 @@ export interface LedgerRow {
 
 export interface Candidate {
   job_id: string;
-  skill_name: string;
+  skill_name?: string;
+  candidate_skill_name?: string;
   proposed_action?: string;
   rationale?: string;
   min_score?: number;
+  candidate_skill?: {
+    name?: string;
+    description?: string;
+    category?: string;
+    content?: string;
+    edit_summary?: Record<string, any>;
+  };
+  current_skill?: {
+    name?: string;
+    description?: string;
+    category?: string;
+    content?: string;
+  } | null;
+  current_skill_md?: string;
+  candidate_skill_md?: string;
+  skill_diff?: string;
+  verify_score?: number | null;
+  replay_score?: number | null;
+  baseline_score?: number | null;
+  recommended_publish?: boolean;
+  evaluation_error?: string | null;
+  evaluation?: EvalResult;
 }
 
 export interface EvalResult {
@@ -102,11 +125,18 @@ export interface EvalResult {
       }>;
     };
   };
+  candidate_skill?: Candidate["candidate_skill"];
+  current_skill?: Candidate["current_skill"];
+  current_skill_md?: string;
+  candidate_skill_md?: string;
+  skill_diff?: string;
 }
 
 export interface ReplaySide {
   score?: number | null;
   response?: string;
+  error?: string;
+  rationale?: string;
   instruction?: string;
   session_id?: string;
   turn_num?: number | null;
@@ -228,7 +258,13 @@ export interface SessionFilterAuditItem {
     reason?: string;
     mode?: string;
     model?: string;
+    true_replay_fallback_reason?: string;
   };
+  candidate_skill?: Candidate["candidate_skill"];
+  current_skill?: Candidate["current_skill"];
+  current_skill_md?: string;
+  candidate_skill_md?: string;
+  skill_diff?: string;
 }
 
 export interface SessionFilterAuditResp {

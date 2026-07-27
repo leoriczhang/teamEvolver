@@ -166,19 +166,6 @@ export default function DashboardView({ active }: { active: boolean }) {
     }
   }
 
-  async function rollback(name: string, target: number) {
-    if (!window.confirm(`确认将 ${name} 回滚到 v${target}？`)) return;
-    try {
-      await api(`/skills/${encodeURIComponent(name)}/rollback?target_version=${target}`, {
-        method: "POST",
-      });
-      toastOk("已回滚", `${name} → v${target}`);
-      refresh(true);
-    } catch (e: any) {
-      toastErr("回滚失败", e.message);
-    }
-  }
-
   const running = status?.running;
   const skills = status?.skills || {};
   const skillNames = Object.keys(skills);
@@ -430,10 +417,10 @@ export default function DashboardView({ active }: { active: boolean }) {
                             size="sm"
                             onClick={(e) => {
                               e.stopPropagation();
-                              rollback(n, v - 1);
+                              setSkillModal({ name: n, version: v });
                             }}
                           >
-                            回滚到 v{v - 1}
+                            版本 / 回滚
                           </Button>
                         ) : (
                           <span className="text-xs text-muted-foreground">—</span>

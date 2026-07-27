@@ -49,6 +49,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Optional
 
@@ -380,6 +381,7 @@ def spawn_branch(branch: str, sandbox: dict[str, str], instruction: str,
                  harness: dict[str, str], skill: Optional[dict[str, Any]],
                  tmp: Path, timeout: int, max_interactions: int = 4) -> dict[str, Any]:
     """Spawn a worker subprocess for one branch and collect its trajectory."""
+    worker_python = os.environ.get("SKILLGENE_REPLAY_PYTHON", "").strip() or sys.executable
     spec = {
         "branch": branch,
         "home": sandbox["home"],
@@ -403,7 +405,7 @@ def spawn_branch(branch: str, sandbox: dict[str, str], instruction: str,
     print(f"  ▶ running {branch} branch (real tool loop, timeout {timeout}s)…", flush=True)
     try:
         subprocess.run(
-            [sys.executable, "-m", "skillgene.true_replay",
+            [worker_python, "-m", "skillgene.true_replay",
              "--worker", "--spec", str(spec_path)],
             cwd=str(_REPO_ROOT), env=env, timeout=timeout,
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -491,7 +493,8 @@ def judge_branch(harness: dict[str, str], instruction: str, branch: dict[str, An
                       {"role": "user", "content": user_prompt}],
             temperature=0,
         )
-        raw = resp.choices[0].message.content or "{}"
+        message = resp.choices[0].message
+        raw = getattr(message, "content", None) or getattr(message, "reasoning_content", None) or "{}"
         start, end = raw.find("{"), raw.rfind("}")
         data = json.loads(raw[start:end + 1]) if start >= 0 else {}
     except Exception as e:  # noqa: BLE001
@@ -640,19 +643,98 @@ def evaluate_job(
 
     tmp = Path(tempfile.mkdtemp(prefix="true_replay_"))
     try:
+        # Build both sandboxes first, then run the two branches concurrently:
+        # each branch is an isolated subprocess with its own HOME/HERMES_HOME, so
+        # they don't share state and can run in parallel to halve wall-clock time.
+        sandboxes = {
+            branch: build_sandbox(tmp, branch, harness, skill)
+            for branch in ("baseline", "candidate")
+        }
         results: dict[str, dict[str, Any]] = {}
-        for branch in ("baseline", "candidate"):
-            sandbox = build_sandbox(tmp, branch, harness, skill)
-            results[branch] = spawn_branch(
-                branch,
-                sandbox,
-                chosen["instruction"],
-                harness,
-                skill,
-                tmp,
-                timeout,
-                max_interactions=max_interactions,
-            )
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = {
+                pool.submit(
+                    spawn_branch,
+                    branch,
+                    sandboxes[branch],
+                    chosen["instruction"],
+                    harness,
+                    skill,
+                    tmp,
+                    timeout,
+                    max_interactions=max_interactions,
+                ): branch
+                for branch in ("baseline", "candidate")
+            }
+            for fut in as_completed(futures):
+                branch = futures[fut]
+                try:
+                    results[branch] = fut.result()
+                except Exception as exc:  # noqa: BLE001
+                    results[branch] = {
+                        "branch": branch,
+                        "ok": False,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+        branch_failures = [
+            f"{branch}: {result.get('error') or 'branch failed'}"
+            for branch, result in results.items()
+            if not result.get("ok")
+        ]
+        if branch_failures:
+            efficiency = compare_efficiency(results["baseline"], results["candidate"])
+
+            def _failed_branch_case(branch: str) -> dict[str, Any]:
+                r = results[branch]
+                return {
+                    "session_id": str(chosen.get("session_id", "") or ""),
+                    "turn_num": int(chosen.get("turn_num", 0) or 0),
+                    "instruction": chosen["instruction"],
+                    "score": None,
+                    "task_completion": None,
+                    "tool_correctness": None,
+                    "rationale": f"branch failed: {r.get('error') or 'unknown error'}",
+                    "trajectory": render_trajectory(r.get("messages") or []),
+                    "final_response": str(r.get("final_response") or "")[:2000],
+                    "ok": bool(r.get("ok")),
+                    "error": r.get("error") or "branch failed",
+                    "elapsed_seconds": r.get("elapsed_seconds"),
+                    "api_calls": r.get("api_calls"),
+                    "interaction_turns": r.get("interaction_turns"),
+                    "tool_call_count": r.get("tool_call_count"),
+                    "total_tokens": r.get("total_tokens"),
+                    "input_tokens": r.get("input_tokens"),
+                    "output_tokens": r.get("output_tokens"),
+                    "cache_read_tokens": r.get("cache_read_tokens"),
+                    "cache_write_tokens": r.get("cache_write_tokens"),
+                    "reasoning_tokens": r.get("reasoning_tokens"),
+                    "interactions": r.get("interactions") or [],
+                }
+
+            return {
+                "status": "failed",
+                "mode": "true_replay",
+                "job_id": job_id,
+                "accepted": False,
+                "no_regression": False,
+                "score": None,
+                "baseline_mean": None,
+                "delta": None,
+                "quality_ok": False,
+                "efficiency": efficiency,
+                "threshold": round(float(min_score), 3),
+                "tolerance": round(float(tolerance), 3),
+                "max_interactions": max(1, int(max_interactions or 4)),
+                "case_count": 1,
+                "reason": "true replay branch failed: " + "; ".join(branch_failures),
+                "case": {
+                    "index": chosen["index"],
+                    "grounded": chosen["grounded"],
+                    "referenced_paths": chosen.get("referenced_paths"),
+                },
+                "harness": {"model": harness.get("model"), "base_url": harness.get("base_url")},
+                "cases": [{"baseline": _failed_branch_case("baseline"), "candidate": _failed_branch_case("candidate")}],
+            }
         judged = {b: judge_branch(harness, chosen["instruction"], results[b])
                   for b in ("baseline", "candidate")}
         efficiency = compare_efficiency(results["baseline"], results["candidate"])

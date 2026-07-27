@@ -40,6 +40,7 @@ class AsyncLLMClient:
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.max_retries = max(1, int(max_retries or 1))
+        self.timeout_seconds = float(timeout_seconds)
 
     async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
         requested_temperature = kwargs.pop("temperature", self.temperature)
@@ -53,7 +54,8 @@ class AsyncLLMClient:
         for attempt in range(self.max_retries):
             try:
                 resp = await asyncio.to_thread(self._client.chat.completions.create, **merged)
-                return resp.choices[0].message.content or ""
+                message = resp.choices[0].message
+                return (getattr(message, "content", None) or getattr(message, "reasoning_content", None) or "")
             except Exception as exc:
                 body_text = getattr(getattr(exc, "response", None), "text", "") or ""
                 status_code = getattr(getattr(exc, "response", None), "status_code", None)

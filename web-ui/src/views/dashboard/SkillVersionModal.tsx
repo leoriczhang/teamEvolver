@@ -39,7 +39,7 @@ export default function SkillVersionModal({
     setLoading(true);
     setError(null);
     api<SkillVersionResp>(
-      `/skills/${encodeURIComponent(name)}/versions/${version}`
+      `/api/skills/${encodeURIComponent(name)}/versions/${version}`
     )
       .then((d) => {
         if (!cancelled) setData(d);
@@ -65,7 +65,7 @@ export default function SkillVersionModal({
       return;
     try {
       const r = await api<{ new_version?: number }>(
-        `/skills/${encodeURIComponent(name)}/rollback?target_version=${target}`,
+        `/api/skills/${encodeURIComponent(name)}/rollback?target_version=${target}`,
         { method: "POST" }
       );
       toastOk("已回滚", name + (r.new_version ? ` → 新版本 v${r.new_version}` : ""));

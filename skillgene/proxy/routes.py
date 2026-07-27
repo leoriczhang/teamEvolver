@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 import time
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
@@ -34,8 +35,10 @@ from ..config_store import ConfigStore
 from ..session_filter import SessionValueClassifier
 from ..session_store import SessionStore
 from ..skills.hub import SkillHub
+from ..skills.render import build_skill_md
 from ..storage import is_not_found_error
 from ..validation.store import ValidationStore
+from ..validation.worker import ValidationWorker
 
 logger = logging.getLogger(__name__)
 _SESSION_COOKIE = "skillgene_console_session"
@@ -169,6 +172,261 @@ def _history_from_archived_sessions(config, *, limit: int = 50, session_id: str 
             }
         )
     return cycles
+
+
+def _candidate_skill_name(job: dict[str, Any]) -> str:
+    candidate_skill = job.get("candidate_skill") if isinstance(job.get("candidate_skill"), dict) else {}
+    return str(
+        job.get("skill_name")
+        or job.get("candidate_skill_name")
+        or candidate_skill.get("name")
+        or ""
+    )
+
+
+def _scrub_legacy_reward_text(text: Any) -> str:
+    value = str(text or "")
+    legacy_marker = "P" + "RM"
+    value = re.sub(rf"\s*\({legacy_marker}\s+[-+]?\d+(?:\.\d+)?\)", "", value, flags=re.IGNORECASE)
+    value = re.sub(rf"\b{legacy_marker}\b", "session quality score", value, flags=re.IGNORECASE)
+    return value
+
+
+def _candidate_payload(job: dict[str, Any], evaluation: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = dict(job)
+    name = _candidate_skill_name(payload)
+    if name:
+        payload["skill_name"] = name
+        payload.setdefault("candidate_skill_name", name)
+    payload["proposed_action"] = str(payload.get("proposed_action") or payload.get("action") or "")
+    if payload.get("rationale"):
+        payload["rationale"] = _scrub_legacy_reward_text(payload.get("rationale"))
+    if evaluation:
+        eval_payload = _evaluation_payload(job, evaluation, cached=True)
+        replay_payload = eval_payload.get("replay") if isinstance(eval_payload.get("replay"), dict) else {}
+        payload["evaluation"] = eval_payload
+        payload["verify_score"] = eval_payload.get("verify_score")
+        payload["replay_score"] = eval_payload.get("replay_score")
+        payload["baseline_score"] = replay_payload.get("baseline_mean")
+        payload["recommended_publish"] = eval_payload.get("recommended_publish")
+        payload["evaluation_error"] = replay_payload.get("error")
+    return payload
+
+
+def _normalize_replay_case(case: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "session_id": str(case.get("session_id") or ""),
+        "turn_num": int(case.get("turn_num", 0) or 0),
+        "instruction": str(case.get("instruction") or ""),
+        "baseline": {
+            "score": case.get("baseline", {}).get("score") if isinstance(case.get("baseline"), dict) else None,
+            "response": (
+                case.get("baseline", {}).get("final_response")
+                or case.get("baseline", {}).get("response_text")
+                if isinstance(case.get("baseline"), dict)
+                else ""
+            ),
+            "instruction": str(case.get("instruction") or ""),
+            "session_id": str(case.get("session_id") or ""),
+            "turn_num": int(case.get("turn_num", 0) or 0),
+            "interaction_turns": case.get("baseline", {}).get("interaction_turns") if isinstance(case.get("baseline"), dict) else None,
+            "tool_call_count": case.get("baseline", {}).get("tool_call_count") if isinstance(case.get("baseline"), dict) else None,
+            "total_tokens": case.get("baseline", {}).get("total_tokens") if isinstance(case.get("baseline"), dict) else None,
+        },
+        "candidate": {
+            "score": case.get("candidate", {}).get("score") if isinstance(case.get("candidate"), dict) else None,
+            "response": (
+                case.get("candidate", {}).get("final_response")
+                or case.get("candidate", {}).get("response_text")
+                if isinstance(case.get("candidate"), dict)
+                else ""
+            ),
+            "instruction": str(case.get("instruction") or ""),
+            "session_id": str(case.get("session_id") or ""),
+            "turn_num": int(case.get("turn_num", 0) or 0),
+            "interaction_turns": case.get("candidate", {}).get("interaction_turns") if isinstance(case.get("candidate"), dict) else None,
+            "tool_call_count": case.get("candidate", {}).get("tool_call_count") if isinstance(case.get("candidate"), dict) else None,
+            "total_tokens": case.get("candidate", {}).get("total_tokens") if isinstance(case.get("candidate"), dict) else None,
+        },
+    }
+
+
+def _evaluation_payload(job: dict[str, Any], result: dict[str, Any], *, cached: bool = False) -> dict[str, Any]:
+    replay_summary = result.get("replay_summary") if isinstance(result.get("replay_summary"), dict) else {}
+    cases = replay_summary.get("cases") if isinstance(replay_summary.get("cases"), list) else []
+    normalized_cases: list[dict[str, Any]] = []
+    fallback_reason = result.get("true_replay_fallback_reason")
+
+    def _first_present(mapping: dict[str, Any], *keys: str) -> Any:
+        for key in keys:
+            if key in mapping and mapping.get(key) is not None:
+                return mapping.get(key)
+        return None
+
+    def _branch_payload(branch: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+        response = _first_present(branch, "final_response", "response_text", "response") or ""
+        error = str(branch.get("error") or "")
+        rationale = str(branch.get("rationale") or branch.get("replay_reason") or "")
+        display_response = response or error or rationale
+        return {
+            "score": _first_present(branch, "score", "normalized_score"),
+            "response": display_response,
+            "error": error,
+            "rationale": rationale,
+            "instruction": branch.get("instruction") or item.get("instruction") or "",
+            "session_id": branch.get("session_id") or item.get("session_id") or "",
+            "turn_num": branch.get("turn_num") if branch.get("turn_num") is not None else item.get("turn_num"),
+            "interaction_turns": branch.get("interaction_turns"),
+            "tool_call_count": branch.get("tool_call_count"),
+            "total_tokens": branch.get("total_tokens"),
+        }
+
+    for item in cases:
+        if not isinstance(item, dict):
+            continue
+        if "baseline" in item or "candidate" in item:
+            baseline = item.get("baseline") if isinstance(item.get("baseline"), dict) else {}
+            candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
+            normalized_cases.append(
+                {
+                    "baseline": _branch_payload(baseline, item),
+                    "candidate": _branch_payload(candidate, item),
+                }
+            )
+    skill_name = _candidate_skill_name(job)
+    threshold = result.get("threshold", job.get("min_score", 0.75))
+    return {
+        "status": "evaluated",
+        "skill_name": skill_name,
+        "proposed_action": str(job.get("proposed_action") or job.get("action") or ""),
+        "verify_score": result.get("score"),
+        "replay_score": result.get("score"),
+        "recommended_publish": bool(result.get("accepted")),
+        "cached": cached,
+        "verification": {
+            "threshold": threshold,
+            "enabled": True,
+            "accepted": bool(result.get("accepted")),
+            "decision": result.get("decision"),
+            "reason": result.get("reason"),
+            "checks": result.get("checks", {}),
+        },
+        "replay": {
+            "threshold": threshold,
+            "tolerance": replay_summary.get("tolerance"),
+            "baseline_mean": replay_summary.get("baseline_mean_score") or replay_summary.get("baseline_mean"),
+            "no_regression": result.get("accepted") or (
+                isinstance(replay_summary.get("candidate_mean_score"), (int, float))
+                and isinstance(replay_summary.get("baseline_mean_score"), (int, float))
+                and float(replay_summary.get("candidate_mean_score")) >= float(replay_summary.get("baseline_mean_score"))
+            ),
+            "cases": normalized_cases,
+            "efficiency": replay_summary.get("efficiency") or {},
+            "mode": result.get("validator_mode"),
+            "error": fallback_reason or replay_summary.get("reason"),
+        },
+        "candidate_skill": job.get("candidate_skill"),
+        "current_skill": job.get("current_skill"),
+    }
+
+
+async def _evaluate_candidate_job(config, owner, job: dict[str, Any]) -> dict[str, Any]:
+    job_id = str(job.get("job_id") or "")
+    try:
+        from ..true_replay import evaluate_job
+
+        try:
+            replay_timeout = max(10, int(os.environ.get("SKILLGENE_TRUE_REPLAY_TIMEOUT_S", "90")))
+        except ValueError:
+            replay_timeout = 90
+        try:
+            max_interactions = max(1, int(os.environ.get("SKILLGENE_TRUE_REPLAY_MAX_INTERACTIONS", "1")))
+        except ValueError:
+            max_interactions = 1
+        replay = await asyncio.to_thread(
+            evaluate_job,
+            job_id,
+            job=job,
+            timeout=replay_timeout,
+            max_interactions=max_interactions,
+        )
+        if replay.get("status") == "evaluated":
+            return {
+                "validator_mode": "true_replay",
+                "decision": "accept" if replay.get("accepted") else "reject",
+                "accepted": bool(replay.get("accepted")),
+                "score": replay.get("score"),
+                "threshold": replay.get("threshold"),
+                "reason": (
+                    f"True Replay score={replay.get('score')}, "
+                    f"baseline={replay.get('baseline_mean')}, "
+                    f"delta={replay.get('delta')}, quality_ok={replay.get('quality_ok')}"
+                ),
+                "checks": {
+                    "grounded_in_evidence": replay.get("score"),
+                    "preserves_existing_value": 1.0 if replay.get("no_regression") else 0.0,
+                    "specificity_and_reusability": replay.get("score"),
+                    "safe_to_publish": replay.get("score") if replay.get("accepted") else 0.0,
+                },
+                "replay_summary": {
+                    **replay,
+                    "baseline_mean": replay.get("baseline_mean"),
+                    "candidate_mean_score": replay.get("score"),
+                    "baseline_mean_score": replay.get("baseline_mean"),
+                    "cases": replay.get("cases") or [],
+                },
+            }
+        logger.info("[Validation] true replay skipped for %s: %s", job_id, replay.get("reason"))
+        fallback_reason = replay.get("reason") or replay.get("status") or "true replay skipped"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Validation] true replay failed for %s: %s", job_id, exc)
+        fallback_reason = f"true replay failed: {type(exc).__name__}: {exc}"
+
+    worker = ValidationWorker(config, idle_provider=owner)
+    try:
+        result = await worker._replay_validate_job(job)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Validation] fallback replay failed for %s: %s", job_id, exc)
+        threshold = round(float(job.get("min_score", 0.75) or 0.75), 3)
+        result = {
+            "validator_mode": "failed",
+            "decision": "reject",
+            "accepted": False,
+            "score": None,
+            "threshold": threshold,
+            "reason": f"Replay evaluation failed after true replay fallback: {type(exc).__name__}: {exc}",
+            "checks": {},
+            "replay_summary": {
+                "reason": f"fallback replay failed: {type(exc).__name__}: {exc}",
+                "cases": [],
+            },
+        }
+    result = dict(result)
+    result["true_replay_fallback_reason"] = fallback_reason
+    return result
+
+
+def _skill_diff_payload(job: dict[str, Any]) -> dict[str, Any]:
+    import difflib
+
+    current = job.get("current_skill") if isinstance(job.get("current_skill"), dict) else None
+    candidate = job.get("candidate_skill") if isinstance(job.get("candidate_skill"), dict) else None
+    current_md = build_skill_md(current).splitlines() if current else []
+    candidate_md = build_skill_md(candidate).splitlines() if candidate else []
+    diff = "\n".join(
+        difflib.unified_diff(
+            current_md,
+            candidate_md,
+            fromfile="current/SKILL.md",
+            tofile="candidate/SKILL.md",
+            lineterm="",
+        )
+    )
+    return {
+        "current_skill_md": "\n".join(current_md),
+        "candidate_skill_md": "\n".join(candidate_md),
+        "skill_diff": diff,
+    }
 
 
 def _storage_status(config) -> dict[str, Any]:
@@ -480,7 +738,8 @@ class RoutesMixin:
                         resp = client.chat.completions.create(**payload)
                     else:
                         raise
-                content = resp.choices[0].message.content or ""
+                message = resp.choices[0].message
+                content = getattr(message, "content", None) or getattr(message, "reasoning_content", None) or ""
                 return {
                     "ok": True,
                     "model": model,
@@ -647,10 +906,108 @@ class RoutesMixin:
         async def validation_candidates():
             try:
                 store = ValidationStore.from_config(owner.config)
-                candidates = store.list_open_jobs(user_alias=str(owner.config.sharing_user_alias or ""))
+                candidates = []
+                for job in store.list_open_jobs(user_alias=str(owner.config.sharing_user_alias or "")):
+                    job_id = str(job.get("job_id") or "")
+                    evaluation = store.load_evaluation(job_id) if job_id else None
+                    candidates.append(_candidate_payload(job, evaluation))
             except Exception:
                 candidates = []
             return {"candidates": candidates}
+
+        @app.get("/validation/candidates/{job_id}")
+        async def validation_candidate_detail(job_id: str):
+            store = ValidationStore.from_config(owner.config)
+            job = store.load_job(job_id)
+            if not job:
+                raise HTTPException(status_code=404, detail="candidate not found")
+            return {**_candidate_payload(job), **_skill_diff_payload(job)}
+
+        @app.post("/validation/candidates/{job_id}/evaluate")
+        async def validation_candidate_evaluate(job_id: str, refresh: bool = False):
+            store = ValidationStore.from_config(owner.config)
+            job = store.load_job(job_id)
+            if not job:
+                return {"status": "not_found", "job_id": job_id}
+            cached = None if refresh else store.load_evaluation(job_id)
+            if cached:
+                return _evaluation_payload(job, cached, cached=True)
+            result = await _evaluate_candidate_job(owner.config, owner, job)
+            store.save_evaluation(job_id, result)
+            return _evaluation_payload(job, result, cached=False)
+
+        @app.post("/validation/candidates/{job_id}/validate")
+        async def validation_candidate_validate(job_id: str, request: Request):
+            _require_admin_user(_session_user(request))
+            body = await request.json()
+            if not isinstance(body, dict):
+                body = {}
+            mode = str(body.get("mode") or "auto")
+            store = ValidationStore.from_config(owner.config)
+            job = store.load_job(job_id)
+            if not job:
+                raise HTTPException(status_code=404, detail="candidate not found")
+            evaluation = store.load_evaluation(job_id)
+            if not evaluation:
+                evaluation = await _evaluate_candidate_job(owner.config, owner, job)
+                store.save_evaluation(job_id, evaluation)
+            accepted = bool(evaluation.get("accepted"))
+            if mode != "force" and not accepted:
+                decision = {
+                    "status": "rejected",
+                    "accepted": False,
+                    "reason": evaluation.get("reason") or "evaluation did not pass",
+                    "evaluation": evaluation,
+                }
+                store.save_decision(job_id, decision)
+                return decision
+            candidate_skill = job.get("candidate_skill") if isinstance(job.get("candidate_skill"), dict) else None
+            if not candidate_skill or not candidate_skill.get("name"):
+                raise HTTPException(status_code=400, detail="candidate missing skill payload")
+            from ..skills.bundle import coerce_skill_bundle
+            from ..skills.editor import save_skill
+
+            name = str(candidate_skill.get("name") or "")
+            current = job.get("current_skill") if isinstance(job.get("current_skill"), dict) else None
+            created = current is None
+            result = save_skill(
+                owner.config.skills_dir,
+                name=name,
+                description=str(candidate_skill.get("description") or ""),
+                category=str(candidate_skill.get("category") or "general"),
+                body=str(candidate_skill.get("content") or ""),
+                skill_md="",
+            )
+            bundle_files = candidate_skill.get("bundle_files")
+            if isinstance(bundle_files, dict):
+                from ..skills.bundle import write_skill_bundle
+
+                write_skill_bundle(
+                    os.path.join(owner.config.skills_dir, name),
+                    coerce_skill_bundle({"SKILL.md": build_skill_md(candidate_skill), **bundle_files}),
+                    clean=True,
+                )
+            loaded = owner._reload_skill_manager()
+            cloud = owner._cloud_sync_push(name)
+            decision = {
+                "status": "published",
+                "accepted": True,
+                "job_id": job_id,
+                "skill_name": name,
+                "created": created,
+                "version": cloud.get("version") or result.get("version"),
+                "loaded_skills": loaded,
+                "cloud": cloud,
+                "evaluation": evaluation,
+            }
+            store.save_decision(job_id, decision)
+            return decision
+
+        @app.delete("/validation/candidates/{job_id}")
+        async def validation_candidate_delete(job_id: str, request: Request):
+            _require_admin_user(_session_user(request))
+            store = ValidationStore.from_config(owner.config)
+            return store.delete_job(job_id)
 
         @app.post("/internal/reload-skills")
         async def reload_skills(

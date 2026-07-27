@@ -875,6 +875,184 @@ class SkillHub:
         """Return a list of skill metadata dicts from the remote manifest."""
         return list(self._load_remote_manifest().values())
 
+    # ------------------------------------------------------------------ #
+    # Version history + rollback                                           #
+    # ------------------------------------------------------------------ #
+
+    def _load_registry(self) -> SkillIDRegistry:
+        registry = SkillIDRegistry()
+        registry.load_from_oss(self._bucket, self._prefix())
+        return registry
+
+    def list_versions(self, skill_name: str) -> dict[str, Any]:
+        """Return the version history for one skill from the ID registry.
+
+        Shape: ``{skill_id, current_version, versions: [int, ...],
+        history: [{version, action, timestamp, ...}, ...]}``. ``versions`` is a
+        descending list of every version we can actually reconstruct from
+        storage (each has a ``versions/v{n}/`` bundle), so the UI never offers a
+        version that cannot be viewed or rolled back to.
+        """
+        name = str(skill_name or "").strip()
+        registry = self._load_registry()
+        entry = registry._map.get(name, {}) if name else {}
+        current = int(entry.get("version") or 0)
+        history = entry.get("history") if isinstance(entry.get("history"), list) else []
+
+        available: list[int] = []
+        for version in range(current, 0, -1):
+            if self._version_bundle_exists(name, version):
+                available.append(version)
+        # The current live version may predate per-version bundles; always keep
+        # it selectable so the modal can show at least the live content.
+        if current > 0 and current not in available:
+            available.insert(0, current)
+
+        return {
+            "name": name,
+            "skill_id": str(entry.get("skill_id") or registry.get_or_create(name) if name else ""),
+            "current_version": current,
+            "versions": available,
+            "history": history,
+        }
+
+    def _version_bundle_exists(self, skill_name: str, version: int) -> bool:
+        try:
+            self._bucket.get_object(self._skill_version_record_key(skill_name, version))
+            return True
+        except Exception:
+            return False
+
+    def _read_version_bundle(self, skill_name: str, version: int) -> dict[str, bytes]:
+        """Reconstruct a specific version's bundle from ``versions/v{n}/``.
+
+        Falls back to the live (non-versioned) bundle only when the requested
+        version equals the current manifest version and no versioned snapshot
+        exists (older skills pushed before per-version snapshots landed).
+        """
+        record_bytes: Optional[bytes] = None
+        try:
+            record_bytes = self._bucket.get_object(
+                self._skill_version_record_key(skill_name, version)
+            ).read()
+        except Exception:
+            record_bytes = None
+
+        if record_bytes is not None:
+            record = json.loads(record_bytes.decode("utf-8"))
+            bundle: dict[str, bytes] = {}
+            file_entries = record.get("files")
+            if isinstance(file_entries, list) and file_entries:
+                for item in file_entries:
+                    rel_path = str((item or {}).get("path") or "").strip().replace("\\", "/")
+                    if not rel_path:
+                        continue
+                    key = self._skill_version_bundle_key(skill_name, version, rel_path)
+                    bundle[rel_path] = self._bucket.get_object(key).read()
+            else:
+                key = self._skill_version_bundle_key(skill_name, version, "SKILL.md")
+                bundle["SKILL.md"] = self._bucket.get_object(key).read()
+            return bundle
+
+        manifest = self._load_remote_manifest()
+        rec = manifest.get(skill_name)
+        if rec and int(rec.get("version") or 0) == int(version):
+            return self._download_skill_bundle(skill_name, rec)
+        raise FileNotFoundError(f"version v{version} of {skill_name} not found in storage")
+
+    def get_version_detail(self, skill_name: str, version: int) -> dict[str, Any]:
+        """Return one version's SKILL.md content + parsed metadata for the UI."""
+        name = str(skill_name or "").strip()
+        info = self.list_versions(name)
+        bundle = self._read_version_bundle(name, int(version))
+        raw_md = bundle.get("SKILL.md", b"").decode("utf-8", errors="replace")
+        parsed = frontmatter._load_frontmatter_from_raw(raw_md) or {}
+        body = raw_md
+        split = frontmatter._split_frontmatter(raw_md)
+        if split is not None:
+            body = split[1]
+        return {
+            "name": name,
+            "skill_id": info.get("skill_id") or name,
+            "version": int(version),
+            "current_version": info.get("current_version") or 0,
+            "is_current": int(version) == int(info.get("current_version") or 0),
+            "versions": info.get("versions") or [],
+            "description": str(parsed.get("description") or ""),
+            "category": frontmatter.resolve_category(parsed) or "general",
+            "content": body,
+            "raw_md": raw_md,
+        }
+
+    def rollback_skill(self, skill_name: str, target_version: int) -> dict[str, Any]:
+        """Republish an older version's content as a new current version.
+
+        Rollback never rewrites history: it reads ``target_version``'s bundle,
+        writes it back as the live bundle, and records a *new* version (so the
+        chain stays append-only and auditable). Returns
+        ``{name, restored_from, new_version}``.
+        """
+        name = str(skill_name or "").strip()
+        if not name:
+            raise ValueError("skill name is required")
+        target = int(target_version)
+        bundle = self._read_version_bundle(name, target)
+        if "SKILL.md" not in bundle:
+            raise FileNotFoundError(f"version v{target} of {name} has no SKILL.md")
+
+        skill_md = bundle_entrypoint_bytes(bundle)
+        local_sha = hashlib.sha256(skill_md).hexdigest()
+        tree_sha = bundle_tree_sha256(bundle)
+        bundle_records = bundle_file_records(bundle)
+
+        # Write the restored bundle back as the live skill objects.
+        self._bucket.put_object(self._skill_key(name), skill_md)
+        for rel_path, data in sorted(bundle.items()):
+            if rel_path == "SKILL.md":
+                continue
+            self._bucket.put_object(self._skill_bundle_key(name, rel_path), data)
+        self._delete_remote_bundle_extras(name, bundle.keys())
+
+        bundle_record = {
+            "format": "bundle_v1",
+            "entrypoint": "SKILL.md",
+            "tree_sha256": tree_sha,
+            "files": bundle_records,
+        }
+        registry = self._load_registry()
+        new_version = registry.record_update(
+            name, local_sha, action=f"rollback:v{target}", bundle_record=bundle_record
+        )
+        self._save_version_bundle(name, new_version, bundle)
+
+        manifest = self._load_remote_manifest()
+        existing = manifest.get(name, {})
+        manifest[name] = {
+            **existing,
+            "name": name,
+            "skill_id": registry.get_or_create(name),
+            "version": new_version,
+            "sha256": local_sha,
+            "tree_sha256": tree_sha,
+            "format": "bundle_v1",
+            "entrypoint": "SKILL.md",
+            "files": bundle_records,
+            "uploaded_by": self._user_alias,
+            "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._save_remote_manifest(manifest)
+        registry.save_to_oss(self._bucket, self._prefix())
+
+        logger.info(
+            "[SkillHub] rolled back %s to v%d as new v%d", name, target, new_version
+        )
+        return {
+            "name": name,
+            "restored_from": target,
+            "new_version": new_version,
+            "bundle": bundle,
+        }
+
     def sync_skills(self, skills_dir: str) -> dict[str, dict[str, Any]]:
         """Bidirectional sync: incremental pull (no deletes), then push."""
         pull_result = self.pull_skills(skills_dir, mirror=False)

@@ -11,6 +11,7 @@ from typing import Any
 from .llm import AsyncLLMClient
 
 logger = logging.getLogger(__name__)
+_DEFAULT_CLASSIFIER_TIMEOUT_SECONDS = 60
 
 
 def _clip(text: str, limit: int = 1200) -> str:
@@ -114,6 +115,13 @@ def heuristic_classify_session(session: dict[str, Any], *, reason: str = "") -> 
     }
 
 
+def _classifier_failure_reason(exc: Exception, timeout_seconds: float) -> str:
+    name = type(exc).__name__
+    if "Timeout" in name:
+        return f"classifier_timeout after {timeout_seconds:.1f}s"
+    return f"classifier_error: {name}"
+
+
 @dataclass
 class SessionValueClassifier:
     """Classify whether a session is worth entering the evolution queue."""
@@ -128,9 +136,17 @@ class SessionValueClassifier:
         if not api_key or not base_url or not model:
             return cls(client=None)
         try:
-            timeout_seconds = max(1.0, float(os.environ.get("SKILLGENE_SESSION_CLASSIFIER_TIMEOUT_S", "8")))
+            timeout_seconds = max(
+                1.0,
+                float(
+                    os.environ.get(
+                        "SKILLGENE_SESSION_CLASSIFIER_TIMEOUT_S",
+                        str(_DEFAULT_CLASSIFIER_TIMEOUT_SECONDS),
+                    )
+                ),
+            )
         except ValueError:
-            timeout_seconds = 8.0
+            timeout_seconds = _DEFAULT_CLASSIFIER_TIMEOUT_SECONDS
         try:
             return cls(
                 client=AsyncLLMClient(
@@ -178,7 +194,7 @@ class SessionValueClassifier:
             raw = await self.client.chat(messages, max_tokens=512, temperature=0)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[SessionFilter] classifier failed: %s", exc)
-            return heuristic_classify_session(session, reason=f"classifier failed: {type(exc).__name__}")
+            return heuristic_classify_session(session, reason=_classifier_failure_reason(exc, self.client.timeout_seconds))
 
         parsed = _extract_json_object(raw)
         decision = str(parsed.get("decision") or "").strip().lower()

@@ -43,6 +43,16 @@ function SecTitle({ children }: { children: ReactNode }) {
   return <div className="mt-5 mb-2.5 flex items-center gap-2 text-[13px] font-bold">{children}</div>;
 }
 
+function candidateName(cand: Candidate | null, ev: EvalResult | null, jobId: string | null): string {
+  return cand?.skill_name || cand?.candidate_skill_name || cand?.candidate_skill?.name || ev?.skill_name || jobId || "-";
+}
+
+function skillToMd(skill?: Candidate["candidate_skill"] | Candidate["current_skill"]) {
+  if (!skill) return "";
+  const description = String(skill.description || "").replace(/"/g, '\\"');
+  return `---\nname: ${skill.name || "unknown"}\ndescription: "${description}"\ncategory: ${skill.category || "general"}\n---\n\n${skill.content || ""}\n`;
+}
+
 function Kpi({
   label,
   value,
@@ -94,6 +104,9 @@ export default function CandidateModal({
   const replayCases = rep.cases || [];
   const efficiencyDimensions = rep.efficiency?.dimensions || {};
   const replayPager = usePagedItems(replayCases);
+  const currentMd = ev?.current_skill_md || cand?.current_skill_md || skillToMd(cand?.current_skill || ev?.current_skill);
+  const candidateMd = ev?.candidate_skill_md || cand?.candidate_skill_md || skillToMd(cand?.candidate_skill || ev?.candidate_skill);
+  const skillDiff = ev?.skill_diff || cand?.skill_diff || "";
   const thr =
     cand?.min_score != null
       ? cand.min_score
@@ -238,7 +251,7 @@ export default function CandidateModal({
             技能 / 动作
           </div>
           <div className="flex items-center gap-2">
-            {cand?.skill_name || ev.skill_name || "-"}
+            {candidateName(cand, ev, jobId)}
             <span className="text-muted-foreground">·</span>
             <Pill tone="blue">{ev.proposed_action || cand?.proposed_action || "-"}</Pill>
           </div>
@@ -329,6 +342,17 @@ export default function CandidateModal({
 
         <SecTitle>🛡 Verify 校验明细</SecTitle>
         {verifyHtml}
+        <SecTitle>📄 Skill 变更内容</SecTitle>
+        <div className="grid gap-2.5 sm:grid-cols-2">
+          <SkillMdBlock title="当前 SKILL.md" body={currentMd || "（新建技能，无当前版本）"} />
+          <SkillMdBlock title="候选 SKILL.md" body={candidateMd || "（无候选内容）"} />
+        </div>
+        {skillDiff && (
+          <details className="rounded-lg border border-border p-3">
+            <summary className="cursor-pointer text-xs font-semibold">查看 Unified Diff</summary>
+            <pre className="mt-2 max-h-[360px] overflow-auto whitespace-pre-wrap text-[11px]">{skillDiff}</pre>
+          </details>
+        )}
         <SecTitle>🔁 A/B 回放明细（基线 vs 候选）</SecTitle>
         {replayHtml}
 
@@ -353,11 +377,20 @@ export default function CandidateModal({
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="max-h-[88vh] w-full !max-w-[860px] overflow-auto">
         <DialogHeader>
-          <DialogTitle>评估详情 · {cand?.skill_name || jobId}</DialogTitle>
+          <DialogTitle>评估详情 · {candidateName(cand, ev, jobId)}</DialogTitle>
         </DialogHeader>
         {bodyInner}
       </DialogContent>
     </Dialog>
+  );
+}
+
+function SkillMdBlock({ title, body }: { title: string; body: string }) {
+  return (
+    <div className="rounded-lg border border-border bg-surface-subtle p-3">
+      <div className="mb-2 text-xs font-semibold text-muted-foreground">{title}</div>
+      <pre className="max-h-[360px] overflow-auto whitespace-pre-wrap text-[11px]">{body}</pre>
+    </div>
   );
 }
 

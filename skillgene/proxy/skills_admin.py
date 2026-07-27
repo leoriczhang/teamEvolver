@@ -195,6 +195,63 @@ class SkillsAdminMixin:
             except SkillEditorError as e:
                 raise HTTPException(status_code=404, detail=str(e)) from e
 
+        @app.get("/api/skills/{name}/versions")
+        async def api_list_skill_versions(name: str):
+            """List a skill's version history from the shared cloud registry."""
+            try:
+                from ..skills.hub import SkillHub
+
+                hub = SkillHub.team_from_config(owner.config)
+                return JSONResponse(content=hub.list_versions(name))
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(status_code=404, detail=f"versions unavailable: {e}") from e
+
+        @app.get("/api/skills/{name}/versions/{version}")
+        async def api_get_skill_version(name: str, version: int):
+            """Return one version's SKILL.md content + parsed metadata."""
+            try:
+                from ..skills.hub import SkillHub
+
+                hub = SkillHub.team_from_config(owner.config)
+                return JSONResponse(content=hub.get_version_detail(name, int(version)))
+            except FileNotFoundError as e:
+                raise HTTPException(status_code=404, detail=str(e)) from e
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(status_code=404, detail=f"version unavailable: {e}") from e
+
+        @app.post("/api/skills/{name}/rollback")
+        async def api_rollback_skill(name: str, target_version: int, request: Request):
+            """Republish ``target_version``'s content as a new current version.
+
+            Admin-only. Rolls the shared cloud copy back, then mirrors the
+            restored bundle into the local skills dir and reloads the manager so
+            injection immediately reflects the rollback.
+            """
+            _require_admin_request(request)
+            try:
+                from ..skills.hub import SkillHub
+                from ..skills.bundle import write_skill_bundle
+                from ..skills import layout
+
+                hub = SkillHub.team_from_config(owner.config)
+                result = hub.rollback_skill(name, int(target_version))
+            except FileNotFoundError as e:
+                raise HTTPException(status_code=404, detail=str(e)) from e
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(status_code=400, detail=f"rollback failed: {e}") from e
+
+            bundle = result.pop("bundle", None)
+            if isinstance(bundle, dict) and bundle:
+                try:
+                    detail = hub.get_version_detail(name, int(result.get("new_version") or 0))
+                    category = str(detail.get("category") or "general")
+                    local_dir = layout.skill_dir_for(owner._skills_dir(), name, category)
+                    write_skill_bundle(local_dir, bundle, clean=True)
+                except Exception as e:  # noqa: BLE001 - local mirror is best-effort
+                    logger.warning("[SkillsAdmin] rollback local mirror failed for %s: %s", name, e)
+            loaded = owner._reload_skill_manager()
+            return JSONResponse(content={**result, "loaded_skills": loaded})
+
         @app.get("/sync/skills")
         async def sync_skills_snapshot():
             return JSONResponse(content=owner._sync_bundle_payload())
