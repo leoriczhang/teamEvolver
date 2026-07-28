@@ -101,9 +101,7 @@ The recommended path is shared storage, local sync, and native agent loading. Co
 
 ---
 
-## Quick Start
-
-### 1. Install
+## Manual Installation
 
 ```bash
 git clone https://github.com/leoriczhang/teamEvolver.git
@@ -112,70 +110,26 @@ python -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
 python -m pip install -e ".[all]"
-```
 
-Core package only:
-
-```bash
-python -m pip install -e .
-```
-
-Installer script:
-
-```bash
-bash scripts/install_teamEvolver.sh
-```
-
-### 2. Configure a Local Skill Library
-
-```bash
+teamEvolver config service.port 52010
 teamEvolver config skills.enabled true
 teamEvolver config skills.dir ./skills
 teamEvolver config sharing.enabled true
 teamEvolver config sharing.backend local
 teamEvolver config sharing.local_root ./teamEvolver-store
-```
 
-### 3. Create a Skill
-
-```bash
-mkdir -p skills/example-skill
-cat > skills/example-skill/SKILL.md <<'EOF'
----
-name: example-skill
-description: Use when you need a minimal teamEvolver example.
-category: general
----
-
-# Example Skill
-
-Follow the project conventions and keep the answer concise.
-EOF
-```
-
-### 4. Sync Skills
-
-```bash
-teamEvolver skills push
-teamEvolver skills list-remote
-teamEvolver skills pull
-```
-
-### 5. Start the Console
-
-```bash
-teamEvolver config service.port 30000
-teamEvolver start --daemon
+mkdir -p skills
+teamEvolver start --daemon --port 52010
 teamEvolver status
 ```
 
-Open:
-
 ```text
-http://127.0.0.1:30000/console
+http://127.0.0.1:52010/console
 ```
 
 On first launch, initialize the admin account. The default username and password are both `admin`; change them after deployment.
+
+Hermes / coding agent integration instructions live in [docs/coding-agent.en.md](./docs/coding-agent.en.md).
 
 ---
 
@@ -213,77 +167,6 @@ The console includes:
 - **Skill Management**: manage personal and team skills, including zip upload.
 - **User Management**: manage users, roles, and personal/team storage credentials.
 - **Model Settings**: configure an optional validation model and test connectivity.
-
----
-
-## Team Skill Sync
-
-Install `teamEvolver-sync` on agent machines. It pulls team skills before each task run and adds the synced directory to the agent's external skill directories.
-
-```mermaid
-sequenceDiagram
-    participant User as User
-    participant Agent as Hermes
-    participant Hook as teamEvolver-sync
-    participant Store as Shared Skill Store
-
-    User->>Agent: Start or continue a task
-    Agent->>Hook: pre_llm_call
-    Hook->>Store: Pull team SKILL.md bundles
-    Store-->>Hook: Manifest + skill files
-    Hook-->>Agent: Update external skill directory
-    Agent->>Agent: Native skill discovery
-```
-
-Install example:
-
-```bash
-python teamEvolver/integrations/hermes_skill_sync/install.py \
-  --url "http://<teamEvolver-host>:52010" \
-  --user "<teamEvolver-user>"
-```
-
-The default installer uses the teamEvolver service backend. Local Hermes machines
-only need the teamEvolver service URL and teamEvolver user name; OpenViking endpoint,
-team key, root prefix, and related shared-storage settings stay on the cloud
-teamEvolver service.
-
-The installer writes configuration similar to:
-
-```yaml
-skills:
-  external_dirs:
-    - <HERMES_HOME>/team_skills/teamEvolver
-hooks:
-  pre_llm_call:
-    - command: "python3 <HERMES_HOME>/skills/teamEvolver-sync/sync_skills.py"
-      timeout: 60
-```
-
-The generated `sync.json` is similar to:
-
-```json
-{
-  "backend": "service",
-  "base_url": "http://<teamEvolver-host>:52010",
-  "user_alias": "<teamEvolver-user>",
-  "target_dir": "<HERMES_HOME>/team_skills/teamEvolver"
-}
-```
-
-If the agent is already running, execute `/reload-skills` to refresh the current session cache. New sessions pick up synced skills automatically.
-
-### Session Skill Attribution and Efficiency Metrics
-
-The `teamEvolver-feed` `on_session_end` hook reads the complete Hermes trajectory
-from `state.db`, including system, user, assistant, and tool messages:
-
-- `injected_skills`: skills actually exposed in the system prompt's `<available_skills>` block.
-- `used_skills`: skills actually loaded through `skill_view`.
-- `metrics`: interaction turns, tool-call count, and input/output/cache/reasoning tokens.
-
-After installing `teamEvolver-feed`, these fields are sent through `/ingest_session`
-and preserved in the session archive and console details.
 
 ---
 
