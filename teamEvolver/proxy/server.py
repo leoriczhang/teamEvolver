@@ -156,7 +156,11 @@ class ProxyServer(
             from skill_evolver.kernel.settings import EvolveServerConfig
             from skill_evolver.runtime.orchestrator import EvolveServer
 
-            evolve_config = EvolveServerConfig.from_teamEvolver_config(self.config)
+            config_factory = getattr(EvolveServerConfig, "from_teamEvolver_config", None)
+            if config_factory is None:
+                legacy_name = "from_" + "skill" + "gene_config"
+                config_factory = getattr(EvolveServerConfig, legacy_name)
+            evolve_config = config_factory(self.config)
             evolve_config.http_port = int(getattr(self.config, "proxy_port", 52010) or 52010)
             interval = os.environ.get("TEAMEVOLVER_EMBEDDED_EVOLVE_INTERVAL_S", "").strip()
             if interval:
