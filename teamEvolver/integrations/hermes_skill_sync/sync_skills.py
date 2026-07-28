@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import select
 import shutil
 import sys
 import time
@@ -294,7 +295,8 @@ def main() -> int:
     # Consume stdin so Hermes can pipe the hook payload without blocking. The
     # current implementation does not need fields from the payload.
     try:
-        sys.stdin.read()
+        if select.select([sys.stdin], [], [], 0)[0]:
+            sys.stdin.read()
     except Exception:
         pass
 

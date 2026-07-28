@@ -17,4 +17,5 @@ dist/
 .env.*
 !.env.example
 *.log
+evolve_history.jsonl
 records/
