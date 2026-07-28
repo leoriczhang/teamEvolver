@@ -103,33 +103,87 @@ teamEvolver 的推荐链路是“共享存储 + 本地同步 + Agent 原生加�
 
 ## 手动安装
 
+连不上外网时先执行：
+
 ```bash
+export http_proxy="http://sys-proxy-rd-relay.byted.org:8118"
+export https_proxy="http://sys-proxy-rd-relay.byted.org:8118"
+export no_proxy="localhost,.byted.org,byted.org,.bytedance.net,bytedance.net,127.0.0.0/8,169.254.0.0/16,100.64.0.0/10,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8,::1,fe80::/10,fd00::/8,33.0.0.0/8,2605:340:CD00::/40,64:ff9b::/96,64:ff9b:1::/48"
+```
+
+### Server 端：部署 teamEvolver
+
+```bash
+export TEAMEVOLVER_HOST="<server-ip-or-hostname>"
+
 git clone https://github.com/leoriczhang/teamEvolver.git
 cd teamEvolver
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
 python -m pip install -e ".[all]"
+npm --prefix web-ui install
+npm --prefix web-ui run build
 
+teamEvolver config service.host 0.0.0.0
 teamEvolver config service.port 52010
 teamEvolver config skills.enabled true
 teamEvolver config skills.dir ./skills
 teamEvolver config sharing.enabled true
-teamEvolver config sharing.backend local
-teamEvolver config sharing.local_root ./teamEvolver-store
+teamEvolver config sharing.backend viking
+teamEvolver config sharing.viking_team_api_key "<team-key>"
+teamEvolver config sharing.viking_personal_api_key "<personal-key>"
+teamEvolver config sharing.viking_root_prefix "team-skill-evolver"
 
 mkdir -p skills
 teamEvolver start --daemon --port 52010
 teamEvolver status
+curl -fsS "http://127.0.0.1:52010/health"
+curl -fsS "http://127.0.0.1:52010/status"
 ```
 
 ```text
-http://127.0.0.1:52010/console
+http://<server-ip-or-hostname>:52010/console
 ```
 
 首次启动时可初始化管理员账号。默认账号与密码均为 `admin`，建议部署后立即修改。
 
-Hermes / coding agent 接入说明已移到 [docs/coding-agent.md](./docs/coding-agent.md)。
+### Client 端：部署 Hermes
+
+```bash
+export TEAMEVOLVER_REPO="/path/to/teamEvolver"
+export HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+export TEAMEVOLVER_URL="http://<server-ip-or-hostname>:52010"
+export TEAMEVOLVER_USER="<unique-user-alias-for-this-machine>"
+export TEAMEVOLVER_API_KEY=""
+TEAMEVOLVER_AUTH_ARGS=()
+[ -n "$TEAMEVOLVER_API_KEY" ] && TEAMEVOLVER_AUTH_ARGS=(--api-key "$TEAMEVOLVER_API_KEY")
+
+python "$TEAMEVOLVER_REPO/teamEvolver/integrations/hermes_skill_sync/install.py" \
+  --hermes-home "$HERMES_HOME" \
+  --backend service \
+  --url "$TEAMEVOLVER_URL" \
+  --user "$TEAMEVOLVER_USER" \
+  "${TEAMEVOLVER_AUTH_ARGS[@]}"
+
+python "$TEAMEVOLVER_REPO/teamEvolver/integrations/hermes_skill/install.py" \
+  --hermes-home "$HERMES_HOME" \
+  --user "$TEAMEVOLVER_USER" \
+  --url "$TEAMEVOLVER_URL" \
+  "${TEAMEVOLVER_AUTH_ARGS[@]}"
+
+python "$HERMES_HOME/skills/teamEvolver-sync/sync_skills.py"
+hermes hooks list
+curl -fsS "$TEAMEVOLVER_URL/status"
+```
+
+如果 Hermes 已经在运行，在 Hermes 会话内执行：
+
+```text
+/reload-skills
+```
+
+更完整的 coding agent 接入说明见 [docs/coding-agent.md](./docs/coding-agent.md)。
 
 ---
 

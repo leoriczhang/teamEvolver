@@ -13,6 +13,16 @@ teamEvolver 统一使用 `52010` 端口。中心机 `http://<teamEvolver-host>:5
 - `GET /sessions`、`GET /conversations`、`GET /validation/candidates`、`GET /storage/status`：控制台和巡检接口。
 - `GET /console`：Web 控制台。
 
+## 网络代理
+
+连不上外网时先执行：
+
+```bash
+export http_proxy="http://sys-proxy-rd-relay.byted.org:8118"
+export https_proxy="http://sys-proxy-rd-relay.byted.org:8118"
+export no_proxy="localhost,.byted.org,byted.org,.bytedance.net,bytedance.net,127.0.0.0/8,169.254.0.0/16,100.64.0.0/10,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8,::1,fe80::/10,fd00::/8,33.0.0.0/8,2605:340:CD00::/40,64:ff9b::/96,64:ff9b:1::/48"
+```
+
 ## 输入变量
 
 ```bash

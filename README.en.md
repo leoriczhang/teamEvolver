@@ -103,33 +103,87 @@ The recommended path is shared storage, local sync, and native agent loading. Co
 
 ## Manual Installation
 
+If external network access fails, run:
+
 ```bash
+export http_proxy="http://sys-proxy-rd-relay.byted.org:8118"
+export https_proxy="http://sys-proxy-rd-relay.byted.org:8118"
+export no_proxy="localhost,.byted.org,byted.org,.bytedance.net,bytedance.net,127.0.0.0/8,169.254.0.0/16,100.64.0.0/10,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8,::1,fe80::/10,fd00::/8,33.0.0.0/8,2605:340:CD00::/40,64:ff9b::/96,64:ff9b:1::/48"
+```
+
+### Server: Deploy teamEvolver
+
+```bash
+export TEAMEVOLVER_HOST="<server-ip-or-hostname>"
+
 git clone https://github.com/leoriczhang/teamEvolver.git
 cd teamEvolver
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
 python -m pip install -e ".[all]"
+npm --prefix web-ui install
+npm --prefix web-ui run build
 
+teamEvolver config service.host 0.0.0.0
 teamEvolver config service.port 52010
 teamEvolver config skills.enabled true
 teamEvolver config skills.dir ./skills
 teamEvolver config sharing.enabled true
-teamEvolver config sharing.backend local
-teamEvolver config sharing.local_root ./teamEvolver-store
+teamEvolver config sharing.backend viking
+teamEvolver config sharing.viking_team_api_key "<team-key>"
+teamEvolver config sharing.viking_personal_api_key "<personal-key>"
+teamEvolver config sharing.viking_root_prefix "team-skill-evolver"
 
 mkdir -p skills
 teamEvolver start --daemon --port 52010
 teamEvolver status
+curl -fsS "http://127.0.0.1:52010/health"
+curl -fsS "http://127.0.0.1:52010/status"
 ```
 
 ```text
-http://127.0.0.1:52010/console
+http://<server-ip-or-hostname>:52010/console
 ```
 
 On first launch, initialize the admin account. The default username and password are both `admin`; change them after deployment.
 
-Hermes / coding agent integration instructions live in [docs/coding-agent.en.md](./docs/coding-agent.en.md).
+### Client: Deploy Hermes
+
+```bash
+export TEAMEVOLVER_REPO="/path/to/teamEvolver"
+export HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+export TEAMEVOLVER_URL="http://<server-ip-or-hostname>:52010"
+export TEAMEVOLVER_USER="<unique-user-alias-for-this-machine>"
+export TEAMEVOLVER_API_KEY=""
+TEAMEVOLVER_AUTH_ARGS=()
+[ -n "$TEAMEVOLVER_API_KEY" ] && TEAMEVOLVER_AUTH_ARGS=(--api-key "$TEAMEVOLVER_API_KEY")
+
+python "$TEAMEVOLVER_REPO/teamEvolver/integrations/hermes_skill_sync/install.py" \
+  --hermes-home "$HERMES_HOME" \
+  --backend service \
+  --url "$TEAMEVOLVER_URL" \
+  --user "$TEAMEVOLVER_USER" \
+  "${TEAMEVOLVER_AUTH_ARGS[@]}"
+
+python "$TEAMEVOLVER_REPO/teamEvolver/integrations/hermes_skill/install.py" \
+  --hermes-home "$HERMES_HOME" \
+  --user "$TEAMEVOLVER_USER" \
+  --url "$TEAMEVOLVER_URL" \
+  "${TEAMEVOLVER_AUTH_ARGS[@]}"
+
+python "$HERMES_HOME/skills/teamEvolver-sync/sync_skills.py"
+hermes hooks list
+curl -fsS "$TEAMEVOLVER_URL/status"
+```
+
+If Hermes is already running, execute this in the Hermes session:
+
+```text
+/reload-skills
+```
+
+Full coding agent integration instructions live in [docs/coding-agent.en.md](./docs/coding-agent.en.md).
 
 ---
 
