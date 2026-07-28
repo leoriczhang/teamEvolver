@@ -1,4 +1,4 @@
-# SkillGene
+# teamEvolver
 
 <div align="center">
 
@@ -16,7 +16,7 @@
 
 ---
 
-## Why SkillGene?
+## Why teamEvolver?
 
 Agents can already complete complex tasks, but team skills often remain a loose set of files on one machine:
 
@@ -25,7 +25,7 @@ Agents can already complete complex tasks, but team skills often remain a loose 
 - **Hard to version**: skill origin, publisher, version state, and live team content are difficult to keep aligned.
 - **Hard to trust**: a skill may look polished, but there is little evidence that it improves task outcomes.
 
-**SkillGene is not about making agents remember more; it is a safe pipeline from real sessions to team capability.**
+**teamEvolver is not about making agents remember more; it is a safe pipeline from real sessions to team capability.**
 It turns scattered sessions into comparable evidence, separates personal and team assets, and publishes team skills through replay validation and version governance.
 
 ---
@@ -36,7 +36,7 @@ It turns scattered sessions into comparable evidence, separates personal and tea
 - **Layered assets**: decide whether knowledge is shareable before deciding whether it should become `skill` or `memory`; personal assets stay isolated, team assets are published deliberately.
 - **Validated release**: team `SKILL.md` assets pass aggregation, redaction, deduplication, replay validation, versioning, and rollback gates.
 
-Hermes and other agents keep their native runtime model. SkillGene delivers team skills through synced directories and hooks, so the agent's native skill system remains in control.
+Hermes and other agents keep their native runtime model. teamEvolver delivers team skills through synced directories and hooks, so the agent's native skill system remains in control.
 
 ---
 
@@ -69,7 +69,7 @@ Hermes and other agents keep their native runtime model. SkillGene delivers team
 
 ```mermaid
 flowchart LR
-    subgraph Team["SkillGene Team Service"]
+    subgraph Team["teamEvolver Team Service"]
         Console["Web Console"]
         API["FastAPI Service"]
         Registry["Skill Registry"]
@@ -82,7 +82,7 @@ flowchart LR
     end
 
     subgraph Agent["Agent Machines"]
-        Sync["skillgene-sync Hook"]
+        Sync["teamEvolver-sync Hook"]
         Dir["Synced SKILL.md Directory"]
         Hermes["Hermes Native Skills"]
     end
@@ -97,7 +97,7 @@ flowchart LR
     Dir --> Hermes
 ```
 
-The recommended path is shared storage, local sync, and native agent loading. Commands such as `skills_list`, `skill_view`, and `/skills` continue to come from the agent itself; SkillGene only makes sure the team skill library reaches the machine reliably.
+The recommended path is shared storage, local sync, and native agent loading. Commands such as `skills_list`, `skill_view`, and `/skills` continue to come from the agent itself; teamEvolver only makes sure the team skill library reaches the machine reliably.
 
 ---
 
@@ -106,8 +106,8 @@ The recommended path is shared storage, local sync, and native agent loading. Co
 ### 1. Install
 
 ```bash
-git clone https://github.com/leoriczhang/skillgene.git
-cd skillgene
+git clone https://github.com/leoriczhang/teamEvolver.git
+cd teamEvolver
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
@@ -123,17 +123,17 @@ python -m pip install -e .
 Installer script:
 
 ```bash
-bash scripts/install_skillgene.sh
+bash scripts/install_teamEvolver.sh
 ```
 
 ### 2. Configure a Local Skill Library
 
 ```bash
-skillgene config skills.enabled true
-skillgene config skills.dir ./skills
-skillgene config sharing.enabled true
-skillgene config sharing.backend local
-skillgene config sharing.local_root ./skillgene-store
+teamEvolver config skills.enabled true
+teamEvolver config skills.dir ./skills
+teamEvolver config sharing.enabled true
+teamEvolver config sharing.backend local
+teamEvolver config sharing.local_root ./teamEvolver-store
 ```
 
 ### 3. Create a Skill
@@ -143,7 +143,7 @@ mkdir -p skills/example-skill
 cat > skills/example-skill/SKILL.md <<'EOF'
 ---
 name: example-skill
-description: Use when you need a minimal SkillGene example.
+description: Use when you need a minimal teamEvolver example.
 category: general
 ---
 
@@ -156,17 +156,17 @@ EOF
 ### 4. Sync Skills
 
 ```bash
-skillgene skills push
-skillgene skills list-remote
-skillgene skills pull
+teamEvolver skills push
+teamEvolver skills list-remote
+teamEvolver skills pull
 ```
 
 ### 5. Start the Console
 
 ```bash
-skillgene config service.port 30000
-skillgene start --daemon
-skillgene status
+teamEvolver config service.port 30000
+teamEvolver start --daemon
+teamEvolver status
 ```
 
 Open:
@@ -182,9 +182,9 @@ On first launch, initialize the admin account. The default username and password
 ## Console Map
 
 <div align="center">
-  <img src="docs/assets/skillgene-console-dashboard.png" width="900" alt="SkillGene console evolution dashboard screenshot">
+  <img src="docs/assets/teamEvolver-console-dashboard.png" width="900" alt="teamEvolver console evolution dashboard screenshot">
   <br>
-  <sub>SkillGene Console: evolution dashboard, team skill status, storage connectivity, and management entry points.</sub>
+  <sub>teamEvolver Console: evolution dashboard, team skill status, storage connectivity, and management entry points.</sub>
 </div>
 
 ```mermaid
@@ -218,13 +218,13 @@ The console includes:
 
 ## Team Skill Sync
 
-Install `skillgene-sync` on agent machines. It pulls team skills before each task run and adds the synced directory to the agent's external skill directories.
+Install `teamEvolver-sync` on agent machines. It pulls team skills before each task run and adds the synced directory to the agent's external skill directories.
 
 ```mermaid
 sequenceDiagram
     participant User as User
     participant Agent as Hermes
-    participant Hook as skillgene-sync
+    participant Hook as teamEvolver-sync
     participant Store as Shared Skill Store
 
     User->>Agent: Start or continue a task
@@ -238,25 +238,25 @@ sequenceDiagram
 Install example:
 
 ```bash
-python skillgene/integrations/hermes_skill_sync/install.py \
-  --url "http://<skillgene-host>:52010" \
-  --user "<skillgene-user>"
+python teamEvolver/integrations/hermes_skill_sync/install.py \
+  --url "http://<teamEvolver-host>:52010" \
+  --user "<teamEvolver-user>"
 ```
 
-The default installer uses the SkillGene service backend. Local Hermes machines
-only need the SkillGene service URL and SkillGene user name; OpenViking endpoint,
+The default installer uses the teamEvolver service backend. Local Hermes machines
+only need the teamEvolver service URL and teamEvolver user name; OpenViking endpoint,
 team key, root prefix, and related shared-storage settings stay on the cloud
-SkillGene service.
+teamEvolver service.
 
 The installer writes configuration similar to:
 
 ```yaml
 skills:
   external_dirs:
-    - <HERMES_HOME>/team_skills/skillgene
+    - <HERMES_HOME>/team_skills/teamEvolver
 hooks:
   pre_llm_call:
-    - command: "python3 <HERMES_HOME>/skills/skillgene-sync/sync_skills.py"
+    - command: "python3 <HERMES_HOME>/skills/teamEvolver-sync/sync_skills.py"
       timeout: 60
 ```
 
@@ -265,9 +265,9 @@ The generated `sync.json` is similar to:
 ```json
 {
   "backend": "service",
-  "base_url": "http://<skillgene-host>:52010",
-  "user_alias": "<skillgene-user>",
-  "target_dir": "<HERMES_HOME>/team_skills/skillgene"
+  "base_url": "http://<teamEvolver-host>:52010",
+  "user_alias": "<teamEvolver-user>",
+  "target_dir": "<HERMES_HOME>/team_skills/teamEvolver"
 }
 ```
 
@@ -275,31 +275,31 @@ If the agent is already running, execute `/reload-skills` to refresh the current
 
 ### Session Skill Attribution and Efficiency Metrics
 
-The `skillgene-feed` `on_session_end` hook reads the complete Hermes trajectory
+The `teamEvolver-feed` `on_session_end` hook reads the complete Hermes trajectory
 from `state.db`, including system, user, assistant, and tool messages:
 
 - `injected_skills`: skills actually exposed in the system prompt's `<available_skills>` block.
 - `used_skills`: skills actually loaded through `skill_view`.
 - `metrics`: interaction turns, tool-call count, and input/output/cache/reasoning tokens.
 
-After installing `skillgene-feed`, these fields are sent through `/ingest_session`
+After installing `teamEvolver-feed`, these fields are sent through `/ingest_session`
 and preserved in the session archive and console details.
 
 ---
 
 ## OpenViking / Object Storage
 
-Remote sync uses SkillGene's object-store abstraction. The default endpoint uses VolcEngine-hosted OpenViking:
+Remote sync uses teamEvolver's object-store abstraction. The default endpoint uses VolcEngine-hosted OpenViking:
 
 ```bash
-skillgene config sharing.enabled true
-skillgene config sharing.backend viking
-skillgene config sharing.viking_team_api_key "<team-key>"
-skillgene config sharing.viking_personal_api_key "<personal-key>"
-skillgene config sharing.viking_root_prefix "skillgene"
+teamEvolver config sharing.enabled true
+teamEvolver config sharing.backend viking
+teamEvolver config sharing.viking_team_api_key "<team-key>"
+teamEvolver config sharing.viking_personal_api_key "<personal-key>"
+teamEvolver config sharing.viking_root_prefix "teamEvolver"
 ```
 
-For self-hosted OpenViking Server deployments, see [volcengine/OpenViking](https://github.com/volcengine/OpenViking) and override the default service URL with `skillgene config sharing.viking_endpoint "<your-server-url>"`.
+For self-hosted OpenViking Server deployments, see [volcengine/OpenViking](https://github.com/volcengine/OpenViking) and override the default service URL with `teamEvolver config sharing.viking_endpoint "<your-server-url>"`.
 
 Do not commit real API keys. Use local configuration, environment variables, or your deployment platform's secret manager.
 
@@ -333,14 +333,14 @@ python -m pip install -e ".[truereplay]"
 Replay a shared validation job:
 
 ```bash
-python -m skillgene.true_replay --job-id <validation-job-id> --json
+python -m teamEvolver.true_replay --job-id <validation-job-id> --json
 ```
 
 Replay a local JSON job file:
 
 ```bash
-python -m skillgene.true_replay --job-file ./candidate_job.json --dry-run
-python -m skillgene.true_replay --job-file ./candidate_job.json --json
+python -m teamEvolver.true_replay --job-file ./candidate_job.json --dry-run
+python -m teamEvolver.true_replay --job-file ./candidate_job.json --json
 ```
 
 True Replay creates temporary `HOME` and `HERMES_HOME` directories for both branches and does not modify your real agent configuration. To use a local agent checkout, set `HERMES_ORIGIN`.
@@ -350,9 +350,9 @@ True Replay creates temporary `HOME` and `HERMES_HOME` directories for both bran
 ## Project Layout
 
 ```text
-skillgene/
-├── skillgene/
-│   ├── cli/              # skillgene command line
+teamEvolver/
+├── teamEvolver/
+│   ├── cli/              # teamEvolver command line
 │   ├── config_store/     # local config store
 │   ├── proxy/            # service routes, console, and admin APIs
 │   ├── skills/           # SKILL.md management, bundling, sync
@@ -393,8 +393,8 @@ Related projects and references:
 - [SkillClaw](https://github.com/AMAP-ML/SkillClaw): a multi-agent skill evolution project.
 - [OpenSpace](https://github.com/HKUDS/OpenSpace): a quality-first skill hub for AI agents.
 - [Hermes Agent](https://github.com/nousresearch/hermes-agent): optional runtime dependency for True Replay.
-- [FastAPI](https://fastapi.tiangolo.com/): the SkillGene service framework.
-- [React](https://react.dev/) and [TypeScript](https://www.typescriptlang.org/): the SkillGene console stack.
+- [FastAPI](https://fastapi.tiangolo.com/): the teamEvolver service framework.
+- [React](https://react.dev/) and [TypeScript](https://www.typescriptlang.org/): the teamEvolver console stack.
 
 ---
 

@@ -5,14 +5,14 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from skillgene.config import SkillGeneConfig
-from skillgene.proxy import ProxyServer
-from skillgene.session_filter import heuristic_classify_session
+from teamEvolver.config import TeamEvolverConfig
+from teamEvolver.proxy import ProxyServer
+from teamEvolver.session_filter import heuristic_classify_session
 
 
 def _server(tmp_path: Path) -> ProxyServer:
     return ProxyServer(
-        config=SkillGeneConfig(
+        config=TeamEvolverConfig(
             sharing_enabled=True,
             sharing_backend="local",
             sharing_session_backend="local",

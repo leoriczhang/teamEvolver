@@ -3,14 +3,14 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "skillgene"
+name = "teamEvolver"
 version = "0.1.0"
-description = "SkillGene: shared SKILL.md library management, sync, console, and optional validation."
+description = "teamEvolver: shared SKILL.md library management, sync, console, and optional validation."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [
-    { name = "SkillGene Contributors" },
+    { name = "teamEvolver Contributors" },
 ]
 keywords = ["skills", "agents", "skill-library", "validation"]
 classifiers = [
@@ -48,23 +48,23 @@ dev = [
     "anyio>=4.0",
 ]
 all = [
-    "skillgene[sharing,validation,truereplay]",
+    "teamEvolver[sharing,validation,truereplay]",
 ]
 
 [project.urls]
-Homepage = "https://github.com/leoriczhang/skillgene"
-Repository = "https://github.com/leoriczhang/skillgene"
-Issues = "https://github.com/leoriczhang/skillgene/issues"
+Homepage = "https://github.com/leoriczhang/teamEvolver"
+Repository = "https://github.com/leoriczhang/teamEvolver"
+Issues = "https://github.com/leoriczhang/teamEvolver/issues"
 
 [project.scripts]
-skillgene = "skillgene.cli:main"
+teamEvolver = "teamEvolver.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["skillgene*"]
+include = ["teamEvolver*"]
 
 [tool.setuptools.package-data]
-skillgene = [
+teamEvolver = [
     "web/*.html",
     "web/dist/*.html",
     "web/dist/assets/*",

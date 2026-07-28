@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from skillgene.session_store import SessionStore
-from skillgene.storage.local import LocalObjectStore
+from teamEvolver.session_store import SessionStore
+from teamEvolver.storage.local import LocalObjectStore
 
 
 def test_session_store_archives_queue_and_filter_audit(tmp_path: Path) -> None:

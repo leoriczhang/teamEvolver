@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from skillgene.true_replay import branch_efficiency, compare_efficiency, count_tool_calls
+from teamEvolver.true_replay import branch_efficiency, compare_efficiency, count_tool_calls
 
 
 def test_efficiency_compares_interactions_tools_and_tokens() -> None:

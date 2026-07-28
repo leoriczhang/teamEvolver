@@ -10,8 +10,8 @@ __pycache__/
 .verify-home/
 build/
 dist/
-!skillgene/web/dist/
-!skillgene/web/dist/**
+!teamEvolver/web/dist/
+!teamEvolver/web/dist/**
 .DS_Store
 .env
 .env.*

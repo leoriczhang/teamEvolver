@@ -22,9 +22,9 @@ from typing import Any
 
 import pytest
 
-from skillgene.config import SkillGeneConfig
-from skillgene.skills import SkillHub
-from skillgene.storage import (
+from teamEvolver.config import TeamEvolverConfig
+from teamEvolver.skills import SkillHub
+from teamEvolver.storage import (
     OpenVikingObjectStore,
     build_object_store,
     is_not_found_error,
@@ -72,9 +72,9 @@ def _make_store(handler=None, **overrides) -> tuple[OpenVikingObjectStore, _Fake
         api_key="secret",
         account="acct",
         user="liuyue",
-        agent="skillgene-evolve",
+        agent="teamEvolver-evolve",
         agent_id=overrides.get("agent_id", "agent-1"),
-        root_prefix=overrides.get("root_prefix", "skillgene"),
+        root_prefix=overrides.get("root_prefix", "teamEvolver"),
         group_id=overrides.get("group_id", ""),
     )
     fake = _FakeHttpx()
@@ -107,19 +107,19 @@ def test_uri_uses_resources_namespace() -> None:
     store, _ = _make_store()
     assert (
         store._uri("peers/cust-a/sessions/x.json")
-        == "viking://resources/skillgene/peers/cust-a/sessions/x.json"
+        == "viking://resources/teamEvolver/peers/cust-a/sessions/x.json"
     )
 
 
 def test_uri_drops_leading_slash_and_normalizes_separators() -> None:
     store, _ = _make_store()
-    assert store._uri("/skills/foo") == "viking://resources/skillgene/skills/foo"
-    assert store._uri("skills\\foo") == "viking://resources/skillgene/skills/foo"
+    assert store._uri("/skills/foo") == "viking://resources/teamEvolver/skills/foo"
+    assert store._uri("skills\\foo") == "viking://resources/teamEvolver/skills/foo"
 
 
 def test_uri_with_custom_root_prefix_and_group() -> None:
-    store, _ = _make_store(root_prefix="skillgene", group_id="team-a")
-    assert store._uri("skills/x.json") == "viking://resources/skillgene/team-a/skills/x.json"
+    store, _ = _make_store(root_prefix="teamEvolver", group_id="team-a")
+    assert store._uri("skills/x.json") == "viking://resources/teamEvolver/team-a/skills/x.json"
 
 
 # --------------------------------------------------------------------- #
@@ -135,13 +135,13 @@ def test_put_object_writes_utf8_content_and_uri() -> None:
     call = fake.calls[0]
     assert call["method"] == "POST"
     assert call["url"] == "http://viking.test/api/v1/content/write"
-    assert call["json"]["uri"] == "viking://resources/skillgene/peers/cust-a/sessions/foo.json"
+    assert call["json"]["uri"] == "viking://resources/teamEvolver/peers/cust-a/sessions/foo.json"
     assert call["json"]["content"] == '{"hello":"world"}'
     assert call["json"]["mode"] == "replace"
     headers = call["headers"]
     assert headers["X-OpenViking-Account"] == "acct"
     assert headers["X-OpenViking-User"] == "liuyue"
-    assert headers["X-OpenViking-Agent"] == "skillgene-evolve"
+    assert headers["X-OpenViking-Agent"] == "teamEvolver-evolve"
     assert headers["X-API-Key"] == "secret"
     assert headers["Authorization"] == "Bearer secret"
 
@@ -200,7 +200,7 @@ def test_get_object_reads_string_result() -> None:
         assert call["url"].endswith("/api/v1/content/read")
         assert (
             call["params"]["uri"]
-            == "viking://resources/skillgene/peers/cust-a/sessions/foo.json"
+            == "viking://resources/teamEvolver/peers/cust-a/sessions/foo.json"
         )
         return _FakeResponse(200, {"status": "ok", "result": '{"x":1}'})
 
@@ -244,7 +244,7 @@ def test_delete_object_issues_real_delete() -> None:
     assert call["url"] == "http://viking.test/api/v1/fs"
     assert (
         call["params"]["uri"]
-        == "viking://resources/skillgene/peers/cust-a/sessions/foo.json"
+        == "viking://resources/teamEvolver/peers/cust-a/sessions/foo.json"
     )
 
 
@@ -264,7 +264,7 @@ def test_delete_object_swallows_not_found() -> None:
 
 
 def test_iter_objects_walks_directory_tree() -> None:
-    base = "viking://resources/skillgene/peers/cust-a"
+    base = "viking://resources/teamEvolver/peers/cust-a"
     result = [
         {"uri": f"{base}/sessions", "isDir": True},
         {"uri": f"{base}/sessions/a.json", "isDir": False},
@@ -303,27 +303,27 @@ def test_build_object_store_routes_viking_backend() -> None:
         endpoint="http://viking.test",
         viking_account="acct",
         viking_user="liuyue",
-        viking_agent="skillgene",
+        viking_agent="teamEvolver",
         viking_agent_id="agent-1",
         viking_api_key="secret",
-        viking_root_prefix="skillgene",
+        viking_root_prefix="teamEvolver",
         viking_group_id="team-a",
     )
     assert isinstance(store, OpenVikingObjectStore)
     assert store._account == "acct"
     assert store._user == "liuyue"
     assert store._agent_id == "agent-1"
-    assert store._root_prefix == "skillgene"
+    assert store._root_prefix == "teamEvolver"
     assert store._group_id == "team-a"
 
 
 def test_build_object_store_viking_defaults_root_prefix_and_group() -> None:
     store = build_object_store(backend="viking", endpoint="http://viking.test")
     assert isinstance(store, OpenVikingObjectStore)
-    assert store._root_prefix == "skillgene"
+    assert store._root_prefix == "teamEvolver"
     assert store._group_id == ""
     # Empty group => no group segment in the base URI.
-    assert store._uri("skills/x") == "viking://resources/skillgene/skills/x"
+    assert store._uri("skills/x") == "viking://resources/teamEvolver/skills/x"
 
 
 def test_build_object_store_rejects_viking_without_endpoint() -> None:
@@ -342,14 +342,14 @@ def test_build_object_store_accepts_openviking_alias() -> None:
 
 
 def test_skill_hub_object_storage_from_config_builds_viking_bucket() -> None:
-    cfg = SkillGeneConfig(
+    cfg = TeamEvolverConfig(
         sharing_backend="viking",
         sharing_viking_endpoint="http://viking.test",
         sharing_viking_account="acct",
         sharing_viking_user="liuyue",
         sharing_viking_agent_id="agent-1",
         sharing_viking_customer_id="cust-a",
-        sharing_viking_root_prefix="skillgene",
+        sharing_viking_root_prefix="teamEvolver",
         sharing_viking_group_id="team-a",
     )
 
@@ -357,5 +357,5 @@ def test_skill_hub_object_storage_from_config_builds_viking_bucket() -> None:
     assert hub is not None
     assert isinstance(hub._bucket, OpenVikingObjectStore)
     assert hub._bucket._user == "liuyue"
-    assert hub._bucket._root_prefix == "skillgene"
+    assert hub._bucket._root_prefix == "teamEvolver"
     assert hub._bucket._group_id == "team-a"

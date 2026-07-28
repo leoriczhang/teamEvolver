@@ -1,4 +1,4 @@
-# SkillGene
+# teamEvolver
 
 <div align="center">
 
@@ -16,7 +16,7 @@
 
 ---
 
-## 为什么需要 SkillGene？
+## 为什么需要 teamEvolver？
 
 Agent 已经能完成复杂任务，但团队技能通常还停留在“某台机器上的一组文件”：
 
@@ -25,7 +25,7 @@ Agent 已经能完成复杂任务，但团队技能通常还停留在“某台�
 - **版本难追踪**：技能来源、发布人、版本状态和当前团队空间内容，很难持续对齐。
 - **质量难判断**：一个技能看起来写得很好，但是否真的改善任务结果，缺少证据。
 
-**SkillGene 不是让 Agent 记住更多信息，而是建立从真实 session 到团队能力的安全流水线。**
+**teamEvolver 不是让 Agent 记住更多信息，而是建立从真实 session 到团队能力的安全流水线。**
 它把分散会话转成可比较的 evidence，区分个人与团队资产，再用回放验证和版本治理发布团队技能。
 
 ---
@@ -36,7 +36,7 @@ Agent 已经能完成复杂任务，但团队技能通常还停留在“某台�
 - **分层沉淀**：先判断是否可共享，再判断应写成 `skill` 还是 `memory`；个人资产隔离，团队资产受控发布。
 - **验证发布**：团队 `SKILL.md` 必须经过聚合、脱敏、去重、回放验证、版本化和回滚门控。
 
-Hermes 等 Agent 保持原生运行方式；SkillGene 通过同步目录和 Hook 把团队技能带到 Agent 原生技能系统里。
+Hermes 等 Agent 保持原生运行方式；teamEvolver 通过同步目录和 Hook 把团队技能带到 Agent 原生技能系统里。
 
 ---
 
@@ -69,7 +69,7 @@ Hermes 等 Agent 保持原生运行方式；SkillGene 通过同步目录和 Hook
 
 ```mermaid
 flowchart LR
-    subgraph Team["SkillGene Team Service"]
+    subgraph Team["teamEvolver Team Service"]
         Console["Web Console"]
         API["FastAPI Service"]
         Registry["Skill Registry"]
@@ -82,7 +82,7 @@ flowchart LR
     end
 
     subgraph Agent["Agent Machines"]
-        Sync["skillgene-sync Hook"]
+        Sync["teamEvolver-sync Hook"]
         Dir["Synced SKILL.md Directory"]
         Hermes["Hermes Native Skills"]
     end
@@ -97,7 +97,7 @@ flowchart LR
     Dir --> Hermes
 ```
 
-SkillGene 的推荐链路是“共享存储 + 本地同步 + Agent 原生加载”。这样 `skills_list`、`skill_view`、`/skills` 等能力仍由 Agent 自己提供，SkillGene 只负责把团队技能可靠送到本机。
+teamEvolver 的推荐链路是“共享存储 + 本地同步 + Agent 原生加载”。这样 `skills_list`、`skill_view`、`/skills` 等能力仍由 Agent 自己提供，teamEvolver 只负责把团队技能可靠送到本机。
 
 ---
 
@@ -106,8 +106,8 @@ SkillGene 的推荐链路是“共享存储 + 本地同步 + Agent 原生加载�
 ### 1. 安装
 
 ```bash
-git clone https://github.com/leoriczhang/skillgene.git
-cd skillgene
+git clone https://github.com/leoriczhang/teamEvolver.git
+cd teamEvolver
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
@@ -123,17 +123,17 @@ python -m pip install -e .
 也可以使用安装脚本：
 
 ```bash
-bash scripts/install_skillgene.sh
+bash scripts/install_teamEvolver.sh
 ```
 
 ### 2. 配置本地技能库
 
 ```bash
-skillgene config skills.enabled true
-skillgene config skills.dir ./skills
-skillgene config sharing.enabled true
-skillgene config sharing.backend local
-skillgene config sharing.local_root ./skillgene-store
+teamEvolver config skills.enabled true
+teamEvolver config skills.dir ./skills
+teamEvolver config sharing.enabled true
+teamEvolver config sharing.backend local
+teamEvolver config sharing.local_root ./teamEvolver-store
 ```
 
 ### 3. 创建一个技能
@@ -143,7 +143,7 @@ mkdir -p skills/example-skill
 cat > skills/example-skill/SKILL.md <<'EOF'
 ---
 name: example-skill
-description: Use when you need a minimal SkillGene example.
+description: Use when you need a minimal teamEvolver example.
 category: general
 ---
 
@@ -156,17 +156,17 @@ EOF
 ### 4. 同步技能
 
 ```bash
-skillgene skills push
-skillgene skills list-remote
-skillgene skills pull
+teamEvolver skills push
+teamEvolver skills list-remote
+teamEvolver skills pull
 ```
 
 ### 5. 启动控制台
 
 ```bash
-skillgene config service.port 52010
-skillgene start --daemon --port 52010
-skillgene status
+teamEvolver config service.port 52010
+teamEvolver start --daemon --port 52010
+teamEvolver status
 ```
 
 打开：
@@ -182,17 +182,17 @@ http://127.0.0.1:52010/console
 ## 给 Coding Agent 的 Hermes 部署说明
 
 这一节是给 coding agent 看的。目标是：agent 只阅读本 README，就能把一台
-Hermes 机器接入中心 SkillGene，并形成“团队技能同步 + 会话回流 + 自动进化”的闭环。
+Hermes 机器接入中心 teamEvolver，并形成“团队技能同步 + 会话回流 + 自动进化”的闭环。
 
 ### 单端口约定
 
-SkillGene 现在统一使用一个端口：`52010`。
+teamEvolver 现在统一使用一个端口：`52010`。
 
-中心机 `http://<skillgene-host>:52010` 同时承载：
+中心机 `http://<teamEvolver-host>:52010` 同时承载：
 
 - `GET /health` / `GET /healthz`：服务健康检查。
 - `GET /status`：进化服务状态、排队 session 数和注册技能数。
-- `POST /ingest_session`：Hermes 会话投喂入口，由 `skillgene-feed` 调用。
+- `POST /ingest_session`：Hermes 会话投喂入口，由 `teamEvolver-feed` 调用。
 - `POST /trigger`：立即触发一次 evolve cycle；只是提速信号，后台仍会周期扫描 `sessions/` 队列。
 - `GET /sessions`、`GET /conversations`、`GET /validation/candidates`、`GET /storage/status`：控制台和巡检接口。
 - `GET /console`：Web 控制台。
@@ -202,107 +202,107 @@ SkillGene 现在统一使用一个端口：`52010`。
 部署前先确定这些变量，不要硬编码到仓库：
 
 ```bash
-export SKILLGENE_REPO="/path/to/skillgene"
+export TEAMEVOLVER_REPO="/path/to/teamEvolver"
 export HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-export SKILLGENE_HOST="<center-linux-intranet-ip>"
-export SKILLGENE_PORT="52010"
-export SKILLGENE_URL="http://${SKILLGENE_HOST}:${SKILLGENE_PORT}"
-export SKILLGENE_USER="<unique-user-alias-for-this-machine>"
-export SKILLGENE_API_KEY=""   # 仅当服务端设置 EVOLVE_INGEST_API_KEY 时填写
-SKILLGENE_AUTH_ARGS=()
-[ -n "$SKILLGENE_API_KEY" ] && SKILLGENE_AUTH_ARGS=(--api-key "$SKILLGENE_API_KEY")
+export TEAMEVOLVER_HOST="<center-linux-intranet-ip>"
+export TEAMEVOLVER_PORT="52010"
+export TEAMEVOLVER_URL="http://${TEAMEVOLVER_HOST}:${TEAMEVOLVER_PORT}"
+export TEAMEVOLVER_USER="<unique-user-alias-for-this-machine>"
+export TEAMEVOLVER_API_KEY=""   # 仅当服务端设置 EVOLVE_INGEST_API_KEY 时填写
+TEAMEVOLVER_AUTH_ARGS=()
+[ -n "$TEAMEVOLVER_API_KEY" ] && TEAMEVOLVER_AUTH_ARGS=(--api-key "$TEAMEVOLVER_API_KEY")
 ```
 
-`SKILLGENE_USER` 必须能区分不同机器或员工；它会出现在控制台“会话历史”中，也用于后续归因。
+`TEAMEVOLVER_USER` 必须能区分不同机器或员工；它会出现在控制台“会话历史”中，也用于后续归因。
 
 ### 中心 Linux 机器部署
 
-中心机只需要启动 SkillGene 一个服务，监听 `0.0.0.0:52010`。`skill_evolver`
+中心机只需要启动 teamEvolver 一个服务，监听 `0.0.0.0:52010`。`skill_evolver`
 `
 ```bash
-cd "$SKILLGENE_REPO"
+cd "$TEAMEVOLVER_REPO"
 python -m pip install -U pip
 python -m pip install -e ".[all]"
 npm --prefix web-ui install
 npm --prefix web-ui run build
 
-skillgene config service.host 0.0.0.0
-skillgene config service.port 52010
-skillgene config sharing.enabled true
-skillgene config sharing.backend viking
+teamEvolver config service.host 0.0.0.0
+teamEvolver config service.port 52010
+teamEvolver config sharing.enabled true
+teamEvolver config sharing.backend viking
 # 按实际团队配置写入 OpenViking 参数；不要把真实 key 提交进仓库。
-# skillgene config sharing.viking_team_api_key "<team-key>"
-# skillgene config sharing.viking_personal_api_key "<personal-key>"
-# skillgene config sharing.viking_root_prefix "team-skill-evolver"
+# teamEvolver config sharing.viking_team_api_key "<team-key>"
+# teamEvolver config sharing.viking_personal_api_key "<personal-key>"
+# teamEvolver config sharing.viking_root_prefix "team-skill-evolver"
 
-skillgene stop || true
-skillgene start --daemon --port 52010
+teamEvolver stop || true
+teamEvolver start --daemon --port 52010
 ```
 
 中心机验证：
 
 ```bash
 ss -ltnp | grep 52010
-curl -fsS "$SKILLGENE_URL/health"
-curl -fsS "$SKILLGENE_URL/status"
-curl -fsS -X POST "$SKILLGENE_URL/trigger"
+curl -fsS "$TEAMEVOLVER_URL/health"
+curl -fsS "$TEAMEVOLVER_URL/status"
+curl -fsS -X POST "$TEAMEVOLVER_URL/trigger"
 ```
 
 
 ### Hermes 机器接入
 
-Hermes 机器不要配置 OpenViking team key。推荐全部走 SkillGene 服务后端：
-本机只知道 `SKILLGENE_URL` 和 `SKILLGENE_USER`，底层 OpenViking endpoint/key/root prefix
-留在中心 SkillGene 服务里。
+Hermes 机器不要配置 OpenViking team key。推荐全部走 teamEvolver 服务后端：
+本机只知道 `TEAMEVOLVER_URL` 和 `TEAMEVOLVER_USER`，底层 OpenViking endpoint/key/root prefix
+留在中心 teamEvolver 服务里。
 
-1. 安装团队技能同步 hook：`skillgene-sync`
+1. 安装团队技能同步 hook：`teamEvolver-sync`
 
 ```bash
-python "$SKILLGENE_REPO/skillgene/integrations/hermes_skill_sync/install.py" \
+python "$TEAMEVOLVER_REPO/teamEvolver/integrations/hermes_skill_sync/install.py" \
   --hermes-home "$HERMES_HOME" \
   --backend service \
-  --url "$SKILLGENE_URL" \
-  --user "$SKILLGENE_USER" \
-  "${SKILLGENE_AUTH_ARGS[@]}"
+  --url "$TEAMEVOLVER_URL" \
+  --user "$TEAMEVOLVER_USER" \
+  "${TEAMEVOLVER_AUTH_ARGS[@]}"
 ```
 
 该脚本会：
 
-- 复制 `skillgene-sync` 到 `$HERMES_HOME/skills/skillgene-sync/`。
-- 写入 `$HERMES_HOME/skills/skillgene-sync/sync.json`。
-- 把 `$HERMES_HOME/team_skills/skillgene` 加入 Hermes `skills.external_dirs`。
+- 复制 `teamEvolver-sync` 到 `$HERMES_HOME/skills/teamEvolver-sync/`。
+- 写入 `$HERMES_HOME/skills/teamEvolver-sync/sync.json`。
+- 把 `$HERMES_HOME/team_skills/teamEvolver` 加入 Hermes `skills.external_dirs`。
 - 注册 `pre_llm_call` hook，在每次模型调用前拉取团队技能。
 - 写入 scoped hook allowlist approval，避免首次运行被 TTY 授权卡住。
 
-2. 安装会话回流 hook：`skillgene-feed`
+2. 安装会话回流 hook：`teamEvolver-feed`
 
 ```bash
-python "$SKILLGENE_REPO/skillgene/integrations/hermes_skill/install.py" \
+python "$TEAMEVOLVER_REPO/teamEvolver/integrations/hermes_skill/install.py" \
   --hermes-home "$HERMES_HOME" \
-  --user "$SKILLGENE_USER" \
-  --url "$SKILLGENE_URL" \
-  "${SKILLGENE_AUTH_ARGS[@]}"
+  --user "$TEAMEVOLVER_USER" \
+  --url "$TEAMEVOLVER_URL" \
+  "${TEAMEVOLVER_AUTH_ARGS[@]}"
 ```
 
 该脚本会：
 
-- 复制 `skillgene-feed` 到 `$HERMES_HOME/skills/skillgene-feed/`。
-- 写入 `$HERMES_HOME/skills/skillgene-feed/feed.json`。
+- 复制 `teamEvolver-feed` 到 `$HERMES_HOME/skills/teamEvolver-feed/`。
+- 写入 `$HERMES_HOME/skills/teamEvolver-feed/feed.json`。
 - 注册 `on_session_end` hook，在每次 Hermes 会话结束后 POST `/ingest_session`。
 - 上传字段包括 `injected_skills`、`used_skills`、tool calls、tool results 和 token metrics。
 
 3. 立即验证同步和 hook
 
 ```bash
-python "$HERMES_HOME/skills/skillgene-sync/sync_skills.py"
+python "$HERMES_HOME/skills/teamEvolver-sync/sync_skills.py"
 hermes hooks list
 hermes hooks test pre_llm_call
 hermes hooks test on_session_end
 ```
 
 `on_session_end` 的 synthetic test 如果输出 skipped 是正常的；它没有真实 Hermes session
-正文可上传。真实验证方式是让 Hermes 完成一轮普通对话，然后看 SkillGene 控制台
-“会话历史”是否出现 `SKILLGENE_USER`。
+正文可上传。真实验证方式是让 Hermes 完成一轮普通对话，然后看 teamEvolver 控制台
+“会话历史”是否出现 `TEAMEVOLVER_USER`。
 
 如果 Hermes 已经在运行，在 Hermes 会话内执行：
 
@@ -317,11 +317,11 @@ hermes hooks test on_session_end
 coding agent 必须逐项确认：
 
 ```bash
-curl -fsS "$SKILLGENE_URL/status"
-curl -fsS -X POST "$SKILLGENE_URL/trigger"
-test -f "$HERMES_HOME/skills/skillgene-sync/sync.json"
-test -f "$HERMES_HOME/skills/skillgene-feed/feed.json"
-test -d "$HERMES_HOME/team_skills/skillgene"
+curl -fsS "$TEAMEVOLVER_URL/status"
+curl -fsS -X POST "$TEAMEVOLVER_URL/trigger"
+test -f "$HERMES_HOME/skills/teamEvolver-sync/sync.json"
+test -f "$HERMES_HOME/skills/teamEvolver-feed/feed.json"
+test -d "$HERMES_HOME/team_skills/teamEvolver"
 hermes hooks list
 ```
 
@@ -329,18 +329,18 @@ hermes hooks list
 
 - `status.running == true`。
 - `POST /trigger` 返回 JSON，不是 nginx 403/404。
-- `sync.json.base_url` 和 `feed.json.base_url` 都是 `http://<skillgene-host>:52010`。
-- `skills.external_dirs` 包含 `$HERMES_HOME/team_skills/skillgene`。
-- hook allowlist 中有 `skillgene-sync` 和 `skillgene-feed` 对应命令。
+- `sync.json.base_url` 和 `feed.json.base_url` 都是 `http://<teamEvolver-host>:52010`。
+- `skills.external_dirs` 包含 `$HERMES_HOME/team_skills/teamEvolver`。
+- hook allowlist 中有 `teamEvolver-sync` 和 `teamEvolver-feed` 对应命令。
 
 ### 常见问题
 
 - 如果 `POST /trigger` 返回 nginx 默认 `403`，先确认没有走 HTTP 代理：
 
   ```bash
-  curl --noproxy '*' -v "$SKILLGENE_URL/status"
-  curl --noproxy '*' -v -X POST "$SKILLGENE_URL/trigger"
-  export NO_PROXY="${SKILLGENE_HOST},10.0.0.0/8,127.0.0.1,localhost"
+  curl --noproxy '*' -v "$TEAMEVOLVER_URL/status"
+  curl --noproxy '*' -v -X POST "$TEAMEVOLVER_URL/trigger"
+  export NO_PROXY="${TEAMEVOLVER_HOST},10.0.0.0/8,127.0.0.1,localhost"
   ```
 
 - 如果 `52010/trigger` 返回 404，说明中心服务不是当前单端口版，或没有重启到最新代码。
@@ -353,9 +353,9 @@ hermes hooks list
 ## 控制台概览
 
 <div align="center">
-  <img src="docs/assets/skillgene-console-dashboard.png" width="900" alt="SkillGene 控制台进化看板截图">
+  <img src="docs/assets/teamEvolver-console-dashboard.png" width="900" alt="teamEvolver 控制台进化看板截图">
   <br>
-  <sub>SkillGene 控制台：进化看板、团队技能状态、存储连通性与管理入口。</sub>
+  <sub>teamEvolver 控制台：进化看板、团队技能状态、存储连通性与管理入口。</sub>
 </div>
 
 ```mermaid
@@ -389,13 +389,13 @@ flowchart TB
 
 ## 团队技能同步
 
-推荐在 Agent 机器上安装 `skillgene-sync`，在每次任务执行前拉取团队技能，并把同步目录加入 Agent 的外部技能目录。
+推荐在 Agent 机器上安装 `teamEvolver-sync`，在每次任务执行前拉取团队技能，并把同步目录加入 Agent 的外部技能目录。
 
 ```mermaid
 sequenceDiagram
     participant User as User
     participant Agent as Hermes
-    participant Hook as skillgene-sync
+    participant Hook as teamEvolver-sync
     participant Store as Shared Skill Store
 
     User->>Agent: Start or continue a task
@@ -409,24 +409,24 @@ sequenceDiagram
 安装示例：
 
 ```bash
-python skillgene/integrations/hermes_skill_sync/install.py \
-  --url "http://<skillgene-host>:52010" \
-  --user "<skillgene-user>"
+python teamEvolver/integrations/hermes_skill_sync/install.py \
+  --url "http://<teamEvolver-host>:52010" \
+  --user "<teamEvolver-user>"
 ```
 
-默认安装走 SkillGene 服务后端。本地 Hermes 只需要知道 SkillGene 服务地址和
-SkillGene 用户名；OpenViking endpoint、团队 key、root prefix 等共享存储配置
-只保存在云端 SkillGene 服务里，避免每台机器重复配置或配错。
+默认安装走 teamEvolver 服务后端。本地 Hermes 只需要知道 teamEvolver 服务地址和
+teamEvolver 用户名；OpenViking endpoint、团队 key、root prefix 等共享存储配置
+只保存在云端 teamEvolver 服务里，避免每台机器重复配置或配错。
 
 安装脚本会写入类似配置：
 
 ```yaml
 skills:
   external_dirs:
-    - <HERMES_HOME>/team_skills/skillgene
+    - <HERMES_HOME>/team_skills/teamEvolver
 hooks:
   pre_llm_call:
-    - command: "python3 <HERMES_HOME>/skills/skillgene-sync/sync_skills.py"
+    - command: "python3 <HERMES_HOME>/skills/teamEvolver-sync/sync_skills.py"
       timeout: 60
 ```
 
@@ -435,9 +435,9 @@ hooks:
 ```json
 {
   "backend": "service",
-  "base_url": "http://<skillgene-host>:52010",
-  "user_alias": "<skillgene-user>",
-  "target_dir": "<HERMES_HOME>/team_skills/skillgene"
+  "base_url": "http://<teamEvolver-host>:52010",
+  "user_alias": "<teamEvolver-user>",
+  "target_dir": "<HERMES_HOME>/team_skills/teamEvolver"
 }
 ```
 
@@ -445,14 +445,14 @@ hooks:
 
 ### 会话技能归因与效率指标
 
-`skillgene-feed` 的 `on_session_end` hook 会从 Hermes `state.db` 上传完整轨迹，
+`teamEvolver-feed` 的 `on_session_end` hook 会从 Hermes `state.db` 上传完整轨迹，
 完整保留 system、user、assistant、tool 消息，以及工具调用和工具结果：
 
 - `injected_skills`：system prompt 的 `<available_skills>` 中实际暴露的技能。
 - `used_skills`：本次对话实际通过 `skill_view` 加载的技能。
 - `metrics`：交互轮次、工具调用次数，以及 input/output/cache/reasoning tokens。
 
-安装 `skillgene-feed` 后，这些字段会随 `/ingest_session` 一起进入会话归档和控制台详情。
+安装 `teamEvolver-feed` 后，这些字段会随 `/ingest_session` 一起进入会话归档和控制台详情。
 
 ---
 
@@ -461,14 +461,14 @@ hooks:
 远端同步通过对象存储抽象完成。默认 endpoint 使用火山托管 OpenViking：
 
 ```bash
-skillgene config sharing.enabled true
-skillgene config sharing.backend viking
-skillgene config sharing.viking_team_api_key "<team-key>"
-skillgene config sharing.viking_personal_api_key "<personal-key>"
-skillgene config sharing.viking_root_prefix "skillgene"
+teamEvolver config sharing.enabled true
+teamEvolver config sharing.backend viking
+teamEvolver config sharing.viking_team_api_key "<team-key>"
+teamEvolver config sharing.viking_personal_api_key "<personal-key>"
+teamEvolver config sharing.viking_root_prefix "teamEvolver"
 ```
 
-如果需要自部署 OpenViking Server，请参考 [volcengine/OpenViking](https://github.com/volcengine/OpenViking)，并通过 `skillgene config sharing.viking_endpoint "<your-server-url>"` 覆盖默认服务地址。
+如果需要自部署 OpenViking Server，请参考 [volcengine/OpenViking](https://github.com/volcengine/OpenViking)，并通过 `teamEvolver config sharing.viking_endpoint "<your-server-url>"` 覆盖默认服务地址。
 
 不要把真实 API Key 写入仓库。建议使用本机配置、环境变量或部署系统的 Secret 管理能力注入。
 
@@ -502,14 +502,14 @@ python -m pip install -e ".[truereplay]"
 从验证队列回放：
 
 ```bash
-python -m skillgene.true_replay --job-id <validation-job-id> --json
+python -m teamEvolver.true_replay --job-id <validation-job-id> --json
 ```
 
 使用本地 JSON 文件独立回放：
 
 ```bash
-python -m skillgene.true_replay --job-file ./candidate_job.json --dry-run
-python -m skillgene.true_replay --job-file ./candidate_job.json --json
+python -m teamEvolver.true_replay --job-file ./candidate_job.json --dry-run
+python -m teamEvolver.true_replay --job-file ./candidate_job.json --json
 ```
 
 True Replay 会为两条分支创建临时 `HOME` 与 `HERMES_HOME`，不会修改真实 Agent 配置。若使用本地 Agent checkout，可通过 `HERMES_ORIGIN` 指定源码位置。
@@ -519,9 +519,9 @@ True Replay 会为两条分支创建临时 `HOME` 与 `HERMES_HOME`，不会修�
 ## 项目结构
 
 ```text
-skillgene/
-├── skillgene/
-│   ├── cli/              # skillgene 命令行
+teamEvolver/
+├── teamEvolver/
+│   ├── cli/              # teamEvolver 命令行
 │   ├── config_store/     # 本地配置读写
 │   ├── proxy/            # 服务路由、控制台与管理接口
 │   ├── skills/           # SKILL.md 管理、打包、同步
@@ -562,8 +562,8 @@ python -m build
 - [SkillClaw](https://github.com/AMAP-ML/SkillClaw)：多 Angent skills 进化项目。
 - [OpenSpace](https://github.com/HKUDS/OpenSpace)：质量优先的 Agent Skill Hub。
 - [Hermes Agent](https://github.com/nousresearch/hermes-agent)：可选 True Replay 运行时依赖。
-- [FastAPI](https://fastapi.tiangolo.com/)：SkillGene 服务端框架。
-- [React](https://react.dev/) 与 [TypeScript](https://www.typescriptlang.org/)：SkillGene 控制台技术栈。
+- [FastAPI](https://fastapi.tiangolo.com/)：teamEvolver 服务端框架。
+- [React](https://react.dev/) 与 [TypeScript](https://www.typescriptlang.org/)：teamEvolver 控制台技术栈。
 
 ---
 

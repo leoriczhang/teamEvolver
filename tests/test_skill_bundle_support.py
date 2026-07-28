@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from skillgene.skills.hub import SkillHub
+from teamEvolver.skills.hub import SkillHub
 
 SKILL_MD = """---
 name: demo-skill
@@ -163,8 +163,8 @@ def test_skill_hub_persists_bundle_version_snapshots(tmp_path: Path) -> None:
 def test_skill_hub_roundtrips_extra_unstructured_files_and_attributes_them(tmp_path: Path) -> None:
     import json
 
-    from skillgene.proxy import _extract_read_skills_from_tool_calls
-    from skillgene.skills.manager import SkillManager
+    from teamEvolver.proxy import _extract_read_skills_from_tool_calls
+    from teamEvolver.skills.manager import SkillManager
 
     skills_dir = tmp_path / "skills"
     extra_md = _skill_md("extra-skill")
@@ -226,11 +226,11 @@ def test_skill_hub_roundtrips_extra_unstructured_files_and_attributes_them(tmp_p
 def test_skill_path_map_and_tool_attribution_include_bundle_files(tmp_path: Path) -> None:
     import json
 
-    from skillgene.proxy import (
+    from teamEvolver.proxy import (
         _extract_modified_skills_from_tool_calls,
         _extract_read_skills_from_tool_calls,
     )
-    from skillgene.skills.manager import SkillManager
+    from teamEvolver.skills.manager import SkillManager
 
     skills_dir = tmp_path / "skills"
     _write_bytes(skills_dir / "demo-skill" / "SKILL.md", SKILL_MD.encode("utf-8"))
@@ -281,11 +281,11 @@ def test_skill_path_map_and_tool_attribution_include_bundle_files(tmp_path: Path
 def test_hermes_skill_tool_attribution_uses_bundle_child_paths(tmp_path: Path) -> None:
     import json
 
-    from skillgene.proxy import (
+    from teamEvolver.proxy import (
         _extract_modified_skills_from_tool_calls,
         _extract_read_skills_from_tool_calls,
     )
-    from skillgene.skills.manager import SkillManager
+    from teamEvolver.skills.manager import SkillManager
 
     skills_dir = tmp_path / "skills"
     _write_bytes(skills_dir / "demo-skill" / "SKILL.md", SKILL_MD.encode("utf-8"))
@@ -347,8 +347,8 @@ def test_hermes_skill_tool_attribution_uses_bundle_child_paths(tmp_path: Path) -
 def test_claude_code_skill_tool_detected(tmp_path: Path) -> None:
     import json
 
-    from skillgene.proxy import _extract_read_skills_from_tool_calls
-    from skillgene.skills.manager import SkillManager
+    from teamEvolver.proxy import _extract_read_skills_from_tool_calls
+    from teamEvolver.skills.manager import SkillManager
 
     skills_dir = tmp_path / "skills"
     _write_bytes(skills_dir / "evolve-demo" / "SKILL.md", _skill_md("evolve-demo").encode("utf-8"))

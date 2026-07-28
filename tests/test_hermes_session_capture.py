@@ -6,8 +6,8 @@ from pathlib import Path
 
 import yaml
 
-from skillgene.integrations.hermes_skill import install
-from skillgene.integrations.hermes_skill.push_session import _read_session
+from teamEvolver.integrations.hermes_skill import install
+from teamEvolver.integrations.hermes_skill.push_session import _read_session
 
 
 def _build_state_db(path: Path) -> str:
@@ -165,7 +165,7 @@ def test_feed_installer_replaces_same_script_with_new_python(tmp_path: Path) -> 
     hooks = config["hooks"]["on_session_end"]
     assert hooks == [
         {
-            "command": f"/opt/python {home / 'skills/skillgene-feed/push_session.py'}",
+            "command": f"/opt/python {home / 'skills/teamEvolver-feed/push_session.py'}",
             "timeout": 20,
         }
     ]

@@ -3,11 +3,11 @@ SkillsAdmin REST routes.
 
 Three layers are covered:
 
-* :mod:`skillgene.skills.editor` — pure on-disk CRUD over ``skills_dir``.
-* :meth:`skillgene.skills.hub.SkillHub.delete_skill` and the ``include_names``
+* :mod:`teamEvolver.skills.editor` — pure on-disk CRUD over ``skills_dir``.
+* :meth:`teamEvolver.skills.hub.SkillHub.delete_skill` and the ``include_names``
   push filter — the cloud side used for auto-sync.
-* :class:`skillgene.proxy.skills_admin.SkillsAdminMixin` routes — wired through a
-  real :class:`~skillgene.proxy.ProxyServer` and exercised with the FastAPI
+* :class:`teamEvolver.proxy.skills_admin.SkillsAdminMixin` routes — wired through a
+  real :class:`~teamEvolver.proxy.ProxyServer` and exercised with the FastAPI
   ``TestClient`` (no live upstream), including the local-backend cloud auto-sync.
 """
 
@@ -22,13 +22,13 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from skillgene.config import SkillGeneConfig
-from skillgene.proxy import ProxyServer
-from skillgene.proxy.users_admin import _hub_from_user
-from skillgene.skills import editor
-from skillgene.skills.editor import SkillEditorError
-from skillgene.skills.hub import SkillHub
-from skillgene.skills.manager import SkillManager
+from teamEvolver.config import TeamEvolverConfig
+from teamEvolver.proxy import ProxyServer
+from teamEvolver.proxy.users_admin import _hub_from_user
+from teamEvolver.skills import editor
+from teamEvolver.skills.editor import SkillEditorError
+from teamEvolver.skills.hub import SkillHub
+from teamEvolver.skills.manager import SkillManager
 
 
 def _skill_md(name: str, description: str = "Demo skill", body: str = "# Demo\n\nDo it.") -> str:
@@ -247,7 +247,7 @@ def _make_server(tmp_path: Path, *, sharing: bool = False) -> ProxyServer:
     # reload() has something to load and generation bumps are observable.
     _seed_skill(skills_dir, "seed-skill")
 
-    config = SkillGeneConfig(
+    config = TeamEvolverConfig(
         skills_dir=str(skills_dir),
         users_registry_path=str(tmp_path / "users.json"),
         sharing_enabled=sharing,

@@ -1,4 +1,4 @@
-// API client for the SkillGene unified console.
+// API client for the teamEvolver unified console.
 //
 // All requests are same-origin: the 52010 evolve server hosts this SPA and
 // serves dashboard, auth, user, skill, model-config and session-ingest endpoints natively.

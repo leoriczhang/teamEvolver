@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from skillgene.config import SkillGeneConfig
-from skillgene.validation.worker import ValidationWorker
+from teamEvolver.config import TeamEvolverConfig
+from teamEvolver.validation.worker import ValidationWorker
 
 
 class _FakeClient:
@@ -14,7 +14,7 @@ class _FakeClient:
 @pytest.mark.anyio
 async def test_replay_branch_uses_replay_result_fields(tmp_path) -> None:
     worker = ValidationWorker(
-        SkillGeneConfig(
+        TeamEvolverConfig(
             sharing_enabled=True,
             sharing_backend="local",
             sharing_session_backend="local",
@@ -40,7 +40,7 @@ async def test_replay_branch_uses_replay_result_fields(tmp_path) -> None:
 @pytest.mark.anyio
 async def test_replay_validation_rejects_tied_replay_scores(tmp_path) -> None:
     worker = ValidationWorker(
-        SkillGeneConfig(
+        TeamEvolverConfig(
             sharing_enabled=True,
             sharing_backend="local",
             sharing_session_backend="local",
