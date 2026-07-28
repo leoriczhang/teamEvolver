@@ -76,6 +76,7 @@ Do not distribute the OpenViking team key to Hermes machines. Prefer the teamEvo
 ```bash
 python "$TEAMEVOLVER_REPO/teamEvolver/integrations/hermes_skill_sync/install.py" \
   --hermes-home "$HERMES_HOME" \
+  --python python3 \
   --backend service \
   --url "$TEAMEVOLVER_URL" \
   --user "$TEAMEVOLVER_USER" \
@@ -95,6 +96,7 @@ The installer:
 ```bash
 python "$TEAMEVOLVER_REPO/teamEvolver/integrations/hermes_skill/install.py" \
   --hermes-home "$HERMES_HOME" \
+  --python python3 \
   --user "$TEAMEVOLVER_USER" \
   --url "$TEAMEVOLVER_URL" \
   "${TEAMEVOLVER_AUTH_ARGS[@]}"

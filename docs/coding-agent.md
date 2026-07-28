@@ -76,6 +76,7 @@ Hermes 机器不要配置 OpenViking team key。推荐全部走 teamEvolver 服�
 ```bash
 python "$TEAMEVOLVER_REPO/teamEvolver/integrations/hermes_skill_sync/install.py" \
   --hermes-home "$HERMES_HOME" \
+  --python python3 \
   --backend service \
   --url "$TEAMEVOLVER_URL" \
   --user "$TEAMEVOLVER_USER" \
@@ -95,6 +96,7 @@ python "$TEAMEVOLVER_REPO/teamEvolver/integrations/hermes_skill_sync/install.py"
 ```bash
 python "$TEAMEVOLVER_REPO/teamEvolver/integrations/hermes_skill/install.py" \
   --hermes-home "$HERMES_HOME" \
+  --python python3 \
   --user "$TEAMEVOLVER_USER" \
   --url "$TEAMEVOLVER_URL" \
   "${TEAMEVOLVER_AUTH_ARGS[@]}"
