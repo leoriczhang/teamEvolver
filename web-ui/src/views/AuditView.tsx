@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Panel,
   StatCard,
@@ -6,6 +6,7 @@ import {
   Empty,
   ListViewport,
   PaginationControls,
+  VerificationCard,
   usePagedItems,
 } from "@/components/common";
 import { Button } from "@/components/ui/button";
@@ -139,27 +140,28 @@ export default function AuditView({ active }: { active: boolean }) {
                         {!evos.length ? (
                           <div className="text-xs text-muted-foreground">本周期未记录技能变更。</div>
                         ) : (
-                          <table className="w-full border-collapse">
-                            <thead>
-                              <tr>
-                                {["技能", "动作", "上传", "原因"].map((h) => (
-                                  <th key={h} className="border-b border-line px-3 py-2 text-left text-xs font-semibold text-muted-foreground">
-                                    {h}
-                                  </th>
-                                ))}
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {evos.map((e, k) => (
-                                <tr key={k}>
-                                  <Td>{e.skill_name || "-"}</Td>
-                                  <Td><Pill tone="blue">{e.action || "-"}</Pill></Td>
-                                  <Td>{e.uploaded ? <Pill tone="green">已上传</Pill> : <Pill tone="gray">未上传</Pill>}</Td>
-                                  <Td><span className="text-xs text-muted-foreground">{e.reason || ""}</span></Td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
+                          <div className="space-y-2.5">
+                            {evos.map((e, k) => {
+                              const reason = e.reason || e.verification?.reason || e.rationale || "";
+                              const rejected = e.action === "verification_rejected" || e.verification?.accepted === false;
+                              return (
+                                <div key={k} className="rounded-lg border border-line bg-surface-subtle p-3">
+                                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <span className="mono text-xs font-semibold">{e.skill_name || "-"}</span>
+                                      <Pill tone={rejected ? "red" : "blue"}>{e.action || "-"}</Pill>
+                                      {e.uploaded ? <Pill tone="green">已上传</Pill> : <Pill tone="gray">未上传</Pill>}
+                                    </div>
+                                    {e.version != null && <span className="text-xs text-muted-foreground">v{e.version}</span>}
+                                  </div>
+                                  <VerificationCard verification={e.verification} fallbackReason={reason} compact />
+                                  {!e.verification && reason && (
+                                    <div className="mt-2 text-xs leading-relaxed text-muted-foreground">{reason}</div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
                         )}
                       </div>
                     </div>
@@ -173,8 +175,4 @@ export default function AuditView({ active }: { active: boolean }) {
       </Panel>
     </div>
   );
-}
-
-function Td({ children }: { children: ReactNode }) {
-  return <td className="border-b border-line px-3 py-2 align-top text-sm">{children}</td>;
 }

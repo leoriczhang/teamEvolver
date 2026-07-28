@@ -188,6 +188,86 @@ def _history_from_archived_sessions(config, *, limit: int = 50, session_id: str 
     return cycles
 
 
+def _evolve_history_path_candidates(config) -> list[str]:
+    raw_paths = [
+        os.environ.get("EVOLVE_HISTORY_PATH", ""),
+        os.environ.get("TEAMEVOLVER_EVOLVE_HISTORY_PATH", ""),
+        getattr(config, "evolve_history_path", ""),
+        "evolve_history.jsonl",
+        os.path.join(os.getcwd(), "evolve_history.jsonl"),
+    ]
+    paths: list[str] = []
+    for raw in raw_paths:
+        value = str(raw or "").strip()
+        if value and value not in paths:
+            paths.append(value)
+    return paths
+
+
+def _cycle_matches_session(record: dict[str, Any], session_id: str) -> bool:
+    wanted = str(session_id or "").strip()
+    if not wanted:
+        return True
+    ids = set(str(item) for item in (record.get("session_ids") or []))
+    for evo in record.get("evolutions") or []:
+        if isinstance(evo, dict):
+            ids.update(str(item) for item in (evo.get("session_ids") or []))
+    return wanted in ids
+
+
+def _filter_cycle_for_session(record: dict[str, Any], session_id: str) -> dict[str, Any]:
+    wanted = str(session_id or "").strip()
+    if not wanted:
+        return dict(record)
+    filtered = dict(record)
+    judge = None
+    for detail in record.get("session_judge_details") or []:
+        if isinstance(detail, dict) and str(detail.get("session_id") or "") == wanted:
+            judge = detail
+            break
+    filtered["judge"] = judge or record.get("judge") or {}
+    filtered["evolutions"] = [
+        evo
+        for evo in (record.get("evolutions") or [])
+        if isinstance(evo, dict) and wanted in set(str(item) for item in (evo.get("session_ids") or []))
+    ]
+    return filtered
+
+
+def _history_from_evolve_file(config, *, limit: int = 50, session_id: str = "") -> list[dict[str, Any]]:
+    capped = max(1, int(limit or 50))
+    for path in _evolve_history_path_candidates(config):
+        rows: list[dict[str, Any]] = []
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(record, dict) or not _cycle_matches_session(record, session_id):
+                        continue
+                    rows.append(_filter_cycle_for_session(record, session_id))
+        except FileNotFoundError:
+            continue
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[History] failed to read evolve history %s: %s", path, exc)
+            continue
+        rows.reverse()
+        return rows[:capped]
+    return []
+
+
+def _history_cycles(config, *, limit: int = 50, session_id: str = "") -> list[dict[str, Any]]:
+    cycles = _history_from_evolve_file(config, limit=limit, session_id=session_id)
+    if cycles:
+        return cycles
+    return _history_from_archived_sessions(config, limit=limit, session_id=session_id)
+
+
 def _candidate_skill_name(job: dict[str, Any]) -> str:
     candidate_skill = job.get("candidate_skill") if isinstance(job.get("candidate_skill"), dict) else {}
     return str(
@@ -894,7 +974,7 @@ class RoutesMixin:
 
         @app.get("/conversations/{session_id}/process")
         async def dashboard_conversation_process(session_id: str):
-            cycles = _history_from_archived_sessions(
+            cycles = _history_cycles(
                 owner.config,
                 limit=50,
                 session_id=_safe_session_id(session_id),
@@ -904,7 +984,7 @@ class RoutesMixin:
         @app.get("/history")
         async def dashboard_history(limit: int = 50, session_id: str = ""):
             return {
-                "cycles": _history_from_archived_sessions(
+                "cycles": _history_cycles(
                     owner.config,
                     limit=max(1, int(limit or 50)),
                     session_id=_safe_session_id(session_id) if session_id else "",

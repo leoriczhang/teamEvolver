@@ -12,6 +12,7 @@ import {
   ErrorText,
   ListViewport,
   PaginationControls,
+  VerificationCard,
   usePagedItems,
 } from "@/components/common";
 import { cn } from "@/lib/utils";
@@ -294,38 +295,28 @@ function ProcessBody({ p }: { p: SessionProcess | null }) {
                 本会话相关的技能进化
               </div>
               {evos.length ? (
-                <table className="w-full border-collapse">
-                  <thead>
-                    <tr>
-                      {["技能", "动作", "已上传", "原因"].map((h) => (
-                        <th
-                          key={h}
-                          className="border-b border-line px-3 py-2 text-left text-xs font-semibold text-muted-foreground"
-                        >
-                          {h}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {evos.map((e, k) => (
-                      <tr key={k}>
-                        <td className="border-b border-line px-3 py-2 align-top">
-                          {e.skill_name || "-"}
-                        </td>
-                        <td className="border-b border-line px-3 py-2 align-top">
-                          {e.action || "-"}
-                        </td>
-                        <td className="border-b border-line px-3 py-2 align-top">
-                          {e.uploaded ? "✅" : "—"}
-                        </td>
-                        <td className="border-b border-line px-3 py-2 align-top text-xs text-muted-foreground">
-                          {e.reason || ""}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                <div className="space-y-2.5">
+                  {evos.map((e, k) => {
+                    const reason = e.reason || e.verification?.reason || e.rationale || "";
+                    const rejected = e.action === "verification_rejected" || e.verification?.accepted === false;
+                    return (
+                      <div key={k} className="rounded-lg border border-line bg-surface-subtle p-3">
+                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="mono text-xs font-semibold">{e.skill_name || "-"}</span>
+                            <Pill tone={rejected ? "red" : "blue"}>{e.action || "-"}</Pill>
+                            {e.uploaded ? <Pill tone="green">已上传</Pill> : <Pill tone="gray">未上传</Pill>}
+                          </div>
+                          {e.version != null && <span className="text-xs text-muted-foreground">v{e.version}</span>}
+                        </div>
+                        <VerificationCard verification={e.verification} fallbackReason={reason} compact />
+                        {!e.verification && reason && (
+                          <div className="mt-2 text-xs leading-relaxed text-muted-foreground">{reason}</div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               ) : (
                 <div className="text-xs text-muted-foreground">
                   本会话未直接触发技能变更（可能仅参与聚合评估）。

@@ -49,6 +49,99 @@ export function ScoreText({
   );
 }
 
+const VERIFY_LABELS: Record<string, string> = {
+  grounded_in_evidence: "证据支撑",
+  preserves_existing_value: "保留价值",
+  specificity_and_reusability: "具体复用",
+  safe_to_publish: "发布安全",
+};
+
+function scoreBar(value?: number | null) {
+  const n = value == null || isNaN(Number(value)) ? null : Math.max(0, Math.min(1, Number(value)));
+  const cls = n == null ? "" : n >= 0.75 ? "good" : n < 0.5 ? "bad" : "";
+  return (
+    <div className="bar min-w-[120px]">
+      <span className={cls} style={{ width: `${((n || 0) * 100).toFixed(0)}%` }} />
+    </div>
+  );
+}
+
+export function VerificationCard({
+  verification,
+  fallbackReason = "",
+  compact = false,
+}: {
+  verification?: {
+    enabled?: boolean;
+    accepted?: boolean;
+    decision?: string;
+    score?: number | null;
+    threshold?: number | null;
+    reason?: string;
+    error?: string;
+    checks?: Record<string, number | null>;
+  } | null;
+  fallbackReason?: string;
+  compact?: boolean;
+}) {
+  const ver = verification || {};
+  const checks = ver.checks || {};
+  const reason = String(ver.reason || fallbackReason || ver.error || "").trim();
+  const hasChecks = Object.keys(checks).length > 0;
+  if (!verification && !reason) return null;
+  const score = ver.score;
+  const threshold = ver.threshold;
+  const rejected = ver.accepted === false || ver.decision === "reject";
+  const accepted = ver.accepted === true || ver.decision === "accept";
+  const statusTone: PillTone = accepted ? "green" : rejected ? "red" : "gray";
+  const statusText = accepted ? "Verifier 通过" : rejected ? "Verifier 拒绝" : "Verifier 结果";
+  const rows = Object.keys(VERIFY_LABELS)
+    .filter((k) => checks[k] != null)
+    .concat(Object.keys(checks).filter((k) => !(k in VERIFY_LABELS)));
+  return (
+    <div className={cn("rounded-lg border border-border bg-background/60 p-3", compact && "p-2.5")}>
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Pill tone={statusTone}>{statusText}</Pill>
+          {score != null && (
+            <span className={cn("score", scoreClass(score, threshold))}>
+              {fmtScore(score)}
+            </span>
+          )}
+          {threshold != null && (
+            <span className="text-[11px] text-muted-foreground">阈值 {fmtScore(threshold)}</span>
+          )}
+        </div>
+        {ver.enabled === false && <Pill tone="gray">未启用</Pill>}
+      </div>
+      {hasChecks && (
+        <div className="grid gap-1.5 md:grid-cols-2">
+          {rows.map((key) => {
+            const value = checks[key];
+            return (
+              <div key={key} className="flex items-center gap-2 text-xs">
+                <div className="w-[72px] shrink-0 text-muted-foreground">{VERIFY_LABELS[key] || key}</div>
+                {scoreBar(value)}
+                <div className="w-9 shrink-0 text-right font-semibold">
+                  {value == null ? "—" : Number(value).toFixed(2)}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {reason && (
+        <details className="mt-2 text-xs leading-relaxed text-muted-foreground" open={!compact}>
+          <summary className="cursor-pointer font-semibold text-foreground">
+            {rejected ? "拒绝原因" : "评审说明"}
+          </summary>
+          <div className="mt-1 whitespace-pre-wrap">{reason}</div>
+        </details>
+      )}
+    </div>
+  );
+}
+
 // ---- Stat card ----------------------------------------------------------- //
 export function StatCard({
   label,

@@ -219,8 +219,23 @@ export interface SessionProcess {
       action?: string;
       uploaded?: boolean;
       reason?: string;
+      rationale?: string;
+      verification?: VerificationResult;
+      version?: number | null;
+      job_id?: string;
     }[];
   }[];
+}
+
+export interface VerificationResult {
+  threshold?: number | null;
+  enabled?: boolean;
+  accepted?: boolean;
+  error?: string;
+  decision?: string;
+  reason?: string;
+  score?: number | null;
+  checks?: Record<string, number | null>;
 }
 
 export interface EvolveHistoryCycle {
@@ -236,6 +251,10 @@ export interface EvolveHistoryCycle {
     action?: string;
     uploaded?: boolean;
     reason?: string;
+    rationale?: string;
+    verification?: VerificationResult;
+    version?: number | null;
+    job_id?: string;
     session_ids?: string[];
   }[];
   [key: string]: any;
