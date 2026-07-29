@@ -1,0 +1,1249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Skill Route Card · teamEvolver / Hermes / OpenViking</title>
+<meta name="description" content="一条 SKILL.md 从一次会话到全组自动装载的五道工序。技能路线单。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,400..700&family=Inter+Tight:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&family=Noto+Serif+SC:wght@500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --paper:#E4E0CE;
+  --paper-deep:#D6D0B9;
+  --ink:#181A12;
+  --ink-mute:#4C4A3C;
+  --rule:#A19E88;
+  --rule-soft:#BEB9A3;
+  --amber:#B0721A;
+  --verified:#2E4A2C;
+  --reject:#7A2A17;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--paper)}
+body{
+  color:var(--ink);
+  font-family:'Inter Tight',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue","Noto Sans SC",Arial,sans-serif;
+  font-size:16px;line-height:1.55;
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+  font-feature-settings:"ss01","cv11";
+}
+::selection{background:var(--amber);color:var(--paper)}
+a:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--amber);outline-offset:3px}
+
+.card{max-width:1220px;margin:0 auto;padding:56px 56px 96px;position:relative}
+
+/* MASTHEAD ------------------------------------------------------------- */
+.masthead{
+  display:grid;grid-template-columns:1fr auto 1fr;align-items:baseline;gap:24px;
+  padding-bottom:14px;border-bottom:1px solid var(--ink);
+  font-family:'JetBrains Mono',ui-monospace,monospace;
+  font-size:10.5px;letter-spacing:0.22em;text-transform:uppercase;
+}
+.masthead__id{color:var(--ink)}
+.masthead__title{color:var(--ink);letter-spacing:0.32em}
+.masthead__issued{color:var(--ink-mute);text-align:right}
+
+/* ARCHITECTURE - where things actually live --------------------------- */
+.arch{
+  margin:32px 0 8px;padding:0 0 20px;
+  border-bottom:1px solid var(--ink);
+}
+.arch__eyebrow{
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;letter-spacing:0.24em;text-transform:uppercase;
+  color:var(--ink-mute);margin:0 0 6px;
+}
+.arch__title{
+  font-family:'Bricolage Grotesque','Noto Serif SC','Inter Tight',sans-serif;
+  font-size:clamp(20px,2.4vw,26px);font-weight:500;
+  font-variation-settings:'opsz' 48,'wdth' 96;
+  letter-spacing:-0.01em;margin:0 0 22px;color:var(--ink);
+}
+.arch__title em{
+  font-style:normal;font-weight:700;
+  font-variation-settings:'opsz' 48,'wdth' 88;
+  color:var(--amber);
+}
+.arch__diagram{display:block;width:100%;height:auto}
+.arch__caption{
+  display:flex;flex-wrap:wrap;gap:20px 28px;margin:16px 0 0;
+  font-family:'JetBrains Mono',monospace;
+  font-size:10.5px;letter-spacing:0.14em;text-transform:uppercase;
+  color:var(--ink-mute);
+}
+.arch__caption span::before{
+  content:"";display:inline-block;width:10px;height:10px;
+  margin-right:6px;transform:translateY(1px);
+}
+.arch__caption .cap--shared::before{background:var(--amber)}
+.arch__caption .cap--peer::before{background:var(--paper-deep);border:1px solid var(--rule)}
+.arch__caption .cap--external::before{background:var(--ink-mute)}
+
+/* HERO ---------------------------------------------------------------- */
+.hero{padding:80px 0 88px;max-width:920px}
+.hero__eyebrow{
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;letter-spacing:0.28em;text-transform:uppercase;
+  color:var(--amber);margin:0 0 26px;
+}
+.hero__title{
+  font-family:'Bricolage Grotesque','Noto Serif SC','Inter Tight',sans-serif;
+  font-weight:400;
+  font-variation-settings:'opsz' 96,'wdth' 92;
+  font-size:clamp(44px,7.4vw,96px);
+  line-height:1.02;letter-spacing:-0.02em;
+  margin:0 0 30px;color:var(--ink);
+}
+.hero__title em{
+  font-style:normal;font-weight:700;
+  font-variation-settings:'opsz' 96,'wdth' 84;
+  color:var(--amber);
+}
+.hero__lede{
+  max-width:640px;
+  font-size:17px;line-height:1.6;color:var(--ink-mute);margin:0;
+}
+.hero__lede code{
+  font-family:'JetBrains Mono',monospace;font-size:14px;
+  padding:1px 6px;background:var(--paper-deep);border-radius:2px;color:var(--ink);
+}
+
+/* ROUTE SPINE --------------------------------------------------------- */
+.route{padding:8px 0 32px}
+.route__spine{display:block;width:100%;height:40px}
+
+/* STATIONS ------------------------------------------------------------ */
+/* STATIONS · SCROLLYTELLING STAGE ------------------------------------- *
+ * The 5 stations become 6 scenes (prelude + 5) pinned to a single screen.
+ * Scroll position drives which scene is visible; cards cross-fade instead
+ * of jumping. Route SVG lives inside the stage, always visible.
+ * ------------------------------------------------------------------- */
+.stage{
+  position:relative;
+  /* Total scroll height = N viewports where N = --stage-scenes.
+     Each stage sets --stage-scenes inline; JS reads .scene count and
+     divides progress into equal buckets accordingly. */
+  height:calc(var(--stage-scenes, 6) * 100vh);
+  margin:56px 0 0;
+}
+.stage__pin{
+  position:sticky;top:0;
+  height:100vh;
+  display:grid;
+  /* rail (auto) · scenes (fills the rest) · foot (auto).
+     scenes must be a proper filled row, or absolutely-positioned .scene
+     children collapse to a 0-height box and drift below/above center. */
+  grid-template-rows:auto minmax(0,1fr) auto;
+  padding:28px 0 24px;
+  overflow:hidden;
+}
+.stage__rail{
+  position:relative;
+  padding-bottom:8px;
+}
+.stage__spine{display:block;width:100%;height:56px}
+/* Progress dots · generic rail for stages that don't have the route SVG.
+   Roles / truths / anatomy each render N dots in stage__rail; the current
+   scene's dot swells and turns amber. Handoff labels between dots are
+   short mono strings from the section eyebrow. */
+.stage__dots{
+  display:flex;align-items:center;gap:14px;
+  padding:6px 0 0;
+  font-family:'JetBrains Mono',monospace;
+  font-size:10px;letter-spacing:0.22em;text-transform:uppercase;
+  color:var(--ink-mute);
+}
+.stage__dots .stage__dots-line{
+  flex:1;height:1px;background:var(--rule);
+  position:relative;
+}
+.stage__dots .stage__dots-track{
+  position:absolute;inset:0;
+  display:flex;justify-content:space-between;align-items:center;
+}
+.stage__dots .stage__dot{
+  width:8px;height:8px;border-radius:50%;
+  background:var(--ink);opacity:0.35;
+  transform:scale(0.7);
+  transition:transform 320ms cubic-bezier(.2,.9,.3,1.2),
+             opacity 240ms ease,
+             background-color 240ms ease;
+}
+.stage__dots .stage__dot.is-past{opacity:0.85;transform:scale(0.9)}
+.stage__dots .stage__dot.is-current{
+  opacity:1;transform:scale(1.4);
+  background:var(--amber);
+  filter:drop-shadow(0 0 6px rgba(197,140,60,0.45));
+}
+.stage__scenes{
+  /* Filled 1fr row from the grid; .scene children lay out relative to this
+     box. place-items:center on each scene handles the vertical centering,
+     so the current card sits in the visual middle of the viewport. */
+  position:relative;
+  width:100%;
+  min-height:0;
+}
+.scene{
+  position:absolute;inset:0;
+  /* flex, not grid: grid's justify-items:center shrinks .scene__inner to
+     content width, which then collapses station__num / station__name / actor
+     into a narrow column. flex just centers without touching sizing. */
+  display:flex;align-items:center;justify-content:center;
+  opacity:0;transform:translateY(24px);
+  transition:opacity 520ms ease, transform 620ms cubic-bezier(.2,.7,.3,1);
+  pointer-events:none;
+  overflow:auto; /* long cards (station 03) still readable in short viewports */
+}
+.scene.is-current{
+  opacity:1;transform:none;
+  pointer-events:auto;
+}
+.scene.is-prev{
+  opacity:0;transform:translateY(-24px);
+}
+.scene__inner{
+  /* flex:1 1 auto + width:100% + min-width:0 · rock-solid width.
+     Without min-width:0 a flex item can shrink to *content* min-width, which
+     for station 03 is roughly (col A monospace min + col B monospace min +
+     gap) ≈ half the design width - causing the whole station header to
+     appear only in the left half. */
+  flex:1 1 auto;
+  width:100%;max-width:920px;min-width:0;
+  padding:0 24px;
+  box-sizing:border-box;
+}
+/* Station is a block child of .scene__inner; make sure it fills the inner
+   width so headers (num/name/actor) don't clip to a sub-column. */
+.scene__inner > .station{width:100%}
+.stage__foot{
+  display:flex;justify-content:space-between;align-items:baseline;
+  padding-top:20px;border-top:1px solid var(--rule);
+  font-family:'JetBrains Mono',monospace;
+  font-size:10.5px;letter-spacing:0.22em;text-transform:uppercase;
+  color:var(--ink-mute);
+}
+.stage__foot em{color:var(--amber);font-style:normal;font-weight:600}
+.stage__hint{color:var(--ink-mute)}
+.stage__hint kbd{
+  font-family:inherit;background:var(--paper-deep);
+  padding:2px 6px;border:1px solid var(--rule);border-radius:2px;
+  color:var(--ink);
+}
+
+/* Station card visual - no longer a grid cell, now a stage card.
+   Wider single card in most scenes, split-body in scene 3. */
+.station{
+  /* In the scrollytelling stage, each station is a self-contained card that
+     the scene box centers vertically. No top-border rule (that was the old
+     conveyor-grid divider between adjacent tiles). */
+  position:relative;padding:0;
+}
+.station--wide .station__body{
+  display:grid;grid-template-columns:1fr 1fr;gap:32px;
+  margin-top:8px;
+}
+.station--wide .station__body > .station__col{position:relative}
+.station--wide .station__col + .station__col{
+  padding-left:32px;
+  border-left:1px dashed var(--rule-soft);
+}
+.station__col-label{
+  font-family:'JetBrains Mono',monospace;
+  font-size:10px;letter-spacing:0.24em;text-transform:uppercase;
+  color:var(--ink-mute);margin:0 0 8px;
+  display:block;
+}
+.station__col-label--distill{color:var(--reject)}
+.station__col-label--verify{color:var(--verified)}
+.station__num{
+  /* Was absolute-positioned to "punch through" the old top-border rule of
+     the station tile in the conveyor grid. In the scrollytelling stage that
+     rule is gone, so a normal block flow above the h3 reads cleaner and no
+     longer overlaps the title in wide viewports. */
+  display:block;
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;letter-spacing:0.22em;font-weight:600;
+  color:var(--ink);
+  margin:0 0 6px;
+}
+.station__name{
+  font-family:'Bricolage Grotesque','Noto Serif SC','Inter Tight',sans-serif;
+  font-weight:500;
+  font-variation-settings:'opsz' 24,'wdth' 100;
+  font-size:24px;line-height:1.15;letter-spacing:-0.01em;
+  margin:0 0 8px;color:var(--ink);
+}
+.station__actor{
+  font-family:'JetBrains Mono',monospace;
+  font-size:10.5px;letter-spacing:0.14em;text-transform:uppercase;
+  color:var(--amber);margin:0 0 10px;
+}
+.station__mode{
+  display:inline-block;
+  font-family:'JetBrains Mono',monospace;
+  font-size:9.5px;letter-spacing:0.18em;text-transform:uppercase;
+  padding:3px 7px 2px;border:1px solid currentColor;
+  margin:0 0 14px;
+}
+.station__mode--auto{color:var(--verified)}
+.station__mode--manual{color:var(--amber)}
+.station__mode--poll{color:var(--ink-mute)}
+.station__mode--external{color:var(--reject)}
+.station__narrative{
+  font-size:14px;line-height:1.6;color:var(--ink);margin:0 0 16px;
+}
+.station__narrative code{
+  font-family:'JetBrains Mono',monospace;font-size:12.5px;
+  background:var(--paper-deep);padding:1px 5px;border-radius:2px;color:var(--ink);
+}
+.station__note{
+  font-size:12.5px;line-height:1.65;color:var(--ink);
+  border-left:2px solid var(--amber);padding:8px 12px;margin:0 0 14px;
+  background:rgba(176,114,26,0.04);
+}
+.station__note code{
+  font-family:'JetBrains Mono',monospace;font-size:11.5px;
+  background:var(--paper-deep);padding:1px 5px;border-radius:2px;color:var(--ink);
+}
+.station__note strong{color:var(--amber);font-weight:600;letter-spacing:0.02em}
+.station__evidence{
+  font-family:'JetBrains Mono',monospace;
+  font-size:12px;line-height:1.75;color:var(--ink-mute);
+  border-left:2px solid var(--rule);padding:2px 0 2px 12px;margin:0;
+  white-space:pre-line;
+}
+.station--verified .station__name{color:var(--verified)}
+.station--verified{position:relative}
+
+/* Stamp - the one loud thing on the page ------------------------------ */
+.stamp{
+  position:absolute;top:14px;right:14px;
+  width:120px;height:50px;
+  transform:rotate(-6deg);
+  mix-blend-mode:multiply;opacity:0.85;
+  pointer-events:none;z-index:3;
+}
+.stamp text{font-family:'JetBrains Mono',monospace}
+
+/* ROLES · TRUTHS · ANATOMY (scrollytelling stages) -------------------- *
+ * These three sections are also pinned scrollytelling stages. Their
+ * individual entries (role / truth / anatomy row) become one scene each,
+ * displayed as a centered card. Old grid/border layouts are replaced with
+ * scene-friendly typography that reads at the current-card size. */
+
+/* Role - single actor card centered in a scene. */
+.role-card{max-width:720px;margin:0 auto;text-align:left}
+.role-card__name{
+  font-family:'Bricolage Grotesque','Noto Serif SC','Inter Tight',sans-serif;
+  font-size:clamp(38px,5vw,56px);font-weight:500;
+  font-variation-settings:'opsz' 72,'wdth' 92;
+  letter-spacing:-0.015em;line-height:1.05;margin:0 0 10px;color:var(--ink);
+}
+.role-card__job{
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;letter-spacing:0.18em;text-transform:uppercase;
+  color:var(--amber);margin:0 0 22px;
+}
+.role-card__sentence{
+  font-size:16px;line-height:1.7;color:var(--ink);margin:0;
+}
+.role-card__sentence em{color:var(--amber);font-style:normal;font-weight:600}
+.role-card--external .role-card__name{color:var(--ink-mute)}
+.role-card--external .role-card__job{color:var(--ink-mute)}
+
+/* Truth - myth ↑ real ↓ evidence · single card. */
+.truth-card{max-width:820px;margin:0 auto}
+.truth-card__myth{
+  font-size:14px;line-height:1.55;color:var(--ink-mute);
+  margin:0 0 18px;
+}
+.truth-card__myth::before{content:"README 让你以为: ";color:var(--reject);font-weight:600}
+.truth-card__real{
+  font-family:'Bricolage Grotesque','Noto Serif SC','Inter Tight',sans-serif;
+  font-size:clamp(24px,3.4vw,34px);font-weight:500;
+  font-variation-settings:'opsz' 48,'wdth' 96;
+  line-height:1.25;letter-spacing:-0.01em;
+  margin:0 0 20px;color:var(--ink);
+}
+.truth-card__real em{
+  font-style:normal;font-weight:700;color:var(--reject);
+  font-variation-settings:'opsz' 48,'wdth' 88;
+}
+.truth-card__proof{
+  font-family:'JetBrains Mono',monospace;
+  font-size:12px;line-height:1.7;color:var(--ink-mute);
+  border-left:2px solid var(--reject);
+  padding:4px 0 4px 14px;margin:0;
+  white-space:pre-line;
+}
+
+/* Anatomy - a single conjuration step per scene. */
+.step-card{max-width:820px;margin:0 auto}
+.step-card__cmd{
+  display:block;
+  font-family:'JetBrains Mono',monospace;
+  font-size:14px;line-height:1.5;color:var(--ink);
+  background:var(--paper-deep);padding:12px 16px;border-radius:2px;
+  border-left:2px solid var(--ink);
+  margin:0 0 22px;word-break:break-all;
+}
+.step-card__arrow{
+  display:block;
+  font-family:'JetBrains Mono',monospace;
+  color:var(--rule);font-size:18px;
+  margin:0 0 14px;
+}
+.step-card__effect{
+  font-size:16px;line-height:1.7;color:var(--ink);margin:0;
+}
+.step-card__effect em{color:var(--amber);font-style:normal;font-weight:600}
+.step-card__effect code{
+  font-family:'JetBrains Mono',monospace;font-size:13px;
+  background:var(--paper-deep);padding:1px 6px;border-radius:2px;
+}
+
+/* Prelude scene - reused across the four stages: eyebrow + big title + lede. */
+.prelude{text-align:center;max-width:720px;margin:0 auto}
+.prelude__eyebrow{
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;letter-spacing:0.24em;text-transform:uppercase;
+  color:var(--ink-mute);margin:0 0 14px;
+}
+.prelude__title{
+  font-family:'Bricolage Grotesque','Noto Serif SC','Inter Tight',sans-serif;font-weight:500;
+  font-size:clamp(30px,4vw,48px);line-height:1.15;
+  letter-spacing:-0.015em;margin:0 0 18px;
+  font-variation-settings:'opsz' 72,'wdth' 92;
+}
+.prelude__title em{color:var(--amber);font-style:normal}
+.prelude__lede{
+  font-size:14.5px;color:var(--ink-mute);line-height:1.65;margin:0;
+}
+.prelude__lede em{color:var(--amber);font-style:normal}
+.prelude__lede kbd{
+  font-family:'JetBrains Mono',monospace;background:var(--paper-deep);
+  padding:2px 6px;border:1px solid var(--rule);border-radius:2px;color:var(--ink);
+}
+
+/* COLOPHON ------------------------------------------------------------ */
+.colophon{
+  margin:96px 0 0;padding-top:20px;
+  border-top:1px solid var(--ink);
+  display:flex;justify-content:space-between;flex-wrap:wrap;gap:24px;
+  font-family:'JetBrains Mono',monospace;
+  font-size:10.5px;letter-spacing:0.18em;text-transform:uppercase;
+  color:var(--ink-mute);
+}
+
+/* REVEAL - subtle, once ---------------------------------------------- */
+.reveal{opacity:0;transform:translateY(6px)}
+.reveal.in{opacity:1;transform:none;transition:opacity 700ms ease,transform 700ms cubic-bezier(.2,.7,.3,1)}
+
+/* STAGE SPINE - the SVG lives inside the pinned stage now.
+   Segments and dots respond to --stage-progress (0..1) set by JS. */
+.stage__spine .seg{
+  stroke-dasharray:400;
+  stroke-dashoffset:400;
+  transition:stroke-dashoffset 620ms cubic-bezier(.5,.05,.3,.95);
+}
+.stage__spine .seg.on{stroke-dashoffset:0}
+.stage__spine .dot{
+  transform-box:fill-box;transform-origin:center;
+  transform:scale(0.4);opacity:0.25;
+  transition:transform 380ms cubic-bezier(.2,.9,.3,1.2), opacity 240ms ease;
+}
+.stage__spine .dot.on{transform:scale(1);opacity:1}
+.stage__spine .dot.is-current{
+  filter:drop-shadow(0 0 8px rgba(46,74,44,0.55));
+}
+.stage__spine .dot--verify.is-current{
+  filter:drop-shadow(0 0 10px rgba(46,74,44,0.75));
+}
+.stage__spine .lbl{opacity:0;transition:opacity 320ms ease}
+.stage__spine .lbl.on{opacity:1}
+
+/* Small staggers - quiet, not scattered. Only the .arch section still
+   uses passive .reveal fade-in; roles/truths/anatomy are now stages. */
+
+/* Arch section: stays static - it's already an information-dense diagram,
+   piling animation on it would only dilute the read. */
+
+/* RESPONSIVE ---------------------------------------------------------- */
+@media (max-width:1180px){
+  .station--wide .station__body{grid-template-columns:1fr 1fr;gap:24px}
+}
+@media (max-width:820px){
+  /* Mobile: pin stage retained per user preference, only sized down.
+     Split body (station 03) folds to single column. */
+  .stage{height:calc(var(--stage-scenes, 6) * 100vh)}
+  .stage__pin{padding:24px 0 24px}
+  .stage__spine{height:44px}
+  .station__name{font-size:22px}
+  .station--wide .station__body{grid-template-columns:1fr;gap:22px}
+  .station--wide .station__col + .station__col{
+    padding-left:0;border-left:none;
+    padding-top:22px;border-top:1px dashed var(--rule-soft);
+  }
+  .stage__foot{font-size:9.5px}
+  .stage__hint{display:none}
+}
+@media (max-width:960px){
+  .card{padding:40px 24px 64px}
+  .masthead{grid-template-columns:1fr;gap:6px;text-align:left}
+  .masthead__issued{text-align:left}
+  .hero{padding:48px 0 56px}
+  .station{padding:26px 0 0}
+  .stamp{right:6px;top:10px;width:88px;height:36px}
+  .role-card__name{font-size:32px}
+  .truth-card__real{font-size:22px}
+  .step-card__cmd{font-size:12px;padding:10px 12px}
+  .step-card__effect{font-size:14.5px}
+}
+
+@media (prefers-reduced-motion:reduce){
+  .reveal{opacity:1;transform:none;transition:none}
+  /* Under reduced motion, unpin the stage and let scenes stack vertically. */
+  .stage{height:auto}
+  .stage__pin{position:static;height:auto;padding:24px 0;overflow:visible}
+  .stage__scenes{position:static}
+  .scene{position:static;opacity:1;transform:none;pointer-events:auto;padding:32px 0;border-top:1px dashed var(--rule-soft)}
+  .scene:first-child{border-top:none}
+  .stage__spine .seg{stroke-dashoffset:0!important;transition:none!important}
+  .stage__spine .dot{transform:none!important;opacity:1!important;transition:none!important}
+  .stage__spine .lbl{opacity:1!important;transition:none!important}
+  *{animation:none!important}
+}
+</style>
+</head>
+<body>
+<main class="card" role="main">
+
+  <header class="masthead">
+    <span class="masthead__id">TE / route card / rev 06</span>
+    <span class="masthead__title">Skill Route Card</span>
+    <span class="masthead__issued">Hermes / teamEvolver / OpenViking</span>
+  </header>
+
+  <section class="arch reveal" aria-labelledby="arch-label">
+    <p class="arch__eyebrow" id="arch-label">架构层</p>
+    <h2 class="arch__title">共享发生在<em>存储层</em>, 不是服务层。</h2>
+
+    <svg class="arch__diagram" viewBox="0 0 1200 360" role="img" aria-labelledby="arch-diagram-title">
+      <title id="arch-diagram-title">四层结构:共享 bucket · 三台本地 teamEvolver · 外部 evolve_server</title>
+
+      <!-- 第 1 层 · 共享存储 -->
+      <g>
+        <rect x="60" y="16" width="1080" height="72" fill="none" stroke="#B0721A" stroke-width="1.5"/>
+        <text x="76" y="36" font-family="JetBrains Mono, monospace" font-size="10" letter-spacing="2.4" fill="#B0721A">LAYER · 01 · SHARED</text>
+        <text x="76" y="62" font-family="Bricolage Grotesque, Inter Tight, sans-serif" font-size="18" font-weight="500" fill="#181A12">OpenViking bucket  ·  resources/teamEvolver/</text>
+        <text x="76" y="80" font-family="JetBrains Mono, monospace" font-size="10.5" letter-spacing="1.4" fill="#4C4A3C">sessions/  ·  candidates/  ·  validation/  ·  skills/</text>
+        <text x="1124" y="80" text-anchor="end" font-family="JetBrains Mono, monospace" font-size="10" letter-spacing="1.6" fill="#B0721A">team AK · 唯一凭据</text>
+      </g>
+
+      <!-- 竖线 · 三条:小张 / 你 / 小李 (bucket → peer box top) -->
+      <line x1="240" y1="88" x2="240" y2="180" stroke="#A19E88" stroke-width="1"/>
+      <line x1="600" y1="88" x2="600" y2="180" stroke="#A19E88" stroke-width="1"/>
+      <line x1="960" y1="88" x2="960" y2="180" stroke="#A19E88" stroke-width="1"/>
+
+      <!-- 双向读写标签 -->
+      <text x="252" y="135" font-family="JetBrains Mono, monospace" font-size="9.5" letter-spacing="1.4" fill="#4C4A3C">R/W · team AK</text>
+      <text x="612" y="135" font-family="JetBrains Mono, monospace" font-size="9.5" letter-spacing="1.4" fill="#4C4A3C">R/W · team AK</text>
+      <text x="972" y="135" font-family="JetBrains Mono, monospace" font-size="9.5" letter-spacing="1.4" fill="#4C4A3C">R/W · team AK</text>
+
+      <!-- 第 2 层 · 三台本地 teamEvolver -->
+      <text x="60" y="168" font-family="JetBrains Mono, monospace" font-size="10" letter-spacing="2.4" fill="#4C4A3C">LAYER · 02 · PEER-LOCAL  ·  每人一份, 无中心服务器</text>
+
+      <g>
+        <rect x="140" y="180" width="200" height="90" fill="#D6D0B9" stroke="#181A12" stroke-width="1"/>
+        <text x="240" y="204" text-anchor="middle" font-family="Bricolage Grotesque, Inter Tight, sans-serif" font-size="14" font-weight="500" fill="#181A12">小张的机器</text>
+        <text x="240" y="223" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" letter-spacing="1.2" fill="#4C4A3C">teamEvolver :30000</text>
+        <text x="240" y="240" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9.5" letter-spacing="1.2" fill="#4C4A3C">+ ValidationWorker</text>
+        <text x="240" y="258" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9.5" letter-spacing="1.2" fill="#4C4A3C">+ Hermes hooks</text>
+
+        <rect x="500" y="180" width="200" height="90" fill="#E4E0CE" stroke="#181A12" stroke-width="2"/>
+        <text x="600" y="204" text-anchor="middle" font-family="Bricolage Grotesque, Inter Tight, sans-serif" font-size="14" font-weight="500" fill="#181A12">你的机器 · here</text>
+        <text x="600" y="223" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" letter-spacing="1.2" fill="#4C4A3C">teamEvolver :30000</text>
+        <text x="600" y="240" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9.5" letter-spacing="1.2" fill="#4C4A3C">+ ValidationWorker</text>
+        <text x="600" y="258" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9.5" letter-spacing="1.2" fill="#4C4A3C">+ Hermes hooks</text>
+
+        <rect x="860" y="180" width="200" height="90" fill="#D6D0B9" stroke="#181A12" stroke-width="1"/>
+        <text x="960" y="204" text-anchor="middle" font-family="Bricolage Grotesque, Inter Tight, sans-serif" font-size="14" font-weight="500" fill="#181A12">小李的机器</text>
+        <text x="960" y="223" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" letter-spacing="1.2" fill="#4C4A3C">teamEvolver :30000</text>
+        <text x="960" y="240" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9.5" letter-spacing="1.2" fill="#4C4A3C">+ ValidationWorker</text>
+        <text x="960" y="258" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9.5" letter-spacing="1.2" fill="#4C4A3C">+ Hermes hooks</text>
+      </g>
+
+      <!-- 三台 teamEvolver → evolve_server: 漏斗式收敛, 落在 evolve 顶部三点 (440, 600, 760), y=298 -->
+      <path d="M 240 270 C 240 288, 440 288, 440 298" fill="none" stroke="#4C4A3C" stroke-width="1" stroke-dasharray="3 3"/>
+      <line x1="600" y1="270" x2="600" y2="298" stroke="#4C4A3C" stroke-width="1" stroke-dasharray="3 3"/>
+      <path d="M 960 270 C 960 288, 760 288, 760 298" fill="none" stroke="#4C4A3C" stroke-width="1" stroke-dasharray="3 3"/>
+
+      <!-- 通知标签: 放在漏斗上方左侧空白 -->
+      <text x="76" y="288" font-family="JetBrains Mono, monospace" font-size="10" letter-spacing="1.6" fill="#4C4A3C">POST /trigger  ·  空 POST · 只是敲门信号</text>
+
+      <!-- 第 3 层 · evolve_server 外部 (虚线框保留 · 表达"不在本 repo"), 水平居中在 600 -->
+      <g>
+        <rect x="420" y="298" width="360" height="46" fill="none" stroke="#4C4A3C" stroke-width="1.5" stroke-dasharray="6 3"/>
+        <text x="600" y="320" text-anchor="middle" font-family="Bricolage Grotesque, Inter Tight, sans-serif" font-size="14" font-weight="500" fill="#4C4A3C">evolve_server</text>
+        <text x="600" y="336" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" letter-spacing="1.2" fill="#4C4A3C">LAYER · 03 · EXTERNAL SERVICE  ·  本 repo 不含</text>
+      </g>
+
+      <!-- evolve_server 独立读写 bucket · 走最右侧空白通道, 不穿任何 peer 卡 -->
+      <path d="M 780 321 L 1120 321 L 1120 88" fill="none" stroke="#4C4A3C" stroke-width="1" stroke-dasharray="3 3"/>
+      <text x="1132" y="205" font-family="JetBrains Mono, monospace" font-size="9" letter-spacing="1.2" fill="#4C4A3C" transform="rotate(90 1132 205)">读会话 / 写候选  ·  同一把 team AK</text>
+    </svg>
+
+    <div class="arch__caption" aria-hidden="true">
+      <span class="cap--shared">共享 · OpenViking bucket</span>
+      <span class="cap--peer">每人一份 · 本地 teamEvolver + Worker</span>
+      <span class="cap--external">外部依赖 · evolve_server</span>
+    </div>
+  </section>
+
+  <section class="hero">
+    <p class="hero__eyebrow">HERMES / TEAMEVOLVER / OPENVIKING</p>
+    <h1 class="hero__title">一个人的<em>教训</em>,<br>一秒变全组的<em>常识</em>。</h1>
+    <p class="hero__lede">追踪一条 <code>deploy-service</code> 技能: 从小张的一次 40 分钟摸索, 到小李下一次任务开始前的自动装载。四位主角, 五道工序, 一个签章。</p>
+  </section>
+
+  <section class="stage" data-stage aria-label="scrollytelling · 五道工序">
+    <div class="stage__pin">
+
+      <div class="stage__rail" aria-hidden="true">
+        <svg class="stage__spine" viewBox="0 0 1200 40" preserveAspectRatio="none">
+          <!-- always-visible dashed rail -->
+          <line x1="0" y1="20" x2="1200" y2="20" stroke="#9F9C87" stroke-width="1" stroke-dasharray="4 6"/>
+          <!-- 5 solid segments, drawn progressively as user scrolls through scenes -->
+          <line class="seg" data-seg="1" x1="60"   y1="20" x2="140"  y2="20" stroke="#181A12" stroke-width="1.5"/>
+          <line class="seg" data-seg="2" x1="260"  y1="20" x2="340"  y2="20" stroke="#181A12" stroke-width="1.5"/>
+          <line class="seg" data-seg="3" x1="440"  y1="20" x2="760"  y2="20" stroke="#2E4A2C" stroke-width="1.5"/>
+          <line class="seg" data-seg="4" x1="860"  y1="20" x2="940"  y2="20" stroke="#181A12" stroke-width="1.5"/>
+          <line class="seg" data-seg="5" x1="1060" y1="20" x2="1140" y2="20" stroke="#181A12" stroke-width="1.5"/>
+          <!-- 5 station dots -->
+          <circle class="dot" data-dot="1" cx="100"  cy="20" r="5"   fill="#181A12"/>
+          <circle class="dot" data-dot="2" cx="300"  cy="20" r="5"   fill="#181A12"/>
+          <circle class="dot dot--verify" data-dot="3" cx="600"  cy="20" r="6.5" fill="#2E4A2C"/>
+          <circle class="dot" data-dot="4" cx="900"  cy="20" r="5"   fill="#181A12"/>
+          <circle class="dot" data-dot="5" cx="1100" cy="20" r="5"   fill="#181A12"/>
+          <!-- 4 handoff labels between stations -->
+          <text class="lbl" data-lbl="1" x="200"  y="12" text-anchor="middle" fill="#4C4A3C" font-family="JetBrains Mono, monospace" font-size="10" letter-spacing="1.2">≈ 4h  ·  feed hook</text>
+          <text class="lbl" data-lbl="2" x="450"  y="12" text-anchor="middle" fill="#4C4A3C" font-family="JetBrains Mono, monospace" font-size="10" letter-spacing="1.2">candidate</text>
+          <text class="lbl" data-lbl="3" x="750"  y="12" text-anchor="middle" fill="#4C4A3C" font-family="JetBrains Mono, monospace" font-size="10" letter-spacing="1.2">≈ 45s  ·  replay</text>
+          <text class="lbl" data-lbl="4" x="1000" y="12" text-anchor="middle" fill="#4C4A3C" font-family="JetBrains Mono, monospace" font-size="10" letter-spacing="1.2">push  ·  v1</text>
+        </svg>
+      </div>
+
+      <div class="stage__scenes">
+
+        <!-- Scene 0 · Prelude: rail is drawn (JS drives segments), no card yet -->
+        <div class="scene" data-scene="0">
+          <div class="scene__inner" style="text-align:center;max-width:640px">
+            <h2 style="font-family:'Bricolage Grotesque','Noto Serif SC','Inter Tight',sans-serif;font-weight:500;font-size:44px;line-height:1.15;letter-spacing:-0.015em;margin:0 0 18px;font-variation-settings:'opsz' 72,'wdth' 92;">
+              一条技能, 从个人<em>教训</em>到全组<em>常识</em>,<br>要走完这五道工序。
+            </h2>
+            <p style="font-size:14.5px;color:var(--ink-mute);line-height:1.65;margin:0">
+              下面这条路线单会随你滚动逐步<em style="color:var(--amber);font-style:normal">推进</em>。每滚一屏, 就点亮下一道工序。 你也可以直接按方向键 <kbd style="font-family:'JetBrains Mono',monospace;background:var(--paper-deep);padding:2px 6px;border:1px solid var(--rule);border-radius:2px">↓</kbd> 跳到下一站。
+            </p>
+          </div>
+        </div>
+
+        <!-- Scene 1 · 工序 01 · 摸索 -->
+        <div class="scene" data-scene="1">
+          <div class="scene__inner">
+            <article class="station">
+              <h3 class="station__name">摸索</h3>
+              <p class="station__actor">小张的 Hermes</p>
+              <span class="station__mode station__mode--manual">人工 / 一次会话</span>
+              <p class="station__narrative">小张让 Hermes 部署一个 FastAPI 服务。它踩了三种端口冲突、猜错了 systemd unit 路径、最后靠 <code>ss -tlnp</code> 破的局。</p>
+              <p class="station__evidence">session · 8f2a
+turns · 23
+tools · 41
+failures · 3
+outcome · ok</p>
+            </article>
+          </div>
+        </div>
+
+        <!-- Scene 2 · 工序 02 · 上交 -->
+        <div class="scene" data-scene="2">
+          <div class="scene__inner">
+            <article class="station">
+              <h3 class="station__name">上交</h3>
+              <p class="station__actor">on_session_end</p>
+              <span class="station__mode station__mode--auto">全自动 / 每次会话结束</span>
+              <p class="station__narrative">Hermes 一收工, <code>teamEvolver-feed</code> 就把整段轨迹 POST 给<em>团队那台</em> teamEvolver。前提是同组所有 Hermes 都指向<em>同一个</em>服务, 否则采集不到别人。</p>
+              <p class="station__evidence">POST /ingest_session
+key · sessions/{sid}.json
+dedup · same sid overwrites
+scope · team (not per-user)</p>
+            </article>
+          </div>
+        </div>
+
+        <!-- Scene 3 · 工序 03 · 提炼与验证 (verified, split body) -->
+        <div class="scene" data-scene="3">
+          <div class="scene__inner" style="max-width:1080px">
+            <article class="station station--verified station--wide">
+              <h3 class="station__name">提炼与验证</h3>
+              <p class="station__actor">evolve_server + ValidationWorker</p>
+              <div class="station__body">
+                <div class="station__col">
+                  <span class="station__col-label station__col-label--distill">A · 提炼 · 外部服务</span>
+                  <span class="station__mode station__mode--external">需外部 evolve_server</span>
+                  <p class="station__narrative">teamEvolver 只是把轨迹排队, 真正把它揉成候选 <code>SKILL.md</code> 的是<em>外部</em>的 evolve_server (本 repo 不包含)。teamEvolver 在 15s 去抖窗口后, 空 POST 一次 <code>/trigger</code> 通知外部大脑, 数据不经这条 HTTP; evolve_server 自己回 bucket 读。</p>
+                  <p class="station__evidence">// 敲门 · 不搬数据
+POST /trigger
+body    · ∅ (empty)
+headers · none
+role    · 只是通知</p>
+                </div>
+                <div class="station__col">
+                  <span class="station__col-label station__col-label--verify">B · 验证 · 客户端轮询</span>
+                  <span class="station__mode station__mode--poll">客户端轮询 · 空闲时跑</span>
+                  <p class="station__narrative">候选入队后, 各机器上的 <code>ValidationWorker</code> 空闲时轮询, 每天最多 5 单, 起真沙盒 A/B 判决。</p>
+                  <p class="station__note"><strong>开关 · <code>validation.enabled</code></strong>决定这台机器是否加入验证矿工池。三条件同时满足才派工:<br>
+                  ① <code>validation.enabled=true</code> · ② <code>sharing.enabled=true</code> · ③ Hermes idle ≥ <code>idle_after_seconds</code> (默认 5 分钟)。<br>
+                  默认关, 由每台机器主人自愿加入。</p>
+                  <p class="station__evidence">// 一次典型判决:
+Δ turns · −38%
+Δ tools · −44%
+verdict · publish
+daily cap · 5 jobs / peer</p>
+                </div>
+              </div>
+              <svg class="stamp" viewBox="0 0 220 92" aria-hidden="true">
+                <rect x="6" y="6" width="208" height="80" fill="none" stroke="#2E4A2C" stroke-width="3"/>
+                <rect x="14" y="14" width="192" height="64" fill="none" stroke="#2E4A2C" stroke-width="1.4"/>
+                <text x="110" y="48" text-anchor="middle" fill="#2E4A2C" font-size="26" font-weight="700" letter-spacing="5">VERIFIED</text>
+                <text x="110" y="68" text-anchor="middle" fill="#2E4A2C" font-size="11" letter-spacing="4">TE · QC</text>
+              </svg>
+            </article>
+          </div>
+        </div>
+
+        <!-- Scene 4 · 工序 04 · 上架 -->
+        <div class="scene" data-scene="4">
+          <div class="scene__inner">
+            <article class="station">
+              <h3 class="station__name">上架</h3>
+              <p class="station__actor">OpenViking / 团队空间</p>
+              <span class="station__mode station__mode--manual">只有人可以按 / 无自动 push</span>
+              <p class="station__narrative">验证通过<em>也不会</em>自动上架。 <code>teamEvolver skills push</code> CLI 或控制台"发布"按钮才是唯一开关, 是刻意留的人工闸门, 不是没写完。</p>
+              <p class="station__evidence">gate · human-in-the-loop
+via  · CLI or /api/skills push
+namespace · resources/teamEvolver
+by   · (any peer with team AK)</p>
+            </article>
+          </div>
+        </div>
+
+        <!-- Scene 5 · 工序 05 · 装载 -->
+        <div class="scene" data-scene="5">
+          <div class="scene__inner">
+            <article class="station">
+              <h3 class="station__name">装载</h3>
+              <p class="station__actor">pre_llm_call · 已装 ✓</p>
+              <span class="station__mode station__mode--auto">全自动 / 60s 节流</span>
+              <p class="station__narrative">小李新开一段会话。Hermes 调模型前的一瞬间, <code>teamEvolver-sync</code> 从货架把最新技能拉到 <code>team_skills/teamEvolver</code>。 Hermes 用它<em>自己的</em> <code>skills_list</code> 就发现了。teamEvolver 不代理模型、不注入上下文。</p>
+              <p class="station__evidence">throttle · 60s
+downloaded · 1
+target · ~/.hermes/team_skills
+via · conda:teamEvolver</p>
+            </article>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="stage__foot" aria-hidden="true">
+        <span>Scene · <em data-stage-current>00</em> / <span data-stage-total>05</span></span>
+        <span class="stage__hint">↓ / space / trackpad to advance</span>
+        <span>Route Card · teamEvolver / Hermes / OpenViking</span>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ROLES STAGE · 1 prelude + 4 actor scenes -->
+  <section class="stage" data-stage aria-label="scrollytelling · 四位主角">
+    <div class="stage__pin">
+
+      <header class="stage__rail" aria-hidden="true">
+        <div class="stage__dots">
+          <span>ROLES</span>
+          <div class="stage__dots-line">
+            <div class="stage__dots-track">
+              <span class="stage__dot" data-progress-dot="1"></span>
+              <span class="stage__dot" data-progress-dot="2"></span>
+              <span class="stage__dot" data-progress-dot="3"></span>
+              <span class="stage__dot" data-progress-dot="4"></span>
+            </div>
+          </div>
+          <span></span>
+        </div>
+      </header>
+
+      <div class="stage__scenes">
+
+        <div class="scene" data-scene="0">
+          <div class="scene__inner">
+            <div class="prelude">
+              <p class="prelude__eyebrow">FOUR ACTORS</p>
+              <h2 class="prelude__title">四位主角,<br>各<em>司</em>其职。</h2>
+              <p class="prelude__lede">一位一位登场。</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="scene" data-scene="1">
+          <div class="scene__inner">
+            <article class="role-card">
+              <h3 class="role-card__name">OpenViking bucket</h3>
+              <p class="role-card__job">THE ONLY SHARED THING</p>
+              <p class="role-card__sentence">真正的共享中心。会话、候选、验证结果、发布的技能, 都汇在这。<em>team AK 是唯一入场券</em>: 谁能读写, 由钥匙决定, 而不是由服务器决定。</p>
+            </article>
+          </div>
+        </div>
+
+        <div class="scene" data-scene="2">
+          <div class="scene__inner">
+            <article class="role-card">
+              <h3 class="role-card__name">你的 teamEvolver</h3>
+              <p class="role-card__job">LOCAL PROXY · PEER-LOCAL</p>
+              <p class="role-card__sentence"><em>每人一份</em>, 跑在你自己 <code>:30000</code>。它是"你这台机器读写团队 bucket 的代理" + UI + 一个验证工人。它不需要架在中心服务器上, 因为中心是 bucket, 不是它。</p>
+            </article>
+          </div>
+        </div>
+
+        <div class="scene" data-scene="3">
+          <div class="scene__inner">
+            <article class="role-card">
+              <h3 class="role-card__name">你的 Hermes</h3>
+              <p class="role-card__job">DOES THE WORK</p>
+              <p class="role-card__sentence">干活的 Agent。它自己发现技能、自己决定用不用。teamEvolver 不代理它的模型、不注入它的上下文。feed / sync 两个钩子把它和本地 teamEvolver 串起来。</p>
+            </article>
+          </div>
+        </div>
+
+        <div class="scene" data-scene="4">
+          <div class="scene__inner">
+            <article class="role-card role-card--external">
+              <h3 class="role-card__name">evolve_server</h3>
+              <p class="role-card__job">DISTILLS · EXTERNAL SERVICE</p>
+              <p class="role-card__sentence">真正把一堆会话揉成候选 <code>SKILL.md</code> 的大脑。<em>本 repo 不包含</em>, 外挂经 <code>evolve.server_url</code> 配置。收到 teamEvolver 的空 POST 敲门后, <em>它自己回头去 bucket 读</em>。数据从不经这条 HTTP。它也用同一把 team AK 读写 bucket, 不是"另一个中心"。</p>
+            </article>
+          </div>
+        </div>
+
+      </div>
+
+      <footer class="stage__foot" aria-hidden="true">
+        <span>Cast · <em data-stage-current>00</em> / <span data-stage-total>04</span></span>
+        <span></span>
+      </footer>
+
+    </div>
+  </section>
+
+  <!-- TRUTHS STAGE · 1 prelude + 3 truth scenes -->
+  <section class="stage" data-stage aria-label="scrollytelling · README 没讲清的三件事">
+    <div class="stage__pin">
+
+      <header class="stage__rail" aria-hidden="true">
+        <div class="stage__dots">
+          <span>TRUTHS</span>
+          <div class="stage__dots-line">
+            <div class="stage__dots-track">
+              <span class="stage__dot" data-progress-dot="1"></span>
+              <span class="stage__dot" data-progress-dot="2"></span>
+              <span class="stage__dot" data-progress-dot="3"></span>
+            </div>
+          </div>
+          <span></span>
+        </div>
+      </header>
+
+      <div class="stage__scenes">
+
+        <div class="scene" data-scene="0">
+          <div class="scene__inner">
+            <div class="prelude">
+              <p class="prelude__eyebrow">三件事</p>
+              <h2 class="prelude__title">"共享"不是<em>服务</em>共享,<br>是<em>存储</em>共享。</h2>
+              <p class="prelude__lede">下面三个真相, 逐条纠误。</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="scene" data-scene="1">
+          <div class="scene__inner">
+            <article class="truth-card">
+              <p class="truth-card__myth">"要有一台大家共用的 teamEvolver 服务器。"</p>
+              <p class="truth-card__real">teamEvolver <em>每人一份</em>, 跑本地。共享的是 <em>OpenViking bucket</em>; 同一把 team AK 就是团队身份。</p>
+              <p class="truth-card__proof">session_store.py:108-115
+key = sessions/{sid}.json
+// bucket 层 team-scope
+hub.py:208-216 comment:
+"sessions deliberately
+ NOT partitioned per peer:
+ team-level evolution
+ must see everyone."
+// = bucket 汇合, 服务不共享</p>
+            </article>
+          </div>
+        </div>
+
+        <div class="scene" data-scene="2">
+          <div class="scene__inner">
+            <article class="truth-card">
+              <p class="truth-card__myth">"teamEvolver 会自己把会话提炼成技能。"</p>
+              <p class="truth-card__real">提炼在<em>外部</em> <code>evolve_server</code>, 本 repo 不含它的代码。teamEvolver 只做<em>敲门</em>: 会话落 bucket 后, 空 POST 一次 <code>/trigger</code> 通知外部大脑"有新东西了"。<em>数据不经这条 HTTP</em>; evolve_server 自己回头去 bucket 读。控制面走网络, 数据面走存储。</p>
+              <p class="truth-card__proof">// teamEvolver 侧的完整动作:
+//   1. session 落 sessions/{sid}.json
+//   2. 15s 去抖窗口开始
+//   3. window 内多次 ingest →
+//      合并成一次通知
+//   4. POST {evolve_url}/trigger
+//      body: 空 · headers: 无
+//
+// evolve_server 收到后:
+//   → 自己去 bucket 读 sessions/*
+//   → 提炼 / 聚类 / 生成候选
+//   → 候选写回 bucket
+//
+// 意义: /trigger 不通只影响
+//       "发现延迟", 不影响数据汇合</p>
+            </article>
+          </div>
+        </div>
+
+        <div class="scene" data-scene="3">
+          <div class="scene__inner">
+            <article class="truth-card">
+              <p class="truth-card__myth">"验证通过后会自动发布到货架。"</p>
+              <p class="truth-card__real">没有一条路径把 True Replay 结果连到 <code>push_skills</code>。<em>发布只能人按</em>。</p>
+              <p class="truth-card__proof">store.py:126-134
+save_result() writes verdict
+// but NEVER calls push_skills
+grep save_decision → 0 callers
+skills_admin.py:222-292
+push routes gated by
+_require_admin_request()</p>
+            </article>
+          </div>
+        </div>
+
+      </div>
+
+      <footer class="stage__foot" aria-hidden="true">
+        <span>Truth · <em data-stage-current>00</em> / <span data-stage-total>03</span></span>
+        <span></span>
+      </footer>
+
+    </div>
+  </section>
+
+  <!-- ANATOMY STAGE · 1 prelude + 8 step scenes + 1 coda scene -->
+  <section class="stage" data-stage aria-label="scrollytelling · 配置解剖">
+    <div class="stage__pin">
+
+      <header class="stage__rail" aria-hidden="true">
+        <div class="stage__dots">
+          <span>SETUP</span>
+          <div class="stage__dots-line">
+            <div class="stage__dots-track">
+              <span class="stage__dot" data-progress-dot="1"></span>
+              <span class="stage__dot" data-progress-dot="2"></span>
+              <span class="stage__dot" data-progress-dot="3"></span>
+              <span class="stage__dot" data-progress-dot="4"></span>
+              <span class="stage__dot" data-progress-dot="5"></span>
+              <span class="stage__dot" data-progress-dot="6"></span>
+              <span class="stage__dot" data-progress-dot="7"></span>
+              <span class="stage__dot" data-progress-dot="8"></span>
+              <span class="stage__dot" data-progress-dot="9"></span>
+            </div>
+          </div>
+          <span></span>
+        </div>
+      </header>
+
+      <div class="stage__scenes">
+
+        <div class="scene" data-scene="0">
+          <div class="scene__inner">
+            <div class="prelude">
+              <p class="prelude__eyebrow">配置解剖</p>
+              <h2 class="prelude__title">环境不是清单, 是<em>咒语</em>,<br>每一行召唤一个物件。</h2>
+              <p class="prelude__lede">按顺序走完 8 步, 把这张路线单从"图上"召唤到"你机器上"。<br>左边是<em>你敲的字</em>, 右边是<em>它在物理上让什么开始存在或工作</em>。</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="scene" data-scene="1">
+          <div class="scene__inner">
+            <article class="step-card">
+              <code class="step-card__cmd">conda create -n teamEvolver python=3.11</code>
+              <span class="step-card__arrow" aria-hidden="true">↓  在物理上等于</span>
+              <p class="step-card__effect"><em>隔离运行时</em>诞生。teamEvolver 从此和系统 Python 分家, 装什么依赖都进这个笼子里, 不弄脏 Hermes 用的解释器。</p>
+            </article>
+          </div>
+        </div>
+
+        <div class="scene" data-scene="2">
+          <div class="scene__inner">
+            <article class="step-card">
+              <code class="step-card__cmd">pip install -e ".[sharing,validation]"</code>
+              <span class="step-card__arrow" aria-hidden="true">↓  在物理上等于</span>
+              <p class="step-card__effect"><em>两个能力被装上</em>: <code>sharing</code> 让本地 teamEvolver 会说 OpenViking 协议 (读写 bucket); <code>validation</code> 让它以后能派生 <code>ValidationWorker</code> 起沙盒 A/B。现在只是把 <em>器官</em> 装进身体, 器官还没启用。</p>
+            </article>
+          </div>
+        </div>
+
+        <div class="scene" data-scene="3">
+          <div class="scene__inner">
+            <article class="step-card">
+              <code class="step-card__cmd">~/.teamEvolver/config.yaml · viking_team_api_key</code>
+              <span class="step-card__arrow" aria-hidden="true">↓  在物理上等于</span>
+              <p class="step-card__effect"><em>团队身份</em>被授予。这把 team AK 是<em>唯一凭据</em>, 决定你能读写哪个 bucket 命名空间。所有 peer 拿同一把 AK, 才算"在同一个团队"; 换了 AK 就换了世界。teamEvolver 服务本身<em>不需要中心部署</em>; AK 就是团队。</p>
+            </article>
+          </div>
+        </div>
+
+        <div class="scene" data-scene="4">
+          <div class="scene__inner">
+            <article class="step-card">
+              <code class="step-card__cmd">teamEvolver start</code>
+              <span class="step-card__arrow" aria-hidden="true">↓  在物理上等于</span>
+              <p class="step-card__effect"><em>本地代理开机</em>: <code>:30000</code> 起 FastAPI 服务, 后台起 skill 轮询协程 (默认 30s 拉一次 bucket manifest), 后台起 evolve 通知去抖器 (15s 窗口)。如果 <code>validation.enabled=true</code>, 再派生一个 <code>ValidationWorker</code> 常驻协程, 但它现在还睡着 (等 idle)。</p>
+            </article>
+          </div>
+        </div>
+
+        <div class="scene" data-scene="5">
+          <div class="scene__inner">
+            <article class="step-card">
+              <code class="step-card__cmd">~/.hermes/config.yaml · hooks.pre_llm_call</code>
+              <span class="step-card__arrow" aria-hidden="true">↓  在物理上等于</span>
+              <p class="step-card__effect"><em>入场通道</em>接通。Hermes 每次要调 LLM 之前, 会先跑一次 <code>sync_skills.py</code>; 它去 bucket 拉最新技能清单, 落到 Hermes 的 <code>skills/external_dirs</code>。你 Hermes 从此"每次开口前先翻新笔记"。</p>
+            </article>
+          </div>
+        </div>
+
+        <div class="scene" data-scene="6">
+          <div class="scene__inner">
+            <article class="step-card">
+              <code class="step-card__cmd">~/.hermes/config.yaml · hooks.on_session_end</code>
+              <span class="step-card__arrow" aria-hidden="true">↓  在物理上等于</span>
+              <p class="step-card__effect"><em>回流通道</em>接通。Hermes 会话一结束, <code>push_session.py</code> 把整段轨迹 POST 给本地 <code>:30000/ingest_session</code>。teamEvolver 内部先跑一次<em>价值判断</em>(判它"有营养"才留), 通过就落到 bucket 的 <code>sessions/{sid}.json</code>。同 sid 后写盖前写。</p>
+            </article>
+          </div>
+        </div>
+
+        <div class="scene" data-scene="7">
+          <div class="scene__inner">
+            <article class="step-card">
+              <code class="step-card__cmd">~/.teamEvolver/config.yaml · evolve.server_url</code>
+              <span class="step-card__arrow" aria-hidden="true">↓  在物理上等于</span>
+              <p class="step-card__effect"><em>敲门声</em>被登记。以后每次落新会话, 本地 teamEvolver 会在 15s 去抖后<em>空 POST</em> 一次 <code>{url}/trigger</code>。只是敲门, 不带数据。evolve_server 收到敲门自己回头去 bucket 读, 数据从不经这条 HTTP。<em>不接也不影响数据流</em>, 只影响"什么时候被发现"。</p>
+            </article>
+          </div>
+        </div>
+
+        <div class="scene" data-scene="8">
+          <div class="scene__inner">
+            <article class="step-card">
+              <code class="step-card__cmd">~/.teamEvolver/config.yaml · validation.enabled</code>
+              <span class="step-card__arrow" aria-hidden="true">↓  在物理上等于</span>
+              <p class="step-card__effect"><em>报名参加矿工池</em>。这个开关一开, 步 04 派生的那个 sleeping worker 就开始每 60s 轮询共享 <code>validation/</code> 队列, 客户端空闲 5 分钟后领 job, 起真沙盒 Hermes 跑 A/B, 结果写回 bucket。每天上限 5 单。<em>关着就纯当消费者, 开了就同时是贡献者</em>。</p>
+            </article>
+          </div>
+        </div>
+
+        <div class="scene" data-scene="9">
+          <div class="scene__inner">
+            <div class="prelude">
+              <p class="prelude__eyebrow">CODA</p>
+              <h2 class="prelude__title">从描述, 变成<em>校对表</em>。</h2>
+              <p class="prelude__lede">按 01 到 08 走完, 这张卡上的每一条虚线、每一个胶囊、每一位主角都变成了你机器上真在动的进程。<br>哪一步没生效, 就查对应的物件是否在跑。</p>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <footer class="stage__foot" aria-hidden="true">
+        <span>Step · <em data-stage-current>00</em> / <span data-stage-total>09</span></span>
+        <span></span>
+      </footer>
+
+    </div>
+  </section>
+
+  <footer class="colophon">
+    <span>Route Card · teamEvolver / Hermes / OpenViking</span>
+    <span>set on paper #E4E0CE</span>
+  </footer>
+
+</main>
+
+<script>
+  (function(){
+    var doc = document;
+    var prefersReduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    // -- Reduced motion path -------------------------------------------------
+    // Under reduced motion, every reveal is instantly "in", every stage
+    // decoration snaps to its final state, and CSS unpins the stages so
+    // scenes stack vertically like normal blocks.
+    if (prefersReduced){
+      doc.querySelectorAll('.reveal').forEach(function(el){ el.classList.add('in'); });
+      doc.querySelectorAll('.seg,.dot,.lbl').forEach(function(el){ el.classList.add('on'); });
+      doc.querySelectorAll('.stage__dot').forEach(function(el){ el.classList.add('is-past'); });
+      doc.querySelectorAll('[data-stage-current]').forEach(function(el){
+        var stage = el.closest('[data-stage]');
+        var scenes = stage ? stage.querySelectorAll('.scene').length : 1;
+        var last = Math.max(0, scenes - 1);
+        el.textContent = (last < 10 ? '0' : '') + last;
+      });
+      return;
+    }
+
+    // -- Passive reveals -----------------------------------------------------
+    var revealIO = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){
+        if (e.isIntersecting){ e.target.classList.add('in'); revealIO.unobserve(e.target); }
+      });
+    }, {rootMargin:'0px 0px -8% 0px', threshold:0.08});
+    doc.querySelectorAll('.reveal').forEach(function(el){ revealIO.observe(el); });
+
+    // -- Scrollytelling stage engine -----------------------------------------
+    // A "stage" is any [data-stage] block. Its child .stage__pin sticks for
+    // (N × 100vh) where N = number of .scene children (also set via
+    // --stage-scenes so CSS matches). As the user scrolls, scroll progress
+    // through the sticky travel is divided into N buckets → current scene
+    // index. Each scene cross-fades with its neighbours.
+    //
+    // Optional decorations, driven off the same index:
+    //   • route SVG in .stage__spine  (segments/dots/labels by data-seg/dot/lbl)
+    //   • generic progress dots in .stage__dots
+    //   • counter [data-stage-current]
+
+    function initStage(stage){
+      var scenes = Array.prototype.slice.call(stage.querySelectorAll('.scene'))
+        .sort(function(a,b){ return (+a.getAttribute('data-scene')) - (+b.getAttribute('data-scene')); });
+      if (!scenes.length) return;
+
+      var N = scenes.length;               // total scenes for this stage
+      stage.style.setProperty('--stage-scenes', N);
+
+      function byIndex(nodes, attr){
+        return Array.prototype.slice.call(nodes).sort(function(a,b){
+          return (+a.getAttribute(attr)) - (+b.getAttribute(attr));
+        });
+      }
+
+      var segs = byIndex(stage.querySelectorAll('.stage__spine .seg'), 'data-seg');
+      var svgDots = byIndex(stage.querySelectorAll('.stage__spine .dot'), 'data-dot');
+      var lbls = byIndex(stage.querySelectorAll('.stage__spine .lbl'), 'data-lbl');
+      var progressDots = byIndex(stage.querySelectorAll('.stage__dots .stage__dot'), 'data-progress-dot');
+      var currentEl = stage.querySelector('[data-stage-current]');
+      var totalEl   = stage.querySelector('[data-stage-total]');
+      if (totalEl){
+        // "content scenes" = scenes 1..N-1 (0 is prelude). Formatted 2 digits.
+        var total = N - 1;
+        totalEl.textContent = (total < 10 ? '0' : '') + total;
+      }
+
+      var lastIndex = -1;
+      var ticking = false;
+
+      function pad2(n){ return (n < 10 ? '0' : '') + n; }
+
+      function computeIndex(){
+        var rect = stage.getBoundingClientRect();
+        var vh = window.innerHeight || doc.documentElement.clientHeight;
+        var scrolled = -rect.top;
+        var travel = rect.height - vh;
+        var p = travel > 0 ? Math.max(0, Math.min(1, scrolled / travel)) : 0;
+        var idx = Math.min(N - 1, Math.floor(p * N));
+        stage.style.setProperty('--stage-progress', p.toFixed(4));
+        return idx;
+      }
+
+      function paint(idx){
+        if (idx === lastIndex) return;
+
+        scenes.forEach(function(el, i){
+          el.classList.remove('is-current','is-prev');
+          if (i === idx) el.classList.add('is-current');
+          else if (i < idx) el.classList.add('is-prev');
+        });
+
+        // Optional route SVG (only exists on the stations stage).
+        // Segment/dot i "reached" when scene ≥ i+1 (scene 0 is prelude).
+        segs.forEach(function(el, i){ el.classList.toggle('on', idx >= i + 1); });
+        svgDots.forEach(function(el, i){
+          var reached = idx >= i + 1;
+          el.classList.toggle('on', reached);
+          el.classList.toggle('is-current', idx === i + 1);
+        });
+        lbls.forEach(function(el, i){ el.classList.toggle('on', idx >= i + 2); });
+
+        // Generic progress dots · dot i corresponds to scene i+1 (prelude
+        // uses no dot). Past dots dim solid, current one enlarges to amber.
+        progressDots.forEach(function(el, i){
+          var sceneOf = i + 1;
+          el.classList.toggle('is-past', idx >= sceneOf);
+          el.classList.toggle('is-current', idx === sceneOf);
+        });
+
+        if (currentEl){
+          currentEl.textContent = pad2(Math.max(0, idx));
+        }
+
+        lastIndex = idx;
+      }
+
+      function onScroll(){
+        if (ticking) return;
+        ticking = true;
+        window.requestAnimationFrame(function(){
+          paint(computeIndex());
+          ticking = false;
+        });
+      }
+
+      window.addEventListener('scroll', onScroll, {passive:true});
+      window.addEventListener('resize', onScroll);
+      paint(computeIndex());
+
+      // Keyboard advance - only when THIS stage is the one currently pinned.
+      window.addEventListener('keydown', function(e){
+        var tag = (e.target && e.target.tagName || '').toLowerCase();
+        if (tag === 'input' || tag === 'textarea') return;
+        var rect = stage.getBoundingClientRect();
+        var vh = window.innerHeight || doc.documentElement.clientHeight;
+        if (rect.top > 0 || rect.bottom < vh) return;
+
+        var travel = rect.height - vh;
+        var dir = 0;
+        if (e.key === 'ArrowDown' || e.key === ' ' || e.key === 'PageDown'){ dir = 1; }
+        else if (e.key === 'ArrowUp' || e.key === 'PageUp'){ dir = -1; }
+        if (!dir) return;
+        e.preventDefault();
+        var next = Math.max(0, Math.min(N - 1, lastIndex + dir));
+        var targetP = (next + 0.5) / N;
+        var stageTopAbs = window.pageYOffset + rect.top;
+        window.scrollTo({top: stageTopAbs + targetP * travel, behavior:'smooth'});
+      });
+    }
+
+    doc.querySelectorAll('[data-stage]').forEach(initStage);
+  })();
+</script>
+
+</body>
+</html>
+
