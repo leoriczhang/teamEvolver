@@ -122,10 +122,12 @@ a:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--amber);outline-
  * ------------------------------------------------------------------- */
 .stage{
   position:relative;
-  /* Total scroll height = N viewports where N = --stage-scenes.
-     Each stage sets --stage-scenes inline; JS reads .scene count and
-     divides progress into equal buckets accordingly. */
-  height:calc(var(--stage-scenes, 6) * 100vh);
+  /* Total scroll height = N × step, where N = --stage-scenes (auto-set by JS)
+     and step = --stage-step (default 55vh). Smaller step = fewer wheel ticks
+     needed to advance one scene, at the cost of pin "lingering" less on each
+     card. 55vh was tuned to feel one-notch-per-scroll on a Mac trackpad
+     without making scenes fly by. */
+  height:calc(var(--stage-scenes, 6) * var(--stage-step, 55vh));
   margin:56px 0 0;
 }
 .stage__pin{
@@ -230,6 +232,44 @@ a:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--amber);outline-
   font-family:inherit;background:var(--paper-deep);
   padding:2px 6px;border:1px solid var(--rule);border-radius:2px;
   color:var(--ink);
+}
+
+/* Scroll cue · 每个 stage 进入时的下滑提示。pin 内绝对定位,底部居中,
+   一旦当前 scene 索引 >= 1 (用户已推进) 就淡出并不再出现,避免干扰阅读。 */
+.stage__scroll-cue{
+  position:absolute;left:50%;bottom:64px;
+  transform:translateX(-50%);
+  display:flex;flex-direction:column;align-items:center;gap:8px;
+  font-family:'JetBrains Mono',monospace;
+  font-size:10px;letter-spacing:0.32em;text-transform:uppercase;
+  color:var(--amber);
+  pointer-events:none;
+  opacity:1;
+  transition:opacity 520ms ease, transform 520ms ease;
+  z-index:2;
+}
+.stage__scroll-cue .cue__lbl{opacity:0.85}
+.stage__scroll-cue .cue__chev{
+  position:relative;width:14px;height:14px;
+}
+.stage__scroll-cue .cue__chev::before,
+.stage__scroll-cue .cue__chev::after{
+  content:"";position:absolute;left:50%;top:0;
+  width:9px;height:9px;
+  border-right:1.5px solid var(--amber);
+  border-bottom:1.5px solid var(--amber);
+  transform:translate(-50%,0) rotate(45deg);
+  animation:cue-bob 1.8s cubic-bezier(.55,.05,.35,.95) infinite;
+}
+.stage__scroll-cue .cue__chev::after{animation-delay:.35s;opacity:0.55}
+@keyframes cue-bob{
+  0%   {transform:translate(-50%,-4px) rotate(45deg);opacity:0}
+  30%  {opacity:1}
+  70%  {transform:translate(-50%, 6px) rotate(45deg);opacity:.35}
+  100% {transform:translate(-50%,10px) rotate(45deg);opacity:0}
+}
+.stage.is-exploring .stage__scroll-cue{
+  opacity:0;transform:translate(-50%,10px);
 }
 
 /* Station card visual - no longer a grid cell, now a stage card.
@@ -476,8 +516,9 @@ a:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--amber);outline-
 }
 @media (max-width:820px){
   /* Mobile: pin stage retained per user preference, only sized down.
-     Split body (station 03) folds to single column. */
-  .stage{height:calc(var(--stage-scenes, 6) * 100vh)}
+     Split body (station 03) folds to single column. Slightly denser step so
+     touch flicks feel proportional to viewport. */
+  .stage{--stage-step:70vh}
   .stage__pin{padding:24px 0 24px}
   .stage__spine{height:44px}
   .station__name{font-size:22px}
@@ -513,6 +554,7 @@ a:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--amber);outline-
   .stage__spine .seg{stroke-dashoffset:0!important;transition:none!important}
   .stage__spine .dot{transform:none!important;opacity:1!important;transition:none!important}
   .stage__spine .lbl{opacity:1!important;transition:none!important}
+  .stage__scroll-cue{display:none!important}
   *{animation:none!important}
 }
 </style>
@@ -757,6 +799,11 @@ via · conda:teamEvolver</p>
 
       </div>
 
+      <div class="stage__scroll-cue" aria-hidden="true" data-stage-cue>
+        <span class="cue__lbl">Scroll</span>
+        <span class="cue__chev"></span>
+      </div>
+
       <div class="stage__foot" aria-hidden="true">
         <span>Scene · <em data-stage-current>00</em> / <span data-stage-total>05</span></span>
         <span class="stage__hint">↓ / space / trackpad to advance</span>
@@ -837,6 +884,11 @@ via · conda:teamEvolver</p>
           </div>
         </div>
 
+      </div>
+
+      <div class="stage__scroll-cue" aria-hidden="true" data-stage-cue>
+        <span class="cue__lbl">Scroll</span>
+        <span class="cue__chev"></span>
       </div>
 
       <footer class="stage__foot" aria-hidden="true">
@@ -935,6 +987,11 @@ _require_admin_request()</p>
           </div>
         </div>
 
+      </div>
+
+      <div class="stage__scroll-cue" aria-hidden="true" data-stage-cue>
+        <span class="cue__lbl">Scroll</span>
+        <span class="cue__chev"></span>
       </div>
 
       <footer class="stage__foot" aria-hidden="true">
@@ -1073,6 +1130,11 @@ _require_admin_request()</p>
 
       </div>
 
+      <div class="stage__scroll-cue" aria-hidden="true" data-stage-cue>
+        <span class="cue__lbl">Scroll</span>
+        <span class="cue__chev"></span>
+      </div>
+
       <footer class="stage__foot" aria-hidden="true">
         <span>Step · <em data-stage-current>00</em> / <span data-stage-total>09</span></span>
         <span></span>
@@ -1180,6 +1242,11 @@ _require_admin_request()</p>
           if (i === idx) el.classList.add('is-current');
           else if (i < idx) el.classList.add('is-prev');
         });
+
+        // Once the user has advanced past the prelude, hide the scroll cue so
+        // it doesn't compete with the content. It reappears only if they
+        // scroll all the way back to scene 0.
+        stage.classList.toggle('is-exploring', idx >= 1);
 
         // Optional route SVG (only exists on the stations stage).
         // Segment/dot i "reached" when scene ≥ i+1 (scene 0 is prelude).
