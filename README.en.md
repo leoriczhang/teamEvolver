@@ -167,7 +167,9 @@ teamEvolver config evolve.evidence_enabled true
 teamEvolver config evolve.evidence_recent_limit 12
 teamEvolver config evolve.evidence_historical_limit 12
 teamEvolver config evolve.evidence_change_debt_threshold 3
-# DreamCycle reads personal-key sources and writes to the team-key space above.
+# DreamCycle is optional and disabled by default; it drives an external dreamcycle engine
+# to maintain long-term team memory. Once enabled, it reads personal-key sources and
+# writes to the team-key space above.
 # Additional AgentsHub peers merge their personal keys through the internal config API.
 teamEvolver config dreamcycle.enabled true
 teamEvolver config dreamcycle.auto_start true
@@ -301,6 +303,15 @@ Do not commit real API keys. Use local configuration, environment variables, or 
 ## DreamCycle and Validation Queue
 
 DreamCycle maintains long-term team experience. The validation queue evaluates candidate skills through real or simulated replay. Both reuse the same OpenViking object-store boundary:
+
+> DreamCycle is optional and disabled by default. It is executed by the standalone [dreamcycle](https://github.com/leoriczhang/dreamcycle) engine; teamEvolver only injects the Key/LLM environment and triggers it on demand. Make `dreamcycle` runnable on the host first (install that project, or point `dreamcycle.daemon_command` / `dreamcycle.trigger_command` at your entry point), then enable it explicitly:
+
+```bash
+teamEvolver config dreamcycle.enabled true       # turn on the optional maintenance
+teamEvolver config dreamcycle.auto_start true    # optional: let the service start a daemon
+teamEvolver config dreamcycle.llm_api_key "<llm-key>"
+teamEvolver config dreamcycle.llm_model "<model-id>"
+```
 
 1. `teamEvolver-feed` uploads real sessions, and the entry point first classifies valuable / chitchat sessions.
 2. The evolution loop builds candidate skills from recent evidence, historical evidence, and replay cases.

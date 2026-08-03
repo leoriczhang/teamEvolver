@@ -30,8 +30,9 @@ def test_defaults_enable_full_evolution_loop(tmp_path) -> None:
     assert config.sharing_auto_pull_on_start is True
     assert config.sharing_viking_root_prefix == "team-skill-evolver"
     assert config.validation_enabled is True
-    assert config.dreamcycle_enabled is True
-    assert config.dreamcycle_auto_start is True
+    # DreamCycle drives an external engine, so it stays opt-in by default.
+    assert config.dreamcycle_enabled is False
+    assert config.dreamcycle_auto_start is False
 
 
 def test_dreamcycle_uses_team_key_target_and_personal_key_sources() -> None:
