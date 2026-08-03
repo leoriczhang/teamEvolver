@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Pill, Empty, ListViewport, PaginationControls, usePagedItems } from "@/components/common";
 import { cn } from "@/lib/utils";
 import { fmtScore } from "@/lib/format";
-import type { Candidate, EvalResult } from "@/api/client";
+import type { Candidate, EvalResult, ReplaySide } from "@/api/client";
 
 const VERIFY_LABELS: Record<string, string> = {
   grounded_in_evidence: "有据可依（基于会话证据）",
@@ -53,6 +53,18 @@ function skillToMd(skill?: Candidate["candidate_skill"] | Candidate["current_ski
   return `---\nname: ${skill.name || "unknown"}\ndescription: "${description}"\ncategory: ${skill.category || "general"}\n---\n\n${skill.content || ""}\n`;
 }
 
+function replayOutput(branch?: ReplaySide): string {
+  if (!branch) return "";
+  return (
+    branch.response ||
+    branch.final_response ||
+    branch.response_text ||
+    branch.rationale ||
+    branch.error ||
+    ""
+  );
+}
+
 function Kpi({
   label,
   value,
@@ -88,6 +100,7 @@ export default function CandidateModal({
   ev,
   evaluating,
   open,
+  readOnly = false,
   onClose,
   onEvaluate,
 }: {
@@ -96,6 +109,7 @@ export default function CandidateModal({
   ev: EvalResult | null;
   evaluating: boolean;
   open: boolean;
+  readOnly?: boolean;
   onClose: () => void;
   onEvaluate: (force: boolean) => void;
 }) {
@@ -105,8 +119,12 @@ export default function CandidateModal({
   const efficiencyDimensions = rep.efficiency?.dimensions || {};
   const replayPager = usePagedItems(replayCases);
   const currentMd = ev?.current_skill_md || cand?.current_skill_md || skillToMd(cand?.current_skill || ev?.current_skill);
-  const candidateMd = ev?.candidate_skill_md || cand?.candidate_skill_md || skillToMd(cand?.candidate_skill || ev?.candidate_skill);
+  const candidateMd = ev?.candidate_skill_md || cand?.candidate_skill_md || skillToMd(cand?.candidate_skill || ev?.candidate_skill) || cand?.content_preview || "";
   const skillDiff = ev?.skill_diff || cand?.skill_diff || "";
+  const action = ev?.proposed_action || cand?.proposed_action || "";
+  const missingCurrentText = action === "create_skill"
+    ? "（新建技能，无当前版本）"
+    : "（候选 Job 未携带当前版本，且当前技能库未找到对应 SKILL.md）";
   const thr =
     cand?.min_score != null
       ? cand.min_score
@@ -118,6 +136,8 @@ export default function CandidateModal({
   if (!ev) {
     bodyInner = evaluating ? (
       <Empty>正在运行 Verify + A/B 回放评估，请稍候…（首次评估需调用模型，可能耗时较久）</Empty>
+    ) : readOnly ? (
+      <Empty>该历史候选没有可展示的缓存评估结果。</Empty>
     ) : (
       <Empty>
         尚未评估。{" "}
@@ -224,14 +244,14 @@ export default function CandidateModal({
                   head="🅰 基线（当前技能 / 无技能）"
                   score={bScore}
                   scoreCls={kv(bScore, thr).cls}
-                  body={b.response}
+                  body={replayOutput(b)}
                 />
                 <AbCol
                   win={aWin}
                   head="🅱 候选（新技能）"
                   score={aScore}
                   scoreCls={kv(aScore, thr).cls}
-                  body={a.response}
+                  body={replayOutput(a)}
                 />
               </div>
             </div>
@@ -253,7 +273,7 @@ export default function CandidateModal({
           <div className="flex items-center gap-2">
             {candidateName(cand, ev, jobId)}
             <span className="text-muted-foreground">·</span>
-            <Pill tone="blue">{ev.proposed_action || cand?.proposed_action || "-"}</Pill>
+            <Pill tone="blue">{action || "-"}</Pill>
           </div>
         </div>
         {cand?.rationale && (
@@ -344,7 +364,7 @@ export default function CandidateModal({
         {verifyHtml}
         <SecTitle>📄 Skill 变更内容</SecTitle>
         <div className="grid gap-2.5 sm:grid-cols-2">
-          <SkillMdBlock title="当前 SKILL.md" body={currentMd || "（新建技能，无当前版本）"} />
+          <SkillMdBlock title="当前 SKILL.md" body={currentMd || missingCurrentText} />
           <SkillMdBlock title="候选 SKILL.md" body={candidateMd || "（无候选内容）"} />
         </div>
         {skillDiff && (
@@ -357,16 +377,18 @@ export default function CandidateModal({
         {replayHtml}
 
         <div className="mt-3.5 flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={evaluating}
-            onClick={() => onEvaluate(true)}
-          >
-            {evaluating ? "评估中…" : "重新评估（重跑回放）"}
-          </Button>
+          {!readOnly && (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={evaluating}
+              onClick={() => onEvaluate(true)}
+            >
+              {evaluating ? "评估中…" : "重新评估（重跑回放）"}
+            </Button>
+          )}
           <span className="text-xs text-muted-foreground">
-            {ev.cached ? "结果来自缓存" : "本次实时评估"}
+            {readOnly ? "历史候选只读展示" : ev.cached ? "结果来自缓存" : "本次实时评估"}
           </span>
         </div>
       </div>

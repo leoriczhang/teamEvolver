@@ -27,6 +27,18 @@ function StatusBadge({ status }: { status?: string }) {
   return <Pill tone="gray">{status || "-"}</Pill>;
 }
 
+function isNoActionNormal(c: NonNullable<SessionProcess["cycles"]>[number], evos: unknown[]) {
+  return (
+    !evos.length &&
+    !c.had_processing_error &&
+    Number(c.sessions || 0) > 0 &&
+    Number(c.skill_groups || 0) > 0 &&
+    Number(c.actions || 0) === 0 &&
+    Number(c.uploaded_skills || 0) === 0 &&
+    Number(c.candidates_queued || 0) === 0
+  );
+}
+
 export default function SessionModal({
   sid,
   initialTab,
@@ -266,12 +278,16 @@ function ProcessBody({ p }: { p: SessionProcess | null }) {
         {cyclesPager.items.map((c, i) => {
           const j = c.judge || {};
           const evos = c.evolutions || [];
+          const noActionNormal = isNoActionNormal(c, evos);
           return (
             <div key={`${c.timestamp || "cycle"}-${cyclesPager.start + i}`} className="rounded-lg border border-border p-4">
-            <div className="mb-2.5 text-xs text-muted-foreground">
-              🕑 {fmtTime(c.timestamp)} &nbsp;·&nbsp; 本周期 {c.sessions ?? "?"} 会话 /{" "}
-              {c.skill_groups ?? "?"} 技能组 / 上传 {c.uploaded_skills ?? 0} / 候选{" "}
-              {c.candidates_queued ?? 0}
+            <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+              <span>
+                🕑 {fmtTime(c.timestamp)} &nbsp;·&nbsp; 本周期 {c.sessions ?? "?"} 会话 /{" "}
+                {c.skill_groups ?? "?"} 技能组 / 上传 {c.uploaded_skills ?? 0} / 候选{" "}
+                {c.candidates_queued ?? 0}
+              </span>
+              {noActionNormal && <Pill tone="blue">无需进化</Pill>}
             </div>
             <div className="mb-3">
               <div className="mb-1.5 text-xs font-semibold text-muted-foreground">
@@ -318,9 +334,18 @@ function ProcessBody({ p }: { p: SessionProcess | null }) {
                   })}
                 </div>
               ) : (
-                <div className="text-xs text-muted-foreground">
-                  本会话未直接触发技能变更（可能仅参与聚合评估）。
-                </div>
+                noActionNormal ? (
+                  <div className="rounded-lg border border-border bg-background/60 p-3 text-xs leading-relaxed text-muted-foreground">
+                    <Pill tone="blue">流程正常</Pill>
+                    <div className="mt-2">
+                      该会话已完成评审与 Skill 分组，planner 判断当前 Skill 无需优化，也无需创建新 Skill。
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-xs text-muted-foreground">
+                    本会话未直接触发技能变更（可能仅参与聚合评估）。
+                  </div>
+                )
               )}
             </div>
             </div>

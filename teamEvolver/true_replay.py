@@ -107,6 +107,98 @@ def load_candidate_job_file(path: str) -> dict[str, Any]:
     return data
 
 
+def load_source_session(session_id: str) -> Optional[dict[str, Any]]:
+    """Load an archived source session so replay can select its native runtime."""
+    if not session_id:
+        return None
+    try:
+        from teamEvolver.config_store import ConfigStore
+        from teamEvolver.session_store import SessionStore
+
+        config = ConfigStore().to_config()
+        return SessionStore.from_config(config).load_session(session_id)
+    except Exception:
+        return None
+
+
+def _agentshub_endpoint(source_session: dict[str, Any]) -> str:
+    configured = os.environ.get("AGENTSHUB_REPLAY_URL", "").strip()
+    if configured:
+        return configured.rstrip("/")
+    runtime = (
+        source_session.get("runtime")
+        if isinstance(source_session.get("runtime"), dict)
+        else {}
+    )
+    endpoint = str(runtime.get("replay_endpoint") or "").strip()
+    if endpoint.startswith(("http://127.0.0.1", "http://localhost", "http://[::1]")):
+        return endpoint.rstrip("/")
+    return ""
+
+
+def spawn_agentshub_branch(
+    branch: str,
+    instruction: str,
+    branch_skill: Optional[dict[str, Any]],
+    job: dict[str, Any],
+    case: dict[str, Any],
+    source_session: dict[str, Any],
+    timeout: int,
+    max_interactions: int,
+) -> dict[str, Any]:
+    endpoint = _agentshub_endpoint(source_session)
+    if not endpoint:
+        return {
+            "branch": branch,
+            "runtime": "agentshub",
+            "ok": False,
+            "error": "AGENTSHUB_REPLAY_URL is not configured",
+        }
+    if not endpoint.endswith("/api/internal/team-evolver/replay"):
+        endpoint = f"{endpoint}/api/internal/team-evolver/replay"
+    headers = {"Content-Type": "application/json"}
+    api_key = os.environ.get("AGENTSHUB_REPLAY_API_KEY", "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        import httpx
+
+        response = httpx.post(
+            endpoint,
+            json={
+                "branch": branch,
+                "instruction": instruction,
+                "target_skill_name": str(
+                    (job.get("candidate_skill") or {}).get("name")
+                    or job.get("candidate_skill_name")
+                    or ""
+                ),
+                "skill": branch_skill,
+                "current_skill": job.get("current_skill"),
+                "source_session": source_session,
+                "case": case,
+                "max_interactions": max(1, int(max_interactions or 1)),
+            },
+            headers=headers,
+            timeout=max(30, int(timeout)),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {
+            "branch": branch,
+            "runtime": "agentshub",
+            "ok": False,
+            "error": "AgentsHub replay returned a non-object response",
+        }
+    except Exception as exc:
+        return {
+            "branch": branch,
+            "runtime": "agentshub",
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
 def read_hermes_harness() -> dict[str, str]:
     """Mirror the user's real Hermes model harness (the replayed agent must be
     consistent with what the client runs). Reads ~/.hermes/config.yaml."""
@@ -125,6 +217,20 @@ def read_hermes_harness() -> dict[str, str]:
         "model": str(model.get("default") or os.getenv("TEAMEVOLVER_REPLAY_MODEL", "doubao-seed-evolving")),
         "api_mode": str(model.get("api_mode") or ""),
         "max_tokens": int(model.get("max_tokens") or 8192),
+    }
+
+
+def read_team_evolver_harness() -> dict[str, Any]:
+    """Use teamEvolver's configured judge for AgentsHub-native replay."""
+    from teamEvolver.config_store import ConfigStore
+
+    config = ConfigStore().to_config()
+    return {
+        "base_url": str(config.llm_api_base or ""),
+        "api_key": str(config.llm_api_key or ""),
+        "model": str(config.llm_model_id or config.model_name or ""),
+        "api_mode": str(config.llm_api_mode or ""),
+        "max_tokens": int(config.llm_max_tokens or 8192),
     }
 
 
@@ -190,6 +296,9 @@ def annotate_cases(job: dict[str, Any], search_roots: list[Path]) -> list[dict[s
                 "session_id": case.get("session_id"),
                 "turn_num": case.get("turn_num"),
                 "instruction": instr,
+                "evidence_window": str(
+                    case.get("evidence_window") or "recent"
+                ),
                 "had_tool_calls": bool(case.get("had_tool_calls")),
                 "referenced_paths": referenced,
                 "missing_paths": missing,
@@ -234,7 +343,7 @@ def build_sandbox(base: Path, branch: str, harness: dict[str, str],
     except Exception:
         (hermes_home / "config.yaml").write_text(json.dumps(config), "utf-8")
 
-    if branch == "candidate" and skill:
+    if skill:
         name = str(skill.get("name") or "candidate-skill")
         sk_dir = hermes_home / "skills" / name
         sk_dir.mkdir(parents=True, exist_ok=True)
@@ -298,8 +407,7 @@ def _run_worker(spec_path: str) -> None:
             save_trajectories=False,
             quiet_mode=True,
         )
-        if spec["branch"] == "candidate" and spec.get("skill_content"):
-            # Single A/B variable: candidate branch sees the skill's procedure.
+        if spec.get("skill_content"):
             kwargs["ephemeral_system_prompt"] = (
                 "You have access to the following installed skill. Follow its "
                 "procedure when relevant:\n\n" + spec["skill_content"]
@@ -392,7 +500,7 @@ def spawn_branch(branch: str, sandbox: dict[str, str], instruction: str,
         "hermes_origin": resolve_hermes_origin() or "",
         "instruction": instruction,
         "harness": harness,
-        "skill_content": (skill or {}).get("content") if branch == "candidate" else None,
+        "skill_content": (skill or {}).get("content"),
         "max_iterations": 25,
         "max_interactions": max(1, int(max_interactions or 4)),
         "out_path": str(tmp / f"{branch}_out.json"),
@@ -591,6 +699,161 @@ def _print_case_table(cases: list[dict[str, Any]]) -> None:
         print(f"       指令: {c['instruction'][:90]}")
 
 
+def _evaluate_agentshub_case(
+    job_id: str,
+    job: dict[str, Any],
+    case: dict[str, Any],
+    source_session: dict[str, Any],
+    harness: dict[str, str],
+    *,
+    timeout: int,
+    min_score: float,
+    tolerance: float,
+    max_interactions: int,
+) -> dict[str, Any]:
+    harness = read_team_evolver_harness()
+    branch_skills = {
+        "baseline": (
+            job.get("current_skill")
+            if isinstance(job.get("current_skill"), dict)
+            else None
+        ),
+        "candidate": job.get("candidate_skill") or {},
+    }
+    results: dict[str, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = {
+            pool.submit(
+                spawn_agentshub_branch,
+                branch,
+                case["instruction"],
+                branch_skills[branch],
+                job,
+                case,
+                source_session,
+                timeout,
+                max_interactions,
+            ): branch
+            for branch in ("baseline", "candidate")
+        }
+        for future in as_completed(futures):
+            branch = futures[future]
+            try:
+                results[branch] = future.result()
+            except Exception as exc:  # noqa: BLE001
+                results[branch] = {
+                    "branch": branch,
+                    "runtime": "agentshub",
+                    "ok": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+
+    failures = [
+        f"{branch}: {result.get('error') or 'branch failed'}"
+        for branch, result in results.items()
+        if not result.get("ok")
+    ]
+    efficiency = compare_efficiency(results["baseline"], results["candidate"])
+
+    def branch_case(branch: str, judged: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+        result = results[branch]
+        score = (judged or {}).get(branch, {})
+        return {
+            "session_id": str(case.get("session_id") or ""),
+            "turn_num": int(case.get("turn_num") or 0),
+            "instruction": case["instruction"],
+            "score": score.get("overall"),
+            "task_completion": score.get("task_completion"),
+            "tool_correctness": score.get("tool_correctness"),
+            "rationale": score.get("rationale") or result.get("error"),
+            "trajectory": render_trajectory(result.get("messages") or []),
+            "final_response": str(result.get("final_response") or "")[:2000],
+            "ok": bool(result.get("ok")),
+            "error": result.get("error"),
+            "elapsed_seconds": result.get("elapsed_seconds"),
+            "api_calls": result.get("api_calls"),
+            "interaction_turns": result.get("interaction_turns"),
+            "tool_call_count": result.get("tool_call_count"),
+            "total_tokens": result.get("total_tokens"),
+            "input_tokens": result.get("input_tokens"),
+            "output_tokens": result.get("output_tokens"),
+            "cache_read_tokens": result.get("cache_read_tokens"),
+            "cache_write_tokens": result.get("cache_write_tokens"),
+            "reasoning_tokens": result.get("reasoning_tokens"),
+            "interactions": result.get("interactions") or [],
+        }
+
+    common = {
+        "mode": "true_replay",
+        "runtime": "agentshub",
+        "job_id": job_id,
+        "threshold": round(float(min_score), 3),
+        "tolerance": round(float(tolerance), 3),
+        "max_interactions": max(1, int(max_interactions or 1)),
+        "case_count": 1,
+        "case": {
+            "index": case["index"],
+            "grounded": True,
+            "referenced_paths": case.get("referenced_paths"),
+        },
+        "harness": {
+            "model": harness.get("model"),
+            "base_url": harness.get("base_url"),
+        },
+        "efficiency": efficiency,
+    }
+    if failures:
+        return {
+            **common,
+            "status": "failed",
+            "accepted": False,
+            "no_regression": False,
+            "score": None,
+            "baseline_mean": None,
+            "delta": None,
+            "quality_ok": False,
+            "reason": "AgentsHub true replay branch failed: " + "; ".join(failures),
+            "cases": [
+                {
+                    "baseline": branch_case("baseline"),
+                    "candidate": branch_case("candidate"),
+                }
+            ],
+        }
+
+    judged = {
+        branch: judge_branch(harness, case["instruction"], results[branch])
+        for branch in ("baseline", "candidate")
+    }
+    baseline_score = float(judged["baseline"]["overall"])
+    candidate_score = float(judged["candidate"]["overall"])
+    delta = round(candidate_score - baseline_score, 3)
+    no_regression = candidate_score >= baseline_score - tolerance
+    quality_ok = candidate_score >= min_score and no_regression
+    efficiency_score = float(efficiency["score"])
+    accepted = (
+        quality_ok
+        and (candidate_score >= baseline_score or efficiency_score > 0)
+        and efficiency_score >= -0.10
+    )
+    return {
+        **common,
+        "status": "evaluated",
+        "accepted": accepted,
+        "no_regression": no_regression,
+        "score": round(candidate_score, 3),
+        "baseline_mean": round(baseline_score, 3),
+        "delta": delta,
+        "quality_ok": quality_ok,
+        "cases": [
+            {
+                "baseline": branch_case("baseline", judged),
+                "candidate": branch_case("candidate", judged),
+            }
+        ],
+    }
+
+
 def evaluate_job(
     job_id: str,
     *,
@@ -623,6 +886,33 @@ def evaluate_job(
     search_roots = [_REPO_ROOT, Path(os.path.expanduser("~"))]
     cases = annotate_cases(job, search_roots)
 
+    requested_cases = [
+        case
+        for case in cases
+        if case["instruction"]
+        and (case_index is None or case["index"] == case_index)
+    ]
+    for source_case in requested_cases:
+        source_session = load_source_session(str(source_case.get("session_id") or ""))
+        runtime = (
+            source_session.get("runtime")
+            if isinstance(source_session, dict)
+            and isinstance(source_session.get("runtime"), dict)
+            else {}
+        )
+        if str(runtime.get("type") or source_session.get("source") or "") == "agentshub":
+            return _evaluate_agentshub_case(
+                job_id,
+                job,
+                source_case,
+                source_session,
+                harness,
+                timeout=timeout,
+                min_score=min_score,
+                tolerance=tolerance,
+                max_interactions=max_interactions,
+            )
+
     runnable = [c for c in cases if c["runnable"] and c["instruction"]]
     if not runnable:
         return {
@@ -646,8 +936,16 @@ def evaluate_job(
         # Build both sandboxes first, then run the two branches concurrently:
         # each branch is an isolated subprocess with its own HOME/HERMES_HOME, so
         # they don't share state and can run in parallel to halve wall-clock time.
+        branch_skills = {
+            "baseline": (
+                job.get("current_skill")
+                if isinstance(job.get("current_skill"), dict)
+                else None
+            ),
+            "candidate": skill,
+        }
         sandboxes = {
-            branch: build_sandbox(tmp, branch, harness, skill)
+            branch: build_sandbox(tmp, branch, harness, branch_skills[branch])
             for branch in ("baseline", "candidate")
         }
         results: dict[str, dict[str, Any]] = {}
@@ -659,7 +957,7 @@ def evaluate_job(
                     sandboxes[branch],
                     chosen["instruction"],
                     harness,
-                    skill,
+                    branch_skills[branch],
                     tmp,
                     timeout,
                     max_interactions=max_interactions,

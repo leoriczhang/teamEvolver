@@ -320,10 +320,13 @@ def test_build_object_store_routes_viking_backend() -> None:
 def test_build_object_store_viking_defaults_root_prefix_and_group() -> None:
     store = build_object_store(backend="viking", endpoint="http://viking.test")
     assert isinstance(store, OpenVikingObjectStore)
-    assert store._root_prefix == "teamEvolver"
+    assert store._root_prefix == "team-skill-evolver"
     assert store._group_id == ""
     # Empty group => no group segment in the base URI.
-    assert store._uri("skills/x") == "viking://resources/teamEvolver/skills/x"
+    assert (
+        store._uri("skills/x")
+        == "viking://resources/team-skill-evolver/skills/x"
+    )
 
 
 def test_build_object_store_rejects_viking_without_endpoint() -> None:

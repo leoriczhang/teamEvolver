@@ -134,6 +134,12 @@ teamEvolver config sharing.backend viking
 teamEvolver config sharing.viking_team_api_key "<team-key>"
 teamEvolver config sharing.viking_personal_api_key "<personal-key>"
 teamEvolver config sharing.viking_root_prefix "team-skill-evolver"
+# DreamCycle reads personal-key sources and writes to the team-key space above.
+# Additional AgentsHub peers merge their personal keys through the internal config API.
+teamEvolver config dreamcycle.enabled true
+teamEvolver config dreamcycle.auto_start true
+teamEvolver config validation.enabled true
+teamEvolver config validation.agentshub_url "http://<agentshub-host>:5173"
 
 mkdir -p skills
 teamEvolver start --daemon --port 52010
@@ -235,7 +241,7 @@ teamEvolver config sharing.enabled true
 teamEvolver config sharing.backend viking
 teamEvolver config sharing.viking_team_api_key "<team-key>"
 teamEvolver config sharing.viking_personal_api_key "<personal-key>"
-teamEvolver config sharing.viking_root_prefix "teamEvolver"
+teamEvolver config sharing.viking_root_prefix "team-skill-evolver"
 ```
 
 For self-hosted OpenViking Server deployments, see [volcengine/OpenViking](https://github.com/volcengine/OpenViking) and override the default service URL with `teamEvolver config sharing.viking_endpoint "<your-server-url>"`.

@@ -29,6 +29,14 @@ import CandidateModal from "./dashboard/CandidateModal";
 
 const POLL_MS = 4000;
 
+function mergeCandidateDetail(items: Candidate[], detail: Candidate): Candidate[] {
+  const found = items.some((item) => item.job_id === detail.job_id);
+  if (!found) return [detail, ...items];
+  return items.map((item) => (
+    item.job_id === detail.job_id ? { ...item, ...detail } : item
+  ));
+}
+
 export default function DashboardView({ active }: { active: boolean }) {
   const [status, setStatus] = useState<StatusResp | null>(null);
   const [storage, setStorage] = useState<StorageStatus | null>(null);
@@ -51,12 +59,33 @@ export default function DashboardView({ active }: { active: boolean }) {
   const [sessModal, setSessModal] = useState<{ sid: string; tab: SessTab } | null>(null);
   const [candJobId, setCandJobId] = useState<string | null>(null);
 
+  const loadCandidateDetail = useCallback(async (jobId: string) => {
+    try {
+      const detail = await api<Candidate>(
+        `/api/validation/candidates/${encodeURIComponent(jobId)}/detail`
+      );
+      setCands((items) => mergeCandidateDetail(items, detail));
+      if (detail.evaluation) {
+        setEvalCache((m) => ({ ...m, [jobId]: detail.evaluation as EvalResult }));
+      }
+      return detail;
+    } catch (e: any) {
+      toastErr("加载评估详情失败", e.message);
+      return null;
+    }
+  }, []);
+
+  const openCandidate = useCallback((jobId: string) => {
+    setCandJobId(jobId);
+    void loadCandidateDetail(jobId);
+  }, [loadCandidateDetail]);
+
   const evaluate = useCallback(async (jobId: string, force: boolean) => {
     if (evaluatingRef.current[jobId]) return;
     setEvaluating((m) => ({ ...m, [jobId]: true }));
     try {
       const r = await api<EvalResult & { status?: string }>(
-        `/validation/candidates/${encodeURIComponent(jobId)}/evaluate${force ? "?refresh=true" : ""}`,
+        `/api/validation/candidates/${encodeURIComponent(jobId)}/evaluate${force ? "?refresh=true" : ""}`,
         { method: "POST" }
       );
       if (r && r.status !== "not_found") {
@@ -91,20 +120,29 @@ export default function DashboardView({ active }: { active: boolean }) {
         led = (await api<{ conversations: LedgerRow[] }>("/conversations?limit=50")).conversations;
       } catch {}
       try {
-        cs = (await api<{ candidates: Candidate[] }>("/validation/candidates")).candidates;
+        cs = (await api<{ candidates: Candidate[] }>("/api/validation/candidates")).candidates;
       } catch {}
+      const nextCands = cs || [];
+      const serverEvaluations: Record<string, EvalResult> = {};
+      for (const c of nextCands) {
+        if (c.evaluation) serverEvaluations[c.job_id] = c.evaluation;
+      }
+      const mergedCache = { ...evalCacheRef.current, ...serverEvaluations };
+      if (Object.keys(serverEvaluations).length) {
+        setEvalCache((m) => ({ ...m, ...serverEvaluations }));
+      }
       setStatus(st);
       setStorage(sto);
       setQueue(q);
       setLedger(led);
-      setCands(cs || []);
+      setCands(nextCands);
       setLastUpdate(
         "更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false })
       );
       inflight.current = false;
       // auto-evaluate un-cached candidates
-      for (const c of cs || []) {
-        if (!evalCacheRef.current[c.job_id] && !evaluatingRef.current[c.job_id]) {
+      for (const c of nextCands) {
+        if (!mergedCache[c.job_id] && !evaluatingRef.current[c.job_id]) {
           evaluate(c.job_id, false);
         }
       }
@@ -129,7 +167,7 @@ export default function DashboardView({ active }: { active: boolean }) {
     if (!window.confirm(msg)) return;
     try {
       const r = await api<{ status?: string; version?: number }>(
-        `/validation/candidates/${encodeURIComponent(jobId)}/validate`,
+        `/api/validation/candidates/${encodeURIComponent(jobId)}/validate`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -152,7 +190,7 @@ export default function DashboardView({ active }: { active: boolean }) {
   async function deleteCandidate(jobId: string) {
     if (!window.confirm("确认删除该待发布候选？删除后将从队列移除且不可恢复。")) return;
     try {
-      await api(`/validation/candidates/${encodeURIComponent(jobId)}`, { method: "DELETE" });
+      await api(`/api/validation/candidates/${encodeURIComponent(jobId)}`, { method: "DELETE" });
       setEvalCache((m) => {
         const n = { ...m };
         delete n[jobId];
@@ -297,7 +335,7 @@ export default function DashboardView({ active }: { active: boolean }) {
               const ev = evalCache[c.job_id];
               const busy = evaluating[c.job_id];
               const thr = c.min_score != null ? c.min_score : 0.75;
-              const open = () => setCandJobId(c.job_id);
+              const open = () => openCandidate(c.job_id);
               const rep = ev?.replay || {};
               return (
                 <tr key={c.job_id}>

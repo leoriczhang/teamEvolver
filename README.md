@@ -134,6 +134,12 @@ teamEvolver config sharing.backend viking
 teamEvolver config sharing.viking_team_api_key "<team-key>"
 teamEvolver config sharing.viking_personal_api_key "<personal-key>"
 teamEvolver config sharing.viking_root_prefix "team-skill-evolver"
+# DreamCycle 从个人 Key 读取经验，写入上面的团队 Key 空间。
+# 多台 AgentsHub 接入时，个人 Key 会通过内部配置接口动态合并，无需写死用户。
+teamEvolver config dreamcycle.enabled true
+teamEvolver config dreamcycle.auto_start true
+teamEvolver config validation.enabled true
+teamEvolver config validation.agentshub_url "http://<agentshub-host>:5173"
 
 mkdir -p skills
 teamEvolver start --daemon --port 52010
@@ -235,7 +241,7 @@ teamEvolver config sharing.enabled true
 teamEvolver config sharing.backend viking
 teamEvolver config sharing.viking_team_api_key "<team-key>"
 teamEvolver config sharing.viking_personal_api_key "<personal-key>"
-teamEvolver config sharing.viking_root_prefix "teamEvolver"
+teamEvolver config sharing.viking_root_prefix "team-skill-evolver"
 ```
 
 如果需要自部署 OpenViking Server，请参考 [volcengine/OpenViking](https://github.com/volcengine/OpenViking)，并通过 `teamEvolver config sharing.viking_endpoint "<your-server-url>"` 覆盖默认服务地址。

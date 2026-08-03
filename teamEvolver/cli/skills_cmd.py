@@ -33,8 +33,11 @@ def _sharing_target(cfg) -> str:
     if backend == "viking":
         endpoint = getattr(cfg, "sharing_viking_endpoint", "")
         # Wire constant: OpenViking namespace root, part of the shared data
-        # contract (viking://resources/teamEvolver/...). Preserved verbatim.
-        root_prefix = getattr(cfg, "sharing_viking_root_prefix", "") or "teamEvolver"
+        # Shared contract with AgentsHub and the evolve server.
+        root_prefix = (
+            getattr(cfg, "sharing_viking_root_prefix", "")
+            or "team-skill-evolver"
+        )
         return f"viking storage (resources/{root_prefix} @ {endpoint})"
     return f"{backend} storage ({group})"
 

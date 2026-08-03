@@ -60,6 +60,19 @@ class Launcher:
         from .proxy import ProxyServer
         from .skills.manager import SkillManager
 
+        if getattr(cfg, "validation_agentshub_url", ""):
+            os.environ["AGENTSHUB_REPLAY_URL"] = str(cfg.validation_agentshub_url)
+        if getattr(cfg, "validation_agentshub_api_key", ""):
+            os.environ["AGENTSHUB_REPLAY_API_KEY"] = str(
+                cfg.validation_agentshub_api_key
+            )
+        os.environ["EVOLVE_VALIDATION_REQUIRED_RESULTS"] = str(
+            max(1, int(getattr(cfg, "validation_required_results", 3) or 3))
+        )
+        os.environ["EVOLVE_VALIDATION_REQUIRED_APPROVALS"] = str(
+            max(1, int(getattr(cfg, "validation_required_approvals", 2) or 2))
+        )
+
         skill_manager: Optional[SkillManager] = None
         if cfg.use_skills:
             Path(cfg.skills_dir).mkdir(parents=True, exist_ok=True)

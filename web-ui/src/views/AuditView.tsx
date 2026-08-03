@@ -99,6 +99,7 @@ export default function AuditView({ active }: { active: boolean }) {
                   const evos = c.evolutions || [];
                   const judge = c.judge || {};
                   const sessionIds = c.session_ids || [];
+                  const noActionNormal = isNoActionNormal(c, evos);
                   return (
                     <div key={`${c.timestamp || "cycle"}-${cyclePager.start + i}`} className="p-4">
                       <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
@@ -108,8 +109,8 @@ export default function AuditView({ active }: { active: boolean }) {
                             {Number(c.sessions || sessionIds.length || 0)} 会话 / {c.skill_groups ?? "?"} 技能组 / 上传 {c.uploaded_skills ?? 0} / 候选 {c.candidates_queued ?? 0}
                           </div>
                         </div>
-                        <Pill tone={Number(c.uploaded_skills || 0) > 0 ? "green" : Number(c.candidates_queued || 0) > 0 ? "amber" : "gray"}>
-                          {Number(c.uploaded_skills || 0) > 0 ? "已产出" : Number(c.candidates_queued || 0) > 0 ? "待评审" : "无变更"}
+                        <Pill tone={Number(c.uploaded_skills || 0) > 0 ? "green" : Number(c.candidates_queued || 0) > 0 ? "amber" : noActionNormal ? "blue" : "gray"}>
+                          {Number(c.uploaded_skills || 0) > 0 ? "已产出" : Number(c.candidates_queued || 0) > 0 ? "待评审" : noActionNormal ? "无需进化" : "无变更"}
                         </Pill>
                       </div>
 
@@ -138,7 +139,16 @@ export default function AuditView({ active }: { active: boolean }) {
                       <div>
                         <div className="mb-1.5 text-xs font-semibold text-muted-foreground">技能变更</div>
                         {!evos.length ? (
-                          <div className="text-xs text-muted-foreground">本周期未记录技能变更。</div>
+                          noActionNormal ? (
+                            <div className="rounded-lg border border-border bg-background/60 p-3 text-xs leading-relaxed text-muted-foreground">
+                              <Pill tone="blue">流程正常</Pill>
+                              <div className="mt-2">
+                                本周期已完成会话评审和 Skill 分组，但 planner 判断当前 Skill 无需优化，也无需创建新 Skill。
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="text-xs text-muted-foreground">本周期未记录技能变更。</div>
+                          )
                         ) : (
                           <div className="space-y-2.5">
                             {evos.map((e, k) => {
@@ -174,5 +184,17 @@ export default function AuditView({ active }: { active: boolean }) {
         )}
       </Panel>
     </div>
+  );
+}
+
+function isNoActionNormal(c: EvolveHistoryCycle, evos: unknown[]) {
+  return (
+    !evos.length &&
+    !c.had_processing_error &&
+    Number(c.sessions || (c.session_ids || []).length || 0) > 0 &&
+    Number(c.skill_groups || 0) > 0 &&
+    Number(c.actions || 0) === 0 &&
+    Number(c.uploaded_skills || 0) === 0 &&
+    Number(c.candidates_queued || 0) === 0
   );
 }
