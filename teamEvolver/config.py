@@ -127,9 +127,11 @@ class TeamEvolverConfig:
     # DreamCycle team-memory maintenance                                  #
     # ------------------------------------------------------------------ #
     # DreamCycle reads the personal keys configured under ``sharing`` and
-    # writes through the same team key used by team skill evolution.
-    dreamcycle_enabled: bool = True
-    dreamcycle_auto_start: bool = True
+    # writes through the same team key used by team skill evolution. It runs
+    # an external ``dreamcycle`` engine, so it stays opt-in: enable it
+    # explicitly and, if desired, let the service auto-start its daemon.
+    dreamcycle_enabled: bool = False
+    dreamcycle_auto_start: bool = False
     dreamcycle_daemon_command: str = "dreamcycle --daemon"
     dreamcycle_trigger_command: str = "dreamcycle --once"
     dreamcycle_viking_agent: str = "dreamcycle"

@@ -167,7 +167,8 @@ teamEvolver config evolve.evidence_enabled true
 teamEvolver config evolve.evidence_recent_limit 12
 teamEvolver config evolve.evidence_historical_limit 12
 teamEvolver config evolve.evidence_change_debt_threshold 3
-# DreamCycle 从个人 Key 读取经验，写入上面的团队 Key 空间。
+# DreamCycle 为可选项，默认关闭；它调用外部 dreamcycle 引擎维护团队长期记忆。
+# 开启后从个人 Key 读取经验，写入上面的团队 Key 空间。
 # 多台 AgentsHub 接入时，个人 Key 会通过内部配置接口动态合并，无需写死用户。
 teamEvolver config dreamcycle.enabled true
 teamEvolver config dreamcycle.auto_start true
@@ -301,6 +302,15 @@ OpenViking 空间分工：
 ## DreamCycle 与验证队列
 
 DreamCycle 负责维护团队长期经验，验证队列负责把候选技能放到真实或模拟回放里评估。两者都复用 OpenViking 对象存储边界：
+
+> DreamCycle 是可选组件，默认关闭。它由独立的 [dreamcycle](https://github.com/leoriczhang/dreamcycle) 引擎执行，teamEvolver 只负责注入 Key/LLM 环境变量并按需触发。需要先让本机可运行 `dreamcycle`（安装该项目或提供 `dreamcycle.daemon_command` / `dreamcycle.trigger_command`），再显式开启：
+
+```bash
+teamEvolver config dreamcycle.enabled true       # 开启可选维护
+teamEvolver config dreamcycle.auto_start true    # 可选：随服务自动拉起常驻 daemon
+teamEvolver config dreamcycle.llm_api_key "<llm-key>"
+teamEvolver config dreamcycle.llm_model "<model-id>"
+```
 
 1. `teamEvolver-feed` 上传真实 session，入口先做 valuable / chitchat 判别。
 2. 进化流程从近期证据、历史证据和 replay case 中构造候选技能。

@@ -216,8 +216,8 @@ class ConfigStore:
             evolve_candidate_coalesce_enabled=bool(
                 evolve.get("candidate_coalesce_enabled", True)
             ),
-            dreamcycle_enabled=bool(dreamcycle.get("enabled", True)),
-            dreamcycle_auto_start=bool(dreamcycle.get("auto_start", True)),
+            dreamcycle_enabled=bool(dreamcycle.get("enabled", False)),
+            dreamcycle_auto_start=bool(dreamcycle.get("auto_start", False)),
             dreamcycle_daemon_command=str(
                 dreamcycle.get("daemon_command", "") or "dreamcycle --daemon"
             ),
@@ -333,8 +333,8 @@ class ConfigStore:
             f"historical={evolve.get('evidence_historical_limit', 12)}",
             f"evolve.change_debt_threshold: {evolve.get('evidence_change_debt_threshold', 3)}",
             f"evolve.candidate_coalesce: {evolve.get('candidate_coalesce_enabled', True)}",
-            f"dreamcycle.enabled: {dreamcycle.get('enabled', True)}",
-            f"dreamcycle.auto_start: {dreamcycle.get('auto_start', True)}",
+            f"dreamcycle.enabled: {dreamcycle.get('enabled', False)}",
+            f"dreamcycle.auto_start: {dreamcycle.get('auto_start', False)}",
             "dreamcycle.personal_sources: "
             f"{len(_normalize_string_list(sharing.get('viking_personal_api_keys', [])))}",
             "dreamcycle.team_target: "

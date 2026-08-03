@@ -80,8 +80,8 @@ _DEFAULTS: dict = {
         "candidate_coalesce_enabled": True,
     },
     "dreamcycle": {
-        "enabled": True,
-        "auto_start": True,
+        "enabled": False,
+        "auto_start": False,
         "daemon_command": "dreamcycle --daemon",
         "trigger_command": "dreamcycle --once",
         "viking_agent": "dreamcycle",
