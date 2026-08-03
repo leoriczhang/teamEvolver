@@ -2,7 +2,7 @@
 
 <div align="center">
 
-## A Skill Library, Sync Console, and Validation Workbench for Agent Teams
+## A Skill Library, Sync Console, DreamCycle, and Validation Workbench for Agent Teams
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-Service-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
@@ -13,6 +13,23 @@
 **Turn real agent experience into reusable, synced, validated `SKILL.md` assets for your team.**
 
 </div>
+
+---
+
+## Table of Contents
+
+- [Why teamEvolver?](#why-teamevolver)
+- [Design Principles](#design-principles)
+- [Core Capabilities](#core-capabilities)
+- [Architecture](#architecture)
+- [Manual Installation](#manual-installation)
+- [Console Map](#console-map)
+- [OpenViking / Object Storage](#openviking--object-storage)
+- [DreamCycle and Validation Queue](#dreamcycle-and-validation-queue)
+- [True Replay: Validate Skills with Real Trajectories](#true-replay-validate-skills-with-real-trajectories)
+- [Project Layout](#project-layout)
+- [Development](#development)
+- [Roadmap](#roadmap)
 
 ---
 
@@ -35,6 +52,7 @@ It turns scattered sessions into comparable evidence, separates personal and tea
 - **Central evidence**: retain sessions, tool calls, success strategies, and failure reasons so cross-user patterns become visible.
 - **Layered assets**: decide whether knowledge is shareable before deciding whether it should become `skill` or `memory`; personal assets stay isolated, team assets are published deliberately.
 - **Validated release**: team `SKILL.md` assets pass aggregation, redaction, deduplication, replay validation, versioning, and rollback gates.
+- **Evidence-first evolution**: new candidates carry recent evidence, historical evidence, and replay cases, so decisions do not depend on one success or one failure.
 
 Hermes and other agents keep their native runtime model. teamEvolver delivers team skills through synced directories and hooks, so the agent's native skill system remains in control.
 
@@ -50,7 +68,7 @@ Hermes and other agents keep their native runtime model. teamEvolver delivers te
     </td>
     <td width="25%" valign="top">
       <h3>Team Sync</h3>
-      <p>Use local object storage or OpenViking-compatible object storage with separate personal and team spaces.</p>
+      <p>Use local object storage or OpenViking-compatible object storage, with personal keys as evidence sources and the team key as the publication target.</p>
     </td>
     <td width="25%" valign="top">
       <h3>Web Console</h3>
@@ -63,6 +81,8 @@ Hermes and other agents keep their native runtime model. teamEvolver delivers te
   </tr>
 </table>
 
+The default configuration is now shaped for the full loop: skill sync, OpenViking team storage, session filtering, evidence windows, DreamCycle, validation queues, and candidate review can all be connected directly.
+
 ---
 
 ## Architecture
@@ -73,7 +93,9 @@ flowchart LR
         Console["Web Console"]
         API["FastAPI Service"]
         Registry["Skill Registry"]
+        Evidence["Evidence Windows"]
         Validation["Validation Queue"]
+        DreamCycle["DreamCycle Supervisor"]
     end
 
     subgraph Storage["Shared Storage"]
@@ -83,18 +105,25 @@ flowchart LR
 
     subgraph Agent["Agent Machines"]
         Sync["teamEvolver-sync Hook"]
+        Feed["teamEvolver-feed Hook"]
         Dir["Synced SKILL.md Directory"]
         Hermes["Hermes Native Skills"]
     end
 
     Console --> API
     API --> Registry
+    API --> Evidence
     API --> Validation
+    API --> DreamCycle
     API <--> Local
     API <--> Viking
+    DreamCycle --> Viking
+    Validation <--> Viking
     Sync --> Viking
     Sync --> Dir
     Dir --> Hermes
+    Hermes --> Feed
+    Feed --> API
 ```
 
 The recommended path is shared storage, local sync, and native agent loading. Commands such as `skills_list`, `skill_view`, and `/skills` continue to come from the agent itself; teamEvolver only makes sure the team skill library reaches the machine reliably.
@@ -134,11 +163,18 @@ teamEvolver config sharing.backend viking
 teamEvolver config sharing.viking_team_api_key "<team-key>"
 teamEvolver config sharing.viking_personal_api_key "<personal-key>"
 teamEvolver config sharing.viking_root_prefix "team-skill-evolver"
+teamEvolver config evolve.evidence_enabled true
+teamEvolver config evolve.evidence_recent_limit 12
+teamEvolver config evolve.evidence_historical_limit 12
+teamEvolver config evolve.evidence_change_debt_threshold 3
 # DreamCycle reads personal-key sources and writes to the team-key space above.
 # Additional AgentsHub peers merge their personal keys through the internal config API.
 teamEvolver config dreamcycle.enabled true
 teamEvolver config dreamcycle.auto_start true
 teamEvolver config validation.enabled true
+teamEvolver config validation.mode replay
+teamEvolver config validation.required_results 3
+teamEvolver config validation.required_approvals 2
 teamEvolver config validation.agentshub_url "http://<agentshub-host>:5173"
 
 mkdir -p skills
@@ -146,6 +182,7 @@ teamEvolver start --daemon --port 52010
 teamEvolver status
 curl -fsS "http://127.0.0.1:52010/health"
 curl -fsS "http://127.0.0.1:52010/status"
+curl -fsS "http://127.0.0.1:52010/trigger-dreamcycle/status"
 ```
 
 ```text
@@ -208,6 +245,7 @@ flowchart TB
     Home["Evolution Dashboard"]
     Candidates["Candidate Review"]
     Audit["Evolution Audit"]
+    Filter["Filter Audit"]
     Health["System Health"]
     Skills["Skill Management"]
     Users["User Management"]
@@ -215,6 +253,7 @@ flowchart TB
 
     Home --> Candidates
     Home --> Audit
+    Home --> Filter
     Home --> Health
     Skills --> Users
     Candidates --> Model
@@ -225,6 +264,7 @@ The console includes:
 - **Evolution Dashboard**: storage connectivity, skill count, candidate queue, and service status.
 - **Candidate Review**: inspect candidate skills before publication, with optional True Replay validation.
 - **Evolution Audit**: review skill-evolution records.
+- **Filter Audit**: review valuable / chitchat decisions, mode, confidence, and reasons before sessions enter evolution.
 - **System Health**: check service, storage, and key API availability.
 - **Skill Management**: manage personal and team skills, including zip upload.
 - **User Management**: manage users, roles, and personal/team storage credentials.
@@ -244,9 +284,46 @@ teamEvolver config sharing.viking_personal_api_key "<personal-key>"
 teamEvolver config sharing.viking_root_prefix "team-skill-evolver"
 ```
 
+OpenViking space roles:
+
+- `sharing.viking_personal_api_key`: the current machine or user's personal evidence source.
+- `sharing.viking_team_api_key`: the shared target for team skills, validation jobs, validation results, and DreamCycle output.
+- `sharing.viking_root_prefix`: the cross-agent namespace, defaulting to `team-skill-evolver`.
+
+When multiple AgentsHub peers connect, the service merges personal key sources through `/internal/agentshub/openviking-config` while keeping the same team key as the publication target.
+
 For self-hosted OpenViking Server deployments, see [volcengine/OpenViking](https://github.com/volcengine/OpenViking) and override the default service URL with `teamEvolver config sharing.viking_endpoint "<your-server-url>"`.
 
 Do not commit real API keys. Use local configuration, environment variables, or your deployment platform's secret manager.
+
+---
+
+## DreamCycle and Validation Queue
+
+DreamCycle maintains long-term team experience. The validation queue evaluates candidate skills through real or simulated replay. Both reuse the same OpenViking object-store boundary:
+
+1. `teamEvolver-feed` uploads real sessions, and the entry point first classifies valuable / chitchat sessions.
+2. The evolution loop builds candidate skills from recent evidence, historical evidence, and replay cases.
+3. DreamCycle reads personal key sources and writes to the team key space, so personal preferences are not published directly as team SOPs.
+4. Candidate skills enter `validation_jobs/`, and clients write `validation_results/` when they are idle.
+5. The console aggregates Verify score, Replay score, rejection reasons, and human decisions before publishing, rejecting, or deleting a candidate.
+
+Common operations:
+
+```bash
+teamEvolver config show
+curl -fsS "http://127.0.0.1:52010/trigger-dreamcycle/status"
+curl -fsS -X POST "http://127.0.0.1:52010/trigger-dreamcycle"
+curl -fsS "http://127.0.0.1:52010/validation/candidates"
+```
+
+Validation uses lightweight replay by default. After the Hermes True Replay runtime is available, switch to real branch replay:
+
+```bash
+teamEvolver config validation.mode true_replay
+teamEvolver config validation.max_jobs_per_day 5
+teamEvolver config validation.max_concurrency 1
+```
 
 ---
 
@@ -290,6 +367,8 @@ python -m teamEvolver.true_replay --job-file ./candidate_job.json --json
 
 True Replay creates temporary `HOME` and `HERMES_HOME` directories for both branches and does not modify your real agent configuration. To use a local agent checkout, set `HERMES_ORIGIN`.
 
+In console candidate review, admins can re-evaluate, validate publish, force publish, or delete the same candidate. Automatic publication should consider Verify score, Replay score, efficiency metrics, and rejection reasons together, not a single score alone.
+
 ---
 
 ## Project Layout
@@ -302,8 +381,8 @@ teamEvolver/
 │   ├── proxy/            # service routes, console, and admin APIs
 │   ├── skills/           # SKILL.md management, bundling, sync
 │   ├── storage/          # local / OpenViking storage backends
-│   ├── integrations/     # Hermes integration
-│   ├── validation/       # optional candidate-skill validation
+│   ├── integrations/     # Hermes / DreamCycle integration
+│   ├── validation/       # shared validation queue, results, and worker
 │   ├── true_replay.py    # true A/B replay
 │   └── web/              # built console assets
 ├── web-ui/               # React + TypeScript console source
@@ -329,6 +408,15 @@ npm --prefix web-ui run build
 python -m pip install build
 python -m build
 ```
+
+---
+
+## Roadmap
+
+- Improve DreamCycle policy: separate personal memory, team memory, and publishable skills more precisely.
+- Expand True Replay: add multi-case replay, visual artifact QA, and more stable efficiency baselines.
+- Strengthen candidate governance: support multi-person approval, bulk rejection, post-release rollback, and finer version diffs.
+- Improve console workflows: add live validation artifact previews, queue trends, and cross-user contribution stats.
 
 ---
 
