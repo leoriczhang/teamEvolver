@@ -20,6 +20,7 @@ import uvicorn
 from starlette.responses import Response
 
 from ..config import TeamEvolverConfig
+from ..integrations.dreamcycle import DreamCycleSupervisor
 from ..skills.manager import SkillManager
 from .routes import RoutesMixin
 from .skills_admin import SkillsAdminMixin
@@ -72,6 +73,7 @@ class ProxyServer(
         self._embedded_evolve_app = None
         self._embedded_evolve_task: Optional[asyncio.Task] = None
         self._embedded_evolve_init_failed = False
+        self._dreamcycle = DreamCycleSupervisor(config)
 
         self.app = self._build_app()
 
@@ -115,8 +117,37 @@ class ProxyServer(
             self._skill_reload_task.cancel()
             await asyncio.gather(self._skill_reload_task, return_exceptions=True)
             self._skill_reload_task = None
+        self._dreamcycle.stop()
         await self._stop_embedded_evolve()
         await self._await_background_tasks(self._shutdown_drain_timeout_seconds)
+
+    def _start_dreamcycle(self) -> None:
+        try:
+            self._dreamcycle.start()
+        except Exception:
+            logger.warning("[DreamCycle] startup failed", exc_info=True)
+
+    def _trigger_dreamcycle(self) -> dict:
+        return self._dreamcycle.trigger()
+
+    def _dreamcycle_status(self) -> dict:
+        return self._dreamcycle.status()
+
+    async def _reload_openviking_integrations(
+        self,
+        config: TeamEvolverConfig,
+    ) -> None:
+        """Apply a credential update without restarting the service process."""
+        await asyncio.to_thread(self._dreamcycle.stop)
+        self.config = config
+        self._dreamcycle = DreamCycleSupervisor(config)
+
+        await self._stop_embedded_evolve()
+        self._embedded_evolve_server = None
+        self._embedded_evolve_app = None
+        self._embedded_evolve_init_failed = False
+        self._start_embedded_evolve()
+        self._start_dreamcycle()
 
     # ------------------------------------------------------------------ #
     # Embedded evolve server                                               #
@@ -185,12 +216,6 @@ class ProxyServer(
         if server is None:
             return None
         app = server.create_http_app()
-        try:
-            from skill_evolver.__main__ import _mount_dreamcycle_route
-
-            _mount_dreamcycle_route(app)
-        except Exception:
-            logger.debug("[EvolveServer] DreamCycle route not mounted", exc_info=True)
         self._embedded_evolve_app = app
         return app
 

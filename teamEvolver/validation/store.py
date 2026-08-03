@@ -13,8 +13,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from ..storage import build_object_store, is_not_found_error, peer_key_prefix
 from ..skills.render import build_skill_md
+from ..storage import build_object_store, is_not_found_error, peer_key_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -208,10 +208,76 @@ class ValidationStore:
                 continue
             if self.load_decision(job_id):
                 continue
-            if user_alias and self.load_result(job_id, user_alias):
-                continue
+            if user_alias:
+                result = self.load_result(job_id, user_alias)
+                if result:
+                    revision = max(1, int(job.get("candidate_revision") or 1))
+                    result_revision = int(result.get("candidate_revision") or 1)
+                    if result_revision == revision and (
+                        result.get("candidate_revision") is not None or revision == 1
+                    ):
+                        continue
             jobs.append(job)
         return jobs
+
+    def list_open_jobs_for_skill(self, skill_name: str) -> list[dict[str, Any]]:
+        wanted = str(skill_name or "").strip()
+        if not wanted:
+            return []
+        matches: list[dict[str, Any]] = []
+        for job in self.list_open_jobs():
+            candidate = (
+                job.get("candidate_skill")
+                if isinstance(job.get("candidate_skill"), dict)
+                else {}
+            )
+            name = str(
+                candidate.get("name") or job.get("candidate_skill_name") or ""
+            ).strip()
+            if name == wanted:
+                matches.append(job)
+        return matches
+
+    def find_open_job_for_skill(self, skill_name: str) -> Optional[dict[str, Any]]:
+        matches = self.list_open_jobs_for_skill(skill_name)
+        if not matches:
+            return None
+        return max(
+            matches,
+            key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""),
+        )
+
+    def reset_job_artifacts(self, job_id: str) -> dict[str, Any]:
+        """Clear revision-bound outputs while retaining the validation job."""
+        removed: list[str] = []
+        keys = [
+            self._candidate_skill_key(job_id),
+            self._evaluation_key(job_id),
+            self._human_review_key(job_id),
+        ]
+        try:
+            result_prefix = f"{self._prefix()}validation_results/{job_id}/"
+            for obj in self._bucket.iter_objects(prefix=result_prefix):
+                keys.append(obj.key)
+        except Exception as exc:
+            if not is_not_found_error(exc):
+                logger.warning(
+                    "[ValidationStore] failed to list stale results for %s: %s",
+                    job_id,
+                    exc,
+                )
+        for key in keys:
+            try:
+                self._bucket.delete_object(key)
+                removed.append(key)
+            except Exception as exc:
+                if not is_not_found_error(exc):
+                    logger.warning(
+                        "[ValidationStore] failed to clear stale artifact %s: %s",
+                        key,
+                        exc,
+                    )
+        return {"job_id": job_id, "removed": removed}
 
     # -- human-in-the-loop review queue ------------------------------- #
 

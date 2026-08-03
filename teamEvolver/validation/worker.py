@@ -185,18 +185,29 @@ class ValidationWorker:
         case_results: list[dict[str, Any]] = []
         candidate_scores: list[float] = []
         baseline_scores: list[float] = []
+        window_scores: dict[str, dict[str, list[float]]] = {}
 
         for case in replay_cases[:3]:
+            window = str(case.get("evidence_window") or "recent")
+            if window not in {"recent", "historical"}:
+                window = "recent"
+            scores = window_scores.setdefault(
+                window,
+                {"baseline": [], "candidate": []},
+            )
             baseline = await self._run_replay_branch(case, current_skill, label="baseline")
             candidate = await self._run_replay_branch(case, candidate_skill, label="candidate")
             baseline_score = baseline.get("normalized_score")
             candidate_score = candidate.get("normalized_score")
             if isinstance(baseline_score, (int, float)):
                 baseline_scores.append(float(baseline_score))
+                scores["baseline"].append(float(baseline_score))
             if isinstance(candidate_score, (int, float)):
                 candidate_scores.append(float(candidate_score))
+                scores["candidate"].append(float(candidate_score))
             case_results.append(
                 {
+                    "evidence_window": window,
                     "session_id": str(case.get("session_id", "") or ""),
                     "turn_num": int(case.get("turn_num", 0) or 0),
                     "instruction": str(case.get("instruction", "") or ""),
@@ -211,13 +222,41 @@ class ValidationWorker:
         candidate_mean = round(sum(candidate_scores) / len(candidate_scores), 3)
         baseline_mean = round(sum(baseline_scores) / len(baseline_scores), 3) if baseline_scores else 0.0
         threshold = round(float(job.get("min_score", 0.75)), 3)
-        improved = candidate_mean > baseline_mean
-        accepted = candidate_mean >= threshold and improved
+        recent = window_scores.get("recent") or next(iter(window_scores.values()))
+        recent_candidate = (
+            sum(recent["candidate"]) / len(recent["candidate"])
+            if recent["candidate"]
+            else 0.0
+        )
+        recent_baseline = (
+            sum(recent["baseline"]) / len(recent["baseline"])
+            if recent["baseline"]
+            else 0.0
+        )
+        recent_improved = (
+            recent_candidate >= threshold and recent_candidate > recent_baseline
+        )
+        historical = window_scores.get("historical")
+        historical_no_regression = True
+        if historical and historical["candidate"]:
+            historical_candidate = sum(historical["candidate"]) / len(
+                historical["candidate"]
+            )
+            historical_baseline = (
+                sum(historical["baseline"]) / len(historical["baseline"])
+                if historical["baseline"]
+                else 0.0
+            )
+            historical_no_regression = (
+                historical_candidate >= historical_baseline - 0.15
+            )
+        accepted = recent_improved and historical_no_regression
         decision = "accept" if accepted else "reject"
         reason = (
             f"Replay validation compared {len(case_results)} case(s): "
             f"candidate_mean={candidate_mean}, baseline_mean={baseline_mean}, "
-            f"threshold={threshold}, improved={improved}"
+            f"threshold={threshold}, recent_improved={recent_improved}, "
+            f"historical_no_regression={historical_no_regression}"
         )
         return {
             "validator_mode": "replay",
@@ -236,8 +275,82 @@ class ValidationWorker:
                 "case_count": len(case_results),
                 "baseline_mean_score": baseline_mean,
                 "candidate_mean_score": candidate_mean,
+                "recent_improved": recent_improved,
+                "historical_no_regression": historical_no_regression,
                 "cases": case_results,
             },
+        }
+
+    @staticmethod
+    def _aggregate_true_replay_windows(
+        results: list[tuple[str, dict[str, Any]]],
+    ) -> dict[str, Any]:
+        evaluated = [
+            (window, result)
+            for window, result in results
+            if str(result.get("status") or "") in {"", "evaluated"}
+        ]
+        if not evaluated:
+            return {
+                "status": "skipped",
+                "accepted": False,
+                "no_regression": False,
+                "reason": "no replay window produced an evaluation",
+                "window_results": {window: result for window, result in results},
+            }
+        by_window = {window: result for window, result in evaluated}
+        recent = by_window.get("recent") or evaluated[0][1]
+        historical = by_window.get("historical")
+        all_windows_evaluated = len(evaluated) == len(results)
+        recent_improved = bool(recent.get("accepted"))
+        historical_no_regression = (
+            True if historical is None else bool(historical.get("no_regression"))
+        )
+
+        def mean_value(key: str) -> float | None:
+            values = [
+                float(result[key])
+                for _, result in evaluated
+                if isinstance(result.get(key), (int, float))
+                and not isinstance(result.get(key), bool)
+            ]
+            return round(sum(values) / len(values), 3) if values else None
+
+        cases: list[dict[str, Any]] = []
+        for window, result in evaluated:
+            for raw_case in result.get("cases") or []:
+                if isinstance(raw_case, dict):
+                    case = dict(raw_case)
+                    case["evidence_window"] = window
+                    cases.append(case)
+        accepted = (
+            recent_improved
+            and historical_no_regression
+            and all_windows_evaluated
+        )
+        return {
+            "status": "evaluated",
+            "mode": "true_replay",
+            "accepted": accepted,
+            "no_regression": all(
+                bool(result.get("no_regression")) for _, result in evaluated
+            )
+            and all_windows_evaluated,
+            "recent_improved": recent_improved,
+            "historical_no_regression": historical_no_regression,
+            "quality_ok": bool(recent.get("quality_ok"))
+            and historical_no_regression,
+            "score": mean_value("score"),
+            "baseline_mean": mean_value("baseline_mean"),
+            "delta": mean_value("delta"),
+            "threshold": recent.get("threshold"),
+            "tolerance": recent.get("tolerance"),
+            "case_count": sum(
+                int(result.get("case_count") or 0)
+                for _, result in evaluated
+            ),
+            "cases": cases,
+            "window_results": {window: result for window, result in results},
         }
 
     async def _validate_job(self, job: dict[str, Any]) -> dict[str, Any]:
@@ -247,7 +360,28 @@ class ValidationWorker:
                 try:
                     from ..true_replay import evaluate_job
 
-                    replay = await asyncio.to_thread(evaluate_job, job_id, job=job)
+                    selected: list[tuple[str, int]] = []
+                    seen_windows: set[str] = set()
+                    for index, case in enumerate(job.get("replay_cases") or []):
+                        if not isinstance(case, dict):
+                            continue
+                        window = str(case.get("evidence_window") or "recent")
+                        if window not in {"recent", "historical"}:
+                            window = "recent"
+                        if window in seen_windows:
+                            continue
+                        selected.append((window, index))
+                        seen_windows.add(window)
+                    window_results: list[tuple[str, dict[str, Any]]] = []
+                    for window, case_index in selected:
+                        result = await asyncio.to_thread(
+                            evaluate_job,
+                            job_id,
+                            job=job,
+                            case_index=case_index,
+                        )
+                        window_results.append((window, result))
+                    replay = self._aggregate_true_replay_windows(window_results)
                     if replay.get("status") == "evaluated":
                         return {
                             "validator_mode": "true_replay",
@@ -306,6 +440,23 @@ class ValidationWorker:
                 summary.skipped_jobs += 1
                 continue
 
+            candidate_revision = max(1, int(job.get("candidate_revision") or 1))
+            latest = self._store.load_job(job_id)
+            latest_revision = (
+                max(1, int(latest.get("candidate_revision") or 1))
+                if isinstance(latest, dict)
+                else 0
+            )
+            if latest_revision != candidate_revision:
+                logger.info(
+                    "[ValidationWorker] discarded stale result for %s revision=%d latest=%d",
+                    job_id,
+                    candidate_revision,
+                    latest_revision,
+                )
+                summary.skipped_jobs += 1
+                continue
+            result["candidate_revision"] = candidate_revision
             self._store.save_result(job_id, self._user_alias, result)
             self._jobs_completed_today += 1
             summary.validated_jobs += 1
@@ -315,6 +466,9 @@ class ValidationWorker:
                 self._user_alias,
                 result.get("score"),
             )
+            finalized = await self._trigger_evolve_finalize()
+            if finalized and result.get("accepted") is True:
+                await self._sync_agentshub_skills(job)
             if summary.validated_jobs >= max(1, int(self.config.validation_max_concurrency)):
                 break
 
@@ -323,6 +477,69 @@ class ValidationWorker:
         elif summary.validated_jobs > 0:
             summary.reason = "validated"
         return summary.__dict__
+
+    async def _trigger_evolve_finalize(self) -> bool:
+        """Wake the evolve cycle after a validation vote is persisted."""
+        base_url = str(getattr(self.config, "evolve_server_url", "") or "").rstrip("/")
+        if not base_url:
+            base_url = f"http://127.0.0.1:{int(getattr(self.config, 'proxy_port', 52010) or 52010)}"
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(f"{base_url}/trigger")
+                response.raise_for_status()
+                return True
+        except Exception as exc:  # noqa: BLE001 - periodic cycle remains the fallback.
+            logger.warning("[ValidationWorker] failed to trigger evolve finalize: %s", exc)
+            return False
+
+    async def _sync_agentshub_skills(self, job: dict[str, Any]) -> None:
+        base_url = str(getattr(self.config, "validation_agentshub_url", "") or "").rstrip("/")
+        if not base_url:
+            return
+        tenant_ids = self._source_tenant_ids(job)
+        if not tenant_ids:
+            return
+        headers: dict[str, str] = {}
+        api_key = str(
+            getattr(self.config, "validation_agentshub_api_key", "") or ""
+        ).strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.post(
+                    f"{base_url}/api/internal/team-evolver/sync",
+                    json={"tenant_ids": tenant_ids},
+                    headers=headers,
+                )
+                response.raise_for_status()
+        except Exception as exc:  # noqa: BLE001 - periodic AgentsHub sync remains the fallback.
+            logger.warning("[ValidationWorker] AgentsHub skill sync callback failed: %s", exc)
+
+    def _source_tenant_ids(self, job: dict[str, Any]) -> list[str]:
+        try:
+            from ..session_store import SessionStore
+
+            store = SessionStore.from_config(self.config)
+        except Exception:
+            return []
+        tenant_ids: list[str] = []
+        for session_id in job.get("session_ids") or []:
+            source = store.load_session(str(session_id or ""))
+            context = (
+                source.get("runtime_context")
+                if isinstance(source, dict)
+                and isinstance(source.get("runtime_context"), dict)
+                else {}
+            )
+            tenant_id = str(context.get("tenant_id") or "").strip()
+            if tenant_id and tenant_id not in tenant_ids:
+                tenant_ids.append(tenant_id)
+        return tenant_ids
 
     async def run(self) -> None:
         interval = max(5, int(self.config.validation_poll_interval_seconds))

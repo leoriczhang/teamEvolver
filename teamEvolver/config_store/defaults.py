@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..config import VOLCENGINE_OPENVIKING_ENDPOINT
+from ..config import TEAM_SKILL_ROOT_PREFIX, VOLCENGINE_OPENVIKING_ENDPOINT
 
 CONFIG_DIR = Path.home() / ".teamEvolver"
 CONFIG_FILE = CONFIG_DIR / "config.yaml"
@@ -25,7 +25,7 @@ _DEFAULTS: dict = {
         "temperature": 0.4,
     },
     "service": {
-        "port": 30000,
+        "port": 52010,
         "host": "0.0.0.0",
     },
     "skills": {
@@ -40,8 +40,8 @@ _DEFAULTS: dict = {
         "data_policy": "",
     },
     "sharing": {
-        "enabled": False,
-        "backend": "",
+        "enabled": True,
+        "backend": "viking",
         "endpoint": "",
         "local_root": "",
         "skill_backend": "",
@@ -51,17 +51,18 @@ _DEFAULTS: dict = {
         # has separate personal and team OpenViking credentials.
         "viking_api_key": "",
         "viking_personal_api_key": "",
+        "viking_personal_api_keys": [],
         "viking_team_api_key": "",
         "viking_account": "default",
         "viking_user": "default",
         # wire constant: OpenViking agent namespace, do not rename
-        "viking_agent": "teamEvolver",
+        "viking_agent": TEAM_SKILL_ROOT_PREFIX,
         "viking_agent_id": "",
         "viking_customer_id": "",
-        "viking_root_prefix": "",
+        "viking_root_prefix": TEAM_SKILL_ROOT_PREFIX,
         "viking_group_id": "",
         "user_alias": "",
-        "auto_pull_on_start": False,
+        "auto_pull_on_start": True,
         "push_min_injections": 5,
         "push_min_effectiveness": 0.3,
         "session_upload_interval": 0,
@@ -69,15 +70,36 @@ _DEFAULTS: dict = {
         "skill_reload_interval_seconds": 30,
     },
     "evolve": {
-        "server_url": "",
+        "server_url": "http://127.0.0.1:52010",
+        "evidence_enabled": True,
+        "evidence_max_entries": 200,
+        "evidence_recent_limit": 12,
+        "evidence_historical_limit": 12,
+        "evidence_replay_cases_per_window": 1,
+        "evidence_change_debt_threshold": 3,
+        "candidate_coalesce_enabled": True,
+    },
+    "dreamcycle": {
+        "enabled": True,
+        "auto_start": True,
+        "daemon_command": "dreamcycle --daemon",
+        "trigger_command": "dreamcycle --once",
+        "viking_agent": "dreamcycle",
+        "llm_base_url": "",
+        "llm_api_key": "",
+        "llm_model": "",
     },
     "validation": {
-        "enabled": False,
+        "enabled": True,
         "mode": "replay",
         "idle_after_seconds": 300,
         "poll_interval_seconds": 60,
         "max_jobs_per_day": 5,
         "max_concurrency": 1,
+        "required_results": 3,
+        "required_approvals": 2,
+        "agentshub_url": "",
+        "agentshub_api_key": "",
     },
 }
 
@@ -155,6 +177,22 @@ def _normalize_non_negative_int(value: Any, default: int = 0) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return default
+
+
+def _normalize_string_list(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        values = value
+    elif value in (None, ""):
+        values = []
+    else:
+        values = str(value).replace("\n", ",").split(",")
+    return list(
+        dict.fromkeys(
+            item
+            for raw in values
+            if (item := str(raw or "").strip())
+        )
+    )
 
 
 def _normalize_reload_interval(value: Any) -> int:

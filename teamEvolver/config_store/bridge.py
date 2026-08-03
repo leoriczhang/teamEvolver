@@ -8,7 +8,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..config import TeamEvolverConfig, VOLCENGINE_OPENVIKING_ENDPOINT
+from ..config import (
+    TEAM_SKILL_ROOT_PREFIX,
+    VOLCENGINE_OPENVIKING_ENDPOINT,
+    TeamEvolverConfig,
+)
 from .defaults import (
     _DEFAULT_SKILLS_DIR,
     _DEFAULTS,
@@ -22,6 +26,7 @@ from .defaults import (
     _normalize_choice,
     _normalize_non_negative_int,
     _normalize_reload_interval,
+    _normalize_string_list,
     _normalize_validation_mode,
     resolve_skills_dir,
 )
@@ -96,6 +101,7 @@ class ConfigStore:
 
         sharing = data.get("sharing", {})
         evolve = data.get("evolve", {})
+        dreamcycle = data.get("dreamcycle", {})
         validation = data.get("validation", {})
         sharing_backend = _infer_sharing_backend(sharing)
         sharing_endpoint = _first_non_empty(sharing, "endpoint")
@@ -122,7 +128,7 @@ class ConfigStore:
             openrouter_fallback_models=orouter.get("fallback_models", ""),
             openrouter_data_policy=orouter.get("data_policy", ""),
             # Service
-            proxy_port=service.get("port", proxy.get("port", 30000)),
+            proxy_port=service.get("port", proxy.get("port", 52010)),
             proxy_host=service.get("host", proxy.get("host", "0.0.0.0")),
             # Skills
             use_skills=bool(skills.get("enabled", True)),
@@ -132,7 +138,7 @@ class ConfigStore:
             # Model
             model_name=llm.get("model_id") or "doubao-seed-evolving",
             # Sharing
-            sharing_enabled=bool(sharing.get("enabled", False)),
+            sharing_enabled=bool(sharing.get("enabled", True)),
             sharing_backend=sharing_backend,
             sharing_endpoint=sharing_endpoint,
             sharing_local_root=sharing_local_root,
@@ -145,6 +151,9 @@ class ConfigStore:
                 or sharing.get("viking_user_api_key", "")
                 or ""
             ),
+            sharing_viking_personal_api_keys=_normalize_string_list(
+                sharing.get("viking_personal_api_keys", [])
+            ),
             sharing_viking_team_api_key=str(
                 sharing.get("viking_team_api_key", "")
                 or sharing.get("viking_resources_api_key", "")
@@ -152,7 +161,9 @@ class ConfigStore:
             ),
             sharing_viking_account=str(sharing.get("viking_account", "") or "default"),
             sharing_viking_user=str(sharing.get("viking_user", "") or "default"),
-            sharing_viking_agent=str(sharing.get("viking_agent", "") or "teamEvolver"),
+            sharing_viking_agent=str(
+                sharing.get("viking_agent", "") or TEAM_SKILL_ROOT_PREFIX
+            ),
             sharing_viking_agent_id=str(
                 sharing.get("viking_agent_id", "") or sharing.get("viking_user_id", "") or ""
             ),
@@ -160,13 +171,15 @@ class ConfigStore:
                 sharing.get("viking_customer_id", "") or sharing.get("viking_peer_id", "") or ""
             ),
             sharing_viking_root_prefix=str(
-                sharing.get("viking_root_prefix", "") or sharing.get("root_prefix", "") or "teamEvolver"
+                sharing.get("viking_root_prefix", "")
+                or sharing.get("root_prefix", "")
+                or TEAM_SKILL_ROOT_PREFIX
             ),
             sharing_viking_group_id=str(
                 sharing.get("viking_group_id", "") or sharing.get("group_id", "") or ""
             ),
             sharing_user_alias=str(sharing.get("user_alias", "") or ""),
-            sharing_auto_pull_on_start=bool(sharing.get("auto_pull_on_start", False)),
+            sharing_auto_pull_on_start=bool(sharing.get("auto_pull_on_start", True)),
             sharing_push_min_injections=int(sharing.get("push_min_injections", 5)),
             sharing_push_min_effectiveness=float(sharing.get("push_min_effectiveness", 0.3)),
             sharing_session_upload_interval=_normalize_non_negative_int(
@@ -181,13 +194,62 @@ class ConfigStore:
             sharing_skill_reload_interval_seconds=_normalize_reload_interval(
                 sharing.get("skill_reload_interval_seconds", 30),
             ),
-            evolve_server_url=str(evolve.get("server_url", "") or ""),
-            validation_enabled=bool(validation.get("enabled", False)),
+            evolve_server_url=str(
+                evolve.get("server_url", "") or "http://127.0.0.1:52010"
+            ),
+            evolve_evidence_enabled=bool(evolve.get("evidence_enabled", True)),
+            evolve_evidence_max_entries=max(
+                1, int(evolve.get("evidence_max_entries", 200))
+            ),
+            evolve_evidence_recent_limit=max(
+                1, int(evolve.get("evidence_recent_limit", 12))
+            ),
+            evolve_evidence_historical_limit=max(
+                0, int(evolve.get("evidence_historical_limit", 12))
+            ),
+            evolve_evidence_replay_cases_per_window=max(
+                1, int(evolve.get("evidence_replay_cases_per_window", 1))
+            ),
+            evolve_evidence_change_debt_threshold=max(
+                1, int(evolve.get("evidence_change_debt_threshold", 3))
+            ),
+            evolve_candidate_coalesce_enabled=bool(
+                evolve.get("candidate_coalesce_enabled", True)
+            ),
+            dreamcycle_enabled=bool(dreamcycle.get("enabled", True)),
+            dreamcycle_auto_start=bool(dreamcycle.get("auto_start", True)),
+            dreamcycle_daemon_command=str(
+                dreamcycle.get("daemon_command", "") or "dreamcycle --daemon"
+            ),
+            dreamcycle_trigger_command=str(
+                dreamcycle.get("trigger_command", "") or "dreamcycle --once"
+            ),
+            dreamcycle_viking_agent=str(
+                dreamcycle.get("viking_agent", "") or "dreamcycle"
+            ),
+            dreamcycle_llm_base_url=str(
+                dreamcycle.get("llm_base_url", "") or ""
+            ),
+            dreamcycle_llm_api_key=str(
+                dreamcycle.get("llm_api_key", "") or ""
+            ),
+            dreamcycle_llm_model=str(dreamcycle.get("llm_model", "") or ""),
+            validation_enabled=bool(validation.get("enabled", True)),
             validation_mode=_normalize_validation_mode(validation.get("mode", "replay")),
             validation_idle_after_seconds=int(validation.get("idle_after_seconds", 300)),
             validation_poll_interval_seconds=int(validation.get("poll_interval_seconds", 60)),
             validation_max_jobs_per_day=int(validation.get("max_jobs_per_day", 5)),
             validation_max_concurrency=max(1, int(validation.get("max_concurrency", 1))),
+            validation_required_results=max(
+                1, int(validation.get("required_results", 3))
+            ),
+            validation_required_approvals=max(
+                1, int(validation.get("required_approvals", 2))
+            ),
+            validation_agentshub_url=str(validation.get("agentshub_url", "") or ""),
+            validation_agentshub_api_key=str(
+                validation.get("agentshub_api_key", "") or ""
+            ),
         )
 
     def describe(self) -> str:
@@ -196,6 +258,7 @@ class ConfigStore:
         llm = data.get("llm", {})
         skills = data.get("skills", {})
         evolve = data.get("evolve", {})
+        dreamcycle = data.get("dreamcycle", {})
         effective_skills_dir = resolve_skills_dir(skills.get("dir", str(_DEFAULT_SKILLS_DIR)))
         lines = [
             f"llm.provider:    {llm.get('provider', '?')}",
@@ -210,7 +273,7 @@ class ConfigStore:
                 if llm.get("provider") == "openrouter"
                 else []
             ),
-            f"service.port:    {data.get('service', {}).get('port', data.get('proxy', {}).get('port', 30000))}",
+            f"service.port:    {data.get('service', {}).get('port', data.get('proxy', {}).get('port', 52010))}",
             f"skills.enabled:  {skills.get('enabled', True)}",
             f"skills.dir:      {effective_skills_dir}",
         ]
@@ -244,7 +307,8 @@ class ConfigStore:
                 )
                 lines += [
                     f"sharing.viking_endpoint: {sharing.get('viking_endpoint', '') or VOLCENGINE_OPENVIKING_ENDPOINT}",
-                    f"sharing.viking_root_prefix: {sharing.get('viking_root_prefix', '') or 'teamEvolver'}",
+                    "sharing.viking_root_prefix: "
+                    f"{sharing.get('viking_root_prefix', '') or TEAM_SKILL_ROOT_PREFIX}",
                     f"sharing.viking_personal_api_key: {'present' if personal_key else 'missing'}",
                     f"sharing.viking_team_api_key: {'present' if team_key else 'missing'}",
                 ]
@@ -263,10 +327,24 @@ class ConfigStore:
         else:
             lines.append("sharing.enabled: False")
         lines += [
-            f"evolve.server_url: {evolve.get('server_url', '') or '(not set)'}",
-            f"validation.enabled: {validation.get('enabled', False)}",
+            f"evolve.server_url: {evolve.get('server_url', '') or 'http://127.0.0.1:52010'}",
+            f"evolve.evidence_enabled: {evolve.get('evidence_enabled', True)}",
+            f"evolve.evidence_windows: recent={evolve.get('evidence_recent_limit', 12)}, "
+            f"historical={evolve.get('evidence_historical_limit', 12)}",
+            f"evolve.change_debt_threshold: {evolve.get('evidence_change_debt_threshold', 3)}",
+            f"evolve.candidate_coalesce: {evolve.get('candidate_coalesce_enabled', True)}",
+            f"dreamcycle.enabled: {dreamcycle.get('enabled', True)}",
+            f"dreamcycle.auto_start: {dreamcycle.get('auto_start', True)}",
+            "dreamcycle.personal_sources: "
+            f"{len(_normalize_string_list(sharing.get('viking_personal_api_keys', [])))}",
+            "dreamcycle.team_target: "
+            f"{'configured' if sharing.get('viking_team_api_key') else 'missing'}",
+            f"validation.enabled: {validation.get('enabled', True)}",
             f"validation.mode: {_normalize_validation_mode(validation.get('mode', 'replay'))}",
             f"validation.idle_after: {validation.get('idle_after_seconds', 300)}",
             f"validation.poll_interval: {validation.get('poll_interval_seconds', 60)}",
+            f"validation.required_results: {validation.get('required_results', 3)}",
+            f"validation.required_approvals: {validation.get('required_approvals', 2)}",
+            f"validation.agentshub_url: {validation.get('agentshub_url', '') or '(not set)'}",
         ]
         return "\n".join(lines)

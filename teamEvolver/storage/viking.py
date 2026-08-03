@@ -8,10 +8,8 @@ from typing import Iterator
 from .base import ObjectInfo, _BytesObject, read_bytes
 
 # Wire constant, do not rename. This string is a shared data contract: Hermes'
-# ``OpenVikingSkillSource`` and the evolve server both read team skills from
-# ``viking://resources/teamEvolver/skills/``. Renaming it would orphan
-# every skill already published to the cloud.
-_VIKING_ROOT_PREFIX = "teamEvolver"
+# AgentsHub and the evolve server read team skills from this shared contract.
+_VIKING_ROOT_PREFIX = "team-skill-evolver"
 
 
 class OpenVikingObjectStore:
@@ -23,12 +21,13 @@ class OpenVikingObjectStore:
         viking://resources/{root_prefix}/...                  # group_id empty
         viking://resources/{root_prefix}/{group_id}/...       # group_id set
 
-    ``root_prefix`` defaults to the wire constant ``teamEvolver`` and
+    ``root_prefix`` defaults to the wire constant ``team-skill-evolver`` and
     ``group_id`` defaults to empty so the team library lives directly under
-    ``viking://resources/teamEvolver/``, matching what Hermes'
+    ``viking://resources/team-skill-evolver/``, matching what AgentsHub and
+    Hermes'
     ``OpenVikingSkillSource`` scans
-    (``viking://resources/teamEvolver/skills/<name>/``). Isolated runs
-    (e.g. eval) use a *separate root_prefix* (``teamEvolver-eval``) rather
+    (``viking://resources/team-skill-evolver/skills/<name>/``). Isolated runs
+    use a separate root prefix rather
     than a group segment. The shared key ``X-API-Key`` authenticates as
     ``account=default`` with write access to the ``resources/`` namespace, so no
     per-user space is needed.

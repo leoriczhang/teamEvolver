@@ -7,21 +7,32 @@ health, skill/user admin, model settings, and internal skill reload). Route bodi
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import re
 import secrets
 import time
-import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from ..config_store import ConfigStore
+from ..session_filter import SessionValueClassifier
+from ..session_store import SessionStore
+from ..skills import frontmatter
+from ..skills.hub import SkillHub
+from ..skills.render import build_skill_md
+from ..storage import is_not_found_error
+from ..validation.store import ValidationStore
+from ..validation.worker import ValidationWorker
 from .users_admin import (
     _find_user,
     _load_registry,
@@ -31,14 +42,6 @@ from .users_admin import (
     _upsert_user,
     _verify_password,
 )
-from ..config_store import ConfigStore
-from ..session_filter import SessionValueClassifier
-from ..session_store import SessionStore
-from ..skills.hub import SkillHub
-from ..skills.render import build_skill_md
-from ..storage import is_not_found_error
-from ..validation.store import ValidationStore
-from ..validation.worker import ValidationWorker
 
 logger = logging.getLogger(__name__)
 _SESSION_COOKIE = "teamEvolver_console_session"
@@ -84,7 +87,50 @@ def _check_ingest_api_key(request: Request) -> None:
         raise HTTPException(status_code=401, detail="invalid ingest api key")
 
 
+def _check_model_proxy_api_key(request: Request) -> None:
+    expected = str(os.environ.get("TEAMEVOLVER_PROXY_API_KEY") or "").strip()
+    if not expected:
+        return
+    header = str(request.headers.get("authorization") or "").strip()
+    token = header[7:].strip() if header.lower().startswith("bearer ") else header
+    if not secrets.compare_digest(token, expected):
+        raise HTTPException(status_code=401, detail="invalid model proxy api key")
+
+
+def _upstream_chat_url(config) -> str:
+    base_url = str(getattr(config, "llm_api_base", "") or "").strip().rstrip("/")
+    if not base_url:
+        raise HTTPException(status_code=503, detail="upstream model base URL is not configured")
+    return f"{base_url}/chat/completions"
+
+
+def _upstream_chat_headers(config) -> dict[str, str]:
+    api_key = str(getattr(config, "llm_api_key", "") or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="upstream model API key is not configured")
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream, application/json",
+    }
+
+
+def _model_proxy_payload(config, body: Any) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be an object")
+    payload = dict(body)
+    configured_model = str(getattr(config, "llm_model_id", "") or "").strip()
+    requested_model = str(payload.get("model") or "").strip()
+    if configured_model and requested_model in {"", "skillgene-model", "teamEvolver-model"}:
+        payload["model"] = configured_model
+    return payload
+
+
 def _is_embedded_evolve_path(path: str) -> bool:
+    if path == "/trigger-dreamcycle" or path.startswith("/trigger-dreamcycle/"):
+        return False
+    if path == "/validation/candidates" or path.startswith("/validation/candidates/"):
+        return False
     if path in {"/trigger", "/status", "/sessions", "/conversations", "/storage/status", "/trigger-dreamcycle"}:
         return True
     return path.startswith(
@@ -286,7 +332,11 @@ def _scrub_legacy_reward_text(text: Any) -> str:
     return value
 
 
-def _candidate_payload(job: dict[str, Any], evaluation: dict[str, Any] | None = None) -> dict[str, Any]:
+def _candidate_payload(
+    job: dict[str, Any],
+    evaluation: dict[str, Any] | None = None,
+    decision: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     payload = dict(job)
     name = _candidate_skill_name(payload)
     if name:
@@ -295,6 +345,19 @@ def _candidate_payload(job: dict[str, Any], evaluation: dict[str, Any] | None = 
     payload["proposed_action"] = str(payload.get("proposed_action") or payload.get("action") or "")
     if payload.get("rationale"):
         payload["rationale"] = _scrub_legacy_reward_text(payload.get("rationale"))
+    if decision:
+        status = str(decision.get("status") or "").strip()
+        if not status:
+            status = "published" if decision.get("accepted") is True else "rejected"
+        payload["review_status"] = status
+        payload["decision"] = decision
+        payload["decision_reason"] = str(decision.get("reason") or "")
+        payload["decided_at"] = str(decision.get("decided_at") or decision.get("created_at") or "")
+        payload["decision_accepted"] = decision.get("accepted")
+        if evaluation is None and isinstance(decision.get("evaluation"), dict):
+            evaluation = decision.get("evaluation")
+    else:
+        payload["review_status"] = "open"
     if evaluation:
         eval_payload = _evaluation_payload(job, evaluation, cached=True)
         replay_payload = eval_payload.get("replay") if isinstance(eval_payload.get("replay"), dict) else {}
@@ -305,6 +368,36 @@ def _candidate_payload(job: dict[str, Any], evaluation: dict[str, Any] | None = 
         payload["recommended_publish"] = eval_payload.get("recommended_publish")
         payload["evaluation_error"] = replay_payload.get("error")
     return payload
+
+
+def _candidate_list_payloads(
+    store: ValidationStore,
+    *,
+    scope: str = "open",
+    user_alias: str = "",
+) -> list[dict[str, Any]]:
+    normalized = str(scope or "open").strip().lower()
+    if normalized in {"history", "processed", "closed", "decided"}:
+        normalized = "processed"
+    elif normalized in {"all", "any"}:
+        normalized = "all"
+    else:
+        normalized = "open"
+
+    jobs = (
+        store.list_open_jobs(user_alias=user_alias)
+        if normalized == "open"
+        else store.list_jobs()
+    )
+    candidates: list[dict[str, Any]] = []
+    for job in jobs:
+        job_id = str(job.get("job_id") or "")
+        decision = None if normalized == "open" else (store.load_decision(job_id) if job_id else None)
+        if normalized == "processed" and not decision:
+            continue
+        evaluation = store.load_evaluation(job_id) if job_id else None
+        candidates.append(_candidate_payload(job, evaluation, decision))
+    return candidates
 
 
 def _normalize_replay_case(case: dict[str, Any]) -> dict[str, Any]:
@@ -347,6 +440,8 @@ def _normalize_replay_case(case: dict[str, Any]) -> dict[str, Any]:
 
 def _evaluation_payload(job: dict[str, Any], result: dict[str, Any], *, cached: bool = False) -> dict[str, Any]:
     replay_summary = result.get("replay_summary") if isinstance(result.get("replay_summary"), dict) else {}
+    if not replay_summary and isinstance(result.get("replay"), dict):
+        replay_summary = result.get("replay") or {}
     cases = replay_summary.get("cases") if isinstance(replay_summary.get("cases"), list) else []
     normalized_cases: list[dict[str, Any]] = []
     fallback_reason = result.get("true_replay_fallback_reason")
@@ -359,6 +454,11 @@ def _evaluation_payload(job: dict[str, Any], result: dict[str, Any], *, cached: 
 
     def _branch_payload(branch: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
         response = _first_present(branch, "final_response", "response_text", "response") or ""
+        if not response and isinstance(branch.get("interactions"), list):
+            for interaction in reversed(branch.get("interactions") or []):
+                if isinstance(interaction, dict) and interaction.get("response"):
+                    response = interaction.get("response") or ""
+                    break
         error = str(branch.get("error") or "")
         rationale = str(branch.get("rationale") or branch.get("replay_reason") or "")
         display_response = response or error or rationale
@@ -388,32 +488,45 @@ def _evaluation_payload(job: dict[str, Any], result: dict[str, Any], *, cached: 
                 }
             )
     skill_name = _candidate_skill_name(job)
-    threshold = result.get("threshold", job.get("min_score", 0.75))
+    verification = result.get("verification") if isinstance(result.get("verification"), dict) else {}
+    threshold = _first_present(result, "threshold") or _first_present(replay_summary, "threshold") or _first_present(verification, "threshold") or job.get("min_score", 0.75)
+    accepted = _first_present(result, "accepted", "recommended_publish")
+    if accepted is None:
+        accepted = verification.get("accepted")
+    replay_score = _first_present(result, "score", "replay_score")
+    if replay_score is None:
+        replay_score = replay_summary.get("score")
+    verify_score = _first_present(result, "score", "verify_score")
+    if verify_score is None:
+        verify_score = replay_score
+    no_regression = replay_summary.get("no_regression")
+    if no_regression is None:
+        no_regression = bool(accepted) or (
+            isinstance(replay_summary.get("candidate_mean_score"), (int, float))
+            and isinstance(replay_summary.get("baseline_mean_score"), (int, float))
+            and float(replay_summary.get("candidate_mean_score")) >= float(replay_summary.get("baseline_mean_score"))
+        )
     return {
         "status": "evaluated",
         "skill_name": skill_name,
         "proposed_action": str(job.get("proposed_action") or job.get("action") or ""),
-        "verify_score": result.get("score"),
-        "replay_score": result.get("score"),
-        "recommended_publish": bool(result.get("accepted")),
+        "verify_score": verify_score,
+        "replay_score": replay_score,
+        "recommended_publish": bool(accepted),
         "cached": cached,
         "verification": {
             "threshold": threshold,
-            "enabled": True,
-            "accepted": bool(result.get("accepted")),
-            "decision": result.get("decision"),
-            "reason": result.get("reason"),
-            "checks": result.get("checks", {}),
+            "enabled": verification.get("enabled", True),
+            "accepted": bool(accepted),
+            "decision": result.get("decision") or verification.get("decision"),
+            "reason": result.get("reason") or verification.get("reason"),
+            "checks": result.get("checks") or verification.get("checks", {}),
         },
         "replay": {
             "threshold": threshold,
             "tolerance": replay_summary.get("tolerance"),
             "baseline_mean": replay_summary.get("baseline_mean_score") or replay_summary.get("baseline_mean"),
-            "no_regression": result.get("accepted") or (
-                isinstance(replay_summary.get("candidate_mean_score"), (int, float))
-                and isinstance(replay_summary.get("baseline_mean_score"), (int, float))
-                and float(replay_summary.get("candidate_mean_score")) >= float(replay_summary.get("baseline_mean_score"))
-            ),
+            "no_regression": bool(no_regression),
             "cases": normalized_cases,
             "efficiency": replay_summary.get("efficiency") or {},
             "mode": result.get("validator_mode"),
@@ -500,13 +613,58 @@ async def _evaluate_candidate_job(config, owner, job: dict[str, Any]) -> dict[st
     return result
 
 
-def _skill_diff_payload(job: dict[str, Any]) -> dict[str, Any]:
+def _load_current_skill_md_for_display(config, skill_name: str) -> str:
+    name = str(skill_name or "").strip()
+    if not name:
+        return ""
+    for raw_root in [getattr(config, "skills_dir", ""), os.path.abspath("skills")]:
+        root = str(raw_root or "").strip()
+        if not root:
+            continue
+        direct = os.path.join(root, name, "SKILL.md")
+        if os.path.isfile(direct):
+            try:
+                with open(direct, "r", encoding="utf-8") as handle:
+                    return handle.read()
+            except Exception:
+                pass
+        try:
+            for current_root, _, files in os.walk(root):
+                if "SKILL.md" not in files:
+                    continue
+                path = os.path.join(current_root, "SKILL.md")
+                try:
+                    parsed = frontmatter.parse_skill_md(path)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, dict) and str(parsed.get("name") or os.path.basename(current_root)) == name:
+                    with open(path, "r", encoding="utf-8") as handle:
+                        return handle.read()
+        except Exception:
+            pass
+    try:
+        hub = SkillHub.team_from_config(config)
+        for record in hub.list_remote():
+            if str(record.get("name") or "") != name:
+                continue
+            bundle = hub._download_skill_bundle(name, record)
+            return bundle.get("SKILL.md", b"").decode("utf-8", errors="replace")
+    except Exception:
+        pass
+    return ""
+
+
+def _skill_diff_payload(job: dict[str, Any], config=None) -> dict[str, Any]:
     import difflib
 
     current = job.get("current_skill") if isinstance(job.get("current_skill"), dict) else None
     candidate = job.get("candidate_skill") if isinstance(job.get("candidate_skill"), dict) else None
     current_md = build_skill_md(current).splitlines() if current else []
     candidate_md = build_skill_md(candidate).splitlines() if candidate else []
+    if not current_md and config is not None:
+        current_raw = _load_current_skill_md_for_display(config, _candidate_skill_name(job))
+        if current_raw:
+            current_md = current_raw.splitlines()
     diff = "\n".join(
         difflib.unified_diff(
             current_md,
@@ -568,6 +726,7 @@ class RoutesMixin:
             owner._ready_event.set()
             owner._start_skill_reload_polling()
             owner._start_embedded_evolve()
+            owner._start_dreamcycle()
             try:
                 yield
             finally:
@@ -639,6 +798,71 @@ class RoutesMixin:
             if os.path.isfile(dist_index):
                 return FileResponse(dist_index)
             return JSONResponse(status_code=404, content={"detail": "teamEvolver console is not built"})
+
+        @app.get("/v1/models")
+        async def model_proxy_models(request: Request):
+            _check_model_proxy_api_key(request)
+            model = str(owner.config.llm_model_id or owner.config.model_name or "")
+            return {
+                "object": "list",
+                "data": [
+                    {
+                        "id": "skillgene-model",
+                        "object": "model",
+                        "owned_by": "teamEvolver",
+                        "upstream_model": model,
+                    }
+                ],
+            }
+
+        @app.post("/v1/chat/completions")
+        async def model_proxy_chat_completions(request: Request):
+            _check_model_proxy_api_key(request)
+            payload = _model_proxy_payload(owner.config, await request.json())
+            url = _upstream_chat_url(owner.config)
+            headers = _upstream_chat_headers(owner.config)
+            timeout = httpx.Timeout(connect=30.0, read=600.0, write=60.0, pool=30.0)
+            if payload.get("stream"):
+                client = httpx.AsyncClient(timeout=timeout)
+                upstream = await client.send(
+                    client.build_request("POST", url, headers=headers, json=payload),
+                    stream=True,
+                )
+                if upstream.status_code >= 400:
+                    error_body = await upstream.aread()
+                    await upstream.aclose()
+                    await client.aclose()
+                    return Response(
+                        content=error_body,
+                        status_code=upstream.status_code,
+                        media_type=upstream.headers.get(
+                            "content-type", "application/json"
+                        ),
+                    )
+
+                async def stream_upstream():
+                    try:
+                        async for chunk in upstream.aiter_raw():
+                            yield chunk
+                    finally:
+                        await upstream.aclose()
+                        await client.aclose()
+
+                return StreamingResponse(
+                    stream_upstream(),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                upstream = await client.post(url, headers=headers, json=payload)
+            return Response(
+                content=upstream.content,
+                status_code=upstream.status_code,
+                media_type=upstream.headers.get("content-type", "application/json"),
+            )
 
         @app.get("/api/auth/status")
         async def auth_status(request: Request):
@@ -749,7 +973,14 @@ class RoutesMixin:
 
         @app.get("/api/evolve-model")
         async def api_get_evolve_model():
-            store = ConfigStore()
+            config_file = str(
+                getattr(owner.config, "_config_file", "") or ""
+            ).strip()
+            store = (
+                ConfigStore(config_file=Path(config_file))
+                if config_file
+                else ConfigStore()
+            )
             return JSONResponse(content=_model_settings_payload(owner.config, store.load()))
 
         @app.post("/api/evolve-model")
@@ -902,6 +1133,100 @@ class RoutesMixin:
                 "value_judge": value_judge,
             }
 
+        @app.post("/internal/agentshub/openviking-config")
+        async def sync_agentshub_openviking_config(request: Request):
+            """Merge one AgentsHub peer's personal source and shared team target."""
+            _check_ingest_api_key(request)
+            body = await _read_limited_json_body(request)
+            endpoint = str(body.get("endpoint") or "").strip()
+            account = str(body.get("account") or "").strip()
+            personal_key = str(body.get("personal_api_key") or "").strip()
+            team_key = str(body.get("team_api_key") or "").strip()
+            if not endpoint or not team_key:
+                raise HTTPException(
+                    status_code=400,
+                    detail="endpoint and team_api_key are required",
+                )
+            from ..integrations.dreamcycle import parse_openviking_key
+
+            key_account, team_user = parse_openviking_key(team_key)
+            if not team_user:
+                raise HTTPException(
+                    status_code=400,
+                    detail="team_api_key does not encode an OpenViking user",
+                )
+
+            config_file = str(
+                getattr(owner.config, "_config_file", "") or ""
+            ).strip()
+            store = (
+                ConfigStore(config_file=Path(config_file))
+                if config_file
+                else ConfigStore()
+            )
+            data = store.load()
+            sharing = data.setdefault("sharing", {})
+            existing = sharing.get("viking_personal_api_keys")
+            source_keys = (
+                list(existing)
+                if isinstance(existing, list)
+                else (
+                    str(existing).replace("\n", ",").split(",")
+                    if existing
+                    else []
+                )
+            )
+            legacy_personal = str(
+                sharing.get("viking_personal_api_key") or ""
+            ).strip()
+            if legacy_personal:
+                source_keys.append(legacy_personal)
+            if personal_key:
+                source_keys.append(personal_key)
+            source_keys = list(
+                dict.fromkeys(
+                    key
+                    for raw in source_keys
+                    if (key := str(raw or "").strip()) and key != team_key
+                )
+            )
+
+            sharing.update(
+                {
+                    "enabled": True,
+                    "backend": "viking",
+                    "viking_endpoint": endpoint,
+                    "viking_account": key_account or account,
+                    "viking_user": team_user,
+                    "viking_team_api_key": team_key,
+                    "viking_personal_api_keys": source_keys,
+                }
+            )
+            # Keep the singular field for older teamEvolver integrations.
+            if personal_key:
+                sharing["viking_personal_api_key"] = personal_key
+            data.setdefault("dreamcycle", {}).update(
+                {"enabled": True, "auto_start": True}
+            )
+            # Remove the short-lived duplicate DreamCycle credential fields.
+            for key in (
+                "viking_endpoint",
+                "viking_api_key",
+                "viking_account",
+                "viking_team_user",
+            ):
+                data["dreamcycle"].pop(key, None)
+            store.save(data)
+            config = store.to_config()
+            await owner._reload_openviking_integrations(config)
+
+            return {
+                "ok": True,
+                "account": key_account or account,
+                "team_user": team_user,
+                "personal_source_count": len(source_keys),
+            }
+
         @app.get("/healthz")
         async def healthz():
             return {"ok": True}
@@ -909,6 +1234,18 @@ class RoutesMixin:
         @app.get("/health")
         async def health():
             return {"status": "ok"}
+
+        @app.post("/trigger-dreamcycle")
+        async def trigger_dreamcycle():
+            result = owner._trigger_dreamcycle()
+            status = str(result.get("status") or "")
+            if status == "not_configured":
+                return JSONResponse(content=result, status_code=503)
+            return JSONResponse(content=result, status_code=202)
+
+        @app.get("/trigger-dreamcycle/status")
+        async def dreamcycle_status():
+            return owner._dreamcycle_status()
 
         @app.get("/storage/status")
         async def storage_status():
@@ -1005,15 +1342,130 @@ class RoutesMixin:
             except Exception as exc:  # noqa: BLE001
                 return {"stats": {"total": 0, "decisions": {}, "statuses": {}, "modes": {}}, "items": [], "reason": str(exc)}
 
+        def _validation_store() -> ValidationStore:
+            return ValidationStore.from_config(owner.config)
+
+        def _validation_candidate_detail_payload(store: ValidationStore, job_id: str) -> dict[str, Any]:
+            job = store.load_job(job_id)
+            if not job:
+                raise HTTPException(status_code=404, detail="candidate not found")
+            evaluation = store.load_evaluation(job_id)
+            decision = store.load_decision(job_id)
+            return {**_candidate_payload(job, evaluation, decision), **_skill_diff_payload(job, owner.config)}
+
+        @app.get("/api/validation/candidates")
+        async def api_validation_candidates(scope: str = "open"):
+            try:
+                store = _validation_store()
+                candidates = _candidate_list_payloads(
+                    store,
+                    scope=scope,
+                    user_alias=str(owner.config.sharing_user_alias or ""),
+                )
+            except Exception:
+                candidates = []
+            return {"candidates": candidates}
+
+        @app.get("/api/validation/candidates/{job_id}/detail")
+        async def api_validation_candidate_detail(job_id: str):
+            store = _validation_store()
+            return _validation_candidate_detail_payload(store, job_id)
+
+        @app.post("/api/validation/candidates/{job_id}/evaluate")
+        async def api_validation_candidate_evaluate(job_id: str, refresh: bool = False):
+            store = _validation_store()
+            job = store.load_job(job_id)
+            if not job:
+                return {"status": "not_found", "job_id": job_id}
+            cached = None if refresh else store.load_evaluation(job_id)
+            if cached:
+                return {**_evaluation_payload(job, cached, cached=True), **_skill_diff_payload(job, owner.config)}
+            result = await _evaluate_candidate_job(owner.config, owner, job)
+            store.save_evaluation(job_id, result)
+            return {**_evaluation_payload(job, result, cached=False), **_skill_diff_payload(job, owner.config)}
+
+        @app.post("/api/validation/candidates/{job_id}/validate")
+        async def api_validation_candidate_validate(job_id: str, request: Request):
+            _require_admin_user(_session_user(request))
+            body = await request.json()
+            if not isinstance(body, dict):
+                body = {}
+            mode = str(body.get("mode") or "auto")
+            store = _validation_store()
+            job = store.load_job(job_id)
+            if not job:
+                raise HTTPException(status_code=404, detail="candidate not found")
+            evaluation = store.load_evaluation(job_id)
+            if not evaluation:
+                evaluation = await _evaluate_candidate_job(owner.config, owner, job)
+                store.save_evaluation(job_id, evaluation)
+            accepted = bool(evaluation.get("accepted"))
+            if mode != "force" and not accepted:
+                decision = {
+                    "status": "rejected",
+                    "accepted": False,
+                    "reason": evaluation.get("reason") or "evaluation did not pass",
+                    "evaluation": evaluation,
+                }
+                store.save_decision(job_id, decision)
+                return decision
+            candidate_skill = job.get("candidate_skill") if isinstance(job.get("candidate_skill"), dict) else None
+            if not candidate_skill or not candidate_skill.get("name"):
+                raise HTTPException(status_code=400, detail="candidate missing skill payload")
+            from ..skills.bundle import coerce_skill_bundle
+            from ..skills.editor import save_skill
+
+            name = str(candidate_skill.get("name") or "")
+            current = job.get("current_skill") if isinstance(job.get("current_skill"), dict) else None
+            created = current is None
+            result = save_skill(
+                owner.config.skills_dir,
+                name=name,
+                description=str(candidate_skill.get("description") or ""),
+                category=str(candidate_skill.get("category") or "general"),
+                body=str(candidate_skill.get("content") or ""),
+                skill_md="",
+            )
+            bundle_files = candidate_skill.get("bundle_files")
+            if isinstance(bundle_files, dict):
+                from ..skills.bundle import write_skill_bundle
+
+                write_skill_bundle(
+                    os.path.join(owner.config.skills_dir, name),
+                    coerce_skill_bundle({"SKILL.md": build_skill_md(candidate_skill), **bundle_files}),
+                    clean=True,
+                )
+            loaded = owner._reload_skill_manager()
+            cloud = owner._cloud_sync_push(name)
+            decision = {
+                "status": "published",
+                "accepted": True,
+                "job_id": job_id,
+                "skill_name": name,
+                "created": created,
+                "version": cloud.get("version") or result.get("version"),
+                "loaded_skills": loaded,
+                "cloud": cloud,
+                "evaluation": evaluation,
+            }
+            store.save_decision(job_id, decision)
+            return decision
+
+        @app.delete("/api/validation/candidates/{job_id}")
+        async def api_validation_candidate_delete(job_id: str, request: Request):
+            _require_admin_user(_session_user(request))
+            store = _validation_store()
+            return store.delete_job(job_id)
+
         @app.get("/validation/candidates")
-        async def validation_candidates():
+        async def validation_candidates(scope: str = "open"):
             try:
                 store = ValidationStore.from_config(owner.config)
-                candidates = []
-                for job in store.list_open_jobs(user_alias=str(owner.config.sharing_user_alias or "")):
-                    job_id = str(job.get("job_id") or "")
-                    evaluation = store.load_evaluation(job_id) if job_id else None
-                    candidates.append(_candidate_payload(job, evaluation))
+                candidates = _candidate_list_payloads(
+                    store,
+                    scope=scope,
+                    user_alias=str(owner.config.sharing_user_alias or ""),
+                )
             except Exception:
                 candidates = []
             return {"candidates": candidates}
@@ -1024,7 +1476,9 @@ class RoutesMixin:
             job = store.load_job(job_id)
             if not job:
                 raise HTTPException(status_code=404, detail="candidate not found")
-            return {**_candidate_payload(job), **_skill_diff_payload(job)}
+            evaluation = store.load_evaluation(job_id)
+            decision = store.load_decision(job_id)
+            return {**_candidate_payload(job, evaluation, decision), **_skill_diff_payload(job, owner.config)}
 
         @app.post("/validation/candidates/{job_id}/evaluate")
         async def validation_candidate_evaluate(job_id: str, refresh: bool = False):

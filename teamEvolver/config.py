@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 
 VOLCENGINE_OPENVIKING_ENDPOINT = "https://api.vikingdb.cn-beijing.volces.com/openviking"
+TEAM_SKILL_ROOT_PREFIX = "team-skill-evolver"
 
 
 @dataclass
@@ -19,7 +20,7 @@ class TeamEvolverConfig:
     # ------------------------------------------------------------------ #
     # Skills                                                              #
     # ------------------------------------------------------------------ #
-    use_skills: bool = False
+    use_skills: bool = True
     skills_dir: str = "memory_data/skills"
     skills_public_root: str = ""
     max_skills_prompt_chars: int = 30000
@@ -35,7 +36,7 @@ class TeamEvolverConfig:
     # ------------------------------------------------------------------ #
     # API Server                                                          #
     # ------------------------------------------------------------------ #
-    proxy_port: int = 30000
+    proxy_port: int = 52010
     proxy_host: str = "0.0.0.0"
 
     # ------------------------------------------------------------------ #
@@ -61,8 +62,8 @@ class TeamEvolverConfig:
     # ------------------------------------------------------------------ #
     # Skill sharing (OpenViking / local object storage)                   #
     # ------------------------------------------------------------------ #
-    sharing_enabled: bool = False
-    sharing_backend: str = ""
+    sharing_enabled: bool = True
+    sharing_backend: str = "viking"
     sharing_endpoint: str = ""
     sharing_local_root: str = ""
     # Optional override for skill assets. When empty, sharing_backend keeps its
@@ -78,12 +79,14 @@ class TeamEvolverConfig:
     # personal and team OpenViking spaces are configured.
     sharing_viking_api_key: str = ""
     sharing_viking_personal_api_key: str = ""
+    sharing_viking_personal_api_keys: list[str] = field(default_factory=list)
     sharing_viking_team_api_key: str = ""
     sharing_viking_account: str = "default"
     sharing_viking_user: str = "default"
     # wire constant: OpenViking agent namespace shared with Hermes /
-    # Default shared skill namespace (viking://resources/teamEvolver/...).
-    sharing_viking_agent: str = "teamEvolver"
+    # Default shared skill namespace
+    # (viking://resources/team-skill-evolver/...).
+    sharing_viking_agent: str = TEAM_SKILL_ROOT_PREFIX
     # Identity fields sent to OpenViking for attribution. Skill spaces use the
     # resources namespace; customer_id may still scope per-customer prefixes
     # such as ``peers/{customer_id}/`` inside that resources root.
@@ -96,11 +99,11 @@ class TeamEvolverConfig:
     # means the team library has no group segment.
     # wire constant: root prefix is the OpenViking data contract namespace, do
     # not rename
-    sharing_viking_root_prefix: str = "teamEvolver"
+    sharing_viking_root_prefix: str = TEAM_SKILL_ROOT_PREFIX
     sharing_viking_group_id: str = ""
 
     sharing_user_alias: str = ""
-    sharing_auto_pull_on_start: bool = False
+    sharing_auto_pull_on_start: bool = True
     sharing_push_min_injections: int = 5
     sharing_push_min_effectiveness: float = 0.3
     sharing_session_upload_interval: int = 0
@@ -111,7 +114,28 @@ class TeamEvolverConfig:
     # ------------------------------------------------------------------ #
     # Evolve server integration                                           #
     # ------------------------------------------------------------------ #
-    evolve_server_url: str = ""
+    evolve_server_url: str = "http://127.0.0.1:52010"
+    evolve_evidence_enabled: bool = True
+    evolve_evidence_max_entries: int = 200
+    evolve_evidence_recent_limit: int = 12
+    evolve_evidence_historical_limit: int = 12
+    evolve_evidence_replay_cases_per_window: int = 1
+    evolve_evidence_change_debt_threshold: int = 3
+    evolve_candidate_coalesce_enabled: bool = True
+
+    # ------------------------------------------------------------------ #
+    # DreamCycle team-memory maintenance                                  #
+    # ------------------------------------------------------------------ #
+    # DreamCycle reads the personal keys configured under ``sharing`` and
+    # writes through the same team key used by team skill evolution.
+    dreamcycle_enabled: bool = True
+    dreamcycle_auto_start: bool = True
+    dreamcycle_daemon_command: str = "dreamcycle --daemon"
+    dreamcycle_trigger_command: str = "dreamcycle --once"
+    dreamcycle_viking_agent: str = "dreamcycle"
+    dreamcycle_llm_base_url: str = ""
+    dreamcycle_llm_api_key: str = ""
+    dreamcycle_llm_model: str = ""
 
     # ------------------------------------------------------------------ #
     # Background validation                                               #
@@ -125,3 +149,8 @@ class TeamEvolverConfig:
     validation_poll_interval_seconds: int = 60
     validation_max_jobs_per_day: int = 5
     validation_max_concurrency: int = 1
+    validation_required_results: int = 3
+    validation_required_approvals: int = 2
+    # Native replay runtime for sessions produced by AgentsHub.
+    validation_agentshub_url: str = ""
+    validation_agentshub_api_key: str = ""

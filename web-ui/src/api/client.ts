@@ -63,7 +63,9 @@ export interface Candidate {
   skill_name?: string;
   candidate_skill_name?: string;
   proposed_action?: string;
+  review_status?: string;
   rationale?: string;
+  content_preview?: string;
   min_score?: number;
   candidate_skill?: {
     name?: string;
@@ -87,6 +89,22 @@ export interface Candidate {
   recommended_publish?: boolean;
   evaluation_error?: string | null;
   evaluation?: EvalResult;
+  decision?: CandidateDecision;
+  decision_reason?: string;
+  decided_at?: string;
+  decision_accepted?: boolean | null;
+}
+
+export interface CandidateDecision {
+  status?: string;
+  accepted?: boolean;
+  reason?: string;
+  decided_at?: string;
+  job_id?: string;
+  skill_name?: string;
+  version?: number;
+  evaluation?: EvalResult;
+  [key: string]: any;
 }
 
 export interface EvalResult {
@@ -135,6 +153,8 @@ export interface EvalResult {
 export interface ReplaySide {
   score?: number | null;
   response?: string;
+  final_response?: string;
+  response_text?: string;
   error?: string;
   rationale?: string;
   instruction?: string;
@@ -211,8 +231,11 @@ export interface SessionProcess {
     timestamp?: string;
     sessions?: number | null;
     skill_groups?: number | null;
+    actions?: number | null;
+    skills_evolved?: number | null;
     uploaded_skills?: number | null;
     candidates_queued?: number | null;
+    had_processing_error?: boolean;
     judge?: { overall_score?: number | null; rationale?: string };
     evolutions?: {
       skill_name?: string;
@@ -243,8 +266,11 @@ export interface EvolveHistoryCycle {
   session_ids?: string[];
   sessions?: number | null;
   skill_groups?: number | null;
+  actions?: number | null;
+  skills_evolved?: number | null;
   uploaded_skills?: number | null;
   candidates_queued?: number | null;
+  had_processing_error?: boolean;
   judge?: { overall_score?: number | null; rationale?: string };
   evolutions?: {
     skill_name?: string;
