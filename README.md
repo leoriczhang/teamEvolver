@@ -2,7 +2,7 @@
 
 <div align="center">
 
-## 面向 Agent 团队的技能库、同步控制台与验证工作台
+## 面向 Agent 团队的技能库、同步控制台、DreamCycle 与验证工作台
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-Service-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
@@ -13,6 +13,23 @@
 **把真实 Agent 使用经验沉淀为可复用、可同步、可验证的 `SKILL.md` 团队资产。**
 
 </div>
+
+---
+
+## 目录
+
+- [为什么需要 teamEvolver？](#为什么需要-teamevolver)
+- [设计原则](#设计原则)
+- [核心能力](#核心能力)
+- [系统图](#系统图)
+- [手动安装](#手动安装)
+- [控制台概览](#控制台概览)
+- [OpenViking / 对象存储](#openviking--对象存储)
+- [DreamCycle 与验证队列](#dreamcycle-与验证队列)
+- [True Replay：用真实轨迹验证技能](#true-replay用真实轨迹验证技能)
+- [项目结构](#项目结构)
+- [开发](#开发)
+- [路线图](#路线图)
 
 ---
 
@@ -35,6 +52,7 @@ Agent 已经能完成复杂任务，但团队技能通常还停留在“某台�
 - **中心化采集**：保留 session、工具调用、成功策略和失败原因，让系统看见跨人共性。
 - **分层沉淀**：先判断是否可共享，再判断应写成 `skill` 还是 `memory`；个人资产隔离，团队资产受控发布。
 - **验证发布**：团队 `SKILL.md` 必须经过聚合、脱敏、去重、回放验证、版本化和回滚门控。
+- **证据优先**：新候选会带上近期证据、历史证据和 replay case，避免只凭单次成功或单次失败做判断。
 
 Hermes 等 Agent 保持原生运行方式；teamEvolver 通过同步目录和 Hook 把团队技能带到 Agent 原生技能系统里。
 
@@ -50,7 +68,7 @@ Hermes 等 Agent 保持原生运行方式；teamEvolver 通过同步目录和 Ho
     </td>
     <td width="25%" valign="top">
       <h3>团队同步</h3>
-      <p>支持本地对象存储和 OpenViking 兼容对象存储，可区分个人空间与团队空间。</p>
+      <p>支持本地对象存储和 OpenViking 兼容对象存储，个人 Key 作为经验来源，团队 Key 作为发布目标。</p>
     </td>
     <td width="25%" valign="top">
       <h3>Web 控制台</h3>
@@ -63,6 +81,8 @@ Hermes 等 Agent 保持原生运行方式；teamEvolver 通过同步目录和 Ho
   </tr>
 </table>
 
+默认配置已面向完整闭环开启：技能同步、OpenViking 团队空间、session 价值过滤、证据窗口、DreamCycle、验证队列和候选评审都可以直接接入。
+
 ---
 
 ## 系统图
@@ -73,7 +93,9 @@ flowchart LR
         Console["Web Console"]
         API["FastAPI Service"]
         Registry["Skill Registry"]
+        Evidence["Evidence Windows"]
         Validation["Validation Queue"]
+        DreamCycle["DreamCycle Supervisor"]
     end
 
     subgraph Storage["Shared Storage"]
@@ -83,18 +105,25 @@ flowchart LR
 
     subgraph Agent["Agent Machines"]
         Sync["teamEvolver-sync Hook"]
+        Feed["teamEvolver-feed Hook"]
         Dir["Synced SKILL.md Directory"]
         Hermes["Hermes Native Skills"]
     end
 
     Console --> API
     API --> Registry
+    API --> Evidence
     API --> Validation
+    API --> DreamCycle
     API <--> Local
     API <--> Viking
+    DreamCycle --> Viking
+    Validation <--> Viking
     Sync --> Viking
     Sync --> Dir
     Dir --> Hermes
+    Hermes --> Feed
+    Feed --> API
 ```
 
 teamEvolver 的推荐链路是“共享存储 + 本地同步 + Agent 原生加载”。这样 `skills_list`、`skill_view`、`/skills` 等能力仍由 Agent 自己提供，teamEvolver 只负责把团队技能可靠送到本机。
@@ -134,11 +163,18 @@ teamEvolver config sharing.backend viking
 teamEvolver config sharing.viking_team_api_key "<team-key>"
 teamEvolver config sharing.viking_personal_api_key "<personal-key>"
 teamEvolver config sharing.viking_root_prefix "team-skill-evolver"
+teamEvolver config evolve.evidence_enabled true
+teamEvolver config evolve.evidence_recent_limit 12
+teamEvolver config evolve.evidence_historical_limit 12
+teamEvolver config evolve.evidence_change_debt_threshold 3
 # DreamCycle 从个人 Key 读取经验，写入上面的团队 Key 空间。
 # 多台 AgentsHub 接入时，个人 Key 会通过内部配置接口动态合并，无需写死用户。
 teamEvolver config dreamcycle.enabled true
 teamEvolver config dreamcycle.auto_start true
 teamEvolver config validation.enabled true
+teamEvolver config validation.mode replay
+teamEvolver config validation.required_results 3
+teamEvolver config validation.required_approvals 2
 teamEvolver config validation.agentshub_url "http://<agentshub-host>:5173"
 
 mkdir -p skills
@@ -146,6 +182,7 @@ teamEvolver start --daemon --port 52010
 teamEvolver status
 curl -fsS "http://127.0.0.1:52010/health"
 curl -fsS "http://127.0.0.1:52010/status"
+curl -fsS "http://127.0.0.1:52010/trigger-dreamcycle/status"
 ```
 
 ```text
@@ -208,6 +245,7 @@ flowchart TB
     Home["进化看板"]
     Candidates["候选评审"]
     Audit["进化审计"]
+    Filter["过滤审计"]
     Health["系统健康"]
     Skills["技能管理"]
     Users["用户管理"]
@@ -215,6 +253,7 @@ flowchart TB
 
     Home --> Candidates
     Home --> Audit
+    Home --> Filter
     Home --> Health
     Skills --> Users
     Candidates --> Model
@@ -225,6 +264,7 @@ flowchart TB
 - **进化看板**：查看存储连通性、技能数量、候选队列和系统状态。
 - **候选评审**：检查待验证候选技能，配合 True Replay 做发布前评估。
 - **进化审计**：查看技能演进相关记录。
+- **过滤审计**：查看 session 入队前的 valuable / chitchat 判别、模式、置信度和原因。
 - **系统健康**：检查服务、存储和关键 API 是否可达。
 - **技能管理**：管理个人技能与团队技能，支持上传 zip 包。
 - **用户管理**：管理用户、角色，以及个人/团队空间凭据。
@@ -244,9 +284,46 @@ teamEvolver config sharing.viking_personal_api_key "<personal-key>"
 teamEvolver config sharing.viking_root_prefix "team-skill-evolver"
 ```
 
+OpenViking 空间分工：
+
+- `sharing.viking_personal_api_key`：当前机器或当前用户的个人经验来源。
+- `sharing.viking_team_api_key`：团队技能、验证任务、验证结果和 DreamCycle 产物的共享目标。
+- `sharing.viking_root_prefix`：跨 Agent 共享命名空间，默认固定为 `team-skill-evolver`。
+
+多台 AgentsHub 接入时，服务端会通过 `/internal/agentshub/openviking-config` 合并个人 Key 来源，并继续使用同一个团队 Key 作为发布目标。
+
 如果需要自部署 OpenViking Server，请参考 [volcengine/OpenViking](https://github.com/volcengine/OpenViking)，并通过 `teamEvolver config sharing.viking_endpoint "<your-server-url>"` 覆盖默认服务地址。
 
 不要把真实 API Key 写入仓库。建议使用本机配置、环境变量或部署系统的 Secret 管理能力注入。
+
+---
+
+## DreamCycle 与验证队列
+
+DreamCycle 负责维护团队长期经验，验证队列负责把候选技能放到真实或模拟回放里评估。两者都复用 OpenViking 对象存储边界：
+
+1. `teamEvolver-feed` 上传真实 session，入口先做 valuable / chitchat 判别。
+2. 进化流程从近期证据、历史证据和 replay case 中构造候选技能。
+3. DreamCycle 读取个人 Key 来源，写入团队 Key 空间，避免把个人偏好直接发布成团队 SOP。
+4. 候选技能进入 `validation_jobs/`，各客户端在空闲时写入 `validation_results/`。
+5. 控制台聚合 Verify 分、Replay 分、拒绝原因和人工决策，再发布、拒绝或删除候选。
+
+常用操作：
+
+```bash
+teamEvolver config show
+curl -fsS "http://127.0.0.1:52010/trigger-dreamcycle/status"
+curl -fsS -X POST "http://127.0.0.1:52010/trigger-dreamcycle"
+curl -fsS "http://127.0.0.1:52010/validation/candidates"
+```
+
+验证模式默认使用轻量 replay。具备 Hermes True Replay 运行时后，可以切到真实分支回放：
+
+```bash
+teamEvolver config validation.mode true_replay
+teamEvolver config validation.max_jobs_per_day 5
+teamEvolver config validation.max_concurrency 1
+```
 
 ---
 
@@ -290,6 +367,8 @@ python -m teamEvolver.true_replay --job-file ./candidate_job.json --json
 
 True Replay 会为两条分支创建临时 `HOME` 与 `HERMES_HOME`，不会修改真实 Agent 配置。若使用本地 Agent checkout，可通过 `HERMES_ORIGIN` 指定源码位置。
 
+在控制台候选评审中，管理员可以对同一个候选执行重新评估、验证发布、强制发布或删除。自动发布应以 Verify 分、Replay 分、效率指标和拒绝原因一起判断，而不是只看单一分数。
+
 ---
 
 ## 项目结构
@@ -302,8 +381,8 @@ teamEvolver/
 │   ├── proxy/            # 服务路由、控制台与管理接口
 │   ├── skills/           # SKILL.md 管理、打包、同步
 │   ├── storage/          # local / OpenViking 存储后端
-│   ├── integrations/     # Hermes 集成
-│   ├── validation/       # 可选候选技能验证
+│   ├── integrations/     # Hermes / DreamCycle 集成
+│   ├── validation/       # 共享验证队列、结果与 worker
 │   ├── true_replay.py    # 真实 A/B 回放
 │   └── web/              # 控制台构建产物
 ├── web-ui/               # React + TypeScript 控制台源码
@@ -329,6 +408,15 @@ npm --prefix web-ui run build
 python -m pip install build
 python -m build
 ```
+
+---
+
+## 路线图
+
+- 增强 DreamCycle 策略：更细粒度地区分个人记忆、团队记忆和可发布技能。
+- 扩展 True Replay：增加多 case 回放、视觉产物 QA 和更稳定的效率基线。
+- 完善候选治理：支持多人审批、批量拒绝、发布后回滚和更细的版本对比。
+- 强化控制台体验：增加验证产物实时预览、队列趋势和跨用户贡献统计。
 
 ---
 
