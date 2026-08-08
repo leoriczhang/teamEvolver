@@ -17,7 +17,12 @@ import {
 } from "@/components/common";
 import { cn } from "@/lib/utils";
 import { fmtTime } from "@/lib/format";
-import { api, type SessionDetail, type SessionProcess } from "@/api/client";
+import {
+  api,
+  type EvidenceClassification,
+  type SessionDetail,
+  type SessionProcess,
+} from "@/api/client";
 
 export type SessTab = "detail" | "process";
 
@@ -36,6 +41,45 @@ function isNoActionNormal(c: NonNullable<SessionProcess["cycles"]>[number], evos
     Number(c.actions || 0) === 0 &&
     Number(c.uploaded_skills || 0) === 0 &&
     Number(c.candidates_queued || 0) === 0
+  );
+}
+
+function EvidenceRouting({ value }: { value?: EvidenceClassification }) {
+  const rows = [
+    ["团队 SOP", value?.team_skill || []],
+    ["用户 Memory 候选", value?.user_memory || []],
+    ["当前任务要求", value?.task_requirement || []],
+    ["运行时问题", value?.agent_runtime || []],
+    ["证据不足", value?.insufficient_evidence || []],
+  ] as const;
+  const populated = rows.filter(([, items]) => items.length);
+  if (!populated.length) return null;
+
+  const describe = (item: string | Record<string, unknown>) => {
+    if (typeof item === "string") return item;
+    for (const key of ["claim", "preference", "requirement", "issue", "observation", "reason"]) {
+      if (typeof item[key] === "string" && item[key]) return String(item[key]);
+    }
+    return JSON.stringify(item);
+  };
+
+  return (
+    <div className="mt-2 rounded-md border border-border bg-background/70 p-2.5 text-xs">
+      <div className="mb-1.5 font-semibold text-muted-foreground">证据归属</div>
+      <div className="space-y-1.5">
+        {populated.map(([label, items]) => (
+          <div key={label}>
+            <span className="font-medium">{label} ({items.length})</span>
+            <span className="text-muted-foreground">：{items.slice(0, 2).map(describe).join("；")}</span>
+          </div>
+        ))}
+      </div>
+      {(value?.user_memory?.length || 0) > 0 && (
+        <div className="mt-2 text-muted-foreground">
+          此处仅为个人记忆候选，尚未写入用户 Memory。
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -329,6 +373,7 @@ function ProcessBody({ p }: { p: SessionProcess | null }) {
                         {!e.verification && reason && (
                           <div className="mt-2 text-xs leading-relaxed text-muted-foreground">{reason}</div>
                         )}
+                        <EvidenceRouting value={e.evidence_classification} />
                       </div>
                     );
                   })}

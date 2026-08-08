@@ -9,12 +9,18 @@ This worker is intentionally conservative:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional, Protocol
 
+from ..checklist import (
+    aggregate_branch_checklist_results,
+    compile_common_checklist,
+    objective_replay_decision,
+)
 from ..llm import AsyncLLMClient
 from ..skills.render import build_skill_md
 from .store import ValidationStore
@@ -284,6 +290,8 @@ class ValidationWorker:
     @staticmethod
     def _aggregate_true_replay_windows(
         results: list[tuple[str, dict[str, Any]]],
+        *,
+        checklist: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         evaluated = [
             (window, result)
@@ -307,15 +315,6 @@ class ValidationWorker:
             True if historical is None else bool(historical.get("no_regression"))
         )
 
-        def mean_value(key: str) -> float | None:
-            values = [
-                float(result[key])
-                for _, result in evaluated
-                if isinstance(result.get(key), (int, float))
-                and not isinstance(result.get(key), bool)
-            ]
-            return round(sum(values) / len(values), 3) if values else None
-
         cases: list[dict[str, Any]] = []
         for window, result in evaluated:
             for raw_case in result.get("cases") or []:
@@ -323,26 +322,79 @@ class ValidationWorker:
                     case = dict(raw_case)
                     case["evidence_window"] = window
                     cases.append(case)
-        accepted = (
-            recent_improved
-            and historical_no_regression
-            and all_windows_evaluated
+        full_checklist = checklist or recent.get("checklist") or {}
+        window_checklist_results = {
+            window: (
+                result.get("checklist_results")
+                if isinstance(result.get("checklist_results"), dict)
+                else {}
+            )
+            for window, result in evaluated
+        }
+        branch_results = {
+            branch: aggregate_branch_checklist_results(
+                full_checklist,
+                [
+                    result.get(branch) or {}
+                    for result in window_checklist_results.values()
+                    if isinstance(result.get(branch), dict)
+                ],
+            )
+            for branch in ("baseline", "candidate")
+        }
+        efficiency_inputs = {"baseline": {}, "candidate": {}}
+        for _, result in evaluated:
+            report = (
+                result.get("efficiency")
+                if isinstance(result.get("efficiency"), dict)
+                else {}
+            )
+            for branch in ("baseline", "candidate"):
+                values = (
+                    report.get(branch)
+                    if isinstance(report.get(branch), dict)
+                    else {}
+                )
+                for key in (
+                    "interaction_turns",
+                    "tool_call_count",
+                    "total_tokens",
+                ):
+                    efficiency_inputs[branch][key] = int(
+                        efficiency_inputs[branch].get(key) or 0
+                    ) + int(values.get(key) or 0)
+        from ..true_replay import compare_efficiency
+
+        efficiency = compare_efficiency(
+            efficiency_inputs["baseline"],
+            efficiency_inputs["candidate"],
+        )
+        policy = objective_replay_decision(
+            checklist=full_checklist,
+            baseline=branch_results["baseline"],
+            candidate=branch_results["candidate"],
+            efficiency=efficiency,
+        )
+        accepted = bool(policy.get("accepted")) and all_windows_evaluated
+        no_regression = (
+            bool(policy.get("no_regression")) and all_windows_evaluated
         )
         return {
             "status": "evaluated",
             "mode": "true_replay",
             "accepted": accepted,
-            "no_regression": all(
-                bool(result.get("no_regression")) for _, result in evaluated
-            )
-            and all_windows_evaluated,
+            "no_regression": no_regression,
             "recent_improved": recent_improved,
             "historical_no_regression": historical_no_regression,
-            "quality_ok": bool(recent.get("quality_ok"))
+            "quality_ok": bool(policy.get("quality_gate"))
             and historical_no_regression,
-            "score": mean_value("score"),
-            "baseline_mean": mean_value("baseline_mean"),
-            "delta": mean_value("delta"),
+            "score": branch_results["candidate"]["pass_rate"],
+            "baseline_mean": branch_results["baseline"]["pass_rate"],
+            "delta": round(
+                branch_results["candidate"]["pass_rate"]
+                - branch_results["baseline"]["pass_rate"],
+                4,
+            ),
             "threshold": recent.get("threshold"),
             "tolerance": recent.get("tolerance"),
             "case_count": sum(
@@ -350,6 +402,18 @@ class ValidationWorker:
                 for _, result in evaluated
             ),
             "cases": cases,
+            "efficiency": efficiency,
+            "checklist": full_checklist,
+            "checklist_results": {
+                **branch_results,
+                "windows": window_checklist_results,
+            },
+            "decision_policy": {
+                **policy,
+                "accepted": accepted,
+                "historical_no_regression": historical_no_regression,
+                "all_windows_evaluated": all_windows_evaluated,
+            },
             "window_results": {window: result for window, result in results},
         }
 
@@ -381,7 +445,10 @@ class ValidationWorker:
                             case_index=case_index,
                         )
                         window_results.append((window, result))
-                    replay = self._aggregate_true_replay_windows(window_results)
+                    replay = self._aggregate_true_replay_windows(
+                        window_results,
+                        checklist=compile_common_checklist(job),
+                    )
                     if replay.get("status") == "evaluated":
                         return {
                             "validator_mode": "true_replay",
@@ -390,9 +457,10 @@ class ValidationWorker:
                             "score": replay.get("score"),
                             "threshold": replay.get("threshold"),
                             "reason": (
-                                f"True Replay score={replay.get('score')}, "
+                                f"Checklist score={replay.get('score')}, "
                                 f"baseline={replay.get('baseline_mean')}, "
-                                f"delta={replay.get('delta')}, quality_ok={replay.get('quality_ok')}"
+                                f"efficiency={((replay.get('decision_policy') or {}).get('efficiency_score'))}, "
+                                f"accepted={replay.get('accepted')}"
                             ),
                             "checks": {
                                 "grounded_in_evidence": replay.get("score"),
@@ -468,7 +536,9 @@ class ValidationWorker:
             )
             finalized = await self._trigger_evolve_finalize()
             if finalized and result.get("accepted") is True:
-                await self._sync_agentshub_skills(job)
+                expected = await self._wait_for_published_commit(job)
+                if expected is not None:
+                    await self._sync_agentshub_skills(job, expected)
             if summary.validated_jobs >= max(1, int(self.config.validation_max_concurrency)):
                 break
 
@@ -494,31 +564,161 @@ class ValidationWorker:
             logger.warning("[ValidationWorker] failed to trigger evolve finalize: %s", exc)
             return False
 
-    async def _sync_agentshub_skills(self, job: dict[str, Any]) -> None:
+    async def _wait_for_published_commit(
+        self,
+        job: dict[str, Any],
+        *,
+        timeout_seconds: float = 180.0,
+    ) -> dict[str, Any] | None:
+        """Wait until finalize commits a versioned bundle selected by the manifest."""
+        job_id = str(job.get("job_id") or "")
+        candidate = (
+            job.get("candidate_skill")
+            if isinstance(job.get("candidate_skill"), dict)
+            else {}
+        )
+        name = str(candidate.get("name") or job.get("candidate_skill_name") or "")
+        if not job_id or not name:
+            return None
+        deadline = asyncio.get_running_loop().time() + max(1.0, timeout_seconds)
+        while asyncio.get_running_loop().time() < deadline:
+            decision = self._store.load_decision(job_id) or {}
+            status = str(decision.get("status") or "")
+            if status in {"rejected", "skipped"}:
+                return None
+            if status == "published":
+                try:
+                    from ..skills.hub import SkillHub
+
+                    hub = SkillHub.team_from_config(self.config)
+                    record = next(
+                        (
+                            item
+                            for item in hub.list_remote()
+                            if str(item.get("name") or "") == name
+                        ),
+                        None,
+                    )
+                    version = int((record or {}).get("version") or 0)
+                    expected_sha = str((record or {}).get("sha256") or "")
+                    bundle = (
+                        hub._read_version_bundle(name, version)
+                        if version > 0
+                        else {}
+                    )
+                    markdown = bundle.get("SKILL.md", b"")
+                    actual_sha = hashlib.sha256(markdown).hexdigest() if markdown else ""
+                    if (
+                        version > 0
+                        and expected_sha
+                        and actual_sha == expected_sha
+                    ):
+                        return {
+                            "name": name,
+                            "version": version,
+                            "sha256": expected_sha,
+                        }
+                except Exception:  # noqa: BLE001 - finalize may still be committing.
+                    pass
+            await asyncio.sleep(1.0)
+
+        self._save_agentshub_sync_status(
+            job_id,
+            status="failed",
+            detail="timed out waiting for committed published bundle",
+        )
+        logger.warning(
+            "[ValidationWorker] timed out waiting for published commit for %s",
+            job_id,
+        )
+        return None
+
+    def _save_agentshub_sync_status(
+        self,
+        job_id: str,
+        *,
+        status: str,
+        expected: dict[str, Any] | None = None,
+        detail: Any = None,
+    ) -> None:
+        decision = self._store.load_decision(job_id)
+        if not decision:
+            return
+        decision["agentshub_sync"] = {
+            "status": status,
+            "expected": dict(expected or {}),
+            "detail": detail,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._store.save_decision(job_id, decision)
+
+    async def _sync_agentshub_skills(
+        self,
+        job: dict[str, Any],
+        expected: dict[str, Any],
+    ) -> dict[str, Any] | None:
         base_url = str(getattr(self.config, "validation_agentshub_url", "") or "").rstrip("/")
         if not base_url:
-            return
+            return None
+        job_id = str(job.get("job_id") or "")
         tenant_ids = self._source_tenant_ids(job)
         if not tenant_ids:
-            return
+            self._save_agentshub_sync_status(
+                job_id,
+                status="failed",
+                expected=expected,
+                detail="source sessions do not contain an AgentsHub tenant",
+            )
+            return None
         headers: dict[str, str] = {}
         api_key = str(
             getattr(self.config, "validation_agentshub_api_key", "") or ""
         ).strip()
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        try:
-            import httpx
+        self._save_agentshub_sync_status(
+            job_id,
+            status="syncing",
+            expected=expected,
+        )
+        import httpx
 
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                response = await client.post(
-                    f"{base_url}/api/internal/team-evolver/sync",
-                    json={"tenant_ids": tenant_ids},
-                    headers=headers,
+        last_error = ""
+        for attempt in range(8):
+            try:
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    response = await client.post(
+                        f"{base_url}/api/internal/team-evolver/sync",
+                        json={
+                            "tenant_ids": tenant_ids,
+                            "expected_skills": [expected],
+                        },
+                        headers=headers,
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                self._save_agentshub_sync_status(
+                    job_id,
+                    status="synced",
+                    expected=expected,
+                    detail=payload,
                 )
-                response.raise_for_status()
-        except Exception as exc:  # noqa: BLE001 - periodic AgentsHub sync remains the fallback.
-            logger.warning("[ValidationWorker] AgentsHub skill sync callback failed: %s", exc)
+                return payload
+            except Exception as exc:  # noqa: BLE001 - retry committed visibility.
+                last_error = str(exc)
+                if attempt < 7:
+                    await asyncio.sleep(2.0)
+        self._save_agentshub_sync_status(
+            job_id,
+            status="failed",
+            expected=expected,
+            detail=last_error,
+        )
+        logger.warning(
+            "[ValidationWorker] AgentsHub verified skill sync callback failed: %s",
+            last_error,
+        )
+        return None
 
     def _source_tenant_ids(self, job: dict[str, Any]) -> list[str]:
         try:

@@ -267,21 +267,23 @@ class SkillHub:
         return f"{self._skill_version_prefix(skill_name, version)}bundle.json"
 
     def _save_version_bundle(self, skill_name: str, version: int, bundle_files: dict[str, bytes]) -> dict[str, Any]:
-        record = {
-            "format": "bundle_v1",
-            "entrypoint": "SKILL.md",
-            "tree_sha256": bundle_tree_sha256(bundle_files),
-            "files": bundle_file_records(bundle_files),
-        }
         keep_keys: set[str] = set()
+        stored_bundle: dict[str, bytes] = {}
         for rel_path, data in sorted(bundle_files.items()):
             key = self._skill_version_bundle_key(skill_name, version, rel_path)
             keep_keys.add(key)
             self._bucket.put_object(key, data)
+            stored_bundle[rel_path] = self._bucket.get_object(key).read()
         for obj in self._iter_remote_keys(f"{self._skill_version_prefix(skill_name, version)}files/"):
             key = str(getattr(obj, "key", "") or "")
             if key and key not in keep_keys:
                 self._bucket.delete_object(key)
+        record = {
+            "format": "bundle_v1",
+            "entrypoint": "SKILL.md",
+            "tree_sha256": bundle_tree_sha256(stored_bundle),
+            "files": bundle_file_records(stored_bundle),
+        }
         self._bucket.put_object(
             self._skill_version_record_key(skill_name, version),
             json.dumps(record, ensure_ascii=False, indent=2).encode("utf-8"),
@@ -416,6 +418,11 @@ class SkillHub:
                 continue
 
             self._bucket.put_object(self._skill_key(skill_name), skill_md)
+            skill_md = self._bucket.get_object(self._skill_key(skill_name)).read()
+            bundle_files = {**bundle_files, "SKILL.md": skill_md}
+            bundle_records = bundle_file_records(bundle_files)
+            tree_sha = bundle_tree_sha256(bundle_files)
+            local_sha = hashlib.sha256(skill_md).hexdigest()
             for rel_path, data in sorted(bundle_files.items()):
                 if rel_path == "SKILL.md":
                     continue

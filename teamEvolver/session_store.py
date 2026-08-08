@@ -114,6 +114,37 @@ class SessionStore:
     def filter_audit_key(self, session_id: str) -> str:
         return self._key(f"session_filter_audit/{session_id}.json")
 
+    def session_index_key(self) -> str:
+        return self._key("session_index.json")
+
+    def _load_session_index(self) -> list[dict[str, Any]]:
+        try:
+            raw = json.loads(
+                self._bucket.get_object(self.session_index_key())
+                .read()
+                .decode("utf-8")
+            )
+        except Exception:
+            return []
+        return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+
+    def _upsert_session_index(self, session: dict[str, Any], *, status: str) -> None:
+        session_id = str(session.get("session_id") or "").strip()
+        rows = [
+            item
+            for item in self._load_session_index()
+            if str(item.get("session_id") or "") != session_id
+        ]
+        rows.append(_session_meta(session, status=status))
+        rows.sort(
+            key=lambda item: str(item.get("ingested_at") or item.get("timestamp") or ""),
+            reverse=True,
+        )
+        self._bucket.put_object(
+            self.session_index_key(),
+            json.dumps(rows[:10000], ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+
     def save_queued(self, session: dict[str, Any]) -> str:
         session_id = str(session.get("session_id") or "").strip()
         if not session_id:
@@ -124,13 +155,19 @@ class SessionStore:
         self._bucket.put_object(self.queue_key(session_id), _json_bytes(queued))
         self._bucket.put_object(self.archive_key(session_id), _json_bytes(queued))
         self.save_filter_audit(queued, status="queued")
+        self._upsert_session_index(queued, status="queued")
         return self.queue_key(session_id)
 
     def save_skipped(self, session: dict[str, Any]) -> None:
         skipped = dict(session)
         skipped["status"] = "skipped"
         skipped.setdefault("ingested_at", utc_now_iso())
+        session_id = str(skipped.get("session_id") or "").strip()
+        if not session_id:
+            raise ValueError("session_id is required")
+        self._bucket.put_object(self.archive_key(session_id), _json_bytes(skipped))
         self.save_filter_audit(skipped, status="skipped")
+        self._upsert_session_index(skipped, status="skipped")
 
     def save_filter_audit(self, session: dict[str, Any], *, status: str) -> None:
         session_id = str(session.get("session_id") or "").strip()
@@ -145,6 +182,24 @@ class SessionStore:
     def _queue_keys(self) -> set[str]:
         return set(_safe_list(self._bucket, self._key("sessions/")))
 
+    def conversation_statuses(self, session_ids: list[str]) -> dict[str, str]:
+        """Resolve queued/consumed state without reading every archived payload."""
+        wanted = {str(value or "").strip() for value in session_ids}
+        wanted.discard("")
+        if not wanted:
+            return {}
+        queue_keys = self._queue_keys()
+        archive_keys = set(_safe_list(self._bucket, self._key("session_archive/")))
+        statuses: dict[str, str] = {}
+        for session_id in wanted:
+            if self.queue_key(session_id) in queue_keys:
+                statuses[session_id] = "queued"
+            elif self.archive_key(session_id) in archive_keys:
+                statuses[session_id] = "consumed"
+            else:
+                statuses[session_id] = "unknown"
+        return statuses
+
     def list_queue(self, *, limit: int = 100) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for key in _safe_list(self._bucket, self._key("sessions/")):
@@ -157,16 +212,40 @@ class SessionStore:
 
     def list_conversations(self, *, limit: int = 100) -> list[dict[str, Any]]:
         queue_keys = self._queue_keys()
-        rows: list[dict[str, Any]] = []
-        for key in _safe_list(self._bucket, self._key("session_archive/")):
-            session = _load_json(self._bucket, key)
-            if not session:
-                continue
-            session_id = str(session.get("session_id") or os.path.basename(key)[:-5])
-            status = str(session.get("status") or "queued")
-            if status == "queued" and self.queue_key(session_id) not in queue_keys:
-                status = "consumed"
-            rows.append({**_session_meta(session, status=status), "key": key})
+        rows = self._load_session_index()
+        if not rows:
+            for key in _safe_list(self._bucket, self._key("session_archive/")):
+                session = _load_json(self._bucket, key)
+                if not session:
+                    continue
+                session_id = str(session.get("session_id") or os.path.basename(key)[:-5])
+                rows.append(
+                    {
+                        **_session_meta(
+                            session,
+                            status=str(session.get("status") or "queued"),
+                        ),
+                        "key": key,
+                    }
+                )
+            if rows:
+                rows.sort(
+                    key=lambda item: str(
+                        item.get("ingested_at") or item.get("timestamp") or ""
+                    ),
+                    reverse=True,
+                )
+                self._bucket.put_object(
+                    self.session_index_key(),
+                    json.dumps(rows[:10000], ensure_ascii=False, indent=2).encode("utf-8"),
+                )
+        for row in rows:
+            session_id = str(row.get("session_id") or "")
+            if (
+                str(row.get("status") or "") == "queued"
+                and self.queue_key(session_id) not in queue_keys
+            ):
+                row["status"] = "consumed"
         rows.sort(key=lambda item: str(item.get("ingested_at") or item.get("timestamp") or ""), reverse=True)
         return rows[: max(0, int(limit))]
 

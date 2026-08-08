@@ -9,7 +9,12 @@ import { Button } from "@/components/ui/button";
 import { Pill, Empty, ListViewport, PaginationControls, usePagedItems } from "@/components/common";
 import { cn } from "@/lib/utils";
 import { fmtScore } from "@/lib/format";
-import type { Candidate, EvalResult, ReplaySide } from "@/api/client";
+import type {
+  Candidate,
+  ChecklistEvaluation,
+  EvalResult,
+  ReplaySide,
+} from "@/api/client";
 
 const VERIFY_LABELS: Record<string, string> = {
   grounded_in_evidence: "有据可依（基于会话证据）",
@@ -94,6 +99,33 @@ function Kpi({
   );
 }
 
+function formatPercent(value?: number | null): string {
+  return value == null || Number.isNaN(Number(value))
+    ? "—"
+    : `${(Number(value) * 100).toFixed(1)}%`;
+}
+
+function formatDelta(value?: number | null): string {
+  if (value == null || Number.isNaN(Number(value))) return "—";
+  const number = Number(value);
+  return `${number >= 0 ? "+" : ""}${number.toFixed(3)}`;
+}
+
+function DecisionCell({
+  label,
+  passed,
+}: {
+  label: string;
+  passed?: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between rounded-lg border border-border bg-surface-subtle p-3 text-xs">
+      <span className="font-semibold">{label}</span>
+      <Pill tone={passed ? "green" : "red"}>{passed ? "通过" : "未通过"}</Pill>
+    </div>
+  );
+}
+
 export default function CandidateModal({
   jobId,
   cand,
@@ -117,6 +149,20 @@ export default function CandidateModal({
   const ver = ev?.verification || {};
   const replayCases = rep.cases || [];
   const efficiencyDimensions = rep.efficiency?.dimensions || {};
+  const checklist = rep.checklist || cand?.checklist;
+  const aggregateChecklist = (
+    rep.checklist_results as { candidate?: ChecklistEvaluation } | undefined
+  )?.candidate;
+  const candidateChecklist = replayCases
+    .map((item) => item.candidate?.checklist)
+    .find((item) => item?.items?.length);
+  const checklistRows =
+    aggregateChecklist?.items ||
+    candidateChecklist?.items ||
+    checklist?.items ||
+    [];
+  const decisionPolicy = rep.decision_policy || {};
+  const mergeSourceResults = decisionPolicy.merge_source_results || [];
   const replayPager = usePagedItems(replayCases);
   const currentMd = ev?.current_skill_md || cand?.current_skill_md || skillToMd(cand?.current_skill || ev?.current_skill);
   const candidateMd = ev?.candidate_skill_md || cand?.candidate_skill_md || skillToMd(cand?.candidate_skill || ev?.candidate_skill) || cand?.content_preview || "";
@@ -282,6 +328,30 @@ export default function CandidateModal({
             <div>{cand.rationale}</div>
           </div>
         )}
+        {cand?.evidence_classification && (
+          <div>
+            <div className="mb-1.5 text-xs font-semibold text-muted-foreground">证据归属</div>
+            <div className="flex flex-wrap gap-1.5">
+              <Pill tone="green">
+                团队 SOP {cand.evidence_classification.team_skill?.length || 0}
+              </Pill>
+              <Pill tone="blue">
+                用户 Memory 候选 {cand.evidence_classification.user_memory?.length || 0}
+              </Pill>
+              <Pill tone="gray">
+                当前任务 {cand.evidence_classification.task_requirement?.length || 0}
+              </Pill>
+              <Pill tone="gray">
+                运行时问题 {cand.evidence_classification.agent_runtime?.length || 0}
+              </Pill>
+            </div>
+            {(cand.evidence_classification.user_memory?.length || 0) > 0 && (
+              <div className="mt-1.5 text-xs text-muted-foreground">
+                Memory 项仅为候选，不会随团队 Skill 发布。
+              </div>
+            )}
+          </div>
+        )}
 
         {/* KPIs */}
         <div className="my-4 flex flex-wrap gap-2.5">
@@ -297,13 +367,13 @@ export default function CandidateModal({
             }
           />
           <Kpi
-            label="A/B 回放分（候选）"
+            label="Checklist 覆盖率（候选）"
             value={kRep.txt}
             cls={kRep.cls}
-            tip={<>门槛 {Number(rep.threshold != null ? rep.threshold : thr).toFixed(2)}</>}
+            tip={<>硬门禁优先，LLM 仅评软项</>}
           />
           <Kpi
-            label="基线分"
+            label="Checklist 覆盖率（基线）"
             value={kBase.txt}
             cls={kBase.cls}
             tip={<>候选需 ≥ 基线−{rep.tolerance != null ? Number(rep.tolerance).toFixed(2) : "0.15"}</>}
@@ -325,14 +395,145 @@ export default function CandidateModal({
           />
         </div>
 
+        {checklist && (
+          <>
+            <SecTitle>✅ 多人共性 Checklist</SecTitle>
+            <div className="rounded-lg border border-border bg-surface-subtle p-3">
+              <div className="mb-3 flex flex-wrap gap-2 text-xs">
+                <Pill tone={checklist.commonality?.passed ? "green" : "red"}>
+                  共性证据 {checklist.commonality?.passed ? "通过" : "不足"}
+                </Pill>
+                <Pill tone="blue">
+                  独立会话 {checklist.commonality?.distinct_session_count || 0}
+                </Pill>
+                <Pill tone="purple">
+                  独立用户 {checklist.commonality?.distinct_user_count || 0}
+                </Pill>
+                <Pill tone="gray">
+                  临时证据 {checklist.commonality?.provisional_claim_count || 0}
+                </Pill>
+              </div>
+              {!!mergeSourceResults.length && (
+                <div className="mb-3 grid gap-2 sm:grid-cols-2">
+                  {mergeSourceResults.map((source, index) => (
+                    <div
+                      key={`${source.skill_name || "candidate"}-${source.version || index}`}
+                      role="status"
+                      aria-label={`${source.skill_name || "当前候选证据"}${source.version ? ` v${source.version}` : ""}：${source.passed ? "覆盖完成" : "覆盖不全"}，必测 ${source.required_item_ids?.length || 0} 项`}
+                      className="flex items-center justify-between rounded-md border border-border bg-background p-2.5 text-xs"
+                    >
+                      <div>
+                        <div className="font-semibold">
+                          {source.skill_name || "当前候选证据"}
+                          {source.version ? ` v${source.version}` : ""}
+                        </div>
+                        <div className="mt-1 text-[11px] text-muted-foreground">
+                          必测 {source.required_item_ids?.length || 0} 项
+                          {!!source.failed_item_ids?.length &&
+                            ` · 失败 ${source.failed_item_ids.length} 项`}
+                        </div>
+                      </div>
+                      <Pill tone={source.passed ? "green" : "red"}>
+                        {source.passed ? "覆盖完成" : "覆盖不全"}
+                      </Pill>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="space-y-2">
+                {checklistRows.map((item) => (
+                  <div
+                    key={item.id}
+                    role="status"
+                    aria-label={`${item.claim || item.id}：${item.passed == null ? "待评估" : item.passed ? "通过" : "失败"}，${item.kind === "hard" ? "代码硬门禁" : "LLM 软判断"}`}
+                    className="rounded-md border border-border bg-background p-2.5 text-xs"
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div className="font-semibold">{item.claim}</div>
+                      <div className="flex gap-1.5">
+                        <Pill tone={item.kind === "hard" ? "red" : "blue"}>
+                          {item.kind === "hard" ? "代码硬门禁" : "LLM 软判断"}
+                        </Pill>
+                        {item.passed != null && (
+                          <Pill tone={item.passed ? "green" : "red"}>
+                            {item.passed ? "通过" : "失败"}
+                          </Pill>
+                        )}
+                      </div>
+                    </div>
+                    {item.inherited_from?.skill_name && (
+                      <div className="mt-1 text-[11px] text-muted-foreground">
+                        继承自：{item.inherited_from.skill_name}
+                        {item.inherited_from.version
+                          ? ` v${item.inherited_from.version}`
+                          : ""}
+                      </div>
+                    )}
+                    {!!item.source_session_ids?.length && (
+                      <div className="mt-1.5 break-all text-[11px] text-muted-foreground">
+                        来源会话：{item.source_session_ids.join("、")}
+                      </div>
+                    )}
+                    {item.causal_link && (
+                      <div className="mt-1 text-[11px] text-muted-foreground">
+                        因果依据：{item.causal_link}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+              {!!checklist.excluded_personal_evidence?.length && (
+                <div className="mt-3 text-[11px] text-muted-foreground">
+                  已排除 {checklist.excluded_personal_evidence.length} 条个人偏好证据，不进入共享 Skill。
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {Object.keys(decisionPolicy).length > 0 && (
+          <>
+            <SecTitle>⚖️ 客观发布决策</SecTitle>
+            <div
+              role="region"
+              aria-label="客观发布决策"
+              className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4"
+            >
+              <DecisionCell label="质量硬门禁" passed={decisionPolicy.quality_gate} />
+              <DecisionCell label="多人共性" passed={decisionPolicy.commonality_pass} />
+              <DecisionCell label="无 Checklist 回退" passed={decisionPolicy.no_regression} />
+              {!!mergeSourceResults.length && (
+                <DecisionCell label="Merge Checklist 并集" passed={decisionPolicy.merge_union_pass} />
+              )}
+              <DecisionCell label="最终决策" passed={decisionPolicy.accepted} />
+            </div>
+            <div className="mt-2 rounded-lg border border-border p-3 text-xs">
+              <div>
+                Checklist 增益：{formatDelta(decisionPolicy.coverage_gain)}
+                {" · "}轮次降低：{formatPercent(decisionPolicy.turn_gain)}
+                {" · "}加权效率：{formatDelta(decisionPolicy.efficiency_score)}
+              </div>
+              {!!decisionPolicy.reason_codes?.length && (
+                <div className="mt-1 text-destructive">
+                  未通过原因：{decisionPolicy.reason_codes.join("、")}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
         {Object.keys(efficiencyDimensions).length > 0 && (
           <>
             <SecTitle>⚡ A/B 效率对比</SecTitle>
-            <div className="overflow-hidden rounded-lg border border-border">
+            <div
+              role="region"
+              aria-label={`客观效率贡献：轮次 ${formatDelta(efficiencyDimensions.interaction_turns?.weighted_gain)}，工具 ${formatDelta(efficiencyDimensions.tool_call_count?.weighted_gain)}，Token ${formatDelta(efficiencyDimensions.total_tokens?.weighted_gain)}`}
+              className="overflow-hidden rounded-lg border border-border"
+            >
               <table className="w-full border-collapse text-xs">
                 <thead>
                   <tr className="bg-surface-subtle text-muted-foreground">
-                    {["指标", "基线", "候选", "减少量", "结果"].map((label) => (
+                    {["指标", "权重", "基线", "候选", "减少量", "加权贡献", "结果"].map((label) => (
                       <th key={label} className="px-3 py-2 text-left font-semibold">{label}</th>
                     ))}
                   </tr>
@@ -341,11 +542,15 @@ export default function CandidateModal({
                   {Object.entries(efficiencyDimensions).map(([key, metric]) => (
                     <tr key={key} className="border-t border-border">
                       <td className="px-3 py-2 font-semibold">{EFFICIENCY_LABELS[key] || key}</td>
+                      <td className="px-3 py-2">{formatPercent(metric.weight)}</td>
                       <td className="px-3 py-2">{Number(metric.baseline || 0).toLocaleString()}</td>
                       <td className="px-3 py-2">{Number(metric.candidate || 0).toLocaleString()}</td>
                       <td className={cn("px-3 py-2 font-bold", metric.delta > 0 && "text-success", metric.delta < 0 && "text-destructive")}>
                         {metric.delta > 0 ? "-" : metric.delta < 0 ? "+" : ""}
                         {Math.abs(Number(metric.delta || 0)).toLocaleString()}
+                      </td>
+                      <td className="px-3 py-2 font-semibold">
+                        {formatDelta(metric.weighted_gain)}
                       </td>
                       <td className="px-3 py-2">
                         <Pill tone={metric.winner === "candidate" ? "green" : metric.winner === "baseline" ? "red" : "gray"}>

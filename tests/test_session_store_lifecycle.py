@@ -22,15 +22,20 @@ def test_session_store_archives_queue_and_filter_audit(tmp_path: Path) -> None:
     assert key == "sessions/session-1.json"
     assert store.list_queue()[0]["session_id"] == "session-1"
     assert store.list_conversations()[0]["status"] == "queued"
+    assert store.conversation_statuses(["session-1"]) == {"session-1": "queued"}
     assert store.filter_stats()["decisions"]["valuable"] == 1
 
     store._bucket.delete_object(store.queue_key("session-1"))
 
     assert store.list_queue() == []
     assert store.list_conversations()[0]["status"] == "consumed"
+    assert store.conversation_statuses(["session-1", "missing"]) == {
+        "session-1": "consumed",
+        "missing": "unknown",
+    }
 
 
-def test_session_store_skipped_sessions_only_write_filter_audit(tmp_path: Path) -> None:
+def test_session_store_skipped_sessions_are_archived_for_review(tmp_path: Path) -> None:
     store = SessionStore(LocalObjectStore(tmp_path))
     store.save_skipped(
         {
@@ -42,6 +47,7 @@ def test_session_store_skipped_sessions_only_write_filter_audit(tmp_path: Path) 
     )
 
     assert store.list_queue() == []
-    assert store.list_conversations() == []
+    assert store.list_conversations()[0]["status"] == "skipped"
+    assert store.load_session("hello-1")["turns"][0]["prompt_text"] == "谢谢"
     assert store.list_filter_audit()[0]["session_id"] == "hello-1"
     assert store.filter_stats()["decisions"]["chitchat"] == 1

@@ -210,7 +210,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hermes-home", default=None, help="Hermes home (default $HERMES_HOME or ~/.hermes)")
     parser.add_argument("--python", default="python3", help="interpreter used in the hook command")
     parser.add_argument("--timeout", type=int, default=60, help="hook timeout seconds (default 60)")
-    parser.add_argument("--target-dir", default="", help="team skill sync dir (default <hermes-home>/team_skills/teamEvolver)")
+    parser.add_argument(
+        "--target-dir",
+        default="",
+        help="team skill sync dir (default <hermes-home>/team_skills/teamEvolver)",
+    )
     parser.add_argument("--min-interval-seconds", type=int, default=60, help="minimum pull interval per Hermes process")
     parser.add_argument("--mirror", action="store_true", help="delete local team skills absent from remote manifest")
     parser.add_argument("--no-hook", action="store_true", help="install files and config only, skip hook wiring")

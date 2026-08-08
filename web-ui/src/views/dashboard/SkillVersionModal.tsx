@@ -79,6 +79,8 @@ export default function SkillVersionModal({
   const versions =
     data?.versions && data.versions.length ? data.versions : version != null ? [version] : [];
   const versionPager = usePagedItems(versions);
+  const replayCases = data?.evolution?.evaluation?.replay?.cases || [];
+  const replayPager = usePagedItems(replayCases, 5);
   const canRoll =
     data != null && version !== data.current_version && (data.current_version || 0) > 0;
 
@@ -127,6 +129,86 @@ export default function SkillVersionModal({
             </Field>
             <Field k="分类">{data.category || "general"}</Field>
             <Field k="描述">{data.description || "（无描述）"}</Field>
+            {data.evolution && Object.keys(data.evolution).length > 0 && (
+              <div className="rounded-lg border border-border bg-surface-subtle p-3">
+                <div className="mb-2 text-xs font-semibold text-muted-foreground">
+                  版本进化内容
+                </div>
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <Pill tone="blue">
+                    {data.evolution.proposed_action || "skill evolution"}
+                  </Pill>
+                  {data.evolution.job_id && (
+                    <span className="mono text-[11px] text-muted-foreground">
+                      {data.evolution.job_id}
+                    </span>
+                  )}
+                </div>
+                {data.evolution.optimization_items?.length ? (
+                  <ul className="mb-3 list-disc space-y-1 pl-5 text-xs">
+                    {data.evolution.optimization_items.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                ) : null}
+                {data.evolution.rationale && (
+                  <p className="mb-3 whitespace-pre-wrap text-xs text-muted-foreground">
+                    {data.evolution.rationale}
+                  </p>
+                )}
+                <div className="mb-3 grid gap-2 sm:grid-cols-3">
+                  <Metric
+                    label="Verify"
+                    value={data.evolution.evaluation?.verify_score}
+                  />
+                  <Metric
+                    label="Replay"
+                    value={data.evolution.evaluation?.replay_score}
+                  />
+                  <Metric
+                    label="Baseline"
+                    value={data.evolution.evaluation?.replay?.baseline_mean}
+                  />
+                </div>
+                {data.evolution.skill_diff && (
+                  <details className="mb-3" open>
+                    <summary className="cursor-pointer text-xs font-semibold">
+                      具体版本差异
+                    </summary>
+                    <pre className="content mt-2 max-h-[280px]">
+                      {data.evolution.skill_diff}
+                    </pre>
+                  </details>
+                )}
+                {replayCases.length > 0 && (
+                  <div>
+                    <div className="mb-2 text-xs font-semibold">
+                      发布回放对比
+                    </div>
+                    <ListViewport maxHeight="360px">
+                      {replayPager.items.map((item, index) => (
+                        <div
+                          key={replayPager.start + index}
+                          className="mb-2 rounded-md border border-border bg-background p-2.5"
+                        >
+                          <div className="mb-2 text-[11px] text-muted-foreground">
+                            Case {replayPager.start + index + 1} / {replayCases.length}
+                          </div>
+                          <div className="grid gap-2 sm:grid-cols-2">
+                            <ReplayColumn label="基线" side={item.baseline} />
+                            <ReplayColumn label="候选" side={item.candidate} />
+                          </div>
+                        </div>
+                      ))}
+                    </ListViewport>
+                    <PaginationControls
+                      {...replayPager}
+                      onPageChange={replayPager.setPage}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
             <div>
               <div className="mb-1.5 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
                 SKILL.md 内容
@@ -160,6 +242,42 @@ function Field({ k, children }: { k: string; children: ReactNode }) {
     <div>
       <div className="mb-1.5 text-xs font-semibold text-muted-foreground">{k}</div>
       <div>{children}</div>
+    </div>
+  );
+}
+
+function Metric({ label, value }: { label: string; value?: number | null }) {
+  return (
+    <div className="rounded-md border border-border bg-background p-2">
+      <div className="text-[11px] text-muted-foreground">{label}</div>
+      <div className="mt-1 font-semibold">
+        {value == null ? "—" : Number(value).toFixed(3)}
+      </div>
+    </div>
+  );
+}
+
+function ReplayColumn({
+  label,
+  side,
+}: {
+  label: string;
+  side?: {
+    score?: number | null;
+    response?: string;
+    rationale?: string;
+    error?: string;
+  };
+}) {
+  const body = side?.response || side?.rationale || side?.error || "（无回放内容）";
+  return (
+    <div className="rounded-md bg-surface-subtle p-2 text-xs">
+      <div className="mb-1 font-semibold">
+        {label} · {side?.score == null ? "—" : Number(side.score).toFixed(3)}
+      </div>
+      <div className="max-h-[160px] overflow-auto whitespace-pre-wrap text-muted-foreground">
+        {body}
+      </div>
     </div>
   );
 }

@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import base64
 import binascii
+import difflib
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +32,15 @@ from ..skills.editor import SkillEditorError
 logger = logging.getLogger(__name__)
 
 _SKILLS_UI_PATH = Path(__file__).resolve().parent.parent / "web" / "skills.html"
+_VERSION_CONTEXT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_VERSION_DETAIL_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def _clear_version_cache(name: str = "") -> None:
+    for cache in (_VERSION_CONTEXT_CACHE, _VERSION_DETAIL_CACHE):
+        for key in list(cache):
+            if not name or key.startswith(f"{name}:"):
+                cache.pop(key, None)
 
 
 def _decode_b64(value: str, *, field: str) -> bytes:
@@ -43,6 +54,159 @@ def _require_admin_request(request: Request) -> None:
     user = getattr(request.state, "console_user", None)
     if not isinstance(user, dict) or str(user.get("role") or "user") != "admin":
         raise HTTPException(status_code=403, detail="only admin users can perform this operation")
+
+
+def _version_evolution_context(
+    config,
+    *,
+    name: str,
+    version: int,
+    history: list[dict[str, Any]],
+) -> dict[str, Any]:
+    cache_key = f"{name}:{version}"
+    now = time.monotonic()
+    cached = _VERSION_CONTEXT_CACHE.get(cache_key)
+    if cached and cached[0] > now:
+        return cached[1]
+    try:
+        from ..validation.store import ValidationStore
+        from .routes import _candidate_list_payloads, _evaluation_payload
+
+        store = ValidationStore.from_config(config)
+        indexed = store.load_skill_version_context(name, version)
+        if indexed:
+            selected = {
+                **(
+                    indexed.get("job")
+                    if isinstance(indexed.get("job"), dict)
+                    else {}
+                ),
+                "decision": indexed.get("decision") or {},
+                "evaluation": indexed.get("evaluation") or {},
+                "decided_at": indexed.get("decided_at") or "",
+                "review_status": str(
+                    (indexed.get("decision") or {}).get("status") or ""
+                ),
+            }
+        else:
+            selected = None
+        candidates = _candidate_list_payloads(store, scope="processed")
+    except Exception:  # noqa: BLE001 - version content remains available.
+        selected = None
+        candidates = []
+
+    target_history = next(
+        (
+            item
+            for item in history
+            if int(item.get("version") or 0) == int(version)
+        ),
+        {},
+    )
+    target_timestamp = str(target_history.get("timestamp") or "")
+
+    def timestamp_distance(candidate: dict[str, Any]) -> float:
+        decided = str(candidate.get("decided_at") or "")
+        if not decided or not target_timestamp:
+            return float("inf")
+        try:
+            from datetime import datetime
+
+            return abs(
+                (
+                    datetime.fromisoformat(decided.replace("Z", "+00:00"))
+                    - datetime.fromisoformat(target_timestamp.replace("Z", "+00:00"))
+                ).total_seconds()
+            )
+        except (TypeError, ValueError):
+            return float("inf")
+
+    if selected is None:
+        matching = [
+            item
+            for item in candidates
+            if str(item.get("skill_name") or "") == name
+            and str(item.get("review_status") or "") == "published"
+        ]
+        exact = [
+            item
+            for item in matching
+            if int((item.get("decision") or {}).get("version") or 0) == int(version)
+        ]
+        selected = exact[0] if exact else (
+            min(matching, key=timestamp_distance) if matching else None
+        )
+        if selected is not None and not exact and timestamp_distance(selected) > 300:
+            selected = None
+
+    context: dict[str, Any] = {}
+    if selected:
+        candidate_skill = (
+            selected.get("candidate_skill")
+            if isinstance(selected.get("candidate_skill"), dict)
+            else {}
+        )
+        current_skill = (
+            selected.get("current_skill")
+            if isinstance(selected.get("current_skill"), dict)
+            else {}
+        )
+        edit_summary = (
+            candidate_skill.get("edit_summary")
+            if isinstance(candidate_skill.get("edit_summary"), dict)
+            else {}
+        )
+        optimization_items: list[str] = []
+        for item in edit_summary.get("changed_sections") or []:
+            text = str(item or "").strip()
+            if text and text not in optimization_items:
+                optimization_items.append(text)
+        notes = str(edit_summary.get("notes") or "").strip()
+        if notes and notes not in optimization_items:
+            optimization_items.append(notes)
+        evidence = (
+            selected.get("evidence_classification")
+            if isinstance(selected.get("evidence_classification"), dict)
+            else {}
+        )
+        for item in evidence.get("team_skill") or []:
+            text = str(item.get("claim") if isinstance(item, dict) else item).strip()
+            if text and text not in optimization_items:
+                optimization_items.append(text)
+        before = str(current_skill.get("content") or "").splitlines()
+        after = str(candidate_skill.get("content") or "").splitlines()
+        skill_diff = "\n".join(
+            difflib.unified_diff(
+                before,
+                after,
+                fromfile=f"v{max(0, version - 1)}/SKILL.md",
+                tofile=f"v{version}/SKILL.md",
+                lineterm="",
+            )
+        )
+        raw_evaluation = (
+            selected.get("evaluation")
+            if isinstance(selected.get("evaluation"), dict)
+            else {}
+        )
+        normalized_evaluation = (
+            raw_evaluation
+            if isinstance(raw_evaluation.get("replay"), dict)
+            else _evaluation_payload(selected, raw_evaluation, cached=True)
+        )
+        context = {
+            "job_id": str(selected.get("job_id") or ""),
+            "proposed_action": str(selected.get("proposed_action") or ""),
+            "rationale": str(selected.get("rationale") or ""),
+            "edit_summary": edit_summary,
+            "optimization_items": optimization_items,
+            "evidence_classification": evidence,
+            "decision": selected.get("decision") or {},
+            "evaluation": normalized_evaluation,
+            "skill_diff": skill_diff,
+        }
+    _VERSION_CONTEXT_CACHE[cache_key] = (now + 30.0, context)
+    return context
 
 
 class SkillsAdminMixin:
@@ -112,7 +276,15 @@ class SkillsAdminMixin:
                     name = str(record.get("name") or "")
                     if not name:
                         continue
-                    bundle = hub._download_skill_bundle(name, record)
+                    try:
+                        version = int(record.get("version") or 0)
+                    except (TypeError, ValueError):
+                        version = 0
+                    bundle = (
+                        hub._read_version_bundle(name, version)
+                        if version > 0
+                        else hub._download_skill_bundle(name, record)
+                    )
                     files = [
                         {
                             "path": rel_path,
@@ -201,8 +373,14 @@ class SkillsAdminMixin:
             try:
                 from ..skills.hub import SkillHub
 
-                hub = SkillHub.team_from_config(owner.config)
-                return JSONResponse(content=hub.list_versions(name))
+                cache_key = f"{name}:list"
+                now = time.monotonic()
+                cached = _VERSION_DETAIL_CACHE.get(cache_key)
+                if cached and cached[0] > now:
+                    return JSONResponse(content=cached[1])
+                payload = SkillHub.team_from_config(owner.config).list_versions(name)
+                _VERSION_DETAIL_CACHE[cache_key] = (now + 15.0, payload)
+                return JSONResponse(content=payload)
             except Exception as e:  # noqa: BLE001
                 raise HTTPException(status_code=404, detail=f"versions unavailable: {e}") from e
 
@@ -213,7 +391,21 @@ class SkillsAdminMixin:
                 from ..skills.hub import SkillHub
 
                 hub = SkillHub.team_from_config(owner.config)
-                return JSONResponse(content=hub.get_version_detail(name, int(version)))
+                cache_key = f"{name}:{int(version)}"
+                now = time.monotonic()
+                cached = _VERSION_DETAIL_CACHE.get(cache_key)
+                if cached and cached[0] > now:
+                    return JSONResponse(content=cached[1])
+                payload = hub.get_version_detail(name, int(version))
+                history = hub.list_versions(name).get("history") or []
+                payload["evolution"] = _version_evolution_context(
+                    owner.config,
+                    name=name,
+                    version=int(version),
+                    history=history,
+                )
+                _VERSION_DETAIL_CACHE[cache_key] = (now + 30.0, payload)
+                return JSONResponse(content=payload)
             except FileNotFoundError as e:
                 raise HTTPException(status_code=404, detail=str(e)) from e
             except Exception as e:  # noqa: BLE001
@@ -229,9 +421,9 @@ class SkillsAdminMixin:
             """
             _require_admin_request(request)
             try:
-                from ..skills.hub import SkillHub
-                from ..skills.bundle import write_skill_bundle
                 from ..skills import layout
+                from ..skills.bundle import write_skill_bundle
+                from ..skills.hub import SkillHub
 
                 hub = SkillHub.team_from_config(owner.config)
                 result = hub.rollback_skill(name, int(target_version))
@@ -250,6 +442,7 @@ class SkillsAdminMixin:
                 except Exception as e:  # noqa: BLE001 - local mirror is best-effort
                     logger.warning("[SkillsAdmin] rollback local mirror failed for %s: %s", name, e)
             loaded = owner._reload_skill_manager()
+            _clear_version_cache(name)
             return JSONResponse(content={**result, "loaded_skills": loaded})
 
         @app.get("/sync/skills")
@@ -277,6 +470,7 @@ class SkillsAdminMixin:
                 raise HTTPException(status_code=400, detail=str(e)) from e
             loaded = owner._reload_skill_manager()
             sync = owner._cloud_sync_push(result["name"])
+            _clear_version_cache(result["name"])
             return JSONResponse(content={**result, "loaded_skills": loaded, "cloud": sync})
 
         @app.delete("/api/skills/{name}")
@@ -288,6 +482,7 @@ class SkillsAdminMixin:
                 raise HTTPException(status_code=404, detail=str(e)) from e
             loaded = owner._reload_skill_manager()
             sync = owner._cloud_sync_delete(result["name"])
+            _clear_version_cache(result["name"])
             return JSONResponse(content={**result, "loaded_skills": loaded, "cloud": sync})
 
         @app.post("/api/skills/{name}/files")

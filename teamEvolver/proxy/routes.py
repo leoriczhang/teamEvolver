@@ -24,6 +24,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from ..checklist import compile_common_checklist
 from ..config_store import ConfigStore
 from ..session_filter import SessionValueClassifier
 from ..session_store import SessionStore
@@ -46,17 +47,42 @@ from .users_admin import (
 logger = logging.getLogger(__name__)
 _SESSION_COOKIE = "teamEvolver_console_session"
 _SESSION_TTL_SECONDS = 24 * 60 * 60
+_DASHBOARD_CACHE: dict[str, tuple[float, Any]] = {}
+
+
+def _cached_dashboard_value(key: str, ttl_seconds: float, loader):
+    now = time.monotonic()
+    cached = _DASHBOARD_CACHE.get(key)
+    if cached and cached[0] > now:
+        return cached[1]
+    value = loader()
+    _DASHBOARD_CACHE[key] = (now + max(0.1, ttl_seconds), value)
+    return value
+
+
+def _invalidate_dashboard_cache(*prefixes: str) -> None:
+    if not prefixes:
+        _DASHBOARD_CACHE.clear()
+        return
+    for key in list(_DASHBOARD_CACHE):
+        if any(key.startswith(prefix) for prefix in prefixes):
+            _DASHBOARD_CACHE.pop(key, None)
 
 
 def _model_settings_payload(config, store_data: dict[str, Any]) -> dict[str, Any]:
     llm = store_data.get("llm") if isinstance(store_data.get("llm"), dict) else {}
     api_key = str(getattr(config, "llm_api_key", "") or llm.get("api_key") or "")
+    temperature = (
+        getattr(config, "llm_temperature", 0.0)
+        if getattr(config, "llm_temperature", None) is not None
+        else llm.get("temperature", 0.4)
+    )
     return {
         "provider": str(llm.get("provider") or getattr(config, "llm_provider", "") or "custom"),
         "base_url": str(getattr(config, "llm_api_base", "") or llm.get("api_base") or ""),
         "model": str(getattr(config, "llm_model_id", "") or llm.get("model_id") or ""),
         "max_tokens": int(getattr(config, "llm_max_tokens", 0) or llm.get("max_tokens") or 100000),
-        "temperature": float(getattr(config, "llm_temperature", 0.0) if getattr(config, "llm_temperature", None) is not None else llm.get("temperature", 0.4)),
+        "temperature": float(temperature),
         "api_key_present": bool(api_key),
     }
 
@@ -121,7 +147,7 @@ def _model_proxy_payload(config, body: Any) -> dict[str, Any]:
     payload = dict(body)
     configured_model = str(getattr(config, "llm_model_id", "") or "").strip()
     requested_model = str(payload.get("model") or "").strip()
-    if configured_model and requested_model in {"", "skillgene-model", "teamEvolver-model"}:
+    if configured_model and requested_model in {"", "teamEvolver-model"}:
         payload["model"] = configured_model
     return payload
 
@@ -131,11 +157,16 @@ def _is_embedded_evolve_path(path: str) -> bool:
         return False
     if path == "/validation/candidates" or path.startswith("/validation/candidates/"):
         return False
-    if path in {"/trigger", "/status", "/sessions", "/conversations", "/storage/status", "/trigger-dreamcycle"}:
+    if path.startswith("/validation/skills/"):
+        return False
+    if path in {"/status", "/sessions", "/conversations", "/storage/status"}:
+        return False
+    if path.startswith("/conversations/"):
+        return False
+    if path in {"/trigger", "/trigger-dreamcycle"}:
         return True
     return path.startswith(
         (
-            "/conversations/",
             "/storage/",
             "/validation/",
             "/skills/",
@@ -384,6 +415,24 @@ def _candidate_list_payloads(
     else:
         normalized = "open"
 
+    indexed_records = (
+        store.list_decision_records()
+        if normalized in {"processed", "all"}
+        else []
+    )
+    if normalized == "processed" and indexed_records:
+        return [
+            _candidate_payload(
+                record.get("job") if isinstance(record.get("job"), dict) else {},
+                record.get("evaluation")
+                if isinstance(record.get("evaluation"), dict)
+                else None,
+                record.get("decision")
+                if isinstance(record.get("decision"), dict)
+                else None,
+            )
+            for record in indexed_records
+        ]
     jobs = (
         store.list_open_jobs(user_alias=user_alias)
         if normalized == "open"
@@ -400,40 +449,71 @@ def _candidate_list_payloads(
     return candidates
 
 
+def _compact_candidate_payload(item: dict[str, Any]) -> dict[str, Any]:
+    compact = {
+        key: value
+        for key, value in item.items()
+        if key
+        not in {
+            "candidate_skill",
+            "current_skill",
+            "candidate_skill_md",
+            "current_skill_md",
+            "skill_diff",
+        }
+    }
+    evaluation = compact.get("evaluation")
+    if isinstance(evaluation, dict):
+        evaluation = dict(evaluation)
+        for key in (
+            "candidate_skill",
+            "current_skill",
+            "candidate_skill_md",
+            "current_skill_md",
+            "skill_diff",
+        ):
+            evaluation.pop(key, None)
+        replay = evaluation.get("replay")
+        if isinstance(replay, dict):
+            replay = dict(replay)
+            replay["cases"] = []
+            evaluation["replay"] = replay
+        compact["evaluation"] = evaluation
+    return compact
+
+
 def _normalize_replay_case(case: dict[str, Any]) -> dict[str, Any]:
+    baseline = case.get("baseline") if isinstance(case.get("baseline"), dict) else {}
+    candidate = case.get("candidate") if isinstance(case.get("candidate"), dict) else {}
     return {
         "session_id": str(case.get("session_id") or ""),
         "turn_num": int(case.get("turn_num", 0) or 0),
         "instruction": str(case.get("instruction") or ""),
         "baseline": {
-            "score": case.get("baseline", {}).get("score") if isinstance(case.get("baseline"), dict) else None,
+            "score": baseline.get("score"),
             "response": (
-                case.get("baseline", {}).get("final_response")
-                or case.get("baseline", {}).get("response_text")
-                if isinstance(case.get("baseline"), dict)
-                else ""
+                baseline.get("final_response")
+                or baseline.get("response_text")
             ),
             "instruction": str(case.get("instruction") or ""),
             "session_id": str(case.get("session_id") or ""),
             "turn_num": int(case.get("turn_num", 0) or 0),
-            "interaction_turns": case.get("baseline", {}).get("interaction_turns") if isinstance(case.get("baseline"), dict) else None,
-            "tool_call_count": case.get("baseline", {}).get("tool_call_count") if isinstance(case.get("baseline"), dict) else None,
-            "total_tokens": case.get("baseline", {}).get("total_tokens") if isinstance(case.get("baseline"), dict) else None,
+            "interaction_turns": baseline.get("interaction_turns"),
+            "tool_call_count": baseline.get("tool_call_count"),
+            "total_tokens": baseline.get("total_tokens"),
         },
         "candidate": {
-            "score": case.get("candidate", {}).get("score") if isinstance(case.get("candidate"), dict) else None,
+            "score": candidate.get("score"),
             "response": (
-                case.get("candidate", {}).get("final_response")
-                or case.get("candidate", {}).get("response_text")
-                if isinstance(case.get("candidate"), dict)
-                else ""
+                candidate.get("final_response")
+                or candidate.get("response_text")
             ),
             "instruction": str(case.get("instruction") or ""),
             "session_id": str(case.get("session_id") or ""),
             "turn_num": int(case.get("turn_num", 0) or 0),
-            "interaction_turns": case.get("candidate", {}).get("interaction_turns") if isinstance(case.get("candidate"), dict) else None,
-            "tool_call_count": case.get("candidate", {}).get("tool_call_count") if isinstance(case.get("candidate"), dict) else None,
-            "total_tokens": case.get("candidate", {}).get("total_tokens") if isinstance(case.get("candidate"), dict) else None,
+            "interaction_turns": candidate.get("interaction_turns"),
+            "tool_call_count": candidate.get("tool_call_count"),
+            "total_tokens": candidate.get("total_tokens"),
         },
     }
 
@@ -473,6 +553,8 @@ def _evaluation_payload(job: dict[str, Any], result: dict[str, Any], *, cached: 
             "interaction_turns": branch.get("interaction_turns"),
             "tool_call_count": branch.get("tool_call_count"),
             "total_tokens": branch.get("total_tokens"),
+            "checklist": branch.get("checklist") or {},
+            "advisory_judge_score": branch.get("advisory_judge_score"),
         }
 
     for item in cases:
@@ -489,7 +571,12 @@ def _evaluation_payload(job: dict[str, Any], result: dict[str, Any], *, cached: 
             )
     skill_name = _candidate_skill_name(job)
     verification = result.get("verification") if isinstance(result.get("verification"), dict) else {}
-    threshold = _first_present(result, "threshold") or _first_present(replay_summary, "threshold") or _first_present(verification, "threshold") or job.get("min_score", 0.75)
+    threshold = (
+        _first_present(result, "threshold")
+        or _first_present(replay_summary, "threshold")
+        or _first_present(verification, "threshold")
+        or job.get("min_score", 0.75)
+    )
     accepted = _first_present(result, "accepted", "recommended_publish")
     if accepted is None:
         accepted = verification.get("accepted")
@@ -506,6 +593,11 @@ def _evaluation_payload(job: dict[str, Any], result: dict[str, Any], *, cached: 
             and isinstance(replay_summary.get("baseline_mean_score"), (int, float))
             and float(replay_summary.get("candidate_mean_score")) >= float(replay_summary.get("baseline_mean_score"))
         )
+    checklist = (
+        replay_summary.get("checklist")
+        if isinstance(replay_summary.get("checklist"), dict)
+        else compile_common_checklist(job)
+    )
     return {
         "status": "evaluated",
         "skill_name": skill_name,
@@ -529,6 +621,18 @@ def _evaluation_payload(job: dict[str, Any], result: dict[str, Any], *, cached: 
             "no_regression": bool(no_regression),
             "cases": normalized_cases,
             "efficiency": replay_summary.get("efficiency") or {},
+            "checklist": checklist,
+            "checklist_results": replay_summary.get("checklist_results") or {},
+            "decision_policy": replay_summary.get("decision_policy") or {},
+            "scoring_policy": {
+                "quality": "checklist hard gate",
+                "efficiency_weights": {
+                    "interaction_turns": 0.60,
+                    "tool_call_count": 0.25,
+                    "total_tokens": 0.15,
+                },
+                "llm_role": "soft checklist only",
+            },
             "mode": result.get("validator_mode"),
             "error": fallback_reason or replay_summary.get("reason"),
         },
@@ -550,12 +654,32 @@ async def _evaluate_candidate_job(config, owner, job: dict[str, Any]) -> dict[st
             max_interactions = max(1, int(os.environ.get("TEAMEVOLVER_TRUE_REPLAY_MAX_INTERACTIONS", "1")))
         except ValueError:
             max_interactions = 1
-        replay = await asyncio.to_thread(
-            evaluate_job,
-            job_id,
-            job=job,
-            timeout=replay_timeout,
-            max_interactions=max_interactions,
+        selected: list[tuple[str, int]] = []
+        seen_windows: set[str] = set()
+        for index, case in enumerate(job.get("replay_cases") or []):
+            if not isinstance(case, dict):
+                continue
+            window = str(case.get("evidence_window") or "recent")
+            if window not in {"recent", "historical"}:
+                window = "recent"
+            if window in seen_windows:
+                continue
+            selected.append((window, index))
+            seen_windows.add(window)
+        window_results = []
+        for window, case_index in selected:
+            result = await asyncio.to_thread(
+                evaluate_job,
+                job_id,
+                job=job,
+                case_index=case_index,
+                timeout=replay_timeout,
+                max_interactions=max_interactions,
+            )
+            window_results.append((window, result))
+        replay = ValidationWorker._aggregate_true_replay_windows(
+            window_results,
+            checklist=compile_common_checklist(job),
         )
         if replay.get("status") == "evaluated":
             return {
@@ -565,9 +689,10 @@ async def _evaluate_candidate_job(config, owner, job: dict[str, Any]) -> dict[st
                 "score": replay.get("score"),
                 "threshold": replay.get("threshold"),
                 "reason": (
-                    f"True Replay score={replay.get('score')}, "
+                    f"Checklist score={replay.get('score')}, "
                     f"baseline={replay.get('baseline_mean')}, "
-                    f"delta={replay.get('delta')}, quality_ok={replay.get('quality_ok')}"
+                    f"efficiency={((replay.get('decision_policy') or {}).get('efficiency_score'))}, "
+                    f"accepted={replay.get('accepted')}"
                 ),
                 "checks": {
                     "grounded_in_evidence": replay.get("score"),
@@ -807,7 +932,7 @@ class RoutesMixin:
                 "object": "list",
                 "data": [
                     {
-                        "id": "skillgene-model",
+                        "id": "teamEvolver-model",
                         "object": "model",
                         "owned_by": "teamEvolver",
                         "upstream_model": model,
@@ -898,8 +1023,21 @@ class RoutesMixin:
                 "created_at": time.time(),
                 "expires_at": time.time() + _SESSION_TTL_SECONDS,
             }
-            resp = JSONResponse(content={"authenticated": True, "needs_setup": False, "user": _public_user(user, owner.config)})
-            resp.set_cookie(_SESSION_COOKIE, token, httponly=True, samesite="lax", max_age=_SESSION_TTL_SECONDS, path="/")
+            resp = JSONResponse(
+                content={
+                    "authenticated": True,
+                    "needs_setup": False,
+                    "user": _public_user(user, owner.config),
+                }
+            )
+            resp.set_cookie(
+                _SESSION_COOKIE,
+                token,
+                httponly=True,
+                samesite="lax",
+                max_age=_SESSION_TTL_SECONDS,
+                path="/",
+            )
             return resp
 
         @app.post("/api/auth/login")
@@ -924,8 +1062,21 @@ class RoutesMixin:
                 "created_at": time.time(),
                 "expires_at": time.time() + _SESSION_TTL_SECONDS,
             }
-            resp = JSONResponse(content={"authenticated": True, "needs_setup": False, "user": _public_user(user, owner.config)})
-            resp.set_cookie(_SESSION_COOKIE, token, httponly=True, samesite="lax", max_age=_SESSION_TTL_SECONDS, path="/")
+            resp = JSONResponse(
+                content={
+                    "authenticated": True,
+                    "needs_setup": False,
+                    "user": _public_user(user, owner.config),
+                }
+            )
+            resp.set_cookie(
+                _SESSION_COOKIE,
+                token,
+                httponly=True,
+                samesite="lax",
+                max_age=_SESSION_TTL_SECONDS,
+                path="/",
+            )
             return resp
 
         @app.post("/api/auth/register")
@@ -958,8 +1109,21 @@ class RoutesMixin:
                 "created_at": time.time(),
                 "expires_at": time.time() + _SESSION_TTL_SECONDS,
             }
-            resp = JSONResponse(content={"authenticated": True, "needs_setup": False, "user": _public_user(user, owner.config)})
-            resp.set_cookie(_SESSION_COOKIE, token, httponly=True, samesite="lax", max_age=_SESSION_TTL_SECONDS, path="/")
+            resp = JSONResponse(
+                content={
+                    "authenticated": True,
+                    "needs_setup": False,
+                    "user": _public_user(user, owner.config),
+                }
+            )
+            resp.set_cookie(
+                _SESSION_COOKIE,
+                token,
+                httponly=True,
+                samesite="lax",
+                max_age=_SESSION_TTL_SECONDS,
+                path="/",
+            )
             return resp
 
         @app.post("/api/auth/logout")
@@ -1043,7 +1207,11 @@ class RoutesMixin:
             base_url = str(body.get("base_url") or owner.config.llm_api_base or llm.get("api_base") or "").strip()
             model = str(body.get("model") or owner.config.llm_model_id or llm.get("model_id") or "").strip()
             raw_key = body.get("api_key")
-            api_key = str(raw_key).strip() if raw_key is not None and str(raw_key).strip() else str(owner.config.llm_api_key or llm.get("api_key") or "")
+            api_key = (
+                str(raw_key).strip()
+                if raw_key is not None and str(raw_key).strip()
+                else str(owner.config.llm_api_key or llm.get("api_key") or "")
+            )
             if not base_url or not model or not api_key:
                 raise HTTPException(status_code=400, detail="base_url, model and api_key are required for test")
             try:
@@ -1108,6 +1276,7 @@ class RoutesMixin:
 
             if value_judge.get("decision") != "valuable":
                 session_store.save_skipped(session)
+                _invalidate_dashboard_cache(f"conversations:{id(owner.config)}")
                 logger.info(
                     "[SessionFilter] skipped session=%s decision=%s reason=%s",
                     session_id,
@@ -1122,7 +1291,16 @@ class RoutesMixin:
                 }
 
             key = session_store.save_queued(session)
-            trigger_scheduled = owner._schedule_evolve_trigger()
+            _invalidate_dashboard_cache(
+                f"queue:{id(owner.config)}",
+                f"conversations:{id(owner.config)}",
+                f"status:{id(owner.config)}",
+            )
+            trigger_scheduled = (
+                False
+                if bool(session.get("defer_evolution_trigger"))
+                else owner._schedule_evolve_trigger()
+            )
             logger.info("[SessionFilter] queued valuable session=%s key=%s", session_id, key)
             return {
                 "status": "queued",
@@ -1252,51 +1430,119 @@ class RoutesMixin:
             return JSONResponse(content=_storage_status(owner.config))
 
         @app.get("/status")
-        async def dashboard_status():
-            skills: dict[str, dict[str, Any]] = {}
-            session_queue = _session_queue_snapshot(owner.config, limit=0)
-            try:
-                hub = SkillHub.team_from_config(owner.config)
-                for item in hub.list_remote():
-                    name = str(item.get("name") or "")
-                    if not name:
-                        continue
-                    skills[name] = {
-                        "skill_id": item.get("skill_id") or name,
-                        "version": item.get("version") or 0,
-                    }
-            except Exception:
-                pass
-            if not skills and owner.skill_manager is not None:
-                for skill in owner.skill_manager.get_all_skills():
-                    name = str(skill.get("name") or "")
-                    if name:
-                        skills[name] = {"skill_id": name, "version": 0}
-            return {
-                "running": False,
-                "pending_sessions": int(session_queue.get("pending") or 0),
-                "registered_skills": len(skills),
-                "skills": skills,
-            }
+        async def dashboard_status(refresh: bool = False):
+            cache_key = f"status:{id(owner.config)}"
+            if refresh:
+                _invalidate_dashboard_cache(cache_key)
+
+            def build_status():
+                skills: dict[str, dict[str, Any]] = {}
+                session_queue = _session_queue_snapshot(owner.config, limit=0)
+                try:
+                    hub = SkillHub.team_from_config(owner.config)
+                    for item in hub.list_remote():
+                        name = str(item.get("name") or "")
+                        if not name:
+                            continue
+                        skills[name] = {
+                            "skill_id": item.get("skill_id") or name,
+                            "version": item.get("version") or 0,
+                        }
+                except Exception:
+                    pass
+                if not skills and owner.skill_manager is not None:
+                    for skill in owner.skill_manager.get_all_skills():
+                        name = str(skill.get("name") or "")
+                        if name:
+                            skills[name] = {"skill_id": name, "version": 0}
+                return {
+                    "running": False,
+                    "pending_sessions": int(session_queue.get("pending") or 0),
+                    "registered_skills": len(skills),
+                    "skills": skills,
+                }
+
+            return _cached_dashboard_value(cache_key, 5.0, build_status)
 
         @app.get("/sessions")
-        async def dashboard_sessions():
-            snapshot = _session_queue_snapshot(owner.config)
+        async def dashboard_sessions(
+            limit: int = 20,
+            offset: int = 0,
+            refresh: bool = False,
+        ):
+            safe_limit = min(200, max(1, int(limit or 20)))
+            safe_offset = max(0, int(offset or 0))
+            cache_key = f"queue:{id(owner.config)}"
+            if refresh:
+                _invalidate_dashboard_cache(cache_key, f"status:{id(owner.config)}")
+            rows = _cached_dashboard_value(
+                cache_key,
+                5.0,
+                lambda: SessionStore.from_config(owner.config).list_queue(limit=100000),
+            )
+            page = rows[safe_offset : safe_offset + safe_limit]
             return {
-                "reachable": bool(snapshot.get("reachable")),
-                "sessions": snapshot.get("sessions", []),
-                "pending": int(snapshot.get("pending") or 0),
-                **({"reason": snapshot.get("reason")} if snapshot.get("reason") else {}),
+                "reachable": True,
+                "sessions": page,
+                "pending": len(rows),
+                "total": len(rows),
+                "limit": safe_limit,
+                "offset": safe_offset,
+                "has_more": safe_offset + len(page) < len(rows),
             }
 
         @app.get("/conversations")
-        async def dashboard_conversations(limit: int = 100):
+        async def dashboard_conversations(
+            limit: int = 20,
+            offset: int = 0,
+            refresh: bool = False,
+        ):
+            try:
+                safe_limit = min(200, max(1, int(limit or 20)))
+                safe_offset = max(0, int(offset or 0))
+                cache_key = f"conversations:{id(owner.config)}"
+                if refresh:
+                    _invalidate_dashboard_cache(cache_key)
+                conversations = _cached_dashboard_value(
+                    cache_key,
+                    15.0,
+                    lambda: SessionStore.from_config(owner.config).list_conversations(
+                        limit=100000
+                    ),
+                )
+                page = conversations[safe_offset : safe_offset + safe_limit]
+                return {
+                    "reachable": True,
+                    "conversations": page,
+                    "total": len(conversations),
+                    "limit": safe_limit,
+                    "offset": safe_offset,
+                    "has_more": safe_offset + len(page) < len(conversations),
+                }
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "reachable": False,
+                    "conversations": [],
+                    "total": 0,
+                    "reason": str(exc),
+                }
+
+        @app.post("/conversations/status")
+        async def dashboard_conversation_statuses(request: Request):
+            body = await request.json()
+            raw_ids = body.get("session_ids") if isinstance(body, dict) else []
+            session_ids = [
+                _safe_session_id(value)
+                for value in (raw_ids if isinstance(raw_ids, list) else [])[:500]
+            ]
             try:
                 store = SessionStore.from_config(owner.config)
-                conversations = store.list_conversations(limit=max(1, int(limit or 100)))
-                return {"reachable": True, "conversations": conversations}
+                return {
+                    "reachable": True,
+                    "statuses": store.conversation_statuses(session_ids),
+                }
             except Exception as exc:  # noqa: BLE001
-                return {"reachable": False, "conversations": [], "reason": str(exc)}
+                return {"reachable": False, "statuses": {}, "reason": str(exc)}
 
         @app.get("/conversations/{session_id}")
         async def dashboard_conversation_detail(session_id: str):
@@ -1340,7 +1586,16 @@ class RoutesMixin:
                     ),
                 }
             except Exception as exc:  # noqa: BLE001
-                return {"stats": {"total": 0, "decisions": {}, "statuses": {}, "modes": {}}, "items": [], "reason": str(exc)}
+                return {
+                    "stats": {
+                        "total": 0,
+                        "decisions": {},
+                        "statuses": {},
+                        "modes": {},
+                    },
+                    "items": [],
+                    "reason": str(exc),
+                }
 
         def _validation_store() -> ValidationStore:
             return ValidationStore.from_config(owner.config)
@@ -1354,17 +1609,41 @@ class RoutesMixin:
             return {**_candidate_payload(job, evaluation, decision), **_skill_diff_payload(job, owner.config)}
 
         @app.get("/api/validation/candidates")
-        async def api_validation_candidates(scope: str = "open"):
+        async def api_validation_candidates(
+            scope: str = "open",
+            limit: int = 20,
+            offset: int = 0,
+            refresh: bool = False,
+            compact: bool = False,
+        ):
             try:
                 store = _validation_store()
-                candidates = _candidate_list_payloads(
-                    store,
-                    scope=scope,
-                    user_alias=str(owner.config.sharing_user_alias or ""),
+                safe_limit = min(200, max(1, int(limit or 20)))
+                safe_offset = max(0, int(offset or 0))
+                cache_key = f"candidates:{id(owner.config)}:{scope}"
+                if refresh:
+                    _invalidate_dashboard_cache(cache_key)
+                candidates = _cached_dashboard_value(
+                    cache_key,
+                    15.0,
+                    lambda: _candidate_list_payloads(
+                        store,
+                        scope=scope,
+                        user_alias=str(owner.config.sharing_user_alias or ""),
+                    ),
                 )
             except Exception:
                 candidates = []
-            return {"candidates": candidates}
+            page = candidates[safe_offset : safe_offset + safe_limit]
+            if compact:
+                page = [_compact_candidate_payload(item) for item in page]
+            return {
+                "candidates": page,
+                "total": len(candidates),
+                "limit": safe_limit,
+                "offset": safe_offset,
+                "has_more": safe_offset + len(page) < len(candidates),
+            }
 
         @app.get("/api/validation/candidates/{job_id}/detail")
         async def api_validation_candidate_detail(job_id: str):
@@ -1382,6 +1661,7 @@ class RoutesMixin:
                 return {**_evaluation_payload(job, cached, cached=True), **_skill_diff_payload(job, owner.config)}
             result = await _evaluate_candidate_job(owner.config, owner, job)
             store.save_evaluation(job_id, result)
+            _invalidate_dashboard_cache(f"candidates:{id(owner.config)}")
             return {**_evaluation_payload(job, result, cached=False), **_skill_diff_payload(job, owner.config)}
 
         @app.post("/api/validation/candidates/{job_id}/validate")
@@ -1408,6 +1688,7 @@ class RoutesMixin:
                     "evaluation": evaluation,
                 }
                 store.save_decision(job_id, decision)
+                _invalidate_dashboard_cache(f"candidates:{id(owner.config)}")
                 return decision
             candidate_skill = job.get("candidate_skill") if isinstance(job.get("candidate_skill"), dict) else None
             if not candidate_skill or not candidate_skill.get("name"):
@@ -1449,26 +1730,53 @@ class RoutesMixin:
                 "evaluation": evaluation,
             }
             store.save_decision(job_id, decision)
+            _invalidate_dashboard_cache(
+                f"candidates:{id(owner.config)}",
+                f"status:{id(owner.config)}",
+            )
             return decision
 
         @app.delete("/api/validation/candidates/{job_id}")
         async def api_validation_candidate_delete(job_id: str, request: Request):
             _require_admin_user(_session_user(request))
             store = _validation_store()
-            return store.delete_job(job_id)
+            result = store.delete_job(job_id)
+            _invalidate_dashboard_cache(f"candidates:{id(owner.config)}")
+            return result
 
         @app.get("/validation/candidates")
-        async def validation_candidates(scope: str = "open"):
+        async def validation_candidates(
+            scope: str = "open",
+            limit: int = 20,
+            offset: int = 0,
+            compact: bool = False,
+        ):
             try:
                 store = ValidationStore.from_config(owner.config)
-                candidates = _candidate_list_payloads(
-                    store,
-                    scope=scope,
-                    user_alias=str(owner.config.sharing_user_alias or ""),
+                cache_key = f"candidates:{id(owner.config)}:{scope}"
+                candidates = _cached_dashboard_value(
+                    cache_key,
+                    15.0,
+                    lambda: _candidate_list_payloads(
+                        store,
+                        scope=scope,
+                        user_alias=str(owner.config.sharing_user_alias or ""),
+                    ),
                 )
             except Exception:
                 candidates = []
-            return {"candidates": candidates}
+            safe_limit = min(200, max(1, int(limit or 20)))
+            safe_offset = max(0, int(offset or 0))
+            page = candidates[safe_offset : safe_offset + safe_limit]
+            if compact:
+                page = [_compact_candidate_payload(item) for item in page]
+            return {
+                "candidates": page,
+                "total": len(candidates),
+                "limit": safe_limit,
+                "offset": safe_offset,
+                "has_more": safe_offset + len(page) < len(candidates),
+            }
 
         @app.get("/validation/candidates/{job_id}")
         async def validation_candidate_detail(job_id: str):
@@ -1479,6 +1787,30 @@ class RoutesMixin:
             evaluation = store.load_evaluation(job_id)
             decision = store.load_decision(job_id)
             return {**_candidate_payload(job, evaluation, decision), **_skill_diff_payload(job, owner.config)}
+
+        @app.get("/validation/skills/{name}/versions/{version}")
+        async def validation_skill_version_detail(name: str, version: int):
+            from .skills_admin import _version_evolution_context
+
+            cache_key = f"validation-version:{name}:{int(version)}"
+
+            def load_detail():
+                hub = SkillHub.team_from_config(owner.config)
+                detail = hub.get_version_detail(name, int(version))
+                history = hub.list_versions(name).get("history") or []
+                detail["evolution"] = _version_evolution_context(
+                    owner.config,
+                    name=name,
+                    version=int(version),
+                    history=history,
+                )
+                return detail
+
+            return _cached_dashboard_value(
+                cache_key,
+                60.0,
+                load_detail,
+            )
 
         @app.post("/validation/candidates/{job_id}/evaluate")
         async def validation_candidate_evaluate(job_id: str, refresh: bool = False):

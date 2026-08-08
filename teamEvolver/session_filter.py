@@ -53,9 +53,24 @@ def _session_user_texts(session: dict[str, Any], limit: int = 6) -> list[str]:
 def _session_summary(session: dict[str, Any]) -> dict[str, Any]:
     metrics = session.get("metrics") if isinstance(session.get("metrics"), dict) else {}
     tool_names: list[str] = []
+    interactions: list[dict[str, Any]] = []
     for turn in session.get("turns") or []:
         if not isinstance(turn, dict):
             continue
+        interaction = {
+            "user": _clip(
+                str(turn.get("prompt_text") or turn.get("instruction") or ""),
+                600,
+            ),
+            "assistant": _clip(
+                str(turn.get("response_text") or turn.get("response") or ""),
+                800,
+            ),
+            "tool_call_count": len(turn.get("tool_calls") or []),
+            "used_skills": turn.get("used_skills") or turn.get("read_skills") or [],
+        }
+        if interaction["user"] or interaction["assistant"]:
+            interactions.append(interaction)
         for call in turn.get("tool_calls") or []:
             if not isinstance(call, dict):
                 continue
@@ -71,6 +86,7 @@ def _session_summary(session: dict[str, Any]) -> dict[str, Any]:
         "used_skills": session.get("used_skills") or [],
         "injected_skills": session.get("injected_skills") or [],
         "tool_names": tool_names[:20],
+        "interactions": interactions[:6],
         "metrics": {
             "interaction_turns": metrics.get("interaction_turns"),
             "tool_call_count": metrics.get("tool_call_count"),
@@ -87,6 +103,7 @@ def heuristic_classify_session(session: dict[str, Any], *, reason: str = "") -> 
     metrics = summary["metrics"]
     tool_call_count = int(metrics.get("tool_call_count") or len(summary["tool_names"]) or 0)
     has_used_skill_signal = bool(summary["used_skills"])
+    is_managed_eval_train = bool(session.get("defer_evolution_trigger"))
 
     if not combined:
         decision = "chitchat"
@@ -96,10 +113,14 @@ def heuristic_classify_session(session: dict[str, Any], *, reason: str = "") -> 
         decision = "valuable"
         confidence = 0.75
         rationale = "session used tools or explicitly used skills"
-    elif len(combined) >= 80 or len(user_texts) >= 2:
+    elif is_managed_eval_train and len(user_texts) >= 2:
         decision = "valuable"
+        confidence = 0.8
+        rationale = "controlled managed-agent training session contains explicit user feedback"
+    elif len(combined) >= 80 or len(user_texts) >= 2:
+        decision = "task_only"
         confidence = 0.65
-        rationale = "session contains a non-trivial task discussion"
+        rationale = "session contains a task request but no reusable execution evidence"
     else:
         decision = "chitchat"
         confidence = 0.6
@@ -111,6 +132,7 @@ def heuristic_classify_session(session: dict[str, Any], *, reason: str = "") -> 
         "decision": decision,
         "confidence": confidence,
         "reason": rationale,
+        "memory_candidates": [],
         "mode": "heuristic",
     }
 
@@ -120,6 +142,41 @@ def _classifier_failure_reason(exc: Exception, timeout_seconds: float) -> str:
     if "Timeout" in name:
         return f"classifier_timeout after {timeout_seconds:.1f}s"
     return f"classifier_error: {name}"
+
+
+def _is_verified_candidate_audit(session: dict[str, Any]) -> bool:
+    runtime_context = (
+        session.get("runtime_context")
+        if isinstance(session.get("runtime_context"), dict)
+        else {}
+    )
+    if not str(runtime_context.get("candidate_job_id") or "").strip():
+        return False
+    if not str(runtime_context.get("candidate_sha256") or "").strip():
+        return False
+    for turn in session.get("turns") or []:
+        if not isinstance(turn, dict):
+            continue
+        for result in turn.get("tool_results") or []:
+            if not isinstance(result, dict):
+                continue
+            name = str(result.get("tool_name") or "").strip()
+            payload = (
+                result.get("result")
+                if isinstance(result.get("result"), dict)
+                else {}
+            )
+            success = bool(
+                payload.get("success")
+                or result.get("success")
+                or (
+                    result.get("has_error") is False
+                    and result.get("content")
+                )
+            )
+            if name == "candidate_skill_gap_report" and success:
+                return True
+    return False
 
 
 @dataclass
@@ -165,6 +222,17 @@ class SessionValueClassifier:
             return cls(client=None)
 
     async def classify(self, session: dict[str, Any]) -> dict[str, Any]:
+        if _is_verified_candidate_audit(session):
+            return {
+                "decision": "valuable",
+                "confidence": 1.0,
+                "reason": (
+                    "controlled candidate audit is anchored to a candidate "
+                    "job/SHA and a successful candidate_skill_gap_report ToolResult"
+                ),
+                "memory_candidates": [],
+                "mode": "deterministic",
+            }
         if self.client is None:
             return heuristic_classify_session(session, reason="classifier model is not configured")
 
@@ -175,14 +243,20 @@ class SessionValueClassifier:
                 "content": (
                     "You classify whether a completed agent session should enter a skill-evolution pipeline.\n"
                     "Do not classify by keyword matching, fixed phrase lists, or language-specific trigger words. "
-                    "Judge the session by whether it contains reusable task behavior and actionable workflow evidence.\n"
+                    "Judge the full interaction sequence, including user corrections and assistant outcomes.\n"
                     "Injected skills only mean skills were visible to the agent; they are not evidence by themselves. "
                     "Used skills, tool calls, concrete procedures, and task outcomes are stronger evidence.\n"
-                    "Return JSON only. Use decision='valuable' for sessions that reveal reusable workflows, "
-                    "tool usage, skill gaps, domain procedures, repeated operational steps, or concrete task "
-                    "evidence. Use decision='chitchat' for sessions without actionable reusable behavior, such as "
-                    "pure social exchanges, trivial one-off questions, or empty/non-task interactions.\n"
-                    'Schema: {"decision":"valuable|chitchat","confidence":0..1,"reason":"short reason"}'
+                    "Return decision='valuable' only when the session contains reusable team-Skill evidence: "
+                    "an executed workflow, concrete outcome, causal skill gap, domain procedure, or user feedback "
+                    "about a produced result. Return decision='memory_candidate' when the useful evidence is a "
+                    "user-specific preference or habit rather than a team SOP. Return decision='task_only' for a "
+                    "real task request that has no completed outcome or actionable evolution evidence yet. Return "
+                    "decision='chitchat' only for social, empty, or non-task interaction.\n"
+                    "Do not promote one deliverable's explicit requirements into user memory. A memory candidate "
+                    "must plausibly remain useful for the same user across future tasks.\n"
+                    'Schema: {"decision":"valuable|memory_candidate|task_only|chitchat",'
+                    '"confidence":0..1,"reason":"short reason","memory_candidates":'
+                    '[{"preference":"...","scope":"...","evidence":"..."}]}'
                 ),
             },
             {
@@ -194,20 +268,35 @@ class SessionValueClassifier:
             raw = await self.client.chat(messages, max_tokens=512, temperature=0)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[SessionFilter] classifier failed: %s", exc)
-            return heuristic_classify_session(session, reason=_classifier_failure_reason(exc, self.client.timeout_seconds))
+            return heuristic_classify_session(
+                session,
+                reason=_classifier_failure_reason(exc, self.client.timeout_seconds),
+            )
 
         parsed = _extract_json_object(raw)
         decision = str(parsed.get("decision") or "").strip().lower()
-        if decision not in {"valuable", "chitchat"}:
+        if decision not in {
+            "valuable",
+            "memory_candidate",
+            "task_only",
+            "chitchat",
+        }:
             return heuristic_classify_session(session, reason="classifier returned invalid JSON")
         try:
             confidence = max(0.0, min(1.0, float(parsed.get("confidence", 0.0))))
         except (TypeError, ValueError):
             confidence = 0.0
+        memory_candidates = parsed.get("memory_candidates")
         return {
             "decision": decision,
             "confidence": confidence,
             "reason": _clip(str(parsed.get("reason") or ""), 500),
+            "memory_candidates": (
+                memory_candidates
+                if decision == "memory_candidate"
+                and isinstance(memory_candidates, list)
+                else []
+            ),
             "mode": "model",
             "model": self.client.model,
         }

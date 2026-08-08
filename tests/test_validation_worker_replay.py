@@ -4,12 +4,110 @@ import pytest
 
 from teamEvolver.config import TeamEvolverConfig
 from teamEvolver.session_store import SessionStore
+from teamEvolver.skills.hub import SkillHub
 from teamEvolver.validation.worker import ValidationWorker
 
 
 class _FakeClient:
     async def chat(self, messages, **kwargs):  # noqa: ANN001, ANN003
         return "已完成重放任务。"
+
+
+def test_true_replay_window_aggregation_enforces_merge_union() -> None:
+    checklist = {
+        "commonality": {"passed": True},
+        "items": [
+            {"id": "base", "kind": "hard", "required": True},
+            {"id": "new", "kind": "soft", "required": True},
+            {"id": "old", "kind": "soft", "required": True},
+        ],
+        "merge_context": {
+            "checklist_sources": [
+                {
+                    "skill_name": "candidate_evidence",
+                    "required_item_ids": ["new"],
+                },
+                {
+                    "skill_name": "existing",
+                    "version": 4,
+                    "inherited": True,
+                    "required_item_ids": ["old"],
+                },
+            ]
+        },
+    }
+
+    def result(
+        baseline_items,
+        candidate_items,
+        baseline_turns,
+        candidate_turns,
+    ):
+        return {
+            "status": "evaluated",
+            "accepted": True,
+            "no_regression": True,
+            "case_count": 1,
+            "cases": [],
+            "checklist_results": {
+                "baseline": {"items": baseline_items},
+                "candidate": {"items": candidate_items},
+            },
+            "efficiency": {
+                "baseline": {
+                    "interaction_turns": baseline_turns,
+                    "tool_call_count": 4,
+                    "total_tokens": 400,
+                },
+                "candidate": {
+                    "interaction_turns": candidate_turns,
+                    "tool_call_count": 4,
+                    "total_tokens": 400,
+                },
+            },
+        }
+
+    replay = ValidationWorker._aggregate_true_replay_windows(
+        [
+            (
+                "recent",
+                result(
+                    [
+                        {"id": "base", "kind": "hard", "passed": True},
+                        {"id": "new", "kind": "soft", "passed": False},
+                    ],
+                    [
+                        {"id": "base", "kind": "hard", "passed": True},
+                        {"id": "new", "kind": "soft", "passed": True},
+                    ],
+                    4,
+                    2,
+                ),
+            ),
+            (
+                "historical",
+                result(
+                    [
+                        {"id": "base", "kind": "hard", "passed": True},
+                        {"id": "old", "kind": "soft", "passed": True},
+                    ],
+                    [
+                        {"id": "base", "kind": "hard", "passed": True},
+                        {"id": "old", "kind": "soft", "passed": True},
+                    ],
+                    2,
+                    2,
+                ),
+            ),
+        ],
+        checklist=checklist,
+    )
+
+    assert replay["accepted"] is True
+    assert replay["score"] == 1.0
+    assert replay["baseline_mean"] == 0.6667
+    assert replay["decision_policy"]["merge_union_pass"] is True
+    assert replay["decision_policy"]["merge_source_results"][1]["passed"] is True
 
 
 @pytest.mark.anyio
@@ -179,3 +277,53 @@ def test_source_tenant_ids_come_from_agentshub_session(tmp_path) -> None:
     assert worker._source_tenant_ids(
         {"session_ids": ["agentshub-session", "missing"]}
     ) == ["tenant_demo"]
+
+
+@pytest.mark.anyio
+async def test_wait_for_published_commit_returns_manifest_version_and_sha(
+    tmp_path,
+) -> None:
+    config = TeamEvolverConfig(
+        sharing_enabled=True,
+        sharing_backend="local",
+        sharing_session_backend="local",
+        sharing_local_root=str(tmp_path / "store"),
+        llm_api_key="",
+        validation_enabled=True,
+    )
+    skills_dir = tmp_path / "skills"
+    skill_dir = skills_dir / "candidate"
+    skill_dir.mkdir(parents=True)
+    skill_dir.joinpath("SKILL.md").write_text(
+        "---\n"
+        "name: candidate\n"
+        "description: committed candidate\n"
+        "---\n\n"
+        "# Procedure\n\nDo the verified work.\n",
+        encoding="utf-8",
+    )
+    SkillHub.team_from_config(config).push_skills(str(skills_dir))
+    worker = ValidationWorker(config, llm_client=_FakeClient())
+    worker._store.save_job(
+        {
+            "job_id": "job-published",
+            "candidate_skill": {"name": "candidate"},
+        }
+    )
+    worker._store.save_decision(
+        "job-published",
+        {"status": "published"},
+    )
+
+    expected = await worker._wait_for_published_commit(
+        {
+            "job_id": "job-published",
+            "candidate_skill": {"name": "candidate"},
+        },
+        timeout_seconds=1,
+    )
+
+    assert expected is not None
+    assert expected["name"] == "candidate"
+    assert expected["version"] == 1
+    assert len(expected["sha256"]) == 64
