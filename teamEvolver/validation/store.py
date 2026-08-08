@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -79,11 +80,40 @@ class ValidationStore:
     def _evaluation_key(self, job_id: str) -> str:
         return f"{self._prefix()}validation_evaluations/{job_id}.json"
 
+    def _decision_index_key(self) -> str:
+        return f"{self._prefix()}validation_decision_index.json"
+
+    def _open_job_index_key(self) -> str:
+        return f"{self._prefix()}validation_open_jobs.json"
+
+    def _skill_version_context_key(self, skill_name: str, version: int) -> str:
+        return (
+            f"{self._prefix()}skill_version_context/"
+            f"{skill_name}/v{max(1, int(version))}.json"
+        )
+
     def make_job_id(self, skill_name: str) -> str:
         slug = str(skill_name or "candidate").strip().lower().replace("_", "-")
         slug = "".join(ch if ch.isalnum() or ch == "-" else "-" for ch in slug).strip("-") or "candidate"
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
         return f"{timestamp}-{slug}-{uuid.uuid4().hex[:8]}"
+
+    def _load_open_job_ids(self) -> list[str] | None:
+        try:
+            raw = json.loads(
+                self._bucket.get_object(self._open_job_index_key())
+                .read()
+                .decode("utf-8")
+            )
+        except Exception as exc:
+            return None if is_not_found_error(exc) else []
+        return [str(item) for item in raw if str(item)] if isinstance(raw, list) else []
+
+    def _save_open_job_ids(self, job_ids: list[str]) -> None:
+        self._bucket.put_object(
+            self._open_job_index_key(),
+            json.dumps(list(dict.fromkeys(job_ids))[-500:], indent=2).encode("utf-8"),
+        )
 
     def save_job(self, job: dict[str, Any]) -> None:
         job_id = str(job.get("job_id", "") or "")
@@ -101,6 +131,9 @@ class ValidationStore:
                 self._candidate_skill_key(job_id),
                 build_skill_md(candidate_skill).encode("utf-8"),
             )
+        open_ids = self._load_open_job_ids()
+        if open_ids is not None and job_id not in open_ids:
+            self._save_open_job_ids([*open_ids, job_id])
 
     def load_job(self, job_id: str) -> Optional[dict[str, Any]]:
         try:
@@ -167,6 +200,103 @@ class ValidationStore:
             self._decision_key(job_id),
             json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
         )
+        job = self.load_job(job_id) or {}
+        evaluation = self.load_evaluation(job_id) or {}
+        candidate = (
+            job.get("candidate_skill")
+            if isinstance(job.get("candidate_skill"), dict)
+            else {}
+        )
+        compact_job = {
+            key: job.get(key)
+            for key in (
+                "job_id",
+                "candidate_skill_name",
+                "candidate_skill_id",
+                "proposed_action",
+                "rationale",
+                "evidence_classification",
+                "session_ids",
+                "min_score",
+                "created_at",
+            )
+            if job.get(key) is not None
+        }
+        compact_job["candidate_skill"] = {
+            key: candidate.get(key)
+            for key in ("name", "description", "category", "skill_id", "edit_summary")
+            if candidate.get(key) is not None
+        }
+        compact_job["replay_case_count"] = len(job.get("replay_cases") or [])
+        compact_evaluation = deepcopy(evaluation)
+        for key in (
+            "candidate_skill",
+            "current_skill",
+            "candidate_skill_md",
+            "current_skill_md",
+            "skill_diff",
+        ):
+            compact_evaluation.pop(key, None)
+        replay_summary = compact_evaluation.get("replay_summary")
+        if isinstance(replay_summary, dict):
+            replay_summary["cases"] = []
+            replay_summary.pop("window_results", None)
+        replay = compact_evaluation.get("replay")
+        if isinstance(replay, dict):
+            replay["cases"] = []
+        record = {
+            "job_id": job_id,
+            "job": compact_job,
+            "decision": payload,
+            "evaluation": compact_evaluation,
+            "decided_at": payload.get("decided_at"),
+        }
+        try:
+            raw = json.loads(
+                self._bucket.get_object(self._decision_index_key())
+                .read()
+                .decode("utf-8")
+            )
+            records = raw if isinstance(raw, list) else []
+        except Exception:
+            records = []
+        records = [
+            item
+            for item in records
+            if isinstance(item, dict) and item.get("job_id") != job_id
+        ]
+        records.append(record)
+        records.sort(key=lambda item: str(item.get("decided_at") or ""), reverse=True)
+        self._bucket.put_object(
+            self._decision_index_key(),
+            json.dumps(records[:200], ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+        candidate = job.get("candidate_skill") if isinstance(job.get("candidate_skill"), dict) else {}
+        skill_name = str(
+            payload.get("skill_name")
+            or candidate.get("name")
+            or job.get("candidate_skill_name")
+            or ""
+        ).strip()
+        try:
+            version = int(payload.get("version") or 0)
+        except (TypeError, ValueError):
+            version = 0
+        if payload.get("status") == "published" and skill_name and version > 0:
+            version_record = {
+                "job_id": job_id,
+                "job": job,
+                "decision": payload,
+                "evaluation": evaluation,
+                "decided_at": payload.get("decided_at"),
+            }
+            self._bucket.put_object(
+                self._skill_version_context_key(skill_name, version),
+                json.dumps(version_record, ensure_ascii=False, indent=2).encode("utf-8"),
+            )
+        open_ids = self._load_open_job_ids()
+        if open_ids is not None and job_id in open_ids:
+            self._save_open_job_ids([value for value in open_ids if value != job_id])
 
     def load_decision(self, job_id: str) -> Optional[dict[str, Any]]:
         try:
@@ -174,6 +304,42 @@ class ValidationStore:
         except Exception as exc:
             if not is_not_found_error(exc):
                 logger.warning("[ValidationStore] failed to load decision %s: %s", job_id, exc)
+            return None
+
+    def list_decision_records(self) -> list[dict[str, Any]]:
+        try:
+            raw = json.loads(
+                self._bucket.get_object(self._decision_index_key())
+                .read()
+                .decode("utf-8")
+            )
+        except Exception as exc:
+            if not is_not_found_error(exc):
+                logger.warning("[ValidationStore] failed to load decision index: %s", exc)
+            return []
+        return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+
+    def load_skill_version_context(
+        self,
+        skill_name: str,
+        version: int,
+    ) -> Optional[dict[str, Any]]:
+        try:
+            return json.loads(
+                self._bucket.get_object(
+                    self._skill_version_context_key(skill_name, version)
+                )
+                .read()
+                .decode("utf-8")
+            )
+        except Exception as exc:
+            if not is_not_found_error(exc):
+                logger.warning(
+                    "[ValidationStore] failed to load version context %s/v%s: %s",
+                    skill_name,
+                    version,
+                    exc,
+                )
             return None
 
     def save_evaluation(self, job_id: str, evaluation: dict[str, Any]) -> None:
@@ -202,7 +368,17 @@ class ValidationStore:
 
     def list_open_jobs(self, *, user_alias: str = "") -> list[dict[str, Any]]:
         jobs: list[dict[str, Any]] = []
-        for job in self.list_jobs():
+        indexed_ids = self._load_open_job_ids()
+        source_jobs = (
+            [
+                job
+                for job_id in indexed_ids
+                if (job := self.load_job(job_id)) is not None
+            ]
+            if indexed_ids is not None
+            else self.list_jobs()
+        )
+        for job in source_jobs:
             job_id = str(job.get("job_id", "") or "")
             if not job_id:
                 continue

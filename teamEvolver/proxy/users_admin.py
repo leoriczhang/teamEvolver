@@ -477,7 +477,10 @@ class UsersAdminMixin:
             data = _load_registry(_registry_path(owner.config))
             _idx, user = _find_user(data, user_id)
             if direction == "personal_to_team" and str(user.get("role") or "user") != "admin":
-                raise HTTPException(status_code=403, detail="only admin users can publish personal skills to team space")
+                raise HTTPException(
+                    status_code=403,
+                    detail="only admin users can publish personal skills to team space",
+                )
 
             source_space = "personal" if direction == "personal_to_team" else "team"
             target_space = "team" if direction == "personal_to_team" else "personal"

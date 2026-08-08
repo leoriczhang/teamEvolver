@@ -22,12 +22,14 @@ import {
   type LedgerRow,
   type Candidate,
   type EvalResult,
+  type PageResponse,
 } from "@/api/client";
 import SkillVersionModal from "./dashboard/SkillVersionModal";
 import SessionModal, { StatusBadge, type SessTab } from "./dashboard/SessionModal";
 import CandidateModal from "./dashboard/CandidateModal";
 
-const POLL_MS = 4000;
+const POLL_MS = 15_000;
+const PAGE_SIZE = 20;
 
 function mergeCandidateDetail(items: Candidate[], detail: Candidate): Candidate[] {
   const found = items.some((item) => item.job_id === detail.job_id);
@@ -37,12 +39,32 @@ function mergeCandidateDetail(items: Candidate[], detail: Candidate): Candidate[
   ));
 }
 
+function serverPager(page: number, total: number, itemCount: number) {
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const currentPage = Math.min(Math.max(1, page), totalPages);
+  const start = (currentPage - 1) * PAGE_SIZE;
+  return {
+    page: currentPage,
+    totalPages,
+    visiblePages: Math.min(10, totalPages),
+    total,
+    start,
+    end: start + itemCount,
+  };
+}
+
 export default function DashboardView({ active }: { active: boolean }) {
   const [status, setStatus] = useState<StatusResp | null>(null);
   const [storage, setStorage] = useState<StorageStatus | null>(null);
   const [queue, setQueue] = useState<QueueSession[] | null>(null);
   const [ledger, setLedger] = useState<LedgerRow[] | null>(null);
   const [cands, setCands] = useState<Candidate[]>([]);
+  const [queueTotal, setQueueTotal] = useState(0);
+  const [ledgerTotal, setLedgerTotal] = useState(0);
+  const [candidateTotal, setCandidateTotal] = useState(0);
+  const [queuePage, setQueuePage] = useState(1);
+  const [ledgerPage, setLedgerPage] = useState(1);
+  const [candidatePage, setCandidatePage] = useState(1);
   const [lastUpdate, setLastUpdate] = useState("—");
 
   const [evalCache, setEvalCache] = useState<Record<string, EvalResult>>({});
@@ -102,26 +124,30 @@ export default function DashboardView({ active }: { active: boolean }) {
     async (force: boolean) => {
       if (inflight.current && !force) return;
       inflight.current = true;
-      let st: StatusResp | null = null;
-      let sto: StorageStatus | null = null;
-      let q: QueueSession[] | null = null;
-      let led: LedgerRow[] | null = null;
-      let cs: Candidate[] | null = null;
-      try {
-        st = await api<StatusResp>("/status");
-      } catch {}
-      try {
-        sto = await api<StorageStatus>("/storage/status");
-      } catch {}
-      try {
-        q = (await api<{ sessions: QueueSession[] }>("/sessions")).sessions;
-      } catch {}
-      try {
-        led = (await api<{ conversations: LedgerRow[] }>("/conversations?limit=50")).conversations;
-      } catch {}
-      try {
-        cs = (await api<{ candidates: Candidate[] }>("/api/validation/candidates")).candidates;
-      } catch {}
+      const refreshFlag = force ? "&refresh=true" : "";
+      const [statusResult, storageResult, queueResult, ledgerResult, candidateResult] =
+        await Promise.allSettled([
+          api<StatusResp>(`/status${force ? "?refresh=true" : ""}`),
+          api<StorageStatus>("/storage/status"),
+          api<PageResponse<QueueSession>>(
+            `/sessions?limit=${PAGE_SIZE}&offset=${(queuePage - 1) * PAGE_SIZE}${refreshFlag}`
+          ),
+          api<PageResponse<LedgerRow>>(
+            `/conversations?limit=${PAGE_SIZE}&offset=${(ledgerPage - 1) * PAGE_SIZE}${refreshFlag}`
+          ),
+          api<PageResponse<Candidate>>(
+            `/api/validation/candidates?compact=true&limit=${PAGE_SIZE}&offset=${(candidatePage - 1) * PAGE_SIZE}${refreshFlag}`
+          ),
+        ]);
+      const st = statusResult.status === "fulfilled" ? statusResult.value : null;
+      const sto = storageResult.status === "fulfilled" ? storageResult.value : null;
+      const queuePayload = queueResult.status === "fulfilled" ? queueResult.value : null;
+      const ledgerPayload = ledgerResult.status === "fulfilled" ? ledgerResult.value : null;
+      const candidatePayload =
+        candidateResult.status === "fulfilled" ? candidateResult.value : null;
+      const q = queuePayload?.sessions || null;
+      const led = ledgerPayload?.conversations || null;
+      const cs = candidatePayload?.candidates || null;
       const nextCands = cs || [];
       const serverEvaluations: Record<string, EvalResult> = {};
       for (const c of nextCands) {
@@ -136,6 +162,9 @@ export default function DashboardView({ active }: { active: boolean }) {
       setQueue(q);
       setLedger(led);
       setCands(nextCands);
+      setQueueTotal(queuePayload?.total || 0);
+      setLedgerTotal(ledgerPayload?.total || 0);
+      setCandidateTotal(candidatePayload?.total || 0);
       setLastUpdate(
         "更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false })
       );
@@ -147,7 +176,7 @@ export default function DashboardView({ active }: { active: boolean }) {
         }
       }
     },
-    [evaluate]
+    [candidatePage, evaluate, ledgerPage, queuePage]
   );
 
   // poll
@@ -208,10 +237,10 @@ export default function DashboardView({ active }: { active: boolean }) {
   const skills = status?.skills || {};
   const skillNames = Object.keys(skills);
   const openCand = candJobId ? cands.find((c) => c.job_id === candJobId) || null : null;
-  const queuePager = usePagedItems(queue || []);
-  const ledgerPager = usePagedItems(ledger || []);
-  const candPager = usePagedItems(cands);
   const skillPager = usePagedItems(skillNames);
+  const queuePager = serverPager(queuePage, queueTotal, queue?.length || 0);
+  const ledgerPager = serverPager(ledgerPage, ledgerTotal, ledger?.length || 0);
+  const candPager = serverPager(candidatePage, candidateTotal, cands.length);
 
   return (
     <div className="mx-auto max-w-[1200px] px-7 py-6">
@@ -246,14 +275,14 @@ export default function DashboardView({ active }: { active: boolean }) {
       </div>
 
       {/* queue */}
-      <Panel title="会话队列" count={queue ? `${queue.length} 个` : ""}>
+      <Panel title="会话队列" count={queue ? `${queueTotal} 个` : ""}>
         {!queue?.length ? (
           <Empty>队列为空，暂无待进化会话</Empty>
         ) : (
           <>
             <ListViewport>
               <Table headers={["提交人", "会话 ID", "轮数", "提交时间"]}>
-                {queuePager.items.map((s, i) => (
+                {(queue || []).map((s, i) => (
                   <tr key={`${s.session_id}-${i}`}>
                     <Td>
                       <UserBadge name={s.user_alias} />
@@ -265,20 +294,20 @@ export default function DashboardView({ active }: { active: boolean }) {
                 ))}
               </Table>
             </ListViewport>
-            <PaginationControls {...queuePager} onPageChange={queuePager.setPage} />
+            <PaginationControls {...queuePager} onPageChange={setQueuePage} />
           </>
         )}
       </Panel>
 
       {/* history */}
-      <Panel title="会话历史" count={ledger ? `${ledger.length} 条` : ""}>
+      <Panel title="会话历史" count={ledger ? `${ledgerTotal} 条` : ""}>
         {!ledger?.length ? (
           <Empty>尚无会话历史</Empty>
         ) : (
           <>
             <ListViewport>
               <Table headers={["会话标题", "提交人", "轮数", "消费状态", "时间"]}>
-                {ledgerPager.items.map((r, i) => {
+                {(ledger || []).map((r, i) => {
                   const sid = r.session_id || "";
                   return (
                     <tr key={`${sid}-${i}`}>
@@ -308,13 +337,13 @@ export default function DashboardView({ active }: { active: boolean }) {
                 })}
               </Table>
             </ListViewport>
-            <PaginationControls {...ledgerPager} onPageChange={ledgerPager.setPage} />
+            <PaginationControls {...ledgerPager} onPageChange={setLedgerPage} />
           </>
         )}
       </Panel>
 
       {/* candidates */}
-      <Panel title="待发布候选" count={cands.length ? `${cands.length} 个` : ""}>
+      <Panel title="待发布候选" count={candidateTotal ? `${candidateTotal} 个` : ""}>
         {!cands.length ? (
           <Empty>暂无待发布候选</Empty>
         ) : (
@@ -331,7 +360,7 @@ export default function DashboardView({ active }: { active: boolean }) {
                   "操作",
                 ]}
               >
-                {candPager.items.map((c) => {
+                {cands.map((c) => {
               const ev = evalCache[c.job_id];
               const busy = evaluating[c.job_id];
               const thr = c.min_score != null ? c.min_score : 0.75;
@@ -410,7 +439,7 @@ export default function DashboardView({ active }: { active: boolean }) {
                 })}
               </Table>
             </ListViewport>
-            <PaginationControls {...candPager} onPageChange={candPager.setPage} />
+            <PaginationControls {...candPager} onPageChange={setCandidatePage} />
           </>
         )}
       </Panel>

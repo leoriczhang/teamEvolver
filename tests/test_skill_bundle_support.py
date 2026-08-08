@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
+from teamEvolver.skills.bundle import bundle_tree_sha256
 from teamEvolver.skills.hub import SkillHub
 
 SKILL_MD = """---
@@ -118,6 +120,64 @@ def test_skill_hub_push_pull_roundtrips_single_file_skill(tmp_path: Path) -> Non
     assert restored_files == ["SKILL.md"]
 
 
+
+def test_skill_hub_hashes_canonical_stored_markdown(tmp_path: Path) -> None:
+    skills_dir = tmp_path / "skills"
+    source = _skill_md("canonical-skill").replace(
+        "description: Demo bundle skill",
+        "description: NOT canonical yet",
+    )
+    _write_bytes(
+        skills_dir / "canonical-skill" / "SKILL.md",
+        source.encode("utf-8"),
+    )
+    hub = SkillHub(
+        backend="local",
+        endpoint="",
+        local_root=str(tmp_path / "bucket"),
+        customer_id="cust-a",
+        user_alias="tester",
+    )
+    inner = hub._bucket
+
+    class CanonicalizingBucket:
+        def put_object(self, key, data):
+            if key.endswith("SKILL.md"):
+                data = data.replace(b"NOT canonical yet", b"Not canonical yet")
+            return inner.put_object(key, data)
+
+        def __getattr__(self, name):
+            return getattr(inner, name)
+
+    hub._bucket = CanonicalizingBucket()
+    result = hub.push_skills(str(skills_dir))
+
+    assert result["uploaded"] == 1
+    prefix = tmp_path / "bucket" / "peers" / "cust-a"
+    current = (prefix / "skills" / "canonical-skill" / "SKILL.md").read_bytes()
+    archived = (
+        prefix / "skills" / "canonical-skill" / "versions" / "v1" / "SKILL.md"
+    ).read_bytes()
+    bundle_record = json.loads(
+        (
+            prefix
+            / "skills"
+            / "canonical-skill"
+            / "versions"
+            / "v1"
+            / "bundle.json"
+        ).read_text("utf-8")
+    )
+    manifest = hub._load_remote_manifest()["canonical-skill"]
+    stored_sha = hashlib.sha256(current).hexdigest()
+    stored_tree = bundle_tree_sha256({"SKILL.md": current})
+
+    assert current == archived
+    assert b"Not canonical yet" in current
+    assert manifest["sha256"] == stored_sha
+    assert manifest["tree_sha256"] == stored_tree
+    assert bundle_record["files"][0]["sha256"] == stored_sha
+    assert bundle_record["tree_sha256"] == stored_tree
 def test_skill_hub_persists_bundle_version_snapshots(tmp_path: Path) -> None:
     skills_dir = tmp_path / "skills"
     skill_dir = skills_dir / "demo-skill"
