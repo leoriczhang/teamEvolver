@@ -176,15 +176,8 @@ export default function SkillsView({
 
   return (
     <div className="mx-auto max-w-[1200px] px-7 py-6">
-      <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-[22px] font-bold tracking-tight">技能管理</h1>
-          <div className="mt-1 text-xs text-muted-foreground">
-            分为个人技能和团队技能；不同空间的编辑、分享和发布在对应子页面完成。
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <select
+      <div className="mb-5 flex flex-wrap items-center justify-end gap-2">
+        <select
             value={activeUserId}
             onChange={(e) => chooseUser(e.target.value)}
             className="h-8 rounded-lg border border-border bg-background px-2 text-xs font-semibold outline-none"
@@ -195,11 +188,10 @@ export default function SkillsView({
                 {(u.display_name || u.id) + (u.role === "admin" ? " · 管理员" : " · 一般用户")}
               </option>
             ))}
-          </select>
-          <Button variant="outline" size="sm" onClick={refreshAll} disabled={loading}>
-            刷新
-          </Button>
-        </div>
+        </select>
+        <Button variant="outline" size="sm" onClick={refreshAll} disabled={loading}>
+          刷新
+        </Button>
       </div>
 
       <div className="mb-5 flex flex-wrap gap-2">

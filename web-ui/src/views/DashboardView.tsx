@@ -42,9 +42,7 @@ export default function DashboardView({ active }: { active: boolean }) {
 
   const inflight = useRef(false);
   const evaluatingRef = useRef<Record<string, boolean>>({});
-  const evalCacheRef = useRef<Record<string, EvalResult>>({});
   evaluatingRef.current = evaluating;
-  evalCacheRef.current = evalCache;
 
   // modal state
   const [skillModal, setSkillModal] = useState<{ name: string; version: number } | null>(null);
@@ -102,14 +100,8 @@ export default function DashboardView({ active }: { active: boolean }) {
         "更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false })
       );
       inflight.current = false;
-      // auto-evaluate un-cached candidates
-      for (const c of cs || []) {
-        if (!evalCacheRef.current[c.job_id] && !evaluatingRef.current[c.job_id]) {
-          evaluate(c.job_id, false);
-        }
-      }
     },
-    [evaluate]
+    []
   );
 
   // poll
@@ -177,23 +169,16 @@ export default function DashboardView({ active }: { active: boolean }) {
 
   return (
     <div className="mx-auto max-w-[1200px] px-7 py-6">
-      {/* header */}
-      <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="flex items-center gap-2.5 text-[22px] font-bold tracking-tight">
-            <Dot state={status ? (running ? "run" : "on") : "err"} /> 进化看板
-          </h1>
-          <div className="mt-1 text-xs text-muted-foreground">
-            会话进化流水线 · 待发布候选 · 技能版本
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <ConnBadge storage={storage} />
-          <span className="text-xs text-muted-foreground">{lastUpdate}</span>
-          <Button variant="outline" size="sm" onClick={() => refresh(true)}>
-            刷新
-          </Button>
-        </div>
+      <div className="mb-5 flex flex-wrap items-center justify-end gap-2">
+        <span className="inline-flex items-center gap-2 text-xs font-semibold text-muted-foreground">
+          <Dot state={status ? (running ? "run" : "on") : "err"} />
+          {status ? (running ? "进化任务运行中" : "服务在线") : "服务不可达"}
+        </span>
+        <ConnBadge storage={storage} />
+        <span className="text-xs text-muted-foreground">{lastUpdate}</span>
+        <Button variant="outline" size="sm" onClick={() => refresh(true)}>
+          刷新
+        </Button>
       </div>
 
       {/* stats */}
@@ -294,7 +279,7 @@ export default function DashboardView({ active }: { active: boolean }) {
                 ]}
               >
                 {candPager.items.map((c) => {
-              const ev = evalCache[c.job_id];
+              const ev = evalCache[c.job_id] || c.evaluation;
               const busy = evaluating[c.job_id];
               const thr = c.min_score != null ? c.min_score : 0.75;
               const open = () => setCandJobId(c.job_id);
@@ -350,7 +335,7 @@ export default function DashboardView({ active }: { active: boolean }) {
                         disabled={busy}
                         onClick={() => evaluate(c.job_id, true)}
                       >
-                        重新评估
+                        {ev ? "重新评估" : "开始 A/B 评估"}
                       </Button>
                       <Button size="sm" onClick={() => validate(c.job_id, "auto")}>
                         验证发布

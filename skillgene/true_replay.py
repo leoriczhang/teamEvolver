@@ -191,6 +191,9 @@ def annotate_cases(job: dict[str, Any], search_roots: list[Path]) -> list[dict[s
                 "turn_num": case.get("turn_num"),
                 "instruction": instr,
                 "had_tool_calls": bool(case.get("had_tool_calls")),
+                "gold": case.get("gold") if isinstance(case.get("gold"), dict) else {},
+                "target_dimensions": case.get("target_dimensions") or [],
+                "difficulty": str(case.get("difficulty") or ""),
                 "referenced_paths": referenced,
                 "missing_paths": missing,
                 "grounded": bool(referenced) and runnable,
@@ -330,6 +333,7 @@ def _run_worker(spec_path: str) -> None:
                 spec["harness"],
                 original_instruction,
                 branch_snapshot,
+                rubric=spec.get("rubric"),
             )
             interactions.append(
                 {
@@ -379,7 +383,8 @@ def _run_worker(spec_path: str) -> None:
 
 def spawn_branch(branch: str, sandbox: dict[str, str], instruction: str,
                  harness: dict[str, str], skill: Optional[dict[str, Any]],
-                 tmp: Path, timeout: int, max_interactions: int = 4) -> dict[str, Any]:
+                 tmp: Path, timeout: int, max_interactions: int = 4,
+                 rubric: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """Spawn a worker subprocess for one branch and collect its trajectory."""
     worker_python = os.environ.get("SKILLGENE_REPLAY_PYTHON", "").strip() or sys.executable
     spec = {
@@ -391,6 +396,7 @@ def spawn_branch(branch: str, sandbox: dict[str, str], instruction: str,
         # hermes-agent package. Resolved once here so both branches agree.
         "hermes_origin": resolve_hermes_origin() or "",
         "instruction": instruction,
+        "rubric": rubric or {},
         "harness": harness,
         "skill_content": (skill or {}).get("content") if branch == "candidate" else None,
         "max_iterations": 25,
@@ -446,7 +452,13 @@ def render_trajectory(messages: list[dict[str, Any]]) -> str:
     return "\n".join(lines) if lines else "(no tool calls were made)"
 
 
-def judge_branch(harness: dict[str, str], instruction: str, branch: dict[str, Any]) -> dict[str, Any]:
+def judge_branch(
+    harness: dict[str, str],
+    instruction: str,
+    branch: dict[str, Any],
+    *,
+    rubric: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     """LLM-as-judge over the *trajectory*: did the task actually get done, were
     the tools used correctly? Returns {overall, task_completion, tool_correctness,
     rationale}. Scores in [0,1]."""
@@ -479,8 +491,14 @@ def judge_branch(harness: dict[str, str], instruction: str, branch: dict[str, An
         'Reply ONLY as JSON: {"success":true|false,"task_completion":..,'
         '"tool_correctness":..,"overall":..,"feedback":"..","rationale":".."}'
     )
+    rubric_text = ""
+    if isinstance(rubric, dict) and rubric:
+        rubric_text = (
+            "\n\n[Task-specific grading rubric]\n"
+            + json.dumps(rubric, ensure_ascii=False, indent=2)[:6000]
+        )
     user_prompt = (
-        f"[Instruction]\n{instruction}\n\n[Tool-call trace]\n{trace}\n\n"
+        f"[Instruction]\n{instruction}{rubric_text}\n\n[Tool-call trace]\n{trace}\n\n"
         f"[Final answer]\n{final}"
     )
     try:
@@ -663,6 +681,7 @@ def evaluate_job(
                     tmp,
                     timeout,
                     max_interactions=max_interactions,
+                    rubric=chosen.get("gold"),
                 ): branch
                 for branch in ("baseline", "candidate")
             }
@@ -735,7 +754,9 @@ def evaluate_job(
                 "harness": {"model": harness.get("model"), "base_url": harness.get("base_url")},
                 "cases": [{"baseline": _failed_branch_case("baseline"), "candidate": _failed_branch_case("candidate")}],
             }
-        judged = {b: judge_branch(harness, chosen["instruction"], results[b])
+        judged = {b: judge_branch(
+                    harness, chosen["instruction"], results[b], rubric=chosen.get("gold")
+                  )
                   for b in ("baseline", "candidate")}
         efficiency = compare_efficiency(results["baseline"], results["candidate"])
 
@@ -868,6 +889,7 @@ def run(
                 tmp,
                 timeout,
                 max_interactions=max_interactions,
+                rubric=chosen.get("gold"),
             )
 
         print("\n===== 双分支执行结果 =====")
@@ -885,7 +907,12 @@ def run(
                 print("   工具轨迹:")
                 print("   " + render_trajectory(r.get("messages") or []).replace("\n", "\n   "))
                 print(f"   最终回答: {str(r.get('final_response') or '')[:400]}")
-            judged[branch] = judge_branch(harness, chosen["instruction"], r)
+            judged[branch] = judge_branch(
+                harness,
+                chosen["instruction"],
+                r,
+                rubric=chosen.get("gold"),
+            )
 
         print("\n===== 裁判打分（trajectory-aware） =====")
         for branch in ("baseline", "candidate"):

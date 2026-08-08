@@ -7,63 +7,66 @@
   box-sizing: border-box;
 }
 
-/* ==== StaffDeck SD1 theme tokens (verbatim from StaffDeck styles.css) ==== */
+/* ==== Hero-Centric theme tokens (from taste-bank hero-centric-saas) ==== *
+ *  Indigo accent (#4f46e5) on cool white/slate, big soft shadows, glowing   *
+ *  primary CTA. Variable names kept identical so components need no change.  */
 :root {
-  --background: #f7f5ef;
-  --foreground: #20201d;
+  --background: #f8fafc;
+  --foreground: #0f172a;
   --surface: #ffffff;
   --surface-raised: #ffffff;
-  --surface-muted: #eeece4;
-  --surface-subtle: #fbfaf6;
-  --border: #ded7cc;
-  --border-strong: #cfc5b7;
-  --line: #e7dfd3;
-  --muted: #eeece4;
-  --muted-soft: #9a9b95;
-  --accent: #0f766e;
-  --accent-soft: #e1f1ed;
+  --surface-muted: #f1f5f9;
+  --surface-subtle: #f8fafc;
+  --border: #e2e8f0;
+  --border-strong: #cbd5e1;
+  --line: #eef0f4;
+  --muted: #f1f5f9;
+  --muted-soft: #94a3b8;
+  --accent: #4f46e5;
+  --accent-soft: #eef2ff;
   --accent-foreground: #ffffff;
   --danger: #dc2626;
-  --warning: #b45309;
-  --success: #138a55;
-  --ink-soft: #343633;
-  --copper: #a85d32;
-  --olive: #6f7b42;
-  --shadow-float: 0 20px 54px rgba(37, 32, 24, 0.1);
-  --shadow-soft: 0 10px 30px rgba(37, 32, 24, 0.055);
+  --warning: #d97706;
+  --success: #059669;
+  --ink-soft: #334155;
+  --copper: #6366f1;
+  --olive: #818cf8;
+  --shadow-float: 0 30px 60px rgba(15, 23, 42, 0.12);
+  --shadow-soft: 0 10px 30px rgba(15, 23, 42, 0.06);
+  --shadow-cta: 0 8px 20px rgba(79, 70, 229, 0.3);
   --font-body: "Inter", "IBM Plex Sans", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
   --font-display: "Inter", "IBM Plex Sans", "Noto Sans SC", "PingFang SC", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  --page-gradient-a: rgba(15, 118, 110, 0.055);
-  --page-gradient-top: #fbfaf6;
-  --page-gradient-bottom: #f3f0e8;
-  --panel-bg: rgba(249, 247, 241, 0.82);
+  --page-gradient-a: rgba(79, 70, 229, 0.05);
+  --page-gradient-top: #ffffff;
+  --page-gradient-bottom: #f1f5f9;
+  --panel-bg: rgba(248, 250, 252, 0.82);
   --card: #ffffff;
-  --card-foreground: #20201d;
+  --card-foreground: #0f172a;
   --popover: #ffffff;
-  --popover-foreground: #20201d;
-  --primary: #0f766e;
+  --popover-foreground: #0f172a;
+  --primary: #4f46e5;
   --primary-foreground: #ffffff;
-  --secondary: #eeece4;
-  --secondary-foreground: #20201d;
-  --muted-foreground: #6d726e;
+  --secondary: #f1f5f9;
+  --secondary-foreground: #0f172a;
+  --muted-foreground: #475569;
   --destructive: #dc2626;
-  --input: #ded7cc;
-  --ring: #0f766e;
-  --chart-1: #0f766e;
-  --chart-2: #6f7b42;
-  --chart-3: #a85d32;
-  --chart-4: #138a55;
-  --chart-5: #b45309;
-  --radius: 0.625rem;
+  --input: #e2e8f0;
+  --ring: #4f46e5;
+  --chart-1: #4f46e5;
+  --chart-2: #6366f1;
+  --chart-3: #818cf8;
+  --chart-4: #059669;
+  --chart-5: #d97706;
+  --radius: 0.75rem;
   --sidebar: #ffffff;
-  --sidebar-foreground: #858b9c;
-  --sidebar-primary: #18181a;
+  --sidebar-foreground: #64748b;
+  --sidebar-primary: #4f46e5;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #f6f6f6;
-  --sidebar-accent-foreground: #18181a;
-  --sidebar-border: #f4f4f4;
-  --sidebar-ring: #18181a;
+  --sidebar-accent: #f8fafc;
+  --sidebar-accent-foreground: #0f172a;
+  --sidebar-border: #eef0f4;
+  --sidebar-ring: #4f46e5;
 }
 
 html,
@@ -138,6 +141,7 @@ select,
   --color-destructive: var(--destructive);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
   --color-muted-foreground: var(--muted-foreground);
   --color-muted: var(--muted);
   --color-secondary-foreground: var(--secondary-foreground);
@@ -363,11 +367,11 @@ td.link {
 .login-hero {
   position: relative;
   overflow: hidden;
-  color: #f4f2ec;
+  color: #eef2ff;
   background:
-    radial-gradient(120% 120% at 84% 12%, rgba(168, 93, 50, 0.32), transparent 55%),
-    radial-gradient(130% 130% at 8% 92%, rgba(111, 123, 66, 0.34), transparent 52%),
-    linear-gradient(140deg, #10827a 0%, #124f4a 46%, #17171b 100%);
+    radial-gradient(120% 120% at 84% 12%, rgba(99, 102, 241, 0.42), transparent 55%),
+    radial-gradient(130% 130% at 8% 92%, rgba(129, 140, 248, 0.34), transparent 52%),
+    linear-gradient(140deg, #4f46e5 0%, #3730a3 46%, #1e1b4b 100%);
 }
 
 /* Floating light orbs for a flashy backdrop */

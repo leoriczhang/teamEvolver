@@ -3,8 +3,9 @@ import { Toaster } from "@/components/ui/sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { Activity, ClipboardCheck, Filter, History, LayoutDashboard, BookOpenText, Users, SlidersHorizontal, LogOut, RefreshCw, Sparkles, Clock, Repeat2, ShieldCheck, TrendingUp, Zap } from "lucide-react";
+import { Activity, ClipboardCheck, Filter, History, LayoutDashboard, BookOpenText, Users, SlidersHorizontal, LogOut, RefreshCw, Sparkles, Clock, Repeat2, ShieldCheck, TrendingUp, Zap, Database, Workflow, ListChecks, ChevronsUpDown } from "lucide-react";
 import { api, type AuthStatus, type UserProfile } from "@/api/client";
+import { PageHeader } from "@/components/common";
 import { toastErr, toastOk } from "@/lib/toast";
 import DashboardView from "@/views/DashboardView";
 import SkillsView from "@/views/SkillsView";
@@ -14,16 +15,57 @@ import CandidateReviewView from "@/views/CandidateReviewView";
 import HealthView from "@/views/HealthView";
 import AuditView from "@/views/AuditView";
 import SessionFilterView from "@/views/SessionFilterView";
+import MiningView, { type MinePage } from "@/views/MiningView";
 
-type ViewKey = "dashboard" | "health" | "skills" | "users" | "model";
+type ViewKey =
+  | "mine-overview"
+  | "mine-sources"
+  | "mine-pipeline"
+  | "mine-jobs"
+  | "mine-model"
+  | "dashboard"
+  | "health"
+  | "skills"
+  | "users"
+  | "model";
 type DashTab = "overview" | "candidates" | "audit" | "filter";
 
-const NAV: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[] = [
-  { key: "dashboard", label: "进化看板", icon: LayoutDashboard },
-  { key: "health", label: "系统健康", icon: Activity },
-  { key: "skills", label: "技能管理", icon: BookOpenText },
-  { key: "users", label: "用户管理", icon: Users },
-  { key: "model", label: "模型配置", icon: SlidersHorizontal },
+// The 挖掘 group is a flat list of menu items (like the 进化 group), each
+// pointing at a single MiningView page.
+const MINE_PAGES: { key: ViewKey; page: MinePage }[] = [
+  { key: "mine-overview", page: "overview" },
+  { key: "mine-sources", page: "sources" },
+  { key: "mine-pipeline", page: "pipeline" },
+  { key: "mine-jobs", page: "jobs" },
+  { key: "mine-model", page: "model" },
+];
+
+// Sidebar is organised around the two active lifecycle stages.  Benchmark is
+// an internal candidate dataset; no external evaluation runtime is required.
+const NAV_GROUPS: {
+  group: string;
+  items: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[];
+}[] = [
+  {
+    group: "挖掘 · SkillMiner",
+    items: [
+      { key: "mine-overview", label: "挖掘总览", icon: LayoutDashboard },
+      { key: "mine-sources", label: "知识源", icon: Database },
+      { key: "mine-pipeline", label: "挖掘流水线", icon: Workflow },
+      { key: "mine-jobs", label: "挖掘任务", icon: ListChecks },
+      { key: "mine-model", label: "挖掘模型", icon: SlidersHorizontal },
+    ],
+  },
+  {
+    group: "进化 · SkillGene",
+    items: [
+      { key: "dashboard", label: "进化看板", icon: LayoutDashboard },
+      { key: "health", label: "系统健康", icon: Activity },
+      { key: "skills", label: "技能管理", icon: BookOpenText },
+      { key: "users", label: "用户管理", icon: Users },
+      { key: "model", label: "进化模型", icon: SlidersHorizontal },
+    ],
+  },
 ];
 
 // Sub-pages hosted inside the 进化看板 group.
@@ -34,9 +76,48 @@ const DASH_TABS: { key: DashTab; label: string; icon: typeof LayoutDashboard }[]
   { key: "filter", label: "过滤审计", icon: Filter },
 ];
 
+const EVOLVE_PAGE_META: Record<"health" | "skills" | "users" | "model", { title: string; description: string }> = {
+  health: {
+    title: "系统健康",
+    description: "聚合服务、存储、模型、用户和技能状态，用于快速定位运行问题。",
+  },
+  skills: {
+    title: "技能管理",
+    description: "管理个人技能与团队技能，并在对应空间完成编辑、分享和发布。",
+  },
+  users: {
+    title: "用户管理",
+    description: "注册用户、分配角色，并配置个人与团队 OpenViking 空间凭据。",
+  },
+  model: {
+    title: "进化模型",
+    description: "配置 SkillGene 在总结、判断、合并和生成技能时使用的模型。",
+  },
+};
+
+const DASH_PAGE_META: Record<DashTab, { title: string; description: string }> = {
+  overview: {
+    title: "进化看板",
+    description: "监控会话进化流水线、待发布候选和技能版本的整体状态。",
+  },
+  candidates: {
+    title: "候选评审",
+    description: "集中处理待发布技能候选，核对 Verify 与 True Replay 证据后再发布。",
+  },
+  audit: {
+    title: "进化审计",
+    description: "追踪每次进化周期消费的会话、生成的候选和上传的技能变更。",
+  },
+  filter: {
+    title: "过滤审计",
+    description: "查看会话入队前的 valuable / chitchat 判别结果，用于校准进化入口。",
+  },
+};
+
 export default function App() {
   const [view, setView] = useState<ViewKey>("dashboard");
   const [dashTab, setDashTab] = useState<DashTab>("overview");
+  const [mineInputDir, setMineInputDir] = useState("");
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
@@ -100,32 +181,35 @@ export default function App() {
           </div>
           <div className="text-[15px] font-bold tracking-tight">SkillGene</div>
         </div>
-        <nav className="flex flex-col gap-0.5 px-2.5 py-3">
-          {NAV.map(({ key, label, icon: Icon }) => (
-            <button
-              key={key}
-              onClick={() => setView(key)}
-              className={cn(
-                "flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-[13.5px] font-semibold transition-colors",
-                view === key
-                  ? "bg-sidebar-accent text-foreground"
-                  : "text-sidebar-foreground hover:bg-sidebar-accent hover:text-foreground"
-              )}
-            >
-              <Icon className="size-4 opacity-80" />
-              {label}
-            </button>
+        <nav className="flex flex-1 flex-col gap-0.5 overflow-auto px-2.5 py-3">
+          {NAV_GROUPS.map(({ group, items }) => (
+            <div key={group} className="mb-1.5">
+              <div className="px-3 pb-1 pt-2.5 text-[10.5px] font-bold uppercase tracking-[0.08em] text-muted-soft">
+                {group}
+              </div>
+              {items.map(({ key, label, icon: Icon }) => (
+                <button
+                  key={key}
+                  type="button"
+                  aria-current={view === key ? "page" : undefined}
+                  onClick={() => {
+                    setView(key);
+                    setUserMenuOpen(false);
+                  }}
+                  className={cn(
+                    "flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-[13.5px] font-semibold transition-colors",
+                    view === key
+                      ? "bg-sidebar-accent text-foreground"
+                      : "text-sidebar-foreground hover:bg-sidebar-accent hover:text-foreground"
+                  )}
+                >
+                  <Icon className="size-4 opacity-80" />
+                  {label}
+                </button>
+              ))}
+            </div>
           ))}
         </nav>
-        <div className="mt-auto border-t border-line px-[18px] py-3.5 text-[11px] leading-relaxed text-muted-soft">
-          团队技能进化平台
-          <br />
-          统一控制台 · v1
-        </div>
-      </aside>
-
-      {/* ---- Content ---- */}
-      <main className="h-screen flex-1 overflow-auto bg-background">
         <UserMenu
           user={auth.user}
           open={userMenuOpen}
@@ -133,13 +217,47 @@ export default function App() {
           onRefresh={refreshAuth}
           onLogout={logout}
         />
+      </aside>
+
+      {/* ---- Content ---- */}
+      <main className="h-screen flex-1 overflow-auto bg-background">
+        {MINE_PAGES.map(({ key, page }) => (
+          <div key={key} className={cn(view !== key && "hidden")}>
+            <MiningView
+              active={view === key}
+              page={page}
+              preferredInputDir={mineInputDir}
+              onInputDirChange={setMineInputDir}
+              onNavigate={(destination) => {
+                if (destination === "candidates") {
+                  setDashTab("candidates");
+                  setView("dashboard");
+                  return;
+                }
+                if (destination === "skills") {
+                  setView("skills");
+                  return;
+                }
+                setView(`mine-${destination}` as ViewKey);
+              }}
+            />
+          </div>
+        ))}
         <div className={cn(view !== "dashboard" && "hidden")}>
+          <PageHeader
+            title={DASH_PAGE_META[dashTab].title}
+            description={DASH_PAGE_META[dashTab].description}
+            badge="SkillGene"
+          />
           {/* Sub-tab bar for the 进化看板 group */}
-          <div className="border-b border-line bg-surface px-7 pt-4">
-            <div className="flex flex-wrap gap-1.5">
+          <div className="border-b border-line bg-surface px-7 pt-3">
+            <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="进化看板页面">
               {DASH_TABS.map(({ key, label, icon: Icon }) => (
                 <button
                   key={key}
+                  type="button"
+                  role="tab"
+                  aria-selected={dashTab === key}
                   onClick={() => setDashTab(key)}
                   className={cn(
                     "flex items-center gap-1.5 rounded-t-lg border-b-2 px-3.5 py-2 text-[13px] font-semibold transition-colors",
@@ -168,15 +286,19 @@ export default function App() {
           </div>
         </div>
         <div className={cn(view !== "health" && "hidden")}>
+          <PageHeader title={EVOLVE_PAGE_META.health.title} description={EVOLVE_PAGE_META.health.description} badge="SkillGene" />
           <HealthView active={view === "health"} user={auth.user} />
         </div>
         <div className={cn(view !== "skills" && "hidden")}>
+          <PageHeader title={EVOLVE_PAGE_META.skills.title} description={EVOLVE_PAGE_META.skills.description} badge="SkillGene" />
           <SkillsView active={view === "skills"} user={auth.user} />
         </div>
         <div className={cn(view !== "users" && "hidden")}>
+          <PageHeader title={EVOLVE_PAGE_META.users.title} description={EVOLVE_PAGE_META.users.description} badge="SkillGene" />
           <UsersView active={view === "users"} />
         </div>
         <div className={cn(view !== "model" && "hidden")}>
+          <PageHeader title={EVOLVE_PAGE_META.model.title} description={EVOLVE_PAGE_META.model.description} badge="SkillGene" />
           <ModelSettingsView active={view === "model"} user={auth.user} />
         </div>
       </main>
@@ -484,28 +606,39 @@ function UserMenu({
   const name = user?.display_name || user?.id || "unknown";
   const initials = name.slice(0, 1).toUpperCase();
   return (
-    <div className="fixed top-4 right-5 z-50">
+    <div className="relative border-t border-line p-2.5">
+      <div className="px-2 pb-2 text-[10.5px] font-medium text-muted-soft">统一控制台 · v1</div>
       <button
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={`账户菜单：${name}`}
         onClick={onToggle}
-        className="flex items-center gap-2 rounded-full border border-border bg-surface px-2 py-1.5 shadow-[var(--shadow-soft)] hover:bg-muted"
+        className={cn(
+          "flex w-full items-center gap-2.5 rounded-xl border px-2.5 py-2 text-left transition-colors",
+          open ? "border-accent/30 bg-accent-soft" : "border-transparent hover:border-border hover:bg-muted"
+        )}
       >
-        <span className="grid size-7 place-items-center rounded-full bg-sidebar-primary text-xs font-bold text-white">
+        <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-sidebar-primary text-xs font-bold text-white shadow-sm">
           {initials}
         </span>
-        <span className="max-w-[160px] truncate text-sm font-semibold">{name}</span>
-        <span className="text-[11px] text-muted-foreground">{user?.role === "admin" ? "管理员" : "用户"}</span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[13px] font-semibold">{name}</span>
+          <span className="block text-[10.5px] text-muted-foreground">{user?.role === "admin" ? "管理员" : "普通用户"}</span>
+        </span>
+        <ChevronsUpDown className="size-3.5 shrink-0 text-muted-soft" />
       </button>
       {open && (
-        <div className="absolute right-0 mt-2 w-[240px] overflow-hidden rounded-xl border border-border bg-surface shadow-[var(--shadow-float)]">
+        <div role="menu" className="absolute bottom-[calc(100%+8px)] left-2.5 right-2.5 z-50 overflow-hidden rounded-xl border border-border bg-surface shadow-[var(--shadow-float)]">
           <div className="border-b border-line px-4 py-3">
             <div className="text-sm font-bold">{name}</div>
             <div className="mt-1 text-xs text-muted-foreground">{user?.email || user?.id || ""}</div>
           </div>
-          <button onClick={onRefresh} className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm hover:bg-muted">
+          <button type="button" role="menuitem" onClick={onRefresh} className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm hover:bg-muted">
             <RefreshCw className="size-4" />
             刷新登录信息
           </button>
-          <button onClick={onLogout} className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm text-destructive hover:bg-muted">
+          <button type="button" role="menuitem" onClick={onLogout} className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm text-destructive hover:bg-muted">
             <LogOut className="size-4" />
             退出登录
           </button>

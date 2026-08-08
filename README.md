@@ -63,6 +63,8 @@ Hermes 等 Agent 保持原生运行方式；SkillGene 通过同步目录和 Hook
   </tr>
 </table>
 
+此外，内置 **SkillMiner → LIFT** 评测链路：从领域文档挖掘 Skill 与 benchmark，把题库转换为 LIFT Suite，经登录用户人工编辑和批准后发布到外部 LIFT 工作区，并在同一控制台运行 warmup/holdout 对照评测。
+
 ---
 
 ## 系统图
@@ -195,6 +197,8 @@ SkillGene 现在统一使用一个端口：`52010`。
 - `POST /ingest_session`：Hermes 会话投喂入口，由 `skillgene-feed` 调用。
 - `POST /trigger`：立即触发一次 evolve cycle；只是提速信号，后台仍会周期扫描 `sessions/` 队列。
 - `GET /sessions`、`GET /conversations`、`GET /validation/candidates`、`GET /storage/status`：控制台和巡检接口。
+- `POST /api/mining/trajectory-benchmarks`：从 SkillGen 等 Agent 轨迹中独立挖掘 Benchmark；不触发 Skill 编译或 LIFT。
+- `GET /api/mining/trajectory-benchmarks` 及 `GET /api/mining/trajectory-benchmarks/{run_id}`：查看历史任务及异步运行状态。
 - `GET /console`：Web 控制台。
 
 ### 给 Agent 的输入变量
@@ -239,6 +243,21 @@ skillgene stop || true
 skillgene start --daemon --port 52010
 ```
 
+> **关于 Hermes CLI：** 进化（evolve）链路直连 LLM HTTP API，**不需要** Hermes。
+> 但文档挖掘（SkillMiner）流水线是通过 subprocess 调用本机 `hermes` 二进制来跑模型的，
+> 所以**中心机若要支持挖掘，必须装 Hermes CLI**。推荐用 `scripts/install_skillgene.sh`
+> 部署——它会在 pip 安装后**幂等地**探测并按需安装 Hermes（已安装则跳过）：
+>
+> ```bash
+> bash scripts/install_skillgene.sh                 # 自动装 SkillGene + Hermes CLI
+> bash scripts/install_skillgene.sh --skip-hermes   # 仅进化，不装 Hermes（挖掘不可用）
+> # 离线/内网镜像：export HERMES_INSTALL_URL=<你的镜像 install.sh>
+> ```
+>
+> 若手动 pip 安装（如上），挖掘要能用需另行安装 Hermes：
+> `curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-setup --non-interactive`，
+> 装完确保 `~/.local/bin` 在 PATH 上，`hermes --version` 可用。
+
 中心机验证：
 
 ```bash
@@ -246,6 +265,7 @@ ss -ltnp | grep 52010
 curl -fsS "$SKILLGENE_URL/health"
 curl -fsS "$SKILLGENE_URL/status"
 curl -fsS -X POST "$SKILLGENE_URL/trigger"
+hermes --version   # 仅当需要文档挖掘时；进化不依赖它
 ```
 
 
@@ -384,6 +404,21 @@ flowchart TB
 - **技能管理**：管理个人技能与团队技能，支持上传 zip 包。
 - **用户管理**：管理用户、角色，以及个人/团队空间凭据。
 - **模型配置**：配置可选验证模型，并提供连通性测试。
+- **文档挖掘**：运行 SkillMiner 的样本包构建、语义发现、技能编译、Benchmark 与覆盖报告，并提供从 Agent 轨迹独立挖掘 Benchmark 的 API。
+- **评测中心**：编辑 SkillMiner 转换出的 LIFT 草稿，完成结构校验、人工审核、发布与运行。
+
+### 接入 LIFT 评测框架
+
+LIFT 作为单独的外部工作区接入，不会被复制进 SkillGene 安装包：
+
+```bash
+bash scripts/setup_lift.sh
+# 完整运行前，再按 LIFT 文档准备 Python 3.12、Docker、Langfuse、凭据和 runtime 镜像
+```
+
+生成 SkillMiner benchmark 后，控制台“评测中心”会显示自动创建的待审核 LIFT 草稿。只有保存且结构校验通过的草稿才能人工批准，只有已批准草稿才能发布到 `<LIFT>/assets/benchmarks/skillgene/`。详细的数据映射、环境变量和目录说明见 [SkillMiner LIFT 集成文档](./skillgene/skillminer/README.md#lift-集成与人工审核)。
+
+> 当前适配基于 LIFT revision `ed8c9d750d729e4c5b1bbf237dd8483d9d142689`。上游仓库目前未提供许可证文件，因此 SkillGene 只提供兼容适配与 setup 脚本；部署或再分发前请确认上游授权条件。
 
 ---
 

@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Skill 挖掘流水线 · 控制台</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- 顶栏 -->
+    <header class="topbar">
+      <div class="brand">
+        <span class="dot"></span>
+        <h1>文档 → Skill 挖掘流水线</h1>
+      </div>
+      <div class="topbar-right">
+        <span id="statusPill" class="pill pill-idle">空闲</span>
+      </div>
+    </header>
+
+    <div class="layout">
+      <!-- 左：配置面板 -->
+      <aside class="panel config">
+        <h2>配置</h2>
+
+        <div class="field">
+          <label>挖掘输入目录</label>
+          <select id="inputDir"></select>
+        </div>
+
+        <div class="field">
+          <label>反思环最大轮数 <span class="val" id="roundsVal">3</span></label>
+          <input type="range" id="maxRounds" min="1" max="5" value="3" />
+        </div>
+
+        <div class="field">
+          <label>模型</label>
+          <div class="readonly" id="modelInfo">—</div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="field toggle-row">
+          <div>
+            <label>运行中向我提问</label>
+            <p class="hint">在关键检查点暂停，补充知识 / 校验产物</p>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="askEnabled" checked />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="field" id="checkpointsWrap">
+          <label>提问检查点</label>
+          <div id="checkpointList"></div>
+        </div>
+
+        <div class="actions">
+          <button id="runBtn" class="btn btn-primary">开始运行</button>
+          <button id="stopBtn" class="btn btn-ghost" disabled>中止</button>
+        </div>
+      </aside>
+
+      <!-- 中：流程图 + 评估 -->
+      <main class="panel flow">
+        <h2>流程</h2>
+        <div class="pipeline" id="pipeline">
+          <div class="node" data-node="step1">
+            <div class="node-icon">1</div>
+            <div class="node-body"><div class="node-title">样本包构建</div><div class="node-sub">data → sample_packages</div></div>
+          </div>
+          <div class="arrow">→</div>
+          <div class="node" data-node="step2">
+            <div class="node-icon">2</div>
+            <div class="node-body"><div class="node-title">语义发现</div><div class="node-sub">→ semantic_reports</div></div>
+          </div>
+          <div class="arrow">→</div>
+          <div class="node" data-node="step3">
+            <div class="node-icon">3</div>
+            <div class="node-body"><div class="node-title">Skill 编译</div><div class="node-sub">→ SKILL.md + EVALUATION.md</div></div>
+          </div>
+        </div>
+        <div class="reflect-loop" id="reflectLoop">
+          <span class="loop-line"></span>
+          <span class="loop-label" data-node="reflect">↩ 反思环 · 携带缺口回跳补证</span>
+        </div>
+
+        <h3>逐轮评估</h3>
+        <div class="rounds" id="rounds"><p class="empty">尚未运行</p></div>
+
+        <div id="finalCard" class="final-card hidden">
+          <div class="final-title">运行结束</div>
+          <div class="final-body" id="finalBody"></div>
+        </div>
+
+        <!-- 评测与报告：benchmark 跑分 + 语义覆盖报告（独立于挖掘流水线） -->
+        <div class="divider"></div>
+        <div class="eval-panel">
+          <h3>评测与报告</h3>
+          <p class="hint">对已编译的 skill 做 benchmark 跑分（可设难度分布），以及语义覆盖占比报告。</p>
+
+          <div class="eval-controls">
+            <div class="eval-row">
+              <label>难度分布</label>
+              <input type="text" id="benchDist" placeholder="easy:3,medium:8,hard:7（留空=不指定）" />
+            </div>
+            <div class="eval-row">
+              <label>目标总题量</label>
+              <input type="number" id="benchTotal" min="1" max="200" value="18" />
+            </div>
+            <div class="eval-row">
+              <label>跑分方式</label>
+              <select id="benchMode"></select>
+            </div>
+            <label class="eval-check">
+              <input type="checkbox" id="benchSkipBuild" />
+              <span>复用现有题库（不重新构建）</span>
+            </label>
+          </div>
+
+          <div class="eval-actions">
+            <button id="benchBtn" class="btn btn-primary">构建 + 跑分</button>
+            <button id="coverageBtn" class="btn btn-ghost">生成语义覆盖报告</button>
+          </div>
+
+          <div class="eval-phases hidden" id="benchPhases">
+            <span class="ephase" data-ephase="build">构建题库</span>
+            <span class="earrow">→</span>
+            <span class="ephase" data-ephase="run">逐题跑分</span>
+            <span class="earrow">→</span>
+            <span class="ephase" data-ephase="aggregate">聚合报告</span>
+          </div>
+
+          <div id="benchResult" class="report-card hidden"></div>
+          <div id="coverageResult" class="report-card hidden"></div>
+        </div>
+      </main>
+
+      <!-- 右：实时日志 -->
+      <aside class="panel logs">
+        <h2>实时日志</h2>
+        <div class="log-stream" id="logStream"></div>
+      </aside>
+    </div>
+  </div>
+
+  <!-- 提问弹窗（阻塞式）：列出系统发现的具体缺口问题，逐条作答 -->
+  <div class="modal-overlay hidden" id="modalOverlay">
+    <div class="modal">
+      <div class="modal-tag" id="qTag">检查点</div>
+      <div class="modal-title" id="qTitle"></div>
+      <p class="modal-intro" id="qIntro"></p>
+      <div class="q-list" id="qList"></div>
+      <label class="stop-row hidden" id="qStopRow">
+        <input type="checkbox" id="qStop" />
+        <span>我认为已无需继续 —— 结束反思环</span>
+      </label>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="qSkip">全部留空继续</button>
+        <button class="btn btn-primary" id="qSubmit">提交答案并继续</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

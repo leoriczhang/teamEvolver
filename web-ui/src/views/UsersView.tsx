@@ -139,17 +139,9 @@ export default function UsersView({ active }: { active: boolean }) {
 
   return (
     <div className="mx-auto max-w-[1200px] px-7 py-6">
-      <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-[22px] font-bold tracking-tight">用户管理</h1>
-          <div className="mt-1 text-xs text-muted-foreground">
-            注册用户、分配角色，并配置个人/团队 OpenViking key；其他空间参数由系统固定。
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={refresh}>刷新</Button>
-          <Button size="sm" onClick={newUser}>+ 注册用户</Button>
-        </div>
+      <div className="mb-5 flex items-center justify-end gap-2">
+        <Button variant="outline" size="sm" onClick={refresh}>刷新</Button>
+        <Button size="sm" onClick={newUser}>+ 注册用户</Button>
       </div>
 
       <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">

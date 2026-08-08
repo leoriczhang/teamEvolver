@@ -17,7 +17,7 @@ export async function api<T = any>(path: string, opts?: RequestInit): Promise<T>
   }
   if (!res.ok) {
     throw new ApiError(
-      data?.detail || data?.raw || res.statusText || `${path} -> ${res.status}`
+      data?.detail || data?.msg || data?.raw || res.statusText || `${path} -> ${res.status}`
     );
   }
   return data as T;
@@ -65,6 +65,14 @@ export interface Candidate {
   proposed_action?: string;
   rationale?: string;
   min_score?: number;
+  source?: {
+    kind?: string;
+    skill_name?: string;
+    artifact_sha256?: string;
+    dataset_format?: string;
+    question_count?: number;
+    submitted_by?: string;
+  };
   candidate_skill?: {
     name?: string;
     description?: string;

@@ -58,15 +58,8 @@ export default function SessionFilterView({ active }: { active: boolean }) {
 
   return (
     <div className="mx-auto max-w-[1200px] px-7 py-6">
-      <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-[22px] font-bold tracking-tight">过滤审计</h1>
-          <div className="mt-1 text-xs text-muted-foreground">
-            查看 session 入队前的 valuable / chitchat 判别结果，用于校准进化入口。
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <select
+      <div className="mb-5 flex flex-wrap items-center justify-end gap-2">
+        <select
             value={decision}
             onChange={(e) => setDecision(e.target.value as DecisionFilter)}
             className="h-8 rounded-lg border border-border bg-background px-2 text-xs font-semibold outline-none"
@@ -74,8 +67,8 @@ export default function SessionFilterView({ active }: { active: boolean }) {
             <option value="">全部判别</option>
             <option value="valuable">valuable</option>
             <option value="chitchat">chitchat</option>
-          </select>
-          <select
+        </select>
+        <select
             value={limit}
             onChange={(e) => setLimit(Number(e.target.value))}
             className="h-8 rounded-lg border border-border bg-background px-2 text-xs font-semibold outline-none"
@@ -83,11 +76,10 @@ export default function SessionFilterView({ active }: { active: boolean }) {
             {[50, 100, 200, 500].map((n) => (
               <option key={n} value={n}>最近 {n} 条</option>
             ))}
-          </select>
-          <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
-            查询
-          </Button>
-        </div>
+        </select>
+        <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
+          查询
+        </Button>
       </div>
 
       <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">

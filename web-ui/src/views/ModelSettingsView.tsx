@@ -104,22 +104,14 @@ export default function ModelSettingsView({
 
   return (
     <div className="mx-auto max-w-[1080px] px-7 py-6">
-      <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-[22px] font-bold tracking-tight">模型配置</h1>
-          <div className="mt-1 text-xs text-muted-foreground">
-            配置 SkillGene 在总结、判断、合并和生成技能时使用的模型。外部 Hermes 会话仍通过服务端接口上传，不在前端手工提交。
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>刷新</Button>
-          <Button variant="outline" size="sm" onClick={testModel} disabled={!isAdmin || testing}>
-            {testing ? "测试中…" : "测试模型"}
-          </Button>
-          <Button size="sm" onClick={save} disabled={!isAdmin || saving}>
-            保存配置
-          </Button>
-        </div>
+      <div className="mb-5 flex items-center justify-end gap-2">
+        <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>刷新</Button>
+        <Button variant="outline" size="sm" onClick={testModel} disabled={!isAdmin || testing}>
+          {testing ? "测试中…" : "测试模型"}
+        </Button>
+        <Button size="sm" onClick={save} disabled={!isAdmin || saving}>
+          保存配置
+        </Button>
       </div>
 
       <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(170px,1fr))] gap-3.5">

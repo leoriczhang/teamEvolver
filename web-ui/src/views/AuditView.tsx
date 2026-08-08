@@ -50,15 +50,8 @@ export default function AuditView({ active }: { active: boolean }) {
 
   return (
     <div className="mx-auto max-w-[1200px] px-7 py-6">
-      <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-[22px] font-bold tracking-tight">进化审计</h1>
-          <div className="mt-1 text-xs text-muted-foreground">
-            追踪每次进化周期消费的会话、生成的候选和上传的技能变更。
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Input
+      <div className="mb-5 flex flex-wrap items-center justify-end gap-2">
+        <Input
             value={sessionId}
             placeholder="按 session_id 过滤"
             className="h-8 w-[220px]"
@@ -66,8 +59,8 @@ export default function AuditView({ active }: { active: boolean }) {
             onKeyDown={(e) => {
               if (e.key === "Enter") refresh();
             }}
-          />
-          <select
+        />
+        <select
             value={limit}
             onChange={(e) => setLimit(Number(e.target.value))}
             className="h-8 rounded-lg border border-border bg-background px-2 text-xs font-semibold outline-none"
@@ -75,9 +68,8 @@ export default function AuditView({ active }: { active: boolean }) {
             {[20, 50, 100, 200].map((n) => (
               <option key={n} value={n}>最近 {n} 条</option>
             ))}
-          </select>
-          <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>查询</Button>
-        </div>
+        </select>
+        <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>查询</Button>
       </div>
 
       <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">

@@ -38,11 +38,9 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
   const [evaluating, setEvaluating] = useState<Record<string, boolean>>({});
   const [openJobId, setOpenJobId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const loaded = useRef(false);
+  const wasActive = useRef(false);
   const evaluatingRef = useRef<Record<string, boolean>>({});
-  const evalCacheRef = useRef<Record<string, EvalResult>>({});
   evaluatingRef.current = evaluating;
-  evalCacheRef.current = evalCache;
 
   const evaluate = useCallback(async (jobId: string, force: boolean) => {
     if (evaluatingRef.current[jobId]) return;
@@ -82,28 +80,22 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
       for (const c of next) {
         if (c.evaluation) serverEvaluations[c.job_id] = c.evaluation;
       }
-      const mergedCache = { ...evalCacheRef.current, ...serverEvaluations };
       if (Object.keys(serverEvaluations).length) {
         setEvalCache((m) => ({ ...m, ...serverEvaluations }));
       }
       setCands(next);
-      for (const c of next) {
-        if (!mergedCache[c.job_id] && !evaluatingRef.current[c.job_id]) {
-          evaluate(c.job_id, false);
-        }
-      }
     } catch (e: any) {
       toastErr("加载候选失败", e.message);
     } finally {
       setLoading(false);
     }
-  }, [evaluate]);
+  }, []);
 
   useEffect(() => {
-    if (active && !loaded.current) {
-      loaded.current = true;
+    if (active && !wasActive.current) {
       refresh();
     }
+    wasActive.current = active;
   }, [active, refresh]);
 
   async function validate(jobId: string, mode: "auto" | "force") {
@@ -159,13 +151,7 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
 
   return (
     <div className="mx-auto max-w-[1200px] px-7 py-6">
-      <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-[22px] font-bold tracking-tight">候选评审</h1>
-          <div className="mt-1 text-xs text-muted-foreground">
-            集中处理待发布技能候选，查看 Verify 与 True Replay 证据后再发布。
-          </div>
-        </div>
+      <div className="mb-5 flex justify-end">
         <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
           刷新
         </Button>
@@ -186,13 +172,9 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
             <ListViewport>
               <Table
                 headers={[
-                  "技能",
-                  "动作",
-                  "Verify",
-                  "True Replay",
-                  "基线",
-                  "建议",
-                  "操作",
+                  "候选技能",
+                  "A/B 评估",
+                  "人工决策",
                 ]}
               >
                 {candPager.items.map((c) => {
@@ -203,27 +185,37 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
                   return (
                     <tr key={c.job_id}>
                       <td className="link border-b border-line px-4 py-2.5 align-top" onClick={() => setOpenJobId(c.job_id)}>
-                        <div className="font-semibold">{candidateName(c)}</div>
-                        <div className="mt-1 max-w-[320px] truncate text-xs text-muted-foreground">{c.rationale || c.job_id}</div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="min-w-0 max-w-[320px] truncate font-semibold" title={candidateName(c)}>{candidateName(c)}</div>
+                          <Pill tone="blue">{c.proposed_action || "-"}</Pill>
+                        </div>
+                        <div className="mt-1 max-w-[320px] truncate text-xs text-muted-foreground" title={c.rationale || c.job_id}>{c.rationale || c.job_id}</div>
                       </td>
-                      <Td><Pill tone="blue">{c.proposed_action || "-"}</Pill></Td>
-                      <Td>{busy ? <span className="score pending">评估中…</span> : <ScoreText value={ev?.verify_score} threshold={ev?.verification?.threshold} pending="待评估" />}</Td>
                       <Td>
-                        {busy ? <span className="score pending">评估中…</span> : <ScoreText value={ev?.replay_score} threshold={rep.threshold ?? c.min_score ?? 0.75} pending="待评估" />}
+                        <div className="grid min-w-[230px] grid-cols-3 gap-3">
+                          <ScoreItem label="Verify">
+                            {busy ? <span className="score pending">评估中…</span> : <ScoreText value={ev?.verify_score} threshold={ev?.verification?.threshold} pending="待评估" />}
+                          </ScoreItem>
+                          <ScoreItem label="Replay">
+                            {busy ? <span className="score pending">评估中…</span> : <ScoreText value={ev?.replay_score} threshold={rep.threshold ?? c.min_score ?? 0.75} pending="待评估" />}
+                          </ScoreItem>
+                          <ScoreItem label="基线">
+                            {busy ? <span className="score pending">—</span> : <ScoreText value={rep.baseline_mean} />}
+                          </ScoreItem>
+                        </div>
                         {!busy && issue && <div className="mt-1 max-w-[220px] truncate text-[11px] text-destructive" title={issue}>{issue}</div>}
                       </Td>
-                      <Td>{busy ? <span className="score pending">—</span> : <ScoreText value={rep.baseline_mean} />}</Td>
                       <Td>
-                        {ev ? (
-                          ev.recommended_publish ? <Pill tone="green">建议发布</Pill> : <Pill tone="red">建议复核</Pill>
-                        ) : (
-                          <span className="text-xs text-muted-foreground">—</span>
-                        )}
-                      </Td>
-                      <Td>
-                        <div className="flex flex-wrap gap-1.5">
+                        <div className="mb-2">
+                          {ev ? (
+                            ev.recommended_publish ? <Pill tone="green">建议发布</Pill> : <Pill tone="red">建议复核</Pill>
+                          ) : (
+                            <Pill tone="gray">等待评估</Pill>
+                          )}
+                        </div>
+                        <div className="flex min-w-[210px] flex-wrap gap-1.5">
                           <Button variant="outline" size="sm" disabled={busy} onClick={() => evaluate(c.job_id, true)}>
-                            {busy ? "评估中…" : "重新评估"}
+                            {busy ? "评估中…" : ev ? "重新评估" : "开始 A/B 评估"}
                           </Button>
                           <Button size="sm" onClick={() => validate(c.job_id, "auto")}>验证发布</Button>
                           <Button variant="outline" size="sm" onClick={() => validate(c.job_id, "force")}>强制发布</Button>
@@ -255,7 +247,7 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
 
 function Table({ headers, children }: { headers: string[]; children: ReactNode }) {
   return (
-    <table className="w-full border-collapse">
+    <table className="w-full table-fixed border-collapse">
       <thead>
         <tr>
           {headers.map((h) => (
@@ -272,4 +264,13 @@ function Table({ headers, children }: { headers: string[]; children: ReactNode }
 
 function Td({ children }: { children: ReactNode }) {
   return <td className="border-b border-line px-4 py-2.5 align-top">{children}</td>;
+}
+
+function ScoreItem({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div>
+      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-soft">{label}</div>
+      {children}
+    </div>
+  );
 }

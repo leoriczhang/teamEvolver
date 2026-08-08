@@ -32,6 +32,11 @@ from .users_admin import (
     _verify_password,
 )
 from ..config_store import ConfigStore
+from ..mining_lifecycle import (
+    MiningLifecycleError,
+    list_mined_skill_statuses,
+    submit_mined_skill,
+)
 from ..session_filter import SessionValueClassifier
 from ..session_store import SessionStore
 from ..skills.hub import SkillHub
@@ -489,6 +494,10 @@ class RoutesMixin:
             owner._start_skill_reload_polling()
             owner._start_embedded_evolve()
             try:
+                owner._start_skillminer()
+            except Exception:
+                logger.debug("[SkillMiner] eager start failed", exc_info=True)
+            try:
                 yield
             finally:
                 owner._ready_event.clear()
@@ -552,6 +561,8 @@ class RoutesMixin:
         # Skill and user management REST APIs used by the unified console.
         self._register_skills_admin_routes(app)
         self._register_users_admin_routes(app)
+        # SkillMiner (挖掘) console reverse-proxy: /api/mining/* -> subprocess.
+        self._register_skillminer_routes(app)
 
         @app.get("/")
         @app.get("/console")
@@ -925,12 +936,73 @@ class RoutesMixin:
             except Exception as exc:  # noqa: BLE001
                 return {"stats": {"total": 0, "decisions": {}, "statuses": {}, "modes": {}}, "items": [], "reason": str(exc)}
 
+        @app.get("/api/mined-skills")
+        async def api_mined_skills():
+            """Annotate SkillMiner artifacts with their SkillGene lifecycle state."""
+            try:
+                store = ValidationStore.from_config(owner.config)
+                registered = {
+                    str(skill.get("name") or "")
+                    for skill in (
+                        owner.skill_manager.get_all_skills()
+                        if owner.skill_manager is not None
+                        else []
+                    )
+                }
+                skills = list_mined_skill_statuses(
+                    store,
+                    registered_skill_names=registered,
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=503, detail=f"候选存储不可用：{exc}") from exc
+            return {"skills": skills, "external_runtime_required": False}
+
+        @app.post("/api/mined-skills/{skill_name}/submit")
+        async def api_submit_mined_skill(skill_name: str, request: Request):
+            """Send a mined bundle to A/B evaluation + human review, idempotently."""
+            user = _session_user(request) or {}
+            current_skill = None
+            if owner.skill_manager is not None:
+                current_skill = next(
+                    (
+                        skill
+                        for skill in owner.skill_manager.get_all_skills()
+                        if str(skill.get("name") or "") == skill_name
+                    ),
+                    None,
+                )
+            try:
+                store = ValidationStore.from_config(owner.config)
+                submitted = submit_mined_skill(
+                    store,
+                    skill_name,
+                    current_skill=current_skill,
+                    submitted_by=str(user.get("id") or user.get("username") or ""),
+                )
+            except MiningLifecycleError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=503, detail=f"提交候选失败：{exc}") from exc
+            job = submitted["job"]
+            decision = submitted.get("decision") if isinstance(submitted.get("decision"), dict) else None
+            return {
+                "created": bool(submitted.get("created")),
+                "job_id": str(job.get("job_id") or ""),
+                "skill_name": str(job.get("skill_name") or skill_name),
+                "status": str(decision.get("status") or "candidate") if decision else "candidate",
+                "dataset_format": (job.get("source") or {}).get("dataset_format"),
+                "question_count": (job.get("source") or {}).get("question_count"),
+            }
+
         @app.get("/validation/candidates")
         async def validation_candidates():
             try:
                 store = ValidationStore.from_config(owner.config)
                 candidates = []
-                for job in store.list_open_jobs(user_alias=str(owner.config.sharing_user_alias or "")):
+                # The console is the human publication queue: a machine-side
+                # validation result must not hide a candidate before an admin
+                # explicitly publishes or rejects it.
+                for job in store.list_open_jobs():
                     job_id = str(job.get("job_id") or "")
                     evaluation = store.load_evaluation(job_id) if job_id else None
                     candidates.append(_candidate_payload(job, evaluation))

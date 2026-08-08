@@ -1,0 +1,23 @@
+package:
+  target_size: 24-36
+  output_mode: mirrored_subset_tree
+  mirror_policy: selected_only
+  stop_when_new_package_has_low_marginal_gain: true
+
+coverage:
+  require_all_single_files_in_every_package: true
+  require_every_source_directory_in_every_package: true
+  require_every_file_inside_directory_in_every_package: false
+  forbid_whole_file_copy_for_single_file_sources: true
+  require_meaningful_directory_sampling_density: true
+  directory_sampling_density_rule:
+    small_dir_le_4: "at_least_N_minus_1"
+    mid_dir_5_to_8: "at_least_ceil(0.5*N)"
+    large_dir_gt_8: "at_least_max(4,ceil(0.35*N))"
+  target_global_directory_file_coverage: ">=80%" 
+
+composition:
+  anchor_rules: 4-8
+  reference_teams: 2-5
+  scoring_examples: 6-12
+  raw_post_snippets: 8-16
