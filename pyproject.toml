@@ -70,7 +70,19 @@ teamEvolver = [
     "web/dist/assets/*",
     "integrations/hermes_skill/*",
     "integrations/hermes_skill_sync/*",
+    "skillminer/*.md",
+    "skillminer/.env.example",
+    "skillminer/*.sh",
+    "skillminer/data/input/.gitkeep",
+    "skillminer/web_console/static/*",
+    "skillminer/*-agent-skill/*.md",
+    "skillminer/*-agent-skill/assets/*",
+    "skillminer/*-agent-skill/references/*",
+    "skillminer/*-agent-skill/scripts/*",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
@@ -78,3 +90,6 @@ line-length = 120
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 ignore = ["E731", "F403", "F405"]
+
+[tool.ruff.lint.per-file-ignores]
+"teamEvolver/skillminer/*_prompt.py" = ["E501"]

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -128,6 +129,57 @@ class ValidationWorker:
             "reason": "replay produced a concrete assistant response",
         }
 
+    async def _score_replay_output_with_rubric(
+        self,
+        case: dict[str, Any],
+        response_text: str,
+    ) -> dict[str, Any]:
+        """Judge a mined benchmark answer against its private gold rubric."""
+        gold = case.get("gold") if isinstance(case.get("gold"), dict) else {}
+        if not gold:
+            return self._score_replay_output(response_text)
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a strict benchmark judge. Score the assistant answer against "
+                    "the private rubric. Reward expected labels and must_hit requirements; "
+                    "penalize any must_avoid violation or invented fact. Reply only as JSON "
+                    'with {"score": number from 0 to 1, "reason": "short reason"}.'
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Instruction:\n{case.get('instruction', '')}\n\n"
+                    f"Private rubric:\n{json.dumps(gold, ensure_ascii=False)}\n\n"
+                    f"Assistant answer:\n{response_text}"
+                ),
+            },
+        ]
+        try:
+            raw = await self._client.chat(
+                messages,
+                max_tokens=512,
+                temperature=0.0,
+            )
+            start, end = raw.find("{"), raw.rfind("}")
+            parsed = (
+                json.loads(raw[start : end + 1])
+                if start >= 0 and end >= start
+                else {}
+            )
+            score = max(0.0, min(1.0, float(parsed.get("score"))))
+            return {
+                "score": round(score, 3),
+                "signal": "gold_rubric",
+                "reason": str(
+                    parsed.get("reason") or "internal benchmark rubric score"
+                )[:800],
+            }
+        except Exception:  # noqa: BLE001
+            return self._score_replay_output(response_text)
+
     @staticmethod
     def _build_replay_skill_system(skill: Optional[dict[str, Any]]) -> str:
         if not isinstance(skill, dict) or not skill.get("name"):
@@ -167,7 +219,10 @@ class ValidationWorker:
             max_tokens=2048,
             temperature=0.1,
         )
-        replay_result = self._score_replay_output(response_text)
+        replay_result = await self._score_replay_output_with_rubric(
+            case,
+            response_text,
+        )
         normalized_score = replay_result["score"]
         return {
             "label": label,

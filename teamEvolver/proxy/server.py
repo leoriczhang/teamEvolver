@@ -23,6 +23,7 @@ from ..config import TeamEvolverConfig
 from ..integrations.dreamcycle import DreamCycleSupervisor
 from ..skills.manager import SkillManager
 from .routes import RoutesMixin
+from .skillminer_bridge import SkillMinerBridgeMixin
 from .skills_admin import SkillsAdminMixin
 from .uploads import UploadsMixin
 from .users_admin import UsersAdminMixin
@@ -35,8 +36,9 @@ _RESET = "\033[0m"
 
 class ProxyServer(
     RoutesMixin,
-    UploadsMixin,
+    SkillMinerBridgeMixin,
     SkillsAdminMixin,
+    UploadsMixin,
     UsersAdminMixin,
 ):
     """teamEvolver service: console, skill sync, user management, and validation.
@@ -119,6 +121,10 @@ class ProxyServer(
             self._skill_reload_task = None
         self._dreamcycle.stop()
         await self._stop_embedded_evolve()
+        try:
+            self._stop_skillminer()
+        except Exception:
+            logger.debug("[SkillMiner] shutdown stop failed", exc_info=True)
         await self._await_background_tasks(self._shutdown_drain_timeout_seconds)
 
     def _start_dreamcycle(self) -> None:

@@ -357,6 +357,9 @@ def annotate_cases(job: dict[str, Any], search_roots: list[Path]) -> list[dict[s
                     case.get("evaluation_profile") or ""
                 ),
                 "had_tool_calls": bool(case.get("had_tool_calls")),
+                "gold": case.get("gold") if isinstance(case.get("gold"), dict) else {},
+                "target_dimensions": case.get("target_dimensions") or [],
+                "difficulty": str(case.get("difficulty") or ""),
                 "referenced_paths": referenced,
                 "missing_paths": missing,
                 "grounded": bool(referenced) and runnable,
@@ -495,6 +498,7 @@ def _run_worker(spec_path: str) -> None:
                 spec["harness"],
                 original_instruction,
                 branch_snapshot,
+                rubric=spec.get("rubric"),
             )
             interactions.append(
                 {
@@ -544,7 +548,8 @@ def _run_worker(spec_path: str) -> None:
 
 def spawn_branch(branch: str, sandbox: dict[str, str], instruction: str,
                  harness: dict[str, str], skill: Optional[dict[str, Any]],
-                 tmp: Path, timeout: int, max_interactions: int = 4) -> dict[str, Any]:
+                 tmp: Path, timeout: int, max_interactions: int = 4,
+                 rubric: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """Spawn a worker subprocess for one branch and collect its trajectory."""
     worker_python = os.environ.get("TEAMEVOLVER_REPLAY_PYTHON", "").strip() or sys.executable
     spec = {
@@ -556,6 +561,7 @@ def spawn_branch(branch: str, sandbox: dict[str, str], instruction: str,
         # hermes-agent package. Resolved once here so both branches agree.
         "hermes_origin": resolve_hermes_origin() or "",
         "instruction": instruction,
+        "rubric": rubric or {},
         "harness": harness,
         "skill_content": (skill or {}).get("content"),
         "max_iterations": 25,
@@ -616,6 +622,8 @@ def judge_branch(
     instruction: str,
     branch: dict[str, Any],
     checklist: dict[str, Any] | None = None,
+    *,
+    rubric: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """LLM-as-judge over the *trajectory*: did the task actually get done, were
     the tools used correctly? Returns {overall, task_completion, tool_correctness,
@@ -683,8 +691,15 @@ def judge_branch(
         '[{"id":"...","passed":true|false,"reason":"..."}],'
         '"feedback":"..","rationale":".."}'
     )
+    rubric_text = ""
+    if isinstance(rubric, dict) and rubric:
+        rubric_text = (
+            "\n\n[Task-specific grading rubric]\n"
+            + json.dumps(rubric, ensure_ascii=False, indent=2)[:6000]
+        )
     user_prompt = (
-        f"[Instruction]\n{instruction}\n\n[Tool-call trace]\n{trace}\n\n"
+        f"[Instruction]\n{instruction}{rubric_text}\n\n"
+        f"[Tool-call trace]\n{trace}\n\n"
         f"[Final answer]\n{final}\n\n[Soft checklist]\n"
         f"{json.dumps(soft_items, ensure_ascii=False, indent=2)}"
     )
@@ -1117,6 +1132,7 @@ def evaluate_job(
                     tmp,
                     timeout,
                     max_interactions=max_interactions,
+                    rubric=chosen.get("gold"),
                 ): branch
                 for branch in ("baseline", "candidate")
             }
@@ -1199,6 +1215,7 @@ def evaluate_job(
                 chosen["instruction"],
                 results[branch],
                 scoped_checklist,
+                rubric=chosen.get("gold"),
             )
             for branch in ("baseline", "candidate")
         }
@@ -1349,6 +1366,7 @@ def run(
                 tmp,
                 timeout,
                 max_interactions=max_interactions,
+                rubric=chosen.get("gold"),
             )
 
         print("\n===== 双分支执行结果 =====")
@@ -1366,7 +1384,12 @@ def run(
                 print("   工具轨迹:")
                 print("   " + render_trajectory(r.get("messages") or []).replace("\n", "\n   "))
                 print(f"   最终回答: {str(r.get('final_response') or '')[:400]}")
-            judged[branch] = judge_branch(harness, chosen["instruction"], r)
+            judged[branch] = judge_branch(
+                harness,
+                chosen["instruction"],
+                r,
+                rubric=chosen.get("gold"),
+            )
 
         print("\n===== 裁判打分（trajectory-aware） =====")
         for branch in ("baseline", "candidate"):

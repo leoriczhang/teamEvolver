@@ -1,0 +1,27 @@
+# Secrets and local Hermes state
+.env
+.hermes_home/
+
+# Input documents are intentionally local by default
+data/input/*
+!data/input/.gitkeep
+data/validation/
+
+# Pipeline and evaluation artifacts
+sample_packages/
+semantic_reports/
+compiled_skill/
+reflection_rounds/
+run_history/
+benchmark_results/
+benchmark_sessions/
+trajectory_benchmarks/
+coverage_reports/
+skill_test_results/
+lift_datasets/
+
+# Logs and caches
+*.log
+__pycache__/
+*.py[cod]
+.DS_Store

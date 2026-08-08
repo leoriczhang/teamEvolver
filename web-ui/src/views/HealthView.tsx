@@ -128,13 +128,7 @@ export default function HealthView({
 
   return (
     <div className="mx-auto max-w-[1120px] px-7 py-6">
-      <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-[22px] font-bold tracking-tight">系统健康</h1>
-          <div className="mt-1 text-xs text-muted-foreground">
-            聚合服务、存储、模型、用户和技能状态，用于快速定位运行问题。
-          </div>
-        </div>
+      <div className="mb-5 flex justify-end">
         <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
           刷新
         </Button>

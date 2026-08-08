@@ -25,6 +25,7 @@
 - [手动安装](#手动安装)
 - [控制台概览](#控制台概览)
 - [OpenViking / 对象存储](#openviking--对象存储)
+- [SkillMiner 与 LIFT](#skillminer-与-lift)
 - [DreamCycle 与验证队列](#dreamcycle-与验证队列)
 - [True Replay：用真实轨迹验证技能](#true-replay用真实轨迹验证技能)
 - [项目结构](#项目结构)
@@ -296,6 +297,33 @@ OpenViking 空间分工：
 如果需要自部署 OpenViking Server，请参考 [volcengine/OpenViking](https://github.com/volcengine/OpenViking)，并通过 `teamEvolver config sharing.viking_endpoint "<your-server-url>"` 覆盖默认服务地址。
 
 不要把真实 API Key 写入仓库。建议使用本机配置、环境变量或部署系统的 Secret 管理能力注入。
+
+---
+
+## SkillMiner 与 LIFT
+
+统一控制台内置 SkillMiner 文档挖掘流程，可从领域文档生成样本包、语义报告、候选
+`SKILL.md` 和内部 `benchmark.jsonl`。挖掘产物不会直接发布，而是提交到现有候选评审
+队列，继续经过 A/B 回放、Checklist 门禁和人工发布。
+
+SkillMiner 通过本机 Hermes CLI 执行模型任务。安装脚本会幂等检查并按需安装 Hermes：
+
+```bash
+bash scripts/install_teamEvolver.sh
+# 仅部署进化服务，不启用文档挖掘
+bash scripts/install_teamEvolver.sh --skip-hermes
+```
+
+LIFT 是可选的外部评测工作区，不会复制进 teamEvolver 安装包：
+
+```bash
+bash scripts/setup_lift.sh
+# 同时创建 LIFT Python 环境
+bash scripts/setup_lift.sh --install-deps
+```
+
+详细的数据契约、环境变量和流水线操作见
+[`teamEvolver/skillminer/README.md`](./teamEvolver/skillminer/README.md)。
 
 ---
 

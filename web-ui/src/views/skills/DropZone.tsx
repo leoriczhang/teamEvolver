@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
 /**
@@ -11,11 +11,13 @@ export default function DropZone({
   label,
   multiple = false,
   accept,
+  disabled = false,
 }: {
   onFiles: (files: FileList) => void;
-  label: string;
+  label: ReactNode;
   multiple?: boolean;
   accept?: string;
+  disabled?: boolean;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
@@ -23,14 +25,26 @@ export default function DropZone({
   return (
     <>
       <div
-        className={cn("drop", over && "over")}
-        onClick={() => inputRef.current?.click()}
+        role="button"
+        tabIndex={disabled ? -1 : 0}
+        aria-disabled={disabled}
+        aria-label={typeof label === "string" ? label : "选择上传文件"}
+        className={cn("drop", over && "over", disabled && "cursor-not-allowed opacity-55")}
+        onClick={() => !disabled && inputRef.current?.click()}
+        onKeyDown={(e) => {
+          if (!disabled && (e.key === "Enter" || e.key === " ")) {
+            e.preventDefault();
+            inputRef.current?.click();
+          }
+        }}
         onDragEnter={(e) => {
           e.preventDefault();
+          if (disabled) return;
           setOver(true);
         }}
         onDragOver={(e) => {
           e.preventDefault();
+          if (disabled) return;
           setOver(true);
         }}
         onDragLeave={(e) => {
@@ -40,7 +54,7 @@ export default function DropZone({
         onDrop={(e) => {
           e.preventDefault();
           setOver(false);
-          if (e.dataTransfer.files.length) onFiles(e.dataTransfer.files);
+          if (!disabled && e.dataTransfer.files.length) onFiles(e.dataTransfer.files);
         }}
       >
         {label}
@@ -50,6 +64,7 @@ export default function DropZone({
         type="file"
         multiple={multiple}
         accept={accept}
+        disabled={disabled}
         className="hidden"
         onChange={(e) => {
           if (e.target.files?.length) onFiles(e.target.files);

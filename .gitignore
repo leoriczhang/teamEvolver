@@ -20,3 +20,4 @@ dist/
 *.orig
 evolve_history.jsonl
 records/
+external/LIFT/

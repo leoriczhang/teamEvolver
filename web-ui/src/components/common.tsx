@@ -29,6 +29,27 @@ export function UserBadge({ name }: { name?: string | null }) {
   return <Pill tone="purple">👤 {name || "unknown"}</Pill>;
 }
 
+// ---- Consistent page identity header ----------------------------------- //
+export function PageHeader({
+  title,
+  description,
+  badge,
+}: {
+  title: React.ReactNode;
+  description: React.ReactNode;
+  badge?: React.ReactNode;
+}) {
+  return (
+    <header className="border-b border-line bg-surface px-7 py-5">
+      <h1 className="flex flex-wrap items-center gap-2.5 text-[22px] font-bold tracking-tight">
+        {title}
+        {badge && <Pill tone="purple">{badge}</Pill>}
+      </h1>
+      <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{description}</p>
+    </header>
+  );
+}
+
 // ---- Score text ---------------------------------------------------------- //
 export function ScoreText({
   value,
