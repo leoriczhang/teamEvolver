@@ -989,6 +989,8 @@ class SkillHub:
             "category": frontmatter.resolve_category(parsed) or "general",
             "content": body,
             "raw_md": raw_md,
+            "tree_sha256": bundle_tree_sha256(bundle),
+            "files": bundle_file_records(bundle),
         }
 
     def rollback_skill(self, skill_name: str, target_version: int) -> dict[str, Any]:

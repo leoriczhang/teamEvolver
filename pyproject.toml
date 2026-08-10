@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "teamEvolver"
 version = "0.1.0"
-description = "teamEvolver: shared SKILL.md library management, sync, console, and optional validation."
+description = "teamEvolver: standalone multi-file team skill evolution, validation, and synchronization."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -29,6 +29,8 @@ dependencies = [
     "fastapi>=0.100",
     "uvicorn[standard]>=0.23",
     "httpx>=0.25.0",
+    "json-repair>=0.44.0",
+    "openai>=1.0",
     "tiktoken>=0.5",
 ]
 

@@ -102,7 +102,7 @@ const DASH_PAGE_META: Record<DashTab, { title: string; description: string }> = 
   },
   candidates: {
     title: "候选评审",
-    description: "集中处理待发布技能候选，核对 Verify 与 True Replay 证据后再发布。",
+    description: "集中处理待发布技能候选，核对 True Replay 证据后再发布。",
   },
   audit: {
     title: "进化审计",

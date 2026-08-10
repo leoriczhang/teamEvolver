@@ -14,7 +14,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from ..skills.render import build_skill_md
+from ..skills.bundle import candidate_skill_bundle, encode_bundle_payload
 from ..storage import build_object_store, is_not_found_error, peer_key_prefix
 
 logger = logging.getLogger(__name__)
@@ -70,6 +70,14 @@ class ValidationStore:
 
     def _candidate_skill_key(self, job_id: str) -> str:
         return f"{self._prefix()}candidate_skills/{job_id}/SKILL.md"
+
+    def _candidate_skill_prefix(self, job_id: str) -> str:
+        return f"{self._prefix()}candidate_skills/{job_id}/"
+
+    def _candidate_bundle_file_key(self, job_id: str, rel_path: str) -> str:
+        if rel_path == "SKILL.md":
+            return self._candidate_skill_key(job_id)
+        return f"{self._candidate_skill_prefix(job_id)}files/{rel_path}"
 
     def _result_key(self, job_id: str, user_alias: str) -> str:
         return f"{self._prefix()}validation_results/{job_id}/{user_alias}.json"
@@ -127,10 +135,27 @@ class ValidationStore:
         )
         candidate_skill = payload.get("candidate_skill")
         if isinstance(candidate_skill, dict) and candidate_skill.get("name"):
+            bundle = candidate_skill_bundle(candidate_skill)
+            keep_keys: set[str] = set()
+            for rel_path, data in sorted(bundle.items()):
+                key = self._candidate_bundle_file_key(job_id, rel_path)
+                keep_keys.add(key)
+                self._bucket.put_object(key, data)
+            bundle_key = f"{self._candidate_skill_prefix(job_id)}bundle.json"
+            keep_keys.add(bundle_key)
             self._bucket.put_object(
-                self._candidate_skill_key(job_id),
-                build_skill_md(candidate_skill).encode("utf-8"),
+                bundle_key,
+                json.dumps(
+                    encode_bundle_payload(bundle),
+                    ensure_ascii=False,
+                    indent=2,
+                ).encode("utf-8"),
             )
+            for obj in self._bucket.iter_objects(
+                prefix=self._candidate_skill_prefix(job_id)
+            ):
+                if obj.key not in keep_keys:
+                    self._bucket.delete_object(obj.key)
         open_ids = self._load_open_job_ids()
         if open_ids is not None and job_id not in open_ids:
             self._save_open_job_ids([*open_ids, job_id])
@@ -317,7 +342,34 @@ class ValidationStore:
             if not is_not_found_error(exc):
                 logger.warning("[ValidationStore] failed to load decision index: %s", exc)
             return []
-        return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+        records = [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+        return self._reconcile_decision_records(records)
+
+    def _reconcile_decision_records(
+        self, records: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Refresh index rows whose per-job decision file has since advanced.
+
+        The index caches a compacted decision per job. When the same job is
+        re-published as a newer version, the authoritative per-job decision
+        file advances but the index row can lag (stale-index drift). Re-read
+        the decision file and adopt it whenever it is newer so the processed
+        list reflects the latest published version.
+        """
+        reconciled: list[dict[str, Any]] = []
+        changed = False
+        for record in records:
+            job_id = str(record.get("job_id") or "")
+            current = self.load_decision(job_id) if job_id else None
+            if isinstance(current, dict):
+                indexed_decision = record.get("decision") if isinstance(record.get("decision"), dict) else {}
+                if str(current.get("decided_at") or "") > str(indexed_decision.get("decided_at") or ""):
+                    record = {**record, "decision": current, "decided_at": current.get("decided_at")}
+                    changed = True
+            reconciled.append(record)
+        if changed:
+            reconciled.sort(key=lambda item: str(item.get("decided_at") or ""), reverse=True)
+        return reconciled
 
     def load_skill_version_context(
         self,
@@ -353,6 +405,12 @@ class ValidationStore:
         payload = dict(evaluation)
         payload["job_id"] = job_id
         payload.setdefault("evaluated_at", _utc_now_iso())
+        # Stamp the revision this evaluation was computed against so a later
+        # revision of the same job (re-generated / merged content) is detected
+        # as stale rather than silently reused. See load_fresh_evaluation.
+        if payload.get("candidate_revision") is None:
+            job = self.load_job(job_id)
+            payload["candidate_revision"] = max(1, int((job or {}).get("candidate_revision") or 1))
         self._bucket.put_object(
             self._evaluation_key(job_id),
             json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
@@ -365,6 +423,35 @@ class ValidationStore:
             if not is_not_found_error(exc):
                 logger.warning("[ValidationStore] failed to load evaluation %s: %s", job_id, exc)
             return None
+
+    def load_fresh_evaluation(
+        self, job_id: str, job: Optional[dict[str, Any]] = None
+    ) -> Optional[dict[str, Any]]:
+        """Return the cached evaluation only if it matches the job's current
+        candidate revision.
+
+        A job whose candidate content was revised (e.g. re-generated or merged
+        under the same job_id) bumps ``candidate_revision``. Reusing an
+        evaluation computed against an older revision would stamp a stale A/B
+        replay onto new content, so treat a revision mismatch as a cache miss
+        and force a fresh evaluation.
+        """
+        cached = self.load_evaluation(job_id)
+        if not isinstance(cached, dict):
+            return None
+        if job is None:
+            job = self.load_job(job_id)
+        job_revision = max(1, int((job or {}).get("candidate_revision") or 1))
+        cached_revision = max(1, int(cached.get("candidate_revision") or 1))
+        if cached_revision != job_revision:
+            logger.info(
+                "[ValidationStore] stale evaluation for %s: eval_revision=%d job_revision=%d",
+                job_id,
+                cached_revision,
+                job_revision,
+            )
+            return None
+        return cached
 
     def list_open_jobs(self, *, user_alias: str = "") -> list[dict[str, Any]]:
         jobs: list[dict[str, Any]] = []
@@ -420,21 +507,27 @@ class ValidationStore:
             return None
         return max(
             matches,
-            key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""),
+            key=lambda item: str(
+                item.get("updated_at") or item.get("created_at") or ""
+            ),
         )
 
     def reset_job_artifacts(self, job_id: str) -> dict[str, Any]:
         """Clear revision-bound outputs while retaining the validation job."""
         removed: list[str] = []
         keys = [
-            self._candidate_skill_key(job_id),
             self._evaluation_key(job_id),
             self._human_review_key(job_id),
         ]
+        result_prefix = f"{self._prefix()}validation_results/{job_id}/"
         try:
-            result_prefix = f"{self._prefix()}validation_results/{job_id}/"
-            for obj in self._bucket.iter_objects(prefix=result_prefix):
-                keys.append(obj.key)
+            keys.extend(obj.key for obj in self._bucket.iter_objects(prefix=result_prefix))
+            keys.extend(
+                obj.key
+                for obj in self._bucket.iter_objects(
+                    prefix=self._candidate_skill_prefix(job_id)
+                )
+            )
         except Exception as exc:
             if not is_not_found_error(exc):
                 logger.warning(
@@ -460,42 +553,64 @@ class ValidationStore:
     def _human_review_key(self, job_id: str) -> str:
         return f"{self._prefix()}human_review/{job_id}.json"
 
-    def save_human_review_task(self, job_id: str, task: dict[str, Any]) -> None:
+    def save_human_review_task(
+        self,
+        job_id: str,
+        task: dict[str, Any],
+    ) -> None:
         payload = dict(task)
         payload["job_id"] = job_id
         payload.setdefault("created_at", _utc_now_iso())
+        payload["updated_at"] = _utc_now_iso()
         self._bucket.put_object(
             self._human_review_key(job_id),
             json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
         )
 
-    def load_human_review_task(self, job_id: str) -> Optional[dict[str, Any]]:
+    def load_human_review_task(
+        self,
+        job_id: str,
+    ) -> Optional[dict[str, Any]]:
         try:
-            return json.loads(self._bucket.get_object(self._human_review_key(job_id)).read().decode("utf-8"))
+            return json.loads(
+                self._bucket.get_object(self._human_review_key(job_id))
+                .read()
+                .decode("utf-8")
+            )
         except Exception as exc:
             if not is_not_found_error(exc):
-                logger.warning("[ValidationStore] failed to load human review task %s: %s", job_id, exc)
+                logger.warning(
+                    "[ValidationStore] failed to load human review %s: %s",
+                    job_id,
+                    exc,
+                )
             return None
 
     def list_human_review_tasks(self) -> list[dict[str, Any]]:
-        prefix = f"{self._prefix()}human_review/"
         tasks: list[dict[str, Any]] = []
+        prefix = f"{self._prefix()}human_review/"
         for obj in self._bucket.iter_objects(prefix=prefix):
             if not obj.key.endswith(".json"):
                 continue
             try:
-                tasks.append(json.loads(self._bucket.get_object(obj.key).read().decode("utf-8")))
+                value = json.loads(
+                    self._bucket.get_object(obj.key).read().decode("utf-8")
+                )
+                if isinstance(value, dict):
+                    tasks.append(value)
             except Exception as exc:
-                logger.warning("[ValidationStore] failed to parse %s: %s", obj.key, exc)
-        tasks.sort(key=lambda item: str(item.get("created_at", "")))
+                logger.warning(
+                    "[ValidationStore] failed to parse %s: %s",
+                    obj.key,
+                    exc,
+                )
+        tasks.sort(
+            key=lambda item: str(
+                item.get("updated_at") or item.get("created_at") or ""
+            ),
+            reverse=True,
+        )
         return tasks
-
-    def delete_human_review_task(self, job_id: str) -> None:
-        try:
-            self._bucket.delete_object(self._human_review_key(job_id))
-        except Exception as exc:
-            if not is_not_found_error(exc):
-                logger.warning("[ValidationStore] failed to delete human review task %s: %s", job_id, exc)
 
     def delete_job(self, job_id: str) -> dict[str, Any]:
         """Remove a validation job and all its side artifacts.
@@ -507,7 +622,6 @@ class ValidationStore:
         removed: list[str] = []
         keys = [
             self._job_key(job_id),
-            self._candidate_skill_key(job_id),
             self._evaluation_key(job_id),
             self._decision_key(job_id),
             self._human_review_key(job_id),
@@ -516,6 +630,10 @@ class ValidationStore:
         try:
             result_prefix = f"{self._prefix()}validation_results/{job_id}/"
             for obj in self._bucket.iter_objects(prefix=result_prefix):
+                keys.append(obj.key)
+            for obj in self._bucket.iter_objects(
+                prefix=self._candidate_skill_prefix(job_id)
+            ):
                 keys.append(obj.key)
         except Exception as exc:
             if not is_not_found_error(exc):
@@ -527,4 +645,7 @@ class ValidationStore:
             except Exception as exc:
                 if not is_not_found_error(exc):
                     logger.warning("[ValidationStore] failed to delete %s: %s", key, exc)
+        open_ids = self._load_open_job_ids()
+        if open_ids is not None and job_id in open_ids:
+            self._save_open_job_ids([item for item in open_ids if item != job_id])
         return {"job_id": job_id, "removed": removed}

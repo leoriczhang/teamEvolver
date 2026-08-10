@@ -209,6 +209,71 @@ def test_objective_policy_rejects_itemwise_regression_at_equal_coverage() -> Non
     assert decision["regressed_item_ids"] == ["old"]
 
 
+def test_objective_policy_accepts_quality_gain_without_efficiency_gain() -> None:
+    checklist = {
+        "commonality": {"passed": True},
+        "items": [
+            {"id": "execution_complete", "kind": "hard", "required": True},
+            {"id": "layout_gate", "kind": "soft", "required": True},
+        ],
+    }
+    decision = objective_replay_decision(
+        checklist=checklist,
+        baseline={
+            "passed": False,
+            "hard_pass": True,
+            "pass_rate": 0.5,
+            "items": [
+                {"id": "execution_complete", "passed": True},
+                {"id": "layout_gate", "passed": False},
+            ],
+        },
+        candidate={
+            "passed": True,
+            "hard_pass": True,
+            "pass_rate": 1.0,
+            "items": [
+                {"id": "execution_complete", "passed": True},
+                {"id": "layout_gate", "passed": True},
+            ],
+        },
+        efficiency=compare_efficiency(
+            {"interaction_turns": 2, "tool_call_count": 4, "total_tokens": 400},
+            {"interaction_turns": 2, "tool_call_count": 4, "total_tokens": 400},
+        ),
+    )
+
+    assert decision["accepted"] is True
+    assert decision["verdict"] == "accept"
+    assert decision["coverage_gain"] == 0.5
+
+
+def test_objective_policy_marks_equal_failed_replay_inconclusive() -> None:
+    checklist = {
+        "commonality": {"passed": True},
+        "items": [{"id": "layout_gate", "kind": "hard", "required": True}],
+    }
+    branch = {
+        "passed": False,
+        "hard_pass": False,
+        "pass_rate": 0.0,
+        "items": [{"id": "layout_gate", "passed": False}],
+    }
+    decision = objective_replay_decision(
+        checklist=checklist,
+        baseline=branch,
+        candidate=branch,
+        efficiency=compare_efficiency(
+            {"interaction_turns": 2, "tool_call_count": 4, "total_tokens": 400},
+            {"interaction_turns": 3, "tool_call_count": 5, "total_tokens": 500},
+        ),
+    )
+
+    assert decision["accepted"] is False
+    assert decision["verdict"] == "inconclusive"
+    assert decision["no_regression"] is True
+
+
 def test_scoped_results_aggregate_back_into_merge_union() -> None:
     checklist = {
         "commonality": {"passed": True},
@@ -334,7 +399,40 @@ def test_baseline_sandbox_installs_current_skill(tmp_path) -> None:
         tmp_path / "baseline" / ".hermes" / "skills" / "existing-skill" / "SKILL.md"
     )
     assert sandbox["home"] == str(tmp_path / "baseline")
-    assert skill_file.read_text("utf-8") == "current procedure"
+    installed = skill_file.read_text("utf-8")
+    assert "name: existing-skill" in installed
+    assert installed.rstrip().endswith("current procedure")
+
+
+def test_sandbox_installs_complete_candidate_bundle(tmp_path) -> None:
+    from teamEvolver.skills.bundle import attach_bundle_payload
+
+    harness = {
+        "base_url": "http://model",
+        "api_key": "key",
+        "model": "model",
+        "api_mode": "chat",
+        "max_tokens": 1024,
+    }
+    skill = attach_bundle_payload(
+        {
+            "name": "bundle-skill",
+            "description": "Bundle",
+            "content": "Run scripts/run.py.",
+        },
+        {
+            "SKILL.md": b"stale",
+            "scripts/run.py": b"print('candidate')\n",
+            "assets/data.bin": b"\x00\xff",
+        },
+    )
+
+    sandbox = build_sandbox(tmp_path, "candidate", harness, skill)
+    skill_root = tmp_path / "candidate" / ".hermes" / "skills" / "bundle-skill"
+
+    assert (skill_root / "scripts" / "run.py").read_text() == "print('candidate')\n"
+    assert (skill_root / "assets" / "data.bin").read_bytes() == b"\x00\xff"
+    assert sandbox["skill_tree_sha256"] == skill["bundle"]["tree_sha256"]
 
 
 def test_agentshub_branch_uses_native_replay_endpoint(monkeypatch) -> None:

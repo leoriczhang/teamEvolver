@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
@@ -70,6 +71,30 @@ def _num_turns(session: dict[str, Any]) -> int:
         return 0
 
 
+def _session_fingerprint(session: dict[str, Any]) -> str:
+    """Stable content fingerprint used to detect whether a re-ingested
+    session actually changed.
+
+    Combines the turn count with a hash of the transcript text so that a
+    session which is merely re-submitted (same conversation, later time)
+    produces the same fingerprint, while genuinely continued conversations
+    (new turns / new text) produce a different one.
+    """
+    parts: list[str] = []
+    for turn in session.get("turns") or []:
+        if not isinstance(turn, dict):
+            continue
+        parts.append(str(turn.get("prompt_text") or turn.get("instruction") or ""))
+        parts.append(str(turn.get("response_text") or turn.get("response") or ""))
+    if not parts:
+        for message in session.get("messages") or []:
+            if isinstance(message, dict):
+                parts.append(str(message.get("role") or ""))
+                parts.append(str(message.get("content") or ""))
+    digest = hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
+    return f"{_num_turns(session)}:{digest}"
+
+
 def _session_meta(session: dict[str, Any], *, status: str) -> dict[str, Any]:
     metrics = session.get("metrics") if isinstance(session.get("metrics"), dict) else {}
     ingested_at = str(session.get("ingested_at") or "")
@@ -84,6 +109,7 @@ def _session_meta(session: dict[str, Any], *, status: str) -> dict[str, Any]:
         "ingested_at": ingested_at,
         "tool_call_count": metrics.get("tool_call_count", 0),
         "total_tokens": metrics.get("total_tokens", 0),
+        "content_fingerprint": _session_fingerprint(session),
         "value_judge": session.get("value_judge") if isinstance(session.get("value_judge"), dict) else {},
     }
 
@@ -199,6 +225,23 @@ class SessionStore:
             else:
                 statuses[session_id] = "unknown"
         return statuses
+
+    def duplicate_of_processed(self, session: dict[str, Any]) -> bool:
+        """True when this session was already ingested with identical content.
+
+        Guards against the same conversation being re-submitted at a later
+        time (no new turns), which would otherwise re-queue it, regenerate the
+        same coalesced candidate, and re-run a redundant evolution cycle. A
+        genuinely continued conversation has a different fingerprint and is not
+        treated as a duplicate.
+        """
+        session_id = str(session.get("session_id") or "").strip()
+        if not session_id:
+            return False
+        prior = _load_json(self._bucket, self.archive_key(session_id))
+        if not prior:
+            return False
+        return _session_fingerprint(prior) == _session_fingerprint(session)
 
     def list_queue(self, *, limit: int = 100) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []

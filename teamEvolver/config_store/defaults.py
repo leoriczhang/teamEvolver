@@ -78,6 +78,11 @@ _DEFAULTS: dict = {
         "evidence_replay_cases_per_window": 1,
         "evidence_change_debt_threshold": 3,
         "candidate_coalesce_enabled": True,
+        "bundle_text_extensions": [".py", ".sh"],
+        "bundle_max_file_bytes": 65536,
+        "bundle_max_prompt_bytes": 262144,
+        "bundle_allow_delete": True,
+        "bundle_static_checks_enabled": True,
     },
     "dreamcycle": {
         "enabled": False,
@@ -91,7 +96,7 @@ _DEFAULTS: dict = {
     },
     "validation": {
         "enabled": True,
-        "mode": "replay",
+        "mode": "true_replay",
         "idle_after_seconds": 300,
         "poll_interval_seconds": 60,
         "max_jobs_per_day": 5,
@@ -163,8 +168,8 @@ def _infer_sharing_backend(sharing: dict[str, Any]) -> str:
 
 
 def _normalize_validation_mode(value: Any) -> str:
-    normalized = str(value or "replay").strip().lower().replace("-", "_")
-    return normalized if normalized in {"replay", "true_replay"} else "replay"
+    normalized = str(value or "true_replay").strip().lower().replace("-", "_")
+    return normalized if normalized in {"replay", "true_replay"} else "true_replay"
 
 
 def _normalize_choice(value: Any, allowed: set[str], default: str) -> str:
@@ -193,6 +198,18 @@ def _normalize_string_list(value: Any) -> list[str]:
             if (item := str(raw or "").strip())
         )
     )
+
+
+def _normalize_extensions(value: Any) -> list[str]:
+    extensions: list[str] = []
+    for raw in _normalize_string_list(value):
+        item = raw.lower().lstrip(".")
+        if not item or "/" in item or "\\" in item:
+            continue
+        extension = f".{item}"
+        if extension not in extensions:
+            extensions.append(extension)
+    return extensions or [".py", ".sh"]
 
 
 def _normalize_reload_interval(value: Any) -> int:

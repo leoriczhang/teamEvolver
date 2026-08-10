@@ -3,7 +3,6 @@ import {
   Panel,
   StatCard,
   Pill,
-  ScoreText,
   Empty,
   ListViewport,
   PaginationControls,
@@ -34,10 +33,6 @@ function replayIssue(ev?: EvalResult): string {
     if (err) return err;
   }
   return "";
-}
-
-function fmtScore(v?: number | null): string {
-  return typeof v === "number" ? v.toFixed(3) : "—";
 }
 
 type CandidateScope = "open" | "processed";
@@ -110,13 +105,14 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
       if (r && r.status !== "not_found") {
         setEvalCache((m) => ({ ...m, [jobId]: r }));
         if (force) {
-          const rep = r.replay || {};
           const issue = replayIssue(r);
           toastOk(
             "重新评估完成",
             issue
-              ? `Verify ${fmtScore(r.verify_score)} / Replay ${fmtScore(r.replay_score)}｜${issue}`
-              : `Verify ${fmtScore(r.verify_score)} / Replay ${fmtScore(r.replay_score)} / 基线 ${fmtScore(rep.baseline_mean)}`
+              ? `回放存在问题：${issue}`
+              : r.recommended_publish
+                ? "回放无回退，建议发布"
+                : "回放完成，建议复核"
           );
         }
       }
@@ -166,7 +162,7 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
     const msg =
       mode === "force"
         ? "确认强制发布该候选技能？此操作会绕过评分门槛。"
-        : "确认按验证结果发布该候选技能？仅在回放无回退时发布。";
+        : "确认按回放结果发布该候选技能？仅在回放无回退时发布。";
     if (!window.confirm(msg)) return;
     try {
       const r = await api<{ status?: string; version?: number }>(
@@ -267,9 +263,7 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
                   "技能",
                   "动作",
                   "状态",
-                  "Verify",
-                  "True Replay",
-                  "基线",
+                  "回放状态",
                   "建议",
                   "操作",
                 ]}
@@ -278,7 +272,6 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
                   const ev = evalCache[c.job_id] || c.evaluation;
                   const busy = !!evaluating[c.job_id];
                   const processed = isProcessedCandidate(c);
-                  const rep = ev?.replay || {};
                   const issue = replayIssue(ev);
                   const decisionReason = c.decision_reason || c.decision?.reason || "";
                   const decidedAt = shortTime(c.decided_at || c.decision?.decided_at);
@@ -286,6 +279,11 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
                     <tr key={c.job_id}>
                       <td className="link border-b border-line px-4 py-2.5 align-top" onClick={() => openCandidate(c.job_id)}>
                         <div className="font-semibold">{candidateName(c)}</div>
+                        {(c.bundle_diff?.changed_count || 0) > 0 && (
+                          <div className="mt-1">
+                            <Pill tone="blue">变更 {c.bundle_diff?.changed_count} 个文件</Pill>
+                          </div>
+                        )}
                         <div className="mt-1 max-w-[320px] truncate text-xs text-muted-foreground" title={c.rationale || c.job_id}>
                           {c.rationale || c.job_id}
                         </div>
@@ -302,12 +300,17 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
                           )}
                         </div>
                       </Td>
-                      <Td>{busy ? <span className="score pending">评估中…</span> : <ScoreText value={ev?.verify_score} threshold={ev?.verification?.threshold} pending="待评估" />}</Td>
                       <Td>
-                        {busy ? <span className="score pending">评估中…</span> : <ScoreText value={ev?.replay_score} threshold={rep.threshold ?? c.min_score ?? 0.75} pending="待评估" />}
+                        {busy ? <Pill tone="amber">评估中…</Pill> : ev ? <Pill tone="blue">已完成</Pill> : <Pill tone="gray">待评估</Pill>}
+                        {(ev?.static_validation || c.static_validation) && (
+                          <div className="mt-1">
+                            <Pill tone={(ev?.static_validation || c.static_validation)?.passed ? "green" : "red"}>
+                              静态检查{(ev?.static_validation || c.static_validation)?.passed ? "通过" : "失败"}
+                            </Pill>
+                          </div>
+                        )}
                         {!busy && issue && <div className="mt-1 max-w-[220px] truncate text-[11px] text-destructive" title={issue}>{issue}</div>}
                       </Td>
-                      <Td>{busy ? <span className="score pending">—</span> : <ScoreText value={rep.baseline_mean} />}</Td>
                       <Td>
                         {ev ? (
                           ev.recommended_publish ? <Pill tone="green">建议发布</Pill> : <Pill tone="red">建议复核</Pill>
@@ -326,7 +329,7 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
                               <Button variant="outline" size="sm" disabled={busy} onClick={() => evaluate(c.job_id, true)}>
                                 {busy ? "评估中…" : "重新评估"}
                               </Button>
-                              <Button size="sm" onClick={() => validate(c.job_id, "auto")}>验证发布</Button>
+                              <Button size="sm" onClick={() => validate(c.job_id, "auto")}>按回放发布</Button>
                               <Button variant="outline" size="sm" onClick={() => validate(c.job_id, "force")}>强制发布</Button>
                               <Button variant="destructive" size="sm" onClick={() => deleteCandidate(c.job_id)}>删除</Button>
                             </>

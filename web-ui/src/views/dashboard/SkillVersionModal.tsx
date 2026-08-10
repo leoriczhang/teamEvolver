@@ -11,6 +11,12 @@ import { cn } from "@/lib/utils";
 import { api, type SkillVersionResp } from "@/api/client";
 import { toastOk, toastErr } from "@/lib/toast";
 
+const EFFICIENCY_LABELS: Record<string, string> = {
+  interaction_turns: "交互轮次",
+  tool_call_count: "工具调用",
+  total_tokens: "Tokens",
+};
+
 export default function SkillVersionModal({
   name,
   initialVersion,
@@ -81,6 +87,8 @@ export default function SkillVersionModal({
   const versionPager = usePagedItems(versions);
   const replayCases = data?.evolution?.evaluation?.replay?.cases || [];
   const replayPager = usePagedItems(replayCases, 5);
+  const efficiencyDimensions =
+    data?.evolution?.evaluation?.replay?.efficiency?.dimensions || {};
   const canRoll =
     data != null && version !== data.current_version && (data.current_version || 0) > 0;
 
@@ -156,20 +164,6 @@ export default function SkillVersionModal({
                     {data.evolution.rationale}
                   </p>
                 )}
-                <div className="mb-3 grid gap-2 sm:grid-cols-3">
-                  <Metric
-                    label="Verify"
-                    value={data.evolution.evaluation?.verify_score}
-                  />
-                  <Metric
-                    label="Replay"
-                    value={data.evolution.evaluation?.replay_score}
-                  />
-                  <Metric
-                    label="Baseline"
-                    value={data.evolution.evaluation?.replay?.baseline_mean}
-                  />
-                </div>
                 {data.evolution.skill_diff && (
                   <details className="mb-3" open>
                     <summary className="cursor-pointer text-xs font-semibold">
@@ -179,6 +173,89 @@ export default function SkillVersionModal({
                       {data.evolution.skill_diff}
                     </pre>
                   </details>
+                )}
+                {data.evolution.bundle_diff?.files?.some((file) => file.status !== "unchanged") && (
+                  <div className="mb-3 space-y-2">
+                    <div className="text-xs font-semibold">技能包文件差异</div>
+                    {data.evolution.bundle_diff.files
+                      .filter((file) => file.status !== "unchanged")
+                      .map((file) => (
+                        <details key={file.path} className="rounded-md border border-border p-2.5">
+                          <summary className="cursor-pointer text-xs font-semibold">
+                            {file.status} · {file.path}
+                          </summary>
+                          {file.diff ? (
+                            <pre className="content mt-2 max-h-[260px]">{file.diff}</pre>
+                          ) : (
+                            <p className="mt-2 text-xs text-muted-foreground">
+                              二进制文件，{file.old_size || 0} → {file.new_size || 0} bytes
+                            </p>
+                          )}
+                        </details>
+                      ))}
+                  </div>
+                )}
+                {Object.keys(efficiencyDimensions).length > 0 && (
+                  <div className="mb-3">
+                    <div className="mb-2 text-xs font-semibold">
+                      与上一版本的效率对比（A/B 回放）
+                    </div>
+                    <div className="overflow-hidden rounded-md border border-border">
+                      <table className="w-full border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-surface-subtle text-muted-foreground">
+                            {["指标", "上一版本", "本版本", "变化", "结果"].map((label) => (
+                              <th key={label} className="px-3 py-2 text-left font-semibold">
+                                {label}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {Object.entries(efficiencyDimensions).map(([key, metric]) => (
+                            <tr key={key} className="border-t border-border">
+                              <td className="px-3 py-2 font-semibold">
+                                {EFFICIENCY_LABELS[key] || key}
+                              </td>
+                              <td className="px-3 py-2">
+                                {Number(metric.baseline || 0).toLocaleString()}
+                              </td>
+                              <td className="px-3 py-2">
+                                {Number(metric.candidate || 0).toLocaleString()}
+                              </td>
+                              <td
+                                className={cn(
+                                  "px-3 py-2 font-bold",
+                                  metric.delta > 0 && "text-success",
+                                  metric.delta < 0 && "text-destructive"
+                                )}
+                              >
+                                {metric.delta > 0 ? "-" : metric.delta < 0 ? "+" : ""}
+                                {Math.abs(Number(metric.delta || 0)).toLocaleString()}
+                              </td>
+                              <td className="px-3 py-2">
+                                <Pill
+                                  tone={
+                                    metric.winner === "candidate"
+                                      ? "green"
+                                      : metric.winner === "baseline"
+                                        ? "red"
+                                        : "gray"
+                                  }
+                                >
+                                  {metric.winner === "candidate"
+                                    ? "本版本更优"
+                                    : metric.winner === "baseline"
+                                      ? "上一版本更优"
+                                      : "持平"}
+                                </Pill>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
                 )}
                 {replayCases.length > 0 && (
                   <div>
@@ -211,7 +288,7 @@ export default function SkillVersionModal({
             )}
             <div>
               <div className="mb-1.5 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
-                SKILL.md 内容
+                技能包入口 SKILL.md
                 <Pill tone={data.is_current ? "green" : "gray"}>
                   v{data.version}
                   {data.is_current ? " ·当前" : ""}
@@ -226,7 +303,7 @@ export default function SkillVersionModal({
                   回滚到 v{version}
                 </Button>
                 <span className="text-xs text-muted-foreground">
-                  将以该版本内容发布为新版本
+                  将以该版本完整技能包发布为新版本
                 </span>
               </div>
             )}
@@ -246,24 +323,12 @@ function Field({ k, children }: { k: string; children: ReactNode }) {
   );
 }
 
-function Metric({ label, value }: { label: string; value?: number | null }) {
-  return (
-    <div className="rounded-md border border-border bg-background p-2">
-      <div className="text-[11px] text-muted-foreground">{label}</div>
-      <div className="mt-1 font-semibold">
-        {value == null ? "—" : Number(value).toFixed(3)}
-      </div>
-    </div>
-  );
-}
-
 function ReplayColumn({
   label,
   side,
 }: {
   label: string;
   side?: {
-    score?: number | null;
     response?: string;
     rationale?: string;
     error?: string;
@@ -272,9 +337,7 @@ function ReplayColumn({
   const body = side?.response || side?.rationale || side?.error || "（无回放内容）";
   return (
     <div className="rounded-md bg-surface-subtle p-2 text-xs">
-      <div className="mb-1 font-semibold">
-        {label} · {side?.score == null ? "—" : Number(side.score).toFixed(3)}
-      </div>
+      <div className="mb-1 font-semibold">{label}</div>
       <div className="max-h-[160px] overflow-auto whitespace-pre-wrap text-muted-foreground">
         {body}
       </div>

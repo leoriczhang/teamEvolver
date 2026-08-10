@@ -6,7 +6,6 @@ import {
   Empty,
   ListViewport,
   PaginationControls,
-  VerificationCard,
   usePagedItems,
 } from "@/components/common";
 import { Button } from "@/components/ui/button";
@@ -109,8 +108,11 @@ export default function AuditView({ active }: { active: boolean }) {
                       {judge.overall_score != null || judge.rationale ? (
                         <div className="mb-3 rounded-lg border border-border bg-background/60 p-3 text-sm">
                           <div className="mb-1 text-xs font-semibold text-muted-foreground">会话评审</div>
-                          <span className="font-bold">{judge.overall_score ?? "—"}</span>
-                          {judge.rationale && <span className="text-muted-foreground"> · {judge.rationale}</span>}
+                          {judge.rationale ? (
+                            <span className="text-muted-foreground">{judge.rationale}</span>
+                          ) : (
+                            <span className="text-muted-foreground">已完成会话评审</span>
+                          )}
                         </div>
                       ) : null}
 
@@ -144,22 +146,36 @@ export default function AuditView({ active }: { active: boolean }) {
                         ) : (
                           <div className="space-y-2.5">
                             {evos.map((e, k) => {
-                              const reason = e.reason || e.verification?.reason || e.rationale || "";
-                              const rejected = e.action === "verification_rejected" || e.verification?.accepted === false;
+                              const legacyVerifier = e.action === "verification_rejected";
+                              const reason = e.reason || e.rationale || "";
                               return (
                                 <div key={k} className="rounded-lg border border-line bg-surface-subtle p-3">
                                   <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                                     <div className="flex flex-wrap items-center gap-2">
                                       <span className="mono text-xs font-semibold">{e.skill_name || "-"}</span>
-                                      <Pill tone={rejected ? "red" : "blue"}>{e.action || "-"}</Pill>
+                                      <Pill tone={legacyVerifier ? "gray" : "blue"}>
+                                        {legacyVerifier ? "未进入回放（旧流程）" : e.action || "-"}
+                                      </Pill>
                                       {e.uploaded ? <Pill tone="green">已上传</Pill> : <Pill tone="gray">未上传</Pill>}
                                     </div>
                                     {e.version != null && <span className="text-xs text-muted-foreground">v{e.version}</span>}
                                   </div>
-                                  <VerificationCard verification={e.verification} fallbackReason={reason} compact />
-                                  {!e.verification && reason && (
+                                  {legacyVerifier ? (
+                                    <div className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                                      该记录由旧版预检流程产生；当前候选发布仅依据 A/B 回放与 Checklist 门禁。
+                                    </div>
+                                  ) : reason ? (
                                     <div className="mt-2 text-xs leading-relaxed text-muted-foreground">{reason}</div>
-                                  )}
+                                  ) : null}
+                                  {e.file_changes?.length ? (
+                                    <div className="mt-2 flex flex-wrap gap-1.5">
+                                      {e.file_changes.map((change, index) => (
+                                        <Pill key={`${change.path}-${index}`} tone={change.operation === "delete" ? "red" : "blue"}>
+                                          {change.operation || "change"} · {change.path || "-"}
+                                        </Pill>
+                                      ))}
+                                    </div>
+                                  ) : null}
                                 </div>
                               );
                             })}

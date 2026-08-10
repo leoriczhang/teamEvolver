@@ -97,6 +97,47 @@ def _require_admin_user(user: dict | None) -> None:
         raise HTTPException(status_code=403, detail="only admin users can perform this operation")
 
 
+def _console_sessions_path(config) -> Path:
+    """Persist console login sessions next to the users registry so a service
+    restart does not force every logged-in operator back to the login page."""
+    return _registry_path(config).parent / "console_sessions.json"
+
+
+def _load_console_sessions(config) -> dict[str, dict]:
+    path = _console_sessions_path(config)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8") or "{}")
+    except Exception:  # noqa: BLE001 - corrupt/partial local file must not crash startup
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    now = time.time()
+    sessions: dict[str, dict] = {}
+    for token, session in data.items():
+        if not isinstance(token, str) or not isinstance(session, dict):
+            continue
+        if float(session.get("expires_at", 0) or 0) < now:
+            continue
+        sessions[token] = session
+    return sessions
+
+
+def _save_console_sessions(config, sessions: dict[str, dict]) -> None:
+    path = _console_sessions_path(config)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(
+            json.dumps(sessions, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+    except Exception:  # noqa: BLE001 - persistence is best-effort, never break auth
+        logger.debug("[console-auth] failed to persist console sessions", exc_info=True)
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -406,6 +447,25 @@ def _candidate_payload(
     return payload
 
 
+def _evaluation_missing_hard_indicators(evaluation: dict[str, Any] | None) -> bool:
+    """True when a (possibly compacted) evaluation lacks efficiency + cases.
+
+    The decision index persists a compacted evaluation (replay cases and
+    window_results stripped). When those hard indicators are absent we should
+    reload the full evaluation file so the dashboard can still show them.
+    """
+    if not isinstance(evaluation, dict):
+        return True
+    summary = evaluation.get("replay_summary") if isinstance(evaluation.get("replay_summary"), dict) else {}
+    if not summary and isinstance(evaluation.get("replay"), dict):
+        summary = evaluation.get("replay") or {}
+    if _normalize_efficiency(summary).get("dimensions"):
+        return False
+    if summary.get("cases"):
+        return False
+    return True
+
+
 def _candidate_list_payloads(
     store: ValidationStore,
     *,
@@ -426,18 +486,29 @@ def _candidate_list_payloads(
         else []
     )
     if normalized == "processed" and indexed_records:
-        return [
-            _candidate_payload(
-                record.get("job") if isinstance(record.get("job"), dict) else {},
+        payloads: list[dict[str, Any]] = []
+        for record in indexed_records:
+            job = record.get("job") if isinstance(record.get("job"), dict) else {}
+            evaluation = (
                 record.get("evaluation")
                 if isinstance(record.get("evaluation"), dict)
-                else None,
+                else None
+            )
+            # The decision index stores a compacted evaluation with replay
+            # cases / window_results stripped. Rehydrate from the full
+            # evaluation file so hard indicators (efficiency, cases) survive.
+            job_id = str((job or {}).get("job_id") or record.get("job_id") or "")
+            if job_id and _evaluation_missing_hard_indicators(evaluation):
+                full = store.load_evaluation(job_id)
+                if isinstance(full, dict):
+                    evaluation = full
+            decision = (
                 record.get("decision")
                 if isinstance(record.get("decision"), dict)
-                else None,
+                else None
             )
-            for record in indexed_records
-        ]
+            payloads.append(_candidate_payload(job, evaluation, decision))
+        return payloads
     jobs = (
         store.list_open_jobs()
         if normalized == "open"
@@ -487,40 +558,77 @@ def _compact_candidate_payload(item: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
-def _normalize_replay_case(case: dict[str, Any]) -> dict[str, Any]:
-    baseline = case.get("baseline") if isinstance(case.get("baseline"), dict) else {}
-    candidate = case.get("candidate") if isinstance(case.get("candidate"), dict) else {}
-    return {
-        "session_id": str(case.get("session_id") or ""),
-        "turn_num": int(case.get("turn_num", 0) or 0),
-        "instruction": str(case.get("instruction") or ""),
-        "baseline": {
-            "score": baseline.get("score"),
-            "response": (
-                baseline.get("final_response")
-                or baseline.get("response_text")
-            ),
-            "instruction": str(case.get("instruction") or ""),
-            "session_id": str(case.get("session_id") or ""),
-            "turn_num": int(case.get("turn_num", 0) or 0),
-            "interaction_turns": baseline.get("interaction_turns"),
-            "tool_call_count": baseline.get("tool_call_count"),
-            "total_tokens": baseline.get("total_tokens"),
-        },
-        "candidate": {
-            "score": candidate.get("score"),
-            "response": (
-                candidate.get("final_response")
-                or candidate.get("response_text")
-            ),
-            "instruction": str(case.get("instruction") or ""),
-            "session_id": str(case.get("session_id") or ""),
-            "turn_num": int(case.get("turn_num", 0) or 0),
-            "interaction_turns": candidate.get("interaction_turns"),
-            "tool_call_count": candidate.get("tool_call_count"),
-            "total_tokens": candidate.get("total_tokens"),
-        },
+
+
+def _aggregate_window_dimensions(windows: Any) -> dict[str, Any]:
+    """Sum per-window efficiency dimensions into a flat ``dimensions`` block.
+
+    ``windows`` may be ``efficiency.windows`` or the summary's
+    ``window_results`` — both carry ``<window>.dimensions`` (older
+    aggregators) or ``<window>.efficiency.dimensions`` (window_results).
+    """
+    if not isinstance(windows, dict) or not windows:
+        return {}
+    metric_keys = ("interaction_turns", "tool_call_count", "total_tokens")
+    totals: dict[str, dict[str, int]] = {
+        key: {"baseline": 0, "candidate": 0} for key in metric_keys
     }
+    found = False
+    for window in windows.values():
+        if not isinstance(window, dict):
+            continue
+        dims = window.get("dimensions")
+        if not isinstance(dims, dict):
+            nested = window.get("efficiency") if isinstance(window.get("efficiency"), dict) else {}
+            dims = nested.get("dimensions") if isinstance(nested.get("dimensions"), dict) else None
+        if not isinstance(dims, dict):
+            continue
+        for key in metric_keys:
+            metric = dims.get(key) if isinstance(dims.get(key), dict) else {}
+            totals[key]["baseline"] += int(metric.get("baseline") or 0)
+            totals[key]["candidate"] += int(metric.get("candidate") or 0)
+            found = True
+    if not found:
+        return {}
+    dimensions: dict[str, dict[str, Any]] = {}
+    for key in metric_keys:
+        baseline_value = totals[key]["baseline"]
+        candidate_value = totals[key]["candidate"]
+        delta = baseline_value - candidate_value
+        dimensions[key] = {
+            "baseline": baseline_value,
+            "candidate": candidate_value,
+            "delta": delta,
+            "winner": "candidate" if delta > 0 else ("baseline" if delta < 0 else "tie"),
+        }
+    return dimensions
+
+
+def _normalize_efficiency(replay_summary: dict[str, Any]) -> dict[str, Any]:
+    """Return an efficiency block with a top-level ``dimensions`` when possible.
+
+    Efficiency data was persisted in three historical shapes:
+      * flat ``efficiency.dimensions`` (dry-run evaluations),
+      * ``efficiency.windows.{recent,historical}.dimensions`` (newer worker),
+      * only ``replay_summary.window_results.<window>.efficiency.dimensions``
+        (older worker that omitted the top-level ``efficiency`` summary).
+
+    The dashboard reads only the flat shape, so recover it from whichever
+    shape is available. Returns ``{}`` when no efficiency data was captured.
+    """
+    if not isinstance(replay_summary, dict):
+        return {}
+    efficiency = replay_summary.get("efficiency") if isinstance(replay_summary.get("efficiency"), dict) else {}
+    if isinstance(efficiency.get("dimensions"), dict) and efficiency.get("dimensions"):
+        return efficiency
+    dimensions = _aggregate_window_dimensions(efficiency.get("windows"))
+    if not dimensions:
+        dimensions = _aggregate_window_dimensions(replay_summary.get("window_results"))
+    if not dimensions:
+        return efficiency
+    merged = dict(efficiency)
+    merged["dimensions"] = dimensions
+    return merged
 
 
 def _evaluation_payload(job: dict[str, Any], result: dict[str, Any], *, cached: bool = False) -> dict[str, Any]:
@@ -625,7 +733,7 @@ def _evaluation_payload(job: dict[str, Any], result: dict[str, Any], *, cached: 
             "baseline_mean": replay_summary.get("baseline_mean_score") or replay_summary.get("baseline_mean"),
             "no_regression": bool(no_regression),
             "cases": normalized_cases,
-            "efficiency": replay_summary.get("efficiency") or {},
+            "efficiency": _normalize_efficiency(replay_summary),
             "checklist": checklist,
             "checklist_results": replay_summary.get("checklist_results") or {},
             "decision_policy": replay_summary.get("decision_policy") or {},
@@ -687,9 +795,17 @@ async def _evaluate_candidate_job(config, owner, job: dict[str, Any]) -> dict[st
             checklist=compile_common_checklist(job),
         )
         if replay.get("status") == "evaluated":
+            replay_decision = str(
+                replay.get("verdict")
+                or (
+                    "accept"
+                    if replay.get("accepted")
+                    else "inconclusive"
+                )
+            )
             return {
                 "validator_mode": "true_replay",
-                "decision": "accept" if replay.get("accepted") else "reject",
+                "decision": replay_decision,
                 "accepted": bool(replay.get("accepted")),
                 "score": replay.get("score"),
                 "threshold": replay.get("threshold"),
@@ -727,7 +843,7 @@ async def _evaluate_candidate_job(config, owner, job: dict[str, Any]) -> dict[st
         threshold = round(float(job.get("min_score", 0.75) or 0.75), 3)
         result = {
             "validator_mode": "failed",
-            "decision": "reject",
+            "decision": "inconclusive",
             "accepted": False,
             "score": None,
             "threshold": threshold,
@@ -869,7 +985,9 @@ class RoutesMixin:
 
         app = FastAPI(title="teamEvolver", lifespan=lifespan)
         app.state.owner = self
-        self._console_sessions = getattr(self, "_console_sessions", {})
+        self._console_sessions = getattr(self, "_console_sessions", None)
+        if self._console_sessions is None:
+            self._console_sessions = _load_console_sessions(self.config)
         dist_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "web", "dist"))
         dist_index = os.path.join(dist_dir, "index.html")
         dist_assets = os.path.join(dist_dir, "assets")
@@ -885,6 +1003,7 @@ class RoutesMixin:
                 return None
             if float(session.get("expires_at", 0) or 0) < time.time():
                 owner._console_sessions.pop(token, None)
+                _save_console_sessions(owner.config, owner._console_sessions)
                 return None
             user_id = str(session.get("user_id") or "")
             if not user_id:
@@ -894,6 +1013,7 @@ class RoutesMixin:
                 _idx, user = _find_user(data, user_id)
             except HTTPException:
                 owner._console_sessions.pop(token, None)
+                _save_console_sessions(owner.config, owner._console_sessions)
                 return None
             session["expires_at"] = time.time() + _SESSION_TTL_SECONDS
             return _public_user(user, owner.config)
@@ -1033,6 +1153,7 @@ class RoutesMixin:
                 "created_at": time.time(),
                 "expires_at": time.time() + _SESSION_TTL_SECONDS,
             }
+            _save_console_sessions(owner.config, owner._console_sessions)
             resp = JSONResponse(
                 content={
                     "authenticated": True,
@@ -1072,6 +1193,7 @@ class RoutesMixin:
                 "created_at": time.time(),
                 "expires_at": time.time() + _SESSION_TTL_SECONDS,
             }
+            _save_console_sessions(owner.config, owner._console_sessions)
             resp = JSONResponse(
                 content={
                     "authenticated": True,
@@ -1119,6 +1241,7 @@ class RoutesMixin:
                 "created_at": time.time(),
                 "expires_at": time.time() + _SESSION_TTL_SECONDS,
             }
+            _save_console_sessions(owner.config, owner._console_sessions)
             resp = JSONResponse(
                 content={
                     "authenticated": True,
@@ -1141,6 +1264,7 @@ class RoutesMixin:
             token = request.cookies.get(_SESSION_COOKIE, "")
             if token:
                 owner._console_sessions.pop(token, None)
+                _save_console_sessions(owner.config, owner._console_sessions)
             resp = JSONResponse(content={"authenticated": False})
             resp.delete_cookie(_SESSION_COOKIE, path="/")
             return resp
@@ -1275,14 +1399,41 @@ class RoutesMixin:
             session["session_id"] = session_id
             session.setdefault("user_alias", str(getattr(owner.config, "sharing_user_alias", "") or "anonymous"))
 
-            classifier = SessionValueClassifier.from_config(owner.config)
-            value_judge = await classifier.classify(session)
-            session["value_judge"] = value_judge
-            session["ingested_at"] = _utc_now_iso()
             try:
                 session_store = SessionStore.from_config(owner.config)
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(status_code=503, detail="session storage is not configured") from exc
+
+            # Skip re-ingesting an already-processed session whose content has
+            # not changed. Re-submitting the same conversation at a later time
+            # would otherwise re-queue it, regenerate the same coalesced
+            # candidate, and trigger a redundant evolution cycle that reuses a
+            # stale A/B replay. A continued conversation (new turns) has a
+            # different fingerprint and is ingested normally.
+            force_reprocess = bool(session.pop("force_reprocess", False))
+            if (
+                not force_reprocess
+                and session_store.duplicate_of_processed(session)
+            ):
+                logger.info(
+                    "[SessionFilter] skipped duplicate session=%s (already processed, no new content)",
+                    session_id,
+                )
+                return {
+                    "status": "duplicate",
+                    "session_id": session_id,
+                    "queued": False,
+                }
+            if force_reprocess:
+                session["reprocess_reason"] = str(
+                    body.get("reprocess_reason")
+                    or "explicit dashboard reingest"
+                )
+
+            classifier = SessionValueClassifier.from_config(owner.config)
+            value_judge = await classifier.classify(session)
+            session["value_judge"] = value_judge
+            session["ingested_at"] = _utc_now_iso()
 
             if value_judge.get("decision") != "valuable":
                 session_store.save_skipped(session)
@@ -1745,7 +1896,7 @@ class RoutesMixin:
             job = store.load_job(job_id)
             if not job:
                 return {"status": "not_found", "job_id": job_id}
-            cached = None if refresh else store.load_evaluation(job_id)
+            cached = None if refresh else store.load_fresh_evaluation(job_id, job)
             if cached:
                 return {**_evaluation_payload(job, cached, cached=True), **_skill_diff_payload(job, owner.config)}
             result = await _evaluate_candidate_job(owner.config, owner, job)
@@ -1764,7 +1915,7 @@ class RoutesMixin:
             job = store.load_job(job_id)
             if not job:
                 raise HTTPException(status_code=404, detail="candidate not found")
-            evaluation = store.load_evaluation(job_id)
+            evaluation = store.load_fresh_evaluation(job_id, job)
             if not evaluation:
                 evaluation = await _evaluate_candidate_job(owner.config, owner, job)
                 store.save_evaluation(job_id, evaluation)
@@ -1832,160 +1983,6 @@ class RoutesMixin:
             result = store.delete_job(job_id)
             _invalidate_dashboard_cache(f"candidates:{id(owner.config)}")
             return result
-
-        @app.get("/validation/candidates")
-        async def validation_candidates(
-            scope: str = "open",
-            limit: int = 20,
-            offset: int = 0,
-            compact: bool = False,
-        ):
-            try:
-                store = ValidationStore.from_config(owner.config)
-                cache_key = f"candidates:{id(owner.config)}:{scope}"
-                candidates = _cached_dashboard_value(
-                    cache_key,
-                    15.0,
-                    lambda: _candidate_list_payloads(
-                        store,
-                        scope=scope,
-                        user_alias=str(owner.config.sharing_user_alias or ""),
-                    ),
-                )
-            except Exception:
-                candidates = []
-            safe_limit = min(200, max(1, int(limit or 20)))
-            safe_offset = max(0, int(offset or 0))
-            page = candidates[safe_offset : safe_offset + safe_limit]
-            if compact:
-                page = [_compact_candidate_payload(item) for item in page]
-            return {
-                "candidates": page,
-                "total": len(candidates),
-                "limit": safe_limit,
-                "offset": safe_offset,
-                "has_more": safe_offset + len(page) < len(candidates),
-            }
-
-        @app.get("/validation/candidates/{job_id}")
-        async def validation_candidate_detail(job_id: str):
-            store = ValidationStore.from_config(owner.config)
-            job = store.load_job(job_id)
-            if not job:
-                raise HTTPException(status_code=404, detail="candidate not found")
-            evaluation = store.load_evaluation(job_id)
-            decision = store.load_decision(job_id)
-            return {**_candidate_payload(job, evaluation, decision), **_skill_diff_payload(job, owner.config)}
-
-        @app.get("/validation/skills/{name}/versions/{version}")
-        async def validation_skill_version_detail(name: str, version: int):
-            from .skills_admin import _version_evolution_context
-
-            cache_key = f"validation-version:{name}:{int(version)}"
-
-            def load_detail():
-                hub = SkillHub.team_from_config(owner.config)
-                detail = hub.get_version_detail(name, int(version))
-                history = hub.list_versions(name).get("history") or []
-                detail["evolution"] = _version_evolution_context(
-                    owner.config,
-                    name=name,
-                    version=int(version),
-                    history=history,
-                )
-                return detail
-
-            return _cached_dashboard_value(
-                cache_key,
-                60.0,
-                load_detail,
-            )
-
-        @app.post("/validation/candidates/{job_id}/evaluate")
-        async def validation_candidate_evaluate(job_id: str, refresh: bool = False):
-            store = ValidationStore.from_config(owner.config)
-            job = store.load_job(job_id)
-            if not job:
-                return {"status": "not_found", "job_id": job_id}
-            cached = None if refresh else store.load_evaluation(job_id)
-            if cached:
-                return _evaluation_payload(job, cached, cached=True)
-            result = await _evaluate_candidate_job(owner.config, owner, job)
-            store.save_evaluation(job_id, result)
-            return _evaluation_payload(job, result, cached=False)
-
-        @app.post("/validation/candidates/{job_id}/validate")
-        async def validation_candidate_validate(job_id: str, request: Request):
-            _require_admin_user(_session_user(request))
-            body = await request.json()
-            if not isinstance(body, dict):
-                body = {}
-            mode = str(body.get("mode") or "auto")
-            store = ValidationStore.from_config(owner.config)
-            job = store.load_job(job_id)
-            if not job:
-                raise HTTPException(status_code=404, detail="candidate not found")
-            evaluation = store.load_evaluation(job_id)
-            if not evaluation:
-                evaluation = await _evaluate_candidate_job(owner.config, owner, job)
-                store.save_evaluation(job_id, evaluation)
-            accepted = bool(evaluation.get("accepted"))
-            if mode != "force" and not accepted:
-                decision = {
-                    "status": "rejected",
-                    "accepted": False,
-                    "reason": evaluation.get("reason") or "evaluation did not pass",
-                    "evaluation": evaluation,
-                }
-                store.save_decision(job_id, decision)
-                return decision
-            candidate_skill = job.get("candidate_skill") if isinstance(job.get("candidate_skill"), dict) else None
-            if not candidate_skill or not candidate_skill.get("name"):
-                raise HTTPException(status_code=400, detail="candidate missing skill payload")
-            from ..skills.bundle import coerce_skill_bundle
-            from ..skills.editor import save_skill
-
-            name = str(candidate_skill.get("name") or "")
-            current = job.get("current_skill") if isinstance(job.get("current_skill"), dict) else None
-            created = current is None
-            result = save_skill(
-                owner.config.skills_dir,
-                name=name,
-                description=str(candidate_skill.get("description") or ""),
-                category=str(candidate_skill.get("category") or "general"),
-                body=str(candidate_skill.get("content") or ""),
-                skill_md="",
-            )
-            bundle_files = candidate_skill.get("bundle_files")
-            if isinstance(bundle_files, dict):
-                from ..skills.bundle import write_skill_bundle
-
-                write_skill_bundle(
-                    os.path.join(owner.config.skills_dir, name),
-                    coerce_skill_bundle({"SKILL.md": build_skill_md(candidate_skill), **bundle_files}),
-                    clean=True,
-                )
-            loaded = owner._reload_skill_manager()
-            cloud = owner._cloud_sync_push(name)
-            decision = {
-                "status": "published",
-                "accepted": True,
-                "job_id": job_id,
-                "skill_name": name,
-                "created": created,
-                "version": cloud.get("version") or result.get("version"),
-                "loaded_skills": loaded,
-                "cloud": cloud,
-                "evaluation": evaluation,
-            }
-            store.save_decision(job_id, decision)
-            return decision
-
-        @app.delete("/validation/candidates/{job_id}")
-        async def validation_candidate_delete(job_id: str, request: Request):
-            _require_admin_user(_session_user(request))
-            store = ValidationStore.from_config(owner.config)
-            return store.delete_job(job_id)
 
         @app.post("/internal/reload-skills")
         async def reload_skills(

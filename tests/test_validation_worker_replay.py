@@ -137,7 +137,7 @@ async def test_replay_branch_uses_replay_result_fields(tmp_path) -> None:
 
 
 @pytest.mark.anyio
-async def test_replay_validation_rejects_tied_replay_scores(tmp_path) -> None:
+async def test_replay_validation_marks_tied_scores_inconclusive(tmp_path) -> None:
     worker = ValidationWorker(
         TeamEvolverConfig(
             sharing_enabled=True,
@@ -164,7 +164,7 @@ async def test_replay_validation_rejects_tied_replay_scores(tmp_path) -> None:
 
     assert result["score"] == 0.75
     assert result["accepted"] is False
-    assert result["decision"] == "reject"
+    assert result["decision"] == "inconclusive"
 
 
 @pytest.mark.anyio

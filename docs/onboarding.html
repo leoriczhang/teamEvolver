@@ -573,7 +573,7 @@ a:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--amber);outline-
     <h2 class="arch__title">共享发生在<em>存储层</em>, 不是服务层。</h2>
 
     <svg class="arch__diagram" viewBox="0 0 1200 360" role="img" aria-labelledby="arch-diagram-title">
-      <title id="arch-diagram-title">四层结构:共享 bucket · 三台本地 teamEvolver · 外部 evolve_server</title>
+      <title id="arch-diagram-title">三层结构:共享 bucket · 三台本地 teamEvolver · 内置 evolve engine</title>
 
       <!-- 第 1 层 · 共享存储 -->
       <g>
@@ -625,11 +625,11 @@ a:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--amber);outline-
       <!-- 通知标签: 放在漏斗上方左侧空白 -->
       <text x="76" y="288" font-family="JetBrains Mono, monospace" font-size="10" letter-spacing="1.6" fill="#4C4A3C">POST /trigger  ·  空 POST · 只是敲门信号</text>
 
-      <!-- 第 3 层 · evolve_server 外部 (虚线框保留 · 表达"不在本 repo"), 水平居中在 600 -->
+      <!-- 第 3 层 · teamEvolver 内置进化引擎 -->
       <g>
         <rect x="420" y="298" width="360" height="46" fill="none" stroke="#4C4A3C" stroke-width="1.5" stroke-dasharray="6 3"/>
-        <text x="600" y="320" text-anchor="middle" font-family="Bricolage Grotesque, Inter Tight, sans-serif" font-size="14" font-weight="500" fill="#4C4A3C">evolve_server</text>
-        <text x="600" y="336" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" letter-spacing="1.2" fill="#4C4A3C">LAYER · 03 · EXTERNAL SERVICE  ·  本 repo 不含</text>
+        <text x="600" y="320" text-anchor="middle" font-family="Bricolage Grotesque, Inter Tight, sans-serif" font-size="14" font-weight="500" fill="#4C4A3C">teamEvolver.evolve</text>
+        <text x="600" y="336" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" letter-spacing="1.2" fill="#4C4A3C">LAYER · 03 · BUILT-IN ENGINE  ·  随项目安装</text>
       </g>
 
       <!-- evolve_server 独立读写 bucket · 走最右侧空白通道, 不穿任何 peer 卡 -->
@@ -640,7 +640,7 @@ a:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--amber);outline-
     <div class="arch__caption" aria-hidden="true">
       <span class="cap--shared">共享 · OpenViking bucket</span>
       <span class="cap--peer">每人一份 · 本地 teamEvolver + Worker</span>
-      <span class="cap--external">外部依赖 · evolve_server</span>
+      <span class="cap--external">内置能力 · evolve engine</span>
     </div>
   </section>
 
@@ -732,9 +732,9 @@ scope · team (not per-user)</p>
               <p class="station__actor">evolve_server + ValidationWorker</p>
               <div class="station__body">
                 <div class="station__col">
-                  <span class="station__col-label station__col-label--distill">A · 提炼 · 外部服务</span>
-                  <span class="station__mode station__mode--external">需外部 evolve_server</span>
-                  <p class="station__narrative">teamEvolver 只是把轨迹排队, 真正把它揉成候选 <code>SKILL.md</code> 的是<em>外部</em>的 evolve_server (本 repo 不包含)。teamEvolver 在 15s 去抖窗口后, 空 POST 一次 <code>/trigger</code> 通知外部大脑, 数据不经这条 HTTP; evolve_server 自己回 bucket 读。</p>
+                  <span class="station__col-label station__col-label--distill">A · 提炼 · 内置引擎</span>
+                  <span class="station__mode station__mode--external">teamEvolver.evolve</span>
+                  <p class="station__narrative">teamEvolver 内置进化引擎把会话轨迹聚合为候选技能包，并通过同一进程内的 <code>/trigger</code> 路由启动进化周期。引擎直接从共享 bucket 读取会话、写入候选，无需外挂源码仓库或独立 evolve_server。</p>
                   <p class="station__evidence">// 敲门 · 不搬数据
 POST /trigger
 body    · ∅ (empty)
@@ -878,8 +878,8 @@ via · conda:teamEvolver</p>
           <div class="scene__inner">
             <article class="role-card role-card--external">
               <h3 class="role-card__name">evolve_server</h3>
-              <p class="role-card__job">DISTILLS · EXTERNAL SERVICE</p>
-              <p class="role-card__sentence">真正把一堆会话揉成候选 <code>SKILL.md</code> 的大脑。<em>本 repo 不包含</em>, 外挂经 <code>evolve.server_url</code> 配置。收到 teamEvolver 的空 POST 敲门后, <em>它自己回头去 bucket 读</em>。数据从不经这条 HTTP。它也用同一把 team AK 读写 bucket, 不是"另一个中心"。</p>
+              <p class="role-card__job">DISTILLS · BUILT-IN ENGINE</p>
+              <p class="role-card__sentence">真正把一组会话提炼成候选技能包的大脑，代码位于 <code>teamEvolver.evolve</code> 并随项目一起安装。它直接读取共享 bucket、生成候选、排队验证和发布完整 bundle，不依赖外部源码目录。</p>
             </article>
           </div>
         </div>
@@ -951,7 +951,7 @@ hub.py:208-216 comment:
           <div class="scene__inner">
             <article class="truth-card">
               <p class="truth-card__myth">"teamEvolver 会自己把会话提炼成技能。"</p>
-              <p class="truth-card__real">提炼在<em>外部</em> <code>evolve_server</code>, 本 repo 不含它的代码。teamEvolver 只做<em>敲门</em>: 会话落 bucket 后, 空 POST 一次 <code>/trigger</code> 通知外部大脑"有新东西了"。<em>数据不经这条 HTTP</em>; evolve_server 自己回头去 bucket 读。控制面走网络, 数据面走存储。</p>
+              <p class="truth-card__real">现在这句话是真的：提炼引擎已经内置在 <code>teamEvolver.evolve</code>。会话落 bucket 后，内置 <code>/trigger</code> 路由启动进化周期；数据仍通过共享存储流转，但不再依赖外部 evolve_server 仓库或进程。</p>
               <p class="truth-card__proof">// teamEvolver 侧的完整动作:
 //   1. session 落 sessions/{sid}.json
 //   2. 15s 去抖窗口开始

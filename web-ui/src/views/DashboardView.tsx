@@ -5,7 +5,6 @@ import {
   UserBadge,
   Pill,
   Dot,
-  ScoreText,
   Empty,
   ListViewport,
   PaginationControls,
@@ -192,7 +191,7 @@ export default function DashboardView({ active }: { active: boolean }) {
     const msg =
       mode === "force"
         ? "确认强制发布该候选技能？（将忽略评分直接发布）"
-        : "确认按验证结果发布该候选技能？（回放无回退才会发布）";
+        : "确认按回放结果发布该候选技能？（回放无回退才会发布）";
     if (!window.confirm(msg)) return;
     try {
       const r = await api<{ status?: string; version?: number }>(
@@ -353,9 +352,7 @@ export default function DashboardView({ active }: { active: boolean }) {
                 headers={[
                   "技能",
                   "动作",
-                  "验证分 (Verify)",
-                  "A/B 回放分",
-                  "基线",
+                  "回放状态",
                   "建议",
                   "操作",
                 ]}
@@ -363,9 +360,7 @@ export default function DashboardView({ active }: { active: boolean }) {
                 {cands.map((c) => {
               const ev = evalCache[c.job_id];
               const busy = evaluating[c.job_id];
-              const thr = c.min_score != null ? c.min_score : 0.75;
               const open = () => openCandidate(c.job_id);
-              const rep = ev?.replay || {};
               return (
                 <tr key={c.job_id}>
                   <td className="link border-b border-line px-4 py-2.5 align-top" onClick={open}>
@@ -376,27 +371,12 @@ export default function DashboardView({ active }: { active: boolean }) {
                   </Td>
                   <td className="link border-b border-line px-4 py-2.5 align-top" onClick={open}>
                     {busy && !ev ? (
-                      <span className="score pending">评估中…</span>
+                      <Pill tone="amber">评估中…</Pill>
                     ) : ev ? (
-                      <ScoreText value={ev.verify_score} threshold={ev.verification?.threshold} />
+                      <Pill tone="blue">已完成</Pill>
                     ) : (
-                      <span className="score pending">待评估</span>
+                      <Pill tone="gray">待评估</Pill>
                     )}
-                  </td>
-                  <td className="link border-b border-line px-4 py-2.5 align-top" onClick={open}>
-                    {busy && !ev ? (
-                      <span className="score pending">评估中…</span>
-                    ) : ev ? (
-                      <ScoreText
-                        value={ev.replay_score}
-                        threshold={rep.threshold != null ? rep.threshold : thr}
-                      />
-                    ) : (
-                      <span className="score pending">待评估</span>
-                    )}
-                  </td>
-                  <td className="link border-b border-line px-4 py-2.5 align-top" onClick={open}>
-                    {ev ? <ScoreText value={rep.baseline_mean} /> : <span className="score pending">—</span>}
                   </td>
                   <td className="link border-b border-line px-4 py-2.5 align-top" onClick={open}>
                     {ev ? (
@@ -420,7 +400,7 @@ export default function DashboardView({ active }: { active: boolean }) {
                         重新评估
                       </Button>
                       <Button size="sm" onClick={() => validate(c.job_id, "auto")}>
-                        验证发布
+                        按回放发布
                       </Button>
                       <Button variant="outline" size="sm" onClick={() => validate(c.job_id, "force")}>
                         强制发布

@@ -23,7 +23,9 @@ from ..checklist import (
     objective_replay_decision,
 )
 from ..llm import AsyncLLMClient
+from ..skills.bundle import bundle_tree_sha256, candidate_skill_bundle
 from ..skills.render import build_skill_md
+from .bundle_checks import validate_candidate_bundle
 from .store import ValidationStore
 
 logger = logging.getLogger(__name__)
@@ -45,6 +47,14 @@ class ValidationRunSummary:
 
 class ValidationWorker:
     """Idle-time client-side validator."""
+
+    CAPABILITIES = frozenset(
+        {
+            "bundle_v1",
+            "bundle_static_v1",
+            "bundle_true_replay_v1",
+        }
+    )
 
     def __init__(
         self,
@@ -312,7 +322,12 @@ class ValidationWorker:
                 historical_candidate >= historical_baseline - 0.15
             )
         accepted = recent_improved and historical_no_regression
-        decision = "accept" if accepted else "reject"
+        if accepted:
+            decision = "accept"
+        elif not historical_no_regression:
+            decision = "reject"
+        else:
+            decision = "inconclusive"
         reason = (
             f"Replay validation compared {len(case_results)} case(s): "
             f"candidate_mean={candidate_mean}, baseline_mean={baseline_mean}, "
@@ -431,6 +446,9 @@ class ValidationWorker:
             efficiency=efficiency,
         )
         accepted = bool(policy.get("accepted")) and all_windows_evaluated
+        verdict = str(policy.get("verdict") or "inconclusive")
+        if not all_windows_evaluated and verdict == "accept":
+            verdict = "inconclusive"
         no_regression = (
             bool(policy.get("no_regression")) and all_windows_evaluated
         )
@@ -438,6 +456,7 @@ class ValidationWorker:
             "status": "evaluated",
             "mode": "true_replay",
             "accepted": accepted,
+            "verdict": verdict,
             "no_regression": no_regression,
             "recent_improved": recent_improved,
             "historical_no_regression": historical_no_regression,
@@ -473,7 +492,38 @@ class ValidationWorker:
         }
 
     async def _validate_job(self, job: dict[str, Any]) -> dict[str, Any]:
-        if str(getattr(self.config, "validation_mode", "replay") or "replay").strip().lower() == "true_replay":
+        candidate = (
+            job.get("candidate_skill")
+            if isinstance(job.get("candidate_skill"), dict)
+            else {}
+        )
+        static_validation = validate_candidate_bundle(
+            candidate,
+            enabled=bool(
+                getattr(
+                    self.config,
+                    "evolve_bundle_static_checks_enabled",
+                    True,
+                )
+            ),
+        )
+        if not static_validation.get("passed"):
+            return {
+                "validator_mode": "bundle_static",
+                "decision": "reject",
+                "accepted": False,
+                "score": 0.0,
+                "threshold": float(job.get("min_score", 0.75) or 0.75),
+                "reason": "Candidate bundle failed deterministic static checks.",
+                "checks": {"safe_to_publish": 0.0},
+                "static_validation": static_validation,
+                "replay_summary": {
+                    "status": "skipped",
+                    "reason": "static validation failed",
+                    "cases": [],
+                },
+            }
+        if str(getattr(self.config, "validation_mode", "true_replay") or "true_replay").strip().lower() == "true_replay":
             job_id = str(job.get("job_id") or "")
             if job_id:
                 try:
@@ -507,7 +557,14 @@ class ValidationWorker:
                     if replay.get("status") == "evaluated":
                         return {
                             "validator_mode": "true_replay",
-                            "decision": "accept" if replay.get("accepted") else "reject",
+                            "decision": str(
+                                replay.get("verdict")
+                                or (
+                                    "accept"
+                                    if replay.get("accepted")
+                                    else "inconclusive"
+                                )
+                            ),
                             "accepted": bool(replay.get("accepted")),
                             "score": replay.get("score"),
                             "threshold": replay.get("threshold"),
@@ -523,12 +580,15 @@ class ValidationWorker:
                                 "specificity_and_reusability": replay.get("score"),
                                 "safe_to_publish": replay.get("score") if replay.get("accepted") else 0.0,
                             },
+                            "static_validation": static_validation,
                             "replay_summary": replay,
                         }
                     logger.info("[ValidationWorker] true replay skipped for %s: %s", job_id, replay.get("reason"))
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("[ValidationWorker] true replay failed for %s: %s", job_id, exc)
-        return await self._replay_validate_job(job)
+        result = await self._replay_validate_job(job)
+        result["static_validation"] = static_validation
+        return result
 
     async def run_once(self, *, force: bool = False) -> dict[str, Any]:
         summary = ValidationRunSummary()
@@ -556,6 +616,19 @@ class ValidationWorker:
             if not job_id:
                 summary.skipped_jobs += 1
                 continue
+            required_capabilities = {
+                str(item)
+                for item in (job.get("required_validator_capabilities") or [])
+                if str(item)
+            }
+            if not required_capabilities.issubset(self.CAPABILITIES):
+                logger.info(
+                    "[ValidationWorker] skipped %s due to unsupported capabilities: %s",
+                    job_id,
+                    sorted(required_capabilities - self.CAPABILITIES),
+                )
+                summary.skipped_jobs += 1
+                continue
             try:
                 result = await self._validate_job(job)
             except Exception as exc:
@@ -580,6 +653,15 @@ class ValidationWorker:
                 summary.skipped_jobs += 1
                 continue
             result["candidate_revision"] = candidate_revision
+            result["validator_capabilities"] = sorted(self.CAPABILITIES)
+            candidate = (
+                job.get("candidate_skill")
+                if isinstance(job.get("candidate_skill"), dict)
+                else {}
+            )
+            result["candidate_bundle_tree_sha256"] = bundle_tree_sha256(
+                candidate_skill_bundle(candidate)
+            )
             self._store.save_result(job_id, self._user_alias, result)
             self._jobs_completed_today += 1
             summary.validated_jobs += 1
@@ -656,6 +738,7 @@ class ValidationWorker:
                     )
                     version = int((record or {}).get("version") or 0)
                     expected_sha = str((record or {}).get("sha256") or "")
+                    expected_tree = str((record or {}).get("tree_sha256") or "")
                     bundle = (
                         hub._read_version_bundle(name, version)
                         if version > 0
@@ -663,15 +746,18 @@ class ValidationWorker:
                     )
                     markdown = bundle.get("SKILL.md", b"")
                     actual_sha = hashlib.sha256(markdown).hexdigest() if markdown else ""
+                    actual_tree = bundle_tree_sha256(bundle) if bundle else ""
                     if (
                         version > 0
                         and expected_sha
                         and actual_sha == expected_sha
+                        and (not expected_tree or actual_tree == expected_tree)
                     ):
                         return {
                             "name": name,
                             "version": version,
                             "sha256": expected_sha,
+                            "tree_sha256": expected_tree or actual_tree,
                         }
                 except Exception:  # noqa: BLE001 - finalize may still be committing.
                     pass

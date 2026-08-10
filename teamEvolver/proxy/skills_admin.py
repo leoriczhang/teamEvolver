@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import difflib
 import logging
 import os
 import time
@@ -27,6 +26,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from ..skills import editor
+from ..skills.bundle import candidate_skill_bundle, diff_skill_bundles
 from ..skills.editor import SkillEditorError
 
 logger = logging.getLogger(__name__)
@@ -173,16 +173,26 @@ def _version_evolution_context(
             text = str(item.get("claim") if isinstance(item, dict) else item).strip()
             if text and text not in optimization_items:
                 optimization_items.append(text)
-        before = str(current_skill.get("content") or "").splitlines()
-        after = str(candidate_skill.get("content") or "").splitlines()
-        skill_diff = "\n".join(
-            difflib.unified_diff(
-                before,
-                after,
-                fromfile=f"v{max(0, version - 1)}/SKILL.md",
-                tofile=f"v{version}/SKILL.md",
-                lineterm="",
-            )
+        for change in candidate_skill.get("file_changes") or []:
+            if not isinstance(change, dict):
+                continue
+            text = (
+                f"{change.get('operation')}: {change.get('path')} - "
+                f"{change.get('reason') or ''}"
+            ).strip()
+            if text not in optimization_items:
+                optimization_items.append(text)
+        bundle_diff = diff_skill_bundles(
+            candidate_skill_bundle(current_skill) if current_skill else {},
+            candidate_skill_bundle(candidate_skill),
+        )
+        skill_file = next(
+            (
+                item
+                for item in bundle_diff["files"]
+                if item.get("path") == "SKILL.md"
+            ),
+            {},
         )
         raw_evaluation = (
             selected.get("evaluation")
@@ -203,7 +213,9 @@ def _version_evolution_context(
             "evidence_classification": evidence,
             "decision": selected.get("decision") or {},
             "evaluation": normalized_evaluation,
-            "skill_diff": skill_diff,
+            "skill_diff": str(skill_file.get("diff") or ""),
+            "bundle_diff": bundle_diff,
+            "static_validation": candidate_skill.get("static_validation"),
         }
     _VERSION_CONTEXT_CACHE[cache_key] = (now + 30.0, context)
     return context

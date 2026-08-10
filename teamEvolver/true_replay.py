@@ -59,6 +59,12 @@ from .checklist import (
     objective_replay_decision,
     scope_checklist_for_case,
 )
+from .skills.bundle import (
+    bundle_tree_sha256,
+    candidate_skill_bundle,
+    write_skill_bundle,
+)
+from .validation.bundle_checks import validate_candidate_bundle
 
 # Canonical checkout root (holds the teamEvolver/ package).
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -406,10 +412,18 @@ def build_sandbox(base: Path, branch: str, harness: dict[str, str],
     if skill:
         name = str(skill.get("name") or "candidate-skill")
         sk_dir = hermes_home / "skills" / name
-        sk_dir.mkdir(parents=True, exist_ok=True)
-        (sk_dir / "SKILL.md").write_text(str(skill.get("content") or ""), "utf-8")
+        bundle = candidate_skill_bundle(skill)
+        write_skill_bundle(sk_dir, bundle, clean=True)
+        installed_tree = bundle_tree_sha256(bundle)
+    else:
+        installed_tree = ""
 
-    return {"home": str(home), "hermes_home": str(hermes_home), "workspace": str(workspace)}
+    return {
+        "home": str(home),
+        "hermes_home": str(hermes_home),
+        "workspace": str(workspace),
+        "skill_tree_sha256": installed_tree,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -994,6 +1008,7 @@ def _evaluate_agentshub_case(
         **common,
         "status": "evaluated",
         "accepted": accepted,
+        "verdict": str(policy.get("verdict") or "inconclusive"),
         "no_regression": no_regression,
         "score": round(candidate_score, 3),
         "baseline_mean": round(baseline_score, 3),
@@ -1038,6 +1053,21 @@ def evaluate_job(
     if job is None:
         return {"status": "not_found", "job_id": job_id}
     skill = job.get("candidate_skill") or {}
+    static_validation = validate_candidate_bundle(skill)
+    if not static_validation.get("passed"):
+        return {
+            "status": "evaluated",
+            "mode": "true_replay",
+            "job_id": job_id,
+            "accepted": False,
+            "no_regression": False,
+            "score": 0.0,
+            "baseline_mean": 0.0,
+            "threshold": round(float(min_score), 3),
+            "reason": "candidate bundle failed deterministic static checks",
+            "static_validation": static_validation,
+            "cases": [],
+        }
     harness = read_hermes_harness()
     search_roots = [_REPO_ROOT, Path(os.path.expanduser("~"))]
     cases = annotate_cases(job, search_roots)

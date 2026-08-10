@@ -68,6 +68,37 @@ export interface LedgerRow {
   timestamp?: string;
 }
 
+export interface BundleFileDiff {
+  path: string;
+  status: "added" | "modified" | "deleted" | "unchanged";
+  old_sha256?: string;
+  new_sha256?: string;
+  old_size?: number;
+  new_size?: number;
+  is_text?: boolean;
+  diff?: string;
+}
+
+export interface BundleDiff {
+  before_tree_sha256?: string;
+  after_tree_sha256?: string;
+  changed_count?: number;
+  files?: BundleFileDiff[];
+}
+
+export interface StaticValidation {
+  passed?: boolean;
+  enabled?: boolean;
+  changed_files?: string[];
+  errors?: string[];
+  checks?: Array<{
+    path?: string;
+    checker?: string;
+    passed?: boolean;
+    detail?: string;
+  }>;
+}
+
 export interface Candidate {
   job_id: string;
   skill_name?: string;
@@ -92,6 +123,12 @@ export interface Candidate {
     category?: string;
     content?: string;
     edit_summary?: Record<string, any>;
+    file_changes?: Array<{
+      path?: string;
+      operation?: "upsert" | "delete";
+      reason?: string;
+    }>;
+    static_validation?: StaticValidation;
   };
   current_skill?: {
     name?: string;
@@ -102,6 +139,8 @@ export interface Candidate {
   current_skill_md?: string;
   candidate_skill_md?: string;
   skill_diff?: string;
+  bundle_diff?: BundleDiff;
+  static_validation?: StaticValidation;
   verify_score?: number | null;
   replay_score?: number | null;
   baseline_score?: number | null;
@@ -185,6 +224,8 @@ export interface EvalResult {
   current_skill_md?: string;
   candidate_skill_md?: string;
   skill_diff?: string;
+  bundle_diff?: BundleDiff;
+  static_validation?: StaticValidation;
 }
 
 export interface ReplayChecklistItem {
@@ -289,6 +330,8 @@ export interface SkillVersionResp {
   current_version: number;
   is_current?: boolean;
   versions?: number[];
+  tree_sha256?: string;
+  files?: Array<{ path: string; sha256?: string; size?: number }>;
   evolution?: {
     job_id?: string;
     proposed_action?: string;
@@ -299,6 +342,8 @@ export interface SkillVersionResp {
     decision?: CandidateDecision;
     evaluation?: EvalResult;
     skill_diff?: string;
+    bundle_diff?: BundleDiff;
+    static_validation?: StaticValidation;
   };
 }
 
@@ -366,6 +411,7 @@ export interface SessionProcess {
       verification?: VerificationResult;
       version?: number | null;
       job_id?: string;
+      file_changes?: Array<{ path?: string; operation?: string; reason?: string }>;
     }[];
   }[];
 }
@@ -411,6 +457,7 @@ export interface EvolveHistoryCycle {
     version?: number | null;
     job_id?: string;
     session_ids?: string[];
+    file_changes?: Array<{ path?: string; operation?: string; reason?: string }>;
   }[];
   [key: string]: any;
 }

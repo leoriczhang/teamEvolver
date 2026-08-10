@@ -122,6 +122,13 @@ class TeamEvolverConfig:
     evolve_evidence_replay_cases_per_window: int = 1
     evolve_evidence_change_debt_threshold: int = 3
     evolve_candidate_coalesce_enabled: bool = True
+    evolve_bundle_text_extensions: list[str] = field(
+        default_factory=lambda: [".py", ".sh"]
+    )
+    evolve_bundle_max_file_bytes: int = 65536
+    evolve_bundle_max_prompt_bytes: int = 262144
+    evolve_bundle_allow_delete: bool = True
+    evolve_bundle_static_checks_enabled: bool = True
 
     # ------------------------------------------------------------------ #
     # DreamCycle team-memory maintenance                                  #
@@ -146,7 +153,7 @@ class TeamEvolverConfig:
     # that actually run candidate-vs-baseline replay; otherwise candidates
     # would queue indefinitely and never publish.
     validation_enabled: bool = True
-    validation_mode: str = "replay"
+    validation_mode: str = "true_replay"
     validation_idle_after_seconds: int = 300
     validation_poll_interval_seconds: int = 60
     validation_max_jobs_per_day: int = 5

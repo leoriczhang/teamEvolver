@@ -10,10 +10,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import sys
 import threading
 import time
-from pathlib import Path
 from typing import Optional
 
 import uvicorn
@@ -144,15 +142,29 @@ class ProxyServer(
         config: TeamEvolverConfig,
     ) -> None:
         """Apply a credential update without restarting the service process."""
+        current_evolve_config = getattr(
+            self._embedded_evolve_server,
+            "config",
+            None,
+        )
+        next_evolve_config = self._build_embedded_evolve_config(config)
+        evolve_config_changed = current_evolve_config != next_evolve_config
+
         await asyncio.to_thread(self._dreamcycle.stop)
         self.config = config
         self._dreamcycle = DreamCycleSupervisor(config)
 
-        await self._stop_embedded_evolve()
-        self._embedded_evolve_server = None
-        self._embedded_evolve_app = None
-        self._embedded_evolve_init_failed = False
-        self._start_embedded_evolve()
+        if evolve_config_changed:
+            await self._stop_embedded_evolve(graceful=True)
+            self._embedded_evolve_server = None
+            self._embedded_evolve_app = None
+            self._embedded_evolve_init_failed = False
+            self._start_embedded_evolve()
+        else:
+            logger.info(
+                "[EvolveServer] OpenViking sync did not change evolve config; "
+                "keeping the active cycle"
+            )
         self._start_dreamcycle()
 
     # ------------------------------------------------------------------ #
@@ -163,23 +175,19 @@ class ProxyServer(
         raw = os.environ.get("TEAMEVOLVER_EMBEDDED_EVOLVE_ENABLED", "1").strip().lower()
         return raw not in {"0", "false", "no", "off"}
 
-    def _ensure_skill_evolver_importable(self) -> None:
-        configured = os.environ.get("TEAMEVOLVER_EVOLVER_REPO", "").strip()
-        candidates = [
-            configured,
-            "/home/zhangpengkun/team_evolve/team_evolve_agent",
-            "/data00/home/zhangpengkun/team_evolve/team_evolve_agent",
-        ]
-        for raw in candidates:
-            if not raw:
-                continue
-            path = Path(raw).expanduser().resolve()
-            if not (path / "skill_evolver").is_dir():
-                continue
-            value = str(path)
-            if value not in sys.path:
-                sys.path.insert(0, value)
-            return
+    def _build_embedded_evolve_config(
+        self,
+        config: TeamEvolverConfig,
+    ):
+        from ..evolve import EvolveServerConfig
+
+        evolve_config = EvolveServerConfig.from_teamEvolver_config(config)
+        evolve_config.http_port = int(getattr(config, "proxy_port", 52010) or 52010)
+        interval = os.environ.get("TEAMEVOLVER_EMBEDDED_EVOLVE_INTERVAL_S", "").strip()
+        if interval:
+            evolve_config.interval_seconds = max(1, int(interval))
+        evolve_config.__post_init__()
+        return evolve_config
 
     def _get_embedded_evolve_server(self):
         if not self._embedded_evolve_enabled():
@@ -189,25 +197,15 @@ class ProxyServer(
         if self._embedded_evolve_init_failed:
             return None
         try:
-            self._ensure_skill_evolver_importable()
-            from skill_evolver.kernel.settings import EvolveServerConfig
-            from skill_evolver.runtime.orchestrator import EvolveServer
+            from ..evolve import EvolveServer
 
-            config_factory = getattr(EvolveServerConfig, "from_teamEvolver_config", None)
-            if config_factory is None:
-                legacy_name = "from_" + "skill" + "gene_config"
-                config_factory = getattr(EvolveServerConfig, legacy_name)
-            evolve_config = config_factory(self.config)
-            evolve_config.http_port = int(getattr(self.config, "proxy_port", 52010) or 52010)
-            interval = os.environ.get("TEAMEVOLVER_EMBEDDED_EVOLVE_INTERVAL_S", "").strip()
-            if interval:
-                evolve_config.interval_seconds = max(1, int(interval))
-            evolve_config.__post_init__()
+            evolve_config = self._build_embedded_evolve_config(self.config)
             self._embedded_evolve_server = EvolveServer(evolve_config)
             logger.info(
-                "[EvolveServer] embedded in teamEvolver on port %s interval=%ss",
+                "[EvolveServer] embedded in teamEvolver on port %s interval=%ss skill_verifier=%s",
                 evolve_config.http_port,
                 evolve_config.interval_seconds,
+                evolve_config.use_skill_verifier,
             )
         except Exception:
             self._embedded_evolve_init_failed = True
@@ -234,8 +232,30 @@ class ProxyServer(
         self._embedded_evolve_task = asyncio.create_task(server.run_periodic())
         logger.info("[EvolveServer] embedded periodic loop started")
 
-    async def _stop_embedded_evolve(self) -> None:
+    async def _stop_embedded_evolve(self, *, graceful: bool = False) -> None:
         server = self._embedded_evolve_server
+        if graceful and server is not None:
+            run_lock = getattr(server, "_run_lock", None)
+            if run_lock is not None and run_lock.locked():
+                timeout = max(
+                    1.0,
+                    float(
+                        os.environ.get(
+                            "TEAMEVOLVER_EVOLVE_RELOAD_GRACE_S",
+                            "900",
+                        )
+                    ),
+                )
+                try:
+                    await asyncio.wait_for(run_lock.acquire(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "[EvolveServer] active cycle did not finish within %.1fs; "
+                        "forcing config reload",
+                        timeout,
+                    )
+                else:
+                    run_lock.release()
         if server is not None:
             try:
                 server.stop()

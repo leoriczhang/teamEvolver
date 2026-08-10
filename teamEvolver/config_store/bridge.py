@@ -24,6 +24,7 @@ from .defaults import (
     _first_non_empty,
     _infer_sharing_backend,
     _normalize_choice,
+    _normalize_extensions,
     _normalize_non_negative_int,
     _normalize_reload_interval,
     _normalize_string_list,
@@ -216,6 +217,22 @@ class ConfigStore:
             evolve_candidate_coalesce_enabled=bool(
                 evolve.get("candidate_coalesce_enabled", True)
             ),
+            evolve_bundle_text_extensions=_normalize_extensions(
+                evolve.get("bundle_text_extensions", [".py", ".sh"])
+            ),
+            evolve_bundle_max_file_bytes=max(
+                1, int(evolve.get("bundle_max_file_bytes", 65536) or 65536)
+            ),
+            evolve_bundle_max_prompt_bytes=max(
+                1,
+                int(evolve.get("bundle_max_prompt_bytes", 262144) or 262144),
+            ),
+            evolve_bundle_allow_delete=bool(
+                evolve.get("bundle_allow_delete", True)
+            ),
+            evolve_bundle_static_checks_enabled=bool(
+                evolve.get("bundle_static_checks_enabled", True)
+            ),
             dreamcycle_enabled=bool(dreamcycle.get("enabled", False)),
             dreamcycle_auto_start=bool(dreamcycle.get("auto_start", False)),
             dreamcycle_daemon_command=str(
@@ -235,7 +252,7 @@ class ConfigStore:
             ),
             dreamcycle_llm_model=str(dreamcycle.get("llm_model", "") or ""),
             validation_enabled=bool(validation.get("enabled", True)),
-            validation_mode=_normalize_validation_mode(validation.get("mode", "replay")),
+            validation_mode=_normalize_validation_mode(validation.get("mode", "true_replay")),
             validation_idle_after_seconds=int(validation.get("idle_after_seconds", 300)),
             validation_poll_interval_seconds=int(validation.get("poll_interval_seconds", 60)),
             validation_max_jobs_per_day=int(validation.get("max_jobs_per_day", 5)),
@@ -333,6 +350,10 @@ class ConfigStore:
             f"historical={evolve.get('evidence_historical_limit', 12)}",
             f"evolve.change_debt_threshold: {evolve.get('evidence_change_debt_threshold', 3)}",
             f"evolve.candidate_coalesce: {evolve.get('candidate_coalesce_enabled', True)}",
+            "evolve.bundle_text_extensions: "
+            f"{','.join(_normalize_extensions(evolve.get('bundle_text_extensions', ['.py', '.sh'])))}",
+            f"evolve.bundle_allow_delete: {evolve.get('bundle_allow_delete', True)}",
+            f"evolve.bundle_static_checks: {evolve.get('bundle_static_checks_enabled', True)}",
             f"dreamcycle.enabled: {dreamcycle.get('enabled', False)}",
             f"dreamcycle.auto_start: {dreamcycle.get('auto_start', False)}",
             "dreamcycle.personal_sources: "
@@ -340,7 +361,7 @@ class ConfigStore:
             "dreamcycle.team_target: "
             f"{'configured' if sharing.get('viking_team_api_key') else 'missing'}",
             f"validation.enabled: {validation.get('enabled', True)}",
-            f"validation.mode: {_normalize_validation_mode(validation.get('mode', 'replay'))}",
+            f"validation.mode: {_normalize_validation_mode(validation.get('mode', 'true_replay'))}",
             f"validation.idle_after: {validation.get('idle_after_seconds', 300)}",
             f"validation.poll_interval: {validation.get('poll_interval_seconds', 60)}",
             f"validation.required_results: {validation.get('required_results', 3)}",

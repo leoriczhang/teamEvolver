@@ -190,3 +190,79 @@ def test_managed_eval_train_session_queues_without_auto_trigger(
     assert resp.json()["status"] == "queued"
     assert resp.json()["trigger_scheduled"] is False
     assert scheduled == 0
+
+
+def test_reingesting_unchanged_processed_session_is_skipped(tmp_path: Path) -> None:
+    """A consumed session re-submitted with identical content must not re-queue."""
+    server = _server(tmp_path)
+    app = server.app
+    payload = {
+        "session_id": "dup-1",
+        "user_alias": "tester",
+        "turns": [
+            {
+                "prompt_text": "帮我整理这个接口调用流程并生成可复用步骤",
+                "tool_calls": [{"function": {"name": "terminal", "arguments": "{}"}}],
+            }
+        ],
+        "metrics": {"tool_call_count": 1},
+    }
+
+    with TestClient(app) as client:
+        first = client.post("/ingest_session", json=payload)
+        assert first.json()["status"] == "queued"
+
+        # Simulate the external evolve engine consuming the session: the queue
+        # entry is removed while the archive copy remains.
+        (tmp_path / "sessions" / "dup-1.json").unlink()
+        assert (tmp_path / "session_archive" / "dup-1.json").exists()
+
+        again = client.post("/ingest_session", json=payload)
+
+    body = again.json()
+    assert body["status"] == "duplicate"
+    assert body["queued"] is False
+    # Not re-queued.
+    assert not (tmp_path / "sessions" / "dup-1.json").exists()
+
+
+def test_reingesting_continued_session_with_new_turn_requeues(tmp_path: Path) -> None:
+    """A genuinely continued conversation (new turn) is ingested again."""
+    server = _server(tmp_path)
+    app = server.app
+    base_turn = {
+        "prompt_text": "帮我整理这个接口调用流程并生成可复用步骤",
+        "tool_calls": [{"function": {"name": "terminal", "arguments": "{}"}}],
+    }
+
+    with TestClient(app) as client:
+        first = client.post(
+            "/ingest_session",
+            json={
+                "session_id": "cont-1",
+                "user_alias": "tester",
+                "turns": [base_turn],
+                "metrics": {"tool_call_count": 1},
+            },
+        )
+        assert first.json()["status"] == "queued"
+        (tmp_path / "sessions" / "cont-1.json").unlink()
+
+        again = client.post(
+            "/ingest_session",
+            json={
+                "session_id": "cont-1",
+                "user_alias": "tester",
+                "turns": [
+                    base_turn,
+                    {
+                        "prompt_text": "再补一个步骤：把结果落地成脚本",
+                        "tool_calls": [{"function": {"name": "terminal", "arguments": "{}"}}],
+                    },
+                ],
+                "metrics": {"tool_call_count": 2},
+            },
+        )
+
+    assert again.json()["status"] == "queued"
+    assert (tmp_path / "sessions" / "cont-1.json").exists()

@@ -8,7 +8,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Pill, Empty, ListViewport, PaginationControls, usePagedItems } from "@/components/common";
 import { cn } from "@/lib/utils";
-import { fmtScore } from "@/lib/format";
 import type {
   Candidate,
   ChecklistEvaluation,
@@ -16,33 +15,11 @@ import type {
   ReplaySide,
 } from "@/api/client";
 
-const VERIFY_LABELS: Record<string, string> = {
-  grounded_in_evidence: "有据可依（基于会话证据）",
-  preserves_existing_value: "保留既有价值（不破坏原技能）",
-  specificity_and_reusability: "具体且可复用",
-  safe_to_publish: "可安全发布",
-};
-
 const EFFICIENCY_LABELS: Record<string, string> = {
   interaction_turns: "交互轮次",
   tool_call_count: "工具调用",
   total_tokens: "Tokens",
 };
-
-function bar(v?: number | null) {
-  const pct = v == null || isNaN(Number(v)) ? 0 : Math.max(0, Math.min(1, Number(v))) * 100;
-  const cls = v == null ? "" : Number(v) >= 0.75 ? "good" : Number(v) < 0.5 ? "bad" : "";
-  return (
-    <div className="bar">
-      <span className={cls} style={{ width: `${pct.toFixed(0)}%` }} />
-    </div>
-  );
-}
-
-function kv(v?: number | null, thr?: number | null): { cls: string; txt: string } {
-  if (v == null || isNaN(Number(v))) return { cls: "muted", txt: "—" };
-  return { cls: thr != null ? (Number(v) >= thr ? "good" : "bad") : "", txt: fmtScore(v) };
-}
 
 function SecTitle({ children }: { children: ReactNode }) {
   return <div className="mt-5 mb-2.5 flex items-center gap-2 text-[13px] font-bold">{children}</div>;
@@ -99,18 +76,6 @@ function Kpi({
   );
 }
 
-function formatPercent(value?: number | null): string {
-  return value == null || Number.isNaN(Number(value))
-    ? "—"
-    : `${(Number(value) * 100).toFixed(1)}%`;
-}
-
-function formatDelta(value?: number | null): string {
-  if (value == null || Number.isNaN(Number(value))) return "—";
-  const number = Number(value);
-  return `${number >= 0 ? "+" : ""}${number.toFixed(3)}`;
-}
-
 function DecisionCell({
   label,
   passed,
@@ -146,7 +111,6 @@ export default function CandidateModal({
   onEvaluate: (force: boolean) => void;
 }) {
   const rep = ev?.replay || {};
-  const ver = ev?.verification || {};
   const replayCases = rep.cases || [];
   const efficiencyDimensions = rep.efficiency?.dimensions || {};
   const checklist = rep.checklist || cand?.checklist;
@@ -167,21 +131,21 @@ export default function CandidateModal({
   const currentMd = ev?.current_skill_md || cand?.current_skill_md || skillToMd(cand?.current_skill || ev?.current_skill);
   const candidateMd = ev?.candidate_skill_md || cand?.candidate_skill_md || skillToMd(cand?.candidate_skill || ev?.candidate_skill) || cand?.content_preview || "";
   const skillDiff = ev?.skill_diff || cand?.skill_diff || "";
+  const bundleDiff = ev?.bundle_diff || cand?.bundle_diff;
+  const changedFiles = (bundleDiff?.files || []).filter((file) => file.status !== "unchanged");
+  const staticValidation =
+    ev?.static_validation ||
+    cand?.static_validation ||
+    cand?.candidate_skill?.static_validation;
   const action = ev?.proposed_action || cand?.proposed_action || "";
   const missingCurrentText = action === "create_skill"
     ? "（新建技能，无当前版本）"
     : "（候选 Job 未携带当前版本，且当前技能库未找到对应 SKILL.md）";
-  const thr =
-    cand?.min_score != null
-      ? cand.min_score
-      : rep.threshold != null
-        ? rep.threshold
-        : 0.75;
 
   let bodyInner: ReactNode;
   if (!ev) {
     bodyInner = evaluating ? (
-      <Empty>正在运行 Verify + A/B 回放评估，请稍候…（首次评估需调用模型，可能耗时较久）</Empty>
+      <Empty>正在运行 A/B 回放评估，请稍候…（首次评估需调用模型，可能耗时较久）</Empty>
     ) : readOnly ? (
       <Empty>该历史候选没有可展示的缓存评估结果。</Empty>
     ) : (
@@ -193,62 +157,6 @@ export default function CandidateModal({
       </Empty>
     );
   } else {
-    const kVer = kv(ev.verify_score, ver.threshold);
-    const kRep = kv(ev.replay_score, rep.threshold != null ? rep.threshold : thr);
-    const kBase = kv(rep.baseline_mean, null);
-
-    // Verify detail
-    let verifyHtml: ReactNode;
-    if (ver.enabled === false) {
-      verifyHtml = (
-        <div className="text-xs text-muted-foreground">
-          Verify 校验未启用（服务未开启 skill verifier）。
-        </div>
-      );
-    } else if (ver.error) {
-      verifyHtml = <div className="text-xs text-destructive">验证失败：{ver.error}</div>;
-    } else {
-      const checks = ver.checks || {};
-      const keys = Object.keys(VERIFY_LABELS)
-        .filter((k) => checks[k] != null)
-        .concat(Object.keys(checks).filter((k) => !(k in VERIFY_LABELS)));
-      const decision = ver.decision ? (
-        <Pill tone={ver.accepted ? "green" : "red"}>
-          {ver.decision === "accept" ? "接受" : "拒绝"}
-        </Pill>
-      ) : null;
-      verifyHtml = (
-        <>
-          {keys.length ? (
-            keys.map((k) => {
-              const v = checks[k];
-              return (
-                <div key={k} className="my-1.5 flex items-center gap-2.5 text-xs">
-                  <div className="w-[210px] shrink-0">{VERIFY_LABELS[k] || k}</div>
-                  {bar(v)}
-                  <div className="w-[46px] shrink-0 text-right font-bold">
-                    {v == null ? "—" : Number(v).toFixed(2)}
-                  </div>
-                </div>
-              );
-            })
-          ) : (
-            <div className="text-xs text-muted-foreground">本次评估未返回细分检查项。</div>
-          )}
-          {ver.reason ? (
-            <div className="mt-2.5">
-              <div className="mb-1.5 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
-                评审理由 {decision}
-              </div>
-              <div className="text-sm">{ver.reason}</div>
-            </div>
-          ) : (
-            decision && <div className="mt-2">{decision}</div>
-          )}
-        </>
-      );
-    }
-
     // Replay detail
     let replayHtml: ReactNode;
     if (rep.error) {
@@ -288,15 +196,11 @@ export default function CandidateModal({
                 <AbCol
                   win={!aWin}
                   head="🅰 基线（当前技能 / 无技能）"
-                  score={bScore}
-                  scoreCls={kv(bScore, thr).cls}
                   body={replayOutput(b)}
                 />
                 <AbCol
                   win={aWin}
                   head="🅱 候选（新技能）"
-                  score={aScore}
-                  scoreCls={kv(aScore, thr).cls}
                   body={replayOutput(a)}
                 />
               </div>
@@ -356,40 +260,12 @@ export default function CandidateModal({
         {/* KPIs */}
         <div className="my-4 flex flex-wrap gap-2.5">
           <Kpi
-            label="验证分 (Verify)"
-            value={kVer.txt}
-            cls={kVer.cls}
-            tip={
-              <>
-                门槛 {ver.threshold != null ? Number(ver.threshold).toFixed(2) : "—"}
-                {ver.enabled === false ? " · 未启用" : ""}
-              </>
-            }
-          />
-          <Kpi
-            label="Checklist 覆盖率（候选）"
-            value={kRep.txt}
-            cls={kRep.cls}
-            tip={<>硬门禁优先，LLM 仅评软项</>}
-          />
-          <Kpi
-            label="Checklist 覆盖率（基线）"
-            value={kBase.txt}
-            cls={kBase.cls}
-            tip={<>候选需 ≥ 基线−{rep.tolerance != null ? Number(rep.tolerance).toFixed(2) : "0.15"}</>}
-          />
-          <Kpi
             label="综合建议"
             value={ev.recommended_publish ? "建议发布" : "建议复核"}
             cls={ev.recommended_publish ? "good" : "bad"}
             tip={
               <>
-                {rep.no_regression ? "无回退" : "存在回退"} ·{" "}
-                {ver.accepted === false
-                  ? "验证未过"
-                  : ver.enabled === false
-                    ? "验证未启用"
-                    : "验证通过"}
+                {rep.no_regression ? "无回退" : "存在回退"} · 回放门禁
               </>
             }
           />
@@ -507,18 +383,13 @@ export default function CandidateModal({
               )}
               <DecisionCell label="最终决策" passed={decisionPolicy.accepted} />
             </div>
-            <div className="mt-2 rounded-lg border border-border p-3 text-xs">
-              <div>
-                Checklist 增益：{formatDelta(decisionPolicy.coverage_gain)}
-                {" · "}轮次降低：{formatPercent(decisionPolicy.turn_gain)}
-                {" · "}加权效率：{formatDelta(decisionPolicy.efficiency_score)}
-              </div>
-              {!!decisionPolicy.reason_codes?.length && (
-                <div className="mt-1 text-destructive">
+            {!!decisionPolicy.reason_codes?.length && (
+              <div className="mt-2 rounded-lg border border-border p-3 text-xs">
+                <div className="text-destructive">
                   未通过原因：{decisionPolicy.reason_codes.join("、")}
                 </div>
-              )}
-            </div>
+              </div>
+            )}
           </>
         )}
 
@@ -527,13 +398,13 @@ export default function CandidateModal({
             <SecTitle>⚡ A/B 效率对比</SecTitle>
             <div
               role="region"
-              aria-label={`客观效率贡献：轮次 ${formatDelta(efficiencyDimensions.interaction_turns?.weighted_gain)}，工具 ${formatDelta(efficiencyDimensions.tool_call_count?.weighted_gain)}，Token ${formatDelta(efficiencyDimensions.total_tokens?.weighted_gain)}`}
+              aria-label={`A/B 效率对比：轮次 基线 ${Number(efficiencyDimensions.interaction_turns?.baseline || 0).toLocaleString()} / 候选 ${Number(efficiencyDimensions.interaction_turns?.candidate || 0).toLocaleString()}，工具 基线 ${Number(efficiencyDimensions.tool_call_count?.baseline || 0).toLocaleString()} / 候选 ${Number(efficiencyDimensions.tool_call_count?.candidate || 0).toLocaleString()}，Token 基线 ${Number(efficiencyDimensions.total_tokens?.baseline || 0).toLocaleString()} / 候选 ${Number(efficiencyDimensions.total_tokens?.candidate || 0).toLocaleString()}`}
               className="overflow-hidden rounded-lg border border-border"
             >
               <table className="w-full border-collapse text-xs">
                 <thead>
                   <tr className="bg-surface-subtle text-muted-foreground">
-                    {["指标", "权重", "基线", "候选", "减少量", "加权贡献", "结果"].map((label) => (
+                    {["指标", "基线", "候选", "变化", "结果"].map((label) => (
                       <th key={label} className="px-3 py-2 text-left font-semibold">{label}</th>
                     ))}
                   </tr>
@@ -542,15 +413,11 @@ export default function CandidateModal({
                   {Object.entries(efficiencyDimensions).map(([key, metric]) => (
                     <tr key={key} className="border-t border-border">
                       <td className="px-3 py-2 font-semibold">{EFFICIENCY_LABELS[key] || key}</td>
-                      <td className="px-3 py-2">{formatPercent(metric.weight)}</td>
                       <td className="px-3 py-2">{Number(metric.baseline || 0).toLocaleString()}</td>
                       <td className="px-3 py-2">{Number(metric.candidate || 0).toLocaleString()}</td>
                       <td className={cn("px-3 py-2 font-bold", metric.delta > 0 && "text-success", metric.delta < 0 && "text-destructive")}>
                         {metric.delta > 0 ? "-" : metric.delta < 0 ? "+" : ""}
                         {Math.abs(Number(metric.delta || 0)).toLocaleString()}
-                      </td>
-                      <td className="px-3 py-2 font-semibold">
-                        {formatDelta(metric.weighted_gain)}
                       </td>
                       <td className="px-3 py-2">
                         <Pill tone={metric.winner === "candidate" ? "green" : metric.winner === "baseline" ? "red" : "gray"}>
@@ -565,9 +432,45 @@ export default function CandidateModal({
           </>
         )}
 
-        <SecTitle>🛡 Verify 校验明细</SecTitle>
-        {verifyHtml}
-        <SecTitle>📄 Skill 变更内容</SecTitle>
+        <SecTitle>技能包变更</SecTitle>
+        {(bundleDiff || staticValidation) && (
+          <div className="mb-3 flex flex-wrap gap-2">
+            {bundleDiff && (
+              <Pill tone="blue">变更 {bundleDiff.changed_count || changedFiles.length} 个文件</Pill>
+            )}
+            {staticValidation && (
+              <Pill tone={staticValidation.passed ? "green" : "red"}>
+                静态检查{staticValidation.passed ? "通过" : "失败"}
+              </Pill>
+            )}
+          </div>
+        )}
+        {staticValidation?.errors?.length ? (
+          <div className="mb-3 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">
+            {staticValidation.errors.join("\n")}
+          </div>
+        ) : null}
+        {changedFiles.length > 0 && (
+          <div className="mb-3 space-y-2">
+            {changedFiles.map((file) => (
+              <details key={file.path} className="rounded-lg border border-border p-3">
+                <summary className="flex cursor-pointer items-center gap-2 text-xs font-semibold">
+                  <Pill tone={file.status === "deleted" ? "red" : file.status === "added" ? "green" : "blue"}>
+                    {file.status}
+                  </Pill>
+                  <span className="mono">{file.path}</span>
+                </summary>
+                {file.diff ? (
+                  <pre className="mt-2 max-h-[360px] overflow-auto whitespace-pre-wrap text-[11px]">{file.diff}</pre>
+                ) : (
+                  <div className="mt-2 text-xs text-muted-foreground">
+                    二进制文件或无可展示文本差异，{file.old_size || 0} → {file.new_size || 0} bytes
+                  </div>
+                )}
+              </details>
+            ))}
+          </div>
+        )}
         <div className="grid gap-2.5 sm:grid-cols-2">
           <SkillMdBlock title="当前 SKILL.md" body={currentMd || missingCurrentText} />
           <SkillMdBlock title="候选 SKILL.md" body={candidateMd || "（无候选内容）"} />
@@ -624,14 +527,10 @@ function SkillMdBlock({ title, body }: { title: string; body: string }) {
 function AbCol({
   win,
   head,
-  score,
-  scoreCls,
   body,
 }: {
   win: boolean;
   head: string;
-  score?: number | null;
-  scoreCls: string;
   body?: string;
 }) {
   return (
@@ -643,15 +542,7 @@ function AbCol({
     >
       <div className="mb-1.5 flex items-center justify-between text-[11px] text-muted-foreground">
         <span>{head}</span>
-        <span
-          className={cn(
-            "font-bold",
-            scoreCls === "good" && "text-success",
-            scoreCls === "bad" && "text-destructive"
-          )}
-        >
-          {score == null ? "—" : Number(score).toFixed(3)}
-        </span>
+        {win && <span className="font-bold text-success">更优</span>}
       </div>
       <div className="max-h-[200px] overflow-auto text-xs leading-normal whitespace-pre-wrap break-words">
         {body || <span className="text-muted-foreground">（无输出）</span>}

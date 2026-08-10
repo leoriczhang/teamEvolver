@@ -57,7 +57,7 @@ export default function HealthView({
         api<UsersListResp>("/api/users"),
         api<SkillListResp>("/api/skills"),
         api<{ sessions: any[] }>("/sessions"),
-        api<{ candidates: any[] }>("/validation/candidates"),
+        api<{ candidates: any[] }>("/api/validation/candidates"),
         api<SessionFilterAuditResp>("/api/session-filter/audit?limit=1"),
       ]);
       setHealth(h.status === "fulfilled" ? h.value : null);

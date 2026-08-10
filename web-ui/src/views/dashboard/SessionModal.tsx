@@ -12,7 +12,6 @@ import {
   ErrorText,
   ListViewport,
   PaginationControls,
-  VerificationCard,
   usePagedItems,
 } from "@/components/common";
 import { cn } from "@/lib/utils";
@@ -338,11 +337,12 @@ function ProcessBody({ p }: { p: SessionProcess | null }) {
                 会话评审
               </div>
               <div>
-                {j.overall_score != null ? (
+                {j.overall_score != null || j.rationale ? (
                   <>
-                    会话评审总分 <b>{j.overall_score}</b>
-                    {j.rationale && (
-                      <span className="text-muted-foreground"> — {j.rationale}</span>
+                    {j.rationale ? (
+                      <span className="text-muted-foreground">{j.rationale}</span>
+                    ) : (
+                      <span className="text-muted-foreground">已完成会话评审</span>
                     )}
                   </>
                 ) : (
@@ -357,22 +357,27 @@ function ProcessBody({ p }: { p: SessionProcess | null }) {
               {evos.length ? (
                 <div className="space-y-2.5">
                   {evos.map((e, k) => {
-                    const reason = e.reason || e.verification?.reason || e.rationale || "";
-                    const rejected = e.action === "verification_rejected" || e.verification?.accepted === false;
+                    const legacyVerifier = e.action === "verification_rejected";
+                    const reason = e.reason || e.rationale || "";
                     return (
                       <div key={k} className="rounded-lg border border-line bg-surface-subtle p-3">
                         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                           <div className="flex flex-wrap items-center gap-2">
                             <span className="mono text-xs font-semibold">{e.skill_name || "-"}</span>
-                            <Pill tone={rejected ? "red" : "blue"}>{e.action || "-"}</Pill>
+                            <Pill tone={legacyVerifier ? "gray" : "blue"}>
+                              {legacyVerifier ? "未进入回放（旧流程）" : e.action || "-"}
+                            </Pill>
                             {e.uploaded ? <Pill tone="green">已上传</Pill> : <Pill tone="gray">未上传</Pill>}
                           </div>
                           {e.version != null && <span className="text-xs text-muted-foreground">v{e.version}</span>}
                         </div>
-                        <VerificationCard verification={e.verification} fallbackReason={reason} compact />
-                        {!e.verification && reason && (
+                        {legacyVerifier ? (
+                          <div className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                            该记录由旧版预检流程产生；当前候选发布仅依据 A/B 回放与 Checklist 门禁。
+                          </div>
+                        ) : reason ? (
                           <div className="mt-2 text-xs leading-relaxed text-muted-foreground">{reason}</div>
-                        )}
+                        ) : null}
                         <EvidenceRouting value={e.evidence_classification} />
                       </div>
                     );
