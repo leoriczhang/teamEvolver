@@ -113,6 +113,23 @@ python3 run_coverage_report.py
 
 该接口只生成 Benchmark，不依赖 `data/input/`，不运行 Step 1–3，不会生成样本包、语义报告、`SKILL.md`、`EVALUATION.md` 或 LIFT 草稿。统一 SkillGene 服务下的标准入口为：
 
+SkillGene 内部组件应直接调用 Python API，无需通过 HTTP 回调自身：
+
+```python
+from skillgene import amine_benchmark_from_trajectories
+
+result = await amine_benchmark_from_trajectories({
+    "dataset_name": "skillgen-evolution",
+    "target_total": 18,
+    "trajectories": trajectories,
+})
+```
+
+同步 Worker 或 CLI 可改用 `mine_benchmark_from_trajectories(...)`。查询历史产物可使用
+`list_trajectory_benchmark_runs()` 和 `get_trajectory_benchmark_run(run_id)`。
+
+下面的 HTTP 路由仅作为前端控制台或独立进程集成时的可选适配层：
+
 ```text
 POST /api/mining/trajectory-benchmarks
 ```

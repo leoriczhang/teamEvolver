@@ -3,6 +3,7 @@ import { Panel, StatCard, Pill, Dot } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { api } from "@/api/client";
 import { fileToB64 } from "@/lib/file";
 import { toastErr, toastOk } from "@/lib/toast";
@@ -19,6 +20,7 @@ import {
   CheckCircle2,
   ArrowRight,
   FileText,
+  Eye,
 } from "lucide-react";
 
 /**
@@ -73,6 +75,36 @@ interface CompiledSkillDetail {
   has_evaluation: boolean;
   has_benchmark: boolean;
   question_count: number;
+}
+
+interface MiningArtifact {
+  name: string;
+  kind: "skill" | "evaluation" | "benchmark" | "semantic";
+  path: string;
+  size_bytes: number;
+  skill_name: string;
+}
+
+interface MiningRound {
+  round: number;
+  artifacts: MiningArtifact[];
+  skills: CompiledSkillDetail[];
+}
+
+interface MiningRun {
+  run_id: string;
+  started_at: string;
+  status: string;
+  rounds: MiningRound[];
+  final_artifacts: MiningArtifact[];
+  skills: CompiledSkillDetail[];
+}
+
+interface ArtifactContent {
+  path: string;
+  name: string;
+  content: string;
+  size_bytes: number;
 }
 
 interface MinedSkillLifecycle {
@@ -160,6 +192,7 @@ const STEP_META = [
 function useMining(active: boolean) {
   const [config, setConfig] = useState<MiningConfig | null>(null);
   const [lifecycle, setLifecycle] = useState<MinedSkillLifecycle[]>([]);
+  const [runs, setRuns] = useState<MiningRun[]>([]);
   const [state, setState] = useState<RunState>("idle");
   const [logs, setLogs] = useState<string[]>([]);
   const [phase, setPhase] = useState<PhaseState>({ step1: "idle", step2: "idle", step3: "idle" });
@@ -177,6 +210,12 @@ function useMining(active: boolean) {
     try {
       const next = await api<MiningConfig>("/api/mining/config");
       setConfig(next);
+      try {
+        const history = await api<{ runs: MiningRun[] }>("/api/mining/runs");
+        setRuns(history.runs || []);
+      } catch (e: any) {
+        toastErr("加载历史挖掘记录失败", e.message);
+      }
       try {
         const handoff = await api<{ skills: MinedSkillLifecycle[] }>("/api/mined-skills");
         setLifecycle(handoff.skills || []);
@@ -322,7 +361,7 @@ function useMining(active: boolean) {
   }, [active, refreshConfig]);
 
   return {
-    config, lifecycle, state, logs, phase, round, evals, question, benchmarkState,
+    config, lifecycle, runs, state, logs, phase, round, evals, question, benchmarkState,
     setLogs, setState, setPhase, setRound, setEvals, setQuestion, setBenchmarkState, refreshConfig,
   };
 }
@@ -351,6 +390,8 @@ export default function MiningView({
   const [submittingSkill, setSubmittingSkill] = useState("");
   const [uploading, setUploading] = useState(false);
   const [selectedInputDir, setSelectedInputDir] = useState("");
+  const [artifactPreview, setArtifactPreview] = useState<ArtifactContent | null>(null);
+  const [loadingArtifact, setLoadingArtifact] = useState("");
   const logRef = useRef<HTMLDivElement | null>(null);
 
   // Sync default rounds from config once loaded.
@@ -383,6 +424,9 @@ export default function MiningView({
   const selectedSource = inputSources.find((source) => source.path === inputDir);
   const compiledSkills = config?.compiled_skill_details
     ?? skills.map((name) => ({ name, has_skill: true, has_evaluation: false, has_benchmark: false, question_count: 0 }));
+  const historicalSkillCount = new Set(
+    mining.runs.flatMap((run) => run.skills.map((skill) => skill.name))
+  ).size;
   const lifecycleByName = new Map(mining.lifecycle.map((item) => [item.name, item]));
   const benchmarkRunning = mining.benchmarkState === "running" || mining.benchmarkState === "waiting";
 
@@ -503,6 +547,20 @@ export default function MiningView({
     }
   }
 
+  async function previewArtifact(artifact: MiningArtifact) {
+    setLoadingArtifact(artifact.path);
+    try {
+      const result = await api<ArtifactContent>(
+        `/api/mining/artifacts/content?path=${encodeURIComponent(artifact.path)}`
+      );
+      setArtifactPreview(result);
+    } catch (e: any) {
+      toastErr("读取历史产物失败", e.message);
+    } finally {
+      setLoadingArtifact("");
+    }
+  }
+
   /** 回答检查点提问：必须带 question_id，后端会拒绝过期/不匹配的提交。 */
   async function submitAnswers(answers: Record<string, string>) {
     if (!question) return;
@@ -543,7 +601,7 @@ export default function MiningView({
       {page === "overview" && (
         <div className="px-7 py-6">
           <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-4">
-            <StatCard label="已编译技能" value={String(skills.length)} />
+            <StatCard label="累计挖掘技能" value={config ? String(historicalSkillCount) : "—"} />
             <StatCard label="输入文档" value={config ? String(inputSources.reduce((sum, source) => sum + source.document_count, 0)) : "—"} />
             <StatCard label="运行状态" value={stateLabel} />
             <StatCard label="当前轮次" value={round ? String(round) : "—"} />
@@ -901,12 +959,92 @@ export default function MiningView({
 
       {/* ---- 挖掘任务 ---- */}
       {page === "jobs" && (
-        <div className="px-7 py-6">
-          <Panel title="已编译技能" count={compiledSkills.length ? `${compiledSkills.length} 个` : undefined}>
+        <div className="space-y-6 px-7 py-6">
+          <Panel title="历史挖掘记录" count={mining.runs.length ? `${mining.runs.length} 次` : undefined}>
+            {mining.runs.length === 0 ? (
+              <div className="flex flex-col items-center gap-3 p-8 text-center text-sm text-muted-soft">
+                <RotateCcw className="size-7" />
+                <span>暂无可读取的历史挖掘归档。</span>
+              </div>
+            ) : (
+              <div className="divide-y divide-line">
+                {mining.runs.map((run, index) => {
+                  const groups = run.final_artifacts.length
+                    ? [{
+                        label: run.status === "running" || run.status === "waiting" ? "当前进度产物" : "最终产物",
+                        artifacts: run.final_artifacts,
+                      }]
+                    : [...run.rounds].reverse().map((item) => ({
+                        label: `第 ${item.round} 轮产物`,
+                        artifacts: item.artifacts,
+                      }));
+                  const dateLabel = run.started_at
+                    ? new Date(run.started_at).toLocaleString("zh-CN", { hour12: false })
+                    : run.run_id === "current" ? "当前工作区" : "旧版归档";
+                  return (
+                    <details key={run.run_id} open={index === 0} className="group px-4 py-3">
+                      <summary className="flex cursor-pointer list-none items-center gap-4 rounded-lg py-1 select-none">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-semibold">{dateLabel}</span>
+                            {run.run_id === "current" && <Pill tone="blue">当前</Pill>}
+                            {(run.status === "running" || run.status === "waiting") && <Pill tone="blue">运行中</Pill>}
+                            <Pill tone="gray">{run.rounds.length || 1} 轮</Pill>
+                          </div>
+                          <div className="mono mt-1 truncate text-[11px] text-muted-soft">{run.run_id}</div>
+                        </div>
+                        <div className="flex flex-wrap justify-end gap-1.5">
+                          {run.skills.length ? run.skills.map((skill) => (
+                            <Pill key={skill.name} tone={skill.has_benchmark ? "green" : "purple"}>
+                              {skill.name}{skill.has_benchmark ? ` · ${skill.question_count} 题` : ""}
+                            </Pill>
+                          )) : <Pill tone="gray">尚无 Skill</Pill>}
+                        </div>
+                      </summary>
+                      <div className="mt-3 space-y-3 border-l-2 border-line pl-4">
+                        {groups.map((group) => (
+                          <div key={group.label}>
+                            <div className="mb-2 text-xs font-semibold text-muted-foreground">{group.label}</div>
+                            <div className="flex flex-wrap gap-2">
+                              {group.artifacts.map((artifact) => {
+                                const tone = artifact.kind === "skill"
+                                  ? "purple"
+                                  : artifact.kind === "benchmark"
+                                    ? "green"
+                                    : artifact.kind === "semantic" ? "blue" : "gray";
+                                const label = artifact.kind === "semantic"
+                                  ? `语义报告 · ${artifact.name}`
+                                  : artifact.skill_name ? `${artifact.skill_name} / ${artifact.name}` : artifact.name;
+                                return (
+                                  <Button
+                                    key={artifact.path}
+                                    size="sm"
+                                    variant="outline"
+                                    disabled={loadingArtifact === artifact.path}
+                                    onClick={() => previewArtifact(artifact)}
+                                  >
+                                    <Eye className="size-3.5" />
+                                    <Pill tone={tone as any}>{artifact.kind === "benchmark" ? "Benchmark" : artifact.kind === "semantic" ? "语义" : artifact.kind === "evaluation" ? "评测" : "Skill"}</Pill>
+                                    <span className="max-w-[300px] truncate">{label}</span>
+                                  </Button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  );
+                })}
+              </div>
+            )}
+          </Panel>
+
+          <Panel title="当前可操作产物" count={compiledSkills.length ? `${compiledSkills.length} 个` : undefined}>
             {compiledSkills.length === 0 ? (
               <div className="flex flex-col items-center gap-3 p-8 text-center text-sm text-muted-soft">
                 <FileText className="size-7" />
-                <span>暂无已编译技能。先运行挖掘流水线，产物会自动出现在这里。</span>
+                <span>{running ? "本轮正在挖掘，完成编译后会出现在这里。历史产物可在上方查看。" : "当前工作区暂无可操作技能，历史产物可在上方查看。"}</span>
                 <Button size="sm" onClick={() => onNavigate?.("pipeline")}>去运行挖掘 <ArrowRight className="size-3.5" /></Button>
               </div>
             ) : (
@@ -1021,6 +1159,18 @@ export default function MiningView({
           )}
         </div>
       )}
+
+      <Dialog open={!!artifactPreview} onOpenChange={(open) => !open && setArtifactPreview(null)}>
+        <DialogContent className="flex max-h-[88vh] w-full !max-w-[980px] flex-col overflow-hidden">
+          <DialogHeader>
+            <DialogTitle>产物预览 · {artifactPreview?.name}</DialogTitle>
+            <div className="mono break-all pr-8 text-[11px] text-muted-soft">{artifactPreview?.path}</div>
+          </DialogHeader>
+          <pre className="mono min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-[#0f172a] p-4 text-[12px] leading-relaxed text-[#dbe4f0]">
+            {artifactPreview?.content}
+          </pre>
+        </DialogContent>
+      </Dialog>
 
       {/* ---- 模型配置 ---- */}
       {page === "model" && (

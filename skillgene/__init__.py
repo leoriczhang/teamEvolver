@@ -9,11 +9,21 @@ if TYPE_CHECKING:
     from .config import SkillGeneConfig
     from .config_store import ConfigStore
     from .skills import SkillManager
+    from .trajectory_benchmark import (
+        amine_benchmark_from_trajectories,
+        get_trajectory_benchmark_run,
+        list_trajectory_benchmark_runs,
+        mine_benchmark_from_trajectories,
+    )
 
 __all__ = [
     "SkillGeneConfig",
     "ConfigStore",
     "SkillManager",
+    "mine_benchmark_from_trajectories",
+    "amine_benchmark_from_trajectories",
+    "list_trajectory_benchmark_runs",
+    "get_trajectory_benchmark_run",
 ]
 
 
@@ -21,6 +31,18 @@ _EXPORT_MAP = {
     "SkillGeneConfig": ("skillgene.config", "SkillGeneConfig"),
     "ConfigStore": ("skillgene.config_store", "ConfigStore"),
     "SkillManager": ("skillgene.skills", "SkillManager"),
+    "mine_benchmark_from_trajectories": (
+        "skillgene.trajectory_benchmark", "mine_benchmark_from_trajectories"
+    ),
+    "amine_benchmark_from_trajectories": (
+        "skillgene.trajectory_benchmark", "amine_benchmark_from_trajectories"
+    ),
+    "list_trajectory_benchmark_runs": (
+        "skillgene.trajectory_benchmark", "list_trajectory_benchmark_runs"
+    ),
+    "get_trajectory_benchmark_run": (
+        "skillgene.trajectory_benchmark", "get_trajectory_benchmark_run"
+    ),
 }
 
 

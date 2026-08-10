@@ -36,6 +36,7 @@ import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 STATIC_DIR = Path(__file__).parent / "static"
@@ -123,6 +124,188 @@ def _compiled_skill_details():
             "question_count": question_count,
         })
     return rows
+
+
+_HISTORY_ARTIFACT_NAMES = {
+    "SKILL.md": "skill",
+    "EVALUATION.md": "evaluation",
+    "BENCHMARK.md": "benchmark",
+    "benchmark.jsonl": "benchmark",
+    "benchmark_bank.json": "benchmark",
+}
+
+
+def _session_started_at(session_id):
+    """Turn the pipeline session tag into an ISO timestamp for the UI."""
+    try:
+        return datetime.strptime(session_id, "%Y%m%d_%H%M%S_%f").isoformat(timespec="seconds")
+    except (TypeError, ValueError):
+        return ""
+
+
+def _history_artifacts(root):
+    """List useful, human-readable artifacts below one archived snapshot."""
+    root = Path(root)
+    if not root.is_dir():
+        return []
+    rows = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        kind = _HISTORY_ARTIFACT_NAMES.get(path.name)
+        if kind is None and "semantic_reports" in path.parts and path.suffix.lower() == ".md":
+            kind = "semantic"
+        if kind is None:
+            continue
+        rows.append({
+            "name": path.name,
+            "kind": kind,
+            "path": path.relative_to(PROJECT_ROOT).as_posix(),
+            "size_bytes": path.stat().st_size,
+            "skill_name": path.parent.name if "compiled_skill" in path.parts else "",
+        })
+    return rows
+
+
+def _skill_summaries(artifacts):
+    grouped = {}
+    for artifact in artifacts:
+        skill_name = artifact.get("skill_name")
+        if not skill_name:
+            continue
+        row = grouped.setdefault(skill_name, {
+            "name": skill_name,
+            "has_skill": False,
+            "has_evaluation": False,
+            "has_benchmark": False,
+            "question_count": 0,
+        })
+        name = artifact["name"]
+        row["has_skill"] = row["has_skill"] or name == "SKILL.md"
+        row["has_evaluation"] = row["has_evaluation"] or name == "EVALUATION.md"
+        row["has_benchmark"] = row["has_benchmark"] or artifact["kind"] == "benchmark"
+        if name == "benchmark.jsonl":
+            target = (PROJECT_ROOT / artifact["path"]).resolve()
+            row["question_count"] = sum(
+                1 for line in target.read_text(encoding="utf-8", errors="ignore").splitlines()
+                if line.strip()
+            )
+    return sorted(grouped.values(), key=lambda item: item["name"])
+
+
+def list_mining_runs():
+    """Build persisted mining history from round archives and final snapshots.
+
+    ``reflection_rounds/<session>`` belongs to that session.  By contrast,
+    ``run_history/<new-session>/preexisting`` is the final snapshot of the
+    immediately preceding session, moved aside when the new run starts.  Merge
+    it back into that preceding session so later-generated Benchmark files are
+    shown beside the Skill that produced them.
+    """
+    rounds_root = PROJECT_ROOT / "reflection_rounds"
+    history_root = PROJECT_ROOT / "run_history"
+    session_ids = sorted(
+        (path.name for path in rounds_root.iterdir() if path.is_dir()),
+        reverse=True,
+    ) if rounds_root.is_dir() else []
+    runs = {}
+    for session_id in session_ids:
+        session_root = rounds_root / session_id
+        round_dirs = sorted(
+            (path for path in session_root.glob("round_*") if path.is_dir()),
+            key=lambda path: int(path.name.removeprefix("round_") or 0),
+        )
+        rounds = []
+        for round_dir in round_dirs:
+            artifacts = _history_artifacts(round_dir)
+            rounds.append({
+                "round": int(round_dir.name.removeprefix("round_") or 0),
+                "artifacts": artifacts,
+                "skills": _skill_summaries(artifacts),
+            })
+        runs[session_id] = {
+            "run_id": session_id,
+            "started_at": _session_started_at(session_id),
+            "status": "archived",
+            "rounds": rounds,
+            "final_artifacts": [],
+            "skills": _skill_summaries(rounds[-1]["artifacts"] if rounds else []),
+        }
+
+    active_run_id = str((MANAGER.config or {}).get("run_id") or "")
+    if not active_run_id and MANAGER.state in {"running", "waiting"} and session_ids:
+        # Compatibility for a task that was started before run_id persistence
+        # was added: the newest on-disk session is necessarily the active one.
+        active_run_id = max(session_ids)
+    if active_run_id in runs and MANAGER.state in {"running", "waiting"}:
+        runs[active_run_id]["status"] = MANAGER.state
+
+    # A preexisting snapshot at session N belongs to the latest session before N.
+    for container in sorted(history_root.iterdir()) if history_root.is_dir() else []:
+        snapshot = container / "preexisting"
+        artifacts = _history_artifacts(snapshot)
+        if not artifacts:
+            continue
+        preceding = next((sid for sid in sorted(runs, reverse=True) if sid < container.name), None)
+        if preceding is None:
+            preceding = f"legacy_before_{container.name}"
+            runs[preceding] = {
+                "run_id": preceding,
+                "started_at": "",
+                "status": "archived",
+                "rounds": [],
+                "final_artifacts": [],
+                "skills": [],
+            }
+        runs[preceding]["final_artifacts"] = artifacts
+        runs[preceding]["skills"] = _skill_summaries(artifacts)
+
+    current_artifacts = _history_artifacts(PROJECT_ROOT / "compiled_skill")
+    current_artifacts += _history_artifacts(PROJECT_ROOT / "semantic_reports")
+    if current_artifacts:
+        current_skills = _skill_summaries(current_artifacts)
+        if active_run_id in runs and MANAGER.state in {"running", "waiting"}:
+            runs[active_run_id]["final_artifacts"] = current_artifacts
+            if current_skills:
+                runs[active_run_id]["skills"] = current_skills
+        else:
+            runs["current"] = {
+                "run_id": "current",
+                "started_at": "",
+                "status": MANAGER.state,
+                "rounds": [],
+                "final_artifacts": current_artifacts,
+                "skills": current_skills,
+            }
+    return sorted(
+        runs.values(),
+        key=lambda item: (item["run_id"] == "current", item["started_at"], item["run_id"]),
+        reverse=True,
+    )
+
+
+def read_history_artifact(relative_path):
+    """Read one history artifact while preventing arbitrary file access."""
+    raw = str(relative_path or "").strip().replace("\\", "/")
+    if not raw:
+        raise ValueError("缺少产物路径")
+    target = (PROJECT_ROOT / raw).resolve()
+    allowed_roots = [
+        (PROJECT_ROOT / name).resolve()
+        for name in ("compiled_skill", "semantic_reports", "reflection_rounds", "run_history")
+    ]
+    if not any(target == root or root in target.parents for root in allowed_roots):
+        raise ValueError("产物路径不在允许的历史目录中")
+    if not target.is_file() or target.suffix.lower() not in {".md", ".json", ".jsonl", ".txt"}:
+        raise FileNotFoundError("历史产物不存在或不支持预览")
+    if target.stat().st_size > 2 * 1024 * 1024:
+        raise ValueError("产物超过 2 MB，暂不支持在线预览")
+    return {
+        "path": target.relative_to(PROJECT_ROOT).as_posix(),
+        "name": target.name,
+        "content": target.read_text(encoding="utf-8", errors="replace"),
+        "size_bytes": target.stat().st_size,
+    }
 
 
 def _knowledge_source_dir(source_path):
@@ -711,6 +894,7 @@ class RunManager:
 
         max_rounds = cfg["max_rounds"]
         session_tag = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        self.config["run_id"] = session_tag
         with contextlib.redirect_stdout(bus_writer):
             try:
                 rp.prepare_run_workspace(session_tag)
@@ -1276,11 +1460,22 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- GET ---
     def do_GET(self):
-        path = self.path.split("?", 1)[0]
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path == "/api/config":
             self._send_json(build_config_schema())
         elif path == "/api/state":
             self._send_json(MANAGER.snapshot())
+        elif path == "/api/runs":
+            self._send_json({"runs": list_mining_runs(), "runner": MANAGER.snapshot()})
+        elif path == "/api/artifacts/content":
+            query = parse_qs(parsed.query)
+            try:
+                self._send_json(read_history_artifact((query.get("path") or [""])[0]))
+            except FileNotFoundError as exc:
+                self._send_json({"ok": False, "msg": str(exc)}, code=404)
+            except ValueError as exc:
+                self._send_json({"ok": False, "msg": str(exc)}, code=400)
         elif path == "/api/trajectory-benchmarks":
             self._send_json({
                 "runs": tb.list_runs(project_root=PROJECT_ROOT),

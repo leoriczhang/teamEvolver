@@ -45,6 +45,68 @@ def test_config_schema_reports_real_source_and_artifact_readiness(tmp_path, monk
     }]
 
 
+def test_mining_history_merges_rounds_with_next_run_preexisting_snapshot(tmp_path, monkeypatch):
+    round_skill = (
+        tmp_path / "reflection_rounds" / "20260805_150618_777997" /
+        "round_1" / "compiled_skill" / "support-skill"
+    )
+    round_skill.mkdir(parents=True)
+    (round_skill / "SKILL.md").write_text("# Skill", encoding="utf-8")
+    (round_skill / "EVALUATION.md").write_text("# Evaluation", encoding="utf-8")
+
+    final_skill = (
+        tmp_path / "run_history" / "20260809_223901_916214" / "preexisting" /
+        "compiled_skill" / "support-skill"
+    )
+    final_skill.mkdir(parents=True)
+    (final_skill / "SKILL.md").write_text("# Final Skill", encoding="utf-8")
+    (final_skill / "EVALUATION.md").write_text("# Final Evaluation", encoding="utf-8")
+    (final_skill / "benchmark.jsonl").write_text('{"id":"q1"}\n{"id":"q2"}\n', encoding="utf-8")
+    report = (
+        tmp_path / "run_history" / "20260809_223901_916214" / "preexisting" /
+        "semantic_reports" / "report.md"
+    )
+    report.parent.mkdir(parents=True)
+    report.write_text("# Report", encoding="utf-8")
+
+    monkeypatch.setattr(server, "PROJECT_ROOT", tmp_path)
+    runs = server.list_mining_runs()
+
+    assert len(runs) == 1
+    assert runs[0]["run_id"] == "20260805_150618_777997"
+    assert runs[0]["started_at"] == "2026-08-05T15:06:18"
+    assert runs[0]["rounds"][0]["round"] == 1
+    assert runs[0]["skills"] == [{
+        "name": "support-skill",
+        "has_skill": True,
+        "has_evaluation": True,
+        "has_benchmark": True,
+        "question_count": 2,
+    }]
+    assert any(item["kind"] == "semantic" for item in runs[0]["final_artifacts"])
+
+
+def test_history_artifact_reader_is_path_safe(tmp_path, monkeypatch):
+    artifact = tmp_path / "reflection_rounds" / "run-1" / "round_1" / "compiled_skill" / "x" / "SKILL.md"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("# Safe", encoding="utf-8")
+    outside = tmp_path / "secret.txt"
+    outside.write_text("secret", encoding="utf-8")
+    monkeypatch.setattr(server, "PROJECT_ROOT", tmp_path)
+
+    result = server.read_history_artifact(
+        "reflection_rounds/run-1/round_1/compiled_skill/x/SKILL.md"
+    )
+    assert result["content"] == "# Safe"
+
+    try:
+        server.read_history_artifact("secret.txt")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("artifact reader allowed a path outside history roots")
+
+
 def test_empty_input_is_rejected_before_worker_start(tmp_path, monkeypatch):
     input_dir = tmp_path / "data" / "empty"
     input_dir.mkdir(parents=True)
