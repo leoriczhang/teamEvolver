@@ -4,8 +4,7 @@ import base64
 import sys
 from pathlib import Path
 
-
-SKILLMINER_ROOT = Path(__file__).resolve().parents[1] / "skillgene" / "skillminer"
+SKILLMINER_ROOT = Path(__file__).resolve().parents[1] / "teamEvolver" / "skillminer"
 if str(SKILLMINER_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILLMINER_ROOT))
 

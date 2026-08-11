@@ -5,7 +5,6 @@ import {
   UserBadge,
   Pill,
   Dot,
-  ScoreText,
   Empty,
   ListViewport,
   PaginationControls,
@@ -22,12 +21,36 @@ import {
   type LedgerRow,
   type Candidate,
   type EvalResult,
+  type PageResponse,
 } from "@/api/client";
 import SkillVersionModal from "./dashboard/SkillVersionModal";
 import SessionModal, { StatusBadge, type SessTab } from "./dashboard/SessionModal";
 import CandidateModal from "./dashboard/CandidateModal";
 
-const POLL_MS = 4000;
+const POLL_MS = 15_000;
+const PAGE_SIZE = 20;
+
+function mergeCandidateDetail(items: Candidate[], detail: Candidate): Candidate[] {
+  const found = items.some((item) => item.job_id === detail.job_id);
+  if (!found) return [detail, ...items];
+  return items.map((item) => (
+    item.job_id === detail.job_id ? { ...item, ...detail } : item
+  ));
+}
+
+function serverPager(page: number, total: number, itemCount: number) {
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const currentPage = Math.min(Math.max(1, page), totalPages);
+  const start = (currentPage - 1) * PAGE_SIZE;
+  return {
+    page: currentPage,
+    totalPages,
+    visiblePages: Math.min(10, totalPages),
+    total,
+    start,
+    end: start + itemCount,
+  };
+}
 
 export default function DashboardView({ active }: { active: boolean }) {
   const [status, setStatus] = useState<StatusResp | null>(null);
@@ -35,6 +58,12 @@ export default function DashboardView({ active }: { active: boolean }) {
   const [queue, setQueue] = useState<QueueSession[] | null>(null);
   const [ledger, setLedger] = useState<LedgerRow[] | null>(null);
   const [cands, setCands] = useState<Candidate[]>([]);
+  const [queueTotal, setQueueTotal] = useState(0);
+  const [ledgerTotal, setLedgerTotal] = useState(0);
+  const [candidateTotal, setCandidateTotal] = useState(0);
+  const [queuePage, setQueuePage] = useState(1);
+  const [ledgerPage, setLedgerPage] = useState(1);
+  const [candidatePage, setCandidatePage] = useState(1);
   const [lastUpdate, setLastUpdate] = useState("—");
 
   const [evalCache, setEvalCache] = useState<Record<string, EvalResult>>({});
@@ -42,19 +71,42 @@ export default function DashboardView({ active }: { active: boolean }) {
 
   const inflight = useRef(false);
   const evaluatingRef = useRef<Record<string, boolean>>({});
+  const evalCacheRef = useRef<Record<string, EvalResult>>({});
   evaluatingRef.current = evaluating;
+  evalCacheRef.current = evalCache;
 
   // modal state
   const [skillModal, setSkillModal] = useState<{ name: string; version: number } | null>(null);
   const [sessModal, setSessModal] = useState<{ sid: string; tab: SessTab } | null>(null);
   const [candJobId, setCandJobId] = useState<string | null>(null);
 
+  const loadCandidateDetail = useCallback(async (jobId: string) => {
+    try {
+      const detail = await api<Candidate>(
+        `/api/validation/candidates/${encodeURIComponent(jobId)}/detail`
+      );
+      setCands((items) => mergeCandidateDetail(items, detail));
+      if (detail.evaluation) {
+        setEvalCache((m) => ({ ...m, [jobId]: detail.evaluation as EvalResult }));
+      }
+      return detail;
+    } catch (e: any) {
+      toastErr("加载评估详情失败", e.message);
+      return null;
+    }
+  }, []);
+
+  const openCandidate = useCallback((jobId: string) => {
+    setCandJobId(jobId);
+    void loadCandidateDetail(jobId);
+  }, [loadCandidateDetail]);
+
   const evaluate = useCallback(async (jobId: string, force: boolean) => {
     if (evaluatingRef.current[jobId]) return;
     setEvaluating((m) => ({ ...m, [jobId]: true }));
     try {
       const r = await api<EvalResult & { status?: string }>(
-        `/validation/candidates/${encodeURIComponent(jobId)}/evaluate${force ? "?refresh=true" : ""}`,
+        `/api/validation/candidates/${encodeURIComponent(jobId)}/evaluate${force ? "?refresh=true" : ""}`,
         { method: "POST" }
       );
       if (r && r.status !== "not_found") {
@@ -71,37 +123,59 @@ export default function DashboardView({ active }: { active: boolean }) {
     async (force: boolean) => {
       if (inflight.current && !force) return;
       inflight.current = true;
-      let st: StatusResp | null = null;
-      let sto: StorageStatus | null = null;
-      let q: QueueSession[] | null = null;
-      let led: LedgerRow[] | null = null;
-      let cs: Candidate[] | null = null;
-      try {
-        st = await api<StatusResp>("/status");
-      } catch {}
-      try {
-        sto = await api<StorageStatus>("/storage/status");
-      } catch {}
-      try {
-        q = (await api<{ sessions: QueueSession[] }>("/sessions")).sessions;
-      } catch {}
-      try {
-        led = (await api<{ conversations: LedgerRow[] }>("/conversations?limit=50")).conversations;
-      } catch {}
-      try {
-        cs = (await api<{ candidates: Candidate[] }>("/validation/candidates")).candidates;
-      } catch {}
+      const refreshFlag = force ? "&refresh=true" : "";
+      const [statusResult, storageResult, queueResult, ledgerResult, candidateResult] =
+        await Promise.allSettled([
+          api<StatusResp>(`/status${force ? "?refresh=true" : ""}`),
+          api<StorageStatus>("/storage/status"),
+          api<PageResponse<QueueSession>>(
+            `/sessions?limit=${PAGE_SIZE}&offset=${(queuePage - 1) * PAGE_SIZE}${refreshFlag}`
+          ),
+          api<PageResponse<LedgerRow>>(
+            `/conversations?limit=${PAGE_SIZE}&offset=${(ledgerPage - 1) * PAGE_SIZE}${refreshFlag}`
+          ),
+          api<PageResponse<Candidate>>(
+            `/api/validation/candidates?compact=true&limit=${PAGE_SIZE}&offset=${(candidatePage - 1) * PAGE_SIZE}${refreshFlag}`
+          ),
+        ]);
+      const st = statusResult.status === "fulfilled" ? statusResult.value : null;
+      const sto = storageResult.status === "fulfilled" ? storageResult.value : null;
+      const queuePayload = queueResult.status === "fulfilled" ? queueResult.value : null;
+      const ledgerPayload = ledgerResult.status === "fulfilled" ? ledgerResult.value : null;
+      const candidatePayload =
+        candidateResult.status === "fulfilled" ? candidateResult.value : null;
+      const q = queuePayload?.sessions || null;
+      const led = ledgerPayload?.conversations || null;
+      const cs = candidatePayload?.candidates || null;
+      const nextCands = cs || [];
+      const serverEvaluations: Record<string, EvalResult> = {};
+      for (const c of nextCands) {
+        if (c.evaluation) serverEvaluations[c.job_id] = c.evaluation;
+      }
+      const mergedCache = { ...evalCacheRef.current, ...serverEvaluations };
+      if (Object.keys(serverEvaluations).length) {
+        setEvalCache((m) => ({ ...m, ...serverEvaluations }));
+      }
       setStatus(st);
       setStorage(sto);
       setQueue(q);
       setLedger(led);
-      setCands(cs || []);
+      setCands(nextCands);
+      setQueueTotal(queuePayload?.total || 0);
+      setLedgerTotal(ledgerPayload?.total || 0);
+      setCandidateTotal(candidatePayload?.total || 0);
       setLastUpdate(
         "更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false })
       );
       inflight.current = false;
+      // auto-evaluate un-cached candidates
+      for (const c of nextCands) {
+        if (!mergedCache[c.job_id] && !evaluatingRef.current[c.job_id]) {
+          evaluate(c.job_id, false);
+        }
+      }
     },
-    []
+    [candidatePage, evaluate, ledgerPage, queuePage]
   );
 
   // poll
@@ -117,11 +191,11 @@ export default function DashboardView({ active }: { active: boolean }) {
     const msg =
       mode === "force"
         ? "确认强制发布该候选技能？（将忽略评分直接发布）"
-        : "确认按验证结果发布该候选技能？（回放无回退才会发布）";
+        : "确认按回放结果发布该候选技能？（回放无回退才会发布）";
     if (!window.confirm(msg)) return;
     try {
       const r = await api<{ status?: string; version?: number }>(
-        `/validation/candidates/${encodeURIComponent(jobId)}/validate`,
+        `/api/validation/candidates/${encodeURIComponent(jobId)}/validate`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -144,7 +218,7 @@ export default function DashboardView({ active }: { active: boolean }) {
   async function deleteCandidate(jobId: string) {
     if (!window.confirm("确认删除该待发布候选？删除后将从队列移除且不可恢复。")) return;
     try {
-      await api(`/validation/candidates/${encodeURIComponent(jobId)}`, { method: "DELETE" });
+      await api(`/api/validation/candidates/${encodeURIComponent(jobId)}`, { method: "DELETE" });
       setEvalCache((m) => {
         const n = { ...m };
         delete n[jobId];
@@ -162,23 +236,30 @@ export default function DashboardView({ active }: { active: boolean }) {
   const skills = status?.skills || {};
   const skillNames = Object.keys(skills);
   const openCand = candJobId ? cands.find((c) => c.job_id === candJobId) || null : null;
-  const queuePager = usePagedItems(queue || []);
-  const ledgerPager = usePagedItems(ledger || []);
-  const candPager = usePagedItems(cands);
   const skillPager = usePagedItems(skillNames);
+  const queuePager = serverPager(queuePage, queueTotal, queue?.length || 0);
+  const ledgerPager = serverPager(ledgerPage, ledgerTotal, ledger?.length || 0);
+  const candPager = serverPager(candidatePage, candidateTotal, cands.length);
 
   return (
     <div className="mx-auto max-w-[1200px] px-7 py-6">
-      <div className="mb-5 flex flex-wrap items-center justify-end gap-2">
-        <span className="inline-flex items-center gap-2 text-xs font-semibold text-muted-foreground">
-          <Dot state={status ? (running ? "run" : "on") : "err"} />
-          {status ? (running ? "进化任务运行中" : "服务在线") : "服务不可达"}
-        </span>
-        <ConnBadge storage={storage} />
-        <span className="text-xs text-muted-foreground">{lastUpdate}</span>
-        <Button variant="outline" size="sm" onClick={() => refresh(true)}>
-          刷新
-        </Button>
+      {/* header */}
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <h1 className="flex items-center gap-2.5 text-[22px] font-bold tracking-tight">
+            <Dot state={status ? (running ? "run" : "on") : "err"} /> 进化看板
+          </h1>
+          <div className="mt-1 text-xs text-muted-foreground">
+            会话进化流水线 · 待发布候选 · 技能版本
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <ConnBadge storage={storage} />
+          <span className="text-xs text-muted-foreground">{lastUpdate}</span>
+          <Button variant="outline" size="sm" onClick={() => refresh(true)}>
+            刷新
+          </Button>
+        </div>
       </div>
 
       {/* stats */}
@@ -193,14 +274,14 @@ export default function DashboardView({ active }: { active: boolean }) {
       </div>
 
       {/* queue */}
-      <Panel title="会话队列" count={queue ? `${queue.length} 个` : ""}>
+      <Panel title="会话队列" count={queue ? `${queueTotal} 个` : ""}>
         {!queue?.length ? (
           <Empty>队列为空，暂无待进化会话</Empty>
         ) : (
           <>
             <ListViewport>
               <Table headers={["提交人", "会话 ID", "轮数", "提交时间"]}>
-                {queuePager.items.map((s, i) => (
+                {(queue || []).map((s, i) => (
                   <tr key={`${s.session_id}-${i}`}>
                     <Td>
                       <UserBadge name={s.user_alias} />
@@ -212,20 +293,20 @@ export default function DashboardView({ active }: { active: boolean }) {
                 ))}
               </Table>
             </ListViewport>
-            <PaginationControls {...queuePager} onPageChange={queuePager.setPage} />
+            <PaginationControls {...queuePager} onPageChange={setQueuePage} />
           </>
         )}
       </Panel>
 
       {/* history */}
-      <Panel title="会话历史" count={ledger ? `${ledger.length} 条` : ""}>
+      <Panel title="会话历史" count={ledger ? `${ledgerTotal} 条` : ""}>
         {!ledger?.length ? (
           <Empty>尚无会话历史</Empty>
         ) : (
           <>
             <ListViewport>
               <Table headers={["会话标题", "提交人", "轮数", "消费状态", "时间"]}>
-                {ledgerPager.items.map((r, i) => {
+                {(ledger || []).map((r, i) => {
                   const sid = r.session_id || "";
                   return (
                     <tr key={`${sid}-${i}`}>
@@ -255,13 +336,13 @@ export default function DashboardView({ active }: { active: boolean }) {
                 })}
               </Table>
             </ListViewport>
-            <PaginationControls {...ledgerPager} onPageChange={ledgerPager.setPage} />
+            <PaginationControls {...ledgerPager} onPageChange={setLedgerPage} />
           </>
         )}
       </Panel>
 
       {/* candidates */}
-      <Panel title="待发布候选" count={cands.length ? `${cands.length} 个` : ""}>
+      <Panel title="待发布候选" count={candidateTotal ? `${candidateTotal} 个` : ""}>
         {!cands.length ? (
           <Empty>暂无待发布候选</Empty>
         ) : (
@@ -271,19 +352,15 @@ export default function DashboardView({ active }: { active: boolean }) {
                 headers={[
                   "技能",
                   "动作",
-                  "验证分 (Verify)",
-                  "A/B 回放分",
-                  "基线",
+                  "回放状态",
                   "建议",
                   "操作",
                 ]}
               >
-                {candPager.items.map((c) => {
-              const ev = evalCache[c.job_id] || c.evaluation;
+                {cands.map((c) => {
+              const ev = evalCache[c.job_id];
               const busy = evaluating[c.job_id];
-              const thr = c.min_score != null ? c.min_score : 0.75;
-              const open = () => setCandJobId(c.job_id);
-              const rep = ev?.replay || {};
+              const open = () => openCandidate(c.job_id);
               return (
                 <tr key={c.job_id}>
                   <td className="link border-b border-line px-4 py-2.5 align-top" onClick={open}>
@@ -294,27 +371,12 @@ export default function DashboardView({ active }: { active: boolean }) {
                   </Td>
                   <td className="link border-b border-line px-4 py-2.5 align-top" onClick={open}>
                     {busy && !ev ? (
-                      <span className="score pending">评估中…</span>
+                      <Pill tone="amber">评估中…</Pill>
                     ) : ev ? (
-                      <ScoreText value={ev.verify_score} threshold={ev.verification?.threshold} />
+                      <Pill tone="blue">已完成</Pill>
                     ) : (
-                      <span className="score pending">待评估</span>
+                      <Pill tone="gray">待评估</Pill>
                     )}
-                  </td>
-                  <td className="link border-b border-line px-4 py-2.5 align-top" onClick={open}>
-                    {busy && !ev ? (
-                      <span className="score pending">评估中…</span>
-                    ) : ev ? (
-                      <ScoreText
-                        value={ev.replay_score}
-                        threshold={rep.threshold != null ? rep.threshold : thr}
-                      />
-                    ) : (
-                      <span className="score pending">待评估</span>
-                    )}
-                  </td>
-                  <td className="link border-b border-line px-4 py-2.5 align-top" onClick={open}>
-                    {ev ? <ScoreText value={rep.baseline_mean} /> : <span className="score pending">—</span>}
                   </td>
                   <td className="link border-b border-line px-4 py-2.5 align-top" onClick={open}>
                     {ev ? (
@@ -335,10 +397,10 @@ export default function DashboardView({ active }: { active: boolean }) {
                         disabled={busy}
                         onClick={() => evaluate(c.job_id, true)}
                       >
-                        {ev ? "重新评估" : "开始 A/B 评估"}
+                        重新评估
                       </Button>
                       <Button size="sm" onClick={() => validate(c.job_id, "auto")}>
-                        验证发布
+                        按回放发布
                       </Button>
                       <Button variant="outline" size="sm" onClick={() => validate(c.job_id, "force")}>
                         强制发布
@@ -357,7 +419,7 @@ export default function DashboardView({ active }: { active: boolean }) {
                 })}
               </Table>
             </ListViewport>
-            <PaginationControls {...candPager} onPageChange={candPager.setPage} />
+            <PaginationControls {...candPager} onPageChange={setCandidatePage} />
           </>
         )}
       </Panel>

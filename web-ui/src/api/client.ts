@@ -1,4 +1,4 @@
-// API client for the SkillGene unified console.
+// API client for the teamEvolver unified console.
 //
 // All requests are same-origin: the 52010 evolve server hosts this SPA and
 // serves dashboard, auth, user, skill, model-config and session-ingest endpoints natively.
@@ -47,6 +47,16 @@ export interface QueueSession {
   timestamp?: string;
 }
 
+export interface PageResponse<T> {
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+  sessions?: T[];
+  conversations?: T[];
+  candidates?: T[];
+}
+
 export interface LedgerRow {
   session_id: string;
   title?: string;
@@ -58,12 +68,46 @@ export interface LedgerRow {
   timestamp?: string;
 }
 
+export interface BundleFileDiff {
+  path: string;
+  status: "added" | "modified" | "deleted" | "unchanged";
+  old_sha256?: string;
+  new_sha256?: string;
+  old_size?: number;
+  new_size?: number;
+  is_text?: boolean;
+  diff?: string;
+}
+
+export interface BundleDiff {
+  before_tree_sha256?: string;
+  after_tree_sha256?: string;
+  changed_count?: number;
+  files?: BundleFileDiff[];
+}
+
+export interface StaticValidation {
+  passed?: boolean;
+  enabled?: boolean;
+  changed_files?: string[];
+  errors?: string[];
+  checks?: Array<{
+    path?: string;
+    checker?: string;
+    passed?: boolean;
+    detail?: string;
+  }>;
+}
+
 export interface Candidate {
   job_id: string;
   skill_name?: string;
   candidate_skill_name?: string;
   proposed_action?: string;
+  review_status?: string;
   rationale?: string;
+  evidence_classification?: EvidenceClassification;
+  content_preview?: string;
   min_score?: number;
   source?: {
     kind?: string;
@@ -79,6 +123,12 @@ export interface Candidate {
     category?: string;
     content?: string;
     edit_summary?: Record<string, any>;
+    file_changes?: Array<{
+      path?: string;
+      operation?: "upsert" | "delete";
+      reason?: string;
+    }>;
+    static_validation?: StaticValidation;
   };
   current_skill?: {
     name?: string;
@@ -89,12 +139,31 @@ export interface Candidate {
   current_skill_md?: string;
   candidate_skill_md?: string;
   skill_diff?: string;
+  bundle_diff?: BundleDiff;
+  static_validation?: StaticValidation;
   verify_score?: number | null;
   replay_score?: number | null;
   baseline_score?: number | null;
   recommended_publish?: boolean;
   evaluation_error?: string | null;
   evaluation?: EvalResult;
+  decision?: CandidateDecision;
+  decision_reason?: string;
+  decided_at?: string;
+  decision_accepted?: boolean | null;
+  checklist?: ReplayChecklist;
+}
+
+export interface CandidateDecision {
+  status?: string;
+  accepted?: boolean;
+  reason?: string;
+  decided_at?: string;
+  job_id?: string;
+  skill_name?: string;
+  version?: number;
+  evaluation?: EvalResult;
+  [key: string]: any;
 }
 
 export interface EvalResult {
@@ -122,6 +191,7 @@ export interface EvalResult {
     cases?: ReplayCase[];
     efficiency?: {
       score?: number;
+      weights?: Record<string, number>;
       improved_dimensions?: string[];
       regressed_dimensions?: string[];
       dimensions?: Record<string, {
@@ -129,8 +199,24 @@ export interface EvalResult {
         candidate: number;
         delta: number;
         reduction_ratio: number;
+        weight?: number;
+        weighted_gain?: number;
         winner: "candidate" | "baseline" | "tie";
       }>;
+    };
+    checklist?: ReplayChecklist;
+    checklist_results?: Record<string, {
+      baseline?: ChecklistEvaluation;
+      candidate?: ChecklistEvaluation;
+    }> | {
+      baseline?: ChecklistEvaluation;
+      candidate?: ChecklistEvaluation;
+    };
+    decision_policy?: ReplayDecisionPolicy;
+    scoring_policy?: {
+      quality?: string;
+      efficiency_weights?: Record<string, number>;
+      llm_role?: string;
     };
   };
   candidate_skill?: Candidate["candidate_skill"];
@@ -138,11 +224,84 @@ export interface EvalResult {
   current_skill_md?: string;
   candidate_skill_md?: string;
   skill_diff?: string;
+  bundle_diff?: BundleDiff;
+  static_validation?: StaticValidation;
+}
+
+export interface ReplayChecklistItem {
+  id: string;
+  claim: string;
+  kind: "hard" | "soft";
+  evaluator: string;
+  required?: boolean;
+  source_session_ids?: string[];
+  causal_link?: string;
+  support_count?: number;
+  passed?: boolean;
+  observed_case_count?: number;
+  inherited_from?: {
+    skill_name?: string;
+    version?: number | null;
+  };
+}
+
+export interface ReplayChecklist {
+  format?: string;
+  action?: string;
+  source_session_ids?: string[];
+  source_user_aliases?: string[];
+  controlled_profiles?: Record<string, string[]>;
+  commonality?: {
+    passed?: boolean;
+    eligible_claim_count?: number;
+    provisional_claim_count?: number;
+    distinct_session_count?: number;
+    distinct_user_count?: number;
+  };
+  items?: ReplayChecklistItem[];
+  provisional_claims?: Array<Record<string, any>>;
+  excluded_personal_evidence?: Array<any>;
+  merge_context?: Record<string, any>;
+}
+
+export interface ChecklistEvaluation {
+  passed?: boolean;
+  hard_pass?: boolean;
+  pass_rate?: number;
+  hard_pass_rate?: number;
+  soft_pass_rate?: number;
+  items?: ReplayChecklistItem[];
+}
+
+export interface ReplayDecisionPolicy {
+  accepted?: boolean;
+  policy?: string;
+  quality_gate?: boolean;
+  commonality_pass?: boolean;
+  no_regression?: boolean;
+  coverage_gain?: number;
+  turn_gain?: number;
+  efficiency_score?: number;
+  reason_codes?: string[];
+  regressed_item_ids?: string[];
+  merge_union_pass?: boolean;
+  merge_source_results?: Array<{
+    skill_name?: string;
+    version?: number | null;
+    inherited?: boolean;
+    required_item_ids?: string[];
+    failed_item_ids?: string[];
+    passed?: boolean;
+  }>;
+  historical_no_regression?: boolean;
+  all_windows_evaluated?: boolean;
 }
 
 export interface ReplaySide {
   score?: number | null;
   response?: string;
+  final_response?: string;
+  response_text?: string;
   error?: string;
   rationale?: string;
   instruction?: string;
@@ -153,6 +312,8 @@ export interface ReplaySide {
   total_tokens?: number | null;
   input_tokens?: number | null;
   output_tokens?: number | null;
+  advisory_judge_score?: number | null;
+  checklist?: ChecklistEvaluation;
 }
 export interface ReplayCase {
   baseline?: ReplaySide;
@@ -169,6 +330,21 @@ export interface SkillVersionResp {
   current_version: number;
   is_current?: boolean;
   versions?: number[];
+  tree_sha256?: string;
+  files?: Array<{ path: string; sha256?: string; size?: number }>;
+  evolution?: {
+    job_id?: string;
+    proposed_action?: string;
+    rationale?: string;
+    edit_summary?: Record<string, any>;
+    optimization_items?: string[];
+    evidence_classification?: EvidenceClassification;
+    decision?: CandidateDecision;
+    evaluation?: EvalResult;
+    skill_diff?: string;
+    bundle_diff?: BundleDiff;
+    static_validation?: StaticValidation;
+  };
 }
 
 export interface SessionDetail {
@@ -219,16 +395,44 @@ export interface SessionProcess {
     timestamp?: string;
     sessions?: number | null;
     skill_groups?: number | null;
+    actions?: number | null;
+    skills_evolved?: number | null;
     uploaded_skills?: number | null;
     candidates_queued?: number | null;
+    had_processing_error?: boolean;
     judge?: { overall_score?: number | null; rationale?: string };
     evolutions?: {
       skill_name?: string;
       action?: string;
       uploaded?: boolean;
       reason?: string;
+      rationale?: string;
+      evidence_classification?: EvidenceClassification;
+      verification?: VerificationResult;
+      version?: number | null;
+      job_id?: string;
+      file_changes?: Array<{ path?: string; operation?: string; reason?: string }>;
     }[];
   }[];
+}
+
+export interface EvidenceClassification {
+  team_skill?: Array<string | Record<string, unknown>>;
+  user_memory?: Array<string | Record<string, unknown>>;
+  task_requirement?: Array<string | Record<string, unknown>>;
+  agent_runtime?: Array<string | Record<string, unknown>>;
+  insufficient_evidence?: Array<string | Record<string, unknown>>;
+}
+
+export interface VerificationResult {
+  threshold?: number | null;
+  enabled?: boolean;
+  accepted?: boolean;
+  error?: string;
+  decision?: string;
+  reason?: string;
+  score?: number | null;
+  checks?: Record<string, number | null>;
 }
 
 export interface EvolveHistoryCycle {
@@ -236,15 +440,24 @@ export interface EvolveHistoryCycle {
   session_ids?: string[];
   sessions?: number | null;
   skill_groups?: number | null;
+  actions?: number | null;
+  skills_evolved?: number | null;
   uploaded_skills?: number | null;
   candidates_queued?: number | null;
+  had_processing_error?: boolean;
   judge?: { overall_score?: number | null; rationale?: string };
   evolutions?: {
     skill_name?: string;
     action?: string;
     uploaded?: boolean;
     reason?: string;
+    rationale?: string;
+    evidence_classification?: EvidenceClassification;
+    verification?: VerificationResult;
+    version?: number | null;
+    job_id?: string;
     session_ids?: string[];
+    file_changes?: Array<{ path?: string; operation?: string; reason?: string }>;
   }[];
   [key: string]: any;
 }

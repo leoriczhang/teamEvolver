@@ -6,8 +6,7 @@ from pathlib import Path
 
 import pytest
 
-
-SKILLMINER_ROOT = Path(__file__).resolve().parents[1] / "skillgene" / "skillminer"
+SKILLMINER_ROOT = Path(__file__).resolve().parents[1] / "teamEvolver" / "skillminer"
 if str(SKILLMINER_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILLMINER_ROOT))
 
@@ -15,7 +14,7 @@ import trajectory_benchmark as tb  # noqa: E402
 from web_console import server  # noqa: E402
 
 
-def test_normalize_trajectories_accepts_skillgene_and_message_shapes_and_redacts() -> None:
+def test_normalize_trajectories_accepts_teamEvolver_and_message_shapes_and_redacts() -> None:
     evidence, source = tb.normalize_trajectories([
         {
             "session_id": "person@example.com",

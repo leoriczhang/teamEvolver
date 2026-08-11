@@ -1,8 +1,8 @@
-# SkillGene
+# teamEvolver
 
 <div align="center">
 
-## A Skill Library, Sync Console, and Validation Workbench for Agent Teams
+## A Skill Library, Sync Console, DreamCycle, and Validation Workbench for Agent Teams
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-Service-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
@@ -16,7 +16,24 @@
 
 ---
 
-## Why SkillGene?
+## Table of Contents
+
+- [Why teamEvolver?](#why-teamevolver)
+- [Design Principles](#design-principles)
+- [Core Capabilities](#core-capabilities)
+- [Architecture](#architecture)
+- [Manual Installation](#manual-installation)
+- [Console Map](#console-map)
+- [OpenViking / Object Storage](#openviking--object-storage)
+- [DreamCycle and Validation Queue](#dreamcycle-and-validation-queue)
+- [True Replay: Validate Skills with Real Trajectories](#true-replay-validate-skills-with-real-trajectories)
+- [Project Layout](#project-layout)
+- [Development](#development)
+- [Roadmap](#roadmap)
+
+---
+
+## Why teamEvolver?
 
 Agents can already complete complex tasks, but team skills often remain a loose set of files on one machine:
 
@@ -25,7 +42,7 @@ Agents can already complete complex tasks, but team skills often remain a loose 
 - **Hard to version**: skill origin, publisher, version state, and live team content are difficult to keep aligned.
 - **Hard to trust**: a skill may look polished, but there is little evidence that it improves task outcomes.
 
-**SkillGene is not about making agents remember more; it is a safe pipeline from real sessions to team capability.**
+**teamEvolver is not about making agents remember more; it is a safe pipeline from real sessions to team capability.**
 It turns scattered sessions into comparable evidence, separates personal and team assets, and publishes team skills through replay validation and version governance.
 
 ---
@@ -35,8 +52,9 @@ It turns scattered sessions into comparable evidence, separates personal and tea
 - **Central evidence**: retain sessions, tool calls, success strategies, and failure reasons so cross-user patterns become visible.
 - **Layered assets**: decide whether knowledge is shareable before deciding whether it should become `skill` or `memory`; personal assets stay isolated, team assets are published deliberately.
 - **Validated release**: team `SKILL.md` assets pass aggregation, redaction, deduplication, replay validation, versioning, and rollback gates.
+- **Evidence-first evolution**: new candidates carry recent evidence, historical evidence, and replay cases, so decisions do not depend on one success or one failure.
 
-Hermes and other agents keep their native runtime model. SkillGene delivers team skills through synced directories and hooks, so the agent's native skill system remains in control.
+Hermes and other agents keep their native runtime model. teamEvolver delivers team skills through synced directories and hooks, so the agent's native skill system remains in control.
 
 ---
 
@@ -50,7 +68,7 @@ Hermes and other agents keep their native runtime model. SkillGene delivers team
     </td>
     <td width="25%" valign="top">
       <h3>Team Sync</h3>
-      <p>Use local object storage or OpenViking-compatible object storage with separate personal and team spaces.</p>
+      <p>Use local object storage or OpenViking-compatible object storage, with personal keys as evidence sources and the team key as the publication target.</p>
     </td>
     <td width="25%" valign="top">
       <h3>Web Console</h3>
@@ -63,17 +81,21 @@ Hermes and other agents keep their native runtime model. SkillGene delivers team
   </tr>
 </table>
 
+The default configuration is now shaped for the full loop: skill sync, OpenViking team storage, session filtering, evidence windows, DreamCycle, validation queues, and candidate review can all be connected directly.
+
 ---
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph Team["SkillGene Team Service"]
+    subgraph Team["teamEvolver Team Service"]
         Console["Web Console"]
         API["FastAPI Service"]
         Registry["Skill Registry"]
+        Evidence["Evidence Windows"]
         Validation["Validation Queue"]
+        DreamCycle["DreamCycle Supervisor"]
     end
 
     subgraph Storage["Shared Storage"]
@@ -82,109 +104,142 @@ flowchart LR
     end
 
     subgraph Agent["Agent Machines"]
-        Sync["skillgene-sync Hook"]
+        Sync["teamEvolver-sync Hook"]
+        Feed["teamEvolver-feed Hook"]
         Dir["Synced SKILL.md Directory"]
         Hermes["Hermes Native Skills"]
     end
 
     Console --> API
     API --> Registry
+    API --> Evidence
     API --> Validation
+    API --> DreamCycle
     API <--> Local
     API <--> Viking
+    DreamCycle --> Viking
+    Validation <--> Viking
     Sync --> Viking
     Sync --> Dir
     Dir --> Hermes
+    Hermes --> Feed
+    Feed --> API
 ```
 
-The recommended path is shared storage, local sync, and native agent loading. Commands such as `skills_list`, `skill_view`, and `/skills` continue to come from the agent itself; SkillGene only makes sure the team skill library reaches the machine reliably.
+The recommended path is shared storage, local sync, and native agent loading. Commands such as `skills_list`, `skill_view`, and `/skills` continue to come from the agent itself; teamEvolver only makes sure the team skill library reaches the machine reliably.
 
 ---
 
-## Quick Start
+## Manual Installation
 
-### 1. Install
+If external network access fails, run:
 
 ```bash
-git clone https://github.com/leoriczhang/skillgene.git
-cd skillgene
+export http_proxy="http://sys-proxy-rd-relay.byted.org:8118"
+export https_proxy="http://sys-proxy-rd-relay.byted.org:8118"
+export no_proxy="localhost,.byted.org,byted.org,.bytedance.net,bytedance.net,127.0.0.0/8,169.254.0.0/16,100.64.0.0/10,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8,::1,fe80::/10,fd00::/8,33.0.0.0/8,2605:340:CD00::/40,64:ff9b::/96,64:ff9b:1::/48"
+```
+
+### Server: Deploy teamEvolver
+
+```bash
+export TEAMEVOLVER_HOST="<server-ip-or-hostname>"
+
+git clone https://github.com/leoriczhang/teamEvolver.git
+cd teamEvolver
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
 python -m pip install -e ".[all]"
+npm --prefix web-ui install
+npm --prefix web-ui run build
+
+teamEvolver config service.host 0.0.0.0
+teamEvolver config service.port 52010
+teamEvolver config skills.enabled true
+teamEvolver config skills.dir ./skills
+teamEvolver config sharing.enabled true
+teamEvolver config sharing.backend viking
+teamEvolver config sharing.viking_team_api_key "<team-key>"
+teamEvolver config sharing.viking_personal_api_key "<personal-key>"
+teamEvolver config sharing.viking_root_prefix "team-skill-evolver"
+teamEvolver config evolve.evidence_enabled true
+teamEvolver config evolve.evidence_recent_limit 12
+teamEvolver config evolve.evidence_historical_limit 12
+teamEvolver config evolve.evidence_change_debt_threshold 3
+# DreamCycle is optional and disabled by default; it drives an external dreamcycle engine
+# to maintain long-term team memory. Once enabled, it reads personal-key sources and
+# writes to the team-key space above.
+# Additional AgentsHub peers merge their personal keys through the internal config API.
+teamEvolver config dreamcycle.enabled true
+teamEvolver config dreamcycle.auto_start true
+teamEvolver config validation.enabled true
+teamEvolver config validation.mode replay
+teamEvolver config validation.required_results 3
+teamEvolver config validation.required_approvals 2
+teamEvolver config validation.agentshub_url "http://<agentshub-host>:5173"
+
+mkdir -p skills
+teamEvolver start --daemon --port 52010
+teamEvolver status
+curl -fsS "http://127.0.0.1:52010/health"
+curl -fsS "http://127.0.0.1:52010/status"
+curl -fsS "http://127.0.0.1:52010/trigger-dreamcycle/status"
 ```
-
-Core package only:
-
-```bash
-python -m pip install -e .
-```
-
-Installer script:
-
-```bash
-bash scripts/install_skillgene.sh
-```
-
-### 2. Configure a Local Skill Library
-
-```bash
-skillgene config skills.enabled true
-skillgene config skills.dir ./skills
-skillgene config sharing.enabled true
-skillgene config sharing.backend local
-skillgene config sharing.local_root ./skillgene-store
-```
-
-### 3. Create a Skill
-
-```bash
-mkdir -p skills/example-skill
-cat > skills/example-skill/SKILL.md <<'EOF'
----
-name: example-skill
-description: Use when you need a minimal SkillGene example.
-category: general
----
-
-# Example Skill
-
-Follow the project conventions and keep the answer concise.
-EOF
-```
-
-### 4. Sync Skills
-
-```bash
-skillgene skills push
-skillgene skills list-remote
-skillgene skills pull
-```
-
-### 5. Start the Console
-
-```bash
-skillgene config service.port 30000
-skillgene start --daemon
-skillgene status
-```
-
-Open:
 
 ```text
-http://127.0.0.1:30000/console
+http://<server-ip-or-hostname>:52010/console
 ```
 
 On first launch, initialize the admin account. The default username and password are both `admin`; change them after deployment.
+
+### Client: Deploy Hermes
+
+```bash
+export TEAMEVOLVER_REPO="/path/to/teamEvolver"
+export HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+export TEAMEVOLVER_URL="http://<server-ip-or-hostname>:52010"
+export TEAMEVOLVER_USER="<unique-user-alias-for-this-machine>"
+export TEAMEVOLVER_API_KEY=""
+TEAMEVOLVER_AUTH_ARGS=()
+[ -n "$TEAMEVOLVER_API_KEY" ] && TEAMEVOLVER_AUTH_ARGS=(--api-key "$TEAMEVOLVER_API_KEY")
+
+python "$TEAMEVOLVER_REPO/teamEvolver/integrations/hermes_skill_sync/install.py" \
+  --hermes-home "$HERMES_HOME" \
+  --python python3 \
+  --backend service \
+  --url "$TEAMEVOLVER_URL" \
+  --user "$TEAMEVOLVER_USER" \
+  "${TEAMEVOLVER_AUTH_ARGS[@]}"
+
+python "$TEAMEVOLVER_REPO/teamEvolver/integrations/hermes_skill/install.py" \
+  --hermes-home "$HERMES_HOME" \
+  --python python3 \
+  --user "$TEAMEVOLVER_USER" \
+  --url "$TEAMEVOLVER_URL" \
+  "${TEAMEVOLVER_AUTH_ARGS[@]}"
+
+python "$HERMES_HOME/skills/teamEvolver-sync/sync_skills.py"
+hermes hooks list
+curl -fsS "$TEAMEVOLVER_URL/status"
+```
+
+If Hermes is already running, execute this in the Hermes session:
+
+```text
+/reload-skills
+```
+
+Full coding agent integration instructions live in [docs/coding-agent.en.md](./docs/coding-agent.en.md).
 
 ---
 
 ## Console Map
 
 <div align="center">
-  <img src="docs/assets/skillgene-console-dashboard.png" width="900" alt="SkillGene console evolution dashboard screenshot">
+  <img src="docs/assets/teamEvolver-console-dashboard.png" width="900" alt="teamEvolver console evolution dashboard screenshot">
   <br>
-  <sub>SkillGene Console: evolution dashboard, team skill status, storage connectivity, and management entry points.</sub>
+  <sub>teamEvolver Console: evolution dashboard, team skill status, storage connectivity, and management entry points.</sub>
 </div>
 
 ```mermaid
@@ -192,6 +247,7 @@ flowchart TB
     Home["Evolution Dashboard"]
     Candidates["Candidate Review"]
     Audit["Evolution Audit"]
+    Filter["Filter Audit"]
     Health["System Health"]
     Skills["Skill Management"]
     Users["User Management"]
@@ -199,6 +255,7 @@ flowchart TB
 
     Home --> Candidates
     Home --> Audit
+    Home --> Filter
     Home --> Health
     Skills --> Users
     Candidates --> Model
@@ -209,6 +266,7 @@ The console includes:
 - **Evolution Dashboard**: storage connectivity, skill count, candidate queue, and service status.
 - **Candidate Review**: inspect candidate skills before publication, with optional True Replay validation.
 - **Evolution Audit**: review skill-evolution records.
+- **Filter Audit**: review valuable / chitchat decisions, mode, confidence, and reasons before sessions enter evolution.
 - **System Health**: check service, storage, and key API availability.
 - **Skill Management**: manage personal and team skills, including zip upload.
 - **User Management**: manage users, roles, and personal/team storage credentials.
@@ -216,92 +274,67 @@ The console includes:
 
 ---
 
-## Team Skill Sync
+## OpenViking / Object Storage
 
-Install `skillgene-sync` on agent machines. It pulls team skills before each task run and adds the synced directory to the agent's external skill directories.
-
-```mermaid
-sequenceDiagram
-    participant User as User
-    participant Agent as Hermes
-    participant Hook as skillgene-sync
-    participant Store as Shared Skill Store
-
-    User->>Agent: Start or continue a task
-    Agent->>Hook: pre_llm_call
-    Hook->>Store: Pull team SKILL.md bundles
-    Store-->>Hook: Manifest + skill files
-    Hook-->>Agent: Update external skill directory
-    Agent->>Agent: Native skill discovery
-```
-
-Install example:
+Remote sync uses teamEvolver's object-store abstraction. The default endpoint uses VolcEngine-hosted OpenViking:
 
 ```bash
-python skillgene/integrations/hermes_skill_sync/install.py \
-  --url "http://<skillgene-host>:52010" \
-  --user "<skillgene-user>"
+teamEvolver config sharing.enabled true
+teamEvolver config sharing.backend viking
+teamEvolver config sharing.viking_team_api_key "<team-key>"
+teamEvolver config sharing.viking_personal_api_key "<personal-key>"
+teamEvolver config sharing.viking_root_prefix "team-skill-evolver"
 ```
 
-The default installer uses the SkillGene service backend. Local Hermes machines
-only need the SkillGene service URL and SkillGene user name; OpenViking endpoint,
-team key, root prefix, and related shared-storage settings stay on the cloud
-SkillGene service.
+OpenViking space roles:
 
-The installer writes configuration similar to:
+- `sharing.viking_personal_api_key`: the current machine or user's personal evidence source.
+- `sharing.viking_team_api_key`: the shared target for team skills, validation jobs, validation results, and DreamCycle output.
+- `sharing.viking_root_prefix`: the cross-agent namespace, defaulting to `team-skill-evolver`.
 
-```yaml
-skills:
-  external_dirs:
-    - <HERMES_HOME>/team_skills/skillgene
-hooks:
-  pre_llm_call:
-    - command: "python3 <HERMES_HOME>/skills/skillgene-sync/sync_skills.py"
-      timeout: 60
-```
+When multiple AgentsHub peers connect, the service merges personal key sources through `/internal/agentshub/openviking-config` while keeping the same team key as the publication target.
 
-The generated `sync.json` is similar to:
+For self-hosted OpenViking Server deployments, see [volcengine/OpenViking](https://github.com/volcengine/OpenViking) and override the default service URL with `teamEvolver config sharing.viking_endpoint "<your-server-url>"`.
 
-```json
-{
-  "backend": "service",
-  "base_url": "http://<skillgene-host>:52010",
-  "user_alias": "<skillgene-user>",
-  "target_dir": "<HERMES_HOME>/team_skills/skillgene"
-}
-```
-
-If the agent is already running, execute `/reload-skills` to refresh the current session cache. New sessions pick up synced skills automatically.
-
-### Session Skill Attribution and Efficiency Metrics
-
-The `skillgene-feed` `on_session_end` hook reads the complete Hermes trajectory
-from `state.db`, including system, user, assistant, and tool messages:
-
-- `injected_skills`: skills actually exposed in the system prompt's `<available_skills>` block.
-- `used_skills`: skills actually loaded through `skill_view`.
-- `metrics`: interaction turns, tool-call count, and input/output/cache/reasoning tokens.
-
-After installing `skillgene-feed`, these fields are sent through `/ingest_session`
-and preserved in the session archive and console details.
+Do not commit real API keys. Use local configuration, environment variables, or your deployment platform's secret manager.
 
 ---
 
-## OpenViking / Object Storage
+## DreamCycle and Validation Queue
 
-Remote sync uses SkillGene's object-store abstraction. The default endpoint uses VolcEngine-hosted OpenViking:
+DreamCycle maintains long-term team experience. The validation queue evaluates candidate skills through real or simulated replay. Both reuse the same OpenViking object-store boundary:
+
+> DreamCycle is optional and disabled by default. It is executed by the standalone [dreamcycle](https://github.com/leoriczhang/dreamcycle) engine; teamEvolver only injects the Key/LLM environment and triggers it on demand. Make `dreamcycle` runnable on the host first (install that project, or point `dreamcycle.daemon_command` / `dreamcycle.trigger_command` at your entry point), then enable it explicitly:
 
 ```bash
-skillgene config sharing.enabled true
-skillgene config sharing.backend viking
-skillgene config sharing.viking_team_api_key "<team-key>"
-skillgene config sharing.viking_personal_api_key "<personal-key>"
-skillgene config sharing.viking_root_prefix "skillgene"
+teamEvolver config dreamcycle.enabled true       # turn on the optional maintenance
+teamEvolver config dreamcycle.auto_start true    # optional: let the service start a daemon
+teamEvolver config dreamcycle.llm_api_key "<llm-key>"
+teamEvolver config dreamcycle.llm_model "<model-id>"
 ```
 
-For self-hosted OpenViking Server deployments, see [volcengine/OpenViking](https://github.com/volcengine/OpenViking) and override the default service URL with `skillgene config sharing.viking_endpoint "<your-server-url>"`.
+1. `teamEvolver-feed` uploads real sessions, and the entry point first classifies valuable / chitchat sessions.
+2. The evolution loop builds candidate skills from recent evidence, historical evidence, and replay cases.
+3. DreamCycle reads personal key sources and writes to the team key space, so personal preferences are not published directly as team SOPs.
+4. Candidate skills enter `validation_jobs/`, and clients write `validation_results/` when they are idle.
+5. The console aggregates Verify score, Replay score, rejection reasons, and human decisions before publishing, rejecting, or deleting a candidate.
 
-Do not commit real API keys. Use local configuration, environment variables, or your deployment platform's secret manager.
+Common operations:
+
+```bash
+teamEvolver config show
+curl -fsS "http://127.0.0.1:52010/trigger-dreamcycle/status"
+curl -fsS -X POST "http://127.0.0.1:52010/trigger-dreamcycle"
+curl -fsS "http://127.0.0.1:52010/validation/candidates"
+```
+
+Validation uses lightweight replay by default. After the Hermes True Replay runtime is available, switch to real branch replay:
+
+```bash
+teamEvolver config validation.mode true_replay
+teamEvolver config validation.max_jobs_per_day 5
+teamEvolver config validation.max_concurrency 1
+```
 
 ---
 
@@ -333,32 +366,34 @@ python -m pip install -e ".[truereplay]"
 Replay a shared validation job:
 
 ```bash
-python -m skillgene.true_replay --job-id <validation-job-id> --json
+python -m teamEvolver.true_replay --job-id <validation-job-id> --json
 ```
 
 Replay a local JSON job file:
 
 ```bash
-python -m skillgene.true_replay --job-file ./candidate_job.json --dry-run
-python -m skillgene.true_replay --job-file ./candidate_job.json --json
+python -m teamEvolver.true_replay --job-file ./candidate_job.json --dry-run
+python -m teamEvolver.true_replay --job-file ./candidate_job.json --json
 ```
 
 True Replay creates temporary `HOME` and `HERMES_HOME` directories for both branches and does not modify your real agent configuration. To use a local agent checkout, set `HERMES_ORIGIN`.
+
+In console candidate review, admins can re-evaluate, validate publish, force publish, or delete the same candidate. Automatic publication should consider Verify score, Replay score, efficiency metrics, and rejection reasons together, not a single score alone.
 
 ---
 
 ## Project Layout
 
 ```text
-skillgene/
-├── skillgene/
-│   ├── cli/              # skillgene command line
+teamEvolver/
+├── teamEvolver/
+│   ├── cli/              # teamEvolver command line
 │   ├── config_store/     # local config store
 │   ├── proxy/            # service routes, console, and admin APIs
 │   ├── skills/           # SKILL.md management, bundling, sync
 │   ├── storage/          # local / OpenViking storage backends
-│   ├── integrations/     # Hermes integration
-│   ├── validation/       # optional candidate-skill validation
+│   ├── integrations/     # Hermes / DreamCycle integration
+│   ├── validation/       # shared validation queue, results, and worker
 │   ├── true_replay.py    # true A/B replay
 │   └── web/              # built console assets
 ├── web-ui/               # React + TypeScript console source
@@ -387,14 +422,23 @@ python -m build
 
 ---
 
+## Roadmap
+
+- Improve DreamCycle policy: separate personal memory, team memory, and publishable skills more precisely.
+- Expand True Replay: add multi-case replay, visual artifact QA, and more stable efficiency baselines.
+- Strengthen candidate governance: support multi-person approval, bulk rejection, post-release rollback, and finer version diffs.
+- Improve console workflows: add live validation artifact previews, queue trends, and cross-user contribution stats.
+
+---
+
 ## References
 
 Related projects and references:
 - [SkillClaw](https://github.com/AMAP-ML/SkillClaw): a multi-agent skill evolution project.
 - [OpenSpace](https://github.com/HKUDS/OpenSpace): a quality-first skill hub for AI agents.
 - [Hermes Agent](https://github.com/nousresearch/hermes-agent): optional runtime dependency for True Replay.
-- [FastAPI](https://fastapi.tiangolo.com/): the SkillGene service framework.
-- [React](https://react.dev/) and [TypeScript](https://www.typescriptlang.org/): the SkillGene console stack.
+- [FastAPI](https://fastapi.tiangolo.com/): the teamEvolver service framework.
+- [React](https://react.dev/) and [TypeScript](https://www.typescriptlang.org/): the teamEvolver console stack.
 
 ---
 

@@ -16,7 +16,12 @@ import {
 } from "@/components/common";
 import { cn } from "@/lib/utils";
 import { fmtTime } from "@/lib/format";
-import { api, type SessionDetail, type SessionProcess } from "@/api/client";
+import {
+  api,
+  type EvidenceClassification,
+  type SessionDetail,
+  type SessionProcess,
+} from "@/api/client";
 
 export type SessTab = "detail" | "process";
 
@@ -24,6 +29,57 @@ function StatusBadge({ status }: { status?: string }) {
   if (status === "consumed") return <Pill tone="green">已消费</Pill>;
   if (status === "queued") return <Pill tone="amber">排队中</Pill>;
   return <Pill tone="gray">{status || "-"}</Pill>;
+}
+
+function isNoActionNormal(c: NonNullable<SessionProcess["cycles"]>[number], evos: unknown[]) {
+  return (
+    !evos.length &&
+    !c.had_processing_error &&
+    Number(c.sessions || 0) > 0 &&
+    Number(c.skill_groups || 0) > 0 &&
+    Number(c.actions || 0) === 0 &&
+    Number(c.uploaded_skills || 0) === 0 &&
+    Number(c.candidates_queued || 0) === 0
+  );
+}
+
+function EvidenceRouting({ value }: { value?: EvidenceClassification }) {
+  const rows = [
+    ["团队 SOP", value?.team_skill || []],
+    ["用户 Memory 候选", value?.user_memory || []],
+    ["当前任务要求", value?.task_requirement || []],
+    ["运行时问题", value?.agent_runtime || []],
+    ["证据不足", value?.insufficient_evidence || []],
+  ] as const;
+  const populated = rows.filter(([, items]) => items.length);
+  if (!populated.length) return null;
+
+  const describe = (item: string | Record<string, unknown>) => {
+    if (typeof item === "string") return item;
+    for (const key of ["claim", "preference", "requirement", "issue", "observation", "reason"]) {
+      if (typeof item[key] === "string" && item[key]) return String(item[key]);
+    }
+    return JSON.stringify(item);
+  };
+
+  return (
+    <div className="mt-2 rounded-md border border-border bg-background/70 p-2.5 text-xs">
+      <div className="mb-1.5 font-semibold text-muted-foreground">证据归属</div>
+      <div className="space-y-1.5">
+        {populated.map(([label, items]) => (
+          <div key={label}>
+            <span className="font-medium">{label} ({items.length})</span>
+            <span className="text-muted-foreground">：{items.slice(0, 2).map(describe).join("；")}</span>
+          </div>
+        ))}
+      </div>
+      {(value?.user_memory?.length || 0) > 0 && (
+        <div className="mt-2 text-muted-foreground">
+          此处仅为个人记忆候选，尚未写入用户 Memory。
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function SessionModal({
@@ -265,23 +321,28 @@ function ProcessBody({ p }: { p: SessionProcess | null }) {
         {cyclesPager.items.map((c, i) => {
           const j = c.judge || {};
           const evos = c.evolutions || [];
+          const noActionNormal = isNoActionNormal(c, evos);
           return (
             <div key={`${c.timestamp || "cycle"}-${cyclesPager.start + i}`} className="rounded-lg border border-border p-4">
-            <div className="mb-2.5 text-xs text-muted-foreground">
-              🕑 {fmtTime(c.timestamp)} &nbsp;·&nbsp; 本周期 {c.sessions ?? "?"} 会话 /{" "}
-              {c.skill_groups ?? "?"} 技能组 / 上传 {c.uploaded_skills ?? 0} / 候选{" "}
-              {c.candidates_queued ?? 0}
+            <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+              <span>
+                🕑 {fmtTime(c.timestamp)} &nbsp;·&nbsp; 本周期 {c.sessions ?? "?"} 会话 /{" "}
+                {c.skill_groups ?? "?"} 技能组 / 上传 {c.uploaded_skills ?? 0} / 候选{" "}
+                {c.candidates_queued ?? 0}
+              </span>
+              {noActionNormal && <Pill tone="blue">无需进化</Pill>}
             </div>
             <div className="mb-3">
               <div className="mb-1.5 text-xs font-semibold text-muted-foreground">
                 会话评审
               </div>
               <div>
-                {j.overall_score != null ? (
+                {j.overall_score != null || j.rationale ? (
                   <>
-                    会话评审总分 <b>{j.overall_score}</b>
-                    {j.rationale && (
-                      <span className="text-muted-foreground"> — {j.rationale}</span>
+                    {j.rationale ? (
+                      <span className="text-muted-foreground">{j.rationale}</span>
+                    ) : (
+                      <span className="text-muted-foreground">已完成会话评审</span>
                     )}
                   </>
                 ) : (
@@ -294,42 +355,47 @@ function ProcessBody({ p }: { p: SessionProcess | null }) {
                 本会话相关的技能进化
               </div>
               {evos.length ? (
-                <table className="w-full border-collapse">
-                  <thead>
-                    <tr>
-                      {["技能", "动作", "已上传", "原因"].map((h) => (
-                        <th
-                          key={h}
-                          className="border-b border-line px-3 py-2 text-left text-xs font-semibold text-muted-foreground"
-                        >
-                          {h}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {evos.map((e, k) => (
-                      <tr key={k}>
-                        <td className="border-b border-line px-3 py-2 align-top">
-                          {e.skill_name || "-"}
-                        </td>
-                        <td className="border-b border-line px-3 py-2 align-top">
-                          {e.action || "-"}
-                        </td>
-                        <td className="border-b border-line px-3 py-2 align-top">
-                          {e.uploaded ? "✅" : "—"}
-                        </td>
-                        <td className="border-b border-line px-3 py-2 align-top text-xs text-muted-foreground">
-                          {e.reason || ""}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              ) : (
-                <div className="text-xs text-muted-foreground">
-                  本会话未直接触发技能变更（可能仅参与聚合评估）。
+                <div className="space-y-2.5">
+                  {evos.map((e, k) => {
+                    const legacyVerifier = e.action === "verification_rejected";
+                    const reason = e.reason || e.rationale || "";
+                    return (
+                      <div key={k} className="rounded-lg border border-line bg-surface-subtle p-3">
+                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="mono text-xs font-semibold">{e.skill_name || "-"}</span>
+                            <Pill tone={legacyVerifier ? "gray" : "blue"}>
+                              {legacyVerifier ? "未进入回放（旧流程）" : e.action || "-"}
+                            </Pill>
+                            {e.uploaded ? <Pill tone="green">已上传</Pill> : <Pill tone="gray">未上传</Pill>}
+                          </div>
+                          {e.version != null && <span className="text-xs text-muted-foreground">v{e.version}</span>}
+                        </div>
+                        {legacyVerifier ? (
+                          <div className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                            该记录由旧版预检流程产生；当前候选发布仅依据 A/B 回放与 Checklist 门禁。
+                          </div>
+                        ) : reason ? (
+                          <div className="mt-2 text-xs leading-relaxed text-muted-foreground">{reason}</div>
+                        ) : null}
+                        <EvidenceRouting value={e.evidence_classification} />
+                      </div>
+                    );
+                  })}
                 </div>
+              ) : (
+                noActionNormal ? (
+                  <div className="rounded-lg border border-border bg-background/60 p-3 text-xs leading-relaxed text-muted-foreground">
+                    <Pill tone="blue">流程正常</Pill>
+                    <div className="mt-2">
+                      该会话已完成评审与 Skill 分组，planner 判断当前 Skill 无需优化，也无需创建新 Skill。
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-xs text-muted-foreground">
+                    本会话未直接触发技能变更（可能仅参与聚合评估）。
+                  </div>
+                )
               )}
             </div>
             </div>

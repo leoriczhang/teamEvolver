@@ -3,11 +3,11 @@ SkillsAdmin REST routes.
 
 Three layers are covered:
 
-* :mod:`skillgene.skills.editor` — pure on-disk CRUD over ``skills_dir``.
-* :meth:`skillgene.skills.hub.SkillHub.delete_skill` and the ``include_names``
+* :mod:`teamEvolver.skills.editor` — pure on-disk CRUD over ``skills_dir``.
+* :meth:`teamEvolver.skills.hub.SkillHub.delete_skill` and the ``include_names``
   push filter — the cloud side used for auto-sync.
-* :class:`skillgene.proxy.skills_admin.SkillsAdminMixin` routes — wired through a
-  real :class:`~skillgene.proxy.ProxyServer` and exercised with the FastAPI
+* :class:`teamEvolver.proxy.skills_admin.SkillsAdminMixin` routes — wired through a
+  real :class:`~teamEvolver.proxy.ProxyServer` and exercised with the FastAPI
   ``TestClient`` (no live upstream), including the local-backend cloud auto-sync.
 """
 
@@ -22,13 +22,14 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from skillgene.config import SkillGeneConfig
-from skillgene.proxy import ProxyServer
-from skillgene.proxy.users_admin import _hub_from_user
-from skillgene.skills import editor
-from skillgene.skills.editor import SkillEditorError
-from skillgene.skills.hub import SkillHub
-from skillgene.skills.manager import SkillManager
+from teamEvolver.config import TeamEvolverConfig
+from teamEvolver.proxy import ProxyServer
+from teamEvolver.proxy.users_admin import _hub_from_user
+from teamEvolver.skills import editor
+from teamEvolver.skills.editor import SkillEditorError
+from teamEvolver.skills.hub import SkillHub
+from teamEvolver.skills.manager import SkillManager
+from teamEvolver.validation.store import ValidationStore
 
 
 def _skill_md(name: str, description: str = "Demo skill", body: str = "# Demo\n\nDo it.") -> str:
@@ -235,6 +236,83 @@ def test_delete_skill_removes_remote_bundle_and_is_idempotent(tmp_path: Path) ->
     assert again == {"deleted": False, "name": "solo"}
 
 
+def test_version_detail_includes_evolution_and_replay_context(tmp_path: Path) -> None:
+    server = _make_server(tmp_path, sharing=True)
+    client = _authed_client(server)
+    skills_dir = Path(server.config.skills_dir)
+    skill_dir = _seed_skill(skills_dir, "audit-skill")
+    hub = SkillHub.team_from_config(server.config)
+    hub.push_skills(str(skills_dir), include_names=["audit-skill"])
+    candidate = _skill_md("audit-skill", body="# After")
+    (skill_dir / "SKILL.md").write_text(candidate, encoding="utf-8")
+    hub.push_skills(str(skills_dir), include_names=["audit-skill"])
+
+    store = ValidationStore.from_config(server.config)
+    job_id = "job-audit-skill-v2"
+    store.save_job(
+        {
+            "job_id": job_id,
+            "candidate_skill": {
+                "name": "audit-skill",
+                "description": "Demo skill",
+                "category": "general",
+                "content": "# After",
+                "edit_summary": {
+                    "changed_sections": ["Stable verifier"],
+                    "notes": "Fix post-write validation.",
+                },
+            },
+            "current_skill": {
+                "name": "audit-skill",
+                "description": "Demo skill",
+                "category": "general",
+                "content": "# Before",
+            },
+            "proposed_action": "improve_skill",
+            "rationale": "Real replay exposed a missing validation step.",
+            "evidence_classification": {
+                "team_skill": [{"claim": "Rerun validation after editing."}]
+            },
+        }
+    )
+    store.save_evaluation(
+        job_id,
+        {
+            "accepted": True,
+            "score": 0.96,
+            "replay_summary": {
+                "score": 0.96,
+                "baseline_mean": 0.90,
+                "cases": [
+                    {
+                        "baseline": {"score": 0.90, "final_response": "before"},
+                        "candidate": {"score": 0.96, "final_response": "after"},
+                    }
+                ],
+            },
+        },
+    )
+    store.save_decision(
+        job_id,
+        {
+            "status": "published",
+            "skill_name": "audit-skill",
+            "version": 2,
+            "mean_score": 0.96,
+        },
+    )
+
+    response = client.get("/api/skills/audit-skill/versions/2")
+
+    assert response.status_code == 200
+    evolution = response.json()["evolution"]
+    assert evolution["job_id"] == job_id
+    assert "Stable verifier" in evolution["optimization_items"]
+    assert evolution["evaluation"]["replay"]["cases"][0]["candidate"]["score"] == 0.96
+    assert "# Before" in evolution["skill_diff"]
+    assert "# After" in evolution["skill_diff"]
+
+
 # --------------------------------------------------------------------------- #
 # SkillsAdmin routes via ProxyServer + TestClient                             #
 # --------------------------------------------------------------------------- #
@@ -247,7 +325,7 @@ def _make_server(tmp_path: Path, *, sharing: bool = False) -> ProxyServer:
     # reload() has something to load and generation bumps are observable.
     _seed_skill(skills_dir, "seed-skill")
 
-    config = SkillGeneConfig(
+    config = TeamEvolverConfig(
         skills_dir=str(skills_dir),
         users_registry_path=str(tmp_path / "users.json"),
         sharing_enabled=sharing,

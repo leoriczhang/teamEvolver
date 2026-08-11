@@ -26,11 +26,11 @@ import {
 /**
  * MiningView — SkillMiner「文档 → Skill」挖掘流水线控制台。
  *
- * 集成后 SkillGene 统一控制台「挖掘」分组的落地页。挖掘能力在左侧边栏拆成
+ * 集成后 teamEvolver 统一控制台「挖掘」分组的落地页。挖掘能力在左侧边栏拆成
  * 5 个独立菜单项（总览 / 知识源 / 挖掘流水线 / 挖掘任务 / 模型配置），本组件
  * 按 `page` 渲染对应页面。
  *
- * 后端已接入：SkillGene 服务把内嵌的 SkillMiner 控制台（子进程）反向代理到
+ * 后端已接入：teamEvolver 服务把内嵌的 SkillMiner 控制台（子进程）反向代理到
  * ``/api/mining/*``。本视图通过 ``/api/mining/config`` 拉配置、``/api/mining/events``
  * (SSE) 接收实时进度、``/api/mining/run`` 与 ``/api/mining/stop`` 驱动流水线。
  */
@@ -52,7 +52,7 @@ const PAGE_META: Record<MinePage, { title: string; desc: string }> = {
   },
   jobs: {
     title: "挖掘任务",
-    desc: "检查编译产物与内部 Benchmark，并提交到 SkillGene 候选评审与人工发布流程。",
+    desc: "检查编译产物与内部 Benchmark，并提交到 teamEvolver 候选评审与人工发布流程。",
   },
   model: {
     title: "挖掘模型",
@@ -925,7 +925,7 @@ export default function MiningView({
                     <span className="font-bold text-accent">编译产物交付</span>
                     <span className="text-muted-foreground">
                       {" "}
-                      — 完成后生成内部 Benchmark，进入 SkillGene A/B 验证与人工发布
+                      — 完成后生成内部 Benchmark，进入 teamEvolver A/B 验证与人工发布
                     </span>
                   </div>
                   <Button size="sm" variant="outline" className="ml-auto" onClick={() => onNavigate?.("jobs")}>
@@ -1210,7 +1210,7 @@ export default function MiningView({
               <div className="rounded-lg border border-border bg-background/60 p-3 text-xs leading-relaxed text-muted-foreground">
                 SkillMiner 的挖掘模型实际由本机 Hermes 安装（<span className="mono">~/.hermes/config.yaml</span> +
                 <span className="mono"> ARK_API_KEY</span>）管理，与「进化」分组下的进化模型相互独立。此处展示当前生效配置，
-                供核对之用。修改模型或凭据后，重启 SkillGene 服务使配置重新加载。
+                供核对之用。修改模型或凭据后，重启 teamEvolver 服务使配置重新加载。
               </div>
             </div>
           </Panel>

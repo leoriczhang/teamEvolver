@@ -57,7 +57,7 @@ const NAV_GROUPS: {
     ],
   },
   {
-    group: "进化 · SkillGene",
+    group: "进化 · teamEvolver",
     items: [
       { key: "dashboard", label: "进化看板", icon: LayoutDashboard },
       { key: "health", label: "系统健康", icon: Activity },
@@ -91,7 +91,7 @@ const EVOLVE_PAGE_META: Record<"health" | "skills" | "users" | "model", { title:
   },
   model: {
     title: "进化模型",
-    description: "配置 SkillGene 在总结、判断、合并和生成技能时使用的模型。",
+    description: "配置 teamEvolver 在总结、判断、合并和生成技能时使用的模型。",
   },
 };
 
@@ -102,7 +102,7 @@ const DASH_PAGE_META: Record<DashTab, { title: string; description: string }> = 
   },
   candidates: {
     title: "候选评审",
-    description: "集中处理待发布技能候选，核对 Verify 与 True Replay 证据后再发布。",
+    description: "集中处理待发布技能候选，核对 True Replay 证据后再发布。",
   },
   audit: {
     title: "进化审计",
@@ -179,7 +179,7 @@ export default function App() {
           <div className="grid size-[30px] place-items-center rounded-lg bg-sidebar-primary text-[13px] font-extrabold tracking-tighter text-white">
             SG
           </div>
-          <div className="text-[15px] font-bold tracking-tight">SkillGene</div>
+          <div className="text-[15px] font-bold tracking-tight">teamEvolver</div>
         </div>
         <nav className="flex flex-1 flex-col gap-0.5 overflow-auto px-2.5 py-3">
           {NAV_GROUPS.map(({ group, items }) => (
@@ -247,7 +247,7 @@ export default function App() {
           <PageHeader
             title={DASH_PAGE_META[dashTab].title}
             description={DASH_PAGE_META[dashTab].description}
-            badge="SkillGene"
+            badge="teamEvolver"
           />
           {/* Sub-tab bar for the 进化看板 group */}
           <div className="border-b border-line bg-surface px-7 pt-3">
@@ -286,19 +286,19 @@ export default function App() {
           </div>
         </div>
         <div className={cn(view !== "health" && "hidden")}>
-          <PageHeader title={EVOLVE_PAGE_META.health.title} description={EVOLVE_PAGE_META.health.description} badge="SkillGene" />
+          <PageHeader title={EVOLVE_PAGE_META.health.title} description={EVOLVE_PAGE_META.health.description} badge="teamEvolver" />
           <HealthView active={view === "health"} user={auth.user} />
         </div>
         <div className={cn(view !== "skills" && "hidden")}>
-          <PageHeader title={EVOLVE_PAGE_META.skills.title} description={EVOLVE_PAGE_META.skills.description} badge="SkillGene" />
+          <PageHeader title={EVOLVE_PAGE_META.skills.title} description={EVOLVE_PAGE_META.skills.description} badge="teamEvolver" />
           <SkillsView active={view === "skills"} user={auth.user} />
         </div>
         <div className={cn(view !== "users" && "hidden")}>
-          <PageHeader title={EVOLVE_PAGE_META.users.title} description={EVOLVE_PAGE_META.users.description} badge="SkillGene" />
+          <PageHeader title={EVOLVE_PAGE_META.users.title} description={EVOLVE_PAGE_META.users.description} badge="teamEvolver" />
           <UsersView active={view === "users"} />
         </div>
         <div className={cn(view !== "model" && "hidden")}>
-          <PageHeader title={EVOLVE_PAGE_META.model.title} description={EVOLVE_PAGE_META.model.description} badge="SkillGene" />
+          <PageHeader title={EVOLVE_PAGE_META.model.title} description={EVOLVE_PAGE_META.model.description} badge="teamEvolver" />
           <ModelSettingsView active={view === "model"} user={auth.user} />
         </div>
       </main>
@@ -361,7 +361,7 @@ function LoginGate({
         <div className="w-full max-w-[420px]">
           <div className="mb-5 lg:hidden">
             <span className="inline-flex items-center gap-2 rounded-full bg-accent-soft px-3 py-1 text-xs font-semibold text-accent">
-              <Sparkles className="size-3.5" /> SkillGene · 团队技能进化平台
+              <Sparkles className="size-3.5" /> teamEvolver · 团队技能进化平台
             </span>
           </div>
           <div className="rounded-4xl border border-border bg-surface p-6 shadow-[var(--shadow-float)]">
@@ -370,7 +370,7 @@ function LoginGate({
                 SG
               </div>
               <h1 className="text-[22px] font-bold tracking-tight">
-                {needsSetup ? "初始化管理员账号" : isRegister ? "注册 SkillGene 账号" : "登录 SkillGene 控制台"}
+                {needsSetup ? "初始化管理员账号" : isRegister ? "注册 teamEvolver 账号" : "登录 teamEvolver 控制台"}
               </h1>
               <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
                 {needsSetup
@@ -465,7 +465,7 @@ const LOGIN_SLIDES: {
     icon: Clock,
     tag: "把重复劳动交给技能",
     title: "别再一遍遍写同样的流程",
-    desc: "请假审批、周报汇总、小红书选题、翻译润色……这些反复出现的活儿，SkillGene 把它们沉淀成可复用的“技能”，下次一键调用。",
+    desc: "请假审批、周报汇总、小红书选题、翻译润色……这些反复出现的活儿，teamEvolver 把它们沉淀成可复用的“技能”，下次一键调用。",
     points: ["高频事务自动成型", "团队共享同一套最佳做法", "新人开箱即用"],
   },
   {
@@ -523,7 +523,7 @@ function LoginHero() {
           SG
         </div>
         <div>
-          <div className="text-[17px] font-bold tracking-tight">SkillGene</div>
+          <div className="text-[17px] font-bold tracking-tight">teamEvolver</div>
           <div className="text-xs text-white/60">团队技能进化平台</div>
         </div>
       </div>

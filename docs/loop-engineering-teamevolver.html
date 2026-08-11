@@ -1,0 +1,804 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="teamEvolver 如何以真实会话、技能候选、True Replay 和发布门禁实现可验证的智能体外层进化环。">
+  <title>让 Agent 从真实工作中进化：teamEvolver 的外层循环与 True Replay</title>
+  <style>
+    :root {
+      --bg: #0b101a;
+      --surface: #111827;
+      --surface-2: #172133;
+      --surface-3: #0d1523;
+      --ink: #edf3fb;
+      --body: #bdc7d6;
+      --muted: #7f8ba0;
+      --line: #263349;
+      --cyan: #5de0ca;
+      --cyan-soft: rgba(93,224,202,.1);
+      --orange: #ff9f63;
+      --orange-soft: rgba(255,159,99,.11);
+      --green: #67dda3;
+      --red: #ff7680;
+      --purple: #aa93ff;
+      --serif: "Noto Serif SC", "Source Han Serif SC", "Songti SC", Georgia, serif;
+      --sans: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--body);
+      background:
+        radial-gradient(circle at 78% -8%, rgba(72,113,239,.13), transparent 27%),
+        radial-gradient(circle at -10% 30%, rgba(93,224,202,.07), transparent 24%),
+        var(--bg);
+      font-family: var(--sans);
+      font-size: 16px;
+      line-height: 1.75;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: inherit; }
+    button { font: inherit; }
+    code { font-family: var(--mono); }
+
+    .head {
+      height: 70px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      padding: 0 max(22px, calc((100vw - 1280px) / 2));
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid rgba(38,51,73,.84);
+      background: rgba(11,16,26,.9);
+      backdrop-filter: blur(18px);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      color: var(--ink);
+      text-decoration: none;
+      font-weight: 760;
+    }
+    .brand-mark {
+      width: 33px;
+      height: 33px;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(93,224,202,.4);
+      border-radius: 10px;
+      color: var(--cyan);
+      background: var(--cyan-soft);
+      font: 800 17px var(--mono);
+      box-shadow: 0 0 26px rgba(93,224,202,.11);
+    }
+    .brand small {
+      padding: 3px 6px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      color: var(--muted);
+      font-size: 8px;
+      letter-spacing: .1em;
+      vertical-align: 2px;
+    }
+    .nav { display: flex; align-items: center; gap: 20px; }
+    .nav a { color: var(--muted); font-size: 11px; text-decoration: none; }
+    .nav a:hover { color: var(--cyan); }
+    .nav .pill {
+      padding: 7px 11px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--ink);
+      background: var(--surface);
+    }
+
+    .hero {
+      max-width: 1050px;
+      margin: 0 auto;
+      padding: 88px 26px 58px;
+      text-align: center;
+    }
+    .kicker {
+      color: var(--cyan);
+      font: 700 11px var(--mono);
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+    h1 {
+      margin: 18px auto 23px;
+      color: var(--ink);
+      font-family: var(--serif);
+      font-size: clamp(42px, 6vw, 74px);
+      line-height: 1.14;
+      letter-spacing: -.05em;
+    }
+    .dek {
+      max-width: 830px;
+      margin: 0 auto;
+      color: #a9b5c7;
+      font-family: var(--serif);
+      font-size: clamp(18px, 2vw, 23px);
+      line-height: 1.75;
+    }
+    .meta {
+      margin-top: 30px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 9px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .meta .dot { color: #3e4b60; }
+    .hero-line { max-width: 1220px; height: 1px; margin: 0 auto; background: var(--line); }
+
+    .layout {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 58px 26px 100px;
+      display: grid;
+      grid-template-columns: 205px minmax(0, 780px) 205px;
+      gap: 40px;
+      justify-content: center;
+      align-items: start;
+    }
+    .toc {
+      position: sticky;
+      top: 100px;
+      font-size: 11px;
+    }
+    .toc b {
+      display: block;
+      margin-bottom: 12px;
+      color: #cbd5e4;
+      font-size: 10px;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+    .toc a {
+      display: block;
+      padding: 6px 0 6px 13px;
+      border-left: 1px solid var(--line);
+      color: var(--muted);
+      line-height: 1.45;
+      text-decoration: none;
+    }
+    .toc a:hover, .toc a.active { border-color: var(--cyan); color: var(--cyan); }
+    .facts {
+      position: sticky;
+      top: 100px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: rgba(17,24,39,.72);
+      font-size: 10px;
+    }
+    .facts h3 { margin: 0 0 12px; color: var(--ink); font-size: 12px; }
+    .fact {
+      padding: 9px 0;
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+    }
+    .fact:last-child { border: 0; }
+    .fact b { color: var(--cyan); font: 700 10px var(--mono); }
+
+    article { min-width: 0; }
+    article > p {
+      margin: 0 0 1.35em;
+      font-family: var(--serif);
+      font-size: 18px;
+      line-height: 1.95;
+    }
+    article > p.lead:first-letter {
+      float: left;
+      padding: 8px 8px 0 0;
+      color: var(--cyan);
+      font-size: 67px;
+      font-weight: 700;
+      line-height: .72;
+    }
+    article h2 {
+      margin: 3.3em 0 .8em;
+      padding-top: 18px;
+      color: var(--ink);
+      font-family: var(--serif);
+      font-size: 32px;
+      line-height: 1.3;
+      letter-spacing: -.035em;
+    }
+    article h3 {
+      margin: 2.1em 0 .65em;
+      color: var(--ink);
+      font-size: 19px;
+    }
+    .section-no {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--cyan);
+      font: 700 10px var(--mono);
+      letter-spacing: .13em;
+      text-transform: uppercase;
+    }
+    .quote {
+      margin: 44px -44px;
+      padding: 10px 42px;
+      border-left: 3px solid var(--cyan);
+      color: var(--ink);
+      font-family: var(--serif);
+      font-size: 27px;
+      font-weight: 650;
+      line-height: 1.55;
+    }
+    .callout {
+      margin: 30px 0;
+      padding: 20px 22px;
+      border: 1px solid rgba(93,224,202,.24);
+      border-radius: 13px;
+      background: var(--cyan-soft);
+      color: #b7dcd5;
+      font-size: 13px;
+      line-height: 1.7;
+    }
+    .callout b { color: var(--cyan); }
+
+    .figure { margin: 42px -42px; }
+    .frame {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(17,24,39,.94);
+      box-shadow: 0 24px 70px rgba(0,0,0,.25);
+      overflow: hidden;
+    }
+    figcaption {
+      margin-top: 11px;
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.55;
+      text-align: center;
+    }
+    figcaption b { color: #cbd5e4; }
+
+    .outer-loop { padding: 28px; }
+    .loop-row {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(96px,1fr));
+      gap: 14px;
+      overflow-x: auto;
+    }
+    .loop-node {
+      min-width: 96px;
+      min-height: 118px;
+      position: relative;
+      padding: 13px 11px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface-3);
+    }
+    .loop-node:not(:last-child)::after {
+      content: "→";
+      position: absolute;
+      right: -13px;
+      top: 44px;
+      color: #536177;
+      font-size: 13px;
+    }
+    .loop-node i { color: #56647a; font: 700 9px var(--mono); font-style: normal; }
+    .loop-node b { display: block; margin: 17px 0 6px; color: var(--ink); font-size: 10px; }
+    .loop-node span { display: block; color: var(--muted); font-size: 8px; line-height: 1.5; }
+    .loop-node.highlight { border-color: rgba(93,224,202,.35); background: var(--cyan-soft); }
+    .loop-node.highlight i { color: var(--cyan); }
+
+    .table {
+      width: 100%;
+      margin: 30px 0;
+      border-collapse: collapse;
+      border-top: 2px solid #93a2b9;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+    .table th, .table td {
+      padding: 13px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+    .table th { color: var(--ink); background: rgba(255,255,255,.025); }
+    .table td:first-child { color: #dce4ef; font-weight: 650; }
+
+    .code {
+      margin: 32px 0;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      overflow: hidden;
+      background: #070d16;
+    }
+    .code-head {
+      padding: 10px 15px;
+      display: flex;
+      justify-content: space-between;
+      border-bottom: 1px solid #1c283a;
+      color: #69768b;
+      font-size: 9px;
+    }
+    pre {
+      margin: 0;
+      padding: 19px;
+      overflow-x: auto;
+      color: #cdd7e7;
+      font: 11px/1.8 var(--mono);
+    }
+    .c-cyan { color: var(--cyan); }
+    .c-orange { color: var(--orange); }
+    .c-green { color: var(--green); }
+    .c-muted { color: #58667a; }
+
+    .replay-lab { padding: 22px; }
+    .lab-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+    .lab-head b { display: block; color: var(--ink); font-size: 13px; }
+    .lab-head span { color: var(--muted); font-size: 9px; }
+    .actions { display: flex; gap: 7px; }
+    .btn {
+      min-height: 34px;
+      padding: 0 11px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: #cbd5e4;
+      background: transparent;
+      cursor: pointer;
+    }
+    .btn.primary { border-color: var(--cyan); background: var(--cyan); color: #07121c; font-weight: 750; }
+    .btn:disabled { opacity: .5; cursor: default; }
+    .case {
+      margin-bottom: 13px;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface-3);
+      color: #d5deea;
+      font-size: 10px;
+    }
+    .branches { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .branch {
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: var(--surface-3);
+    }
+    .branch-head { display: flex; justify-content: space-between; gap: 10px; }
+    .branch-head b { color: var(--ink); font-size: 11px; }
+    .branch-head span { color: var(--muted); font: 8px var(--mono); }
+    .trace {
+      min-height: 144px;
+      margin-top: 11px;
+      padding: 10px;
+      border-radius: 8px;
+      background: #070d16;
+      color: #66758c;
+      font: 9px/1.75 var(--mono);
+    }
+    .trace-line { opacity: .18; transition: .2s ease; }
+    .trace-line.show { opacity: 1; }
+    .trace-line .tool { color: var(--cyan); }
+    .trace-line .ok { color: var(--green); }
+    .trace-line .warn { color: var(--orange); }
+    .metrics {
+      margin-top: 10px;
+      display: grid;
+      grid-template-columns: repeat(3,1fr);
+      gap: 6px;
+    }
+    .metric {
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+    }
+    .metric span { display: block; color: var(--muted); font-size: 7px; }
+    .metric b { color: var(--ink); font-size: 11px; }
+    .gate {
+      margin-top: 12px;
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 13px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface-2);
+    }
+    .gate b { color: var(--ink); font-size: 10px; }
+    .gate span { color: var(--muted); font-size: 8px; }
+    .gate.pass { border-color: rgba(103,221,163,.35); background: rgba(103,221,163,.07); }
+    .gate.pass b { color: var(--green); }
+    .gate.reject { border-color: rgba(255,118,128,.35); background: rgba(255,118,128,.07); }
+    .gate.reject b { color: var(--red); }
+
+    .principles {
+      margin: 28px 0;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .principle {
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: rgba(17,24,39,.6);
+    }
+    .principle i { color: var(--cyan); font: 700 9px var(--mono); font-style: normal; }
+    .principle b { display: block; margin: 12px 0 6px; color: var(--ink); font-size: 12px; }
+    .principle p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
+
+    .references {
+      margin-top: 72px;
+      padding-top: 28px;
+      border-top: 1px solid var(--line);
+    }
+    .references h2 { margin-top: 0; font-size: 23px; }
+    .references ol { padding-left: 21px; color: var(--muted); font-size: 11px; }
+    .references li { margin-bottom: 8px; }
+    .article-foot {
+      margin-top: 56px;
+      padding: 25px;
+      border: 1px solid rgba(93,224,202,.28);
+      border-radius: 14px;
+      background: var(--cyan-soft);
+      text-align: center;
+    }
+    .article-foot b { display: block; color: var(--cyan); font-family: var(--serif); font-size: 20px; }
+    .article-foot p { margin: 6px 0 0; color: #91aaa7; font-size: 11px; }
+
+    @media (max-width: 1080px) {
+      .layout { grid-template-columns: 180px minmax(0,780px); }
+      .facts { display: none; }
+    }
+    @media (max-width: 820px) {
+      .nav a:not(.pill) { display: none; }
+      .layout { display: block; padding-top: 30px; }
+      .toc { display: none; }
+      article > p { font-size: 17px; }
+      .quote, .figure { margin-left: 0; margin-right: 0; }
+    }
+    @media (max-width: 560px) {
+      .head { padding-inline: 15px; }
+      .hero { padding: 50px 18px 38px; }
+      h1 { font-size: 38px; }
+      .layout { padding-inline: 18px; }
+      article h2 { font-size: 27px; }
+      .quote { padding-left: 22px; font-size: 22px; }
+      .replay-lab { padding: 13px; }
+      .lab-head { align-items: flex-start; flex-direction: column; }
+      .branches, .principles { grid-template-columns: 1fr; }
+      .gate { align-items: flex-start; flex-direction: column; }
+      .table { display: block; overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <header class="head">
+    <a class="brand" href="#top"><span class="brand-mark">↻</span><span>teamEvolver <small>RESEARCH NOTE</small></span></a>
+    <nav class="nav">
+      <a href="#outer-loop">外层循环</a>
+      <a href="#replay">True Replay</a>
+      <a href="#gate">发布门禁</a>
+      <a class="pill" href="#references">参考资料</a>
+    </nav>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="kicker">Verified learning · Outer agent loop</div>
+      <h1>让 Agent 从真实工作中进化：<br>teamEvolver 的外层循环与 True Replay</h1>
+      <p class="dek">从会话中提炼技能并不难，难的是证明新技能真的更好。teamEvolver 将经验筛选、候选生成、隔离回放、发布判断和版本回流组织成一个可审计的持续进化闭环。</p>
+      <div class="meta"><span>teamEvolver Engineering</span><span class="dot">·</span><span>2026 年 7 月</span><span class="dot">·</span><span>约 14 分钟阅读</span></div>
+    </section>
+    <div class="hero-line"></div>
+
+    <div class="layout">
+      <aside class="toc">
+        <b>本文目录</b>
+        <a href="#problem">01 · 为什么需要外层循环</a>
+        <a href="#outer-loop">02 · 双环系统</a>
+        <a href="#evidence">03 · 经验如何成为证据</a>
+        <a href="#replay">04 · True Replay</a>
+        <a href="#gate">05 · 发布门禁</a>
+        <a href="#distributed">06 · 分布式验证</a>
+        <a href="#gaps">07 · 当前缺口</a>
+        <a href="#roadmap">08 · 演进路线</a>
+      </aside>
+
+      <article>
+        <p class="lead">一个 Agent 完成了任务，并不意味着系统已经学会了这项能力。经验可能只存在于某次对话里，可能依赖某台机器上的文件，也可能是一条看起来合理、实际会让工具调用退化的流程。要把经验变成团队资产，需要一个比“总结这段会话”更严格的系统。</p>
+
+        <p>teamEvolver 的目标，是把真实 Agent 使用经验沉淀为可复用、可同步、可验证的 <code>SKILL.md</code>。它位于 Agent Runtime 外层，不直接替代 Agent 的执行循环，而是观察大量已完成会话，提出改进候选，再通过对照实验决定是否发布。</p>
+
+        <div class="quote">生成技能几乎是免费的，可靠判断却仍然昂贵。外层循环真正稀缺的资源不是文本，而是可信的验证。</div>
+
+        <h2 id="problem"><span class="section-no">01 · The problem</span>为什么“自动总结经验”还不够</h2>
+        <p>最朴素的技能演进流程是：读取成功会话，让模型总结一套步骤，然后覆盖原技能。这条路径有三个严重问题。</p>
+
+        <p>首先，它把生成者和验收者合并为同一个角色。模型通常能解释自己的候选为什么合理，却无法证明它在真实环境里更有效。其次，最终回答掩盖了行动过程：一个技能可能输出更漂亮的文字，却多调用三次工具、遗漏一个关键文件，或者产生真实副作用。最后，线上技能一旦被直接覆盖，就失去了 baseline，对未来退化也缺乏可回滚依据。</p>
+
+        <div class="callout"><b>teamEvolver 的基本约束：</b>候选不能因为“看起来更完整”就发布。它必须在相同任务、相同环境与相同预算下，与当前版本进行 A/B 回放，并留下可审计的分支轨迹。</div>
+
+        <h2 id="outer-loop"><span class="section-no">02 · Two timescales</span>内层完成任务，外层改进能力</h2>
+        <p>AgentsHub 和 teamEvolver 形成两个不同时间尺度的循环。内层执行环在秒到分钟内收敛，目标是完成当前任务；外层进化环在小时到天的尺度上收敛，目标是提高未来相似任务的成功率。</p>
+
+        <figure class="figure">
+          <div class="frame outer-loop">
+            <div class="loop-row">
+              <div class="loop-node"><i>01</i><b>会话采集</b><span>消息、工具、技能、环境与 Token</span></div>
+              <div class="loop-node"><i>02</i><b>价值筛选</b><span>过滤闲聊，识别可复用任务证据</span></div>
+              <div class="loop-node"><i>03</i><b>候选生成</b><span>创建或改进 SKILL.md</span></div>
+              <div class="loop-node highlight"><i>04</i><b>True Replay</b><span>Baseline 与 Candidate 隔离执行</span></div>
+              <div class="loop-node highlight"><i>05</i><b>发布门禁</b><span>质量、回归、效率联合判断</span></div>
+              <div class="loop-node"><i>06</i><b>版本发布</b><span>可拒绝、可评审、可回滚</span></div>
+              <div class="loop-node"><i>07</i><b>能力回流</b><span>同步到 Agent 团队技能目录</span></div>
+            </div>
+          </div>
+          <figcaption><b>图 1.</b> teamEvolver 外层循环。True Replay 和发布门禁是“经验”转化为“能力”的边界。</figcaption>
+        </figure>
+
+        <p>把两个循环分开有一个直接好处：运行时反思不会在一次任务中擅自修改团队技能；技能演进也不能绕过隔离验证直接影响线上 Agent。人的位置从每一步执行，移动到高风险发布和证据冲突的判断点。</p>
+
+        <h2 id="evidence"><span class="section-no">03 · Evidence pipeline</span>一段会话如何成为可验证证据</h2>
+        <p>teamEvolver 接收的不只是聊天文本。AgentsHub 导出的原生会话包含每轮 prompt / response、工具调用和结果、已注入与实际使用的技能、每轮前后状态、附件、Agent / Environment / Model 身份，以及 input、output、cache 和 reasoning Token。</p>
+
+        <table class="table">
+          <thead><tr><th>证据层</th><th>关键内容</th><th>验证价值</th></tr></thead>
+          <tbody>
+            <tr><td>Conversation</td><td>用户目标、回答、历史回合</td><td>恢复任务语义与多轮上下文</td></tr>
+            <tr><td>Trajectory</td><td>tool calls、tool results、AgentEvent</td><td>判断任务是否真的通过工具完成</td></tr>
+            <tr><td>Capability</td><td>injected skills、used skills</td><td>识别能力来源和技能缺口</td></tr>
+            <tr><td>Runtime</td><td>Agent、Environment、Model、session state</td><td>恢复执行身份与状态边界</td></tr>
+            <tr><td>Filesystem</td><td>附件与 sandbox tar.gz 快照</td><td>让回放看到原任务使用的真实文件</td></tr>
+            <tr><td>Efficiency</td><td>交互、工具数、Token、延迟</td><td>判断候选是否用过度消耗换取质量</td></tr>
+          </tbody>
+        </table>
+
+        <h3>先判断会话是否值得学习</h3>
+        <p>SessionValueClassifier 先区分高价值任务和闲聊。工具调用、实际使用技能、具体操作流程和任务产物是强信号；没有配置分类模型时，系统按内容复杂度、工具和技能使用做启发式降级，并把判断写入审计记录。</p>
+
+        <h3>候选不是发布版本</h3>
+        <p>有价值会话进入共享对象存储，候选技能和验证任务分别持久化。候选拥有自己的 job ID、来源 session、当前技能、建议动作、回放案例和最低分数。直到验证决策完成，它都不会替代现有技能。</p>
+
+        <h2 id="replay"><span class="section-no">04 · True Replay</span>为什么必须回放行动轨迹，而不只比较回答</h2>
+        <p>普通文本 A/B 只能比较最终回答。True Replay 则同时启动 baseline 和 candidate 两个隔离分支，让它们在同一任务、同一环境和相同预算下运行完整 Agent Loop。两条轨迹最终交给独立 Judge，判断任务完成度、工具正确性和整体质量。</p>
+
+        <p>AgentsHub 原生回放会对 SQLite 数据库做一致性备份，为每个分支创建独立子进程和全新数据目录，恢复来源会话状态与沙箱快照。在线记忆、远程 Viking 能力和会话再次上报会被关闭，避免回放污染真实系统。</p>
+
+        <div class="code">
+          <div class="code-head"><span>true_replay.py · conceptual</span><span>Python</span></div>
+          <pre>branches = {
+    <span class="c-cyan">"baseline"</span>: current_skill,
+    <span class="c-orange">"candidate"</span>: proposed_skill,
+}
+
+<span class="c-muted"># 同一来源会话，同一 instruction，同一环境快照</span>
+results = parallel_run(
+    branches,
+    source_session=source_session,
+    sandbox_snapshot=snapshot,
+    tool_cassette=recorded_results,
+)
+
+scores = strict_judge(results)
+accepted = (
+    scores.candidate &gt;= <span class="c-green">0.75</span>
+    and scores.candidate &gt;= scores.baseline - <span class="c-green">0.15</span>
+    and efficiency_delta &gt;= <span class="c-green">-0.10</span>
+)</pre>
+        </div>
+
+        <h3>副作用如何被隔离</h3>
+        <p>回放中的工具调用不应再次发送邮件、修改订单或触发外部写操作。AgentsHub 使用 cassette executor 消费原轨迹中记录的工具结果；没有可用记录时返回 <code>REPLAY_TOOL_MISS</code>，而不是访问真实业务系统。</p>
+
+        <p>这是一种保守设计：它牺牲部分动态真实性，换取可重复和无副作用的验证。对于只读查询，未来可以逐步引入受控实时回放；对于写操作，仍应坚持 cassette、沙箱或专用测试环境。</p>
+
+        <figure class="figure">
+          <div class="frame replay-lab">
+            <div class="lab-head">
+              <div><b>交互图解 · Baseline / Candidate True Replay</b><span>运行后查看两条轨迹和发布门禁结果</span></div>
+              <div class="actions"><button class="btn" id="resetBtn">重置</button><button class="btn primary" id="runBtn">运行回放</button></div>
+            </div>
+            <div class="case">Replay case · 读取本季度工单，识别高频问题并生成带证据的改进建议。</div>
+            <div class="branches">
+              <div class="branch">
+                <div class="branch-head"><b>Baseline · v3</b><span id="baseState">IDLE</span></div>
+                <div class="trace">
+                  <div class="trace-line">[01] restore <span class="ok">session snapshot</span></div>
+                  <div class="trace-line">[02] call <span class="tool">archive.query</span>(Q3)</div>
+                  <div class="trace-line">[03] call <span class="tool">ticket.cluster</span>(level=1)</div>
+                  <div class="trace-line">[04] call <span class="tool">report.write</span>()</div>
+                  <div class="trace-line">[05] judge <span class="warn">missing categories</span></div>
+                </div>
+                <div class="metrics">
+                  <div class="metric"><span>QUALITY</span><b id="baseQuality">--</b></div>
+                  <div class="metric"><span>TOOLS</span><b id="baseTools">--</b></div>
+                  <div class="metric"><span>TOKENS</span><b id="baseTokens">--</b></div>
+                </div>
+              </div>
+              <div class="branch">
+                <div class="branch-head"><b>Candidate · proposed v4</b><span id="candState">IDLE</span></div>
+                <div class="trace">
+                  <div class="trace-line">[01] restore <span class="ok">session snapshot</span></div>
+                  <div class="trace-line">[02] call <span class="tool">archive.query</span>(Q3)</div>
+                  <div class="trace-line">[03] call <span class="tool">ticket.cluster</span>(level=2)</div>
+                  <div class="trace-line">[04] verify <span class="ok">coverage=96.8%</span></div>
+                  <div class="trace-line">[05] call <span class="tool">report.write</span>(evidence=true)</div>
+                </div>
+                <div class="metrics">
+                  <div class="metric"><span>QUALITY</span><b id="candQuality">--</b></div>
+                  <div class="metric"><span>TOOLS</span><b id="candTools">--</b></div>
+                  <div class="metric"><span>TOKENS</span><b id="candTokens">--</b></div>
+                </div>
+              </div>
+            </div>
+            <div class="gate" id="demoGate">
+              <div><b id="gateTitle">等待发布判断</b><br><span id="gateCopy">质量、回归、效率与分支状态尚未评估</span></div>
+              <span id="gateBadge">NOT STARTED</span>
+            </div>
+          </div>
+          <figcaption><b>图 2.</b> 交互实验使用模拟数据，但评分维度与 teamEvolver 当前 True Replay 保持一致。</figcaption>
+        </figure>
+
+        <h2 id="gate"><span class="section-no">05 · Release gate</span>发布门禁如何判断“真的更好”</h2>
+        <p>teamEvolver 的门禁不是一个单分数阈值。它同时检查绝对质量、相对回归、效率和分支完整性。这可以避免两类常见错误：候选比一个很差的 baseline 稍好，但仍不可用；候选质量略有提升，却消耗显著更多 Token 和工具调用。</p>
+
+        <table class="table">
+          <thead><tr><th>门禁维度</th><th>当前规则</th><th>设计目的</th></tr></thead>
+          <tbody>
+            <tr><td>绝对质量</td><td>candidate overall ≥ 0.75</td><td>保证候选本身达到可用标准</td></tr>
+            <tr><td>无明显回归</td><td>candidate ≥ baseline - 0.15</td><td>容忍评估噪声，拒绝实质退化</td></tr>
+            <tr><td>相对价值</td><td>质量不低于基线，或效率提升</td><td>要求候选带来至少一种真实收益</td></tr>
+            <tr><td>效率底线</td><td>综合效率退化不得低于 -10%</td><td>防止用无限资源购买轻微质量</td></tr>
+            <tr><td>硬失败</td><td>任一分支失败则拒绝</td><td>证据不完整时不自动发布</td></tr>
+          </tbody>
+        </table>
+
+        <p>自动门禁并不取消人工判断。高风险技能、新型副作用、Judge 冲突和强制发布仍进入候选评审。人工评审看到的不是一句“建议发布”，而是技能 diff、两条轨迹、Judge 理由、质量与效率明细。</p>
+
+        <h2 id="distributed"><span class="section-no">06 · Distributed validation</span>为什么验证可以分布到空闲客户端</h2>
+        <p>ValidationWorker 在共享开启、客户端空闲且每日配额允许时领取开放任务。验证结果按 job 和 user alias 写入共享存储，进化服务可以要求多份结果和多票通过，再决定发布或升级人工。</p>
+
+        <p>这使验证能力可以复用团队机器的空闲资源，也避免中心服务承担所有模型与回放成本。默认配置仍然保守：单客户端每日最多 5 个任务、并发 1，只有在空闲时间达到阈值后才运行。</p>
+
+        <div class="principles">
+          <div class="principle"><i>01 / SEPARATE</i><b>生成与验证分离</b><p>候选生成上下文不能直接决定自己的发布结果。</p></div>
+          <div class="principle"><i>02 / PERSIST</i><b>任务与结果持久化</b><p>job、result、decision 和 human review 都是共享状态。</p></div>
+          <div class="principle"><i>03 / BUDGET</i><b>验证也有预算</b><p>空闲阈值、每日配额、并发和超时共同约束成本。</p></div>
+          <div class="principle"><i>04 / REVERSIBLE</i><b>发布必须可逆</b><p>版本记录与 rollback 让错误学习不成为永久状态。</p></div>
+        </div>
+
+        <h2 id="gaps"><span class="section-no">07 · Honest gaps</span>当前实现还不够完整的地方</h2>
+        <p>Loop Engineering 的价值来自真实边界，而不是架构图的完整。当前系统已经具备外层循环骨架，但仍有四个重要缺口。</p>
+
+        <h3>AgentsHub 原生回放仍是单轮</h3>
+        <p>回放请求暴露了 <code>max_interactions</code>，Hermes 路径也支持根据 Judge feedback 继续交互；但 AgentsHub 原生 worker 当前只执行一次 <code>handle_turn</code>。两种运行时的完成语义需要统一。</p>
+
+        <h3>工具 cassette 的匹配粒度不足</h3>
+        <p>当前主要按工具名和顺序消费记录。同名工具多次调用、但参数不同的会话可能错误配对。更可靠的键应包含工具名、规范化参数、资源 ID 和 occurrence index。</p>
+
+        <h3>沙箱快照依赖同机路径</h3>
+        <p><code>tar.gz</code> 快照恢复了文件保真，但来源路径仍是同机绝对路径。跨机验证需要把快照改为带摘要、权限和生命周期的对象存储资源。</p>
+
+        <h3>Judge 仍需校准</h3>
+        <p>评估角色已经分离，但可能仍使用相同模型族。下一步应组合硬校验、异构 Judge、规则评分和固定比例人工抽检，并版本化 rubric、模型和阈值。</p>
+
+        <h2 id="roadmap"><span class="section-no">08 · Roadmap</span>从技能演进走向循环演进</h2>
+        <p>短期优先级不是增加更多自动化，而是提升证据质量。首先统一 stop reason 和 Loop Contract；随后补齐原生多轮回放、参数级 cassette 与跨机快照；再建设按技能分层的固定回归集、灰度发布与自动回滚。</p>
+
+        <p>只有当这些门禁稳定后，外层循环才适合扩展优化对象：从 Skill 进一步覆盖 Prompt、Context policy、Tool schema 和 Harness 配置。每一种对象都必须拥有独立的权限、评测集和回滚方式，否则一次变更多层会让失败无法归因。</p>
+
+        <div class="quote">可靠的自我改进，不是让系统更快地修改自己；而是让每次修改都能被复现、比较、拒绝和撤销。</div>
+
+        <p>这正是 teamEvolver 对 Loop Engineering 的实践答案：把真实工作变成证据，把候选变成实验，把发布变成可审计决策。Agent 因此不是在一次对话中“突然变聪明”，而是在长期运行中，通过受控反馈逐步积累组织能力。</p>
+
+        <section class="references" id="references">
+          <h2>参考资料</h2>
+          <ol>
+            <li><a href="https://addyosmani.com/blog/loop-engineering/">Addy Osmani, Loop Engineering</a>, 2026.</li>
+            <li><a href="https://www.ibm.com/think/topics/loop-engineering">IBM, What is loop engineering?</a>, 2026.</li>
+            <li><a href="https://www.anthropic.com/engineering/building-effective-agents">Anthropic, Building effective agents</a>.</li>
+            <li><a href="https://arxiv.org/abs/2210.03629">Yao et al., ReAct</a>.</li>
+            <li><a href="https://arxiv.org/abs/2303.11366">Shinn et al., Reflexion</a>.</li>
+          </ol>
+        </section>
+
+        <footer class="article-foot">
+          <b>从真实 Session 到可验证的团队 Skill</b>
+          <p>Evidence first. Replay before release. Every learning step remains reversible.</p>
+        </footer>
+      </article>
+
+      <aside class="facts">
+        <h3>当前门禁参数</h3>
+        <div class="fact"><span>最低质量</span><b>0.75</b></div>
+        <div class="fact"><span>回归容忍</span><b>0.15</b></div>
+        <div class="fact"><span>效率底线</span><b>-10%</b></div>
+        <div class="fact"><span>最大交互</span><b>4</b></div>
+        <div class="fact"><span>默认超时</span><b>900s</b></div>
+      </aside>
+    </div>
+  </main>
+
+  <script>
+    const traces = [...document.querySelectorAll(".trace-line")];
+    const runBtn = document.getElementById("runBtn");
+    const resetBtn = document.getElementById("resetBtn");
+    const gate = document.getElementById("demoGate");
+    let timers = [];
+
+    function resetLab() {
+      timers.forEach(clearTimeout);
+      timers = [];
+      traces.forEach(line => line.classList.remove("show"));
+      document.getElementById("baseState").textContent = "IDLE";
+      document.getElementById("candState").textContent = "IDLE";
+      ["baseQuality","baseTools","baseTokens","candQuality","candTools","candTokens"].forEach(id => {
+        document.getElementById(id).textContent = "--";
+      });
+      gate.classList.remove("pass","reject");
+      document.getElementById("gateTitle").textContent = "等待发布判断";
+      document.getElementById("gateCopy").textContent = "质量、回归、效率与分支状态尚未评估";
+      document.getElementById("gateBadge").textContent = "NOT STARTED";
+      runBtn.disabled = false;
+      runBtn.textContent = "运行回放";
+    }
+    function runLab() {
+      resetLab();
+      runBtn.disabled = true;
+      runBtn.textContent = "回放中…";
+      document.getElementById("baseState").textContent = "RUNNING";
+      document.getElementById("candState").textContent = "RUNNING";
+      const branchLines = [...document.querySelectorAll(".branch")].map(branch => [...branch.querySelectorAll(".trace-line")]);
+      branchLines.forEach((lines, branchIndex) => {
+        lines.forEach((line, index) => {
+          timers.push(setTimeout(() => line.classList.add("show"), 250 + index * 430 + branchIndex * 90));
+        });
+      });
+      timers.push(setTimeout(() => {
+        document.getElementById("baseState").textContent = "EVALUATED";
+        document.getElementById("candState").textContent = "EVALUATED";
+        document.getElementById("baseQuality").textContent = "0.72";
+        document.getElementById("baseTools").textContent = "4";
+        document.getElementById("baseTokens").textContent = "9,260";
+        document.getElementById("candQuality").textContent = "0.86";
+        document.getElementById("candTools").textContent = "4";
+        document.getElementById("candTokens").textContent = "8,240";
+        gate.classList.add("pass");
+        document.getElementById("gateTitle").textContent = "允许发布 · Candidate 胜出";
+        document.getElementById("gateCopy").textContent = "质量 +0.14 · Token 降低 11.0% · 无回归 · 分支均成功";
+        document.getElementById("gateBadge").textContent = "PASS";
+        runBtn.disabled = false;
+        runBtn.textContent = "再次运行";
+      }, 2850));
+    }
+    runBtn.addEventListener("click", runLab);
+    resetBtn.addEventListener("click", resetLab);
+
+    const tocLinks = [...document.querySelectorAll(".toc a")];
+    const sections = tocLinks.map(link => document.querySelector(link.getAttribute("href"))).filter(Boolean);
+    const observer = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (!entry.isIntersecting) return;
+        tocLinks.forEach(link => link.classList.toggle("active", link.getAttribute("href") === `#${entry.target.id}`));
+      });
+    }, { rootMargin: "-18% 0px -72% 0px" });
+    sections.forEach(section => observer.observe(section));
+  </script>
+</body>
+</html>

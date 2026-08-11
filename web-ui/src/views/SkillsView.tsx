@@ -61,7 +61,7 @@ export default function SkillsView({
     const data = await api<UsersListResp>("/api/users");
     const list = data.users || [];
     setUsers(list);
-    const saved = window.localStorage.getItem("skillgene.activeUserId") || "";
+    const saved = window.localStorage.getItem("teamEvolver.activeUserId") || "";
     const next = (saved && list.some((u) => u.id === saved) && saved) || list[0]?.id || "";
     setActiveUserId((cur) => (cur && list.some((u) => u.id === cur) ? cur : next));
     return next;
@@ -121,7 +121,7 @@ export default function SkillsView({
 
   function chooseUser(id: string) {
     setActiveUserId(id);
-    window.localStorage.setItem("skillgene.activeUserId", id);
+    window.localStorage.setItem("teamEvolver.activeUserId", id);
   }
 
   function requireAdmin(): boolean {

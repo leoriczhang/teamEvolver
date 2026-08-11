@@ -5,8 +5,7 @@ import shutil
 import sys
 from pathlib import Path
 
-
-SKILLMINER_DIR = Path(__file__).resolve().parents[1] / "skillgene" / "skillminer"
+SKILLMINER_DIR = Path(__file__).resolve().parents[1] / "teamEvolver" / "skillminer"
 sys.path.insert(0, str(SKILLMINER_DIR))
 
 import lift_integration as li  # noqa: E402
@@ -39,8 +38,8 @@ def _configure_paths(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
     monkeypatch.setattr(li, "DRAFTS_DIR", datasets_root / "drafts")
     monkeypatch.setattr(li, "PUBLISHED_DIR", datasets_root / "published")
     monkeypatch.setattr(li, "RUNS_DIR", datasets_root / "runs")
-    monkeypatch.setenv("SKILLGENE_LIFT_ROOT", str(lift_root))
-    monkeypatch.setenv("SKILLGENE_LIFT_PYTHON", sys.executable)
+    monkeypatch.setenv("TEAMEVOLVER_LIFT_ROOT", str(lift_root))
+    monkeypatch.setenv("TEAMEVOLVER_LIFT_PYTHON", sys.executable)
     return skillminer_root, lift_root
 
 
@@ -88,7 +87,7 @@ def test_build_suite_matches_lift_suite_v1_contract():
         assert set(task["expected_result"]) == {"content_reqs", "trajectory_reqs"}
         assert task["query"]
         assert task["expected_result"]["content_reqs"].startswith("1. ")
-        assert task["requirements"]["extra_skills_dir"] == "assets/benchmark_mds/skillgene/demo-suite/skills"
+        assert task["requirements"]["extra_skills_dir"] == "assets/benchmark_mds/teamEvolver/demo-suite/skills"
     assert metrics["dimension_overlap_pct"] == 100.0
     assert li.validate_suite(suite)["valid"] is True
 
@@ -135,8 +134,8 @@ def test_draft_review_publish_lifecycle_writes_lift_source_and_json(tmp_path, mo
 
     published = li.publish_draft(draft_id)
     assert published["manifest"]["state"] == "published"
-    suite_json = lift_root / "assets" / "benchmarks" / "skillgene" / "demo-suite.json"
-    source_scene = lift_root / "assets" / "benchmark_mds" / "skillgene" / "demo-suite"
+    suite_json = lift_root / "assets" / "benchmarks" / "teamEvolver" / "demo-suite.json"
+    source_scene = lift_root / "assets" / "benchmark_mds" / "teamEvolver" / "demo-suite"
     assert json.loads(suite_json.read_text(encoding="utf-8"))["warmup_tasks"][0]["query"] == "人工审核后的 query"
     assert (source_scene / "skills" / "demo-skill" / "references" / "guide.md").is_file()
 
@@ -154,7 +153,7 @@ def test_draft_review_publish_lifecycle_writes_lift_source_and_json(tmp_path, mo
 def test_build_lift_command_uses_published_suite_and_safe_hermes_policy(tmp_path, monkeypatch):
     _skillminer_root, lift_root = _configure_paths(tmp_path, monkeypatch)
     _write_lift_markers(lift_root)
-    suite_path = lift_root / "assets" / "benchmarks" / "skillgene" / "demo-suite.json"
+    suite_path = lift_root / "assets" / "benchmarks" / "teamEvolver" / "demo-suite.json"
     suite_path.parent.mkdir(parents=True)
     suite_path.write_text("{}\n", encoding="utf-8")
     ready_status = li.lift_status()
@@ -194,7 +193,7 @@ def test_publish_failure_restores_previous_lift_dataset(tmp_path, monkeypatch):
     original_copytree = shutil.copytree
 
     def fail_external_scene_copy(src, dst, *args, **kwargs):
-        if Path(dst) == lift_root / "assets" / "benchmark_mds" / "skillgene" / "demo-suite":
+        if Path(dst) == lift_root / "assets" / "benchmark_mds" / "teamEvolver" / "demo-suite":
             raise OSError("simulated publish failure")
         return original_copytree(src, dst, *args, **kwargs)
 

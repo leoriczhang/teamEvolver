@@ -104,14 +104,22 @@ export default function ModelSettingsView({
 
   return (
     <div className="mx-auto max-w-[1080px] px-7 py-6">
-      <div className="mb-5 flex items-center justify-end gap-2">
-        <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>刷新</Button>
-        <Button variant="outline" size="sm" onClick={testModel} disabled={!isAdmin || testing}>
-          {testing ? "测试中…" : "测试模型"}
-        </Button>
-        <Button size="sm" onClick={save} disabled={!isAdmin || saving}>
-          保存配置
-        </Button>
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <h1 className="text-[22px] font-bold tracking-tight">模型配置</h1>
+          <div className="mt-1 text-xs text-muted-foreground">
+            配置 teamEvolver 在总结、判断、合并和生成技能时使用的模型。外部 Hermes 会话仍通过服务端接口上传，不在前端手工提交。
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>刷新</Button>
+          <Button variant="outline" size="sm" onClick={testModel} disabled={!isAdmin || testing}>
+            {testing ? "测试中…" : "测试模型"}
+          </Button>
+          <Button size="sm" onClick={save} disabled={!isAdmin || saving}>
+            保存配置
+          </Button>
+        </div>
       </div>
 
       <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(170px,1fr))] gap-3.5">
@@ -223,7 +231,7 @@ export default function ModelSettingsView({
           )}
 
           <div className="rounded-lg border border-border bg-background/60 p-3 text-xs leading-relaxed text-muted-foreground">
-            这些参数只影响 SkillGene 52010 服务自身的技能进化流程；不会配置 Hermes，也不会暴露本机路径或明文 Key。
+            这些参数只影响 teamEvolver 52010 服务自身的技能进化流程；不会配置 Hermes，也不会暴露本机路径或明文 Key。
           </div>
         </div>
       </Panel>

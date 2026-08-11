@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-import skillgene
-import skillgene.trajectory_benchmark as api
+import teamEvolver
+import teamEvolver.trajectory_benchmark as api
 
 
 def _payload() -> dict:
@@ -32,7 +32,7 @@ def test_public_package_exposes_internal_trajectory_benchmark_api(tmp_path: Path
         return {"state": "done", "run_id": request["run_id"], "question_count": 3}
 
     monkeypatch.setattr(api._implementation, "mine_trajectory_benchmark", fake_mine)
-    result = skillgene.mine_benchmark_from_trajectories(_payload(), project_root=tmp_path)
+    result = teamEvolver.mine_benchmark_from_trajectories(_payload(), project_root=tmp_path)
 
     assert result["state"] == "done"
     assert captured["request"]["dataset_name"] == "skillgen-evolution"

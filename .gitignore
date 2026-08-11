@@ -10,12 +10,14 @@ __pycache__/
 .verify-home/
 build/
 dist/
-!skillgene/web/dist/
-!skillgene/web/dist/**
+!teamEvolver/web/dist/
+!teamEvolver/web/dist/**
 .DS_Store
 .env
 .env.*
 !.env.example
 *.log
+*.orig
+evolve_history.jsonl
 records/
 external/LIFT/

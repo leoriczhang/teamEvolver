@@ -603,7 +603,7 @@ export default function EvalView({
 
         <div className="flex items-start gap-3 rounded-lg border border-border bg-surface p-4 text-xs leading-relaxed text-muted-foreground">
           <GitBranch className="mt-0.5 size-4 shrink-0 text-accent" />
-          <div><span className="font-semibold text-foreground">兼容边界：</span>当前适配基于 LIFT Suite v1 与审计 revision <span className="mono">{integration?.compatibility_revision?.slice(0, 12) || "—"}</span>。上游代码保持外部 checkout，不进入 SkillGene 安装包。</div>
+          <div><span className="font-semibold text-foreground">兼容边界：</span>当前适配基于 LIFT Suite v1 与审计 revision <span className="mono">{integration?.compatibility_revision?.slice(0, 12) || "—"}</span>。上游代码保持外部 checkout，不进入 teamEvolver 安装包。</div>
         </div>
       </div>
     </div>

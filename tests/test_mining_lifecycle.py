@@ -5,14 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from skillgene.mining_lifecycle import (
+from teamEvolver.mining_lifecycle import (
     INTERNAL_BENCHMARK_FORMAT,
     MiningLifecycleError,
     list_mined_skill_statuses,
     resolve_mined_skill_dir,
     submit_mined_skill,
 )
-from skillgene.validation.store import ValidationStore
+from teamEvolver.validation.store import ValidationStore
 
 
 def _store(root: Path) -> ValidationStore:

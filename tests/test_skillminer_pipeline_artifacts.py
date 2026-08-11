@@ -4,12 +4,11 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-
-SKILLMINER_DIR = Path(__file__).resolve().parents[1] / "skillgene" / "skillminer"
+SKILLMINER_DIR = Path(__file__).resolve().parents[1] / "teamEvolver" / "skillminer"
 sys.path.insert(0, str(SKILLMINER_DIR))
 
-import run_pipeline as rp  # noqa: E402
 import run_benchmark as rb  # noqa: E402
+import run_pipeline as rp  # noqa: E402
 
 
 def _point_pipeline_at(monkeypatch, root: Path) -> None:

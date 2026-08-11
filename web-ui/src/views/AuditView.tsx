@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Panel,
   StatCard,
@@ -90,6 +90,7 @@ export default function AuditView({ active }: { active: boolean }) {
                   const evos = c.evolutions || [];
                   const judge = c.judge || {};
                   const sessionIds = c.session_ids || [];
+                  const noActionNormal = isNoActionNormal(c, evos);
                   return (
                     <div key={`${c.timestamp || "cycle"}-${cyclePager.start + i}`} className="p-4">
                       <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
@@ -99,16 +100,19 @@ export default function AuditView({ active }: { active: boolean }) {
                             {Number(c.sessions || sessionIds.length || 0)} 会话 / {c.skill_groups ?? "?"} 技能组 / 上传 {c.uploaded_skills ?? 0} / 候选 {c.candidates_queued ?? 0}
                           </div>
                         </div>
-                        <Pill tone={Number(c.uploaded_skills || 0) > 0 ? "green" : Number(c.candidates_queued || 0) > 0 ? "amber" : "gray"}>
-                          {Number(c.uploaded_skills || 0) > 0 ? "已产出" : Number(c.candidates_queued || 0) > 0 ? "待评审" : "无变更"}
+                        <Pill tone={Number(c.uploaded_skills || 0) > 0 ? "green" : Number(c.candidates_queued || 0) > 0 ? "amber" : noActionNormal ? "blue" : "gray"}>
+                          {Number(c.uploaded_skills || 0) > 0 ? "已产出" : Number(c.candidates_queued || 0) > 0 ? "待评审" : noActionNormal ? "无需进化" : "无变更"}
                         </Pill>
                       </div>
 
                       {judge.overall_score != null || judge.rationale ? (
                         <div className="mb-3 rounded-lg border border-border bg-background/60 p-3 text-sm">
                           <div className="mb-1 text-xs font-semibold text-muted-foreground">会话评审</div>
-                          <span className="font-bold">{judge.overall_score ?? "—"}</span>
-                          {judge.rationale && <span className="text-muted-foreground"> · {judge.rationale}</span>}
+                          {judge.rationale ? (
+                            <span className="text-muted-foreground">{judge.rationale}</span>
+                          ) : (
+                            <span className="text-muted-foreground">已完成会话评审</span>
+                          )}
                         </div>
                       ) : null}
 
@@ -129,29 +133,53 @@ export default function AuditView({ active }: { active: boolean }) {
                       <div>
                         <div className="mb-1.5 text-xs font-semibold text-muted-foreground">技能变更</div>
                         {!evos.length ? (
-                          <div className="text-xs text-muted-foreground">本周期未记录技能变更。</div>
+                          noActionNormal ? (
+                            <div className="rounded-lg border border-border bg-background/60 p-3 text-xs leading-relaxed text-muted-foreground">
+                              <Pill tone="blue">流程正常</Pill>
+                              <div className="mt-2">
+                                本周期已完成会话评审和 Skill 分组，但 planner 判断当前 Skill 无需优化，也无需创建新 Skill。
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="text-xs text-muted-foreground">本周期未记录技能变更。</div>
+                          )
                         ) : (
-                          <table className="w-full border-collapse">
-                            <thead>
-                              <tr>
-                                {["技能", "动作", "上传", "原因"].map((h) => (
-                                  <th key={h} className="border-b border-line px-3 py-2 text-left text-xs font-semibold text-muted-foreground">
-                                    {h}
-                                  </th>
-                                ))}
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {evos.map((e, k) => (
-                                <tr key={k}>
-                                  <Td>{e.skill_name || "-"}</Td>
-                                  <Td><Pill tone="blue">{e.action || "-"}</Pill></Td>
-                                  <Td>{e.uploaded ? <Pill tone="green">已上传</Pill> : <Pill tone="gray">未上传</Pill>}</Td>
-                                  <Td><span className="text-xs text-muted-foreground">{e.reason || ""}</span></Td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
+                          <div className="space-y-2.5">
+                            {evos.map((e, k) => {
+                              const legacyVerifier = e.action === "verification_rejected";
+                              const reason = e.reason || e.rationale || "";
+                              return (
+                                <div key={k} className="rounded-lg border border-line bg-surface-subtle p-3">
+                                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <span className="mono text-xs font-semibold">{e.skill_name || "-"}</span>
+                                      <Pill tone={legacyVerifier ? "gray" : "blue"}>
+                                        {legacyVerifier ? "未进入回放（旧流程）" : e.action || "-"}
+                                      </Pill>
+                                      {e.uploaded ? <Pill tone="green">已上传</Pill> : <Pill tone="gray">未上传</Pill>}
+                                    </div>
+                                    {e.version != null && <span className="text-xs text-muted-foreground">v{e.version}</span>}
+                                  </div>
+                                  {legacyVerifier ? (
+                                    <div className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                                      该记录由旧版预检流程产生；当前候选发布仅依据 A/B 回放与 Checklist 门禁。
+                                    </div>
+                                  ) : reason ? (
+                                    <div className="mt-2 text-xs leading-relaxed text-muted-foreground">{reason}</div>
+                                  ) : null}
+                                  {e.file_changes?.length ? (
+                                    <div className="mt-2 flex flex-wrap gap-1.5">
+                                      {e.file_changes.map((change, index) => (
+                                        <Pill key={`${change.path}-${index}`} tone={change.operation === "delete" ? "red" : "blue"}>
+                                          {change.operation || "change"} · {change.path || "-"}
+                                        </Pill>
+                                      ))}
+                                    </div>
+                                  ) : null}
+                                </div>
+                              );
+                            })}
+                          </div>
                         )}
                       </div>
                     </div>
@@ -167,6 +195,14 @@ export default function AuditView({ active }: { active: boolean }) {
   );
 }
 
-function Td({ children }: { children: ReactNode }) {
-  return <td className="border-b border-line px-3 py-2 align-top text-sm">{children}</td>;
+function isNoActionNormal(c: EvolveHistoryCycle, evos: unknown[]) {
+  return (
+    !evos.length &&
+    !c.had_processing_error &&
+    Number(c.sessions || (c.session_ids || []).length || 0) > 0 &&
+    Number(c.skill_groups || 0) > 0 &&
+    Number(c.actions || 0) === 0 &&
+    Number(c.uploaded_skills || 0) === 0 &&
+    Number(c.candidates_queued || 0) === 0
+  );
 }
