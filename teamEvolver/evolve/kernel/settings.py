@@ -67,35 +67,30 @@ class EvolveServerConfig:
     evolve_batch_size: int = 20
     reject_rewrite: bool = False  # Reject skill improvements that look like full rewrites
     use_session_judge: bool = True
-    use_skill_verifier: bool = True
-    skill_verifier_min_score: float = 0.75
-    # Semantic dedup gate: an LLM checks whether a brand-new skill is redundant
-    # against the existing library before it is published.
-    use_skill_dedup: bool = True
-    skill_dedup_max_similarity: float = 0.8
-    # Progressive disclosure: stage 1 shortlists by metadata only, stage 2 only
-    # fetches full content for at most this many skills, bounding prompt size.
-    skill_dedup_shortlist_size: int = 5
     # Cross-cycle evidence keeps long-term skill context while recent sessions
     # remain a distinct, high-sensitivity window.
     evidence_enabled: bool = True
-    evidence_max_entries: int = 200
-    evidence_recent_limit: int = 12
-    evidence_historical_limit: int = 12
+    evidence_max_entries: int = 400
+    evidence_recent_limit: int = 20
+    evidence_historical_limit: int = 20
     evidence_replay_cases_per_window: int = 1
     evidence_change_debt_threshold: int = 3
+    dataset_synthesis_enabled: bool = True
+    dataset_test_cases: int = 2
+    dataset_min_requirements: int = 12
+    dataset_max_requirements: int = 24
+    dataset_disclosure_batch_size: int = 4
     candidate_coalesce_enabled: bool = True
     bundle_text_extensions: list[str] = field(
         default_factory=lambda: [".py", ".sh"]
     )
-    bundle_max_file_bytes: int = 65536
-    bundle_max_prompt_bytes: int = 262144
+    bundle_max_file_bytes: int = 262144
+    bundle_max_prompt_bytes: int = 786432
     bundle_allow_delete: bool = True
     bundle_static_checks_enabled: bool = True
     publish_mode: str = "validated"
     validation_required_results: int = 3
     validation_required_approvals: int = 2
-    validation_min_mean_score: float = 0.75
     validation_max_rejections: int = 1
     # Human-in-the-loop: when client replay/AB validation is inconclusive (the
     # gray zone), escalate the job to a human review queue instead of leaving it
@@ -121,15 +116,6 @@ class EvolveServerConfig:
 
     def __post_init__(self) -> None:
         self.engine = str(self.engine or "workflow").strip().lower() or "workflow"
-        self.skill_verifier_min_score = max(
-            0.0,
-            min(1.0, float(self.skill_verifier_min_score or 0.0)),
-        )
-        self.skill_dedup_max_similarity = max(
-            0.0,
-            min(1.0, float(self.skill_dedup_max_similarity or 0.0)),
-        )
-        self.skill_dedup_shortlist_size = max(1, int(self.skill_dedup_shortlist_size or 1))
         self.evidence_max_entries = max(1, int(self.evidence_max_entries or 1))
         self.evidence_recent_limit = max(1, int(self.evidence_recent_limit or 1))
         self.evidence_historical_limit = max(0, int(self.evidence_historical_limit or 0))
@@ -138,6 +124,17 @@ class EvolveServerConfig:
         )
         self.evidence_change_debt_threshold = max(
             1, int(self.evidence_change_debt_threshold or 1)
+        )
+        self.dataset_test_cases = max(1, min(6, int(self.dataset_test_cases or 2)))
+        self.dataset_min_requirements = max(
+            1, int(self.dataset_min_requirements or 1)
+        )
+        self.dataset_max_requirements = max(
+            self.dataset_min_requirements,
+            int(self.dataset_max_requirements or self.dataset_min_requirements),
+        )
+        self.dataset_disclosure_batch_size = max(
+            1, int(self.dataset_disclosure_batch_size or 1)
         )
         normalized_extensions: list[str] = []
         raw_extensions = self.bundle_text_extensions
@@ -160,10 +157,6 @@ class EvolveServerConfig:
             self.publish_mode = "direct"
         self.validation_required_results = max(1, int(self.validation_required_results or 1))
         self.validation_required_approvals = max(1, int(self.validation_required_approvals or 1))
-        self.validation_min_mean_score = max(
-            0.0,
-            min(1.0, float(self.validation_min_mean_score or 0.0)),
-        )
         self.validation_max_rejections = max(1, int(self.validation_max_rejections or 1))
 
     @classmethod
@@ -204,20 +197,31 @@ class EvolveServerConfig:
             evolve_batch_size=int(os.environ.get("EVOLVE_BATCH_SIZE", "20")),
             reject_rewrite=os.environ.get("EVOLVE_REJECT_REWRITE", "0").lower() in {"1", "true", "yes"},
             use_session_judge=os.environ.get("EVOLVE_USE_SESSION_JUDGE", "1").lower() not in {"0", "false", "no"},
-            use_skill_verifier=os.environ.get("EVOLVE_USE_SKILL_VERIFIER", "1").lower() not in {"0", "false", "no"},
-            skill_verifier_min_score=float(os.environ.get("EVOLVE_SKILL_VERIFIER_MIN_SCORE", "0.75")),
-            use_skill_dedup=os.environ.get("EVOLVE_USE_SKILL_DEDUP", "1").lower() not in {"0", "false", "no"},
-            skill_dedup_max_similarity=float(os.environ.get("EVOLVE_SKILL_DEDUP_MAX_SIMILARITY", "0.8")),
-            skill_dedup_shortlist_size=int(os.environ.get("EVOLVE_SKILL_DEDUP_SHORTLIST_SIZE", "5")),
             evidence_enabled=os.environ.get("EVOLVE_EVIDENCE_ENABLED", "1").lower() not in {"0", "false", "no"},
-            evidence_max_entries=int(os.environ.get("EVOLVE_EVIDENCE_MAX_ENTRIES", "200")),
-            evidence_recent_limit=int(os.environ.get("EVOLVE_EVIDENCE_RECENT_LIMIT", "12")),
-            evidence_historical_limit=int(os.environ.get("EVOLVE_EVIDENCE_HISTORICAL_LIMIT", "12")),
+            evidence_max_entries=int(os.environ.get("EVOLVE_EVIDENCE_MAX_ENTRIES", "400")),
+            evidence_recent_limit=int(os.environ.get("EVOLVE_EVIDENCE_RECENT_LIMIT", "20")),
+            evidence_historical_limit=int(os.environ.get("EVOLVE_EVIDENCE_HISTORICAL_LIMIT", "20")),
             evidence_replay_cases_per_window=int(
                 os.environ.get("EVOLVE_EVIDENCE_REPLAY_CASES_PER_WINDOW", "1")
             ),
             evidence_change_debt_threshold=int(
                 os.environ.get("EVOLVE_EVIDENCE_CHANGE_DEBT_THRESHOLD", "3")
+            ),
+            dataset_synthesis_enabled=os.environ.get(
+                "EVOLVE_DATASET_SYNTHESIS_ENABLED", "1"
+            ).lower()
+            not in {"0", "false", "no"},
+            dataset_test_cases=int(
+                os.environ.get("EVOLVE_DATASET_TEST_CASES", "2")
+            ),
+            dataset_min_requirements=int(
+                os.environ.get("EVOLVE_DATASET_MIN_REQUIREMENTS", "12")
+            ),
+            dataset_max_requirements=int(
+                os.environ.get("EVOLVE_DATASET_MAX_REQUIREMENTS", "24")
+            ),
+            dataset_disclosure_batch_size=int(
+                os.environ.get("EVOLVE_DATASET_DISCLOSURE_BATCH_SIZE", "4")
             ),
             candidate_coalesce_enabled=os.environ.get(
                 "EVOLVE_CANDIDATE_COALESCE_ENABLED", "1"
@@ -227,10 +231,10 @@ class EvolveServerConfig:
                 "EVOLVE_BUNDLE_TEXT_EXTENSIONS", ".py,.sh"
             ).split(","),
             bundle_max_file_bytes=int(
-                os.environ.get("EVOLVE_BUNDLE_MAX_FILE_BYTES", "65536")
+                os.environ.get("EVOLVE_BUNDLE_MAX_FILE_BYTES", "262144")
             ),
             bundle_max_prompt_bytes=int(
-                os.environ.get("EVOLVE_BUNDLE_MAX_PROMPT_BYTES", "262144")
+                os.environ.get("EVOLVE_BUNDLE_MAX_PROMPT_BYTES", "786432")
             ),
             bundle_allow_delete=os.environ.get(
                 "EVOLVE_BUNDLE_ALLOW_DELETE", "1"
@@ -243,7 +247,6 @@ class EvolveServerConfig:
             publish_mode=os.environ.get("EVOLVE_PUBLISH_MODE", "validated"),
             validation_required_results=int(os.environ.get("EVOLVE_VALIDATION_REQUIRED_RESULTS", "3")),
             validation_required_approvals=int(os.environ.get("EVOLVE_VALIDATION_REQUIRED_APPROVALS", "2")),
-            validation_min_mean_score=float(os.environ.get("EVOLVE_VALIDATION_MIN_MEAN_SCORE", "0.75")),
             validation_max_rejections=int(os.environ.get("EVOLVE_VALIDATION_MAX_REJECTIONS", "1")),
             human_review_enabled=os.environ.get("EVOLVE_HUMAN_REVIEW_ENABLED", "1").lower() not in {"0", "false", "no"},
             human_review_pending_timeout_seconds=int(os.environ.get("EVOLVE_HUMAN_REVIEW_TIMEOUT_SECONDS", "86400")),
@@ -323,11 +326,6 @@ class EvolveServerConfig:
             evolve_batch_size=int(os.environ.get("EVOLVE_BATCH_SIZE", "20")),
             reject_rewrite=os.environ.get("EVOLVE_REJECT_REWRITE", "0").lower() in {"1", "true", "yes"},
             use_session_judge=os.environ.get("EVOLVE_USE_SESSION_JUDGE", "1").lower() not in {"0", "false", "no"},
-            use_skill_verifier=os.environ.get("EVOLVE_USE_SKILL_VERIFIER", "1").lower() not in {"0", "false", "no"},
-            skill_verifier_min_score=float(os.environ.get("EVOLVE_SKILL_VERIFIER_MIN_SCORE", "0.75")),
-            use_skill_dedup=os.environ.get("EVOLVE_USE_SKILL_DEDUP", "1").lower() not in {"0", "false", "no"},
-            skill_dedup_max_similarity=float(os.environ.get("EVOLVE_SKILL_DEDUP_MAX_SIMILARITY", "0.8")),
-            skill_dedup_shortlist_size=int(os.environ.get("EVOLVE_SKILL_DEDUP_SHORTLIST_SIZE", "5")),
             evidence_enabled=os.environ.get(
                 "EVOLVE_EVIDENCE_ENABLED",
                 "1" if getattr(config, "evolve_evidence_enabled", True) else "0",
@@ -336,19 +334,19 @@ class EvolveServerConfig:
             evidence_max_entries=int(
                 os.environ.get(
                     "EVOLVE_EVIDENCE_MAX_ENTRIES",
-                    str(getattr(config, "evolve_evidence_max_entries", 200) or 200),
+                    str(getattr(config, "evolve_evidence_max_entries", 400) or 400),
                 )
             ),
             evidence_recent_limit=int(
                 os.environ.get(
                     "EVOLVE_EVIDENCE_RECENT_LIMIT",
-                    str(getattr(config, "evolve_evidence_recent_limit", 12) or 12),
+                    str(getattr(config, "evolve_evidence_recent_limit", 20) or 20),
                 )
             ),
             evidence_historical_limit=int(
                 os.environ.get(
                     "EVOLVE_EVIDENCE_HISTORICAL_LIMIT",
-                    str(getattr(config, "evolve_evidence_historical_limit", 12) or 0),
+                    str(getattr(config, "evolve_evidence_historical_limit", 20) or 0),
                 )
             ),
             evidence_replay_cases_per_window=int(
@@ -377,6 +375,50 @@ class EvolveServerConfig:
                     ),
                 )
             ),
+            dataset_synthesis_enabled=os.environ.get(
+                "EVOLVE_DATASET_SYNTHESIS_ENABLED",
+                "1"
+                if getattr(config, "evolve_dataset_synthesis_enabled", True)
+                else "0",
+            ).lower()
+            not in {"0", "false", "no"},
+            dataset_test_cases=int(
+                os.environ.get(
+                    "EVOLVE_DATASET_TEST_CASES",
+                    str(getattr(config, "evolve_dataset_test_cases", 2) or 2),
+                )
+            ),
+            dataset_min_requirements=int(
+                os.environ.get(
+                    "EVOLVE_DATASET_MIN_REQUIREMENTS",
+                    str(
+                        getattr(config, "evolve_dataset_min_requirements", 12)
+                        or 12
+                    ),
+                )
+            ),
+            dataset_max_requirements=int(
+                os.environ.get(
+                    "EVOLVE_DATASET_MAX_REQUIREMENTS",
+                    str(
+                        getattr(config, "evolve_dataset_max_requirements", 24)
+                        or 24
+                    ),
+                )
+            ),
+            dataset_disclosure_batch_size=int(
+                os.environ.get(
+                    "EVOLVE_DATASET_DISCLOSURE_BATCH_SIZE",
+                    str(
+                        getattr(
+                            config,
+                            "evolve_dataset_disclosure_batch_size",
+                            4,
+                        )
+                        or 4
+                    ),
+                )
+            ),
             candidate_coalesce_enabled=os.environ.get(
                 "EVOLVE_CANDIDATE_COALESCE_ENABLED",
                 "1"
@@ -389,11 +431,11 @@ class EvolveServerConfig:
                 or [".py", ".sh"]
             ),
             bundle_max_file_bytes=int(
-                getattr(config, "evolve_bundle_max_file_bytes", 65536) or 65536
+                getattr(config, "evolve_bundle_max_file_bytes", 262144) or 262144
             ),
             bundle_max_prompt_bytes=int(
-                getattr(config, "evolve_bundle_max_prompt_bytes", 262144)
-                or 262144
+                getattr(config, "evolve_bundle_max_prompt_bytes", 786432)
+                or 786432
             ),
             bundle_allow_delete=bool(
                 getattr(config, "evolve_bundle_allow_delete", True)
@@ -414,7 +456,6 @@ class EvolveServerConfig:
                     str(getattr(config, "validation_required_approvals", 2) or 2),
                 )
             ),
-            validation_min_mean_score=float(os.environ.get("EVOLVE_VALIDATION_MIN_MEAN_SCORE", "0.75")),
             validation_max_rejections=int(os.environ.get("EVOLVE_VALIDATION_MAX_REJECTIONS", "1")),
             human_review_enabled=os.environ.get("EVOLVE_HUMAN_REVIEW_ENABLED", "1").lower() not in {"0", "false", "no"},
             human_review_pending_timeout_seconds=int(os.environ.get("EVOLVE_HUMAN_REVIEW_TIMEOUT_SECONDS", "86400")),

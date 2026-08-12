@@ -23,15 +23,14 @@ class TeamEvolverConfig:
     use_skills: bool = True
     skills_dir: str = "memory_data/skills"
     skills_public_root: str = ""
-    max_skills_prompt_chars: int = 30000
+    max_skills_prompt_chars: int = 120000
 
     # ------------------------------------------------------------------ #
     # Context window                                                       #
     # ------------------------------------------------------------------ #
-    # Prompt budget retained for model-testing and validation clients. The token estimate divides
-    # char count by 4, which undercounts CJK, so keep some headroom below the
-    # model's hard context limit. Default targets modern 256k-context models.
-    max_context_tokens: int = 240000
+    # Prompt budget retained for model-testing and validation clients. Default
+    # assumes modern models support at least a 256k token context window.
+    max_context_tokens: int = 256000
 
     # ------------------------------------------------------------------ #
     # API Server                                                          #
@@ -116,17 +115,22 @@ class TeamEvolverConfig:
     # ------------------------------------------------------------------ #
     evolve_server_url: str = "http://127.0.0.1:52010"
     evolve_evidence_enabled: bool = True
-    evolve_evidence_max_entries: int = 200
-    evolve_evidence_recent_limit: int = 12
-    evolve_evidence_historical_limit: int = 12
+    evolve_evidence_max_entries: int = 400
+    evolve_evidence_recent_limit: int = 20
+    evolve_evidence_historical_limit: int = 20
     evolve_evidence_replay_cases_per_window: int = 1
     evolve_evidence_change_debt_threshold: int = 3
+    evolve_dataset_synthesis_enabled: bool = True
+    evolve_dataset_test_cases: int = 2
+    evolve_dataset_min_requirements: int = 12
+    evolve_dataset_max_requirements: int = 24
+    evolve_dataset_disclosure_batch_size: int = 4
     evolve_candidate_coalesce_enabled: bool = True
     evolve_bundle_text_extensions: list[str] = field(
         default_factory=lambda: [".py", ".sh"]
     )
-    evolve_bundle_max_file_bytes: int = 65536
-    evolve_bundle_max_prompt_bytes: int = 262144
+    evolve_bundle_max_file_bytes: int = 262144
+    evolve_bundle_max_prompt_bytes: int = 786432
     evolve_bundle_allow_delete: bool = True
     evolve_bundle_static_checks_enabled: bool = True
 
@@ -163,3 +167,27 @@ class TeamEvolverConfig:
     # Native replay runtime for sessions produced by AgentsHub.
     validation_agentshub_url: str = ""
     validation_agentshub_api_key: str = ""
+
+    # ------------------------------------------------------------------ #
+    # Langfuse session ingestion                                          #
+    # ------------------------------------------------------------------ #
+    # Pull agent sessions directly from a Langfuse deployment (verified against
+    # Langfuse v3.117.2 public REST API) and feed them into the same ingest
+    # pipeline used by Hermes/AgentsHub. Auth is Basic (public_key:secret_key).
+    langfuse_enabled: bool = False
+    langfuse_host: str = "https://cloud.langfuse.com"
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_timeout_seconds: int = 30
+    # Paging knobs for the public API. ``page_limit`` is items per request;
+    # ``max_sessions`` caps how many sessions a single pull will materialize.
+    langfuse_page_limit: int = 50
+    langfuse_max_sessions: int = 100
+    # Default session-attribute filters applied when a pull does not override
+    # them. ``environment`` and ``tags`` accept multiple values.
+    langfuse_default_environment: list[str] = field(default_factory=list)
+    langfuse_default_user_id: str = ""
+    langfuse_default_tags: list[str] = field(default_factory=list)
+    langfuse_default_release: str = ""
+    langfuse_default_version: str = ""
+    langfuse_default_trace_name: str = ""

@@ -62,6 +62,7 @@ def _version_evolution_context(
     name: str,
     version: int,
     history: list[dict[str, Any]],
+    store: Any = None,
 ) -> dict[str, Any]:
     cache_key = f"{name}:{version}"
     now = time.monotonic()
@@ -72,7 +73,8 @@ def _version_evolution_context(
         from ..validation.store import ValidationStore
         from .routes import _candidate_list_payloads, _evaluation_payload
 
-        store = ValidationStore.from_config(config)
+        if store is None:
+            store = ValidationStore.from_config(config)
         indexed = store.load_skill_version_context(name, version)
         if indexed:
             selected = {

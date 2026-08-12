@@ -10,7 +10,6 @@ import { Pill, Empty, ListViewport, PaginationControls, usePagedItems } from "@/
 import { cn } from "@/lib/utils";
 import type {
   Candidate,
-  ChecklistEvaluation,
   EvalResult,
   ReplaySide,
 } from "@/api/client";
@@ -47,50 +46,6 @@ function replayOutput(branch?: ReplaySide): string {
   );
 }
 
-function Kpi({
-  label,
-  value,
-  cls,
-  tip,
-}: {
-  label: string;
-  value: string;
-  cls: string;
-  tip: ReactNode;
-}) {
-  return (
-    <div className="min-w-[120px] flex-1 rounded-lg border border-border bg-surface-subtle px-3 py-2.5">
-      <div className="mb-1.5 text-[11px] font-semibold text-muted-foreground">{label}</div>
-      <div
-        className={cn(
-          "text-[19px] font-bold",
-          cls === "good" && "text-success",
-          cls === "bad" && "text-destructive",
-          cls === "muted" && "font-normal text-muted-foreground"
-        )}
-      >
-        {value}
-      </div>
-      <div className="mt-1 text-[11px] text-muted-foreground">{tip}</div>
-    </div>
-  );
-}
-
-function DecisionCell({
-  label,
-  passed,
-}: {
-  label: string;
-  passed?: boolean;
-}) {
-  return (
-    <div className="flex items-center justify-between rounded-lg border border-border bg-surface-subtle p-3 text-xs">
-      <span className="font-semibold">{label}</span>
-      <Pill tone={passed ? "green" : "red"}>{passed ? "通过" : "未通过"}</Pill>
-    </div>
-  );
-}
-
 export default function CandidateModal({
   jobId,
   cand,
@@ -113,20 +68,7 @@ export default function CandidateModal({
   const rep = ev?.replay || {};
   const replayCases = rep.cases || [];
   const efficiencyDimensions = rep.efficiency?.dimensions || {};
-  const checklist = rep.checklist || cand?.checklist;
-  const aggregateChecklist = (
-    rep.checklist_results as { candidate?: ChecklistEvaluation } | undefined
-  )?.candidate;
-  const candidateChecklist = replayCases
-    .map((item) => item.candidate?.checklist)
-    .find((item) => item?.items?.length);
-  const checklistRows =
-    aggregateChecklist?.items ||
-    candidateChecklist?.items ||
-    checklist?.items ||
-    [];
   const decisionPolicy = rep.decision_policy || {};
-  const mergeSourceResults = decisionPolicy.merge_source_results || [];
   const replayPager = usePagedItems(replayCases);
   const currentMd = ev?.current_skill_md || cand?.current_skill_md || skillToMd(cand?.current_skill || ev?.current_skill);
   const candidateMd = ev?.candidate_skill_md || cand?.candidate_skill_md || skillToMd(cand?.candidate_skill || ev?.candidate_skill) || cand?.content_preview || "";
@@ -176,9 +118,6 @@ export default function CandidateModal({
           const b = cc.baseline || {};
           const a = cc.candidate || {};
           const instr = a.instruction || b.instruction || "";
-          const bScore = b.score;
-          const aScore = a.score;
-          const aWin = aScore != null && bScore != null && aScore >= bScore;
           const turnNum = b.turn_num != null ? b.turn_num : a.turn_num;
           return (
             <div key={replayPager.start + i} className="mb-3 rounded-lg border border-border p-3.5">
@@ -194,13 +133,13 @@ export default function CandidateModal({
               </div>
               <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
                 <AbCol
-                  win={!aWin}
                   head="🅰 基线（当前技能 / 无技能）"
+                  branch={b}
                   body={replayOutput(b)}
                 />
                 <AbCol
-                  win={aWin}
                   head="🅱 候选（新技能）"
+                  branch={a}
                   body={replayOutput(a)}
                 />
               </div>
@@ -257,141 +196,28 @@ export default function CandidateModal({
           </div>
         )}
 
-        {/* KPIs */}
-        <div className="my-4 flex flex-wrap gap-2.5">
-          <Kpi
-            label="综合建议"
-            value={ev.recommended_publish ? "建议发布" : "建议复核"}
-            cls={ev.recommended_publish ? "good" : "bad"}
-            tip={
-              <>
-                {rep.no_regression ? "无回退" : "存在回退"} · 回放门禁
-              </>
+        <div className="my-4 rounded-lg border border-border bg-surface-subtle p-3 text-xs">
+          <div className="mb-1 font-semibold">True Replay 客观结论</div>
+          <Pill
+            tone={
+              decisionPolicy.verdict === "accept"
+                ? "green"
+                : decisionPolicy.verdict === "reject"
+                ? "red"
+                : "amber"
             }
-          />
+          >
+            {decisionPolicy.decision_basis === "interaction_turns_decreased"
+              ? "轮次下降，直接判定正向"
+              : decisionPolicy.decision_basis === "interaction_turns_increased"
+              ? "轮次上升，判定负向"
+              : decisionPolicy.decision_basis === "secondary_metrics_decreased"
+              ? "轮次持平，工具调用 / Token 改善"
+              : decisionPolicy.decision_basis === "secondary_metrics_increased"
+              ? "轮次持平，工具调用 / Token 有增加"
+              : "三项持平 / 数据不完整"}
+          </Pill>
         </div>
-
-        {checklist && (
-          <>
-            <SecTitle>✅ 多人共性 Checklist</SecTitle>
-            <div className="rounded-lg border border-border bg-surface-subtle p-3">
-              <div className="mb-3 flex flex-wrap gap-2 text-xs">
-                <Pill tone={checklist.commonality?.passed ? "green" : "red"}>
-                  共性证据 {checklist.commonality?.passed ? "通过" : "不足"}
-                </Pill>
-                <Pill tone="blue">
-                  独立会话 {checklist.commonality?.distinct_session_count || 0}
-                </Pill>
-                <Pill tone="purple">
-                  独立用户 {checklist.commonality?.distinct_user_count || 0}
-                </Pill>
-                <Pill tone="gray">
-                  临时证据 {checklist.commonality?.provisional_claim_count || 0}
-                </Pill>
-              </div>
-              {!!mergeSourceResults.length && (
-                <div className="mb-3 grid gap-2 sm:grid-cols-2">
-                  {mergeSourceResults.map((source, index) => (
-                    <div
-                      key={`${source.skill_name || "candidate"}-${source.version || index}`}
-                      role="status"
-                      aria-label={`${source.skill_name || "当前候选证据"}${source.version ? ` v${source.version}` : ""}：${source.passed ? "覆盖完成" : "覆盖不全"}，必测 ${source.required_item_ids?.length || 0} 项`}
-                      className="flex items-center justify-between rounded-md border border-border bg-background p-2.5 text-xs"
-                    >
-                      <div>
-                        <div className="font-semibold">
-                          {source.skill_name || "当前候选证据"}
-                          {source.version ? ` v${source.version}` : ""}
-                        </div>
-                        <div className="mt-1 text-[11px] text-muted-foreground">
-                          必测 {source.required_item_ids?.length || 0} 项
-                          {!!source.failed_item_ids?.length &&
-                            ` · 失败 ${source.failed_item_ids.length} 项`}
-                        </div>
-                      </div>
-                      <Pill tone={source.passed ? "green" : "red"}>
-                        {source.passed ? "覆盖完成" : "覆盖不全"}
-                      </Pill>
-                    </div>
-                  ))}
-                </div>
-              )}
-              <div className="space-y-2">
-                {checklistRows.map((item) => (
-                  <div
-                    key={item.id}
-                    role="status"
-                    aria-label={`${item.claim || item.id}：${item.passed == null ? "待评估" : item.passed ? "通过" : "失败"}，${item.kind === "hard" ? "代码硬门禁" : "LLM 软判断"}`}
-                    className="rounded-md border border-border bg-background p-2.5 text-xs"
-                  >
-                    <div className="flex flex-wrap items-start justify-between gap-2">
-                      <div className="font-semibold">{item.claim}</div>
-                      <div className="flex gap-1.5">
-                        <Pill tone={item.kind === "hard" ? "red" : "blue"}>
-                          {item.kind === "hard" ? "代码硬门禁" : "LLM 软判断"}
-                        </Pill>
-                        {item.passed != null && (
-                          <Pill tone={item.passed ? "green" : "red"}>
-                            {item.passed ? "通过" : "失败"}
-                          </Pill>
-                        )}
-                      </div>
-                    </div>
-                    {item.inherited_from?.skill_name && (
-                      <div className="mt-1 text-[11px] text-muted-foreground">
-                        继承自：{item.inherited_from.skill_name}
-                        {item.inherited_from.version
-                          ? ` v${item.inherited_from.version}`
-                          : ""}
-                      </div>
-                    )}
-                    {!!item.source_session_ids?.length && (
-                      <div className="mt-1.5 break-all text-[11px] text-muted-foreground">
-                        来源会话：{item.source_session_ids.join("、")}
-                      </div>
-                    )}
-                    {item.causal_link && (
-                      <div className="mt-1 text-[11px] text-muted-foreground">
-                        因果依据：{item.causal_link}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-              {!!checklist.excluded_personal_evidence?.length && (
-                <div className="mt-3 text-[11px] text-muted-foreground">
-                  已排除 {checklist.excluded_personal_evidence.length} 条个人偏好证据，不进入共享 Skill。
-                </div>
-              )}
-            </div>
-          </>
-        )}
-
-        {Object.keys(decisionPolicy).length > 0 && (
-          <>
-            <SecTitle>⚖️ 客观发布决策</SecTitle>
-            <div
-              role="region"
-              aria-label="客观发布决策"
-              className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4"
-            >
-              <DecisionCell label="质量硬门禁" passed={decisionPolicy.quality_gate} />
-              <DecisionCell label="多人共性" passed={decisionPolicy.commonality_pass} />
-              <DecisionCell label="无 Checklist 回退" passed={decisionPolicy.no_regression} />
-              {!!mergeSourceResults.length && (
-                <DecisionCell label="Merge Checklist 并集" passed={decisionPolicy.merge_union_pass} />
-              )}
-              <DecisionCell label="最终决策" passed={decisionPolicy.accepted} />
-            </div>
-            {!!decisionPolicy.reason_codes?.length && (
-              <div className="mt-2 rounded-lg border border-border p-3 text-xs">
-                <div className="text-destructive">
-                  未通过原因：{decisionPolicy.reason_codes.join("、")}
-                </div>
-              </div>
-            )}
-          </>
-        )}
 
         {Object.keys(efficiencyDimensions).length > 0 && (
           <>
@@ -416,12 +242,15 @@ export default function CandidateModal({
                       <td className="px-3 py-2">{Number(metric.baseline || 0).toLocaleString()}</td>
                       <td className="px-3 py-2">{Number(metric.candidate || 0).toLocaleString()}</td>
                       <td className={cn("px-3 py-2 font-bold", metric.delta > 0 && "text-success", metric.delta < 0 && "text-destructive")}>
-                        {metric.delta > 0 ? "-" : metric.delta < 0 ? "+" : ""}
-                        {Math.abs(Number(metric.delta || 0)).toLocaleString()}
+                        {metric.delta > 0
+                          ? `减少 ${Number(metric.delta).toLocaleString()}`
+                          : metric.delta < 0
+                          ? `增加 ${Math.abs(Number(metric.delta)).toLocaleString()}`
+                          : "持平"}
                       </td>
                       <td className="px-3 py-2">
                         <Pill tone={metric.winner === "candidate" ? "green" : metric.winner === "baseline" ? "red" : "gray"}>
-                          {metric.winner === "candidate" ? "候选更优" : metric.winner === "baseline" ? "基线更优" : "持平"}
+                          {metric.winner === "candidate" ? "减少" : metric.winner === "baseline" ? "增加" : "持平"}
                         </Pill>
                       </td>
                     </tr>
@@ -525,24 +354,23 @@ function SkillMdBlock({ title, body }: { title: string; body: string }) {
 }
 
 function AbCol({
-  win,
   head,
+  branch,
   body,
 }: {
-  win: boolean;
   head: string;
   body?: string;
+  branch: ReplaySide;
 }) {
   return (
-    <div
-      className={cn(
-        "rounded-md border bg-surface-subtle px-2.5 py-2.5",
-        win ? "border-success" : "border-border"
-      )}
-    >
-      <div className="mb-1.5 flex items-center justify-between text-[11px] text-muted-foreground">
-        <span>{head}</span>
-        {win && <span className="font-bold text-success">更优</span>}
+    <div className="rounded-md border border-border bg-surface-subtle px-2.5 py-2.5">
+      <div className="mb-1.5 text-[11px] font-semibold text-muted-foreground">
+        {head}
+      </div>
+      <div className="mb-2 flex flex-wrap gap-2 text-[11px] text-muted-foreground">
+        <span>轮次 {Number(branch.interaction_turns || 0).toLocaleString()}</span>
+        <span>工具 {Number(branch.tool_call_count || 0).toLocaleString()}</span>
+        <span>Token {Number(branch.total_tokens || 0).toLocaleString()}</span>
       </div>
       <div className="max-h-[200px] overflow-auto text-xs leading-normal whitespace-pre-wrap break-words">
         {body || <span className="text-muted-foreground">（无输出）</span>}

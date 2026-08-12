@@ -11,9 +11,9 @@ from typing import Any
 from ...storage import is_not_found_error
 
 _SCHEMA_VERSION = 1
-_SUMMARY_LIMIT = 4_000
-_TRAJECTORY_LIMIT = 6_000
-_RESPONSE_LIMIT = 4_000
+_SUMMARY_LIMIT = 16_000
+_TRAJECTORY_LIMIT = 32_000
+_RESPONSE_LIMIT = 16_000
 
 
 def _utc_now_iso() -> str:
@@ -83,7 +83,7 @@ def _extract_replay_cases(session: dict[str, Any], *, limit: int = 2) -> list[di
         case = {
             "session_id": session_id,
             "turn_num": int(turn.get("turn_num") or 0),
-            "instruction": _clip(instruction, 3_000),
+            "instruction": _clip(instruction, 12_000),
             "reference_response": _clip(response, _RESPONSE_LIMIT),
             "had_tool_calls": bool(turn.get("tool_calls")),
             "had_tool_results": bool(

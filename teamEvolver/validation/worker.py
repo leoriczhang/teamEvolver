@@ -10,21 +10,18 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional, Protocol
 
-from ..checklist import (
-    aggregate_branch_checklist_results,
-    compile_common_checklist,
-    objective_replay_decision,
+from ..progressive_replay import (
+    aggregate_case_checklists,
+    progressive_replay_decision,
+    select_replay_cases,
 )
-from ..llm import AsyncLLMClient
 from ..skills.bundle import bundle_tree_sha256, candidate_skill_bundle
-from ..skills.render import build_skill_md
 from .bundle_checks import validate_candidate_bundle
 from .store import ValidationStore
 
@@ -63,19 +60,13 @@ class ValidationWorker:
         idle_provider: Optional[IdleStateProvider] = None,
         llm_client: Any = None,
     ) -> None:
+        del llm_client
         self.config = config
         self._idle_provider = idle_provider
         self._store = ValidationStore.from_config(config)
         self._stop_event = asyncio.Event()
         self._jobs_completed_today = 0
         self._jobs_completed_date = datetime.now(timezone.utc).date().isoformat()
-        self._client = llm_client or AsyncLLMClient(
-            api_key=config.llm_api_key,
-            base_url=config.llm_api_base,
-            model=config.llm_model_id or config.model_name or "doubao-seed-evolving",
-            max_tokens=4096,
-            temperature=0.1,
-        )
         self._user_alias = str(config.sharing_user_alias or os.environ.get("USER", "anonymous"))
 
     def stop(self) -> None:
@@ -107,261 +98,8 @@ class ValidationWorker:
         )
 
     @staticmethod
-    def _score_replay_output(response_text: str) -> dict[str, Any]:
-        """Score the replay branch from the replay result itself."""
-        text = str(response_text or "").strip()
-        if not text:
-            return {
-                "score": 0.0,
-                "signal": "empty_response",
-                "reason": "replay produced no assistant response",
-            }
-        lowered = text.lower()
-        failure_markers = (
-            "i can't",
-            "i cannot",
-            "无法完成",
-            "不能完成",
-            "抱歉",
-            "sorry",
-            "error",
-            "failed",
-        )
-        if any(marker in lowered for marker in failure_markers):
-            return {
-                "score": 0.25,
-                "signal": "uncertain_or_incomplete",
-                "reason": "replay response contains failure or uncertainty markers",
-            }
-        return {
-            "score": 0.75,
-            "signal": "completed_response",
-            "reason": "replay produced a concrete assistant response",
-        }
-
-    async def _score_replay_output_with_rubric(
-        self,
-        case: dict[str, Any],
-        response_text: str,
-    ) -> dict[str, Any]:
-        """Judge a mined benchmark answer against its private gold rubric."""
-        gold = case.get("gold") if isinstance(case.get("gold"), dict) else {}
-        if not gold:
-            return self._score_replay_output(response_text)
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a strict benchmark judge. Score the assistant answer against "
-                    "the private rubric. Reward expected labels and must_hit requirements; "
-                    "penalize any must_avoid violation or invented fact. Reply only as JSON "
-                    'with {"score": number from 0 to 1, "reason": "short reason"}.'
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Instruction:\n{case.get('instruction', '')}\n\n"
-                    f"Private rubric:\n{json.dumps(gold, ensure_ascii=False)}\n\n"
-                    f"Assistant answer:\n{response_text}"
-                ),
-            },
-        ]
-        try:
-            raw = await self._client.chat(
-                messages,
-                max_tokens=512,
-                temperature=0.0,
-            )
-            start, end = raw.find("{"), raw.rfind("}")
-            parsed = (
-                json.loads(raw[start : end + 1])
-                if start >= 0 and end >= start
-                else {}
-            )
-            score = max(0.0, min(1.0, float(parsed.get("score"))))
-            return {
-                "score": round(score, 3),
-                "signal": "gold_rubric",
-                "reason": str(
-                    parsed.get("reason") or "internal benchmark rubric score"
-                )[:800],
-            }
-        except Exception:  # noqa: BLE001
-            return self._score_replay_output(response_text)
-
-    @staticmethod
-    def _build_replay_skill_system(skill: Optional[dict[str, Any]]) -> str:
-        if not isinstance(skill, dict) or not skill.get("name"):
-            return ""
-        return (
-            "You are replaying a previously observed user task on this client machine.\n"
-            "Apply the following local skill if it is relevant to the user instruction.\n"
-            "If it does not apply, answer normally.\n\n"
-            "<skill_file>\n"
-            f"{build_skill_md(skill).strip()}\n"
-            "</skill_file>"
-        )
-
-    @staticmethod
-    def _build_replay_messages(case: dict[str, Any], skill: Optional[dict[str, Any]]) -> list[dict[str, str]]:
-        messages: list[dict[str, str]] = []
-        system_prompt = ValidationWorker._build_replay_skill_system(skill)
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        instruction = str(case.get("instruction", "") or "").strip()
-        if instruction:
-            messages.append({"role": "user", "content": instruction})
-        return messages
-
-    async def _run_replay_branch(
-        self,
-        case: dict[str, Any],
-        skill: Optional[dict[str, Any]],
-        *,
-        label: str,
-    ) -> dict[str, Any]:
-        messages = self._build_replay_messages(case, skill)
-        if not messages or messages[-1].get("role") != "user":
-            raise ValueError("replay case missing user instruction")
-        response_text = await self._client.chat(
-            messages,
-            max_tokens=2048,
-            temperature=0.1,
-        )
-        replay_result = await self._score_replay_output_with_rubric(
-            case,
-            response_text,
-        )
-        normalized_score = replay_result["score"]
-        return {
-            "label": label,
-            "response_text": response_text,
-            "replay_score": replay_result["score"],
-            "replay_signal": replay_result["signal"],
-            "replay_reason": replay_result["reason"],
-            "normalized_score": normalized_score,
-        }
-
-    async def _replay_validate_job(self, job: dict[str, Any]) -> dict[str, Any]:
-        candidate_skill = job.get("candidate_skill")
-        if not isinstance(candidate_skill, dict) or not candidate_skill.get("name"):
-            raise ValueError("validation job missing candidate_skill")
-
-        replay_cases = [case for case in (job.get("replay_cases") or []) if isinstance(case, dict)]
-        if not replay_cases:
-            raise ValueError("validation job missing replay_cases")
-
-        current_skill = job.get("current_skill") if isinstance(job.get("current_skill"), dict) else None
-        case_results: list[dict[str, Any]] = []
-        candidate_scores: list[float] = []
-        baseline_scores: list[float] = []
-        window_scores: dict[str, dict[str, list[float]]] = {}
-
-        for case in replay_cases[:3]:
-            window = str(case.get("evidence_window") or "recent")
-            if window not in {"recent", "historical"}:
-                window = "recent"
-            scores = window_scores.setdefault(
-                window,
-                {"baseline": [], "candidate": []},
-            )
-            baseline = await self._run_replay_branch(case, current_skill, label="baseline")
-            candidate = await self._run_replay_branch(case, candidate_skill, label="candidate")
-            baseline_score = baseline.get("normalized_score")
-            candidate_score = candidate.get("normalized_score")
-            if isinstance(baseline_score, (int, float)):
-                baseline_scores.append(float(baseline_score))
-                scores["baseline"].append(float(baseline_score))
-            if isinstance(candidate_score, (int, float)):
-                candidate_scores.append(float(candidate_score))
-                scores["candidate"].append(float(candidate_score))
-            case_results.append(
-                {
-                    "evidence_window": window,
-                    "session_id": str(case.get("session_id", "") or ""),
-                    "turn_num": int(case.get("turn_num", 0) or 0),
-                    "instruction": str(case.get("instruction", "") or ""),
-                    "baseline": baseline,
-                    "candidate": candidate,
-                }
-            )
-
-        if not candidate_scores:
-            raise ValueError("replay validation produced no candidate scores")
-
-        candidate_mean = round(sum(candidate_scores) / len(candidate_scores), 3)
-        baseline_mean = round(sum(baseline_scores) / len(baseline_scores), 3) if baseline_scores else 0.0
-        threshold = round(float(job.get("min_score", 0.75)), 3)
-        recent = window_scores.get("recent") or next(iter(window_scores.values()))
-        recent_candidate = (
-            sum(recent["candidate"]) / len(recent["candidate"])
-            if recent["candidate"]
-            else 0.0
-        )
-        recent_baseline = (
-            sum(recent["baseline"]) / len(recent["baseline"])
-            if recent["baseline"]
-            else 0.0
-        )
-        recent_improved = (
-            recent_candidate >= threshold and recent_candidate > recent_baseline
-        )
-        historical = window_scores.get("historical")
-        historical_no_regression = True
-        if historical and historical["candidate"]:
-            historical_candidate = sum(historical["candidate"]) / len(
-                historical["candidate"]
-            )
-            historical_baseline = (
-                sum(historical["baseline"]) / len(historical["baseline"])
-                if historical["baseline"]
-                else 0.0
-            )
-            historical_no_regression = (
-                historical_candidate >= historical_baseline - 0.15
-            )
-        accepted = recent_improved and historical_no_regression
-        if accepted:
-            decision = "accept"
-        elif not historical_no_regression:
-            decision = "reject"
-        else:
-            decision = "inconclusive"
-        reason = (
-            f"Replay validation compared {len(case_results)} case(s): "
-            f"candidate_mean={candidate_mean}, baseline_mean={baseline_mean}, "
-            f"threshold={threshold}, recent_improved={recent_improved}, "
-            f"historical_no_regression={historical_no_regression}"
-        )
-        return {
-            "validator_mode": "replay",
-            "decision": decision,
-            "accepted": accepted,
-            "score": candidate_mean,
-            "threshold": threshold,
-            "reason": reason,
-            "checks": {
-                "grounded_in_evidence": candidate_mean,
-                "preserves_existing_value": min(1.0, max(0.0, candidate_mean - baseline_mean + 0.5)),
-                "specificity_and_reusability": candidate_mean,
-                "safe_to_publish": candidate_mean,
-            },
-            "replay_summary": {
-                "case_count": len(case_results),
-                "baseline_mean_score": baseline_mean,
-                "candidate_mean_score": candidate_mean,
-                "recent_improved": recent_improved,
-                "historical_no_regression": historical_no_regression,
-                "cases": case_results,
-            },
-        }
-
-    @staticmethod
     def _aggregate_true_replay_windows(
         results: list[tuple[str, dict[str, Any]]],
-        *,
-        checklist: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         evaluated = [
             (window, result)
@@ -376,14 +114,7 @@ class ValidationWorker:
                 "reason": "no replay window produced an evaluation",
                 "window_results": {window: result for window, result in results},
             }
-        by_window = {window: result for window, result in evaluated}
-        recent = by_window.get("recent") or evaluated[0][1]
-        historical = by_window.get("historical")
         all_windows_evaluated = len(evaluated) == len(results)
-        recent_improved = bool(recent.get("accepted"))
-        historical_no_regression = (
-            True if historical is None else bool(historical.get("no_regression"))
-        )
 
         cases: list[dict[str, Any]] = []
         for window, result in evaluated:
@@ -392,26 +123,6 @@ class ValidationWorker:
                     case = dict(raw_case)
                     case["evidence_window"] = window
                     cases.append(case)
-        full_checklist = checklist or recent.get("checklist") or {}
-        window_checklist_results = {
-            window: (
-                result.get("checklist_results")
-                if isinstance(result.get("checklist_results"), dict)
-                else {}
-            )
-            for window, result in evaluated
-        }
-        branch_results = {
-            branch: aggregate_branch_checklist_results(
-                full_checklist,
-                [
-                    result.get(branch) or {}
-                    for result in window_checklist_results.values()
-                    if isinstance(result.get(branch), dict)
-                ],
-            )
-            for branch in ("baseline", "candidate")
-        }
         efficiency_inputs = {"baseline": {}, "candidate": {}}
         for _, result in evaluated:
             report = (
@@ -439,11 +150,14 @@ class ValidationWorker:
             efficiency_inputs["baseline"],
             efficiency_inputs["candidate"],
         )
-        policy = objective_replay_decision(
-            checklist=full_checklist,
-            baseline=branch_results["baseline"],
-            candidate=branch_results["candidate"],
+        branch_checklists = {
+            branch: aggregate_case_checklists(cases, branch=branch)
+            for branch in ("baseline", "candidate")
+        }
+        policy = progressive_replay_decision(
             efficiency=efficiency,
+            baseline_checklist=branch_checklists["baseline"],
+            candidate_checklist=branch_checklists["candidate"],
         )
         accepted = bool(policy.get("accepted")) and all_windows_evaluated
         verdict = str(policy.get("verdict") or "inconclusive")
@@ -458,34 +172,16 @@ class ValidationWorker:
             "accepted": accepted,
             "verdict": verdict,
             "no_regression": no_regression,
-            "recent_improved": recent_improved,
-            "historical_no_regression": historical_no_regression,
-            "quality_ok": bool(policy.get("quality_gate"))
-            and historical_no_regression,
-            "score": branch_results["candidate"]["pass_rate"],
-            "baseline_mean": branch_results["baseline"]["pass_rate"],
-            "delta": round(
-                branch_results["candidate"]["pass_rate"]
-                - branch_results["baseline"]["pass_rate"],
-                4,
-            ),
-            "threshold": recent.get("threshold"),
-            "tolerance": recent.get("tolerance"),
             "case_count": sum(
                 int(result.get("case_count") or 0)
                 for _, result in evaluated
             ),
             "cases": cases,
             "efficiency": efficiency,
-            "checklist": full_checklist,
-            "checklist_results": {
-                **branch_results,
-                "windows": window_checklist_results,
-            },
+            "checklist": branch_checklists,
             "decision_policy": {
                 **policy,
                 "accepted": accepted,
-                "historical_no_regression": historical_no_regression,
                 "all_windows_evaluated": all_windows_evaluated,
             },
             "window_results": {window: result for window, result in results},
@@ -512,10 +208,7 @@ class ValidationWorker:
                 "validator_mode": "bundle_static",
                 "decision": "reject",
                 "accepted": False,
-                "score": 0.0,
-                "threshold": float(job.get("min_score", 0.75) or 0.75),
                 "reason": "Candidate bundle failed deterministic static checks.",
-                "checks": {"safe_to_publish": 0.0},
                 "static_validation": static_validation,
                 "replay_summary": {
                     "status": "skipped",
@@ -523,24 +216,16 @@ class ValidationWorker:
                     "cases": [],
                 },
             }
+        replay: dict[str, Any] = {}
         if str(getattr(self.config, "validation_mode", "true_replay") or "true_replay").strip().lower() == "true_replay":
             job_id = str(job.get("job_id") or "")
             if job_id:
                 try:
                     from ..true_replay import evaluate_job
 
-                    selected: list[tuple[str, int]] = []
-                    seen_windows: set[str] = set()
-                    for index, case in enumerate(job.get("replay_cases") or []):
-                        if not isinstance(case, dict):
-                            continue
-                        window = str(case.get("evidence_window") or "recent")
-                        if window not in {"recent", "historical"}:
-                            window = "recent"
-                        if window in seen_windows:
-                            continue
-                        selected.append((window, index))
-                        seen_windows.add(window)
+                    selected = select_replay_cases(
+                        job.get("replay_cases") or []
+                    )
                     window_results: list[tuple[str, dict[str, Any]]] = []
                     for window, case_index in selected:
                         result = await asyncio.to_thread(
@@ -548,13 +233,28 @@ class ValidationWorker:
                             job_id,
                             job=job,
                             case_index=case_index,
+                            max_interactions=max(
+                                1,
+                                int(job.get("max_interactions") or 4),
+                            ),
                         )
                         window_results.append((window, result))
                     replay = self._aggregate_true_replay_windows(
                         window_results,
-                        checklist=compile_common_checklist(job),
                     )
                     if replay.get("status") == "evaluated":
+                        policy = (
+                            replay.get("decision_policy")
+                            if isinstance(replay.get("decision_policy"), dict)
+                            else {}
+                        )
+                        changes = policy.get("metric_changes") or {}
+                        reason = ", ".join(
+                            f"{name}: {item.get('baseline', 0)} -> "
+                            f"{item.get('candidate', 0)}"
+                            for name, item in changes.items()
+                            if isinstance(item, dict)
+                        )
                         return {
                             "validator_mode": "true_replay",
                             "decision": str(
@@ -566,29 +266,37 @@ class ValidationWorker:
                                 )
                             ),
                             "accepted": bool(replay.get("accepted")),
-                            "score": replay.get("score"),
-                            "threshold": replay.get("threshold"),
-                            "reason": (
-                                f"Checklist score={replay.get('score')}, "
-                                f"baseline={replay.get('baseline_mean')}, "
-                                f"efficiency={((replay.get('decision_policy') or {}).get('efficiency_score'))}, "
-                                f"accepted={replay.get('accepted')}"
-                            ),
-                            "checks": {
-                                "grounded_in_evidence": replay.get("score"),
-                                "preserves_existing_value": 1.0 if replay.get("no_regression") else 0.0,
-                                "specificity_and_reusability": replay.get("score"),
-                                "safe_to_publish": replay.get("score") if replay.get("accepted") else 0.0,
-                            },
+                            "reason": reason,
                             "static_validation": static_validation,
                             "replay_summary": replay,
                         }
                     logger.info("[ValidationWorker] true replay skipped for %s: %s", job_id, replay.get("reason"))
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("[ValidationWorker] true replay failed for %s: %s", job_id, exc)
-        result = await self._replay_validate_job(job)
-        result["static_validation"] = static_validation
-        return result
+                    replay = {
+                        "status": "skipped",
+                        "reason": f"{type(exc).__name__}: {exc}",
+                        "cases": [],
+                    }
+        return {
+            "validator_mode": "true_replay",
+            "decision": "inconclusive",
+            "accepted": False,
+            "reason": str(
+                (replay if isinstance(replay, dict) else {}).get("reason")
+                or "true replay produced no complete result"
+            ),
+            "static_validation": static_validation,
+            "replay_summary": (
+                replay
+                if isinstance(replay, dict)
+                else {
+                    "status": "skipped",
+                    "reason": "true replay unavailable",
+                    "cases": [],
+                }
+            ),
+        }
 
     async def run_once(self, *, force: bool = False) -> dict[str, Any]:
         summary = ValidationRunSummary()
@@ -663,13 +371,18 @@ class ValidationWorker:
                 candidate_skill_bundle(candidate)
             )
             self._store.save_result(job_id, self._user_alias, result)
+            # Candidate/replay UIs read the evaluation object, while the
+            # distributed publish quorum reads per-validator results. Persist
+            # both projections so automatic validation is immediately visible.
+            self._store.save_evaluation(job_id, result)
             self._jobs_completed_today += 1
             summary.validated_jobs += 1
             logger.info(
-                "[ValidationWorker] submitted result for job %s as %s (score=%s)",
+                "[ValidationWorker] submitted result for job %s as %s "
+                "(decision=%s)",
                 job_id,
                 self._user_alias,
-                result.get("score"),
+                result.get("decision"),
             )
             finalized = await self._trigger_evolve_finalize()
             if finalized and result.get("accepted") is True:

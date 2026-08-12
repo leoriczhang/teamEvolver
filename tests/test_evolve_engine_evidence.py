@@ -17,9 +17,6 @@ from teamEvolver.evolve.stages.execute import (
     _parse_evolve_result,
 )
 from teamEvolver.evolve.stages.judge import _extract_output_artifacts
-from teamEvolver.evolve.stages.verify import (
-    _build_session_evidence as build_verifier_evidence,
-)
 
 
 def test_candidate_without_team_skill_evidence_is_suppressed() -> None:
@@ -120,7 +117,7 @@ def test_truncated_evolve_json_is_repaired_before_validation() -> None:
     assert result["skill"]["content"] == "Apply the shared acceptance rule."
 
 
-def test_evaluation_profile_is_visible_to_planner_and_verifier(
+def test_evaluation_profile_is_visible_to_planner_and_replay(
     tmp_path: Path,
 ) -> None:
     session = {
@@ -133,7 +130,6 @@ def test_evaluation_profile_is_visible_to_planner_and_verifier(
     }
 
     planner_evidence = build_planner_evidence([session])
-    verifier_evidence = build_verifier_evidence([session])
     cohort_context = _build_evaluation_cohort_context(
         [
             session,
@@ -153,7 +149,6 @@ def test_evaluation_profile_is_visible_to_planner_and_verifier(
     persisted_evidence = server._build_validation_evidence([session])
 
     assert "evaluation_profile: html_ppt_methodology_v1" in planner_evidence
-    assert verifier_evidence[0]["evaluation_profile"] == "html_ppt_methodology_v1"
     assert "html_ppt_methodology_v1" in cohort_context
     assert "session-profile-2" in cohort_context
     assert persisted_evidence[0]["evaluation_profile"] == (
@@ -287,18 +282,6 @@ async def test_true_replay_subprocess_receives_parent_job_file(
                 "evidence_window": "recent",
             }
         ],
-        "checklist": {
-            "format": "common_checklist_v2",
-            "commonality": {"passed": True},
-            "items": [
-                {
-                    "id": "execution_complete",
-                    "kind": "hard",
-                    "required": True,
-                }
-            ],
-        },
-        "min_score": 0.75,
     }
     captured: dict = {}
 
@@ -309,39 +292,8 @@ async def test_true_replay_subprocess_receives_parent_job_file(
             "status": "evaluated",
             "accepted": True,
             "no_regression": True,
-            "quality_ok": True,
-            "score": 0.9,
-            "baseline_mean": 0.7,
             "case_count": 1,
             "cases": [],
-            "checklist_results": {
-                "baseline": {
-                    "passed": False,
-                    "hard_pass": False,
-                    "pass_rate": 0.0,
-                    "items": [
-                        {
-                            "id": "execution_complete",
-                            "kind": "hard",
-                            "required": True,
-                            "passed": False,
-                        }
-                    ],
-                },
-                "candidate": {
-                    "passed": True,
-                    "hard_pass": True,
-                    "pass_rate": 1.0,
-                    "items": [
-                        {
-                            "id": "execution_complete",
-                            "kind": "hard",
-                            "required": True,
-                            "passed": True,
-                        }
-                    ],
-                },
-            },
             "efficiency": {
                 "baseline": {
                     "interaction_turns": 2,
@@ -374,7 +326,7 @@ async def test_true_replay_subprocess_receives_parent_job_file(
     assert result["accepted"] is True
 
 
-def test_validation_job_restores_verifier_evidence() -> None:
+def test_validation_job_restores_replay_evidence() -> None:
     sessions = EvolveServer._restore_validation_sessions(
         {
             "session_evidence": [

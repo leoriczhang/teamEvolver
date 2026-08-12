@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_CLASSIFIER_TIMEOUT_SECONDS = 60
 
 
-def _clip(text: str, limit: int = 1200) -> str:
+def _clip(text: str, limit: int = 8000) -> str:
     text = str(text or "").strip()
     return text if len(text) <= limit else text[:limit] + "..."
 
@@ -31,7 +31,7 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _session_user_texts(session: dict[str, Any], limit: int = 6) -> list[str]:
+def _session_user_texts(session: dict[str, Any], limit: int = 20) -> list[str]:
     texts: list[str] = []
     for turn in session.get("turns") or []:
         if not isinstance(turn, dict):
@@ -60,11 +60,11 @@ def _session_summary(session: dict[str, Any]) -> dict[str, Any]:
         interaction = {
             "user": _clip(
                 str(turn.get("prompt_text") or turn.get("instruction") or ""),
-                600,
+                4000,
             ),
             "assistant": _clip(
                 str(turn.get("response_text") or turn.get("response") or ""),
-                800,
+                6000,
             ),
             "tool_call_count": len(turn.get("tool_calls") or []),
             "used_skills": turn.get("used_skills") or turn.get("read_skills") or [],
@@ -82,11 +82,11 @@ def _session_summary(session: dict[str, Any]) -> dict[str, Any]:
         "session_id": str(session.get("session_id") or ""),
         "title": str(session.get("title") or ""),
         "user_alias": str(session.get("user_alias") or ""),
-        "user_requests": [_clip(text, 600) for text in _session_user_texts(session)],
+        "user_requests": [_clip(text, 4000) for text in _session_user_texts(session)],
         "used_skills": session.get("used_skills") or [],
         "injected_skills": session.get("injected_skills") or [],
         "tool_names": tool_names[:20],
-        "interactions": interactions[:6],
+        "interactions": interactions[:20],
         "metrics": {
             "interaction_turns": metrics.get("interaction_turns"),
             "tool_call_count": metrics.get("tool_call_count"),

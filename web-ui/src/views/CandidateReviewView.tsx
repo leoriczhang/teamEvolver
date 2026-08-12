@@ -111,8 +111,8 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
             issue
               ? `回放存在问题：${issue}`
               : r.recommended_publish
-                ? "回放无回退，建议发布"
-                : "回放完成，建议复核"
+                ? "客观指标改善"
+                : "客观指标持平或增加"
           );
         }
       }
@@ -161,8 +161,8 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
   async function validate(jobId: string, mode: "auto" | "force") {
     const msg =
       mode === "force"
-        ? "确认强制发布该候选技能？此操作会绕过评分门槛。"
-        : "确认按回放结果发布该候选技能？仅在回放无回退时发布。";
+        ? "确认强制发布该候选技能？仍会保留 True Replay 三项指标。"
+        : "确认按 True Replay 发布？轮次下降直接正向；轮次持平时再比较工具调用和 Token。";
     if (!window.confirm(msg)) return;
     try {
       const r = await api<{ status?: string; version?: number }>(
@@ -248,8 +248,8 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
       <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">
         <StatCard label={isHistory ? "历史候选" : "待评审候选"} value={cands.length} />
         <StatCard label={isHistory ? "已发布" : "已完成评估"} value={isHistory ? published : evaluated} />
-        <StatCard label={isHistory ? "已拒绝" : "建议发布"} value={isHistory ? rejected : recommended} />
-        <StatCard label={isHistory ? "带评估证据" : "建议复核"} value={isHistory ? evaluated : risky} />
+        <StatCard label={isHistory ? "已拒绝" : "指标改善"} value={isHistory ? rejected : recommended} />
+        <StatCard label={isHistory ? "带回放证据" : "持平或增加"} value={isHistory ? evaluated : risky} />
       </div>
 
       <Panel title={isHistory ? "已处理/历史候选" : "评审队列"} count={`${cands.length} 个`}>
@@ -264,7 +264,7 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
                   "动作",
                   "状态",
                   "回放状态",
-                  "建议",
+                  "客观结论",
                   "操作",
                 ]}
               >
@@ -313,7 +313,7 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
                       </Td>
                       <Td>
                         {ev ? (
-                          ev.recommended_publish ? <Pill tone="green">建议发布</Pill> : <Pill tone="red">建议复核</Pill>
+                          ev.recommended_publish ? <Pill tone="green">指标改善</Pill> : <Pill tone="amber">持平 / 有增加</Pill>
                         ) : (
                           <span className="text-xs text-muted-foreground">—</span>
                         )}

@@ -106,6 +106,20 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _effective_judge_system() -> str:
+    """Return the judge system prompt, honoring any Prompt Studio override.
+
+    Lazy import avoids a circular import; falls back to the module default so
+    the pipeline is byte-identical when no override is stored.
+    """
+    try:
+        from ..prompt_studio import effective_prompt
+
+        return effective_prompt("judge", _JUDGE_SYSTEM)
+    except Exception:  # noqa: BLE001 - never let studio wiring break the pipeline
+        return _JUDGE_SYSTEM
+
+
 def _extract_json_object(text: str) -> Optional[dict[str, Any]]:
     raw = str(text or "")
     raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
@@ -136,7 +150,7 @@ def _normalize_score(value: Any) -> Optional[float]:
     return round(score, 3)
 
 
-def _clip_text(value: Any, max_chars: int = 1200) -> str:
+def _clip_text(value: Any, max_chars: int = 8000) -> str:
     text = str(value or "").strip()
     if len(text) <= max_chars:
         return text
@@ -227,7 +241,7 @@ def _build_judge_payload(session: dict[str, Any]) -> dict[str, Any]:
 def _extract_output_artifacts(
     session: dict[str, Any],
     *,
-    max_artifacts: int = 4,
+    max_artifacts: int = 12,
 ) -> list[dict[str, str]]:
     artifacts: list[dict[str, str]] = []
     seen_paths: set[str] = set()
@@ -299,7 +313,7 @@ def _extract_output_artifacts(
 def _extract_source_artifacts(
     session: dict[str, Any],
     *,
-    max_artifacts: int = 6,
+    max_artifacts: int = 12,
 ) -> list[dict[str, str]]:
     artifacts: list[dict[str, str]] = []
     seen_paths: set[str] = set()
@@ -411,7 +425,7 @@ async def judge_session(
 
     payload = _build_judge_payload(session)
     messages = [
-        {"role": "system", "content": _JUDGE_SYSTEM},
+        {"role": "system", "content": _effective_judge_system()},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
     try:

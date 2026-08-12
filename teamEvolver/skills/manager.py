@@ -178,7 +178,7 @@ class SkillManager:
     def _location_for(self, skill: dict) -> str:
         return self._public_skill_path(skill) or skill.get("file_path", "")
 
-    def build_injection_prompt(self, max_chars: int = 30_000, read_tool_name: str = "read") -> str:
+    def build_injection_prompt(self, max_chars: int = 120_000, read_tool_name: str = "read") -> str:
         """Catalog all skills and wrap them with the mandatory-skills block.
 
         Uses the full catalog when it fits within *max_chars*, else the compact

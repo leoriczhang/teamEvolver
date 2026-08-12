@@ -12,13 +12,13 @@ import {
   api,
   type EvolveModelSettings,
   type SkillListResp,
-  type SessionFilterAuditResp,
   type StatusResp,
   type StorageStatus,
   type UserProfile,
   type UsersListResp,
 } from "@/api/client";
 import { toastErr } from "@/lib/toast";
+import { RefreshCw } from "lucide-react";
 
 type Check = {
   name: string;
@@ -42,23 +42,23 @@ export default function HealthView({
   const [health, setHealth] = useState<{ status?: string } | null>(null);
   const [queueCount, setQueueCount] = useState<number | null>(null);
   const [candidateCount, setCandidateCount] = useState<number | null>(null);
-  const [filterStats, setFilterStats] = useState<SessionFilterAuditResp["stats"] | null>(null);
   const [loading, setLoading] = useState(false);
   const loaded = useRef(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [h, st, sto, mdl, us, sk, sess, cands, filter] = await Promise.allSettled([
+      const [h, st, sto, mdl, us, sk, sess, cands] = await Promise.allSettled([
         api<{ status?: string }>("/health"),
         api<StatusResp>("/status"),
         api<StorageStatus>("/storage/status"),
         api<EvolveModelSettings>("/api/evolve-model"),
         api<UsersListResp>("/api/users"),
         api<SkillListResp>("/api/skills"),
-        api<{ sessions: any[] }>("/sessions"),
-        api<{ candidates: any[] }>("/api/validation/candidates"),
-        api<SessionFilterAuditResp>("/api/session-filter/audit?limit=1"),
+        api<{ sessions: any[]; total?: number }>("/sessions?limit=1&offset=0"),
+        api<{ candidates: any[]; total?: number }>(
+          "/api/validation/candidates?compact=true&limit=1&offset=0"
+        ),
       ]);
       setHealth(h.status === "fulfilled" ? h.value : null);
       setStatus(st.status === "fulfilled" ? st.value : null);
@@ -66,9 +66,16 @@ export default function HealthView({
       setModel(mdl.status === "fulfilled" ? mdl.value : null);
       setUsers(us.status === "fulfilled" ? us.value.users || [] : []);
       setSkills(sk.status === "fulfilled" ? sk.value : null);
-      setQueueCount(sess.status === "fulfilled" ? (sess.value.sessions || []).length : null);
-      setCandidateCount(cands.status === "fulfilled" ? (cands.value.candidates || []).length : null);
-      setFilterStats(filter.status === "fulfilled" ? filter.value.stats : null);
+      setQueueCount(
+        sess.status === "fulfilled"
+          ? Number(sess.value.total ?? (sess.value.sessions || []).length)
+          : null
+      );
+      setCandidateCount(
+        cands.status === "fulfilled"
+          ? Number(cands.value.total ?? (cands.value.candidates || []).length)
+          : null
+      );
     } catch (e: any) {
       toastErr("健康检查失败", e.message);
     } finally {
@@ -77,6 +84,10 @@ export default function HealthView({
   }, []);
 
   useEffect(() => {
+    if (!active) {
+      loaded.current = false;
+      return;
+    }
     if (active && !loaded.current) {
       loaded.current = true;
       refresh();
@@ -114,13 +125,6 @@ export default function HealthView({
       ok: !!skills,
       detail: skills ? `${skills.skills.length} 个团队技能 · ${skills.sharing_enabled ? "云同步开启" : "云同步关闭"}` : "无法读取技能列表",
     },
-    {
-      name: "过滤审计",
-      ok: !!filterStats,
-      detail: filterStats
-        ? `${filterStats.total} 条判别 · valuable ${filterStats.decisions?.valuable || 0} · chitchat ${filterStats.decisions?.chitchat || 0}`
-        : "无法读取过滤审计",
-    },
   ];
 
   const okCount = checks.filter((c) => c.ok).length;
@@ -130,7 +134,8 @@ export default function HealthView({
     <div className="mx-auto max-w-[1120px] px-7 py-6">
       <div className="mb-5 flex justify-end">
         <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
-          刷新
+          <RefreshCw className={loading ? "size-3.5 animate-spin" : "size-3.5"} />
+          {loading ? "检查中…" : "刷新"}
         </Button>
       </div>
 
@@ -140,7 +145,6 @@ export default function HealthView({
         <StatCard label="排队会话" value={queueCount ?? status?.pending_sessions ?? "—"} />
         <StatCard label="待评审候选" value={candidateCount ?? "—"} />
         <StatCard label="注册技能" value={status?.registered_skills ?? "—"} />
-        <StatCard label="过滤判别" value={filterStats?.total ?? "—"} />
       </div>
 
       <Panel title="健康检查" count={`${checks.length} 项`}>

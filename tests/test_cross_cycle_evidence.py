@@ -10,6 +10,7 @@ from teamEvolver.evolve.kernel.enums import DecisionAction
 from teamEvolver.evolve.kernel.settings import EvolveServerConfig
 from teamEvolver.evolve.runtime.evidence import SkillEvidenceStore
 from teamEvolver.evolve.runtime.orchestrator import EvolveServer
+from teamEvolver.proxy.routes import _is_embedded_evolve_path
 from teamEvolver.storage import LocalObjectStore
 
 
@@ -29,6 +30,14 @@ def _session(session_id: str, score: float = 0.7) -> dict:
             }
         ],
     }
+
+
+def test_validation_candidate_api_routes_to_embedded_evolver() -> None:
+    assert _is_embedded_evolve_path("/validation/candidates") is True
+    assert (
+        _is_embedded_evolve_path("/validation/candidates/job-1")
+        is True
+    )
 
 
 def test_evidence_store_preserves_recent_history_and_change_debt(
@@ -146,16 +155,74 @@ def test_validation_candidate_is_coalesced_and_stale_outputs_are_cleared(
     assert len(active_jobs) == 1
     assert active_jobs[0]["candidate_skill"]["content"] == "updated candidate"
     assert active_jobs[0]["session_ids"] == ["session-1", "session-2"]
-    assert active_jobs[0]["checklist"]["format"] == "common_checklist_v2"
-    assert active_jobs[0]["checklist"]["source_session_ids"] == [
-        "session-1",
-        "session-2",
-    ]
+    assert "checklist" not in active_jobs[0]
     superseded = server._validation_store.load_decision("legacy-duplicate")
     assert superseded["status"] == "superseded"
     assert superseded["superseded_by"] == job_id
     assert server._validation_store.load_evaluation(job_id) is None
     assert server._validation_store.load_result(job_id, "validator") is None
+
+
+def test_validation_job_uses_synthesized_test_dataset_as_replay_contract(
+    tmp_path: Path,
+) -> None:
+    server = EvolveServer(
+        EvolveServerConfig(
+            storage_backend="local",
+            local_root=str(tmp_path),
+            llm_api_key="test-key",
+            publish_mode="validated",
+        )
+    )
+    dataset = {
+        "dataset_id": "synth-case-1",
+        "dataset_format": "teamEvolver-progressive-test-v1",
+        "name": "Progressive test",
+        "query": "完成测试任务。",
+        "requirements": ["输出报告", "标注来源"],
+        "trajectory_requirements": ["读取输入材料"],
+        "checklist": [
+            {"id": "R01", "text": "输出报告", "kind": "output"},
+            {"id": "R02", "text": "标注来源", "kind": "output"},
+            {"id": "T01", "text": "读取输入材料", "kind": "trajectory"},
+        ],
+        "source_session_ids": ["session-1"],
+        "evidence_window": "recent",
+        "progressive_disclosure": {
+            "enabled": True,
+            "initial_visibility": "query_only",
+            "batch_size": 2,
+        },
+    }
+
+    queued = server._queue_validation_job(
+        {
+            "name": "ppt-generation",
+            "description": "Candidate",
+            "content": "Use the shared SOP.",
+        },
+        DecisionAction.IMPROVE,
+        [_session("session-1")],
+        "shared SOP evidence",
+        "skill_group",
+        evidence_key="ppt-generation",
+        test_datasets=[dataset],
+    )
+
+    job = server._validation_store.load_job(queued["validation_job_id"])
+    assert job is not None
+    assert queued["test_dataset_count"] == 1
+    assert job["test_datasets"][0]["dataset_id"] == "synth-case-1"
+    assert job["replay_cases"][0]["instruction"] == "完成测试任务。"
+    assert "输出报告" not in job["replay_cases"][0]["instruction"]
+    assert job["replay_cases"][0]["checklist"][0]["id"] == "R01"
+    assert job["max_interactions"] == 3
+    stored = server._skill_bucket.get_object(
+        "evolution_datasets/"
+        "6a8ce311cca2/"
+        f"{queued['validation_job_id']}.json"
+    ).read()
+    assert b"synth-case-1" in stored
 
 
 @pytest.mark.anyio
@@ -187,6 +254,15 @@ async def test_inconclusive_validation_stays_open_for_revision(
         evidence_key="ppt-generation",
     )
     job_id = queued["validation_job_id"]
+    server._validation_store.save_evaluation(
+        job_id,
+        {
+            "decision": "inconclusive",
+            "score": 0.5,
+            "candidate_revision": 1,
+            "evaluated_at": "2026-08-10T10:00:00+00:00",
+        },
+    )
     server._validation_store.save_result(
         job_id,
         "validator",
@@ -206,6 +282,65 @@ async def test_inconclusive_validation_stays_open_for_revision(
     assert summary["inconclusive"] == 1
     assert summary["escalated_to_human"] == 1
     assert records[0]["action"] == "escalated_to_human_review"
+
+
+def test_candidate_read_api_projects_automatic_validator_result(
+    tmp_path: Path,
+) -> None:
+    server = EvolveServer(
+        EvolveServerConfig(
+            storage_backend="local",
+            local_root=str(tmp_path),
+            llm_api_key="test-key",
+            publish_mode="validated",
+        )
+    )
+    queued = server._queue_validation_job(
+        {
+            "name": "html-ppt-methodology",
+            "description": "Candidate",
+            "content": "Validate after every write.",
+        },
+        DecisionAction.IMPROVE,
+        [_session("session-1")],
+        "post-write validation",
+        "skill_group",
+        evidence_key="html-ppt-methodology",
+    )
+    job_id = queued["validation_job_id"]
+    server._validation_store.save_result(
+        job_id,
+        "validator",
+        {
+            "decision": "inconclusive",
+            "accepted": False,
+            "candidate_revision": 1,
+            "created_at": "2026-08-10T11:00:00+00:00",
+            "replay_summary": {
+                "verdict": "inconclusive",
+                "case_count": 1,
+                "cases": [{"baseline": {}, "candidate": {}}],
+                "efficiency": {
+                    "dimensions": {
+                        "interaction_turns": {
+                            "baseline": 1,
+                            "candidate": 1,
+                            "delta": 0,
+                            "winner": "tie",
+                        }
+                    }
+                },
+            },
+        },
+    )
+
+    rows = server._list_validation_candidates("all")
+
+    row = next(item for item in rows if item["job_id"] == job_id)
+    assert row["review_status"] == "inconclusive"
+    assert row["replay_verdict"] == "inconclusive"
+    assert row["efficiency"]["dimensions"]["interaction_turns"]["delta"] == 0
+    assert row["evaluation"]["replay"]["case_count"] == 1
 
 
 @pytest.mark.anyio
@@ -238,8 +373,6 @@ async def test_repeated_skip_debt_is_visible_to_next_planner_cycle(
             local_root=str(tmp_path),
             llm_api_key="test-key",
             evidence_change_debt_threshold=2,
-            use_skill_verifier=False,
-            use_skill_dedup=False,
         )
     )
 
@@ -265,96 +398,13 @@ async def test_repeated_skip_debt_is_visible_to_next_planner_cycle(
     assert contexts[2]["total_evidence_sessions"] == 3
 
 
-def test_dual_window_gate_requires_recent_improvement_and_history_stability() -> None:
-    checklist = {
-        "commonality": {"passed": True},
-        "items": [
-            {
-                "id": "execution_complete",
-                "kind": "hard",
-                "required": True,
-            },
-            {
-                "id": "new_requirement",
-                "kind": "soft",
-                "required": True,
-                "scope": "source_sessions",
-                "source_session_ids": ["new"],
-            },
-            {
-                "id": "old_requirement",
-                "kind": "soft",
-                "required": True,
-                "scope": "source_sessions",
-                "source_session_ids": ["old"],
-            },
-        ],
-        "merge_context": {
-            "checklist_sources": [
-                {
-                    "skill_name": "candidate_evidence",
-                    "required_item_ids": ["new_requirement"],
-                },
-                {
-                    "skill_name": "existing",
-                    "version": 2,
-                    "inherited": True,
-                    "required_item_ids": ["old_requirement"],
-                },
-            ]
-        },
-    }
-
-    def branch_result(*item_ids: str) -> dict:
-        return {
-            "passed": True,
-            "hard_pass": True,
-            "pass_rate": 1.0,
-            "items": [
-                {
-                    "id": item_id,
-                    "kind": "hard"
-                    if item_id == "execution_complete"
-                    else "soft",
-                    "required": True,
-                    "passed": True,
-                }
-                for item_id in item_ids
-            ],
-        }
-
+def test_dual_window_gate_aggregates_metrics_across_windows() -> None:
     recent = {
         "status": "evaluated",
         "accepted": True,
         "no_regression": True,
-        "quality_ok": True,
         "case_count": 1,
         "cases": [],
-        "checklist_results": {
-            "baseline": {
-                **branch_result("execution_complete", "new_requirement"),
-                "passed": False,
-                "pass_rate": 0.5,
-                "items": [
-                    {
-                        "id": "execution_complete",
-                        "kind": "hard",
-                        "required": True,
-                        "passed": True,
-                    },
-                    {
-                        "id": "new_requirement",
-                        "kind": "soft",
-                        "required": True,
-                        "passed": False,
-                    },
-                ],
-            },
-            "candidate": branch_result(
-                "execution_complete",
-                "new_requirement",
-            ),
-        },
         "efficiency": {
             "baseline": {
                 "interaction_turns": 4,
@@ -372,19 +422,8 @@ def test_dual_window_gate_requires_recent_improvement_and_history_stability() ->
         "status": "evaluated",
         "accepted": False,
         "no_regression": True,
-        "quality_ok": True,
         "case_count": 1,
         "cases": [],
-        "checklist_results": {
-            "baseline": branch_result(
-                "execution_complete",
-                "old_requirement",
-            ),
-            "candidate": branch_result(
-                "execution_complete",
-                "old_requirement",
-            ),
-        },
         "efficiency": {
             "baseline": {
                 "interaction_turns": 2,
@@ -400,51 +439,38 @@ def test_dual_window_gate_requires_recent_improvement_and_history_stability() ->
     }
     accepted = EvolveServer._aggregate_replay_windows(
         [("recent", recent), ("historical", historical)],
-        checklist=checklist,
-        threshold=0.75,
-        tolerance=0.15,
         max_interactions=4,
     )
     assert accepted["accepted"] is True
-    assert accepted["recent_improved"] is True
-    assert accepted["historical_no_regression"] is True
-    assert accepted["decision_policy"]["merge_union_pass"] is True
+    assert accepted["verdict"] == "accept"
+    assert accepted["decision_policy"]["improved_metrics"] == [
+        "interaction_turns",
+        "tool_call_count",
+        "total_tokens",
+    ]
 
     regressed_historical = {
         **historical,
-        "no_regression": False,
-        "checklist_results": {
-            **historical["checklist_results"],
+        "efficiency": {
+            **historical["efficiency"],
             "candidate": {
-                **historical["checklist_results"]["candidate"],
-                "passed": False,
-                "pass_rate": 0.5,
-                "items": [
-                    {
-                        "id": "execution_complete",
-                        "kind": "hard",
-                        "required": True,
-                        "passed": True,
-                    },
-                    {
-                        "id": "old_requirement",
-                        "kind": "soft",
-                        "required": True,
-                        "passed": False,
-                    },
-                ],
+                **historical["efficiency"]["candidate"],
+                "tool_call_count": 7,
             },
         },
     }
-    rejected = EvolveServer._aggregate_replay_windows(
+    still_accepted = EvolveServer._aggregate_replay_windows(
         [("recent", recent), ("historical", regressed_historical)],
-        checklist=checklist,
-        threshold=0.75,
-        tolerance=0.15,
         max_interactions=4,
     )
-    assert rejected["accepted"] is False
-    assert rejected["historical_no_regression"] is False
+    assert still_accepted["accepted"] is True
+    assert still_accepted["verdict"] == "accept"
+    assert still_accepted["decision_policy"]["decision_basis"] == (
+        "interaction_turns_decreased"
+    )
+    assert still_accepted["decision_policy"]["regressed_metrics"] == [
+        "tool_call_count",
+    ]
 
 
 def test_team_config_maps_cross_cycle_evidence_settings(monkeypatch, tmp_path) -> None:

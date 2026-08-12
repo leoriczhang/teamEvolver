@@ -26,12 +26,12 @@ _SUMMARIZER_DEBUG_DIR = ""
 #  Programmatic trajectory builder (zero information loss)             #
 # ------------------------------------------------------------------ #
 
-_PROMPT_MAX = 400
-_RESPONSE_MAX = 400
-_TOOL_ARG_MAX = 400
-_TOOL_RESULT_MAX = 400
-_TOOL_ERR_MAX = 300
-_MAX_TOOLS_PER_STEP = 8
+_PROMPT_MAX = 4000
+_RESPONSE_MAX = 4000
+_TOOL_ARG_MAX = 4000
+_TOOL_RESULT_MAX = 4000
+_TOOL_ERR_MAX = 2000
+_MAX_TOOLS_PER_STEP = 20
 
 
 def _clip(text: Any, limit: int) -> str:
@@ -260,8 +260,22 @@ misleading.
 Output ONLY the plain-text summary — no JSON, no markdown fences.
 """
 
-_SUMMARY_PROMPT_MAX_CHARS = 2000
-_SUMMARY_RESPONSE_MAX_CHARS = 2000
+_SUMMARY_PROMPT_MAX_CHARS = 8000
+_SUMMARY_RESPONSE_MAX_CHARS = 8000
+
+
+def _effective_summarize_system() -> str:
+    """Return the summarize system prompt, honoring any Prompt Studio override.
+
+    Falls back to the module default so behavior is unchanged when no override
+    is stored. Import is lazy to avoid a circular import at module load.
+    """
+    try:
+        from ..prompt_studio import effective_prompt
+
+        return effective_prompt("summarize", _SUMMARIZE_SESSION_SYSTEM)
+    except Exception:  # noqa: BLE001 - never let studio wiring break the pipeline
+        return _SUMMARIZE_SESSION_SYSTEM
 
 
 def _build_session_payload(session: dict) -> dict[str, Any]:
@@ -403,7 +417,7 @@ async def summarize_session(llm: AsyncLLMClient, session: dict) -> str:
     """Summarize an entire session via LLM (trajectory-aware)."""
     payload = _build_session_payload(session)
     messages = [
-        {"role": "system", "content": _SUMMARIZE_SESSION_SYSTEM},
+        {"role": "system", "content": _effective_summarize_system()},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
     try:

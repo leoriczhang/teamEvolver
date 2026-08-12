@@ -72,8 +72,6 @@ class Launcher:
         os.environ["EVOLVE_VALIDATION_REQUIRED_APPROVALS"] = str(
             max(1, int(getattr(cfg, "validation_required_approvals", 2) or 2))
         )
-        os.environ.setdefault("EVOLVE_VALIDATION_MIN_MEAN_SCORE", "0.0")
-
         skill_manager: Optional[SkillManager] = None
         if cfg.use_skills:
             Path(cfg.skills_dir).mkdir(parents=True, exist_ok=True)

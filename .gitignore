@@ -21,3 +21,4 @@ dist/
 evolve_history.jsonl
 records/
 external/LIFT/
+.trae/

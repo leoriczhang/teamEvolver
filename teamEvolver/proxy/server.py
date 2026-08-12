@@ -21,6 +21,7 @@ from ..config import TeamEvolverConfig
 from ..integrations.dreamcycle import DreamCycleSupervisor
 from ..skills.manager import SkillManager
 from .routes import RoutesMixin
+from .skill_lab import SkillLabMixin
 from .skillminer_bridge import SkillMinerBridgeMixin
 from .skills_admin import SkillsAdminMixin
 from .uploads import UploadsMixin
@@ -35,6 +36,7 @@ _RESET = "\033[0m"
 class ProxyServer(
     RoutesMixin,
     SkillMinerBridgeMixin,
+    SkillLabMixin,
     SkillsAdminMixin,
     UploadsMixin,
     UsersAdminMixin,
@@ -202,10 +204,9 @@ class ProxyServer(
             evolve_config = self._build_embedded_evolve_config(self.config)
             self._embedded_evolve_server = EvolveServer(evolve_config)
             logger.info(
-                "[EvolveServer] embedded in teamEvolver on port %s interval=%ss skill_verifier=%s",
+                "[EvolveServer] embedded in teamEvolver on port %s interval=%ss",
                 evolve_config.http_port,
                 evolve_config.interval_seconds,
-                evolve_config.use_skill_verifier,
             )
         except Exception:
             self._embedded_evolve_init_failed = True

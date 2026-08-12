@@ -16,6 +16,7 @@ import { api, type SkillSpaceConfig, type UserProfile, type UsersListResp } from
 import { toastErr, toastOk } from "@/lib/toast";
 import { fmtTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { RefreshCw } from "lucide-react";
 
 type UserRole = "user" | "admin";
 type FormUser = UserProfile & {
@@ -64,7 +65,7 @@ export default function UsersView({ active }: { active: boolean }) {
     return n + (u.personal_space?.api_key_present ? 1 : 0) + (u.team_space?.api_key_present ? 1 : 0);
   }, 0);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (notify = false) => {
     setLoading(true);
     try {
       const data = await api<UsersListResp>("/api/users");
@@ -73,6 +74,7 @@ export default function UsersView({ active }: { active: boolean }) {
         setSelectedId("");
         setForm(emptyUser());
       }
+      if (notify) toastOk("用户列表已刷新", `${data.users.length} 个用户`);
     } catch (e: any) {
       toastErr("加载用户失败", e.message);
     } finally {
@@ -81,9 +83,13 @@ export default function UsersView({ active }: { active: boolean }) {
   }, [selectedId]);
 
   useEffect(() => {
+    if (!active) {
+      loaded.current = false;
+      return;
+    }
     if (active && !loaded.current) {
       loaded.current = true;
-      refresh();
+      refresh(false);
     }
   }, [active, refresh]);
 
@@ -116,7 +122,7 @@ export default function UsersView({ active }: { active: boolean }) {
       toastOk("已保存用户", saved.id);
       setSelectedId(saved.id);
       setForm(toForm(saved));
-      await refresh();
+      await refresh(false);
     } catch (e: any) {
       toastErr("保存失败", e.message);
     } finally {
@@ -131,7 +137,7 @@ export default function UsersView({ active }: { active: boolean }) {
       await api(`/api/users/${encodeURIComponent(selectedId)}`, { method: "DELETE" });
       toastOk("已删除用户", selectedId);
       newUser();
-      await refresh();
+      await refresh(false);
     } catch (e: any) {
       toastErr("删除失败", e.message);
     }
@@ -140,7 +146,15 @@ export default function UsersView({ active }: { active: boolean }) {
   return (
     <div className="mx-auto max-w-[1200px] px-7 py-6">
       <div className="mb-5 flex items-center justify-end gap-2">
-        <Button variant="outline" size="sm" onClick={refresh}>刷新</Button>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={loading}
+          onClick={() => refresh(true)}
+        >
+          <RefreshCw className={loading ? "size-3.5 animate-spin" : "size-3.5"} />
+          {loading ? "刷新中…" : "刷新"}
+        </Button>
         <Button size="sm" onClick={newUser}>+ 注册用户</Button>
       </div>
 
@@ -172,7 +186,20 @@ export default function UsersView({ active }: { active: boolean }) {
                   </thead>
                   <tbody>
                     {userPager.items.map((u) => (
-                      <tr key={u.id} className={cn("clickable", selectedId === u.id && "bg-muted/70")} onClick={() => selectUser(u)}>
+                      <tr
+                        key={u.id}
+                        role="button"
+                        tabIndex={0}
+                        aria-label={`编辑用户 ${u.id}`}
+                        className={cn("clickable", selectedId === u.id && "bg-muted/70")}
+                        onClick={() => selectUser(u)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            selectUser(u);
+                          }
+                        }}
+                      >
                         <td className="border-b border-line px-4 py-2.5 align-top">
                           <div className="mono text-xs font-semibold">{u.id}</div>
                           <div className="mt-1 text-xs text-muted-foreground">{u.display_name || "—"}</div>

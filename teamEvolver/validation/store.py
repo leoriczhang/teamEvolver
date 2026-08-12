@@ -207,7 +207,18 @@ class ValidationStore:
     def list_results(self, job_id: str) -> list[dict[str, Any]]:
         prefix = f"{self._prefix()}validation_results/{job_id}/"
         results: list[dict[str, Any]] = []
-        for obj in self._bucket.iter_objects(prefix=prefix):
+        try:
+            objects = list(self._bucket.iter_objects(prefix=prefix))
+        except Exception as exc:
+            if is_not_found_error(exc):
+                return []
+            logger.warning(
+                "[ValidationStore] failed to list results for %s: %s",
+                job_id,
+                exc,
+            )
+            return []
+        for obj in objects:
             if not obj.key.endswith(".json"):
                 continue
             try:
@@ -331,7 +342,11 @@ class ValidationStore:
                 logger.warning("[ValidationStore] failed to load decision %s: %s", job_id, exc)
             return None
 
-    def list_decision_records(self) -> list[dict[str, Any]]:
+    def list_decision_records(
+        self,
+        *,
+        reconcile: bool = True,
+    ) -> list[dict[str, Any]]:
         try:
             raw = json.loads(
                 self._bucket.get_object(self._decision_index_key())
@@ -343,7 +358,11 @@ class ValidationStore:
                 logger.warning("[ValidationStore] failed to load decision index: %s", exc)
             return []
         records = [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
-        return self._reconcile_decision_records(records)
+        return (
+            self._reconcile_decision_records(records)
+            if reconcile
+            else records
+        )
 
     def _reconcile_decision_records(
         self, records: list[dict[str, Any]]
@@ -395,12 +414,12 @@ class ValidationStore:
             return None
 
     def save_evaluation(self, job_id: str, evaluation: dict[str, Any]) -> None:
-        """Persist a non-binding dry-run evaluation (verify + A/B replay scores).
+        """Persist a non-binding True Replay metric evaluation.
 
         Unlike a decision, an evaluation does NOT close the job: it is the
-        score preview a reviewer inspects before deciding whether to publish.
-        Cached so the dashboard can show scores without re-running the LLM
-        replay on every poll.
+        metric comparison a reviewer inspects before deciding whether to
+        publish. Cached so the dashboard does not re-run the replay on every
+        poll.
         """
         payload = dict(evaluation)
         payload["job_id"] = job_id
@@ -452,6 +471,80 @@ class ValidationStore:
             )
             return None
         return cached
+
+    @staticmethod
+    def _replay_has_completed_metrics(source: dict[str, Any]) -> bool:
+        """True when a result/evaluation carries a genuinely completed replay.
+
+        A skipped or failed True Replay leaves every efficiency dimension at
+        zero; a completed one has at least one non-zero baseline or candidate
+        metric. Used to prefer a real prior comparison over a newer "skipped"
+        auto-evaluation.
+        """
+        if not isinstance(source, dict):
+            return False
+        summary = (
+            source.get("replay")
+            if isinstance(source.get("replay"), dict)
+            else source.get("replay_summary")
+            if isinstance(source.get("replay_summary"), dict)
+            else {}
+        )
+        efficiency = (
+            summary.get("efficiency")
+            if isinstance(summary.get("efficiency"), dict)
+            else {}
+        )
+        dimensions = efficiency.get("dimensions")
+        if not isinstance(dimensions, dict) or not dimensions:
+            return False
+        return any(
+            isinstance(metric, dict)
+            and (
+                int(metric.get("baseline") or 0) != 0
+                or int(metric.get("candidate") or 0) != 0
+            )
+            for metric in dimensions.values()
+        )
+
+    def load_best_evaluation(
+        self, job_id: str, job: Optional[dict[str, Any]] = None
+    ) -> Optional[dict[str, Any]]:
+        """Best evaluation for the job's current revision.
+
+        Prefers the most recent source (cached evaluation or per-user result)
+        that actually completed a True Replay, so a transient replay failure
+        recorded as a newer "skipped" evaluation never blanks out a real prior
+        metric comparison. Falls back to the newest source otherwise.
+        """
+        if job is None:
+            job = self.load_job(job_id)
+        revision = max(1, int((job or {}).get("candidate_revision") or 1))
+
+        def _time(source: dict[str, Any]) -> str:
+            return str(
+                source.get("created_at") or source.get("evaluated_at") or ""
+            )
+
+        sources: list[dict[str, Any]] = []
+        cached = self.load_evaluation(job_id)
+        if isinstance(cached, dict) and cached:
+            if max(1, int(cached.get("candidate_revision") or 1)) == revision:
+                sources.append(cached)
+        for result in self.list_results(job_id):
+            if not isinstance(result, dict) or not result:
+                continue
+            if max(1, int(result.get("candidate_revision") or 1)) == revision:
+                sources.append(result)
+        if not sources:
+            return None
+        completed = [
+            source
+            for source in sources
+            if self._replay_has_completed_metrics(source)
+        ]
+        pool = completed or sources
+        return max(pool, key=_time)
 
     def list_open_jobs(self, *, user_alias: str = "") -> list[dict[str, Any]]:
         jobs: list[dict[str, Any]] = []

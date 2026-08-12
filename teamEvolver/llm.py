@@ -73,7 +73,7 @@ class AsyncLLMClient:
         # returns finish_reason=length with empty content; doubling the budget
         # and retrying lets the model finish reasoning and emit the JSON verdict.
         budget_bumps_left = 3
-        budget_ceiling = 65536
+        budget_ceiling = 131072
 
         max_retries = 6
         for attempt in range(max_retries):

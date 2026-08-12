@@ -258,7 +258,7 @@ def test_version_detail_includes_evolution_and_replay_context(tmp_path: Path) ->
                 "category": "general",
                 "content": "# After",
                 "edit_summary": {
-                    "changed_sections": ["Stable verifier"],
+                        "changed_sections": ["Stable replay metrics"],
                     "notes": "Fix post-write validation.",
                 },
             },
@@ -279,14 +279,23 @@ def test_version_detail_includes_evolution_and_replay_context(tmp_path: Path) ->
         job_id,
         {
             "accepted": True,
-            "score": 0.96,
+            "decision": "accept",
             "replay_summary": {
-                "score": 0.96,
-                "baseline_mean": 0.90,
+                "verdict": "accept",
+                "efficiency": {
+                    "dimensions": {
+                        "tool_call_count": {
+                            "baseline": 8,
+                            "candidate": 6,
+                            "delta": 2,
+                            "winner": "candidate",
+                        }
+                    }
+                },
                 "cases": [
                     {
-                        "baseline": {"score": 0.90, "final_response": "before"},
-                        "candidate": {"score": 0.96, "final_response": "after"},
+                        "baseline": {"tool_call_count": 8, "final_response": "before"},
+                        "candidate": {"tool_call_count": 6, "final_response": "after"},
                     }
                 ],
             },
@@ -298,7 +307,6 @@ def test_version_detail_includes_evolution_and_replay_context(tmp_path: Path) ->
             "status": "published",
             "skill_name": "audit-skill",
             "version": 2,
-            "mean_score": 0.96,
         },
     )
 
@@ -307,8 +315,13 @@ def test_version_detail_includes_evolution_and_replay_context(tmp_path: Path) ->
     assert response.status_code == 200
     evolution = response.json()["evolution"]
     assert evolution["job_id"] == job_id
-    assert "Stable verifier" in evolution["optimization_items"]
-    assert evolution["evaluation"]["replay"]["cases"][0]["candidate"]["score"] == 0.96
+    assert "Stable replay metrics" in evolution["optimization_items"]
+    assert (
+        evolution["evaluation"]["replay"]["efficiency"]["dimensions"][
+            "tool_call_count"
+        ]["delta"]
+        == 2
+    )
     assert "# Before" in evolution["skill_diff"]
     assert "# After" in evolution["skill_diff"]
 
@@ -398,6 +411,20 @@ def test_public_registration_creates_regular_user_and_logs_in(tmp_path: Path) ->
         json={"username": "alice", "password": "pw2"},
     )
     assert duplicate.status_code == 409
+
+
+def test_logout_invalidates_console_session(tmp_path: Path) -> None:
+    server = _make_server(tmp_path)
+    client = _authed_client(server)
+
+    before = client.get("/api/auth/status")
+    logged_out = client.post("/api/auth/logout")
+    after = client.get("/api/auth/status")
+
+    assert before.json()["authenticated"] is True
+    assert logged_out.status_code == 200
+    assert logged_out.json()["authenticated"] is False
+    assert after.json()["authenticated"] is False
 
 
 def test_user_routes_register_hide_keys_and_share_local_spaces(tmp_path: Path) -> None:

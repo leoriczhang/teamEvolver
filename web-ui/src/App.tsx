@@ -3,7 +3,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { Activity, ClipboardCheck, Filter, History, LayoutDashboard, BookOpenText, Users, SlidersHorizontal, LogOut, RefreshCw, Sparkles, Clock, Repeat2, ShieldCheck, TrendingUp, Zap, Database, Workflow, ListChecks, ChevronsUpDown } from "lucide-react";
+import { Activity, Beaker, ClipboardCheck, Filter, History, LayoutDashboard, BookOpenText, Users, SlidersHorizontal, LogOut, RefreshCw, Sparkles, Clock, Repeat2, ShieldCheck, TrendingUp, Zap, Database, Workflow, ListChecks, ChevronsUpDown, DownloadCloud, TerminalSquare } from "lucide-react";
 import { api, type AuthStatus, type UserProfile } from "@/api/client";
 import { PageHeader } from "@/components/common";
 import { toastErr, toastOk } from "@/lib/toast";
@@ -15,6 +15,9 @@ import CandidateReviewView from "@/views/CandidateReviewView";
 import HealthView from "@/views/HealthView";
 import AuditView from "@/views/AuditView";
 import SessionFilterView from "@/views/SessionFilterView";
+import LangfuseView from "@/views/LangfuseView";
+import PromptStudioView from "@/views/PromptStudioView";
+import SkillLabView from "@/views/SkillLabView";
 import MiningView, { type MinePage } from "@/views/MiningView";
 
 type ViewKey =
@@ -24,6 +27,9 @@ type ViewKey =
   | "mine-jobs"
   | "mine-model"
   | "dashboard"
+  | "langfuse"
+  | "skill-lab"
+  | "prompt-studio"
   | "health"
   | "skills"
   | "users"
@@ -60,6 +66,9 @@ const NAV_GROUPS: {
     group: "进化 · teamEvolver",
     items: [
       { key: "dashboard", label: "进化看板", icon: LayoutDashboard },
+      { key: "langfuse", label: "Langfuse 接入", icon: DownloadCloud },
+      { key: "skill-lab", label: "Skills 实验台", icon: Beaker },
+      { key: "prompt-studio", label: "Prompt 工作台", icon: TerminalSquare },
       { key: "health", label: "系统健康", icon: Activity },
       { key: "skills", label: "技能管理", icon: BookOpenText },
       { key: "users", label: "用户管理", icon: Users },
@@ -76,7 +85,19 @@ const DASH_TABS: { key: DashTab; label: string; icon: typeof LayoutDashboard }[]
   { key: "filter", label: "过滤审计", icon: Filter },
 ];
 
-const EVOLVE_PAGE_META: Record<"health" | "skills" | "users" | "model", { title: string; description: string }> = {
+const EVOLVE_PAGE_META: Record<"langfuse" | "skill-lab" | "prompt-studio" | "health" | "skills" | "users" | "model", { title: string; description: string }> = {
+  langfuse: {
+    title: "Langfuse 接入",
+    description: "从 Langfuse 拉取 Agent 会话作为进化证据，支持按环境、用户、标签、版本、元数据等 session 属性筛选。",
+  },
+  "skill-lab": {
+    title: "Skills 实验台",
+    description: "编辑 Skill 草稿，维护由历史 Session 挖掘或手工编写的实验数据集，并通过 True Replay 查看完整 A/B Trace 与轮次、Tool、Token 变化。",
+  },
+  "prompt-studio": {
+    title: "Prompt 工作台",
+    description: "把技能进化流程从黑盒变透明：可视化链路、查看并编辑每个 LLM 阶段的 prompt、用真实会话测试并看到输入输出。",
+  },
   health: {
     title: "系统健康",
     description: "聚合服务、存储、模型、用户和技能状态，用于快速定位运行问题。",
@@ -121,15 +142,18 @@ export default function App() {
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [refreshingLogin, setRefreshingLogin] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
 
   const refreshAuth = useCallback(async () => {
     setCheckingAuth(true);
     try {
       const status = await api<AuthStatus>("/api/auth/status");
       setAuth(status);
+      return status;
     } catch (e: any) {
-      setAuth({ authenticated: false, needs_setup: false });
       toastErr("登录状态检查失败", e.message);
+      return null;
     } finally {
       setCheckingAuth(false);
     }
@@ -139,14 +163,31 @@ export default function App() {
     refreshAuth();
   }, [refreshAuth]);
 
+  async function refreshLoginInfo() {
+    setUserMenuOpen(false);
+    setRefreshingLogin(true);
+    const status = await refreshAuth();
+    setRefreshingLogin(false);
+    if (status?.authenticated) {
+      toastOk(
+        "登录信息已刷新",
+        status.user?.display_name || status.user?.id || ""
+      );
+    }
+  }
+
   async function logout() {
+    setUserMenuOpen(false);
+    setLoggingOut(true);
+    toastOk("正在退出登录…");
     try {
       await api("/api/auth/logout", { method: "POST" });
       setAuth({ authenticated: false, needs_setup: false });
-      setUserMenuOpen(false);
       toastOk("已退出登录");
     } catch (e: any) {
       toastErr("退出失败", e.message);
+    } finally {
+      setLoggingOut(false);
     }
   }
 
@@ -214,7 +255,9 @@ export default function App() {
           user={auth.user}
           open={userMenuOpen}
           onToggle={() => setUserMenuOpen((v) => !v)}
-          onRefresh={refreshAuth}
+          refreshing={refreshingLogin}
+          loggingOut={loggingOut}
+          onRefresh={refreshLoginInfo}
           onLogout={logout}
         />
       </aside>
@@ -284,6 +327,18 @@ export default function App() {
           <div className={cn(dashTab !== "filter" && "hidden")}>
             <SessionFilterView active={view === "dashboard" && dashTab === "filter"} />
           </div>
+        </div>
+        <div className={cn(view !== "langfuse" && "hidden")}>
+          <PageHeader title={EVOLVE_PAGE_META.langfuse.title} description={EVOLVE_PAGE_META.langfuse.description} badge="teamEvolver" />
+          <LangfuseView active={view === "langfuse"} user={auth.user} />
+        </div>
+        <div className={cn(view !== "prompt-studio" && "hidden")}>
+          <PageHeader title={EVOLVE_PAGE_META["prompt-studio"].title} description={EVOLVE_PAGE_META["prompt-studio"].description} badge="teamEvolver" />
+          <PromptStudioView active={view === "prompt-studio"} user={auth.user} />
+        </div>
+        <div className={cn(view !== "skill-lab" && "hidden")}>
+          <PageHeader title={EVOLVE_PAGE_META["skill-lab"].title} description={EVOLVE_PAGE_META["skill-lab"].description} badge="teamEvolver" />
+          <SkillLabView active={view === "skill-lab"} user={auth.user} />
         </div>
         <div className={cn(view !== "health" && "hidden")}>
           <PageHeader title={EVOLVE_PAGE_META.health.title} description={EVOLVE_PAGE_META.health.description} badge="teamEvolver" />
@@ -593,12 +648,16 @@ function LoginHero() {
 function UserMenu({
   user,
   open,
+  refreshing,
+  loggingOut,
   onToggle,
   onRefresh,
   onLogout,
 }: {
   user?: UserProfile | null;
   open: boolean;
+  refreshing: boolean;
+  loggingOut: boolean;
   onToggle: () => void;
   onRefresh: () => void;
   onLogout: () => void;
@@ -634,13 +693,25 @@ function UserMenu({
             <div className="text-sm font-bold">{name}</div>
             <div className="mt-1 text-xs text-muted-foreground">{user?.email || user?.id || ""}</div>
           </div>
-          <button type="button" role="menuitem" onClick={onRefresh} className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm hover:bg-muted">
-            <RefreshCw className="size-4" />
-            刷新登录信息
+          <button
+            type="button"
+            role="menuitem"
+            disabled={refreshing || loggingOut}
+            onClick={onRefresh}
+            className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm hover:bg-muted disabled:opacity-50"
+          >
+            <RefreshCw className={refreshing ? "size-4 animate-spin" : "size-4"} />
+            {refreshing ? "刷新中…" : "刷新登录信息"}
           </button>
-          <button type="button" role="menuitem" onClick={onLogout} className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm text-destructive hover:bg-muted">
+          <button
+            type="button"
+            role="menuitem"
+            disabled={refreshing || loggingOut}
+            onClick={onLogout}
+            className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm text-destructive hover:bg-muted disabled:opacity-50"
+          >
             <LogOut className="size-4" />
-            退出登录
+            {loggingOut ? "退出中…" : "退出登录"}
           </button>
         </div>
       )}

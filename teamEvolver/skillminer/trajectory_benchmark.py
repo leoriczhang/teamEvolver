@@ -28,8 +28,8 @@ ORIGIN = "trajectory-mining"
 DEFAULT_TARGET_TOTAL = 18
 MAX_TARGET_TOTAL = 100
 MAX_TRAJECTORIES = 100
-MAX_EVIDENCE_TURNS = 300
-MAX_PROMPT_EVIDENCE_CHARS = 120_000
+MAX_EVIDENCE_TURNS = 500
+MAX_PROMPT_EVIDENCE_CHARS = 240_000
 HERMES_TIMEOUT_SECONDS = 1500
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -89,9 +89,9 @@ def make_run_id(dataset_name: str) -> str:
 
 def _list_text(value: Any, *, limit: int = 20) -> list[str]:
     if isinstance(value, list):
-        return [redact_sensitive_text(item, 1200) for item in value[:limit] if str(item or "").strip()]
+        return [redact_sensitive_text(item, 4000) for item in value[:limit] if str(item or "").strip()]
     if isinstance(value, str) and value.strip():
-        return [redact_sensitive_text(value, 1200)]
+        return [redact_sensitive_text(value, 4000)]
     return []
 
 
@@ -111,7 +111,7 @@ def _tool_trace(turn: dict[str, Any]) -> list[dict[str, Any]]:
         trace.append({
             "kind": "call",
             "name": _tool_name(call),
-            "arguments": redact_sensitive_text(function.get("arguments") or call.get("arguments"), 1200),
+            "arguments": redact_sensitive_text(function.get("arguments") or call.get("arguments"), 4000),
         })
     for result in turn.get("tool_results") or []:
         if not isinstance(result, dict):
@@ -119,10 +119,10 @@ def _tool_trace(turn: dict[str, Any]) -> list[dict[str, Any]]:
         trace.append({
             "kind": "result",
             "name": str(result.get("tool_name") or result.get("name") or ""),
-            "content": redact_sensitive_text(result.get("content") or result.get("output"), 1600),
+            "content": redact_sensitive_text(result.get("content") or result.get("output"), 6000),
             "has_error": bool(result.get("has_error")),
         })
-    return trace[:30]
+    return trace[:60]
 
 
 def _turn_from_mapping(turn: dict[str, Any], turn_num: int) -> dict[str, Any] | None:
@@ -155,8 +155,8 @@ def _turn_from_mapping(turn: dict[str, Any], turn_num: int) -> dict[str, Any] | 
         normalized_turn_num = turn_num
     return {
         "turn_num": normalized_turn_num,
-        "instruction": redact_sensitive_text(instruction, 4000),
-        "reference_response": redact_sensitive_text(response, 6000),
+        "instruction": redact_sensitive_text(instruction, 12000),
+        "reference_response": redact_sensitive_text(response, 16000),
         "tool_trace": trace,
         "outcome": {
             "success": turn.get("success"),
@@ -440,7 +440,7 @@ def normalize_generated_questions(
     normalized: list[dict[str, Any]] = []
     seen_inputs: set[str] = set()
     for question in questions:
-        input_text = redact_sensitive_text(question.get("input"), 6000)
+        input_text = redact_sensitive_text(question.get("input"), 12000)
         input_key = re.sub(r"\s+", " ", input_text).strip().lower()
         if not input_key or input_key in seen_inputs:
             continue
@@ -448,7 +448,7 @@ def normalize_generated_questions(
         gold = question.get("gold") if isinstance(question.get("gold"), dict) else {}
         expected = gold.get("expected_label") if isinstance(gold.get("expected_label"), dict) else {}
         expected = {
-            redact_sensitive_text(key, 120): redact_sensitive_text(value, 500)
+            redact_sensitive_text(key, 240): redact_sensitive_text(value, 2000)
             for key, value in expected.items()
             if str(key or "").strip() and str(value or "").strip()
         }
