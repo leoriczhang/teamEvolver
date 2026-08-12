@@ -25,6 +25,7 @@
 - [手动安装](#手动安装)
 - [控制台概览](#控制台概览)
 - [OpenViking / 对象存储](#openviking--对象存储)
+- [Langfuse 会话接入](#langfuse-会话接入)
 - [SkillMiner 与 LIFT](#skillminer-与-lift)
 - [DreamCycle 与验证队列](#dreamcycle-与验证队列)
 - [True Replay：用真实轨迹验证技能](#true-replay用真实轨迹验证技能)
@@ -300,6 +301,74 @@ OpenViking 空间分工：
 
 ---
 
+## Langfuse 会话接入
+
+除 Hermes / AgentsHub 主动推送外，teamEvolver 还能直接从 [Langfuse](https://langfuse.com)
+拉取 Agent 会话作为进化证据。集成基于 Langfuse **v3.117.2** 的公开 REST API（`/api/public/*`，
+HTTP Basic 认证：public key 作用户名、secret key 作密码），使用内置 `httpx` 直连，不绑定特定
+`langfuse` SDK 版本。
+
+一个 Langfuse **session** 会映射为一个 teamEvolver session，其下每条 **trace** 折叠为一个交互
+轮次（turn），`GENERATION` 观测提供 token 用量、`tool_calls` 与工具结果映射为工具调用记录。拉取
+到的会话与 `/ingest_session` 走**同一条**去重、价值分类、入队与进化触发链路。
+
+### 配置
+
+```bash
+teamEvolver config langfuse.enabled true
+teamEvolver config langfuse.host "https://cloud.langfuse.com"   # 自部署填自己的地址
+teamEvolver config langfuse.public_key "pk-lf-..."
+teamEvolver config langfuse.secret_key "sk-lf-..."
+teamEvolver config langfuse.max_sessions 100                    # 单次拉取上限
+# 可选：默认会话属性过滤（拉取时未显式指定则生效）
+teamEvolver config langfuse.default_environment "production,staging"
+teamEvolver config langfuse.default_tags "agent,eval"
+teamEvolver config langfuse.default_user_id ""
+```
+
+凭据切勿写入仓库，建议通过本机配置或 Secret 注入。
+
+### 会话属性筛选
+
+`/sessions` 列表端点仅支持按时间与 `environment` 过滤，而 Agent 会话通常在 **trace** 层带有更丰富的
+属性。因此只要指定了任一 trace 级过滤条件（`user_id` / `tags` / `release` / `version` / `name` /
+`metadata`），客户端会改走支持这些属性的 `/traces` 端点来解析匹配的 session id；否则回退到轻量的
+`/sessions` 列表。`metadata` 过滤会转换为 Langfuse v3 的高级 `filter` JSON（`stringObject` 等）。
+
+### CLI
+
+```bash
+# 连通性与当前默认过滤器
+teamEvolver langfuse status
+
+# 仅列出匹配会话（不入库），可组合任意过滤条件
+teamEvolver langfuse list \
+  --environment production --tag agent --user-id u-123 \
+  --from 2026-08-01T00:00:00Z --metadata customer_tier=enterprise
+
+# 拉取并进入进化流水线（默认 POST 到运行中的服务，复用触发链路）
+teamEvolver langfuse pull --environment production --tag agent --max-sessions 20
+
+# 无服务时本地直接入库
+teamEvolver langfuse pull --session-id <sid> --in-process
+```
+
+支持的过滤标志：`--environment/-e`（可重复）、`--user-id/-u`、`--tag`（可重复，全部匹配）、
+`--release`、`--version`、`--name`、`--session-id`、`--from`、`--to`、`--metadata/-m key=value`
+（可重复）、`--max-sessions`。
+
+### REST 端点
+
+- `GET /langfuse/status` — 连通性探测与默认过滤器快照。
+- `POST /langfuse/sessions` — 按过滤条件列出匹配会话（不入库），返回轻量属性（用户、标签、环境、trace 数）。
+- `POST /langfuse/pull` — 拉取、转换并入库；受 `EVOLVE_INGEST_API_KEY` 保护（若已设置）。
+
+请求体字段与 CLI 一致：`environment`、`user_id`、`tags`、`release`、`version`、`trace_name`、
+`session_id`、`from_timestamp`、`to_timestamp`、`metadata`、`max_sessions`、`user_alias`、
+`force_reprocess`、`defer_evolution_trigger`。
+
+---
+
 ## SkillMiner 与 LIFT
 
 统一控制台内置 SkillMiner 文档挖掘流程，可从领域文档生成样本包、语义报告、候选
@@ -341,10 +410,10 @@ teamEvolver config dreamcycle.llm_model "<model-id>"
 ```
 
 1. `teamEvolver-feed` 上传真实 session，入口先做 valuable / chitchat 判别。
-2. 进化流程从近期证据、历史证据和 replay case 中构造候选技能。
+2. 进化流程从近期 Session、历史 Session 和跨周期团队 SOP evidence 中同步构造候选 Skill 与 test datasets。
 3. DreamCycle 读取个人 Key 来源，写入团队 Key 空间，避免把个人偏好直接发布成团队 SOP。
 4. 候选技能进入 `validation_jobs/`，各客户端在空闲时写入 `validation_results/`。
-5. 控制台聚合 Verify 分、Replay 分、拒绝原因和人工决策，再发布、拒绝或删除候选。
+5. True Replay 在合成的 test datasets 上渐进执行 Checklist，并沉淀轮次、Tool 调用和 Token；控制台据此发布、拒绝或人工处理候选。
 
 常用操作：
 
@@ -367,7 +436,9 @@ teamEvolver config validation.max_concurrency 1
 
 ## True Replay：用真实轨迹验证技能
 
-普通文本 A/B 只能判断回答像不像；True Replay 会在隔离环境中启动真实 Agent，对 baseline 和 candidate 两个分支分别执行任务。任务未完成时，裁判反馈会作为下一轮用户消息在同一 session 中继续交互。最终优先比较：
+普通文本 A/B 只能判断回答像不像；True Replay 会在隔离环境中启动真实 Agent，对 baseline 和 candidate 两个分支分别执行任务。候选 Skill 生成时，Dataset Synthesizer 使用同一批 Session 与团队 SOP evidence 同步生成带 12–24 条扁平 Checklist 的 test datasets。
+
+每条 case 的第 1 轮只向 Agent 披露初始 Query。独立 Checklist judge 根据真实回复、Tool events 与产物检查未满足项；后续每轮只披露下一批未满足要求，直到全部满足或达到轮次上限。Checklist 是完成条件，不计算综合分数。两边完成情况相同时，最终按以下客观效率指标判定：
 
 1. 达成任务所需的交互轮次，越少越好。
 2. 工具调用次数，越少通常说明执行路径越直接。
@@ -375,13 +446,18 @@ teamEvolver config validation.max_concurrency 1
 
 ```mermaid
 flowchart LR
-    Job["Candidate Job"] --> Base["Baseline Sandbox"]
+    Evidence["Sessions + SOP Evidence"] --> Skill["Candidate Skill"]
+    Evidence --> Dataset["Test Dataset + Checklist"]
+    Skill --> Job["Candidate Job"]
+    Dataset --> Job
+    Job --> Base["Baseline Sandbox"]
     Job --> Cand["Candidate Sandbox"]
-    Base --> TraceA["Tool Trace A"]
-    Cand --> TraceB["Tool Trace B"]
-    TraceA --> Score["Replay Scoring"]
-    TraceB --> Score
-    Score --> Decision["Keep / Revise / Publish"]
+    Base --> TraceA["Progressive Trace A"]
+    Cand --> TraceB["Progressive Trace B"]
+    TraceA --> Check["Checklist Completion"]
+    TraceB --> Check
+    Check --> Metrics["Turns / Tools / Tokens"]
+    Metrics --> Decision["Keep / Revise / Publish"]
 ```
 
 安装依赖：
@@ -405,7 +481,7 @@ python -m teamEvolver.true_replay --job-file ./candidate_job.json --json
 
 True Replay 会为两条分支创建临时 `HOME` 与 `HERMES_HOME`，不会修改真实 Agent 配置。若使用本地 Agent checkout，可通过 `HERMES_ORIGIN` 指定源码位置。
 
-在控制台候选评审中，管理员可以对同一个候选执行重新评估、验证发布、强制发布或删除。自动发布应以 Verify 分、Replay 分、效率指标和拒绝原因一起判断，而不是只看单一分数。
+在控制台候选评审中，管理员可以对同一个候选执行重新评估、验证发布、强制发布或删除。`Skills 实验台` 与自动 True Replay 使用同一渐进协议，并可从历史 Session / SOP evidence 独立生成可编辑数据集、上传材料和查看完整 A/B Trace。
 
 ---
 

@@ -40,8 +40,8 @@ def parse_single_skill(text: str) -> Optional[dict]:
 #  Tool snippet compaction                                             #
 # ------------------------------------------------------------------ #
 
-_TOOL_SNIPPET_MAX_ITEMS = 4
-_TOOL_SNIPPET_MAX_CHARS = 240
+_TOOL_SNIPPET_MAX_ITEMS = 12
+_TOOL_SNIPPET_MAX_CHARS = 2000
 
 
 def _clip_text(value: Any, max_chars: int = _TOOL_SNIPPET_MAX_CHARS) -> str:

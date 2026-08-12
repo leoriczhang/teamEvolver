@@ -246,8 +246,8 @@ Analyze the session evidence alongside the current skill content, then \
 decide the best course of action:
 
 If `active_candidate_feedback` is present, a previous candidate already failed
-or was inconclusive in True Replay. Treat its failed checklist items and reason
-codes as new evidence: preserve passing behavior, make a materially different
+or was inconclusive in True Replay. Use only its turn, tool-call, and token
+changes as feedback: preserve existing behavior, make a materially different
 targeted repair, and do not return the same candidate wording or edit summary.
 
 1. **improve_skill** - The skill content needs targeted edits based on the \
@@ -294,7 +294,7 @@ or ambiguous to justify changes. No action needed.
 - If a successful session supports a section, leave that section untouched unless failure evidence explicitly contradicts it.
 - Prefer tightening or clarifying an existing section over adding a brand-new section.
 - Do not introduce a new large section unless failure evidence is strong and the existing structure cannot express the fix.
-- If you add a new checklist item, keep it short and tied to the observed failure.
+- Keep any new procedural check short and tied to the observed failure.
 
 ## Distinguishing skill problems from agent problems
 
@@ -546,6 +546,21 @@ _CREATE_FROM_SESSIONS_SYSTEM = _inject_shared_blocks(_CREATE_FROM_SESSIONS_SYSTE
 _EVOLVE_DEBUG_DIR = ""
 
 
+def _effective_system(stage_id: str, fallback: str) -> str:
+    """Return a stage's system prompt, honoring any Prompt Studio override.
+
+    Lazy import avoids a circular import (prompt_studio imports this module for
+    its default resolvers). Falls back to the in-module default so the pipeline
+    is byte-identical when no override is stored.
+    """
+    try:
+        from ..prompt_studio import effective_prompt
+
+        return effective_prompt(stage_id, fallback)
+    except Exception:  # noqa: BLE001 - never let studio wiring break the pipeline
+        return fallback
+
+
 def set_evolve_debug_dir(path: str) -> None:
     """Set the debug dump directory used by session-level evolution calls."""
     global _EVOLVE_DEBUG_DIR
@@ -576,7 +591,7 @@ async def execute_merge(
         f"Content:\n```\n{incoming_skill.get('content', '')}\n```"
     )
     messages = [
-        {"role": "system", "content": _MERGE_SKILL_SYSTEM},
+        {"role": "system", "content": _effective_system("merge", _MERGE_SKILL_SYSTEM)},
         {"role": "user", "content": user_msg},
     ]
     raw = await llm.chat(
@@ -620,7 +635,7 @@ def _build_skill_block(skill: dict) -> str:
     return "".join(parts)
 
 
-def _build_session_evidence(sessions: list[dict], max_sessions: int = 30) -> str:
+def _build_session_evidence(sessions: list[dict], max_sessions: int = 60) -> str:
     """Format session evidence (trajectory + summary) for LLM prompts."""
     blocks: list[str] = []
     for session in sessions[:max_sessions]:
@@ -812,7 +827,9 @@ async def evolve_skill_from_sessions(
     evolution_context: Optional[dict] = None,
 ) -> Optional[dict]:
     """Combined decision + execution for one existing-skill session group."""
-    system = _EVOLVE_FROM_SESSIONS_SYSTEM.replace("{skill_name}", skill_name)
+    system = _effective_system("evolve_skill", _EVOLVE_FROM_SESSIONS_SYSTEM).replace(
+        "{skill_name}", skill_name
+    )
     skill_section = _build_skill_block(current_skill) if current_skill else ""
     evidence = _build_session_evidence(sessions)
     user_msg = (
@@ -864,7 +881,7 @@ async def create_skill_from_sessions(
     _write_debug_dump(stem, _CREATE_FROM_SESSIONS_SYSTEM, user_msg)
 
     messages = [
-        {"role": "system", "content": _CREATE_FROM_SESSIONS_SYSTEM},
+        {"role": "system", "content": _effective_system("create_skill", _CREATE_FROM_SESSIONS_SYSTEM)},
         {"role": "user", "content": user_msg},
     ]
     raw = await llm.chat(
@@ -897,15 +914,39 @@ def _parse_evolve_result(raw: str, skill_name: str) -> Optional[dict]:
             result = json.loads(candidate)
         except (json.JSONDecodeError, ValueError):
             try:
-                from json_repair import repair_json
+                stack: list[str] = []
+                in_string = False
+                escaped = False
+                pairs = {"{": "}", "[": "]"}
+                for char in candidate:
+                    if in_string:
+                        if escaped:
+                            escaped = False
+                        elif char == "\\":
+                            escaped = True
+                        elif char == '"':
+                            in_string = False
+                        continue
+                    if char == '"':
+                        in_string = True
+                    elif char in pairs:
+                        stack.append(pairs[char])
+                    elif stack and char == stack[-1]:
+                        stack.pop()
+                if in_string:
+                    raise ValueError("truncated JSON string")
+                result = json.loads(candidate + "".join(reversed(stack)))
+            except (json.JSONDecodeError, ValueError):
+                try:
+                    from json_repair import repair_json
 
-                result = repair_json(candidate, return_objects=True)
-            except Exception:  # noqa: BLE001 - malformed model output is non-fatal.
-                logger.warning(
-                    "[SessionExec] failed to parse evolve result for '%s'",
-                    skill_name,
-                )
-                return None
+                    result = repair_json(candidate, return_objects=True)
+                except Exception:  # noqa: BLE001 - malformed model output is non-fatal.
+                    logger.warning(
+                        "[SessionExec] failed to parse evolve result for '%s'",
+                        skill_name,
+                    )
+                    return None
 
     if not isinstance(result, dict):
         return None

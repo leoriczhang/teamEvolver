@@ -1,18 +1,10 @@
-"""True A/B replay prototype for skill-candidate validation.
-
-The existing candidate validation (``_run_candidate_replay`` in
-``orchestrator.py``) is a *text* replay: it feeds the original user instruction
-to ``llm.chat`` once per branch and judges the returned text. Tools never run,
-so tool-oriented skills (e.g. "install a skill from a path", which copies files
-and edits config) get systematically under-scored — the model can only *say*
-what it would do, not actually do it.
+"""True A/B replay for skill-candidate validation.
 
 This module implements a *true* replay: for a single instruction it spins up
 **two real Hermes agents** in isolated, disposable sandboxes that differ only in
 whether the candidate skill's guidance is injected, lets each run the full tool
-loop for real (``TERMINAL_ENV=local``, ``HERMES_YOLO_MODE=1``), then judges both
-trajectories — including tool-call correctness, not just the final text — with
-an LLM judge inspired by ``agent_evolve_evaluation``'s trajectory dimension.
+loop for real (``TERMINAL_ENV=local``, ``HERMES_YOLO_MODE=1``), then compares
+interaction turns, tool calls, and tokens directly.
 
 Safety model
 ------------
@@ -43,6 +35,7 @@ per-branch error rather than crashing the server. See ``resolve_hermes_origin``.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import subprocess
@@ -53,55 +46,29 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Optional
 
-from .checklist import (
-    compile_common_checklist,
-    evaluate_branch_checklist,
-    objective_replay_decision,
-    scope_checklist_for_case,
+from .progressive_replay import (
+    initial_query,
+    next_disclosure_prompt,
+    normalize_case_checklist,
+    normalize_checklist_report,
+    progressive_config,
+    progressive_replay_decision,
 )
 from .skills.bundle import (
     bundle_tree_sha256,
     candidate_skill_bundle,
+    normalize_bundle_rel_path,
     write_skill_bundle,
 )
 from .validation.bundle_checks import validate_candidate_bundle
 
 # Canonical checkout root (holds the teamEvolver/ package).
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_MIN_EFFICIENCY_ONLY_GAIN = 0.05
-_EFFICIENCY_WEIGHTS = {
-    "interaction_turns": 0.60,
-    "tool_call_count": 0.25,
-    "total_tokens": 0.15,
-}
-
-
-def replay_candidate_accepted(
-    *,
-    baseline_score: float,
-    candidate_score: float,
-    min_score: float,
-    tolerance: float,
-    efficiency_score: float,
-) -> bool:
-    """Legacy compatibility helper.
-
-    The live release path uses ``objective_replay_decision`` with checklist
-    gates and weighted execution cost. Keep this only for callers of the old
-    public helper while they migrate.
-    """
-    no_regression = candidate_score >= baseline_score - tolerance
-    quality_ok = candidate_score >= min_score and no_regression
-    quality_improved = candidate_score > baseline_score
-    efficiency_improved = (
-        no_regression
-        and efficiency_score >= _MIN_EFFICIENCY_ONLY_GAIN
-    )
-    return bool(
-        quality_ok
-        and (quality_improved or efficiency_improved)
-        and efficiency_score >= -0.10
-    )
+_EFFICIENCY_METRICS = (
+    "interaction_turns",
+    "tool_call_count",
+    "total_tokens",
+)
 
 
 def resolve_hermes_origin() -> Optional[str]:
@@ -276,7 +243,7 @@ def read_hermes_harness() -> dict[str, str]:
         "api_key": str(model.get("api_key") or os.getenv("OPENAI_API_KEY", "")),
         "model": str(model.get("default") or os.getenv("TEAMEVOLVER_REPLAY_MODEL", "doubao-seed-evolving")),
         "api_mode": str(model.get("api_mode") or ""),
-        "max_tokens": int(model.get("max_tokens") or 8192),
+        "max_tokens": int(model.get("max_tokens") or 100000),
     }
 
 
@@ -290,7 +257,7 @@ def read_team_evolver_harness() -> dict[str, Any]:
         "api_key": str(config.llm_api_key or ""),
         "model": str(config.llm_model_id or config.model_name or ""),
         "api_mode": str(config.llm_api_mode or ""),
-        "max_tokens": int(config.llm_max_tokens or 8192),
+        "max_tokens": int(config.llm_max_tokens or 100000),
     }
 
 
@@ -339,12 +306,43 @@ def check_paths(paths: list[str], search_roots: list[Path]) -> list[dict[str, An
     return out
 
 
+def _uploaded_material_path(
+    referenced_path: str,
+    materials: list[dict[str, Any]],
+) -> Optional[str]:
+    wanted = str(referenced_path or "").strip().strip("`'\"").replace("\\", "/")
+    wanted = wanted.rstrip("/")
+    if not wanted or wanted.startswith("/"):
+        return None
+    for item in materials:
+        material_path = str(item.get("path") or "").strip().replace("\\", "/")
+        if material_path == wanted or material_path.startswith(f"{wanted}/"):
+            return material_path
+    return None
+
+
 def annotate_cases(job: dict[str, Any], search_roots: list[Path]) -> list[dict[str, Any]]:
     """Attach path-grounding to every replay case and flag which are runnable."""
     cases = []
     for idx, case in enumerate(job.get("replay_cases") or []):
-        instr = str(case.get("instruction") or "").strip()
+        instr = initial_query(case)
+        checklist = normalize_case_checklist(case)
+        disclosure = progressive_config(case)
+        materials = [
+            dict(item)
+            for item in (case.get("materials") or [])
+            if isinstance(item, dict) and item.get("path")
+        ]
         refs = check_paths(extract_referenced_paths(instr), search_roots)
+        for ref in refs:
+            uploaded = _uploaded_material_path(str(ref.get("path") or ""), materials)
+            if uploaded:
+                ref.update(
+                    {
+                        "exists": True,
+                        "resolved": f"uploaded://{uploaded}",
+                    }
+                )
         referenced = [r for r in refs if r["exists"] or r["path"].startswith("/")]
         missing = [r for r in referenced if not r["exists"]]
         # Runnable when the instruction either references no path, or every
@@ -356,6 +354,7 @@ def annotate_cases(job: dict[str, Any], search_roots: list[Path]) -> list[dict[s
                 "session_id": case.get("session_id"),
                 "turn_num": case.get("turn_num"),
                 "instruction": instr,
+                "query": instr,
                 "evidence_window": str(
                     case.get("evidence_window") or "recent"
                 ),
@@ -364,6 +363,13 @@ def annotate_cases(job: dict[str, Any], search_roots: list[Path]) -> list[dict[s
                 ),
                 "had_tool_calls": bool(case.get("had_tool_calls")),
                 "gold": case.get("gold") if isinstance(case.get("gold"), dict) else {},
+                "requirements": case.get("requirements") or [],
+                "trajectory_requirements": (
+                    case.get("trajectory_requirements") or []
+                ),
+                "checklist": checklist,
+                "progressive_disclosure": disclosure,
+                "materials": materials,
                 "target_dimensions": case.get("target_dimensions") or [],
                 "difficulty": str(case.get("difficulty") or ""),
                 "referenced_paths": referenced,
@@ -380,8 +386,13 @@ def annotate_cases(job: dict[str, Any], search_roots: list[Path]) -> list[dict[s
 # ---------------------------------------------------------------------------
 
 
-def build_sandbox(base: Path, branch: str, harness: dict[str, str],
-                  skill: Optional[dict[str, Any]]) -> dict[str, str]:
+def build_sandbox(
+    base: Path,
+    branch: str,
+    harness: dict[str, str],
+    skill: Optional[dict[str, Any]],
+    materials: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, str]:
     """Create an isolated HOME for one branch. ``branch`` is 'baseline' or
     'candidate'. The candidate branch also gets the skill installed under its
     private skills/ dir; both get a config.yaml mirroring the real harness."""
@@ -418,6 +429,19 @@ def build_sandbox(base: Path, branch: str, harness: dict[str, str],
     else:
         installed_tree = ""
 
+    for item in materials or []:
+        rel_path = normalize_bundle_rel_path(str(item.get("path") or ""))
+        try:
+            data = base64.b64decode(
+                str(item.get("content_b64") or ""),
+                validate=True,
+            )
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"invalid replay material: {rel_path}") from exc
+        target = workspace / Path(rel_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+
     return {
         "home": str(home),
         "hermes_home": str(hermes_home),
@@ -437,6 +461,108 @@ def count_tool_calls(messages: list[dict[str, Any]]) -> int:
         for message in messages
         if isinstance(message, dict) and message.get("role") == "assistant"
     )
+
+
+def _workspace_evidence(workspace: str, *, max_files: int = 40) -> list[dict[str, Any]]:
+    root = Path(workspace)
+    evidence: list[dict[str, Any]] = []
+    if not root.is_dir():
+        return evidence
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or len(evidence) >= max_files:
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        item: dict[str, Any] = {
+            "path": path.relative_to(root).as_posix(),
+            "size": len(data),
+        }
+        try:
+            item["text_preview"] = data[:32_000].decode("utf-8")
+        except UnicodeDecodeError:
+            item["binary"] = True
+        evidence.append(item)
+    return evidence
+
+
+def _evaluate_local_checklist(
+    *,
+    harness: dict[str, Any],
+    checklist: list[dict[str, Any]],
+    interactions: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+    workspace: str,
+) -> dict[str, Any]:
+    if not checklist:
+        return normalize_checklist_report(
+            {"checklist_report": {"items": [], "all_satisfied": True}},
+            expected_checklist=[],
+        )
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(
+            api_key=str(harness.get("api_key") or "not-configured"),
+            base_url=str(harness.get("base_url") or ""),
+            timeout=120,
+        )
+        payload = {
+            "checklist": checklist,
+            "interactions": interactions,
+            "tool_trajectory": render_trajectory(messages),
+            "workspace_artifacts": _workspace_evidence(workspace),
+        }
+        completion = client.chat.completions.create(
+            model=str(harness.get("model") or ""),
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Evaluate each checklist item using only the supplied "
+                        "responses, tool trajectory, and real workspace artifacts. "
+                        "Output JSON {items:[{id,satisfied,evidence}],all_satisfied}. "
+                        "Do not infer success without concrete evidence."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(payload, ensure_ascii=False),
+                },
+            ],
+            temperature=0,
+            max_tokens=8_192,
+            response_format={"type": "json_object"},
+        )
+        raw = completion.choices[0].message.content or "{}"
+        parsed = json.loads(raw)
+        report = normalize_checklist_report(
+            {"checklist_report": parsed},
+            expected_checklist=checklist,
+        )
+        report["judge"] = "model"
+        return report
+    except Exception as exc:  # noqa: BLE001 - failed judge must be conservative.
+        report = normalize_checklist_report(
+            {
+                "checklist_report": {
+                    "items": [
+                        {
+                            **item,
+                            "satisfied": False,
+                            "evidence": "checklist judge unavailable",
+                        }
+                        for item in checklist
+                    ],
+                    "all_satisfied": False,
+                }
+            },
+            expected_checklist=checklist,
+        )
+        report["judge"] = "unavailable"
+        report["error"] = f"{type(exc).__name__}: {exc}"
+        return report
 
 
 def _run_worker(spec_path: str) -> None:
@@ -487,68 +613,100 @@ def _run_worker(spec_path: str) -> None:
                 "procedure when relevant:\n\n" + spec["skill_content"]
             )
         agent = AIAgent(**kwargs)
-        original_instruction = str(spec["instruction"])
-        current_prompt = original_instruction
+        instruction = str(spec["instruction"])
+        current_prompt = instruction
+        checklist = [
+            dict(item)
+            for item in spec.get("checklist") or []
+            if isinstance(item, dict) and item.get("text")
+        ]
+        disclosure = (
+            spec.get("progressive_disclosure")
+            if isinstance(spec.get("progressive_disclosure"), dict)
+            else {}
+        )
+        batch_size = max(1, int(disclosure.get("batch_size") or 4))
+        max_interactions = max(1, int(spec.get("max_interactions") or 1))
+        disclosed_ids: set[str] = set()
         interactions: list[dict[str, Any]] = []
+        messages: list[dict[str, Any]] = []
+        checklist_report: dict[str, Any] = {}
+        totals = {
+            "api_calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "total_tokens": 0,
+            "tool_call_count": 0,
+        }
         result: dict[str, Any] = {}
-        previous_total_tokens = 0
-        previous_tool_calls = 0
-        progress: dict[str, Any] = {}
-        max_interactions = max(1, int(spec.get("max_interactions", 4) or 4))
         for interaction_num in range(1, max_interactions + 1):
             result = agent.run_conversation(
                 current_prompt,
-                task_id=f"replay_{spec['branch']}",
+                task_id=f"replay_{spec['branch']}_{interaction_num}",
             )
-            messages = result.get("messages") or []
-            total_tokens = int(result.get("total_tokens") or 0)
-            tool_call_count = count_tool_calls(messages)
-            branch_snapshot = {
-                "ok": True,
-                "messages": messages,
-                "final_response": result.get("final_response", ""),
+            round_messages = [
+                dict(item)
+                for item in result.get("messages") or []
+                if isinstance(item, dict)
+            ]
+            messages.extend(round_messages)
+            round_tools = count_tool_calls(round_messages)
+            for key in totals:
+                if key == "tool_call_count":
+                    totals[key] += round_tools
+                else:
+                    totals[key] += int(result.get(key) or 0)
+            interaction = {
+                "interaction_num": interaction_num,
+                "prompt": current_prompt,
+                "response": str(result.get("final_response") or ""),
+                "tool_call_count": round_tools,
+                "total_tokens": int(result.get("total_tokens") or 0),
             }
-            progress = judge_branch(
-                spec["harness"],
-                original_instruction,
-                branch_snapshot,
-                rubric=spec.get("rubric"),
+            interactions.append(interaction)
+            checklist_report = _evaluate_local_checklist(
+                harness=spec["harness"],
+                checklist=checklist,
+                interactions=interactions,
+                messages=messages,
+                workspace=spec["workspace"],
             )
-            interactions.append(
-                {
-                    "interaction_num": interaction_num,
-                    "prompt": current_prompt,
-                    "response": str(result.get("final_response") or "")[:4000],
-                    "tool_call_count": max(0, tool_call_count - previous_tool_calls),
-                    "total_tokens": max(0, total_tokens - previous_total_tokens),
-                    "completed": bool(progress.get("success")),
-                    "judge": progress,
-                }
+            interaction["checklist_report"] = checklist_report
+            interaction["completed"] = bool(
+                checklist_report.get("all_satisfied")
             )
-            previous_total_tokens = total_tokens
-            previous_tool_calls = tool_call_count
-            if progress.get("success"):
+            if checklist_report.get("all_satisfied"):
                 break
-            feedback = str(progress.get("feedback") or progress.get("rationale") or "").strip()
-            current_prompt = feedback or (
-                "上一轮尚未完整达成任务目标，请检查现有结果并继续完成，不要重复已经成功的步骤。"
+            current_prompt, disclosed = next_disclosure_prompt(
+                checklist=checklist,
+                report=checklist_report,
+                disclosed_ids=disclosed_ids,
+                round_number=interaction_num + 1,
+                batch_size=batch_size,
             )
+            disclosed_ids.update(disclosed)
+            if not current_prompt:
+                break
+        checklist_report["rounds"] = len(interactions)
         out.update(
             ok=True,
             final_response=result.get("final_response", ""),
-            messages=result.get("messages", []),
-            api_calls=result.get("api_calls"),
-            completed=result.get("completed"),
+            messages=messages,
+            api_calls=totals["api_calls"],
+            completed=bool(checklist_report.get("all_satisfied")),
             interaction_turns=len(interactions),
-            tool_call_count=count_tool_calls(result.get("messages") or []),
-            input_tokens=int(result.get("input_tokens") or result.get("prompt_tokens") or 0),
-            output_tokens=int(result.get("output_tokens") or result.get("completion_tokens") or 0),
-            cache_read_tokens=int(result.get("cache_read_tokens") or 0),
-            cache_write_tokens=int(result.get("cache_write_tokens") or 0),
-            reasoning_tokens=int(result.get("reasoning_tokens") or 0),
-            total_tokens=int(result.get("total_tokens") or 0),
+            tool_call_count=totals["tool_call_count"],
+            input_tokens=totals["input_tokens"],
+            output_tokens=totals["output_tokens"],
+            cache_read_tokens=totals["cache_read_tokens"],
+            cache_write_tokens=totals["cache_write_tokens"],
+            reasoning_tokens=totals["reasoning_tokens"],
+            total_tokens=totals["total_tokens"],
             interactions=interactions,
-            progress_judge=progress,
+            checklist_report=checklist_report,
         )
     except Exception as e:  # noqa: BLE001 — surface any failure to the parent
         import traceback
@@ -560,10 +718,18 @@ def _run_worker(spec_path: str) -> None:
         Path(spec["out_path"]).write_text(json.dumps(out, ensure_ascii=False), "utf-8")
 
 
-def spawn_branch(branch: str, sandbox: dict[str, str], instruction: str,
-                 harness: dict[str, str], skill: Optional[dict[str, Any]],
-                 tmp: Path, timeout: int, max_interactions: int = 4,
-                 rubric: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+def spawn_branch(
+    branch: str,
+    sandbox: dict[str, str],
+    instruction: str,
+    harness: dict[str, str],
+    skill: Optional[dict[str, Any]],
+    tmp: Path,
+    timeout: int,
+    max_interactions: int = 4,
+    *,
+    case: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     """Spawn a worker subprocess for one branch and collect its trajectory."""
     worker_python = os.environ.get("TEAMEVOLVER_REPLAY_PYTHON", "").strip() or sys.executable
     spec = {
@@ -575,9 +741,12 @@ def spawn_branch(branch: str, sandbox: dict[str, str], instruction: str,
         # hermes-agent package. Resolved once here so both branches agree.
         "hermes_origin": resolve_hermes_origin() or "",
         "instruction": instruction,
-        "rubric": rubric or {},
         "harness": harness,
         "skill_content": (skill or {}).get("content"),
+        "checklist": list((case or {}).get("checklist") or []),
+        "progressive_disclosure": dict(
+            (case or {}).get("progressive_disclosure") or {}
+        ),
         "max_iterations": 25,
         "max_interactions": max(1, int(max_interactions or 4)),
         "out_path": str(tmp / f"{branch}_out.json"),
@@ -620,154 +789,15 @@ def render_trajectory(messages: list[dict[str, Any]]) -> str:
                 step += 1
                 fn = (tc.get("function") or {})
                 args = fn.get("arguments")
-                if isinstance(args, str) and len(args) > 600:
-                    args = args[:600] + "…"
+                if isinstance(args, str) and len(args) > 4000:
+                    args = args[:4000] + "…"
                 lines.append(f"[step {step}] call {fn.get('name')}({args})")
         elif role == "tool":
             content = m.get("content")
-            if isinstance(content, str) and len(content) > 500:
-                content = content[:500] + "…"
+            if isinstance(content, str) and len(content) > 4000:
+                content = content[:4000] + "…"
             lines.append(f"        ↳ result: {content}")
     return "\n".join(lines) if lines else "(no tool calls were made)"
-
-
-def judge_branch(
-    harness: dict[str, str],
-    instruction: str,
-    branch: dict[str, Any],
-    checklist: dict[str, Any] | None = None,
-    *,
-    rubric: Optional[dict[str, Any]] = None,
-) -> dict[str, Any]:
-    """LLM-as-judge over the *trajectory*: did the task actually get done, were
-    the tools used correctly? Returns {overall, task_completion, tool_correctness,
-    rationale}. Scores in [0,1]."""
-    if not branch.get("ok"):
-        return {
-            "success": False,
-            "overall": 0.0,
-            "task_completion": 0.0,
-            "tool_correctness": 0.0,
-            "feedback": "",
-            "rationale": f"branch failed: {branch.get('error')}",
-        }
-    gap_report = (
-        branch.get("artifact_gap_report")
-        if isinstance(branch.get("artifact_gap_report"), dict)
-        else {}
-    )
-    if gap_report and not gap_report.get("passed"):
-        failed = [
-            str(item)
-            for item in gap_report.get("failed_checks") or []
-            if item
-        ]
-        return {
-            "success": False,
-            "overall": 0.0,
-            "task_completion": 0.0,
-            "tool_correctness": 0.5 if branch.get("artifacts") else 0.0,
-            "feedback": failed[0][:800] if failed else "",
-            "rationale": (
-                "real artifact did not pass methodology checks: "
-                + "; ".join(failed[:6])
-            )[:800],
-        }
-
-    trace = render_trajectory(branch.get("messages") or [])
-    final = str(branch.get("final_response") or "")[:1500]
-    soft_items = [
-        {
-            "id": str(item.get("id") or ""),
-            "claim": str(item.get("claim") or ""),
-        }
-        for item in (checklist or {}).get("items") or []
-        if isinstance(item, dict) and item.get("kind") == "soft"
-    ]
-    sys_prompt = (
-        "You are a strict evaluator of an AI agent's execution TRACE. You are "
-        "given a user instruction, the agent's tool-call sequence (with results), "
-        "and its final answer. Judge whether the task was ACTUALLY accomplished "
-        "via the tools (files really created/copied, config really edited, etc.), "
-        "not merely described. Score three numbers in [0,1]:\n"
-        "- task_completion: was the concrete goal achieved end-to-end?\n"
-        "- tool_correctness: were the right tools called with correct arguments, "
-        "and did they succeed (vs error/no-op)?\n"
-        "- overall: advisory holistic quality; it is NOT the release score.\n"
-        "- success: true only when the concrete task is complete enough that no "
-        "further user interaction is needed.\n"
-        "- checklist_results: pass/fail each supplied SOFT checklist item. Do "
-        "not evaluate hard items; code handles them.\n"
-        "- feedback: if incomplete, give a concise next-turn instruction that "
-        "helps the same agent finish without revealing hidden grading rubrics.\n"
-        'Reply ONLY as JSON: {"success":true|false,"task_completion":..,'
-        '"tool_correctness":..,"overall":..,"checklist_results":'
-        '[{"id":"...","passed":true|false,"reason":"..."}],'
-        '"feedback":"..","rationale":".."}'
-    )
-    rubric_text = ""
-    if isinstance(rubric, dict) and rubric:
-        rubric_text = (
-            "\n\n[Task-specific grading rubric]\n"
-            + json.dumps(rubric, ensure_ascii=False, indent=2)[:6000]
-        )
-    user_prompt = (
-        f"[Instruction]\n{instruction}{rubric_text}\n\n"
-        f"[Tool-call trace]\n{trace}\n\n"
-        f"[Final answer]\n{final}\n\n[Soft checklist]\n"
-        f"{json.dumps(soft_items, ensure_ascii=False, indent=2)}"
-    )
-    try:
-        from openai import OpenAI
-
-        client = OpenAI(base_url=harness["base_url"], api_key=harness["api_key"])
-        resp = client.chat.completions.create(
-            model=harness["model"],
-            messages=[{"role": "system", "content": sys_prompt},
-                      {"role": "user", "content": user_prompt}],
-            temperature=0,
-        )
-        message = resp.choices[0].message
-        raw = getattr(message, "content", None) or getattr(message, "reasoning_content", None) or "{}"
-        start, end = raw.find("{"), raw.rfind("}")
-        data = json.loads(raw[start:end + 1]) if start >= 0 else {}
-    except Exception as e:  # noqa: BLE001
-        return {
-            "success": False,
-            "overall": 0.0,
-            "task_completion": 0.0,
-            "tool_correctness": 0.0,
-            "feedback": "",
-            "rationale": f"judge error: {type(e).__name__}: {e}",
-        }
-
-    def _num(x: Any) -> float:
-        try:
-            return max(0.0, min(1.0, float(x)))
-        except Exception:
-            return 0.0
-
-    checklist_results: dict[str, bool] = {}
-    checklist_reasons: dict[str, str] = {}
-    raw_checklist = data.get("checklist_results")
-    if isinstance(raw_checklist, list):
-        for item in raw_checklist:
-            if not isinstance(item, dict):
-                continue
-            item_id = str(item.get("id") or "")
-            if item_id:
-                checklist_results[item_id] = bool(item.get("passed"))
-                checklist_reasons[item_id] = str(item.get("reason") or "")[:500]
-    return {
-        "success": bool(data.get("success")) and _num(data.get("task_completion")) >= 0.75,
-        "overall": _num(data.get("overall")),
-        "task_completion": _num(data.get("task_completion")),
-        "tool_correctness": _num(data.get("tool_correctness")),
-        "feedback": str(data.get("feedback") or "")[:800],
-        "rationale": str(data.get("rationale") or "")[:800],
-        "checklist_results": checklist_results,
-        "checklist_reasons": checklist_reasons,
-    }
 
 
 def branch_efficiency(branch: dict[str, Any]) -> dict[str, int]:
@@ -793,34 +823,30 @@ def compare_efficiency(
     base = branch_efficiency(baseline)
     cand = branch_efficiency(candidate)
     dimensions: dict[str, dict[str, Any]] = {}
-    weighted_gains: list[float] = []
-    for key, weight in _EFFICIENCY_WEIGHTS.items():
+    for key in _EFFICIENCY_METRICS:
         baseline_value = int(base[key])
         candidate_value = int(cand[key])
         delta = baseline_value - candidate_value
         gain = max(-1.0, min(1.0, delta / max(1, baseline_value)))
-        weighted_gains.append(gain * weight)
         dimensions[key] = {
             "baseline": baseline_value,
             "candidate": candidate_value,
             "delta": delta,
             "reduction_ratio": round(gain, 4),
-            "weight": weight,
-            "weighted_gain": round(gain * weight, 4),
             "winner": "candidate" if delta > 0 else ("baseline" if delta < 0 else "tie"),
         }
-    score = sum(weighted_gains)
     return {
         "baseline": base,
         "candidate": cand,
         "dimensions": dimensions,
-        "score": round(score, 4),
-        "weights": dict(_EFFICIENCY_WEIGHTS),
         "improved_dimensions": [
             key for key, value in dimensions.items() if value["winner"] == "candidate"
         ],
         "regressed_dimensions": [
             key for key, value in dimensions.items() if value["winner"] == "baseline"
+        ],
+        "unchanged_dimensions": [
+            key for key, value in dimensions.items() if value["winner"] == "tie"
         ],
     }
 
@@ -849,8 +875,6 @@ def _evaluate_agentshub_case(
     harness: dict[str, str],
     *,
     timeout: int,
-    min_score: float,
-    tolerance: float,
     max_interactions: int,
 ) -> dict[str, Any]:
     harness = read_team_evolver_harness()
@@ -896,27 +920,24 @@ def _evaluate_agentshub_case(
         if not result.get("ok")
     ]
     efficiency = compare_efficiency(results["baseline"], results["candidate"])
-    checklist = compile_common_checklist(job)
-    scoped_checklist = scope_checklist_for_case(checklist, case)
-    checklist_results: dict[str, dict[str, Any]] = {}
+    expected_checklist = list(case.get("checklist") or [])
+    branch_checklists = {
+        branch: normalize_checklist_report(
+            results[branch],
+            expected_checklist=expected_checklist,
+        )
+        for branch in ("baseline", "candidate")
+    }
 
-    def branch_case(branch: str, judged: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    def branch_case(branch: str) -> dict[str, Any]:
         result = results[branch]
-        score = (judged or {}).get(branch, {})
-        return {
+        payload = {
             "session_id": str(case.get("session_id") or ""),
             "turn_num": int(case.get("turn_num") or 0),
             "instruction": case["instruction"],
-            "score": checklist_results.get(branch, {}).get(
-                "pass_rate",
-                score.get("overall"),
-            ),
-            "advisory_judge_score": score.get("overall"),
-            "task_completion": score.get("task_completion"),
-            "tool_correctness": score.get("tool_correctness"),
-            "rationale": score.get("rationale") or result.get("error"),
+            "rationale": result.get("error"),
             "trajectory": render_trajectory(result.get("messages") or []),
-            "final_response": str(result.get("final_response") or "")[:2000],
+            "final_response": str(result.get("final_response") or "")[:8000],
             "ok": bool(result.get("ok")),
             "error": result.get("error"),
             "elapsed_seconds": result.get("elapsed_seconds"),
@@ -932,15 +953,17 @@ def _evaluate_agentshub_case(
             "interactions": result.get("interactions") or [],
             "artifacts": result.get("artifacts") or [],
             "artifact_gap_report": result.get("artifact_gap_report") or {},
-            "checklist": checklist_results.get(branch),
+            "checklist_report": branch_checklists[branch],
         }
+        if job.get("include_full_trace"):
+            payload["messages"] = result.get("messages") or []
+            payload["final_response"] = str(result.get("final_response") or "")
+        return payload
 
     common = {
         "mode": "true_replay",
         "runtime": "agentshub",
         "job_id": job_id,
-        "threshold": round(float(min_score), 3),
-        "tolerance": round(float(tolerance), 3),
         "max_interactions": max(1, int(max_interactions or 1)),
         "case_count": 1,
         "case": {
@@ -953,8 +976,10 @@ def _evaluate_agentshub_case(
             "base_url": harness.get("base_url"),
         },
         "efficiency": efficiency,
-        "checklist": checklist,
-        "scoped_checklist": scoped_checklist,
+        "checklist": branch_checklists,
+        "progressive_disclosure": dict(
+            case.get("progressive_disclosure") or {}
+        ),
     }
     if failures:
         return {
@@ -962,10 +987,6 @@ def _evaluate_agentshub_case(
             "status": "failed",
             "accepted": False,
             "no_regression": False,
-            "score": None,
-            "baseline_mean": None,
-            "delta": None,
-            "quality_ok": False,
             "reason": "AgentsHub true replay branch failed: " + "; ".join(failures),
             "cases": [
                 {
@@ -975,34 +996,12 @@ def _evaluate_agentshub_case(
             ],
         }
 
-    judged = {
-        branch: judge_branch(
-            harness,
-            case["instruction"],
-            results[branch],
-            scoped_checklist,
-        )
-        for branch in ("baseline", "candidate")
-    }
-    checklist_results = {
-        branch: evaluate_branch_checklist(
-            scoped_checklist,
-            results[branch],
-            judged[branch].get("checklist_results"),
-        )
-        for branch in ("baseline", "candidate")
-    }
-    policy = objective_replay_decision(
-        checklist=scoped_checklist,
-        baseline=checklist_results["baseline"],
-        candidate=checklist_results["candidate"],
+    policy = progressive_replay_decision(
         efficiency=efficiency,
+        baseline_checklist=branch_checklists["baseline"],
+        candidate_checklist=branch_checklists["candidate"],
     )
-    baseline_score = float(checklist_results["baseline"]["pass_rate"])
-    candidate_score = float(checklist_results["candidate"]["pass_rate"])
-    delta = round(candidate_score - baseline_score, 3)
     no_regression = bool(policy["no_regression"])
-    quality_ok = bool(policy["quality_gate"])
     accepted = bool(policy["accepted"])
     return {
         **common,
@@ -1010,16 +1009,11 @@ def _evaluate_agentshub_case(
         "accepted": accepted,
         "verdict": str(policy.get("verdict") or "inconclusive"),
         "no_regression": no_regression,
-        "score": round(candidate_score, 3),
-        "baseline_mean": round(baseline_score, 3),
-        "delta": delta,
-        "quality_ok": quality_ok,
         "decision_policy": policy,
-        "checklist_results": checklist_results,
         "cases": [
             {
-                "baseline": branch_case("baseline", judged),
-                "candidate": branch_case("candidate", judged),
+                "baseline": branch_case("baseline"),
+                "candidate": branch_case("candidate"),
             }
         ],
     }
@@ -1031,21 +1025,13 @@ def evaluate_job(
     job: Optional[dict[str, Any]] = None,
     case_index: Optional[int] = None,
     timeout: int = 600,
-    min_score: float = 0.75,
-    tolerance: float = 0.15,
     keep_sandbox: bool = False,
     max_interactions: int = 4,
 ) -> dict[str, Any]:
-    """Run a true replay for one candidate and return a structured verdict.
-
-    The return shape mirrors the orchestrator's text ``_run_candidate_replay``
-    (``score``/``baseline_mean``/``no_regression``/``accepted``/``cases``) so it
-    is a drop-in replacement, with extra true-replay fields (per-branch tool
-    trajectories, judge rationales, path-grounding). ``score`` is the candidate
-    branch's ``overall``; ``baseline_mean`` is the baseline branch's ``overall``.
+    """Run baseline/candidate agents and compare three execution metrics.
 
     A candidate whose referenced source paths are missing on this machine yields
-    ``status="skipped"`` (nothing runnable) rather than a misleading 0.0.
+    ``status="skipped"`` rather than a fabricated metric comparison.
     """
     import shutil
 
@@ -1060,10 +1046,8 @@ def evaluate_job(
             "mode": "true_replay",
             "job_id": job_id,
             "accepted": False,
+            "verdict": "reject",
             "no_regression": False,
-            "score": 0.0,
-            "baseline_mean": 0.0,
-            "threshold": round(float(min_score), 3),
             "reason": "candidate bundle failed deterministic static checks",
             "static_validation": static_validation,
             "cases": [],
@@ -1109,8 +1093,6 @@ def evaluate_job(
                 source_session,
                 harness,
                 timeout=timeout,
-                min_score=min_score,
-                tolerance=tolerance,
                 max_interactions=max_interactions,
             )
 
@@ -1146,7 +1128,13 @@ def evaluate_job(
             "candidate": skill,
         }
         sandboxes = {
-            branch: build_sandbox(tmp, branch, harness, branch_skills[branch])
+            branch: build_sandbox(
+                tmp,
+                branch,
+                harness,
+                branch_skills[branch],
+                materials=chosen.get("materials") or [],
+            )
             for branch in ("baseline", "candidate")
         }
         results: dict[str, dict[str, Any]] = {}
@@ -1162,7 +1150,7 @@ def evaluate_job(
                     tmp,
                     timeout,
                     max_interactions=max_interactions,
-                    rubric=chosen.get("gold"),
+                    case=chosen,
                 ): branch
                 for branch in ("baseline", "candidate")
             }
@@ -1186,16 +1174,13 @@ def evaluate_job(
 
             def _failed_branch_case(branch: str) -> dict[str, Any]:
                 r = results[branch]
-                return {
+                payload = {
                     "session_id": str(chosen.get("session_id", "") or ""),
                     "turn_num": int(chosen.get("turn_num", 0) or 0),
                     "instruction": chosen["instruction"],
-                    "score": None,
-                    "task_completion": None,
-                    "tool_correctness": None,
                     "rationale": f"branch failed: {r.get('error') or 'unknown error'}",
                     "trajectory": render_trajectory(r.get("messages") or []),
-                    "final_response": str(r.get("final_response") or "")[:2000],
+                    "final_response": str(r.get("final_response") or "")[:8000],
                     "ok": bool(r.get("ok")),
                     "error": r.get("error") or "branch failed",
                     "elapsed_seconds": r.get("elapsed_seconds"),
@@ -1212,6 +1197,10 @@ def evaluate_job(
                     "artifacts": r.get("artifacts") or [],
                     "artifact_gap_report": r.get("artifact_gap_report") or {},
                 }
+                if job.get("include_full_trace"):
+                    payload["messages"] = r.get("messages") or []
+                    payload["final_response"] = str(r.get("final_response") or "")
+                return payload
 
             return {
                 "status": "failed",
@@ -1219,13 +1208,7 @@ def evaluate_job(
                 "job_id": job_id,
                 "accepted": False,
                 "no_regression": False,
-                "score": None,
-                "baseline_mean": None,
-                "delta": None,
-                "quality_ok": False,
                 "efficiency": efficiency,
-                "threshold": round(float(min_score), 3),
-                "tolerance": round(float(tolerance), 3),
                 "max_interactions": max(1, int(max_interactions or 4)),
                 "case_count": 1,
                 "reason": "true replay branch failed: " + "; ".join(branch_failures),
@@ -1237,54 +1220,32 @@ def evaluate_job(
                 "harness": {"model": harness.get("model"), "base_url": harness.get("base_url")},
                 "cases": [{"baseline": _failed_branch_case("baseline"), "candidate": _failed_branch_case("candidate")}],
             }
-        checklist = compile_common_checklist(job)
-        scoped_checklist = scope_checklist_for_case(checklist, chosen)
-        judged = {
-            branch: judge_branch(
-                harness,
-                chosen["instruction"],
-                results[branch],
-                scoped_checklist,
-                rubric=chosen.get("gold"),
-            )
-            for branch in ("baseline", "candidate")
-        }
         efficiency = compare_efficiency(results["baseline"], results["candidate"])
-        checklist_results = {
-            branch: evaluate_branch_checklist(
-                scoped_checklist,
+        expected_checklist = list(chosen.get("checklist") or [])
+        branch_checklists = {
+            branch: normalize_checklist_report(
                 results[branch],
-                judged[branch].get("checklist_results"),
+                expected_checklist=expected_checklist,
             )
             for branch in ("baseline", "candidate")
         }
-        policy = objective_replay_decision(
-            checklist=scoped_checklist,
-            baseline=checklist_results["baseline"],
-            candidate=checklist_results["candidate"],
+        policy = progressive_replay_decision(
             efficiency=efficiency,
+            baseline_checklist=branch_checklists["baseline"],
+            candidate_checklist=branch_checklists["candidate"],
         )
-        baseline_overall = float(checklist_results["baseline"]["pass_rate"])
-        candidate_overall = float(checklist_results["candidate"]["pass_rate"])
-        delta = round(candidate_overall - baseline_overall, 3)
         no_regression = bool(policy["no_regression"])
-        quality_ok = bool(policy["quality_gate"])
         accepted = bool(policy["accepted"])
 
         def _branch_case(branch: str) -> dict[str, Any]:
             r = results[branch]
-            j = judged[branch]
-            return {
+            payload = {
                 "session_id": str(chosen.get("session_id", "") or ""),
                 "turn_num": int(chosen.get("turn_num", 0) or 0),
                 "instruction": chosen["instruction"],
-                "score": checklist_results[branch]["pass_rate"],
-                "advisory_judge_score": j["overall"],
-                "task_completion": j["task_completion"],
-                "tool_correctness": j["tool_correctness"],
-                "rationale": j["rationale"],
+                "rationale": r.get("error"),
                 "trajectory": render_trajectory(r.get("messages") or []),
-                "final_response": str(r.get("final_response") or "")[:2000],
+                "final_response": str(r.get("final_response") or "")[:8000],
                 "ok": bool(r.get("ok")),
                 "error": r.get("error"),
                 "elapsed_seconds": r.get("elapsed_seconds"),
@@ -1300,26 +1261,26 @@ def evaluate_job(
                 "interactions": r.get("interactions") or [],
                 "artifacts": r.get("artifacts") or [],
                 "artifact_gap_report": r.get("artifact_gap_report") or {},
-                "checklist": checklist_results[branch],
+                "checklist_report": branch_checklists[branch],
             }
+            if job.get("include_full_trace"):
+                payload["messages"] = r.get("messages") or []
+                payload["final_response"] = str(r.get("final_response") or "")
+            return payload
 
         return {
             "status": "evaluated",
             "mode": "true_replay",
             "job_id": job_id,
             "accepted": accepted,
+            "verdict": str(policy.get("verdict") or "inconclusive"),
             "no_regression": no_regression,
-            "score": round(candidate_overall, 3),
-            "baseline_mean": round(baseline_overall, 3),
-            "delta": delta,
-            "quality_ok": quality_ok,
-            "checklist": checklist,
-            "scoped_checklist": scoped_checklist,
-            "checklist_results": checklist_results,
             "decision_policy": policy,
             "efficiency": efficiency,
-            "threshold": round(float(min_score), 3),
-            "tolerance": round(float(tolerance), 3),
+            "checklist": branch_checklists,
+            "progressive_disclosure": dict(
+                chosen.get("progressive_disclosure") or {}
+            ),
             "max_interactions": max(1, int(max_interactions or 4)),
             "case_count": 1,
             "case": {
@@ -1386,7 +1347,13 @@ def run(
     try:
         results: dict[str, dict[str, Any]] = {}
         for branch in ("baseline", "candidate"):
-            sandbox = build_sandbox(tmp, branch, harness, skill)
+            sandbox = build_sandbox(
+                tmp,
+                branch,
+                harness,
+                skill,
+                materials=chosen.get("materials") or [],
+            )
             results[branch] = spawn_branch(
                 branch,
                 sandbox,
@@ -1396,11 +1363,10 @@ def run(
                 tmp,
                 timeout,
                 max_interactions=max_interactions,
-                rubric=chosen.get("gold"),
+                case=chosen,
             )
 
         print("\n===== 双分支执行结果 =====")
-        judged: dict[str, dict[str, Any]] = {}
         for branch in ("baseline", "candidate"):
             r = results[branch]
             label = "🅰 基线(无技能)" if branch == "baseline" else "🅱 候选(注入技能)"
@@ -1414,26 +1380,7 @@ def run(
                 print("   工具轨迹:")
                 print("   " + render_trajectory(r.get("messages") or []).replace("\n", "\n   "))
                 print(f"   最终回答: {str(r.get('final_response') or '')[:400]}")
-            judged[branch] = judge_branch(
-                harness,
-                chosen["instruction"],
-                r,
-                rubric=chosen.get("gold"),
-            )
-
-        print("\n===== 裁判打分（trajectory-aware） =====")
-        for branch in ("baseline", "candidate"):
-            j = judged[branch]
-            print(f"  {branch:9s}: overall={j['overall']:.3f}  "
-                  f"task_completion={j['task_completion']:.3f}  "
-                  f"tool_correctness={j['tool_correctness']:.3f}")
-            print(f"             理由: {j['rationale']}")
-
-        b, c = judged["baseline"]["overall"], judged["candidate"]["overall"]
-        delta = c - b
         efficiency = compare_efficiency(results["baseline"], results["candidate"])
-        print(f"\n===== 分差 =====\n  候选 - 基线 = {c:.3f} - {b:.3f} = {delta:+.3f}  "
-              f"→ {'候选更优' if delta > 0.001 else ('基线更优' if delta < -0.001 else '持平')}")
         print("\n===== 效率对比（正数表示候选减少） =====")
         for key, metric in efficiency["dimensions"].items():
             print(
@@ -1444,7 +1391,7 @@ def run(
         artifact = tmp / "true_replay_result.json"
         artifact.write_text(json.dumps(
             {"job_id": job_id, "case": chosen, "harness": harness,
-             "results": results, "judged": judged, "delta": delta, "efficiency": efficiency},
+             "results": results, "efficiency": efficiency},
             ensure_ascii=False, indent=2), "utf-8")
         print(f"\n完整结果已存档: {artifact}")
     finally:
@@ -1468,8 +1415,6 @@ def main() -> None:
     )
     ap.add_argument("--json", action="store_true",
                     help="emit a single structured JSON verdict on stdout (for programmatic callers)")
-    ap.add_argument("--min-score", type=float, default=0.75, help="acceptance threshold (--json)")
-    ap.add_argument("--tolerance", type=float, default=0.15, help="no-regression tolerance (--json)")
     args = ap.parse_args()
 
     if args.worker:
@@ -1487,8 +1432,6 @@ def main() -> None:
             job=loaded_job,
             case_index=args.case,
             timeout=args.timeout,
-            min_score=args.min_score,
-            tolerance=args.tolerance,
             max_interactions=args.max_interactions,
         )
         # Frame the payload so a caller can extract it even if worker subprocesses

@@ -190,8 +190,8 @@ export default function DashboardView({ active }: { active: boolean }) {
   async function validate(jobId: string, mode: "auto" | "force") {
     const msg =
       mode === "force"
-        ? "确认强制发布该候选技能？（将忽略评分直接发布）"
-        : "确认按回放结果发布该候选技能？（回放无回退才会发布）";
+        ? "确认强制发布该候选技能？（仍保留 True Replay 三项指标）"
+        : "确认按 True Replay 发布？轮次下降直接正向；轮次持平时再比较工具调用和 Token。";
     if (!window.confirm(msg)) return;
     try {
       const r = await api<{ status?: string; version?: number }>(
@@ -353,7 +353,7 @@ export default function DashboardView({ active }: { active: boolean }) {
                   "技能",
                   "动作",
                   "回放状态",
-                  "建议",
+                  "客观结论",
                   "操作",
                 ]}
               >
@@ -381,9 +381,9 @@ export default function DashboardView({ active }: { active: boolean }) {
                   <td className="link border-b border-line px-4 py-2.5 align-top" onClick={open}>
                     {ev ? (
                       ev.recommended_publish ? (
-                        <Pill tone="green">建议发布</Pill>
+                        <Pill tone="green">指标改善</Pill>
                       ) : (
-                        <Pill tone="red">建议复核</Pill>
+                        <Pill tone="amber">持平 / 有增加</Pill>
                       )
                     ) : (
                       <span className="text-xs text-muted-foreground">—</span>

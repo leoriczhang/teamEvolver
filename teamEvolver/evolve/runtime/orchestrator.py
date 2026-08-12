@@ -32,6 +32,11 @@ from ...skills.bundle import (
     bundle_tree_sha256,
     candidate_skill_bundle,
 )
+from ...dataset_synthesizer import (
+    SynthesizedDatasetStore,
+    dataset_to_replay_case,
+    synthesize_evolution_datasets,
+)
 from ...storage import LocalObjectStore, build_object_store, is_not_found_error
 from ...validation import ValidationStore
 from ...validation.bundle_checks import validate_candidate_bundle
@@ -47,7 +52,6 @@ from ..kernel.llm import AsyncLLMClient
 from ..kernel.registry import SkillIDRegistry
 from ..kernel.settings import EvolveServerConfig
 from ..stages.aggregate import aggregate_sessions_by_skill
-from ..stages.dedup import check_skill_redundancy
 from ..stages.execute import (
     create_skill_from_sessions,
     evolve_skill_from_sessions,
@@ -56,7 +60,6 @@ from ..stages.execute import (
 )
 from ..stages.judge import judge_sessions_parallel
 from ..stages.summarize import set_summarizer_debug_dir, summarize_sessions_parallel
-from ..stages.verify import verify_skill_candidate
 from ..store.object_store import (
     delete_session_keys,
     fetch_skill_bundle,
@@ -71,10 +74,10 @@ from ..store.object_store import (
     save_version_bundle,
 )
 from .evidence import SkillEvidenceStore, is_candidate_audit_session
-from .checklist import (
-    aggregate_branch_checklist_results,
-    compile_common_checklist,
-    objective_replay_decision,
+from ...progressive_replay import (
+    aggregate_case_checklists,
+    progressive_replay_decision,
+    select_replay_cases,
 )
 from .mixins import EvolveEngineMixin
 
@@ -86,11 +89,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 class EvolveServer(EvolveEngineMixin):
     """Session-level evolve server backed by shared object storage."""
-
-    # Auto-publish gate: how far a candidate's replay mean may sit below the
-    # baseline mean and still count as "no regression". Absorbs single-shot
-    # LLM-judge noise on the per-stage replay cases.
-    REPLAY_REGRESSION_TOLERANCE = 0.15
 
     # Per-branch wall-clock budget for a true replay (each of baseline/candidate
     # runs a full real tool loop). The subprocess is given ~2x + slack overall.
@@ -226,6 +224,46 @@ class EvolveServer(EvolveEngineMixin):
             )
         return planning_sessions, context, replay_windows
 
+    async def _synthesize_candidate_datasets(
+        self,
+        *,
+        skill_name: str,
+        sessions: list[dict[str, Any]],
+        candidate_skill: dict[str, Any],
+        evidence_classification: Optional[dict[str, Any]],
+        evolution_context: Optional[dict[str, Any]],
+        replay_windows: Optional[dict[str, list[dict[str, Any]]]],
+    ) -> list[dict[str, Any]]:
+        if not self.config.dataset_synthesis_enabled:
+            return []
+        synthesis_skill = {
+            **candidate_skill,
+            "_evidence_classification": (
+                evidence_classification
+                if isinstance(evidence_classification, dict)
+                else {}
+            ),
+        }
+        datasets = await synthesize_evolution_datasets(
+            self._llm,
+            skill_name=skill_name,
+            sessions=sessions,
+            candidate_skill=synthesis_skill,
+            evidence_context=evolution_context or {},
+            replay_windows=replay_windows or {},
+            case_count=self.config.dataset_test_cases,
+            min_requirements=self.config.dataset_min_requirements,
+            max_requirements=self.config.dataset_max_requirements,
+            batch_size=self.config.dataset_disclosure_batch_size,
+        )
+        logger.info(
+            "[DatasetSynthesizer] skill=%s sessions=%d generated=%d",
+            skill_name,
+            len(sessions),
+            len(datasets),
+        )
+        return datasets
+
     def _candidate_validation_feedback(
         self,
         job_id: str,
@@ -246,35 +284,20 @@ class EvolveServer(EvolveEngineMixin):
                 if isinstance(replay.get("decision_policy"), dict)
                 else {}
             )
-            checklist_results = (
-                replay.get("checklist_results")
-                if isinstance(replay.get("checklist_results"), dict)
-                else {}
-            )
-            candidate = (
-                checklist_results.get("candidate")
-                if isinstance(checklist_results.get("candidate"), dict)
-                else {}
-            )
             compact_results.append(
                 {
                     "validator": str(result.get("user_alias") or ""),
                     "decision": str(
                         result.get("decision") or "inconclusive"
                     ),
-                    "score": result.get("score"),
-                    "baseline_score": replay.get("baseline_mean"),
-                    "coverage_gain": policy.get("coverage_gain"),
-                    "efficiency_score": policy.get("efficiency_score"),
+                    "metric_changes": policy.get("metric_changes") or {},
+                    "improved_metrics": list(
+                        policy.get("improved_metrics") or []
+                    ),
+                    "regressed_metrics": list(
+                        policy.get("regressed_metrics") or []
+                    ),
                     "reason": str(result.get("reason") or "")[:1_000],
-                    "reason_codes": list(policy.get("reason_codes") or []),
-                    "failed_candidate_items": [
-                        str(item.get("id") or "")
-                        for item in candidate.get("items") or []
-                        if isinstance(item, dict)
-                        and not item.get("passed")
-                        and str(item.get("id") or "")
-                    ],
                 }
             )
         return {
@@ -292,9 +315,9 @@ class EvolveServer(EvolveEngineMixin):
             or {},
             "validator_results": compact_results,
             "revision_guidance": (
-                "Preserve passing behavior. Revise the candidate only where "
-                "validator evidence shows a failed checklist item or a "
-                "missing objective gain; do not repeat the same candidate."
+                "Preserve existing behavior. Revise the candidate where True "
+                "Replay shows an increased metric or no objective gain; do not "
+                "repeat the same candidate."
             ),
         }
 
@@ -340,11 +363,11 @@ class EvolveServer(EvolveEngineMixin):
         store = self._new_evidence_store()
         await self._call_storage(store.mark_published, evidence_key, job_id)
 
-    def _load_published_checklist_context(
+    def _load_published_replay_context(
         self,
         skill_name: str,
     ) -> Optional[dict[str, Any]]:
-        """Load the current published checklist and replay cases for a merge."""
+        """Load replay cases from the current published version for a merge."""
         version = int(self._id_registry.get_version(skill_name) or 0)
         if version <= 0:
             return None
@@ -387,30 +410,18 @@ class EvolveServer(EvolveEngineMixin):
             and isinstance(context.get("job"), dict)
             else {}
         )
-        checklist = (
-            job.get("checklist")
-            if isinstance(job.get("checklist"), dict)
-            else {}
-        )
-        if not checklist and job:
-            checklist = compile_common_checklist(
-                action=str(job.get("proposed_action") or ""),
-                evidence_classification=job.get("evidence_classification"),
-                session_evidence=job.get("session_evidence"),
-                replay_cases=job.get("replay_cases"),
-            )
-        if not checklist:
+        replay_cases = [
+            dict(case)
+            for case in job.get("replay_cases") or []
+            if isinstance(case, dict)
+        ]
+        if not replay_cases:
             return None
         return {
             "skill_name": skill_name,
             "version": version,
             "job_id": str((context or {}).get("job_id") or job.get("job_id") or ""),
-            "checklist": checklist,
-            "replay_cases": [
-                dict(case)
-                for case in job.get("replay_cases") or []
-                if isinstance(case, dict)
-            ],
+            "replay_cases": replay_cases,
         }
 
     def _load_remote_skills(self) -> dict[str, dict[str, Any]]:
@@ -854,66 +865,6 @@ class EvolveServer(EvolveEngineMixin):
             details.append(detail)
         return details
 
-    def _empty_skill_verifier_summary(self) -> dict[str, Any]:
-        return {
-            "enabled": bool(self.config.use_skill_verifier),
-            "verified_skills": 0,
-            "accepted": 0,
-            "rejected": 0,
-            "mean_score": None,
-            "min_score": None,
-            "max_score": None,
-        }
-
-    def _collect_skill_verifier_summary(self, records: list[dict[str, Any]]) -> dict[str, Any]:
-        summary = self._empty_skill_verifier_summary()
-        if not self.config.use_skill_verifier:
-            return summary
-
-        scores: list[float] = []
-        for record in records:
-            verification = record.get("verification")
-            if not isinstance(verification, dict) or not verification.get("enabled"):
-                continue
-            summary["verified_skills"] += 1
-            if verification.get("accepted"):
-                summary["accepted"] += 1
-            else:
-                summary["rejected"] += 1
-            score = verification.get("score")
-            if isinstance(score, (int, float)) and not isinstance(score, bool):
-                scores.append(float(score))
-
-        if scores:
-            summary["mean_score"] = round(sum(scores) / len(scores), 3)
-            summary["min_score"] = round(min(scores), 3)
-            summary["max_score"] = round(max(scores), 3)
-        return summary
-
-    def _empty_skill_dedup_summary(self) -> dict[str, Any]:
-        return {
-            "enabled": bool(self.config.use_skill_dedup),
-            "checked_skills": 0,
-            "redundant": 0,
-            "distinct": 0,
-        }
-
-    def _collect_skill_dedup_summary(self, records: list[dict[str, Any]]) -> dict[str, Any]:
-        summary = self._empty_skill_dedup_summary()
-        if not self.config.use_skill_dedup:
-            return summary
-
-        for record in records:
-            dedup = record.get("dedup")
-            if not isinstance(dedup, dict) or not dedup.get("enabled"):
-                continue
-            summary["checked_skills"] += 1
-            if dedup.get("is_redundant"):
-                summary["redundant"] += 1
-            else:
-                summary["distinct"] += 1
-        return summary
-
     def _empty_validation_publish_summary(self) -> dict[str, Any]:
         return {
             "publish_mode": self.config.publish_mode,
@@ -1134,8 +1085,7 @@ class EvolveServer(EvolveEngineMixin):
         evidence_key: str = "",
         evolution_context: Optional[dict[str, Any]] = None,
         replay_windows: Optional[dict[str, list[dict[str, Any]]]] = None,
-        dedup: Optional[dict[str, Any]] = None,
-        inherited_checklists: Optional[list[dict[str, Any]]] = None,
+        test_datasets: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
         name = str(skill.get("name", "") or "")
         skill_id = self._id_registry.get_or_create(name)
@@ -1197,23 +1147,43 @@ class EvolveServer(EvolveEngineMixin):
             if str(session.get("session_id") or "").strip()
         ]
         current_evidence = self._build_validation_evidence(sessions)
-        windows = replay_windows or {
-            "recent": self._build_replay_cases(sessions),
-            "historical": [],
-        }
         normalized_windows: dict[str, list[dict[str, Any]]] = {}
-        for window in ("recent", "historical"):
-            cases: list[dict[str, Any]] = []
-            for raw in windows.get(window) or []:
-                if not isinstance(raw, dict):
-                    continue
-                case = dict(raw)
-                case["evidence_window"] = window
-                cases.append(case)
-            normalized_windows[window] = cases
-        replay_cases = (
-            normalized_windows["recent"] + normalized_windows["historical"]
-        )
+        synthesized = [
+            dict(item)
+            for item in (test_datasets or [])
+            if isinstance(item, dict) and item.get("query")
+        ]
+        if synthesized:
+            normalized_windows = {"recent": [], "historical": []}
+            for dataset in synthesized:
+                case = dataset_to_replay_case(dataset)
+                window = str(case.get("evidence_window") or "recent")
+                if window not in normalized_windows:
+                    window = "recent"
+                    case["evidence_window"] = window
+                normalized_windows[window].append(case)
+            replay_cases = (
+                normalized_windows["recent"]
+                + normalized_windows["historical"]
+            )
+        else:
+            windows = replay_windows or {
+                "recent": self._build_replay_cases(sessions),
+                "historical": [],
+            }
+            for window in ("recent", "historical"):
+                cases: list[dict[str, Any]] = []
+                for raw in windows.get(window) or []:
+                    if not isinstance(raw, dict):
+                        continue
+                    case = dict(raw)
+                    case["evidence_window"] = window
+                    cases.append(case)
+                normalized_windows[window] = cases
+            replay_cases = (
+                normalized_windows["recent"]
+                + normalized_windows["historical"]
+            )
         if not replay_cases:
             replay_cases = self._build_replay_cases(sessions)
             for case in replay_cases:
@@ -1235,6 +1205,45 @@ class EvolveServer(EvolveEngineMixin):
         )
         revision = int(previous.get("candidate_revision") or 0) + 1
         now = datetime.now(timezone.utc).isoformat()
+        progressive_max_interactions = max(
+            [
+                (
+                    len(dataset.get("checklist") or [])
+                    + max(
+                        1,
+                        int(
+                            (
+                                dataset.get("progressive_disclosure")
+                                if isinstance(
+                                    dataset.get("progressive_disclosure"),
+                                    dict,
+                                )
+                                else {}
+                            ).get("batch_size")
+                            or self.config.dataset_disclosure_batch_size
+                        ),
+                    )
+                    - 1
+                )
+                // max(
+                    1,
+                    int(
+                        (
+                            dataset.get("progressive_disclosure")
+                            if isinstance(
+                                dataset.get("progressive_disclosure"),
+                                dict,
+                            )
+                            else {}
+                        ).get("batch_size")
+                        or self.config.dataset_disclosure_batch_size
+                    ),
+                )
+                + 1
+                for dataset in synthesized
+            ]
+            or [4]
+        )
         job = {
             "job_id": job_id,
             "status": "pending_validation",
@@ -1255,6 +1264,11 @@ class EvolveServer(EvolveEngineMixin):
             ),
             "session_ids": session_ids,
             "session_evidence": session_evidence,
+            "test_datasets": synthesized,
+            "max_interactions": min(
+                20,
+                max(1, progressive_max_interactions),
+            ),
             "replay_cases": replay_cases,
             "replay_case_windows": normalized_windows,
             "evidence_key": str(evidence_key or name),
@@ -1263,7 +1277,6 @@ class EvolveServer(EvolveEngineMixin):
             + (1 if previous else 0),
             "min_results": self.config.validation_required_results,
             "min_approvals": self.config.validation_required_approvals,
-            "min_score": self.config.validation_min_mean_score,
             "max_rejections": self.config.validation_max_rejections,
         }
         candidate_bundle = candidate_skill_bundle(skill)
@@ -1277,26 +1290,20 @@ class EvolveServer(EvolveEngineMixin):
                 "bundle_static_v1",
                 "bundle_true_replay_v1",
             ]
-        job["checklist"] = compile_common_checklist(
-            action=action_type,
-            evidence_classification=job["evidence_classification"],
-            session_evidence=job["session_evidence"],
-            replay_cases=job["replay_cases"],
-            dedup=dedup,
-            inherited_checklists=inherited_checklists,
-        )
-        if inherited_checklists:
-            job["inherited_checklists"] = [
-                {
-                    "skill_name": context.get("skill_name"),
-                    "version": context.get("version"),
-                    "job_id": context.get("job_id"),
-                }
-                for context in inherited_checklists
-            ]
         if previous:
             self._validation_store.reset_job_artifacts(job_id)
         self._validation_store.save_job(job)
+        if synthesized:
+            SynthesizedDatasetStore(
+                self._skill_bucket,
+                prefix=self._skill_prefix,
+            ).save_generation(
+                skill_name=name,
+                generation_id=job_id,
+                datasets=synthesized,
+                source_session_ids=session_ids,
+                candidate_revision=revision,
+            )
         logger.info(
             "[EvolveServer] %s validation job %s for skill '%s' revision=%d",
             "updated" if previous else "queued",
@@ -1324,6 +1331,10 @@ class EvolveServer(EvolveEngineMixin):
             "validation_job_id": job_id,
             "candidate_revision": revision,
             "coalesced": bool(previous),
+            "test_dataset_count": len(synthesized),
+            "test_dataset_ids": [
+                str(item.get("dataset_id") or "") for item in synthesized
+            ],
         }
 
     async def _finalize_validation_jobs(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -1382,7 +1393,6 @@ class EvolveServer(EvolveEngineMixin):
             accepted = 0
             rejected = 0
             inconclusive = 0
-            scores: list[float] = []
             for result in results:
                 result_decision = str(result.get("decision") or "").lower()
                 if result.get("accepted") is True or result_decision == "accept":
@@ -1391,16 +1401,10 @@ class EvolveServer(EvolveEngineMixin):
                     rejected += 1
                 else:
                     inconclusive += 1
-                score = result.get("score")
-                if isinstance(score, (int, float)) and not isinstance(score, bool):
-                    scores.append(float(score))
 
-            mean_score = round(sum(scores) / len(scores), 3) if scores else None
             publish_ready = (
                 len(results) >= self.config.validation_required_results
                 and accepted >= self.config.validation_required_approvals
-                and mean_score is not None
-                and mean_score >= self.config.validation_min_mean_score
             )
             reject_ready = rejected >= self.config.validation_max_rejections
 
@@ -1416,7 +1420,6 @@ class EvolveServer(EvolveEngineMixin):
                             "accepted_count": accepted,
                             "rejected_count": rejected,
                             "inconclusive_count": inconclusive,
-                            "mean_score": mean_score,
                         },
                     )
                     summary["rejected"] += 1
@@ -1427,7 +1430,11 @@ class EvolveServer(EvolveEngineMixin):
                 published_version = self._id_registry.get_version(skill_name)
                 best_result = max(
                     results,
-                    key=lambda item: float(item.get("score") or 0.0),
+                    key=lambda item: str(
+                        item.get("created_at")
+                        or item.get("evaluated_at")
+                        or ""
+                    ),
                 )
                 self._validation_store.save_decision(
                     job_id,
@@ -1440,7 +1447,6 @@ class EvolveServer(EvolveEngineMixin):
                         "accepted_count": accepted,
                         "rejected_count": rejected,
                         "inconclusive_count": inconclusive,
-                        "mean_score": mean_score,
                         "evaluation": best_result,
                     },
                 )
@@ -1470,7 +1476,6 @@ class EvolveServer(EvolveEngineMixin):
                             "accepted_count": accepted,
                             "rejected_count": rejected,
                             "inconclusive_count": inconclusive,
-                            "mean_score": mean_score,
                         },
                     }
                 )
@@ -1486,7 +1491,6 @@ class EvolveServer(EvolveEngineMixin):
                         "accepted_count": accepted,
                         "rejected_count": rejected,
                         "inconclusive_count": inconclusive,
-                        "mean_score": mean_score,
                     },
                 )
                 summary["rejected"] += 1
@@ -1507,7 +1511,6 @@ class EvolveServer(EvolveEngineMixin):
                             "result_count": len(results),
                             "accepted_count": accepted,
                             "rejected_count": rejected,
-                            "mean_score": mean_score,
                         },
                     }
                 )
@@ -1524,10 +1527,8 @@ class EvolveServer(EvolveEngineMixin):
                 "accepted_count": accepted,
                 "rejected_count": rejected,
                 "inconclusive_count": inconclusive,
-                "mean_score": mean_score,
                 "required_results": self.config.validation_required_results,
                 "required_approvals": self.config.validation_required_approvals,
-                "min_mean_score": self.config.validation_min_mean_score,
             }
             escalation_reason = ""
             if len(results) >= self.config.validation_required_results:
@@ -1580,30 +1581,333 @@ class EvolveServer(EvolveEngineMixin):
     # quorum wait.                                                        #
     # ------------------------------------------------------------------ #
 
-    def _list_validation_candidates(self) -> list[dict[str, Any]]:
-        """Open validation jobs (awaiting a decision) as a compact review view."""
-        candidates: list[dict[str, Any]] = []
-        for job in self._validation_store.list_jobs():
-            job_id = str(job.get("job_id", "") or "")
-            if not job_id or self._validation_store.load_decision(job_id):
-                continue
-            candidate = job.get("candidate_skill") if isinstance(job.get("candidate_skill"), dict) else {}
-            replay_cases = [c for c in (job.get("replay_cases") or []) if isinstance(c, dict)]
-            candidates.append(
-                {
-                    "job_id": job_id,
-                    "skill_name": str(candidate.get("name") or job.get("candidate_skill_name") or ""),
-                    "skill_id": str(candidate.get("skill_id") or job.get("candidate_skill_id") or ""),
-                    "description": str(candidate.get("description") or ""),
-                    "proposed_action": str(job.get("proposed_action") or DecisionAction.CREATE),
-                    "rationale": str(job.get("rationale") or ""),
-                    "session_ids": list(job.get("session_ids") or []),
-                    "replay_case_count": len(replay_cases),
-                    "min_score": float(job.get("min_score", self.config.validation_min_mean_score) or 0.75),
-                    "created_at": str(job.get("created_at") or ""),
-                    "content_preview": str(candidate.get("content") or "")[:600],
-                }
+    def _validation_candidate_payload(
+        self,
+        job: dict[str, Any],
+        *,
+        evaluation: Optional[dict[str, Any]] = None,
+        decision: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Project a validation job, result, and decision for read APIs."""
+        job_id = str(job.get("job_id", "") or "")
+        candidate = (
+            job.get("candidate_skill")
+            if isinstance(job.get("candidate_skill"), dict)
+            else {}
+        )
+        decision = (
+            self._validation_store.load_decision(job_id) or {}
+            if decision is None
+            else decision
+        )
+        should_load_latest_result = evaluation is None
+        if should_load_latest_result:
+            evaluation = (
+                self._validation_store.load_best_evaluation(job_id, job) or {}
             )
+        replay = (
+            evaluation.get("replay")
+            if isinstance(evaluation.get("replay"), dict)
+            else evaluation.get("replay_summary")
+            if isinstance(evaluation.get("replay_summary"), dict)
+            else {}
+        )
+        raw_efficiency = (
+            replay.get("efficiency")
+            if isinstance(replay.get("efficiency"), dict)
+            else {}
+        )
+        raw_dimensions = (
+            raw_efficiency.get("dimensions")
+            if isinstance(raw_efficiency.get("dimensions"), dict)
+            else {}
+        )
+        metric_names = (
+            "interaction_turns",
+            "tool_call_count",
+            "total_tokens",
+        )
+        dimensions: dict[str, dict[str, Any]] = {}
+        baseline_metrics: dict[str, int] = {}
+        candidate_metrics: dict[str, int] = {}
+        for name in metric_names:
+            raw_metric = (
+                raw_dimensions.get(name)
+                if isinstance(raw_dimensions.get(name), dict)
+                else {}
+            )
+            baseline_value = int(
+                raw_metric.get("baseline")
+                if raw_metric.get("baseline") is not None
+                else (raw_efficiency.get("baseline") or {}).get(name)
+                or 0
+            )
+            candidate_value = int(
+                raw_metric.get("candidate")
+                if raw_metric.get("candidate") is not None
+                else (raw_efficiency.get("candidate") or {}).get(name)
+                or 0
+            )
+            delta = baseline_value - candidate_value
+            baseline_metrics[name] = baseline_value
+            candidate_metrics[name] = candidate_value
+            dimensions[name] = {
+                "baseline": baseline_value,
+                "candidate": candidate_value,
+                "delta": delta,
+                "reduction_ratio": round(
+                    max(-1.0, min(1.0, delta / max(1, baseline_value))),
+                    4,
+                ),
+                "winner": (
+                    "candidate"
+                    if delta > 0
+                    else "baseline"
+                    if delta < 0
+                    else "tie"
+                ),
+            }
+        sanitized_efficiency = {
+            "baseline": baseline_metrics,
+            "candidate": candidate_metrics,
+            "dimensions": dimensions,
+        }
+        normalized_cases: list[dict[str, Any]] = []
+        for raw_case in replay.get("cases") or []:
+            if not isinstance(raw_case, dict):
+                continue
+            normalized_case: dict[str, Any] = {}
+            for branch_name in ("baseline", "candidate"):
+                branch = (
+                    raw_case.get(branch_name)
+                    if isinstance(raw_case.get(branch_name), dict)
+                    else {}
+                )
+                normalized_case[branch_name] = {
+                    "session_id": str(branch.get("session_id") or ""),
+                    "turn_num": int(branch.get("turn_num") or 0),
+                    "instruction": str(branch.get("instruction") or ""),
+                    "response": str(
+                        branch.get("response")
+                        or branch.get("final_response")
+                        or branch.get("response_text")
+                        or branch.get("trajectory")
+                        or branch.get("rationale")
+                        or ""
+                    ),
+                    "error": str(branch.get("error") or ""),
+                    "interaction_turns": int(
+                        branch.get("interaction_turns") or 0
+                    ),
+                    "tool_call_count": int(
+                        branch.get("tool_call_count") or 0
+                    ),
+                    "total_tokens": int(branch.get("total_tokens") or 0),
+                    "interactions": branch.get("interactions") or [],
+                    "checklist_report": branch.get("checklist_report") or {},
+                }
+            normalized_cases.append(normalized_case)
+        branch_checklists = (
+            replay.get("checklist")
+            if isinstance(replay.get("checklist"), dict)
+            else {
+                branch: aggregate_case_checklists(
+                    normalized_cases,
+                    branch=branch,
+                )
+                for branch in ("baseline", "candidate")
+            }
+        )
+        metric_policy = progressive_replay_decision(
+            efficiency=sanitized_efficiency,
+            baseline_checklist=branch_checklists.get("baseline") or {},
+            candidate_checklist=branch_checklists.get("candidate") or {},
+        )
+        sanitized_replay = {
+            "status": str(replay.get("status") or "evaluated"),
+            "mode": str(replay.get("mode") or "true_replay"),
+            "accepted": bool(metric_policy.get("accepted")),
+            "verdict": str(metric_policy.get("verdict") or "inconclusive"),
+            "no_regression": bool(metric_policy.get("no_regression")),
+            "case_count": int(
+                replay.get("case_count") or len(normalized_cases)
+            ),
+            "cases": normalized_cases,
+            "efficiency": sanitized_efficiency,
+            "checklist": branch_checklists,
+            "decision_policy": metric_policy,
+            "reason": str(metric_policy.get("verdict") or "inconclusive"),
+            "error": replay.get("error"),
+        }
+        evaluation_payload = {
+            "validator_mode": str(
+                evaluation.get("validator_mode") or "true_replay"
+            ),
+            "decision": sanitized_replay["verdict"],
+            "accepted": sanitized_replay["accepted"],
+            "reason": sanitized_replay["reason"],
+            "created_at": str(evaluation.get("created_at") or ""),
+            "replay": sanitized_replay,
+        } if replay else {}
+        review_status = str(decision.get("status") or "").strip()
+        if not review_status:
+            review_status = sanitized_replay["verdict"] if replay else "open"
+        replay_cases = [
+            case
+            for case in (job.get("replay_cases") or [])
+            if isinstance(case, dict)
+        ]
+        test_datasets = [
+            dataset
+            for dataset in (job.get("test_datasets") or [])
+            if isinstance(dataset, dict)
+        ]
+        sanitized_decision = {
+            key: decision.get(key)
+            for key in (
+                "status",
+                "accepted",
+                "reason",
+                "decided_at",
+                "job_id",
+                "skill_name",
+                "version",
+                "mode",
+                "reviewer",
+            )
+            if decision.get(key) is not None
+        }
+        payload = {
+            **job,
+            "job_id": job_id,
+            "skill_name": str(
+                candidate.get("name")
+                or job.get("candidate_skill_name")
+                or ""
+            ),
+            "skill_id": str(
+                candidate.get("skill_id")
+                or job.get("candidate_skill_id")
+                or ""
+            ),
+            "description": str(candidate.get("description") or ""),
+            "proposed_action": str(
+                job.get("proposed_action") or DecisionAction.CREATE
+            ),
+            "rationale": str(job.get("rationale") or ""),
+            "session_ids": list(job.get("session_ids") or []),
+            "replay_case_count": int(
+                replay.get("case_count") or len(replay_cases)
+            ),
+            "test_dataset_count": len(test_datasets),
+            "test_dataset_ids": [
+                str(item.get("dataset_id") or "") for item in test_datasets
+            ],
+            "created_at": str(job.get("created_at") or ""),
+            "content_preview": str(candidate.get("content") or "")[:600],
+            "review_status": review_status,
+            "decision": sanitized_decision,
+            "decided_at": str(decision.get("decided_at") or ""),
+            "evaluation": evaluation_payload,
+            "replay_verdict": sanitized_replay["verdict"] if replay else "",
+            "efficiency": sanitized_efficiency if replay else {},
+        }
+        for key in (
+            "min_score",
+            "checklist",
+            "inherited_checklists",
+            "evolution_context",
+            "session_evidence",
+            "replay_cases",
+            "test_datasets",
+            "verification",
+            "verify_score",
+            "replay_score",
+            "baseline_score",
+            "threshold",
+        ):
+            payload.pop(key, None)
+        return payload
+
+    def _list_validation_candidates(
+        self,
+        scope: str = "open",
+    ) -> list[dict[str, Any]]:
+        """Validation jobs with automatic replay evidence projected inline."""
+        normalized = str(scope or "open").strip().lower()
+        if normalized in {"history", "closed", "decided"}:
+            normalized = "processed"
+        if normalized not in {"open", "processed", "all"}:
+            normalized = "open"
+        candidates: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        if normalized in {"processed", "all"}:
+            for record in self._validation_store.list_decision_records(
+                reconcile=False,
+            ):
+                job = (
+                    record.get("job")
+                    if isinstance(record.get("job"), dict)
+                    else {}
+                )
+                job_id = str(
+                    job.get("job_id") or record.get("job_id") or ""
+                )
+                if not job_id:
+                    continue
+                job = {**job, "job_id": job_id}
+                candidates.append(
+                    self._validation_candidate_payload(
+                        job,
+                        evaluation=(
+                            record.get("evaluation")
+                            if isinstance(record.get("evaluation"), dict)
+                            else {}
+                        ),
+                        decision=(
+                            record.get("decision")
+                            if isinstance(record.get("decision"), dict)
+                            else {}
+                        ),
+                    )
+                )
+                seen.add(job_id)
+        if normalized in {"open", "all"}:
+            for job in self._validation_store.list_open_jobs():
+                job_id = str(job.get("job_id", "") or "")
+                if not job_id or job_id in seen:
+                    continue
+                evaluation = (
+                    self._validation_store.load_fresh_evaluation(
+                        job_id,
+                        job,
+                    )
+                    or {}
+                )
+                if not evaluation:
+                    revision = max(
+                        1,
+                        int(job.get("candidate_revision") or 1),
+                    )
+                    results = [
+                        result
+                        for result in self._validation_store.list_results(
+                            job_id
+                        )
+                        if max(
+                            1,
+                            int(result.get("candidate_revision") or 1),
+                        )
+                        == revision
+                    ]
+                    evaluation = results[-1] if results else {}
+                candidates.append(
+                    self._validation_candidate_payload(
+                        job,
+                        evaluation=evaluation,
+                        decision={},
+                    )
+                )
         candidates.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
         return candidates
 
@@ -1611,9 +1915,6 @@ class EvolveServer(EvolveEngineMixin):
     def _aggregate_replay_windows(
         window_results: list[tuple[str, dict[str, Any]]],
         *,
-        checklist: dict[str, Any],
-        threshold: float,
-        tolerance: float,
         max_interactions: int,
     ) -> dict[str, Any]:
         if not window_results:
@@ -1625,8 +1926,6 @@ class EvolveServer(EvolveEngineMixin):
         ]
         if not evaluated:
             verdict = dict(window_results[0][1])
-            verdict.setdefault("score", None)
-            verdict.setdefault("baseline_mean", None)
             verdict.setdefault("no_regression", False)
             verdict.setdefault("accepted", False)
             verdict["window_results"] = {
@@ -1634,14 +1933,7 @@ class EvolveServer(EvolveEngineMixin):
             }
             return verdict
 
-        by_window = {window: verdict for window, verdict in evaluated}
-        recent = by_window.get("recent") or evaluated[0][1]
-        historical = by_window.get("historical")
         all_windows_evaluated = len(evaluated) == len(window_results)
-        recent_improved = bool(recent.get("accepted"))
-        historical_no_regression = (
-            True if historical is None else bool(historical.get("no_regression"))
-        )
 
         cases: list[dict[str, Any]] = []
         for window, verdict in evaluated:
@@ -1651,25 +1943,6 @@ class EvolveServer(EvolveEngineMixin):
                 case = dict(raw_case)
                 case["evidence_window"] = window
                 cases.append(case)
-        window_checklist_results = {
-            window: (
-                verdict.get("checklist_results")
-                if isinstance(verdict.get("checklist_results"), dict)
-                else {}
-            )
-            for window, verdict in evaluated
-        }
-        branch_results = {
-            branch: aggregate_branch_checklist_results(
-                checklist,
-                [
-                    result.get(branch) or {}
-                    for result in window_checklist_results.values()
-                    if isinstance(result.get(branch), dict)
-                ],
-            )
-            for branch in ("baseline", "candidate")
-        }
         efficiency_inputs = {"baseline": {}, "candidate": {}}
         for _, verdict in evaluated:
             report = (
@@ -1691,53 +1964,20 @@ class EvolveServer(EvolveEngineMixin):
                     efficiency_inputs[branch][key] = int(
                         efficiency_inputs[branch].get(key) or 0
                     ) + int(values.get(key) or 0)
-        weights = {
-            "interaction_turns": 0.60,
-            "tool_call_count": 0.25,
-            "total_tokens": 0.15,
+        from ...true_replay import compare_efficiency
+
+        efficiency = compare_efficiency(
+            efficiency_inputs["baseline"],
+            efficiency_inputs["candidate"],
+        )
+        branch_checklists = {
+            branch: aggregate_case_checklists(cases, branch=branch)
+            for branch in ("baseline", "candidate")
         }
-        dimensions = {}
-        for key, weight in weights.items():
-            baseline_value = int(efficiency_inputs["baseline"].get(key) or 0)
-            candidate_value = int(efficiency_inputs["candidate"].get(key) or 0)
-            delta = baseline_value - candidate_value
-            reduction = max(
-                -1.0,
-                min(1.0, delta / max(1, baseline_value)),
-            )
-            dimensions[key] = {
-                "baseline": baseline_value,
-                "candidate": candidate_value,
-                "delta": delta,
-                "reduction_ratio": round(reduction, 4),
-                "weight": weight,
-                "weighted_gain": round(reduction * weight, 4),
-                "winner": (
-                    "candidate"
-                    if delta > 0
-                    else "baseline"
-                    if delta < 0
-                    else "tie"
-                ),
-            }
-        efficiency = {
-            "baseline": efficiency_inputs["baseline"],
-            "candidate": efficiency_inputs["candidate"],
-            "dimensions": dimensions,
-            "weights": weights,
-            "score": round(
-                sum(
-                    float(value.get("weighted_gain") or 0.0)
-                    for value in dimensions.values()
-                ),
-                4,
-            ),
-        }
-        policy = objective_replay_decision(
-            checklist=checklist,
-            baseline=branch_results["baseline"],
-            candidate=branch_results["candidate"],
+        policy = progressive_replay_decision(
             efficiency=efficiency,
+            baseline_checklist=branch_checklists["baseline"],
+            candidate_checklist=branch_checklists["candidate"],
         )
         accepted = bool(policy.get("accepted")) and all_windows_evaluated
         verdict = str(policy.get("verdict") or "inconclusive")
@@ -1746,23 +1986,12 @@ class EvolveServer(EvolveEngineMixin):
         no_regression = (
             bool(policy.get("no_regression")) and all_windows_evaluated
         )
-        score = branch_results["candidate"]["pass_rate"]
-        baseline_mean = branch_results["baseline"]["pass_rate"]
         return {
             "status": "evaluated",
             "mode": "true_replay",
             "accepted": accepted,
             "verdict": verdict,
             "no_regression": no_regression,
-            "recent_improved": recent_improved,
-            "historical_no_regression": historical_no_regression,
-            "quality_ok": bool(policy.get("quality_gate"))
-            and historical_no_regression,
-            "score": score,
-            "baseline_mean": baseline_mean,
-            "delta": round(score - baseline_mean, 4),
-            "threshold": round(float(threshold), 3),
-            "tolerance": round(float(tolerance), 3),
             "max_interactions": max_interactions,
             "case_count": sum(
                 int(verdict.get("case_count") or 0)
@@ -1770,26 +1999,16 @@ class EvolveServer(EvolveEngineMixin):
             ),
             "cases": cases,
             "efficiency": efficiency,
-            "checklist": checklist,
-            "checklist_results": {
-                **branch_results,
-                "windows": window_checklist_results,
-            },
+            "checklist": branch_checklists,
             "decision_policy": {
                 **policy,
                 "accepted": accepted,
-                "historical_no_regression": historical_no_regression,
                 "all_windows_evaluated": all_windows_evaluated,
             },
             "window_results": {
                 window: verdict for window, verdict in window_results
             },
-            "reason": (
-                "recent window must improve while historical window must not regress; "
-                f"recent_improved={recent_improved}, "
-                f"historical_no_regression={historical_no_regression}, "
-                f"all_windows_evaluated={all_windows_evaluated}"
-            ),
+            "reason": verdict,
         }
 
     async def _run_candidate_replay(self, job: dict[str, Any]) -> dict[str, Any]:
@@ -1798,16 +2017,13 @@ class EvolveServer(EvolveEngineMixin):
         This is a **true replay**: it spins up two real Hermes agents in isolated,
         disposable sandboxes (both ``HOME`` and ``HERMES_HOME`` redirected into a
         throwaway temp dir) that differ only in whether the candidate skill is
-        injected, lets each run the full tool loop for real, then judges both
-        trajectories. Tool-oriented skills (which the old text replay
-        systematically scored 0.0) are now evaluated on what they actually *do*.
+        injected, and lets each run the full tool loop for real. The verdict
+        uses only interaction turns, tool calls, and total tokens.
 
         The heavy lifting runs in a subprocess because Hermes caches
         ``HERMES_HOME`` at import time, so it must be set before the interpreter
         imports the agent. We shell out to ``teamEvolver.true_replay
-        --json`` and parse its framed verdict, which already matches the shape
-        this method used to return (``score``/``baseline_mean``/``no_regression``/
-        ``accepted``/``cases``)."""
+        --json`` and parse its framed metric verdict."""
         candidate_skill = job.get("candidate_skill")
         if not isinstance(candidate_skill, dict) or not candidate_skill.get("name"):
             raise ValueError("validation job missing candidate_skill")
@@ -1822,8 +2038,6 @@ class EvolveServer(EvolveEngineMixin):
         if not replay_cases:
             raise ValueError("validation job has no replay_cases to replay")
 
-        threshold = round(float(job.get("min_score", self.config.validation_min_mean_score) or 0.75), 3)
-        tolerance = self.REPLAY_REGRESSION_TOLERANCE
         max_interactions = max(1, int(job.get("max_interactions") or 4))
         worker_python = (
             os.environ.get("SKILLGENE_REPLAY_PYTHON", "").strip()
@@ -1833,7 +2047,6 @@ class EvolveServer(EvolveEngineMixin):
         base_cmd = [
             worker_python, "-m", "teamEvolver.true_replay",
             "--job-id", job_id, "--json",
-            "--min-score", str(threshold), "--tolerance", str(tolerance),
             "--timeout", str(self.TRUE_REPLAY_TIMEOUT),
             "--max-interactions", str(max_interactions),
         ]
@@ -1868,16 +2081,7 @@ class EvolveServer(EvolveEngineMixin):
             payload = out[begin + len("TRUE_REPLAY_JSON_BEGIN"): end].strip()
             return json.loads(payload)
 
-        selected: list[tuple[str, int]] = []
-        seen_windows: set[str] = set()
-        for index, case in enumerate(replay_cases):
-            window = str(case.get("evidence_window") or "recent")
-            if window not in {"recent", "historical"}:
-                window = "recent"
-            if window in seen_windows:
-                continue
-            selected.append((window, index))
-            seen_windows.add(window)
+        selected = select_replay_cases(replay_cases)
         window_results: list[tuple[str, dict[str, Any]]] = []
         for window, case_index in selected:
             try:
@@ -1889,18 +2093,6 @@ class EvolveServer(EvolveEngineMixin):
             window_results.append((window, verdict))
         return self._aggregate_replay_windows(
             window_results,
-            checklist=(
-                job.get("checklist")
-                if isinstance(job.get("checklist"), dict)
-                else compile_common_checklist(
-                    action=str(job.get("proposed_action") or ""),
-                    evidence_classification=job.get("evidence_classification"),
-                    session_evidence=job.get("session_evidence"),
-                    replay_cases=job.get("replay_cases"),
-                )
-            ),
-            threshold=threshold,
-            tolerance=tolerance,
             max_interactions=max_interactions,
         )
 
@@ -1915,10 +2107,9 @@ class EvolveServer(EvolveEngineMixin):
         as-is instead of being re-published.
 
         ``mode``:
-          * ``"auto"`` — publish only if the replay shows no regression
-            (candidate mean within tolerance of baseline). The score gates.
-          * ``"force"`` — always publish; the replay still runs and its score is
-            reported for reference, but a reviewer has decided to ship it.
+          * ``"auto"`` — interaction turns decide first. When turns tie,
+            tool calls and total tokens decide.
+          * ``"force"`` — always publish after replay; metrics remain visible.
         """
         mode = "force" if str(mode).lower() == "force" else "auto"
         async with self._get_run_lock():
@@ -1941,38 +2132,57 @@ class EvolveServer(EvolveEngineMixin):
 
             publish = True if mode == "force" else bool(replay.get("accepted"))
             candidate_revision = max(1, int(job.get("candidate_revision") or 1))
+            policy = (
+                replay.get("decision_policy")
+                if isinstance(replay.get("decision_policy"), dict)
+                else {}
+            )
+            metric_changes = (
+                policy.get("metric_changes")
+                if isinstance(policy.get("metric_changes"), dict)
+                else {}
+            )
 
             result_record = {
                 "validator_mode": f"reviewer_replay:{mode}",
                 "candidate_revision": candidate_revision,
                 "accepted": publish,
-                "score": replay["score"],
-                "baseline_mean": replay["baseline_mean"],
-                "threshold": replay["threshold"],
-                "reason": (
-                    f"reviewer replay over {replay['case_count']} case(s): "
-                    f"candidate={replay['score']} baseline={replay['baseline_mean']} "
-                    f"threshold={replay['threshold']} mode={mode}"
+                "decision": "accept" if publish else str(
+                    replay.get("verdict") or "inconclusive"
                 ),
+                "reason": ", ".join(
+                    f"{name}: {item.get('baseline', 0)} -> "
+                    f"{item.get('candidate', 0)}"
+                    for name, item in metric_changes.items()
+                    if isinstance(item, dict)
+                ),
+                "replay_summary": replay,
             }
             await self._call_storage(
                 self._validation_store.save_result, job_id, reviewer, result_record
             )
 
             if not publish:
+                verdict = str(replay.get("verdict") or "inconclusive")
+                if verdict != "reject":
+                    return {
+                        "status": "inconclusive",
+                        "job_id": job_id,
+                        "mode": mode,
+                        "replay": replay,
+                    }
                 decision = {
                     "status": "rejected",
-                    "reason": (
-                        "reviewer replay showed a regression vs. baseline "
-                        f"(candidate={replay['score']} < baseline={replay['baseline_mean']} "
-                        f"- tolerance={replay['tolerance']})"
+                    "reason": str(
+                        policy.get("decision_basis")
+                        or "True Replay metrics rejected the candidate"
                     ),
                     "result_count": 1,
                     "accepted_count": 0,
                     "rejected_count": 1,
-                    "mean_score": replay["score"],
                     "reviewed_by": reviewer,
                     "mode": mode,
+                    "evaluation": result_record,
                 }
                 await self._call_storage(self._validation_store.save_decision, job_id, decision)
                 return {
@@ -1998,9 +2208,9 @@ class EvolveServer(EvolveEngineMixin):
                 "result_count": 1,
                 "accepted_count": 1,
                 "rejected_count": 0,
-                "mean_score": replay["score"],
                 "reviewed_by": reviewer,
                 "mode": mode,
+                "evaluation": result_record,
             }
             await self._call_storage(self._validation_store.save_decision, job_id, decision)
             if uploaded:
@@ -2021,35 +2231,8 @@ class EvolveServer(EvolveEngineMixin):
                 "decision": decision,
             }
 
-    async def _run_skill_verifier(
-        self,
-        skill: dict[str, Any],
-        action_type: str,
-        sessions: list[dict[str, Any]],
-        *,
-        current_skill: Optional[dict[str, Any]] = None,
-        evidence_classification: Optional[dict[str, Any]] = None,
-    ) -> dict[str, Any]:
-        if not self.config.use_skill_verifier:
-            return {"enabled": False}
-        return await verify_skill_candidate(
-            self._llm,
-            skill,
-            sessions,
-            action_type,
-            current_skill=current_skill,
-            evidence_classification=evidence_classification,
-            min_score=self.config.skill_verifier_min_score,
-        )
-
     # ------------------------------------------------------------------ #
-    # Non-binding candidate evaluation (verify + A/B replay, no publish). #
-    #                                                                     #
-    # The dashboard shows scores BEFORE a human decides to publish. This  #
-    # runs the exact same two gates the automatic pipeline uses — the     #
-    # skill verifier and the A/B replay — but stops short of writing a    #
-    # decision or uploading anything. The scores are cached so repeated   #
-    # dashboard polls do not re-run the (slow, costly) LLM replay.        #
+    # Non-binding candidate True Replay evaluation (no publish).          #
     # ------------------------------------------------------------------ #
 
     def _schedule_candidate_evaluation(self, job_id: str) -> None:
@@ -2080,9 +2263,11 @@ class EvolveServer(EvolveEngineMixin):
                     logger.info("[EvolveServer] auto true-replay evaluation started for %s", job_id)
                     result = await self.evaluate_candidate(job_id, refresh=True)
                     logger.info(
-                        "[EvolveServer] auto true-replay evaluation done for %s: status=%s score=%s",
-                        job_id, result.get("status"),
-                        (result.get("replay") or {}).get("score"),
+                        "[EvolveServer] auto true-replay evaluation done for %s: "
+                        "status=%s verdict=%s",
+                        job_id,
+                        result.get("status"),
+                        (result.get("replay") or {}).get("verdict"),
                     )
                     if job_id not in self._eval_refresh_pending:
                         break
@@ -2100,7 +2285,7 @@ class EvolveServer(EvolveEngineMixin):
     async def evaluate_candidate(
         self, job_id: str, *, refresh: bool = False
     ) -> dict[str, Any]:
-        """Score a candidate with verify + A/B replay WITHOUT publishing it.
+        """Compare a candidate using True Replay execution metrics only.
 
         Returns the cached evaluation when one exists (unless ``refresh`` is
         set), so the dashboard can poll cheaply. The verdict is advisory only:
@@ -2121,7 +2306,6 @@ class EvolveServer(EvolveEngineMixin):
 
         candidate_skill = job.get("candidate_skill") if isinstance(job.get("candidate_skill"), dict) else {}
         action_type = str(job.get("proposed_action", DecisionAction.CREATE) or DecisionAction.CREATE)
-        current_skill = job.get("current_skill") if isinstance(job.get("current_skill"), dict) else None
 
         # A/B replay (baseline vs. candidate over the originating cases).
         try:
@@ -2129,23 +2313,7 @@ class EvolveServer(EvolveEngineMixin):
         except ValueError as exc:
             replay = {"error": str(exc)}
 
-        # Rebuild the persisted evidence so the publication gate evaluates the
-        # candidate's causal basis instead of scoring the text in isolation.
-        validation_sessions = self._restore_validation_sessions(job)
-        verification = await self._run_skill_verifier(
-            candidate_skill,
-            action_type,
-            validation_sessions,
-            current_skill=current_skill,
-            evidence_classification=job.get("evidence_classification"),
-        )
-
-        replay_score = replay.get("score") if isinstance(replay, dict) else None
-        verify_score = verification.get("score") if isinstance(verification, dict) else None
-        # Advisory "would auto-publish?" flag: mirrors the auto-mode gate
-        # (replay shows no regression) AND the verifier's own acceptance.
         replay_ok = bool(isinstance(replay, dict) and replay.get("accepted"))
-        verify_ok = (not verification.get("enabled")) or bool(verification.get("accepted"))
         latest = await self._call_storage(self._validation_store.load_job, job_id)
         latest_revision = (
             max(1, int(latest.get("candidate_revision") or 1))
@@ -2166,10 +2334,7 @@ class EvolveServer(EvolveEngineMixin):
             "skill_name": str(candidate_skill.get("name") or job.get("candidate_skill_name") or ""),
             "proposed_action": action_type,
             "replay": replay,
-            "verification": verification,
-            "replay_score": replay_score,
-            "verify_score": verify_score,
-            "recommended_publish": replay_ok and verify_ok,
+            "recommended_publish": replay_ok,
             "cached": False,
         }
         await self._call_storage(self._validation_store.save_evaluation, job_id, evaluation)
@@ -2220,69 +2385,6 @@ class EvolveServer(EvolveEngineMixin):
             "api_key_present": bool(getattr(self.config, "viking_api_key", "")),
             "reachable": bool(reachable),
         }
-
-    def _build_existing_skill_metadata_for_dedup(self, exclude_name: str) -> list[dict[str, Any]]:
-        """Assemble lightweight metadata (no content) for the dedup shortlist."""
-        manifest = self._load_remote_skills()
-        existing: list[dict[str, Any]] = []
-        for record in manifest.values():
-            if not isinstance(record, dict):
-                continue
-            name = str(record.get("name", "") or "").strip()
-            if not name or name == exclude_name:
-                continue
-            existing.append(
-                {
-                    "name": name,
-                    "description": str(record.get("description", "") or ""),
-                    "category": str(record.get("category", "general") or "general"),
-                }
-            )
-        return existing
-
-    def _fetch_skill_contents(self, names: list[str]) -> dict[str, str]:
-        """Fetch full content for a small set of skills (the dedup shortlist)."""
-        contents: dict[str, str] = {}
-        for name in names:
-            md = self._fetch_skill(name)
-            if not md:
-                continue
-            parsed = parse_skill_content(name, md)
-            if isinstance(parsed, dict):
-                contents[name] = str(parsed.get("content", "") or "")
-        return contents
-
-    async def _run_skill_dedup(
-        self,
-        skill: dict[str, Any],
-        action_type: str,
-    ) -> dict[str, Any]:
-        """Semantic redundancy gate; only applies to brand-new skills.
-
-        Uses progressive disclosure: stage 1 shortlists by metadata only, then
-        stage 2 fetches full content for just the shortlist, keeping prompt
-        context bounded even for large libraries.
-        """
-        if not self.config.use_skill_dedup or action_type != DecisionAction.CREATE:
-            return {"enabled": False}
-        exclude_name = str(skill.get("name", "") or "")
-        existing_skills = await self._call_storage(
-            self._build_existing_skill_metadata_for_dedup,
-            exclude_name,
-        )
-
-        async def fetch_contents(names: list[str]) -> dict[str, str]:
-            return await self._call_storage(self._fetch_skill_contents, names)
-
-        return await check_skill_redundancy(
-            self._llm,
-            skill,
-            existing_skills,
-            max_similarity=self.config.skill_dedup_max_similarity,
-            fetch_contents=fetch_contents,
-            shortlist_size=self.config.skill_dedup_shortlist_size,
-        )
-
 
     def _inherit_current_skill(
         self,
@@ -2392,77 +2494,7 @@ class EvolveServer(EvolveEngineMixin):
                 "static_validation": static_validation,
             }
 
-        dedup = await self._run_skill_dedup(evolved_skill, action_type)
-        if dedup.get("enabled") and dedup.get("is_redundant"):
-            closest = str(dedup.get("most_similar_skill") or "").strip()
-            should_merge = (
-                dedup.get("recommended_action") == "merge_into_existing"
-                and bool(closest)
-            )
-            if should_merge:
-                existing_md = await self._call_storage(self._fetch_skill, closest)
-                existing_skill = (
-                    parse_skill_content(closest, existing_md)
-                    if existing_md
-                    else None
-                )
-                merged = (
-                    await execute_merge(self._llm, existing_skill, evolved_skill)
-                    if existing_skill
-                    else None
-                )
-                if merged and merged.get("content"):
-                    merged["name"] = closest
-                    self._inherit_current_skill(merged, evolved_skill)
-                    merged = attach_bundle_payload(
-                        merged,
-                        candidate_skill_bundle(merged),
-                        file_changes=evolved_skill.get("file_changes") or [],
-                    )
-                    evolved_skill = merged
-                    current_skill = existing_skill
-                    action_type = DecisionAction.MERGE
-                    name = closest
-                    dedup["merge_candidate_name"] = str(
-                        dedup.get("candidate_name")
-                        or candidate_name
-                        or ""
-                    )
-                    dedup["merge_target_skill"] = closest
-                    evolution_context = {
-                        **(evolution_context or {}),
-                        "merge_context": {
-                            "target_skill": closest,
-                            "similarity": dedup.get("similarity"),
-                            "reason": dedup.get("reason"),
-                        },
-                    }
-                else:
-                    should_merge = False
-            if not should_merge:
-                logger.info(
-                    "[EvolveServer] dedup rejected new skill '%s' (similarity=%s, closest='%s'): %s",
-                    name,
-                    dedup.get("similarity"),
-                    closest,
-                    dedup.get("reason", "no reason provided"),
-                )
-                return {
-                    "action": "dedup_rejected",
-                    "proposed_action": action_type,
-                    "skill_name": name,
-                    "skill_id": None,
-                    "version": None,
-                    "session_ids": session_ids,
-                    "rationale": rationale,
-                    "evidence_classification": evidence_classification or {},
-                    "source": source,
-                    "edit_summary": evolved_skill.get("edit_summary"),
-                    "uploaded": False,
-                    "dedup": dedup,
-                }
-
-        inherited_checklists: list[dict[str, Any]] = []
+        inherited_replay_contexts: list[dict[str, Any]] = []
         effective_replay_windows = {
             "recent": list((replay_windows or {}).get("recent") or []),
             "historical": list((replay_windows or {}).get("historical") or []),
@@ -2477,11 +2509,11 @@ class EvolveServer(EvolveEngineMixin):
             )
             for inherited_name in inherited_names:
                 context = await self._call_storage(
-                    self._load_published_checklist_context,
+                    self._load_published_replay_context,
                     inherited_name,
                 )
                 if context:
-                    inherited_checklists.append(context)
+                    inherited_replay_contexts.append(context)
             inherited_cases = [
                 {
                     **case,
@@ -2489,7 +2521,7 @@ class EvolveServer(EvolveEngineMixin):
                     "inherited_from_skill": context.get("skill_name"),
                     "inherited_from_version": context.get("version"),
                 }
-                for context in inherited_checklists
+                for context in inherited_replay_contexts
                 for case in context.get("replay_cases") or []
                 if isinstance(case, dict)
             ]
@@ -2508,7 +2540,7 @@ class EvolveServer(EvolveEngineMixin):
                         )
                         else {}
                     ),
-                    "inherited_checklists": [
+                    "inherited_replays": [
                         {
                             "skill_name": context.get("skill_name"),
                             "version": context.get("version"),
@@ -2517,40 +2549,19 @@ class EvolveServer(EvolveEngineMixin):
                                 context.get("replay_cases") or []
                             ),
                         }
-                        for context in inherited_checklists
+                        for context in inherited_replay_contexts
                     ],
                 },
             }
 
-        verification = await self._run_skill_verifier(
-            evolved_skill,
-            action_type,
-            sessions,
-            current_skill=current_skill,
+        test_datasets = await self._synthesize_candidate_datasets(
+            skill_name=name,
+            sessions=sessions,
+            candidate_skill=evolved_skill,
             evidence_classification=evidence_classification,
+            evolution_context=evolution_context,
+            replay_windows=effective_replay_windows,
         )
-        if verification.get("enabled") and not verification.get("accepted"):
-            logger.info(
-                "[EvolveServer] verifier rejected skill '%s': %s",
-                name,
-                verification.get("reason", "no reason provided"),
-            )
-            return {
-                "action": "verification_rejected",
-                "proposed_action": action_type,
-                "skill_name": name,
-                "skill_id": None,
-                "version": None,
-                "session_ids": session_ids,
-                "rationale": rationale,
-                "evidence_classification": evidence_classification or {},
-                "source": source,
-                "edit_summary": evolved_skill.get("edit_summary"),
-                "uploaded": False,
-                "verification": verification,
-                "dedup": dedup,
-            }
-
         skill_id = self._id_registry.get_or_create(name)
         evolved_skill["skill_id"] = skill_id
         if self.config.publish_mode == "validated":
@@ -2565,11 +2576,8 @@ class EvolveServer(EvolveEngineMixin):
                 evidence_key=evidence_key or name,
                 evolution_context=evolution_context,
                 replay_windows=effective_replay_windows,
-                dedup=dedup,
-                inherited_checklists=inherited_checklists,
+                test_datasets=test_datasets,
             )
-            record["verification"] = verification
-            record["dedup"] = dedup
             job_id = str(record.get("validation_job_id") or "")
             await self._record_evolution_candidate(
                 evidence_key or name,
@@ -2606,8 +2614,6 @@ class EvolveServer(EvolveEngineMixin):
             "edit_summary": evolved_skill.get("edit_summary"),
             "file_changes": evolved_skill.get("file_changes") or [],
             "uploaded": uploaded,
-            "verification": verification,
-            "dedup": dedup,
         }
 
     async def _evolve_skill_group(
@@ -3401,8 +3407,6 @@ class EvolveServer(EvolveEngineMixin):
         published_after_validation = sum(
             1 for record in all_records if record.get("action") == "published_after_validation"
         )
-        skill_verifier_summary = self._collect_skill_verifier_summary(all_records)
-        skill_dedup_summary = self._collect_skill_dedup_summary(all_records)
         human_review_summary = await self._call_storage(self._collect_human_review_summary)
         summary = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -3431,8 +3435,6 @@ class EvolveServer(EvolveEngineMixin):
             "evolutions": all_records,
             "session_judge": judge_summary,
             "session_judge_details": self._collect_session_judge_details(sessions),
-            "skill_verifier": skill_verifier_summary,
-            "skill_dedup": skill_dedup_summary,
             "validation_publish": validation_publish_summary,
             "human_review": human_review_summary,
             "had_processing_error": had_processing_error,
@@ -3747,10 +3749,34 @@ class EvolveServer(EvolveEngineMixin):
             """One version's SKILL.md content + parsed description/body.
 
             Powers the skill detail panel and lets the dashboard switch between
-            versions to compare content.
+            versions to compare content. Also attaches the ``evolution`` block
+            (optimization items, rationale, skill diff, True Replay evidence) so
+            remote consumers (e.g. AgentsHub) get the same context the local
+            console shows, without needing an authenticated admin session.
             """
             result = await self.get_skill_version(name, version)
             status_code = 404 if result.get("status") == "not_found" else 200
+            if status_code == 200:
+                try:
+                    from ...proxy.skills_admin import _version_evolution_context
+
+                    versions_payload = await self.list_skill_versions(name)
+                    history = versions_payload.get("history") or []
+                    result["evolution"] = await asyncio.to_thread(
+                        _version_evolution_context,
+                        self.config,
+                        name=self._sanitise_name(name),
+                        version=int(version),
+                        history=history,
+                        store=self._validation_store,
+                    )
+                except Exception:  # noqa: BLE001 - version content stays available.
+                    logger.warning(
+                        "[EvolveServer] failed to attach evolution context for %s v%s",
+                        name,
+                        version,
+                        exc_info=True,
+                    )
             return JSONResponse(content=result, status_code=status_code)
 
         @app.post("/skills/{name}/rollback")
@@ -3760,18 +3786,63 @@ class EvolveServer(EvolveEngineMixin):
             return JSONResponse(content=result, status_code=status_code)
 
         @app.get("/validation/candidates")
-        async def validation_candidates():
-            """Open validation jobs awaiting a reviewer decision."""
-            candidates = await self._call_storage(self._list_validation_candidates)
-            return JSONResponse(content={"candidates": candidates})
+        async def validation_candidates(
+            scope: str = "open",
+            limit: int = 20,
+            offset: int = 0,
+            compact: bool = False,
+        ):
+            """Validation jobs plus automatic replay results."""
+            candidates = await self._call_storage(
+                self._list_validation_candidates,
+                scope,
+            )
+            safe_limit = min(200, max(1, int(limit or 20)))
+            safe_offset = max(0, int(offset or 0))
+            page = candidates[safe_offset : safe_offset + safe_limit]
+            if compact:
+                page = [
+                    {
+                        key: value
+                        for key, value in item.items()
+                        if key not in {"candidate_skill", "current_skill"}
+                    }
+                    for item in page
+                ]
+            return JSONResponse(
+                content={
+                    "candidates": page,
+                    "total": len(candidates),
+                    "limit": safe_limit,
+                    "offset": safe_offset,
+                    "has_more": safe_offset + len(page) < len(candidates),
+                }
+            )
+
+        @app.get("/validation/candidates/{job_id}")
+        async def validation_candidate_detail(job_id: str):
+            job = await self._call_storage(
+                self._validation_store.load_job,
+                job_id,
+            )
+            if not job:
+                return JSONResponse(
+                    content={"status": "not_found", "job_id": job_id},
+                    status_code=404,
+                )
+            return JSONResponse(
+                content=await self._call_storage(
+                    self._validation_candidate_payload,
+                    job,
+                )
+            )
 
         @app.post("/validation/candidates/{job_id}/evaluate")
         async def validation_evaluate(job_id: str, refresh: bool = False):
-            """Score a candidate (verify + A/B replay) WITHOUT publishing.
+            """Run True Replay metrics for a candidate without publishing.
 
             Returns the cached evaluation when present unless ``?refresh=true``.
-            The verdict is advisory: the dashboard shows the scores and the
-            reviewer decides whether to publish via ``.../validate``.
+            The dashboard shows interaction turns, tool calls, and tokens.
             """
             result = await self.evaluate_candidate(job_id, refresh=bool(refresh))
             status_code = 404 if result.get("status") == "not_found" else 200
@@ -3781,9 +3852,8 @@ class EvolveServer(EvolveEngineMixin):
         async def validation_validate(job_id: str, body: dict[str, Any] = Body(default_factory=dict)):
             """Replay-validate one candidate and publish it.
 
-            ``mode`` in the body selects the gate: ``"auto"`` (default) publishes
-            only if the replay shows no regression; ``"force"`` always publishes
-            and reports the replay score for reference.
+            ``mode`` in the body selects the gate: ``"auto"`` (default) uses
+            turn-first True Replay comparison; ``"force"`` always publishes.
             """
             reviewer = str((body or {}).get("reviewer") or "staffdeck-reviewer").strip() or "staffdeck-reviewer"
             mode = str((body or {}).get("mode") or "auto").strip().lower() or "auto"

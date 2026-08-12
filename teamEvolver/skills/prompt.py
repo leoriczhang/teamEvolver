@@ -112,7 +112,7 @@ def build_injection_prompt(
     skills: list[dict[str, Any]],
     location_for: Callable[[dict[str, Any]], str],
     *,
-    max_chars: int = 30_000,
+    max_chars: int = 120_000,
     read_tool_name: str = "read",
 ) -> str:
     """Catalog *skills* and wrap them with the mandatory-skills instructions.

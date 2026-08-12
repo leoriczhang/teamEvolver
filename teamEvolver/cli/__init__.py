@@ -20,6 +20,7 @@ except ImportError:
 from .config_cmd import config_cmd
 from .daemon import start, status, stop
 from .diag import doctor, restore, validation
+from .langfuse_cmd import langfuse
 from .skills_cmd import skills
 
 
@@ -36,6 +37,7 @@ main.add_command(doctor)
 main.add_command(restore)
 main.add_command(validation)
 main.add_command(skills)
+main.add_command(langfuse)
 
 
 if __name__ == "__main__":

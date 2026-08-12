@@ -104,6 +104,7 @@ class ConfigStore:
         evolve = data.get("evolve", {})
         dreamcycle = data.get("dreamcycle", {})
         validation = data.get("validation", {})
+        langfuse = data.get("langfuse", {}) if isinstance(data.get("langfuse"), dict) else {}
         sharing_backend = _infer_sharing_backend(sharing)
         sharing_endpoint = _first_non_empty(sharing, "endpoint")
         sharing_local_root = _first_non_empty(sharing, "local_root")
@@ -135,7 +136,7 @@ class ConfigStore:
             use_skills=bool(skills.get("enabled", True)),
             skills_dir=skills_dir,
             skills_public_root=str(skills.get("public_root", "") or ""),
-            max_context_tokens=int(data.get("max_context_tokens", 240000) or 240000),
+            max_context_tokens=int(data.get("max_context_tokens", 256000) or 256000),
             # Model
             model_name=llm.get("model_id") or "doubao-seed-evolving",
             # Sharing
@@ -200,19 +201,34 @@ class ConfigStore:
             ),
             evolve_evidence_enabled=bool(evolve.get("evidence_enabled", True)),
             evolve_evidence_max_entries=max(
-                1, int(evolve.get("evidence_max_entries", 200))
+                1, int(evolve.get("evidence_max_entries", 400))
             ),
             evolve_evidence_recent_limit=max(
-                1, int(evolve.get("evidence_recent_limit", 12))
+                1, int(evolve.get("evidence_recent_limit", 20))
             ),
             evolve_evidence_historical_limit=max(
-                0, int(evolve.get("evidence_historical_limit", 12))
+                0, int(evolve.get("evidence_historical_limit", 20))
             ),
             evolve_evidence_replay_cases_per_window=max(
                 1, int(evolve.get("evidence_replay_cases_per_window", 1))
             ),
             evolve_evidence_change_debt_threshold=max(
                 1, int(evolve.get("evidence_change_debt_threshold", 3))
+            ),
+            evolve_dataset_synthesis_enabled=bool(
+                evolve.get("dataset_synthesis_enabled", True)
+            ),
+            evolve_dataset_test_cases=max(
+                1, int(evolve.get("dataset_test_cases", 2))
+            ),
+            evolve_dataset_min_requirements=max(
+                1, int(evolve.get("dataset_min_requirements", 12))
+            ),
+            evolve_dataset_max_requirements=max(
+                1, int(evolve.get("dataset_max_requirements", 24))
+            ),
+            evolve_dataset_disclosure_batch_size=max(
+                1, int(evolve.get("dataset_disclosure_batch_size", 4))
             ),
             evolve_candidate_coalesce_enabled=bool(
                 evolve.get("candidate_coalesce_enabled", True)
@@ -221,11 +237,11 @@ class ConfigStore:
                 evolve.get("bundle_text_extensions", [".py", ".sh"])
             ),
             evolve_bundle_max_file_bytes=max(
-                1, int(evolve.get("bundle_max_file_bytes", 65536) or 65536)
+                1, int(evolve.get("bundle_max_file_bytes", 262144) or 262144)
             ),
             evolve_bundle_max_prompt_bytes=max(
                 1,
-                int(evolve.get("bundle_max_prompt_bytes", 262144) or 262144),
+                int(evolve.get("bundle_max_prompt_bytes", 786432) or 786432),
             ),
             evolve_bundle_allow_delete=bool(
                 evolve.get("bundle_allow_delete", True)
@@ -266,6 +282,33 @@ class ConfigStore:
             validation_agentshub_url=str(validation.get("agentshub_url", "") or ""),
             validation_agentshub_api_key=str(
                 validation.get("agentshub_api_key", "") or ""
+            ),
+            langfuse_enabled=bool(langfuse.get("enabled", False)),
+            langfuse_host=str(
+                langfuse.get("host", "") or "https://cloud.langfuse.com"
+            ).rstrip("/"),
+            langfuse_public_key=str(langfuse.get("public_key", "") or ""),
+            langfuse_secret_key=str(langfuse.get("secret_key", "") or ""),
+            langfuse_timeout_seconds=max(
+                1, int(langfuse.get("timeout_seconds", 30) or 30)
+            ),
+            langfuse_page_limit=max(
+                1, min(100, int(langfuse.get("page_limit", 50) or 50))
+            ),
+            langfuse_max_sessions=max(
+                1, int(langfuse.get("max_sessions", 100) or 100)
+            ),
+            langfuse_default_environment=_normalize_string_list(
+                langfuse.get("default_environment", [])
+            ),
+            langfuse_default_user_id=str(langfuse.get("default_user_id", "") or ""),
+            langfuse_default_tags=_normalize_string_list(
+                langfuse.get("default_tags", [])
+            ),
+            langfuse_default_release=str(langfuse.get("default_release", "") or ""),
+            langfuse_default_version=str(langfuse.get("default_version", "") or ""),
+            langfuse_default_trace_name=str(
+                langfuse.get("default_trace_name", "") or ""
             ),
         )
 
@@ -346,9 +389,11 @@ class ConfigStore:
         lines += [
             f"evolve.server_url: {evolve.get('server_url', '') or 'http://127.0.0.1:52010'}",
             f"evolve.evidence_enabled: {evolve.get('evidence_enabled', True)}",
-            f"evolve.evidence_windows: recent={evolve.get('evidence_recent_limit', 12)}, "
-            f"historical={evolve.get('evidence_historical_limit', 12)}",
+            f"evolve.evidence_windows: recent={evolve.get('evidence_recent_limit', 20)}, "
+            f"historical={evolve.get('evidence_historical_limit', 20)}",
             f"evolve.change_debt_threshold: {evolve.get('evidence_change_debt_threshold', 3)}",
+            f"evolve.dataset_synthesis: {evolve.get('dataset_synthesis_enabled', True)}",
+            f"evolve.dataset_test_cases: {evolve.get('dataset_test_cases', 2)}",
             f"evolve.candidate_coalesce: {evolve.get('candidate_coalesce_enabled', True)}",
             "evolve.bundle_text_extensions: "
             f"{','.join(_normalize_extensions(evolve.get('bundle_text_extensions', ['.py', '.sh'])))}",
@@ -368,4 +413,18 @@ class ConfigStore:
             f"validation.required_approvals: {validation.get('required_approvals', 2)}",
             f"validation.agentshub_url: {validation.get('agentshub_url', '') or '(not set)'}",
         ]
+        langfuse = data.get("langfuse", {}) if isinstance(data.get("langfuse"), dict) else {}
+        lines.append(f"langfuse.enabled: {bool(langfuse.get('enabled', False))}")
+        if langfuse.get("enabled"):
+            lines += [
+                f"langfuse.host: {str(langfuse.get('host', '') or 'https://cloud.langfuse.com').rstrip('/')}",
+                f"langfuse.public_key: {'present' if langfuse.get('public_key') else 'missing'}",
+                f"langfuse.secret_key: {'present' if langfuse.get('secret_key') else 'missing'}",
+                f"langfuse.max_sessions: {langfuse.get('max_sessions', 100)}",
+                "langfuse.default_environment: "
+                f"{','.join(_normalize_string_list(langfuse.get('default_environment', []))) or '(any)'}",
+                f"langfuse.default_user_id: {langfuse.get('default_user_id', '') or '(any)'}",
+                "langfuse.default_tags: "
+                f"{','.join(_normalize_string_list(langfuse.get('default_tags', []))) or '(any)'}",
+            ]
         return "\n".join(lines)

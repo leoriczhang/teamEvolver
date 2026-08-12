@@ -162,7 +162,7 @@ export default function AuditView({ active }: { active: boolean }) {
                                   </div>
                                   {legacyVerifier ? (
                                     <div className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                                      该记录由旧版预检流程产生；当前候选发布仅依据 A/B 回放与 Checklist 门禁。
+                                      该记录由旧版预检流程产生；当前版本仅比较 True Replay 的轮次、工具调用和 Token。
                                     </div>
                                   ) : reason ? (
                                     <div className="mt-2 text-xs leading-relaxed text-muted-foreground">{reason}</div>

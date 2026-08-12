@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import base64
 import json
+from dataclasses import replace
+from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from teamEvolver.config import TeamEvolverConfig
@@ -135,3 +138,81 @@ def test_agentshub_config_sync_merges_personal_sources(
     assert saved["viking_account"] == "acct"
     assert saved["viking_user"] == "team-space"
     assert saved["viking_personal_api_keys"] == [existing, personal_b]
+
+
+@pytest.mark.anyio
+async def test_personal_source_sync_does_not_restart_evolve(monkeypatch) -> None:
+    config = TeamEvolverConfig(
+        sharing_viking_endpoint="https://openviking.example",
+        sharing_viking_team_api_key=_key("acct", "team-space"),
+        sharing_viking_account="acct",
+        sharing_viking_user="team-space",
+    )
+    server = ProxyServer(config)
+    server._embedded_evolve_server = SimpleNamespace(
+        config=server._build_embedded_evolve_config(config)
+    )
+    calls: list[tuple[str, bool] | tuple[str]] = []
+
+    monkeypatch.setattr(server._dreamcycle, "stop", lambda: None)
+    monkeypatch.setattr(server, "_start_dreamcycle", lambda: calls.append(("dream",)))
+
+    async def fake_stop(*, graceful: bool = False) -> None:
+        calls.append(("evolve-stop", graceful))
+
+    monkeypatch.setattr(server, "_stop_embedded_evolve", fake_stop)
+    monkeypatch.setattr(
+        server,
+        "_start_embedded_evolve",
+        lambda: calls.append(("evolve-start",)),
+    )
+
+    await server._reload_openviking_integrations(
+        replace(
+            config,
+            sharing_viking_personal_api_keys=[_key("acct", "alice")],
+        )
+    )
+
+    assert ("evolve-stop", True) not in calls
+    assert ("evolve-start",) not in calls
+    assert ("dream",) in calls
+
+
+@pytest.mark.anyio
+async def test_team_target_sync_restarts_evolve_gracefully(monkeypatch) -> None:
+    config = TeamEvolverConfig(
+        sharing_viking_endpoint="https://openviking.example",
+        sharing_viking_team_api_key=_key("acct", "team-a"),
+        sharing_viking_account="acct",
+        sharing_viking_user="team-a",
+    )
+    server = ProxyServer(config)
+    server._embedded_evolve_server = SimpleNamespace(
+        config=server._build_embedded_evolve_config(config)
+    )
+    calls: list[tuple[str, bool] | tuple[str]] = []
+
+    monkeypatch.setattr(server._dreamcycle, "stop", lambda: None)
+    monkeypatch.setattr(server, "_start_dreamcycle", lambda: None)
+
+    async def fake_stop(*, graceful: bool = False) -> None:
+        calls.append(("evolve-stop", graceful))
+
+    monkeypatch.setattr(server, "_stop_embedded_evolve", fake_stop)
+    monkeypatch.setattr(
+        server,
+        "_start_embedded_evolve",
+        lambda: calls.append(("evolve-start",)),
+    )
+
+    await server._reload_openviking_integrations(
+        replace(
+            config,
+            sharing_viking_team_api_key=_key("acct", "team-b"),
+            sharing_viking_user="team-b",
+        )
+    )
+
+    assert ("evolve-stop", True) in calls
+    assert ("evolve-start",) in calls

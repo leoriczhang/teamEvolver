@@ -39,7 +39,7 @@ from pathlib import Path
 # No default base_url on purpose: the teamEvolver service address must be
 # supplied explicitly (env / feed.json). If it is missing we skip silently
 # rather than guess a host.
-MAX_CHARS = 8000  # cap any single message body so payloads stay reasonable
+MAX_CHARS = 64_000  # modern model context windows can absorb much richer turns
 MAX_SYSTEM_CHARS = 200_000
 _AVAILABLE_SKILLS_RE = re.compile(
     r"<available_skills>\s*(.*?)\s*</available_skills>",

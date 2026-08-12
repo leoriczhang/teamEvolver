@@ -24,12 +24,16 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from ..checklist import compile_common_checklist
 from ..config_store import ConfigStore
 from ..mining_lifecycle import (
     MiningLifecycleError,
     list_mined_skill_statuses,
     submit_mined_skill,
+)
+from ..progressive_replay import (
+    aggregate_case_checklists,
+    progressive_replay_decision,
+    select_replay_cases,
 )
 from ..session_filter import SessionValueClassifier
 from ..session_store import SessionStore
@@ -89,6 +93,53 @@ def _model_settings_payload(config, store_data: dict[str, Any]) -> dict[str, Any
         "max_tokens": int(getattr(config, "llm_max_tokens", 0) or llm.get("max_tokens") or 100000),
         "temperature": float(temperature),
         "api_key_present": bool(api_key),
+    }
+
+
+def _langfuse_settings_payload(config, store_data: dict[str, Any]) -> dict[str, Any]:
+    """Snapshot of the persisted Langfuse settings for the console form.
+
+    Secret keys are never echoed back; only presence flags are exposed, mirroring
+    how ``_model_settings_payload`` handles the model API key.
+    """
+    langfuse = store_data.get("langfuse") if isinstance(store_data.get("langfuse"), dict) else {}
+
+    def _as_list(value: Any) -> list[str]:
+        if isinstance(value, (list, tuple, set)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if value in (None, ""):
+            return []
+        return [item for raw in str(value).replace("\n", ",").split(",") if (item := raw.strip())]
+
+    return {
+        "enabled": bool(langfuse.get("enabled", getattr(config, "langfuse_enabled", False))),
+        "host": str(langfuse.get("host") or getattr(config, "langfuse_host", "") or "https://cloud.langfuse.com"),
+        "public_key": str(langfuse.get("public_key") or getattr(config, "langfuse_public_key", "") or ""),
+        "public_key_present": bool(langfuse.get("public_key") or getattr(config, "langfuse_public_key", "")),
+        "secret_key_present": bool(langfuse.get("secret_key") or getattr(config, "langfuse_secret_key", "")),
+        "max_sessions": int(langfuse.get("max_sessions") or getattr(config, "langfuse_max_sessions", 100) or 100),
+        "page_limit": int(langfuse.get("page_limit") or getattr(config, "langfuse_page_limit", 50) or 50),
+        "timeout_seconds": int(
+            langfuse.get("timeout_seconds") or getattr(config, "langfuse_timeout_seconds", 30) or 30
+        ),
+        "default_environment": _as_list(
+            langfuse.get("default_environment", getattr(config, "langfuse_default_environment", []))
+        ),
+        "default_user_id": str(
+            langfuse.get("default_user_id") or getattr(config, "langfuse_default_user_id", "") or ""
+        ),
+        "default_tags": _as_list(
+            langfuse.get("default_tags", getattr(config, "langfuse_default_tags", []))
+        ),
+        "default_release": str(
+            langfuse.get("default_release") or getattr(config, "langfuse_default_release", "") or ""
+        ),
+        "default_version": str(
+            langfuse.get("default_version") or getattr(config, "langfuse_default_version", "") or ""
+        ),
+        "default_trace_name": str(
+            langfuse.get("default_trace_name") or getattr(config, "langfuse_default_trace_name", "") or ""
+        ),
     }
 
 
@@ -202,7 +253,7 @@ def _is_embedded_evolve_path(path: str) -> bool:
     if path == "/trigger-dreamcycle" or path.startswith("/trigger-dreamcycle/"):
         return False
     if path == "/validation/candidates" or path.startswith("/validation/candidates/"):
-        return False
+        return True
     if path.startswith("/validation/skills/"):
         return False
     if path in {"/status", "/sessions", "/conversations", "/storage/status"}:
@@ -223,9 +274,9 @@ def _is_embedded_evolve_path(path: str) -> bool:
 
 def _max_session_body_bytes() -> int:
     try:
-        value = int(os.environ.get("TEAMEVOLVER_MAX_SESSION_BODY_BYTES", str(8 * 1024 * 1024)) or 0)
+        value = int(os.environ.get("TEAMEVOLVER_MAX_SESSION_BODY_BYTES", str(32 * 1024 * 1024)) or 0)
     except ValueError:
-        value = 8 * 1024 * 1024
+        value = 32 * 1024 * 1024
     return max(1024, value)
 
 
@@ -427,7 +478,21 @@ def _candidate_payload(
         if not status:
             status = "published" if decision.get("accepted") is True else "rejected"
         payload["review_status"] = status
-        payload["decision"] = decision
+        payload["decision"] = {
+            key: decision.get(key)
+            for key in (
+                "status",
+                "accepted",
+                "reason",
+                "decided_at",
+                "job_id",
+                "skill_name",
+                "version",
+                "mode",
+                "reviewer",
+            )
+            if decision.get(key) is not None
+        }
         payload["decision_reason"] = str(decision.get("reason") or "")
         payload["decided_at"] = str(decision.get("decided_at") or decision.get("created_at") or "")
         payload["decision_accepted"] = decision.get("accepted")
@@ -435,35 +500,39 @@ def _candidate_payload(
             evaluation = decision.get("evaluation")
     else:
         payload["review_status"] = "open"
+    test_datasets = [
+        item
+        for item in job.get("test_datasets") or []
+        if isinstance(item, dict)
+    ]
+    payload["test_dataset_count"] = len(test_datasets)
+    payload["test_dataset_ids"] = [
+        str(item.get("dataset_id") or "") for item in test_datasets
+    ]
     if evaluation:
         eval_payload = _evaluation_payload(job, evaluation, cached=True)
         replay_payload = eval_payload.get("replay") if isinstance(eval_payload.get("replay"), dict) else {}
         payload["evaluation"] = eval_payload
-        payload["verify_score"] = eval_payload.get("verify_score")
-        payload["replay_score"] = eval_payload.get("replay_score")
-        payload["baseline_score"] = replay_payload.get("baseline_mean")
         payload["recommended_publish"] = eval_payload.get("recommended_publish")
         payload["evaluation_error"] = replay_payload.get("error")
+        payload["replay_verdict"] = replay_payload.get("verdict")
+        payload["efficiency"] = replay_payload.get("efficiency") or {}
+    for key in (
+        "min_score",
+        "checklist",
+        "inherited_checklists",
+        "evolution_context",
+        "session_evidence",
+        "replay_cases",
+        "test_datasets",
+        "verification",
+        "verify_score",
+        "replay_score",
+        "baseline_score",
+        "threshold",
+    ):
+        payload.pop(key, None)
     return payload
-
-
-def _evaluation_missing_hard_indicators(evaluation: dict[str, Any] | None) -> bool:
-    """True when a (possibly compacted) evaluation lacks efficiency + cases.
-
-    The decision index persists a compacted evaluation (replay cases and
-    window_results stripped). When those hard indicators are absent we should
-    reload the full evaluation file so the dashboard can still show them.
-    """
-    if not isinstance(evaluation, dict):
-        return True
-    summary = evaluation.get("replay_summary") if isinstance(evaluation.get("replay_summary"), dict) else {}
-    if not summary and isinstance(evaluation.get("replay"), dict):
-        summary = evaluation.get("replay") or {}
-    if _normalize_efficiency(summary).get("dimensions"):
-        return False
-    if summary.get("cases"):
-        return False
-    return True
 
 
 def _candidate_list_payloads(
@@ -481,47 +550,41 @@ def _candidate_list_payloads(
         normalized = "open"
 
     indexed_records = (
-        store.list_decision_records()
+        store.list_decision_records(reconcile=False)
         if normalized in {"processed", "all"}
         else []
     )
-    if normalized == "processed" and indexed_records:
-        payloads: list[dict[str, Any]] = []
-        for record in indexed_records:
-            job = record.get("job") if isinstance(record.get("job"), dict) else {}
-            evaluation = (
-                record.get("evaluation")
-                if isinstance(record.get("evaluation"), dict)
-                else None
-            )
-            # The decision index stores a compacted evaluation with replay
-            # cases / window_results stripped. Rehydrate from the full
-            # evaluation file so hard indicators (efficiency, cases) survive.
-            job_id = str((job or {}).get("job_id") or record.get("job_id") or "")
-            if job_id and _evaluation_missing_hard_indicators(evaluation):
-                full = store.load_evaluation(job_id)
-                if isinstance(full, dict):
-                    evaluation = full
-            decision = (
-                record.get("decision")
-                if isinstance(record.get("decision"), dict)
-                else None
-            )
-            payloads.append(_candidate_payload(job, evaluation, decision))
-        return payloads
-    jobs = (
-        store.list_open_jobs()
-        if normalized == "open"
-        else store.list_jobs()
-    )
     candidates: list[dict[str, Any]] = []
-    for job in jobs:
-        job_id = str(job.get("job_id") or "")
-        decision = None if normalized == "open" else (store.load_decision(job_id) if job_id else None)
-        if normalized == "processed" and not decision:
+    seen: set[str] = set()
+    for record in indexed_records:
+        job = (
+            record.get("job")
+            if isinstance(record.get("job"), dict)
+            else {}
+        )
+        job_id = str(job.get("job_id") or record.get("job_id") or "")
+        if not job_id:
             continue
-        evaluation = store.load_evaluation(job_id) if job_id else None
+        evaluation = (
+            record.get("evaluation")
+            if isinstance(record.get("evaluation"), dict)
+            else None
+        )
+        decision = (
+            record.get("decision")
+            if isinstance(record.get("decision"), dict)
+            else None
+        )
         candidates.append(_candidate_payload(job, evaluation, decision))
+        seen.add(job_id)
+    if normalized == "processed":
+        return candidates
+    for job in store.list_open_jobs():
+        job_id = str(job.get("job_id") or "")
+        if not job_id or job_id in seen:
+            continue
+        evaluation = store.load_best_evaluation(job_id, job) if job_id else None
+        candidates.append(_candidate_payload(job, evaluation, None))
     return candidates
 
 
@@ -620,15 +683,35 @@ def _normalize_efficiency(replay_summary: dict[str, Any]) -> dict[str, Any]:
         return {}
     efficiency = replay_summary.get("efficiency") if isinstance(replay_summary.get("efficiency"), dict) else {}
     if isinstance(efficiency.get("dimensions"), dict) and efficiency.get("dimensions"):
-        return efficiency
+        dimensions = efficiency.get("dimensions") or {}
+        return {
+            "baseline": efficiency.get("baseline") or {},
+            "candidate": efficiency.get("candidate") or {},
+            "dimensions": {
+                key: {
+                    field: value.get(field)
+                    for field in (
+                        "baseline",
+                        "candidate",
+                        "delta",
+                        "reduction_ratio",
+                        "winner",
+                    )
+                }
+                for key, value in dimensions.items()
+                if isinstance(value, dict)
+            },
+        }
     dimensions = _aggregate_window_dimensions(efficiency.get("windows"))
     if not dimensions:
         dimensions = _aggregate_window_dimensions(replay_summary.get("window_results"))
     if not dimensions:
         return efficiency
-    merged = dict(efficiency)
-    merged["dimensions"] = dimensions
-    return merged
+    return {
+        "baseline": efficiency.get("baseline") or {},
+        "candidate": efficiency.get("candidate") or {},
+        "dimensions": dimensions,
+    }
 
 
 def _evaluation_payload(job: dict[str, Any], result: dict[str, Any], *, cached: bool = False) -> dict[str, Any]:
@@ -656,7 +739,6 @@ def _evaluation_payload(job: dict[str, Any], result: dict[str, Any], *, cached: 
         rationale = str(branch.get("rationale") or branch.get("replay_reason") or "")
         display_response = response or error or rationale
         return {
-            "score": _first_present(branch, "score", "normalized_score"),
             "response": display_response,
             "error": error,
             "rationale": rationale,
@@ -666,8 +748,8 @@ def _evaluation_payload(job: dict[str, Any], result: dict[str, Any], *, cached: 
             "interaction_turns": branch.get("interaction_turns"),
             "tool_call_count": branch.get("tool_call_count"),
             "total_tokens": branch.get("total_tokens"),
-            "checklist": branch.get("checklist") or {},
-            "advisory_judge_score": branch.get("advisory_judge_score"),
+            "interactions": branch.get("interactions") or [],
+            "checklist_report": branch.get("checklist_report") or {},
         }
 
     for item in cases:
@@ -683,71 +765,41 @@ def _evaluation_payload(job: dict[str, Any], result: dict[str, Any], *, cached: 
                 }
             )
     skill_name = _candidate_skill_name(job)
-    verification = result.get("verification") if isinstance(result.get("verification"), dict) else {}
-    threshold = (
-        _first_present(result, "threshold")
-        or _first_present(replay_summary, "threshold")
-        or _first_present(verification, "threshold")
-        or job.get("min_score", 0.75)
-    )
-    accepted = _first_present(result, "accepted", "recommended_publish")
-    if accepted is None:
-        accepted = verification.get("accepted")
-    replay_score = _first_present(result, "score", "replay_score")
-    if replay_score is None:
-        replay_score = replay_summary.get("score")
-    verify_score = _first_present(result, "score", "verify_score")
-    if verify_score is None:
-        verify_score = replay_score
-    no_regression = replay_summary.get("no_regression")
-    if no_regression is None:
-        no_regression = bool(accepted) or (
-            isinstance(replay_summary.get("candidate_mean_score"), (int, float))
-            and isinstance(replay_summary.get("baseline_mean_score"), (int, float))
-            and float(replay_summary.get("candidate_mean_score")) >= float(replay_summary.get("baseline_mean_score"))
-        )
-    checklist = (
+    efficiency = _normalize_efficiency(replay_summary)
+    branch_checklists = (
         replay_summary.get("checklist")
         if isinstance(replay_summary.get("checklist"), dict)
-        else compile_common_checklist(job)
+        else {
+            branch: aggregate_case_checklists(
+                normalized_cases,
+                branch=branch,
+            )
+            for branch in ("baseline", "candidate")
+        }
     )
+    policy = progressive_replay_decision(
+        efficiency=efficiency,
+        baseline_checklist=branch_checklists.get("baseline") or {},
+        candidate_checklist=branch_checklists.get("candidate") or {},
+    )
+    accepted = bool(policy.get("accepted"))
+    no_regression = bool(policy.get("no_regression"))
+    verdict = str(policy.get("verdict") or "inconclusive")
     return {
         "status": "evaluated",
         "skill_name": skill_name,
         "proposed_action": str(job.get("proposed_action") or job.get("action") or ""),
-        "verify_score": verify_score,
-        "replay_score": replay_score,
         "recommended_publish": bool(accepted),
         "cached": cached,
-        "verification": {
-            "threshold": threshold,
-            "enabled": verification.get("enabled", True),
-            "accepted": bool(accepted),
-            "decision": result.get("decision") or verification.get("decision"),
-            "reason": result.get("reason") or verification.get("reason"),
-            "checks": result.get("checks") or verification.get("checks", {}),
-        },
         "replay": {
-            "threshold": threshold,
-            "tolerance": replay_summary.get("tolerance"),
-            "baseline_mean": replay_summary.get("baseline_mean_score") or replay_summary.get("baseline_mean"),
+            "verdict": verdict,
             "no_regression": bool(no_regression),
             "cases": normalized_cases,
-            "efficiency": _normalize_efficiency(replay_summary),
-            "checklist": checklist,
-            "checklist_results": replay_summary.get("checklist_results") or {},
-            "decision_policy": replay_summary.get("decision_policy") or {},
-            "scoring_policy": {
-                "quality": "checklist hard gate",
-                "efficiency_weights": {
-                    "interaction_turns": 0.60,
-                    "tool_call_count": 0.25,
-                    "total_tokens": 0.15,
-                },
-                "llm_role": "soft checklist only",
-            },
+            "efficiency": efficiency,
+            "checklist": branch_checklists,
+            "decision_policy": policy,
             "mode": result.get("validator_mode"),
-            "error": fallback_reason or replay_summary.get("reason"),
+            "error": fallback_reason or replay_summary.get("error"),
         },
         "candidate_skill": job.get("candidate_skill"),
         "current_skill": job.get("current_skill"),
@@ -764,21 +816,18 @@ async def _evaluate_candidate_job(config, owner, job: dict[str, Any]) -> dict[st
         except ValueError:
             replay_timeout = 90
         try:
-            max_interactions = max(1, int(os.environ.get("TEAMEVOLVER_TRUE_REPLAY_MAX_INTERACTIONS", "1")))
+            max_interactions = max(
+                1,
+                int(
+                    os.environ.get(
+                        "TEAMEVOLVER_TRUE_REPLAY_MAX_INTERACTIONS",
+                        str(job.get("max_interactions") or 4),
+                    )
+                ),
+            )
         except ValueError:
-            max_interactions = 1
-        selected: list[tuple[str, int]] = []
-        seen_windows: set[str] = set()
-        for index, case in enumerate(job.get("replay_cases") or []):
-            if not isinstance(case, dict):
-                continue
-            window = str(case.get("evidence_window") or "recent")
-            if window not in {"recent", "historical"}:
-                window = "recent"
-            if window in seen_windows:
-                continue
-            selected.append((window, index))
-            seen_windows.add(window)
+            max_interactions = max(1, int(job.get("max_interactions") or 4))
+        selected = select_replay_cases(job.get("replay_cases") or [])
         window_results = []
         for window, case_index in selected:
             result = await asyncio.to_thread(
@@ -792,7 +841,6 @@ async def _evaluate_candidate_job(config, owner, job: dict[str, Any]) -> dict[st
             window_results.append((window, result))
         replay = ValidationWorker._aggregate_true_replay_windows(
             window_results,
-            checklist=compile_common_checklist(job),
         )
         if replay.get("status") == "evaluated":
             replay_decision = str(
@@ -807,27 +855,8 @@ async def _evaluate_candidate_job(config, owner, job: dict[str, Any]) -> dict[st
                 "validator_mode": "true_replay",
                 "decision": replay_decision,
                 "accepted": bool(replay.get("accepted")),
-                "score": replay.get("score"),
-                "threshold": replay.get("threshold"),
-                "reason": (
-                    f"Checklist score={replay.get('score')}, "
-                    f"baseline={replay.get('baseline_mean')}, "
-                    f"efficiency={((replay.get('decision_policy') or {}).get('efficiency_score'))}, "
-                    f"accepted={replay.get('accepted')}"
-                ),
-                "checks": {
-                    "grounded_in_evidence": replay.get("score"),
-                    "preserves_existing_value": 1.0 if replay.get("no_regression") else 0.0,
-                    "specificity_and_reusability": replay.get("score"),
-                    "safe_to_publish": replay.get("score") if replay.get("accepted") else 0.0,
-                },
-                "replay_summary": {
-                    **replay,
-                    "baseline_mean": replay.get("baseline_mean"),
-                    "candidate_mean_score": replay.get("score"),
-                    "baseline_mean_score": replay.get("baseline_mean"),
-                    "cases": replay.get("cases") or [],
-                },
+                "reason": replay_decision,
+                "replay_summary": replay,
             }
         logger.info("[Validation] true replay skipped for %s: %s", job_id, replay.get("reason"))
         fallback_reason = replay.get("reason") or replay.get("status") or "true replay skipped"
@@ -835,28 +864,17 @@ async def _evaluate_candidate_job(config, owner, job: dict[str, Any]) -> dict[st
         logger.warning("[Validation] true replay failed for %s: %s", job_id, exc)
         fallback_reason = f"true replay failed: {type(exc).__name__}: {exc}"
 
-    worker = ValidationWorker(config, idle_provider=owner)
-    try:
-        result = await worker._replay_validate_job(job)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[Validation] fallback replay failed for %s: %s", job_id, exc)
-        threshold = round(float(job.get("min_score", 0.75) or 0.75), 3)
-        result = {
-            "validator_mode": "failed",
-            "decision": "inconclusive",
-            "accepted": False,
-            "score": None,
-            "threshold": threshold,
-            "reason": f"Replay evaluation failed after true replay fallback: {type(exc).__name__}: {exc}",
-            "checks": {},
-            "replay_summary": {
-                "reason": f"fallback replay failed: {type(exc).__name__}: {exc}",
-                "cases": [],
-            },
-        }
-    result = dict(result)
-    result["true_replay_fallback_reason"] = fallback_reason
-    return result
+    return {
+        "validator_mode": "true_replay",
+        "decision": "inconclusive",
+        "accepted": False,
+        "reason": fallback_reason,
+        "replay_summary": {
+            "status": "skipped",
+            "reason": fallback_reason,
+            "cases": [],
+        },
+    }
 
 
 def _load_current_skill_md_for_display(config, skill_name: str) -> str:
@@ -961,6 +979,80 @@ def _storage_status(config) -> dict[str, Any]:
         return payload
 
 
+async def _ingest_session_dict(owner, session: dict[str, Any]) -> dict[str, Any]:
+    """Shared ingest pipeline for one already-normalized session dict.
+
+    Both the public ``/ingest_session`` endpoint and the Langfuse puller feed
+    sessions through this single path so dedup, value classification, queueing,
+    and the debounced evolve trigger behave identically regardless of source.
+
+    The caller MUST have already set a sanitized ``session_id`` and any
+    ``user_alias`` default. Returns the same status payload the endpoint emits.
+    """
+    session_id = str(session.get("session_id") or "")
+    try:
+        session_store = SessionStore.from_config(owner.config)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="session storage is not configured") from exc
+
+    # Skip re-ingesting an already-processed session whose content has not
+    # changed. A continued conversation (new turns) has a different fingerprint
+    # and is ingested normally.
+    force_reprocess = bool(session.pop("force_reprocess", False))
+    if not force_reprocess and session_store.duplicate_of_processed(session):
+        logger.info(
+            "[SessionFilter] skipped duplicate session=%s (already processed, no new content)",
+            session_id,
+        )
+        return {"status": "duplicate", "session_id": session_id, "queued": False}
+    if force_reprocess:
+        session["reprocess_reason"] = str(
+            session.get("reprocess_reason") or "explicit dashboard reingest"
+        )
+
+    classifier = SessionValueClassifier.from_config(owner.config)
+    value_judge = await classifier.classify(session)
+    session["value_judge"] = value_judge
+    session["ingested_at"] = _utc_now_iso()
+
+    if value_judge.get("decision") != "valuable":
+        session_store.save_skipped(session)
+        _invalidate_dashboard_cache(f"conversations:{id(owner.config)}")
+        logger.info(
+            "[SessionFilter] skipped session=%s decision=%s reason=%s",
+            session_id,
+            value_judge.get("decision"),
+            value_judge.get("reason"),
+        )
+        return {
+            "status": "skipped",
+            "session_id": session_id,
+            "queued": False,
+            "value_judge": value_judge,
+        }
+
+    key = session_store.save_queued(session)
+    _invalidate_dashboard_cache(
+        f"queue:{id(owner.config)}",
+        f"conversations:{id(owner.config)}",
+        f"status:{id(owner.config)}",
+    )
+    trigger_scheduled = (
+        False
+        if bool(session.get("defer_evolution_trigger"))
+        else owner._schedule_evolve_trigger()
+    )
+    logger.info("[SessionFilter] queued valuable session=%s key=%s", session_id, key)
+    return {
+        "status": "queued",
+        "session_id": session_id,
+        "queued": True,
+        "key": key,
+        "trigger_scheduled": trigger_scheduled,
+        "value_judge": value_judge,
+    }
+
+
 class RoutesMixin:
     """FastAPI app construction, routing, and request authentication."""
 
@@ -1044,6 +1136,7 @@ class RoutesMixin:
 
         # Skill and user management REST APIs used by the unified console.
         self._register_skills_admin_routes(app)
+        self._register_skill_lab_routes(app)
         self._register_users_admin_routes(app)
         self._register_skillminer_routes(app)
 
@@ -1329,6 +1422,253 @@ class RoutesMixin:
             owner.config = store.to_config()
             return JSONResponse(content=_model_settings_payload(owner.config, data))
 
+        @app.get("/api/langfuse-config")
+        async def api_get_langfuse_config():
+            config_file = str(getattr(owner.config, "_config_file", "") or "").strip()
+            store = ConfigStore(config_file=Path(config_file)) if config_file else ConfigStore()
+            return JSONResponse(content=_langfuse_settings_payload(owner.config, store.load()))
+
+        @app.post("/api/langfuse-config")
+        async def api_save_langfuse_config(request: Request):
+            _require_admin_user(_session_user(request))
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise HTTPException(status_code=400, detail="langfuse settings body must be an object")
+
+            enabled = bool(body.get("enabled", False))
+            host = str(body.get("host") or "").strip().rstrip("/") or "https://cloud.langfuse.com"
+
+            def _norm_list(value: Any) -> list[str]:
+                if isinstance(value, (list, tuple, set)):
+                    items = value
+                elif value in (None, ""):
+                    items = []
+                else:
+                    items = str(value).replace("\n", ",").split(",")
+                seen: list[str] = []
+                for raw in items:
+                    item = str(raw or "").strip()
+                    if item and item not in seen:
+                        seen.append(item)
+                return seen
+
+            try:
+                max_sessions = max(1, int(body.get("max_sessions") or owner.config.langfuse_max_sessions or 100))
+                page_limit = max(1, min(100, int(body.get("page_limit") or owner.config.langfuse_page_limit or 50)))
+                timeout_seconds = max(
+                    1, int(body.get("timeout_seconds") or owner.config.langfuse_timeout_seconds or 30)
+                )
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=400, detail="invalid max_sessions / page_limit / timeout_seconds"
+                ) from exc
+
+            # Enabling requires usable credentials so the UI never claims "enabled"
+            # while /langfuse/* would immediately 401.
+            store = ConfigStore()
+            data = store.load()
+            langfuse = data.setdefault("langfuse", {})
+
+            existing_public = str(langfuse.get("public_key") or owner.config.langfuse_public_key or "")
+            existing_secret = str(langfuse.get("secret_key") or owner.config.langfuse_secret_key or "")
+            clear_public = bool(body.get("clear_public_key", False))
+            clear_secret = bool(body.get("clear_secret_key", False))
+            public_key = "" if clear_public else existing_public
+            secret_key = "" if clear_secret else existing_secret
+            raw_public = body.get("public_key")
+            raw_secret = body.get("secret_key")
+            if raw_public is not None and str(raw_public).strip():
+                public_key = str(raw_public).strip()
+            if raw_secret is not None and str(raw_secret).strip():
+                secret_key = str(raw_secret).strip()
+
+            if enabled and (not public_key or not secret_key):
+                raise HTTPException(
+                    status_code=400,
+                    detail="public_key 和 secret_key 均为必填项才能启用 Langfuse 集成",
+                )
+
+            langfuse.update(
+                {
+                    "enabled": enabled,
+                    "host": host,
+                    "public_key": public_key,
+                    "secret_key": secret_key,
+                    "max_sessions": max_sessions,
+                    "page_limit": page_limit,
+                    "timeout_seconds": timeout_seconds,
+                    "default_environment": _norm_list(body.get("default_environment")),
+                    "default_user_id": str(body.get("default_user_id") or "").strip(),
+                    "default_tags": _norm_list(body.get("default_tags")),
+                    "default_release": str(body.get("default_release") or "").strip(),
+                    "default_version": str(body.get("default_version") or "").strip(),
+                    "default_trace_name": str(body.get("default_trace_name") or "").strip(),
+                }
+            )
+            store.save(data)
+            # Hot-reload the in-memory config so /langfuse/* endpoints pick up the
+            # new host/keys/filters immediately, without a service restart.
+            owner.config = store.to_config()
+            return JSONResponse(content=_langfuse_settings_payload(owner.config, data))
+
+        @app.post("/api/langfuse-config/test")
+        async def api_test_langfuse_config(request: Request):
+            _require_admin_user(_session_user(request))
+            from ..integrations.langfuse_client import LangfuseClient, LangfuseError
+
+            body = await request.json() if await request.body() else {}
+            if not isinstance(body, dict):
+                body = {}
+            host = str(body.get("host") or owner.config.langfuse_host or "").strip().rstrip("/")
+            public_key = str(body.get("public_key") or "").strip() or str(owner.config.langfuse_public_key or "")
+            secret_key = str(body.get("secret_key") or "").strip() or str(owner.config.langfuse_secret_key or "")
+            if not host or not public_key or not secret_key:
+                raise HTTPException(
+                    status_code=400, detail="host / public_key / secret_key 均为测试连通性的必填项"
+                )
+            try:
+                health = await asyncio.to_thread(
+                    lambda: LangfuseClient(
+                        host=host,
+                        public_key=public_key,
+                        secret_key=secret_key,
+                        timeout=float(owner.config.langfuse_timeout_seconds or 30),
+                    ).health()
+                )
+            except LangfuseError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=400, detail=f"langfuse test failed: {exc}") from exc
+            return JSONResponse(
+                content={"ok": True, "host": host, "total_sessions": health.get("total_sessions")}
+            )
+
+        # ---- Prompt Studio: transparent, editable, testable pipeline ---- #
+        def _prompt_studio():
+            from ..evolve import prompt_studio as ps
+
+            return ps
+
+        def _load_studio_session(session_id: str) -> dict[str, Any]:
+            """Load a full session dict (turns) to use as test input."""
+            store = SessionStore.from_config(owner.config)
+            session = store.load_session(_safe_session_id(session_id))
+            if not session:
+                raise HTTPException(status_code=404, detail="session not found")
+            return session
+
+        def _studio_llm_factory():
+            from ..llm import AsyncLLMClient
+
+            api_key = str(getattr(owner.config, "llm_api_key", "") or "")
+            base_url = str(getattr(owner.config, "llm_api_base", "") or "")
+            model = str(getattr(owner.config, "llm_model_id", "") or getattr(owner.config, "model_name", "") or "")
+            if not api_key or not base_url or not model:
+                raise HTTPException(
+                    status_code=503,
+                    detail="进化模型未配置，无法测试 prompt。请先在「进化模型」中配置。",
+                )
+            return AsyncLLMClient(
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                max_tokens=int(getattr(owner.config, "llm_max_tokens", 100000) or 100000),
+                temperature=float(getattr(owner.config, "llm_temperature", 0.4) or 0.4),
+            )
+
+        @app.get("/api/prompt-studio/pipeline")
+        async def api_prompt_studio_pipeline():
+            return JSONResponse(content=_prompt_studio().pipeline_graph())
+
+        @app.get("/api/prompt-studio/prompts")
+        async def api_prompt_studio_prompts():
+            return JSONResponse(content={"prompts": _prompt_studio().list_prompts()})
+
+        @app.get("/api/prompt-studio/prompts/{stage_id}")
+        async def api_prompt_studio_prompt_detail(stage_id: str):
+            try:
+                return JSONResponse(content=_prompt_studio().get_prompt(stage_id))
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=f"unknown prompt stage: {stage_id}") from exc
+
+        @app.post("/api/prompt-studio/prompts/{stage_id}")
+        async def api_prompt_studio_save(stage_id: str, request: Request):
+            _require_admin_user(_session_user(request))
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise HTTPException(status_code=400, detail="body must be an object")
+            prompt = str(body.get("prompt") or "")
+            ps = _prompt_studio()
+            try:
+                ps.set_override(stage_id, prompt)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=f"unknown prompt stage: {stage_id}") from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return JSONResponse(content=ps.get_prompt(stage_id))
+
+        @app.post("/api/prompt-studio/prompts/{stage_id}/reset")
+        async def api_prompt_studio_reset(stage_id: str, request: Request):
+            _require_admin_user(_session_user(request))
+            ps = _prompt_studio()
+            try:
+                ps.reset_override(stage_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=f"unknown prompt stage: {stage_id}") from exc
+            return JSONResponse(content=ps.get_prompt(stage_id))
+
+        @app.get("/api/prompt-studio/sessions")
+        async def api_prompt_studio_sessions(limit: int = 20):
+            """Recent sessions the operator can use as test input."""
+            try:
+                store = SessionStore.from_config(owner.config)
+                rows = store.list_conversations(limit=max(1, min(200, int(limit or 20))))
+            except Exception as exc:  # noqa: BLE001
+                return JSONResponse(content={"sessions": [], "reason": str(exc)})
+            sessions = [
+                {
+                    "session_id": r.get("session_id"),
+                    "title": r.get("title"),
+                    "user_alias": r.get("user_alias"),
+                    "num_turns": r.get("num_turns"),
+                    "status": r.get("status"),
+                    "timestamp": r.get("ingested_at") or r.get("timestamp"),
+                }
+                for r in rows
+            ]
+            return JSONResponse(content={"sessions": sessions})
+
+        @app.post("/api/prompt-studio/prompts/{stage_id}/test")
+        async def api_prompt_studio_test(stage_id: str, request: Request):
+            _require_admin_user(_session_user(request))
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise HTTPException(status_code=400, detail="body must be an object")
+            session_id = str(body.get("session_id") or "").strip()
+            if not session_id:
+                raise HTTPException(status_code=400, detail="session_id is required for a prompt test")
+            system_prompt = body.get("prompt")
+            skill_name = str(body.get("skill_name") or "").strip()
+            ps = _prompt_studio()
+            session = _load_studio_session(session_id)
+            if skill_name:
+                session = dict(session)
+                session["_probe_skill_name"] = skill_name
+            try:
+                result = await ps.run_stage_test(
+                    stage_id,
+                    session,
+                    system_prompt=(str(system_prompt) if system_prompt is not None else None),
+                    llm_factory=_studio_llm_factory,
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=f"unknown prompt stage: {stage_id}") from exc
+            except HTTPException:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=502, detail=f"prompt test failed: {exc}") from exc
+            return JSONResponse(content=result)
+
         @app.post("/api/evolve-model/test")
         async def api_test_evolve_model(request: Request):
             _require_admin_user(_session_user(request))
@@ -1398,79 +1738,123 @@ class RoutesMixin:
             session = dict(body)
             session["session_id"] = session_id
             session.setdefault("user_alias", str(getattr(owner.config, "sharing_user_alias", "") or "anonymous"))
+            return await _ingest_session_dict(owner, session)
 
-            try:
-                session_store = SessionStore.from_config(owner.config)
-            except Exception as exc:  # noqa: BLE001
-                raise HTTPException(status_code=503, detail="session storage is not configured") from exc
+        async def _ingest_langfuse_session(session: dict[str, Any]) -> dict[str, Any]:
+            """In-process ingest for one converted Langfuse session dict."""
+            session = dict(session)
+            session["session_id"] = _safe_session_id(session.get("session_id"))
+            session.setdefault(
+                "user_alias",
+                str(getattr(owner.config, "sharing_user_alias", "") or "langfuse"),
+            )
+            return await _ingest_session_dict(owner, session)
 
-            # Skip re-ingesting an already-processed session whose content has
-            # not changed. Re-submitting the same conversation at a later time
-            # would otherwise re-queue it, regenerate the same coalesced
-            # candidate, and trigger a redundant evolution cycle that reuses a
-            # stale A/B replay. A continued conversation (new turns) has a
-            # different fingerprint and is ingested normally.
-            force_reprocess = bool(session.pop("force_reprocess", False))
-            if (
-                not force_reprocess
-                and session_store.duplicate_of_processed(session)
+        def _langfuse_filter_overrides(source: dict[str, Any]) -> dict[str, Any]:
+            if not isinstance(source, dict):
+                return {}
+            overrides: dict[str, Any] = {}
+            for key in (
+                "from_timestamp",
+                "to_timestamp",
+                "environment",
+                "user_id",
+                "tags",
+                "release",
+                "version",
+                "trace_name",
+                "session_id",
+                "metadata",
             ):
-                logger.info(
-                    "[SessionFilter] skipped duplicate session=%s (already processed, no new content)",
-                    session_id,
-                )
-                return {
-                    "status": "duplicate",
-                    "session_id": session_id,
-                    "queued": False,
-                }
-            if force_reprocess:
-                session["reprocess_reason"] = str(
-                    body.get("reprocess_reason")
-                    or "explicit dashboard reingest"
-                )
+                if source.get(key) not in (None, ""):
+                    overrides[key] = source.get(key)
+            return overrides
 
-            classifier = SessionValueClassifier.from_config(owner.config)
-            value_judge = await classifier.classify(session)
-            session["value_judge"] = value_judge
-            session["ingested_at"] = _utc_now_iso()
+        @app.get("/langfuse/status")
+        async def langfuse_status():
+            from ..integrations.langfuse_client import LangfuseClient, LangfuseError
 
-            if value_judge.get("decision") != "valuable":
-                session_store.save_skipped(session)
-                _invalidate_dashboard_cache(f"conversations:{id(owner.config)}")
-                logger.info(
-                    "[SessionFilter] skipped session=%s decision=%s reason=%s",
-                    session_id,
-                    value_judge.get("decision"),
-                    value_judge.get("reason"),
-                )
-                return {
-                    "status": "skipped",
-                    "session_id": session_id,
-                    "queued": False,
-                    "value_judge": value_judge,
-                }
-
-            key = session_store.save_queued(session)
-            _invalidate_dashboard_cache(
-                f"queue:{id(owner.config)}",
-                f"conversations:{id(owner.config)}",
-                f"status:{id(owner.config)}",
-            )
-            trigger_scheduled = (
-                False
-                if bool(session.get("defer_evolution_trigger"))
-                else owner._schedule_evolve_trigger()
-            )
-            logger.info("[SessionFilter] queued valuable session=%s key=%s", session_id, key)
-            return {
-                "status": "queued",
-                "session_id": session_id,
-                "queued": True,
-                "key": key,
-                "trigger_scheduled": trigger_scheduled,
-                "value_judge": value_judge,
+            enabled = bool(getattr(owner.config, "langfuse_enabled", False))
+            payload: dict[str, Any] = {
+                "enabled": enabled,
+                "host": str(getattr(owner.config, "langfuse_host", "") or ""),
+                "public_key_present": bool(getattr(owner.config, "langfuse_public_key", "")),
+                "secret_key_present": bool(getattr(owner.config, "langfuse_secret_key", "")),
+                "max_sessions": int(getattr(owner.config, "langfuse_max_sessions", 100) or 100),
+                "default_filters": {
+                    "environment": list(getattr(owner.config, "langfuse_default_environment", []) or []),
+                    "user_id": str(getattr(owner.config, "langfuse_default_user_id", "") or ""),
+                    "tags": list(getattr(owner.config, "langfuse_default_tags", []) or []),
+                    "release": str(getattr(owner.config, "langfuse_default_release", "") or ""),
+                    "version": str(getattr(owner.config, "langfuse_default_version", "") or ""),
+                    "trace_name": str(getattr(owner.config, "langfuse_default_trace_name", "") or ""),
+                },
+                "reachable": False,
             }
+            if not enabled:
+                payload["reason"] = "langfuse_disabled"
+                return JSONResponse(content=payload)
+            try:
+                health = await asyncio.to_thread(
+                    lambda: LangfuseClient.from_config(owner.config).health()
+                )
+                payload["reachable"] = True
+                payload["total_sessions"] = health.get("total_sessions")
+            except LangfuseError as exc:
+                payload["reason"] = str(exc)
+            except Exception as exc:  # noqa: BLE001
+                payload["reason"] = str(exc)
+            return JSONResponse(content=payload)
+
+        @app.post("/langfuse/sessions")
+        async def langfuse_sessions(request: Request):
+            from ..integrations.langfuse_pull import preview_sessions
+
+            body = await request.json() if await request.body() else {}
+            if not isinstance(body, dict):
+                body = {}
+            overrides = _langfuse_filter_overrides(body)
+            try:
+                max_sessions = int(body.get("max_sessions") or 0)
+            except (TypeError, ValueError):
+                max_sessions = 0
+            try:
+                result = await asyncio.to_thread(
+                    preview_sessions,
+                    owner.config,
+                    overrides,
+                    max_sessions=max_sessions,
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=502, detail=f"langfuse list failed: {exc}") from exc
+            return JSONResponse(content=result)
+
+        @app.post("/langfuse/pull")
+        async def langfuse_pull(request: Request):
+            _check_ingest_api_key(request)
+            from ..integrations.langfuse_pull import pull_sessions
+
+            body = await request.json() if await request.body() else {}
+            if not isinstance(body, dict):
+                body = {}
+            overrides = _langfuse_filter_overrides(body)
+            try:
+                max_sessions = int(body.get("max_sessions") or 0)
+            except (TypeError, ValueError):
+                max_sessions = 0
+            try:
+                result = await pull_sessions(
+                    owner.config,
+                    _ingest_langfuse_session,
+                    overrides,
+                    max_sessions=max_sessions,
+                    user_alias=str(body.get("user_alias") or ""),
+                    force_reprocess=bool(body.get("force_reprocess", False)),
+                    defer_evolution_trigger=bool(body.get("defer_evolution_trigger", False)),
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=502, detail=f"langfuse pull failed: {exc}") from exc
+            return JSONResponse(content=result)
 
         @app.post("/internal/agentshub/openviking-config")
         async def sync_agentshub_openviking_config(request: Request):
@@ -1480,6 +1864,15 @@ class RoutesMixin:
             endpoint = str(body.get("endpoint") or "").strip()
             account = str(body.get("account") or "").strip()
             personal_key = str(body.get("personal_api_key") or "").strip()
+            # AgentsHub sends every registered user's personal key as an array so
+            # DreamCycle can read each user's OpenViking space (scope=all). Fall
+            # back to the singular field for older AgentsHub builds.
+            raw_personal_keys = body.get("personal_api_keys")
+            personal_keys_in = (
+                [str(item or "").strip() for item in raw_personal_keys]
+                if isinstance(raw_personal_keys, list)
+                else []
+            )
             team_key = str(body.get("team_api_key") or "").strip()
             if not endpoint or not team_key:
                 raise HTTPException(
@@ -1522,6 +1915,8 @@ class RoutesMixin:
                 source_keys.append(legacy_personal)
             if personal_key:
                 source_keys.append(personal_key)
+            if personal_keys_in:
+                source_keys.extend(personal_keys_in)
             source_keys = list(
                 dict.fromkeys(
                     key
@@ -1737,15 +2132,28 @@ class RoutesMixin:
 
         @app.get("/api/session-filter/audit")
         async def api_session_filter_audit(limit: int = 100, decision: str = ""):
-            try:
+            safe_limit = max(1, int(limit or 100))
+            wanted = str(decision or "").strip().lower()
+            cache_key = f"session-filter-audit:{id(owner.config)}:{safe_limit}:{wanted}"
+
+            def load_audit() -> dict[str, Any]:
                 store = SessionStore.from_config(owner.config)
                 return {
                     "stats": store.filter_stats(),
                     "items": store.list_filter_audit(
-                        limit=max(1, int(limit or 100)),
-                        decision=decision,
+                        limit=safe_limit,
+                        decision=wanted,
                     ),
                 }
+
+            try:
+                return await asyncio.to_thread(
+                    lambda: _cached_dashboard_value(
+                        cache_key,
+                        30.0,
+                        load_audit,
+                    )
+                )
             except Exception as exc:  # noqa: BLE001
                 return {
                     "stats": {
