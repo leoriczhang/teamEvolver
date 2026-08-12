@@ -27,8 +27,11 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import yaml
+
 import validate_sample_packages as vsp
 import human_checkpoints as hc
+import hermes_isolation as hi
 
 # 直接执行本文件时，后续延迟导入的 run_benchmark -> run_skill_test 会按模块名
 # ``run_pipeline`` 复用当前实例。否则 Python 会把本文件再加载一次，导致隔离任务的
@@ -193,7 +196,7 @@ def resolve_ark_key():
 
 
 def ensure_hermes_home():
-    """初始化隔离的 HERMES_HOME，不读取或修改用户全局 ``~/.hermes``。"""
+    """初始化隔离 HERMES_HOME，并强制关闭远程进化与外部 Hook。"""
     HERMES_HOME.mkdir(parents=True, exist_ok=True)
     base_home = PROJECT_HERMES_HOME.resolve()
     current_home = HERMES_HOME.resolve()
@@ -222,12 +225,18 @@ def ensure_hermes_home():
         except Exception as e:
             print(f"  ✗ 初始化 Hermes 配置失败: {e}")
             return False
+    try:
+        if hi.sanitize_config_file(config_path):
+            print("  ✓ 已关闭项目 Hermes 的外部 Hook、技能目录与进化投喂")
+    except (OSError, ValueError, yaml.YAMLError) as e:
+        print(f"  ✗ 隔离 Hermes 配置失败: {e}")
+        return False
     return True
 
 
 def build_hermes_env():
     """构造项目 Hermes 的隔离环境变量。"""
-    env = dict(os.environ)
+    env = hi.sanitize_environment(os.environ)
     # 这些全局覆盖项会压过项目 config.yaml；移除后项目模型配置才是唯一真源。
     env.pop("HERMES_INFERENCE_MODEL", None)
     env.pop("HERMES_IGNORE_USER_CONFIG", None)
@@ -236,8 +245,6 @@ def build_hermes_env():
     key = resolve_ark_key()
     if key:
         env["ARK_API_KEY"] = key
-    # 无 TTY 的脚本场景：自动接受 hooks，避免交互卡住
-    env["HERMES_ACCEPT_HOOKS"] = "1"
     return env, bool(key)
 
 

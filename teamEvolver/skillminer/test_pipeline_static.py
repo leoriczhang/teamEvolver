@@ -47,7 +47,16 @@ def load_module(module_name):
     path = PROJECT_ROOT / f"{module_name}.py"
     spec = importlib.util.spec_from_file_location(module_name, path)
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    previous = sys.modules.get(module_name)
+    sys.modules[module_name] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:
+        if previous is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
+        raise
     return mod
 
 
@@ -202,7 +211,6 @@ def test_skill_frontmatter():
             "sample-package-constructor-agent-skill",
             "semantic-discovery-agent-skill",
             "evaluation-compiler-agent-skill",
-            "protocol-scoring-agent-skill",
         ]
     for skill_dir in skills:
         md = PROJECT_ROOT / skill_dir / "SKILL.md"

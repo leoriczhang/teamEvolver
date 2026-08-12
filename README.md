@@ -388,6 +388,8 @@ bash scripts/install_teamEvolver.sh --skip-hermes
 
 项目模型配置位于 `teamEvolver/skillminer/.hermes_home/config.yaml`，首次运行从无密钥模板 `teamEvolver/skillminer/hermes/config.yaml.example` 初始化。可直接修改 provider、模型、base URL、上下文长度等；并行挖掘任务会各自复制配置快照，互不写入彼此状态。
 
+内置 Hermes 仅作为 SkillMiner 的模型执行器：运行时会强制移除 session feed、远程技能同步 Hook、外部技能目录和进化服务环境变量，不会自动参与团队进化。Skill 与 Benchmark 只有在人工审核并点击“提交进化”后才会进入候选评审队列。
+
 LIFT 是可选的外部评测工作区，不会复制进 teamEvolver 安装包：
 
 ```bash

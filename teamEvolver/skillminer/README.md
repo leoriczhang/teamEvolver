@@ -76,7 +76,7 @@ cp .env.example .env
 export ARK_API_KEY="your-api-key"
 ```
 
-> 说明：`run_pipeline.py` / `run_benchmark.py` / `run_multi_session.py` 启动时会读取 `ARK_API_KEY` 并注入项目 Hermes 环境，并先做一次连通性自检（返回 `HERMES_OK` 即通过）。自检失败时默认立即停止，避免已知无效的调用继续消耗时间；仅当确认是探测命令与 provider 不兼容时，主流水线可显式使用 `--allow-connection-probe-failure`。首次运行会从 `hermes/config.yaml.example` 创建项目本地 `.hermes_home/config.yaml`，以后不会覆盖你的修改；并行挖掘任务会从这份项目配置创建自己的快照。
+> 说明：`run_pipeline.py` / `run_benchmark.py` / `run_multi_session.py` 启动时会读取 `ARK_API_KEY` 并注入项目 Hermes 环境，并先做一次连通性自检（返回 `HERMES_OK` 即通过）。自检失败时默认立即停止，避免已知无效的调用继续消耗时间；仅当确认是探测命令与 provider 不兼容时，主流水线可显式使用 `--allow-connection-probe-failure`。首次运行会从 `hermes/config.yaml.example` 创建项目本地 `.hermes_home/config.yaml`，以后不会覆盖你的模型修改；并行挖掘任务会从这份项目配置创建自己的快照。每次启动都会强制移除内置 Hermes 的外部 Hook、外部技能目录和远程投喂环境变量，因此它只执行挖掘，不会把 session 提交到进化服务；挖掘产物仍可在人工审核后通过控制台的“提交进化”进入候选区。
 
 ## 修改项目 Hermes 的模型配置
 

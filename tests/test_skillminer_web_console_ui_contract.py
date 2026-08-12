@@ -52,6 +52,39 @@ def test_mining_model_settings_can_be_saved_without_returning_secret(tmp_path, m
     assert config_path.stat().st_mode & 0o777 == 0o600
 
 
+def test_saving_mining_model_settings_drops_legacy_evolution_hooks(tmp_path, monkeypatch):
+    config_path = tmp_path / ".hermes_home" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        """
+model:
+  default: old-model
+  base_url: https://old.example/v1
+hooks:
+  on_session_end:
+    - command: python push_session.py
+skills:
+  external_dirs:
+    - /Users/example/.hermes/team_skills/skillgene
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(server, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(server.rp, "resolve_ark_key", lambda: "")
+
+    server.save_mining_model_settings({
+        "model": "new-model",
+        "base_url": "https://model.example/v1",
+        "max_tokens": 4096,
+        "temperature": 0.2,
+    })
+
+    persisted = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert "hooks" not in persisted
+    assert persisted["hooks_auto_accept"] is False
+    assert "skills" not in persisted
+
+
 def test_mining_model_test_uses_current_form_values(tmp_path, monkeypatch):
     config_path = tmp_path / ".hermes_home" / "config.yaml"
     config_path.parent.mkdir(parents=True)

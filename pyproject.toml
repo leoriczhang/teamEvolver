@@ -81,6 +81,7 @@ teamEvolver = [
     "skillminer/*.sh",
     "skillminer/hermes/*",
     "skillminer/data/input/.gitkeep",
+    "skillminer/data/中文金融客服测试/*.md",
     "skillminer/web_console/*.py",
     "skillminer/web_console/static/*",
     "skillminer/*-agent-skill/*.md",

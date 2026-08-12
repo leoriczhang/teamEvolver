@@ -18,8 +18,17 @@ if [[ ! -f "$HERMES_HOME_DIR/config.yaml" ]]; then
   echo "Initialized project Hermes config: $HERMES_HOME_DIR/config.yaml" >&2
 fi
 
+# The embedded Hermes runtime is only SkillMiner's model executor.  Remove any
+# feed/sync hooks inherited by an older local config before every direct call.
+"$ROOT_DIR/.venv/bin/python" \
+  "$ROOT_DIR/teamEvolver/skillminer/hermes_isolation.py" \
+  "$HERMES_HOME_DIR/config.yaml"
+
 export HERMES_HOME="$HERMES_HOME_DIR"
 export PYTHONNOUSERSITE=1
-unset HERMES_INFERENCE_MODEL HERMES_IGNORE_USER_CONFIG
+export TEAMEVOLVER_DISABLE_SESSION_FEED=1
+unset HERMES_INFERENCE_MODEL HERMES_IGNORE_USER_CONFIG HERMES_ACCEPT_HOOKS
+unset TEAMEVOLVER_URL TEAMEVOLVER_USER TEAMEVOLVER_API_KEY TEAMEVOLVER_FEED_CONFIG
+unset EVOLVE_INGEST_API_KEY HERMES_STATE_DB
 
 exec "$HERMES_BIN" "$@"

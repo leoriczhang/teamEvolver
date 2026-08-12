@@ -338,6 +338,14 @@ def _post(base_url: str, session: dict, user: str, api_key: str) -> None:
 
 
 def main() -> int:
+    # SkillMiner's embedded Hermes exports this defense-in-depth marker.  Even
+    # if a stale config somehow retains the feed hook, its model-runner
+    # transcripts must never enter team evolution automatically.
+    if str(os.environ.get("TEAMEVOLVER_DISABLE_SESSION_FEED") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }:
+        _log("session feed disabled for embedded SkillMiner Hermes")
+        return 0
     try:
         payload = json.loads(sys.stdin.read() or "{}")
     except ValueError:

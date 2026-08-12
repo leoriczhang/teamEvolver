@@ -7,6 +7,8 @@ data/*
 !data/input/
 data/input/*
 !data/input/.gitkeep
+!data/中文金融客服测试/
+!data/中文金融客服测试/**
 
 # Pipeline and evaluation artifacts
 sample_packages/

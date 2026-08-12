@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import yaml
+
 SKILLMINER_DIR = Path(__file__).resolve().parents[1] / "teamEvolver" / "skillminer"
 sys.path.insert(0, str(SKILLMINER_DIR))
 
@@ -50,7 +52,9 @@ def test_hermes_home_initializes_from_project_template_not_user_home(tmp_path, m
     monkeypatch.setattr(rp, "HERMES_CONFIG_TEMPLATE", template)
 
     assert rp.ensure_hermes_home() is True
-    assert (task_home / "config.yaml").read_text(encoding="utf-8") == template.read_text(encoding="utf-8")
+    initialized = yaml.safe_load((task_home / "config.yaml").read_text(encoding="utf-8"))
+    assert initialized["model"]["default"] == "project-model"
+    assert initialized["hooks_auto_accept"] is False
 
     base_home.mkdir(parents=True)
     (base_home / "config.yaml").write_text("model:\n  default: configured-model\n", encoding="utf-8")
@@ -60,18 +64,59 @@ def test_hermes_home_initializes_from_project_template_not_user_home(tmp_path, m
     assert "configured-model" in (second_task / "config.yaml").read_text(encoding="utf-8")
 
 
+def test_hermes_home_removes_inherited_evolution_hooks_and_external_skills(tmp_path, monkeypatch):
+    base_home = tmp_path / "project" / ".hermes_home"
+    task_home = tmp_path / "task" / ".hermes_home"
+    base_home.mkdir(parents=True)
+    (base_home / "config.yaml").write_text(
+        """
+model:
+  default: configured-model
+skills:
+  external_dirs:
+    - /Users/example/.hermes/team_skills/skillgene
+hooks_auto_accept: true
+hooks:
+  pre_llm_call:
+    - command: python sync_skills.py
+  on_session_end:
+    - command: python push_session.py
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(rp, "PROJECT_HERMES_HOME", base_home)
+    monkeypatch.setattr(rp, "HERMES_HOME", task_home)
+
+    assert rp.ensure_hermes_home() is True
+    sanitized = yaml.safe_load((task_home / "config.yaml").read_text(encoding="utf-8"))
+    assert sanitized["model"]["default"] == "configured-model"
+    assert "hooks" not in sanitized
+    assert sanitized["hooks_auto_accept"] is False
+    assert "skills" not in sanitized
+
+
 def test_hermes_environment_prefers_project_config_over_global_overrides(tmp_path, monkeypatch):
     monkeypatch.setattr(rp, "HERMES_HOME", tmp_path / ".hermes_home")
     monkeypatch.setattr(rp, "resolve_ark_key", lambda: "")
     monkeypatch.setenv("HERMES_HOME", "/global/hermes")
     monkeypatch.setenv("HERMES_INFERENCE_MODEL", "global-model")
     monkeypatch.setenv("HERMES_IGNORE_USER_CONFIG", "1")
+    monkeypatch.setenv("HERMES_ACCEPT_HOOKS", "1")
+    monkeypatch.setenv("TEAMEVOLVER_URL", "https://evolve.example")
+    monkeypatch.setenv("TEAMEVOLVER_USER", "embedded-hermes")
+    monkeypatch.setenv("EVOLVE_INGEST_API_KEY", "feed-secret")
 
     env, has_key = rp.build_hermes_env()
 
     assert env["HERMES_HOME"] == str(tmp_path / ".hermes_home")
     assert "HERMES_INFERENCE_MODEL" not in env
     assert "HERMES_IGNORE_USER_CONFIG" not in env
+    assert "HERMES_ACCEPT_HOOKS" not in env
+    assert "TEAMEVOLVER_URL" not in env
+    assert "TEAMEVOLVER_USER" not in env
+    assert "EVOLVE_INGEST_API_KEY" not in env
+    assert env["TEAMEVOLVER_DISABLE_SESSION_FEED"] == "1"
     assert env["PYTHONNOUSERSITE"] == "1"
     assert has_key is False
 

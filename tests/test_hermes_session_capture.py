@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
+from io import StringIO
 from pathlib import Path
 
 import yaml
 
 from teamEvolver.integrations.hermes_skill import install
+from teamEvolver.integrations.hermes_skill import push_session
 from teamEvolver.integrations.hermes_skill.push_session import _read_session
 
 
@@ -175,3 +178,15 @@ def test_feed_installer_replaces_same_script_with_new_python(tmp_path: Path) -> 
     ]
     assert len(feed_approvals) == 1
     assert feed_approvals[0]["command"].startswith("/opt/python ")
+
+
+def test_embedded_skillminer_hermes_never_posts_session(monkeypatch) -> None:
+    monkeypatch.setenv("TEAMEVOLVER_DISABLE_SESSION_FEED", "1")
+    monkeypatch.setattr(sys, "stdin", StringIO('{"session_id":"session-1"}'))
+    monkeypatch.setattr(
+        push_session,
+        "_post",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not post")),
+    )
+
+    assert push_session.main() == 0

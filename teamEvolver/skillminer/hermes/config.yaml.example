@@ -27,3 +27,8 @@ terminal:
   cwd: .
   home_mode: profile
   timeout: 180
+
+# This Hermes profile is only SkillMiner's model executor.  It intentionally
+# has no session-end feed, remote skill-sync hook, or external skill directory.
+# run_pipeline.py enforces the same policy on existing local configurations.
+hooks_auto_accept: false

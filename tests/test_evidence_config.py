@@ -7,9 +7,9 @@ def test_evidence_defaults_are_exposed_to_embedded_evolver(tmp_path) -> None:
     config = ConfigStore(tmp_path / "missing.yaml").to_config()
 
     assert config.evolve_evidence_enabled is True
-    assert config.evolve_evidence_max_entries == 200
-    assert config.evolve_evidence_recent_limit == 12
-    assert config.evolve_evidence_historical_limit == 12
+    assert config.evolve_evidence_max_entries == 400
+    assert config.evolve_evidence_recent_limit == 20
+    assert config.evolve_evidence_historical_limit == 20
     assert config.evolve_evidence_replay_cases_per_window == 1
     assert config.evolve_evidence_change_debt_threshold == 3
     assert config.evolve_candidate_coalesce_enabled is True

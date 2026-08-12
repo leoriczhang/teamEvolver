@@ -111,6 +111,12 @@ import run_pipeline as rp  # noqa: E402
 import trajectory_benchmark as tb  # noqa: E402  轨迹 → 内部 Benchmark 独立入口
 
 rst = rb.rst  # run_skill_test 模块（find_skill_to_test / deploy_test_skill 等）
+
+# 旧版运行数据迁移可能带入用户 Hermes 的 teamEvolver feed/sync hooks。
+# 控制台启动即清除，确保内置 Hermes 只负责挖掘模型调用。
+with contextlib.suppress(OSError, ValueError, yaml.YAMLError):
+    rp.hi.sanitize_config_file(PROJECT_ROOT / ".hermes_home" / "config.yaml")
+
 JOBS = mj.MiningJobManager(PROJECT_ROOT)
 MODEL_CONFIG_LOCK = threading.RLock()
 
@@ -1649,6 +1655,7 @@ def save_mining_model_settings(body):
             model_config["api_key"] = normalized["api_key"]
             model_config.pop("api", None)
         document["model"] = model_config
+        document = rp.hi.sanitize_config_document(document)
 
         path = _model_config_path()
         path.parent.mkdir(parents=True, exist_ok=True)
