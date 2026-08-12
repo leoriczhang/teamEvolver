@@ -8,16 +8,15 @@ INSTALL_EXTRAS="${TEAMEVOLVER_INSTALL_EXTRAS:-all}"
 RUN_SETUP=0
 RUN_START=0
 SKIP_HERMES="${TEAMEVOLVER_SKIP_HERMES:-0}"
-# Canonical upstream Hermes installer. Overridable for air-gapped mirrors.
-HERMES_INSTALL_URL="${HERMES_INSTALL_URL:-https://hermes-agent.nousresearch.com/install.sh}"
+HERMES_PACKAGE_SPEC="${TEAMEVOLVER_HERMES_PACKAGE_SPEC:-hermes-agent==0.19.0}"
 
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [--venv-dir PATH] [--python BIN] [--extras LIST] [--run-setup] [--run-start] [--skip-hermes]
 
 Installs teamEvolver from the current repository checkout into a local virtualenv.
-Also provisions the Hermes CLI (required for the document-mining pipeline) unless
-it is already installed or --skip-hermes is given.
+Installs Hermes into this project's virtualenv (required for document mining)
+unless --skip-hermes is given. A system/global Hermes is never used or changed.
 
 Examples:
   bash scripts/install_teamEvolver.sh
@@ -25,12 +24,12 @@ Examples:
   bash scripts/install_teamEvolver.sh --extras all --run-setup --run-start
   bash scripts/install_teamEvolver.sh --skip-hermes   # server won't run mining
 
-Default install command:
+Default project install command:
   python -m pip install -e ".[all]"
 
-Hermes provisioning is idempotent: if a working \`hermes\` binary is already on
-PATH (or at ~/.local/bin, /opt/homebrew/bin, /usr/local/bin) it is left as-is.
-Override the installer source with HERMES_INSTALL_URL for air-gapped mirrors.
+Hermes provisioning is idempotent and targets only <venv>/bin/hermes. Override
+the pinned package spec with TEAMEVOLVER_HERMES_PACKAGE_SPEC when using a mirror
+or an internally reviewed build.
 
 After install you can run:
   teamEvolver setup
@@ -81,16 +80,10 @@ if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   exit 1
 fi
 
-# Resolve a working `hermes` binary using the same discovery contract as
-# teamEvolver/skillminer/run_pipeline.py (find_hermes_bin): PATH first, then the
-# fixed candidate locations. Prints the resolved path on success.
+# Resolve only the Hermes console script owned by this project's virtualenv.
 find_hermes_bin() {
   local cand
-  if command -v hermes >/dev/null 2>&1; then
-    command -v hermes
-    return 0
-  fi
-  for cand in "$HOME/.local/bin/hermes" "/opt/homebrew/bin/hermes" "/usr/local/bin/hermes"; do
+  for cand in "$VENV_DIR/bin/hermes" "$VENV_DIR/Scripts/hermes.exe"; do
     if [[ -x "$cand" ]]; then
       echo "$cand"
       return 0
@@ -99,10 +92,8 @@ find_hermes_bin() {
   return 1
 }
 
-# Idempotently provision the Hermes CLI. Mining (skillminer) shells out to the
-# `hermes` binary, so a server that should run mining needs it. Evolve does NOT
-# need it (it calls the LLM HTTP API directly), so --skip-hermes is safe for
-# evolve-only deployments.
+# Idempotently provision Hermes inside the active project virtualenv. Mining
+# shells out to this exact binary; no PATH/system fallback is allowed.
 provision_hermes() {
   if [[ "$SKIP_HERMES" -eq 1 ]]; then
     echo "[install_teamEvolver] --skip-hermes set; skipping Hermes CLI provisioning"
@@ -112,40 +103,19 @@ provision_hermes() {
 
   local existing
   if existing="$(find_hermes_bin)" && "$existing" --version >/dev/null 2>&1; then
-    echo "[install_teamEvolver] Hermes already installed: $existing ($("$existing" --version 2>/dev/null | head -1))"
+    echo "[install_teamEvolver] project Hermes already installed: $existing ($("$existing" --version 2>/dev/null | head -1))"
     return 0
   fi
 
-  echo "[install_teamEvolver] Hermes CLI not found; installing from $HERMES_INSTALL_URL"
-  if ! command -v curl >/dev/null 2>&1; then
-    echo "[install_teamEvolver] WARN: curl not available; cannot auto-install Hermes." >&2
-    echo "[install_teamEvolver]       Install it manually (see https://github.com/NousResearch/hermes-agent)," >&2
-    echo "[install_teamEvolver]       or re-run with --skip-hermes to skip. Mining will be unavailable." >&2
-    return 0
-  fi
-
-  local installer
-  installer="$(mktemp 2>/dev/null || echo "/tmp/hermes-install.$$.sh")"
-  if ! curl -fsSL "$HERMES_INSTALL_URL" -o "$installer"; then
-    echo "[install_teamEvolver] WARN: failed to download Hermes installer from $HERMES_INSTALL_URL" >&2
-    rm -f "$installer"
-    return 0
-  fi
-  # Non-interactive: no setup wizard, no TTY prompts (server context).
-  if bash "$installer" --skip-setup --non-interactive; then
-    rm -f "$installer"
-  else
-    echo "[install_teamEvolver] WARN: Hermes installer exited non-zero; continuing." >&2
-    rm -f "$installer"
-  fi
+  echo "[install_teamEvolver] project Hermes not found; installing $HERMES_PACKAGE_SPEC"
+  python -m pip install "$HERMES_PACKAGE_SPEC"
 
   local resolved
   if resolved="$(find_hermes_bin)" && "$resolved" --version >/dev/null 2>&1; then
-    echo "[install_teamEvolver] Hermes installed: $resolved"
+    echo "[install_teamEvolver] project Hermes installed: $resolved"
   else
-    echo "[install_teamEvolver] WARN: Hermes still not resolvable after install." >&2
-    echo "[install_teamEvolver]       Ensure ~/.local/bin is on PATH (open a new shell or 'source ~/.bashrc')," >&2
-    echo "[install_teamEvolver]       then verify with 'hermes --version'. Mining needs it; evolve does not." >&2
+    echo "[install_teamEvolver] ERROR: project Hermes is unavailable after installation." >&2
+    return 1
   fi
 }
 
@@ -159,11 +129,21 @@ cd "$ROOT_DIR"
 # shellcheck disable=SC1090
 source "$VENV_DIR/bin/activate"
 
+if ! python -m pip --version >/dev/null 2>&1; then
+  echo "[install_teamEvolver] pip missing in existing virtualenv; bootstrapping with ensurepip"
+  python -m ensurepip --upgrade
+fi
 python -m pip install -U pip
+if [[ "$SKIP_HERMES" -eq 1 && "$INSTALL_EXTRAS" == "all" ]]; then
+  # `all` includes the mining/true-replay Hermes dependency. Preserve the
+  # documented --skip-hermes behavior for the default invocation.
+  INSTALL_EXTRAS="sharing,validation"
+  echo "[install_teamEvolver] --skip-hermes: using extras $INSTALL_EXTRAS"
+fi
 python -m pip install -e ".[${INSTALL_EXTRAS}]"
 
 echo
-echo "[install_teamEvolver] provisioning Hermes CLI (for document mining)"
+echo "[install_teamEvolver] provisioning project-isolated Hermes (for document mining)"
 provision_hermes
 
 echo

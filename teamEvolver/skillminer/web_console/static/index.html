@@ -43,8 +43,8 @@
 
         <div class="field toggle-row">
           <div>
-            <label>运行中向我提问</label>
-            <p class="hint">在关键检查点暂停，补充知识 / 校验产物</p>
+            <label>启用知识补证</label>
+            <p class="hint">在关键阶段暂停，逐条补充规则、指标与依据</p>
           </div>
           <label class="switch">
             <input type="checkbox" id="askEnabled" checked />
@@ -53,7 +53,7 @@
         </div>
 
         <div class="field" id="checkpointsWrap">
-          <label>提问检查点</label>
+          <label>知识补证阶段</label>
           <div id="checkpointList"></div>
         </div>
 
@@ -149,7 +149,7 @@
   <!-- 提问弹窗（阻塞式）：列出系统发现的具体缺口问题，逐条作答 -->
   <div class="modal-overlay hidden" id="modalOverlay">
     <div class="modal">
-      <div class="modal-tag" id="qTag">检查点</div>
+      <div class="modal-tag" id="qTag">知识补证</div>
       <div class="modal-title" id="qTitle"></div>
       <p class="modal-intro" id="qIntro"></p>
       <div class="q-list" id="qList"></div>

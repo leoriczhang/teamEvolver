@@ -267,5 +267,5 @@ class SkillMinerBridgeMixin:
         app.add_api_route(
             "/api/mining/{path:path}",
             _mining_proxy,
-            methods=["GET", "POST"],
+            methods=["GET", "POST", "DELETE"],
         )

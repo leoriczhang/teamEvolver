@@ -375,13 +375,18 @@ teamEvolver langfuse pull --session-id <sid> --in-process
 `SKILL.md` 和内部 `benchmark.jsonl`。挖掘产物不会直接发布，而是提交到现有候选评审
 队列，继续经过 A/B 回放、Checklist 门禁和人工发布。
 
-SkillMiner 通过本机 Hermes CLI 执行模型任务。安装脚本会幂等检查并按需安装 Hermes：
+SkillMiner 通过**项目虚拟环境内的 Hermes CLI**执行模型任务。安装脚本会把固定版本的 Hermes 安装到本项目 `.venv`，运行时使用独立的 `teamEvolver/skillminer/.hermes_home`；不会发现、调用或修改系统全局 Hermes 与 `~/.hermes`：
 
 ```bash
 bash scripts/install_teamEvolver.sh
+# 验证/配置项目 Hermes（不会影响全局 Hermes）
+scripts/project_hermes.sh --version
+scripts/project_hermes.sh model
 # 仅部署进化服务，不启用文档挖掘
 bash scripts/install_teamEvolver.sh --skip-hermes
 ```
+
+项目模型配置位于 `teamEvolver/skillminer/.hermes_home/config.yaml`，首次运行从无密钥模板 `teamEvolver/skillminer/hermes/config.yaml.example` 初始化。可直接修改 provider、模型、base URL、上下文长度等；并行挖掘任务会各自复制配置快照，互不写入彼此状态。
 
 LIFT 是可选的外部评测工作区，不会复制进 teamEvolver 安装包：
 

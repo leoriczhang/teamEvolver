@@ -28,6 +28,7 @@ from ..config_store import ConfigStore
 from ..mining_lifecycle import (
     MiningLifecycleError,
     list_mined_skill_statuses,
+    resolve_mined_job_skill_root,
     submit_mined_skill,
 )
 from ..progressive_replay import (
@@ -2241,6 +2242,79 @@ class RoutesMixin:
                     "dataset_format"
                 ),
                 "question_count": (job.get("source") or {}).get(
+                    "question_count"
+                ),
+            }
+
+        @app.post("/api/mined-jobs/{job_id}/skills/{skill_name}/submit")
+        async def api_submit_mined_job_skill(
+            job_id: str,
+            skill_name: str,
+            request: Request,
+        ):
+            """Send a completed task's edited bundle to the evolution review gate."""
+            user = _session_user(request) or {}
+            current_skill = None
+            if owner.skill_manager is not None:
+                current_skill = next(
+                    (
+                        skill
+                        for skill in owner.skill_manager.get_all_skills()
+                        if str(skill.get("name") or "") == skill_name
+                    ),
+                    None,
+                )
+            try:
+                payload = {}
+                try:
+                    parsed_payload = await request.json()
+                    if isinstance(parsed_payload, dict):
+                        payload = parsed_payload
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                workspace = resolve_mined_job_skill_root(
+                    job_id,
+                    skill_name,
+                    artifact_path=str(payload.get("artifact_path") or ""),
+                )
+                store = ValidationStore.from_config(owner.config)
+                submitted = submit_mined_skill(
+                    store,
+                    skill_name,
+                    current_skill=current_skill,
+                    submitted_by=str(
+                        user.get("id") or user.get("username") or ""
+                    ),
+                    skillminer_root=workspace,
+                    mining_job_id=job_id,
+                )
+            except MiningLifecycleError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"提交候选失败：{exc}",
+                ) from exc
+            candidate = submitted["job"]
+            decision = (
+                submitted.get("decision")
+                if isinstance(submitted.get("decision"), dict)
+                else None
+            )
+            return {
+                "created": bool(submitted.get("created")),
+                "job_id": str(candidate.get("job_id") or ""),
+                "mining_job_id": job_id,
+                "skill_name": str(candidate.get("skill_name") or skill_name),
+                "status": (
+                    str(decision.get("status") or "candidate")
+                    if decision
+                    else "candidate"
+                ),
+                "dataset_format": (candidate.get("source") or {}).get(
+                    "dataset_format"
+                ),
+                "question_count": (candidate.get("source") or {}).get(
                     "question_count"
                 ),
             }

@@ -14,7 +14,7 @@
 6. **轨迹 Benchmark 独立挖掘**：直接接收 teamEvolver/SkillGen 或 OpenAI messages 风格轨迹，生成 held-out Benchmark；不进入样本包、语义发现、Skill 编译或 LIFT 流程。
 7. **多次构建 · 交集 · 稳定性复跑**：把多次构建的题库存为快照、求交集，再对交集项各跑多个 session，观察 skill 在多轮对话下的行为稳定性。
 8. **覆盖报告**：统计语义单元采纳率、GAP 消解率和维度证据覆盖。
-9. **Web 控制台**：提供真实运行、人工检查点、跑分和覆盖报告入口。
+9. **Web 控制台**：提供真实运行、知识补证、跑分和覆盖报告入口。
 10. **LIFT 适配**：把 SkillMiner 题库转换为 LIFT Suite v1 与 Markdown 场景，经人工编辑、校验、批准后再发布到外部 LIFT 工作区，并可从统一控制台启动评测。
 
 ## 项目结构
@@ -51,19 +51,22 @@ run_history/          # 新任务启动时隔离保存的上一批生成物
 benchmark_sessions/   # 快照、交集清单与多 session 复跑留档
 trajectory_benchmarks/# 从轨迹独立挖掘的 Benchmark 及清单
 lift_datasets/        # LIFT 待审核草稿、已发布快照与运行元数据
-.hermes_home/         # Hermes 运行时状态（含 config.yaml，不应提交）
+.hermes_home/         # 项目 Hermes 的独立配置与运行状态（不应提交）
 ```
 
-此外 `logs/` 下的运行日志按 `*.log` 规则被忽略；`clean_artifacts.sh` 会清理上述除 `.hermes_home/` 外的产物目录（`.hermes_home/` 已配好 provider，如需重置请手动删除）。
+此外 `logs/` 下的运行日志按 `*.log` 规则被忽略；`clean_artifacts.sh` 会清理上述除 `.hermes_home/` 外的产物目录。删除 `.hermes_home/` 后，下次运行会从 `hermes/config.yaml.example` 重新初始化。
 
 ## 前置条件
 
-- Python 3.10+
-- 已安装并可从 `PATH` 调用的 Hermes：
+- Python 3.11～3.13（Hermes 运行时要求）
+- 已通过项目安装脚本把 Hermes 安装进本项目虚拟环境：
 
 ```bash
-hermes --version
+bash scripts/install_teamEvolver.sh
+scripts/project_hermes.sh --version
 ```
+
+流水线只会调用 `TEAMEVOLVER_HERMES_BIN` 显式指定的可执行文件、当前项目虚拟环境中的 Hermes，或仓库 `.venv/bin/hermes`；不会搜索 `PATH`、`~/.local/bin`、Homebrew 或 `/usr/local/bin` 中的全局 Hermes。
 
 - 一个可用的模型 provider。本项目默认对接**火山方舟（Volcengine Ark）**，在 `.hermes_home/config.yaml` 中以 `custom:volcengine-ark` provider 配置，默认模型为 `doubao-seed-1-6-250615`（256k 上下文，输出上限 32768）。密钥通过环境变量注入，不要写进仓库：
 
@@ -73,7 +76,24 @@ cp .env.example .env
 export ARK_API_KEY="your-api-key"
 ```
 
-> 说明：`run_pipeline.py` / `run_benchmark.py` / `run_multi_session.py` 启动时会读取 `ARK_API_KEY` 并注入 Hermes 运行环境，并先做一次连通性自检（返回 `HERMES_OK` 即通过）。自检失败时默认立即停止，避免已知无效的调用继续消耗时间；仅当确认是探测命令与 provider 不兼容时，主流水线可显式使用 `--allow-connection-probe-failure`。若换用其他 OpenAI 兼容端点，改 `config.yaml` 里的 `providers.*.base_url` 与 `model.default` 即可。首次运行会创建项目本地 `.hermes_home/`；该目录已配好上述 provider，重跑不会被覆盖。
+> 说明：`run_pipeline.py` / `run_benchmark.py` / `run_multi_session.py` 启动时会读取 `ARK_API_KEY` 并注入项目 Hermes 环境，并先做一次连通性自检（返回 `HERMES_OK` 即通过）。自检失败时默认立即停止，避免已知无效的调用继续消耗时间；仅当确认是探测命令与 provider 不兼容时，主流水线可显式使用 `--allow-connection-probe-failure`。首次运行会从 `hermes/config.yaml.example` 创建项目本地 `.hermes_home/config.yaml`，以后不会覆盖你的修改；并行挖掘任务会从这份项目配置创建自己的快照。
+
+## 修改项目 Hermes 的模型配置
+
+可以直接编辑当前项目的配置，不会影响 `~/.hermes/config.yaml`：
+
+```bash
+# 首次执行会初始化 teamEvolver/skillminer/.hermes_home/config.yaml
+scripts/project_hermes.sh --version
+
+# 使用 Hermes 自带的模型选择器；所有改动只写入项目 HERMES_HOME
+scripts/project_hermes.sh model
+
+# 或直接编辑
+${EDITOR:-vi} teamEvolver/skillminer/.hermes_home/config.yaml
+```
+
+若希望修改“全新 checkout / 删除 `.hermes_home` 后”的默认值，可编辑可提交的 `teamEvolver/skillminer/hermes/config.yaml.example`。API Key 请放在环境变量或 `.hermes_home/.env`，不要写入 YAML。
 
 ## 快速开始
 

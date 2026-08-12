@@ -2,10 +2,11 @@
 .env
 .hermes_home/
 
-# Input documents are intentionally local by default
+# User-managed knowledge sources are runtime data, not repository content.
+data/*
+!data/input/
 data/input/*
 !data/input/.gitkeep
-data/validation/
 
 # Pipeline and evaluation artifacts
 sample_packages/
@@ -19,6 +20,7 @@ trajectory_benchmarks/
 coverage_reports/
 skill_test_results/
 lift_datasets/
+mining_jobs/
 
 # Logs and caches
 *.log

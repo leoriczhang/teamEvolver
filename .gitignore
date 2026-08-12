@@ -22,3 +22,10 @@ evolve_history.jsonl
 records/
 external/LIFT/
 .trae/
+
+# Local runtime state and generated presentation artifacts
+.skillgene-sync.lock
+.skillgene-sync.stamp
+artifacts/
+ppt/
+skillgene/

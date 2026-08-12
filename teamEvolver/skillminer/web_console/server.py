@@ -30,13 +30,19 @@ import json
 import os
 import queue
 import re
+import shutil
+import signal
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
+
+import yaml
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 STATIC_DIR = Path(__file__).parent / "static"
@@ -52,16 +58,61 @@ MAX_KNOWLEDGE_UPLOAD_BYTES = 40 * 1024 * 1024
 # console is stdlib-only.  Leave enough headroom for base64 expansion.
 MAX_KNOWLEDGE_REQUEST_BYTES = 56 * 1024 * 1024
 MAX_TRAJECTORY_BENCHMARK_REQUEST_BYTES = 16 * 1024 * 1024
+MAX_EDITABLE_ARTIFACT_BYTES = 2 * 1024 * 1024
+
+
+def _import_legacy_runtime_data():
+    """Bring forward local SkillMiner state after the package-directory rename.
+
+    Older checkouts stored runtime data below ``skillgene/skillminer`` while
+    the merged project now runs from ``teamEvolver/skillminer``.  Copy only
+    files that are missing at the new location, so startup is idempotent and
+    never overwrites either user uploads or generated artifacts.
+    """
+    legacy_root = PROJECT_ROOT.parents[1] / "skillgene" / "skillminer"
+    if not legacy_root.is_dir() or legacy_root.resolve() == PROJECT_ROOT:
+        return
+    runtime_dirs = (
+        "data", "compiled_skill", "semantic_reports", "sample_packages",
+        "reflection_rounds", "run_history", "benchmark_results",
+        "benchmark_sessions", "trajectory_benchmarks", "coverage_reports",
+        "skill_test_results", "lift_datasets",
+    )
+    for name in runtime_dirs:
+        source_root = legacy_root / name
+        if not source_root.is_dir():
+            continue
+        for source in source_root.rglob("*"):
+            if not source.is_file():
+                continue
+            target = PROJECT_ROOT / name / source.relative_to(source_root)
+            if target.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+    for name in ("config.yaml", ".env", "auth.json"):
+        source = legacy_root / ".hermes_home" / name
+        target = PROJECT_ROOT / ".hermes_home" / name
+        if source.is_file() and not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+
+
+_import_legacy_runtime_data()
 
 # 复用主控脚本的编排能力（真实模式用）
 sys.path.insert(0, str(PROJECT_ROOT))
 import lift_integration as li  # noqa: E402  SkillMiner → LIFT 数据契约与外部运行时
+import human_checkpoints as hc  # noqa: E402  具体问题生成 + 检查点表单契约
+import mining_jobs as mj  # noqa: E402  持久化并行挖掘任务
 import run_benchmark as rb  # noqa: E402  benchmark 构建 + 跑分
 import run_coverage_report as rc  # noqa: E402  复用语义单元解析
 import run_pipeline as rp  # noqa: E402
 import trajectory_benchmark as tb  # noqa: E402  轨迹 → 内部 Benchmark 独立入口
 
 rst = rb.rst  # run_skill_test 模块（find_skill_to_test / deploy_test_skill 等）
+JOBS = mj.MiningJobManager(PROJECT_ROOT)
+MODEL_CONFIG_LOCK = threading.RLock()
 
 
 # ============================================================
@@ -71,10 +122,6 @@ rst = rb.rst  # run_skill_test 模块（find_skill_to_test / deploy_test_skill �
 # 真实发现的缺口逐条转成具体问题，让使用者作答。使用者的答案再作为
 # 权威领域知识注入下一轮定向补证。
 # ============================================================
-
-# 缺口行里的严重度标记 → 展示用等级
-_SEVERITY_ORDER = {"高": 0, "中": 1, "低": 2, "": 3}
-
 
 def _visible_files(root):
     """Return non-hidden files below *root* in deterministic order."""
@@ -292,10 +339,18 @@ def read_history_artifact(relative_path):
     target = (PROJECT_ROOT / raw).resolve()
     allowed_roots = [
         (PROJECT_ROOT / name).resolve()
-        for name in ("compiled_skill", "semantic_reports", "reflection_rounds", "run_history")
+        for name in (
+            "compiled_skill", "semantic_reports", "reflection_rounds", "run_history", "mining_jobs"
+        )
     ]
     if not any(target == root or root in target.parents for root in allowed_roots):
         raise ValueError("产物路径不在允许的历史目录中")
+    jobs_root = (PROJECT_ROOT / "mining_jobs").resolve()
+    if jobs_root in target.parents and not any(
+        name in target.parts
+        for name in ("compiled_skill", "semantic_reports", "reflection_rounds")
+    ):
+        raise ValueError("任务路径不是可预览的挖掘产物")
     if not target.is_file() or target.suffix.lower() not in {".md", ".json", ".jsonl", ".txt"}:
         raise FileNotFoundError("历史产物不存在或不支持预览")
     if target.stat().st_size > 2 * 1024 * 1024:
@@ -306,6 +361,122 @@ def read_history_artifact(relative_path):
         "content": target.read_text(encoding="utf-8", errors="replace"),
         "size_bytes": target.stat().st_size,
     }
+
+
+def save_history_artifact(relative_path, content):
+    """Persist an approved human revision to a completed text artifact."""
+    if not isinstance(content, str):
+        raise ValueError("产物内容必须是文本")
+    encoded = content.encode("utf-8")
+    if len(encoded) > MAX_EDITABLE_ARTIFACT_BYTES:
+        raise ValueError("产物超过 2 MB，暂不支持在线编辑")
+
+    current = read_history_artifact(relative_path)
+    target = (PROJECT_ROOT / current["path"]).resolve()
+    is_named_artifact = target.name in _HISTORY_ARTIFACT_NAMES
+    is_semantic_report = "semantic_reports" in target.parts and target.suffix.lower() == ".md"
+    if not (is_named_artifact or is_semantic_report):
+        raise ValueError("该文件不是可编辑的挖掘产物")
+
+    jobs_root = (PROJECT_ROOT / "mining_jobs").resolve()
+    if jobs_root in target.parents:
+        relative = target.relative_to(jobs_root)
+        if len(relative.parts) < 2:
+            raise ValueError("挖掘任务产物路径无效")
+        metadata_path = jobs_root / relative.parts[0] / "job.json"
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("无法确认挖掘任务状态") from exc
+        if str(metadata.get("status") or "") != "succeeded":
+            raise ValueError("只有已完成任务的产物可以人工修改")
+
+    temp = target.with_name(f".{target.name}.editing-{os.getpid()}-{threading.get_ident()}")
+    try:
+        temp.write_bytes(encoded)
+        os.replace(temp, target)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temp.unlink()
+    result = read_history_artifact(current["path"])
+    result["ok"] = True
+    result["edited"] = True
+    return result
+
+
+def _legacy_run_as_job(run):
+    """Expose pre-job-manager archives through the same task-list contract."""
+    artifacts = list(run.get("final_artifacts") or [])
+    rounds = list(run.get("rounds") or [])
+    if not artifacts and rounds:
+        artifacts = list(rounds[-1].get("artifacts") or [])
+    skills = list(run.get("skills") or [])
+    skill_label = "、".join(item.get("name", "") for item in skills if item.get("name"))
+    status = str(run.get("status") or "archived")
+    is_active = status in {"running", "waiting"}
+    gap_questions = []
+    seen_gaps = set()
+    semantic_dirs = []
+    for artifact in artifacts:
+        if artifact.get("kind") != "semantic":
+            continue
+        target = (PROJECT_ROOT / str(artifact.get("path") or "")).resolve()
+        if target.is_file() and target.parent not in semantic_dirs:
+            semantic_dirs.append(target.parent)
+    for semantic_dir in semantic_dirs:
+        extracted, _ = hc.extract_gap_questions_from_semantic_reports(semantic_dir, limit=50)
+        for question in extracted:
+            key = str(question.get("qid") or question.get("question") or "")
+            if key and key not in seen_gaps:
+                seen_gaps.add(key)
+                gap_questions.append(question)
+
+    return {
+        "job_id": f"legacy:{run.get('run_id')}",
+        "legacy_run_id": run.get("run_id"),
+        "legacy": True,
+        "name": skill_label or "旧版挖掘任务",
+        "status": "running" if is_active else "succeeded",
+        "input_dir": "",
+        "document_count": None,
+        "max_rounds": max(1, len(rounds)),
+        "current_round": len(rounds),
+        "phase": {
+            "step1": "done" if not is_active else "idle",
+            "step2": "done" if not is_active else "idle",
+            "step3": "done" if not is_active else "idle",
+        },
+        "created_at": run.get("started_at") or "",
+        "started_at": run.get("started_at") or "",
+        "finished_at": run.get("started_at") or "",
+        "updated_at": run.get("started_at") or "",
+        "error": "",
+        "stop_reason": "历史归档",
+        "artifacts": artifacts,
+        "rounds": rounds,
+        "logs": [],
+        "skills": skills,
+        "knowledge_gaps": {
+            "total": len(gap_questions),
+            "questions": gap_questions,
+        } if gap_questions else None,
+    }
+
+
+def list_all_mining_jobs():
+    jobs = JOBS.list_jobs()
+    jobs.extend(_legacy_run_as_job(run) for run in list_mining_runs())
+    return sorted(jobs, key=lambda item: item.get("created_at") or "", reverse=True)
+
+
+def get_mining_job(job_id):
+    if str(job_id).startswith("legacy:"):
+        target = str(job_id).removeprefix("legacy:")
+        run = next((item for item in list_mining_runs() if str(item.get("run_id")) == target), None)
+        if run is None:
+            raise KeyError(job_id)
+        return _legacy_run_as_job(run)
+    return JOBS.get_job(str(job_id))
 
 
 def _knowledge_source_dir(source_path):
@@ -414,6 +585,84 @@ def save_uploaded_knowledge(body):
     }
 
 
+def create_knowledge_source(body):
+    """Create one empty first-level directory below data/."""
+    if not isinstance(body, dict):
+        raise ValueError("创建参数必须是对象")
+    raw_name = str(body.get("name") or body.get("source_name") or "").strip()
+    source_dir = _knowledge_source_dir(f"data/{raw_name}")
+    if source_dir.exists():
+        raise ValueError(f"数据源已存在：{raw_name}")
+    source_dir.mkdir(parents=True)
+    return {"ok": True, "source": _input_source_detail(source_dir)}
+
+
+def delete_knowledge_source(source_name):
+    """Delete exactly one selected data source directory."""
+    source_dir = _knowledge_source_dir(f"data/{str(source_name or '').strip()}")
+    if not source_dir.is_dir():
+        raise FileNotFoundError(f"数据源不存在：{source_dir.name}")
+    detail = _input_source_detail(source_dir)
+    shutil.rmtree(source_dir)
+    return {"ok": True, "deleted": detail}
+
+
+def _merge_destination(source_dir, relative_path):
+    """Resolve a collision-free target while preserving nested structure."""
+    relative_path = Path(relative_path)
+    target = source_dir / relative_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    index = 2
+    while target.exists():
+        target = target.with_name(f"{relative_path.stem}-{index}{relative_path.suffix}")
+        index += 1
+    return target
+
+
+def merge_knowledge_sources(body):
+    """Copy two or more existing sources into a new or existing target source."""
+    if not isinstance(body, dict):
+        raise ValueError("合并参数必须是对象")
+    raw_sources = body.get("source_paths") or body.get("sources")
+    if not isinstance(raw_sources, list) or len(raw_sources) < 2:
+        raise ValueError("请至少选择两个数据源进行合并")
+    sources = []
+    seen = set()
+    for raw in raw_sources:
+        path = _knowledge_source_dir(str(raw or ""))
+        if path.name in seen:
+            continue
+        if not path.is_dir():
+            raise FileNotFoundError(f"数据源不存在：{path.name}")
+        seen.add(path.name)
+        sources.append(path)
+    if len(sources) < 2:
+        raise ValueError("请至少选择两个不同的数据源")
+
+    target_name = str(body.get("target_name") or "").strip()
+    target = _knowledge_source_dir(f"data/{target_name}")
+    if target.name in seen:
+        raise ValueError("合并目标不能与来源数据源同名")
+    target.mkdir(parents=True, exist_ok=True)
+    copied = []
+    for source in sources:
+        for item in _visible_files(source):
+            relative = item.relative_to(source)
+            destination = _merge_destination(target, relative)
+            shutil.copy2(item, destination)
+            copied.append({
+                "from": f"data/{source.name}/{relative.as_posix()}",
+                "path": f"data/{target.name}/{destination.relative_to(target).as_posix()}",
+                "renamed": destination.relative_to(target) != relative,
+            })
+    return {
+        "ok": True,
+        "sources": [f"data/{source.name}" for source in sources],
+        "source": _input_source_detail(target),
+        "copied": copied,
+    }
+
+
 def _find_compiled_skill(skill_name=""):
     """Resolve one compiled skill without allowing paths outside compiled_skill/."""
     if not skill_name:
@@ -433,87 +682,19 @@ def extract_gap_questions_from_skill(skill_md_path):
       - **冲突未解决**：情绪安抚要求充分倾听，可能与时效冲突——优先哪个？（来源：…）
     我们按 `### 维度X：标题` 归属维度，逐条抽成 {qid,dimension,severity,question}。
     """
-    if not skill_md_path or not Path(skill_md_path).exists():
-        return []
-    text = Path(skill_md_path).read_text(encoding="utf-8", errors="ignore")
-
-    questions = []
-    cur_dim = ""
-    seen = set()
-    idx = 0
-    dim_re = re.compile(r"^#{2,4}\s*(维度[一二三四五六七八九十百]+[：:][^\n]+)")
-    # 命中「缺口」「冲突未解决」「存疑」等信号的列表行
-    gap_re = re.compile(r"[-*]\s*\**\s*(高|中|低)?严重度?\s*(缺口|冲突|存疑)")
-    for raw in text.splitlines():
-        line = raw.strip()
-        m = dim_re.match(line)
-        if m:
-            cur_dim = m.group(1).strip()
-            continue
-        if not (gap_re.search(line) or ("冲突未解决" in line) or ("存疑" in line)):
-            continue
-        sev_m = re.search(r"(高|中|低)严重度", line)
-        severity = sev_m.group(1) if sev_m else ""
-        # 去掉行首列表符号与「**X严重度缺口**：」前缀，保留问题主体
-        body = re.sub(r"^[-*]\s*", "", line)
-        body = re.sub(r"\**\s*(高|中|低)?严重度?(缺口|冲突未解决|冲突|存疑)\**\s*[：:]?\s*", "", body)
-        # 去掉行尾「（来源：…）」
-        body = re.sub(r"[（(]来源[：:][^）)]*[）)]\s*$", "", body).strip()
-        if len(body) < 6:
-            continue
-        key = body[:40]
-        if key in seen:
-            continue
-        seen.add(key)
-        idx += 1
-        questions.append({
-            "qid": f"g{idx}",
-            "dimension": cur_dim,
-            "severity": severity,
-            "question": body,
-        })
-    # 高严重度优先
-    questions.sort(key=lambda q: _SEVERITY_ORDER.get(q["severity"], 3))
-    return questions
+    return hc.extract_gap_questions_from_skill(skill_md_path)
 
 
 # ============================================================
-# 语义归纳结果 → 人工审核问题
+# 语义归纳结果 → 关键知识缺口补证问题
 # ------------------------------------------------------------
-# Step2（语义发现）产出 semantic_reports/*.md，含候选语义单元 U-XX
-# （规范名 + 保留等级 高/中/低）。审核检查点把这些单元逐个转成一条
-# 审核问题：请使用者确认命名/边界是否准确、是否应保留、需要修正什么。
-# 使用者的回答会作为编译（Step3）前的权威指令注入 reflection_context。
+# Step2（语义发现）产出 semantic_reports/*.md，内含结构化缺口清单 GAP-XX。
+# 检查点只询问会阻碍 Skill 落地的缺失规则、阈值、公式和例外；使用者
+# 的回答会作为编译（Step3）前的权威领域知识注入 reflection_context。
 # ============================================================
-def semantic_units_to_questions(semantic_reports_dir, limit=8):
-    """从 semantic_reports/*.md 解析候选单元，转成审核问题清单。
-
-    优先审核「保留等级=高」及未标注的单元（对最终 skill 影响最大）。
-    """
-    reports = []
-    d = Path(semantic_reports_dir)
-    if d.exists():
-        for p in sorted(d.glob("*.md")):
-            reports.append(rc.parse_semantic_report(p))
-    units = []
-    for rep in reports:
-        for u in rep["units"]:
-            units.append(u)
-    # 高 > 未标注 > 中 > 低（高保留=最该确认；低保留=大概率会被剪，次要）
-    order = {"高": 0, "未标注": 1, "中": 2, "低": 3}
-    units.sort(key=lambda u: order.get(u["retention"], 1))
-    picked = units[:limit]
-    questions = []
-    for u in picked:
-        questions.append({
-            "qid": u["ref"],
-            "dimension": f"语义单元 {u['ref']}",
-            "severity": {"高": "高", "中": "中", "低": "低"}.get(u["retention"], ""),
-            "question": f"语义归纳出候选单元「{u['name']}」（保留等级：{u['retention']}）。"
-                        f"该单元的命名/边界是否准确？是否应写入最终 skill？"
-                        f"若需修正命名、收紧边界或直接删除，请说明（留空=认可采纳）。",
-        })
-    return questions, len(units)
+def semantic_gap_questions(semantic_reports_dir, limit=10):
+    """从语义报告的结构化缺口清单生成逐项补证问题。"""
+    return hc.extract_gap_questions_from_semantic_reports(semantic_reports_dir, limit=limit)
 
 
 # ============================================================
@@ -716,20 +897,7 @@ class RunManager:
     @staticmethod
     def _format_qa_context(header, questions, answers):
         """把「问题→使用者回答」拼成注入下一轮的补充知识块。"""
-        lines = [f"\n{header}"]
-        n = 0
-        for q in questions:
-            a = answers.get(q["qid"])
-            if not a:
-                continue
-            n += 1
-            dim = f"（{q['dimension']}）" if q.get("dimension") else ""
-            lines.append(f"  {n}. 问{dim}：{q['question']}")
-            lines.append(f"     使用者答：{a}")
-        if n == 0:
-            return ""
-        lines.append("  请把上述使用者提供的答案作为权威领域知识，写入对应维度并消解相应缺口。\n")
-        return "\n".join(lines)
+        return hc.format_qa_context(header, questions, answers)
 
     # ========================================================
     # 编排主体
@@ -754,28 +922,26 @@ class RunManager:
     # 每个检查点都：从「本轮发现的缺口/冲突」里挑出**具体问题**问使用者，
     # 使用者的回答拼成补充知识注入下一轮。gap_questions 由调用方按轮次准备。
     def _checkpoint_after_semantic(self, cfg, round_idx, semantic_reports_dir):
-        """语义归纳后人工审核：把 Step2 产出的候选语义单元逐个交使用者确认/修正。
+        """语义归纳后补证：询问 Step2 发现的关键业务知识缺口。
 
-        返回注入 Step3 编译的补充上下文（把使用者的修正当作权威指令）。
+        返回注入 Step3 编译的补充上下文（把使用者答案当作权威领域知识）。
         """
         if not (cfg["ask_enabled"] and cfg["checkpoints"].get("after_semantic")):
             return ""
-        picked, total = semantic_units_to_questions(semantic_reports_dir)
+        picked, total = semantic_gap_questions(semantic_reports_dir)
         if not picked:
             return ""
         answers, _ = self.ask_questions(
             "after_semantic", round_idx,
-            title=f"第 {round_idx} 轮语义归纳完成 · 请审核 {len(picked)} 个候选语义单元"
-                  f"（共发现 {total} 个）",
-            intro="Step2 语义发现已从素材中归纳出下列候选语义单元（规范名 + 保留等级），"
-                  "编译成 skill 前请你人工审核：命名/边界是否准确、是否应保留。"
-                  "逐条回答，**留空=认可采纳**；如需修正命名/收紧边界/删除请直接写明。",
+            title=f"第 {round_idx} 轮发现 {total} 个关键知识缺口 · 请补全其中 {len(picked)} 项",
+            intro="系统只列出会影响 Skill 生成、且现有素材没有给出明确答案的问题。"
+                  "请填写准确规则、数值、单位、适用条件或例外；暂时无法确认的条目可以留空。",
             questions=picked,
         )
         if answers:
-            self.log(f"[语义审核] 使用者修正了 {len(answers)}/{len(picked)} 个候选单元")
+            self.log(f"[知识补证] 使用者补全了 {len(answers)}/{len(picked)} 个关键缺口")
         return self._format_qa_context(
-            f"【使用者对第{round_idx}轮语义归纳单元的审核意见（编译前，具最高优先级）】",
+            f"【使用者对第{round_idx}轮关键知识缺口的补充（编译前，具最高优先级）】",
             picked, answers)
 
     def _checkpoint_after_compile(self, cfg, round_idx, info, gap_questions):
@@ -830,9 +996,12 @@ class RunManager:
             "qid": "priority",
             "dimension": "",
             "severity": "",
-            "question": f"即将带着 {info['gap_count']} 项缺口（{remaining}）回跳补跑第 "
-                        f"{round_idx + 1} 轮。你希望下一轮**优先攻关哪些缺口**？"
-                        "还有哪些线索/来源可以帮助消解它们？",
+            "question": f"请问，第 {round_idx + 1} 轮应优先补证哪些缺口？",
+            "context": f"当前共 {info['gap_count']} 项缺口：{remaining}",
+            "field_label": "优先缺口与可用线索",
+            "placeholder": "例如：优先 GAP-01、GAP-03；可参考退款规则第 4 条与 2026 年 SOP",
+            "answer_type": "long_text",
+            "required": False,
         }]
         answers, stopped = self.ask_questions(
             "before_reflection", round_idx,
@@ -927,8 +1096,8 @@ class RunManager:
             def _on_phase(phase, state):
                 self.emit("phase", phase=phase, round=round_idx, state=state)
 
-            # 语义审核检查点：作为回调注入 run_pipeline_once，在 Step2 完成、
-            # Step3 编译开始之前触发，把候选语义单元交使用者审核。审核意见并入
+            # 关键知识补证检查点：作为回调注入 run_pipeline_once，在 Step2 完成、
+            # Step3 编译开始前触发，把结构化缺口交使用者逐项补全。答案并入
             # 本轮编译的 reflection_context。
             def _semantic_hook(r_idx, sem_dir):
                 # ask_questions 会阻塞在提问上，需脱离 stdout 重定向以正常走事件流
@@ -1341,6 +1510,207 @@ def build_coverage_payload(skill_name=None):
 # ============================================================
 # 配置项：暴露给前端的可配置面
 # ============================================================
+def _model_config_path():
+    return PROJECT_ROOT / ".hermes_home" / "config.yaml"
+
+
+def _load_model_config_document():
+    """Load the project-owned model runtime config without exposing secrets."""
+    path = _model_config_path()
+    fallback = PROJECT_ROOT / "hermes" / "config.yaml.example"
+    source = path if path.is_file() else fallback
+    if not source.is_file():
+        return {}
+    try:
+        loaded = yaml.safe_load(source.read_text(encoding="utf-8", errors="ignore")) or {}
+    except yaml.YAMLError as exc:
+        raise ValueError(f"模型配置文件格式错误：{exc}") from exc
+    if not isinstance(loaded, dict):
+        raise ValueError("模型配置文件必须是 YAML 对象")
+    return loaded
+
+
+def get_mining_model_settings(document=None):
+    """Return the public, secret-free settings used by new mining tasks."""
+    config_document = document if isinstance(document, dict) else _load_model_config_document()
+    model_config = config_document.get("model") or {}
+    if not isinstance(model_config, dict):
+        model_config = {}
+    model_id = str(model_config.get("default") or model_config.get("model") or "").strip()
+    base_url = str(model_config.get("base_url") or "").strip()
+    try:
+        max_tokens = int(model_config.get("max_tokens") or 32768)
+    except (TypeError, ValueError):
+        max_tokens = 32768
+    try:
+        temperature = float(model_config.get("temperature") if model_config.get("temperature") is not None else 0.2)
+    except (TypeError, ValueError):
+        temperature = 0.2
+    inline_key = str(model_config.get("api_key") or model_config.get("api") or "").strip()
+    inherited_key = ""
+    if not inline_key:
+        try:
+            inherited_key = rp.resolve_ark_key()
+        except Exception:
+            inherited_key = ""
+    return {
+        "provider": "openai-compatible",
+        "id": model_id,
+        "model": model_id,
+        "base_url": base_url,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "api_key_present": bool(inline_key or inherited_key),
+        "configured": bool(model_id and base_url),
+    }
+
+
+def _normalize_mining_model_payload(body, document=None):
+    if not isinstance(body, dict):
+        raise ValueError("模型配置必须是对象")
+    config_document = document if isinstance(document, dict) else _load_model_config_document()
+    current = config_document.get("model") or {}
+    if not isinstance(current, dict):
+        current = {}
+
+    model_id = str(body.get("model") or body.get("id") or current.get("default") or "").strip()
+    if not model_id:
+        raise ValueError("请填写模型名称")
+    if len(model_id) > 200 or any(ch in model_id for ch in "\r\n"):
+        raise ValueError("模型名称格式不正确")
+
+    base_url = str(body.get("base_url") or current.get("base_url") or "").strip().rstrip("/")
+    parsed_url = urlparse(base_url)
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        raise ValueError("Base URL 必须是有效的 HTTP(S) 地址")
+
+    try:
+        max_tokens = int(body.get("max_tokens") or current.get("max_tokens") or 32768)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("最大输出 Token 必须是整数") from exc
+    if not 1 <= max_tokens <= 131072:
+        raise ValueError("最大输出 Token 必须在 1 到 131072 之间")
+
+    raw_temperature = body.get("temperature")
+    if raw_temperature is None:
+        raw_temperature = current.get("temperature", 0.2)
+    try:
+        temperature = float(raw_temperature)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Temperature 必须是数字") from exc
+    if not 0 <= temperature <= 2:
+        raise ValueError("Temperature 必须在 0 到 2 之间")
+
+    incoming_key = str(body.get("api_key") or "").strip()
+    if any(ch in incoming_key for ch in "\r\n") or len(incoming_key) > 4096:
+        raise ValueError("API Key 格式不正确")
+    clear_key = bool(body.get("clear_api_key", False))
+    current_key = str(current.get("api_key") or current.get("api") or "").strip()
+    if clear_key:
+        effective_key = ""
+    elif incoming_key:
+        effective_key = incoming_key
+    elif current_key:
+        effective_key = current_key
+    else:
+        effective_key = rp.resolve_ark_key()
+
+    return {
+        "model": model_id,
+        "base_url": base_url,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "api_key": incoming_key,
+        "clear_api_key": clear_key,
+    }, effective_key
+
+
+def save_mining_model_settings(body):
+    """Persist the editable mining model settings for subsequent jobs."""
+    with MODEL_CONFIG_LOCK:
+        document = _load_model_config_document()
+        normalized, _ = _normalize_mining_model_payload(body, document)
+        model_config = document.get("model") or {}
+        if not isinstance(model_config, dict):
+            model_config = {}
+        model_config.update({
+            "default": normalized["model"],
+            "provider": "custom",
+            "base_url": normalized["base_url"],
+            "api_mode": "chat_completions",
+            "max_tokens": normalized["max_tokens"],
+            "temperature": normalized["temperature"],
+        })
+        model_config.pop("model", None)
+        if normalized["clear_api_key"]:
+            model_config.pop("api_key", None)
+            model_config.pop("api", None)
+        elif normalized["api_key"]:
+            model_config["api_key"] = normalized["api_key"]
+            model_config.pop("api", None)
+        document["model"] = model_config
+
+        path = _model_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".yaml.tmp")
+        temporary.write_text(
+            yaml.safe_dump(document, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+        return get_mining_model_settings(document)
+
+
+def test_mining_model_settings(body):
+    """Probe the OpenAI-compatible endpoint using edited or saved settings."""
+    document = _load_model_config_document()
+    normalized, api_key = _normalize_mining_model_payload(body, document)
+    if not api_key:
+        raise ValueError("请先填写并保存 API Key")
+    endpoint = normalized["base_url"]
+    if not endpoint.endswith("/chat/completions"):
+        endpoint += "/chat/completions"
+    payload = json.dumps({
+        "model": normalized["model"],
+        "messages": [{"role": "user", "content": "Reply with exactly: OK"}],
+        "max_tokens": 8,
+        "temperature": 0,
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            raw = response.read(1_000_000).decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(4096).decode("utf-8", errors="replace")
+        detail = detail.replace(api_key, "***")
+        raise ValueError(f"模型接口返回 HTTP {exc.code}：{detail[:300]}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        message = str(exc).replace(api_key, "***")
+        raise ValueError(f"无法连接模型接口：{message[:300]}") from exc
+    try:
+        response_payload = json.loads(raw)
+        response_text = str(response_payload["choices"][0]["message"]["content"] or "").strip()
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("模型接口返回格式不符合 OpenAI Chat Completions 规范") from exc
+    return {
+        "ok": True,
+        "model": normalized["model"],
+        "latency_ms": round((time.monotonic() - started) * 1000),
+        "response": response_text[:200],
+    }
+
+
 def build_config_schema():
     # 探测可选输入目录
     data_dir = PROJECT_ROOT / "data"
@@ -1359,34 +1729,14 @@ def build_config_schema():
         for item in _compiled_skill_details()
     ]
     compiled = [item["name"] for item in compiled_details]
-    # 从 Hermes 配置读模型信息（尽力而为，纯文本扫描）。优先项目本地
-    # .hermes_home/config.yaml；缺失时回退用户全局 ~/.hermes/config.yaml
-    # （首次运行前项目本地配置尚未生成）。
-    model_id, base_url = "", ""
-    cfg_candidates = [
-        PROJECT_ROOT / ".hermes_home" / "config.yaml",
-        Path.home() / ".hermes" / "config.yaml",
-    ]
-    cfg_yaml = next((p for p in cfg_candidates if p.exists()), None)
-    if cfg_yaml is not None:
-        in_model_block = False
-        for line in cfg_yaml.read_text(encoding="utf-8", errors="ignore").splitlines():
-            stripped = line.strip()
-            # 顶层 key（无缩进）才切换块；进入/离开 model: 块
-            if line and not line[0].isspace():
-                in_model_block = stripped.startswith("model:")
-            if in_model_block and stripped.startswith("default:") and not model_id:
-                model_id = stripped.split(":", 1)[1].strip()
-            # base_url 限定在 model: 块内取，避免误抓到其他 provider 的地址
-            if in_model_block and stripped.startswith("base_url:") and not base_url:
-                base_url = stripped.split(":", 1)[1].strip()
+    model_settings = get_mining_model_settings()
     return {
         "input_dirs": input_dirs,
         "input_sources": input_sources,
         "default_input_dir": default_input_dir,
         "max_rounds_default": 3,
         "max_rounds_range": [1, 5],
-        "model": {"id": model_id, "base_url": base_url},
+        "model": model_settings,
         "compiled_skills": compiled,
         "compiled_skill_details": compiled_details,
         "benchmark": {
@@ -1407,8 +1757,8 @@ def build_config_schema():
             "max_trajectories": tb.MAX_TRAJECTORIES,
         },
         "checkpoints": [
-            {"key": "after_semantic", "label": "语义归纳后人工审核",
-             "desc": "Step2 语义发现产出候选单元后、编译成 skill 前，请你逐个审核/修正语义单元"},
+            {"key": "after_semantic", "label": "Skill 生成前关键知识补证",
+             "desc": "Step2 发现缺失的业务规则、准确阈值或例外后，在编译 Skill 前逐项补全"},
             {"key": "after_compile", "label": "编译 skill 后校验",
              "desc": "每轮产出 SKILL.md 后，请你人工校验关键条目"},
             {"key": "on_gap_low_confidence", "label": "发现缺口 / 置信度低时",
@@ -1480,10 +1830,23 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         if path == "/api/config":
             self._send_json(build_config_schema())
+        elif path == "/api/model":
+            try:
+                self._send_json(get_mining_model_settings())
+            except ValueError as exc:
+                self._send_json({"ok": False, "msg": str(exc)}, code=400)
         elif path == "/api/state":
             self._send_json(MANAGER.snapshot())
         elif path == "/api/runs":
             self._send_json({"runs": list_mining_runs(), "runner": MANAGER.snapshot()})
+        elif path == "/api/jobs":
+            self._send_json({"jobs": list_all_mining_jobs(), "summary": JOBS.summary()})
+        elif path.startswith("/api/jobs/"):
+            job_id = unquote(path.removeprefix("/api/jobs/").strip("/"))
+            try:
+                self._send_json({"ok": True, "job": get_mining_job(job_id)})
+            except KeyError:
+                self._send_json({"ok": False, "msg": "挖掘任务不存在"}, code=404)
         elif path == "/api/artifacts/content":
             query = parse_qs(parsed.query)
             try:
@@ -1557,13 +1920,24 @@ class Handler(BaseHTTPRequestHandler):
                     max_bytes = MAX_KNOWLEDGE_REQUEST_BYTES
                 elif path in {"/api/trajectory-benchmarks", "/api/benchmark/from-trajectories"}:
                     max_bytes = MAX_TRAJECTORY_BENCHMARK_REQUEST_BYTES
+                elif path == "/api/artifacts/content":
+                    max_bytes = MAX_EDITABLE_ARTIFACT_BYTES + 64 * 1024
                 else:
                     max_bytes = 1_000_000
                 body = self._read_json_body(max_bytes=max_bytes)
             except ValueError as e:
                 self._send_json({"ok": False, "msg": str(e)}, code=400)
                 return
-        if path == "/api/sources/upload":
+        if path == "/api/artifacts/content":
+            try:
+                self._send_json(save_history_artifact(body.get("path"), body.get("content")))
+            except FileNotFoundError as e:
+                self._send_json({"ok": False, "msg": str(e)}, code=404)
+            except ValueError as e:
+                self._send_json({"ok": False, "msg": str(e)}, code=400)
+            except OSError as e:
+                self._send_json({"ok": False, "msg": f"保存挖掘产物失败：{e}"}, code=500)
+        elif path == "/api/sources/upload":
             if MANAGER.state in ("running", "waiting"):
                 self._send_json(
                     {"ok": False, "msg": "挖掘任务运行中，暂不能修改输入文档"},
@@ -1576,6 +1950,61 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "msg": str(e)}, code=400)
             except OSError as e:
                 self._send_json({"ok": False, "msg": f"写入知识源失败：{e}"}, code=500)
+        elif path == "/api/sources":
+            try:
+                self._send_json(create_knowledge_source(body), code=201)
+            except ValueError as e:
+                self._send_json({"ok": False, "msg": str(e)}, code=400)
+            except OSError as e:
+                self._send_json({"ok": False, "msg": f"创建数据源失败：{e}"}, code=500)
+        elif path == "/api/sources/merge":
+            try:
+                self._send_json(merge_knowledge_sources(body), code=201)
+            except FileNotFoundError as e:
+                self._send_json({"ok": False, "msg": str(e)}, code=404)
+            except ValueError as e:
+                self._send_json({"ok": False, "msg": str(e)}, code=400)
+            except OSError as e:
+                self._send_json({"ok": False, "msg": f"合并数据源失败：{e}"}, code=500)
+        elif path == "/api/jobs":
+            try:
+                jobs = JOBS.create_jobs(body)
+                self._send_json({"ok": True, "jobs": jobs, "summary": JOBS.summary()}, code=201)
+            except mj.MiningJobError as e:
+                self._send_json({"ok": False, "msg": str(e)}, code=400)
+            except OSError as e:
+                self._send_json({"ok": False, "msg": f"创建挖掘任务失败：{e}"}, code=500)
+        elif path == "/api/model":
+            try:
+                self._send_json(save_mining_model_settings(body))
+            except ValueError as e:
+                self._send_json({"ok": False, "msg": str(e)}, code=400)
+            except OSError as e:
+                self._send_json({"ok": False, "msg": f"保存模型配置失败：{e}"}, code=500)
+        elif path == "/api/model/test":
+            try:
+                self._send_json(test_mining_model_settings(body))
+            except ValueError as e:
+                self._send_json({"ok": False, "msg": str(e)}, code=400)
+        elif path.startswith("/api/jobs/") and path.endswith("/stop"):
+            job_id = unquote(path.removeprefix("/api/jobs/").removesuffix("/stop").strip("/"))
+            try:
+                self._send_json({"ok": True, "job": JOBS.stop_job(job_id)})
+            except KeyError:
+                self._send_json({"ok": False, "msg": "挖掘任务不存在"}, code=404)
+            except mj.MiningJobError as e:
+                self._send_json({"ok": False, "msg": str(e)}, code=409)
+        elif path.startswith("/api/jobs/") and path.endswith("/answer"):
+            job_id = unquote(path.removeprefix("/api/jobs/").removesuffix("/answer").strip("/"))
+            try:
+                self._send_json({
+                    "ok": True,
+                    "job": JOBS.submit_checkpoint_answer(job_id, body),
+                })
+            except KeyError:
+                self._send_json({"ok": False, "msg": "挖掘任务不存在"}, code=404)
+            except mj.MiningJobError as e:
+                self._send_json({"ok": False, "msg": str(e)}, code=409)
         elif path == "/api/run":
             if LIFT_MANAGER.state in ("running", "stopping"):
                 self._send_json({"ok": False, "msg": "LIFT 任务运行中，暂不能启动挖掘"}, code=409)
@@ -1700,6 +2129,22 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_error(404, "Unknown API")
 
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path.startswith("/api/sources/"):
+            source_name = unquote(path.removeprefix("/api/sources/").strip("/"))
+            try:
+                self._send_json(delete_knowledge_source(source_name))
+            except FileNotFoundError as e:
+                self._send_json({"ok": False, "msg": str(e)}, code=404)
+            except ValueError as e:
+                self._send_json({"ok": False, "msg": str(e)}, code=400)
+            except OSError as e:
+                self._send_json({"ok": False, "msg": f"删除数据源失败：{e}"}, code=500)
+        else:
+            self.send_error(404, "Unknown API")
+
     # --- SSE ---
     def _serve_sse(self):
         self.send_response(200)
@@ -1778,6 +2223,12 @@ def _normalize_config(body):
 def main():
     port = int(os.environ.get("PORT", "8765"))
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    prior_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def request_shutdown(_signum, _frame):
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, request_shutdown)
     print(f"✓ 控制台已启动： http://127.0.0.1:{port}")
     print(f"  项目根： {PROJECT_ROOT}")
     print("  Ctrl+C 停止")
@@ -1786,6 +2237,10 @@ def main():
     except KeyboardInterrupt:
         print("\n已停止")
         server.shutdown()
+    finally:
+        JOBS.shutdown()
+        server.server_close()
+        signal.signal(signal.SIGTERM, prior_sigterm)
 
 
 if __name__ == "__main__":

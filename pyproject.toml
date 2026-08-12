@@ -38,11 +38,14 @@ dependencies = [
 sharing = [
     "boto3>=1.28",
 ]
+mining = [
+    "hermes-agent==0.19.0",
+]
 validation = [
     "openai>=1.0",
 ]
 truereplay = [
-    "hermes-agent @ git+https://github.com/nousresearch/hermes-agent.git",
+    "hermes-agent==0.19.0",
     "openai>=1.0",
 ]
 dev = [
@@ -50,7 +53,7 @@ dev = [
     "anyio>=4.0",
 ]
 all = [
-    "teamEvolver[sharing,validation,truereplay]",
+    "teamEvolver[sharing,mining,validation,truereplay]",
 ]
 
 [project.urls]
@@ -73,9 +76,12 @@ teamEvolver = [
     "integrations/hermes_skill/*",
     "integrations/hermes_skill_sync/*",
     "skillminer/*.md",
+    "skillminer/*.py",
     "skillminer/.env.example",
     "skillminer/*.sh",
+    "skillminer/hermes/*",
     "skillminer/data/input/.gitkeep",
+    "skillminer/web_console/*.py",
     "skillminer/web_console/static/*",
     "skillminer/*-agent-skill/*.md",
     "skillminer/*-agent-skill/assets/*",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,65 @@ import run_pipeline as rp  # noqa: E402
 def _point_pipeline_at(monkeypatch, root: Path) -> None:
     monkeypatch.setattr(rp, "PROJECT_ROOT", root)
     monkeypatch.setattr(rp, "RUN_HISTORY_DIR", root / "run_history")
+
+
+def test_hermes_discovery_uses_project_venv_and_ignores_global_path(tmp_path, monkeypatch):
+    repository = tmp_path / "repository"
+    global_bin = tmp_path / "global-bin"
+    global_bin.mkdir()
+    global_hermes = global_bin / "hermes"
+    global_hermes.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    global_hermes.chmod(0o755)
+
+    monkeypatch.setattr(rp, "REPOSITORY_ROOT", repository)
+    monkeypatch.setattr(rp.sys, "prefix", rp.sys.base_prefix)
+    monkeypatch.delenv("TEAMEVOLVER_HERMES_BIN", raising=False)
+    monkeypatch.setenv("PATH", str(global_bin))
+
+    assert rp.find_hermes_bin() is None
+
+    project_hermes = repository / ".venv" / "bin" / "hermes"
+    project_hermes.parent.mkdir(parents=True)
+    project_hermes.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    project_hermes.chmod(0o755)
+    assert rp.find_hermes_bin() == str(project_hermes)
+
+
+def test_hermes_home_initializes_from_project_template_not_user_home(tmp_path, monkeypatch):
+    base_home = tmp_path / "project" / ".hermes_home"
+    task_home = tmp_path / "task" / ".hermes_home"
+    template = tmp_path / "config.yaml.example"
+    template.write_text("model:\n  default: project-model\n", encoding="utf-8")
+
+    monkeypatch.setattr(rp, "PROJECT_HERMES_HOME", base_home)
+    monkeypatch.setattr(rp, "HERMES_HOME", task_home)
+    monkeypatch.setattr(rp, "HERMES_CONFIG_TEMPLATE", template)
+
+    assert rp.ensure_hermes_home() is True
+    assert (task_home / "config.yaml").read_text(encoding="utf-8") == template.read_text(encoding="utf-8")
+
+    base_home.mkdir(parents=True)
+    (base_home / "config.yaml").write_text("model:\n  default: configured-model\n", encoding="utf-8")
+    second_task = tmp_path / "second-task" / ".hermes_home"
+    monkeypatch.setattr(rp, "HERMES_HOME", second_task)
+    assert rp.ensure_hermes_home() is True
+    assert "configured-model" in (second_task / "config.yaml").read_text(encoding="utf-8")
+
+
+def test_hermes_environment_prefers_project_config_over_global_overrides(tmp_path, monkeypatch):
+    monkeypatch.setattr(rp, "HERMES_HOME", tmp_path / ".hermes_home")
+    monkeypatch.setattr(rp, "resolve_ark_key", lambda: "")
+    monkeypatch.setenv("HERMES_HOME", "/global/hermes")
+    monkeypatch.setenv("HERMES_INFERENCE_MODEL", "global-model")
+    monkeypatch.setenv("HERMES_IGNORE_USER_CONFIG", "1")
+
+    env, has_key = rp.build_hermes_env()
+
+    assert env["HERMES_HOME"] == str(tmp_path / ".hermes_home")
+    assert "HERMES_INFERENCE_MODEL" not in env
+    assert "HERMES_IGNORE_USER_CONFIG" not in env
+    assert env["PYTHONNOUSERSITE"] == "1"
+    assert has_key is False
 
 
 def test_prepare_run_workspace_moves_old_outputs_recoverably(tmp_path, monkeypatch):
@@ -90,6 +150,70 @@ def test_compiled_artifact_contract_requires_pair_and_consistent_confidence(tmp_
 
     skill_md.write_text("# Demo\n\n置信档：生产级\n\n无高严重度缺口\n", encoding="utf-8")
     assert rp.validate_compiled_artifacts() == []
+
+
+def test_final_artifact_contract_requires_valid_benchmark_pair(tmp_path, monkeypatch):
+    _point_pipeline_at(monkeypatch, tmp_path)
+    out = tmp_path / "compiled_skill" / "demo"
+    out.mkdir(parents=True)
+    (out / "SKILL.md").write_text("# Demo\n\n置信档：候选级\n", encoding="utf-8")
+    (out / "EVALUATION.md").write_text("# Evaluation\n", encoding="utf-8")
+
+    missing = rp.validate_final_artifacts()
+    assert any("BENCHMARK.md" in error for error in missing)
+    assert any("benchmark.jsonl" in error for error in missing)
+
+    (out / "BENCHMARK.md").write_text("# Benchmark\n", encoding="utf-8")
+    (out / "benchmark.jsonl").write_text(
+        '{"id":"BM-01","input":"测试情境"}\n',
+        encoding="utf-8",
+    )
+    assert rp.validate_final_artifacts() == []
+
+
+def test_final_benchmark_builder_targets_isolated_workspace(tmp_path, monkeypatch):
+    _point_pipeline_at(monkeypatch, tmp_path)
+    out = tmp_path / "compiled_skill" / "demo"
+    out.mkdir(parents=True)
+    (out / "SKILL.md").write_text("# Demo\n\n置信档：候选级\n", encoding="utf-8")
+    (out / "EVALUATION.md").write_text("# Evaluation\n", encoding="utf-8")
+
+    def fake_build(skill_dir, skill_name, hermes_env):
+        assert skill_dir == out
+        assert skill_name == "demo"
+        assert hermes_env == {"TOKEN": "configured"}
+        (out / "benchmark.jsonl").write_text(
+            '{"id":"BM-01","input":"测试情境"}\n', encoding="utf-8"
+        )
+        (out / "BENCHMARK.md").write_text("# Benchmark\n", encoding="utf-8")
+        return [{"id": "BM-01", "input": "测试情境"}]
+
+    monkeypatch.setattr(rb, "build_phase", fake_build)
+
+    assert rp.build_final_benchmark({"TOKEN": "configured"}) is True
+    assert rb.PROJECT_ROOT == tmp_path
+    assert rb.rst.PROJECT_ROOT == tmp_path
+
+
+def test_pipeline_finalizer_builds_and_archives_benchmark_once(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        rp,
+        "build_final_benchmark",
+        lambda env: calls.append(("build", env)) or True,
+    )
+    monkeypatch.setattr(
+        rp,
+        "archive_round",
+        lambda round_idx, session_tag: calls.append(("archive", round_idx, session_tag))
+        or (tmp_path / "round_1"),
+    )
+
+    assert rp.finalize_pipeline_artifacts({"TOKEN": "configured"}, 1, "session-a") is True
+    assert calls == [
+        ("build", {"TOKEN": "configured"}),
+        ("archive", 1, "session-a"),
+    ]
 
 
 def test_security_policy_is_injected_into_every_pipeline_prompt(tmp_path, monkeypatch):
@@ -171,7 +295,8 @@ def test_oversized_single_package_full_copy_is_still_rejected(tmp_path):
     package = packages / "样本包001"
     input_dir.mkdir(parents=True)
     package.mkdir(parents=True)
-    content = "超出下游容量的领域规则。" * 12000
+    # Keep this fixture above the current 200,000-character downstream limit.
+    content = "超出下游容量的领域规则。" * 20000
     (input_dir / "guide.md").write_text(content, encoding="utf-8")
     (package / "guide.md").write_text(content, encoding="utf-8")
     _write_package_notes(packages, ["样本包001"])

@@ -23,7 +23,6 @@ import MiningView, { type MinePage } from "@/views/MiningView";
 type ViewKey =
   | "mine-overview"
   | "mine-sources"
-  | "mine-pipeline"
   | "mine-jobs"
   | "mine-model"
   | "dashboard"
@@ -41,7 +40,6 @@ type DashTab = "overview" | "candidates" | "audit" | "filter";
 const MINE_PAGES: { key: ViewKey; page: MinePage }[] = [
   { key: "mine-overview", page: "overview" },
   { key: "mine-sources", page: "sources" },
-  { key: "mine-pipeline", page: "pipeline" },
   { key: "mine-jobs", page: "jobs" },
   { key: "mine-model", page: "model" },
 ];
@@ -57,7 +55,6 @@ const NAV_GROUPS: {
     items: [
       { key: "mine-overview", label: "挖掘总览", icon: LayoutDashboard },
       { key: "mine-sources", label: "知识源", icon: Database },
-      { key: "mine-pipeline", label: "挖掘流水线", icon: Workflow },
       { key: "mine-jobs", label: "挖掘任务", icon: ListChecks },
       { key: "mine-model", label: "挖掘模型", icon: SlidersHorizontal },
     ],

@@ -32,6 +32,88 @@ def _compiled_root(skillminer_root: Path | str = SKILLMINER_ROOT) -> Path:
     return Path(skillminer_root).resolve() / "compiled_skill"
 
 
+def resolve_mined_job_workspace(
+    job_id: str,
+    *,
+    skillminer_root: Path | str = SKILLMINER_ROOT,
+) -> Path:
+    """Resolve the immutable workspace of one completed mining job safely."""
+    raw_id = str(job_id or "").strip()
+    if not raw_id:
+        raise MiningLifecycleError("job_id is required")
+    jobs_root = Path(skillminer_root).resolve() / "mining_jobs"
+    job_dir = (jobs_root / raw_id).resolve()
+    if job_dir.parent != jobs_root:
+        raise MiningLifecycleError("挖掘任务 ID 无效")
+    metadata_path = job_dir / "job.json"
+    if not metadata_path.is_file():
+        raise MiningLifecycleError(f"未找到挖掘任务：{raw_id}")
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MiningLifecycleError(f"挖掘任务元数据损坏：{raw_id}") from exc
+    if not isinstance(metadata, dict) or str(metadata.get("job_id") or raw_id) != raw_id:
+        raise MiningLifecycleError(f"挖掘任务元数据不匹配：{raw_id}")
+    if str(metadata.get("status") or "") != "succeeded":
+        raise MiningLifecycleError("只有已完成的挖掘任务可以提交到进化候选区")
+    workspace = job_dir / "workspace"
+    if not (workspace / "compiled_skill").is_dir():
+        raise MiningLifecycleError("挖掘任务没有可提交的已编译 Skill")
+    return workspace
+
+
+def resolve_mined_job_skill_root(
+    job_id: str,
+    skill_name: str,
+    *,
+    artifact_path: str = "",
+    skillminer_root: Path | str = SKILLMINER_ROOT,
+) -> Path:
+    """Resolve the root containing ``compiled_skill`` for modern or legacy jobs."""
+    raw_job_id = str(job_id or "").strip()
+    if not raw_job_id.startswith("legacy:"):
+        return resolve_mined_job_workspace(raw_job_id, skillminer_root=skillminer_root)
+
+    run_id = raw_job_id.removeprefix("legacy:")
+    root = Path(skillminer_root).resolve()
+    raw_path = str(artifact_path or "").strip().replace("\\", "/")
+    target = (root / raw_path).resolve()
+    if (
+        not raw_path
+        or root not in target.parents
+        or target.name != "SKILL.md"
+        or target.parent.name != str(skill_name or "").strip()
+        or target.parent.parent.name != "compiled_skill"
+        or not target.is_file()
+    ):
+        raise MiningLifecycleError("旧版挖掘任务的 Skill 产物路径无效")
+
+    relative = target.relative_to(root)
+    if relative.parts[0] == "compiled_skill":
+        if run_id != "current":
+            raise MiningLifecycleError("旧版挖掘任务与 Skill 产物不匹配")
+        return root
+    if relative.parts[0] == "reflection_rounds":
+        if len(relative.parts) < 3 or relative.parts[1] != run_id:
+            raise MiningLifecycleError("旧版挖掘任务与 Skill 产物不匹配")
+        return target.parent.parent.parent
+    if relative.parts[0] == "run_history":
+        if len(relative.parts) < 4:
+            raise MiningLifecycleError("旧版挖掘任务的归档路径无效")
+        container_id = relative.parts[1]
+        rounds_root = root / "reflection_rounds"
+        session_ids = sorted(
+            (path.name for path in rounds_root.iterdir() if path.is_dir()),
+            reverse=True,
+        ) if rounds_root.is_dir() else []
+        preceding = next((session_id for session_id in session_ids if session_id < container_id), None)
+        expected_run_id = preceding or f"legacy_before_{container_id}"
+        if run_id != expected_run_id:
+            raise MiningLifecycleError("旧版挖掘任务与归档 Skill 不匹配")
+        return target.parent.parent.parent
+    raise MiningLifecycleError("旧版挖掘任务的 Skill 不在允许的产物目录中")
+
+
 def resolve_mined_skill_dir(
     skill_name: str,
     *,
@@ -194,6 +276,7 @@ def submit_mined_skill(
     current_skill: Optional[dict[str, Any]] = None,
     submitted_by: str = "",
     skillminer_root: Path | str = SKILLMINER_ROOT,
+    mining_job_id: str = "",
 ) -> dict[str, Any]:
     """Create (or return) an idempotent human-review candidate job."""
     artifact = mined_artifact_descriptor(skill_name, skillminer_root=skillminer_root)
@@ -233,6 +316,8 @@ def submit_mined_skill(
             "submitted_by": str(submitted_by or ""),
         },
     }
+    if mining_job_id:
+        job["source"]["mining_job_id"] = str(mining_job_id)
     store.save_job(job)
     return {"created": True, "job": job, "decision": None}
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Panel, StatCard, Pill, Dot } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,33 +9,43 @@ import { fileToB64 } from "@/lib/file";
 import { toastErr, toastOk } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import DropZone from "@/views/skills/DropZone";
+import MarkdownWorkspace, { MarkdownDocument } from "@/components/MarkdownWorkspace";
 import {
   Boxes,
   ScanSearch,
   FileCode2,
   RotateCcw,
   Play,
-  Square,
   Upload,
   CheckCircle2,
   ArrowRight,
   FileText,
   Eye,
+  FolderPlus,
+  FolderInput,
+  Trash2,
+  ListChecks,
+  Clock3,
+  CircleStop,
+  ChevronDown,
+  Pencil,
+  Save,
+  Send,
 } from "lucide-react";
 
 /**
  * MiningView — SkillMiner「文档 → Skill」挖掘流水线控制台。
  *
  * 集成后 teamEvolver 统一控制台「挖掘」分组的落地页。挖掘能力在左侧边栏拆成
- * 5 个独立菜单项（总览 / 知识源 / 挖掘流水线 / 挖掘任务 / 模型配置），本组件
+ * 4 个独立菜单项（总览 / 知识源 / 挖掘任务 / 模型配置），本组件
  * 按 `page` 渲染对应页面。
  *
  * 后端已接入：teamEvolver 服务把内嵌的 SkillMiner 控制台（子进程）反向代理到
- * ``/api/mining/*``。本视图通过 ``/api/mining/config`` 拉配置、``/api/mining/events``
- * (SSE) 接收实时进度、``/api/mining/run`` 与 ``/api/mining/stop`` 驱动流水线。
+ * ``/api/mining/*``。本视图通过 ``/api/mining/config`` 管理数据源，并通过
+ * ``/api/mining/jobs`` 创建、调度和跟踪持久化挖掘任务。
  */
 
-export type MinePage = "overview" | "sources" | "pipeline" | "jobs" | "model";
+export type MinePage = "overview" | "sources" | "jobs" | "model";
 
 const PAGE_META: Record<MinePage, { title: string; desc: string }> = {
   overview: {
@@ -46,17 +56,13 @@ const PAGE_META: Record<MinePage, { title: string; desc: string }> = {
     title: "知识源",
     desc: "上传并管理用于挖掘的领域文档，然后选择要进入流水线的知识源。",
   },
-  pipeline: {
-    title: "挖掘流水线",
-    desc: "配置并运行「样本包构建 → 语义发现 → Skill 编译」流水线。",
-  },
   jobs: {
     title: "挖掘任务",
-    desc: "检查编译产物与内部 Benchmark，并提交到 teamEvolver 候选评审与人工发布流程。",
+    desc: "统一查看排队中、挖掘中和已完成的任务；运行中查看流水线，完成后查看产物。",
   },
   model: {
     title: "挖掘模型",
-    desc: "查看 SkillMiner 当前实际生效的 Hermes 模型配置。",
+    desc: "配置 SkillMiner 在样本构建、语义发现、技能编译和 Benchmark 生成中使用的模型。",
   },
 };
 
@@ -88,16 +94,77 @@ interface MiningArtifact {
 interface MiningRound {
   round: number;
   artifacts: MiningArtifact[];
-  skills: CompiledSkillDetail[];
+  skills?: CompiledSkillDetail[];
 }
 
-interface MiningRun {
-  run_id: string;
+type MiningJobStatus =
+  | "preparing"
+  | "queued"
+  | "running"
+  | "waiting"
+  | "stopping"
+  | "stopped"
+  | "succeeded"
+  | "failed"
+  | "interrupted";
+
+interface MiningJob {
+  job_id: string;
+  name: string;
+  status: MiningJobStatus;
+  input_dir: string;
+  document_count: number | null;
+  max_rounds: number;
+  current_round: number;
+  phase: PhaseState;
+  created_at: string;
   started_at: string;
-  status: string;
-  rounds: MiningRound[];
-  final_artifacts: MiningArtifact[];
-  skills: CompiledSkillDetail[];
+  finished_at: string;
+  updated_at: string;
+  error: string;
+  stop_reason: string;
+  legacy?: boolean;
+  artifacts?: MiningArtifact[];
+  rounds?: MiningRound[];
+  logs?: string[];
+  skills?: CompiledSkillDetail[];
+  pending_checkpoint?: HumanCheckpoint | null;
+  knowledge_gaps?: {
+    total: number;
+    questions: HumanCheckpointQuestion[];
+  } | null;
+}
+
+interface HumanCheckpointQuestion {
+  qid: string;
+  dimension: string;
+  severity: string;
+  question: string;
+  context?: string;
+  source?: string;
+  field_label?: string;
+  placeholder?: string;
+  answer_type?: "short_text" | "long_text";
+  required?: boolean;
+}
+
+interface HumanCheckpoint {
+  id: string;
+  checkpoint: string;
+  round: number;
+  title: string;
+  intro: string;
+  questions: HumanCheckpointQuestion[];
+  allow_stop?: boolean;
+}
+
+interface MiningJobSummary {
+  total: number;
+  running: number;
+  queued: number;
+  completed: number;
+  failed: number;
+  max_parallel: number;
 }
 
 interface ArtifactContent {
@@ -107,23 +174,13 @@ interface ArtifactContent {
   size_bytes: number;
 }
 
-interface MinedSkillLifecycle {
-  name: string;
-  status: "incomplete" | "ready" | "candidate" | "published" | "rejected";
-  job_id: string;
-  question_count: number;
-  dataset_format: string;
-  registered: boolean;
-  error?: string;
-}
-
 interface MiningConfig {
   input_dirs: string[];
   input_sources: InputSource[];
   default_input_dir: string;
   max_rounds_default: number;
   max_rounds_range: [number, number];
-  model: { id: string; base_url: string };
+  model: MiningModelSettings;
   compiled_skills: string[];
   compiled_skill_details: CompiledSkillDetail[];
   benchmark: {
@@ -132,6 +189,37 @@ interface MiningConfig {
   };
   checkpoints: { key: string; label: string; desc: string }[];
 }
+
+interface MiningModelSettings {
+  provider: string;
+  id?: string;
+  model: string;
+  base_url: string;
+  max_tokens: number;
+  temperature: number;
+  api_key?: string;
+  api_key_present: boolean;
+  configured: boolean;
+  clear_api_key?: boolean;
+}
+
+interface MiningModelTestResult {
+  ok: boolean;
+  model: string;
+  latency_ms: number;
+  response: string;
+}
+
+const emptyMiningModelSettings = (): MiningModelSettings => ({
+  provider: "openai-compatible",
+  model: "",
+  base_url: "",
+  max_tokens: 32768,
+  temperature: 0.2,
+  api_key: "",
+  api_key_present: false,
+  configured: false,
+});
 
 interface KnowledgeUploadResult {
   ok: boolean;
@@ -145,37 +233,10 @@ interface KnowledgeUploadResult {
   source: InputSource;
 }
 
-type RunState = "idle" | "running" | "waiting" | "done" | "error";
-
 interface PhaseState {
   step1: "idle" | "active" | "done";
   step2: "idle" | "active" | "done";
   step3: "idle" | "active" | "done";
-}
-
-interface RoundEval {
-  round: number;
-  confidence?: string | number;
-  gap_count?: number;
-  gaps?: string[];
-  question_count?: number;
-}
-
-interface MiningQuestionItem {
-  qid: string;
-  dimension?: string;
-  severity?: string;
-  question: string;
-}
-
-interface MiningQuestion {
-  id: string;
-  checkpoint?: string;
-  round?: number;
-  title?: string;
-  intro?: string;
-  allow_stop?: boolean;
-  questions: MiningQuestionItem[];
 }
 
 const STEP_META = [
@@ -185,187 +246,52 @@ const STEP_META = [
 ];
 
 /**
- * Shared hook: owns the SkillMiner config + live SSE state. Instantiated once
- * per MiningView mount and kept alive across page switches (the outer <main>
- * hides views with CSS rather than unmounting).
+ * Shared hook: owns knowledge-source configuration and the persistent job list.
+ * It polls lightweight task summaries; the selected active task separately
+ * polls its detail so logs and pipeline progress stay current.
  */
 function useMining(active: boolean) {
   const [config, setConfig] = useState<MiningConfig | null>(null);
-  const [lifecycle, setLifecycle] = useState<MinedSkillLifecycle[]>([]);
-  const [runs, setRuns] = useState<MiningRun[]>([]);
-  const [state, setState] = useState<RunState>("idle");
-  const [logs, setLogs] = useState<string[]>([]);
-  const [phase, setPhase] = useState<PhaseState>({ step1: "idle", step2: "idle", step3: "idle" });
-  const [round, setRound] = useState(0);
-  const [evals, setEvals] = useState<RoundEval[]>([]);
-  const [question, setQuestion] = useState<MiningQuestion | null>(null);
-  const [benchmarkState, setBenchmarkState] = useState<RunState>("idle");
-  const esRef = useRef<EventSource | null>(null);
-  // 已处理的最大事件 seq：SkillMiner 事件流带单调 seq，用于去重
-  // （浏览器自动重连虽有 Last-Event-ID 续传，这里再兜一层防重放翻倍）。
-  const lastSeq = useRef(0);
-  const streamId = useRef("");
+  const [jobs, setJobs] = useState<MiningJob[]>([]);
+  const [jobSummary, setJobSummary] = useState<MiningJobSummary>({
+    total: 0, running: 0, queued: 0, completed: 0, failed: 0, max_parallel: 3,
+  });
+
+  const refreshJobs = useCallback(async (notifyFailure = false) => {
+    try {
+      const response = await api<{ jobs: MiningJob[]; summary: MiningJobSummary }>("/api/mining/jobs");
+      setJobs(response.jobs || []);
+      setJobSummary(response.summary || {
+        total: 0, running: 0, queued: 0, completed: 0, failed: 0, max_parallel: 3,
+      });
+      return response.jobs || [];
+    } catch (e: any) {
+      if (notifyFailure) toastErr("加载挖掘任务失败", e.message);
+      return [];
+    }
+  }, []);
 
   const refreshConfig = useCallback(async () => {
     try {
       const next = await api<MiningConfig>("/api/mining/config");
       setConfig(next);
-      try {
-        const history = await api<{ runs: MiningRun[] }>("/api/mining/runs");
-        setRuns(history.runs || []);
-      } catch (e: any) {
-        toastErr("加载历史挖掘记录失败", e.message);
-      }
-      try {
-        const handoff = await api<{ skills: MinedSkillLifecycle[] }>("/api/mined-skills");
-        setLifecycle(handoff.skills || []);
-      } catch (e: any) {
-        toastErr("加载候选交接状态失败", e.message);
-      }
+      await refreshJobs(false);
       return next;
     } catch (e: any) {
       toastErr("加载挖掘配置失败", e.message);
       return null;
     }
-  }, []);
+  }, [refreshJobs]);
 
-  // 每次重新进入挖掘页面都重连 SSE；离开页面时连接会关闭。lastSeq 会保留，
-  // 因此服务端历史重放只补齐离开期间的新事件，不会把旧日志重复追加。
   useEffect(() => {
     if (!active) return;
-
     refreshConfig();
+    const timer = window.setInterval(() => refreshJobs(false), 2000);
+    return () => window.clearInterval(timer);
+  }, [active, refreshConfig, refreshJobs]);
 
-    const es = new EventSource("/api/mining/events");
-    esRef.current = es;
-    es.onmessage = (ev) => {
-      let data: any;
-      try {
-        data = JSON.parse(ev.data);
-      } catch {
-        return;
-      }
-      // SkillMiner 子进程重启后 seq 会从 1 重新开始；stream_id 用于识别新进程，
-      // 避免沿用旧 lastSeq 而把新进程的全部事件误判为重放。
-      if (typeof data.stream_id === "string" && data.stream_id !== streamId.current) {
-        streamId.current = data.stream_id;
-        lastSeq.current = 0;
-      }
-      if (typeof data.seq === "number") {
-        if (data.seq <= lastSeq.current) return; // 重放/重连的旧事件，跳过
-        lastSeq.current = data.seq;
-      }
-      switch (data.type) {
-        case "reset":
-          // 新任务开始（可能由其他客户端触发）：清空对应面板
-          setLogs([]);
-          if (data.scope !== "benchmark") {
-            setEvals([]);
-            setPhase({ step1: "idle", step2: "idle", step3: "idle" });
-            setRound(0);
-            setQuestion(null);
-          }
-          break;
-        case "status":
-          if (data.state) setState(data.state as RunState);
-          break;
-        case "log":
-          // SkillMiner 的 log 事件字段是 msg（兼容旧的 line 命名）
-          {
-            const line = typeof data.msg === "string" ? data.msg : data.line;
-            if (typeof line === "string") {
-              setLogs((prev) => [...prev.slice(-400), line]);
-            }
-          }
-          break;
-        case "round_start":
-          setRound(Number(data.round || 0));
-          setPhase({ step1: "idle", step2: "idle", step3: "idle" });
-          break;
-        case "phase": {
-          // SkillMiner 的 phase 事件字段是 phase/state（兼容旧的 step/status 命名）
-          const step = (data.phase ?? data.step) as keyof PhaseState;
-          const st = (data.state ?? data.status) === "done" ? "done" : "active";
-          if (step === "step1" || step === "step2" || step === "step3") {
-            setPhase((prev) => ({ ...prev, [step]: st }));
-          }
-          break;
-        }
-        case "round_eval":
-          setEvals((prev) => [
-            ...prev,
-            {
-              round: Number(data.round || 0),
-              confidence: data.confidence,
-              gap_count: data.gap_count,
-              gaps: data.gaps,
-              question_count: data.question_count,
-            },
-          ]);
-          break;
-        case "question":
-          // 检查点提问：阻塞流水线直到 /api/mining/answer 回填
-          if (data.id && Array.isArray(data.questions)) {
-            setQuestion(data as MiningQuestion);
-          }
-          break;
-        case "answer_ack":
-          // 与 question 成对：正常应答与中止路径都会补发，弹出的问答卡片在此关闭
-          setQuestion(null);
-          break;
-        case "done":
-          setState("done");
-          setPhase({ step1: "done", step2: "done", step3: "done" });
-          setQuestion(null);
-          // 编译完成后刷新 compiled_skills，任务页无需手动刷新浏览器。
-          refreshConfig();
-          break;
-        case "bench_status":
-          if (data.state) setBenchmarkState(data.state as RunState);
-          break;
-        case "bench_done":
-          setBenchmarkState("done");
-          refreshConfig();
-          break;
-        case "bench_error":
-          setBenchmarkState("error");
-          {
-            const msg = data.msg ?? data.message;
-            if (msg) setLogs((prev) => [...prev.slice(-400), `[错误] ${msg}`]);
-          }
-          break;
-        case "error":
-          setState("error");
-          {
-            const msg = data.msg ?? data.message;
-            if (msg) setLogs((prev) => [...prev.slice(-400), `[错误] ${msg}`]);
-          }
-          break;
-        case "warning":
-          // 非致命告警（如本轮部分步骤失败）：显式标注但不切 error 状态，
-          // 流水线仍在继续。
-          {
-            const msg = data.msg ?? data.message;
-            if (msg) setLogs((prev) => [...prev.slice(-400), `[告警] ${msg}`]);
-          }
-          break;
-      }
-    };
-    es.onerror = () => {
-      // Browser auto-reconnects (with Last-Event-ID); nothing to do.
-    };
-    return () => {
-      es.close();
-      esRef.current = null;
-    };
-  }, [active, refreshConfig]);
-
-  return {
-    config, lifecycle, runs, state, logs, phase, round, evals, question, benchmarkState,
-    setLogs, setState, setPhase, setRound, setEvals, setQuestion, setBenchmarkState, refreshConfig,
-  };
+  return { config, jobs, jobSummary, refreshConfig, refreshJobs };
 }
-
 export default function MiningView({
   active,
   page,
@@ -380,19 +306,43 @@ export default function MiningView({
   onNavigate?: (destination: MinePage | "candidates" | "skills") => void;
 }) {
   const mining = useMining(active);
-  const { config, state, logs, phase, round, evals, question } = mining;
+  const { config } = mining;
 
   const [rounds, setRounds] = useState(3);
-  const [askEnabled, setAskEnabled] = useState(true);
+  const [taskName, setTaskName] = useState("");
   const [starting, setStarting] = useState(false);
-  const [benchmarkStarting, setBenchmarkStarting] = useState(false);
-  const [benchmarkingSkill, setBenchmarkingSkill] = useState("");
-  const [submittingSkill, setSubmittingSkill] = useState("");
   const [uploading, setUploading] = useState(false);
   const [selectedInputDir, setSelectedInputDir] = useState("");
+  const [uploadTarget, setUploadTarget] = useState("");
+  const [newUploadSourceName, setNewUploadSourceName] = useState("");
+  const [createSourceOpen, setCreateSourceOpen] = useState(false);
+  const [createSourceName, setCreateSourceName] = useState("");
+  const [mergeSourceOpen, setMergeSourceOpen] = useState(false);
+  const [mergeSourcePaths, setMergeSourcePaths] = useState<string[]>([]);
+  const [mergeTargetName, setMergeTargetName] = useState("");
+  const [deleteSource, setDeleteSource] = useState<InputSource | null>(null);
+  const [sourceMutating, setSourceMutating] = useState(false);
+  const [jobFilter, setJobFilter] = useState<"all" | "active" | "completed" | "failed">("all");
+  const [selectedJobId, setSelectedJobId] = useState("");
+  const [selectedJob, setSelectedJob] = useState<MiningJob | null>(null);
+  const [jobActionPending, setJobActionPending] = useState(false);
+  const [checkpointAnswers, setCheckpointAnswers] = useState<Record<string, string>>({});
+  const [checkpointSubmitting, setCheckpointSubmitting] = useState(false);
   const [artifactPreview, setArtifactPreview] = useState<ArtifactContent | null>(null);
+  const [artifactDraft, setArtifactDraft] = useState("");
+  const [artifactEditing, setArtifactEditing] = useState(false);
+  const [artifactEditable, setArtifactEditable] = useState(false);
+  const [artifactSaving, setArtifactSaving] = useState(false);
   const [loadingArtifact, setLoadingArtifact] = useState("");
-  const logRef = useRef<HTMLDivElement | null>(null);
+  const [submittingJobId, setSubmittingJobId] = useState("");
+  const [createJobOpen, setCreateJobOpen] = useState(false);
+  const [modelSettings, setModelSettings] = useState<MiningModelSettings>(() => emptyMiningModelSettings());
+  const [modelSaving, setModelSaving] = useState(false);
+  const [modelTesting, setModelTesting] = useState(false);
+  const [modelRefreshing, setModelRefreshing] = useState(false);
+  const [clearModelKey, setClearModelKey] = useState(false);
+  const [modelTestResult, setModelTestResult] = useState<MiningModelTestResult | null>(null);
+  const artifactIsMarkdown = isMarkdownArtifact(artifactPreview);
 
   // Sync default rounds from config once loaded.
   useEffect(() => {
@@ -404,31 +354,79 @@ export default function MiningView({
         ? selectedInputDir
         : config.default_input_dir || config.input_dirs[0] || "data/input";
     setSelectedInputDir(next);
+    if (!uploadTarget || (!config.input_dirs.includes(uploadTarget) && uploadTarget !== "__new__")) {
+      setUploadTarget(next);
+    }
     onInputDirChange?.(next);
   }, [config, preferredInputDir]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-scroll the log console.
   useEffect(() => {
-    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [logs]);
+    if (page !== "model" || !config?.model) return;
+    setModelSettings({ ...emptyMiningModelSettings(), ...config.model, api_key: "" });
+    setClearModelKey(false);
+    setModelTestResult(null);
+  }, [page, config]);
+
+  useEffect(() => {
+    if (!active || page !== "jobs" || !selectedJobId) return;
+    let cancelled = false;
+    async function loadDetail() {
+      try {
+        const response = await api<{ ok: boolean; job: MiningJob }>(
+          `/api/mining/jobs/${encodeURIComponent(selectedJobId)}`
+        );
+        if (!cancelled) setSelectedJob(response.job);
+      } catch (e: any) {
+        if (!cancelled) toastErr("加载任务详情失败", e.message);
+      }
+    }
+    loadDetail();
+    const selected = mining.jobs.find((job) => job.job_id === selectedJobId);
+    const timer = selected && isActiveJob(selected.status)
+      ? window.setInterval(loadDetail, 2000)
+      : undefined;
+    return () => {
+      cancelled = true;
+      if (timer) window.clearInterval(timer);
+    };
+  }, [active, page, selectedJobId, mining.jobs]);
+
+  useEffect(() => {
+    setCheckpointAnswers({});
+  }, [selectedJob?.pending_checkpoint?.id]);
 
   if (!active) return null;
 
   const meta = PAGE_META[page];
-  const running = state === "running" || state === "waiting";
   const inputDir = selectedInputDir || config?.default_input_dir || "data/input";
   const maxRounds = config?.max_rounds_range?.[1] ?? 5;
   const minRounds = config?.max_rounds_range?.[0] ?? 1;
-  const skills = config?.compiled_skills ?? [];
   const inputSources = config?.input_sources ?? [];
   const selectedSource = inputSources.find((source) => source.path === inputDir);
-  const compiledSkills = config?.compiled_skill_details
-    ?? skills.map((name) => ({ name, has_skill: true, has_evaluation: false, has_benchmark: false, question_count: 0 }));
-  const historicalSkillCount = new Set(
-    mining.runs.flatMap((run) => run.skills.map((skill) => skill.name))
-  ).size;
-  const lifecycleByName = new Map(mining.lifecycle.map((item) => [item.name, item]));
-  const benchmarkRunning = mining.benchmarkState === "running" || mining.benchmarkState === "waiting";
+  const jobCounts = {
+    total: mining.jobs.length,
+    running: mining.jobs.filter((job) => isActiveJob(job.status) && job.status !== "queued" && job.status !== "preparing").length,
+    queued: mining.jobs.filter((job) => job.status === "queued" || job.status === "preparing").length,
+    completed: mining.jobs.filter((job) => job.status === "succeeded").length,
+    failed: mining.jobs.filter((job) => job.status === "failed" || job.status === "interrupted" || job.status === "stopped").length,
+  };
+  const activeJob = mining.jobs.find((job) => job.status === "running" || job.status === "stopping")
+    || mining.jobs.find((job) => job.status === "waiting")
+    || mining.jobs.find((job) => job.status === "queued" || job.status === "preparing");
+  const running = Boolean(activeJob);
+  const overviewPhase = activeJob?.phase || { step1: "idle", step2: "idle", step3: "idle" };
+  const stateLabel = jobCounts.running
+    ? `${jobCounts.running} 个运行中`
+    : jobCounts.queued
+      ? `${jobCounts.queued} 个排队中`
+      : "当前无运行任务";
+  const stateTone = jobCounts.running ? "blue" : jobCounts.queued ? "amber" : "gray";
+  const filteredJobs = mining.jobs.filter((job) => {
+    if (jobFilter === "active") return isActiveJob(job.status);
+    if (jobFilter === "completed") return job.status === "succeeded";
+    if (jobFilter === "failed") return job.status === "failed" || job.status === "interrupted" || job.status === "stopped";
+    return true;
+  });
 
   function selectInputDir(path: string) {
     setSelectedInputDir(path);
@@ -439,6 +437,17 @@ export default function MiningView({
     if (!list.length) return;
     setUploading(true);
     try {
+      let target = uploadTarget || inputDir;
+      if (target === "__new__") {
+        const name = newUploadSourceName.trim();
+        if (!name) throw new Error("请输入新数据源名称");
+        const created = await api<{ source: InputSource }>("/api/mining/sources", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name }),
+        });
+        target = created.source.path;
+      }
       const files = await Promise.all(Array.from(list).map(async (file) => ({
         name: file.name,
         content_b64: await fileToB64(file),
@@ -446,7 +455,7 @@ export default function MiningView({
       const result = await api<KnowledgeUploadResult>("/api/mining/sources/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source_path: inputDir, files }),
+        body: JSON.stringify({ source_path: target, files }),
       });
       const renamed = result.written.filter((file) => file.renamed).length;
       toastOk(
@@ -454,6 +463,8 @@ export default function MiningView({
         renamed ? `${renamed} 个重名文件已自动保留为新副本` : `已写入 ${result.source.path}`
       );
       await mining.refreshConfig();
+      setUploadTarget(result.source.path);
+      setNewUploadSourceName("");
     } catch (e: any) {
       toastErr("上传知识文档失败", e.message);
     } finally {
@@ -463,27 +474,23 @@ export default function MiningView({
 
   async function startRun() {
     setStarting(true);
-    mining.setLogs([]);
-    mining.setEvals([]);
-    mining.setPhase({ step1: "idle", step2: "idle", step3: "idle" });
     try {
-      await api("/api/mining/run", {
+      const response = await api<{ jobs: MiningJob[] }>("/api/mining/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          name: taskName.trim() || `${selectedSource?.path.split("/").pop() || "知识源"} 挖掘任务`,
           input_dir: inputDir,
           max_rounds: rounds,
-          ask_enabled: askEnabled,
-          checkpoints: {
-            after_semantic: askEnabled,
-            after_compile: askEnabled,
-            on_gap_low_confidence: askEnabled,
-            before_reflection: false,
-          },
         }),
       });
-      mining.setState("running");
-      toastOk("挖掘已启动", `输入 ${inputDir} · 最多 ${rounds} 轮`);
+      const created = response.jobs?.[0];
+      if (created) setSelectedJobId(created.job_id);
+      await mining.refreshJobs(false);
+      setTaskName("");
+      setCreateJobOpen(false);
+      toastOk("挖掘任务已创建", `输入 ${inputDir} · 最多 ${rounds} 轮`);
+      onNavigate?.("jobs");
     } catch (e: any) {
       toastErr("启动挖掘失败", e.message);
     } finally {
@@ -491,69 +498,121 @@ export default function MiningView({
     }
   }
 
-  async function stopRun() {
+  async function createSource() {
+    const name = createSourceName.trim();
+    if (!name) return;
+    setSourceMutating(true);
     try {
-      await api("/api/mining/stop", { method: "POST" });
-      toastOk("已发送中止信号", "");
-    } catch (e: any) {
-      toastErr("中止失败", e.message);
-    }
-  }
-
-  async function buildBenchmark(skillName: string) {
-    if (!config) return;
-    setBenchmarkStarting(true);
-    setBenchmarkingSkill(skillName);
-    mining.setBenchmarkState("running");
-    mining.setLogs([]);
-    try {
-      await api("/api/mining/benchmark", {
+      const response = await api<{ source: InputSource }>("/api/mining/sources", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          skill_name: skillName,
-          difficulty_dist: config.benchmark.default_dist,
-          target_total: config.benchmark.default_total,
-          skip_build: false,
-          build_only: true,
-        }),
+        body: JSON.stringify({ name }),
       });
-      toastOk("Benchmark 生成已启动", `${skillName} · ${config.benchmark.default_total} 题`);
+      await mining.refreshConfig();
+      setUploadTarget(response.source.path);
+      setCreateSourceOpen(false);
+      setCreateSourceName("");
+      toastOk("数据源已创建", response.source.path);
     } catch (e: any) {
-      mining.setBenchmarkState("error");
-      toastErr("启动 Benchmark 生成失败", e.message);
+      toastErr("创建数据源失败", e.message);
     } finally {
-      setBenchmarkStarting(false);
+      setSourceMutating(false);
     }
   }
 
-  async function submitCandidate(skillName: string) {
-    setSubmittingSkill(skillName);
+  async function deleteKnowledgeSource() {
+    if (!deleteSource) return;
+    setSourceMutating(true);
     try {
-      const result = await api<{ created: boolean; job_id: string; question_count: number }>(
-        `/api/mined-skills/${encodeURIComponent(skillName)}/submit`,
+      const name = deleteSource.path.split("/").pop() || "";
+      await api(`/api/mining/sources/${encodeURIComponent(name)}`, { method: "DELETE" });
+      setDeleteSource(null);
+      await mining.refreshConfig();
+      toastOk("数据源已删除", deleteSource.path);
+    } catch (e: any) {
+      toastErr("删除数据源失败", e.message);
+    } finally {
+      setSourceMutating(false);
+    }
+  }
+
+  async function mergeSources() {
+    if (mergeSourcePaths.length < 2 || !mergeTargetName.trim()) return;
+    setSourceMutating(true);
+    try {
+      const response = await api<{ source: InputSource; copied: unknown[] }>("/api/mining/sources/merge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source_paths: mergeSourcePaths, target_name: mergeTargetName.trim() }),
+      });
+      await mining.refreshConfig();
+      setUploadTarget(response.source.path);
+      setMergeSourceOpen(false);
+      setMergeSourcePaths([]);
+      setMergeTargetName("");
+      toastOk("数据源已合并", `${response.source.path} · ${response.copied.length} 个文件`);
+    } catch (e: any) {
+      toastErr("合并数据源失败", e.message);
+    } finally {
+      setSourceMutating(false);
+    }
+  }
+
+  async function stopJob(job: MiningJob) {
+    if (job.legacy) return;
+    setJobActionPending(true);
+    try {
+      const response = await api<{ job: MiningJob }>(
+        `/api/mining/jobs/${encodeURIComponent(job.job_id)}/stop`,
         { method: "POST" }
       );
-      toastOk(
-        result.created ? "已提交候选评审" : "候选已在评审流程中",
-        `${skillName} · ${result.question_count || 0} 道内部 Benchmark`
-      );
-      await mining.refreshConfig();
-      onNavigate?.("candidates");
+      setSelectedJob(response.job);
+      await mining.refreshJobs(false);
+      toastOk("已发送停止信号", job.name);
     } catch (e: any) {
-      toastErr("提交候选评审失败", e.message);
+      toastErr("停止任务失败", e.message);
     } finally {
-      setSubmittingSkill("");
+      setJobActionPending(false);
     }
   }
 
-  async function previewArtifact(artifact: MiningArtifact) {
+  async function submitCheckpointAnswers(job: MiningJob) {
+    const checkpoint = job.pending_checkpoint;
+    if (!checkpoint) return;
+    setCheckpointSubmitting(true);
+    try {
+      const response = await api<{ job: MiningJob }>(
+        `/api/mining/jobs/${encodeURIComponent(job.job_id)}/answer`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            question_id: checkpoint.id,
+            answers: checkpointAnswers,
+          }),
+        }
+      );
+      setSelectedJob(response.job);
+      setCheckpointAnswers({});
+      await mining.refreshJobs(false);
+      toastOk("补证信息已提交", "挖掘任务将带着你的答案继续运行");
+    } catch (e: any) {
+      toastErr("提交知识补证失败", e.message);
+    } finally {
+      setCheckpointSubmitting(false);
+    }
+  }
+
+  async function previewArtifact(artifact: MiningArtifact, editable: boolean) {
     setLoadingArtifact(artifact.path);
     try {
       const result = await api<ArtifactContent>(
         `/api/mining/artifacts/content?path=${encodeURIComponent(artifact.path)}`
       );
       setArtifactPreview(result);
+      setArtifactDraft(result.content);
+      setArtifactEditing(false);
+      setArtifactEditable(editable);
     } catch (e: any) {
       toastErr("读取历史产物失败", e.message);
     } finally {
@@ -561,29 +620,364 @@ export default function MiningView({
     }
   }
 
-  /** 回答检查点提问：必须带 question_id，后端会拒绝过期/不匹配的提交。 */
-  async function submitAnswers(answers: Record<string, string>) {
-    if (!question) return;
-    const questionId = question.id;
+  async function saveArtifactRevision() {
+    if (!artifactPreview) return;
+    setArtifactSaving(true);
     try {
-      const resp = await api<{ ok: boolean; msg?: string }>("/api/mining/answer", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question_id: questionId, answers, stop: false }),
-      });
-      if (!resp.ok) {
-        toastErr("提交答案未被接受", resp.msg || "");
-        return;
-      }
-      // 正常情况下由 answer_ack 关闭；这里兜底处理事件流短暂断线。
-      mining.setQuestion((current) => current?.id === questionId ? null : current);
+      const saved = await api<ArtifactContent & { edited: boolean }>(
+        "/api/mining/artifacts/content",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: artifactPreview.path, content: artifactDraft }),
+        }
+      );
+      setArtifactPreview(saved);
+      setArtifactDraft(saved.content);
+      setArtifactEditing(isMarkdownArtifact(saved));
+      toastOk("产物修改已保存", "提交到进化时将使用当前版本");
     } catch (e: any) {
-      toastErr("提交答案失败", e.message);
+      toastErr("保存产物失败", e.message);
+    } finally {
+      setArtifactSaving(false);
     }
   }
 
-  const stateTone = state === "running" ? "blue" : state === "waiting" ? "amber" : state === "done" ? "green" : state === "error" ? "red" : "gray";
-  const stateLabel = { idle: "空闲", running: "运行中", waiting: "等待人工", done: "已完成", error: "出错" }[state];
+  async function submitJobToEvolution(job: MiningJob) {
+    if (job.status !== "succeeded") return;
+    const skillNames = jobSkillNames(job);
+    if (!skillNames.length) {
+      toastErr("无法提交到进化", "任务中没有完整的 Skill 产物");
+      return;
+    }
+    setSubmittingJobId(job.job_id);
+    try {
+      const results = [];
+      for (const skillName of skillNames) {
+        const skillArtifact = jobArtifacts(job).find(
+          (artifact) => artifact.kind === "skill" && artifact.skill_name === skillName
+        );
+        results.push(await api<{ created: boolean; job_id: string; skill_name: string }>(
+          `/api/mined-jobs/${encodeURIComponent(job.job_id)}/skills/${encodeURIComponent(skillName)}/submit`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ artifact_path: skillArtifact?.path || "" }),
+          }
+        ));
+      }
+      const created = results.filter((result) => result.created).length;
+      toastOk(
+        "已提交到进化候选区",
+        created
+          ? `${created} 个 Skill 已生成候选，等待评测与人工审核`
+          : "当前产物版本已在候选区中"
+      );
+      onNavigate?.("candidates");
+    } catch (e: any) {
+      toastErr("提交到进化失败", e.message);
+    } finally {
+      setSubmittingJobId("");
+    }
+  }
+
+  async function refreshMiningModel() {
+    setModelRefreshing(true);
+    try {
+      const settings = await api<MiningModelSettings>("/api/mining/model");
+      setModelSettings({ ...emptyMiningModelSettings(), ...settings, api_key: "" });
+      setClearModelKey(false);
+      setModelTestResult(null);
+    } catch (e: any) {
+      toastErr("加载挖掘模型失败", e.message);
+    } finally {
+      setModelRefreshing(false);
+    }
+  }
+
+  async function saveMiningModel() {
+    setModelSaving(true);
+    try {
+      const saved = await api<MiningModelSettings>("/api/mining/model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...modelSettings,
+          max_tokens: Number(modelSettings.max_tokens || 32768),
+          temperature: Number(modelSettings.temperature ?? 0.2),
+          clear_api_key: clearModelKey,
+        }),
+      });
+      setModelSettings({ ...emptyMiningModelSettings(), ...saved, api_key: "" });
+      setClearModelKey(false);
+      setModelTestResult(null);
+      await mining.refreshConfig();
+      toastOk("挖掘模型配置已保存", `${saved.model} · 后续任务自动生效`);
+    } catch (e: any) {
+      toastErr("保存挖掘模型失败", e.message);
+    } finally {
+      setModelSaving(false);
+    }
+  }
+
+  async function testMiningModel() {
+    setModelTesting(true);
+    setModelTestResult(null);
+    try {
+      const result = await api<MiningModelTestResult>("/api/mining/model/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...modelSettings,
+          max_tokens: Number(modelSettings.max_tokens || 32768),
+          temperature: Number(modelSettings.temperature ?? 0.2),
+          clear_api_key: clearModelKey,
+        }),
+      });
+      setModelTestResult(result);
+      toastOk("模型连通性正常", `${result.latency_ms} ms · ${result.response || "已返回"}`);
+    } catch (e: any) {
+      toastErr("模型测试失败", e.message);
+    } finally {
+      setModelTesting(false);
+    }
+  }
+
+  function renderJobDetail(job: MiningJob) {
+    const durableGaps = job.knowledge_gaps?.questions || [];
+    return (
+      <div className="space-y-4 border-t border-accent/20 bg-accent-soft/35 px-5 py-5">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="truncate text-[15px] font-bold">{job.name}</div>
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+              <Pill tone={jobStatusMeta(job.status).tone as any}>{jobStatusMeta(job.status).label}</Pill>
+              {job.input_dir && <span className="mono">{job.input_dir}</span>}
+              {job.document_count !== null && <span>{job.document_count} 个文档</span>}
+            </div>
+          </div>
+          {isActiveJob(job.status) && !job.legacy && (
+            <Button size="sm" variant="outline" disabled={jobActionPending || job.status === "stopping"} onClick={() => stopJob(job)}>
+              <CircleStop className="size-3.5" /> {job.status === "stopping" ? "停止中" : "停止"}
+            </Button>
+          )}
+        </div>
+
+        {durableGaps.length > 0 && !job.pending_checkpoint && (
+          <div className="rounded-xl border border-amber-300/70 bg-amber-50/80 p-4 shadow-sm">
+            <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="mb-1 flex items-center gap-2">
+                  <ListChecks className="size-4 text-amber-700" />
+                  <span className="text-[14px] font-bold">关键知识缺口</span>
+                  <Pill tone="amber">{job.knowledge_gaps?.total || durableGaps.length} 项</Pill>
+                </div>
+                <p className="max-w-4xl text-[11.5px] leading-relaxed text-muted-foreground">
+                  这些是语义报告中会影响 Skill 生成的缺失规则、准确数值、适用边界或例外。清单随任务产物永久保留。
+                </p>
+              </div>
+            </div>
+            <div className="grid gap-3 lg:grid-cols-2">
+              {durableGaps.map((question, index) => (
+                <div key={`${question.qid}-${index}`} className="rounded-xl border border-amber-200/80 bg-background p-3.5">
+                  <div className="mb-2 flex flex-wrap items-center gap-2">
+                    <span className="grid size-6 place-items-center rounded-full bg-amber-500 text-[11px] font-bold text-white">{index + 1}</span>
+                    {question.severity && <Pill tone={question.severity === "高" ? "red" : "amber"}>{question.severity}优先级</Pill>}
+                    {question.field_label && <span className="text-[10.5px] font-semibold text-amber-800">{question.field_label}</span>}
+                  </div>
+                  <div className="text-[13px] font-semibold leading-relaxed">{question.question}</div>
+                  {question.context && (
+                    <div className="mt-2 rounded-lg border-l-2 border-accent/40 bg-accent-soft px-2.5 py-2 text-[10.5px] leading-relaxed text-muted-foreground">
+                      {question.context}
+                    </div>
+                  )}
+                  {question.source && <div className="mt-1.5 text-[9.5px] text-muted-soft">建议核对：{question.source}</div>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {isActiveJob(job.status) ? (
+          <div className="space-y-4">
+            {job.pending_checkpoint && (
+              <div className="rounded-xl border border-amber-300/70 bg-amber-50/80 p-4 shadow-sm">
+                <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="mb-1 flex items-center gap-2">
+                      <Pill tone="amber">等待知识补证</Pill>
+                      <span className="text-[11px] text-amber-800">第 {job.pending_checkpoint.round} 轮</span>
+                    </div>
+                    <div className="text-[14px] font-bold text-foreground">{job.pending_checkpoint.title}</div>
+                    <p className="mt-1 max-w-4xl text-[11.5px] leading-relaxed text-muted-foreground">
+                      {job.pending_checkpoint.intro}
+                    </p>
+                  </div>
+                  <div className="text-[11px] text-muted-foreground">
+                    {Object.values(checkpointAnswers).filter((value) => value.trim()).length} / {job.pending_checkpoint.questions.length} 已填写
+                  </div>
+                </div>
+
+                <div className="grid gap-3 lg:grid-cols-2">
+                  {job.pending_checkpoint.questions.map((question, index) => (
+                    <div key={question.qid} className="rounded-xl border border-amber-200/80 bg-background p-3.5">
+                      <div className="mb-2 flex flex-wrap items-center gap-2">
+                        <span className="grid size-6 place-items-center rounded-full bg-amber-500 text-[11px] font-bold text-white">{index + 1}</span>
+                        {question.severity && <Pill tone={question.severity === "高" ? "red" : "amber"}>{question.severity}优先级</Pill>}
+                        {question.dimension && <span className="text-[10.5px] text-muted-foreground">{question.dimension}</span>}
+                      </div>
+                      <div className="text-[13px] font-semibold leading-relaxed">{question.question}</div>
+                      {question.context && (
+                        <div className="mt-2 rounded-lg border-l-2 border-accent/40 bg-accent-soft px-2.5 py-2 text-[10.5px] leading-relaxed text-muted-foreground">
+                          {question.context}
+                        </div>
+                      )}
+                      {question.source && <div className="mt-1.5 text-[9.5px] text-muted-soft">参考来源：{question.source}</div>}
+                      <label className="mt-3 block">
+                        <span className="mb-1.5 block text-[11px] font-semibold text-muted-foreground">
+                          {question.field_label || "你的回答"}
+                        </span>
+                        {question.answer_type === "short_text" ? (
+                          <Input
+                            value={checkpointAnswers[question.qid] || ""}
+                            placeholder={question.placeholder || "请输入具体答案"}
+                            onChange={(event) => setCheckpointAnswers((current) => ({ ...current, [question.qid]: event.target.value }))}
+                          />
+                        ) : (
+                          <textarea
+                            rows={3}
+                            value={checkpointAnswers[question.qid] || ""}
+                            placeholder={question.placeholder || "请输入具体答案"}
+                            onChange={(event) => setCheckpointAnswers((current) => ({ ...current, [question.qid]: event.target.value }))}
+                            className="w-full resize-y rounded-lg border border-border bg-background px-3 py-2 text-[12px] leading-relaxed outline-none transition-colors focus:border-accent"
+                          />
+                        )}
+                      </label>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="mt-4 flex items-center justify-between gap-3 border-t border-amber-200 pt-3">
+                  <span className="text-[10.5px] text-muted-foreground">不确定的问题可以留空，系统会继续保留为知识缺口。</span>
+                  <Button disabled={checkpointSubmitting} onClick={() => submitCheckpointAnswers(job)}>
+                    {checkpointSubmitting ? "提交中…" : "提交答案并继续挖掘"}
+                    <ArrowRight className="size-3.5" />
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            <div className="grid gap-4 lg:grid-cols-[minmax(360px,0.8fr)_minmax(0,1.2fr)]">
+            <div className="rounded-xl border border-border bg-surface p-4">
+              <div className="mb-4 flex items-center justify-between text-xs">
+                <span className="font-semibold">挖掘流水线</span>
+                <span className="text-muted-foreground">
+                  {job.status === "queued" || job.status === "preparing"
+                    ? "等待调度"
+                    : `第 ${job.current_round || 1} / ${job.max_rounds} 轮`}
+                </span>
+              </div>
+              <div className="space-y-3">
+                {STEP_META.map((step, index) => {
+                  const stepState = job.phase?.[step.key] || "idle";
+                  const Icon = step.icon;
+                  return (
+                    <div key={step.key} className="flex items-center gap-3">
+                      <span className={cn(
+                        "grid size-8 shrink-0 place-items-center rounded-lg text-xs font-bold",
+                        stepState === "done" ? "bg-success text-white" : stepState === "active" ? "bg-accent text-white" : "bg-muted text-muted-foreground"
+                      )}>
+                        {stepState === "done" ? <CheckCircle2 className="size-4" /> : index + 1}
+                      </span>
+                      <Icon className="size-4 text-muted-foreground" />
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[13px] font-semibold">{step.title}</div>
+                        <div className="text-[10px] text-muted-soft">{step.sub}</div>
+                      </div>
+                      {stepState === "active" && <Pill tone="blue">进行中</Pill>}
+                      {stepState === "done" && <Pill tone="green">已完成</Pill>}
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-muted">
+                <div
+                  className="h-full rounded-full bg-accent transition-all"
+                  style={{ width: `${jobProgress(job)}%` }}
+                />
+              </div>
+            </div>
+            <div className="rounded-xl border border-border bg-[#0f172a] p-3">
+              <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold text-[#cbd5e1]">
+                <Clock3 className="size-3.5" /> 实时日志
+              </div>
+              <div className="mono max-h-64 min-h-40 overflow-auto whitespace-pre-wrap break-words text-[10.5px] leading-relaxed text-[#cbd5e1]">
+                {job.logs?.length
+                  ? job.logs.map((line, index) => <div key={index}>{formatRuntimeLog(line)}</div>)
+                  : <span className="text-muted-soft">任务正在准备，暂无日志。</span>}
+              </div>
+            </div>
+            </div>
+          </div>
+        ) : (
+          <div className="rounded-xl border border-border bg-surface p-4">
+            <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="text-[13px] font-bold">任务产物</div>
+                {job.status === "succeeded" && (
+                  <div className="mt-1 text-[10.5px] text-muted-foreground">
+                    点击文件可预览并人工修订；保存后的版本将作为提交进化候选的源文件。
+                  </div>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                {job.finished_at && <span className="text-[10px] text-muted-soft">完成于 {formatDateTime(job.finished_at)}</span>}
+                {job.status === "succeeded" && (
+                  <Button
+                    size="sm"
+                    disabled={submittingJobId === job.job_id || !jobSkillNames(job).length}
+                    onClick={() => submitJobToEvolution(job)}
+                  >
+                    <Send className="size-3.5" />
+                    {submittingJobId === job.job_id ? "提交中…" : "提交到进化"}
+                  </Button>
+                )}
+              </div>
+            </div>
+            {jobArtifacts(job).length ? (
+              <div className="grid gap-2 md:grid-cols-2">
+                {jobArtifacts(job).map((artifact) => (
+                  <button
+                    key={artifact.path}
+                    type="button"
+                    disabled={loadingArtifact === artifact.path}
+                    onClick={() => previewArtifact(artifact, job.status === "succeeded")}
+                    className="flex w-full items-center gap-2 rounded-lg border border-border bg-background px-3 py-2.5 text-left transition-colors hover:border-accent"
+                  >
+                    <FileText className="size-4 shrink-0 text-accent" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[12px] font-semibold">
+                        {artifact.skill_name ? `${artifact.skill_name} / ${artifact.name}` : artifact.name}
+                      </span>
+                      <span className="mono block truncate text-[9.5px] text-muted-soft">{artifact.path}</span>
+                    </span>
+                    <Pill tone={artifactTone(artifact.kind) as any}>{artifactLabel(artifact.kind)}</Pill>
+                    {job.status === "succeeded"
+                      ? <Pencil className="size-3.5 text-muted-foreground" />
+                      : <Eye className="size-3.5 text-muted-foreground" />}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-lg border border-dashed border-border p-6 text-center text-xs text-muted-soft">
+                {job.error || job.stop_reason || "该任务没有产生可预览产物。"}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -592,7 +986,7 @@ export default function MiningView({
         <h1 className="flex items-center gap-2.5 text-[22px] font-bold tracking-tight">
           {meta.title}
           <Pill tone="purple">SkillMiner</Pill>
-          {running && <Pill tone="blue">运行中{round ? ` · 第 ${round} 轮` : ""}</Pill>}
+          {running && <Pill tone="blue">{jobCounts.running ? `${jobCounts.running} 个运行中` : `${jobCounts.queued} 个排队中`}</Pill>}
         </h1>
         <p className="mt-1 text-sm text-muted-foreground">{meta.desc}</p>
       </div>
@@ -601,17 +995,17 @@ export default function MiningView({
       {page === "overview" && (
         <div className="px-7 py-6">
           <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-4">
-            <StatCard label="累计挖掘技能" value={config ? String(historicalSkillCount) : "—"} />
+            <StatCard label="累计挖掘任务" value={config ? String(jobCounts.total) : "—"} />
             <StatCard label="输入文档" value={config ? String(inputSources.reduce((sum, source) => sum + source.document_count, 0)) : "—"} />
             <StatCard label="运行状态" value={stateLabel} />
-            <StatCard label="当前轮次" value={round ? String(round) : "—"} />
+            <StatCard label="当前轮次" value={activeJob?.current_round ? `${activeJob.current_round} / ${activeJob.max_rounds}` : "—"} />
           </div>
 
           <div className="grid gap-6 lg:grid-cols-2">
             <Panel title="流水线状态" extra={<Pill tone={stateTone as any}>{stateLabel}</Pill>}>
               <div className="space-y-3 p-4">
                 {STEP_META.map((s) => {
-                  const st = phase[s.key];
+                  const st = overviewPhase[s.key];
                   return (
                     <div key={s.key} className="flex items-center gap-3">
                       <span
@@ -634,20 +1028,25 @@ export default function MiningView({
               </div>
             </Panel>
 
-            <Panel title="逐轮评估" count={evals.length ? `${evals.length} 轮` : undefined}>
-              {evals.length === 0 ? (
-                <div className="p-6 text-center text-sm text-muted-soft">
-                  暂无评估数据，运行一次挖掘后展示每轮的置信度与缺口数。
-                </div>
+            <Panel title="近期任务" count={mining.jobs.length ? `${mining.jobs.length} 个` : undefined}>
+              {mining.jobs.length === 0 ? (
+                <div className="p-6 text-center text-sm text-muted-soft">暂无挖掘任务。</div>
               ) : (
                 <ul className="divide-y divide-line">
-                  {evals.map((e, i) => (
-                    <li key={i} className="flex items-center justify-between px-4 py-3 text-[13px]">
-                      <span className="font-semibold">第 {e.round} 轮</span>
-                      <span className="flex items-center gap-3 text-muted-foreground">
-                        <span>置信 {e.confidence ?? "—"}</span>
-                        <span>缺口 {e.gap_count ?? "—"}</span>
-                      </span>
+                  {mining.jobs.slice(0, 5).map((job) => (
+                    <li key={job.job_id} className="flex items-center justify-between gap-3 px-4 py-3 text-[13px]">
+                      <button
+                        type="button"
+                        className="min-w-0 flex-1 truncate text-left font-semibold hover:text-accent"
+                        onClick={() => {
+                          setSelectedJobId(job.job_id);
+                          setSelectedJob(job);
+                          onNavigate?.("jobs");
+                        }}
+                      >
+                        {job.name}
+                      </button>
+                      <Pill tone={jobStatusMeta(job.status).tone as any}>{jobStatusMeta(job.status).label}</Pill>
                     </li>
                   ))}
                 </ul>
@@ -659,24 +1058,31 @@ export default function MiningView({
 
       {/* ---- 知识源 ---- */}
       {page === "sources" && (
-        <div className="px-7 py-6">
+        <div className="space-y-6 px-7 py-6">
           <Panel
-            title="上传本地文档"
-            extra={<Pill tone={running ? "amber" : "green"}>{running ? "任务运行中" : "可上传"}</Pill>}
+            title="上传文档"
+            extra={
+              <div className="flex items-center gap-2">
+                <Button size="sm" variant="outline" onClick={() => setCreateSourceOpen(true)}>
+                  <FolderPlus className="size-3.5" /> 新建数据源
+                </Button>
+                <Button size="sm" variant="outline" disabled={inputSources.length < 2} onClick={() => setMergeSourceOpen(true)}>
+                  <FolderInput className="size-3.5" /> 合并数据源
+                </Button>
+              </div>
+            }
           >
             <div className="grid gap-5 p-4 lg:grid-cols-[minmax(0,1fr)_260px]">
               <div>
                 <DropZone
                   multiple
                   accept=".md,.markdown,.txt,.rst,.csv,.tsv,.json,.jsonl,.yaml,.yml,.xml,.html,.htm"
-                  disabled={running || uploading || !config}
+                  disabled={uploading || !config || (uploadTarget === "__new__" && !newUploadSourceName.trim())}
                   onFiles={uploadKnowledgeFiles}
                   label={
-                    running
-                      ? "挖掘运行中，暂不能修改输入文档"
-                      : uploading
-                        ? "正在上传并校验文档…"
-                        : "点击选择或将多个知识文档拖拽到这里"
+                    uploading
+                      ? "正在上传并校验文档…"
+                      : "点击选择或将多个知识文档拖拽到这里"
                   }
                 />
                 <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
@@ -691,15 +1097,25 @@ export default function MiningView({
                 </Label>
                 <select
                   id="knowledge-source-target"
-                  value={inputDir}
-                  disabled={running || uploading || !config}
-                  onChange={(e) => selectInputDir(e.target.value)}
+                  value={uploadTarget || inputDir}
+                  disabled={uploading || !config}
+                  onChange={(e) => setUploadTarget(e.target.value)}
                   className="mono w-full rounded-lg border border-border bg-background px-3 py-2 text-[13px] outline-none focus:border-accent disabled:opacity-60"
                 >
                   {(config?.input_dirs ?? [inputDir]).map((dir) => (
                     <option key={dir} value={dir}>{dir}</option>
                   ))}
+                  <option value="__new__">＋ 上传为新数据源</option>
                 </select>
+                {uploadTarget === "__new__" && (
+                  <Input
+                    className="mt-2"
+                    value={newUploadSourceName}
+                    onChange={(event) => setNewUploadSourceName(event.target.value)}
+                    placeholder="新数据源名称，如 abc"
+                    maxLength={80}
+                  />
+                )}
                 <div className="mt-3 flex items-start gap-2 text-[11px] leading-relaxed text-muted-foreground">
                   <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-success" />
                   <span>不会覆盖同名文件；系统会自动添加序号，并统一保存为 UTF-8 文本。</span>
@@ -709,7 +1125,7 @@ export default function MiningView({
           </Panel>
 
           <Panel
-            title="知识源 · 输入目录"
+            title="数据源目录"
             count={config ? `${inputSources.length} 个目录` : undefined}
           >
             {!config ? (
@@ -744,17 +1160,28 @@ export default function MiningView({
                         <Pill tone={source.ready ? "green" : "amber"}>{source.ready ? "可挖掘" : "空目录"}</Pill>
                       </td>
                       <td className="px-4 py-3 text-right">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={!source.ready}
-                          onClick={() => {
-                            selectInputDir(source.path);
-                            onNavigate?.("pipeline");
-                          }}
-                        >
-                          用于挖掘 <ArrowRight className="size-3.5" />
-                        </Button>
+                        <div className="flex justify-end gap-2">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={!source.ready}
+                            onClick={() => {
+                              selectInputDir(source.path);
+                              onNavigate?.("jobs");
+                            }}
+                          >
+                            用于挖掘 <ArrowRight className="size-3.5" />
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="text-destructive hover:text-destructive"
+                            onClick={() => setDeleteSource(source)}
+                            aria-label={`删除 ${source.path}`}
+                          >
+                            <Trash2 className="size-3.5" />
+                          </Button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -765,410 +1192,426 @@ export default function MiningView({
         </div>
       )}
 
-      {/* ---- 挖掘流水线 ---- */}
-      {page === "pipeline" && (
-        <div className="grid gap-6 px-7 py-6 lg:grid-cols-[300px_1fr]">
-          {/* config panel */}
-          <Panel title="配置">
-            <div className="space-y-4 p-4">
-              <label className="block">
-                <span className="mb-1.5 block text-xs font-semibold text-muted-foreground">
-                  输入文档目录
-                </span>
-                {config && config.input_dirs.length > 1 ? (
-                  <select
-                    value={inputDir}
-                    disabled={running}
-                    onChange={(e) => selectInputDir(e.target.value)}
-                    className="mono w-full rounded-lg border border-border bg-background px-3 py-2 text-[13px] outline-none focus:border-accent disabled:opacity-60"
-                  >
-                    {config.input_dirs.map((dir) => (
-                      <option key={dir} value={dir}>{dir}</option>
-                    ))}
-                  </select>
-                ) : (
-                  <div className="mono rounded-lg border border-border bg-background px-3 py-2 text-[13px]">
-                    {inputDir}
-                  </div>
-                )}
-                <div className={cn("mt-1.5 text-[11px]", selectedSource?.ready ? "text-muted-foreground" : "text-amber-700")}>
-                  {!config
-                    ? "正在检查目录…"
-                    : selectedSource?.ready
-                      ? `已检测到 ${selectedSource.document_count} 个文档 · ${formatBytes(selectedSource.total_bytes)}`
-                      : "该目录没有非隐藏文档，请先放入素材后再启动。"}
-                </div>
-              </label>
-
-              <label className="block">
-                <span className="mb-1.5 flex items-center justify-between text-xs font-semibold text-muted-foreground">
-                  反思环最大轮数
-                  <span className="text-accent">{rounds}</span>
-                </span>
-                <input
-                  type="range"
-                  min={minRounds}
-                  max={maxRounds}
-                  value={rounds}
-                  disabled={running}
-                  onChange={(e) => setRounds(Number(e.target.value))}
-                  className="w-full accent-[var(--accent)]"
-                />
-              </label>
-
-              <label className="block">
-                <span className="mb-1.5 block text-xs font-semibold text-muted-foreground">
-                  模型
-                </span>
-                <div className="mono rounded-lg border border-border bg-background px-3 py-2 text-[11px] text-muted-foreground">
-                  {config?.model?.id || "由本机 Hermes 配置"}
-                </div>
-              </label>
-
-              <div className="border-t border-line pt-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="text-[13px] font-semibold">人工检查点</div>
-                    <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
-                      在关键节点暂停，补充知识 / 校验产物
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-label="人工检查点"
-                    aria-checked={askEnabled}
-                    onClick={() => setAskEnabled((v) => !v)}
-                    disabled={running}
-                    className={cn(
-                      "relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-50",
-                      askEnabled ? "bg-accent" : "bg-muted"
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        "absolute top-0.5 size-5 rounded-full bg-white shadow transition-all",
-                        askEnabled ? "left-[22px]" : "left-0.5"
-                      )}
-                    />
-                  </button>
-                </div>
-              </div>
-
-              <div className="flex gap-2 pt-1">
-                <Button className="flex-1" onClick={startRun} disabled={running || starting || !selectedSource?.ready}>
-                  <Play className="size-4" /> {starting ? "启动中…" : "开始挖掘"}
-                </Button>
-                <Button variant="outline" onClick={stopRun} disabled={!running}>
-                  <Square className="size-4" /> 中止
-                </Button>
-              </div>
-            </div>
-          </Panel>
-
-          {/* flow diagram + live log */}
-          <div className="space-y-6">
-            <Panel
-              title="流程"
-              extra={<Pill tone={stateTone as any}>{stateLabel}{round ? ` · 第 ${round} 轮` : ""}</Pill>}
-            >
-              <div className="p-5">
-                <div className="grid gap-3 md:grid-cols-3">
-                  {STEP_META.map((s) => {
-                    const Icon = s.icon;
-                    const st = phase[s.key];
-                    return (
-                      <div key={s.key} className="relative flex min-w-0 items-stretch">
-                        <div
-                          className={cn(
-                            "w-full rounded-xl border p-3.5 transition-colors",
-                            st === "active"
-                              ? "border-accent bg-accent-soft"
-                              : st === "done"
-                                ? "border-border bg-surface-subtle"
-                                : "border-border bg-background"
-                          )}
-                        >
-                          <div className="mb-2 flex items-center gap-2">
-                            <span
-                              className={cn(
-                                "grid size-7 place-items-center rounded-lg text-[13px] font-extrabold text-white",
-                                st === "idle" ? "bg-muted-soft" : "bg-accent"
-                              )}
-                            >
-                              {s.n}
-                            </span>
-                            <Icon className="size-4 text-muted-foreground" />
-                            {st === "active" && <Dot state="run" className="ml-auto" />}
-                            {st === "done" && <CheckCircle2 className="ml-auto size-4 text-success" />}
-                          </div>
-                          <div className="text-[13px] font-bold">{s.title}</div>
-                          <div className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
-                            {s.sub}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {/* Reflection loop */}
-                <div className="mt-4 flex items-center gap-2 rounded-lg border border-dashed border-border bg-surface-subtle px-3.5 py-2.5 text-[12px] font-semibold text-muted-foreground">
-                  <RotateCcw className="size-4 text-accent" />
-                  反思环 · 携带缺口回跳补证（置信未收敛且有补充素材时）
-                </div>
-
-                {/* Downstream hand-off */}
-                <div className="mt-4 flex items-center gap-3 rounded-lg border border-accent/30 bg-accent-soft px-4 py-3">
-                  <Upload className="size-4 text-accent" />
-                  <div className="text-[12.5px]">
-                    <span className="font-bold text-accent">编译产物交付</span>
-                    <span className="text-muted-foreground">
-                      {" "}
-                      — 完成后生成内部 Benchmark，进入 teamEvolver A/B 验证与人工发布
-                    </span>
-                  </div>
-                  <Button size="sm" variant="outline" className="ml-auto" onClick={() => onNavigate?.("jobs")}>
-                    查看产物 <ArrowRight className="size-3.5" />
-                  </Button>
-                </div>
-              </div>
-            </Panel>
-
-            {/* Checkpoint Q&A: pipeline blocks in "waiting" until answered */}
-            {question && (
-              <CheckpointCard key={question.id} q={question} onSubmit={submitAnswers} />
-            )}
-
-            {/* Live log console */}
-            <Panel title="实时日志" count={logs.length ? `${logs.length} 行` : undefined}>
-              <div
-                ref={logRef}
-                className="mono max-h-80 overflow-auto whitespace-pre-wrap break-words bg-[#0f172a] p-4 text-[11.5px] leading-relaxed text-[#cbd5e1]"
-              >
-                {logs.length === 0 ? (
-                  <span className="text-muted-soft">等待运行… 点击「开始挖掘」后实时输出流水线日志。</span>
-                ) : (
-                  logs.map((l, i) => <div key={i}>{l}</div>)
-                )}
-              </div>
-            </Panel>
-          </div>
-        </div>
-      )}
-
       {/* ---- 挖掘任务 ---- */}
       {page === "jobs" && (
         <div className="space-y-6 px-7 py-6">
-          <Panel title="历史挖掘记录" count={mining.runs.length ? `${mining.runs.length} 次` : undefined}>
-            {mining.runs.length === 0 ? (
-              <div className="flex flex-col items-center gap-3 p-8 text-center text-sm text-muted-soft">
-                <RotateCcw className="size-7" />
-                <span>暂无可读取的历史挖掘归档。</span>
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+            <StatCard label="全部任务" value={String(jobCounts.total)} />
+            <StatCard label="运行中" value={String(jobCounts.running)} />
+            <StatCard label="排队中" value={String(jobCounts.queued)} />
+            <StatCard label="已完成" value={String(jobCounts.completed)} />
+            <StatCard label="异常 / 停止" value={String(jobCounts.failed)} />
+          </div>
+
+          <Panel
+            title="挖掘任务"
+            count={filteredJobs.length ? `${filteredJobs.length} 个` : undefined}
+            extra={
+              <div className="flex items-center gap-2">
+                <select
+                  value={jobFilter}
+                  onChange={(event) => setJobFilter(event.target.value as typeof jobFilter)}
+                  className="rounded-lg border border-border bg-background px-3 py-1.5 text-xs outline-none focus:border-accent"
+                >
+                  <option value="all">全部任务</option>
+                  <option value="active">进行中</option>
+                  <option value="completed">已完成</option>
+                  <option value="failed">异常 / 已停止</option>
+                </select>
+                <Button size="sm" onClick={() => setCreateJobOpen(true)}>
+                  <FolderPlus className="size-3.5" /> 新建挖掘任务
+                </Button>
+              </div>
+            }
+          >
+            {mining.jobs.length === 0 ? (
+              <div className="flex flex-col items-center gap-3 p-10 text-center text-sm text-muted-soft">
+                <ListChecks className="size-8" />
+                <span>暂无挖掘任务，可以从不同数据源连续创建多个任务。</span>
+                <Button size="sm" onClick={() => setCreateJobOpen(true)}>创建第一个任务</Button>
               </div>
             ) : (
-              <div className="divide-y divide-line">
-                {mining.runs.map((run, index) => {
-                  const groups = run.final_artifacts.length
-                    ? [{
-                        label: run.status === "running" || run.status === "waiting" ? "当前进度产物" : "最终产物",
-                        artifacts: run.final_artifacts,
-                      }]
-                    : [...run.rounds].reverse().map((item) => ({
-                        label: `第 ${item.round} 轮产物`,
-                        artifacts: item.artifacts,
-                      }));
-                  const dateLabel = run.started_at
-                    ? new Date(run.started_at).toLocaleString("zh-CN", { hour12: false })
-                    : run.run_id === "current" ? "当前工作区" : "旧版归档";
+              <div className="min-w-0">
+                <div className="grid grid-cols-[112px_minmax(180px,1fr)_minmax(120px,0.65fr)_150px_28px] border-b border-line bg-surface-subtle px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  <span>状态</span><span>任务</span><span>数据源</span><span>创建时间</span><span />
+                </div>
+                {filteredJobs.length === 0 ? (
+                  <div className="p-8 text-center text-sm text-muted-soft">当前筛选下没有任务。</div>
+                ) : filteredJobs.map((job) => {
+                  const status = jobStatusMeta(job.status);
+                  const expanded = selectedJobId === job.job_id;
                   return (
-                    <details key={run.run_id} open={index === 0} className="group px-4 py-3">
-                      <summary className="flex cursor-pointer list-none items-center gap-4 rounded-lg py-1 select-none">
-                        <div className="min-w-0 flex-1">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="font-semibold">{dateLabel}</span>
-                            {run.run_id === "current" && <Pill tone="blue">当前</Pill>}
-                            {(run.status === "running" || run.status === "waiting") && <Pill tone="blue">运行中</Pill>}
-                            <Pill tone="gray">{run.rounds.length || 1} 轮</Pill>
-                          </div>
-                          <div className="mono mt-1 truncate text-[11px] text-muted-soft">{run.run_id}</div>
-                        </div>
-                        <div className="flex flex-wrap justify-end gap-1.5">
-                          {run.skills.length ? run.skills.map((skill) => (
-                            <Pill key={skill.name} tone={skill.has_benchmark ? "green" : "purple"}>
-                              {skill.name}{skill.has_benchmark ? ` · ${skill.question_count} 题` : ""}
-                            </Pill>
-                          )) : <Pill tone="gray">尚无 Skill</Pill>}
-                        </div>
-                      </summary>
-                      <div className="mt-3 space-y-3 border-l-2 border-line pl-4">
-                        {groups.map((group) => (
-                          <div key={group.label}>
-                            <div className="mb-2 text-xs font-semibold text-muted-foreground">{group.label}</div>
-                            <div className="flex flex-wrap gap-2">
-                              {group.artifacts.map((artifact) => {
-                                const tone = artifact.kind === "skill"
-                                  ? "purple"
-                                  : artifact.kind === "benchmark"
-                                    ? "green"
-                                    : artifact.kind === "semantic" ? "blue" : "gray";
-                                const label = artifact.kind === "semantic"
-                                  ? `语义报告 · ${artifact.name}`
-                                  : artifact.skill_name ? `${artifact.skill_name} / ${artifact.name}` : artifact.name;
-                                return (
-                                  <Button
-                                    key={artifact.path}
-                                    size="sm"
-                                    variant="outline"
-                                    disabled={loadingArtifact === artifact.path}
-                                    onClick={() => previewArtifact(artifact)}
-                                  >
-                                    <Eye className="size-3.5" />
-                                    <Pill tone={tone as any}>{artifact.kind === "benchmark" ? "Benchmark" : artifact.kind === "semantic" ? "语义" : artifact.kind === "evaluation" ? "评测" : "Skill"}</Pill>
-                                    <span className="max-w-[300px] truncate">{label}</span>
-                                  </Button>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </details>
+                    <div key={job.job_id} className="border-b border-line last:border-b-0">
+                      <button
+                        type="button"
+                        aria-expanded={expanded}
+                        onClick={() => {
+                          if (expanded) {
+                            setSelectedJobId("");
+                            setSelectedJob(null);
+                          } else {
+                            setSelectedJobId(job.job_id);
+                            setSelectedJob(null);
+                          }
+                        }}
+                        className={cn(
+                          "grid w-full grid-cols-[112px_minmax(180px,1fr)_minmax(120px,0.65fr)_150px_28px] items-center px-4 py-3 text-left text-[13px] transition-colors hover:bg-surface-subtle",
+                          expanded && "bg-accent-soft"
+                        )}
+                      >
+                        <span><Pill tone={status.tone as any}>{status.label}</Pill></span>
+                        <span className="min-w-0 pr-4">
+                          <span className="block truncate font-semibold">{job.name}</span>
+                          <span className="mono mt-0.5 block truncate text-[10px] text-muted-soft">{job.job_id}</span>
+                        </span>
+                        <span className="mono truncate pr-3 text-[11px] text-muted-foreground">{job.input_dir || "历史归档"}</span>
+                        <span className="text-[11px] text-muted-foreground">{formatDateTime(job.created_at)}</span>
+                        <ChevronDown className={cn("size-4 text-muted-foreground transition-transform", expanded && "rotate-180 text-accent")} />
+                      </button>
+                      {expanded && (
+                        selectedJob?.job_id === job.job_id
+                          ? renderJobDetail(selectedJob)
+                          : <div className="border-t border-accent/20 bg-accent-soft/35 px-5 py-8 text-center text-xs text-muted-soft">正在加载任务详情…</div>
+                      )}
+                    </div>
                   );
                 })}
               </div>
             )}
           </Panel>
 
-          <Panel title="当前可操作产物" count={compiledSkills.length ? `${compiledSkills.length} 个` : undefined}>
-            {compiledSkills.length === 0 ? (
-              <div className="flex flex-col items-center gap-3 p-8 text-center text-sm text-muted-soft">
-                <FileText className="size-7" />
-                <span>{running ? "本轮正在挖掘，完成编译后会出现在这里。历史产物可在上方查看。" : "当前工作区暂无可操作技能，历史产物可在上方查看。"}</span>
-                <Button size="sm" onClick={() => onNavigate?.("pipeline")}>去运行挖掘 <ArrowRight className="size-3.5" /></Button>
-              </div>
-            ) : (
-              <table className="w-full border-collapse text-[13px]">
-                <thead>
-                  <tr className="border-b border-line text-[11px] uppercase tracking-wide text-muted-foreground">
-                    <th className="px-4 py-2.5 text-left font-semibold">技能</th>
-                    <th className="px-4 py-2.5 text-left font-semibold">编译产物</th>
-                    <th className="px-4 py-2.5 text-left font-semibold">Benchmark</th>
-                    <th className="px-4 py-2.5 text-left font-semibold">生命周期</th>
-                    <th className="px-4 py-2.5 text-right font-semibold">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {compiledSkills.map((skill) => {
-                    const handoff = lifecycleByName.get(skill.name);
-                    const statusLabel = {
-                      incomplete: "产物不完整",
-                      ready: "待提交",
-                      candidate: "待人工评审",
-                      published: "已发布",
-                      rejected: "未通过",
-                    }[handoff?.status || "incomplete"];
-                    const statusTone = handoff?.status === "published"
-                      ? "green"
-                      : handoff?.status === "candidate"
-                        ? "blue"
-                        : handoff?.status === "rejected" || handoff?.status === "incomplete"
-                          ? "amber"
-                          : "gray";
-                    return (
-                    <tr key={skill.name} className="border-b border-line last:border-none">
-                      <td className="px-4 py-3 font-semibold">{skill.name}</td>
-                      <td className="px-4 py-3">
-                        <div className="flex flex-wrap gap-1.5">
-                          <Pill tone="green">SKILL.md</Pill>
-                          <Pill tone={skill.has_evaluation ? "green" : "amber"}>
-                            {skill.has_evaluation ? "EVALUATION.md" : "缺少 EVALUATION.md"}
-                          </Pill>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3">
-                        <Pill tone={skill.has_benchmark ? "green" : "gray"}>
-                          {skill.has_benchmark ? `${skill.question_count} 题` : "未生成"}
-                        </Pill>
-                      </td>
-                      <td className="px-4 py-3">
-                        <Pill tone={statusTone as any}>{statusLabel}</Pill>
-                        {handoff?.error && (
-                          <div className="mt-1 max-w-[220px] truncate text-[11px] text-amber-700" title={handoff.error}>
-                            {handoff.error}
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        {handoff?.status === "candidate" || handoff?.status === "published" ? (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => onNavigate?.(handoff.status === "published" ? "skills" : "candidates")}
-                          >
-                            {handoff.status === "published" ? "查看技能" : "进入候选评审"} <ArrowRight className="size-3.5" />
-                          </Button>
-                        ) : handoff?.status === "rejected" ? (
-                          <Button size="sm" variant="outline" disabled title="修改挖掘产物后会生成新的候选版本">
-                            修改产物后重提
-                          </Button>
-                        ) : skill.has_benchmark ? (
-                          <Button
-                            size="sm"
-                            disabled={submittingSkill === skill.name || handoff?.status === "incomplete"}
-                            onClick={() => submitCandidate(skill.name)}
-                          >
-                            {submittingSkill === skill.name ? "提交中…" : "提交候选评审"} <ArrowRight className="size-3.5" />
-                          </Button>
-                        ) : (
-                          <Button
-                            size="sm"
-                            disabled={!skill.has_evaluation || benchmarkRunning || benchmarkStarting}
-                            onClick={() => buildBenchmark(skill.name)}
-                            title={!skill.has_evaluation ? "需要 EVALUATION.md 才能生成 Benchmark" : undefined}
-                          >
-                            {benchmarkingSkill === skill.name && (benchmarkRunning || benchmarkStarting) ? "正在生成…" : "生成 Benchmark"}
-                          </Button>
-                        )}
-                      </td>
-                    </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
-          </Panel>
-          {benchmarkingSkill && (
-            <div className="mt-6">
-              <Panel
-                title={`Benchmark 生成 · ${benchmarkingSkill}`}
-                extra={<Pill tone={mining.benchmarkState === "done" ? "green" : mining.benchmarkState === "error" ? "red" : "blue"}>
-                  {mining.benchmarkState === "done" ? "已完成" : mining.benchmarkState === "error" ? "失败" : "生成中"}
-                </Pill>}
-              >
-                <div ref={logRef} className="mono max-h-64 min-h-28 overflow-auto whitespace-pre-wrap break-words bg-[#0f172a] p-4 text-[11.5px] leading-relaxed text-[#cbd5e1]">
-                  {logs.length ? logs.map((line, index) => <div key={index}>{line}</div>) : <span className="text-muted-soft">正在准备 Benchmark 生成任务…</span>}
-                </div>
-                {benchmarkRunning && (
-                  <div className="flex justify-end border-t border-line p-3">
-                    <Button size="sm" variant="outline" onClick={stopRun}><Square className="size-3.5" />停止生成</Button>
-                  </div>
-                )}
-              </Panel>
-            </div>
-          )}
         </div>
       )}
 
-      <Dialog open={!!artifactPreview} onOpenChange={(open) => !open && setArtifactPreview(null)}>
-        <DialogContent className="flex max-h-[88vh] w-full !max-w-[980px] flex-col overflow-hidden">
+      <Dialog open={createJobOpen} onOpenChange={(open) => !starting && setCreateJobOpen(open)}>
+        <DialogContent className="max-h-[90vh] w-[calc(100vw-32px)] overflow-y-auto !max-w-[1120px]">
           <DialogHeader>
-            <DialogTitle>产物预览 · {artifactPreview?.name}</DialogTitle>
-            <div className="mono break-all pr-8 text-[11px] text-muted-soft">{artifactPreview?.path}</div>
+            <DialogTitle>新建挖掘任务</DialogTitle>
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              选择数据源和反思轮数，任务创建后将在独立流水线中运行，并可与其他任务并行执行。
+            </p>
           </DialogHeader>
-          <pre className="mono min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-[#0f172a] p-4 text-[12px] leading-relaxed text-[#dbe4f0]">
-            {artifactPreview?.content}
-          </pre>
+
+          <div className="grid gap-5 lg:grid-cols-[320px_minmax(0,1fr)]">
+            <div className="rounded-xl border border-border bg-surface-subtle p-4">
+              <div className="mb-4 text-[13px] font-bold">任务配置</div>
+              <div className="space-y-4">
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-semibold text-muted-foreground">任务名称</span>
+                  <Input
+                    value={taskName}
+                    onChange={(event) => setTaskName(event.target.value)}
+                    placeholder="例如：智能客服技能挖掘"
+                    maxLength={120}
+                    autoFocus
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-semibold text-muted-foreground">输入文档目录</span>
+                  {config && config.input_dirs.length > 1 ? (
+                    <select
+                      value={inputDir}
+                      disabled={starting}
+                      onChange={(event) => selectInputDir(event.target.value)}
+                      className="mono w-full rounded-lg border border-border bg-background px-3 py-2 text-[13px] outline-none focus:border-accent disabled:opacity-60"
+                    >
+                      {config.input_dirs.map((dir) => (
+                        <option key={dir} value={dir}>{dir}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <div className="mono rounded-lg border border-border bg-background px-3 py-2 text-[13px]">{inputDir}</div>
+                  )}
+                  <div className={cn("mt-1.5 text-[11px]", selectedSource?.ready ? "text-muted-foreground" : "text-amber-700")}>
+                    {!config
+                      ? "正在检查目录…"
+                      : selectedSource?.ready
+                        ? `已检测到 ${selectedSource.document_count} 个文档 · ${formatBytes(selectedSource.total_bytes)}`
+                        : "该目录没有非隐藏文档，请先上传素材。"}
+                  </div>
+                </label>
+
+                <label className="block">
+                  <span className="mb-1.5 flex items-center justify-between text-xs font-semibold text-muted-foreground">
+                    反思环最大轮数
+                    <span className="text-accent">{rounds}</span>
+                  </span>
+                  <input
+                    type="range"
+                    min={minRounds}
+                    max={maxRounds}
+                    value={rounds}
+                    disabled={starting}
+                    onChange={(event) => setRounds(Number(event.target.value))}
+                    className="w-full accent-[var(--accent)]"
+                  />
+                </label>
+
+                <div>
+                  <span className="mb-1.5 block text-xs font-semibold text-muted-foreground">模型</span>
+                  <div className="mono rounded-lg border border-border bg-background px-3 py-2 text-[11px] text-muted-foreground">
+                    {config?.model?.model || config?.model?.id || "请先配置挖掘模型"}
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-border bg-background/70 p-3 text-[11px] leading-relaxed text-muted-foreground">
+                  任务创建时固化数据源快照。最多同时运行 {mining.jobSummary.max_parallel} 个任务，超出后自动排队。
+                </div>
+
+                <div className="flex justify-end gap-2 pt-1">
+                  <Button variant="outline" disabled={starting} onClick={() => setCreateJobOpen(false)}>取消</Button>
+                  <Button onClick={startRun} disabled={starting || !selectedSource?.ready}>
+                    <Play className="size-4" /> {starting ? "创建中…" : "创建任务"}
+                  </Button>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <div className="rounded-xl border border-border bg-surface p-4">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-[13px] font-bold">挖掘流程预览</div>
+                    <div className="mt-0.5 text-[11px] text-muted-foreground">创建后可在当前任务条目下查看实时进度与日志</div>
+                  </div>
+                  <Pill tone="blue">独立任务 · 可并行</Pill>
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-3">
+                  {STEP_META.map((step) => {
+                    const Icon = step.icon;
+                    return (
+                      <div key={step.key} className="rounded-xl border border-border bg-background p-3.5">
+                        <div className="mb-2 flex items-center gap-2">
+                          <span className="grid size-7 place-items-center rounded-lg bg-muted-soft text-[13px] font-extrabold text-white">{step.n}</span>
+                          <Icon className="size-4 text-muted-foreground" />
+                        </div>
+                        <div className="text-[13px] font-bold">{step.title}</div>
+                        <div className="mt-0.5 text-[11px] leading-snug text-muted-foreground">{step.sub}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-4 flex items-center gap-2 rounded-lg border border-dashed border-border bg-surface-subtle px-3.5 py-2.5 text-[12px] font-semibold text-muted-foreground">
+                  <RotateCcw className="size-4 text-accent" />
+                  反思环 · 携带缺口回跳补证（置信未收敛且有补充素材时）
+                </div>
+
+                <div className="mt-4 flex items-center gap-3 rounded-lg border border-accent/30 bg-accent-soft px-4 py-3">
+                  <Upload className="size-4 shrink-0 text-accent" />
+                  <div className="text-[12.5px]">
+                    <span className="font-bold text-accent">编译产物交付</span>
+                    <span className="text-muted-foreground"> — 完成后生成 Skill、语义报告与内部 Benchmark</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-3">
+                <TaskPrinciple icon={Boxes} title="数据快照" text="任务启动时固化输入，后续上传或合并不会影响本次挖掘。" />
+                <TaskPrinciple icon={ListChecks} title="并行调度" text="可以连续新建多个任务，调度器自动运行或排队。" />
+                <TaskPrinciple icon={FileCode2} title="产物归档" text="每个任务的 Skill 与 Benchmark 独立保存并可追溯。" />
+              </div>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={createSourceOpen} onOpenChange={setCreateSourceOpen}>
+        <DialogContent className="w-full !max-w-[460px]">
+          <DialogHeader>
+            <DialogTitle>新建数据源</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label htmlFor="create-source-name" className="mb-1.5 block text-xs font-semibold">数据源名称</Label>
+              <Input
+                id="create-source-name"
+                autoFocus
+                value={createSourceName}
+                maxLength={80}
+                placeholder="例如：abc"
+                onChange={(event) => setCreateSourceName(event.target.value)}
+                onKeyDown={(event) => event.key === "Enter" && createSource()}
+              />
+              <p className="mt-1.5 text-[11px] text-muted-foreground">将创建为 <span className="mono">data/{createSourceName.trim() || "数据源名"}</span>。</p>
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setCreateSourceOpen(false)}>取消</Button>
+              <Button disabled={!createSourceName.trim() || sourceMutating} onClick={createSource}>
+                {sourceMutating ? "创建中…" : "创建"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={mergeSourceOpen} onOpenChange={setMergeSourceOpen}>
+        <DialogContent className="w-full !max-w-[540px]">
+          <DialogHeader>
+            <DialogTitle>合并数据源</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label className="mb-2 block text-xs font-semibold">选择来源（至少 2 个）</Label>
+              <div className="max-h-56 space-y-2 overflow-auto rounded-lg border border-border p-2">
+                {inputSources.map((source) => (
+                  <label key={source.path} className="flex cursor-pointer items-center gap-3 rounded-lg px-2.5 py-2 hover:bg-surface-subtle">
+                    <input
+                      type="checkbox"
+                      checked={mergeSourcePaths.includes(source.path)}
+                      onChange={(event) => setMergeSourcePaths((current) => event.target.checked
+                        ? [...current, source.path]
+                        : current.filter((path) => path !== source.path))}
+                      className="size-4 accent-[var(--accent)]"
+                    />
+                    <span className="mono min-w-0 flex-1 truncate text-[12px] font-semibold">{source.path}</span>
+                    <span className="text-[11px] text-muted-foreground">{source.document_count} 个文档</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div>
+              <Label htmlFor="merge-target-name" className="mb-1.5 block text-xs font-semibold">合并后的数据源</Label>
+              <Input
+                id="merge-target-name"
+                value={mergeTargetName}
+                maxLength={80}
+                placeholder="例如：all-customer-service"
+                onChange={(event) => setMergeTargetName(event.target.value)}
+              />
+              <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+                合并会复制文件到目标目录，不删除原数据源；同名文件自动添加序号保留。
+              </p>
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setMergeSourceOpen(false)}>取消</Button>
+              <Button disabled={mergeSourcePaths.length < 2 || !mergeTargetName.trim() || sourceMutating} onClick={mergeSources}>
+                {sourceMutating ? "合并中…" : `合并 ${mergeSourcePaths.length} 个数据源`}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!deleteSource} onOpenChange={(open) => !open && setDeleteSource(null)}>
+        <DialogContent className="w-full !max-w-[460px]">
+          <DialogHeader>
+            <DialogTitle>删除数据源</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <p className="text-sm leading-relaxed text-muted-foreground">
+              确定删除 <span className="mono font-semibold text-foreground">{deleteSource?.path}</span>
+              ？目录内 {deleteSource?.document_count ?? 0} 个文档会一并删除。已创建任务使用独立快照，不受影响。
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setDeleteSource(null)}>取消</Button>
+              <Button disabled={sourceMutating} onClick={deleteKnowledgeSource} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+                <Trash2 className="size-3.5" /> {sourceMutating ? "删除中…" : "确认删除"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!artifactPreview}
+        onOpenChange={(open) => {
+          if (!open && !artifactSaving) {
+            if (artifactEditing && artifactDraft !== artifactPreview?.content) {
+              const discard = window.confirm("当前文档有未保存修改，确定放弃修改并关闭吗？");
+              if (!discard) return;
+            }
+            setArtifactPreview(null);
+            setArtifactDraft("");
+            setArtifactEditing(false);
+            setArtifactEditable(false);
+          }
+        }}
+      >
+        <DialogContent
+          className={cn(
+            "flex w-full flex-col overflow-hidden p-0",
+            artifactIsMarkdown ? "h-[92vh] !max-w-[1240px] gap-0" : "max-h-[88vh] !max-w-[980px] gap-4 p-4"
+          )}
+        >
+          <DialogHeader className={cn(artifactIsMarkdown && "border-b border-border bg-surface px-5 py-3.5") }>
+            <div className="flex items-center justify-between gap-3 pr-8">
+              <div className="min-w-0">
+                <DialogTitle className="truncate">
+                  {artifactEditing ? "编辑产物" : "产物预览"} · {artifactPreview?.name}
+                </DialogTitle>
+                <div className="mt-1.5 flex items-center gap-2 text-[11px] text-muted-soft">
+                  <span className="mono truncate">{artifactPreview?.path}</span>
+                  {artifactIsMarkdown && <span className="shrink-0 rounded-full bg-accent-soft px-2 py-0.5 font-semibold text-accent">Markdown</span>}
+                </div>
+              </div>
+              {artifactEditable && !artifactEditing && (
+                <Button size="sm" variant="outline" onClick={() => setArtifactEditing(true)}>
+                  <Pencil className="size-3.5" /> 编辑产物
+                </Button>
+              )}
+            </div>
+          </DialogHeader>
+          {artifactEditing ? (
+            artifactIsMarkdown ? (
+              <div className="min-h-0 flex-1">
+                <MarkdownWorkspace
+                  value={artifactDraft}
+                  onChange={setArtifactDraft}
+                  onSave={saveArtifactRevision}
+                  saving={artifactSaving}
+                  dirty={artifactDraft !== artifactPreview?.content}
+                  fileName={artifactPreview?.name}
+                />
+              </div>
+            ) : (
+              <div className="flex min-h-0 flex-1 flex-col gap-3">
+                <div className="rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-800">
+                  该产物使用结构化源码格式。请保留 Benchmark JSONL 等文件的语法，提交进化时会再次执行完整性校验。
+                </div>
+                <textarea
+                  autoFocus
+                  spellCheck={false}
+                  value={artifactDraft}
+                  aria-label="产物源码编辑器"
+                  onChange={(event) => setArtifactDraft(event.target.value)}
+                  className="mono min-h-[420px] flex-1 resize-none overflow-auto rounded-lg border border-border bg-[#0f172a] p-4 text-[12px] leading-relaxed text-[#dbe4f0] outline-none focus:border-accent"
+                />
+                <div className="flex justify-end gap-2">
+                  <Button
+                    variant="outline"
+                    disabled={artifactSaving}
+                    onClick={() => {
+                      setArtifactDraft(artifactPreview?.content || "");
+                      setArtifactEditing(false);
+                    }}
+                  >
+                    取消修改
+                  </Button>
+                  <Button
+                    disabled={artifactSaving || artifactDraft === artifactPreview?.content}
+                    onClick={saveArtifactRevision}
+                  >
+                    <Save className="size-3.5" /> {artifactSaving ? "保存中…" : "保存修改"}
+                  </Button>
+                </div>
+              </div>
+            )
+          ) : (
+            artifactIsMarkdown ? (
+              <div className="min-h-0 flex-1 overflow-auto bg-[#f6f7f9] px-5 py-8">
+                <div className="mx-auto min-h-full max-w-[820px] bg-white px-12 py-10 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_14px_40px_rgba(15,23,42,0.06)]">
+                  <MarkdownDocument content={artifactPreview?.content || ""} />
+                </div>
+              </div>
+            ) : (
+              <pre className="mono min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-[#0f172a] p-4 text-[12px] leading-relaxed text-[#dbe4f0]">
+                {artifactPreview?.content}
+              </pre>
+            )
+          )}
         </DialogContent>
       </Dialog>
 
@@ -1176,41 +1619,125 @@ export default function MiningView({
       {page === "model" && (
         <div className="mx-auto max-w-[1080px] px-7 py-6">
           <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(170px,1fr))] gap-3.5">
-            <StatCard label="当前模型" value={config?.model?.id || "未配置"} />
-            <StatCard label="Base URL" value={config?.model?.base_url || "未配置"} mono />
-            <StatCard label="凭据" value="由 Hermes 管理" />
-            <StatCard label="配置模式" value="只读" />
+            <StatCard label="当前模型" value={modelSettings.model || "未配置"} />
+            <StatCard label="Base URL" value={modelSettings.base_url || "未配置"} mono />
+            <StatCard
+              label="API Key"
+              value={clearModelKey ? "将清空" : modelSettings.api_key ? "待保存" : modelSettings.api_key_present ? "已配置" : "未配置"}
+            />
+            <StatCard label="接口协议" value="OpenAI 兼容" />
           </div>
 
           <Panel
-            title="挖掘模型 · 当前生效配置"
+            title="挖掘模型配置"
             extra={
-              <span className="inline-flex items-center gap-2 text-xs text-muted-foreground">
-                <Dot state={config?.model?.id ? "on" : "off"} />
-                <Pill tone={config?.model?.id ? "green" : "gray"}>
-                  {config?.model?.id ? "已由 Hermes 配置" : "待配置"}
-                </Pill>
-              </span>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <span className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+                  <Dot state={modelSettings.configured ? "on" : "off"} />
+                  <Pill tone={modelSettings.configured ? "green" : "gray"}>
+                    {modelSettings.configured ? "配置已生效" : "待配置"}
+                  </Pill>
+                </span>
+                <Button variant="outline" size="sm" onClick={refreshMiningModel} disabled={modelRefreshing || modelSaving || modelTesting}>
+                  <RotateCcw className={cn("size-3.5", modelRefreshing && "animate-spin")} />
+                  {modelRefreshing ? "刷新中…" : "刷新"}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={testMiningModel}
+                  disabled={modelTesting || modelSaving || !modelSettings.model.trim() || !modelSettings.base_url.trim()}
+                >
+                  {modelTesting ? "测试中…" : "测试连接"}
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={saveMiningModel}
+                  disabled={modelSaving || modelTesting || !modelSettings.model.trim() || !modelSettings.base_url.trim()}
+                >
+                  {modelSaving ? "保存中…" : "保存配置"}
+                </Button>
+              </div>
             }
           >
             <div className="space-y-5 p-4">
               <div className="grid gap-3.5 md:grid-cols-2">
-                <MField label="模型标识">
-                  <Input value={config?.model?.id || ""} placeholder="未从 Hermes 读取到模型" readOnly disabled />
+                <MField label="模型名称 *">
+                  <Input
+                    value={modelSettings.model}
+                    placeholder="例如：doubao-seed-1-6-250615"
+                    onChange={(event) => setModelSettings({ ...modelSettings, model: event.target.value })}
+                    maxLength={200}
+                  />
                 </MField>
                 <MField label="Base URL">
-                  <Input value={config?.model?.base_url || ""} placeholder="未从 Hermes 读取到地址" readOnly disabled />
+                  <Input
+                    value={modelSettings.base_url}
+                    placeholder="https://example.com/v1"
+                    onChange={(event) => setModelSettings({ ...modelSettings, base_url: event.target.value })}
+                  />
                 </MField>
               </div>
 
-              <MField label="API Key">
-                <Input value="" placeholder="由服务端环境变量 ARK_API_KEY 管理，不在浏览器中读取或保存" readOnly disabled />
-              </MField>
+              <div className="grid gap-3.5 md:grid-cols-2">
+                <MField label={`API Key${modelSettings.api_key_present ? "（已配置，留空保留）" : " *"}`}>
+                  <Input
+                    type="password"
+                    value={modelSettings.api_key || ""}
+                    disabled={clearModelKey}
+                    placeholder={modelSettings.api_key_present ? "输入新值可替换现有 Key" : "请输入模型 API Key"}
+                    onChange={(event) => setModelSettings({ ...modelSettings, api_key: event.target.value })}
+                  />
+                </MField>
+                <MField label="最大输出 Token">
+                  <Input
+                    type="number"
+                    min={1}
+                    max={131072}
+                    value={modelSettings.max_tokens}
+                    onChange={(event) => setModelSettings({ ...modelSettings, max_tokens: Number(event.target.value) })}
+                  />
+                </MField>
+              </div>
+
+              <div className="grid gap-3.5 md:grid-cols-2">
+                <MField label="Temperature">
+                  <Input
+                    type="number"
+                    min={0}
+                    max={2}
+                    step={0.1}
+                    value={modelSettings.temperature}
+                    onChange={(event) => setModelSettings({ ...modelSettings, temperature: Number(event.target.value) })}
+                  />
+                </MField>
+                <div className="flex items-end pb-2">
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={clearModelKey}
+                      onChange={(event) => {
+                        setClearModelKey(event.target.checked);
+                        if (event.target.checked) setModelSettings({ ...modelSettings, api_key: "" });
+                      }}
+                    />
+                    清空项目中已保存的 API Key
+                  </label>
+                </div>
+              </div>
+
+              {modelTestResult && (
+                <div className="rounded-lg border border-success/30 bg-success/5 p-3 text-xs leading-relaxed">
+                  <div className="mb-1 font-semibold text-success">模型测试通过</div>
+                  <div className="text-muted-foreground">
+                    {modelTestResult.model} · {modelTestResult.latency_ms} ms · 返回：{modelTestResult.response || "（空）"}
+                  </div>
+                </div>
+              )}
 
               <div className="rounded-lg border border-border bg-background/60 p-3 text-xs leading-relaxed text-muted-foreground">
-                SkillMiner 的挖掘模型实际由本机 Hermes 安装（<span className="mono">~/.hermes/config.yaml</span> +
-                <span className="mono"> ARK_API_KEY</span>）管理，与「进化」分组下的进化模型相互独立。此处展示当前生效配置，
-                供核对之用。修改模型或凭据后，重启 teamEvolver 服务使配置重新加载。
+                保存后，新创建或尚未启动的挖掘任务会自动使用这套配置；已经运行的任务继续使用启动时的配置。
+                模型执行组件由系统内置维护，不需要用户安装、选择或单独管理。
               </div>
             </div>
           </Panel>
@@ -1218,6 +1745,106 @@ export default function MiningView({
       )}
     </div>
   );
+}
+
+function TaskPrinciple({
+  icon: Icon,
+  title,
+  text,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  title: string;
+  text: string;
+}) {
+  return (
+    <div className="rounded-xl border border-border bg-background p-4">
+      <Icon className="mb-3 size-5 text-accent" />
+      <div className="text-[13px] font-bold">{title}</div>
+      <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{text}</p>
+    </div>
+  );
+}
+
+function isActiveJob(status: MiningJobStatus) {
+  return status === "preparing" || status === "queued" || status === "running" || status === "waiting" || status === "stopping";
+}
+
+function jobStatusMeta(status: MiningJobStatus) {
+  const entries: Record<MiningJobStatus, { label: string; tone: string }> = {
+    preparing: { label: "准备中", tone: "gray" },
+    queued: { label: "排队中", tone: "blue" },
+    running: { label: "运行中", tone: "blue" },
+    waiting: { label: "待知识补证", tone: "amber" },
+    stopping: { label: "停止中", tone: "amber" },
+    stopped: { label: "已停止", tone: "gray" },
+    succeeded: { label: "已完成", tone: "green" },
+    failed: { label: "失败", tone: "red" },
+    interrupted: { label: "已中断", tone: "red" },
+  };
+  return entries[status] || entries.failed;
+}
+
+function jobProgress(job: MiningJob) {
+  if (job.status === "queued" || job.status === "preparing") return 0;
+  if (job.status === "succeeded") return 100;
+  const completedRounds = Math.max(0, (job.current_round || 1) - 1);
+  const doneSteps = STEP_META.filter((step) => job.phase?.[step.key] === "done").length;
+  const activeStep = STEP_META.some((step) => job.phase?.[step.key] === "active") ? 0.5 : 0;
+  return Math.min(98, Math.round(((completedRounds + (doneSteps + activeStep) / 3) / Math.max(1, job.max_rounds)) * 100));
+}
+
+function jobArtifacts(job: MiningJob) {
+  const source = job.artifacts?.length
+    ? job.artifacts
+    : (job.rounds || []).flatMap((round) => round.artifacts || []);
+  const seen = new Set<string>();
+  return source.filter((artifact) => {
+    if (seen.has(artifact.path)) return false;
+    seen.add(artifact.path);
+    return true;
+  });
+}
+
+function jobSkillNames(job: MiningJob) {
+  return Array.from(new Set(
+    jobArtifacts(job)
+      .filter((artifact) => artifact.kind === "skill" && artifact.skill_name)
+      .map((artifact) => artifact.skill_name)
+  ));
+}
+
+function artifactTone(kind: MiningArtifact["kind"]) {
+  if (kind === "benchmark") return "green";
+  if (kind === "skill") return "purple";
+  if (kind === "semantic") return "blue";
+  return "gray";
+}
+
+function artifactLabel(kind: MiningArtifact["kind"]) {
+  if (kind === "benchmark") return "Benchmark";
+  if (kind === "skill") return "Skill";
+  if (kind === "semantic") return "语义报告";
+  return "评测定义";
+}
+
+function isMarkdownArtifact(artifact: Pick<ArtifactContent, "name" | "path"> | null) {
+  if (!artifact) return false;
+  return /\.(?:md|markdown)$/i.test(artifact.name) || /\.(?:md|markdown)$/i.test(artifact.path);
+}
+
+function formatDateTime(value: string) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function formatRuntimeLog(line: string) {
+  return line
+    .replace(/HERMES_HOME/g, "模型运行配置")
+    .replace(/HERMES_OK/g, "MODEL_OK")
+    .replace(/\.hermes_home/g, ".model_runtime")
+    .replace(/hermes/gi, "模型运行时");
 }
 
 function MField({ label, children }: { label: string; children: React.ReactNode }) {
@@ -1233,79 +1860,4 @@ function formatBytes(value: number) {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
-}
-
-/**
- * CheckpointCard — 渲染流水线检查点提问（缺口补充 / 语义审核 / 编译后校验），
- * 逐条作答后回传 SkillMiner（留空 = 认可采纳/跳过该条）。流水线在收到答案前
- * 保持 "waiting" 状态。
- */
-function CheckpointCard({
-  q,
-  onSubmit,
-}: {
-  q: MiningQuestion;
-  onSubmit: (answers: Record<string, string>) => Promise<void>;
-}) {
-  const [values, setValues] = useState<Record<string, string>>({});
-  const [submitting, setSubmitting] = useState(false);
-
-  function collect(): Record<string, string> {
-    const out: Record<string, string> = {};
-    for (const [k, v] of Object.entries(values)) {
-      const t = v.trim();
-      if (t) out[k] = t;
-    }
-    return out;
-  }
-
-  const sevTone = (s?: string) => (s === "高" ? "red" : s === "中" ? "amber" : "gray");
-
-  async function submit(answers: Record<string, string>) {
-    if (submitting) return;
-    setSubmitting(true);
-    try {
-      await onSubmit(answers);
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <Panel
-      title={q.title || "检查点 · 请补充以下内容"}
-      extra={<Pill tone="amber">等待人工 · 第 {q.round ?? "—"} 轮</Pill>}
-    >
-      <div className="space-y-4 p-4">
-        {q.intro && <p className="text-[12.5px] leading-relaxed text-muted-foreground">{q.intro}</p>}
-        <div className="space-y-3">
-          {q.questions.map((item, i) => (
-            <div key={item.qid} className="rounded-lg border border-border bg-background p-3">
-              <div className="mb-1.5 flex items-center gap-2 text-[12px]">
-                <span className="grid size-5 place-items-center rounded bg-muted font-bold">{i + 1}</span>
-                {item.severity && <Pill tone={sevTone(item.severity) as any}>{item.severity}严重度</Pill>}
-                {item.dimension && <span className="text-muted-foreground">{item.dimension}</span>}
-              </div>
-              <div className="mb-2 text-[13px] leading-relaxed">{item.question}</div>
-              <textarea
-                rows={2}
-                value={values[item.qid] || ""}
-                onChange={(e) => setValues((prev) => ({ ...prev, [item.qid]: e.target.value }))}
-                placeholder="填入你掌握的准确规则 / 数值 / 来源……（留空跳过此条）"
-                className="w-full resize-y rounded-lg border border-border bg-surface px-3 py-2 text-[13px] outline-none focus:border-accent"
-              />
-            </div>
-          ))}
-        </div>
-        <div className="flex justify-end gap-2">
-          <Button variant="outline" size="sm" disabled={submitting} onClick={() => submit({})}>
-            全部留空继续
-          </Button>
-          <Button size="sm" disabled={submitting} onClick={() => submit(collect())}>
-            {submitting ? "提交中…" : "提交答案并继续"}
-          </Button>
-        </div>
-      </div>
-    </Panel>
-  );
 }

@@ -254,6 +254,13 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
 .q-sev-low { background: #e8e8ed; color: var(--ink-2); }
 .q-dim { font-size: 11px; color: var(--ink-3); }
 .q-text { font-size: 13.5px; font-weight: 600; line-height: 1.5; margin-bottom: 10px; color: var(--ink); }
+.q-context {
+  margin: -2px 0 8px; padding: 8px 10px; border-left: 3px solid rgba(0,113,227,.32);
+  background: rgba(0,113,227,.05); border-radius: 6px; color: var(--ink-2);
+  font-size: 11.5px; line-height: 1.55;
+}
+.q-source { margin: -2px 0 9px; color: var(--ink-3); font-size: 10.5px; }
+.q-field-label { display: block; margin: 0 0 5px; color: var(--ink-2); font-size: 11.5px; font-weight: 700; }
 .q-item textarea { background: #fff; }
 
 .stop-row {

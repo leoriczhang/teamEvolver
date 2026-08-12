@@ -9,6 +9,8 @@ from teamEvolver.mining_lifecycle import (
     INTERNAL_BENCHMARK_FORMAT,
     MiningLifecycleError,
     list_mined_skill_statuses,
+    resolve_mined_job_skill_root,
+    resolve_mined_job_workspace,
     resolve_mined_skill_dir,
     submit_mined_skill,
 )
@@ -112,3 +114,80 @@ def test_submit_requires_complete_artifacts_and_rejects_path_escape(tmp_path: Pa
         submit_mined_skill(_store(tmp_path), "demo-skill", skillminer_root=miner_root)
     with pytest.raises(MiningLifecycleError):
         resolve_mined_skill_dir("../demo-skill", skillminer_root=miner_root)
+
+
+def test_completed_job_workspace_can_submit_edited_artifacts(tmp_path: Path) -> None:
+    miner_root = tmp_path / "skillminer"
+    job_id = "mine-001"
+    job_dir = miner_root / "mining_jobs" / job_id
+    workspace = job_dir / "workspace"
+    _write_mined_skill(workspace)
+    (workspace / "compiled_skill" / "demo-skill" / "SKILL.md").write_text(
+        "---\n"
+        "name: demo-skill\n"
+        "description: Human refined skill\n"
+        "category: support\n"
+        "---\n\n"
+        "# Refined procedure\n",
+        encoding="utf-8",
+    )
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "job.json").write_text(
+        json.dumps({"job_id": job_id, "status": "succeeded"}),
+        encoding="utf-8",
+    )
+
+    resolved = resolve_mined_job_workspace(job_id, skillminer_root=miner_root)
+    submitted = submit_mined_skill(
+        _store(tmp_path),
+        "demo-skill",
+        skillminer_root=resolved,
+        mining_job_id=job_id,
+    )
+
+    assert resolved == workspace
+    assert submitted["job"]["candidate_skill"]["description"] == "Human refined skill"
+    assert submitted["job"]["source"]["mining_job_id"] == job_id
+
+
+def test_non_completed_job_cannot_enter_evolution(tmp_path: Path) -> None:
+    miner_root = tmp_path / "skillminer"
+    job_id = "mine-running"
+    job_dir = miner_root / "mining_jobs" / job_id
+    _write_mined_skill(job_dir / "workspace")
+    (job_dir / "job.json").write_text(
+        json.dumps({"job_id": job_id, "status": "running"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(MiningLifecycleError, match="已完成"):
+        resolve_mined_job_workspace(job_id, skillminer_root=miner_root)
+    with pytest.raises(MiningLifecycleError):
+        resolve_mined_job_workspace("../mine-running", skillminer_root=miner_root)
+
+
+def test_legacy_job_skill_root_is_resolved_from_its_archived_artifact(tmp_path: Path) -> None:
+    miner_root = tmp_path / "skillminer"
+    older = "20260805_150618_777997"
+    newer = "20260809_223901_916214"
+    (miner_root / "reflection_rounds" / older).mkdir(parents=True)
+    (miner_root / "reflection_rounds" / newer).mkdir(parents=True)
+    snapshot = miner_root / "run_history" / newer / "preexisting"
+    skill_dir = _write_mined_skill(snapshot)
+    artifact_path = skill_dir.joinpath("SKILL.md").relative_to(miner_root).as_posix()
+
+    resolved = resolve_mined_job_skill_root(
+        f"legacy:{older}",
+        "demo-skill",
+        artifact_path=artifact_path,
+        skillminer_root=miner_root,
+    )
+
+    assert resolved == snapshot
+    with pytest.raises(MiningLifecycleError, match="不匹配"):
+        resolve_mined_job_skill_root(
+            f"legacy:{newer}",
+            "demo-skill",
+            artifact_path=artifact_path,
+            skillminer_root=miner_root,
+        )

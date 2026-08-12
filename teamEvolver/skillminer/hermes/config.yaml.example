@@ -1,0 +1,29 @@
+# Project-owned Hermes configuration.
+#
+# On first run this file is copied to ../.hermes_home/config.yaml. Edit that
+# generated file to change this checkout's provider/model without touching
+# ~/.hermes/config.yaml. Keep credentials out of YAML; inject ARK_API_KEY via
+# the environment or ../.hermes_home/.env.
+
+model:
+  default: doubao-seed-1-6-250615
+  provider: custom:volcengine-ark
+  base_url: https://ark.cn-beijing.volces.com/api/v3
+  context_length: 256000
+  max_tokens: 32768
+
+custom_providers:
+  - name: volcengine-ark
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    model: doubao-seed-1-6-250615
+    key_env: ARK_API_KEY
+    api_mode: chat_completions
+
+# Keep subprocess-level HOME/config state under this Hermes profile too. This
+# is stricter than Hermes' default "auto" mode and avoids writes to user-level
+# CLI configuration when a model happens to invoke a terminal tool.
+terminal:
+  backend: local
+  cwd: .
+  home_mode: profile
+  timeout: 180

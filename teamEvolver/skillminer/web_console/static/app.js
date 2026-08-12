@@ -157,12 +157,12 @@ function addRoundEval(ev) {
 function showQuestion(ev) {
   state.currentQuestionId = ev.id || null;
   const tagMap = {
-    after_semantic: "语义归纳审核",
+    after_semantic: "Skill 生成前关键补证",
     after_compile: "编译后校验",
     on_gap_low_confidence: "缺口补充",
     before_reflection: "反思前 · 指定优先级",
   };
-  $("#qTag").textContent = `检查点 · ${tagMap[ev.checkpoint] || ev.checkpoint} · 第 ${ev.round} 轮`;
+  $("#qTag").textContent = `知识补证 · ${tagMap[ev.checkpoint] || ev.checkpoint} · 第 ${ev.round} 轮`;
   $("#qTitle").textContent = ev.title || "请补充以下内容";
   $("#qIntro").textContent = ev.intro || "";
 
@@ -174,12 +174,19 @@ function showQuestion(ev) {
     item.className = "q-item";
     const sev = q.severity ? `<span class="q-sev ${sevCls(q.severity)}">${q.severity}严重度</span>` : "";
     const dim = q.dimension ? `<span class="q-dim">${escapeHtml(q.dimension)}</span>` : "";
+    const context = q.context ? `<div class="q-context">${escapeHtml(q.context)}</div>` : "";
+    const source = q.source ? `<div class="q-source">参考来源：${escapeHtml(q.source)}</div>` : "";
+    const fieldLabel = escapeHtml(q.field_label || "你的回答");
+    const placeholder = escapeHtml(q.placeholder || "请填写明确结论、适用条件和例外");
+    const rows = q.answer_type === "short_text" ? 1 : 3;
     item.innerHTML = `
       <div class="q-head">
         <span class="q-num">${i + 1}</span>${sev}${dim}
       </div>
       <div class="q-text">${escapeHtml(q.question)}</div>
-      <textarea rows="2" data-qid="${q.qid}" placeholder="填入你掌握的准确规则 / 数值 / 来源……（可留空跳过此条）"></textarea>`;
+      ${context}${source}
+      <label class="q-field-label" for="answer-${escapeHtml(q.qid)}">${fieldLabel}</label>
+      <textarea id="answer-${escapeHtml(q.qid)}" rows="${rows}" data-qid="${escapeHtml(q.qid)}" placeholder="${placeholder}"></textarea>`;
     list.appendChild(item);
   });
 
