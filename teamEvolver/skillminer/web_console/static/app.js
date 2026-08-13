@@ -24,7 +24,7 @@ async function loadConfig() {
   inp.innerHTML = "";
   schema.input_dirs.forEach((d) => {
     const o = document.createElement("option");
-    o.value = d; o.textContent = d;
+    o.value = d; o.textContent = d.replace(/^data[\\/]+/, "");
     if (d === schema.default_input_dir) o.selected = true;
     inp.appendChild(o);
   });

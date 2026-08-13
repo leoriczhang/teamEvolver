@@ -11,7 +11,7 @@
 
 流水线:
 data/input/ -> sample_packages/ -> semantic_reports/ -> compiled_skill/ -> benchmark
-(注: 最终可提交产物包含 SKILL.md、EVALUATION.md、benchmark.jsonl 与 BENCHMARK.md)
+(注: 最终可提交产物包含 SKILL.md、EVALUATION.md、benchmark.json 与 BENCHMARK.md)
 
 模型配置由项目内的 .hermes_home/config.yaml 管理，凭据由环境变量注入。
 项目 Hermes 的可执行文件和运行状态均与用户全局 Hermes 隔离。
@@ -32,6 +32,7 @@ import yaml
 import validate_sample_packages as vsp
 import human_checkpoints as hc
 import hermes_isolation as hi
+import benchmark_format as bf
 
 # 直接执行本文件时，后续延迟导入的 run_benchmark -> run_skill_test 会按模块名
 # ``run_pipeline`` 复用当前实例。否则 Python 会把本文件再加载一次，导致隔离任务的
@@ -644,8 +645,6 @@ def validate_compiled_artifacts():
 
 def validate_final_artifacts():
     """校验最终产物是否满足 SkillMiner → teamEvolver 的提交契约。"""
-    import json
-
     errors = validate_compiled_artifacts()
     if errors:
         return errors
@@ -659,31 +658,14 @@ def validate_final_artifacts():
     if not benchmark_md.is_file() or benchmark_md.stat().st_size == 0:
         errors.append(f"缺少可读 Benchmark：{benchmark_md.relative_to(PROJECT_ROOT)}")
 
-    benchmark_jsonl = skill_dir / "benchmark.jsonl"
-    if not benchmark_jsonl.is_file() or benchmark_jsonl.stat().st_size == 0:
-        errors.append(f"缺少机器题库：{benchmark_jsonl.relative_to(PROJECT_ROOT)}")
+    benchmark_json = skill_dir / "benchmark.json"
+    if not benchmark_json.is_file() or benchmark_json.stat().st_size == 0:
+        errors.append(f"缺少机器题库：{benchmark_json.relative_to(PROJECT_ROOT)}")
         return errors
-
-    question_count = 0
-    try:
-        lines = benchmark_jsonl.read_text(encoding="utf-8", errors="strict").splitlines()
-    except UnicodeDecodeError:
-        errors.append("benchmark.jsonl 不是有效 UTF-8 文本")
-        return errors
-    for line_no, line in enumerate(lines, start=1):
-        if not line.strip():
-            continue
-        try:
-            question = json.loads(line)
-        except ValueError:
-            errors.append(f"benchmark.jsonl 第 {line_no} 行不是有效 JSON")
-            continue
-        if not isinstance(question, dict) or not str(question.get("input") or "").strip():
-            errors.append(f"benchmark.jsonl 第 {line_no} 行缺少有效 input")
-            continue
-        question_count += 1
-    if question_count == 0:
-        errors.append("benchmark.jsonl 没有可用题目")
+    payload, format_errors = bf.read_document(benchmark_json)
+    if payload is not None:
+        format_errors.extend(bf.validate_document(payload, expected_skill_name=skill_dir.name))
+    errors.extend(f"benchmark.json：{error}" for error in dict.fromkeys(format_errors))
     return errors
 
 

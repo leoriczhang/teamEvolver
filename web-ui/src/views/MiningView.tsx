@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Panel, StatCard, Pill, Dot } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -322,12 +322,18 @@ export default function MiningView({
   const [mergeTargetName, setMergeTargetName] = useState("");
   const [deleteSource, setDeleteSource] = useState<InputSource | null>(null);
   const [sourceMutating, setSourceMutating] = useState(false);
+  const [renamingSourcePath, setRenamingSourcePath] = useState("");
+  const [renameSourceName, setRenameSourceName] = useState("");
+  const [renameSourceError, setRenameSourceError] = useState("");
+  const [renamePendingPath, setRenamePendingPath] = useState("");
+  const cancelledRenamePath = useRef("");
   const [jobFilter, setJobFilter] = useState<"all" | "active" | "completed" | "failed">("all");
   const [selectedJobId, setSelectedJobId] = useState("");
   const [selectedJob, setSelectedJob] = useState<MiningJob | null>(null);
   const [jobActionPending, setJobActionPending] = useState(false);
   const [checkpointAnswers, setCheckpointAnswers] = useState<Record<string, string>>({});
   const [checkpointSubmitting, setCheckpointSubmitting] = useState(false);
+  const [knowledgeSupplementExpanded, setKnowledgeSupplementExpanded] = useState(false);
   const [artifactPreview, setArtifactPreview] = useState<ArtifactContent | null>(null);
   const [artifactDraft, setArtifactDraft] = useState("");
   const [artifactEditing, setArtifactEditing] = useState(false);
@@ -395,6 +401,10 @@ export default function MiningView({
     setCheckpointAnswers({});
   }, [selectedJob?.pending_checkpoint?.id]);
 
+  useEffect(() => {
+    setKnowledgeSupplementExpanded(false);
+  }, [selectedJobId, selectedJob?.pending_checkpoint?.id]);
+
   if (!active) return null;
 
   const meta = PAGE_META[page];
@@ -433,6 +443,86 @@ export default function MiningView({
     onInputDirChange?.(path);
   }
 
+  function validateSourceRename(source: InputSource, value: string) {
+    const name = value.trim();
+    if (!name) return "数据源名称不能为空";
+    if (name.startsWith(".") || name.length > 80 || name.includes("/") || name.includes("\\")) {
+      return "名称不能以 . 开头、超过 80 个字符或包含 /、\\";
+    }
+    const normalized = name.toLocaleLowerCase();
+    const duplicate = inputSources.find((item) => (
+      item.path !== source.path && sourceDisplayName(item.path).toLocaleLowerCase() === normalized
+    ));
+    return duplicate ? `已存在同名数据源：${sourceDisplayName(duplicate.path)}` : "";
+  }
+
+  function beginSourceRename(source: InputSource) {
+    if (renamePendingPath) return;
+    cancelledRenamePath.current = "";
+    setRenamingSourcePath(source.path);
+    setRenameSourceName(sourceDisplayName(source.path));
+    setRenameSourceError("");
+  }
+
+  function cancelSourceRename(source: InputSource, input: HTMLInputElement) {
+    cancelledRenamePath.current = source.path;
+    setRenamingSourcePath("");
+    setRenameSourceName("");
+    setRenameSourceError("");
+    input.blur();
+  }
+
+  async function commitSourceRename(source: InputSource) {
+    if (cancelledRenamePath.current === source.path) {
+      cancelledRenamePath.current = "";
+      return;
+    }
+    if (renamingSourcePath !== source.path || renamePendingPath) return;
+
+    const name = renameSourceName.trim();
+    const validationError = validateSourceRename(source, name);
+    if (validationError) {
+      setRenameSourceError(validationError);
+      return;
+    }
+    if (name === sourceDisplayName(source.path)) {
+      setRenamingSourcePath("");
+      setRenameSourceName("");
+      setRenameSourceError("");
+      return;
+    }
+
+    setRenamePendingPath(source.path);
+    setRenameSourceError("");
+    try {
+      const response = await api<{ source: InputSource; previous_path: string }>(
+        `/api/mining/sources/${encodeURIComponent(sourceDisplayName(source.path))}/rename`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name }),
+        }
+      );
+      if (selectedInputDir === source.path) {
+        setSelectedInputDir(response.source.path);
+        onInputDirChange?.(response.source.path);
+      }
+      if (uploadTarget === source.path) setUploadTarget(response.source.path);
+      await mining.refreshConfig();
+      setRenamingSourcePath("");
+      setRenameSourceName("");
+      toastOk(
+        "数据源已重命名",
+        `${sourceDisplayName(source.path)} → ${sourceDisplayName(response.source.path)}`
+      );
+    } catch (e: any) {
+      setRenameSourceError(e.message);
+      toastErr("重命名数据源失败", e.message);
+    } finally {
+      setRenamePendingPath("");
+    }
+  }
+
   async function uploadKnowledgeFiles(list: FileList) {
     if (!list.length) return;
     setUploading(true);
@@ -460,7 +550,7 @@ export default function MiningView({
       const renamed = result.written.filter((file) => file.renamed).length;
       toastOk(
         `已上传 ${result.written.length} 个文档`,
-        renamed ? `${renamed} 个重名文件已自动保留为新副本` : `已写入 ${result.source.path}`
+        renamed ? `${renamed} 个重名文件已自动保留为新副本` : `已写入 ${sourceDisplayName(result.source.path)}`
       );
       await mining.refreshConfig();
       setUploadTarget(result.source.path);
@@ -489,7 +579,7 @@ export default function MiningView({
       await mining.refreshJobs(false);
       setTaskName("");
       setCreateJobOpen(false);
-      toastOk("挖掘任务已创建", `输入 ${inputDir} · 最多 ${rounds} 轮`);
+      toastOk("挖掘任务已创建", `输入 ${sourceDisplayName(inputDir)} · 最多 ${rounds} 轮`);
       onNavigate?.("jobs");
     } catch (e: any) {
       toastErr("启动挖掘失败", e.message);
@@ -512,7 +602,7 @@ export default function MiningView({
       setUploadTarget(response.source.path);
       setCreateSourceOpen(false);
       setCreateSourceName("");
-      toastOk("数据源已创建", response.source.path);
+      toastOk("数据源已创建", sourceDisplayName(response.source.path));
     } catch (e: any) {
       toastErr("创建数据源失败", e.message);
     } finally {
@@ -528,7 +618,7 @@ export default function MiningView({
       await api(`/api/mining/sources/${encodeURIComponent(name)}`, { method: "DELETE" });
       setDeleteSource(null);
       await mining.refreshConfig();
-      toastOk("数据源已删除", deleteSource.path);
+      toastOk("数据源已删除", sourceDisplayName(deleteSource.path));
     } catch (e: any) {
       toastErr("删除数据源失败", e.message);
     } finally {
@@ -550,7 +640,7 @@ export default function MiningView({
       setMergeSourceOpen(false);
       setMergeSourcePaths([]);
       setMergeTargetName("");
-      toastOk("数据源已合并", `${response.source.path} · ${response.copied.length} 个文件`);
+      toastOk("数据源已合并", `${sourceDisplayName(response.source.path)} · ${response.copied.length} 个文件`);
     } catch (e: any) {
       toastErr("合并数据源失败", e.message);
     } finally {
@@ -745,6 +835,8 @@ export default function MiningView({
 
   function renderJobDetail(job: MiningJob) {
     const durableGaps = job.knowledge_gaps?.questions || [];
+    const supplementQuestions = job.pending_checkpoint?.questions || durableGaps;
+    const hasKnowledgeSupplement = supplementQuestions.length > 0;
     return (
       <div className="space-y-4 border-t border-accent/20 bg-accent-soft/35 px-5 py-5">
         <div className="flex items-start justify-between gap-3">
@@ -752,7 +844,7 @@ export default function MiningView({
             <div className="truncate text-[15px] font-bold">{job.name}</div>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
               <Pill tone={jobStatusMeta(job.status).tone as any}>{jobStatusMeta(job.status).label}</Pill>
-              {job.input_dir && <span className="mono">{job.input_dir}</span>}
+              {job.input_dir && <span className="mono">{sourceDisplayName(job.input_dir)}</span>}
               {job.document_count !== null && <span>{job.document_count} 个文档</span>}
             </div>
           </div>
@@ -763,110 +855,131 @@ export default function MiningView({
           )}
         </div>
 
-        {durableGaps.length > 0 && !job.pending_checkpoint && (
-          <div className="rounded-xl border border-amber-300/70 bg-amber-50/80 p-4 shadow-sm">
-            <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <div className="mb-1 flex items-center gap-2">
-                  <ListChecks className="size-4 text-amber-700" />
-                  <span className="text-[14px] font-bold">关键知识缺口</span>
-                  <Pill tone="amber">{job.knowledge_gaps?.total || durableGaps.length} 项</Pill>
-                </div>
-                <p className="max-w-4xl text-[11.5px] leading-relaxed text-muted-foreground">
-                  这些是语义报告中会影响 Skill 生成的缺失规则、准确数值、适用边界或例外。清单随任务产物永久保留。
-                </p>
-              </div>
-            </div>
-            <div className="grid gap-3 lg:grid-cols-2">
-              {durableGaps.map((question, index) => (
-                <div key={`${question.qid}-${index}`} className="rounded-xl border border-amber-200/80 bg-background p-3.5">
-                  <div className="mb-2 flex flex-wrap items-center gap-2">
-                    <span className="grid size-6 place-items-center rounded-full bg-amber-500 text-[11px] font-bold text-white">{index + 1}</span>
-                    {question.severity && <Pill tone={question.severity === "高" ? "red" : "amber"}>{question.severity}优先级</Pill>}
-                    {question.field_label && <span className="text-[10.5px] font-semibold text-amber-800">{question.field_label}</span>}
+        {hasKnowledgeSupplement && (
+          <div className="overflow-hidden rounded-xl border border-amber-300/70 bg-amber-50/80 shadow-sm">
+            <div className={cn("flex flex-wrap items-center justify-between gap-3 px-4 py-3.5", knowledgeSupplementExpanded && "border-b border-amber-200")}>
+              <div className="flex min-w-0 items-center gap-2.5">
+                <ListChecks className="size-4 shrink-0 text-amber-700" />
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[14px] font-bold">知识补充</span>
+                    {job.pending_checkpoint
+                      ? <Pill tone="amber">等待填写</Pill>
+                      : <Pill tone="amber">{job.knowledge_gaps?.total || durableGaps.length} 项缺口</Pill>}
+                    {job.pending_checkpoint && (
+                      <span className="text-[11px] text-amber-800">
+                        第 {job.pending_checkpoint.round} 轮 · {job.pending_checkpoint.questions.length} 个问题
+                      </span>
+                    )}
                   </div>
-                  <div className="text-[13px] font-semibold leading-relaxed">{question.question}</div>
-                  {question.context && (
-                    <div className="mt-2 rounded-lg border-l-2 border-accent/40 bg-accent-soft px-2.5 py-2 text-[10.5px] leading-relaxed text-muted-foreground">
-                      {question.context}
-                    </div>
-                  )}
-                  {question.source && <div className="mt-1.5 text-[9.5px] text-muted-soft">建议核对：{question.source}</div>}
+                  <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                    {job.pending_checkpoint
+                      ? "任务正在等待你补充关键规则、准确数值、适用边界或例外。"
+                      : "查看本次挖掘识别出的关键知识缺口。"}
+                  </p>
                 </div>
-              ))}
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                aria-expanded={knowledgeSupplementExpanded}
+                onClick={() => setKnowledgeSupplementExpanded((expanded) => !expanded)}
+              >
+                {knowledgeSupplementExpanded ? "收起" : "展开"}
+                <ChevronDown className={cn("size-3.5 transition-transform", knowledgeSupplementExpanded && "rotate-180")} />
+              </Button>
             </div>
+
+            {knowledgeSupplementExpanded && (
+              <div className="p-4">
+                {job.pending_checkpoint ? (
+                  <>
+                    <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <div className="text-[14px] font-bold text-foreground">{job.pending_checkpoint.title}</div>
+                        <p className="mt-1 max-w-4xl text-[11.5px] leading-relaxed text-muted-foreground">
+                          {job.pending_checkpoint.intro}
+                        </p>
+                      </div>
+                      <div className="text-[11px] text-muted-foreground">
+                        {Object.values(checkpointAnswers).filter((value) => value.trim()).length} / {job.pending_checkpoint.questions.length} 已填写
+                      </div>
+                    </div>
+
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      {job.pending_checkpoint.questions.map((question, index) => (
+                        <div key={question.qid} className="rounded-xl border border-amber-200/80 bg-background p-3.5">
+                          <div className="mb-2 flex flex-wrap items-center gap-2">
+                            <span className="grid size-6 place-items-center rounded-full bg-amber-500 text-[11px] font-bold text-white">{index + 1}</span>
+                            {question.severity && <Pill tone={question.severity === "高" ? "red" : "amber"}>{question.severity}优先级</Pill>}
+                            {question.dimension && <span className="text-[10.5px] text-muted-foreground">{question.dimension}</span>}
+                          </div>
+                          <div className="text-[13px] font-semibold leading-relaxed">{question.question}</div>
+                          {question.context && (
+                            <div className="mt-2 rounded-lg border-l-2 border-accent/40 bg-accent-soft px-2.5 py-2 text-[10.5px] leading-relaxed text-muted-foreground">
+                              {question.context}
+                            </div>
+                          )}
+                          {question.source && <div className="mt-1.5 text-[9.5px] text-muted-soft">参考来源：{question.source}</div>}
+                          <label className="mt-3 block">
+                            <span className="mb-1.5 block text-[11px] font-semibold text-muted-foreground">
+                              {question.field_label || "你的回答"}
+                            </span>
+                            {question.answer_type === "short_text" ? (
+                              <Input
+                                value={checkpointAnswers[question.qid] || ""}
+                                placeholder={question.placeholder || "请输入具体答案"}
+                                onChange={(event) => setCheckpointAnswers((current) => ({ ...current, [question.qid]: event.target.value }))}
+                              />
+                            ) : (
+                              <textarea
+                                rows={3}
+                                value={checkpointAnswers[question.qid] || ""}
+                                placeholder={question.placeholder || "请输入具体答案"}
+                                onChange={(event) => setCheckpointAnswers((current) => ({ ...current, [question.qid]: event.target.value }))}
+                                className="w-full resize-y rounded-lg border border-border bg-background px-3 py-2 text-[12px] leading-relaxed outline-none transition-colors focus:border-accent"
+                              />
+                            )}
+                          </label>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="mt-4 flex items-center justify-between gap-3 border-t border-amber-200 pt-3">
+                      <span className="text-[10.5px] text-muted-foreground">不确定的问题可以留空，系统会继续保留为知识缺口。</span>
+                      <Button disabled={checkpointSubmitting} onClick={() => submitCheckpointAnswers(job)}>
+                        {checkpointSubmitting ? "提交中…" : "提交答案并继续挖掘"}
+                        <ArrowRight className="size-3.5" />
+                      </Button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="grid gap-3 lg:grid-cols-2">
+                    {durableGaps.map((question, index) => (
+                      <div key={`${question.qid}-${index}`} className="rounded-xl border border-amber-200/80 bg-background p-3.5">
+                        <div className="mb-2 flex flex-wrap items-center gap-2">
+                          <span className="grid size-6 place-items-center rounded-full bg-amber-500 text-[11px] font-bold text-white">{index + 1}</span>
+                          {question.severity && <Pill tone={question.severity === "高" ? "red" : "amber"}>{question.severity}优先级</Pill>}
+                          {question.field_label && <span className="text-[10.5px] font-semibold text-amber-800">{question.field_label}</span>}
+                        </div>
+                        <div className="text-[13px] font-semibold leading-relaxed">{question.question}</div>
+                        {question.context && (
+                          <div className="mt-2 rounded-lg border-l-2 border-accent/40 bg-accent-soft px-2.5 py-2 text-[10.5px] leading-relaxed text-muted-foreground">
+                            {question.context}
+                          </div>
+                        )}
+                        {question.source && <div className="mt-1.5 text-[9.5px] text-muted-soft">建议核对：{question.source}</div>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
         {isActiveJob(job.status) ? (
           <div className="space-y-4">
-            {job.pending_checkpoint && (
-              <div className="rounded-xl border border-amber-300/70 bg-amber-50/80 p-4 shadow-sm">
-                <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <div className="mb-1 flex items-center gap-2">
-                      <Pill tone="amber">等待知识补证</Pill>
-                      <span className="text-[11px] text-amber-800">第 {job.pending_checkpoint.round} 轮</span>
-                    </div>
-                    <div className="text-[14px] font-bold text-foreground">{job.pending_checkpoint.title}</div>
-                    <p className="mt-1 max-w-4xl text-[11.5px] leading-relaxed text-muted-foreground">
-                      {job.pending_checkpoint.intro}
-                    </p>
-                  </div>
-                  <div className="text-[11px] text-muted-foreground">
-                    {Object.values(checkpointAnswers).filter((value) => value.trim()).length} / {job.pending_checkpoint.questions.length} 已填写
-                  </div>
-                </div>
-
-                <div className="grid gap-3 lg:grid-cols-2">
-                  {job.pending_checkpoint.questions.map((question, index) => (
-                    <div key={question.qid} className="rounded-xl border border-amber-200/80 bg-background p-3.5">
-                      <div className="mb-2 flex flex-wrap items-center gap-2">
-                        <span className="grid size-6 place-items-center rounded-full bg-amber-500 text-[11px] font-bold text-white">{index + 1}</span>
-                        {question.severity && <Pill tone={question.severity === "高" ? "red" : "amber"}>{question.severity}优先级</Pill>}
-                        {question.dimension && <span className="text-[10.5px] text-muted-foreground">{question.dimension}</span>}
-                      </div>
-                      <div className="text-[13px] font-semibold leading-relaxed">{question.question}</div>
-                      {question.context && (
-                        <div className="mt-2 rounded-lg border-l-2 border-accent/40 bg-accent-soft px-2.5 py-2 text-[10.5px] leading-relaxed text-muted-foreground">
-                          {question.context}
-                        </div>
-                      )}
-                      {question.source && <div className="mt-1.5 text-[9.5px] text-muted-soft">参考来源：{question.source}</div>}
-                      <label className="mt-3 block">
-                        <span className="mb-1.5 block text-[11px] font-semibold text-muted-foreground">
-                          {question.field_label || "你的回答"}
-                        </span>
-                        {question.answer_type === "short_text" ? (
-                          <Input
-                            value={checkpointAnswers[question.qid] || ""}
-                            placeholder={question.placeholder || "请输入具体答案"}
-                            onChange={(event) => setCheckpointAnswers((current) => ({ ...current, [question.qid]: event.target.value }))}
-                          />
-                        ) : (
-                          <textarea
-                            rows={3}
-                            value={checkpointAnswers[question.qid] || ""}
-                            placeholder={question.placeholder || "请输入具体答案"}
-                            onChange={(event) => setCheckpointAnswers((current) => ({ ...current, [question.qid]: event.target.value }))}
-                            className="w-full resize-y rounded-lg border border-border bg-background px-3 py-2 text-[12px] leading-relaxed outline-none transition-colors focus:border-accent"
-                          />
-                        )}
-                      </label>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="mt-4 flex items-center justify-between gap-3 border-t border-amber-200 pt-3">
-                  <span className="text-[10.5px] text-muted-foreground">不确定的问题可以留空，系统会继续保留为知识缺口。</span>
-                  <Button disabled={checkpointSubmitting} onClick={() => submitCheckpointAnswers(job)}>
-                    {checkpointSubmitting ? "提交中…" : "提交答案并继续挖掘"}
-                    <ArrowRight className="size-3.5" />
-                  </Button>
-                </div>
-              </div>
-            )}
-
             <div className="grid gap-4 lg:grid-cols-[minmax(360px,0.8fr)_minmax(0,1.2fr)]">
             <div className="rounded-xl border border-border bg-surface p-4">
               <div className="mb-4 flex items-center justify-between text-xs">
@@ -1103,7 +1216,7 @@ export default function MiningView({
                   className="mono w-full rounded-lg border border-border bg-background px-3 py-2 text-[13px] outline-none focus:border-accent disabled:opacity-60"
                 >
                   {(config?.input_dirs ?? [inputDir]).map((dir) => (
-                    <option key={dir} value={dir}>{dir}</option>
+                    <option key={dir} value={dir}>{sourceDisplayName(dir)}</option>
                   ))}
                   <option value="__new__">＋ 上传为新数据源</option>
                 </select>
@@ -1132,13 +1245,13 @@ export default function MiningView({
               <div className="p-6 text-center text-sm text-muted-soft">加载中…</div>
             ) : inputSources.length === 0 ? (
               <div className="p-6 text-center text-sm text-muted-soft">
-                尚无输入目录。请在 SkillMiner 的 data/ 下放置待挖掘文档。
+                尚无数据源。请先新建数据源并上传待挖掘文档。
               </div>
             ) : (
               <table className="w-full border-collapse text-[13px]">
                 <thead>
                   <tr className="border-b border-line text-[11px] uppercase tracking-wide text-muted-foreground">
-                    <th className="px-4 py-2.5 text-left font-semibold">目录</th>
+                    <th className="px-4 py-2.5 text-left font-semibold">目录名称</th>
                     <th className="px-4 py-2.5 text-left font-semibold">文档</th>
                     <th className="px-4 py-2.5 text-left font-semibold">状态</th>
                     <th className="px-4 py-2.5 text-right font-semibold">操作</th>
@@ -1148,9 +1261,47 @@ export default function MiningView({
                   {inputSources.map((source) => (
                     <tr key={source.path} className="border-b border-line last:border-none">
                       <td className="px-4 py-3">
-                        <div className="mono font-semibold">{source.path}</div>
+                        <div className="flex min-w-[220px] items-center font-semibold">
+                          <div className="group/rename relative min-w-0 max-w-[320px] flex-1">
+                            <input
+                              value={renamingSourcePath === source.path ? renameSourceName : sourceDisplayName(source.path)}
+                              onFocus={() => beginSourceRename(source)}
+                              onChange={(event) => {
+                                const value = event.target.value;
+                                setRenameSourceName(value);
+                                setRenameSourceError(validateSourceRename(source, value));
+                              }}
+                              onBlur={() => commitSourceRename(source)}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") event.currentTarget.blur();
+                                if (event.key === "Escape") {
+                                  event.preventDefault();
+                                  cancelSourceRename(source, event.currentTarget);
+                                }
+                              }}
+                              disabled={Boolean(renamePendingPath)}
+                              aria-label={`重命名数据源 ${sourceDisplayName(source.path)}`}
+                              aria-invalid={renamingSourcePath === source.path && Boolean(renameSourceError)}
+                              aria-describedby={renamingSourcePath === source.path && renameSourceError ? `rename-error-${encodeURIComponent(source.path)}` : undefined}
+                              title="点击名称直接修改"
+                              className={cn(
+                                "mono h-7 w-full rounded-md border border-transparent bg-transparent py-1 pl-1 pr-7 text-[13px] font-semibold outline-none transition-colors",
+                                "hover:border-input hover:bg-background focus:border-ring focus:bg-background focus:ring-2 focus:ring-ring/20",
+                                renamingSourcePath === source.path && renameSourceError && "border-destructive bg-background ring-2 ring-destructive/15"
+                              )}
+                            />
+                            <Pencil className="pointer-events-none absolute right-2 top-1/2 size-3 -translate-y-1/2 text-muted-soft transition-colors group-hover/rename:text-muted-foreground" />
+                          </div>
+                        </div>
+                        {renamingSourcePath === source.path && renameSourceError && (
+                          <div id={`rename-error-${encodeURIComponent(source.path)}`} role="alert" className="mt-1 text-[11px] text-destructive">
+                            {renameSourceError}
+                          </div>
+                        )}
                         <div className="mt-0.5 text-[11px] text-muted-foreground">
-                          {source.path === config.default_input_dir ? "默认挖掘输入" : "候选输入"}
+                          {renamePendingPath === source.path
+                            ? "正在保存新名称…"
+                            : `${source.path === config.default_input_dir ? "默认挖掘输入" : "候选输入"} · 点击名称直接修改`}
                         </div>
                       </td>
                       <td className="px-4 py-3 text-muted-foreground">
@@ -1177,7 +1328,7 @@ export default function MiningView({
                             variant="outline"
                             className="text-destructive hover:text-destructive"
                             onClick={() => setDeleteSource(source)}
-                            aria-label={`删除 ${source.path}`}
+                            aria-label={`删除 ${sourceDisplayName(source.path)}`}
                           >
                             <Trash2 className="size-3.5" />
                           </Button>
@@ -1264,7 +1415,9 @@ export default function MiningView({
                           <span className="block truncate font-semibold">{job.name}</span>
                           <span className="mono mt-0.5 block truncate text-[10px] text-muted-soft">{job.job_id}</span>
                         </span>
-                        <span className="mono truncate pr-3 text-[11px] text-muted-foreground">{job.input_dir || "历史归档"}</span>
+                        <span className="mono truncate pr-3 text-[11px] text-muted-foreground">
+                          {job.input_dir ? sourceDisplayName(job.input_dir) : "历史归档"}
+                        </span>
                         <span className="text-[11px] text-muted-foreground">{formatDateTime(job.created_at)}</span>
                         <ChevronDown className={cn("size-4 text-muted-foreground transition-transform", expanded && "rotate-180 text-accent")} />
                       </button>
@@ -1317,11 +1470,13 @@ export default function MiningView({
                       className="mono w-full rounded-lg border border-border bg-background px-3 py-2 text-[13px] outline-none focus:border-accent disabled:opacity-60"
                     >
                       {config.input_dirs.map((dir) => (
-                        <option key={dir} value={dir}>{dir}</option>
+                        <option key={dir} value={dir}>{sourceDisplayName(dir)}</option>
                       ))}
                     </select>
                   ) : (
-                    <div className="mono rounded-lg border border-border bg-background px-3 py-2 text-[13px]">{inputDir}</div>
+                    <div className="mono rounded-lg border border-border bg-background px-3 py-2 text-[13px]">
+                      {sourceDisplayName(inputDir)}
+                    </div>
                   )}
                   <div className={cn("mt-1.5 text-[11px]", selectedSource?.ready ? "text-muted-foreground" : "text-amber-700")}>
                     {!config
@@ -1435,7 +1590,9 @@ export default function MiningView({
                 onChange={(event) => setCreateSourceName(event.target.value)}
                 onKeyDown={(event) => event.key === "Enter" && createSource()}
               />
-              <p className="mt-1.5 text-[11px] text-muted-foreground">将创建为 <span className="mono">data/{createSourceName.trim() || "数据源名"}</span>。</p>
+              <p className="mt-1.5 text-[11px] text-muted-foreground">
+                将创建数据源 <span className="mono">{createSourceName.trim() || "数据源名"}</span>。
+              </p>
             </div>
             <div className="flex justify-end gap-2">
               <Button variant="outline" onClick={() => setCreateSourceOpen(false)}>取消</Button>
@@ -1466,7 +1623,9 @@ export default function MiningView({
                         : current.filter((path) => path !== source.path))}
                       className="size-4 accent-[var(--accent)]"
                     />
-                    <span className="mono min-w-0 flex-1 truncate text-[12px] font-semibold">{source.path}</span>
+                    <span className="mono min-w-0 flex-1 truncate text-[12px] font-semibold">
+                      {sourceDisplayName(source.path)}
+                    </span>
                     <span className="text-[11px] text-muted-foreground">{source.document_count} 个文档</span>
                   </label>
                 ))}
@@ -1502,7 +1661,9 @@ export default function MiningView({
           </DialogHeader>
           <div className="space-y-4">
             <p className="text-sm leading-relaxed text-muted-foreground">
-              确定删除 <span className="mono font-semibold text-foreground">{deleteSource?.path}</span>
+              确定删除 <span className="mono font-semibold text-foreground">
+                {deleteSource ? sourceDisplayName(deleteSource.path) : ""}
+              </span>
               ？目录内 {deleteSource?.document_count ?? 0} 个文档会一并删除。已创建任务使用独立快照，不受影响。
             </p>
             <div className="flex justify-end gap-2">
@@ -1837,6 +1998,10 @@ function formatDateTime(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function sourceDisplayName(path: string) {
+  return path.replace(/^data[\\/]+/, "");
 }
 
 function formatRuntimeLog(line: string) {

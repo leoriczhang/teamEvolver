@@ -334,6 +334,28 @@ def test_knowledge_sources_can_be_created_merged_and_deleted(tmp_path, monkeypat
     assert not (tmp_path / "data" / "abc").exists()
 
 
+def test_knowledge_source_can_be_renamed_without_overwriting_duplicate(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "PROJECT_ROOT", tmp_path)
+    original = tmp_path / "data" / "support-docs"
+    original.mkdir(parents=True)
+    (original / "guide.md").write_text("keep me", encoding="utf-8")
+    existing = tmp_path / "data" / "existing"
+    existing.mkdir()
+
+    renamed = server.rename_knowledge_source("support-docs", {"name": "customer-support"})
+
+    assert renamed["previous_path"] == "data/support-docs"
+    assert renamed["source"]["path"] == "data/customer-support"
+    assert not original.exists()
+    assert (tmp_path / "data" / "customer-support" / "guide.md").read_text(encoding="utf-8") == "keep me"
+
+    with pytest.raises(FileExistsError, match="数据源名称已存在"):
+        server.rename_knowledge_source("customer-support", {"name": "EXISTING"})
+
+    assert (tmp_path / "data" / "customer-support" / "guide.md").is_file()
+    assert existing.is_dir()
+
+
 def test_job_artifact_reader_does_not_expose_snapshot_or_metadata(tmp_path, monkeypatch):
     artifact = tmp_path / "mining_jobs" / "job-1" / "workspace" / "compiled_skill" / "demo" / "SKILL.md"
     artifact.parent.mkdir(parents=True)

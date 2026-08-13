@@ -11,6 +11,22 @@ if str(SKILLMINER_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILLMINER_ROOT))
 
 from mining_jobs import MiningJobManager  # noqa: E402
+import benchmark_format as bf  # noqa: E402
+
+
+def _progressive_benchmark_json() -> str:
+    payload = bf.build_document(
+        "demo",
+        [{
+            "id": "BM-01",
+            "name": "测试场景",
+            "input": "test",
+            "gold": {"must_hit": [f"requirement {index}" for index in range(1, 13)]},
+            "trajectory_requirements": ["confirm facts", "verify result"],
+        }],
+        created_at="2026-08-13T00:00:00+00:00",
+    )
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _prepare_project(root: Path) -> None:
@@ -30,8 +46,9 @@ def _prepare_project(root: Path) -> None:
         "evaluation_compiler_agent_prompt.py",
     ):
         (root / name).write_text("PROMPT = ''\n", encoding="utf-8")
+    benchmark_json = _progressive_benchmark_json()
     (root / "run_pipeline.py").write_text(
-        """from pathlib import Path
+        f"""from pathlib import Path
 print('[第 1 轮][Step 1/3] sample')
 print('[第 1 轮][Step 2/3] semantic')
 print('[第 1 轮][Step 3/3] compile')
@@ -39,7 +56,7 @@ target = Path('compiled_skill') / 'demo'
 target.mkdir(parents=True, exist_ok=True)
 (target / 'SKILL.md').write_text('# Demo skill', encoding='utf-8')
 (target / 'EVALUATION.md').write_text('# Demo evaluation', encoding='utf-8')
-(target / 'benchmark.jsonl').write_text('{\"id\": \"q1\", \"input\": \"test\"}\\n', encoding='utf-8')
+(target / 'benchmark.json').write_text({benchmark_json!r}, encoding='utf-8')
 (target / 'BENCHMARK.md').write_text('# Demo benchmark', encoding='utf-8')
 print('编译产物契约校验通过')
 """,
@@ -73,7 +90,7 @@ def test_parallel_jobs_are_isolated_persisted_and_expose_artifacts(tmp_path):
     assert [job["status"] for job in finished] == ["succeeded", "succeeded"]
     assert all(job["phase"] == {"step1": "done", "step2": "done", "step3": "done"} for job in finished)
     assert all(any(item["name"] == "SKILL.md" for item in job["artifacts"]) for job in finished)
-    assert all(any(item["name"] == "benchmark.jsonl" for item in job["artifacts"]) for job in finished)
+    assert all(any(item["name"] == "benchmark.json" for item in job["artifacts"]) for job in finished)
 
     alpha_workspace = tmp_path / "mining_jobs" / job_ids[0] / "workspace"
     beta_workspace = tmp_path / "mining_jobs" / job_ids[1] / "workspace"
@@ -112,7 +129,7 @@ print('编译产物契约校验通过')
     assert finished["status"] == "failed"
     assert "挖掘产物不完整" in finished["error"]
     assert "BENCHMARK.md" in finished["error"]
-    assert "benchmark.jsonl" in finished["error"]
+    assert "benchmark.json" in finished["error"]
 
 
 def test_nonzero_exit_reports_missing_final_artifacts(tmp_path):
@@ -140,7 +157,7 @@ raise SystemExit(1)
     assert finished["status"] == "failed"
     assert "最终产物生成失败" in finished["error"]
     assert "BENCHMARK.md" in finished["error"]
-    assert "benchmark.jsonl" in finished["error"]
+    assert "benchmark.json" in finished["error"]
 
 
 def test_waiting_job_exposes_form_checkpoint_and_accepts_answers(tmp_path):

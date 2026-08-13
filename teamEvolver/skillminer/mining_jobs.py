@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import human_checkpoints as hc
+import benchmark_format as bf
 
 
 _STATIC_WORKSPACE_ITEMS = (
@@ -36,7 +37,7 @@ _ARTIFACT_NAMES = {
     "SKILL.md": "skill",
     "EVALUATION.md": "evaluation",
     "BENCHMARK.md": "benchmark",
-    "benchmark.jsonl": "benchmark",
+    "benchmark.json": "benchmark",
     "benchmark_bank.json": "benchmark",
 }
 _ACTIVE_STATES = {"preparing", "queued", "running", "waiting", "stopping"}
@@ -358,32 +359,17 @@ class MiningJobManager:
 
         skill_dir = skill_files[0].parent
         errors = []
-        for filename in ("EVALUATION.md", "BENCHMARK.md", "benchmark.jsonl"):
+        for filename in ("EVALUATION.md", "BENCHMARK.md", "benchmark.json"):
             path = skill_dir / filename
             if not path.is_file() or path.stat().st_size == 0:
                 errors.append(f"缺少 {filename}")
-        benchmark_path = skill_dir / "benchmark.jsonl"
+        benchmark_path = skill_dir / "benchmark.json"
         if not benchmark_path.is_file() or benchmark_path.stat().st_size == 0:
             return errors
-
-        question_count = 0
-        for line_no, line in enumerate(
-            benchmark_path.read_text(encoding="utf-8", errors="replace").splitlines(),
-            start=1,
-        ):
-            if not line.strip():
-                continue
-            try:
-                question = json.loads(line)
-            except json.JSONDecodeError:
-                errors.append(f"benchmark.jsonl 第 {line_no} 行无效")
-                continue
-            if not isinstance(question, dict) or not str(question.get("input") or "").strip():
-                errors.append(f"benchmark.jsonl 第 {line_no} 行缺少 input")
-                continue
-            question_count += 1
-        if question_count == 0:
-            errors.append("benchmark.jsonl 没有可用题目")
+        payload, format_errors = bf.read_document(benchmark_path)
+        if payload is not None:
+            format_errors.extend(bf.validate_document(payload, expected_skill_name=skill_dir.name))
+        errors.extend(f"benchmark.json：{error}" for error in dict.fromkeys(format_errors))
         return errors
 
     def stop_job(self, job_id: str) -> dict[str, Any]:

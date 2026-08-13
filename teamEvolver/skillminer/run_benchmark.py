@@ -10,7 +10,7 @@ Benchmark 构建 + 阅卷脚本（Hermes 版）
     读被测 skill 的 SKILL.md + EVALUATION.md，用 `hermes -z` 生成一套结构化题库。
     题目直接脱胎于 EVALUATION.md 里各维度的正例/负例 + 边界/例外/降级考核，
     并补充 hard-negative 陷阱题。产出两种格式（都写进 compiled_skill/<skill>/）：
-      - benchmark.jsonl  —— 机器可跑分的真源（每行一道题）
+      - benchmark.json   —— teamEvolver-progressive-test-v1 机器题库
       - BENCHMARK.md     —— 人读友好的视图
     每道题不是"标准范文"，而是可判定的锚点：
       gold.expected_label（分类项期望标签）+ gold.must_hit（必须命中）+ gold.must_avoid（绝不能出现）
@@ -40,6 +40,7 @@ from pathlib import Path
 # 复用已验证过的引导与工具函数
 import lift_integration as li
 import run_skill_test as rst
+import benchmark_format as bf
 
 rp = rst.rp  # run_pipeline 模块
 
@@ -242,7 +243,9 @@ def build_benchmark_prompt(skill_text, eval_text, out_path, difficulty_counts=No
         "以及必要的业务背景与系统信息。\n"
         "5. 可复用 EVALUATION.md 里的正例/负例作为种子，但要改写成完整情境，并尽量新增变体。\n"
         "6. gold 是**可判定的锚点**而非范文：expected_label 给分类项的期望标签（无分类项则填 {}）；"
-        "must_hit 是回答必须命中的要点；must_avoid 是绝对不能出现的表述（如禁用语、越权承诺）。\n"
+        "must_hit 是回答必须命中的要点；must_avoid 是绝对不能出现的表述（如禁用语、越权承诺）。"
+        "每道题的 expected_label 各项、must_hit 与 must_avoid 合计必须有 12~24 个互不重复、"
+        "可独立核验的要求。\n"
         "7. **【多轮对话必备】每道题都要给出 `customer_sim`——一份「模拟参与者」的扮演剧本**，"
         "供自动化测试时由一个 AI 扮演情境参与者，与被测 skill 进行多轮对话（追问 / 补充信息 / 情绪施压），"
         "从而考核其「主动追问补全缺失信息」「情绪升级应对」等多轮能力。字段要求：\n"
@@ -261,11 +264,12 @@ def build_benchmark_prompt(skill_text, eval_text, out_path, difficulty_counts=No
         "文件内容必须是**纯 JSON 数组本体**（不含 Markdown 代码围栏、不含任何解释文字）。"
         "本任务唯一允许的工具动作是使用文件写入工具写入上述路径：不要搜索、读取或修改"
         "项目中的其他文件，不要运行命令、代码、测试或网络请求，也不要自行生成"
-        "benchmark.jsonl / BENCHMARK.md 等下游文件；这些校验与转换由调用方负责。"
+        "benchmark.json / BENCHMARK.md 等下游文件；这些校验与转换由调用方负责。"
         "写完后立即结束，并在回复里只简要说明题量与覆盖情况。\n\n"
         "数组每个元素形如：\n"
         "{\n"
         '  "id": "BM-01",\n'
+        '  "name": "可读的测试场景名称",\n'
         '  "target_dimensions": ["维度三", "维度五"],\n'
         '  "difficulty": "easy|medium|hard",\n'
         '  "input": "完整情境文本（含角色/权限/参与者原话/系统信息）",\n'
@@ -283,6 +287,8 @@ def build_benchmark_prompt(skill_text, eval_text, out_path, difficulty_counts=No
         '    "opening_line": "这件事今天必须处理完，你直接告诉我能不能批准。",\n'
         '    "stop_when": "被测 skill 已完成必要核验、说明权限边界，并给出明确的下一步与时限"\n'
         "  },\n"
+        '  "trajectory_requirements": ["主动确认关键缺失信息", "处理完成前核验权限边界"],\n'
+        '  "source_session_ids": [],\n'
         '  "source": "002-U-01",\n'
         '  "in_corpus": true\n'
         "}\n\n"
@@ -338,6 +344,7 @@ def normalize_questions(raw):
             gold = {}
         questions.append({
             "id": q.get("id") or f"BM-{idx:02d}",
+            "name": (q.get("name") or "").strip(),
             "target_dimensions": q.get("target_dimensions") or [],
             "difficulty": q.get("difficulty") or "medium",
             "input": (q.get("input") or "").strip(),
@@ -347,6 +354,9 @@ def normalize_questions(raw):
                 "must_avoid": gold.get("must_avoid") or [],
             },
             "customer_sim": _normalize_customer_sim(q),
+            "requirements": q.get("requirements") or [],
+            "trajectory_requirements": q.get("trajectory_requirements") or [],
+            "source_session_ids": q.get("source_session_ids") or [],
             "source": q.get("source") or "",
             "in_corpus": bool(q.get("in_corpus", True)),
         })
@@ -359,7 +369,7 @@ def render_benchmark_md(questions, skill_name):
     lines = [
         f"# 评测基准（BENCHMARK）· {skill_name}",
         "",
-        "> 本文件是 `benchmark.jsonl` 的人读视图（机器跑分请以 jsonl 为准）。",
+        "> 本文件是 `benchmark.json` 的人读视图（机器跑分请以 JSON 为准）。",
         "> 每道题给出情境 + 可判定锚点（期望标签 / 必须命中 / 绝不能出现），",
         "> 由 `run_benchmark.py` 用 EVALUATION.md 作为评分标准自动跑分。",
         "",
@@ -415,7 +425,7 @@ def render_benchmark_md(questions, skill_name):
 
 
 def build_phase(skill_dir, skill_name, hermes_env, difficulty_counts=None):
-    """阶段一：生成题库，写 benchmark.jsonl + BENCHMARK.md。返回 questions 列表。
+    """阶段一：生成题库，写 benchmark.json + BENCHMARK.md。返回 questions 列表。
 
     difficulty_counts: 目标难度配额 {"easy":n,"medium":n,"hard":n}，写进出题 prompt。
     """
@@ -464,10 +474,19 @@ def build_phase(skill_dir, skill_name, hermes_env, difficulty_counts=None):
         print(f"    原始输出已存：{(skill_dir / 'benchmark_raw_output.txt').relative_to(PROJECT_ROOT)}")
         return None
 
-    jsonl_path = skill_dir / "benchmark.jsonl"
-    with jsonl_path.open("w", encoding="utf-8") as f:
-        for q in questions:
-            f.write(json.dumps(q, ensure_ascii=False) + "\n")
+    benchmark_payload = bf.build_document(skill_name, questions)
+    format_errors = bf.validate_document(benchmark_payload, expected_skill_name=skill_name)
+    if format_errors:
+        print("  ✗ 生成内容不符合 teamEvolver-progressive-test-v1：")
+        for error in format_errors:
+            print(f"    - {error}")
+        return None
+
+    json_path = skill_dir / "benchmark.json"
+    bf.write_document(json_path, benchmark_payload)
+    raw_json_path.unlink(missing_ok=True)
+    # 新挖掘产物只保留规范 JSON，避免同一 Skill 同时出现两份相互冲突的机器题库。
+    (skill_dir / "benchmark.jsonl").unlink(missing_ok=True)
     md_path = skill_dir / "BENCHMARK.md"
     md_path.write_text(render_benchmark_md(questions, skill_name), encoding="utf-8")
 
@@ -477,11 +496,11 @@ def build_phase(skill_dir, skill_name, hermes_env, difficulty_counts=None):
         for d in q["target_dimensions"]:
             covered[d] = covered.get(d, 0) + 1
     print(f"  ✓ 生成 {len(questions)} 道题")
-    print(f"    - {jsonl_path.relative_to(PROJECT_ROOT)}（机器可跑）")
+    print(f"    - {json_path.relative_to(PROJECT_ROOT)}（teamEvolver progressive-test）")
     print(f"    - {md_path.relative_to(PROJECT_ROOT)}（人读视图）")
     print(f"    维度覆盖：{len(covered)} 个维度被触及")
 
-    # benchmark.jsonl 是 SkillMiner → teamEvolver 候选评审的内部数据契约。
+    # benchmark.json 是 SkillMiner 生成的 teamEvolver progressive-test 题库。
     # 外部 LIFT 仅保留为显式兼容出口，默认不创建草稿、不参与主生命周期。
     if os.environ.get("SKILLMINER_LIFT_AUTO_DRAFT", "0").strip().lower() not in {"0", "false", "no", "off"}:
         try:
@@ -499,7 +518,15 @@ def build_phase(skill_dir, skill_name, hermes_env, difficulty_counts=None):
 
 
 def load_existing_benchmark(skill_dir):
-    """从已有 benchmark.jsonl 读回题库（--skip-build 用）。"""
+    """从已有 benchmark.json 读回题库（--skip-build 用）。"""
+    json_path = skill_dir / "benchmark.json"
+    if json_path.is_file():
+        payload, errors = bf.read_document(json_path)
+        if errors or payload is None:
+            return None
+        return normalize_questions(bf.to_runner_questions(payload))
+
+    # 只读兼容历史挖掘产物；新的 build_phase 不再生成 JSONL。
     jsonl_path = skill_dir / "benchmark.jsonl"
     if not jsonl_path.exists():
         return None
@@ -1225,7 +1252,7 @@ def write_report(agg, results, skill_name):
 def parse_args():
     ap = argparse.ArgumentParser(description="构建并跑分 skill 的评测基准（benchmark）")
     ap.add_argument("--skip-build", action="store_true",
-                    help="跳过题库生成，复用已有 benchmark.jsonl")
+                    help="跳过题库生成，复用已有 benchmark.json")
     ap.add_argument("--build-only", action="store_true",
                     help="只生成题库，不跑分")
     ap.add_argument("--limit", type=int, default=None,
@@ -1287,9 +1314,12 @@ def main():
     if args.skip_build:
         questions = load_existing_benchmark(skill_dir)
         if not questions:
-            print("✗ --skip-build 但未找到可用的 benchmark.jsonl，请先生成")
+            print("✗ --skip-build 但未找到可用的 benchmark.json，请先生成")
             sys.exit(1)
-        print(f"\n[载入已有题库] {len(questions)} 道题（{(skill_dir / 'benchmark.jsonl').relative_to(PROJECT_ROOT)}）")
+        benchmark_path = skill_dir / "benchmark.json"
+        if not benchmark_path.is_file():
+            benchmark_path = skill_dir / "benchmark.jsonl"
+        print(f"\n[载入已有题库] {len(questions)} 道题（{benchmark_path.relative_to(PROJECT_ROOT)}）")
     else:
         questions = build_phase(skill_dir, skill_name, hermes_env,
                                 difficulty_counts=difficulty_counts)
@@ -1329,7 +1359,7 @@ def main():
 
     print("\n" + "=" * 60)
     print("✓ Benchmark 构建 + 跑分完成")
-    print(f"  题库（双格式）: compiled_skill/{skill_dir.name}/benchmark.jsonl + BENCHMARK.md")
+    print(f"  题库（双格式）: compiled_skill/{skill_dir.name}/benchmark.json + BENCHMARK.md")
     print(f"  跑分报告:       {RESULTS_DIR.relative_to(PROJECT_ROOT)}/REPORT.md + scores.json")
     print(f"  逐题详情:       {RESULTS_DIR.relative_to(PROJECT_ROOT)}/<题号>_detail.md")
     print("=" * 60)

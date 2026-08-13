@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -12,11 +13,47 @@ sys.path.insert(0, str(SKILLMINER_DIR))
 
 import run_benchmark as rb  # noqa: E402
 import run_pipeline as rp  # noqa: E402
+import benchmark_format as bf  # noqa: E402
+
+
+def _progressive_benchmark(skill_name="demo", query="测试情境"):
+    question = {
+        "id": "BM-01",
+        "name": "测试场景",
+        "input": query,
+        "gold": {"must_hit": [f"可核验要求 {index}" for index in range(1, 13)]},
+        "trajectory_requirements": ["先确认关键事实", "完成后核验结果"],
+    }
+    return bf.build_document(skill_name, [question], created_at="2026-08-13T00:00:00+00:00")
 
 
 def _point_pipeline_at(monkeypatch, root: Path) -> None:
     monkeypatch.setattr(rp, "PROJECT_ROOT", root)
     monkeypatch.setattr(rp, "RUN_HISTORY_DIR", root / "run_history")
+
+
+def test_progressive_benchmark_matches_skillgene_schema():
+    payload = _progressive_benchmark()
+    assert set(payload) == {
+        "schema_version", "dataset_format", "skill_name", "generation_id",
+        "candidate_revision", "source_session_ids", "datasets", "created_at",
+    }
+    dataset = payload["datasets"][0]
+    assert set(dataset) == {
+        "dataset_id", "dataset_format", "skill_name", "split", "name", "query",
+        "requirements", "trajectory_requirements", "checklist", "source_session_ids",
+        "evidence_window", "synthesis_mode", "requirement_count",
+        "minimum_requirement_target", "progressive_disclosure", "created_at",
+    }
+    assert payload["schema_version"] == 1
+    assert dataset["minimum_requirement_target"] == 12
+    assert dataset["progressive_disclosure"] == {
+        "enabled": True,
+        "initial_visibility": "query_only",
+        "batch_size": 4,
+        "stop_when": "all_checklist_items_satisfied",
+    }
+    assert bf.validate_document(payload, expected_skill_name="demo") == []
 
 
 def test_hermes_discovery_uses_project_venv_and_ignores_global_path(tmp_path, monkeypatch):
@@ -206,13 +243,10 @@ def test_final_artifact_contract_requires_valid_benchmark_pair(tmp_path, monkeyp
 
     missing = rp.validate_final_artifacts()
     assert any("BENCHMARK.md" in error for error in missing)
-    assert any("benchmark.jsonl" in error for error in missing)
+    assert any("benchmark.json" in error for error in missing)
 
     (out / "BENCHMARK.md").write_text("# Benchmark\n", encoding="utf-8")
-    (out / "benchmark.jsonl").write_text(
-        '{"id":"BM-01","input":"测试情境"}\n',
-        encoding="utf-8",
-    )
+    bf.write_document(out / "benchmark.json", _progressive_benchmark())
     assert rp.validate_final_artifacts() == []
 
 
@@ -227,9 +261,7 @@ def test_final_benchmark_builder_targets_isolated_workspace(tmp_path, monkeypatc
         assert skill_dir == out
         assert skill_name == "demo"
         assert hermes_env == {"TOKEN": "configured"}
-        (out / "benchmark.jsonl").write_text(
-            '{"id":"BM-01","input":"测试情境"}\n', encoding="utf-8"
-        )
+        bf.write_document(out / "benchmark.json", _progressive_benchmark())
         (out / "BENCHMARK.md").write_text("# Benchmark\n", encoding="utf-8")
         return [{"id": "BM-01", "input": "测试情境"}]
 
@@ -368,7 +400,9 @@ def test_benchmark_builder_limits_hermes_to_file_tools(tmp_path, monkeypatch):
         (skill_dir / "benchmark_bank.json").write_text(
             '[{"id":"BM-01","target_dimensions":["维度一"],'
             '"difficulty":"easy","input":"测试情境",'
-            '"gold":{"must_hit":["正确处理"]}}]',
+            '"gold":{"must_hit":['
+            + ",".join(f'"可核验要求 {index}"' for index in range(1, 13))
+            + ']},"trajectory_requirements":["先确认事实","完成后核验"]}]',
             encoding="utf-8",
         )
         return True, "done"
@@ -382,3 +416,9 @@ def test_benchmark_builder_limits_hermes_to_file_tools(tmp_path, monkeypatch):
     assert captured["args"][2] == "-z"
     assert "唯一允许的工具动作" in captured["args"][3]
     assert captured["timeout"] == 1500
+    payload = json.loads((skill_dir / "benchmark.json").read_text(encoding="utf-8"))
+    assert payload["dataset_format"] == "teamEvolver-progressive-test-v1"
+    assert payload["datasets"][0]["requirement_count"] == 12
+    assert payload["datasets"][0]["checklist"][0]["id"] == "R01"
+    assert not (skill_dir / "benchmark.jsonl").exists()
+    assert not (skill_dir / "benchmark_bank.json").exists()

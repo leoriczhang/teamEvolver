@@ -603,6 +603,46 @@ def create_knowledge_source(body):
     return {"ok": True, "source": _input_source_detail(source_dir)}
 
 
+def rename_knowledge_source(source_name, body):
+    """Rename one data source without overwriting an existing directory."""
+    if not isinstance(body, dict):
+        raise ValueError("重命名参数必须是对象")
+    source_dir = _knowledge_source_dir(f"data/{str(source_name or '').strip()}")
+    if not source_dir.is_dir():
+        raise FileNotFoundError(f"数据源不存在：{source_dir.name}")
+
+    raw_name = str(body.get("name") or body.get("source_name") or "").strip()
+    target_dir = _knowledge_source_dir(f"data/{raw_name}")
+    if target_dir.name == source_dir.name:
+        return {
+            "ok": True,
+            "previous_path": f"data/{source_dir.name}",
+            "source": _input_source_detail(source_dir),
+        }
+
+    conflict = next((
+        item for item in source_dir.parent.iterdir()
+        if item.is_dir()
+        and item != source_dir
+        and item.name.casefold() == target_dir.name.casefold()
+    ), None)
+    target_is_source = (
+        target_dir.exists()
+        and os.path.samefile(source_dir, target_dir)
+    )
+    if conflict is not None or (target_dir.exists() and not target_is_source):
+        existing_name = conflict.name if conflict is not None else target_dir.name
+        raise FileExistsError(f"数据源名称已存在：{existing_name}")
+
+    previous_path = f"data/{source_dir.name}"
+    source_dir.rename(target_dir)
+    return {
+        "ok": True,
+        "previous_path": previous_path,
+        "source": _input_source_detail(target_dir),
+    }
+
+
 def delete_knowledge_source(source_name):
     """Delete exactly one selected data source directory."""
     source_dir = _knowledge_source_dir(f"data/{str(source_name or '').strip()}")
@@ -1973,6 +2013,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "msg": str(e)}, code=400)
             except OSError as e:
                 self._send_json({"ok": False, "msg": f"合并数据源失败：{e}"}, code=500)
+        elif path.startswith("/api/sources/") and path.endswith("/rename"):
+            source_name = unquote(
+                path.removeprefix("/api/sources/").removesuffix("/rename").strip("/")
+            )
+            try:
+                self._send_json(rename_knowledge_source(source_name, body))
+            except FileNotFoundError as e:
+                self._send_json({"ok": False, "msg": str(e)}, code=404)
+            except FileExistsError as e:
+                self._send_json({"ok": False, "msg": str(e)}, code=409)
+            except ValueError as e:
+                self._send_json({"ok": False, "msg": str(e)}, code=400)
+            except OSError as e:
+                self._send_json({"ok": False, "msg": f"重命名数据源失败：{e}"}, code=500)
         elif path == "/api/jobs":
             try:
                 jobs = JOBS.create_jobs(body)
