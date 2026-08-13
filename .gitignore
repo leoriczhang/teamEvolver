@@ -26,6 +26,8 @@ external/LIFT/
 # Local runtime state and generated presentation artifacts
 .skillgene-sync.lock
 .skillgene-sync.stamp
+teamEvolver/skillminer/.knowledge_originals/
+teamEvolver/skillminer/.knowledge_locks/
 artifacts/
 ppt/
 skillgene/

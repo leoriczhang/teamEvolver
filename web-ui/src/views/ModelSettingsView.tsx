@@ -103,13 +103,11 @@ export default function ModelSettingsView({
   }
 
   return (
-    <div className="mx-auto max-w-[1080px] px-7 py-6">
-      <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-[22px] font-bold tracking-tight">模型配置</h1>
-          <div className="mt-1 text-xs text-muted-foreground">
-            配置 teamEvolver 在总结、判断、合并和生成技能时使用的模型。外部 Hermes 会话仍通过服务端接口上传，不在前端手工提交。
-          </div>
+    <div className="mx-auto max-w-[1080px] px-[22px] py-[22px]">
+      <div className="content-toolbar">
+        <div className="flex items-center gap-2 text-[12px] font-[700] text-[#464c5e]">
+          <Dot state={settings.api_key_present ? "on" : "off"} />
+          {settings.api_key_present ? "模型凭据已配置" : "模型凭据尚未配置"}
         </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>刷新</Button>
@@ -122,7 +120,7 @@ export default function ModelSettingsView({
         </div>
       </div>
 
-      <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(170px,1fr))] gap-3.5">
+      <div className="mb-[18px] grid grid-cols-[repeat(auto-fit,minmax(170px,1fr))] gap-3.5">
         <StatCard label="当前模型" value={settings.model || "未配置"} />
         <StatCard label="Base URL" value={settings.base_url || "未配置"} mono />
         <StatCard label="API Key" value={settings.api_key_present ? "已配置" : "未配置"} />

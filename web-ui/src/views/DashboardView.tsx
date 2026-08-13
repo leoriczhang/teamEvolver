@@ -242,16 +242,12 @@ export default function DashboardView({ active }: { active: boolean }) {
   const candPager = serverPager(candidatePage, candidateTotal, cands.length);
 
   return (
-    <div className="mx-auto max-w-[1200px] px-7 py-6">
+    <div className="mx-auto max-w-[1200px] px-[22px] py-[22px]">
       {/* header */}
-      <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="flex items-center gap-2.5 text-[22px] font-bold tracking-tight">
-            <Dot state={status ? (running ? "run" : "on") : "err"} /> 进化看板
-          </h1>
-          <div className="mt-1 text-xs text-muted-foreground">
-            会话进化流水线 · 待发布候选 · 技能版本
-          </div>
+      <div className="content-toolbar">
+        <div className="flex items-center gap-2 text-[12px] font-[700] text-[#464c5e]">
+          <Dot state={status ? (running ? "run" : "on") : "err"} />
+          {status ? (running ? "进化任务运行中" : "进化服务空闲") : "进化服务不可达"}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <ConnBadge storage={storage} />
@@ -263,7 +259,7 @@ export default function DashboardView({ active }: { active: boolean }) {
       </div>
 
       {/* stats */}
-      <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">
+      <div className="mb-[18px] grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">
         <StatCard label="运行状态" value={status ? (running ? "进化中" : "空闲") : "不可达"} />
         <StatCard label="排队会话" value={status ? status.pending_sessions : "—"} />
         <StatCard label="已注册技能" value={status ? status.registered_skills : "—"} />
@@ -311,7 +307,7 @@ export default function DashboardView({ active }: { active: boolean }) {
                   return (
                     <tr key={`${sid}-${i}`}>
                       <td
-                        className="link max-w-[360px] truncate border-b border-line px-4 py-2.5 align-top text-[#2563eb]"
+                        className="link max-w-[360px] truncate border-b border-line px-4 py-2.5 align-top text-accent"
                         title={"点击查看会话内容：" + (r.title || "")}
                         onClick={() => setSessModal({ sid, tab: "detail" })}
                       >

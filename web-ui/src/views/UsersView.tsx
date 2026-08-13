@@ -144,7 +144,7 @@ export default function UsersView({ active }: { active: boolean }) {
   }
 
   return (
-    <div className="mx-auto max-w-[1200px] px-7 py-6">
+    <div className="mx-auto max-w-[1200px] px-[22px] py-[22px]">
       <div className="mb-5 flex items-center justify-end gap-2">
         <Button
           variant="outline"

@@ -452,7 +452,7 @@ export default function SkillLabView({
   const completedCount = runs.filter((run) => run.status === "completed").length;
 
   return (
-    <div className="mx-auto max-w-[1440px] px-7 py-6">
+    <div className="mx-auto max-w-[1440px] px-[22px] py-[22px]">
       <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">
         <StatCard label="当前 Skill" value={skillName || "未选择"} mono />
         <StatCard label="手工数据集" value={manualCount} />

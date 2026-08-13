@@ -216,13 +216,10 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
   const candPager = usePagedItems(cands);
 
   return (
-    <div className="mx-auto max-w-[1200px] px-7 py-6">
-      <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-[22px] font-bold tracking-tight">候选评审</h1>
-          <div className="mt-1 text-xs text-muted-foreground">
-            集中处理待发布技能候选，也可回看已发布或已拒绝的历史候选。
-          </div>
+    <div className="mx-auto max-w-[1200px] px-[22px] py-[22px]">
+      <div className="content-toolbar">
+        <div className="text-[12px] font-[700] text-[#464c5e]">
+          {isHistory ? "正在查看已处理候选" : "正在查看待处理候选"}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button
@@ -245,7 +242,7 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
         </div>
       </div>
 
-      <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">
+      <div className="mb-[18px] grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">
         <StatCard label={isHistory ? "历史候选" : "待评审候选"} value={cands.length} />
         <StatCard label={isHistory ? "已发布" : "已完成评估"} value={isHistory ? published : evaluated} />
         <StatCard label={isHistory ? "已拒绝" : "指标改善"} value={isHistory ? rejected : recommended} />

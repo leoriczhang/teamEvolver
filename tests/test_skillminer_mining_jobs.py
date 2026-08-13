@@ -5,13 +5,12 @@ import sys
 import time
 from pathlib import Path
 
-
 SKILLMINER_ROOT = Path(__file__).resolve().parents[1] / "teamEvolver" / "skillminer"
 if str(SKILLMINER_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILLMINER_ROOT))
 
-from mining_jobs import MiningJobManager  # noqa: E402
 import benchmark_format as bf  # noqa: E402
+from mining_jobs import MiningJobManager  # noqa: E402
 
 
 def _progressive_benchmark_json() -> str:
@@ -102,6 +101,32 @@ def test_parallel_jobs_are_isolated_persisted_and_expose_artifacts(tmp_path):
     restored = MiningJobManager(tmp_path, max_parallel=2)
     assert {job["job_id"] for job in restored.list_jobs()} == set(job_ids)
     assert all(restored.get_job(job_id)["status"] == "succeeded" for job_id in job_ids)
+
+
+def test_loading_manager_without_start_is_read_only(tmp_path):
+    _prepare_project(tmp_path)
+    job_id = "mine-existing-waiting"
+    job_dir = tmp_path / "mining_jobs" / job_id
+    checkpoint_dir = job_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    job = {
+        "job_id": job_id,
+        "name": "existing waiting job",
+        "status": "waiting",
+        "created_at": "2026-08-13T00:00:00+00:00",
+        "updated_at": "2026-08-13T00:00:00+00:00",
+        "workspace": f"mining_jobs/{job_id}/workspace",
+    }
+    (job_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    pending = {"id": "checkpoint-existing", "questions": []}
+    pending_path = checkpoint_dir / "pending.json"
+    pending_path.write_text(json.dumps(pending), encoding="utf-8")
+
+    manager = MiningJobManager(tmp_path, start_immediately=False)
+
+    assert manager.get_job(job_id)["status"] == "waiting"
+    assert json.loads((job_dir / "job.json").read_text(encoding="utf-8"))["status"] == "waiting"
+    assert pending_path.is_file()
 
 
 def test_zero_exit_with_missing_benchmark_is_not_marked_succeeded(tmp_path):

@@ -175,7 +175,7 @@ export default function SkillsView({
   const selectedTeamNames = Array.from(selectedTeam);
 
   return (
-    <div className="mx-auto max-w-[1200px] px-7 py-6">
+    <div className="mx-auto max-w-[1200px] px-[22px] py-[22px]">
       <div className="mb-5 flex flex-wrap items-center justify-end gap-2">
         <select
             value={activeUserId}

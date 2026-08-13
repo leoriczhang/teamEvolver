@@ -406,19 +406,21 @@ export default function EvalView({
 
   return (
     <div>
-      <div className="border-b border-line bg-surface px-7 py-5">
-        <h1 className="flex items-center gap-2.5 text-[22px] font-bold tracking-tight">
-          LIFT 评测中心
-          <Pill tone="purple">Suite v1</Pill>
-          {running && <Pill tone="blue">运行中</Pill>}
-        </h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          将 SkillMiner 题库转换为 LIFT Suite，经人工审核后发布并运行 warmup → holdout baseline/evolved 对照评测。
-        </p>
+      <div className="page-header">
+        <div>
+          <h1 className="flex items-center gap-2 text-[20px] font-[800] leading-tight">
+            LIFT 评测中心
+            <Pill tone="purple">Suite v1</Pill>
+            {running && <Pill tone="blue">运行中</Pill>}
+          </h1>
+          <p className="mt-1 text-[12px] leading-relaxed text-[#626b80]">
+            将 SkillMiner 题库转换为 LIFT Suite，经人工审核后发布并运行 warmup → holdout baseline/evolved 对照评测。
+          </p>
+        </div>
       </div>
 
-      <div className="px-7 py-6">
-        <div className="mb-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <div className="px-[22px] py-[22px]">
+        <div className="mb-[18px] grid grid-cols-2 gap-4 lg:grid-cols-4">
           <StatCard label="LIFT 工作区" value={integration?.checkout_ready ? "已就绪" : "未配置"} />
           <StatCard label="待审核草稿" value={String(drafts.filter((item) => item.state === "draft").length)} />
           <StatCard label="已发布 Suite" value={String(drafts.filter((item) => item.state === "published").length)} />

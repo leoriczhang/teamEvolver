@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Panel, StatCard, Pill, Dot } from "@/components/common";
+import { PageHeader, Panel, StatCard, Pill, Dot, type PillTone } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -41,38 +41,45 @@ import {
  * 按 `page` 渲染对应页面。
  *
  * 后端已接入：teamEvolver 服务把内嵌的 SkillMiner 控制台（子进程）反向代理到
- * ``/api/mining/*``。本视图通过 ``/api/mining/config`` 管理数据源，并通过
+ * ``/api/mining/*``。本视图通过 ``/api/mining/config`` 管理知识源，并通过
  * ``/api/mining/jobs`` 创建、调度和跟踪持久化挖掘任务。
  */
 
 export type MinePage = "overview" | "sources" | "jobs" | "model";
 
-const PAGE_META: Record<MinePage, { title: string; desc: string }> = {
-  overview: {
-    title: "挖掘总览",
-    desc: "SkillMiner 文档挖掘的整体进度、近期动态与流水线运行状态。",
-  },
-  sources: {
-    title: "知识源",
-    desc: "上传并管理用于挖掘的领域文档，然后选择要进入流水线的知识源。",
-  },
-  jobs: {
-    title: "挖掘任务",
-    desc: "统一查看排队中、挖掘中和已完成的任务；运行中查看流水线，完成后查看产物。",
-  },
-  model: {
-    title: "挖掘模型",
-    desc: "配置 SkillMiner 在样本构建、语义发现、技能编译和 Benchmark 生成中使用的模型。",
-  },
+const PAGE_META: Record<MinePage, { title: string; description: string }> = {
+  overview: { title: "挖掘总览", description: "查看知识源、挖掘任务与产物编译状态，快速掌握 SkillMiner 当前工作负载。" },
+  sources: { title: "知识源", description: "管理用于技能挖掘的文档目录，支持上传、新建、重命名、合并与删除。" },
+  jobs: { title: "挖掘任务", description: "并行创建和跟踪挖掘任务；任务完成后可审核、编辑产物并提交进化。" },
+  model: { title: "挖掘模型", description: "配置 SkillMiner 使用的 OpenAI 兼容模型，并检查当前连接状态。" },
 };
 
 // ---- Backend types (subset of SkillMiner /api/config & SSE events) -------- //
+
+type SourceIngestionStatusValue = "empty" | "processing" | "ready" | "failed";
+
+interface SourceIngestionStatus {
+  schema_version: number;
+  source_path: string;
+  batch_id: string;
+  status: SourceIngestionStatusValue;
+  stage: "idle" | "validating" | "converting" | "writing" | "merging" | "complete" | "failed" | string;
+  progress: number;
+  processed_files: number;
+  total_files: number;
+  current_file: string;
+  error: string;
+  started_at: string;
+  updated_at: string;
+  finished_at: string;
+}
 
 interface InputSource {
   path: string;
   document_count: number;
   total_bytes: number;
   ready: boolean;
+  ingestion?: SourceIngestionStatus;
 }
 
 interface CompiledSkillDetail {
@@ -223,11 +230,16 @@ const emptyMiningModelSettings = (): MiningModelSettings => ({
 
 interface KnowledgeUploadResult {
   ok: boolean;
+  batch_id: string;
   written: Array<{
     name: string;
     path: string;
+    original_name: string;
     size_bytes: number;
+    normalized_size_bytes: number;
     renamed: boolean;
+    converted: boolean;
+    source_format: string;
     source_encoding: string;
   }>;
   source: InputSource;
@@ -271,24 +283,24 @@ function useMining(active: boolean) {
     }
   }, []);
 
-  const refreshConfig = useCallback(async () => {
+  const refreshConfig = useCallback(async (notifyFailure = true) => {
     try {
       const next = await api<MiningConfig>("/api/mining/config");
       setConfig(next);
       await refreshJobs(false);
       return next;
     } catch (e: any) {
-      toastErr("加载挖掘配置失败", e.message);
+      if (notifyFailure) toastErr("加载挖掘配置失败", e.message);
       return null;
     }
   }, [refreshJobs]);
 
   useEffect(() => {
     if (!active) return;
-    refreshConfig();
-    const timer = window.setInterval(() => refreshJobs(false), 2000);
+    refreshConfig(true);
+    const timer = window.setInterval(() => refreshConfig(false), 2000);
     return () => window.clearInterval(timer);
-  }, [active, refreshConfig, refreshJobs]);
+  }, [active, refreshConfig]);
 
   return { config, jobs, jobSummary, refreshConfig, refreshJobs };
 }
@@ -312,6 +324,7 @@ export default function MiningView({
   const [taskName, setTaskName] = useState("");
   const [starting, setStarting] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<SourceIngestionStatus | null>(null);
   const [selectedInputDir, setSelectedInputDir] = useState("");
   const [uploadTarget, setUploadTarget] = useState("");
   const [newUploadSourceName, setNewUploadSourceName] = useState("");
@@ -413,6 +426,9 @@ export default function MiningView({
   const minRounds = config?.max_rounds_range?.[0] ?? 1;
   const inputSources = config?.input_sources ?? [];
   const selectedSource = inputSources.find((source) => source.path === inputDir);
+  const uploadTargetSource = inputSources.find((source) => source.path === uploadTarget);
+  const selectedIngestion = selectedSource ? sourceIngestion(selectedSource) : null;
+  const uploadTargetIngestion = uploadTargetSource ? sourceIngestion(uploadTargetSource) : null;
   const jobCounts = {
     total: mining.jobs.length,
     running: mining.jobs.filter((job) => isActiveJob(job.status) && job.status !== "queued" && job.status !== "preparing").length,
@@ -420,16 +436,16 @@ export default function MiningView({
     completed: mining.jobs.filter((job) => job.status === "succeeded").length,
     failed: mining.jobs.filter((job) => job.status === "failed" || job.status === "interrupted" || job.status === "stopped").length,
   };
-  const activeJob = mining.jobs.find((job) => job.status === "running" || job.status === "stopping")
-    || mining.jobs.find((job) => job.status === "waiting")
-    || mining.jobs.find((job) => job.status === "queued" || job.status === "preparing");
-  const running = Boolean(activeJob);
-  const overviewPhase = activeJob?.phase || { step1: "idle", step2: "idle", step3: "idle" };
-  const stateLabel = jobCounts.running
-    ? `${jobCounts.running} 个运行中`
-    : jobCounts.queued
-      ? `${jobCounts.queued} 个排队中`
-      : "当前无运行任务";
+  const sourceDocumentTotal = inputSources.reduce((sum, source) => sum + source.document_count, 0);
+  const pipelineJobs = mining.jobs.filter(
+    (job) => job.status === "running" || job.status === "waiting" || job.status === "stopping"
+  );
+  const recentTaskCount = Math.min(5, jobCounts.total);
+  const running = jobCounts.running > 0 || jobCounts.queued > 0;
+  const stateLabel = [
+    jobCounts.running ? `${jobCounts.running} 个运行中` : "",
+    jobCounts.queued ? `${jobCounts.queued} 个排队中` : "",
+  ].filter(Boolean).join(" · ") || "当前无运行任务";
   const stateTone = jobCounts.running ? "blue" : jobCounts.queued ? "amber" : "gray";
   const filteredJobs = mining.jobs.filter((job) => {
     if (jobFilter === "active") return isActiveJob(job.status);
@@ -445,7 +461,7 @@ export default function MiningView({
 
   function validateSourceRename(source: InputSource, value: string) {
     const name = value.trim();
-    if (!name) return "数据源名称不能为空";
+    if (!name) return "知识源名称不能为空";
     if (name.startsWith(".") || name.length > 80 || name.includes("/") || name.includes("\\")) {
       return "名称不能以 . 开头、超过 80 个字符或包含 /、\\";
     }
@@ -453,7 +469,7 @@ export default function MiningView({
     const duplicate = inputSources.find((item) => (
       item.path !== source.path && sourceDisplayName(item.path).toLocaleLowerCase() === normalized
     ));
-    return duplicate ? `已存在同名数据源：${sourceDisplayName(duplicate.path)}` : "";
+    return duplicate ? `已存在同名知识源：${sourceDisplayName(duplicate.path)}` : "";
   }
 
   function beginSourceRename(source: InputSource) {
@@ -512,53 +528,109 @@ export default function MiningView({
       setRenamingSourcePath("");
       setRenameSourceName("");
       toastOk(
-        "数据源已重命名",
+        "知识源已重命名",
         `${sourceDisplayName(source.path)} → ${sourceDisplayName(response.source.path)}`
       );
     } catch (e: any) {
       setRenameSourceError(e.message);
-      toastErr("重命名数据源失败", e.message);
+      toastErr("重命名知识源失败", e.message);
     } finally {
       setRenamePendingPath("");
     }
   }
 
   async function uploadKnowledgeFiles(list: FileList) {
-    if (!list.length) return;
+    // FileList belongs to the hidden <input>. DropZone clears that input as
+    // soon as this callback returns, so keep a stable snapshot before any
+    // await (notably before a new source would otherwise be created).
+    const selectedFiles = Array.from(list);
+    if (!selectedFiles.length) return;
     setUploading(true);
+    let progressTimer: number | undefined;
     try {
       let target = uploadTarget || inputDir;
+      let createSource = false;
       if (target === "__new__") {
         const name = newUploadSourceName.trim();
-        if (!name) throw new Error("请输入新数据源名称");
-        const created = await api<{ source: InputSource }>("/api/mining/sources", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name }),
-        });
-        target = created.source.path;
+        if (!name) throw new Error("请输入新知识源名称");
+        const duplicate = inputSources.some(
+          (source) => sourceDisplayName(source.path).toLocaleLowerCase() === name.toLocaleLowerCase()
+        );
+        if (duplicate) throw new Error(`知识源已存在：${name}`);
+        target = `data/${name}`;
+        createSource = true;
       }
-      const files = await Promise.all(Array.from(list).map(async (file) => ({
+      const batchId = globalThis.crypto?.randomUUID?.() || `upload-${Date.now()}`;
+      setUploadProgress({
+        schema_version: 1,
+        source_path: target,
+        batch_id: batchId,
+        status: "processing",
+        stage: "validating",
+        progress: 0,
+        processed_files: 0,
+        total_files: selectedFiles.length,
+        current_file: "",
+        error: "",
+        started_at: "",
+        updated_at: "",
+        finished_at: "",
+      });
+      const files = await Promise.all(selectedFiles.map(async (file) => ({
         name: file.name,
         content_b64: await fileToB64(file),
       })));
+      let pollInFlight = false;
+      const pollProgress = async () => {
+        if (pollInFlight) return;
+        pollInFlight = true;
+        try {
+          const response = await api<{ source: InputSource }>(
+            `/api/mining/sources/status?source_path=${encodeURIComponent(target)}`
+          );
+          const ingestion = response.source.ingestion;
+          if (ingestion?.batch_id === batchId) {
+            setUploadProgress(ingestion);
+          }
+        } catch {
+          // The upload request remains authoritative; a transient polling
+          // failure should not turn a successful conversion into an error.
+        } finally {
+          pollInFlight = false;
+        }
+      };
+      progressTimer = window.setInterval(pollProgress, 400);
       const result = await api<KnowledgeUploadResult>("/api/mining/sources/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source_path: target, files }),
+        body: JSON.stringify({
+          source_path: target,
+          batch_id: batchId,
+          create_source: createSource,
+          files,
+        }),
       });
+      if (result.source.ingestion) setUploadProgress(result.source.ingestion);
       const renamed = result.written.filter((file) => file.renamed).length;
+      const converted = result.written.filter((file) => file.converted).length;
+      const details = [
+        converted ? `${converted} 个文件已转为 Markdown` : "",
+        renamed ? `${renamed} 个重名文件已保留为新副本` : "",
+      ].filter(Boolean).join("；");
       toastOk(
         `已上传 ${result.written.length} 个文档`,
-        renamed ? `${renamed} 个重名文件已自动保留为新副本` : `已写入 ${sourceDisplayName(result.source.path)}`
+        details || `已写入 ${sourceDisplayName(result.source.path)}`
       );
       await mining.refreshConfig();
       setUploadTarget(result.source.path);
       setNewUploadSourceName("");
     } catch (e: any) {
+      await mining.refreshConfig(false);
       toastErr("上传知识文档失败", e.message);
     } finally {
+      if (progressTimer) window.clearInterval(progressTimer);
       setUploading(false);
+      setUploadProgress(null);
     }
   }
 
@@ -602,9 +674,9 @@ export default function MiningView({
       setUploadTarget(response.source.path);
       setCreateSourceOpen(false);
       setCreateSourceName("");
-      toastOk("数据源已创建", sourceDisplayName(response.source.path));
+      toastOk("知识源已创建", sourceDisplayName(response.source.path));
     } catch (e: any) {
-      toastErr("创建数据源失败", e.message);
+      toastErr("创建知识源失败", e.message);
     } finally {
       setSourceMutating(false);
     }
@@ -618,9 +690,9 @@ export default function MiningView({
       await api(`/api/mining/sources/${encodeURIComponent(name)}`, { method: "DELETE" });
       setDeleteSource(null);
       await mining.refreshConfig();
-      toastOk("数据源已删除", sourceDisplayName(deleteSource.path));
+      toastOk("知识源已删除", sourceDisplayName(deleteSource.path));
     } catch (e: any) {
-      toastErr("删除数据源失败", e.message);
+      toastErr("删除知识源失败", e.message);
     } finally {
       setSourceMutating(false);
     }
@@ -640,9 +712,9 @@ export default function MiningView({
       setMergeSourceOpen(false);
       setMergeSourcePaths([]);
       setMergeTargetName("");
-      toastOk("数据源已合并", `${sourceDisplayName(response.source.path)} · ${response.copied.length} 个文件`);
+      toastOk("知识源已合并", `${sourceDisplayName(response.source.path)} · ${response.copied.length} 个文件`);
     } catch (e: any) {
-      toastErr("合并数据源失败", e.message);
+      toastErr("合并知识源失败", e.message);
     } finally {
       setSourceMutating(false);
     }
@@ -872,11 +944,6 @@ export default function MiningView({
                       </span>
                     )}
                   </div>
-                  <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
-                    {job.pending_checkpoint
-                      ? "任务正在等待你补充关键规则、准确数值、适用边界或例外。"
-                      : "查看本次挖掘识别出的关键知识缺口。"}
-                  </p>
                 </div>
               </div>
               <Button
@@ -1035,14 +1102,7 @@ export default function MiningView({
         ) : (
           <div className="rounded-xl border border-border bg-surface p-4">
             <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <div className="text-[13px] font-bold">任务产物</div>
-                {job.status === "succeeded" && (
-                  <div className="mt-1 text-[10.5px] text-muted-foreground">
-                    点击文件可预览并人工修订；保存后的版本将作为提交进化候选的源文件。
-                  </div>
-                )}
-              </div>
+              <div className="text-[13px] font-bold">任务产物</div>
               <div className="flex items-center gap-2">
                 {job.finished_at && <span className="text-[10px] text-muted-soft">完成于 {formatDateTime(job.finished_at)}</span>}
                 {job.status === "succeeded" && (
@@ -1094,93 +1154,141 @@ export default function MiningView({
 
   return (
     <div>
-      {/* Page header */}
-      <div className="border-b border-line bg-surface px-7 py-5">
-        <h1 className="flex items-center gap-2.5 text-[22px] font-bold tracking-tight">
-          {meta.title}
-          <Pill tone="purple">SkillMiner</Pill>
-          {running && <Pill tone="blue">{jobCounts.running ? `${jobCounts.running} 个运行中` : `${jobCounts.queued} 个排队中`}</Pill>}
-        </h1>
-        <p className="mt-1 text-sm text-muted-foreground">{meta.desc}</p>
-      </div>
+      <PageHeader
+        title={meta.title}
+        description={meta.description}
+        badge="SkillMiner"
+        actions={running && <Pill tone="blue">{jobCounts.running ? `${jobCounts.running} 个运行中` : `${jobCounts.queued} 个排队中`}</Pill>}
+      />
 
       {/* ---- 总览 ---- */}
       {page === "overview" && (
-        <div className="px-7 py-6">
-          <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-4">
-            <StatCard label="累计挖掘任务" value={config ? String(jobCounts.total) : "—"} />
-            <StatCard label="输入文档" value={config ? String(inputSources.reduce((sum, source) => sum + source.document_count, 0)) : "—"} />
-            <StatCard label="运行状态" value={stateLabel} />
-            <StatCard label="当前轮次" value={activeJob?.current_round ? `${activeJob.current_round} / ${activeJob.max_rounds}` : "—"} />
+        <div className="px-[22px] py-[22px]">
+          <div className="mb-[18px] grid grid-cols-2 gap-4 md:grid-cols-4">
+            <StatCard label="知识源" value={config ? String(inputSources.length) : "—"} />
+            <StatCard label="文档总数" value={config ? String(sourceDocumentTotal) : "—"} />
+            <StatCard label="总任务" value={config ? String(jobCounts.total) : "—"} />
+            <StatCard label="任务状态" value={stateLabel} />
           </div>
 
-          <div className="grid gap-6 lg:grid-cols-2">
-            <Panel title="流水线状态" extra={<Pill tone={stateTone as any}>{stateLabel}</Pill>}>
-              <div className="space-y-3 p-4">
-                {STEP_META.map((s) => {
-                  const st = overviewPhase[s.key];
-                  return (
-                    <div key={s.key} className="flex items-center gap-3">
-                      <span
-                        className={cn(
-                          "grid size-7 shrink-0 place-items-center rounded-lg text-[13px] font-extrabold text-white",
-                          st === "idle" ? "bg-muted-soft" : "bg-accent"
-                        )}
-                      >
-                        {s.n}
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <div className="text-[13px] font-semibold">{s.title}</div>
-                        <div className="mono text-[11px] text-muted-soft">{s.sub}</div>
-                      </div>
-                      {st === "active" && <Pill tone="blue">进行中</Pill>}
-                      {st === "done" && <CheckCircle2 className="size-4 text-success" />}
-                    </div>
-                  );
-                })}
+          <Panel
+            title="任务流水线"
+            count={pipelineJobs.length ? `${pipelineJobs.length} 个活动任务` : undefined}
+            extra={<Pill tone={stateTone as any}>{stateLabel}</Pill>}
+          >
+            {pipelineJobs.length === 0 ? (
+              <div className="p-8 text-center text-sm text-muted-soft">
+                {jobCounts.queued ? `${jobCounts.queued} 个任务等待调度` : "当前没有运行中的挖掘任务。"}
               </div>
-            </Panel>
-
-            <Panel title="近期任务" count={mining.jobs.length ? `${mining.jobs.length} 个` : undefined}>
-              {mining.jobs.length === 0 ? (
-                <div className="p-6 text-center text-sm text-muted-soft">暂无挖掘任务。</div>
-              ) : (
-                <ul className="divide-y divide-line">
-                  {mining.jobs.slice(0, 5).map((job) => (
-                    <li key={job.job_id} className="flex items-center justify-between gap-3 px-4 py-3 text-[13px]">
-                      <button
-                        type="button"
-                        className="min-w-0 flex-1 truncate text-left font-semibold hover:text-accent"
-                        onClick={() => {
-                          setSelectedJobId(job.job_id);
-                          setSelectedJob(job);
-                          onNavigate?.("jobs");
-                        }}
-                      >
-                        {job.name}
-                      </button>
+            ) : (
+              <div className="max-h-[440px] space-y-3 overflow-auto p-4">
+                {pipelineJobs.map((job) => (
+                  <div key={job.job_id} className="rounded-lg border border-border bg-background p-3.5">
+                    <div className="mb-3 flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <button
+                          type="button"
+                          className="block max-w-full truncate text-left text-[13px] font-bold hover:text-accent"
+                          onClick={() => {
+                            setSelectedJobId(job.job_id);
+                            setSelectedJob(job);
+                            onNavigate?.("jobs");
+                          }}
+                        >
+                          {job.name}
+                        </button>
+                        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10.5px] text-muted-foreground">
+                          <span>{sourceDisplayName(job.input_dir)}</span>
+                          <span>第 {Math.max(1, job.current_round || 1)} / {job.max_rounds} 轮</span>
+                        </div>
+                      </div>
                       <Pill tone={jobStatusMeta(job.status).tone as any}>{jobStatusMeta(job.status).label}</Pill>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </Panel>
-          </div>
+                    </div>
+                    <div className="grid gap-2 sm:grid-cols-3">
+                      {STEP_META.map((step) => {
+                        const stepState = job.phase?.[step.key] || "idle";
+                        return (
+                          <div
+                            key={step.key}
+                            className={cn(
+                              "flex items-center gap-2 rounded-md border px-2.5 py-2",
+                              stepState === "active"
+                                ? "border-accent/50 bg-accent-soft"
+                                : stepState === "done"
+                                  ? "border-success/30 bg-success/5"
+                                  : "border-border bg-surface-subtle"
+                            )}
+                          >
+                            <span className={cn(
+                              "grid size-5 shrink-0 place-items-center rounded text-[10px] font-bold text-white",
+                              stepState === "idle" ? "bg-muted-soft" : "bg-accent"
+                            )}>
+                              {step.n}
+                            </span>
+                            <span className="min-w-0 flex-1 truncate text-[11px] font-semibold">{step.title}</span>
+                            <span className={cn(
+                              "shrink-0 text-[10px]",
+                              stepState === "active" ? "text-accent" : stepState === "done" ? "text-success" : "text-muted-soft"
+                            )}>
+                              {pipelineStepLabel(stepState)}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+                {jobCounts.queued > 0 && (
+                  <div className="rounded-lg border border-dashed border-border px-3 py-2 text-center text-[11px] text-muted-foreground">
+                    另有 {jobCounts.queued} 个任务等待调度
+                  </div>
+                )}
+              </div>
+            )}
+          </Panel>
+
+          <Panel title="近期任务">
+            {mining.jobs.length === 0 ? (
+              <div className="p-6 text-center text-sm text-muted-soft">暂无挖掘任务。</div>
+            ) : (
+              <ul className="divide-y divide-line">
+                {mining.jobs.slice(0, recentTaskCount).map((job) => (
+                  <li key={job.job_id} className="flex items-center justify-between gap-3 px-4 py-3 text-[13px]">
+                    <button
+                      type="button"
+                      className="min-w-0 flex-1 truncate text-left font-semibold hover:text-accent"
+                      onClick={() => {
+                        setSelectedJobId(job.job_id);
+                        setSelectedJob(job);
+                        onNavigate?.("jobs");
+                      }}
+                    >
+                      {job.name}
+                    </button>
+                    <span className="hidden shrink-0 text-[11px] text-muted-foreground sm:block">
+                      {sourceDisplayName(job.input_dir)}
+                    </span>
+                    <Pill tone={jobStatusMeta(job.status).tone as any}>{jobStatusMeta(job.status).label}</Pill>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Panel>
         </div>
       )}
 
       {/* ---- 知识源 ---- */}
       {page === "sources" && (
-        <div className="space-y-6 px-7 py-6">
+        <div className="space-y-[18px] px-[22px] py-[22px]">
           <Panel
             title="上传文档"
             extra={
               <div className="flex items-center gap-2">
                 <Button size="sm" variant="outline" onClick={() => setCreateSourceOpen(true)}>
-                  <FolderPlus className="size-3.5" /> 新建数据源
+                  <FolderPlus className="size-3.5" /> 新建知识源
                 </Button>
                 <Button size="sm" variant="outline" disabled={inputSources.length < 2} onClick={() => setMergeSourceOpen(true)}>
-                  <FolderInput className="size-3.5" /> 合并数据源
+                  <FolderInput className="size-3.5" /> 合并知识源
                 </Button>
               </div>
             }
@@ -1189,8 +1297,13 @@ export default function MiningView({
               <div>
                 <DropZone
                   multiple
-                  accept=".md,.markdown,.txt,.rst,.csv,.tsv,.json,.jsonl,.yaml,.yml,.xml,.html,.htm"
-                  disabled={uploading || !config || (uploadTarget === "__new__" && !newUploadSourceName.trim())}
+                  accept=".md,.markdown,.txt,.docx,.xlsx,.pdf"
+                  disabled={
+                    uploading
+                    || !config
+                    || uploadTargetIngestion?.status === "processing"
+                    || (uploadTarget === "__new__" && !newUploadSourceName.trim())
+                  }
                   onFiles={uploadKnowledgeFiles}
                   label={
                     uploading
@@ -1199,9 +1312,29 @@ export default function MiningView({
                   }
                 />
                 <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
-                  支持 Markdown、TXT、RST、CSV/TSV、JSON/JSONL、YAML、XML 和 HTML；
+                  支持 Markdown、TXT、Word（.docx）、Excel（.xlsx）和 PDF，上传后统一转为 Markdown；扫描版 PDF 需要先完成 OCR。
                   单文件不超过 10 MB，单次最多 50 个、合计不超过 40 MB。
                 </p>
+                {uploading && uploadProgress && (
+                  <div className="mt-3 rounded-lg border border-border bg-background/70 p-3">
+                    <div className="mb-2 flex items-center justify-between gap-3 text-[11px] font-semibold">
+                      <span className="min-w-0 truncate">
+                        {ingestionStageLabel(uploadProgress.stage)}
+                        {uploadProgress.current_file ? ` · ${uploadProgress.current_file}` : ""}
+                      </span>
+                      <span className="mono shrink-0 text-accent">{uploadProgress.progress}%</span>
+                    </div>
+                    <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-accent transition-[width] duration-300"
+                        style={{ width: `${uploadProgress.progress}%` }}
+                      />
+                    </div>
+                    <div className="mt-1.5 text-[10.5px] text-muted-foreground">
+                      {uploadProgress.processed_files} / {uploadProgress.total_files} 个文件
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="rounded-lg border border-border bg-background/60 p-3.5">
@@ -1218,14 +1351,14 @@ export default function MiningView({
                   {(config?.input_dirs ?? [inputDir]).map((dir) => (
                     <option key={dir} value={dir}>{sourceDisplayName(dir)}</option>
                   ))}
-                  <option value="__new__">＋ 上传为新数据源</option>
+                  <option value="__new__">＋ 上传为新知识源</option>
                 </select>
                 {uploadTarget === "__new__" && (
                   <Input
                     className="mt-2"
                     value={newUploadSourceName}
                     onChange={(event) => setNewUploadSourceName(event.target.value)}
-                    placeholder="新数据源名称，如 abc"
+                    placeholder="新知识源名称，如 abc"
                     maxLength={80}
                   />
                 )}
@@ -1238,14 +1371,14 @@ export default function MiningView({
           </Panel>
 
           <Panel
-            title="数据源目录"
+            title="知识源目录"
             count={config ? `${inputSources.length} 个目录` : undefined}
           >
             {!config ? (
               <div className="p-6 text-center text-sm text-muted-soft">加载中…</div>
             ) : inputSources.length === 0 ? (
               <div className="p-6 text-center text-sm text-muted-soft">
-                尚无数据源。请先新建数据源并上传待挖掘文档。
+                尚无知识源。请先新建知识源并上传待挖掘文档。
               </div>
             ) : (
               <table className="w-full border-collapse text-[13px]">
@@ -1279,11 +1412,10 @@ export default function MiningView({
                                   cancelSourceRename(source, event.currentTarget);
                                 }
                               }}
-                              disabled={Boolean(renamePendingPath)}
-                              aria-label={`重命名数据源 ${sourceDisplayName(source.path)}`}
+                              disabled={Boolean(renamePendingPath) || sourceIngestion(source).status === "processing"}
+                              aria-label={`重命名知识源 ${sourceDisplayName(source.path)}`}
                               aria-invalid={renamingSourcePath === source.path && Boolean(renameSourceError)}
                               aria-describedby={renamingSourcePath === source.path && renameSourceError ? `rename-error-${encodeURIComponent(source.path)}` : undefined}
-                              title="点击名称直接修改"
                               className={cn(
                                 "mono h-7 w-full rounded-md border border-transparent bg-transparent py-1 pl-1 pr-7 text-[13px] font-semibold outline-none transition-colors",
                                 "hover:border-input hover:bg-background focus:border-ring focus:bg-background focus:ring-2 focus:ring-ring/20",
@@ -1298,17 +1430,35 @@ export default function MiningView({
                             {renameSourceError}
                           </div>
                         )}
-                        <div className="mt-0.5 text-[11px] text-muted-foreground">
-                          {renamePendingPath === source.path
-                            ? "正在保存新名称…"
-                            : `${source.path === config.default_input_dir ? "默认挖掘输入" : "候选输入"} · 点击名称直接修改`}
-                        </div>
+                        {(renamePendingPath === source.path || source.path === config.default_input_dir) && (
+                          <div className="mt-0.5 text-[11px] text-muted-foreground">
+                            {renamePendingPath === source.path ? "正在保存新名称…" : "默认挖掘输入"}
+                          </div>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-muted-foreground">
                         {source.document_count} 个 · {formatBytes(source.total_bytes)}
                       </td>
                       <td className="px-4 py-3">
-                        <Pill tone={source.ready ? "green" : "amber"}>{source.ready ? "可挖掘" : "空目录"}</Pill>
+                        <Pill tone={sourceStatusMeta(source).tone}>{sourceStatusMeta(source).label}</Pill>
+                        {sourceIngestion(source).status === "processing" && (
+                          <div className="mt-2 w-28">
+                            <div className="h-1 overflow-hidden rounded-full bg-muted">
+                              <div
+                                className="h-full rounded-full bg-accent transition-[width] duration-300"
+                                style={{ width: `${sourceIngestion(source).progress}%` }}
+                              />
+                            </div>
+                            <div className="mono mt-1 text-[10px] text-muted-foreground">
+                              {sourceIngestion(source).progress}%
+                            </div>
+                          </div>
+                        )}
+                        {sourceIngestion(source).status === "failed" && sourceIngestion(source).error && (
+                          <div className="mt-1 max-w-52 truncate text-[10px] text-destructive" title={sourceIngestion(source).error}>
+                            {sourceIngestion(source).error}
+                          </div>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-right">
                         <div className="flex justify-end gap-2">
@@ -1326,6 +1476,7 @@ export default function MiningView({
                           <Button
                             size="sm"
                             variant="outline"
+                            disabled={sourceIngestion(source).status === "processing"}
                             className="text-destructive hover:text-destructive"
                             onClick={() => setDeleteSource(source)}
                             aria-label={`删除 ${sourceDisplayName(source.path)}`}
@@ -1345,7 +1496,7 @@ export default function MiningView({
 
       {/* ---- 挖掘任务 ---- */}
       {page === "jobs" && (
-        <div className="space-y-6 px-7 py-6">
+        <div className="space-y-[18px] px-[22px] py-[22px]">
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
             <StatCard label="全部任务" value={String(jobCounts.total)} />
             <StatCard label="运行中" value={String(jobCounts.running)} />
@@ -1378,13 +1529,13 @@ export default function MiningView({
             {mining.jobs.length === 0 ? (
               <div className="flex flex-col items-center gap-3 p-10 text-center text-sm text-muted-soft">
                 <ListChecks className="size-8" />
-                <span>暂无挖掘任务，可以从不同数据源连续创建多个任务。</span>
+                <span>暂无挖掘任务。</span>
                 <Button size="sm" onClick={() => setCreateJobOpen(true)}>创建第一个任务</Button>
               </div>
             ) : (
               <div className="min-w-0">
                 <div className="grid grid-cols-[112px_minmax(180px,1fr)_minmax(120px,0.65fr)_150px_28px] border-b border-line bg-surface-subtle px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                  <span>状态</span><span>任务</span><span>数据源</span><span>创建时间</span><span />
+                  <span>状态</span><span>任务</span><span>知识源</span><span>创建时间</span><span />
                 </div>
                 {filteredJobs.length === 0 ? (
                   <div className="p-8 text-center text-sm text-muted-soft">当前筛选下没有任务。</div>
@@ -1440,9 +1591,6 @@ export default function MiningView({
         <DialogContent className="max-h-[90vh] w-[calc(100vw-32px)] overflow-y-auto !max-w-[1120px]">
           <DialogHeader>
             <DialogTitle>新建挖掘任务</DialogTitle>
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              选择数据源和反思轮数，任务创建后将在独立流水线中运行，并可与其他任务并行执行。
-            </p>
           </DialogHeader>
 
           <div className="grid gap-5 lg:grid-cols-[320px_minmax(0,1fr)]">
@@ -1469,8 +1617,10 @@ export default function MiningView({
                       onChange={(event) => selectInputDir(event.target.value)}
                       className="mono w-full rounded-lg border border-border bg-background px-3 py-2 text-[13px] outline-none focus:border-accent disabled:opacity-60"
                     >
-                      {config.input_dirs.map((dir) => (
-                        <option key={dir} value={dir}>{sourceDisplayName(dir)}</option>
+                      {inputSources.map((source) => (
+                        <option key={source.path} value={source.path} disabled={!source.ready}>
+                          {sourceDisplayName(source.path)}{source.ready ? "" : `（${sourceStatusMeta(source).label}）`}
+                        </option>
                       ))}
                     </select>
                   ) : (
@@ -1478,12 +1628,19 @@ export default function MiningView({
                       {sourceDisplayName(inputDir)}
                     </div>
                   )}
-                  <div className={cn("mt-1.5 text-[11px]", selectedSource?.ready ? "text-muted-foreground" : "text-amber-700")}>
+                  <div className={cn(
+                    "mt-1.5 text-[11px]",
+                    selectedSource?.ready ? "text-muted-foreground" : selectedIngestion?.status === "failed" ? "text-destructive" : "text-amber-700"
+                  )}>
                     {!config
                       ? "正在检查目录…"
                       : selectedSource?.ready
                         ? `已检测到 ${selectedSource.document_count} 个文档 · ${formatBytes(selectedSource.total_bytes)}`
-                        : "该目录没有非隐藏文档，请先上传素材。"}
+                        : selectedIngestion?.status === "processing"
+                          ? `知识源正在后处理（${selectedIngestion.progress}%），完成前不可用于挖掘。`
+                          : selectedIngestion?.status === "failed"
+                            ? `知识源后处理失败：${selectedIngestion.error || "请重新上传文件"}`
+                            : "该目录没有非隐藏文档，请先上传素材。"}
                   </div>
                 </label>
 
@@ -1511,7 +1668,7 @@ export default function MiningView({
                 </div>
 
                 <div className="rounded-lg border border-border bg-background/70 p-3 text-[11px] leading-relaxed text-muted-foreground">
-                  任务创建时固化数据源快照。最多同时运行 {mining.jobSummary.max_parallel} 个任务，超出后自动排队。
+                  任务创建时固化知识源快照。最多同时运行 {mining.jobSummary.max_parallel} 个任务，超出后自动排队。
                 </div>
 
                 <div className="flex justify-end gap-2 pt-1">
@@ -1526,11 +1683,7 @@ export default function MiningView({
             <div className="space-y-4">
               <div className="rounded-xl border border-border bg-surface p-4">
                 <div className="mb-4 flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-[13px] font-bold">挖掘流程预览</div>
-                    <div className="mt-0.5 text-[11px] text-muted-foreground">创建后可在当前任务条目下查看实时进度与日志</div>
-                  </div>
-                  <Pill tone="blue">独立任务 · 可并行</Pill>
+                  <div className="text-[13px] font-bold">挖掘流程预览</div>
                 </div>
 
                 <div className="grid gap-3 md:grid-cols-3">
@@ -1562,12 +1715,6 @@ export default function MiningView({
                   </div>
                 </div>
               </div>
-
-              <div className="grid gap-3 md:grid-cols-3">
-                <TaskPrinciple icon={Boxes} title="数据快照" text="任务启动时固化输入，后续上传或合并不会影响本次挖掘。" />
-                <TaskPrinciple icon={ListChecks} title="并行调度" text="可以连续新建多个任务，调度器自动运行或排队。" />
-                <TaskPrinciple icon={FileCode2} title="产物归档" text="每个任务的 Skill 与 Benchmark 独立保存并可追溯。" />
-              </div>
             </div>
           </div>
         </DialogContent>
@@ -1576,11 +1723,11 @@ export default function MiningView({
       <Dialog open={createSourceOpen} onOpenChange={setCreateSourceOpen}>
         <DialogContent className="w-full !max-w-[460px]">
           <DialogHeader>
-            <DialogTitle>新建数据源</DialogTitle>
+            <DialogTitle>新建知识源</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
             <div>
-              <Label htmlFor="create-source-name" className="mb-1.5 block text-xs font-semibold">数据源名称</Label>
+              <Label htmlFor="create-source-name" className="mb-1.5 block text-xs font-semibold">知识源名称</Label>
               <Input
                 id="create-source-name"
                 autoFocus
@@ -1590,9 +1737,6 @@ export default function MiningView({
                 onChange={(event) => setCreateSourceName(event.target.value)}
                 onKeyDown={(event) => event.key === "Enter" && createSource()}
               />
-              <p className="mt-1.5 text-[11px] text-muted-foreground">
-                将创建数据源 <span className="mono">{createSourceName.trim() || "数据源名"}</span>。
-              </p>
             </div>
             <div className="flex justify-end gap-2">
               <Button variant="outline" onClick={() => setCreateSourceOpen(false)}>取消</Button>
@@ -1607,16 +1751,20 @@ export default function MiningView({
       <Dialog open={mergeSourceOpen} onOpenChange={setMergeSourceOpen}>
         <DialogContent className="w-full !max-w-[540px]">
           <DialogHeader>
-            <DialogTitle>合并数据源</DialogTitle>
+            <DialogTitle>合并知识源</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
             <div>
               <Label className="mb-2 block text-xs font-semibold">选择来源（至少 2 个）</Label>
               <div className="max-h-56 space-y-2 overflow-auto rounded-lg border border-border p-2">
                 {inputSources.map((source) => (
-                  <label key={source.path} className="flex cursor-pointer items-center gap-3 rounded-lg px-2.5 py-2 hover:bg-surface-subtle">
+                  <label key={source.path} className={cn(
+                    "flex items-center gap-3 rounded-lg px-2.5 py-2",
+                    source.ready ? "cursor-pointer hover:bg-surface-subtle" : "cursor-not-allowed opacity-55"
+                  )}>
                     <input
                       type="checkbox"
+                      disabled={!source.ready}
                       checked={mergeSourcePaths.includes(source.path)}
                       onChange={(event) => setMergeSourcePaths((current) => event.target.checked
                         ? [...current, source.path]
@@ -1632,7 +1780,7 @@ export default function MiningView({
               </div>
             </div>
             <div>
-              <Label htmlFor="merge-target-name" className="mb-1.5 block text-xs font-semibold">合并后的数据源</Label>
+              <Label htmlFor="merge-target-name" className="mb-1.5 block text-xs font-semibold">合并后的知识源</Label>
               <Input
                 id="merge-target-name"
                 value={mergeTargetName}
@@ -1641,13 +1789,13 @@ export default function MiningView({
                 onChange={(event) => setMergeTargetName(event.target.value)}
               />
               <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
-                合并会复制文件到目标目录，不删除原数据源；同名文件自动添加序号保留。
+                合并会复制文件到目标目录，不删除原知识源；同名文件自动添加序号保留。
               </p>
             </div>
             <div className="flex justify-end gap-2">
               <Button variant="outline" onClick={() => setMergeSourceOpen(false)}>取消</Button>
               <Button disabled={mergeSourcePaths.length < 2 || !mergeTargetName.trim() || sourceMutating} onClick={mergeSources}>
-                {sourceMutating ? "合并中…" : `合并 ${mergeSourcePaths.length} 个数据源`}
+                {sourceMutating ? "合并中…" : `合并 ${mergeSourcePaths.length} 个知识源`}
               </Button>
             </div>
           </div>
@@ -1657,7 +1805,7 @@ export default function MiningView({
       <Dialog open={!!deleteSource} onOpenChange={(open) => !open && setDeleteSource(null)}>
         <DialogContent className="w-full !max-w-[460px]">
           <DialogHeader>
-            <DialogTitle>删除数据源</DialogTitle>
+            <DialogTitle>删除知识源</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
             <p className="text-sm leading-relaxed text-muted-foreground">
@@ -1730,7 +1878,7 @@ export default function MiningView({
             ) : (
               <div className="flex min-h-0 flex-1 flex-col gap-3">
                 <div className="rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-800">
-                  该产物使用结构化源码格式。请保留 Benchmark JSONL 等文件的语法，提交进化时会再次执行完整性校验。
+                  该产物使用结构化源码格式。请保留 Benchmark JSON 等文件的语法，提交进化时会再次执行完整性校验。
                 </div>
                 <textarea
                   autoFocus
@@ -1778,7 +1926,7 @@ export default function MiningView({
 
       {/* ---- 模型配置 ---- */}
       {page === "model" && (
-        <div className="mx-auto max-w-[1080px] px-7 py-6">
+        <div className="mx-auto max-w-[1080px] px-[22px] py-[22px]">
           <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(170px,1fr))] gap-3.5">
             <StatCard label="当前模型" value={modelSettings.model || "未配置"} />
             <StatCard label="Base URL" value={modelSettings.base_url || "未配置"} mono />
@@ -1898,30 +2046,11 @@ export default function MiningView({
 
               <div className="rounded-lg border border-border bg-background/60 p-3 text-xs leading-relaxed text-muted-foreground">
                 保存后，新创建或尚未启动的挖掘任务会自动使用这套配置；已经运行的任务继续使用启动时的配置。
-                模型执行组件由系统内置维护，不需要用户安装、选择或单独管理。
               </div>
             </div>
           </Panel>
         </div>
       )}
-    </div>
-  );
-}
-
-function TaskPrinciple({
-  icon: Icon,
-  title,
-  text,
-}: {
-  icon: React.ComponentType<{ className?: string }>;
-  title: string;
-  text: string;
-}) {
-  return (
-    <div className="rounded-xl border border-border bg-background p-4">
-      <Icon className="mb-3 size-5 text-accent" />
-      <div className="text-[13px] font-bold">{title}</div>
-      <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{text}</p>
     </div>
   );
 }
@@ -1952,6 +2081,48 @@ function jobProgress(job: MiningJob) {
   const doneSteps = STEP_META.filter((step) => job.phase?.[step.key] === "done").length;
   const activeStep = STEP_META.some((step) => job.phase?.[step.key] === "active") ? 0.5 : 0;
   return Math.min(98, Math.round(((completedRounds + (doneSteps + activeStep) / 3) / Math.max(1, job.max_rounds)) * 100));
+}
+
+function pipelineStepLabel(state: PhaseState[keyof PhaseState]) {
+  if (state === "active") return "进行中";
+  if (state === "done") return "完成";
+  return "未开始";
+}
+
+function sourceStatusMeta(source: InputSource): { label: string; tone: PillTone } {
+  const ingestion = sourceIngestion(source);
+  if (ingestion.status === "processing") return { label: "后处理中", tone: "blue" };
+  if (ingestion.status === "failed") return { label: "处理失败", tone: "red" };
+  if (source.ready) return { label: "可挖掘", tone: "green" };
+  return { label: "空目录", tone: "amber" };
+}
+
+function sourceIngestion(source: InputSource): SourceIngestionStatus {
+  return source.ingestion || {
+    schema_version: 1,
+    source_path: source.path,
+    batch_id: "",
+    status: source.ready ? "ready" : "empty",
+    stage: source.ready ? "complete" : "idle",
+    progress: source.ready ? 100 : 0,
+    processed_files: 0,
+    total_files: 0,
+    current_file: "",
+    error: "",
+    started_at: "",
+    updated_at: "",
+    finished_at: "",
+  };
+}
+
+function ingestionStageLabel(stage: SourceIngestionStatus["stage"]) {
+  if (stage === "validating") return "校验上传文件";
+  if (stage === "converting") return "转换为 Markdown";
+  if (stage === "writing") return "写入知识源";
+  if (stage === "merging") return "合并知识源";
+  if (stage === "complete") return "处理完成";
+  if (stage === "failed") return "处理失败";
+  return "准备处理";
 }
 
 function jobArtifacts(job: MiningJob) {

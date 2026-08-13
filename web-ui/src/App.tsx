@@ -210,19 +210,21 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-screen overflow-hidden">
-      {/* ---- Sidebar (StaffDeck SD1 layout) ---- */}
-      <aside className="flex h-screen w-54 shrink-0 flex-col border-r border-line bg-surface">
-        <div className="flex h-[58px] items-center gap-2.5 border-b border-line px-[18px]">
-          <div className="grid size-[30px] place-items-center rounded-lg bg-sidebar-primary text-[13px] font-extrabold tracking-tighter text-white">
+    <div className="app-shell flex h-screen overflow-hidden">
+      <aside className="app-sidebar flex h-screen shrink-0 flex-col border-r">
+        <div className="sidebar-brand flex h-[60px] items-center gap-2.5 border-b border-sidebar-border px-[18px]">
+          <div className="grid size-[31px] shrink-0 place-items-center rounded-[10px] bg-accent text-[12px] font-extrabold tracking-tighter text-white shadow-[0_7px_16px_rgba(15,118,110,0.18)]">
             SG
           </div>
-          <div className="text-[15px] font-bold tracking-tight">teamEvolver</div>
+          <div className="sidebar-brand-copy">
+            <div className="text-[14px] font-[800] leading-tight">teamEvolver</div>
+            <div className="mt-0.5 text-[9.5px] font-[600] text-muted-soft">技能生命周期工作台</div>
+          </div>
         </div>
-        <nav className="flex flex-1 flex-col gap-0.5 overflow-auto px-2.5 py-3">
+        <nav className="sidebar-nav flex flex-1 flex-col gap-0.5 overflow-auto px-2.5 py-3">
           {NAV_GROUPS.map(({ group, items }) => (
             <div key={group} className="mb-1.5">
-              <div className="px-3 pb-1 pt-2.5 text-[10.5px] font-bold uppercase tracking-[0.08em] text-muted-soft">
+              <div className="sidebar-group-label px-3 pb-1 pt-2.5 text-[10px] font-[800] uppercase tracking-[0.08em] text-muted-soft">
                 {group}
               </div>
               {items.map(({ key, label, icon: Icon }) => (
@@ -234,15 +236,16 @@ export default function App() {
                     setView(key);
                     setUserMenuOpen(false);
                   }}
+                  title={label}
                   className={cn(
-                    "flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-[13.5px] font-semibold transition-colors",
+                    "sidebar-nav-item flex w-full items-center gap-2.5 rounded-[10px] px-3 py-2.5 text-[13px] font-[700] transition-[background-color,color,transform,box-shadow]",
                     view === key
-                      ? "bg-sidebar-accent text-foreground"
-                      : "text-sidebar-foreground hover:bg-sidebar-accent hover:text-foreground"
+                      ? "bg-sidebar-primary text-sidebar-primary-foreground shadow-[0_7px_18px_rgba(24,24,26,0.12)]"
+                      : "text-sidebar-foreground hover:translate-x-[3px] hover:bg-sidebar-accent hover:text-foreground"
                   )}
                 >
-                  <Icon className="size-4 opacity-80" />
-                  {label}
+                  <Icon className="size-4 shrink-0 opacity-85" />
+                  <span className="sidebar-item-label">{label}</span>
                 </button>
               ))}
             </div>
@@ -260,7 +263,7 @@ export default function App() {
       </aside>
 
       {/* ---- Content ---- */}
-      <main className="h-screen flex-1 overflow-auto bg-background">
+      <main className="app-main h-screen flex-1 overflow-auto">
         {MINE_PAGES.map(({ key, page }) => (
           <div key={key} className={cn(view !== key && "hidden")}>
             <MiningView
@@ -290,7 +293,7 @@ export default function App() {
             badge="teamEvolver"
           />
           {/* Sub-tab bar for the 进化看板 group */}
-          <div className="border-b border-line bg-surface px-7 pt-3">
+          <div className="section-tabs pt-2.5">
             <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="进化看板页面">
               {DASH_TABS.map(({ key, label, icon: Icon }) => (
                 <button
@@ -300,9 +303,9 @@ export default function App() {
                   aria-selected={dashTab === key}
                   onClick={() => setDashTab(key)}
                   className={cn(
-                    "flex items-center gap-1.5 rounded-t-lg border-b-2 px-3.5 py-2 text-[13px] font-semibold transition-colors",
+                    "flex items-center gap-1.5 border-b-2 px-3 py-2 text-[12px] font-[700] transition-colors",
                     dashTab === key
-                      ? "border-sidebar-primary text-foreground"
+                      ? "border-accent text-foreground"
                       : "border-transparent text-muted-foreground hover:text-foreground"
                   )}
                 >
@@ -404,21 +407,21 @@ function LoginGate({
   }
 
   return (
-    <div className="grid min-h-screen lg:grid-cols-[1.15fr_1fr]">
+    <div className="grid min-h-screen bg-background lg:grid-cols-[1.15fr_1fr]">
       {/* ---- Left: animated carousel showcase ---- */}
       <LoginHero />
 
       {/* ---- Right: auth form ---- */}
-      <div className="grid place-items-center bg-background px-6 py-10">
+      <div className="grid place-items-center bg-transparent px-6 py-10">
         <div className="w-full max-w-[420px]">
           <div className="mb-5 lg:hidden">
             <span className="inline-flex items-center gap-2 rounded-full bg-accent-soft px-3 py-1 text-xs font-semibold text-accent">
               <Sparkles className="size-3.5" /> teamEvolver · 团队技能进化平台
             </span>
           </div>
-          <div className="rounded-4xl border border-border bg-surface p-6 shadow-[var(--shadow-float)]">
+          <div className="rounded-[18px] border border-border bg-surface p-6 shadow-[var(--shadow-float)]">
             <div className="mb-5">
-              <div className="mb-2 grid size-10 place-items-center rounded-xl bg-sidebar-primary text-sm font-extrabold text-white">
+              <div className="mb-2 grid size-10 place-items-center rounded-xl bg-accent text-sm font-extrabold text-white shadow-[0_8px_18px_rgba(15,118,110,0.18)]">
                 SG
               </div>
               <h1 className="text-[22px] font-bold tracking-tight">
@@ -662,8 +665,8 @@ function UserMenu({
   const name = user?.display_name || user?.id || "unknown";
   const initials = name.slice(0, 1).toUpperCase();
   return (
-    <div className="relative border-t border-line p-2.5">
-      <div className="px-2 pb-2 text-[10.5px] font-medium text-muted-soft">统一控制台 · v1</div>
+    <div className="sidebar-user-footer relative border-t border-sidebar-border p-2.5">
+      <div className="sidebar-version px-2 pb-2 text-[10px] font-[600] text-muted-soft">统一控制台 · v1</div>
       <button
         type="button"
         aria-haspopup="menu"
@@ -671,21 +674,21 @@ function UserMenu({
         aria-label={`账户菜单：${name}`}
         onClick={onToggle}
         className={cn(
-          "flex w-full items-center gap-2.5 rounded-xl border px-2.5 py-2 text-left transition-colors",
+          "sidebar-user-button flex w-full items-center gap-2.5 rounded-[12px] border px-2.5 py-2 text-left transition-colors",
           open ? "border-accent/30 bg-accent-soft" : "border-transparent hover:border-border hover:bg-muted"
         )}
       >
-        <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-sidebar-primary text-xs font-bold text-white shadow-sm">
+        <span className="grid size-8 shrink-0 place-items-center rounded-[10px] bg-accent text-xs font-bold text-white shadow-sm">
           {initials}
         </span>
-        <span className="min-w-0 flex-1">
+        <span className="sidebar-user-copy min-w-0 flex-1">
           <span className="block truncate text-[13px] font-semibold">{name}</span>
           <span className="block text-[10.5px] text-muted-foreground">{user?.role === "admin" ? "管理员" : "普通用户"}</span>
         </span>
-        <ChevronsUpDown className="size-3.5 shrink-0 text-muted-soft" />
+        <ChevronsUpDown className="sidebar-user-chevron size-3.5 shrink-0 text-muted-soft" />
       </button>
       {open && (
-        <div role="menu" className="absolute bottom-[calc(100%+8px)] left-2.5 right-2.5 z-50 overflow-hidden rounded-xl border border-border bg-surface shadow-[var(--shadow-float)]">
+        <div role="menu" className="sidebar-user-popover absolute bottom-[calc(100%+8px)] left-2.5 right-2.5 z-50 overflow-hidden rounded-[14px] border border-border bg-surface shadow-[var(--shadow-float)]">
           <div className="border-b border-line px-4 py-3">
             <div className="text-sm font-bold">{name}</div>
             <div className="mt-1 text-xs text-muted-foreground">{user?.email || user?.id || ""}</div>

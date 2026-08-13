@@ -299,7 +299,7 @@ export default function LangfuseView({
   const usable = enabled && reachable;
 
   return (
-    <div className="mx-auto max-w-[1200px] px-7 py-6">
+    <div className="mx-auto max-w-[1200px] px-[22px] py-[22px]">
       {/* ---- Connection status ---- */}
       <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">
         <StatCard

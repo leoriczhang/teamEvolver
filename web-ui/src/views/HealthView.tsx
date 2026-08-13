@@ -131,7 +131,7 @@ export default function HealthView({
   const checksPager = usePagedItems(checks);
 
   return (
-    <div className="mx-auto max-w-[1120px] px-7 py-6">
+    <div className="mx-auto max-w-[1120px] px-[22px] py-[22px]">
       <div className="mb-5 flex justify-end">
         <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
           <RefreshCw className={loading ? "size-3.5 animate-spin" : "size-3.5"} />

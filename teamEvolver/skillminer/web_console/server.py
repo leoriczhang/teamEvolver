@@ -26,6 +26,7 @@
 import base64
 import binascii
 import contextlib
+import hashlib
 import json
 import os
 import queue
@@ -37,6 +38,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -47,11 +49,6 @@ import yaml
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 STATIC_DIR = Path(__file__).parent / "static"
 
-SUPPORTED_KNOWLEDGE_SUFFIXES = {
-    ".md", ".markdown", ".txt", ".rst",
-    ".csv", ".tsv", ".json", ".jsonl",
-    ".yaml", ".yml", ".xml", ".html", ".htm",
-}
 MAX_KNOWLEDGE_FILE_BYTES = 10 * 1024 * 1024
 MAX_KNOWLEDGE_UPLOAD_BYTES = 40 * 1024 * 1024
 # JSON + base64 is deliberately used here because the embedded SkillMiner
@@ -76,7 +73,7 @@ def _import_legacy_runtime_data():
         "data", "compiled_skill", "semantic_reports", "sample_packages",
         "reflection_rounds", "run_history", "benchmark_results",
         "benchmark_sessions", "trajectory_benchmarks", "coverage_reports",
-        "skill_test_results", "lift_datasets",
+        "skill_test_results", "lift_datasets", ".knowledge_originals",
     )
     for name in runtime_dirs:
         source_root = legacy_root / name
@@ -102,8 +99,9 @@ _import_legacy_runtime_data()
 
 # 复用主控脚本的编排能力（真实模式用）
 sys.path.insert(0, str(PROJECT_ROOT))
-import lift_integration as li  # noqa: E402  SkillMiner → LIFT 数据契约与外部运行时
 import human_checkpoints as hc  # noqa: E402  具体问题生成 + 检查点表单契约
+import knowledge_ingestion as ki  # noqa: E402  上传文档统一转 Markdown
+import lift_integration as li  # noqa: E402  SkillMiner → LIFT 数据契约与外部运行时
 import mining_jobs as mj  # noqa: E402  持久化并行挖掘任务
 import run_benchmark as rb  # noqa: E402  benchmark 构建 + 跑分
 import run_coverage_report as rc  # noqa: E402  复用语义单元解析
@@ -111,13 +109,14 @@ import run_pipeline as rp  # noqa: E402
 import trajectory_benchmark as tb  # noqa: E402  轨迹 → 内部 Benchmark 独立入口
 
 rst = rb.rst  # run_skill_test 模块（find_skill_to_test / deploy_test_skill 等）
+SUPPORTED_KNOWLEDGE_SUFFIXES = ki.SUPPORTED_KNOWLEDGE_SUFFIXES
 
 # 旧版运行数据迁移可能带入用户 Hermes 的 teamEvolver feed/sync hooks。
 # 控制台启动即清除，确保内置 Hermes 只负责挖掘模型调用。
 with contextlib.suppress(OSError, ValueError, yaml.YAMLError):
     rp.hi.sanitize_config_file(PROJECT_ROOT / ".hermes_home" / "config.yaml")
 
-JOBS = mj.MiningJobManager(PROJECT_ROOT)
+JOBS = mj.MiningJobManager(PROJECT_ROOT, start_immediately=False)
 MODEL_CONFIG_LOCK = threading.RLock()
 
 
@@ -145,11 +144,25 @@ def _input_source_detail(path):
     """Build the lightweight readiness metadata shown by the web console."""
     path = Path(path)
     files = _visible_files(path)
+    persisted_ingestion = ki.read_ingestion_state(
+        PROJECT_ROOT,
+        path.name,
+        has_documents=bool(files),
+    )
+    ingestion = {
+        key: persisted_ingestion.get(key)
+        for key in (
+            "schema_version", "source_path", "batch_id", "status", "stage",
+            "progress", "processed_files", "total_files", "current_file",
+            "error", "started_at", "updated_at", "finished_at",
+        )
+    }
     return {
         "path": f"data/{path.name}",
         "document_count": len(files),
         "total_bytes": sum(file.stat().st_size for file in files),
-        "ready": bool(files),
+        "ready": bool(files) and ingestion["status"] == "ready",
+        "ingestion": ingestion,
     }
 
 
@@ -501,18 +514,13 @@ def _knowledge_source_dir(source_path):
     return target
 
 
-def _decode_knowledge_text(raw):
-    """Decode common UTF-8/Chinese text inputs and normalize them to UTF-8."""
-    if not raw:
-        raise ValueError("不允许上传空文件")
-    if b"\x00" in raw:
-        raise ValueError("文件包含二进制内容，请先转换为文本格式")
-    for encoding in ("utf-8-sig", "gb18030"):
-        try:
-            return raw.decode(encoding), encoding
-        except UnicodeDecodeError:
-            continue
-    raise ValueError("无法识别文件编码，请转换为 UTF-8 文本后上传")
+def _knowledge_originals_dir(source_dir):
+    """Resolve the raw-file archive paired with one normalized data source."""
+    root = (PROJECT_ROOT / ".knowledge_originals").resolve()
+    target = (root / Path(source_dir).name).resolve()
+    if target.parent != root:
+        raise ValueError("知识源原件目录越界")
+    return target
 
 
 def _available_upload_path(source_dir, filename, reserved):
@@ -526,8 +534,44 @@ def _available_upload_path(source_dir, filename, reserved):
     return candidate
 
 
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_bytes_atomic(target, payload):
+    """Publish a new file atomically so failed writes never expose partial data."""
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_bytes(payload)
+        if target.exists():
+            raise FileExistsError(f"目标文件已存在：{target.name}")
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _copy_file_atomic(source, target):
+    """Copy one file through a hidden temporary path before publishing it."""
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        shutil.copy2(source, temporary)
+        if target.exists():
+            raise FileExistsError(f"目标文件已存在：{target.name}")
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def save_uploaded_knowledge(body):
-    """Validate and persist a batch of text-native knowledge documents."""
+    """Convert a batch to Markdown and archive originals outside pipeline input."""
     if not isinstance(body, dict):
         raise ValueError("上传参数必须是对象")
     files = body.get("files")
@@ -537,7 +581,15 @@ def save_uploaded_knowledge(body):
         raise ValueError("单次最多上传 50 个文件")
 
     source_dir = _knowledge_source_dir(body.get("source_path") or "data/input")
-    decoded = []
+    create_source = body.get("create_source") is True
+    requested_batch_id = str(body.get("batch_id") or "").strip()
+    if requested_batch_id and (
+        len(requested_batch_id) > 100
+        or not re.fullmatch(r"[A-Za-z0-9_.:-]+", requested_batch_id)
+    ):
+        raise ValueError("上传批次标识格式无效")
+    batch_id = requested_batch_id or uuid.uuid4().hex
+    prepared = []
     total_bytes = 0
     for item in files:
         if not isinstance(item, dict):
@@ -568,27 +620,183 @@ def save_uploaded_knowledge(body):
         total_bytes += len(raw)
         if total_bytes > MAX_KNOWLEDGE_UPLOAD_BYTES:
             raise ValueError("单次上传总大小不能超过 40 MB")
-        text, source_encoding = _decode_knowledge_text(raw)
-        decoded.append((filename, text, source_encoding, len(raw)))
+        prepared.append((filename, raw))
 
-    source_dir.mkdir(parents=True, exist_ok=True)
-    reserved = set()
-    written = []
-    for filename, text, source_encoding, size_bytes in decoded:
-        target = _available_upload_path(source_dir, filename, reserved)
-        target.write_text(text.replace("\r\n", "\n"), encoding="utf-8")
-        written.append({
-            "name": target.name,
-            "path": f"data/{source_dir.name}/{target.name}",
-            "size_bytes": size_bytes,
-            "renamed": target.name != filename,
-            "source_encoding": source_encoding,
-        })
-    return {
-        "ok": True,
-        "written": written,
-        "source": _input_source_detail(source_dir),
-    }
+    with ki.source_operation_lock(PROJECT_ROOT, source_dir.name) as acquired:
+        if not acquired:
+            raise ValueError(f"知识源 {source_dir.name} 正在处理，请等待完成后再上传")
+        originals_dir = _knowledge_originals_dir(source_dir)
+        if create_source:
+            if source_dir.exists() or originals_dir.exists():
+                raise ValueError(f"知识源已存在：{source_dir.name}")
+        elif not source_dir.is_dir():
+            raise ValueError(f"知识源不存在：{source_dir.name}")
+        legacy_manager = globals().get("MANAGER")
+        if legacy_manager is not None and legacy_manager.state in ("running", "waiting"):
+            raise ValueError("挖掘任务运行中，暂不能修改输入文档")
+
+        started_at = datetime.now().astimezone().isoformat()
+        state_base = {
+            "batch_id": batch_id,
+            "total_files": len(prepared),
+            "processed_files": 0,
+            "current_file": "",
+            "error": "",
+            "started_at": started_at,
+            "finished_at": "",
+            "owner_pid": os.getpid(),
+        }
+        normalized = []
+        created_paths = []
+        try:
+            ki.write_ingestion_state(
+                PROJECT_ROOT,
+                source_dir.name,
+                **state_base,
+                status="processing",
+                stage="validating",
+                progress=2,
+            )
+            for index, (filename, raw) in enumerate(prepared):
+                ki.write_ingestion_state(
+                    PROJECT_ROOT,
+                    source_dir.name,
+                    status="processing",
+                    stage="converting",
+                    progress=5 + round(65 * index / len(prepared)),
+                    processed_files=index,
+                    current_file=filename,
+                )
+                converted = ki.normalize_knowledge_document(filename, raw)
+                normalized.append((filename, raw, converted))
+                ki.write_ingestion_state(
+                    PROJECT_ROOT,
+                    source_dir.name,
+                    status="processing",
+                    stage="converting",
+                    progress=5 + round(65 * (index + 1) / len(prepared)),
+                    processed_files=index + 1,
+                    current_file=filename,
+                )
+
+            source_dir.mkdir(parents=True, exist_ok=True)
+            originals_dir.mkdir(parents=True, exist_ok=True)
+            reserved_markdown = set()
+            reserved_originals = set()
+            write_plan = []
+            pending_outputs = []
+            for filename, raw, converted in normalized:
+                normalized_name = f"{Path(filename).stem}.md"
+                target = _available_upload_path(source_dir, normalized_name, reserved_markdown)
+                original_target = _available_upload_path(originals_dir, filename, reserved_originals)
+                encoded_markdown = converted.markdown.encode("utf-8")
+                write_plan.append((
+                    filename,
+                    raw,
+                    converted,
+                    normalized_name,
+                    target,
+                    original_target,
+                    encoded_markdown,
+                ))
+                pending_outputs.extend((
+                    {
+                        "path": original_target.relative_to(PROJECT_ROOT).as_posix(),
+                        "sha256": hashlib.sha256(raw).hexdigest(),
+                    },
+                    {
+                        "path": target.relative_to(PROJECT_ROOT).as_posix(),
+                        "sha256": hashlib.sha256(encoded_markdown).hexdigest(),
+                    },
+                ))
+            ki.write_ingestion_state(
+                PROJECT_ROOT,
+                source_dir.name,
+                status="processing",
+                stage="writing",
+                progress=72,
+                processed_files=len(normalized),
+                current_file="",
+                pending_outputs=pending_outputs,
+            )
+            written = []
+            for index, (
+                filename,
+                raw,
+                converted,
+                normalized_name,
+                target,
+                original_target,
+                encoded_markdown,
+            ) in enumerate(write_plan):
+                ki.write_ingestion_state(
+                    PROJECT_ROOT,
+                    source_dir.name,
+                    status="processing",
+                    stage="writing",
+                    progress=72 + round(25 * index / len(normalized)),
+                    processed_files=len(normalized),
+                    current_file=filename,
+                )
+                _write_bytes_atomic(original_target, raw)
+                created_paths.append(original_target)
+                _write_bytes_atomic(target, encoded_markdown)
+                created_paths.append(target)
+                written.append({
+                    "name": target.name,
+                    "path": f"data/{source_dir.name}/{target.name}",
+                    "original_name": filename,
+                    "size_bytes": len(raw),
+                    "normalized_size_bytes": len(encoded_markdown),
+                    "renamed": target.name != normalized_name,
+                    "converted": Path(filename).suffix.lower() != ".md",
+                    "source_format": converted.source_format,
+                    "source_encoding": converted.source_encoding,
+                })
+
+            ki.write_ingestion_state(
+                PROJECT_ROOT,
+                source_dir.name,
+                status="ready",
+                stage="complete",
+                progress=100,
+                processed_files=len(normalized),
+                total_files=len(normalized),
+                current_file="",
+                error="",
+                finished_at=datetime.now().astimezone().isoformat(),
+                pending_outputs=[],
+                owner_pid=0,
+            )
+            return {
+                "ok": True,
+                "batch_id": batch_id,
+                "written": written,
+                "source": _input_source_detail(source_dir),
+            }
+        except Exception as exc:
+            for created in reversed(created_paths):
+                with contextlib.suppress(OSError):
+                    created.unlink()
+            if create_source:
+                with contextlib.suppress(OSError):
+                    shutil.rmtree(source_dir)
+                with contextlib.suppress(OSError):
+                    shutil.rmtree(originals_dir)
+            else:
+                ki.write_ingestion_state(
+                    PROJECT_ROOT,
+                    source_dir.name,
+                    status="failed",
+                    stage="failed",
+                    progress=0,
+                    current_file="",
+                    error=str(exc)[:500],
+                    finished_at=datetime.now().astimezone().isoformat(),
+                    pending_outputs=[],
+                    owner_pid=0,
+                )
+            raise
 
 
 def create_knowledge_source(body):
@@ -597,10 +805,13 @@ def create_knowledge_source(body):
         raise ValueError("创建参数必须是对象")
     raw_name = str(body.get("name") or body.get("source_name") or "").strip()
     source_dir = _knowledge_source_dir(f"data/{raw_name}")
-    if source_dir.exists():
-        raise ValueError(f"数据源已存在：{raw_name}")
-    source_dir.mkdir(parents=True)
-    return {"ok": True, "source": _input_source_detail(source_dir)}
+    with ki.source_operation_lock(PROJECT_ROOT, source_dir.name) as acquired:
+        if not acquired:
+            raise ValueError("知识源正在创建或后处理，请稍后重试")
+        if source_dir.exists():
+            raise ValueError(f"知识源已存在：{raw_name}")
+        source_dir.mkdir(parents=True)
+        return {"ok": True, "source": _input_source_detail(source_dir)}
 
 
 def rename_knowledge_source(source_name, body):
@@ -609,59 +820,85 @@ def rename_knowledge_source(source_name, body):
         raise ValueError("重命名参数必须是对象")
     source_dir = _knowledge_source_dir(f"data/{str(source_name or '').strip()}")
     if not source_dir.is_dir():
-        raise FileNotFoundError(f"数据源不存在：{source_dir.name}")
+        raise FileNotFoundError(f"知识源不存在：{source_dir.name}")
 
     raw_name = str(body.get("name") or body.get("source_name") or "").strip()
     target_dir = _knowledge_source_dir(f"data/{raw_name}")
-    if target_dir.name == source_dir.name:
+    lock_names = sorted({source_dir.name, target_dir.name})
+    with contextlib.ExitStack() as stack:
+        for name in lock_names:
+            if not stack.enter_context(ki.source_operation_lock(PROJECT_ROOT, name)):
+                raise ValueError("知识源正在后处理，完成前不能重命名")
+        source_detail = _input_source_detail(source_dir)
+        if source_detail["ingestion"]["status"] == "processing":
+            raise ValueError("知识源正在后处理，完成前不能重命名")
+        if target_dir.name == source_dir.name:
+            return {
+                "ok": True,
+                "previous_path": f"data/{source_dir.name}",
+                "source": source_detail,
+            }
+
+        conflict = next((
+            item for item in source_dir.parent.iterdir()
+            if item.is_dir()
+            and item != source_dir
+            and item.name.casefold() == target_dir.name.casefold()
+        ), None)
+        target_is_source = (
+            target_dir.exists()
+            and os.path.samefile(source_dir, target_dir)
+        )
+        if conflict is not None or (target_dir.exists() and not target_is_source):
+            existing_name = conflict.name if conflict is not None else target_dir.name
+            raise FileExistsError(f"知识源名称已存在：{existing_name}")
+
+        source_originals = _knowledge_originals_dir(source_dir)
+        target_originals = _knowledge_originals_dir(target_dir)
+        if source_originals.is_dir() and target_originals.exists():
+            raise FileExistsError(f"知识源原件归档已存在：{target_dir.name}")
+
+        previous_path = f"data/{source_dir.name}"
+        source_dir.rename(target_dir)
+        if source_originals.is_dir():
+            target_originals.parent.mkdir(parents=True, exist_ok=True)
+            source_originals.rename(target_originals)
         return {
             "ok": True,
-            "previous_path": f"data/{source_dir.name}",
-            "source": _input_source_detail(source_dir),
+            "previous_path": previous_path,
+            "source": _input_source_detail(target_dir),
         }
-
-    conflict = next((
-        item for item in source_dir.parent.iterdir()
-        if item.is_dir()
-        and item != source_dir
-        and item.name.casefold() == target_dir.name.casefold()
-    ), None)
-    target_is_source = (
-        target_dir.exists()
-        and os.path.samefile(source_dir, target_dir)
-    )
-    if conflict is not None or (target_dir.exists() and not target_is_source):
-        existing_name = conflict.name if conflict is not None else target_dir.name
-        raise FileExistsError(f"数据源名称已存在：{existing_name}")
-
-    previous_path = f"data/{source_dir.name}"
-    source_dir.rename(target_dir)
-    return {
-        "ok": True,
-        "previous_path": previous_path,
-        "source": _input_source_detail(target_dir),
-    }
 
 
 def delete_knowledge_source(source_name):
     """Delete exactly one selected data source directory."""
     source_dir = _knowledge_source_dir(f"data/{str(source_name or '').strip()}")
     if not source_dir.is_dir():
-        raise FileNotFoundError(f"数据源不存在：{source_dir.name}")
-    detail = _input_source_detail(source_dir)
-    shutil.rmtree(source_dir)
-    return {"ok": True, "deleted": detail}
+        raise FileNotFoundError(f"知识源不存在：{source_dir.name}")
+    with ki.source_operation_lock(PROJECT_ROOT, source_dir.name) as acquired:
+        if not acquired:
+            raise ValueError("知识源正在后处理，完成前不能删除")
+        detail = _input_source_detail(source_dir)
+        if detail["ingestion"]["status"] == "processing":
+            raise ValueError("知识源正在后处理，完成前不能删除")
+        shutil.rmtree(source_dir)
+        originals_dir = _knowledge_originals_dir(source_dir)
+        if originals_dir.is_dir():
+            shutil.rmtree(originals_dir)
+        return {"ok": True, "deleted": detail}
 
 
-def _merge_destination(source_dir, relative_path):
+def _merge_destination(source_dir, relative_path, reserved=None):
     """Resolve a collision-free target while preserving nested structure."""
     relative_path = Path(relative_path)
     target = source_dir / relative_path
     target.parent.mkdir(parents=True, exist_ok=True)
     index = 2
-    while target.exists():
+    reserved = reserved if reserved is not None else set()
+    while target.exists() or target.relative_to(source_dir).as_posix() in reserved:
         target = target.with_name(f"{relative_path.stem}-{index}{relative_path.suffix}")
         index += 1
+    reserved.add(target.relative_to(source_dir).as_posix())
     return target
 
 
@@ -671,7 +908,7 @@ def merge_knowledge_sources(body):
         raise ValueError("合并参数必须是对象")
     raw_sources = body.get("source_paths") or body.get("sources")
     if not isinstance(raw_sources, list) or len(raw_sources) < 2:
-        raise ValueError("请至少选择两个数据源进行合并")
+        raise ValueError("请至少选择两个知识源进行合并")
     sources = []
     seen = set()
     for raw in raw_sources:
@@ -679,34 +916,151 @@ def merge_knowledge_sources(body):
         if path.name in seen:
             continue
         if not path.is_dir():
-            raise FileNotFoundError(f"数据源不存在：{path.name}")
+            raise FileNotFoundError(f"知识源不存在：{path.name}")
         seen.add(path.name)
         sources.append(path)
     if len(sources) < 2:
-        raise ValueError("请至少选择两个不同的数据源")
+        raise ValueError("请至少选择两个不同的知识源")
 
     target_name = str(body.get("target_name") or "").strip()
     target = _knowledge_source_dir(f"data/{target_name}")
     if target.name in seen:
-        raise ValueError("合并目标不能与来源数据源同名")
-    target.mkdir(parents=True, exist_ok=True)
-    copied = []
-    for source in sources:
-        for item in _visible_files(source):
-            relative = item.relative_to(source)
-            destination = _merge_destination(target, relative)
-            shutil.copy2(item, destination)
-            copied.append({
-                "from": f"data/{source.name}/{relative.as_posix()}",
-                "path": f"data/{target.name}/{destination.relative_to(target).as_posix()}",
-                "renamed": destination.relative_to(target) != relative,
-            })
-    return {
-        "ok": True,
-        "sources": [f"data/{source.name}" for source in sources],
-        "source": _input_source_detail(target),
-        "copied": copied,
-    }
+        raise ValueError("合并目标不能与来源知识源同名")
+    lock_names = sorted({target.name, *(source.name for source in sources)})
+    with contextlib.ExitStack() as stack:
+        for name in lock_names:
+            if not stack.enter_context(ki.source_operation_lock(PROJECT_ROOT, name)):
+                raise ValueError("所选知识源正在后处理，完成前不能合并")
+        for source in sources:
+            if not _input_source_detail(source)["ready"]:
+                raise ValueError(f"知识源尚未就绪，不能合并：{source.name}")
+        if target.exists():
+            target_status = _input_source_detail(target)["ingestion"]["status"]
+            if target_status not in {"empty", "ready"}:
+                raise ValueError(f"合并目标尚未就绪：{target.name}")
+
+        total_items = sum(len(_visible_files(source)) for source in sources)
+        batch_id = f"merge-{uuid.uuid4().hex}"
+        ki.write_ingestion_state(
+            PROJECT_ROOT,
+            target.name,
+            batch_id=batch_id,
+            status="processing",
+            stage="merging",
+            progress=2,
+            processed_files=0,
+            total_files=total_items,
+            current_file="",
+            error="",
+            started_at=datetime.now().astimezone().isoformat(),
+            finished_at="",
+            owner_pid=os.getpid(),
+        )
+        target_preexisted = target.exists()
+        target.mkdir(parents=True, exist_ok=True)
+        copied = []
+        created_paths = []
+        processed = 0
+        try:
+            data_plan = []
+            original_plan = []
+            pending_outputs = []
+            reserved_data = set()
+            reserved_originals = set()
+            for source in sources:
+                for item in _visible_files(source):
+                    relative = item.relative_to(source)
+                    destination = _merge_destination(target, relative, reserved_data)
+                    data_plan.append((source, item, relative, destination))
+                    pending_outputs.append({
+                        "path": destination.relative_to(PROJECT_ROOT).as_posix(),
+                        "sha256": _file_sha256(item),
+                    })
+                originals = _knowledge_originals_dir(source)
+                if originals.is_dir():
+                    target_originals = _knowledge_originals_dir(target)
+                    for item in _visible_files(originals):
+                        relative = Path(source.name) / item.relative_to(originals)
+                        destination = _merge_destination(
+                            target_originals,
+                            relative,
+                            reserved_originals,
+                        )
+                        original_plan.append((item, destination))
+                        pending_outputs.append({
+                            "path": destination.relative_to(PROJECT_ROOT).as_posix(),
+                            "sha256": _file_sha256(item),
+                        })
+            ki.write_ingestion_state(
+                PROJECT_ROOT,
+                target.name,
+                status="processing",
+                stage="merging",
+                progress=5,
+                pending_outputs=pending_outputs,
+            )
+
+            for source, item, relative, destination in data_plan:
+                _copy_file_atomic(item, destination)
+                created_paths.append(destination)
+                processed += 1
+                copied.append({
+                    "from": f"data/{source.name}/{relative.as_posix()}",
+                    "path": f"data/{target.name}/{destination.relative_to(target).as_posix()}",
+                    "renamed": destination.relative_to(target) != relative,
+                })
+                ki.write_ingestion_state(
+                    PROJECT_ROOT,
+                    target.name,
+                    status="processing",
+                    stage="merging",
+                    progress=5 + round(90 * processed / max(1, total_items)),
+                    processed_files=processed,
+                    current_file=item.name,
+                )
+            for item, destination in original_plan:
+                _copy_file_atomic(item, destination)
+                created_paths.append(destination)
+            ki.write_ingestion_state(
+                PROJECT_ROOT,
+                target.name,
+                status="ready",
+                stage="complete",
+                progress=100,
+                processed_files=total_items,
+                total_files=total_items,
+                current_file="",
+                error="",
+                finished_at=datetime.now().astimezone().isoformat(),
+                pending_outputs=[],
+                owner_pid=0,
+            )
+            return {
+                "ok": True,
+                "sources": [f"data/{source.name}" for source in sources],
+                "source": _input_source_detail(target),
+                "copied": copied,
+            }
+        except Exception as exc:
+            for created in reversed(created_paths):
+                with contextlib.suppress(OSError):
+                    created.unlink()
+            if not target_preexisted:
+                with contextlib.suppress(OSError):
+                    shutil.rmtree(target)
+            ki.write_ingestion_state(
+                PROJECT_ROOT,
+                target.name,
+                status="failed",
+                stage="failed",
+                progress=0,
+                current_file="",
+                error=str(exc)[:500],
+                finished_at=datetime.now().astimezone().isoformat(),
+                pending_outputs=[],
+                owner_pid=0,
+            )
+            raise
 
 
 def _find_compiled_skill(skill_name=""):
@@ -841,23 +1195,43 @@ class RunManager:
                 return False, "输入目录必须位于 SkillMiner 项目内"
             if not input_abs.is_dir():
                 return False, f"输入目录不存在：{config.get('input_dir') or 'data/input'}"
-            if not _visible_files(input_abs):
+            input_files = _visible_files(input_abs)
+            if not input_files:
                 return False, "输入目录中没有可用于挖掘的文档"
-            self.bus.reset()
-            self.stop_flag.clear()
-            # 清空可能残留的旧答案
-            while not self.answer_q.empty():
-                self.answer_q.get_nowait()
-            self.config = config
-            self.task_kind = "skill_mining"
-            self.last_result = None
-            self.state = "running"
-            self.pending_question = None
-            # reset 事件：通知所有已连接客户端清空面板（新任务开始）
-            self.emit("reset", scope="pipeline")
-            self.thread = threading.Thread(target=self._run, args=(config,), daemon=True)
-            self.thread.start()
-            return True, "started"
+            data_root = (PROJECT_ROOT / "data").resolve()
+            source_name = input_abs.name if input_abs.parent == data_root else ""
+            lock_context = (
+                ki.source_operation_lock(PROJECT_ROOT, source_name)
+                if source_name else contextlib.nullcontext(True)
+            )
+            with lock_context as acquired:
+                if not acquired:
+                    return False, "知识源正在后处理，完成前不能用于挖掘"
+                if source_name:
+                    ingestion = ki.read_ingestion_state(
+                        PROJECT_ROOT,
+                        source_name,
+                        has_documents=bool(input_files),
+                    )
+                    if ingestion["status"] == "processing":
+                        return False, "知识源正在后处理，完成前不能用于挖掘"
+                    if ingestion["status"] == "failed":
+                        return False, f"知识源后处理失败：{ingestion.get('error') or '请重新上传文件'}"
+                self.bus.reset()
+                self.stop_flag.clear()
+                # 清空可能残留的旧答案
+                while not self.answer_q.empty():
+                    self.answer_q.get_nowait()
+                self.config = config
+                self.task_kind = "skill_mining"
+                self.last_result = None
+                self.state = "running"
+                self.pending_question = None
+                # reset 事件：通知所有已连接客户端清空面板（新任务开始）
+                self.emit("reset", scope="pipeline")
+                self.thread = threading.Thread(target=self._run, args=(config,), daemon=True)
+                self.thread.start()
+                return True, "started"
 
     def submit_answer(self, payload):
         # 用 _lock 保护「读 state/pending_question + 校验」这一复合判断，避免与
@@ -1888,6 +2262,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"runs": list_mining_runs(), "runner": MANAGER.snapshot()})
         elif path == "/api/jobs":
             self._send_json({"jobs": list_all_mining_jobs(), "summary": JOBS.summary()})
+        elif path == "/api/sources/status":
+            query = parse_qs(parsed.query)
+            try:
+                source_dir = _knowledge_source_dir((query.get("source_path") or ["data/input"])[0])
+                self._send_json({"ok": True, "source": _input_source_detail(source_dir)})
+            except ValueError as exc:
+                self._send_json({"ok": False, "msg": str(exc)}, code=400)
         elif path.startswith("/api/jobs/"):
             job_id = unquote(path.removeprefix("/api/jobs/").strip("/"))
             try:
@@ -2003,7 +2384,7 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as e:
                 self._send_json({"ok": False, "msg": str(e)}, code=400)
             except OSError as e:
-                self._send_json({"ok": False, "msg": f"创建数据源失败：{e}"}, code=500)
+                self._send_json({"ok": False, "msg": f"创建知识源失败：{e}"}, code=500)
         elif path == "/api/sources/merge":
             try:
                 self._send_json(merge_knowledge_sources(body), code=201)
@@ -2012,7 +2393,7 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as e:
                 self._send_json({"ok": False, "msg": str(e)}, code=400)
             except OSError as e:
-                self._send_json({"ok": False, "msg": f"合并数据源失败：{e}"}, code=500)
+                self._send_json({"ok": False, "msg": f"合并知识源失败：{e}"}, code=500)
         elif path.startswith("/api/sources/") and path.endswith("/rename"):
             source_name = unquote(
                 path.removeprefix("/api/sources/").removesuffix("/rename").strip("/")
@@ -2026,7 +2407,7 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as e:
                 self._send_json({"ok": False, "msg": str(e)}, code=400)
             except OSError as e:
-                self._send_json({"ok": False, "msg": f"重命名数据源失败：{e}"}, code=500)
+                self._send_json({"ok": False, "msg": f"重命名知识源失败：{e}"}, code=500)
         elif path == "/api/jobs":
             try:
                 jobs = JOBS.create_jobs(body)
@@ -2202,7 +2583,7 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as e:
                 self._send_json({"ok": False, "msg": str(e)}, code=400)
             except OSError as e:
-                self._send_json({"ok": False, "msg": f"删除数据源失败：{e}"}, code=500)
+                self._send_json({"ok": False, "msg": f"删除知识源失败：{e}"}, code=500)
         else:
             self.send_error(404, "Unknown API")
 
@@ -2283,6 +2664,8 @@ def _normalize_config(body):
 
 def main():
     port = int(os.environ.get("PORT", "8765"))
+    ki.mark_interrupted_ingestions(PROJECT_ROOT)
+    JOBS.start()
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     prior_sigterm = signal.getsignal(signal.SIGTERM)
 

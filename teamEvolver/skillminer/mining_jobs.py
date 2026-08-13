@@ -21,9 +21,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import human_checkpoints as hc
 import benchmark_format as bf
-
+import human_checkpoints as hc
+import knowledge_ingestion as ki
 
 _STATIC_WORKSPACE_ITEMS = (
     "sample-package-constructor-agent-skill",
@@ -84,6 +84,7 @@ class MiningJobManager:
         *,
         max_parallel: int | None = None,
         python_executable: str | None = None,
+        start_immediately: bool = True,
     ) -> None:
         self.project_root = Path(project_root).resolve()
         self.jobs_root = self.project_root / "mining_jobs"
@@ -96,7 +97,8 @@ class MiningJobManager:
         self._processes: dict[str, subprocess.Popen] = {}
         self._shutting_down = False
         self._load_existing()
-        self._dispatch()
+        if start_immediately:
+            self.start()
 
     def _load_existing(self) -> None:
         for meta_path in sorted(self.jobs_root.glob("*/job.json")):
@@ -106,14 +108,30 @@ class MiningJobManager:
                 continue
             job_id = str(job.get("job_id") or meta_path.parent.name)
             job["job_id"] = job_id
+            self._jobs[job_id] = job
+
+    def start(self) -> None:
+        """Recover orphaned jobs and start queued work when the service starts.
+
+        Loading the module is intentionally read-only.  Test discovery and CLI
+        utilities import this class too, and must not mutate jobs owned by an
+        already-running SkillMiner service.
+        """
+        with self._lock:
+            self._shutting_down = False
+            self._recover_interrupted_jobs()
+        self._dispatch()
+
+    def _recover_interrupted_jobs(self) -> None:
+        for job in self._jobs.values():
             if job.get("status") in {"preparing", "running", "waiting", "stopping"}:
                 job["status"] = "interrupted"
                 job["finished_at"] = _utc_now()
                 job["error"] = "服务重启导致任务中断，可重新创建任务继续挖掘"
-                (meta_path.parent / "checkpoints" / "pending.json").unlink(missing_ok=True)
-                (meta_path.parent / "checkpoints" / "answer.json").unlink(missing_ok=True)
+                checkpoint_dir = self._job_dir(job["job_id"]) / "checkpoints"
+                (checkpoint_dir / "pending.json").unlink(missing_ok=True)
+                (checkpoint_dir / "answer.json").unlink(missing_ok=True)
                 self._persist(job)
-            self._jobs[job_id] = job
 
     def _job_dir(self, job_id: str) -> Path:
         return self.jobs_root / job_id
@@ -131,16 +149,39 @@ class MiningJobManager:
         target = (data_root / parts[1]).resolve()
         if target.parent != data_root or not target.is_dir():
             raise MiningJobError(f"知识源不存在：{raw}")
-        if not _visible_files(target):
+        files = _visible_files(target)
+        if not files:
             raise MiningJobError(f"知识源中没有可挖掘文档：{raw}")
+        ingestion = ki.read_ingestion_state(
+            self.project_root,
+            target.name,
+            has_documents=True,
+        )
+        if ingestion["status"] == "processing":
+            raise MiningJobError(f"知识源正在后处理，完成前不能用于挖掘：{raw}")
+        if ingestion["status"] == "failed":
+            detail = str(ingestion.get("error") or "请重新上传文件")
+            raise MiningJobError(f"知识源后处理失败，不能用于挖掘：{detail}")
+        if ingestion["status"] != "ready":
+            raise MiningJobError(f"知识源尚未就绪：{raw}")
         return target
 
     def _prepare_workspace(self, job: dict[str, Any], source: Path) -> Path:
-        job_dir = self._job_dir(job["job_id"])
-        workspace = job_dir / "workspace"
-        workspace.mkdir(parents=True, exist_ok=False)
-        data_target = workspace / "data" / "input"
-        shutil.copytree(source, data_target)
+        with ki.source_operation_lock(self.project_root, source.name) as acquired:
+            if not acquired:
+                raise MiningJobError(f"知识源正在后处理，完成前不能创建任务：data/{source.name}")
+            ingestion = ki.read_ingestion_state(
+                self.project_root,
+                source.name,
+                has_documents=bool(_visible_files(source)),
+            )
+            if ingestion["status"] != "ready":
+                raise MiningJobError(f"知识源尚未就绪：data/{source.name}")
+            job_dir = self._job_dir(job["job_id"])
+            workspace = job_dir / "workspace"
+            workspace.mkdir(parents=True, exist_ok=False)
+            data_target = workspace / "data" / "input"
+            shutil.copytree(source, data_target)
         (workspace / "compiled_skill").mkdir()
         for name in _STATIC_WORKSPACE_ITEMS:
             source_item = self.project_root / name

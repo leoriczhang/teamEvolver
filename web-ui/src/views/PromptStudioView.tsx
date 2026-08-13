@@ -171,7 +171,7 @@ export default function PromptStudioView({
   const dirty = !!detail && draft !== detail.effective_prompt;
 
   return (
-    <div className="mx-auto max-w-[1280px] px-7 py-6">
+    <div className="mx-auto max-w-[1280px] px-[22px] py-[22px]">
       {/* ---- Pipeline chain visualization ---- */}
       <Panel
         title="进化链路"
