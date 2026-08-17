@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -37,6 +38,10 @@ from ...dataset_synthesizer import (
     dataset_to_replay_case,
     flatten_requirements,
     synthesize_evolution_datasets,
+)
+from ...observability import (
+    langfuse_observation,
+    update_langfuse_observation,
 )
 from ...progressive_replay import (
     aggregate_case_checklists,
@@ -3602,6 +3607,45 @@ class EvolveServer(EvolveEngineMixin):
         return await self._call_storage(self._get_session_process, session_id)
 
     async def run_once(self) -> dict:
+        cycle_id = f"eb-{uuid.uuid4().hex[:12]}"
+        with langfuse_observation(
+            name="teamEvolver.evolve.cycle",
+            as_type="agent",
+            input={
+                "cycle_id": cycle_id,
+                "strategy": self.config.evolve_strategy,
+                "publish_mode": self.config.publish_mode,
+            },
+            metadata={
+                "component": "teamEvolver.evolve",
+                "operation": "cycle",
+                "cycle_id": cycle_id,
+            },
+            trace_name="teamEvolver.evolve.cycle",
+            session_id=cycle_id,
+            tags=["evolve", "cycle"],
+        ) as observation:
+            result = await self._run_once()
+            update_langfuse_observation(
+                observation,
+                output={
+                    key: result.get(key)
+                    for key in (
+                        "sessions",
+                        "skill_groups",
+                        "actions",
+                        "skills_evolved",
+                        "candidates_queued",
+                        "had_processing_error",
+                    )
+                },
+                metadata={
+                    "source_session_ids": result.get("session_ids") or [],
+                },
+            )
+            return result
+
+    async def _run_once(self) -> dict:
         logger.info("[EvolveServer] === starting evolution cycle ===")
         started_at = time.monotonic()
 

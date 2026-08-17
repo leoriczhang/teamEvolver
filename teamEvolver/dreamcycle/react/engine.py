@@ -13,10 +13,15 @@ from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 from openai import OpenAI
+
+from ...observability import (
+    langfuse_observation,
+    update_langfuse_observation,
+)
 from ..config import DreamCycleConfig
-from ..tools.base import ToolRegistry, ToolResult
+from ..tools.base import ToolRegistry
 from .memory import WorkingMemory
-from .planner import Task, TaskPlan, TaskStatus
+from .planner import TaskPlan, TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +47,7 @@ class ReActEngine:
         config: DreamCycleConfig,
         tools: ToolRegistry,
         system_prompt: str,
+        trace_session_id: str = "",
     ):
         self._config = config
         self._tools = tools
@@ -57,6 +63,8 @@ class ReActEngine:
         self._consecutive_errors = 0
         self._max_turns = config.scheduler.max_turns_per_job
         self._max_errors = config.scheduler.max_consecutive_errors
+        self._trace_session_id = str(trace_session_id or "")
+        self._current_job = ""
         # Count of mutating tool calls that actually succeeded this plan. Task
         # completion is anchored to these events, not to LLM self-report.
         self._successful_writes = 0
@@ -79,6 +87,7 @@ class ReActEngine:
             The updated TaskPlan with results
         """
         logger.info("[ReAct] Starting plan: %s (%d tasks)", plan.job_name, len(plan.tasks))
+        self._current_job = plan.job_name
         self._memory.reset()
         self._messages = [{"role": "system", "content": self._system_prompt}]
         self._turn_count = 0
@@ -134,7 +143,36 @@ class ReActEngine:
                         args = {}
 
                     logger.debug("[ReAct] ACT: %s(%s)", name, json.dumps(args, ensure_ascii=False)[:80])
-                    result = self._tools.execute(name, **args)
+                    with langfuse_observation(
+                        name=f"teamEvolver.dreamcycle.tool.{name}",
+                        as_type="tool",
+                        input=args,
+                        metadata={
+                            "component": "teamEvolver.dreamcycle",
+                            "job": plan.job_name,
+                            "turn": self._turn_count,
+                            "mutating": name in self._WRITE_TOOLS,
+                        },
+                        trace_name=(
+                            f"teamEvolver.dreamcycle.{plan.job_name}"
+                        ),
+                        session_id=self._trace_session_id,
+                        tags=["dreamcycle", plan.job_name, "tool", name],
+                    ) as observation:
+                        result = self._tools.execute(name, **args)
+                        update_langfuse_observation(
+                            observation,
+                            output={
+                                "success": result.success,
+                                "output": result.output,
+                            },
+                            level=None if result.success else "ERROR",
+                            status_message=(
+                                None
+                                if result.success
+                                else result.output[:500]
+                            ),
+                        )
 
                     if result.success:
                         any_tool_success = True
@@ -229,18 +267,78 @@ class ReActEngine:
 
     def _call_llm(self) -> Optional[Dict]:
         """Call the LLM with retry logic."""
-        try:
-            resp = self._client.chat.completions.create(
-                model=self._config.llm.model,
-                messages=self._messages,
-                tools=self._tools.all_schemas(),
-                temperature=self._config.llm.temperature,
-                max_tokens=self._config.llm.max_tokens,
+        job_name = self._current_job or "maintenance"
+        with langfuse_observation(
+            name=f"teamEvolver.dreamcycle.{job_name}.reason",
+            as_type="generation",
+            input={
+                "messages": self._messages,
+                "tools": self._tools.all_schemas(),
+            },
+            metadata={
+                "component": "teamEvolver.dreamcycle",
+                "job": job_name,
+                "turn": self._turn_count + 1,
+            },
+            model=self._config.llm.model,
+            model_parameters={
+                "temperature": self._config.llm.temperature,
+                "max_tokens": self._config.llm.max_tokens,
+            },
+            trace_name=f"teamEvolver.dreamcycle.{job_name}",
+            session_id=self._trace_session_id,
+            tags=["dreamcycle", job_name, "reason"],
+        ) as observation:
+            try:
+                resp = self._client.chat.completions.create(
+                    model=self._config.llm.model,
+                    messages=self._messages,
+                    tools=self._tools.all_schemas(),
+                    temperature=self._config.llm.temperature,
+                    max_tokens=self._config.llm.max_tokens,
+                )
+            except Exception as e:
+                update_langfuse_observation(
+                    observation,
+                    level="ERROR",
+                    status_message=f"{type(e).__name__}: {e}",
+                )
+                logger.error("[ReAct] LLM call failed: %s", e)
+                return None
+
+            choice = resp.choices[0]
+            usage = getattr(resp, "usage", None)
+            usage_details = {
+                key: int(value)
+                for key, value in {
+                    "input_tokens": getattr(
+                        usage,
+                        "prompt_tokens",
+                        None,
+                    ),
+                    "output_tokens": getattr(
+                        usage,
+                        "completion_tokens",
+                        None,
+                    ),
+                    "total_tokens": getattr(
+                        usage,
+                        "total_tokens",
+                        None,
+                    ),
+                }.items()
+                if isinstance(value, (int, float))
+            }
+            update_langfuse_observation(
+                observation,
+                output=choice.message.model_dump(),
+                usage_details=usage_details,
+                metadata={
+                    "finish_reason": choice.finish_reason,
+                    "response_id": getattr(resp, "id", None),
+                },
             )
             return resp.model_dump()
-        except Exception as e:
-            logger.error("[ReAct] LLM call failed: %s", e)
-            return None
 
     def _format_plan(self, plan: TaskPlan) -> str:
         """Format the plan for the LLM."""

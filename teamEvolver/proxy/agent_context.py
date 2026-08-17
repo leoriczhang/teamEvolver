@@ -622,12 +622,28 @@ class AgentContextMixin:
             request: Request,
             external_subject: str = Query(...),
             scope: str = Query(default="all"),
+            context_session_id: str = Query(default=""),
         ):
             record = owner._agent_context_auth(
                 request,
                 required_scope="context.skills",
             )
             user = owner._agent_context_user(record, external_subject)
+            state = store()
+            if context_session_id:
+                session = state.get_session(
+                    context_session_id,
+                    agent_id=str(record.get("agent_id") or ""),
+                )
+                if (
+                    session is None
+                    or str(session.get("user_id") or "")
+                    != str(user.get("id") or "")
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="context session subject binding conflict",
+                    )
             names = {
                 "personal": ["personal_skills"],
                 "team": ["team_skills"],
@@ -636,7 +652,6 @@ class AgentContextMixin:
             if names is None:
                 raise HTTPException(status_code=400, detail="unsupported skill scope")
             scopes = owner._agent_context_scopes(user)
-            state = store()
             items: list[dict[str, Any]] = []
             for name in names:
                 selected = scopes[name]
@@ -674,7 +689,7 @@ class AgentContextMixin:
                     context_ref, receipt = state.issue_ref(
                         agent_id=str(record.get("agent_id") or ""),
                         user_id=str(user.get("id") or ""),
-                        session_id="",
+                        session_id=context_session_id,
                         scope=name,
                         uri=uri,
                         kind="skill",
@@ -691,9 +706,35 @@ class AgentContextMixin:
                             "receipt": receipt,
                         }
                     )
+            snapshot_id = ""
+            if context_session_id and items:
+                snapshot_id = "ctxsnap_" + stable_hash(
+                    {
+                        "agent": record.get("agent_id"),
+                        "user": user.get("id"),
+                        "session": context_session_id,
+                        "inventory": [
+                            item["context_ref"] for item in items
+                        ],
+                    }
+                )[:32]
+                state.save_snapshot(
+                    snapshot_id=snapshot_id,
+                    agent_id=str(record.get("agent_id") or ""),
+                    user_id=str(user.get("id") or ""),
+                    session_id=context_session_id,
+                    items=[
+                        {
+                            "context_ref": item["context_ref"],
+                            "title": item["name"],
+                        }
+                        for item in items
+                    ],
+                )
             return JSONResponse(
                 content={
                     "skills": items,
+                    "snapshot_id": snapshot_id,
                     "etag": stable_hash(
                         [
                             (item["qualified_skill_id"], item["receipt"]["uri_hash"])

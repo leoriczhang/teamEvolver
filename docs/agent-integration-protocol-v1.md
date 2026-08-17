@@ -198,6 +198,28 @@ A successful result must contain non-negative integer metrics:
 Missing metrics, a mismatched `request_id`/`branch`, or an invalid schema fails
 closed as `INVALID_RESPONSE`.
 
+The runtime must isolate replay state and credentials:
+
+- materialize only the source tenant/user/runtime configuration required by the
+  branch, never a full production database;
+- inject the frozen Context projection actually used by the runtime and return
+  its hash as `context_input_hash`;
+- keep upstream model credentials outside candidate-controlled processes,
+  behind a short-lived parent broker;
+- place the worker in a private network namespace and connect its local model
+  sidecar to the parent broker through a protected Unix socket;
+- keep the branch workspace as the only writable host path;
+- fail with `REPLAY_EXTERNAL_TOOL_UNSUPPORTED` when a recorded external side
+  effect cannot be deterministically injected into the current runtime.
+
+Agents that support recorded external-tool injection identify every result by
+the normalized tool name, canonical argument signature, same-signature call
+sequence, and result SHA-256. Matching by tool name alone is not Protocol V1
+compliant. AgentsHub's Pi runtime currently advertises
+`external_tool_replay=fail-closed`: workspace-local tools execute inside the
+branch sandbox, while network-capable or external tools make the case
+non-runnable rather than falling back to live side effects.
+
 Checklist completion is a gate, not a weighted score. Efficiency comparison is
 ordered by interaction turns, tool calls, then total tokens.
 

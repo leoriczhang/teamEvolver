@@ -240,7 +240,7 @@ class TeamEvolverConfig:
     validation_agentshub_api_key: str = ""
 
     # ------------------------------------------------------------------ #
-    # Langfuse session ingestion                                          #
+    # Langfuse session ingestion and observability                        #
     # ------------------------------------------------------------------ #
     # Pull agent sessions directly from a Langfuse deployment (verified against
     # Langfuse v3.117.2 public REST API) and feed them into the same ingest
@@ -250,6 +250,16 @@ class TeamEvolverConfig:
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
     langfuse_timeout_seconds: int = 30
+    # Export teamEvolver's own evolution and DreamCycle model/tool traces.
+    # This is intentionally independent from ``langfuse_enabled``, which
+    # controls pulling external sessions into the evolution queue.
+    langfuse_tracing_enabled: bool = False
+    langfuse_tracing_environment: str = "local"
+    langfuse_tracing_release: str = ""
+    langfuse_tracing_sample_rate: float = 1.0
+    langfuse_tracing_capture_content: bool = True
+    langfuse_tracing_flush_at: int = 1
+    langfuse_tracing_flush_interval_seconds: float = 1.0
     # Paging knobs for the public API. ``page_limit`` is items per request;
     # ``max_sessions`` caps how many sessions a single pull will materialize.
     langfuse_page_limit: int = 50

@@ -270,6 +270,89 @@ export interface ReplayCase {
   candidate?: ReplaySide;
 }
 
+export interface MemoryReplayBranch {
+  ok?: boolean;
+  error?: string;
+  final_response?: string;
+  trajectory?: string;
+  interaction_turns?: number;
+  tool_call_count?: number;
+  total_tokens?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  context_input_hash?: string;
+  checklist_report?: SkillLabChecklistReport;
+  safety_report?: Record<string, any>;
+}
+
+export interface MemoryTrueReplay {
+  replay_id: string;
+  change_id: string;
+  status?: "evaluated" | "failed";
+  runtime?: string;
+  source_session_id?: string;
+  query?: string;
+  checklist?: Array<{ id?: string; text?: string }>;
+  verdict?: "accept" | "reject" | "inconclusive";
+  accepted?: boolean;
+  no_regression?: boolean;
+  reason?: string;
+  completed_at?: string;
+  treatment?: {
+    before_oid?: string;
+    after_oid?: string;
+    before_hash?: string;
+    after_hash?: string;
+    action?: string;
+  };
+  efficiency?: {
+    dimensions?: Record<string, {
+      baseline: number;
+      candidate: number;
+      delta: number;
+      reduction_ratio: number;
+      winner: "candidate" | "baseline" | "tie";
+    }>;
+  };
+  cases?: Array<{
+    baseline?: MemoryReplayBranch;
+    candidate?: MemoryReplayBranch;
+  }>;
+}
+
+export interface MemoryChangeRecord {
+  change_id: string;
+  run_id?: string;
+  job_name?: string;
+  action?: string;
+  result?: string;
+  snapshot_status?: string;
+  risk_level?: string;
+  before_oid?: string;
+  after_oid?: string;
+  before_hash?: string;
+  after_hash?: string;
+  before_exists?: boolean;
+  after_exists?: boolean;
+  target_paths?: string[];
+  policy_reasons?: string[];
+  completed_at?: string;
+  latest_replay?: MemoryTrueReplay;
+}
+
+export interface MemoryChangeList {
+  schema_version: string;
+  count: number;
+  items: MemoryChangeRecord[];
+}
+
+export interface MemoryTrueReplayList {
+  schema_version: string;
+  change_id: string;
+  count: number;
+  items: MemoryTrueReplay[];
+}
+
 export interface SkillVersionResp {
   skill_id?: string;
   category?: string;
@@ -844,6 +927,7 @@ export interface AuthStatus {
 
 export interface LangfuseStatus {
   enabled: boolean;
+  tracing?: LangfuseTracingStatus;
   host?: string;
   public_key_present?: boolean;
   secret_key_present?: boolean;
@@ -859,6 +943,18 @@ export interface LangfuseStatus {
     version?: string;
     trace_name?: string;
   };
+}
+
+export interface LangfuseTracingStatus {
+  enabled: boolean;
+  sdk_available?: boolean;
+  initialized?: boolean;
+  host?: string;
+  environment?: string;
+  release?: string;
+  sample_rate?: number;
+  capture_content?: boolean;
+  last_error?: string;
 }
 
 // Session-attribute filters that can be applied to a Langfuse list/pull.
@@ -918,6 +1014,7 @@ export interface LangfusePullResp {
 // Persisted Langfuse connection + default-filter settings (editable in console).
 export interface LangfuseConfig {
   enabled: boolean;
+  tracing_enabled?: boolean;
   host: string;
   public_key?: string;
   public_key_present?: boolean;
@@ -925,6 +1022,13 @@ export interface LangfuseConfig {
   max_sessions?: number;
   page_limit?: number;
   timeout_seconds?: number;
+  tracing_environment?: string;
+  tracing_release?: string;
+  tracing_sample_rate?: number;
+  tracing_capture_content?: boolean;
+  tracing_flush_at?: number;
+  tracing_flush_interval_seconds?: number;
+  tracing_status?: LangfuseTracingStatus;
   default_environment?: string[];
   default_user_id?: string;
   default_tags?: string[];

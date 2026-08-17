@@ -48,14 +48,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Optional
 
-from .progressive_replay import (
-    initial_query,
-    next_disclosure_prompt,
-    normalize_case_checklist,
-    normalize_checklist_report,
-    progressive_config,
-    progressive_replay_decision,
-)
 from .integrations.agent_protocol import (
     REPLAY_REQUEST_SCHEMA_V1,
     replay_request_id,
@@ -65,7 +57,18 @@ from .integrations.replay_adapters import (
     LegacyAgentsHubHttpAdapter,
     legacy_branch_projection,
 )
-from .integrations.replay_model_broker import replay_model_broker
+from .integrations.replay_model_broker import (
+    ReplayModelSidecar,
+    replay_model_broker,
+)
+from .progressive_replay import (
+    initial_query,
+    next_disclosure_prompt,
+    normalize_case_checklist,
+    normalize_checklist_report,
+    progressive_config,
+    progressive_replay_decision,
+)
 from .skills.bundle import (
     bundle_tree_sha256,
     candidate_skill_bundle,
@@ -326,6 +329,10 @@ def _native_agent_runtime(source_session: dict[str, Any]) -> tuple[str, str]:
     endpoint = str(runtime.get("replay_endpoint") or "").strip()
     if endpoint.startswith(("http://127.0.0.1", "http://localhost", "http://[::1]")):
         return runtime_type or "native_agent", endpoint.rstrip("/")
+    if runtime_type == "agentshub" and not integration_id:
+        configured = os.environ.get("AGENTSHUB_REPLAY_URL", "").strip()
+        if configured:
+            return "agentshub", configured.rstrip("/")
     config = None
     try:
         from teamEvolver.config_store import ConfigStore
@@ -353,9 +360,6 @@ def _native_agent_runtime(source_session: dict[str, Any]) -> tuple[str, str]:
     except Exception:
         config = None
     if runtime_type == "agentshub" and not integration_id:
-        configured = os.environ.get("AGENTSHUB_REPLAY_URL", "").strip()
-        if configured:
-            return "agentshub", configured.rstrip("/")
         legacy = str(
             getattr(config, "validation_agentshub_url", "") or ""
         ).strip()
@@ -391,6 +395,11 @@ def spawn_native_agent_branch(
     record: dict[str, Any] = {}
     capability: dict[str, Any] = {}
     config = None
+    explicit_legacy_agentshub = bool(
+        runtime_type == "agentshub"
+        and not integration_id
+        and os.environ.get("AGENTSHUB_REPLAY_URL", "").strip()
+    )
     try:
         from teamEvolver.config_store import ConfigStore
         from teamEvolver.integrations.agent_registry import (
@@ -398,11 +407,15 @@ def spawn_native_agent_branch(
         )
 
         config = ConfigStore().to_config()
-        resolved = resolve_replay_capability(
-            config,
-            runtime_type=runtime_type,
-            agent_id=integration_id,
-            allow_runtime_fallback=not bool(integration_id),
+        resolved = (
+            None
+            if explicit_legacy_agentshub
+            else resolve_replay_capability(
+                config,
+                runtime_type=runtime_type,
+                agent_id=integration_id,
+                allow_runtime_fallback=not bool(integration_id),
+            )
         )
         if resolved is not None:
             record, capability = resolved
@@ -925,7 +938,25 @@ def _run_worker(spec_path: str) -> None:
 
     out: dict[str, Any] = {"branch": spec["branch"], "ok": False}
     t0 = time.time()
+    sidecar: ReplayModelSidecar | None = None
     try:
+        sidecar = ReplayModelSidecar(
+            socket_path=Path(
+                os.environ["TEAMEVOLVER_REPLAY_MODEL_SOCKET"]
+            ),
+            port=int(
+                os.environ[
+                    "TEAMEVOLVER_REPLAY_MODEL_SIDECAR_PORT"
+                ]
+            ),
+            timeout_seconds=int(
+                os.environ.get(
+                    "TEAMEVOLVER_REPLAY_MODEL_TIMEOUT",
+                    "600",
+                )
+            ),
+        )
+        sidecar.start()
         # ``hermes_origin`` is a local checkout path to inject on sys.path, or
         # empty/absent to import an installed ``hermes-agent`` package as-is.
         origin = spec.get("hermes_origin")
@@ -1059,6 +1090,8 @@ def _run_worker(spec_path: str) -> None:
         out["error"] = f"{type(e).__name__}: {e}"
         out["traceback"] = traceback.format_exc()
     finally:
+        if sidecar is not None:
+            sidecar.close()
         out["elapsed_seconds"] = round(time.time() - t0, 1)
         Path(spec["out_path"]).write_text(json.dumps(out, ensure_ascii=False), "utf-8")
 
@@ -1103,6 +1136,10 @@ def _sandbox_read_paths(
 def _worker_environment(
     worker_python: str,
     sandbox: dict[str, str],
+    *,
+    broker_socket_path: Optional[Path] = None,
+    broker_sidecar_port: int = 0,
+    timeout: int = 0,
 ) -> dict[str, str]:
     tmp_dir = Path(sandbox["home"]) / "tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -1131,6 +1168,18 @@ def _worker_environment(
         "PYTHONPATH": str(_REPO_ROOT),
         "TMPDIR": str(tmp_dir),
     }
+    if broker_socket_path is not None:
+        env.update(
+            {
+                "TEAMEVOLVER_REPLAY_MODEL_SOCKET": str(
+                    broker_socket_path
+                ),
+                "TEAMEVOLVER_REPLAY_MODEL_SIDECAR_PORT": str(
+                    broker_sidecar_port
+                ),
+                "TEAMEVOLVER_REPLAY_MODEL_TIMEOUT": str(timeout),
+            }
+        )
     for key in ("SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE"):
         value = str(os.environ.get(key) or "").strip()
         if value and Path(value).exists():
@@ -1147,6 +1196,8 @@ def _systemd_sandbox_command(
     timeout: int,
     case: Optional[dict[str, Any]],
     unit_name: str,
+    broker_socket_path: Optional[Path] = None,
+    broker_sidecar_port: int = 0,
 ) -> list[str]:
     del harness
     for executable in (_SYSTEMD_RUN, _SYSTEMCTL, _ENV_BINARY):
@@ -1172,7 +1223,13 @@ def _systemd_sandbox_command(
         "-p",
         "ProtectHome=yes",
         "-p",
+        "PrivateNetwork=yes",
+        "-p",
         "PrivateTmp=yes",
+        "-p",
+        "ProtectProc=invisible",
+        "-p",
+        "ProcSubset=pid",
         "-p",
         f"InaccessiblePaths={actual_home}",
         "-p",
@@ -1182,17 +1239,13 @@ def _systemd_sandbox_command(
         "-p",
         "LockPersonality=yes",
         "-p",
+        "RestrictNamespaces=yes",
+        "-p",
         "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
         "-p",
         "SystemCallArchitectures=native",
         "-p",
         "UMask=0077",
-        "-p",
-        "IPAddressDeny=any",
-        "-p",
-        "IPAddressAllow=127.0.0.0/8",
-        "-p",
-        "IPAddressAllow=::1/128",
         "-p",
         f"RuntimeMaxSec={max(1, int(timeout))}s",
         "-p",
@@ -1206,7 +1259,13 @@ def _systemd_sandbox_command(
     command.append("-i")
     command.extend(
         f"{key}={value}"
-        for key, value in _worker_environment(worker_python, sandbox).items()
+        for key, value in _worker_environment(
+            worker_python,
+            sandbox,
+            broker_socket_path=broker_socket_path,
+            broker_sidecar_port=broker_sidecar_port,
+            timeout=timeout,
+        ).items()
     )
     command.extend(
         (
@@ -1260,16 +1319,21 @@ def spawn_branch(
         f"{uuid.uuid4().hex[:10]}"
     )
     broker_token = secrets.token_urlsafe(32)
+    broker_socket_path = branch_home / ".model-broker.sock"
+    broker_sidecar_port = 43128
     try:
         with replay_model_broker(
             base_url=str(harness.get("base_url") or ""),
             api_key=str(harness.get("api_key") or ""),
+            socket_path=broker_socket_path,
             token=broker_token,
             timeout_seconds=timeout,
         ) as broker:
             worker_harness = {
                 **harness,
-                "base_url": broker.worker_base_url,
+                "base_url": broker.worker_base_url(
+                    broker_sidecar_port
+                ),
                 "api_key": broker_token,
             }
             _write_sandbox_harness_config(
@@ -1314,6 +1378,8 @@ def spawn_branch(
                 timeout=timeout,
                 case=case,
                 unit_name=unit_name,
+                broker_socket_path=broker_socket_path,
+                broker_sidecar_port=broker_sidecar_port,
             )
             print(
                 f"  ▶ running {branch} branch "

@@ -388,3 +388,75 @@ async def test_pull_sessions_requires_enabled() -> None:
 
     with pytest.raises(LangfuseError):
         await langfuse_pull.pull_sessions(config, _ingest, {})
+
+
+def test_config_store_maps_langfuse_tracing_settings(tmp_path) -> None:
+    from teamEvolver.config_store import ConfigStore
+
+    store = ConfigStore(config_file=tmp_path / "config.yaml")
+    store.set("langfuse.tracing_enabled", True)
+    store.set("langfuse.tracing_environment", "local-dev")
+    store.set("langfuse.tracing_release", "abc123")
+    store.set("langfuse.tracing_sample_rate", 0.25)
+    store.set("langfuse.tracing_capture_content", False)
+
+    config = store.to_config()
+
+    assert config.langfuse_tracing_enabled is True
+    assert config.langfuse_tracing_environment == "local-dev"
+    assert config.langfuse_tracing_release == "abc123"
+    assert config.langfuse_tracing_sample_rate == 0.25
+    assert config.langfuse_tracing_capture_content is False
+
+
+def test_langfuse_tracing_runtime_redacts_content() -> None:
+    from contextlib import contextmanager
+
+    from teamEvolver.observability.langfuse import (
+        LangfuseTracingSettings,
+        _LangfuseRuntime,
+    )
+
+    class _Observation:
+        def __init__(self) -> None:
+            self.updates: list[dict[str, Any]] = []
+
+        def update(self, **kwargs):
+            self.updates.append(kwargs)
+
+    class _Client:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+            self.observation = _Observation()
+
+        @contextmanager
+        def start_as_current_observation(self, **kwargs):
+            self.calls.append(kwargs)
+            yield self.observation
+
+    runtime = _LangfuseRuntime()
+    runtime._settings = LangfuseTracingSettings(
+        enabled=True,
+        public_key="pk",
+        secret_key="sk",
+        capture_content=False,
+    )
+    client = _Client()
+    runtime._client = client
+
+    with runtime.observation(
+        name="test-generation",
+        as_type="generation",
+        input={"secret": "prompt"},
+        metadata={"operation": "test"},
+        model="test-model",
+    ) as observation:
+        runtime.update(
+            observation,
+            output={"secret": "response"},
+            metadata={"finish_reason": "stop"},
+        )
+
+    assert client.calls[0]["input"] == {"redacted": True}
+    assert client.calls[0]["metadata"] == {"operation": "test"}
+    assert client.observation.updates[0]["output"] == {"redacted": True}

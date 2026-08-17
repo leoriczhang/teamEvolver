@@ -67,7 +67,7 @@ const NAV_SECTIONS: {
     label: "进化闭环",
     items: [
       { key: "dashboard", label: "运行总览", icon: LayoutDashboard },
-      { key: "langfuse", label: "会话数据源", icon: DownloadCloud },
+      { key: "langfuse", label: "Langfuse 接入", icon: DownloadCloud },
       { key: "prompt-studio", label: "进化链路", icon: TerminalSquare },
     ],
   },
@@ -119,9 +119,9 @@ type StandalonePageConfig = {
 const STANDALONE_PAGES: StandalonePageConfig[] = [
   {
     key: "langfuse",
-    title: "会话数据源",
-    description: "管理技能进化的会话证据入口。当前支持从 Langfuse 拉取数据，并按环境、用户、标签、版本和元数据筛选。",
-    badge: "数据接入",
+    title: "Langfuse 接入",
+    description: "统一配置会话证据拉取，以及 Skills 进化、团队 Memory 和内部模型调用的链路观测。",
+    badge: "数据与观测",
     render: ({ active, user }) => <LangfuseView active={active} user={user} />,
   },
   {

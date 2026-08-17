@@ -13,17 +13,10 @@ Usage:
 
 from __future__ import annotations
 
-try:
-    from langfuse.openai import register_tracing
-    register_tracing()
-except Exception:
-    pass
-
 import argparse
 import json
 import logging
 import sys
-from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -77,6 +70,9 @@ Examples:
 
     from .config import DreamCycleConfig
     config = DreamCycleConfig(env_file=env_file)
+    from ..observability import configure_langfuse
+
+    configure_langfuse()
 
     if args.verbose:
         config.log.log_level = "DEBUG"
@@ -136,13 +132,18 @@ Examples:
         config.viking.customer_id or "(agent-level)",
     )
 
-    if args.daemon:
-        scheduler.run_daemon()
-    else:
-        results = scheduler.run_once()
-        # Exit code: 0 if all ok, 1 if any job failed
-        has_failure = any(r.status.value == "failed" for r in results)
-        sys.exit(1 if has_failure else 0)
+    try:
+        if args.daemon:
+            scheduler.run_daemon()
+        else:
+            results = scheduler.run_once()
+            # Exit code: 0 if all ok, 1 if any job failed
+            has_failure = any(r.status.value == "failed" for r in results)
+            sys.exit(1 if has_failure else 0)
+    finally:
+        from ..observability import flush_langfuse
+
+        flush_langfuse()
 
 
 def _show_status(config):

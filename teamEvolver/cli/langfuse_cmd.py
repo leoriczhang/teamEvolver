@@ -15,12 +15,19 @@ import click
 from ..config_store import ConfigStore
 
 
-def _require_langfuse(cs: ConfigStore):
+def _require_langfuse(cs: ConfigStore, *, pull_required: bool = True):
     cfg = cs.to_config()
-    if not getattr(cfg, "langfuse_enabled", False):
+    enabled = bool(getattr(cfg, "langfuse_enabled", False))
+    tracing_enabled = bool(
+        getattr(cfg, "langfuse_tracing_enabled", False)
+    )
+    if (pull_required and not enabled) or (
+        not pull_required and not enabled and not tracing_enabled
+    ):
         raise click.ClickException(
             "Langfuse integration is disabled. Enable it with "
-            "'teamEvolver config langfuse.enabled true' and set "
+            "'teamEvolver config langfuse.enabled true' or "
+            "'teamEvolver config langfuse.tracing_enabled true', then set "
             "langfuse.host / langfuse.public_key / langfuse.secret_key."
         )
     if not getattr(cfg, "langfuse_public_key", "") or not getattr(cfg, "langfuse_secret_key", ""):
@@ -139,21 +146,27 @@ def langfuse():
 def langfuse_status():
     """Check Langfuse connectivity and configured default filters."""
     cs = ConfigStore()
-    cfg = _require_langfuse(cs)
+    cfg = _require_langfuse(cs, pull_required=False)
     from ..integrations.langfuse_client import LangfuseClient, LangfuseError
+    from ..observability import configure_langfuse
 
     click.echo(f"host: {cfg.langfuse_host}")
+    click.echo(f"session_pull_enabled: {cfg.langfuse_enabled}")
+    click.echo(f"tracing_enabled: {cfg.langfuse_tracing_enabled}")
+    click.echo(f"tracing_environment: {cfg.langfuse_tracing_environment}")
     click.echo(f"public_key: {'present' if cfg.langfuse_public_key else 'missing'}")
     click.echo(f"secret_key: {'present' if cfg.langfuse_secret_key else 'missing'}")
     click.echo(f"max_sessions: {cfg.langfuse_max_sessions}")
     click.echo(f"default.environment: {','.join(cfg.langfuse_default_environment) or '(any)'}")
     click.echo(f"default.user_id: {cfg.langfuse_default_user_id or '(any)'}")
     click.echo(f"default.tags: {','.join(cfg.langfuse_default_tags) or '(any)'}")
+    tracing = configure_langfuse(cfg)
+    click.echo(f"tracing_sdk_available: {tracing['sdk_available']}")
     try:
         health = LangfuseClient.from_config(cfg).health()
     except LangfuseError as exc:
         raise click.ClickException(str(exc)) from None
-    click.echo(f"reachable: True")
+    click.echo("reachable: True")
     total = health.get("total_sessions")
     if total is not None:
         click.echo(f"total_sessions: {total}")

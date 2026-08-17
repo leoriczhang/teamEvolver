@@ -442,7 +442,19 @@ async def judge_session(
         # emitting any content; on large sessions the reasoning alone can exceed
         # 8k and return empty content (finish_reason=length). Keep this high, and
         # the client also auto-doubles the budget on an empty length-capped reply.
-        raw = await llm.chat(messages, **_judge_call_options())
+        raw = await llm.chat(
+            messages,
+            **_judge_call_options(),
+            trace_name="teamEvolver.evolve.judge",
+            trace_tags=["evolve", "judge"],
+            trace_metadata={
+                "component": "teamEvolver.evolve",
+                "operation": "judge",
+                "source_session_id": str(
+                    session.get("session_id") or ""
+                ),
+            },
+        )
     except Exception as exc:
         logger.warning(
             "[SessionJudge] LLM call failed for session %s: %s",

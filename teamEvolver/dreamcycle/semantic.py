@@ -13,6 +13,11 @@ import logging
 import math
 from typing import Callable, Dict, List, Optional
 
+from ..observability import (
+    langfuse_observation,
+    update_langfuse_observation,
+)
+
 logger = logging.getLogger(__name__)
 
 # Embedding function contract: given texts, return one vector per text.
@@ -139,7 +144,35 @@ def make_openai_embedder(
     client = OpenAI(api_key=api_key, base_url=base_url.rstrip("/"))
 
     def embed(texts: List[str]) -> List[List[float]]:
-        resp = client.embeddings.create(model=model, input=texts)
-        return [item.embedding for item in resp.data]
+        with langfuse_observation(
+            name="teamEvolver.dreamcycle.embedding",
+            as_type="embedding",
+            input=texts,
+            metadata={
+                "component": "teamEvolver.dreamcycle",
+                "operation": "semantic_dedup",
+                "input_count": len(texts),
+            },
+            model=model,
+            trace_name="teamEvolver.dreamcycle.semantic_dedup",
+            tags=["dreamcycle", "embedding", "semantic-dedup"],
+        ) as observation:
+            resp = client.embeddings.create(model=model, input=texts)
+            vectors = [item.embedding for item in resp.data]
+            usage = getattr(resp, "usage", None)
+            total_tokens = getattr(usage, "total_tokens", None)
+            update_langfuse_observation(
+                observation,
+                output={
+                    "vector_count": len(vectors),
+                    "dimensions": len(vectors[0]) if vectors else 0,
+                },
+                usage_details=(
+                    {"total_tokens": int(total_tokens)}
+                    if isinstance(total_tokens, (int, float))
+                    else None
+                ),
+            )
+            return vectors
 
     return embed

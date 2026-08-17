@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import http.server
 import os
+import socket
 import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 
-from teamEvolver.integrations.replay_model_broker import replay_model_broker
+from teamEvolver.integrations.replay_model_broker import (
+    ReplayModelSidecar,
+    replay_model_broker,
+)
 from teamEvolver.replay_metrics import objective_replay_decision
 from teamEvolver.true_replay import (
     _agentshub_endpoint,
@@ -363,16 +367,17 @@ def test_systemd_sandbox_command_enforces_filesystem_network_and_clean_env(
 
     assert "ProtectSystem=strict" in command
     assert "ProtectHome=yes" in command
-    assert "IPAddressDeny=any" in command
-    assert "IPAddressAllow=127.0.0.0/8" in command
-    assert "IPAddressAllow=::1/128" in command
+    assert "PrivateNetwork=yes" in command
+    assert "IPAddressAllow=127.0.0.0/8" not in command
     assert "RuntimeMaxSec=90s" in command
     assert "/usr/bin/env" in command
     assert "-i" in command
     assert "must-not-appear-in-command" not in rendered
 
 
-def test_replay_model_broker_keeps_real_key_in_parent() -> None:
+def test_replay_model_broker_keeps_real_key_in_parent(
+    tmp_path,
+) -> None:
     captured: dict[str, str] = {}
 
     class Upstream(http.server.BaseHTTPRequestHandler):
@@ -397,20 +402,35 @@ def test_replay_model_broker_keeps_real_key_in_parent() -> None:
     thread.start()
     try:
         port = int(upstream.server_address[1])
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            sidecar_port = int(probe.getsockname()[1])
+        socket_path = tmp_path / "model-broker.sock"
         with replay_model_broker(
             base_url=f"http://127.0.0.1:{port}/v1",
             api_key="real-parent-key",
+            socket_path=socket_path,
             token="ephemeral-worker-token",
             timeout_seconds=5,
         ) as broker:
-            response = httpx.post(
-                broker.worker_base_url + "/chat/completions",
-                headers={
-                    "Authorization": "Bearer ephemeral-worker-token"
-                },
-                json={"model": "model-a", "messages": []},
-                timeout=5,
+            sidecar = ReplayModelSidecar(
+                socket_path=socket_path,
+                port=sidecar_port,
+                timeout_seconds=5,
             )
+            sidecar.start()
+            try:
+                response = httpx.post(
+                    broker.worker_base_url(sidecar_port)
+                    + "/chat/completions",
+                    headers={
+                        "Authorization": "Bearer ephemeral-worker-token"
+                    },
+                    json={"model": "model-a", "messages": []},
+                    timeout=5,
+                )
+            finally:
+                sidecar.close()
         assert response.json() == {"ok": True}
         assert captured["authorization"] == "Bearer real-parent-key"
     finally:
@@ -452,6 +472,73 @@ def test_local_replay_fails_closed_when_sandbox_is_unavailable(
 
     assert result["ok"] is False
     assert result["error_code"] == "REPLAY_SANDBOX_UNAVAILABLE"
+
+
+def test_local_replay_spec_never_contains_upstream_key(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    real_key = "real-key-must-stay-parent"
+    harness = {
+        "base_url": "https://model.example/v1",
+        "api_key": real_key,
+        "model": "model",
+        "api_mode": "chat",
+        "max_tokens": 1024,
+    }
+    sandbox = build_sandbox(tmp_path, "baseline", harness, None)
+
+    class Broker:
+        @staticmethod
+        def worker_base_url(_port):
+            return "http://127.0.0.1:43210/upstream"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(
+        "teamEvolver.true_replay.resolve_replay_python",
+        lambda: os.sys.executable,
+    )
+    monkeypatch.setattr(
+        "teamEvolver.true_replay.replay_model_broker",
+        lambda **_kwargs: Broker(),
+    )
+    monkeypatch.setattr(
+        "teamEvolver.true_replay._systemd_sandbox_command",
+        lambda **_kwargs: ["sandbox-command"],
+    )
+
+    def fake_run(*_args, **_kwargs):
+        spec_path = Path(sandbox["home"]) / ".replay_spec.json"
+        config_path = Path(sandbox["hermes_home"]) / "config.yaml"
+        assert real_key not in spec_path.read_text("utf-8")
+        assert real_key not in config_path.read_text("utf-8")
+        Path(sandbox["home"], ".replay_result.json").write_text(
+            '{"branch":"baseline","ok":true}',
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(
+        "teamEvolver.true_replay.subprocess.run",
+        fake_run,
+    )
+
+    result = spawn_branch(
+        "baseline",
+        sandbox,
+        "do work",
+        harness,
+        None,
+        tmp_path,
+        30,
+    )
+
+    assert result["ok"] is True
 
 
 def test_sandbox_installs_complete_candidate_bundle(tmp_path) -> None:

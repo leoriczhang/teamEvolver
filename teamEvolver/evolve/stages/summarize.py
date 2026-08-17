@@ -15,8 +15,8 @@ import json
 import logging
 from typing import Any
 
-from ..kernel.llm import AsyncLLMClient
 from ..kernel.helpers import compact_tool_calls, compact_tool_observations
+from ..kernel.llm import AsyncLLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -476,12 +476,23 @@ def _extract_session_metadata(session: dict) -> None:
 async def summarize_session(llm: AsyncLLMClient, session: dict) -> str:
     """Summarize an entire session via LLM (trajectory-aware)."""
     payload = _build_session_payload(session)
+    session_id = str(session.get("session_id") or "").strip()
     messages = [
         {"role": "system", "content": _effective_summarize_system()},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
     try:
-        return await llm.chat(messages, **_summarize_call_options())
+        return await llm.chat(
+            messages,
+            **_summarize_call_options(),
+            trace_name="teamEvolver.evolve.summarize",
+            trace_tags=["evolve", "summarize"],
+            trace_metadata={
+                "component": "teamEvolver.evolve",
+                "operation": "summarize",
+                "source_session_id": session_id,
+            },
+        )
     except Exception as e:
         logger.warning(
             "[Summarizer] LLM call failed for session %s: %s",

@@ -25,7 +25,7 @@
 - [手动安装](#手动安装)
 - [控制台概览](#控制台概览)
 - [OpenViking / 对象存储](#openviking--对象存储)
-- [Langfuse 会话接入](#langfuse-会话接入)
+- [Langfuse 会话与观测接入](#langfuse-会话与观测接入)
 - [SkillMiner 与 LIFT](#skillminer-与-lift)
 - [DreamCycle 与验证队列](#dreamcycle-与验证队列)
 - [True Replay：用真实轨迹验证技能](#true-replay用真实轨迹验证技能)
@@ -367,12 +367,13 @@ teamEvolver 的 workspace 管理直接复用 OpenViking 原生 `fs` 与 `content
 
 ---
 
-## Langfuse 会话接入
+## Langfuse 会话与观测接入
 
 除 Hermes / AgentsHub 主动推送外，teamEvolver 还能直接从 [Langfuse](https://langfuse.com)
 拉取 Agent 会话作为进化证据。集成基于 Langfuse **v3.117.2** 的公开 REST API（`/api/public/*`，
 HTTP Basic 认证：public key 作用户名、secret key 作密码），使用内置 `httpx` 直连，不绑定特定
-`langfuse` SDK 版本。
+`langfuse` SDK 版本。teamEvolver 自身的 Skills 进化、团队 Memory/DreamCycle、模型 generation、
+embedding 和工具调用则通过 Langfuse Python SDK v4 上报，两条链路可独立启停。
 
 一个 Langfuse **session** 会映射为一个 teamEvolver session，其下每条 **trace** 折叠为一个交互
 轮次（turn），`GENERATION` 观测提供 token 用量、`tool_calls` 与工具结果映射为工具调用记录。拉取
@@ -391,6 +392,22 @@ teamEvolver config langfuse.default_environment "production,staging"
 teamEvolver config langfuse.default_tags "agent,eval"
 teamEvolver config langfuse.default_user_id ""
 ```
+
+本地 Langfuse 的链路观测配置：
+
+```bash
+teamEvolver config langfuse.host "http://127.0.0.1:3000"
+teamEvolver config langfuse.public_key "pk-lf-..."
+teamEvolver config langfuse.secret_key "sk-lf-..."
+teamEvolver config langfuse.tracing_enabled true
+teamEvolver config langfuse.tracing_environment local
+teamEvolver config langfuse.tracing_sample_rate 1
+# 含敏感 Memory 时可关闭 prompt/response 采集
+teamEvolver config langfuse.tracing_capture_content false
+```
+
+`langfuse.enabled` 控制会话拉取，`langfuse.tracing_enabled` 控制内部链路上报。两者可独立启停，
+配置可在控制台“Langfuse 接入”页面热更新；上报失败不会中断进化或 Memory 维护。
 
 凭据切勿写入仓库，建议通过本机配置或 Secret 注入。
 

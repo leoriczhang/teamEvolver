@@ -16,6 +16,7 @@ from ..dreamcycle.config import (
 )
 from ..dreamcycle.jobs import ALL_JOBS
 from ..dreamcycle.logging_config import setup_embedded_logging
+from ..dreamcycle.memory_replay import MemoryTrueReplayRunner
 from ..dreamcycle.scheduler import Scheduler
 from .dreamcycle import (
     collect_personal_source_keys,
@@ -86,6 +87,10 @@ class FullDreamCycleSupervisor:
         self._last_results: list[dict[str, Any]] = []
         self._last_error = ""
         self._scheduler = self._build_scheduler()
+        self._memory_replay = MemoryTrueReplayRunner(
+            ledger=self._scheduler._change_ledger,
+            app_config=self.config,
+        )
 
     def _enabled(self) -> bool:
         return bool(getattr(self.config, "dreamcycle_enabled", False))
@@ -490,10 +495,55 @@ class FullDreamCycleSupervisor:
         changes = self._scheduler._change_ledger.list_changes(
             limit=max(1, min(500, int(limit))),
         )
+        latest_by_change: dict[str, dict[str, Any]] = {}
+        for replay in self._memory_replay.list_replays(limit=10000):
+            change_id = str(replay.get("change_id") or "")
+            if change_id and change_id not in latest_by_change:
+                latest_by_change[change_id] = replay
+        for change in changes:
+            latest = latest_by_change.get(str(change.get("change_id") or ""))
+            if latest is not None:
+                change["latest_replay"] = latest
         return {
             "schema_version": "teamevolver.memory-change-list.v1",
             "count": len(changes),
             "items": changes,
+        }
+
+    def run_memory_replay(
+        self,
+        *,
+        change_id: str,
+        query: str,
+        checklist: list[Any],
+        source_session_id: str = "",
+        max_interactions: int = 4,
+        timeout_seconds: int = 600,
+    ) -> dict[str, Any]:
+        return self._memory_replay.run(
+            change_id=change_id,
+            query=query,
+            checklist=checklist,
+            source_session_id=source_session_id,
+            max_interactions=max_interactions,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def memory_replays(
+        self,
+        *,
+        change_id: str,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        items = self._memory_replay.list_replays(
+            change_id=change_id,
+            limit=max(1, min(500, int(limit))),
+        )
+        return {
+            "schema_version": "teamevolver.memory-true-replay-list.v1",
+            "change_id": change_id,
+            "count": len(items),
+            "items": items,
         }
 
     def reset(

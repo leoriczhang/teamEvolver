@@ -140,6 +140,39 @@ async def test_verified_candidate_audit_bypasses_subjective_classifier() -> None
     assert result["mode"] == "deterministic"
 
 
+@pytest.mark.anyio
+async def test_classifier_empty_response_falls_back_to_heuristic() -> None:
+    class EmptyClient:
+        model = "test-model"
+        timeout_seconds = 10
+
+        async def chat(self, *_args, **_kwargs):
+            return None
+
+    result = await SessionValueClassifier(client=EmptyClient()).classify(
+        {
+            "turns": [
+                {
+                    "prompt_text": "生成并校验演示稿",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "write",
+                                "arguments": "{}",
+                            }
+                        }
+                    ],
+                }
+            ],
+            "metrics": {"tool_call_count": 1},
+        }
+    )
+
+    assert result["decision"] == "valuable"
+    assert result["mode"] == "heuristic"
+    assert "invalid JSON" in result["reason"]
+
+
 def test_ingest_queues_valuable_sessions(tmp_path: Path) -> None:
     app = _server(tmp_path).app
 

@@ -18,6 +18,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type
 
+from ..observability import (
+    langfuse_observation,
+    update_langfuse_observation,
+)
 from .config import DreamCycleConfig
 from .jobs.base import Job, JobResult, JobStatus
 from .memory_changes import MemoryChangeLedger
@@ -80,12 +84,14 @@ class ExecutionState:
 
         # Keep last 30 days of history
         history = self._data.setdefault("history", [])
-        history.append({
-            "date": today,
-            "time": datetime.now(timezone.utc).isoformat(),
-            "round": self._data["rounds_today"],
-            "jobs": [r.to_dict() for r in results],
-        })
+        history.append(
+            {
+                "date": today,
+                "time": datetime.now(timezone.utc).isoformat(),
+                "round": self._data["rounds_today"],
+                "jobs": [r.to_dict() for r in results],
+            }
+        )
         # Trim old history
         if len(history) > 90:
             self._data["history"] = history[-90:]
@@ -99,7 +105,7 @@ class ExecutionState:
 
 class Scheduler:
     """Manages the DreamCycle execution schedule.
-    
+
     Modes:
     - daemon: Runs continuously, executing during active hours
     - once: Runs a single round immediately (ignores time window)
@@ -115,12 +121,10 @@ class Scheduler:
         change_ledger: MemoryChangeLedger | None = None,
     ):
         self._config = config
-        self._job_classes = sorted(jobs, key=lambda j: j().priority if hasattr(j, 'priority') else 50)
+        self._job_classes = sorted(jobs, key=lambda j: j().priority if hasattr(j, "priority") else 50)
         self._state = ExecutionState(config.log.state_file)
         self._change_ledger = (
-            change_ledger
-            if change_ledger is not None
-            else MemoryChangeLedger.from_config(config.viking)
+            change_ledger if change_ledger is not None else MemoryChangeLedger.from_config(config.viking)
         )
         self._shutdown = False
         self._signal_count = 0
@@ -134,6 +138,7 @@ class Scheduler:
         if self._signal_count >= 2:
             logger.info("Force shutdown (signal #%d)", self._signal_count)
             import os
+
             os._exit(1)
         logger.info("Shutdown signal received — press Ctrl+C again to force quit")
         self._shutdown = True
@@ -177,15 +182,10 @@ class Scheduler:
             for api_key in self._config.viking.source_api_keys
         ]
         source_clients.extend(
-            VikingHTTPClient(self._config.viking, user_override=user)
-            for user in self._config.viking.source_users
+            VikingHTTPClient(self._config.viking, user_override=user) for user in self._config.viking.source_users
         )
         source_clients = list(
-            {
-                source.user: source
-                for source in source_clients
-                if source.user and source.user != client.user
-            }.values()
+            {source.user: source for source in source_clients if source.user and source.user != client.user}.values()
         )
         registry = ToolRegistry()
 
@@ -278,6 +278,36 @@ class Scheduler:
 
     def run_round(self) -> List[JobResult]:
         """Execute one full round of all maintenance jobs."""
+        run_id = self._change_ledger.begin_round()
+        with langfuse_observation(
+            name="teamEvolver.dreamcycle.round",
+            as_type="agent",
+            input={
+                "run_id": run_id,
+                "jobs": [job().name for job in self._job_classes],
+                "team_name": self._config.team_name,
+            },
+            metadata={
+                "component": "teamEvolver.dreamcycle",
+                "operation": "round",
+                "run_id": run_id,
+            },
+            trace_name="teamEvolver.dreamcycle.round",
+            session_id=run_id,
+            tags=["dreamcycle", "round"],
+        ) as observation:
+            results = self._run_round(run_id)
+            update_langfuse_observation(
+                observation,
+                output={
+                    "jobs": [result.to_dict() for result in results],
+                    "completed": sum(result.status == JobStatus.COMPLETED for result in results),
+                    "failed": sum(result.status == JobStatus.FAILED for result in results),
+                },
+            )
+            return results
+
+    def _run_round(self, run_id: str) -> List[JobResult]:
         logger.info("=" * 60)
         logger.info("DreamCycle Round %d starting", self._state.rounds_today + 1)
         logger.info("=" * 60)
@@ -287,7 +317,6 @@ class Scheduler:
         # One shared blackboard per round: jobs run on fresh engines but reuse
         # this registry, so facts and already-processed URIs carry across jobs.
         blackboard = Blackboard()
-        run_id = self._change_ledger.begin_round()
         logger.info("[Scheduler] Memory Change run: %s", run_id)
         tools = self._build_tools(blackboard)
         results: List[JobResult] = []
@@ -307,22 +336,42 @@ class Scheduler:
             engine = ReActEngine(
                 config=job_config,
                 tools=tools,
-                system_prompt=(
-                    self._config.job_prompts.get(job.name)
-                    or job.get_system_prompt()
-                ),
+                system_prompt=(self._config.job_prompts.get(job.name) or job.get_system_prompt()),
+                trace_session_id=run_id,
             )
 
             try:
-                result = job.execute(engine)
-                result.memory_changes = self._change_ledger.summaries_since(
-                    change_cursor
-                )
+                with langfuse_observation(
+                    name=f"teamEvolver.dreamcycle.job.{job.name}",
+                    as_type="agent",
+                    input={
+                        "job": job.name,
+                        "priority": job.priority,
+                    },
+                    metadata={
+                        "component": "teamEvolver.dreamcycle",
+                        "operation": "job",
+                        "job": job.name,
+                        "run_id": run_id,
+                    },
+                    trace_name="teamEvolver.dreamcycle.round",
+                    session_id=run_id,
+                    tags=["dreamcycle", "job", job.name],
+                ) as observation:
+                    result = job.execute(engine)
+                    result.memory_changes = self._change_ledger.summaries_since(change_cursor)
+                    update_langfuse_observation(
+                        observation,
+                        output=result.to_dict(),
+                        level=("ERROR" if result.status == JobStatus.FAILED else None),
+                    )
                 results.append(result)
                 logger.info(
                     "[Scheduler] Job %s: %s (%.1fs, %d tasks done)",
-                    job.name, result.status.value,
-                    result.duration_seconds, result.tasks_completed,
+                    job.name,
+                    result.status.value,
+                    result.duration_seconds,
+                    result.tasks_completed,
                 )
             except Exception as e:
                 logger.error("[Scheduler] Job %s crashed: %s", job.name, e, exc_info=True)
@@ -333,9 +382,7 @@ class Scheduler:
                     errors=[str(e)],
                     summary=f"Crashed: {e}",
                 )
-                failed_result.memory_changes = (
-                    self._change_ledger.summaries_since(change_cursor)
-                )
+                failed_result.memory_changes = self._change_ledger.summaries_since(change_cursor)
                 results.append(failed_result)
 
         # Record state
@@ -426,4 +473,6 @@ class Scheduler:
         # Also log individual job results
         for r in results:
             icon = "✅" if r.status == JobStatus.COMPLETED else "❌"
-            logger.info("  %s %s: %s (%.1fs, %d turns)", icon, r.job_name, r.status.value, r.duration_seconds, r.turns_used)
+            logger.info(
+                "  %s %s: %s (%.1fs, %d turns)", icon, r.job_name, r.status.value, r.duration_seconds, r.turns_used
+            )

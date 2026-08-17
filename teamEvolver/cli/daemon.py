@@ -22,6 +22,23 @@ def _default_daemon_log_path() -> Path:
     return Path.home() / ".teamEvolver" / "teamEvolver.log"
 
 
+def _daemon_child_environment(
+    base_env: dict[str, str],
+    *,
+    home: Path | None = None,
+) -> dict[str, str]:
+    from dotenv import dotenv_values
+
+    env = dict(base_env)
+    env_file = (home or Path.home()) / ".teamEvolver" / "agent-protocol.env"
+    if not env_file.is_file():
+        return env
+    for key, value in dotenv_values(env_file).items():
+        if key and value is not None:
+            env.setdefault(str(key), str(value))
+    return env
+
+
 def _effective_service_port(config_store: ConfigStore, override_port: int | None) -> int:
     if override_port:
         return override_port
@@ -119,7 +136,7 @@ def _spawn_daemon_process(
                 cmd.extend(["--port", str(port)])
 
             with log_path.open("ab") as log_handle:
-                child_env = os.environ.copy()
+                child_env = _daemon_child_environment(dict(os.environ))
                 child_env["TEAMEVOLVER_RUNTIME_KIND"] = "daemon"
                 child_env["TEAMEVOLVER_RUNTIME_LOG_PATH"] = str(log_path)
                 popen_kwargs = {

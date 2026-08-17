@@ -25,6 +25,7 @@
 - [Manual Installation](#manual-installation)
 - [Console Map](#console-map)
 - [OpenViking / Object Storage](#openviking--object-storage)
+- [Langfuse Sessions and Observability](#langfuse-sessions-and-observability)
 - [DreamCycle and Validation Queue](#dreamcycle-and-validation-queue)
 - [True Replay: Validate Skills with Real Trajectories](#true-replay-validate-skills-with-real-trajectories)
 - [Project Layout](#project-layout)
@@ -325,6 +326,24 @@ The teamEvolver console proxies OpenViking's native filesystem and content APIs.
 Any Agent runtime can integrate by posting a stable `agent_id`, `runtime_type`, capabilities, and non-secret health/replay/Skill-sync endpoints to `/internal/agents/register`. Sessions continue to enter through `/ingest_session` and identify their runtime through `runtime.type` and `runtime.integration_id`; True Replay resolves the registered endpoint dynamically.
 
 Do not commit real API keys. Use local configuration, environment variables, or your deployment platform's secret manager.
+
+---
+
+## Langfuse Sessions and Observability
+
+Langfuse can import sessions and observe Skill evolution, team Memory,
+model generations, embeddings, and tool calls.
+
+```bash
+teamEvolver config langfuse.host "http://127.0.0.1:3000"
+teamEvolver config langfuse.public_key "pk-lf-..."
+teamEvolver config langfuse.secret_key "sk-lf-..."
+teamEvolver config langfuse.tracing_enabled true
+```
+
+`langfuse.enabled` controls session imports; `langfuse.tracing_enabled` controls
+trace export. Set `langfuse.tracing_capture_content` to `false` to redact model
+and tool content. Tracing failures never stop evolution or Memory maintenance.
 
 ---
 

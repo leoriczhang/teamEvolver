@@ -56,6 +56,7 @@ const EMPTY_FORM: FilterForm = {
 // Editable connection + default-filter settings (persisted server-side).
 interface ConfigForm {
   enabled: boolean;
+  tracing_enabled: boolean;
   host: string;
   public_key: string;
   secret_key: string;
@@ -63,10 +64,15 @@ interface ConfigForm {
   default_environment: string;
   default_user_id: string;
   default_tags: string;
+  tracing_environment: string;
+  tracing_release: string;
+  tracing_sample_rate: string;
+  tracing_capture_content: boolean;
 }
 
 const EMPTY_CONFIG: ConfigForm = {
   enabled: false,
+  tracing_enabled: false,
   host: "https://cloud.langfuse.com",
   public_key: "",
   secret_key: "",
@@ -74,6 +80,10 @@ const EMPTY_CONFIG: ConfigForm = {
   default_environment: "",
   default_user_id: "",
   default_tags: "",
+  tracing_environment: "local",
+  tracing_release: "",
+  tracing_sample_rate: "1",
+  tracing_capture_content: true,
 };
 
 function splitList(value: string): string[] {
@@ -150,6 +160,7 @@ export default function LangfuseView({
   const applyConfigToForms = useCallback((cfg: LangfuseConfig) => {
     setCfgForm({
       enabled: !!cfg.enabled,
+      tracing_enabled: !!cfg.tracing_enabled,
       host: cfg.host || "https://cloud.langfuse.com",
       public_key: cfg.public_key || "",
       secret_key: "",
@@ -157,6 +168,10 @@ export default function LangfuseView({
       default_environment: (cfg.default_environment || []).join(", "),
       default_user_id: cfg.default_user_id || "",
       default_tags: (cfg.default_tags || []).join(", "),
+      tracing_environment: cfg.tracing_environment || "local",
+      tracing_release: cfg.tracing_release || "",
+      tracing_sample_rate: String(cfg.tracing_sample_rate ?? 1),
+      tracing_capture_content: cfg.tracing_capture_content !== false,
     });
   }, []);
 
@@ -172,7 +187,11 @@ export default function LangfuseView({
         setConfig(cfgData);
         applyConfigToForms(cfgData);
         // Auto-open the settings panel when the integration is not yet usable.
-        if (!cfgData.enabled || !cfgData.public_key_present || !cfgData.secret_key_present) {
+        if (
+          (!cfgData.enabled && !cfgData.tracing_enabled)
+          || !cfgData.public_key_present
+          || !cfgData.secret_key_present
+        ) {
           setShowConfig(true);
         }
         // Prefill filter form with configured defaults on first load only.
@@ -209,11 +228,16 @@ export default function LangfuseView({
     try {
       const payload: LangfuseConfig = {
         enabled: cfgForm.enabled,
+        tracing_enabled: cfgForm.tracing_enabled,
         host: cfgForm.host.trim(),
         max_sessions: Number(cfgForm.max_sessions) || undefined,
         default_environment: splitList(cfgForm.default_environment),
         default_user_id: cfgForm.default_user_id.trim(),
         default_tags: splitList(cfgForm.default_tags),
+        tracing_environment: cfgForm.tracing_environment.trim() || "local",
+        tracing_release: cfgForm.tracing_release.trim(),
+        tracing_sample_rate: Number(cfgForm.tracing_sample_rate),
+        tracing_capture_content: cfgForm.tracing_capture_content,
       };
       // Only send secrets when the operator typed a new value.
       if (cfgForm.public_key.trim()) payload.public_key = cfgForm.public_key.trim();
@@ -225,7 +249,10 @@ export default function LangfuseView({
       });
       setConfig(saved);
       applyConfigToForms(saved);
-      toastOk("Langfuse 配置已保存", saved.enabled ? "集成已启用" : "集成已停用");
+      toastOk(
+        "Langfuse 配置已保存",
+        saved.enabled || saved.tracing_enabled ? "集成已启用" : "集成已停用"
+      );
       // Re-probe connectivity so the status cards reflect the new credentials.
       await refresh(false);
     } catch (e: any) {
@@ -297,16 +324,25 @@ export default function LangfuseView({
   const enabled = !!status?.enabled;
   const reachable = !!status?.reachable;
   const usable = enabled && reachable;
+  const tracingEnabled = !!status?.tracing?.enabled;
 
   return (
     <div className="mx-auto max-w-[1200px] px-[22px] py-[22px]">
       {/* ---- Connection status ---- */}
       <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">
         <StatCard
-          label="集成状态"
+          label="会话拉取"
           value={
             <Pill tone={enabled ? (reachable ? "green" : "amber") : "gray"}>
               {enabled ? (reachable ? "已连接" : "未连通") : "未启用"}
+            </Pill>
+          }
+        />
+        <StatCard
+          label="链路观测"
+          value={
+            <Pill tone={tracingEnabled ? "green" : "gray"}>
+              {tracingEnabled ? "已启用" : "未启用"}
             </Pill>
           }
         />
@@ -334,7 +370,9 @@ export default function LangfuseView({
         title="连接配置"
         extra={
           <div className="flex items-center gap-2">
-            <Pill tone={config?.enabled ? "green" : "gray"}>{config?.enabled ? "已启用" : "已停用"}</Pill>
+            <Pill tone={config?.enabled || config?.tracing_enabled ? "green" : "gray"}>
+              {config?.enabled || config?.tracing_enabled ? "已启用" : "已停用"}
+            </Pill>
             <Button variant="ghost" size="sm" onClick={() => setShowConfig((v) => !v)}>
               {showConfig ? "收起" : "编辑"}
             </Button>
@@ -355,7 +393,16 @@ export default function LangfuseView({
                 checked={cfgForm.enabled}
                 onChange={(e) => setCfgForm({ ...cfgForm, enabled: e.target.checked })}
               />
-              启用 Langfuse 集成
+              从 Langfuse 拉取会话
+            </label>
+            <label className="flex items-center gap-2 text-sm font-semibold">
+              <input
+                type="checkbox"
+                disabled={!isAdmin}
+                checked={cfgForm.tracing_enabled}
+                onChange={(e) => setCfgForm({ ...cfgForm, tracing_enabled: e.target.checked })}
+              />
+              上报进化与团队 Memory 链路
             </label>
             <div className="grid gap-3.5 md:grid-cols-2">
               <FormField label="Host *" hint="Langfuse 部署地址，自部署填自己的">
@@ -420,10 +467,46 @@ export default function LangfuseView({
                   onChange={(e) => setCfgForm({ ...cfgForm, default_user_id: e.target.value })}
                 />
               </FormField>
+              <FormField label="观测 Environment" hint="例如 local、staging、production">
+                <Input
+                  disabled={!isAdmin}
+                  value={cfgForm.tracing_environment}
+                  placeholder="local"
+                  onChange={(e) => setCfgForm({ ...cfgForm, tracing_environment: e.target.value })}
+                />
+              </FormField>
+              <FormField label="观测 Release" hint="可填写版本号或 Git SHA">
+                <Input
+                  disabled={!isAdmin}
+                  value={cfgForm.tracing_release}
+                  placeholder="（可选）"
+                  onChange={(e) => setCfgForm({ ...cfgForm, tracing_release: e.target.value })}
+                />
+              </FormField>
+              <FormField label="采样率" hint="0 到 1；本地调试建议 1">
+                <Input
+                  disabled={!isAdmin}
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={cfgForm.tracing_sample_rate}
+                  onChange={(e) => setCfgForm({ ...cfgForm, tracing_sample_rate: e.target.value })}
+                />
+              </FormField>
+              <label className="flex items-center gap-2 self-end pb-2 text-sm">
+                <input
+                  type="checkbox"
+                  disabled={!isAdmin}
+                  checked={cfgForm.tracing_capture_content}
+                  onChange={(e) => setCfgForm({ ...cfgForm, tracing_capture_content: e.target.checked })}
+                />
+                采集模型输入与输出
+              </label>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <Button size="sm" onClick={saveConfig} disabled={!isAdmin || savingCfg}>
-                {savingCfg ? "保存中…" : "保存并启用"}
+                {savingCfg ? "保存中…" : "保存配置"}
               </Button>
               <Button variant="outline" size="sm" onClick={testConfig} disabled={!isAdmin || testingCfg}>
                 {testingCfg ? "测试中…" : "测试连通性"}
@@ -436,8 +519,8 @@ export default function LangfuseView({
         )}
         {!showConfig && (
           <div className="px-4 py-3 text-xs text-muted-foreground">
-            {config?.enabled
-              ? `已启用 · ${config.host}`
+            {config?.enabled || config?.tracing_enabled
+              ? `已启用 · ${config.host} · 拉取 ${config.enabled ? "开" : "关"} · 观测 ${config.tracing_enabled ? "开" : "关"}`
               : "尚未启用。点击右上角「编辑」填写 Host 与 public/secret key 后保存即可使用。"}
           </div>
         )}

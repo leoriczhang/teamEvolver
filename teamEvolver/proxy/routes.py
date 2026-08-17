@@ -603,6 +603,9 @@ def _langfuse_settings_payload(config, store_data: dict[str, Any]) -> dict[str, 
     how ``_model_settings_payload`` handles the model API key.
     """
     langfuse = store_data.get("langfuse") if isinstance(store_data.get("langfuse"), dict) else {}
+    from ..observability import langfuse_status
+
+    tracing_status = langfuse_status()
 
     def _as_list(value: Any) -> list[str]:
         if isinstance(value, (list, tuple, set)):
@@ -617,6 +620,51 @@ def _langfuse_settings_payload(config, store_data: dict[str, Any]) -> dict[str, 
         "public_key": str(langfuse.get("public_key") or getattr(config, "langfuse_public_key", "") or ""),
         "public_key_present": bool(langfuse.get("public_key") or getattr(config, "langfuse_public_key", "")),
         "secret_key_present": bool(langfuse.get("secret_key") or getattr(config, "langfuse_secret_key", "")),
+        "tracing_enabled": bool(
+            langfuse.get(
+                "tracing_enabled",
+                getattr(config, "langfuse_tracing_enabled", False),
+            )
+        ),
+        "tracing_environment": str(
+            langfuse.get("tracing_environment")
+            or getattr(config, "langfuse_tracing_environment", "")
+            or "local"
+        ),
+        "tracing_release": str(
+            langfuse.get("tracing_release")
+            or getattr(config, "langfuse_tracing_release", "")
+            or ""
+        ),
+        "tracing_sample_rate": float(
+            langfuse.get(
+                "tracing_sample_rate",
+                getattr(config, "langfuse_tracing_sample_rate", 1.0),
+            )
+        ),
+        "tracing_capture_content": bool(
+            langfuse.get(
+                "tracing_capture_content",
+                getattr(config, "langfuse_tracing_capture_content", True),
+            )
+        ),
+        "tracing_flush_at": int(
+            langfuse.get(
+                "tracing_flush_at",
+                getattr(config, "langfuse_tracing_flush_at", 1),
+            )
+        ),
+        "tracing_flush_interval_seconds": float(
+            langfuse.get(
+                "tracing_flush_interval_seconds",
+                getattr(
+                    config,
+                    "langfuse_tracing_flush_interval_seconds",
+                    1.0,
+                ),
+            )
+        ),
+        "tracing_status": tracing_status,
         "max_sessions": int(langfuse.get("max_sessions") or getattr(config, "langfuse_max_sessions", 100) or 100),
         "page_limit": int(langfuse.get("page_limit") or getattr(config, "langfuse_page_limit", 50) or 50),
         "timeout_seconds": int(
@@ -2581,6 +2629,7 @@ class RoutesMixin:
                 raise HTTPException(status_code=400, detail="langfuse settings body must be an object")
 
             enabled = bool(body.get("enabled", False))
+            tracing_enabled = bool(body.get("tracing_enabled", False))
             host = str(body.get("host") or "").strip().rstrip("/") or "https://cloud.langfuse.com"
 
             def _norm_list(value: Any) -> list[str]:
@@ -2603,9 +2652,30 @@ class RoutesMixin:
                 timeout_seconds = max(
                     1, int(body.get("timeout_seconds") or owner.config.langfuse_timeout_seconds or 30)
                 )
+                tracing_sample_rate = max(
+                    0.0,
+                    min(
+                        1.0,
+                        float(body.get("tracing_sample_rate", 1.0)),
+                    ),
+                )
+                tracing_flush_at = max(
+                    1, int(body.get("tracing_flush_at") or 1)
+                )
+                tracing_flush_interval_seconds = max(
+                    0.1,
+                    float(
+                        body.get("tracing_flush_interval_seconds")
+                        or 1.0
+                    ),
+                )
             except (TypeError, ValueError) as exc:
                 raise HTTPException(
-                    status_code=400, detail="invalid max_sessions / page_limit / timeout_seconds"
+                    status_code=400,
+                    detail=(
+                        "invalid Langfuse paging, timeout, sampling, or flush "
+                        "settings"
+                    ),
                 ) from exc
 
             # Enabling requires usable credentials so the UI never claims "enabled"
@@ -2627,10 +2697,13 @@ class RoutesMixin:
             if raw_secret is not None and str(raw_secret).strip():
                 secret_key = str(raw_secret).strip()
 
-            if enabled and (not public_key or not secret_key):
+            if (enabled or tracing_enabled) and (not public_key or not secret_key):
                 raise HTTPException(
                     status_code=400,
-                    detail="public_key 和 secret_key 均为必填项才能启用 Langfuse 集成",
+                    detail=(
+                        "public_key 和 secret_key 均为必填项才能启用 "
+                        "Langfuse 会话拉取或链路观测"
+                    ),
                 )
 
             langfuse.update(
@@ -2639,6 +2712,21 @@ class RoutesMixin:
                     "host": host,
                     "public_key": public_key,
                     "secret_key": secret_key,
+                    "tracing_enabled": tracing_enabled,
+                    "tracing_environment": str(
+                        body.get("tracing_environment") or "local"
+                    ).strip(),
+                    "tracing_release": str(
+                        body.get("tracing_release") or ""
+                    ).strip(),
+                    "tracing_sample_rate": tracing_sample_rate,
+                    "tracing_capture_content": bool(
+                        body.get("tracing_capture_content", True)
+                    ),
+                    "tracing_flush_at": tracing_flush_at,
+                    "tracing_flush_interval_seconds": (
+                        tracing_flush_interval_seconds
+                    ),
                     "max_sessions": max_sessions,
                     "page_limit": page_limit,
                     "timeout_seconds": timeout_seconds,
@@ -2653,7 +2741,7 @@ class RoutesMixin:
             store.save(data)
             # Hot-reload the in-memory config so /langfuse/* endpoints pick up the
             # new host/keys/filters immediately, without a service restart.
-            owner.config = store.to_config()
+            owner._configure_langfuse(store.to_config())
             return JSONResponse(content=_langfuse_settings_payload(owner.config, data))
 
         @app.post("/api/langfuse-config/test")
@@ -3002,10 +3090,12 @@ class RoutesMixin:
         @app.get("/langfuse/status")
         async def langfuse_status():
             from ..integrations.langfuse_client import LangfuseClient, LangfuseError
+            from ..observability import langfuse_status as tracing_status
 
             enabled = bool(getattr(owner.config, "langfuse_enabled", False))
             payload: dict[str, Any] = {
                 "enabled": enabled,
+                "tracing": tracing_status(),
                 "host": str(getattr(owner.config, "langfuse_host", "") or ""),
                 "public_key_present": bool(getattr(owner.config, "langfuse_public_key", "")),
                 "secret_key_present": bool(getattr(owner.config, "langfuse_secret_key", "")),
@@ -3333,6 +3423,77 @@ class RoutesMixin:
                     detail="limit must be between 1 and 500",
                 )
             return owner._dreamcycle_memory_changes(limit=limit)
+
+        @app.post(
+            "/trigger-dreamcycle/memory-changes/{change_id}/true-replay"
+        )
+        async def dreamcycle_memory_true_replay(
+            change_id: str,
+            request: Request,
+        ):
+            _require_admin_user(_session_user(request))
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Memory True Replay body must be an object",
+                )
+            raw_checklist = body.get("checklist")
+            if isinstance(raw_checklist, str):
+                checklist = [
+                    line.strip()
+                    for line in raw_checklist.splitlines()
+                    if line.strip()
+                ]
+            elif isinstance(raw_checklist, list):
+                checklist = list(raw_checklist)
+            else:
+                checklist = []
+            try:
+                return await asyncio.to_thread(
+                    owner._run_dreamcycle_memory_replay,
+                    change_id=change_id,
+                    query=str(body.get("query") or ""),
+                    checklist=checklist,
+                    source_session_id=str(
+                        body.get("source_session_id") or ""
+                    ),
+                    max_interactions=int(
+                        body.get("max_interactions") or 4
+                    ),
+                    timeout_seconds=int(
+                        body.get("timeout_seconds") or 600
+                    ),
+                )
+            except KeyError as exc:
+                raise HTTPException(
+                    status_code=404,
+                    detail=str(exc),
+                ) from exc
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=str(exc),
+                ) from exc
+
+        @app.get(
+            "/trigger-dreamcycle/memory-changes/{change_id}/true-replays"
+        )
+        async def dreamcycle_memory_true_replays(
+            change_id: str,
+            request: Request,
+            limit: int = 100,
+        ):
+            _require_admin_user(_session_user(request))
+            if not 1 <= limit <= 500:
+                raise HTTPException(
+                    status_code=400,
+                    detail="limit must be between 1 and 500",
+                )
+            return owner._dreamcycle_memory_replays(
+                change_id=change_id,
+                limit=limit,
+            )
 
         @app.post("/trigger-dreamcycle/reset")
         async def dreamcycle_reset(request: Request):

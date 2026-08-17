@@ -476,6 +476,35 @@ class ConfigStore:
             ).rstrip("/"),
             langfuse_public_key=str(langfuse.get("public_key", "") or ""),
             langfuse_secret_key=str(langfuse.get("secret_key", "") or ""),
+            langfuse_tracing_enabled=bool(
+                langfuse.get("tracing_enabled", False)
+            ),
+            langfuse_tracing_environment=str(
+                langfuse.get("tracing_environment", "") or "local"
+            ),
+            langfuse_tracing_release=str(
+                langfuse.get("tracing_release", "") or ""
+            ),
+            langfuse_tracing_sample_rate=max(
+                0.0,
+                min(
+                    1.0,
+                    float(langfuse.get("tracing_sample_rate", 1.0) or 0.0),
+                ),
+            ),
+            langfuse_tracing_capture_content=bool(
+                langfuse.get("tracing_capture_content", True)
+            ),
+            langfuse_tracing_flush_at=max(
+                1, int(langfuse.get("tracing_flush_at", 1) or 1)
+            ),
+            langfuse_tracing_flush_interval_seconds=max(
+                0.1,
+                float(
+                    langfuse.get("tracing_flush_interval_seconds", 1.0)
+                    or 1.0
+                ),
+            ),
             langfuse_timeout_seconds=max(
                 1, int(langfuse.get("timeout_seconds", 30) or 30)
             ),
@@ -604,11 +633,19 @@ class ConfigStore:
         ]
         langfuse = data.get("langfuse", {}) if isinstance(data.get("langfuse"), dict) else {}
         lines.append(f"langfuse.enabled: {bool(langfuse.get('enabled', False))}")
-        if langfuse.get("enabled"):
+        lines.append(
+            "langfuse.tracing_enabled: "
+            f"{bool(langfuse.get('tracing_enabled', False))}"
+        )
+        if langfuse.get("enabled") or langfuse.get("tracing_enabled"):
             lines += [
                 f"langfuse.host: {str(langfuse.get('host', '') or 'https://cloud.langfuse.com').rstrip('/')}",
                 f"langfuse.public_key: {'present' if langfuse.get('public_key') else 'missing'}",
                 f"langfuse.secret_key: {'present' if langfuse.get('secret_key') else 'missing'}",
+                "langfuse.tracing_environment: "
+                f"{langfuse.get('tracing_environment', 'local') or 'local'}",
+                "langfuse.tracing_sample_rate: "
+                f"{langfuse.get('tracing_sample_rate', 1.0)}",
                 f"langfuse.max_sessions: {langfuse.get('max_sessions', 100)}",
                 "langfuse.default_environment: "
                 f"{','.join(_normalize_string_list(langfuse.get('default_environment', []))) or '(any)'}",

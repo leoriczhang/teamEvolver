@@ -198,7 +198,11 @@ class ContextStateStore:
                     "l0": str(item.get("l0") or ""),
                     "l1": str(item.get("l1") or ""),
                     "content_hash": str(item.get("content_hash") or ""),
-                    "expanded": {},
+                    "expanded": {
+                        level: str(item.get(level) or "")
+                        for level in ("l0", "l1")
+                        if str(item.get(level) or "").strip()
+                    },
                 }
             )
         snapshot = {

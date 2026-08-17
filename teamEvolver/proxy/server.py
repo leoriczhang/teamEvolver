@@ -21,6 +21,7 @@ from ..config import TeamEvolverConfig
 from ..integrations.dreamcycle_runtime import (
     FullDreamCycleSupervisor as DreamCycleSupervisor,
 )
+from ..observability import configure_langfuse, flush_langfuse
 from ..skills.manager import SkillManager
 from .agent_context import AgentContextMixin
 from .memory_debug import MemoryDebugMixin
@@ -83,6 +84,7 @@ class ProxyServer(
         self._embedded_evolve_app = None
         self._embedded_evolve_task: Optional[asyncio.Task] = None
         self._embedded_evolve_init_failed = False
+        configure_langfuse(config)
         self._dreamcycle = DreamCycleSupervisor(config)
 
         self.app = self._build_app()
@@ -134,6 +136,12 @@ class ProxyServer(
         except Exception:
             logger.debug("[SkillMiner] shutdown stop failed", exc_info=True)
         await self._await_background_tasks(self._shutdown_drain_timeout_seconds)
+        await asyncio.to_thread(flush_langfuse)
+
+    def _configure_langfuse(self, config: TeamEvolverConfig) -> dict:
+        """Hot-reload outbound tracing without restarting model runtimes."""
+        self.config = config
+        return configure_langfuse(config)
 
     def _start_dreamcycle(self) -> None:
         try:
@@ -152,6 +160,36 @@ class ProxyServer(
 
     def _dreamcycle_memory_changes(self, *, limit: int = 100) -> dict:
         return self._dreamcycle.memory_changes(limit=limit)
+
+    def _run_dreamcycle_memory_replay(
+        self,
+        *,
+        change_id: str,
+        query: str,
+        checklist: list,
+        source_session_id: str = "",
+        max_interactions: int = 4,
+        timeout_seconds: int = 600,
+    ) -> dict:
+        return self._dreamcycle.run_memory_replay(
+            change_id=change_id,
+            query=query,
+            checklist=checklist,
+            source_session_id=source_session_id,
+            max_interactions=max_interactions,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def _dreamcycle_memory_replays(
+        self,
+        *,
+        change_id: str,
+        limit: int = 100,
+    ) -> dict:
+        return self._dreamcycle.memory_replays(
+            change_id=change_id,
+            limit=limit,
+        )
 
     def _dreamcycle_reset(
         self,
@@ -176,6 +214,7 @@ class ProxyServer(
 
         await asyncio.to_thread(self._dreamcycle.stop)
         self.config = config
+        configure_langfuse(config)
         self._dreamcycle = DreamCycleSupervisor(config)
 
         if evolve_config_changed:

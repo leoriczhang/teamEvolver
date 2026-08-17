@@ -55,7 +55,8 @@ def _clip(text: str, limit: int = 8000) -> str:
     return text if len(text) <= limit else text[:limit] + "..."
 
 
-def _extract_json_object(text: str) -> dict[str, Any]:
+def _extract_json_object(text: Any) -> dict[str, Any]:
+    text = str(text or "")
     start = text.find("{")
     end = text.rfind("}")
     if start < 0 or end <= start:
@@ -345,7 +346,19 @@ class SessionValueClassifier:
             },
         ]
         try:
-            raw = await self.client.chat(messages, **_classifier_call_options())
+            raw = await self.client.chat(
+                messages,
+                **_classifier_call_options(),
+                trace_name="teamEvolver.evolve.session_filter",
+                trace_tags=["evolve", "session-filter"],
+                trace_metadata={
+                    "component": "teamEvolver.evolve",
+                    "operation": "session_filter",
+                    "source_session_id": str(
+                        session.get("session_id") or ""
+                    ),
+                },
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[SessionFilter] classifier failed: %s", exc)
             return heuristic_classify_session(

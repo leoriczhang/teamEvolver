@@ -5,10 +5,13 @@ Async LLM client — thin wrapper around the ``openai`` SDK.
 from __future__ import annotations
 
 import asyncio
-from contextlib import nullcontext
 import os
 from typing import Any
 
+from .observability import (
+    langfuse_observation,
+    update_langfuse_observation,
+)
 
 _CCR_MODEL_OVERRIDE = "deepseek-v4-flash-ga-260731"
 
@@ -26,6 +29,22 @@ def _normalize_temperature(model: str, requested: float) -> float:
     if normalized in {"kimi-k2.5"}:
         return 1
     return requested
+
+
+def _usage_details(response: Any) -> dict[str, int]:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return {}
+    values = {
+        "input_tokens": getattr(usage, "prompt_tokens", None),
+        "output_tokens": getattr(usage, "completion_tokens", None),
+        "total_tokens": getattr(usage, "total_tokens", None),
+    }
+    return {
+        key: int(value)
+        for key, value in values.items()
+        if isinstance(value, (int, float))
+    }
 
 
 class AsyncLLMClient:
@@ -101,54 +120,118 @@ class AsyncLLMClient:
         budget_ceiling = 131072
 
         for attempt in range(self.max_retries):
-            try:
-                trace_scope = nullcontext()
-                if trace_name or trace_tags or trace_metadata or trace_session_id or trace_user_id:
-                    try:
-                        from langfuse import propagate_attributes
-
-                        trace_scope = propagate_attributes(
-                            trace_name=trace_name or None,
-                            session_id=trace_session_id or None,
-                            user_id=trace_user_id or None,
-                            tags=trace_tags or None,
-                            metadata=trace_metadata or None,
-                        )
-                    except Exception:
-                        trace_scope = nullcontext()
-                with trace_scope:
+            generation_input: dict[str, Any] = {"messages": messages}
+            if merged.get("tools"):
+                generation_input["tools"] = merged["tools"]
+            observation_metadata = {
+                **trace_metadata,
+                "component": trace_metadata.get(
+                    "component",
+                    "teamEvolver.llm",
+                ),
+                "attempt": attempt + 1,
+                "max_retries": self.max_retries,
+            }
+            with langfuse_observation(
+                name=trace_name or "teamEvolver.llm.chat",
+                as_type="generation",
+                input=generation_input,
+                metadata=observation_metadata,
+                model=requested_model,
+                model_parameters={
+                    key: merged[key]
+                    for key in ("temperature", "max_completion_tokens")
+                    if key in merged
+                },
+                trace_name=trace_name or "teamEvolver.llm.chat",
+                session_id=trace_session_id,
+                user_id=trace_user_id,
+                tags=["llm", *trace_tags],
+            ) as observation:
+                try:
                     resp = await asyncio.to_thread(
                         self._client.chat.completions.create,
                         **merged,
                     )
-                choice = resp.choices[0]
-                content = choice.message.content or ""
-                if (
-                    not content.strip()
-                    and getattr(choice, "finish_reason", None) == "length"
-                    and budget_bumps_left > 0
-                ):
-                    current = int(merged.get("max_completion_tokens") or self.max_tokens)
-                    if current < budget_ceiling:
-                        merged["max_completion_tokens"] = min(current * 2, budget_ceiling)
-                        budget_bumps_left -= 1
+                    choice = resp.choices[0]
+                    content = choice.message.content or ""
+                    finish_reason = getattr(choice, "finish_reason", None)
+                    update_langfuse_observation(
+                        observation,
+                        output=content,
+                        usage_details=_usage_details(resp),
+                        metadata={
+                            "finish_reason": finish_reason,
+                            "response_id": getattr(resp, "id", None),
+                        },
+                    )
+                    if (
+                        not content.strip()
+                        and finish_reason == "length"
+                        and budget_bumps_left > 0
+                    ):
+                        current = int(
+                            merged.get("max_completion_tokens")
+                            or self.max_tokens
+                        )
+                        if current < budget_ceiling:
+                            merged["max_completion_tokens"] = min(
+                                current * 2,
+                                budget_ceiling,
+                            )
+                            budget_bumps_left -= 1
+                            continue
+                    return content
+                except Exception as exc:
+                    body_text = (
+                        getattr(getattr(exc, "response", None), "text", "")
+                        or ""
+                    )
+                    status_code = getattr(
+                        getattr(exc, "response", None),
+                        "status_code",
+                        None,
+                    )
+                    if (
+                        status_code == 400
+                        and "'temperature' is not supported" in body_text
+                    ):
+                        update_langfuse_observation(
+                            observation,
+                            level="WARNING",
+                            status_message=(
+                                "provider rejected temperature; retrying "
+                                "without it"
+                            ),
+                        )
+                        merged.pop("temperature", None)
                         continue
-                return content
-            except Exception as exc:
-                body_text = getattr(getattr(exc, "response", None), "text", "") or ""
-                status_code = getattr(getattr(exc, "response", None), "status_code", None)
-                if status_code == 400 and "'temperature' is not supported" in body_text:
-                    merged.pop("temperature", None)
-                    continue
-                if status_code == 400 and "Stream must be set to true" in body_text:
-                    return await self._chat_via_stream(merged)
-                if attempt < self.max_retries - 1:
-                    import random
+                    if (
+                        status_code == 400
+                        and "Stream must be set to true" in body_text
+                    ):
+                        content = await self._chat_via_stream(merged)
+                        update_langfuse_observation(
+                            observation,
+                            output=content,
+                            metadata={"transport": "stream-fallback"},
+                        )
+                        return content
+                    if attempt < self.max_retries - 1:
+                        import random
 
-                    wait = min(2**attempt + random.uniform(0, 1), 30)
-                    await asyncio.sleep(wait)
-                    continue
-                raise
+                        wait = min(2**attempt + random.uniform(0, 1), 30)
+                        update_langfuse_observation(
+                            observation,
+                            level="WARNING",
+                            status_message=(
+                                f"{type(exc).__name__}; retrying in "
+                                f"{wait:.1f}s"
+                            ),
+                        )
+                        await asyncio.sleep(wait)
+                        continue
+                    raise
 
     async def _chat_via_stream(self, body: dict[str, Any]) -> str:
         import json

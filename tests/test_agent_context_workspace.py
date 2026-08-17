@@ -335,6 +335,73 @@ def test_context_session_append_and_commit_are_idempotent(tmp_path) -> None:
     assert len(commit_calls) == 1
 
 
+def test_context_skill_inventory_refs_commit_in_same_session(
+    tmp_path,
+) -> None:
+    client, owner, token, _config = _client(tmp_path)
+
+    async def fake_request(_user, scope, _method, path, **_kwargs):
+        if path == "/api/v1/fs/tree":
+            root = scope.root_uri.rstrip("/")
+            return [
+                {
+                    "uri": f"{root}/demo-skill",
+                    "is_dir": True,
+                },
+                {
+                    "uri": f"{root}/demo-skill/SKILL.md",
+                    "is_dir": False,
+                },
+            ]
+        if path == "/api/v1/content/read":
+            return {"content": "# Demo Skill"}
+        return {"ok": True}
+
+    owner._workspace_request = AsyncMock(side_effect=fake_request)
+    started = client.post(
+        "/internal/agents/context/sessions/start",
+        headers=_headers(token),
+        json={
+            "external_subject": "external-alice",
+            "external_session_id": "conversation-skills",
+        },
+    )
+    context_session_id = started.json()["context_session_id"]
+
+    listed = client.get(
+        "/internal/agents/context/skills",
+        headers=_headers(token),
+        params={
+            "external_subject": "external-alice",
+            "scope": "team",
+            "context_session_id": context_session_id,
+        },
+    )
+    skill_ref = listed.json()["skills"][0]["context_ref"]
+    read = client.post(
+        "/internal/agents/context/read",
+        headers=_headers(token),
+        json={"context_ref": skill_ref, "level": "full"},
+    )
+    committed = client.post(
+        "/internal/agents/context/sessions/commit",
+        headers=_headers(token),
+        json={
+            "context_session_id": context_session_id,
+            "used_context_refs": [skill_ref],
+        },
+    )
+
+    assert read.status_code == 200
+    assert committed.status_code == 200
+    assert committed.json()["usage"] == {
+        "contexts": 0,
+        "skills": 1,
+        "submitted": 1,
+        "skipped": 0,
+    }
+
+
 def test_context_session_submits_used_refs_once_before_retrying_commit(tmp_path) -> None:
     client, owner, token, config = _client(tmp_path)
     commit_attempts = 0

@@ -4,12 +4,22 @@ from __future__ import annotations
 
 import http.server
 import json
+import os
+import socketserver
 import threading
 from contextlib import contextmanager
-from typing import Any, Iterator
+from pathlib import Path
+from typing import Any, Generator
 from urllib.parse import urlsplit
 
 import httpx
+
+
+class _ThreadingUnixHTTPServer(
+    socketserver.ThreadingMixIn,
+    socketserver.UnixStreamServer,
+):
+    daemon_threads = True
 
 
 class ReplayModelBroker:
@@ -18,6 +28,7 @@ class ReplayModelBroker:
         *,
         base_url: str,
         api_key: str,
+        socket_path: Path,
         token: str,
         timeout_seconds: int,
     ) -> None:
@@ -37,9 +48,10 @@ class ReplayModelBroker:
             raise ValueError("replay model API key is unavailable")
         self.base_url = endpoint
         self.api_key = api_key
+        self.socket_path = socket_path
         self.token = token
         self.timeout_seconds = timeout_seconds
-        self.server: http.server.ThreadingHTTPServer | None = None
+        self.server: _ThreadingUnixHTTPServer | None = None
         self.thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -135,10 +147,13 @@ class ReplayModelBroker:
             ) -> None:
                 return
 
-        self.server = http.server.ThreadingHTTPServer(
-            ("127.0.0.1", 0),
+        self.socket_path.parent.mkdir(parents=True, exist_ok=True)
+        self.socket_path.unlink(missing_ok=True)
+        self.server = _ThreadingUnixHTTPServer(
+            str(self.socket_path),
             Handler,
         )
+        os.chmod(self.socket_path, 0o600)
         self.thread = threading.Thread(
             target=self.server.serve_forever,
             name="teamevolver-replay-model-broker",
@@ -146,11 +161,108 @@ class ReplayModelBroker:
         )
         self.thread.start()
 
-    @property
-    def worker_base_url(self) -> str:
-        if self.server is None:
-            raise RuntimeError("replay model broker is not running")
-        return f"http://127.0.0.1:{self.server.server_address[1]}/upstream"
+    @staticmethod
+    def worker_base_url(sidecar_port: int) -> str:
+        return f"http://127.0.0.1:{sidecar_port}/upstream"
+
+    def close(self) -> None:
+        if self.server is not None:
+            self.server.shutdown()
+            self.server.server_close()
+        if self.thread is not None:
+            self.thread.join(timeout=5)
+        self.socket_path.unlink(missing_ok=True)
+
+
+class ReplayModelSidecar:
+    """Private-network HTTP bridge to the parent Unix-socket broker."""
+
+    def __init__(
+        self,
+        *,
+        socket_path: Path,
+        port: int,
+        timeout_seconds: int,
+    ) -> None:
+        self.socket_path = socket_path
+        self.port = port
+        self.timeout_seconds = timeout_seconds
+        self.server: http.server.ThreadingHTTPServer | None = None
+        self.thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        sidecar = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length") or 0)
+                if length <= 0 or length > 32 * 1024 * 1024:
+                    self.send_error(413)
+                    return
+                body = self.rfile.read(length)
+                transport = httpx.HTTPTransport(
+                    uds=str(sidecar.socket_path)
+                )
+                try:
+                    with httpx.Client(
+                        transport=transport,
+                        timeout=sidecar.timeout_seconds,
+                    ).stream(
+                        "POST",
+                        "http://broker" + self.path,
+                        headers={
+                            "Authorization": str(
+                                self.headers.get("Authorization") or ""
+                            ),
+                            "Content-Type": str(
+                                self.headers.get("Content-Type")
+                                or "application/json"
+                            ),
+                            "Accept": str(
+                                self.headers.get("Accept")
+                                or "application/json"
+                            ),
+                        },
+                        content=body,
+                    ) as response:
+                        self.send_response(response.status_code)
+                        self.send_header(
+                            "Content-Type",
+                            response.headers.get(
+                                "content-type",
+                                "application/json",
+                            ),
+                        )
+                        self.send_header("Connection", "close")
+                        self.end_headers()
+                        for chunk in response.iter_bytes():
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
+                except Exception as exc:  # noqa: BLE001
+                    self.send_error(
+                        502,
+                        f"replay sidecar failed: {type(exc).__name__}",
+                    )
+
+            def log_message(
+                self,
+                _format: str,
+                *_args: Any,
+            ) -> None:
+                return
+
+        self.server = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", self.port),
+            Handler,
+        )
+        self.thread = threading.Thread(
+            target=self.server.serve_forever,
+            name="teamevolver-replay-model-sidecar",
+            daemon=True,
+        )
+        self.thread.start()
 
     def close(self) -> None:
         if self.server is not None:
@@ -165,12 +277,14 @@ def replay_model_broker(
     *,
     base_url: str,
     api_key: str,
+    socket_path: Path,
     token: str,
     timeout_seconds: int,
-) -> Iterator[ReplayModelBroker]:
+) -> Generator[ReplayModelBroker, None, None]:
     broker = ReplayModelBroker(
         base_url=base_url,
         api_key=api_key,
+        socket_path=socket_path,
         token=token,
         timeout_seconds=timeout_seconds,
     )
@@ -181,4 +295,8 @@ def replay_model_broker(
         broker.close()
 
 
-__all__ = ["ReplayModelBroker", "replay_model_broker"]
+__all__ = [
+    "ReplayModelBroker",
+    "ReplayModelSidecar",
+    "replay_model_broker",
+]

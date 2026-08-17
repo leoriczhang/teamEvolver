@@ -655,8 +655,8 @@ def build_stage_messages(stage_id: str, session: dict[str, Any], *, system_promp
         ]
 
     if stage_id == "judge":
-        from .stages.summarize import _extract_session_metadata, build_session_trajectory
         from .stages.judge import _build_judge_payload
+        from .stages.summarize import _extract_session_metadata, build_session_trajectory
 
         # Ensure the trajectory/summary/metadata the judge payload reads exist.
         _extract_session_metadata(session)
@@ -670,8 +670,8 @@ def build_stage_messages(stage_id: str, session: dict[str, Any], *, system_promp
         ]
 
     if stage_id in {"evolve_skill", "create_skill"}:
-        from .stages.summarize import _extract_session_metadata, build_session_trajectory
         from .stages import execute as ex
+        from .stages.summarize import _extract_session_metadata, build_session_trajectory
 
         _extract_session_metadata(session)
         if not session.get("_trajectory"):
@@ -810,7 +810,18 @@ async def run_stage_test(
 
     messages = build_stage_messages(stage_id, session, system_prompt=resolved_system)
     llm = llm_factory()
-    output = await llm.chat(messages, **stage_call_options(stage_id))
+    output = await llm.chat(
+        messages,
+        **stage_call_options(stage_id),
+        trace_name=f"teamEvolver.evolve.prompt_test.{stage_id}",
+        trace_tags=["evolve", "prompt-studio", stage_id],
+        trace_metadata={
+            "component": "teamEvolver.evolve",
+            "operation": "prompt_test",
+            "stage_id": stage_id,
+            "source_session_id": str(session.get("session_id") or ""),
+        },
+    )
     return {
         "stage_id": stage_id,
         "system_prompt": messages[0]["content"],

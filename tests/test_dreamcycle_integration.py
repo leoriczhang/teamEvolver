@@ -150,6 +150,87 @@ def test_unified_dreamcycle_routes_are_available(tmp_path, monkeypatch) -> None:
         "items": [],
     }
 
+
+def test_memory_true_replay_routes_are_admin_only(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("TEAMEVOLVER_EMBEDDED_EVOLVE_ENABLED", "0")
+    config = TeamEvolverConfig(
+        dreamcycle_enabled=False,
+        dreamcycle_auto_start=False,
+        dreamcycle_state_dir=str(tmp_path),
+        users_registry_path=str(tmp_path / "users.json"),
+        sharing_enabled=False,
+        sharing_skill_reload_mode="off",
+    )
+    server = ProxyServer(config)
+    captured: dict = {}
+
+    def run_replay(**kwargs):
+        captured.update(kwargs)
+        return {
+            "replay_id": "mrp-test",
+            "change_id": kwargs["change_id"],
+            "status": "evaluated",
+            "verdict": "accept",
+        }
+
+    monkeypatch.setattr(
+        server,
+        "_run_dreamcycle_memory_replay",
+        run_replay,
+    )
+    monkeypatch.setattr(
+        server,
+        "_dreamcycle_memory_replays",
+        lambda **kwargs: {
+            "schema_version": "teamevolver.memory-true-replay-list.v1",
+            "change_id": kwargs["change_id"],
+            "count": 1,
+            "items": [{"replay_id": "mrp-test"}],
+        },
+    )
+
+    with TestClient(server.app) as client:
+        denied = client.post(
+            "/trigger-dreamcycle/memory-changes/mch-test/true-replay",
+            json={"query": "task", "checklist": ["done"]},
+        )
+        assert denied.status_code == 403
+        assert client.post(
+            "/api/auth/bootstrap",
+            json={
+                "username": "admin",
+                "display_name": "Admin",
+                "password": "secret",
+            },
+        ).status_code == 200
+        replay = client.post(
+            "/trigger-dreamcycle/memory-changes/mch-test/true-replay",
+            json={
+                "query": "perform task",
+                "checklist": "first requirement\nsecond requirement",
+                "source_session_id": "session-1",
+                "max_interactions": 3,
+            },
+        )
+        history = client.get(
+            "/trigger-dreamcycle/memory-changes/mch-test/true-replays",
+        )
+
+    assert replay.status_code == 200
+    assert replay.json()["verdict"] == "accept"
+    assert captured["checklist"] == [
+        "first requirement",
+        "second requirement",
+    ]
+    assert captured["source_session_id"] == "session-1"
+    assert captured["max_interactions"] == 3
+    assert history.status_code == 200
+    assert history.json()["count"] == 1
+
+
 def test_agentshub_config_sync_merges_personal_sources(
     tmp_path,
     monkeypatch,
