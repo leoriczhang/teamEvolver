@@ -282,8 +282,12 @@ export default function App() {
     <div className="app-shell flex h-screen overflow-hidden">
       <aside className="app-sidebar flex h-screen shrink-0 flex-col border-r">
         <div className="sidebar-brand flex h-[60px] items-center gap-2.5 border-b border-sidebar-border px-[18px]">
-          <div className="grid size-[31px] shrink-0 place-items-center rounded-[10px] bg-accent text-[12px] font-extrabold tracking-tighter text-white shadow-[0_7px_16px_rgba(15,118,110,0.18)]">
-            SG
+          <div
+            className="grid size-[31px] shrink-0 place-items-center rounded-[10px] bg-accent text-[12px] font-extrabold tracking-tighter text-white shadow-[0_7px_16px_rgba(15,118,110,0.18)]"
+            aria-label="TeamEvolver"
+            title="TeamEvolver"
+          >
+            TE
           </div>
           <div className="sidebar-brand-copy">
             <div className="text-[14px] font-[800] leading-tight">teamEvolver</div>
@@ -475,8 +479,12 @@ function LoginGate({
           </div>
           <div className="rounded-[18px] border border-border bg-surface p-6 shadow-[var(--shadow-float)]">
             <div className="mb-5">
-              <div className="mb-2 grid size-10 place-items-center rounded-xl bg-accent text-sm font-extrabold text-white shadow-[0_8px_18px_rgba(15,118,110,0.18)]">
-                SG
+              <div
+                className="mb-2 grid size-10 place-items-center rounded-xl bg-accent text-sm font-extrabold text-white shadow-[0_8px_18px_rgba(15,118,110,0.18)]"
+                aria-label="TeamEvolver"
+                title="TeamEvolver"
+              >
+                TE
               </div>
               <h1 className="text-[22px] font-bold tracking-tight">
                 {needsSetup ? "初始化管理员账号" : isRegister ? "注册 teamEvolver 账号" : "登录 teamEvolver 控制台"}
@@ -628,8 +636,12 @@ function LoginHero() {
 
       {/* brand */}
       <div className="relative z-10 flex items-center gap-3">
-        <div className="grid size-11 place-items-center rounded-2xl bg-white/15 text-base font-extrabold tracking-tighter ring-1 ring-white/25 backdrop-blur">
-          SG
+        <div
+          className="grid size-11 place-items-center rounded-2xl bg-white/15 text-base font-extrabold tracking-tighter ring-1 ring-white/25 backdrop-blur"
+          aria-label="TeamEvolver"
+          title="TeamEvolver"
+        >
+          TE
         </div>
         <div>
           <div className="text-[17px] font-bold tracking-tight">teamEvolver</div>

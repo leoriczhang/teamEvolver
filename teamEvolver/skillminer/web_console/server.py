@@ -1950,8 +1950,67 @@ def _load_model_config_document():
     return loaded
 
 
+def _load_unified_mining_model_settings():
+    """Read the teamEvolver-owned mining model when embedded in its console.
+
+    The standalone SkillMiner console still uses ``.hermes_home/config.yaml``.
+    When the parent service passes ``TEAMEVOLVER_CONFIG_FILE``, that file is the
+    source of truth for both the visible form and a newly created task.
+    """
+    enabled = str(
+        os.environ.get("SKILLMINER_USE_UNIFIED_MODEL_CONFIG") or ""
+    ).lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return None
+    config_file = str(os.environ.get("TEAMEVOLVER_CONFIG_FILE") or "").strip()
+    if not config_file:
+        return None
+    path = Path(config_file).expanduser()
+    if not path.is_file():
+        return None
+    try:
+        document = yaml.safe_load(path.read_text(encoding="utf-8", errors="ignore")) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    mining = document.get("mining") if isinstance(document.get("mining"), dict) else {}
+    model = mining.get("model") if isinstance(mining.get("model"), dict) else {}
+    llm = document.get("llm") if isinstance(document.get("llm"), dict) else {}
+    model_id = str(model.get("model_id") or llm.get("model_id") or "").strip()
+    base_url = str(model.get("base_url") or llm.get("api_base") or "").strip()
+    if not model_id and not base_url:
+        return None
+    try:
+        max_tokens = int(model.get("max_tokens") or llm.get("max_tokens") or 32768)
+    except (TypeError, ValueError):
+        max_tokens = 32768
+    try:
+        temperature = float(
+            model.get("temperature")
+            if model.get("temperature") is not None
+            else llm.get("temperature", 0.2)
+        )
+    except (TypeError, ValueError):
+        temperature = 0.2
+    api_key = str(model.get("api_key") or llm.get("api_key") or "").strip()
+    return {
+        "provider": "openai-compatible",
+        "id": model_id,
+        "model": model_id,
+        "base_url": base_url,
+        "max_tokens": max_tokens,
+        "temperature": max(0.0, min(2.0, temperature)),
+        "api_key_present": bool(api_key or rp.resolve_ark_key()),
+        "configured": bool(model_id and base_url),
+    }
+
+
 def get_mining_model_settings(document=None):
     """Return the public, secret-free settings used by new mining tasks."""
+    unified = _load_unified_mining_model_settings()
+    if unified is not None:
+        return unified
     config_document = document if isinstance(document, dict) else _load_model_config_document()
     model_config = config_document.get("model") or {}
     if not isinstance(model_config, dict):

@@ -17,6 +17,11 @@ if str(SKILLMINER_ROOT) not in sys.path:
 
 from web_console import server  # noqa: E402
 
+from teamEvolver.mining_settings import (  # noqa: E402
+    mining_model_form_payload,
+    update_mining_model_form,
+)
+
 
 def test_mining_model_settings_can_be_saved_without_returning_secret(tmp_path, monkeypatch):
     config_path = tmp_path / ".hermes_home" / "config.yaml"
@@ -86,6 +91,82 @@ skills:
     assert "hooks" not in persisted
     assert persisted["hooks_auto_accept"] is False
     assert "skills" not in persisted
+
+
+def test_unified_mining_model_form_persists_the_config_used_by_new_jobs():
+    data = {
+        "llm": {
+            "model_id": "global-model",
+            "api_base": "https://global.example/v1",
+            "api_key": "global-secret",
+        }
+    }
+
+    saved = update_mining_model_form(
+        data,
+        {
+            "model": "mining-model",
+            "base_url": "https://mining.example/v1/",
+            "max_tokens": 8192,
+            "temperature": 0.3,
+            "api_key": "mining-secret",
+        },
+    )
+
+    assert saved["model"] == "mining-model"
+    assert saved["base_url"] == "https://mining.example/v1"
+    assert saved["api_key_present"] is True
+    assert "api_key" not in saved
+    assert data["mining"]["model"] == {
+        "provider": "custom",
+        "model_id": "mining-model",
+        "base_url": "https://mining.example/v1",
+        "max_tokens": 8192,
+        "temperature": 0.3,
+        "api_key": "mining-secret",
+    }
+    assert mining_model_form_payload(data)["model"] == "mining-model"
+
+
+def test_embedded_model_view_and_pipeline_prefer_unified_mining_config(tmp_path, monkeypatch):
+    config_file = tmp_path / "team-evolver.yaml"
+    config_file.write_text(
+        """
+llm:
+  model_id: global-model
+  api_base: https://global.example/v1
+  api_key: global-secret
+mining:
+  model:
+    provider: custom
+    model_id: mining-model
+    base_url: https://mining.example/v1
+    max_tokens: 8192
+    temperature: 0.3
+    api_key: mining-secret
+""".lstrip(),
+        encoding="utf-8",
+    )
+    hermes_home = tmp_path / ".hermes_home"
+    hermes_home.mkdir()
+    (hermes_home / "config.yaml").write_text(
+        "model:\n  default: stale-model\n  base_url: https://stale.example/v1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TEAMEVOLVER_CONFIG_FILE", str(config_file))
+    monkeypatch.setenv("SKILLMINER_USE_UNIFIED_MODEL_CONFIG", "1")
+    monkeypatch.setenv("SKILLMINER_MODEL_ID", "stale-environment-model")
+    monkeypatch.setattr(server.rp, "HERMES_HOME", hermes_home)
+
+    visible = server.get_mining_model_settings()
+    server.rp._apply_configured_model()
+    materialized = yaml.safe_load((hermes_home / "config.yaml").read_text("utf-8"))
+
+    assert visible["model"] == "mining-model"
+    assert visible["base_url"] == "https://mining.example/v1"
+    assert materialized["model"]["default"] == "mining-model"
+    assert materialized["model"]["base_url"] == "https://mining.example/v1"
+    assert materialized["model"]["api_key"] == "mining-secret"
 
 
 def test_mining_model_test_uses_current_form_values(tmp_path, monkeypatch):
