@@ -6,12 +6,13 @@ from types import SimpleNamespace
 import pytest
 
 import teamEvolver.evolve.runtime.orchestrator as orchestrator_module
+from teamEvolver.dataset_store import SkillDatasetStore
 from teamEvolver.evolve.kernel.enums import DecisionAction
 from teamEvolver.evolve.kernel.settings import EvolveServerConfig
 from teamEvolver.evolve.runtime.evidence import SkillEvidenceStore
 from teamEvolver.evolve.runtime.orchestrator import EvolveServer
 from teamEvolver.proxy.routes import _is_embedded_evolve_path
-from teamEvolver.storage import LocalObjectStore
+from teamEvolver.storage import InMemoryObjectStore
 
 
 def _session(session_id: str, score: float = 0.7) -> dict:
@@ -44,7 +45,7 @@ def test_evidence_store_preserves_recent_history_and_change_debt(
     tmp_path: Path,
 ) -> None:
     store = SkillEvidenceStore(
-        LocalObjectStore(tmp_path),
+        InMemoryObjectStore(str(tmp_path)),
         max_entries=10,
         recent_limit=2,
         historical_limit=2,
@@ -102,11 +103,11 @@ def test_validation_candidate_is_coalesced_and_stale_outputs_are_cleared(
 ) -> None:
     server = EvolveServer(
         EvolveServerConfig(
-            storage_backend="local",
-            local_root=str(tmp_path),
             llm_api_key="test-key",
             publish_mode="validated",
-        )
+        ),
+        mock=True,
+        mock_root=str(tmp_path),
     )
     first = server._queue_validation_job(
         {
@@ -168,11 +169,11 @@ def test_validation_job_uses_synthesized_test_dataset_as_replay_contract(
 ) -> None:
     server = EvolveServer(
         EvolveServerConfig(
-            storage_backend="local",
-            local_root=str(tmp_path),
             llm_api_key="test-key",
             publish_mode="validated",
-        )
+        ),
+        mock=True,
+        mock_root=str(tmp_path),
     )
     dataset = {
         "dataset_id": "synth-case-1",
@@ -226,20 +227,91 @@ def test_validation_job_uses_synthesized_test_dataset_as_replay_contract(
 
 
 @pytest.mark.anyio
+async def test_fixed_skill_dataset_is_reused_by_evolution_replay(
+    tmp_path: Path,
+) -> None:
+    server = EvolveServer(
+        EvolveServerConfig(
+            llm_api_key="test-key",
+            publish_mode="validated",
+            dataset_synthesis_enabled=False,
+            dataset_test_cases=2,
+        ),
+        mock=True,
+        mock_root=str(tmp_path),
+    )
+    SkillDatasetStore(server._skill_bucket).save_dataset(
+        {
+            "dataset_id": "regression-1",
+            "skill_name": "ppt-generation",
+            "name": "Pinned regression",
+            "query": "Build the requested deck.",
+            "requirements": "1. Save the PPTX\n2. Verify slide count",
+            "trajectory_requirements": "1. Inspect the generated artifact",
+            "progressive_disclosure": {
+                "enabled": True,
+                "initial_visibility": "query_only",
+                "batch_size": 2,
+            },
+            "source": {
+                "kind": "manual",
+                "source_session_ids": ["session-1"],
+                "evidence_window": "historical",
+            },
+            "read_only": False,
+            "enabled_for_evolution": True,
+        }
+    )
+
+    datasets = await server._synthesize_candidate_datasets(
+        skill_name="ppt-generation",
+        sessions=[_session("session-1")],
+        candidate_skill={
+            "name": "ppt-generation",
+            "description": "Build decks",
+            "content": "Build and verify.",
+        },
+        evidence_classification={},
+        evolution_context={},
+        replay_windows={"recent": [], "historical": []},
+    )
+    queued = server._queue_validation_job(
+        {
+            "name": "ppt-generation",
+            "description": "Build decks",
+            "content": "Build and verify.",
+        },
+        DecisionAction.IMPROVE,
+        [_session("session-1")],
+        "fixed regression",
+        "skill_group",
+        evidence_key="ppt-generation",
+        test_datasets=datasets,
+    )
+
+    job = server._validation_store.load_job(queued["validation_job_id"])
+    assert [item["dataset_id"] for item in datasets] == ["regression-1"]
+    assert job is not None
+    assert job["test_datasets"][0]["dataset_id"] == "regression-1"
+    assert job["replay_cases"][0]["instruction"] == "Build the requested deck."
+    assert job["replay_cases"][0]["checklist"][0]["text"] == "Save the PPTX"
+
+
+@pytest.mark.anyio
 async def test_inconclusive_validation_stays_open_for_revision(
     tmp_path: Path,
 ) -> None:
     server = EvolveServer(
         EvolveServerConfig(
-            storage_backend="local",
-            local_root=str(tmp_path),
             llm_api_key="test-key",
             publish_mode="validated",
             validation_required_results=1,
             validation_required_approvals=1,
             validation_max_rejections=1,
             human_review_enabled=True,
-        )
+        ),
+        mock=True,
+        mock_root=str(tmp_path),
     )
     queued = server._queue_validation_job(
         {
@@ -289,11 +361,11 @@ def test_candidate_read_api_projects_automatic_validator_result(
 ) -> None:
     server = EvolveServer(
         EvolveServerConfig(
-            storage_backend="local",
-            local_root=str(tmp_path),
             llm_api_key="test-key",
             publish_mode="validated",
-        )
+        ),
+        mock=True,
+        mock_root=str(tmp_path),
     )
     queued = server._queue_validation_job(
         {
@@ -369,11 +441,11 @@ async def test_repeated_skip_debt_is_visible_to_next_planner_cycle(
     )
     server = EvolveServer(
         EvolveServerConfig(
-            storage_backend="local",
-            local_root=str(tmp_path),
             llm_api_key="test-key",
             evidence_change_debt_threshold=2,
-        )
+        ),
+        mock=True,
+        mock_root=str(tmp_path),
     )
 
     first = await server._evolve_skill_group(
@@ -485,9 +557,9 @@ def test_team_config_maps_cross_cycle_evidence_settings(monkeypatch, tmp_path) -
     ):
         monkeypatch.delenv(name, raising=False)
     source = SimpleNamespace(
-        sharing_backend="local",
-        sharing_local_root=str(tmp_path),
-        sharing_viking_endpoint="",
+        sharing_backend="viking",
+        sharing_viking_deployment="cloud",
+        sharing_viking_endpoint="https://viking.example/openviking",
         sharing_viking_api_key="",
         sharing_viking_team_api_key="",
         sharing_viking_account="default",

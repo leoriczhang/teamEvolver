@@ -30,8 +30,8 @@ def test_runtime_source_has_no_external_evolver_imports() -> None:
 def test_builtin_evolve_engine_instantiates_from_primary_config(tmp_path: Path) -> None:
     config = TeamEvolverConfig(
         sharing_enabled=True,
-        sharing_backend="local",
-        sharing_local_root=str(tmp_path / "storage"),
+        sharing_backend="viking",
+        sharing_viking_endpoint="memory://" + str(tmp_path / "storage"),
         skills_dir=str(tmp_path / "skills"),
     )
     Path(config.skills_dir).mkdir(parents=True)
@@ -40,4 +40,22 @@ def test_builtin_evolve_engine_instantiates_from_primary_config(tmp_path: Path) 
     server = EvolveServer(evolve_config)
 
     assert type(server).__module__.startswith("teamEvolver.evolve.")
-    assert evolve_config.storage_backend == "local"
+    assert evolve_config.storage_backend == "viking"
+
+
+def test_agent_protocol_install_resources_are_present() -> None:
+    integrations = ROOT / "teamEvolver" / "integrations"
+
+    assert (integrations / "agent_protocol.py").is_file()
+    assert (
+        integrations / "hermes_context_provider" / "__init__.py"
+    ).is_file()
+    assert (
+        integrations / "hermes_context_provider" / "plugin.yaml"
+    ).is_file()
+    assert (
+        ROOT / "docs" / "schemas" / "agent-registration-v1.schema.json"
+    ).is_file()
+    assert (
+        ROOT / "docs" / "schemas" / "replay-branch-result-v1.schema.json"
+    ).is_file()

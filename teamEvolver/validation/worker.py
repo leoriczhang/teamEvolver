@@ -388,7 +388,7 @@ class ValidationWorker:
             if finalized and result.get("accepted") is True:
                 expected = await self._wait_for_published_commit(job)
                 if expected is not None:
-                    await self._sync_agentshub_skills(job, expected)
+                    await self._sync_registered_agents(job, expected)
             if summary.validated_jobs >= max(1, int(self.config.validation_max_concurrency)):
                 break
 
@@ -505,6 +505,30 @@ class ValidationWorker:
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         self._store.save_decision(job_id, decision)
+
+    async def _sync_registered_agents(
+        self,
+        job: dict[str, Any],
+        expected: dict[str, Any],
+    ) -> dict[str, Any]:
+        from ..integrations.skill_sync_adapters import sync_published_skill
+
+        job_id = str(job.get("job_id") or "")
+        payload = await sync_published_skill(
+            self.config,
+            job_id=job_id,
+            expected=expected,
+            tenant_ids=self._source_tenant_ids(job),
+        )
+        decision = self._store.load_decision(job_id)
+        if decision:
+            decision["agent_sync"] = {
+                **payload,
+                "expected": dict(expected),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self._store.save_decision(job_id, decision)
+        return payload
 
     async def _sync_agentshub_skills(
         self,

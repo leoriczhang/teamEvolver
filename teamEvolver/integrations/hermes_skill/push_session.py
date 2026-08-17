@@ -230,6 +230,12 @@ def _fold_turns(rows: list[sqlite3.Row], injected_skills: list[str]) -> list[dic
                     "tool_call_count": len(tool_calls),
                     "message_tokens": sum(int(m.get("token_count") or 0) for m in current),
                 },
+                "context_usage": {
+                    "context_snapshot_id": "",
+                    "memory_refs": [],
+                    "skill_refs": [],
+                    "feedback": {},
+                },
             }
         )
         current.clear()
@@ -318,7 +324,75 @@ def _read_session(db_path: Path, session_id: str) -> dict | None:
     return session
 
 
-def _post(base_url: str, session: dict, user: str, api_key: str) -> None:
+def _context_usage_path(session_id: str) -> Path:
+    return (
+        _hermes_home()
+        / "teamEvolver-context-usage"
+        / f"{session_id}.jsonl"
+    )
+
+
+def _context_usage_records(session_id: str) -> list[dict]:
+    path = _context_usage_path(session_id)
+    try:
+        lines = path.read_text("utf-8").splitlines()
+    except OSError:
+        return []
+    records: list[dict] = []
+    for line in lines:
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            records.append(value)
+    return records
+
+
+def _v1_session(session: dict, cfg: dict, user: str) -> dict:
+    payload = dict(session)
+    integration_id = str(cfg.get("integration_id") or "hermes:local")
+    profile_id = str(cfg.get("profile_id") or "legacy")
+    payload.update(
+        {
+            "schema_version": "teamevolver.agent-session.v1",
+            "protocol_version": "1.0",
+            "user_alias": user,
+            "runtime": {
+                "type": "hermes",
+                "integration_id": integration_id,
+                "version": "1",
+                "protocol_version": "1.0",
+                "profile_id": profile_id,
+            },
+            "runtime_context": {
+                "external_subject": str(
+                    cfg.get("external_subject") or user
+                ),
+                "profile_id": profile_id,
+                "source_session_id": str(session.get("session_id") or ""),
+            },
+        }
+    )
+    usage_records = _context_usage_records(
+        str(session.get("session_id") or "")
+    )
+    payload["turns"] = [
+        {
+            **dict(turn),
+            "context_usage": (
+                dict(usage_records[min(index, len(usage_records) - 1)])
+                if usage_records
+                else dict(turn.get("context_usage") or {})
+            ),
+        }
+        for index, turn in enumerate(session.get("turns") or [])
+        if isinstance(turn, dict)
+    ]
+    return payload
+
+
+def _post(base_url: str, session: dict, user: str, api_key: str) -> bool:
     session = dict(session)
     session["user_alias"] = user
     url = base_url.rstrip("/") + "/ingest_session"
@@ -331,10 +405,60 @@ def _post(base_url: str, session: dict, user: str, api_key: str) -> None:
         with urllib.request.urlopen(req, timeout=15) as resp:
             body = resp.read().decode("utf-8", "replace")
             _log(f"ingested {session['session_id']} ({len(session['turns'])} turns): {body[:200]}")
+            return True
     except urllib.error.HTTPError as exc:
         _log(f"ingest failed HTTP {exc.code}: {exc.read().decode('utf-8', 'replace')[:200]}")
     except urllib.error.URLError as exc:
         _log(f"ingest unreachable at {url}: {exc.reason}")
+    return False
+
+
+def _spool_dir(cfg: dict) -> Path:
+    configured = str(cfg.get("spool_dir") or "").strip()
+    return (
+        Path(configured).expanduser()
+        if configured
+        else _hermes_home() / "teamEvolver-feed-spool"
+    )
+
+
+def _spool(session: dict, cfg: dict) -> None:
+    path = _spool_dir(cfg)
+    path.mkdir(parents=True, exist_ok=True)
+    target = path / f"{session.get('session_id') or 'unknown'}.json"
+    temporary = target.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(session, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, target)
+    os.chmod(target, 0o600)
+
+
+def _flush_spool(
+    cfg: dict,
+    *,
+    base_url: str,
+    user: str,
+    api_key: str,
+) -> None:
+    path = _spool_dir(cfg)
+    if not path.is_dir():
+        return
+    for item in sorted(path.glob("*.json"))[:20]:
+        try:
+            session = json.loads(item.read_text("utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(session, dict):
+            continue
+        if not _post(base_url, session, user, api_key):
+            break
+        try:
+            item.unlink()
+        except OSError:
+            pass
 
 
 def main() -> int:
@@ -364,14 +488,39 @@ def main() -> int:
     if not base_url:
         _log("no base_url configured (run install.py --url ... or set TEAMEVOLVER_URL)")
         return 0
-    api_key = str(os.environ.get("EVOLVE_INGEST_API_KEY") or cfg.get("api_key") or "")
+    workspace_token = str(
+        os.environ.get("TEAMEVOLVER_WORKSPACE_TOKEN")
+        or cfg.get("workspace_token")
+        or ""
+    )
+    legacy_key = str(
+        os.environ.get("EVOLVE_INGEST_API_KEY")
+        or cfg.get("api_key")
+        or ""
+    )
+    api_key = workspace_token or legacy_key
 
     session = _read_session(_state_db_path(cfg), session_id)
     if not session:
         _log(f"session {session_id} had no foldable turns; skipped")
         return 0
 
-    _post(base_url, session, user, api_key)
+    if workspace_token:
+        session = _v1_session(session, cfg, user)
+    _flush_spool(
+        cfg,
+        base_url=base_url,
+        user=user,
+        api_key=api_key,
+    )
+    delivered = _post(base_url, session, user, api_key)
+    if not delivered:
+        _spool(session, cfg)
+    else:
+        try:
+            _context_usage_path(session_id).unlink()
+        except OSError:
+            pass
     print(json.dumps({"action": "allow"}))  # for `hermes hooks test`
     return 0
 

@@ -1,16 +1,20 @@
 """Object-store primitives and helpers shared by all backends.
 
-Two deployment modes are supported by the concrete stores in this package:
+The only supported sharing backend is ``viking`` — an OpenViking
+account-scoped *resources* namespace. The same backend serves both supported
+deployments: cloud OpenViking (Volcengine-hosted) and local OpenViking (a
+self-hosted ``openviking-server``); they differ only by endpoint. Every object
+(skills, manifest, registry, sessions) lives under the team-shared root
+``viking://resources/{root_prefix}/...`` (an optional ``{group_id}`` segment
+may follow ``{root_prefix}`` for isolation, but the team library uses none).
+This is the same namespace Hermes' ``OpenVikingSkillSource`` reads team skills
+from, so pushed skills become installable without any mirroring. Per-person
+isolation is layered on top by callers via ``peers/{customer_id}/`` key
+prefixes (see :func:`peer_key_prefix`).
 
-- ``local``: a local filesystem directory tree (development / unit tests).
-- ``viking``: an OpenViking account-scoped *resources* namespace. Every object
-  (skills, manifest, registry, sessions) lives under the team-shared root
-  ``viking://resources/{root_prefix}/...`` (an optional ``{group_id}`` segment
-  may follow ``{root_prefix}`` for isolation, but the team library uses none).
-  This is the same namespace Hermes' ``OpenVikingSkillSource`` reads team
-  skills from, so pushed skills become installable without any mirroring.
-  Per-person isolation is layered on top by callers via ``peers/{customer_id}/``
-  key prefixes (see :func:`peer_key_prefix`).
+An in-process :class:`~teamEvolver.storage.memory.InMemoryObjectStore` also
+implements this contract, but it is reserved for unit tests and the evolve
+engine's ``mock`` mode — it is never a user-selectable sharing backend.
 """
 
 from __future__ import annotations
@@ -45,20 +49,27 @@ def read_bytes(data: bytes | str | io.IOBase) -> bytes:
 
 
 def normalize_backend(backend: str | None, *, endpoint: str = "", local_root: str = "") -> str:
-    """Map user-facing aliases into the concrete backend names we support."""
+    """Map user-facing aliases into the concrete backend names we support.
+
+    Only ``viking`` is supported (cloud or local OpenViking). ``local_root`` is
+    accepted for signature compatibility but no longer selects a filesystem
+    backend; when a viking alias or endpoint is present the result is
+    ``"viking"``, otherwise the empty string.
+    """
     value = str(backend or "").strip().lower().replace("_", "-")
     aliases = {
-        "filesystem": "local",
-        "fs": "local",
         "openviking": "viking",
         "open-viking": "viking",
     }
     if value in aliases:
-        return aliases[value]
+        return "viking"
+    if value == "viking":
+        return "viking"
     if value:
-        return value
-    if local_root:
-        return "local"
+        # Unknown/legacy backend names collapse to the single supported backend.
+        return "viking"
+    if endpoint:
+        return "viking"
     return ""
 
 

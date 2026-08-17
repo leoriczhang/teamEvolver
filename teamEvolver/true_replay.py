@@ -38,10 +38,13 @@ import argparse
 import base64
 import json
 import os
+import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Optional
@@ -54,6 +57,16 @@ from .progressive_replay import (
     progressive_config,
     progressive_replay_decision,
 )
+from .integrations.agent_protocol import (
+    REPLAY_REQUEST_SCHEMA_V1,
+    replay_request_id,
+)
+from .integrations.replay_adapters import (
+    HttpReplayAdapter,
+    LegacyAgentsHubHttpAdapter,
+    legacy_branch_projection,
+)
+from .integrations.replay_model_broker import replay_model_broker
 from .skills.bundle import (
     bundle_tree_sha256,
     candidate_skill_bundle,
@@ -69,6 +82,28 @@ _EFFICIENCY_METRICS = (
     "tool_call_count",
     "total_tokens",
 )
+_CHECKLIST_JUDGE_SYSTEM = (
+    "Evaluate each checklist item using only the supplied responses, tool "
+    "trajectory, and real workspace artifacts. Output JSON "
+    "{items:[{id,satisfied,evidence}],all_satisfied}. Do not infer success "
+    "without concrete evidence."
+)
+_SYSTEMD_RUN = "/usr/bin/systemd-run"
+_SYSTEMCTL = "/usr/bin/systemctl"
+_ENV_BINARY = "/usr/bin/env"
+
+
+def _checklist_judge_config() -> dict[str, Any]:
+    prompt = _CHECKLIST_JUDGE_SYSTEM
+    options: dict[str, Any] = {"max_tokens": 8_192, "temperature": 0}
+    try:
+        from .evolve.prompt_studio import effective_prompt, stage_call_options
+
+        prompt = effective_prompt("replay_checklist", prompt)
+        options = stage_call_options("replay_checklist")
+    except Exception:  # noqa: BLE001 - replay keeps conservative defaults
+        pass
+    return {"system_prompt": prompt, **options}
 
 
 def resolve_hermes_origin() -> Optional[str]:
@@ -92,6 +127,67 @@ def resolve_hermes_origin() -> Optional[str]:
     if (sibling / "run_agent.py").exists():
         return str(sibling)
     return None
+
+
+_REPLAY_PYTHON_CACHE: Optional[str] = None
+
+
+def resolve_replay_python() -> str:
+    """Select a Python that can import Hermes without trusting PATH order."""
+    global _REPLAY_PYTHON_CACHE
+    explicit = str(
+        os.environ.get("TEAMEVOLVER_REPLAY_PYTHON") or ""
+    ).strip()
+    if explicit:
+        candidate = Path(explicit).expanduser()
+        if not candidate.is_file():
+            raise RuntimeError(
+                f"TEAMEVOLVER_REPLAY_PYTHON does not exist: {candidate}"
+            )
+        return str(candidate)
+    if _REPLAY_PYTHON_CACHE:
+        return _REPLAY_PYTHON_CACHE
+    candidates = [
+        Path(sys.executable),
+        _REPO_ROOT / ".venv" / "bin" / "python",
+        Path.home() / "miniconda3" / "bin" / "python3.13",
+        Path.home() / "miniconda3" / "bin" / "python",
+    ]
+    seen: set[str] = set()
+    for candidate in candidates:
+        resolved = str(candidate.expanduser().resolve())
+        if resolved in seen or not candidate.is_file():
+            continue
+        seen.add(resolved)
+        try:
+            probe = subprocess.run(
+                [
+                    resolved,
+                    "-c",
+                    (
+                        "import importlib.util,sys;"
+                        "sys.exit(0 if importlib.util.find_spec('run_agent') else 1)"
+                    ),
+                ],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if probe.returncode == 0:
+            _REPLAY_PYTHON_CACHE = resolved
+            return resolved
+    origin = resolve_hermes_origin()
+    if origin:
+        # A checkout can be injected by the worker, so any functioning Python
+        # with the teamEvolver dependencies is sufficient.
+        _REPLAY_PYTHON_CACHE = sys.executable
+        return sys.executable
+    raise RuntimeError(
+        "Hermes replay runtime is unavailable; set "
+        "TEAMEVOLVER_REPLAY_PYTHON to a Python that can import run_agent"
+    )
 
 # ---------------------------------------------------------------------------
 # Candidate job loading (reuses the running server's config + storage bucket).
@@ -135,34 +231,141 @@ def load_source_session(session_id: str) -> Optional[dict[str, Any]]:
         return None
 
 
-def _agentshub_endpoint(source_session: dict[str, Any]) -> str:
-    configured = os.environ.get("AGENTSHUB_REPLAY_URL", "").strip()
-    if configured:
-        return configured.rstrip("/")
+def load_context_snapshot(
+    snapshot_id: str,
+    source_session: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    if not str(snapshot_id or "").strip():
+        return None
+    try:
+        from teamEvolver.config_store import ConfigStore
+        from teamEvolver.integrations.context_workspace import ContextStateStore
+
+        runtime = (
+            source_session.get("runtime")
+            if isinstance(source_session.get("runtime"), dict)
+            else {}
+        )
+        runtime_context = (
+            source_session.get("runtime_context")
+            if isinstance(source_session.get("runtime_context"), dict)
+            else {}
+        )
+        return ContextStateStore(ConfigStore().to_config()).load_snapshot(
+            snapshot_id,
+            agent_id=str(runtime.get("integration_id") or ""),
+            user_id=str(runtime_context.get("team_evolver_user_id") or ""),
+        )
+    except Exception:
+        return None
+
+
+_LOCAL_HERMES_RUNTIME_TYPES = {
+    "hermes",
+    "cli",
+    "hermes-cli",
+    "hermes_cli",
+    "gateway",
+    "hermes-gateway",
+    "hermes_gateway",
+}
+
+
+def _source_runtime_type(source_session: dict[str, Any]) -> str:
     runtime = (
         source_session.get("runtime")
         if isinstance(source_session.get("runtime"), dict)
         else {}
     )
-    endpoint = str(runtime.get("replay_endpoint") or "").strip()
-    if endpoint.startswith(("http://127.0.0.1", "http://localhost", "http://[::1]")):
-        return endpoint.rstrip("/")
-    try:
-        from teamEvolver.config_store import ConfigStore
+    return str(
+        runtime.get("type") or source_session.get("source") or ""
+    ).strip().lower()
 
-        endpoint = str(
-            ConfigStore().to_config().validation_agentshub_url or ""
-        ).strip()
-    except Exception:
-        endpoint = ""
-    if endpoint.startswith(
-        ("http://127.0.0.1", "http://localhost", "http://[::1]")
-    ):
-        return endpoint.rstrip("/")
+
+def _is_candidate_audit_source(source_session: dict[str, Any]) -> bool:
+    runtime_context = (
+        source_session.get("runtime_context")
+        if isinstance(source_session.get("runtime_context"), dict)
+        else {}
+    )
+    return bool(
+        str(source_session.get("source") or "").strip()
+        == "managed_agent_candidate_audit"
+        or str(runtime_context.get("candidate_job_id") or "").strip()
+    )
+
+
+def _source_identity_error(
+    source_session: dict[str, Any],
+    *,
+    runtime_type: str,
+) -> str:
+    if not source_session:
+        return "source session is unavailable"
+    if _is_candidate_audit_source(source_session):
+        return "candidate-audit sessions cannot be used as replay sources"
+    if runtime_type == "agentshub":
+        runtime_context = (
+            source_session.get("runtime_context")
+            if isinstance(source_session.get("runtime_context"), dict)
+            else {}
+        )
+        if not str(runtime_context.get("tenant_id") or "").strip():
+            return "AgentsHub replay source is missing runtime_context.tenant_id"
     return ""
 
 
-def spawn_agentshub_branch(
+def _native_agent_runtime(source_session: dict[str, Any]) -> tuple[str, str]:
+    """Return ``(runtime_type, replay_endpoint)`` for a registered Agent."""
+    runtime = (
+        source_session.get("runtime")
+        if isinstance(source_session.get("runtime"), dict)
+        else {}
+    )
+    runtime_type = _source_runtime_type(source_session)
+    integration_id = str(runtime.get("integration_id") or "").strip()
+    endpoint = str(runtime.get("replay_endpoint") or "").strip()
+    if endpoint.startswith(("http://127.0.0.1", "http://localhost", "http://[::1]")):
+        return runtime_type or "native_agent", endpoint.rstrip("/")
+    config = None
+    try:
+        from teamEvolver.config_store import ConfigStore
+        from teamEvolver.integrations.agent_registry import resolve_runtime_agent
+
+        config = ConfigStore().to_config()
+        registered = resolve_runtime_agent(
+            config,
+            runtime_type=runtime_type,
+            agent_id=integration_id,
+            allow_runtime_fallback=not bool(integration_id),
+        )
+        endpoints = (
+            registered.get("endpoints")
+            if isinstance(registered, dict)
+            and isinstance(registered.get("endpoints"), dict)
+            else {}
+        )
+        endpoint = str(endpoints.get("replay_url") or "").strip()
+        if endpoint:
+            registered_type = str(
+                (registered or {}).get("runtime_type") or runtime_type
+            ).strip().lower()
+            return registered_type or "native_agent", endpoint.rstrip("/")
+    except Exception:
+        config = None
+    if runtime_type == "agentshub" and not integration_id:
+        configured = os.environ.get("AGENTSHUB_REPLAY_URL", "").strip()
+        if configured:
+            return "agentshub", configured.rstrip("/")
+        legacy = str(
+            getattr(config, "validation_agentshub_url", "") or ""
+        ).strip()
+        if legacy:
+            return "agentshub", legacy.rstrip("/")
+    return runtime_type or "native_agent", ""
+
+
+def spawn_native_agent_branch(
     branch: str,
     instruction: str,
     branch_skill: Optional[dict[str, Any]],
@@ -172,58 +375,152 @@ def spawn_agentshub_branch(
     timeout: int,
     max_interactions: int,
 ) -> dict[str, Any]:
-    endpoint = _agentshub_endpoint(source_session)
+    runtime_type, endpoint = _native_agent_runtime(source_session)
     if not endpoint:
         return {
             "branch": branch,
-            "runtime": "agentshub",
+            "runtime": runtime_type,
             "ok": False,
-            "error": "AGENTSHUB_REPLAY_URL is not configured",
+            "error": f"{runtime_type} replay endpoint is not configured",
         }
-    if not endpoint.endswith("/api/internal/team-evolver/replay"):
-        endpoint = f"{endpoint}/api/internal/team-evolver/replay"
-    headers = {"Content-Type": "application/json"}
-    api_key = os.environ.get("AGENTSHUB_REPLAY_API_KEY", "").strip()
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    runtime = (
+        source_session.get("runtime")
+        if isinstance(source_session.get("runtime"), dict)
+        else {}
+    )
+    integration_id = str(runtime.get("integration_id") or "").strip()
+    record: dict[str, Any] = {}
+    capability: dict[str, Any] = {}
+    config = None
     try:
-        import httpx
-
-        response = httpx.post(
-            endpoint,
-            json={
-                "branch": branch,
-                "instruction": instruction,
-                "target_skill_name": str(
-                    (job.get("candidate_skill") or {}).get("name")
-                    or job.get("candidate_skill_name")
-                    or ""
-                ),
-                "skill": branch_skill,
-                "current_skill": job.get("current_skill"),
-                "source_session": source_session,
-                "case": case,
-                "timeout_seconds": max(30, int(timeout)),
-                "max_interactions": max(1, int(max_interactions or 1)),
-            },
-            headers=headers,
-            timeout=max(60, int(timeout) + 30),
+        from teamEvolver.config_store import ConfigStore
+        from teamEvolver.integrations.agent_registry import (
+            resolve_replay_capability,
         )
-        response.raise_for_status()
-        payload = response.json()
-        return payload if isinstance(payload, dict) else {
-            "branch": branch,
-            "runtime": "agentshub",
-            "ok": False,
-            "error": "AgentsHub replay returned a non-object response",
-        }
+
+        config = ConfigStore().to_config()
+        resolved = resolve_replay_capability(
+            config,
+            runtime_type=runtime_type,
+            agent_id=integration_id,
+            allow_runtime_fallback=not bool(integration_id),
+        )
+        if resolved is not None:
+            record, capability = resolved
     except Exception as exc:
         return {
             "branch": branch,
-            "runtime": "agentshub",
+            "runtime": runtime_type,
             "ok": False,
-            "error": f"{type(exc).__name__}: {exc}",
+            "error": f"replay capability resolution failed: {type(exc).__name__}: {exc}",
         }
+    candidate_revision = str(
+        job.get("candidate_revision")
+        or (job.get("candidate_skill") or {}).get("tree_sha256")
+        or ""
+    )
+    job_identifier = str(
+        job.get("job_id")
+        or job.get("id")
+        or f"legacy-{candidate_revision or case.get('session_id') or 'replay'}"
+    )
+    snapshot_id = str(case.get("context_snapshot_id") or "")
+    context_snapshot = (
+        case.get("context_snapshot")
+        if isinstance(case.get("context_snapshot"), dict)
+        else None
+    )
+    if context_snapshot is None and snapshot_id:
+        context_snapshot = load_context_snapshot(
+            snapshot_id,
+            source_session,
+        )
+    request = {
+        "schema_version": REPLAY_REQUEST_SCHEMA_V1,
+        "protocol_version": "1.0",
+        "request_id": replay_request_id(
+            job_id=job_identifier,
+            case_index=int(case.get("index") or 0),
+            branch=branch,
+            candidate_revision=candidate_revision,
+        ),
+        "job_id": job_identifier,
+        "case_id": str(case.get("dataset_id") or case.get("index") or ""),
+        "case_index": int(case.get("index") or 0),
+        "branch": branch,
+        "target_skill_name": str(
+            (job.get("candidate_skill") or {}).get("name")
+            or job.get("candidate_skill_name")
+            or ""
+        ),
+        "skill": branch_skill,
+        "current_skill": job.get("current_skill"),
+        "baseline_ref": job.get("baseline_ref") or {},
+        "source_session": source_session,
+        "case": {
+            **case,
+            "query": str(case.get("query") or instruction),
+        },
+        "context_snapshot": context_snapshot or {},
+        "execution_manifest": case.get("execution_manifest") or {},
+        "tool_policy": case.get("tool_policy") or {},
+        "checklist_policy": case.get("checklist_policy") or {},
+        "limits": {
+            "timeout_seconds": max(30, min(3600, int(timeout))),
+            "max_interactions": max(
+                1,
+                min(
+                    int(capability.get("max_interactions") or 20),
+                    int(max_interactions or 1),
+                ),
+            ),
+        },
+        "options": {
+            "include_full_trace": bool(job.get("include_full_trace")),
+        },
+    }
+    compatibility = str(record.get("compatibility") or "legacy")
+    legacy = compatibility != "compatible"
+    if legacy and runtime_type == "agentshub" and not endpoint.endswith(
+        "/api/internal/team-evolver/replay"
+    ):
+        endpoint = f"{endpoint}/api/internal/team-evolver/replay"
+    auth_profile = str(capability.get("auth_profile") or "")
+    configured_agentshub_key = ""
+    if runtime_type == "agentshub":
+        configured_agentshub_key = str(
+            getattr(config, "validation_agentshub_api_key", "") or ""
+        ).strip()
+    adapter = (
+        LegacyAgentsHubHttpAdapter(
+            endpoint=endpoint,
+            runtime_type=runtime_type,
+            auth_profile=auth_profile,
+            api_key=configured_agentshub_key,
+        )
+        if legacy
+        else HttpReplayAdapter(
+            endpoint=endpoint,
+            runtime_type=runtime_type,
+            auth_profile=auth_profile,
+            api_key=configured_agentshub_key,
+        )
+    )
+    return legacy_branch_projection(adapter.execute_branch(request))
+
+
+def _agentshub_endpoint(source_session: dict[str, Any]) -> str:
+    """Backward-compatible AgentsHub endpoint resolver."""
+    _runtime_type, endpoint = _native_agent_runtime(source_session)
+    suffix = "/api/internal/team-evolver/replay"
+    if endpoint.endswith(suffix):
+        return endpoint[: -len(suffix)]
+    return endpoint
+
+
+def spawn_agentshub_branch(*args, **kwargs) -> dict[str, Any]:
+    """Backward-compatible alias for the generic native Agent replay client."""
+    return spawn_native_agent_branch(*args, **kwargs)
 
 
 def read_hermes_harness() -> dict[str, str]:
@@ -276,13 +573,23 @@ def extract_referenced_paths(text: str) -> list[str]:
     tokens = re.split(r"[\s,;，；、]+", text.strip())
     hits: list[str] = []
     for tok in tokens:
-        tok = tok.strip().strip("`'\"")
+        tok = tok.strip().strip("`'\"()[]{}<>。，！？：:")
         if not tok:
             continue
-        looks_pathy = tok.startswith("/") or ("/" in tok and not tok.startswith("http"))
+        looks_pathy = (
+            tok.startswith("/")
+            or ("/" in tok and not tok.startswith(("http://", "https://")))
+            or bool(
+                re.search(
+                    r"\.(?:zip|tar|gz|tgz|7z|pdf|docx?|xlsx?|pptx?|csv|json|ya?ml|md|txt|html?)$",
+                    tok,
+                    re.IGNORECASE,
+                )
+            )
+        )
         if looks_pathy:
             hits.append(tok)
-    return hits
+    return list(dict.fromkeys(hits))
 
 
 def check_paths(paths: list[str], search_roots: list[Path]) -> list[dict[str, Any]]:
@@ -316,7 +623,11 @@ def _uploaded_material_path(
         return None
     for item in materials:
         material_path = str(item.get("path") or "").strip().replace("\\", "/")
-        if material_path == wanted or material_path.startswith(f"{wanted}/"):
+        if (
+            material_path == wanted
+            or material_path.startswith(f"{wanted}/")
+            or material_path.rsplit("/", 1)[-1] == wanted
+        ):
             return material_path
     return None
 
@@ -343,7 +654,7 @@ def annotate_cases(job: dict[str, Any], search_roots: list[Path]) -> list[dict[s
                         "resolved": f"uploaded://{uploaded}",
                     }
                 )
-        referenced = [r for r in refs if r["exists"] or r["path"].startswith("/")]
+        referenced = list(refs)
         missing = [r for r in referenced if not r["exists"]]
         # Runnable when the instruction either references no path, or every
         # referenced path resolves on this machine.
@@ -360,6 +671,19 @@ def annotate_cases(job: dict[str, Any], search_roots: list[Path]) -> list[dict[s
                 ),
                 "evaluation_profile": str(
                     case.get("evaluation_profile") or ""
+                ),
+                "source_runtime": (
+                    dict(case.get("source_runtime"))
+                    if isinstance(case.get("source_runtime"), dict)
+                    else {}
+                ),
+                "source_runtime_context": (
+                    dict(case.get("source_runtime_context"))
+                    if isinstance(case.get("source_runtime_context"), dict)
+                    else {}
+                ),
+                "context_snapshot_id": str(
+                    case.get("context_snapshot_id") or ""
                 ),
                 "had_tool_calls": bool(case.get("had_tool_calls")),
                 "gold": case.get("gold") if isinstance(case.get("gold"), dict) else {},
@@ -386,6 +710,33 @@ def annotate_cases(job: dict[str, Any], search_roots: list[Path]) -> list[dict[s
 # ---------------------------------------------------------------------------
 
 
+def _write_sandbox_harness_config(
+    hermes_home: Path,
+    harness: dict[str, Any],
+) -> None:
+    config = {
+        "model": {
+            "provider": "custom",
+            "base_url": harness["base_url"],
+            "default": harness["model"],
+            "api_key": harness["api_key"],
+            "max_tokens": harness["max_tokens"],
+            "api_mode": harness["api_mode"],
+        }
+    }
+    config_path = hermes_home / "config.yaml"
+    try:
+        import yaml
+
+        config_path.write_text(
+            yaml.safe_dump(config, sort_keys=False),
+            "utf-8",
+        )
+    except Exception:
+        config_path.write_text(json.dumps(config), "utf-8")
+    os.chmod(config_path, 0o600)
+
+
 def build_sandbox(
     base: Path,
     branch: str,
@@ -401,24 +752,11 @@ def build_sandbox(
     workspace = home / "workspace"
     for d in (hermes_home / "skills", hermes_home / "sessions", hermes_home / "logs", workspace):
         d.mkdir(parents=True, exist_ok=True)
+    os.chmod(home, 0o700)
+    os.chmod(hermes_home, 0o700)
+    os.chmod(workspace, 0o700)
 
-    # Minimal config.yaml so the sandboxed Hermes matches the client harness.
-    config = {
-        "model": {
-            "provider": "custom",
-            "base_url": harness["base_url"],
-            "default": harness["model"],
-            "api_key": harness["api_key"],
-            "max_tokens": harness["max_tokens"],
-            "api_mode": harness["api_mode"],
-        }
-    }
-    try:
-        import yaml
-
-        (hermes_home / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=False), "utf-8")
-    except Exception:
-        (hermes_home / "config.yaml").write_text(json.dumps(config), "utf-8")
+    _write_sandbox_harness_config(hermes_home, harness)
 
     if skill:
         name = str(skill.get("name") or "candidate-skill")
@@ -494,6 +832,7 @@ def _evaluate_local_checklist(
     interactions: list[dict[str, Any]],
     messages: list[dict[str, Any]],
     workspace: str,
+    judge_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not checklist:
         return normalize_checklist_report(
@@ -503,6 +842,7 @@ def _evaluate_local_checklist(
     try:
         from openai import OpenAI
 
+        resolved_judge = dict(judge_config or {})
         client = OpenAI(
             api_key=str(harness.get("api_key") or "not-configured"),
             base_url=str(harness.get("base_url") or ""),
@@ -515,15 +855,17 @@ def _evaluate_local_checklist(
             "workspace_artifacts": _workspace_evidence(workspace),
         }
         completion = client.chat.completions.create(
-            model=str(harness.get("model") or ""),
+            model=str(
+                resolved_judge.get("model")
+                or harness.get("model")
+                or ""
+            ),
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        "Evaluate each checklist item using only the supplied "
-                        "responses, tool trajectory, and real workspace artifacts. "
-                        "Output JSON {items:[{id,satisfied,evidence}],all_satisfied}. "
-                        "Do not infer success without concrete evidence."
+                    "content": str(
+                        resolved_judge.get("system_prompt")
+                        or _CHECKLIST_JUDGE_SYSTEM
                     ),
                 },
                 {
@@ -531,8 +873,11 @@ def _evaluate_local_checklist(
                     "content": json.dumps(payload, ensure_ascii=False),
                 },
             ],
-            temperature=0,
-            max_tokens=8_192,
+            temperature=float(resolved_judge.get("temperature", 0)),
+            max_tokens=max(
+                1,
+                int(resolved_judge.get("max_tokens") or 8_192),
+            ),
             response_format={"type": "json_object"},
         )
         raw = completion.choices[0].message.content or "{}"
@@ -673,6 +1018,7 @@ def _run_worker(spec_path: str) -> None:
                 interactions=interactions,
                 messages=messages,
                 workspace=spec["workspace"],
+                judge_config=spec.get("checklist_judge"),
             )
             interaction["checklist_report"] = checklist_report
             interaction["completed"] = bool(
@@ -718,6 +1064,173 @@ def _run_worker(spec_path: str) -> None:
         Path(spec["out_path"]).write_text(json.dumps(out, ensure_ascii=False), "utf-8")
 
 
+def _path_is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _sandbox_read_paths(
+    worker_python: str,
+    case: Optional[dict[str, Any]],
+) -> list[Path]:
+    """Return explicit host-home paths that the hidden-home worker may read."""
+    home = Path.home().resolve()
+    candidates = [
+        _REPO_ROOT.resolve(),
+        Path(worker_python).resolve().parents[1],
+    ]
+    origin = resolve_hermes_origin()
+    if origin:
+        candidates.append(Path(origin).resolve())
+    for item in (case or {}).get("referenced_paths") or []:
+        if not isinstance(item, dict):
+            continue
+        resolved = str(item.get("resolved") or "").strip()
+        if not resolved or resolved.startswith("uploaded://"):
+            continue
+        path = Path(resolved).resolve()
+        if path.exists():
+            candidates.append(path)
+    unique: list[Path] = []
+    for path in candidates:
+        if path.exists() and _path_is_within(path, home) and path not in unique:
+            unique.append(path)
+    return unique
+
+
+def _worker_environment(
+    worker_python: str,
+    sandbox: dict[str, str],
+) -> dict[str, str]:
+    tmp_dir = Path(sandbox["home"]) / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(tmp_dir, 0o700)
+    python_bin = str(Path(worker_python).resolve().parent)
+    path = ":".join(
+        dict.fromkeys(
+            [
+                python_bin,
+                "/usr/local/sbin",
+                "/usr/local/bin",
+                "/usr/sbin",
+                "/usr/bin",
+                "/sbin",
+                "/bin",
+            ]
+        )
+    )
+    env = {
+        "HOME": sandbox["home"],
+        "HERMES_HOME": sandbox["hermes_home"],
+        "LANG": str(os.environ.get("LANG") or "C.UTF-8"),
+        "LC_ALL": str(os.environ.get("LC_ALL") or ""),
+        "PATH": path,
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPATH": str(_REPO_ROOT),
+        "TMPDIR": str(tmp_dir),
+    }
+    for key in ("SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE"):
+        value = str(os.environ.get(key) or "").strip()
+        if value and Path(value).exists():
+            env[key] = value
+    return {key: value for key, value in env.items() if value}
+
+
+def _systemd_sandbox_command(
+    *,
+    worker_python: str,
+    spec_path: Path,
+    sandbox: dict[str, str],
+    harness: dict[str, str],
+    timeout: int,
+    case: Optional[dict[str, Any]],
+    unit_name: str,
+) -> list[str]:
+    del harness
+    for executable in (_SYSTEMD_RUN, _SYSTEMCTL, _ENV_BINARY):
+        if not Path(executable).is_file():
+            raise RuntimeError(f"required sandbox executable is missing: {executable}")
+    sandbox_home = Path(sandbox["home"]).resolve()
+    actual_home = Path.home().resolve()
+    command = [
+        _SYSTEMD_RUN,
+        "--user",
+        "--wait",
+        "--pipe",
+        "--quiet",
+        "--collect",
+        f"--unit={unit_name}",
+        f"--working-directory={_REPO_ROOT}",
+        "-p",
+        "Type=exec",
+        "-p",
+        "NoNewPrivileges=yes",
+        "-p",
+        "ProtectSystem=strict",
+        "-p",
+        "ProtectHome=yes",
+        "-p",
+        "PrivateTmp=yes",
+        "-p",
+        f"InaccessiblePaths={actual_home}",
+        "-p",
+        f"ReadWritePaths={sandbox_home}",
+        "-p",
+        "RestrictSUIDSGID=yes",
+        "-p",
+        "LockPersonality=yes",
+        "-p",
+        "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+        "-p",
+        "SystemCallArchitectures=native",
+        "-p",
+        "UMask=0077",
+        "-p",
+        "IPAddressDeny=any",
+        "-p",
+        "IPAddressAllow=127.0.0.0/8",
+        "-p",
+        "IPAddressAllow=::1/128",
+        "-p",
+        f"RuntimeMaxSec={max(1, int(timeout))}s",
+        "-p",
+        "TimeoutStopSec=5s",
+        "-p",
+        "KillMode=mixed",
+    ]
+    for path in _sandbox_read_paths(worker_python, case):
+        command.extend(("-p", f"BindReadOnlyPaths={path}"))
+    command.append(_ENV_BINARY)
+    command.append("-i")
+    command.extend(
+        f"{key}={value}"
+        for key, value in _worker_environment(worker_python, sandbox).items()
+    )
+    command.extend(
+        (
+            worker_python,
+            "-m",
+            "teamEvolver.true_replay",
+            "--worker",
+            "--spec",
+            str(spec_path),
+        )
+    )
+    return command
+
+
+def _systemd_launcher_environment() -> dict[str, str]:
+    env = {"PATH": "/usr/bin:/bin"}
+    for key in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"):
+        value = str(os.environ.get(key) or "").strip()
+        if value:
+            env[key] = value
+    return env
+
+
 def spawn_branch(
     branch: str,
     sandbox: dict[str, str],
@@ -731,7 +1244,17 @@ def spawn_branch(
     case: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Spawn a worker subprocess for one branch and collect its trajectory."""
-    worker_python = os.environ.get("TEAMEVOLVER_REPLAY_PYTHON", "").strip() or sys.executable
+    try:
+        worker_python = resolve_replay_python()
+    except Exception as exc:  # noqa: BLE001 - replay must fail closed.
+        return {
+            "branch": branch,
+            "ok": False,
+            "error_code": "REPLAY_SANDBOX_UNAVAILABLE",
+            "error": f"replay runtime unavailable: {type(exc).__name__}: {exc}",
+        }
+    branch_home = Path(sandbox["home"])
+    out_file = branch_home / ".replay_result.json"
     spec = {
         "branch": branch,
         "home": sandbox["home"],
@@ -749,26 +1272,79 @@ def spawn_branch(
         ),
         "max_iterations": 25,
         "max_interactions": max(1, int(max_interactions or 4)),
-        "out_path": str(tmp / f"{branch}_out.json"),
+        "checklist_judge": _checklist_judge_config(),
+        "out_path": str(out_file),
     }
-    spec_path = tmp / f"{branch}_spec.json"
+    spec_path = branch_home / ".replay_spec.json"
     spec_path.write_text(json.dumps(spec, ensure_ascii=False), "utf-8")
     os.chmod(spec_path, 0o600)  # spec carries the api_key
 
-    env = {**os.environ, "PYTHONPATH": str(_REPO_ROOT)}
+    unit_name = (
+        f"teamevolver-replay-{os.getpid()}-{branch}-"
+        f"{uuid.uuid4().hex[:10]}"
+    )
+    try:
+        command = _systemd_sandbox_command(
+            worker_python=worker_python,
+            spec_path=spec_path,
+            sandbox=sandbox,
+            harness=harness,
+            timeout=timeout,
+            case=case,
+            unit_name=unit_name,
+        )
+    except Exception as exc:  # noqa: BLE001 - no unsafe direct fallback.
+        return {
+            "branch": branch,
+            "ok": False,
+            "error_code": "REPLAY_SANDBOX_UNAVAILABLE",
+            "error": f"replay sandbox unavailable: {type(exc).__name__}: {exc}",
+        }
     print(f"  ▶ running {branch} branch (real tool loop, timeout {timeout}s)…", flush=True)
     try:
-        subprocess.run(
-            [worker_python, "-m", "teamEvolver.true_replay",
-             "--worker", "--spec", str(spec_path)],
-            cwd=str(_REPO_ROOT), env=env, timeout=timeout,
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        process = subprocess.run(
+            command,
+            cwd=str(_REPO_ROOT),
+            env=_systemd_launcher_environment(),
+            timeout=max(15, int(timeout) + 15),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
         )
     except subprocess.TimeoutExpired:
-        return {"branch": branch, "ok": False, "error": f"timeout after {timeout}s"}
-    out_file = tmp / f"{branch}_out.json"
+        subprocess.run(
+            [_SYSTEMCTL, "--user", "stop", f"{unit_name}.service"],
+            env=_systemd_launcher_environment(),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+        return {
+            "branch": branch,
+            "ok": False,
+            "error_code": "TIMEOUT",
+            "error": f"timeout after {timeout}s",
+        }
+    except OSError as exc:
+        return {
+            "branch": branch,
+            "ok": False,
+            "error_code": "REPLAY_SANDBOX_UNAVAILABLE",
+            "error": f"cannot launch replay sandbox: {type(exc).__name__}: {exc}",
+        }
     if not out_file.exists():
-        return {"branch": branch, "ok": False, "error": "worker produced no output"}
+        detail = str(process.stderr or "").strip()[-2000:]
+        return {
+            "branch": branch,
+            "ok": False,
+            "error_code": "REPLAY_SANDBOX_FAILED",
+            "error": (
+                f"sandboxed worker produced no output (rc={process.returncode})"
+                + (f": {detail}" if detail else "")
+            ),
+        }
     return json.loads(out_file.read_text("utf-8"))
 
 
@@ -867,7 +1443,7 @@ def _print_case_table(cases: list[dict[str, Any]]) -> None:
         print(f"       指令: {c['instruction'][:90]}")
 
 
-def _evaluate_agentshub_case(
+def _evaluate_native_agent_case(
     job_id: str,
     job: dict[str, Any],
     case: dict[str, Any],
@@ -877,6 +1453,7 @@ def _evaluate_agentshub_case(
     timeout: int,
     max_interactions: int,
 ) -> dict[str, Any]:
+    runtime_type, _endpoint = _native_agent_runtime(source_session)
     harness = read_team_evolver_harness()
     branch_skills = {
         "baseline": (
@@ -890,7 +1467,7 @@ def _evaluate_agentshub_case(
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = {
             pool.submit(
-                spawn_agentshub_branch,
+                spawn_native_agent_branch,
                 branch,
                 case["instruction"],
                 branch_skills[branch],
@@ -909,16 +1486,35 @@ def _evaluate_agentshub_case(
             except Exception as exc:  # noqa: BLE001
                 results[branch] = {
                     "branch": branch,
-                    "runtime": "agentshub",
+                    "runtime": runtime_type,
                     "ok": False,
                     "error": f"{type(exc).__name__}: {exc}",
                 }
 
+    parity_failures: list[str] = []
+    context_hashes = {
+        str(result.get("context_input_hash") or "")
+        for result in results.values()
+        if result.get("ok")
+    }
+    if len(context_hashes) > 1:
+        parity_failures.append(
+            "CONTEXT_PARITY_VIOLATION: branch context_input_hash values differ"
+        )
+    execution_hashes = {
+        str(result.get("execution_manifest_hash") or "")
+        for result in results.values()
+        if result.get("ok")
+    }
+    if len(execution_hashes) > 1:
+        parity_failures.append(
+            "EXECUTION_PARITY_VIOLATION: branch execution manifest hashes differ"
+        )
     failures = [
         f"{branch}: {result.get('error') or 'branch failed'}"
         for branch, result in results.items()
         if not result.get("ok")
-    ]
+    ] + parity_failures
     efficiency = compare_efficiency(results["baseline"], results["candidate"])
     expected_checklist = list(case.get("checklist") or [])
     branch_checklists = {
@@ -962,7 +1558,7 @@ def _evaluate_agentshub_case(
 
     common = {
         "mode": "true_replay",
-        "runtime": "agentshub",
+        "runtime": runtime_type,
         "job_id": job_id,
         "max_interactions": max(1, int(max_interactions or 1)),
         "case_count": 1,
@@ -1066,27 +1662,48 @@ def evaluate_job(
         source_session = (
             load_source_session(str(source_case.get("session_id") or "")) or {}
         )
-        runtime = (
-            source_session.get("runtime")
-            if isinstance(source_session.get("runtime"), dict)
-            else {}
+        if isinstance(source_case.get("source_runtime"), dict):
+            source_session["runtime"] = {
+                **dict(source_case.get("source_runtime") or {}),
+                **(
+                    dict(source_session.get("runtime"))
+                    if isinstance(source_session.get("runtime"), dict)
+                    else {}
+                ),
+            }
+        if isinstance(source_case.get("source_runtime_context"), dict):
+            source_session["runtime_context"] = {
+                **dict(source_case.get("source_runtime_context") or {}),
+                **(
+                    dict(source_session.get("runtime_context"))
+                    if isinstance(source_session.get("runtime_context"), dict)
+                    else {}
+                ),
+            }
+        source_session.setdefault(
+            "session_id",
+            str(source_case.get("session_id") or ""),
         )
-        if (
-            os.environ.get("AGENTSHUB_REPLAY_URL", "").strip()
-            or str(
-                runtime.get("type") or source_session.get("source") or ""
-            )
-            == "agentshub"
-        ):
-            if not runtime:
-                source_session["runtime"] = {
-                    "type": "agentshub",
-                    "replay_endpoint": os.environ.get(
-                        "AGENTSHUB_REPLAY_URL",
-                        "",
-                    ).strip(),
-                }
-            return _evaluate_agentshub_case(
+        runtime_type, replay_endpoint = _native_agent_runtime(source_session)
+        identity_error = _source_identity_error(
+            source_session,
+            runtime_type=runtime_type,
+        )
+        if identity_error:
+            return {
+                "status": "skipped",
+                "mode": "true_replay",
+                "job_id": job_id,
+                "accepted": False,
+                "case_count": 0,
+                "reason": (
+                    f"case {source_case['index']} is not replayable: "
+                    f"{identity_error}"
+                ),
+                "cases": [],
+            }
+        if replay_endpoint:
+            return _evaluate_native_agent_case(
                 job_id,
                 job,
                 source_case,
@@ -1095,6 +1712,19 @@ def evaluate_job(
                 timeout=timeout,
                 max_interactions=max_interactions,
             )
+        if runtime_type not in _LOCAL_HERMES_RUNTIME_TYPES:
+            return {
+                "status": "skipped",
+                "mode": "true_replay",
+                "job_id": job_id,
+                "accepted": False,
+                "case_count": 0,
+                "reason": (
+                    f"case {source_case['index']} runtime "
+                    f"{runtime_type or 'unknown'} has no replay capability"
+                ),
+                "cases": [],
+            }
 
     runnable = [c for c in cases if c["runnable"] and c["instruction"]]
     if not runnable:

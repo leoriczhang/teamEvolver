@@ -4,12 +4,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { api } from "@/api/client";
+import { api, type UserProfile } from "@/api/client";
 import { fileToB64 } from "@/lib/file";
 import { toastErr, toastOk } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import DropZone from "@/views/skills/DropZone";
 import MarkdownWorkspace, { MarkdownDocument } from "@/components/MarkdownWorkspace";
+import MiningWhiteboxPanel from "@/views/MiningWhiteboxPanel";
 import {
   Boxes,
   ScanSearch,
@@ -51,7 +52,10 @@ const PAGE_META: Record<MinePage, { title: string; description: string }> = {
   overview: { title: "挖掘总览", description: "查看知识源、挖掘任务与产物编译状态，快速掌握 SkillMiner 当前工作负载。" },
   sources: { title: "知识源", description: "管理用于技能挖掘的文档目录，支持上传、新建、重命名、合并与删除。" },
   jobs: { title: "挖掘任务", description: "并行创建和跟踪挖掘任务；任务完成后可审核、编辑产物并提交进化。" },
-  model: { title: "挖掘模型", description: "配置 SkillMiner 使用的 OpenAI 兼容模型，并检查当前连接状态。" },
+  model: {
+    title: "挖掘配置",
+    description: "配置 SkillMiner 使用的模型、挖掘 Prompt 与 Benchmark 评估规则，并检查当前连接状态。",
+  },
 };
 
 // ---- Backend types (subset of SkillMiner /api/config & SSE events) -------- //
@@ -310,12 +314,14 @@ export default function MiningView({
   preferredInputDir,
   onInputDirChange,
   onNavigate,
+  user: _user,
 }: {
   active: boolean;
   page: MinePage;
   preferredInputDir?: string;
   onInputDirChange?: (path: string) => void;
   onNavigate?: (destination: MinePage | "candidates" | "skills") => void;
+  user?: UserProfile | null;
 }) {
   const mining = useMining(active);
   const { config } = mining;
@@ -2049,6 +2055,7 @@ export default function MiningView({
               </div>
             </div>
           </Panel>
+          <MiningWhiteboxPanel active={active} user={_user} />
         </div>
       )}
     </div>

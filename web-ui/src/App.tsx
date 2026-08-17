@@ -3,12 +3,12 @@ import { Toaster } from "@/components/ui/sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { Activity, Beaker, ClipboardCheck, Filter, History, LayoutDashboard, BookOpenText, Users, SlidersHorizontal, LogOut, RefreshCw, Sparkles, Clock, Repeat2, ShieldCheck, TrendingUp, Zap, Database, Workflow, ListChecks, ChevronsUpDown, DownloadCloud, TerminalSquare } from "lucide-react";
+import { Activity, Brain, ClipboardCheck, Filter, FolderTree, History, LayoutDashboard, BookOpenText, Users, SlidersHorizontal, LogOut, RefreshCw, Sparkles, Clock, Repeat2, ShieldCheck, TrendingUp, Zap, Database, Workflow, ListChecks, ChevronsUpDown, DownloadCloud, TerminalSquare } from "lucide-react";
 import { api, type AuthStatus, type UserProfile } from "@/api/client";
 import { PageHeader } from "@/components/common";
 import { toastErr, toastOk } from "@/lib/toast";
 import DashboardView from "@/views/DashboardView";
-import SkillsView from "@/views/SkillsView";
+import SkillsWorkspaceView from "@/views/SkillsWorkspaceView";
 import UsersView from "@/views/UsersView";
 import ModelSettingsView from "@/views/ModelSettingsView";
 import CandidateReviewView from "@/views/CandidateReviewView";
@@ -16,9 +16,10 @@ import HealthView from "@/views/HealthView";
 import AuditView from "@/views/AuditView";
 import SessionFilterView from "@/views/SessionFilterView";
 import LangfuseView from "@/views/LangfuseView";
-import PromptStudioView from "@/views/PromptStudioView";
-import SkillLabView from "@/views/SkillLabView";
+import EvolutionWorkspaceView from "@/views/EvolutionWorkspaceView";
+import MemoryWorkspaceView from "@/views/MemoryWorkspaceView";
 import MiningView, { type MinePage } from "@/views/MiningView";
+import OpenVikingWorkspaceView from "@/views/OpenVikingWorkspaceShell";
 
 type ViewKey =
   | "mine-overview"
@@ -31,50 +32,75 @@ type ViewKey =
   | "prompt-studio"
   | "health"
   | "skills"
+  | "memories"
+  | "workspace"
   | "users"
   | "model";
 type DashTab = "overview" | "candidates" | "audit" | "filter";
+type MiningViewKey = "mine-overview" | "mine-sources" | "mine-jobs" | "mine-model";
+type StandaloneViewKey = Exclude<ViewKey, MiningViewKey | "dashboard">;
 
-// The 挖掘 group is a flat list of menu items (like the 进化 group), each
-// pointing at a single MiningView page.
-const MINE_PAGES: { key: ViewKey; page: MinePage }[] = [
+const MINE_PAGES: { key: MiningViewKey; page: MinePage }[] = [
   { key: "mine-overview", page: "overview" },
   { key: "mine-sources", page: "sources" },
   { key: "mine-jobs", page: "jobs" },
   { key: "mine-model", page: "model" },
 ];
 
-// Sidebar is organised around the two active lifecycle stages.  Benchmark is
-// an internal candidate dataset; no external evaluation runtime is required.
-const NAV_GROUPS: {
-  group: string;
+const NAV_SECTIONS: {
+  id: string;
+  label: string;
   items: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[];
 }[] = [
   {
-    group: "挖掘 · SkillMiner",
+    id: "mining",
+    label: "技能挖掘",
     items: [
       { key: "mine-overview", label: "挖掘总览", icon: LayoutDashboard },
       { key: "mine-sources", label: "知识源", icon: Database },
       { key: "mine-jobs", label: "挖掘任务", icon: ListChecks },
-      { key: "mine-model", label: "挖掘模型", icon: SlidersHorizontal },
+      { key: "mine-model", label: "挖掘配置", icon: SlidersHorizontal },
     ],
   },
   {
-    group: "进化 · teamEvolver",
+    id: "evolution",
+    label: "进化闭环",
     items: [
-      { key: "dashboard", label: "进化看板", icon: LayoutDashboard },
-      { key: "langfuse", label: "Langfuse 接入", icon: DownloadCloud },
-      { key: "skill-lab", label: "Skills 实验台", icon: Beaker },
-      { key: "prompt-studio", label: "Prompt 工作台", icon: TerminalSquare },
-      { key: "health", label: "系统健康", icon: Activity },
-      { key: "skills", label: "技能管理", icon: BookOpenText },
-      { key: "users", label: "用户管理", icon: Users },
-      { key: "model", label: "进化模型", icon: SlidersHorizontal },
+      { key: "dashboard", label: "运行总览", icon: LayoutDashboard },
+      { key: "langfuse", label: "会话数据源", icon: DownloadCloud },
+      { key: "prompt-studio", label: "进化链路", icon: TerminalSquare },
+    ],
+  },
+  {
+    id: "assets",
+    label: "资产中心",
+    items: [
+      { key: "skills", label: "Skills Workspace", icon: BookOpenText },
+      { key: "memories", label: "Memory Workspace", icon: Brain },
+      { key: "workspace", label: "上下文空间", icon: FolderTree },
+    ],
+  },
+  {
+    id: "governance",
+    label: "平台治理",
+    items: [
+      { key: "model", label: "全局模型", icon: SlidersHorizontal },
+      { key: "users", label: "用户与权限", icon: Users },
+      { key: "health", label: "运行状态", icon: Activity },
     ],
   },
 ];
 
-// Sub-pages hosted inside the 进化看板 group.
+const VIEW_KEYS = new Set<ViewKey>(
+  NAV_SECTIONS.flatMap(({ items }) => items.map(({ key }) => key))
+);
+
+function initialView(): ViewKey {
+  const requested = new URLSearchParams(window.location.search).get("view") as ViewKey | null;
+  return requested && VIEW_KEYS.has(requested) ? requested : "dashboard";
+}
+
+// Operational views stay together under the evolution overview.
 const DASH_TABS: { key: DashTab; label: string; icon: typeof LayoutDashboard }[] = [
   { key: "overview", label: "总览", icon: LayoutDashboard },
   { key: "candidates", label: "候选评审", icon: ClipboardCheck },
@@ -82,41 +108,84 @@ const DASH_TABS: { key: DashTab; label: string; icon: typeof LayoutDashboard }[]
   { key: "filter", label: "过滤审计", icon: Filter },
 ];
 
-const EVOLVE_PAGE_META: Record<"langfuse" | "skill-lab" | "prompt-studio" | "health" | "skills" | "users" | "model", { title: string; description: string }> = {
-  langfuse: {
-    title: "Langfuse 接入",
-    description: "从 Langfuse 拉取 Agent 会话作为进化证据，支持按环境、用户、标签、版本、元数据等 session 属性筛选。",
-  },
-  "skill-lab": {
-    title: "Skills 实验台",
-    description: "编辑 Skill 草稿，维护由历史 Session 挖掘或手工编写的实验数据集，并通过 True Replay 查看完整 A/B Trace 与轮次、Tool、Token 变化。",
-  },
-  "prompt-studio": {
-    title: "Prompt 工作台",
-    description: "把技能进化流程从黑盒变透明：可视化链路、查看并编辑每个 LLM 阶段的 prompt、用真实会话测试并看到输入输出。",
-  },
-  health: {
-    title: "系统健康",
-    description: "聚合服务、存储、模型、用户和技能状态，用于快速定位运行问题。",
-  },
-  skills: {
-    title: "技能管理",
-    description: "管理个人技能与团队技能，并在对应空间完成编辑、分享和发布。",
-  },
-  users: {
-    title: "用户管理",
-    description: "注册用户、分配角色，并配置个人与团队 OpenViking 空间凭据。",
-  },
-  model: {
-    title: "进化模型",
-    description: "配置 teamEvolver 在总结、判断、合并和生成技能时使用的模型。",
-  },
+type StandalonePageConfig = {
+  key: StandaloneViewKey;
+  title: string;
+  description: string;
+  badge: string;
+  render: (props: { active: boolean; user?: UserProfile | null }) => ReactNode;
 };
+
+const STANDALONE_PAGES: StandalonePageConfig[] = [
+  {
+    key: "langfuse",
+    title: "会话数据源",
+    description: "管理技能进化的会话证据入口。当前支持从 Langfuse 拉取数据，并按环境、用户、标签、版本和元数据筛选。",
+    badge: "数据接入",
+    render: ({ active, user }) => <LangfuseView active={active} user={user} />,
+  },
+  {
+    key: "prompt-studio",
+    title: "进化链路",
+    description: "统一管理 Skills 自进化与团队 Memory 自进化（DreamCycle）的 Prompt、模型、参数和运行状态。",
+    badge: "白盒配置",
+    render: ({ active, user }) => <EvolutionWorkspaceView active={active} user={user} />,
+  },
+  {
+    key: "skill-lab",
+    title: "Skill Lab",
+    description: "兼容入口：Skill Lab 已归入 Skills Workspace。",
+    badge: "Skills Workspace",
+    render: ({ active, user }) => <SkillsWorkspaceView active={active} user={user} initialTab="lab" />,
+  },
+  {
+    key: "skills",
+    title: "Skills Workspace",
+    description: "统一管理个人与团队技能、OpenViking 技能目录和 Skill Lab 实验评测。",
+    badge: "Agent Workspace",
+    render: ({ active, user }) => <SkillsWorkspaceView active={active} user={user} />,
+  },
+  {
+    key: "memories",
+    title: "Memory Workspace",
+    description: "管理个人与团队 Memory，并调试 Agent Query 实际召回和注入的上下文。",
+    badge: "Agent Workspace",
+    render: ({ active, user }) => <MemoryWorkspaceView active={active} user={user} />,
+  },
+  {
+    key: "workspace",
+    title: "上下文空间",
+    description: "浏览个人、团队和 Skill 的上下文空间，统一查看文件、摘要和原生 OpenViking 资源。",
+    badge: "OpenViking",
+    render: ({ active, user }) => <OpenVikingWorkspaceView active={active} mode="workspace" user={user} />,
+  },
+  {
+    key: "model",
+    title: "全局模型",
+    description: "配置进化链路继承的全局模型默认值；阶段专属参数在进化链路中维护。",
+    badge: "平台治理",
+    render: ({ active, user }) => <ModelSettingsView active={active} user={user} />,
+  },
+  {
+    key: "users",
+    title: "用户与权限",
+    description: "管理用户、角色、Agent 身份映射，以及个人和团队 OpenViking 空间凭据。",
+    badge: "平台治理",
+    render: ({ active, user }) => <UsersView active={active} user={user} />,
+  },
+  {
+    key: "health",
+    title: "运行状态",
+    description: "汇总服务、存储、模型、Agent、用户和技能状态，定位平台运行问题。",
+    badge: "平台治理",
+    render: ({ active, user }) => <HealthView active={active} user={user} />,
+  },
+];
 
 const DASH_PAGE_META: Record<DashTab, { title: string; description: string }> = {
   overview: {
-    title: "进化看板",
-    description: "监控会话进化流水线、待发布候选和技能版本的整体状态。",
+    title: "运行总览",
+    description: "监控会话进入、技能进化、候选评审和版本发布的完整闭环。",
   },
   candidates: {
     title: "候选评审",
@@ -133,7 +202,7 @@ const DASH_PAGE_META: Record<DashTab, { title: string; description: string }> = 
 };
 
 export default function App() {
-  const [view, setView] = useState<ViewKey>("dashboard");
+  const [view, setView] = useState<ViewKey>(initialView);
   const [dashTab, setDashTab] = useState<DashTab>("overview");
   const [mineInputDir, setMineInputDir] = useState("");
   const [auth, setAuth] = useState<AuthStatus | null>(null);
@@ -221,11 +290,14 @@ export default function App() {
             <div className="mt-0.5 text-[9.5px] font-[600] text-muted-soft">技能生命周期工作台</div>
           </div>
         </div>
-        <nav className="sidebar-nav flex flex-1 flex-col gap-0.5 overflow-auto px-2.5 py-3">
-          {NAV_GROUPS.map(({ group, items }) => (
-            <div key={group} className="mb-1.5">
-              <div className="sidebar-group-label px-3 pb-1 pt-2.5 text-[10px] font-[800] uppercase tracking-[0.08em] text-muted-soft">
-                {group}
+        <nav className="sidebar-nav flex flex-1 flex-col gap-0.5 overflow-auto px-2.5 py-3" aria-label="主导航">
+          {NAV_SECTIONS.map(({ id, label, items }) => (
+            <section key={id} className="sidebar-nav-section mb-1.5" aria-labelledby={`nav-section-${id}`}>
+              <div
+                id={`nav-section-${id}`}
+                className="sidebar-group-label px-3 pb-1 pt-2.5 text-[10px] font-[800] uppercase tracking-[0.08em] text-muted-soft"
+              >
+                {label}
               </div>
               {items.map(({ key, label, icon: Icon }) => (
                 <button
@@ -248,7 +320,7 @@ export default function App() {
                   <span className="sidebar-item-label">{label}</span>
                 </button>
               ))}
-            </div>
+            </section>
           ))}
         </nav>
         <UserMenu
@@ -269,6 +341,7 @@ export default function App() {
             <MiningView
               active={view === key}
               page={page}
+              user={auth.user}
               preferredInputDir={mineInputDir}
               onInputDirChange={setMineInputDir}
               onNavigate={(destination) => {
@@ -290,11 +363,11 @@ export default function App() {
           <PageHeader
             title={DASH_PAGE_META[dashTab].title}
             description={DASH_PAGE_META[dashTab].description}
-            badge="teamEvolver"
+            badge="进化闭环"
           />
-          {/* Sub-tab bar for the 进化看板 group */}
+          {/* Operational detail views for the evolution loop. */}
           <div className="section-tabs pt-2.5">
-            <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="进化看板页面">
+            <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="进化运行页面">
               {DASH_TABS.map(({ key, label, icon: Icon }) => (
                 <button
                   key={key}
@@ -328,34 +401,15 @@ export default function App() {
             <SessionFilterView active={view === "dashboard" && dashTab === "filter"} />
           </div>
         </div>
-        <div className={cn(view !== "langfuse" && "hidden")}>
-          <PageHeader title={EVOLVE_PAGE_META.langfuse.title} description={EVOLVE_PAGE_META.langfuse.description} badge="teamEvolver" />
-          <LangfuseView active={view === "langfuse"} user={auth.user} />
-        </div>
-        <div className={cn(view !== "prompt-studio" && "hidden")}>
-          <PageHeader title={EVOLVE_PAGE_META["prompt-studio"].title} description={EVOLVE_PAGE_META["prompt-studio"].description} badge="teamEvolver" />
-          <PromptStudioView active={view === "prompt-studio"} user={auth.user} />
-        </div>
-        <div className={cn(view !== "skill-lab" && "hidden")}>
-          <PageHeader title={EVOLVE_PAGE_META["skill-lab"].title} description={EVOLVE_PAGE_META["skill-lab"].description} badge="teamEvolver" />
-          <SkillLabView active={view === "skill-lab"} user={auth.user} />
-        </div>
-        <div className={cn(view !== "health" && "hidden")}>
-          <PageHeader title={EVOLVE_PAGE_META.health.title} description={EVOLVE_PAGE_META.health.description} badge="teamEvolver" />
-          <HealthView active={view === "health"} user={auth.user} />
-        </div>
-        <div className={cn(view !== "skills" && "hidden")}>
-          <PageHeader title={EVOLVE_PAGE_META.skills.title} description={EVOLVE_PAGE_META.skills.description} badge="teamEvolver" />
-          <SkillsView active={view === "skills"} user={auth.user} />
-        </div>
-        <div className={cn(view !== "users" && "hidden")}>
-          <PageHeader title={EVOLVE_PAGE_META.users.title} description={EVOLVE_PAGE_META.users.description} badge="teamEvolver" />
-          <UsersView active={view === "users"} />
-        </div>
-        <div className={cn(view !== "model" && "hidden")}>
-          <PageHeader title={EVOLVE_PAGE_META.model.title} description={EVOLVE_PAGE_META.model.description} badge="teamEvolver" />
-          <ModelSettingsView active={view === "model"} user={auth.user} />
-        </div>
+        {STANDALONE_PAGES.map(({ key, title, description, badge, render }) => {
+          const active = view === key;
+          return (
+            <div key={key} className={cn(!active && "hidden")}>
+              <PageHeader title={title} description={description} badge={badge} />
+              {render({ active, user: auth.user })}
+            </div>
+          );
+        })}
       </main>
 
       <Toaster position="bottom-right" />
@@ -431,7 +485,7 @@ function LoginGate({
                 {needsSetup
                   ? "当前还没有用户。默认管理员账号和密码均为 admin，可直接创建后登录。"
                   : isRegister
-                    ? "注册后将创建普通用户账号，管理员权限需由管理员在用户管理中分配。"
+                    ? "注册后将创建普通用户账号，管理员权限需由管理员在“用户与权限”中分配。"
                     : "请输入账号密码后继续访问团队技能进化控制台。"}
               </p>
             </div>
@@ -569,7 +623,7 @@ function LoginHero() {
     <div className="login-hero relative hidden flex-col justify-between p-10 lg:flex xl:p-14">
       {/* animated backdrop */}
       <div className="login-blob" style={{ width: 320, height: 320, top: -60, right: -40, background: "rgba(126, 231, 213, 0.55)" }} />
-      <div className="login-blob" style={{ width: 260, height: 260, bottom: -40, left: -30, background: "rgba(198, 120, 70, 0.5)", animationDelay: "-6s" }} />
+      <div className="login-blob" style={{ width: 260, height: 260, bottom: -40, left: -30, background: "rgba(132, 115, 194, 0.48)", animationDelay: "-6s" }} />
       <div className="login-grid" />
 
       {/* brand */}

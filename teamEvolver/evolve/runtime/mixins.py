@@ -9,7 +9,7 @@ import os
 import re
 from typing import Any
 
-from ...storage import LocalObjectStore, build_object_store
+from ...storage import InMemoryObjectStore, build_object_store
 
 from ..kernel.enums import SLUG_RE
 from ..kernel.settings import EvolveServerConfig
@@ -38,13 +38,12 @@ class EvolveEngineMixin:
         if mock:
             if not mock_root:
                 raise ValueError("mock mode requires mock_root")
-            return LocalObjectStore(mock_root)
+            return InMemoryObjectStore(mock_root)
         backend_normalized = str(config.storage_backend or "").strip().lower()
         if backend_normalized == "viking":
             return build_object_store(
                 backend="viking",
                 endpoint=getattr(config, "viking_endpoint", "") or config.storage_endpoint,
-                local_root="",
                 viking_account=getattr(config, "viking_account", "") or "default",
                 viking_user=getattr(config, "viking_user", "") or "default",
                 viking_agent=getattr(config, "viking_agent", "") or "team-skill-evolver",
@@ -56,19 +55,16 @@ class EvolveEngineMixin:
         return build_object_store(
             backend=config.storage_backend,
             endpoint=config.storage_endpoint,
-            local_root=config.local_root,
         )
 
     def _uses_local_storage(self) -> bool:
-        """Return True when object-store calls are local and need no thread hop."""
-        backend = str(self.config.storage_backend or "").strip().lower()
-        if backend == "local" or self._mock:
-            return True
-        if backend == "viking":
-            # OpenViking is always remote; force the worker thread path.
-            return False
-        bucket_type = type(self._bucket).__name__.lower()
-        return "local" in bucket_type and bool(self.config.local_root)
+        """Return True when object-store calls are in-process and need no thread hop.
+
+        Only mock mode uses an in-process store now; the viking backend
+        (cloud or local self-hosted OpenViking) is always remote HTTP and must
+        run on the worker thread.
+        """
+        return bool(self._mock)
 
     async def _call_storage(self, func, *args):
         """Call storage helpers inline for local stores, in a worker for remote stores."""

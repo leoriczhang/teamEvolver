@@ -14,11 +14,12 @@ from teamEvolver.mining_lifecycle import (
     resolve_mined_skill_dir,
     submit_mined_skill,
 )
+from teamEvolver.storage import InMemoryObjectStore
 from teamEvolver.validation.store import ValidationStore
 
 
 def _store(root: Path) -> ValidationStore:
-    return ValidationStore(backend="local", endpoint="", local_root=str(root / "objects"))
+    return ValidationStore.from_bucket(bucket=InMemoryObjectStore(str(root / "objects")))
 
 
 def _write_mined_skill(root: Path, name: str = "demo-skill") -> Path:

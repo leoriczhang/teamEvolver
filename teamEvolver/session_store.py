@@ -91,6 +91,38 @@ def _session_fingerprint(session: dict[str, Any]) -> str:
             if isinstance(message, dict):
                 parts.append(str(message.get("role") or ""))
                 parts.append(str(message.get("content") or ""))
+    runtime = (
+        session.get("runtime")
+        if isinstance(session.get("runtime"), dict)
+        else {}
+    )
+    parts.extend(
+        [
+            str(runtime.get("type") or session.get("source") or ""),
+            str(runtime.get("integration_id") or ""),
+        ]
+    )
+    for turn in session.get("turns") or []:
+        if not isinstance(turn, dict):
+            continue
+        usage = (
+            turn.get("context_usage")
+            if isinstance(turn.get("context_usage"), dict)
+            else {}
+        )
+        parts.append(
+            json.dumps(
+                {
+                    "snapshot": usage.get("context_snapshot_id") or "",
+                    "memory_refs": usage.get("memory_refs") or [],
+                    "skill_refs": usage.get("skill_refs") or [],
+                    "feedback": usage.get("feedback") or {},
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
     digest = hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
     return f"{_num_turns(session)}:{digest}"
 

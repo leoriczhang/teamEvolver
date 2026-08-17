@@ -3,11 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from teamEvolver.session_store import SessionStore
-from teamEvolver.storage.local import LocalObjectStore
+from teamEvolver.storage import InMemoryObjectStore
 
 
 def test_session_store_archives_queue_and_filter_audit(tmp_path: Path) -> None:
-    store = SessionStore(LocalObjectStore(tmp_path))
+    store = SessionStore(InMemoryObjectStore(str(tmp_path)))
     session = {
         "session_id": "session-1",
         "user_alias": "tester",
@@ -36,7 +36,7 @@ def test_session_store_archives_queue_and_filter_audit(tmp_path: Path) -> None:
 
 
 def test_session_store_skipped_sessions_are_archived_for_review(tmp_path: Path) -> None:
-    store = SessionStore(LocalObjectStore(tmp_path))
+    store = SessionStore(InMemoryObjectStore(str(tmp_path)))
     store.save_skipped(
         {
             "session_id": "hello-1",

@@ -143,11 +143,19 @@ def _apply_overrides(config, cfg: dict[str, Any]):
         "viking_customer_id": "sharing_viking_customer_id",
         "viking_root_prefix": "sharing_viking_root_prefix",
         "viking_group_id": "sharing_viking_group_id",
-        "local_root": "sharing_local_root",
+        "viking_deployment": "sharing_viking_deployment",
     }
     for source, target in mapping.items():
         if source in cfg and cfg[source] not in (None, ""):
             setattr(config, target, cfg[source])
+    # Derive the effective OpenViking endpoint from the deployment mode when no
+    # explicit endpoint was provided (cloud vs local self-hosted server).
+    if not str(getattr(config, "sharing_viking_endpoint", "") or "").strip():
+        from teamEvolver.config import resolve_viking_endpoint
+
+        config.sharing_viking_endpoint = resolve_viking_endpoint(
+            str(getattr(config, "sharing_viking_deployment", "") or "cloud")
+        )
     if any(
         cfg.get(key)
         for key in ("backend", "sharing_backend", "endpoint", "viking_endpoint", "viking_api_key", "team_api_key")

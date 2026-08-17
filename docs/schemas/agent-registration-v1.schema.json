@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://teamevolver.local/schemas/agent-registration-v1.schema.json",
+  "title": "teamEvolver Agent Registration V1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "protocol_version",
+    "agent_id",
+    "runtime_type",
+    "capabilities"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "teamevolver.agent-registration.v1"
+    },
+    "protocol_version": {
+      "pattern": "^1\\."
+    },
+    "agent_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "runtime_type": {
+      "type": "string",
+      "minLength": 1
+    },
+    "runtime_version": {
+      "type": "string"
+    },
+    "display_name": {
+      "type": "string"
+    },
+    "capabilities": {
+      "oneOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object"
+          }
+        }
+      ]
+    },
+    "endpoints": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "format": "uri"
+      }
+    },
+    "rotate_access_token": {
+      "type": "boolean"
+    }
+  },
+  "not": {
+    "required": [
+      "storage"
+    ]
+  },
+  "additionalProperties": true
+}

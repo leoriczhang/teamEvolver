@@ -17,8 +17,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from teamEvolver.config import VOLCENGINE_OPENVIKING_ENDPOINT
-
 SKILL_NAME = "teamEvolver-sync"
 BUNDLE_FILES = ("SKILL.md", "sync_skills.py")
 ALLOWLIST_FILENAME = "shell-hooks-allowlist.json"
@@ -182,11 +180,11 @@ def _write_sync_config(path: Path, args, target_dir: Path) -> None:
         "base_url": args.url or args.service_url,
         "user_alias": args.user,
         "api_key": args.api_key,
-        "local_root": args.local_root,
     }
     if args.backend == "viking":
         optional_fields.update(
             {
+                "viking_deployment": args.viking_deployment,
                 "viking_endpoint": args.viking_endpoint,
                 "viking_team_api_key": args.viking_team_api_key,
                 "viking_api_key": args.viking_api_key,
@@ -222,17 +220,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--backend",
         default="service",
-        choices=["service", "viking", "local"],
-        help="team skill backend (default: teamEvolver service; no local OpenViking key needed)",
+        choices=["service", "viking"],
+        help="team skill backend (default: teamEvolver service; no OpenViking key needed)",
     )
     parser.add_argument("--url", default="", help="teamEvolver service URL for --backend service")
     parser.add_argument("--service-url", default="", help="alias of --url")
     parser.add_argument("--user", default="", help="teamEvolver user alias for service sync attribution")
     parser.add_argument("--api-key", default="", help="optional teamEvolver service sync API key")
     parser.add_argument(
+        "--viking-deployment",
+        default="cloud",
+        choices=["cloud", "local"],
+        help="OpenViking deployment: cloud (Volcengine-hosted) or local (self-hosted server)",
+    )
+    parser.add_argument(
         "--viking-endpoint",
-        default=VOLCENGINE_OPENVIKING_ENDPOINT,
-        help="OpenViking endpoint",
+        default="",
+        help="OpenViking endpoint override (default derived from --viking-deployment)",
     )
     parser.add_argument("--viking-team-api-key", default="", help="team OpenViking API key")
     parser.add_argument("--viking-api-key", default="", help="fallback OpenViking API key")
@@ -243,7 +247,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--viking-customer-id", default="", help="optional per-customer prefix")
     parser.add_argument("--viking-root-prefix", default="", help="OpenViking resources root prefix")
     parser.add_argument("--viking-group-id", default="", help="optional OpenViking group segment")
-    parser.add_argument("--local-root", default="", help="local object-store root when --backend local")
     args = parser.parse_args(argv)
 
     src_dir = Path(__file__).resolve().parent

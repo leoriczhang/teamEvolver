@@ -5,13 +5,14 @@ Reads/writes ~/.teamEvolver/config.yaml and bridges to TeamEvolverConfig.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
 from ..config import (
     TEAM_SKILL_ROOT_PREFIX,
-    VOLCENGINE_OPENVIKING_ENDPOINT,
     TeamEvolverConfig,
+    resolve_viking_endpoint,
 )
 from .defaults import (
     _DEFAULT_SKILLS_DIR,
@@ -29,6 +30,7 @@ from .defaults import (
     _normalize_reload_interval,
     _normalize_string_list,
     _normalize_validation_mode,
+    _normalize_viking_deployment,
     resolve_skills_dir,
 )
 
@@ -87,6 +89,12 @@ class ConfigStore:
 
     def to_config(self) -> TeamEvolverConfig:
         data = self.load()
+        team = data.get("team", {}) if isinstance(data.get("team"), dict) else {}
+        team_display_name = str(
+            os.environ.get("EVOLVE_TEAM_DISPLAY_NAME")
+            or team.get("display_name")
+            or "Team"
+        ).strip() or "Team"
         llm = data.get("llm", {})
         llm_provider = llm.get("provider", "openai")
         llm_api_base = llm.get("api_base", "")
@@ -104,17 +112,37 @@ class ConfigStore:
         evolve = data.get("evolve", {})
         dreamcycle = data.get("dreamcycle", {})
         validation = data.get("validation", {})
+        dreamcycle_prompts = dreamcycle.get("prompts") if isinstance(dreamcycle.get("prompts"), dict) else {}
+        dreamcycle_job_prompts = (
+            dreamcycle.get("job_prompts")
+            if isinstance(dreamcycle.get("job_prompts"), dict)
+            else {}
+        )
+        dreamcycle_job_settings = (
+            dreamcycle.get("job_settings")
+            if isinstance(dreamcycle.get("job_settings"), dict)
+            else {}
+        )
         langfuse = data.get("langfuse", {}) if isinstance(data.get("langfuse"), dict) else {}
         sharing_backend = _infer_sharing_backend(sharing)
         sharing_endpoint = _first_non_empty(sharing, "endpoint")
-        sharing_local_root = _first_non_empty(sharing, "local_root")
         sharing_skill_backend = _first_non_empty(sharing, "skill_backend")
         sharing_session_backend = _first_non_empty(sharing, "session_backend")
+        sharing_viking_deployment = _normalize_viking_deployment(
+            sharing.get("viking_deployment")
+        )
+        # Resolve the effective endpoint: an explicit viking_endpoint wins,
+        # otherwise it derives from the cloud/local deployment choice.
+        sharing_viking_endpoint = resolve_viking_endpoint(
+            sharing_viking_deployment,
+            str(sharing.get("viking_endpoint", "") or ""),
+        )
 
         skills_dir = resolve_skills_dir(skills.get("dir", str(_DEFAULT_SKILLS_DIR)))
 
         return TeamEvolverConfig(
             _config_file=str(self.config_file),
+            team_display_name=team_display_name,
             # LLM forwarding
             llm_provider=llm_provider,
             llm_api_base=llm_api_base,
@@ -142,11 +170,11 @@ class ConfigStore:
             # Sharing
             sharing_enabled=bool(sharing.get("enabled", True)),
             sharing_backend=sharing_backend,
+            sharing_viking_deployment=sharing_viking_deployment,
             sharing_endpoint=sharing_endpoint,
-            sharing_local_root=sharing_local_root,
             sharing_skill_backend=sharing_skill_backend,
             sharing_session_backend=sharing_session_backend,
-            sharing_viking_endpoint=str(sharing.get("viking_endpoint", "") or VOLCENGINE_OPENVIKING_ENDPOINT),
+            sharing_viking_endpoint=sharing_viking_endpoint,
             sharing_viking_api_key=str(sharing.get("viking_api_key", "") or ""),
             sharing_viking_personal_api_key=str(
                 sharing.get("viking_personal_api_key", "")
@@ -162,6 +190,9 @@ class ConfigStore:
                 or ""
             ),
             sharing_viking_account=str(sharing.get("viking_account", "") or "default"),
+            sharing_viking_personal_user=str(
+                sharing.get("viking_personal_user", "") or ""
+            ),
             sharing_viking_user=str(sharing.get("viking_user", "") or "default"),
             sharing_viking_agent=str(
                 sharing.get("viking_agent", "") or TEAM_SKILL_ROOT_PREFIX
@@ -198,6 +229,26 @@ class ConfigStore:
             ),
             evolve_server_url=str(
                 evolve.get("server_url", "") or "http://127.0.0.1:52010"
+            ),
+            evolve_use_session_judge=bool(
+                evolve.get("use_session_judge", True)
+            ),
+            evolve_publish_mode=_normalize_choice(
+                evolve.get("publish_mode", "validated"),
+                {"direct", "validated"},
+                "validated",
+            ),
+            evolve_validation_max_rejections=max(
+                1, int(evolve.get("validation_max_rejections", 1))
+            ),
+            evolve_human_review_enabled=bool(
+                evolve.get("human_review_enabled", True)
+            ),
+            evolve_human_review_timeout_seconds=max(
+                1, int(evolve.get("human_review_timeout_seconds", 86400))
+            ),
+            evolve_interval_seconds=max(
+                1, int(evolve.get("interval_seconds", 600))
             ),
             evolve_evidence_enabled=bool(evolve.get("evidence_enabled", True)),
             evolve_evidence_max_entries=max(
@@ -267,6 +318,142 @@ class ConfigStore:
                 dreamcycle.get("llm_api_key", "") or ""
             ),
             dreamcycle_llm_model=str(dreamcycle.get("llm_model", "") or ""),
+            dreamcycle_llm_max_tokens=max(
+                1, int(dreamcycle.get("llm_max_tokens", 4096) or 4096)
+            ),
+            dreamcycle_temperature=max(
+                0.0,
+                min(
+                    2.0,
+                    float(
+                        dreamcycle.get("temperature", 0.3)
+                        if dreamcycle.get("temperature") is not None
+                        else 0.3
+                    ),
+                ),
+            ),
+            dreamcycle_embed_model=str(
+                dreamcycle.get("embed_model", "") or ""
+            ),
+            dreamcycle_embed_base_url=str(
+                dreamcycle.get("embed_base_url", "") or ""
+            ),
+            dreamcycle_embed_api_key=str(
+                dreamcycle.get("embed_api_key", "") or ""
+            ),
+            dreamcycle_dedup_merge_threshold=max(
+                -1.0,
+                min(
+                    1.0,
+                    float(
+                        dreamcycle.get("dedup_merge_threshold", 0.86)
+                        if dreamcycle.get("dedup_merge_threshold") is not None
+                        else 0.86
+                    ),
+                ),
+            ),
+            dreamcycle_dedup_warn_threshold=max(
+                -1.0,
+                min(
+                    1.0,
+                    float(
+                        dreamcycle.get("dedup_warn_threshold", 0.72)
+                        if dreamcycle.get("dedup_warn_threshold") is not None
+                        else 0.72
+                    ),
+                ),
+            ),
+            dreamcycle_active_start_hour=max(
+                0,
+                min(
+                    23,
+                    int(dreamcycle.get("active_start_hour", 0) or 0),
+                ),
+            ),
+            dreamcycle_active_end_hour=max(
+                0,
+                min(
+                    23,
+                    int(
+                        dreamcycle.get("active_end_hour", 6)
+                        if dreamcycle.get("active_end_hour") is not None
+                        else 6
+                    ),
+                ),
+            ),
+            dreamcycle_rounds_per_window=max(
+                1,
+                int(dreamcycle.get("rounds_per_window", 3) or 3),
+            ),
+            dreamcycle_round_interval_minutes=max(
+                1,
+                int(
+                    dreamcycle.get("round_interval_minutes", 90)
+                    or 90
+                ),
+            ),
+            dreamcycle_max_turns_per_job=max(
+                1,
+                int(dreamcycle.get("max_turns_per_job", 25) or 25),
+            ),
+            dreamcycle_max_consecutive_errors=max(
+                1,
+                int(
+                    dreamcycle.get("max_consecutive_errors", 3)
+                    or 3
+                ),
+            ),
+            dreamcycle_retry_delay_seconds=max(
+                1,
+                int(dreamcycle.get("retry_delay_seconds", 300) or 300),
+            ),
+            dreamcycle_customer_id=str(
+                dreamcycle.get("customer_id")
+                or dreamcycle.get("peer_id")
+                or ""
+            ),
+            dreamcycle_state_dir=str(
+                dreamcycle.get("state_dir", "") or ""
+            ),
+            dreamcycle_log_level=str(
+                dreamcycle.get("log_level", "") or "INFO"
+            ),
+            dreamcycle_enabled_jobs=(
+                _normalize_string_list(dreamcycle.get("enabled_jobs"))
+                if "enabled_jobs" in dreamcycle
+                else [
+                    "team_overview",
+                    "deduplication",
+                    "cleanup",
+                    "onboarding_check",
+                    "consolidate",
+                ]
+            ),
+            dreamcycle_job_prompts={
+                str(key): str(value)
+                for key, value in dreamcycle_job_prompts.items()
+                if str(key).strip() and str(value).strip()
+            },
+            dreamcycle_job_settings={
+                str(key): dict(value)
+                for key, value in dreamcycle_job_settings.items()
+                if str(key).strip() and isinstance(value, dict)
+            },
+            dreamcycle_interval_seconds=max(
+                60, int(dreamcycle.get("interval_seconds", 86400) or 86400)
+            ),
+            dreamcycle_max_source_items=max(
+                1, int(dreamcycle.get("max_source_items", 100) or 100)
+            ),
+            dreamcycle_max_source_chars=max(
+                1000, int(dreamcycle.get("max_source_chars", 120000) or 120000)
+            ),
+            dreamcycle_extract_prompt=str(
+                dreamcycle_prompts.get("extract", "")
+            ),
+            dreamcycle_consolidate_prompt=str(
+                dreamcycle_prompts.get("consolidate", "")
+            ),
             validation_enabled=bool(validation.get("enabled", True)),
             validation_mode=_normalize_validation_mode(validation.get("mode", "true_replay")),
             validation_idle_after_seconds=int(validation.get("idle_after_seconds", 300)),
@@ -321,6 +508,7 @@ class ConfigStore:
         dreamcycle = data.get("dreamcycle", {})
         effective_skills_dir = resolve_skills_dir(skills.get("dir", str(_DEFAULT_SKILLS_DIR)))
         lines = [
+            f"team.display_name: {self.to_config().team_display_name}",
             f"llm.provider:    {llm.get('provider', '?')}",
             f"llm.model_id:    {llm.get('model_id', '?')}",
             f"llm.api_base:    {llm.get('api_base', '—')}",
@@ -348,11 +536,11 @@ class ConfigStore:
             ]
             if skill_backend:
                 lines.append(f"sharing.skill_backend: {skill_backend}")
-            if backend == "local":
-                lines += [
-                    f"sharing.local_root: {sharing.get('local_root', '?')}",
-                ]
-            elif backend == "viking":
+            if backend == "viking":
+                deployment = _normalize_viking_deployment(sharing.get("viking_deployment"))
+                endpoint = resolve_viking_endpoint(
+                    deployment, str(sharing.get("viking_endpoint", "") or "")
+                )
                 personal_key = (
                     sharing.get("viking_personal_api_key")
                     or sharing.get("viking_user_api_key")
@@ -366,7 +554,8 @@ class ConfigStore:
                     or ""
                 )
                 lines += [
-                    f"sharing.viking_endpoint: {sharing.get('viking_endpoint', '') or VOLCENGINE_OPENVIKING_ENDPOINT}",
+                    f"sharing.viking_deployment: {deployment}",
+                    f"sharing.viking_endpoint: {endpoint}",
                     "sharing.viking_root_prefix: "
                     f"{sharing.get('viking_root_prefix', '') or TEAM_SKILL_ROOT_PREFIX}",
                     f"sharing.viking_personal_api_key: {'present' if personal_key else 'missing'}",

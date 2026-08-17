@@ -86,7 +86,7 @@ export function StatCard({
   mono?: boolean;
 }) {
   return (
-    <div className="min-h-[76px] rounded-[14px] border border-border bg-white p-[14px] shadow-[var(--shadow-soft)] transition-[border-color,box-shadow,transform] hover:-translate-y-px hover:border-border-strong hover:shadow-[0_14px_34px_rgba(37,32,24,0.075)]">
+    <div className="min-h-[76px] rounded-[14px] border border-border bg-white p-[14px] shadow-[var(--shadow-soft)] transition-[border-color,box-shadow,transform] hover:-translate-y-px hover:border-border-strong hover:shadow-[0_14px_34px_rgba(15,23,42,0.075)]">
       <div className="mb-1.5 text-[11px] font-[700] text-muted-foreground">{label}</div>
       <div
         className={cn(

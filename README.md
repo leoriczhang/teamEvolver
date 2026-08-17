@@ -70,7 +70,7 @@ Hermes 等 Agent 保持原生运行方式；teamEvolver 通过同步目录和 Ho
     </td>
     <td width="25%" valign="top">
       <h3>团队同步</h3>
-      <p>支持本地对象存储和 OpenViking 兼容对象存储，个人 Key 作为经验来源，团队 Key 作为发布目标。</p>
+      <p>基于 OpenViking 对象存储，支持云上（火山托管）与本地自建两种部署，个人 Key 作为经验来源，团队 Key 作为发布目标。</p>
     </td>
     <td width="25%" valign="top">
       <h3>Web 控制台</h3>
@@ -97,7 +97,7 @@ flowchart LR
         Registry["Skill Registry"]
         Evidence["Evidence Windows"]
         Validation["Validation Queue"]
-        DreamCycle["DreamCycle Supervisor"]
+        DreamCycle["原生 Memory 进化"]
     end
 
     subgraph Storage["Shared Storage"]
@@ -169,7 +169,7 @@ teamEvolver config evolve.evidence_enabled true
 teamEvolver config evolve.evidence_recent_limit 12
 teamEvolver config evolve.evidence_historical_limit 12
 teamEvolver config evolve.evidence_change_debt_threshold 3
-# DreamCycle 为可选项，默认关闭；它调用外部 dreamcycle 引擎维护团队长期记忆。
+# DreamCycle 已内置到 teamEvolver，默认关闭；无需安装外部 dreamcycle 包。
 # 开启后从个人 Key 读取经验，写入上面的团队 Key 空间。
 # 多台 AgentsHub 接入时，个人 Key 会通过内部配置接口动态合并，无需写死用户。
 teamEvolver config dreamcycle.enabled true
@@ -270,22 +270,40 @@ flowchart TB
 - **过滤审计**：查看 session 入队前的 valuable / chitchat 判别、模式、置信度和原因。
 - **系统健康**：检查服务、存储和关键 API 是否可达。
 - **技能管理**：管理个人技能与团队技能，支持上传 zip 包。
-- **用户管理**：管理用户、角色，以及个人/团队空间凭据。
+- **记忆管理**：管理个人 Memory 与团队共享 Memory，支持目录、文件和 Markdown 内容编辑。
+- **OpenViking Workspace**：浏览个人/团队/Skill 上下文树，并跳转到完整 OpenViking Studio。
+- **用户管理**：管理团队显示名称、用户、角色，以及个人/团队空间凭据。
 - **模型配置**：配置可选验证模型，并提供连通性测试。
+
+团队显示名称由管理员在「用户与权限 → 团队身份」中维护，也可通过 CLI 设置：
+
+```bash
+teamEvolver config team.display_name "My Team"
+```
+
+部署环境可使用 `EVOLVE_TEAM_DISPLAY_NAME` 覆盖持久化值。DreamCycle 的团队概况、
+提示词和 Memory 清洗逻辑都会使用最终生效的团队名称。
 
 ---
 
 ## OpenViking / 对象存储
 
-远端同步通过对象存储抽象完成。默认 endpoint 使用火山托管 OpenViking：
+远端同步通过 OpenViking 完成，只有两种部署可选：**云上 OpenViking**（火山托管）和**本地 OpenViking**（本机自建 `openviking-server`）。二者仅端点不同，均使用 `viking` 后端。
 
 ```bash
 teamEvolver config sharing.enabled true
 teamEvolver config sharing.backend viking
+# 部署选择：cloud（火山托管，默认）或 local（本机自建 openviking-server）
+teamEvolver config sharing.viking_deployment cloud
 teamEvolver config sharing.viking_team_api_key "<team-key>"
 teamEvolver config sharing.viking_personal_api_key "<personal-key>"
 teamEvolver config sharing.viking_root_prefix "team-skill-evolver"
 ```
+
+- **云上 OpenViking**：`viking_deployment=cloud`，端点默认 `https://api.vikingdb.cn-beijing.volces.com/openviking`。
+- **本地 OpenViking**：`viking_deployment=local`，端点默认 `http://localhost:1933`（本机 `openviking-server`）。
+
+两种部署也可在控制台「系统健康 → OpenViking 部署」面板中一键切换（管理员）。
 
 OpenViking 空间分工：
 
@@ -293,9 +311,57 @@ OpenViking 空间分工：
 - `sharing.viking_team_api_key`：团队技能、验证任务、验证结果和 DreamCycle 产物的共享目标。
 - `sharing.viking_root_prefix`：跨 Agent 共享命名空间，默认固定为 `team-skill-evolver`。
 
-多台 AgentsHub 接入时，服务端会通过 `/internal/agentshub/openviking-config` 合并个人 Key 来源，并继续使用同一个团队 Key 作为发布目标。
+Agent 通过通用 `/internal/agents/register` 接口注册运行时类型、能力和回放/Skill 同步端点；旧版 AgentsHub 的 `/internal/agentshub/openviking-config` 仍保留兼容适配。本地部署时 teamEvolver 是 OpenViking 配置权威，外部 Agent 不能覆盖本地 endpoint 或凭据。
 
-如果需要自部署 OpenViking Server，请参考 [volcengine/OpenViking](https://github.com/volcengine/OpenViking)，并通过 `teamEvolver config sharing.viking_endpoint "<your-server-url>"` 覆盖默认服务地址。
+本地 OpenViking 推荐直接使用最新开源版及其 Web Studio：
+
+```bash
+# 默认读取 ~/OpenViking 和 ~/.openviking/ov.conf；首次启动会构建 Web Studio
+bash scripts/start_local_openviking.sh
+
+# 切换 teamEvolver 到本地服务，endpoint 留空时自动使用 localhost:1933
+teamEvolver config sharing.viking_deployment local
+teamEvolver config sharing.viking_endpoint ""
+teamEvolver start
+```
+
+Python 环境不在默认位置时，通过 `OPENVIKING_PYTHON=/path/to/python` 指定；源码或配置位于其他目录时，使用 `OPENVIKING_REPO`、`OPENVIKING_CONFIG` 覆盖。完整 Studio 默认位于 `http://127.0.0.1:1933/studio/`。
+
+若本地 `ov.conf` 配置了 `server.root_api_key`，需要把这个本地 Key 配置到 teamEvolver 管理员的个人/团队 OpenViking 空间；云端 Key 不能用于本地服务。
+
+teamEvolver 的 workspace 管理直接复用 OpenViking 原生 `fs` 与 `content` API，空间映射如下：
+
+| 管理范围 | OpenViking 根 URI | 写权限 |
+| --- | --- | --- |
+| 个人 Memory | `viking://user/<personal-user>/memories` | 本人或管理员 |
+| 团队 Memory | `viking://user/<team-user>/memories` | 管理员 |
+| 个人 Skill | `viking://resources/team-skill-evolver/peers/<user>/skills` | 本人或管理员 |
+| 团队 Skill | `viking://resources/team-skill-evolver/skills` | 管理员 |
+
+浏览器只访问 teamEvolver 的受控代理，OpenViking Key 由服务端注入，URI 也被限制在所选根目录内。
+
+如需自定义地址，用 `teamEvolver config sharing.viking_endpoint "<your-server-url>"` 覆盖部署默认端点。
+
+### 通用 Agent 接入
+
+任意 Agent 运行时可向 `POST /internal/agents/register` 提交：
+
+```json
+{
+  "agent_id": "my-agent:tenant-a",
+  "runtime_type": "my-agent",
+  "display_name": "My Agent",
+  "capabilities": ["session_ingest", "true_replay", "skill_sync"],
+  "endpoints": {
+    "health_url": "http://agent-host/health",
+    "replay_url": "http://agent-host/replay",
+    "skill_sync_url": "http://agent-host/sync"
+  },
+  "metadata": {"tenant_id": "tenant-a"}
+}
+```
+
+注册表只保存非敏感运行时元数据，不保存 Agent 提交的 Key/Token。会话通过现有 `/ingest_session` 进入进化流程，并在 `runtime.type`、`runtime.integration_id` 中声明回放运行时；True Replay 会按注册表解析对应回放端点。
 
 不要把真实 API Key 写入仓库。建议使用本机配置、环境变量或部署系统的 Secret 管理能力注入。
 
@@ -407,11 +473,11 @@ bash scripts/setup_lift.sh --install-deps
 
 DreamCycle 负责维护团队长期经验，验证队列负责把候选技能放到真实或模拟回放里评估。两者都复用 OpenViking 对象存储边界：
 
-> DreamCycle 是可选组件，默认关闭。它由独立的 [dreamcycle](https://github.com/leoriczhang/dreamcycle) 引擎执行，teamEvolver 只负责注入 Key/LLM 环境变量并按需触发。需要先让本机可运行 `dreamcycle`（安装该项目或提供 `dreamcycle.daemon_command` / `dreamcycle.trigger_command`），再显式开启：
+> DreamCycle 现为 teamEvolver 原生完整能力，无需安装外部包。它包含团队概况、去重、清理、新人可发现性、个人经验团队化 5 个 Job，以及 ReAct 多轮工具调用、OpenViking 读写/归档、策略审计、报告、夜间多轮调度与历史状态。
 
 ```bash
 teamEvolver config dreamcycle.enabled true       # 开启可选维护
-teamEvolver config dreamcycle.auto_start true    # 可选：随服务自动拉起常驻 daemon
+teamEvolver config dreamcycle.auto_start true    # 可选：服务内周期运行
 teamEvolver config dreamcycle.llm_api_key "<llm-key>"
 teamEvolver config dreamcycle.llm_model "<model-id>"
 ```
@@ -501,7 +567,7 @@ teamEvolver/
 │   ├── config_store/     # 本地配置读写
 │   ├── proxy/            # 服务路由、控制台与管理接口
 │   ├── skills/           # SKILL.md 管理、打包、同步
-│   ├── storage/          # local / OpenViking 存储后端
+│   ├── storage/          # OpenViking 存储后端（云上 / 本地）
 │   ├── integrations/     # Hermes / DreamCycle 集成
 │   ├── validation/       # 共享验证队列、结果与 worker
 │   ├── true_replay.py    # 真实 A/B 回放

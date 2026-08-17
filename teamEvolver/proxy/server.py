@@ -18,8 +18,13 @@ import uvicorn
 from starlette.responses import Response
 
 from ..config import TeamEvolverConfig
-from ..integrations.dreamcycle import DreamCycleSupervisor
+from ..integrations.dreamcycle_runtime import (
+    FullDreamCycleSupervisor as DreamCycleSupervisor,
+)
 from ..skills.manager import SkillManager
+from .agent_context import AgentContextMixin
+from .memory_debug import MemoryDebugMixin
+from .openviking_workspace import OpenVikingWorkspaceMixin
 from .routes import RoutesMixin
 from .skill_lab import SkillLabMixin
 from .skillminer_bridge import SkillMinerBridgeMixin
@@ -40,6 +45,9 @@ class ProxyServer(
     SkillsAdminMixin,
     UploadsMixin,
     UsersAdminMixin,
+    OpenVikingWorkspaceMixin,
+    MemoryDebugMixin,
+    AgentContextMixin,
 ):
     """teamEvolver service: console, skill sync, user management, and validation.
 
@@ -138,6 +146,20 @@ class ProxyServer(
 
     def _dreamcycle_status(self) -> dict:
         return self._dreamcycle.status()
+
+    def _dreamcycle_dry_run(self) -> dict:
+        return self._dreamcycle.dry_run()
+
+    def _dreamcycle_memory_changes(self, *, limit: int = 100) -> dict:
+        return self._dreamcycle.memory_changes(limit=limit)
+
+    def _dreamcycle_reset(
+        self,
+        *,
+        remote: bool = False,
+        dry_run: bool = True,
+    ) -> dict:
+        return self._dreamcycle.reset(remote=remote, dry_run=dry_run)
 
     async def _reload_openviking_integrations(
         self,

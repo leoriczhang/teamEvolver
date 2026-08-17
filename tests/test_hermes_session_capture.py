@@ -178,6 +178,118 @@ def test_feed_installer_replaces_same_script_with_new_python(tmp_path: Path) -> 
     ]
     assert len(feed_approvals) == 1
     assert feed_approvals[0]["command"].startswith("/opt/python ")
+    feed_path = home / "skills" / "teamEvolver-feed" / "feed.json"
+    feed = json.loads(feed_path.read_text("utf-8"))
+    assert feed["protocol_version"] == "1.0"
+    assert feed["integration_id"].startswith("hermes:")
+    assert feed["profile_id"]
+    assert feed["external_subject"] == "tester"
+    assert feed_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_v1_hermes_session_binds_profile_and_subject(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    session_id = _build_state_db(db_path)
+    session = _read_session(db_path, session_id)
+
+    payload = push_session._v1_session(
+        session,
+        {
+            "integration_id": "hermes:machine:profile",
+            "profile_id": "profile",
+            "external_subject": "subject-1",
+        },
+        "alice",
+    )
+
+    assert payload["schema_version"] == "teamevolver.agent-session.v1"
+    assert payload["runtime"]["integration_id"] == "hermes:machine:profile"
+    assert payload["runtime"]["profile_id"] == "profile"
+    assert payload["runtime_context"]["external_subject"] == "subject-1"
+    assert payload["turns"][0]["context_usage"]["memory_refs"] == []
+
+
+def test_feed_installer_enables_context_provider_after_v1_registration(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / ".hermes"
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "ok": True,
+                    "credentials": {
+                        "agent_access_token": "tev1_workspace_token"
+                    },
+                }
+            ).encode("utf-8")
+
+    monkeypatch.setattr(
+        install.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(),
+    )
+
+    assert install.main(
+        [
+            "--user",
+            "alice",
+            "--url",
+            "http://team-evolver:52010",
+            "--api-key",
+            "control-key",
+            "--hermes-home",
+            str(home),
+        ]
+    ) == 0
+
+    provider = home / "plugins" / "team_evolver"
+    assert (provider / "__init__.py").is_file()
+    assert (provider / "plugin.yaml").is_file()
+    config = yaml.safe_load((home / "config.yaml").read_text("utf-8"))
+    assert config["memory"]["provider"] == "team_evolver"
+    feed = json.loads(
+        (home / "skills" / "teamEvolver-feed" / "feed.json").read_text(
+            "utf-8"
+        )
+    )
+    assert feed["workspace_token"] == "tev1_workspace_token"
+
+
+def test_failed_hermes_delivery_is_spooled_and_retried(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = {"spool_dir": str(tmp_path / "spool")}
+    session = {"session_id": "session-1", "turns": [{}]}
+    push_session._spool(session, cfg)
+    spool_file = tmp_path / "spool" / "session-1.json"
+    assert spool_file.is_file()
+    assert spool_file.stat().st_mode & 0o777 == 0o600
+
+    calls = []
+    monkeypatch.setattr(
+        push_session,
+        "_post",
+        lambda *_args, **_kwargs: calls.append(True) or True,
+    )
+    push_session._flush_spool(
+        cfg,
+        base_url="http://team-evolver",
+        user="alice",
+        api_key="token",
+    )
+
+    assert calls == [True]
+    assert not spool_file.exists()
 
 
 def test_embedded_skillminer_hermes_never_posts_session(monkeypatch) -> None:

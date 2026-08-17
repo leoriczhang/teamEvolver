@@ -33,6 +33,7 @@ dependencies = [
     "openai>=1.0",
     "openpyxl>=3.1",
     "pypdf>=5.0",
+    "pydantic-settings>=2.0",
     "python-docx>=1.1",
     "tiktoken>=0.5",
 ]
@@ -66,6 +67,7 @@ Issues = "https://github.com/leoriczhang/teamEvolver/issues"
 
 [project.scripts]
 teamEvolver = "teamEvolver.cli:main"
+teamEvolver-dreamcycle = "teamEvolver.dreamcycle.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -78,6 +80,7 @@ teamEvolver = [
     "web/dist/assets/*",
     "integrations/hermes_skill/*",
     "integrations/hermes_skill_sync/*",
+    "integrations/hermes_context_provider/*",
     "skillminer/*.md",
     "skillminer/*.py",
     "skillminer/.env.example",

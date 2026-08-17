@@ -104,6 +104,12 @@ PROMPT_MODULES = [
     },
 ]
 
+_PROMPT_STAGE_IDS = {
+    "sample_package_constructor_agent_prompt": "sample_package",
+    "semantic_discovery_agent_prompt": "semantic_discovery",
+    "evaluation_compiler_agent_prompt": "evaluation_compiler",
+}
+
 # 运行时解析出的 hermes 可执行文件
 _HERMES_BIN = None
 
@@ -232,7 +238,103 @@ def ensure_hermes_home():
     except (OSError, ValueError, yaml.YAMLError) as e:
         print(f"  ✗ 隔离 Hermes 配置失败: {e}")
         return False
+    _apply_configured_model()
     return True
+
+
+def _load_team_evolver_data():
+    config_path = Path(
+        os.environ.get(
+            "TEAMEVOLVER_CONFIG_FILE",
+            str(Path.home() / ".teamEvolver" / "config.yaml"),
+        )
+    ).expanduser()
+    if not config_path.exists():
+        return {}
+    try:
+        import yaml
+
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def configured_prompt(stage_id):
+    if str(
+        os.environ.get("SKILLMINER_DISABLE_PROMPT_OVERRIDES", "")
+    ).lower() in {"1", "true", "yes", "on"}:
+        return ""
+    mining = _load_team_evolver_data().get("mining")
+    prompts = (
+        mining.get("prompts")
+        if isinstance(mining, dict)
+        and isinstance(mining.get("prompts"), dict)
+        else {}
+    )
+    override = prompts.get(str(stage_id or ""))
+    return (
+        str(override)
+        if isinstance(override, str) and override.strip()
+        else ""
+    )
+
+
+def apply_prompt_override(stage_id, default_prompt, replacements=None):
+    """Apply a white-box prompt template while preserving dynamic inputs."""
+    prompt = configured_prompt(stage_id)
+    if not prompt:
+        return default_prompt
+    for token, value in (replacements or {}).items():
+        prompt = prompt.replace(str(token), str(value))
+    return prompt
+
+
+def _apply_configured_model():
+    """Materialize the UI-selected model into SkillMiner's isolated Hermes home."""
+    model_id = str(os.environ.get("SKILLMINER_MODEL_ID") or "").strip()
+    base_url = str(os.environ.get("SKILLMINER_MODEL_BASE_URL") or "").strip()
+    api_key = str(os.environ.get("SKILLMINER_MODEL_API_KEY") or "").strip()
+    if not model_id and not base_url and not api_key:
+        return
+    config_path = HERMES_HOME / "config.yaml"
+    try:
+        import yaml
+
+        data = (
+            yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            if config_path.exists()
+            else {}
+        )
+        if not isinstance(data, dict):
+            data = {}
+        model = data.setdefault("model", {})
+        if not isinstance(model, dict):
+            model = {}
+            data["model"] = model
+        if model_id:
+            model["default"] = model_id
+        if base_url:
+            model["base_url"] = base_url
+        if api_key:
+            model["api_key"] = api_key
+        model["provider"] = str(
+            os.environ.get("SKILLMINER_MODEL_PROVIDER") or "custom"
+        )
+        model["max_tokens"] = int(
+            os.environ.get("SKILLMINER_MODEL_MAX_TOKENS", "100000")
+            or 100000
+        )
+        model["context_length"] = int(
+            os.environ.get("SKILLMINER_MODEL_CONTEXT_LENGTH", "240000")
+            or 240000
+        )
+        config_path.write_text(
+            yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        print(f"  ⚠️ 写入 SkillMiner 模型配置失败: {exc}")
 
 
 def build_hermes_env():
@@ -298,6 +400,9 @@ def get_prompt_with_paths(prompt_module_info):
     exec(content, {}, local_vars)
 
     prompt = local_vars[prompt_var]
+    stage_id = _PROMPT_STAGE_IDS.get(module_name, "")
+    if stage_id:
+        prompt = apply_prompt_override(stage_id, prompt)
 
     # 处理 protocol_dir（仅 scoring agent 有）
     if "protocol_dir" in prompt_module_info:
@@ -332,7 +437,9 @@ def get_prompt_with_paths(prompt_module_info):
 
 # 单次 hermes oneshot 的最长执行时间（秒）。超时视为该步失败，避免挂起的
 # 模型调用让整条流水线（尤其是 Web 控制台的运行线程）永久卡死。
-HERMES_ONESHOT_TIMEOUT = 1800
+HERMES_ONESHOT_TIMEOUT = int(
+    os.environ.get("SKILLMINER_ONESHOT_TIMEOUT", "1800") or 1800
+)
 
 # 进程注册表：记录所有在跑的 hermes 子进程，供「中止」立即 terminate，
 # 而不是等当前模型调用自然结束。
@@ -593,11 +700,17 @@ def verify_environment():
 #   4) 达到 MAX_REFLECTION_ROUNDS 上限
 # ============================================================
 
-MAX_REFLECTION_ROUNDS = 3  # 含首轮；即首轮 + 最多 2 次反思补跑
+MAX_REFLECTION_ROUNDS = int(
+    os.environ.get("SKILLMINER_MAX_ROUNDS", "3") or 3
+)
 
 # Step1 切分质量校验：硬伤时带反馈重跑的次数上限；STRICT 时重跑后仍有硬伤则中止本轮
-STEP1_VALIDATION_RETRIES = 1
-STRICT_STEP1 = True
+STEP1_VALIDATION_RETRIES = int(
+    os.environ.get("SKILLMINER_STEP1_VALIDATION_RETRIES", "1") or 1
+)
+STRICT_STEP1 = str(
+    os.environ.get("SKILLMINER_STRICT_STEP1", "1") or "1"
+).lower() not in {"0", "false", "no", "off"}
 
 
 def find_compiled_skill_md():

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from teamEvolver.skills.bundle import bundle_tree_sha256
 from teamEvolver.skills.hub import SkillHub
+from teamEvolver.storage import InMemoryObjectStore
 
 SKILL_MD = """---
 name: demo-skill
@@ -45,10 +46,8 @@ def test_skill_hub_push_pull_roundtrips_bundle(tmp_path: Path) -> None:
     _write_bytes(skills_dir / "demo-skill" / "assets" / "icon.bin", b"\x00\x01\x02\x03")
 
     bucket_root = tmp_path / "bucket"
-    hub = SkillHub(
-        backend="local",
-        endpoint="",
-        local_root=str(bucket_root),
+    hub = SkillHub.from_bucket(
+        InMemoryObjectStore(str(bucket_root)),
         customer_id="cust-a",
         user_alias="tester",
     )
@@ -84,10 +83,8 @@ def test_skill_hub_push_pull_roundtrips_single_file_skill(tmp_path: Path) -> Non
     _write_bytes(skills_dir / "solo-skill" / "SKILL.md", solo_md.encode("utf-8"))
 
     bucket_root = tmp_path / "bucket"
-    hub = SkillHub(
-        backend="local",
-        endpoint="",
-        local_root=str(bucket_root),
+    hub = SkillHub.from_bucket(
+        InMemoryObjectStore(str(bucket_root)),
         customer_id="cust-a",
         user_alias="tester",
     )
@@ -131,10 +128,8 @@ def test_skill_hub_hashes_canonical_stored_markdown(tmp_path: Path) -> None:
         skills_dir / "canonical-skill" / "SKILL.md",
         source.encode("utf-8"),
     )
-    hub = SkillHub(
-        backend="local",
-        endpoint="",
-        local_root=str(tmp_path / "bucket"),
+    hub = SkillHub.from_bucket(
+        InMemoryObjectStore(str(tmp_path / "bucket")),
         customer_id="cust-a",
         user_alias="tester",
     )
@@ -153,20 +148,17 @@ def test_skill_hub_hashes_canonical_stored_markdown(tmp_path: Path) -> None:
     result = hub.push_skills(str(skills_dir))
 
     assert result["uploaded"] == 1
-    prefix = tmp_path / "bucket" / "peers" / "cust-a"
-    current = (prefix / "skills" / "canonical-skill" / "SKILL.md").read_bytes()
-    archived = (
-        prefix / "skills" / "canonical-skill" / "versions" / "v1" / "SKILL.md"
-    ).read_bytes()
+    prefix = "peers/cust-a"
+    current = hub._bucket.get_object(
+        f"{prefix}/skills/canonical-skill/SKILL.md"
+    ).read()
+    archived = hub._bucket.get_object(
+        f"{prefix}/skills/canonical-skill/versions/v1/SKILL.md"
+    ).read()
     bundle_record = json.loads(
-        (
-            prefix
-            / "skills"
-            / "canonical-skill"
-            / "versions"
-            / "v1"
-            / "bundle.json"
-        ).read_text("utf-8")
+        hub._bucket.get_object(
+            f"{prefix}/skills/canonical-skill/versions/v1/bundle.json"
+        ).read().decode("utf-8")
     )
     manifest = hub._load_remote_manifest()["canonical-skill"]
     stored_sha = hashlib.sha256(current).hexdigest()
@@ -185,10 +177,8 @@ def test_skill_hub_persists_bundle_version_snapshots(tmp_path: Path) -> None:
     _write_bytes(skill_dir / "references" / "guide.md", b"v1 guide\n")
 
     bucket_root = tmp_path / "bucket"
-    hub = SkillHub(
-        backend="local",
-        endpoint="",
-        local_root=str(bucket_root),
+    hub = SkillHub.from_bucket(
+        InMemoryObjectStore(str(bucket_root)),
         customer_id="cust-a",
         user_alias="tester",
     )
@@ -201,8 +191,11 @@ def test_skill_hub_persists_bundle_version_snapshots(tmp_path: Path) -> None:
     second_push = hub.push_skills(str(skills_dir))
     assert second_push["uploaded"] == 1
 
-    registry_path = bucket_root / "peers" / "cust-a" / "evolve_skill_registry.json"
-    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry = json.loads(
+        hub._bucket.get_object("peers/cust-a/evolve_skill_registry.json")
+        .read()
+        .decode("utf-8")
+    )
     entry = registry["demo-skill"]
     assert entry["version"] == 2
     assert [item["version"] for item in entry["history"]] == [1, 2]
@@ -212,12 +205,15 @@ def test_skill_hub_persists_bundle_version_snapshots(tmp_path: Path) -> None:
         for item in entry["history"]
     )
 
-    v1_root = bucket_root / "peers" / "cust-a" / "skills" / "demo-skill" / "versions" / "v1"
-    v2_root = bucket_root / "peers" / "cust-a" / "skills" / "demo-skill" / "versions" / "v2"
-    assert (v1_root / "SKILL.md").read_text(encoding="utf-8") == SKILL_MD
-    assert (v1_root / "files" / "references" / "guide.md").read_bytes() == b"v1 guide\n"
-    assert (v2_root / "SKILL.md").read_text(encoding="utf-8") == _skill_md("demo-skill")
-    assert (v2_root / "files" / "references" / "guide.md").read_bytes() == b"v2 guide\n"
+    v1_root = "peers/cust-a/skills/demo-skill/versions/v1"
+    v2_root = "peers/cust-a/skills/demo-skill/versions/v2"
+    assert hub._bucket.get_object(f"{v1_root}/SKILL.md").read().decode("utf-8") == SKILL_MD
+    assert hub._bucket.get_object(f"{v1_root}/files/references/guide.md").read() == b"v1 guide\n"
+    assert (
+        hub._bucket.get_object(f"{v2_root}/SKILL.md").read().decode("utf-8")
+        == _skill_md("demo-skill")
+    )
+    assert hub._bucket.get_object(f"{v2_root}/files/references/guide.md").read() == b"v2 guide\n"
 
 
 def test_skill_hub_roundtrips_extra_unstructured_files_and_attributes_them(tmp_path: Path) -> None:
@@ -233,10 +229,8 @@ def test_skill_hub_roundtrips_extra_unstructured_files_and_attributes_them(tmp_p
     _write_bytes(skills_dir / "extra-skill" / "workspace" / "payload.bin", b"\x10\x20\x30\x40")
 
     bucket_root = tmp_path / "bucket"
-    hub = SkillHub(
-        backend="local",
-        endpoint="",
-        local_root=str(bucket_root),
+    hub = SkillHub.from_bucket(
+        InMemoryObjectStore(str(bucket_root)),
         customer_id="cust-a",
         user_alias="tester",
     )

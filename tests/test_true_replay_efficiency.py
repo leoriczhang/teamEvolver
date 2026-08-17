@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from types import SimpleNamespace
 
 from teamEvolver.replay_metrics import objective_replay_decision
 from teamEvolver.true_replay import (
     _agentshub_endpoint,
+    _model_endpoint_networks,
+    _native_agent_runtime,
+    _source_identity_error,
+    _systemd_sandbox_command,
+    _worker_environment,
     annotate_cases,
     branch_efficiency,
     build_sandbox,
     compare_efficiency,
     count_tool_calls,
+    spawn_branch,
     spawn_agentshub_branch,
 )
 
@@ -96,6 +104,77 @@ def test_agentshub_endpoint_falls_back_to_service_config(
     assert _agentshub_endpoint({"runtime": {"type": "agentshub"}}) == (
         "http://127.0.0.1:5173"
     )
+
+
+def test_non_agentshub_runtime_does_not_use_agentshub_fallback(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AGENTSHUB_REPLAY_URL", "http://127.0.0.1:5173")
+    monkeypatch.setattr(
+        "teamEvolver.config_store.ConfigStore.to_config",
+        lambda _self: SimpleNamespace(
+            validation_agentshub_url="http://127.0.0.1:5173"
+        ),
+    )
+
+    assert _native_agent_runtime(
+        {"runtime": {"type": "cli"}, "source": "cli"}
+    ) == ("cli", "")
+
+
+def test_exact_integration_does_not_fall_back_to_legacy_url(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("AGENTSHUB_REPLAY_URL", raising=False)
+    monkeypatch.setattr(
+        "teamEvolver.config_store.ConfigStore.to_config",
+        lambda _self: SimpleNamespace(
+            validation_agentshub_url="http://127.0.0.1:5173"
+        ),
+    )
+    monkeypatch.setattr(
+        "teamEvolver.integrations.agent_registry.resolve_runtime_agent",
+        lambda *_args, **_kwargs: None,
+    )
+
+    assert _native_agent_runtime(
+        {
+            "runtime": {
+                "type": "agentshub",
+                "integration_id": "agentshub:missing",
+            }
+        }
+    ) == ("agentshub", "")
+
+
+def test_agentshub_source_requires_tenant_identity() -> None:
+    assert _source_identity_error(
+        {
+            "runtime": {"type": "agentshub"},
+            "runtime_context": {},
+        },
+        runtime_type="agentshub",
+    ) == "AgentsHub replay source is missing runtime_context.tenant_id"
+    assert (
+        _source_identity_error(
+            {
+                "runtime": {"type": "agentshub"},
+                "runtime_context": {"tenant_id": "tenant-a"},
+            },
+            runtime_type="agentshub",
+        )
+        == ""
+    )
+
+
+def test_candidate_audit_session_is_not_a_replay_source() -> None:
+    assert _source_identity_error(
+        {
+            "source": "managed_agent_candidate_audit",
+            "runtime_context": {"candidate_job_id": "job-1"},
+        },
+        runtime_type="managed_agent_candidate_audit",
+    ) == "candidate-audit sessions cannot be used as replay sources"
 
 
 def test_objective_policy_accepts_metric_reduction_without_regression() -> None:
@@ -224,6 +303,124 @@ def test_baseline_sandbox_installs_current_skill(tmp_path) -> None:
     installed = skill_file.read_text("utf-8")
     assert "name: existing-skill" in installed
     assert installed.rstrip().endswith("current procedure")
+    assert (tmp_path / "baseline" / ".hermes" / "config.yaml").stat().st_mode & 0o777 == 0o600
+
+
+def test_model_endpoint_networks_freezes_resolved_addresses(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "teamEvolver.true_replay.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (2, 1, 6, "", ("203.0.113.7", 443)),
+            (10, 1, 6, "", ("2001:db8::7", 443, 0, 0)),
+        ],
+    )
+
+    networks = _model_endpoint_networks("https://model.example.test/v1")
+
+    assert "203.0.113.7/32" in networks
+    assert "2001:db8::7/128" in networks
+
+
+def test_worker_environment_does_not_inherit_secrets_or_proxies(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example")
+    sandbox = build_sandbox(
+        tmp_path,
+        "baseline",
+        {
+            "base_url": "https://127.0.0.1/v1",
+            "api_key": "key",
+            "model": "model",
+            "api_mode": "chat",
+            "max_tokens": 1024,
+        },
+        None,
+    )
+
+    env = _worker_environment(os.sys.executable, sandbox)
+
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+    assert "HTTPS_PROXY" not in env
+    assert env["HOME"] == sandbox["home"]
+    assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+
+
+def test_systemd_sandbox_command_enforces_filesystem_network_and_clean_env(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    harness = {
+        "base_url": "https://127.0.0.1/v1",
+        "api_key": "must-not-appear-in-command",
+        "model": "model",
+        "api_mode": "chat",
+        "max_tokens": 1024,
+    }
+    sandbox = build_sandbox(tmp_path, "candidate", harness, None)
+    spec_path = Path(sandbox["home"]) / ".replay_spec.json"
+    spec_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        "teamEvolver.true_replay._model_endpoint_networks",
+        lambda _url: ["127.0.0.1/32"],
+    )
+
+    command = _systemd_sandbox_command(
+        worker_python=os.sys.executable,
+        spec_path=spec_path,
+        sandbox=sandbox,
+        harness=harness,
+        timeout=90,
+        case={},
+        unit_name="teamevolver-replay-test",
+    )
+    rendered = "\n".join(command)
+
+    assert "ProtectSystem=strict" in command
+    assert "ProtectHome=yes" in command
+    assert "IPAddressDeny=any" in command
+    assert "IPAddressAllow=127.0.0.1/32" in command
+    assert "RuntimeMaxSec=90s" in command
+    assert "/usr/bin/env" in command
+    assert "-i" in command
+    assert "must-not-appear-in-command" not in rendered
+
+
+def test_local_replay_fails_closed_when_sandbox_is_unavailable(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    harness = {
+        "base_url": "https://127.0.0.1/v1",
+        "api_key": "key",
+        "model": "model",
+        "api_mode": "chat",
+        "max_tokens": 1024,
+    }
+    sandbox = build_sandbox(tmp_path, "baseline", harness, None)
+    monkeypatch.setattr(
+        "teamEvolver.true_replay.resolve_replay_python",
+        lambda: os.sys.executable,
+    )
+    monkeypatch.setattr(
+        "teamEvolver.true_replay._systemd_sandbox_command",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("unsupported")),
+    )
+
+    result = spawn_branch(
+        "baseline",
+        sandbox,
+        "do work",
+        harness,
+        None,
+        tmp_path,
+        30,
+    )
+
+    assert result["ok"] is False
+    assert result["error_code"] == "REPLAY_SANDBOX_UNAVAILABLE"
 
 
 def test_sandbox_installs_complete_candidate_bundle(tmp_path) -> None:
@@ -265,7 +462,14 @@ def test_agentshub_branch_uses_native_replay_endpoint(monkeypatch) -> None:
             return None
 
         def json(self):
-            return {"branch": "candidate", "runtime": "agentshub", "ok": True}
+            return {
+                "branch": "candidate",
+                "runtime": "agentshub",
+                "ok": True,
+                "interaction_turns": 1,
+                "tool_call_count": 0,
+                "total_tokens": 12,
+            }
 
     def fake_post(url, **kwargs):  # noqa: ANN001
         captured["url"] = url

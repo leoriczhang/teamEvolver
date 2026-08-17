@@ -58,6 +58,39 @@ def is_candidate_audit_session(session: dict[str, Any]) -> bool:
     )
 
 
+_RUNTIME_CONTEXT_KEYS = {
+    "tenant_id",
+    "user_id",
+    "username",
+    "external_subject",
+    "agent_id",
+    "environment_id",
+    "source_session_id",
+    "model_config_id",
+    "evaluation_profile",
+    "profile_id",
+}
+
+
+def _runtime_projection(session: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    runtime = (
+        dict(session.get("runtime"))
+        if isinstance(session.get("runtime"), dict)
+        else {}
+    )
+    context = (
+        session.get("runtime_context")
+        if isinstance(session.get("runtime_context"), dict)
+        else {}
+    )
+    projected = {
+        key: context.get(key)
+        for key in _RUNTIME_CONTEXT_KEYS
+        if context.get(key) not in (None, "")
+    }
+    return runtime, projected
+
+
 def _extract_replay_cases(session: dict[str, Any], *, limit: int = 2) -> list[dict[str, Any]]:
     if is_candidate_audit_session(session):
         return []
@@ -72,6 +105,7 @@ def _extract_replay_cases(session: dict[str, Any], *, limit: int = 2) -> list[di
     evaluation_profile = str(
         runtime_context.get("evaluation_profile") or ""
     ).strip()
+    source_runtime, source_runtime_context = _runtime_projection(session)
     turns = session.get("turns") if isinstance(session.get("turns"), list) else []
     for turn in turns:
         if not isinstance(turn, dict):
@@ -88,6 +122,16 @@ def _extract_replay_cases(session: dict[str, Any], *, limit: int = 2) -> list[di
             "had_tool_calls": bool(turn.get("tool_calls")),
             "had_tool_results": bool(
                 turn.get("tool_results") or turn.get("tool_observations")
+            ),
+            "source_runtime": source_runtime,
+            "source_runtime_context": source_runtime_context,
+            "context_snapshot_id": str(
+                (
+                    turn.get("context_usage")
+                    if isinstance(turn.get("context_usage"), dict)
+                    else {}
+                ).get("context_snapshot_id")
+                or ""
             ),
         }
         if evaluation_profile:
@@ -120,6 +164,7 @@ def _entry_from_session(session: dict[str, Any]) -> dict[str, Any]:
         or session.get("started_at")
         or _utc_now_iso()
     )
+    runtime, projected_context = _runtime_projection(session)
     return {
         "session_id": str(session.get("session_id") or "").strip(),
         "observed_at": observed_at,
@@ -129,7 +174,14 @@ def _entry_from_session(session: dict[str, Any]) -> dict[str, Any]:
         "judge_overall_score": overall,
         "avg_prm": avg_prm,
         "has_tool_errors": bool(session.get("_has_tool_errors")),
+        "verified_skill_feedback": [
+            dict(item)
+            for item in session.get("_verified_skill_feedback") or []
+            if isinstance(item, dict)
+        ],
         "source": str(session.get("source") or ""),
+        "runtime": runtime,
+        "runtime_context": projected_context,
         "evaluation_profile": str(
             runtime_context.get("evaluation_profile") or ""
         ).strip(),
@@ -404,8 +456,24 @@ class SkillEvidenceStore:
             "_trajectory": str(entry.get("trajectory") or ""),
             "_avg_prm": entry.get("avg_prm"),
             "_has_tool_errors": bool(entry.get("has_tool_errors")),
+            "_verified_skill_feedback": [
+                dict(item)
+                for item in entry.get("verified_skill_feedback") or []
+                if isinstance(item, dict)
+            ],
             "_evidence_window": window,
             "timestamp": str(entry.get("observed_at") or ""),
+            "source": str(entry.get("source") or ""),
+            "runtime": (
+                dict(entry.get("runtime"))
+                if isinstance(entry.get("runtime"), dict)
+                else {}
+            ),
+            "runtime_context": (
+                dict(entry.get("runtime_context"))
+                if isinstance(entry.get("runtime_context"), dict)
+                else {}
+            ),
         }
         replay_profiles = [
             str(item.get("evaluation_profile") or "").strip()
@@ -418,9 +486,9 @@ class SkillEvidenceStore:
             or (replay_profiles[0] if replay_profiles else "")
         ).strip()
         if evaluation_profile:
-            result["runtime_context"] = {
-                "evaluation_profile": evaluation_profile,
-            }
+            result.setdefault("runtime_context", {})[
+                "evaluation_profile"
+            ] = evaluation_profile
         overall = entry.get("judge_overall_score")
         if isinstance(overall, (int, float)) and not isinstance(overall, bool):
             result["_judge_scores"] = {"overall_score": float(overall)}

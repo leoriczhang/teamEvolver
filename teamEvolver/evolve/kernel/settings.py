@@ -14,12 +14,15 @@ def _first_env(*names: str, default: str = "") -> str:
     return default
 
 
-def _infer_storage_backend(endpoint: str, local_root: str) -> str:
+def _infer_storage_backend(endpoint: str, local_root: str = "") -> str:
+    """Resolve the evolve engine's storage backend.
+
+    Only ``viking`` (OpenViking) is supported. ``local_root`` is accepted for
+    signature compatibility but no longer selects a filesystem backend.
+    """
     backend = _first_env("EVOLVE_STORAGE_BACKEND", default="").strip().lower()
     if backend:
-        return backend
-    if local_root:
-        return "local"
+        return "viking"
     if os.environ.get("EVOLVE_VIKING_ENDPOINT") or endpoint:
         return "viking"
     return ""
@@ -32,7 +35,6 @@ class EvolveServerConfig:
     # Storage
     storage_backend: str = ""
     storage_endpoint: str = ""
-    local_root: str = ""
 
     # OpenViking storage backend.  Used when storage_backend == "viking".
     viking_endpoint: str = ""
@@ -163,8 +165,7 @@ class EvolveServerConfig:
     def from_env(cls) -> "EvolveServerConfig":
         """Populate every field from environment variables."""
         storage_endpoint = _first_env("EVOLVE_STORAGE_ENDPOINT")
-        local_root = _first_env("EVOLVE_STORAGE_LOCAL_ROOT", "EVOLVE_LOCAL_ROOT")
-        storage_backend = _infer_storage_backend(storage_endpoint, local_root)
+        storage_backend = _infer_storage_backend(storage_endpoint)
         engine = _first_env("EVOLVE_ENGINE", default="workflow").strip().lower() or "workflow"
 
         llm_api_key = os.environ.get("OPENAI_API_KEY", "")
@@ -176,7 +177,6 @@ class EvolveServerConfig:
             engine=engine,
             storage_backend=storage_backend,
             storage_endpoint=storage_endpoint,
-            local_root=local_root,
             viking_endpoint=os.environ.get("EVOLVE_VIKING_ENDPOINT", ""),
             viking_api_key=_first_env("EVOLVE_VIKING_TEAM_API_KEY", "EVOLVE_VIKING_API_KEY"),
             viking_account=os.environ.get("EVOLVE_VIKING_ACCOUNT", "default"),
@@ -262,7 +262,6 @@ class EvolveServerConfig:
         """Build from teamEvolver's primary configuration object."""
         engine = _first_env("EVOLVE_ENGINE", default="workflow").strip().lower() or "workflow"
         sharing_backend = str(getattr(config, "sharing_backend", "") or "").strip().lower()
-        local_root = str(getattr(config, "sharing_local_root", "") or os.environ.get("EVOLVE_LOCAL_ROOT", ""))
         viking_endpoint = str(getattr(config, "sharing_viking_endpoint", "") or "")
         storage_endpoint = viking_endpoint
         llm_api_key = str(getattr(config, "llm_api_key", "") or "")
@@ -290,18 +289,15 @@ class EvolveServerConfig:
 
         storage_backend = _first_env("EVOLVE_STORAGE_BACKEND", default="")
         if not storage_backend:
-            if local_root:
-                storage_backend = "local"
-            elif viking_endpoint:
+            if viking_endpoint:
                 storage_backend = "viking"
-            elif sharing_backend in {"local", "viking"}:
-                storage_backend = sharing_backend
+            elif sharing_backend:
+                storage_backend = "viking"
 
         return cls(
             engine=engine,
             storage_backend=storage_backend,
             storage_endpoint=storage_endpoint,
-            local_root=local_root,
             viking_endpoint=viking_endpoint,
             viking_api_key=str(
                 getattr(config, "sharing_viking_team_api_key", "")
@@ -325,7 +321,13 @@ class EvolveServerConfig:
             use_success_feedback=os.environ.get("EVOLVE_USE_SUCCESS_FEEDBACK", "1").lower() not in {"0", "false", "no"},
             evolve_batch_size=int(os.environ.get("EVOLVE_BATCH_SIZE", "20")),
             reject_rewrite=os.environ.get("EVOLVE_REJECT_REWRITE", "0").lower() in {"1", "true", "yes"},
-            use_session_judge=os.environ.get("EVOLVE_USE_SESSION_JUDGE", "1").lower() not in {"0", "false", "no"},
+            use_session_judge=os.environ.get(
+                "EVOLVE_USE_SESSION_JUDGE",
+                "1"
+                if getattr(config, "evolve_use_session_judge", True)
+                else "0",
+            ).lower()
+            not in {"0", "false", "no"},
             evidence_enabled=os.environ.get(
                 "EVOLVE_EVIDENCE_ENABLED",
                 "1" if getattr(config, "evolve_evidence_enabled", True) else "0",
@@ -443,7 +445,13 @@ class EvolveServerConfig:
             bundle_static_checks_enabled=bool(
                 getattr(config, "evolve_bundle_static_checks_enabled", True)
             ),
-            publish_mode=os.environ.get("EVOLVE_PUBLISH_MODE", "validated"),
+            publish_mode=os.environ.get(
+                "EVOLVE_PUBLISH_MODE",
+                str(
+                    getattr(config, "evolve_publish_mode", "validated")
+                    or "validated"
+                ),
+            ),
             validation_required_results=int(
                 os.environ.get(
                     "EVOLVE_VALIDATION_REQUIRED_RESULTS",
@@ -456,9 +464,48 @@ class EvolveServerConfig:
                     str(getattr(config, "validation_required_approvals", 2) or 2),
                 )
             ),
-            validation_max_rejections=int(os.environ.get("EVOLVE_VALIDATION_MAX_REJECTIONS", "1")),
-            human_review_enabled=os.environ.get("EVOLVE_HUMAN_REVIEW_ENABLED", "1").lower() not in {"0", "false", "no"},
-            human_review_pending_timeout_seconds=int(os.environ.get("EVOLVE_HUMAN_REVIEW_TIMEOUT_SECONDS", "86400")),
+            validation_max_rejections=int(
+                os.environ.get(
+                    "EVOLVE_VALIDATION_MAX_REJECTIONS",
+                    str(
+                        getattr(
+                            config,
+                            "evolve_validation_max_rejections",
+                            1,
+                        )
+                        or 1
+                    ),
+                )
+            ),
+            human_review_enabled=os.environ.get(
+                "EVOLVE_HUMAN_REVIEW_ENABLED",
+                "1"
+                if getattr(config, "evolve_human_review_enabled", True)
+                else "0",
+            ).lower()
+            not in {"0", "false", "no"},
+            human_review_pending_timeout_seconds=int(
+                os.environ.get(
+                    "EVOLVE_HUMAN_REVIEW_TIMEOUT_SECONDS",
+                    str(
+                        getattr(
+                            config,
+                            "evolve_human_review_timeout_seconds",
+                            86400,
+                        )
+                        or 86400
+                    ),
+                )
+            ),
+            interval_seconds=int(
+                os.environ.get(
+                    "EVOLVE_INTERVAL",
+                    str(
+                        getattr(config, "evolve_interval_seconds", 600)
+                        or 600
+                    ),
+                )
+            ),
             ingest_api_key=os.environ.get(
                 "EVOLVE_INGEST_API_KEY",
                 str(getattr(config, "proxy_api_key", "") or ""),

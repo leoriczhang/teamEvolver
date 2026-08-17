@@ -14,6 +14,7 @@ sys.path.insert(0, str(SKILLMINER_DIR))
 import run_benchmark as rb  # noqa: E402
 import run_pipeline as rp  # noqa: E402
 import benchmark_format as bf  # noqa: E402
+from teamEvolver.mining_settings import settings_payload, update_settings
 
 
 def _progressive_benchmark(skill_name="demo", query="测试情境"):
@@ -312,6 +313,93 @@ def test_security_policy_is_injected_into_every_pipeline_prompt(tmp_path, monkey
     assert "不可信输入安全边界" in rendered
 
 
+def test_pipeline_prompt_override_is_loaded_from_whitebox_config(tmp_path, monkeypatch):
+    _point_pipeline_at(monkeypatch, tmp_path)
+    prompt_file = tmp_path / "sample_package_constructor_agent_prompt.py"
+    prompt_file.write_text(
+        'SAMPLE_PACKAGE_CONSTRUCTOR_AGENT_PROMPT = "DEFAULT {INPUT_DIR} {OUTPUT_DIR}"\n',
+        encoding="utf-8",
+    )
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "mining:\n"
+        "  prompts:\n"
+        "    sample_package: 'CUSTOM {INPUT_DIR} {OUTPUT_DIR}'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TEAMEVOLVER_CONFIG_FILE", str(config))
+
+    rendered = rp.get_prompt_with_paths(
+        {
+            "module": "sample_package_constructor_agent_prompt",
+            "prompt_var": "SAMPLE_PACKAGE_CONSTRUCTOR_AGENT_PROMPT",
+            "input_dir": "input",
+            "output_dir": "output",
+        }
+    )
+
+    assert "CUSTOM" in rendered
+    assert "DEFAULT" not in rendered
+
+
+def test_mining_whitebox_settings_roundtrip():
+    data = {
+        "llm": {
+            "provider": "custom",
+            "model_id": "global-model",
+            "api_base": "https://example.invalid/v1",
+            "api_key": "secret",
+        }
+    }
+    before = settings_payload(data)
+    assert before["model"]["model"] == "global-model"
+    assert len(before["prompts"]) == 10
+
+    updated = update_settings(
+        data,
+        {
+            "model": {
+                "model": "mining-model",
+                "base_url": "https://mining.invalid/v1",
+                "max_tokens": 4096,
+            },
+            "pipeline": {
+                "max_rounds": 7,
+                "max_retries": 4,
+                "strict_step1": False,
+            },
+            "prompts": [
+                {"id": "semantic_discovery", "prompt": "CUSTOM SEMANTIC"}
+            ],
+        },
+    )
+
+    assert updated["model"]["model"] == "mining-model"
+    assert updated["pipeline"]["max_rounds"] == 7
+    assert updated["pipeline"]["strict_step1"] is False
+    semantic = next(
+        item for item in updated["prompts"]
+        if item["id"] == "semantic_discovery"
+    )
+    assert semantic["effective_prompt"] == "CUSTOM SEMANTIC"
+    assert semantic["overridden"] is True
+
+
+def test_benchmark_prompt_override_preserves_dynamic_input(tmp_path, monkeypatch):
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "mining:\n"
+        "  prompts:\n"
+        "    benchmark_usage: 'CUSTOM TASK: {{question_input}}'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TEAMEVOLVER_CONFIG_FILE", str(config))
+
+    rendered = rb.usage_prompt_for({"input": "dynamic case"})
+
+    assert rendered == "CUSTOM TASK: dynamic case"
+
+
 def test_model_probe_requires_success_exit_and_expected_marker(tmp_path, monkeypatch):
     _point_pipeline_at(monkeypatch, tmp_path)
     monkeypatch.setattr(rp, "_HERMES_BIN", "/fake/hermes")
@@ -415,7 +503,7 @@ def test_benchmark_builder_limits_hermes_to_file_tools(tmp_path, monkeypatch):
     assert captured["args"][:2] == ["-t", "file"]
     assert captured["args"][2] == "-z"
     assert "唯一允许的工具动作" in captured["args"][3]
-    assert captured["timeout"] == 1500
+    assert captured["timeout"] == rp.HERMES_ONESHOT_TIMEOUT
     payload = json.loads((skill_dir / "benchmark.json").read_text(encoding="utf-8"))
     assert payload["dataset_format"] == "teamEvolver-progressive-test-v1"
     assert payload["datasets"][0]["requirement_count"] == 12

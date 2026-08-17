@@ -7,8 +7,8 @@ The skill lab keeps three concerns separate:
 * durable experiment runs with full branch traces and objective efficiency data
 
 Dataset and run artifacts use the same object-storage boundary as sessions and
-validation jobs. A local fallback next to ``skills_dir`` keeps the lab usable
-when sharing is disabled.
+validation jobs. When no OpenViking backend is configured, an ephemeral
+in-memory fallback keeps the lab usable within a single process run.
 """
 
 from __future__ import annotations
@@ -17,18 +17,26 @@ import base64
 import binascii
 import hashlib
 import json
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Any, Mapping, Optional
 
 import yaml
 
+from .dataset_store import (
+    SkillDatasetStore,
+    dataset_material_integrity,
+)
 from .dataset_synthesizer import checklist_items, flatten_requirements
 from .skills import editor, frontmatter
 from .skills.bundle import attach_bundle_payload, read_skill_bundle
-from .storage import LocalObjectStore, is_not_found_error
+from .storage import InMemoryObjectStore, is_not_found_error
+
+logger = logging.getLogger(__name__)
+
 
 _DATASET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
 _MAX_FILE_BYTES = 20 * 1024 * 1024
@@ -125,6 +133,12 @@ class SkillLabStore:
 
     def __init__(self, bucket) -> None:
         self._bucket = bucket
+        self._datasets = SkillDatasetStore(bucket)
+
+    # Process-lifetime fallback store shared across from_config() calls, used
+    # only when no OpenViking backend is configured. Data is ephemeral (in
+    # memory) — configure cloud or local OpenViking to persist skill-lab state.
+    _fallback_bucket: "InMemoryObjectStore | None" = None
 
     @classmethod
     def from_config(cls, config) -> "SkillLabStore":
@@ -133,26 +147,30 @@ class SkillLabStore:
         hub = SkillHub.object_storage_from_config(config)
         if hub is not None:
             return cls(hub._bucket)
-        config_file = str(getattr(config, "_config_file", "") or "").strip()
-        if config_file:
-            root = Path(config_file).expanduser().resolve().parent / "skill_lab_store"
-        else:
-            skills_dir = Path(str(getattr(config, "skills_dir", "") or "skills")).expanduser()
-            root = skills_dir.resolve().parent / ".skill_lab_store"
-        return cls(LocalObjectStore(root))
+        logger.warning(
+            "[SkillLabStore] no OpenViking backend configured; using an "
+            "in-memory fallback store. Skill-lab data will not persist across "
+            "restarts. Configure cloud or local OpenViking to persist."
+        )
+        if cls._fallback_bucket is None:
+            cls._fallback_bucket = InMemoryObjectStore("skill_lab")
+        return cls(cls._fallback_bucket)
 
     @staticmethod
     def make_run_id() -> str:
         return _run_id()
 
-    def _dataset_key(self, dataset_id: str) -> str:
+    def _legacy_dataset_key(self, dataset_id: str) -> str:
         return f"skill_lab/datasets/{_normalize_dataset_id(dataset_id)}/metadata.json"
 
-    def _dataset_prefix(self, dataset_id: str) -> str:
+    def _legacy_dataset_prefix(self, dataset_id: str) -> str:
         return f"skill_lab/datasets/{_normalize_dataset_id(dataset_id)}/"
 
-    def _material_key(self, dataset_id: str, rel_path: str) -> str:
-        return f"{self._dataset_prefix(dataset_id)}materials/{_normalize_material_path(rel_path)}"
+    def _legacy_material_key(self, dataset_id: str, rel_path: str) -> str:
+        return (
+            f"{self._legacy_dataset_prefix(dataset_id)}materials/"
+            f"{_normalize_material_path(rel_path)}"
+        )
 
     def _run_key(self, run_id: str) -> str:
         return f"skill_lab/runs/{_normalize_dataset_id(run_id)}/metadata.json"
@@ -175,6 +193,54 @@ class SkillLabStore:
             json.dumps(dict(payload), ensure_ascii=False, indent=2).encode("utf-8"),
         )
 
+    def _available_material_paths(
+        self,
+        dataset: Mapping[str, Any],
+    ) -> list[str]:
+        skill_name = str(dataset.get("skill_name") or "")
+        dataset_id = str(dataset.get("dataset_id") or "")
+        canonical = self._datasets.load_dataset(
+            skill_name=skill_name,
+            dataset_id=dataset_id,
+        )
+        if canonical:
+            return self._datasets.available_material_paths(canonical)
+        paths: list[str] = []
+        for item in dataset.get("materials") or []:
+            if not isinstance(item, Mapping) or not item.get("path"):
+                continue
+            rel_path = _normalize_material_path(item.get("path"))
+            try:
+                self._bucket.get_object(
+                    self._legacy_material_key(dataset_id, rel_path)
+                )
+            except Exception as exc:
+                if is_not_found_error(exc):
+                    continue
+                raise
+            paths.append(rel_path)
+        return paths
+
+    def _present_dataset(
+        self,
+        dataset: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        item = {
+            **dict(dataset),
+            "requirements": _text_block(dataset.get("requirements")),
+            "trajectory_requirements": _text_block(
+                dataset.get("trajectory_requirements")
+            ),
+        }
+        return {
+            **item,
+            "material_integrity": dataset_material_integrity(
+                item,
+                available_paths=self._available_material_paths(item),
+            ),
+            "dataset_markdown": render_dataset_markdown(item),
+        }
+
     def save_dataset(
         self,
         payload: Mapping[str, Any],
@@ -190,13 +256,25 @@ class SkillLabStore:
             if payload.get("dataset_id")
             else _dataset_id()
         )
-        existing = self.load_dataset(dataset_id)
+        canonical_existing = self._datasets.load_dataset(
+            skill_name=skill_name,
+            dataset_id=dataset_id,
+        )
+        existing = (
+            canonical_existing
+            or self._datasets.find_dataset(dataset_id)
+            or self.load_dataset(
+                dataset_id,
+                skill_name=skill_name,
+            )
+        )
         if existing and str(existing.get("skill_name") or "") != skill_name:
             raise SkillLabError("不能把已有数据集移动到另一个 skill")
 
         materials = list(existing.get("materials") or []) if existing else []
+        decoded: list[tuple[str, bytes]] | None = None
         if files is not None:
-            decoded: list[tuple[str, bytes]] = []
+            decoded = []
             total_bytes = 0
             seen: set[str] = set()
             for raw_file in files:
@@ -219,26 +297,31 @@ class SkillLabStore:
                         f"单个数据集材料合计不能超过 {_MAX_DATASET_BYTES // (1024 * 1024)} MB"
                     )
                 decoded.append((rel_path, data))
-
-            for obj in list(
-                self._bucket.iter_objects(
-                    prefix=f"{self._dataset_prefix(dataset_id)}materials/"
-                )
-            ):
-                self._bucket.delete_object(obj.key)
-            materials = []
-            for rel_path, data in decoded:
-                self._bucket.put_object(self._material_key(dataset_id, rel_path), data)
-                materials.append(
-                    {
-                        "path": rel_path,
-                        "size": len(data),
-                        "sha256": hashlib.sha256(data).hexdigest(),
-                    }
-                )
+        elif existing and not canonical_existing and materials:
+            decoded = []
+            for item in materials:
+                if not isinstance(item, Mapping):
+                    continue
+                rel_path = _normalize_material_path(item.get("path"))
+                data = self._bucket.get_object(
+                    self._legacy_material_key(dataset_id, rel_path)
+                ).read()
+                decoded.append((rel_path, data))
 
         now = _utc_now_iso()
-        source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+        source = (
+            payload.get("source")
+            if isinstance(payload.get("source"), dict)
+            else (existing or {}).get("source")
+            if isinstance((existing or {}).get("source"), dict)
+            else {}
+        )
+        if str(source.get("kind") or "") == "evolution":
+            source = {
+                **source,
+                "user_edited": True,
+                "edited_at": now,
+            }
         progressive = (
             payload.get("progressive_disclosure")
             if isinstance(payload.get("progressive_disclosure"), dict)
@@ -248,6 +331,11 @@ class SkillLabStore:
         )
         dataset = {
             "dataset_id": dataset_id,
+            "dataset_format": str(
+                payload.get("dataset_format")
+                or (existing or {}).get("dataset_format")
+                or "teamEvolver-skill-dataset-v1"
+            ),
             "skill_name": skill_name,
             "name": str(payload.get("name") or "").strip() or query.splitlines()[0][:80],
             "query": query,
@@ -267,41 +355,126 @@ class SkillLabStore:
             "materials": materials,
             "source": source or {"kind": "manual"},
             "read_only": False,
+            "enabled_for_evolution": bool(
+                payload.get("enabled_for_evolution")
+                if "enabled_for_evolution" in payload
+                else (existing or {}).get("enabled_for_evolution", False)
+            ),
             "created_at": str((existing or {}).get("created_at") or now),
             "updated_at": now,
         }
-        self._write_json(self._dataset_key(dataset_id), dataset)
-        return {**dataset, "dataset_markdown": render_dataset_markdown(dataset)}
+        available_paths = (
+            [rel_path for rel_path, _data in decoded]
+            if decoded is not None
+            else self._available_material_paths(existing or dataset)
+        )
+        integrity = dataset_material_integrity(
+            dataset,
+            available_paths=available_paths,
+        )
+        if not integrity["complete"]:
+            missing = "、".join(integrity["missing_paths"])
+            raise SkillLabError(
+                f"数据集引用了缺失材料：{missing}。请上传对应材料，"
+                "或把必要内容直接内嵌到 Query 的“材料：”段落。"
+            )
+        if decoded is not None:
+            dataset["materials"] = self._datasets.replace_materials(
+                skill_name=skill_name,
+                dataset_id=dataset_id,
+                files=decoded,
+            )
+        saved = self._datasets.save_dataset(dataset)
+        if existing and not canonical_existing:
+            for obj in list(
+                self._bucket.iter_objects(
+                    prefix=self._legacy_dataset_prefix(dataset_id)
+                )
+            ):
+                self._bucket.delete_object(obj.key)
+        return self._present_dataset(saved)
 
-    def load_dataset(self, dataset_id: str) -> Optional[dict[str, Any]]:
-        dataset = self._read_json(self._dataset_key(dataset_id))
+    def load_dataset(
+        self,
+        dataset_id: str,
+        *,
+        skill_name: str = "",
+    ) -> Optional[dict[str, Any]]:
+        dataset = (
+            self._datasets.load_dataset(
+                skill_name=skill_name,
+                dataset_id=dataset_id,
+            )
+            if skill_name
+            else self._datasets.find_dataset(dataset_id)
+        )
+        if dataset:
+            return self._present_dataset(dataset)
+        dataset = self._read_json(self._legacy_dataset_key(dataset_id))
         if not dataset:
             return None
-        return {**dataset, "dataset_markdown": render_dataset_markdown(dataset)}
+        if skill_name and str(dataset.get("skill_name") or "") != skill_name:
+            return None
+        return self._present_dataset(dataset)
 
     def list_datasets(self, *, skill_name: str = "") -> list[dict[str, Any]]:
         wanted = str(skill_name or "").strip()
-        rows: list[dict[str, Any]] = []
+        rows = [
+            self._present_dataset(item)
+            for item in self._datasets.list_datasets(skill_name=wanted)
+        ]
+        seen = {
+            (
+                str(item.get("skill_name") or ""),
+                str(item.get("dataset_id") or ""),
+            )
+            for item in rows
+        }
         for obj in self._bucket.iter_objects(prefix="skill_lab/datasets/"):
             if not obj.key.endswith("/metadata.json"):
                 continue
             item = self._read_json(obj.key)
             if not item or (wanted and str(item.get("skill_name") or "") != wanted):
                 continue
-            rows.append({**item, "dataset_markdown": render_dataset_markdown(item)})
+            key = (
+                str(item.get("skill_name") or ""),
+                str(item.get("dataset_id") or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(self._present_dataset(item))
         rows.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
         return rows
 
     def material_payloads(self, dataset: Mapping[str, Any]) -> list[dict[str, Any]]:
         dataset_id = _normalize_dataset_id(dataset.get("dataset_id"))
+        skill_name = editor.validate_skill_name(
+            str(dataset.get("skill_name") or "")
+        )
+        canonical = self._datasets.load_dataset(
+            skill_name=skill_name,
+            dataset_id=dataset_id,
+        )
         payloads: list[dict[str, Any]] = []
-        for item in dataset.get("materials") or []:
-            if not isinstance(item, Mapping):
-                continue
-            rel_path = _normalize_material_path(item.get("path"))
-            data = self._bucket.get_object(
-                self._material_key(dataset_id, rel_path)
-            ).read()
+        files = (
+            self._datasets.read_materials(canonical)
+            if canonical
+            else [
+                (
+                    _normalize_material_path(item.get("path")),
+                    self._bucket.get_object(
+                        self._legacy_material_key(
+                            dataset_id,
+                            _normalize_material_path(item.get("path")),
+                        )
+                    ).read(),
+                )
+                for item in dataset.get("materials") or []
+                if isinstance(item, Mapping) and item.get("path")
+            ]
+        )
+        for rel_path, data in files:
             payloads.append(
                 {
                     "path": rel_path,
@@ -312,12 +485,23 @@ class SkillLabStore:
             )
         return payloads
 
-    def delete_dataset(self, dataset_id: str) -> bool:
-        prefix = self._dataset_prefix(dataset_id)
-        objects = list(self._bucket.iter_objects(prefix=prefix))
-        for obj in objects:
+    def delete_dataset(self, dataset_id: str, *, skill_name: str = "") -> bool:
+        dataset = self.load_dataset(dataset_id, skill_name=skill_name)
+        if not dataset or bool(dataset.get("read_only")):
+            return False
+        owner = str(dataset.get("skill_name") or "")
+        deleted = self._datasets.delete_dataset(
+            skill_name=owner,
+            dataset_id=dataset_id,
+        )
+        legacy_objects = list(
+            self._bucket.iter_objects(
+                prefix=self._legacy_dataset_prefix(dataset_id)
+            )
+        )
+        for obj in legacy_objects:
             self._bucket.delete_object(obj.key)
-        return bool(objects)
+        return deleted or bool(legacy_objects)
 
     def create_run(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         run_id = _normalize_dataset_id(payload.get("run_id") or _run_id())
@@ -519,6 +703,10 @@ def evolution_datasets(config, *, skill_name: str) -> list[dict[str, Any]]:
             ]
             dataset = {
                 "dataset_id": str(case.get("dataset_id") or dataset_id),
+                "dataset_format": str(
+                    case.get("dataset_format")
+                    or "teamEvolver-progressive-test-v1"
+                ),
                 "skill_name": wanted,
                 "name": str(
                     case.get("name")
@@ -551,9 +739,14 @@ def evolution_datasets(config, *, skill_name: str) -> list[dict[str, Any]]:
                     "evidence_window": window,
                 },
                 "read_only": True,
+                "enabled_for_evolution": False,
                 "created_at": str(job.get("created_at") or ""),
                 "updated_at": str(job.get("updated_at") or job.get("created_at") or ""),
             }
+            dataset["material_integrity"] = dataset_material_integrity(
+                dataset,
+                available_paths=[],
+            )
             rows.append(
                 {**dataset, "dataset_markdown": render_dataset_markdown(dataset)}
             )
@@ -567,13 +760,9 @@ def resolve_dataset(
     skill_name: str,
     dataset_id: str,
 ) -> Optional[dict[str, Any]]:
-    persisted = store.load_dataset(dataset_id)
+    persisted = store.load_dataset(dataset_id, skill_name=skill_name)
     if persisted:
-        return (
-            persisted
-            if str(persisted.get("skill_name") or "") == skill_name
-            else None
-        )
+        return persisted
     return next(
         (
             item
@@ -655,6 +844,7 @@ def prepare_experiment_job(
     )
     replay_case = {
         "case_id": str(dataset.get("dataset_id") or ""),
+        "dataset_id": str(dataset.get("dataset_id") or ""),
         "session_id": session_id,
         "turn_num": source.get("turn_num") or 1,
         "instruction": compose_experiment_instruction(dataset),
@@ -686,7 +876,10 @@ def prepare_experiment_job(
         },
         "materials": [dict(item) for item in materials],
         "evidence_window": str(source.get("evidence_window") or "lab"),
-        "dataset_format": "teamEvolver-skill-lab-v1",
+        "dataset_format": str(
+            dataset.get("dataset_format")
+            or "teamEvolver-skill-dataset-v1"
+        ),
     }
     return {
         "job_id": run_id,

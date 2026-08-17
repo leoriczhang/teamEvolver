@@ -35,7 +35,7 @@ def parse_openviking_key(value: str) -> tuple[str, str]:
 
 
 def build_dreamcycle_env(config: Any) -> tuple[dict[str, str], list[str]]:
-    """Build DreamCycle env: personal keys are sources, team key is target."""
+    """Build DreamCycle env for one authenticated user's maintained memory."""
     api_key = str(
         getattr(config, "sharing_viking_team_api_key", "")
         or getattr(config, "sharing_viking_api_key", "")
@@ -49,8 +49,11 @@ def build_dreamcycle_env(config: Any) -> tuple[dict[str, str], list[str]]:
     account = str(
         key_account or getattr(config, "sharing_viking_account", "") or ""
     ).strip()
-    team_user = key_user
+    agent_id = str(
+        key_user or getattr(config, "sharing_viking_user", "") or ""
+    ).strip()
     source_api_keys = collect_personal_source_keys(config)
+    source_users = collect_personal_source_users(config)
     llm_base_url = str(
         getattr(config, "dreamcycle_llm_base_url", "")
         or getattr(config, "llm_api_base", "")
@@ -72,7 +75,7 @@ def build_dreamcycle_env(config: Any) -> tuple[dict[str, str], list[str]]:
     for name, value in (
         ("sharing.viking_endpoint", endpoint),
         ("sharing.viking_team_api_key", api_key),
-        ("sharing.viking_team_api_key.user", team_user),
+        ("sharing.viking_team_api_key.user", agent_id),
         ("dreamcycle.llm_api_key", llm_api_key),
         ("dreamcycle.llm_model", llm_model),
     ):
@@ -85,14 +88,44 @@ def build_dreamcycle_env(config: Any) -> tuple[dict[str, str], list[str]]:
             "OPENVIKING_ENDPOINT": endpoint,
             "OPENVIKING_API_KEY": api_key,
             "OPENVIKING_ACCOUNT": account,
-            "OPENVIKING_TEAM_USER": team_user,
+            "OPENVIKING_AGENT_ID": agent_id,
             "OPENVIKING_SOURCE_API_KEYS": json.dumps(source_api_keys),
+            "OPENVIKING_SOURCE_USERS": json.dumps(source_users),
+            "OPENVIKING_CUSTOMER_ID": str(
+                getattr(config, "dreamcycle_customer_id", "") or ""
+            ),
             "OPENVIKING_AGENT": str(
                 getattr(config, "dreamcycle_viking_agent", "") or "dreamcycle"
             ),
             "DREAMCYCLE_LLM_BASE_URL": llm_base_url,
             "DREAMCYCLE_LLM_API_KEY": llm_api_key,
             "DREAMCYCLE_MODEL": llm_model,
+            "DREAMCYCLE_TEAM_NAME": str(
+                getattr(config, "team_display_name", "") or "Team"
+            ).strip(),
+            "DREAMCYCLE_EMBED_MODEL": str(
+                getattr(config, "dreamcycle_embed_model", "") or ""
+            ),
+            "DREAMCYCLE_EMBED_BASE_URL": str(
+                getattr(config, "dreamcycle_embed_base_url", "") or ""
+            ),
+            "DREAMCYCLE_EMBED_API_KEY": str(
+                getattr(config, "dreamcycle_embed_api_key", "") or ""
+            ),
+            "DREAMCYCLE_DEDUP_MERGE_THRESHOLD": str(
+                getattr(
+                    config,
+                    "dreamcycle_dedup_merge_threshold",
+                    0.86,
+                )
+            ),
+            "DREAMCYCLE_DEDUP_WARN_THRESHOLD": str(
+                getattr(
+                    config,
+                    "dreamcycle_dedup_warn_threshold",
+                    0.72,
+                )
+            ),
         }
     )
     return env, missing
@@ -137,6 +170,37 @@ def collect_personal_source_keys(config: Any) -> list[str]:
             key
             for raw in candidates
             if (key := str(raw or "").strip()) and key != team_key
+        )
+    )
+
+
+def collect_personal_source_users(config: Any) -> list[str]:
+    """Collect explicit personal namespaces for local/root-key deployments."""
+    candidates = [
+        str(getattr(config, "sharing_viking_personal_user", "") or "")
+    ]
+    registry_path = str(getattr(config, "users_registry_path", "") or "").strip()
+    path = (
+        Path(registry_path).expanduser()
+        if registry_path
+        else Path.home() / ".teamEvolver" / "users.json"
+    )
+    try:
+        registry = json.loads(path.read_text("utf-8"))
+        for user in registry.get("users") or []:
+            if not isinstance(user, dict):
+                continue
+            personal = user.get("personal_space")
+            if isinstance(personal, dict):
+                candidates.append(str(personal.get("viking_user") or ""))
+    except (FileNotFoundError, OSError, TypeError, ValueError):
+        pass
+    team_user = str(getattr(config, "sharing_viking_user", "") or "").strip()
+    return list(
+        dict.fromkeys(
+            user
+            for raw in candidates
+            if (user := str(raw or "").strip()) and user != team_user
         )
     )
 

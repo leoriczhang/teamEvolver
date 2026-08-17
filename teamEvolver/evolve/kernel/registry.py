@@ -29,6 +29,7 @@ class SkillIDRegistry:
 
     def __init__(self) -> None:
         self._map: dict[str, dict[str, Any]] = {}
+        self._dirty = False
 
     # -- persistence -------------------------------------------------- #
 
@@ -39,15 +40,69 @@ class SkillIDRegistry:
             raw = json.loads(data)
             if isinstance(raw, dict):
                 self._map = self._normalise(raw)
+                self._dirty = False
             logger.info("[SkillIDRegistry] loaded %d entries from storage", len(self._map))
         except Exception:
             logger.info("[SkillIDRegistry] no existing registry in storage — starting fresh")
 
     def save_to_oss(self, bucket, prefix: str) -> None:
+        if not self._dirty:
+            return
         key = f"{prefix}evolve_skill_registry.json"
-        content = json.dumps(self._map, ensure_ascii=False, indent=2)
-        bucket.put_object(key, content.encode("utf-8"))
+        if bool(getattr(bucket, "native_batch_write", False)):
+            _changed, precondition = self.merge_from_oss_snapshot(bucket, prefix)
+            bucket.batch_write(
+                {key: self.to_bytes()},
+                preconditions={key: precondition},
+                wait=True,
+                telemetry=True,
+            )
+        else:
+            bucket.put_object(key, self.to_bytes())
+        self.mark_persisted()
         logger.info("[SkillIDRegistry] saved %d entries to storage", len(self._map))
+
+    def to_bytes(self) -> bytes:
+        return json.dumps(self._map, ensure_ascii=False, indent=2).encode("utf-8")
+
+    def snapshot(self) -> dict[str, dict[str, Any]]:
+        return deepcopy(self._map)
+
+    def restore(
+        self,
+        snapshot: dict[str, dict[str, Any]],
+        *,
+        dirty: bool = True,
+    ) -> None:
+        self._map = deepcopy(snapshot)
+        self._dirty = dirty
+
+    @property
+    def dirty(self) -> bool:
+        return self._dirty
+
+    def mark_persisted(self) -> None:
+        self._dirty = False
+
+    def merge_from_oss_snapshot(
+        self,
+        bucket,
+        prefix: str,
+    ) -> tuple[int, dict[str, str]]:
+        """Merge one exact remote payload and return its matching CAS guard."""
+        key = f"{prefix}evolve_skill_registry.json"
+        try:
+            raw_bytes = bucket.get_object(key).read()
+        except FileNotFoundError:
+            return 0, {"kind": "create_if_absent"}
+        raw = json.loads(raw_bytes.decode("utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("skill registry must be a JSON object")
+        changed = self._merge_raw(raw)
+        return changed, {
+            "kind": "replace_if_hash",
+            "base_hash": "sha256:" + hashlib.sha256(raw_bytes).hexdigest(),
+        }
 
     def merge_from_oss(self, bucket, prefix: str) -> int:
         """Adopt externally-seeded registry entries from storage into memory.
@@ -69,6 +124,9 @@ class SkillIDRegistry:
             return 0
         if not isinstance(raw, dict):
             return 0
+        return self._merge_raw(raw)
+
+    def _merge_raw(self, raw: dict[str, Any]) -> int:
         incoming = self._normalise(raw)
         changed = 0
         for name, entry in incoming.items():
@@ -126,6 +184,7 @@ class SkillIDRegistry:
             "content_sha": "",
             "history": [],
         }
+        self._dirty = True
         return sid
 
     def get(self, skill_name: str) -> Optional[str]:
@@ -186,6 +245,7 @@ class SkillIDRegistry:
         if len(history) > 20:
             entry["history"] = history[-20:]
 
+        self._dirty = True
         return new_version
 
     def record_rollback(

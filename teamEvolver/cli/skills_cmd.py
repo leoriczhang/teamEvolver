@@ -15,9 +15,7 @@ def _sharing_backend(cfg) -> str:
         or str(getattr(cfg, "sharing_backend", "") or "").strip().lower()
     )
     if backend:
-        return backend
-    if getattr(cfg, "sharing_local_root", ""):
-        return "local"
+        return "viking"
     if getattr(cfg, "sharing_viking_endpoint", ""):
         return "viking"
     return ""
@@ -28,17 +26,16 @@ def _sharing_target(cfg) -> str:
     agent = str(getattr(cfg, "sharing_viking_agent_id", "") or "default")
     customer = str(getattr(cfg, "sharing_viking_customer_id", "") or "")
     group = f"{agent}/peers/{customer}" if customer else agent
-    if backend == "local":
-        return f"local storage ({cfg.sharing_local_root}/{group})"
     if backend == "viking":
         endpoint = getattr(cfg, "sharing_viking_endpoint", "")
+        deployment = str(getattr(cfg, "sharing_viking_deployment", "") or "cloud")
         # Wire constant: OpenViking namespace root, part of the shared data
         # Shared contract with AgentsHub and the evolve server.
         root_prefix = (
             getattr(cfg, "sharing_viking_root_prefix", "")
             or "team-skill-evolver"
         )
-        return f"viking storage (resources/{root_prefix} @ {endpoint})"
+        return f"OpenViking ({deployment}) storage (resources/{root_prefix} @ {endpoint})"
     return f"{backend} storage ({group})"
 
 
@@ -51,17 +48,17 @@ def _require_sharing(cs: ConfigStore):
             "Run 'teamEvolver config sharing.enabled true' to configure."
         )
     backend = _sharing_backend(cfg)
-    if backend == "local":
-        if not cfg.sharing_local_root:
-            raise click.ClickException("Local sharing backend is not configured. Set sharing.local_root first.")
-    elif backend == "viking":
+    if backend == "viking":
         if not cfg.sharing_viking_endpoint:
             raise click.ClickException(
-                "OpenViking sharing backend is not configured. Set sharing.viking_endpoint first."
+                "OpenViking sharing backend is not configured. "
+                "Set sharing.viking_deployment (cloud or local) or "
+                "sharing.viking_endpoint first."
             )
     else:
         raise click.ClickException(
-            "Sharing backend is not configured. Set sharing.backend to local or viking."
+            "Sharing backend is not configured. "
+            "Set sharing.viking_deployment to cloud or local."
         )
     from ..skills.hub import SkillHub
 

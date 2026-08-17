@@ -7,8 +7,8 @@ require a real OpenViking server.  Covers:
   (``viking://resources/{root_prefix}/...``, with an optional ``{group_id}``)
 - ``put_object`` via ``POST /api/v1/content/write`` with the
   replace -> create -> append write strategy
-- ``get_object`` via ``GET /api/v1/content/read``
-- binary payload base64 fallback
+- ``get_object`` via raw ``GET /api/v1/content/download``
+- binary payloads via one-operation ``content/batch-write``
 - ``delete_object`` via ``DELETE /api/v1/fs``
 - ``iter_objects`` via recursive ``GET /api/v1/fs/ls``
 - ``build_object_store`` routes ``backend="viking"`` and aliases
@@ -33,10 +33,17 @@ from teamEvolver.storage import (
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int = 200, payload: Any = None, text: str = ""):
+    def __init__(
+        self,
+        status_code: int = 200,
+        payload: Any = None,
+        text: str = "",
+        content: bytes | None = None,
+    ):
         self.status_code = status_code
         self._payload = payload if payload is not None else {}
         self.text = text or ""
+        self.content = content if content is not None else self.text.encode("utf-8")
 
     def json(self) -> Any:
         if isinstance(self._payload, Exception):
@@ -147,13 +154,26 @@ def test_put_object_writes_utf8_content_and_uri() -> None:
 
 
 def test_put_object_falls_back_to_base64_for_binary_payload() -> None:
-    store, fake = _make_store(handler=lambda call: _FakeResponse(200, {"status": "ok"}))
+    def handler(call: dict) -> _FakeResponse:
+        if call["url"].endswith("/api/v1/content/download"):
+            return _FakeResponse(
+                404,
+                {"error": {"code": "NOT_FOUND", "message": "missing"}},
+            )
+        if call["url"].endswith("/api/v1/fs/mkdir"):
+            return _FakeResponse(200, {"status": "ok", "result": {}})
+        return _FakeResponse(
+            200,
+            {"status": "ok", "result": {"created": [], "updated": []}},
+        )
+
+    store, fake = _make_store(handler=handler)
     binary = b"\xff\xfe\x80\x81\x82\x83"
     store.put_object("blobs/x.bin", binary)
 
-    body = fake.calls[0]["json"]
-    assert body["encoding"] == "base64"
-    assert base64.b64decode(body["content"]) == binary
+    body = fake.calls[-1]["json"]
+    assert fake.calls[-1]["url"].endswith("/api/v1/content/batch-write")
+    assert base64.b64decode(body["operations"][0]["content_base64"]) == binary
 
 
 def test_put_object_falls_back_to_create_when_replace_misses() -> None:
@@ -195,14 +215,108 @@ def test_put_object_falls_back_to_append_for_restricted_extension() -> None:
     assert [c["json"]["mode"] for c in fake.calls] == ["replace", "create", "append"]
 
 
-def test_get_object_reads_string_result() -> None:
+def test_batch_write_sends_conditional_text_and_binary_operations() -> None:
     def handler(call: dict) -> _FakeResponse:
-        assert call["url"].endswith("/api/v1/content/read")
+        if call["url"].endswith("/api/v1/fs/mkdir"):
+            return _FakeResponse(200, {"status": "ok", "result": {}})
+        assert call["url"].endswith("/api/v1/content/batch-write")
+        return _FakeResponse(
+            200,
+            {
+                "status": "ok",
+                "result": {
+                    "created": ["viking://resources/teamEvolver/skills/demo/SKILL.md"],
+                    "updated": [],
+                    "unchanged": [],
+                    "queue_status": {"Semantic": {"error_count": 0}},
+                },
+                "telemetry": {"id": "telemetry-1"},
+            },
+        )
+
+    store, fake = _make_store(handler=handler)
+    result = store.batch_write(
+        {
+            "skills/demo/SKILL.md": b"# Demo\n",
+            "skills/demo/files/icon.bin": b"\xff\x00",
+        },
+        preconditions={
+            "skills/demo/SKILL.md": {"kind": "create_if_absent"},
+            "skills/demo/files/icon.bin": {
+                "kind": "replace_if_hash",
+                "base_hash": "sha256:" + "a" * 64,
+            },
+        },
+    )
+
+    assert result["queue_status"]["Semantic"]["error_count"] == 0
+    assert result["telemetry"] == {"id": "telemetry-1"}
+    assert len(fake.calls) == 2
+    payload = fake.calls[1]["json"]
+    assert payload["root_uri"] == "viking://resources/teamEvolver"
+    assert payload["wait"] is True
+    assert payload["telemetry"] is True
+    operations = {item["uri"]: item for item in payload["operations"]}
+    text_op = operations["viking://resources/teamEvolver/skills/demo/SKILL.md"]
+    binary_op = operations["viking://resources/teamEvolver/skills/demo/files/icon.bin"]
+    assert text_op["content"] == "# Demo\n"
+    assert text_op["precondition"] == {"kind": "create_if_absent"}
+    assert base64.b64decode(binary_op["content_base64"]) == b"\xff\x00"
+    assert binary_op["precondition"]["kind"] == "replace_if_hash"
+
+
+def test_batch_write_captures_existing_object_hash() -> None:
+    import hashlib
+
+    old = b"old content"
+
+    def handler(call: dict) -> _FakeResponse:
+        if call["url"].endswith("/api/v1/content/download"):
+            return _FakeResponse(200, content=old)
+        if call["url"].endswith("/api/v1/fs/mkdir"):
+            return _FakeResponse(200, {"status": "ok", "result": {}})
+        return _FakeResponse(
+            200,
+            {"status": "ok", "result": {"created": [], "updated": [], "unchanged": []}},
+        )
+
+    store, fake = _make_store(handler=handler)
+    store.batch_write({"manifest.json": b"new content"})
+
+    operation = fake.calls[-1]["json"]["operations"][0]
+    assert operation["precondition"] == {
+        "kind": "replace_if_hash",
+        "base_hash": "sha256:" + hashlib.sha256(old).hexdigest(),
+    }
+
+
+def test_batch_write_propagates_conflict_without_fallback() -> None:
+    def handler(call: dict) -> _FakeResponse:
+        if call["url"].endswith("/api/v1/fs/mkdir"):
+            return _FakeResponse(200, {"status": "ok", "result": {}})
+        return _FakeResponse(
+            409,
+            {"error": {"code": "CONFLICT", "message": "content hash changed"}},
+        )
+
+    store, fake = _make_store(handler=handler)
+    with pytest.raises(RuntimeError, match="CONFLICT"):
+        store.batch_write(
+            {"manifest.json": b"new"},
+            preconditions={"manifest.json": {"kind": "create_if_absent"}},
+        )
+
+    assert len(fake.calls) == 2
+
+
+def test_get_object_downloads_raw_text() -> None:
+    def handler(call: dict) -> _FakeResponse:
+        assert call["url"].endswith("/api/v1/content/download")
         assert (
             call["params"]["uri"]
             == "viking://resources/teamEvolver/peers/cust-a/sessions/foo.json"
         )
-        return _FakeResponse(200, {"status": "ok", "result": '{"x":1}'})
+        return _FakeResponse(200, content=b'{"x":1}')
 
     store, _ = _make_store(handler=handler)
     obj = store.get_object("peers/cust-a/sessions/foo.json")
@@ -210,13 +324,13 @@ def test_get_object_reads_string_result() -> None:
     assert obj.read() == b'{"x":1}'
 
 
-def test_get_object_reads_dict_result_with_content_field() -> None:
+def test_get_object_downloads_raw_binary() -> None:
     def handler(call: dict) -> _FakeResponse:
         del call
-        return _FakeResponse(200, {"status": "ok", "result": {"content": "payload-text"}})
+        return _FakeResponse(200, content=b"\xff\x00")
 
     store, _ = _make_store(handler=handler)
-    assert store.get_object("k").read() == b"payload-text"
+    assert store.get_object("k").read() == b"\xff\x00"
 
 
 def test_get_object_translates_not_found_into_filenotfounderror() -> None:

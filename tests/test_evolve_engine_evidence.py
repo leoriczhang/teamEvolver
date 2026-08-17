@@ -141,10 +141,10 @@ def test_evaluation_profile_is_visible_to_planner_and_replay(
     )
     server = EvolveServer(
         EvolveServerConfig(
-            storage_backend="local",
-            local_root=str(tmp_path),
             llm_api_key="test-key",
-        )
+        ),
+        mock=True,
+        mock_root=str(tmp_path),
     )
     persisted_evidence = server._build_validation_evidence([session])
 
@@ -180,10 +180,10 @@ async def test_open_candidate_is_used_as_next_evolution_draft(
 ) -> None:
     server = EvolveServer(
         EvolveServerConfig(
-            storage_backend="local",
-            local_root=str(tmp_path),
             llm_api_key="test-key",
-        )
+        ),
+        mock=True,
+        mock_root=str(tmp_path),
     )
     server._validation_store.save_job(
         {
@@ -220,10 +220,10 @@ def test_candidate_audit_is_excluded_from_true_replay_cases(
 ) -> None:
     server = EvolveServer(
         EvolveServerConfig(
-            storage_backend="local",
-            local_root=str(tmp_path),
             llm_api_key="test-key",
-        )
+        ),
+        mock=True,
+        mock_root=str(tmp_path),
     )
     cases = server._build_replay_cases(
         [
@@ -263,10 +263,10 @@ async def test_true_replay_subprocess_receives_parent_job_file(
 ) -> None:
     server = EvolveServer(
         EvolveServerConfig(
-            storage_backend="local",
-            local_root=str(tmp_path),
             llm_api_key="test-key",
-        )
+        ),
+        mock=True,
+        mock_root=str(tmp_path),
     )
     job = {
         "job_id": "job-1",

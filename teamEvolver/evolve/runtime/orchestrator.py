@@ -13,6 +13,7 @@ Active flow:
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -25,6 +26,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from ...dataset_store import (
+    SkillDatasetStore,
+    dataset_material_integrity,
+)
+from ...dataset_synthesizer import (
+    DATASET_FORMAT,
+    SynthesizedDatasetStore,
+    checklist_items,
+    dataset_to_replay_case,
+    flatten_requirements,
+    synthesize_evolution_datasets,
+)
+from ...progressive_replay import (
+    aggregate_case_checklists,
+    progressive_replay_decision,
+    select_replay_cases,
+)
 from ...skills.bundle import (
     attach_bundle_payload,
     bundle_entrypoint_text,
@@ -32,21 +50,15 @@ from ...skills.bundle import (
     bundle_tree_sha256,
     candidate_skill_bundle,
 )
-from ...dataset_synthesizer import (
-    SynthesizedDatasetStore,
-    dataset_to_replay_case,
-    synthesize_evolution_datasets,
-)
-from ...storage import LocalObjectStore, build_object_store, is_not_found_error
+from ...storage import InMemoryObjectStore, build_object_store, is_not_found_error
 from ...validation import ValidationStore
 from ...validation.bundle_checks import validate_candidate_bundle
-
-from ..kernel.enums import NO_SKILL_KEY, DecisionAction
 from ..kernel.bundle_changes import (
     BundleChangeError,
     materialize_bundle_changes,
     select_editable_files,
 )
+from ..kernel.enums import NO_SKILL_KEY, DecisionAction
 from ..kernel.helpers import build_skill_md, parse_skill_content
 from ..kernel.llm import AsyncLLMClient
 from ..kernel.registry import SkillIDRegistry
@@ -61,6 +73,7 @@ from ..stages.execute import (
 from ..stages.judge import judge_sessions_parallel
 from ..stages.summarize import set_summarizer_debug_dir, summarize_sessions_parallel
 from ..store.object_store import (
+    build_bundle_record,
     delete_session_keys,
     fetch_skill_bundle,
     fetch_skill_content,
@@ -68,17 +81,14 @@ from ..store.object_store import (
     list_session_keys,
     list_skill_versions,
     load_manifest,
+    load_manifest_snapshot,
+    publish_skill_bundle_batch,
     read_json_object,
     save_active_bundle,
     save_manifest,
     save_version_bundle,
 )
 from .evidence import SkillEvidenceStore, is_candidate_audit_session
-from ...progressive_replay import (
-    aggregate_case_checklists,
-    progressive_replay_decision,
-    select_replay_cases,
-)
 from .mixins import EvolveEngineMixin
 
 logger = logging.getLogger(__name__)
@@ -164,13 +174,12 @@ class EvolveServer(EvolveEngineMixin):
         if mock:
             if not mock_root:
                 raise ValueError("mock mode requires mock_root")
-            return LocalObjectStore(mock_root)
+            return InMemoryObjectStore(mock_root)
         backend_normalized = str(config.storage_backend or "").strip().lower()
         if backend_normalized == "viking":
             return build_object_store(
                 backend="viking",
                 endpoint=getattr(config, "viking_endpoint", "") or config.storage_endpoint,
-                local_root="",
                 viking_account=getattr(config, "viking_account", "") or "default",
                 viking_user=getattr(config, "viking_user", "") or "default",
                 viking_agent=getattr(config, "viking_agent", "") or "team-skill-evolver",
@@ -234,8 +243,14 @@ class EvolveServer(EvolveEngineMixin):
         evolution_context: Optional[dict[str, Any]],
         replay_windows: Optional[dict[str, list[dict[str, Any]]]],
     ) -> list[dict[str, Any]]:
-        if not self.config.dataset_synthesis_enabled:
-            return []
+        target_count = max(1, min(6, int(self.config.dataset_test_cases or 2)))
+        managed = await self._call_storage(
+            self._managed_evolution_datasets,
+            skill_name,
+            target_count,
+        )
+        if not self.config.dataset_synthesis_enabled or len(managed) >= target_count:
+            return managed
         synthesis_skill = {
             **candidate_skill,
             "_evidence_classification": (
@@ -251,18 +266,105 @@ class EvolveServer(EvolveEngineMixin):
             candidate_skill=synthesis_skill,
             evidence_context=evolution_context or {},
             replay_windows=replay_windows or {},
-            case_count=self.config.dataset_test_cases,
+            case_count=target_count - len(managed),
             min_requirements=self.config.dataset_min_requirements,
             max_requirements=self.config.dataset_max_requirements,
             batch_size=self.config.dataset_disclosure_batch_size,
         )
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for dataset in [*managed, *datasets]:
+            dataset_id = str(dataset.get("dataset_id") or "")
+            if not dataset_id or dataset_id in seen:
+                continue
+            seen.add(dataset_id)
+            merged.append(dataset)
         logger.info(
-            "[DatasetSynthesizer] skill=%s sessions=%d generated=%d",
+            "[DatasetSynthesizer] skill=%s sessions=%d managed=%d generated=%d",
             skill_name,
             len(sessions),
+            len(managed),
             len(datasets),
         )
-        return datasets
+        return merged[:target_count]
+
+    def _managed_evolution_datasets(
+        self,
+        skill_name: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Load explicitly pinned Skill datasets for candidate replay."""
+        store = SkillDatasetStore(
+            self._skill_bucket,
+            prefix=self._skill_prefix,
+        )
+        selected: list[dict[str, Any]] = []
+        for raw in store.list_datasets(skill_name=skill_name):
+            if not bool(raw.get("enabled_for_evolution")):
+                continue
+            available_paths = store.available_material_paths(raw)
+            integrity = dataset_material_integrity(
+                raw,
+                available_paths=available_paths,
+            )
+            if not integrity["complete"]:
+                logger.warning(
+                    "[DatasetStore] skip incomplete fixed regression "
+                    "skill=%s dataset=%s missing=%s",
+                    skill_name,
+                    raw.get("dataset_id"),
+                    integrity["missing_paths"],
+                )
+                continue
+            requirements = flatten_requirements(raw.get("requirements"))
+            trajectory = flatten_requirements(
+                raw.get("trajectory_requirements")
+            )
+            if not requirements and not trajectory:
+                continue
+            source = (
+                raw.get("source")
+                if isinstance(raw.get("source"), dict)
+                else {}
+            )
+            source_session_ids = [
+                str(item or "")
+                for item in source.get("source_session_ids") or []
+                if str(item or "")
+            ]
+            session_id = str(source.get("session_id") or "")
+            if session_id and session_id not in source_session_ids:
+                source_session_ids.insert(0, session_id)
+            materials = []
+            for rel_path, data in store.read_materials(raw):
+                materials.append(
+                    {
+                        "path": rel_path,
+                        "size": len(data),
+                        "content_b64": base64.b64encode(data).decode("ascii"),
+                    }
+                )
+            selected.append(
+                {
+                    **raw,
+                    "dataset_format": str(
+                        raw.get("dataset_format") or DATASET_FORMAT
+                    ),
+                    "requirements": requirements,
+                    "trajectory_requirements": trajectory,
+                    "checklist": checklist_items(requirements, trajectory),
+                    "source_session_ids": source_session_ids,
+                    "evidence_window": str(
+                        raw.get("evidence_window")
+                        or source.get("evidence_window")
+                        or "historical"
+                    ),
+                    "materials": materials,
+                }
+            )
+            if len(selected) >= max(1, int(limit or 1)):
+                break
+        return selected
 
     def _candidate_validation_feedback(
         self,
@@ -501,13 +603,42 @@ class EvolveServer(EvolveEngineMixin):
         if not name:
             return "skipped_missing_name"
 
+        native_batch = bool(getattr(self._skill_bucket, "native_batch_write", False))
+        fixed_preconditions: dict[str, dict[str, str]] = {}
+        if native_batch:
+            _merged, registry_precondition = (
+                self._id_registry.merge_from_oss_snapshot(
+                    self._skill_bucket,
+                    self._skill_prefix,
+                )
+            )
+            fixed_preconditions[
+                f"{self._skill_prefix}evolve_skill_registry.json"
+            ] = registry_precondition
+        registry_snapshot = self._id_registry.snapshot()
+        registry_was_dirty = self._id_registry.dirty
+        if native_batch:
+            manifest, manifest_precondition = load_manifest_snapshot(
+                self._skill_bucket,
+                self._skill_prefix,
+            )
+            fixed_preconditions[f"{self._skill_prefix}manifest.json"] = (
+                manifest_precondition
+            )
+        else:
+            manifest = self._load_remote_skills()
+
         skill_id = self._id_registry.get_or_create(name)
         bundle = candidate_skill_bundle(skill)
-        bundle_record = save_active_bundle(
-            self._skill_bucket,
-            self._skill_prefix,
-            name,
-            bundle,
+        bundle_record = (
+            build_bundle_record(bundle)
+            if native_batch
+            else save_active_bundle(
+                self._skill_bucket,
+                self._skill_prefix,
+                name,
+                bundle,
+            )
         )
         md_bytes = bundle["SKILL.md"]
         content_sha = hashlib.sha256(md_bytes).hexdigest()
@@ -518,15 +649,6 @@ class EvolveServer(EvolveEngineMixin):
             action=action,
             bundle_record=bundle_record,
         )
-        save_version_bundle(
-            self._skill_bucket,
-            self._skill_prefix,
-            name,
-            version,
-            bundle,
-        )
-
-        manifest = self._load_remote_skills()
         manifest[name] = {
             "name": name,
             "skill_id": skill_id,
@@ -541,7 +663,34 @@ class EvolveServer(EvolveEngineMixin):
             "description": skill.get("description", ""),
             "category": skill.get("category", "general"),
         }
-        save_manifest(self._skill_bucket, self._skill_prefix, manifest)
+        try:
+            if native_batch:
+                publish_skill_bundle_batch(
+                    self._skill_bucket,
+                    self._skill_prefix,
+                    name,
+                    version,
+                    bundle,
+                    manifest=manifest,
+                    registry_bytes=self._id_registry.to_bytes(),
+                    fixed_preconditions=fixed_preconditions,
+                )
+                self._id_registry.mark_persisted()
+            else:
+                save_version_bundle(
+                    self._skill_bucket,
+                    self._skill_prefix,
+                    name,
+                    version,
+                    bundle,
+                )
+                save_manifest(self._skill_bucket, self._skill_prefix, manifest)
+        except Exception:
+            self._id_registry.restore(
+                registry_snapshot,
+                dirty=registry_was_dirty,
+            )
+            raise
         logger.info(
             "[EvolveServer] uploaded skill %s (id=%s, v%d) to %s",
             name,
@@ -585,14 +734,41 @@ class EvolveServer(EvolveEngineMixin):
                 "available_versions": available,
             }
 
+        native_batch = bool(getattr(self._skill_bucket, "native_batch_write", False))
+        fixed_preconditions: dict[str, dict[str, str]] = {}
+        if native_batch:
+            _merged, registry_precondition = (
+                self._id_registry.merge_from_oss_snapshot(
+                    self._skill_bucket,
+                    self._skill_prefix,
+                )
+            )
+            fixed_preconditions[
+                f"{self._skill_prefix}evolve_skill_registry.json"
+            ] = registry_precondition
+            manifest, manifest_precondition = load_manifest_snapshot(
+                self._skill_bucket,
+                self._skill_prefix,
+            )
+            fixed_preconditions[f"{self._skill_prefix}manifest.json"] = (
+                manifest_precondition
+            )
+        else:
+            manifest = self._load_remote_skills()
+        registry_snapshot = self._id_registry.snapshot()
+        registry_was_dirty = self._id_registry.dirty
         skill_id = self._id_registry.get_or_create(name)
         from_version = self._id_registry.get_version(name)
 
-        bundle_record = save_active_bundle(
-            self._skill_bucket,
-            self._skill_prefix,
-            name,
-            bundle,
+        bundle_record = (
+            build_bundle_record(bundle)
+            if native_batch
+            else save_active_bundle(
+                self._skill_bucket,
+                self._skill_prefix,
+                name,
+                bundle,
+            )
         )
         content_sha = hashlib.sha256(md_bytes).hexdigest()
         tree_sha = str(bundle_record["tree_sha256"])
@@ -602,15 +778,6 @@ class EvolveServer(EvolveEngineMixin):
             target_version,
             bundle_record=bundle_record,
         )
-        save_version_bundle(
-            self._skill_bucket,
-            self._skill_prefix,
-            name,
-            new_version,
-            bundle,
-        )
-
-        manifest = self._load_remote_skills()
         existing = manifest.get(name, {})
         parsed = parse_skill_content(name, md_bytes.decode("utf-8"))
         manifest[name] = {
@@ -627,8 +794,38 @@ class EvolveServer(EvolveEngineMixin):
             "description": parsed.get("description") or existing.get("description", ""),
             "category": parsed.get("category") or existing.get("category", "general"),
         }
-        save_manifest(self._skill_bucket, self._skill_prefix, manifest)
-        self._id_registry.save_to_oss(self._skill_bucket, self._skill_prefix)
+        try:
+            if native_batch:
+                publish_skill_bundle_batch(
+                    self._skill_bucket,
+                    self._skill_prefix,
+                    name,
+                    new_version,
+                    bundle,
+                    manifest=manifest,
+                    registry_bytes=self._id_registry.to_bytes(),
+                    fixed_preconditions=fixed_preconditions,
+                )
+                self._id_registry.mark_persisted()
+            else:
+                save_version_bundle(
+                    self._skill_bucket,
+                    self._skill_prefix,
+                    name,
+                    new_version,
+                    bundle,
+                )
+                save_manifest(self._skill_bucket, self._skill_prefix, manifest)
+                self._id_registry.save_to_oss(
+                    self._skill_bucket,
+                    self._skill_prefix,
+                )
+        except Exception:
+            self._id_registry.restore(
+                registry_snapshot,
+                dirty=registry_was_dirty,
+            )
+            raise
         logger.info(
             "[EvolveServer] rolled back skill '%s' from v%d to v%d (new v%d)",
             name,
@@ -1146,6 +1343,12 @@ class EvolveServer(EvolveEngineMixin):
             for session in sessions
             if str(session.get("session_id") or "").strip()
         ]
+        source_sessions = {
+            str(session.get("session_id") or ""): session
+            for session in sessions
+            if isinstance(session, dict)
+            and str(session.get("session_id") or "").strip()
+        }
         current_evidence = self._build_validation_evidence(sessions)
         normalized_windows: dict[str, list[dict[str, Any]]] = {}
         synthesized = [
@@ -1157,6 +1360,36 @@ class EvolveServer(EvolveEngineMixin):
             normalized_windows = {"recent": [], "historical": []}
             for dataset in synthesized:
                 case = dataset_to_replay_case(dataset)
+                source_session = source_sessions.get(
+                    str(case.get("session_id") or "")
+                )
+                if isinstance(source_session, dict):
+                    case["source_runtime"] = (
+                        dict(source_session.get("runtime"))
+                        if isinstance(source_session.get("runtime"), dict)
+                        else {}
+                    )
+                    runtime_context = (
+                        source_session.get("runtime_context")
+                        if isinstance(source_session.get("runtime_context"), dict)
+                        else {}
+                    )
+                    case["source_runtime_context"] = {
+                        key: runtime_context.get(key)
+                        for key in (
+                            "tenant_id",
+                            "user_id",
+                            "username",
+                            "external_subject",
+                            "agent_id",
+                            "environment_id",
+                            "source_session_id",
+                            "model_config_id",
+                            "evaluation_profile",
+                            "profile_id",
+                        )
+                        if runtime_context.get(key) not in (None, "")
+                    }
                 window = str(case.get("evidence_window") or "recent")
                 if window not in normalized_windows:
                     window = "recent"
@@ -2373,8 +2606,6 @@ class EvolveServer(EvolveEngineMixin):
         group_id = str(getattr(self.config, "viking_group_id", "") or "")
         if backend == "viking":
             namespace = f"viking://resources/{root_prefix}/" + (f"{group_id}/" if group_id else "")
-        elif backend == "local":
-            namespace = str(self.config.local_root or "")
         else:
             namespace = ""
         reachable = await self._call_storage(self._probe_storage_reachable)
@@ -2924,6 +3155,11 @@ class EvolveServer(EvolveEngineMixin):
                     "tool_errors": turn.get("tool_errors") or [],
                     "metrics": turn.get("metrics") or {},
                     "prm_score": turn.get("prm_score"),
+                    "context_usage": (
+                        dict(turn.get("context_usage"))
+                        if isinstance(turn.get("context_usage"), dict)
+                        else {}
+                    ),
                 }
             )
 
@@ -2931,6 +3167,8 @@ class EvolveServer(EvolveEngineMixin):
             datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
         )
         normalized = {
+            "schema_version": str(payload.get("schema_version") or ""),
+            "protocol_version": str(payload.get("protocol_version") or ""),
             "session_id": session_id,
             "timestamp": timestamp,
             "user_alias": user_alias,
@@ -2951,6 +3189,21 @@ class EvolveServer(EvolveEngineMixin):
             "metrics": payload.get("metrics") or {},
             "source": str(payload.get("source") or ""),
             "model": str(payload.get("model") or ""),
+            "runtime": (
+                dict(payload.get("runtime"))
+                if isinstance(payload.get("runtime"), dict)
+                else {}
+            ),
+            "runtime_context": (
+                dict(payload.get("runtime_context"))
+                if isinstance(payload.get("runtime_context"), dict)
+                else {}
+            ),
+            "source_materials": [
+                dict(item)
+                for item in payload.get("source_materials") or []
+                if isinstance(item, dict) and item.get("path")
+            ],
         }
         # Preserve a caller-supplied conversation title so the ledger / 会话历史
         # can show it verbatim instead of falling back to the first prompt.
@@ -3129,9 +3382,10 @@ class EvolveServer(EvolveEngineMixin):
 
         The queue object ``sessions/{id}.json`` is removed once a cycle drains
         it, which would otherwise make the conversation content unrecoverable.
-        We snapshot only the human-meaningful fields (turns + core metadata) so
-        the dashboard can show "what was said" even after consumption. Archiving
-        is best-effort: a failure here must never block the drain.
+        Runtime identity, sandbox snapshot references, and embedded source
+        materials are retained so later dataset synthesis and True Replay can
+        reconstruct uploaded inputs. Archiving is best-effort: a failure here
+        must never block the drain.
         """
         for session in sessions:
             if not isinstance(session, dict):
@@ -3157,8 +3411,15 @@ class EvolveServer(EvolveEngineMixin):
                     "injected_skills": turn.get("injected_skills") or [],
                     "modified_skills": turn.get("modified_skills") or [],
                     "metrics": turn.get("metrics") or {},
+                    "context_usage": (
+                        dict(turn.get("context_usage"))
+                        if isinstance(turn.get("context_usage"), dict)
+                        else {}
+                    ),
                 })
             archived = {
+                "schema_version": session.get("schema_version") or "",
+                "protocol_version": session.get("protocol_version") or "",
                 "session_id": sid,
                 "timestamp": session.get("timestamp") or "",
                 "user_alias": session.get("user_alias") or "",
@@ -3172,6 +3433,21 @@ class EvolveServer(EvolveEngineMixin):
                 "metrics": session.get("metrics") or {},
                 "source": session.get("source") or "",
                 "model": session.get("model") or "",
+                "runtime": (
+                    dict(session.get("runtime"))
+                    if isinstance(session.get("runtime"), dict)
+                    else {}
+                ),
+                "runtime_context": (
+                    dict(session.get("runtime_context"))
+                    if isinstance(session.get("runtime_context"), dict)
+                    else {}
+                ),
+                "source_materials": [
+                    dict(item)
+                    for item in session.get("source_materials") or []
+                    if isinstance(item, dict) and item.get("path")
+                ],
             }
             try:
                 self._bucket.put_object(

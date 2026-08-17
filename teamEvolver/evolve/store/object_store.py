@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from typing import Any, Optional
@@ -71,6 +72,42 @@ def load_manifest(bucket, prefix: str) -> dict[str, dict[str, Any]]:
         except json.JSONDecodeError:
             continue
     return skills
+
+
+def load_manifest_snapshot(
+    bucket,
+    prefix: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    """Read a manifest and the exact CAS precondition for that same payload."""
+    key = f"{prefix}manifest.json"
+    try:
+        raw = bucket.get_object(key).read()
+    except FileNotFoundError:
+        return {}, {"kind": "create_if_absent"}
+
+    manifest: dict[str, dict[str, Any]] = {}
+    for line in raw.decode("utf-8").strip().splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        name = str(record.get("name") or "") if isinstance(record, dict) else ""
+        if name:
+            manifest[name] = record
+    return manifest, {
+        "kind": "replace_if_hash",
+        "base_hash": "sha256:" + hashlib.sha256(raw).hexdigest(),
+    }
+
+
+def serialize_manifest(manifest: dict[str, dict[str, Any]]) -> bytes:
+    newline = bytes([10])
+    return b"".join(
+        json.dumps(record, ensure_ascii=False).encode("utf-8") + newline
+        for record in manifest.values()
+    )
 
 
 def save_manifest(bucket, prefix: str, manifest: dict[str, dict[str, Any]]) -> None:
@@ -203,6 +240,81 @@ def skill_version_bundle_key(prefix: str, skill_name: str, version: int, rel_pat
 
 def skill_version_record_key(prefix: str, skill_name: str, version: int) -> str:
     return f"{skill_version_prefix(prefix, skill_name, version)}bundle.json"
+
+
+def build_bundle_record(bundle_files: dict[str, bytes]) -> dict[str, Any]:
+    bundle = coerce_skill_bundle(bundle_files)
+    return {
+        "format": "bundle_v1",
+        "entrypoint": "SKILL.md",
+        "tree_sha256": bundle_tree_sha256(bundle),
+        "files": bundle_file_records(bundle),
+    }
+
+
+def publish_skill_bundle_batch(
+    bucket,
+    prefix: str,
+    skill_name: str,
+    version: int,
+    bundle_files: dict[str, bytes],
+    *,
+    manifest: dict[str, dict[str, Any]],
+    registry_bytes: bytes,
+    fixed_preconditions: Optional[dict[str, dict[str, str]]] = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Conditionally publish the live bundle, version, manifest, and registry."""
+    if not bool(getattr(bucket, "native_batch_write", False)):
+        raise TypeError("bucket does not support native batch_write")
+
+    bundle = coerce_skill_bundle(bundle_files)
+    record = build_bundle_record(bundle)
+    objects: dict[str, bytes] = {}
+    live_keys: set[str] = set()
+    version_keys: set[str] = set()
+    for rel_path, data in sorted(bundle.items()):
+        live_key = active_skill_bundle_key(prefix, skill_name, rel_path)
+        version_key = skill_version_bundle_key(prefix, skill_name, version, rel_path)
+        live_keys.add(live_key)
+        version_keys.add(version_key)
+        objects[live_key] = data
+        objects[version_key] = data
+
+    version_record_key = skill_version_record_key(prefix, skill_name, version)
+    manifest_key = f"{prefix}manifest.json"
+    registry_key = f"{prefix}evolve_skill_registry.json"
+    objects[version_record_key] = json.dumps(
+        record,
+        ensure_ascii=False,
+        indent=2,
+    ).encode("utf-8")
+    objects[manifest_key] = serialize_manifest(manifest)
+    objects[registry_key] = registry_bytes
+
+    if len(objects) > 256:
+        raise ValueError(
+            "skill bundle is too large for one OpenViking batch-write; "
+            "reduce the bundle below 127 files"
+        )
+    preconditions = {key: bucket.object_precondition(key) for key in objects}
+    preconditions.update(fixed_preconditions or {})
+    result = bucket.batch_write(
+        objects,
+        preconditions=preconditions,
+        wait=True,
+        telemetry=True,
+    )
+
+    for key in list_object_keys(bucket, f"{prefix}skills/{skill_name}/files/"):
+        if key not in live_keys:
+            bucket.delete_object(key)
+    for key in list_object_keys(
+        bucket,
+        f"{skill_version_prefix(prefix, skill_name, version)}files/",
+    ):
+        if key not in version_keys:
+            bucket.delete_object(key)
+    return record, result
 
 
 def list_skill_versions(bucket, prefix: str, skill_name: str) -> list[int]:

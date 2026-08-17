@@ -561,6 +561,20 @@ def _effective_system(stage_id: str, fallback: str) -> str:
         return fallback
 
 
+def _stage_call_options(
+    stage_id: str,
+    *,
+    max_tokens: int,
+    temperature: float,
+) -> dict[str, Any]:
+    try:
+        from ..prompt_studio import stage_call_options
+
+        return stage_call_options(stage_id)
+    except Exception:  # noqa: BLE001 - retain stable stage defaults
+        return {"max_tokens": max_tokens, "temperature": temperature}
+
+
 def set_evolve_debug_dir(path: str) -> None:
     """Set the debug dump directory used by session-level evolution calls."""
     global _EVOLVE_DEBUG_DIR
@@ -596,8 +610,11 @@ async def execute_merge(
     ]
     raw = await llm.chat(
         messages,
-        max_tokens=8192,
-        temperature=0.3,
+        **_stage_call_options(
+            "merge",
+            max_tokens=8192,
+            temperature=0.3,
+        ),
         **_llm_trace_kwargs("merge_skill", skill_name=str(existing_skill.get("name") or "")),
     )
     return parse_single_skill(raw)
@@ -851,8 +868,11 @@ async def evolve_skill_from_sessions(
     ]
     raw = await llm.chat(
         messages,
-        max_tokens=16384,
-        temperature=0.4,
+        **_stage_call_options(
+            "evolve_skill",
+            max_tokens=16384,
+            temperature=0.4,
+        ),
         **_llm_trace_kwargs("evolve_skill", skill_name=skill_name, sessions=sessions),
     )
     _write_debug_dump(stem, system, user_msg, raw)
@@ -886,8 +906,11 @@ async def create_skill_from_sessions(
     ]
     raw = await llm.chat(
         messages,
-        max_tokens=16384,
-        temperature=0.4,
+        **_stage_call_options(
+            "create_skill",
+            max_tokens=16384,
+            temperature=0.4,
+        ),
         **_llm_trace_kwargs("create_skill", sessions=sessions),
     )
     _write_debug_dump(stem, _CREATE_FROM_SESSIONS_SYSTEM, user_msg, raw)

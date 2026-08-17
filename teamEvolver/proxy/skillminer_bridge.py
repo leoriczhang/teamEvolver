@@ -27,6 +27,9 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from ..config_store import ConfigStore
+from ..mining_settings import reset_prompt, settings_payload, update_settings
+
 logger = logging.getLogger(__name__)
 
 # Path to the vendored SkillMiner project root inside the package.
@@ -84,10 +87,81 @@ class SkillMinerBridgeMixin:
             port = _pick_free_port(int(os.environ.get("TEAMEVOLVER_SKILLMINER_PORT", "8765") or 8765))
             env = dict(os.environ)
             env["PORT"] = str(port)
-            # Ensure the mining API key falls through from teamEvolver config if set.
-            api_key = str(getattr(self.config, "llm_api_key", "") or "").strip()
-            if api_key and not env.get("ARK_API_KEY"):
+            config_file = str(
+                getattr(self.config, "_config_file", "") or ""
+            ).strip()
+            store = (
+                ConfigStore(config_file=Path(config_file))
+                if config_file
+                else ConfigStore()
+            )
+            data = store.load()
+            mining = (
+                data.get("mining")
+                if isinstance(data.get("mining"), dict)
+                else {}
+            )
+            model = (
+                mining.get("model")
+                if isinstance(mining.get("model"), dict)
+                else {}
+            )
+            llm = data.get("llm") if isinstance(data.get("llm"), dict) else {}
+            effective = settings_payload(data)
+            effective_model = effective["model"]
+            effective_pipeline = effective["pipeline"]
+            env["TEAMEVOLVER_CONFIG_FILE"] = str(store.config_file)
+            env["SKILLMINER_MODEL_PROVIDER"] = str(
+                effective_model.get("provider") or "custom"
+            )
+            env["SKILLMINER_MODEL_ID"] = str(
+                effective_model.get("model") or ""
+            )
+            env["SKILLMINER_MODEL_BASE_URL"] = str(
+                effective_model.get("base_url") or ""
+            )
+            env["SKILLMINER_MODEL_MAX_TOKENS"] = str(
+                effective_model.get("max_tokens") or 100000
+            )
+            env["SKILLMINER_MODEL_CONTEXT_LENGTH"] = str(
+                effective_model.get("context_length") or 240000
+            )
+            api_key = str(
+                model.get("api_key")
+                or llm.get("api_key")
+                or getattr(self.config, "llm_api_key", "")
+                or ""
+            ).strip()
+            if api_key:
                 env["ARK_API_KEY"] = api_key
+                env["SKILLMINER_MODEL_API_KEY"] = api_key
+            env["SKILLMINER_MAX_ROUNDS"] = str(
+                effective_pipeline["max_rounds"]
+            )
+            env["SKILLMINER_HERMES_RETRIES"] = str(
+                effective_pipeline["max_retries"]
+            )
+            env["SKILLMINER_HERMES_BACKOFF"] = str(
+                effective_pipeline["retry_backoff_seconds"]
+            )
+            env["SKILLMINER_ONESHOT_TIMEOUT"] = str(
+                effective_pipeline["oneshot_timeout_seconds"]
+            )
+            env["SKILLMINER_STEP1_VALIDATION_RETRIES"] = str(
+                effective_pipeline["step1_validation_retries"]
+            )
+            env["SKILLMINER_STRICT_STEP1"] = (
+                "1" if effective_pipeline["strict_step1"] else "0"
+            )
+            env["SKILLMINER_BENCHMARK_TARGET_TOTAL"] = str(
+                effective_pipeline["benchmark_target_total"]
+            )
+            env["SKILLMINER_BENCHMARK_DIFFICULTY_DIST"] = str(
+                effective_pipeline["benchmark_difficulty_dist"]
+            )
+            env["SKILLMINER_BENCHMARK_MAX_TURNS"] = str(
+                effective_pipeline["benchmark_max_turns"]
+            )
             try:
                 self._skillminer_proc = subprocess.Popen(
                     [sys.executable, str(_CONSOLE_SERVER)],
@@ -257,6 +331,67 @@ class SkillMinerBridgeMixin:
     def _register_skillminer_routes(self, app: FastAPI) -> None:
         """Register a catch-all route for ``/api/mining/*``."""
         owner = self
+
+        def _store() -> ConfigStore:
+            config_file = str(
+                getattr(owner.config, "_config_file", "") or ""
+            ).strip()
+            return (
+                ConfigStore(config_file=Path(config_file))
+                if config_file
+                else ConfigStore()
+            )
+
+        def _require_admin(request: Request) -> Optional[JSONResponse]:
+            user = getattr(request.state, "console_user", None)
+            if not isinstance(user, dict) or str(user.get("role") or "") != "admin":
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "only admin users can edit mining settings"},
+                )
+            return None
+
+        @app.get("/api/mining/settings")
+        async def mining_settings_get():
+            store = _store()
+            return JSONResponse(content=settings_payload(store.load()))
+
+        @app.post("/api/mining/settings")
+        async def mining_settings_save(request: Request):
+            denied = _require_admin(request)
+            if denied is not None:
+                return denied
+            try:
+                body = await request.json()
+                store = _store()
+                data = store.load()
+                payload = update_settings(data, body)
+                store.save(data)
+            except (ValueError, TypeError) as exc:
+                return JSONResponse(
+                    status_code=400,
+                    content={"detail": str(exc)},
+                )
+            owner._stop_skillminer()
+            return JSONResponse(content=payload)
+
+        @app.post("/api/mining/prompts/{stage_id}/reset")
+        async def mining_prompt_reset(stage_id: str, request: Request):
+            denied = _require_admin(request)
+            if denied is not None:
+                return denied
+            try:
+                store = _store()
+                data = store.load()
+                payload = reset_prompt(data, stage_id)
+                store.save(data)
+            except KeyError as exc:
+                return JSONResponse(
+                    status_code=404,
+                    content={"detail": str(exc)},
+                )
+            owner._stop_skillminer()
+            return JSONResponse(content=payload)
 
         async def _mining_proxy(request: Request):
             response = await owner._dispatch_skillminer_request(request)

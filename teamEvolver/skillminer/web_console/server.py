@@ -2155,14 +2155,25 @@ def build_config_schema():
         "input_dirs": input_dirs,
         "input_sources": input_sources,
         "default_input_dir": default_input_dir,
-        "max_rounds_default": 3,
-        "max_rounds_range": [1, 5],
+        "max_rounds_default": max(
+            1,
+            min(
+                20,
+                int(os.environ.get("SKILLMINER_MAX_ROUNDS", "3") or 3),
+            ),
+        ),
+        "max_rounds_range": [1, 20],
         "model": model_settings,
         "compiled_skills": compiled,
         "compiled_skill_details": compiled_details,
         "benchmark": {
             "difficulty_levels": rb.DIFFICULTY_LEVELS,
-            "default_dist": "easy:3,medium:8,hard:7",
+            "default_dist": str(
+                os.environ.get(
+                    "SKILLMINER_BENCHMARK_DIFFICULTY_DIST",
+                    "easy:4,medium:7,hard:5",
+                )
+            ),
             "default_total": rb.DEFAULT_TARGET_TOTAL,
             "modes": [
                 {"value": "dialogue", "label": "多轮对话（模拟参与者 ↔ skill）"},
@@ -2650,7 +2661,7 @@ def _normalize_config(body):
         max_rounds = 3
     return {
         "input_dir": input_dir.strip(),
-        "max_rounds": max(1, min(5, max_rounds)),
+        "max_rounds": max(1, min(20, max_rounds)),
         "ask_enabled": bool(body.get("ask_enabled", True)),
         "checkpoints": {
             "after_semantic": bool(checkpoints_in.get("after_semantic", True)),

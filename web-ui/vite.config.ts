@@ -29,6 +29,7 @@ export default defineConfig({
       '/validation': { target: 'http://127.0.0.1:52010', changeOrigin: true },
       '/skills': { target: 'http://127.0.0.1:52010', changeOrigin: true },
       '/langfuse': { target: 'http://127.0.0.1:52010', changeOrigin: true },
+      '/trigger-dreamcycle': { target: 'http://127.0.0.1:52010', changeOrigin: true },
     },
   },
 });

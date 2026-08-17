@@ -32,13 +32,11 @@ class ValidationStore:
         *,
         backend: str,
         endpoint: str,
-        local_root: str = "",
         customer_id: str = "",
     ) -> None:
         self._bucket = build_object_store(
             backend=backend,
             endpoint=endpoint,
-            local_root=local_root,
         )
         self._customer_id = str(customer_id or "").strip("/")
 
@@ -56,7 +54,7 @@ class ValidationStore:
 
         hub = SkillHub.object_storage_from_config(config)
         if hub is None:
-            raise ValueError("validation storage requires local or viking object storage")
+            raise ValueError("validation storage requires OpenViking object storage")
         store = cls.__new__(cls)
         store._bucket = hub._bucket
         store._customer_id = str(getattr(config, "sharing_viking_customer_id", "") or "").strip("/")

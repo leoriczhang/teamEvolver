@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from teamEvolver.storage.local import LocalObjectStore
+from teamEvolver.storage import InMemoryObjectStore
 from teamEvolver.validation.store import ValidationStore
 
 
 def _store(tmp_path: Path) -> ValidationStore:
-    return ValidationStore.from_bucket(bucket=LocalObjectStore(tmp_path))
+    return ValidationStore.from_bucket(bucket=InMemoryObjectStore(str(tmp_path)))
 
 
 def test_fresh_evaluation_reused_when_revision_matches(tmp_path: Path) -> None:

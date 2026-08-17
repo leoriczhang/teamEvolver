@@ -76,9 +76,21 @@ class SkillLabMixin:
 
         def merged_datasets(skill_name: str) -> list[dict[str, Any]]:
             store = lab_store()
-            manual = store.list_datasets(skill_name=skill_name)
-            evolved = evolution_datasets(owner.config, skill_name=skill_name)
-            return [*manual, *evolved]
+            persisted = store.list_datasets(skill_name=skill_name)
+            seen = {
+                str(item.get("dataset_id") or "")
+                for item in persisted
+                if item.get("dataset_id")
+            }
+            legacy_evolution = [
+                item
+                for item in evolution_datasets(
+                    owner.config,
+                    skill_name=skill_name,
+                )
+                if str(item.get("dataset_id") or "") not in seen
+            ]
+            return [*persisted, *legacy_evolution]
 
         def latest_skill_session_id(skill_name: str) -> str:
             try:
@@ -132,6 +144,11 @@ class SkillLabMixin:
                     for item in datasets
                     if str((item.get("source") or {}).get("kind") or "") == "evolution"
                 ),
+                "regression_count": sum(
+                    1
+                    for item in datasets
+                    if bool(item.get("enabled_for_evolution"))
+                ),
             }
 
         @app.post("/api/skill-lab/datasets")
@@ -150,7 +167,26 @@ class SkillLabMixin:
             if files is not None and not isinstance(files, list):
                 raise HTTPException(status_code=400, detail="files 必须是数组")
             try:
-                dataset = lab_store().save_dataset(payload, files=files)
+                store = lab_store()
+                dataset_id = str(payload.get("dataset_id") or "").strip()
+                skill_name = str(payload.get("skill_name") or "").strip()
+                if dataset_id and skill_name:
+                    source_dataset = resolve_dataset(
+                        owner.config,
+                        store,
+                        skill_name=skill_name,
+                        dataset_id=dataset_id,
+                    )
+                    if source_dataset:
+                        for key in (
+                            "source",
+                            "dataset_format",
+                            "created_at",
+                            "enabled_for_evolution",
+                        ):
+                            if key not in payload:
+                                payload[key] = source_dataset.get(key)
+                dataset = store.save_dataset(payload, files=files)
             except (SkillLabError, ValueError) as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return dataset
@@ -277,19 +313,38 @@ class SkillLabMixin:
                     replay_windows=replay_windows,
                     case_count=max(
                         1,
-                        min(6, int(body.get("case_count") or 2)),
+                        min(
+                            6,
+                            int(
+                                body.get("case_count")
+                                or owner.config.evolve_dataset_test_cases
+                                or 2
+                            ),
+                        ),
                     ),
                     min_requirements=max(
                         1,
-                        int(body.get("min_requirements") or 12),
+                        int(
+                            body.get("min_requirements")
+                            or owner.config.evolve_dataset_min_requirements
+                            or 12
+                        ),
                     ),
                     max_requirements=max(
                         1,
-                        int(body.get("max_requirements") or 24),
+                        int(
+                            body.get("max_requirements")
+                            or owner.config.evolve_dataset_max_requirements
+                            or 24
+                        ),
                     ),
                     batch_size=max(
                         1,
-                        int(body.get("disclosure_batch_size") or 4),
+                        int(
+                            body.get("disclosure_batch_size")
+                            or owner.config.evolve_dataset_disclosure_batch_size
+                            or 4
+                        ),
                     ),
                 )
                 store = lab_store()
@@ -320,8 +375,15 @@ class SkillLabMixin:
                                     "synthesis_mode"
                                 ),
                             },
+                            "enabled_for_evolution": False,
                         },
-                        files=[],
+                        files=[
+                            item
+                            for item in dataset.get("materials") or []
+                            if isinstance(item, dict)
+                            and item.get("path")
+                            and item.get("content_b64")
+                        ],
                     )
                     for dataset in generated
                 ]
@@ -351,6 +413,18 @@ class SkillLabMixin:
                 )
                 if not source:
                     raise HTTPException(status_code=404, detail="数据集不存在")
+                integrity = (
+                    source.get("material_integrity")
+                    if isinstance(source.get("material_integrity"), dict)
+                    else {}
+                )
+                if not bool(integrity.get("complete", True)):
+                    raise SkillLabError("数据集材料不完整，请先编辑并补齐材料")
+                source_files = (
+                    store.material_payloads(source)
+                    if source.get("materials")
+                    else []
+                )
                 cloned = store.save_dataset(
                     {
                         "skill_name": skill_name,
@@ -366,16 +440,22 @@ class SkillLabMixin:
                             "origin": source.get("source") or {},
                         },
                     },
-                    files=[],
+                    files=source_files,
                 )
             except (SkillLabError, ValueError) as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return cloned
 
         @app.delete("/api/skill-lab/datasets/{dataset_id}")
-        async def api_skill_lab_delete_dataset(dataset_id: str):
+        async def api_skill_lab_delete_dataset(
+            dataset_id: str,
+            skill_name: str = "",
+        ):
             try:
-                deleted = lab_store().delete_dataset(dataset_id)
+                deleted = lab_store().delete_dataset(
+                    dataset_id,
+                    skill_name=skill_name,
+                )
             except (SkillLabError, ValueError) as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             if not deleted:
@@ -430,6 +510,23 @@ class SkillLabMixin:
                 )
                 if not dataset:
                     raise HTTPException(status_code=404, detail="数据集不存在")
+                integrity = (
+                    dataset.get("material_integrity")
+                    if isinstance(dataset.get("material_integrity"), dict)
+                    else {}
+                )
+                if not bool(integrity.get("complete", True)):
+                    missing = "、".join(
+                        str(item)
+                        for item in integrity.get("missing_paths") or []
+                    )
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"数据集缺少回放材料：{missing}。"
+                            "请先编辑数据集并上传对应材料。"
+                        ),
+                    )
                 source = (
                     dict(dataset.get("source"))
                     if isinstance(dataset.get("source"), dict)

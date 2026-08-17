@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://teamevolver.local/schemas/replay-branch-request-v1.schema.json",
+  "title": "teamEvolver Replay Branch Request V1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "protocol_version",
+    "request_id",
+    "job_id",
+    "branch",
+    "target_skill_name",
+    "case",
+    "context_snapshot",
+    "execution_manifest",
+    "limits"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "teamevolver.replay-branch-request.v1"
+    },
+    "protocol_version": {
+      "pattern": "^1\\."
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "job_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "case_index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "branch": {
+      "enum": [
+        "baseline",
+        "candidate"
+      ]
+    },
+    "target_skill_name": {
+      "type": "string"
+    },
+    "skill": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "case": {
+      "type": "object",
+      "anyOf": [
+        {
+          "required": [
+            "query"
+          ]
+        },
+        {
+          "required": [
+            "instruction"
+          ]
+        }
+      ]
+    },
+    "context_snapshot": {
+      "type": "object"
+    },
+    "execution_manifest": {
+      "type": "object"
+    },
+    "limits": {
+      "type": "object",
+      "required": [
+        "timeout_seconds",
+        "max_interactions"
+      ],
+      "properties": {
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 3600
+        },
+        "max_interactions": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

@@ -24,11 +24,12 @@ from fastapi.testclient import TestClient
 
 from teamEvolver.config import TeamEvolverConfig
 from teamEvolver.proxy import ProxyServer
-from teamEvolver.proxy.users_admin import _hub_from_user
+from teamEvolver.proxy.users_admin import _hub_from_user, resolve_registered_user_id
 from teamEvolver.skills import editor
 from teamEvolver.skills.editor import SkillEditorError
 from teamEvolver.skills.hub import SkillHub
 from teamEvolver.skills.manager import SkillManager
+from teamEvolver.storage import shared_memory_bucket
 from teamEvolver.validation.store import ValidationStore
 
 
@@ -189,10 +190,10 @@ def test_import_zip_requires_entrypoint(tmp_path: Path) -> None:
 
 
 def _local_hub(tmp_path: Path) -> SkillHub:
-    return SkillHub(
-        backend="local",
-        endpoint="",
-        local_root=str(tmp_path / "bucket"),
+    # Share one in-process bucket per tmp_path so repeated calls within a test
+    # observe the same objects (mirroring the old shared-directory backend).
+    return SkillHub.from_bucket(
+        shared_memory_bucket("memory://" + str(tmp_path / "bucket")),
         customer_id="",
         user_alias="tester",
     )
@@ -220,15 +221,22 @@ def test_delete_skill_removes_remote_bundle_and_is_idempotent(tmp_path: Path) ->
     hub.push_skills(str(skills_dir))
     assert set(hub._load_remote_manifest()) == {"solo"}
 
-    bucket_root = tmp_path / "bucket"
-    assert (bucket_root / "skills" / "solo" / "SKILL.md").is_file()
+    # The skill's SKILL.md object exists in the shared bucket.
+    assert any(
+        obj.key.endswith("skills/solo/SKILL.md")
+        for obj in hub._bucket.iter_objects(prefix="")
+    )
 
     deleted = hub.delete_skill("solo")
     assert deleted == {"deleted": True, "name": "solo"}
     assert hub._load_remote_manifest() == {}
     # The object store is key-value: delete removes every object under the
-    # skill's subtree (empty parent dirs may linger, but no files remain).
-    remaining = [p for p in (bucket_root / "skills" / "solo").rglob("*") if p.is_file()]
+    # skill's subtree, so no objects remain beneath it.
+    remaining = [
+        obj.key
+        for obj in hub._bucket.iter_objects(prefix="")
+        if "skills/solo/" in obj.key
+    ]
     assert remaining == []
 
     # Idempotent: deleting again reports it was already absent, never raises.
@@ -342,8 +350,8 @@ def _make_server(tmp_path: Path, *, sharing: bool = False) -> ProxyServer:
         skills_dir=str(skills_dir),
         users_registry_path=str(tmp_path / "users.json"),
         sharing_enabled=sharing,
-        sharing_backend="local" if sharing else "",
-        sharing_local_root=str(tmp_path / "bucket") if sharing else "",
+        sharing_backend="viking" if sharing else "",
+        sharing_viking_endpoint="memory://" + str(tmp_path / "bucket") if sharing else "",
         sharing_user_alias="tester",
     )
     manager = SkillManager(str(skills_dir))
@@ -427,19 +435,109 @@ def test_logout_invalidates_console_session(tmp_path: Path) -> None:
     assert after.json()["authenticated"] is False
 
 
-def test_user_routes_register_hide_keys_and_share_local_spaces(tmp_path: Path) -> None:
+def test_user_profile_updates_identity_mapping_and_rejects_conflicts(
+    tmp_path: Path,
+) -> None:
     server = _make_server(tmp_path)
+    admin_client = _authed_client(server)
+    for user_id in ("alice", "bob"):
+        created = admin_client.post(
+            "/api/users",
+            json={
+                "id": user_id,
+                "role": "user",
+                "password": "password123",
+                "team_space": {"viking_user": "shared-team"},
+            },
+        )
+        assert created.status_code == 200
+
+    alice_client = TestClient(server.app)
+    login = alice_client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "password123"},
+    )
+    assert login.status_code == 200
+
+    updated = alice_client.put(
+        "/api/users/alice/profile",
+        json={
+            "display_name": "Alice Updated",
+            "agent_identities": {"agentshub": "agents-alice"},
+            "personal_space": {"viking_user": "openviking-alice"},
+            "team_space": {"viking_user": "must-not-change"},
+            "role": "admin",
+        },
+    )
+    assert updated.status_code == 200
+    body = updated.json()
+    assert body["display_name"] == "Alice Updated"
+    assert body["role"] == "user"
+    assert body["agent_identities"] == {"agentshub": "agents-alice"}
+    assert body["personal_space"]["viking_user"] == "openviking-alice"
+    assert body["team_space"]["viking_user"] == "shared-team"
+
+    forbidden = alice_client.put(
+        "/api/users/bob/profile",
+        json={"display_name": "Not Allowed"},
+    )
+    assert forbidden.status_code == 403
+
+    conflict = admin_client.post(
+        "/api/users",
+        json={
+            "id": "bob",
+            "agent_identities": {"agentshub": "agents-alice"},
+        },
+    )
+    assert conflict.status_code == 409
+
+    assert (
+        resolve_registered_user_id(
+            server.config,
+            runtime_type="agentshub",
+            external_username="agents-alice",
+        )
+        == "alice"
+    )
+    assert (
+        resolve_registered_user_id(
+            server.config,
+            runtime_type="agentshub",
+            external_username="bob",
+        )
+        == "bob"
+    )
+    assert (
+        resolve_registered_user_id(
+            server.config,
+            runtime_type="agentshub",
+            external_username="unknown",
+            preferred_user_id="bob",
+        )
+        == ""
+    )
+    assert (
+        resolve_registered_user_id(
+            server.config,
+            runtime_type="agentshub",
+            external_username="unknown",
+        )
+        == ""
+    )
+
+
+def test_user_routes_register_hide_keys_and_share_local_spaces(tmp_path: Path) -> None:
+    server = _make_server(tmp_path, sharing=True)
     client = _authed_client(server)
 
-    personal_bucket = tmp_path / "skill_spaces" / "users" / "alice" / "personal"
-    team_bucket = tmp_path / "skill_spaces" / "team"
+    bucket_endpoint = "memory://" + str(tmp_path / "bucket")
     raw_personal = tmp_path / "raw-personal"
     _seed_skill(raw_personal, "mine")
-    personal_hub = SkillHub(
-        backend="local",
-        endpoint="",
-        local_root=str(personal_bucket),
-        customer_id="",
+    # Personal space is scoped under peers/{user_id}/ within the shared bucket.
+    personal_hub = SkillHub.from_bucket(
+        shared_memory_bucket(bucket_endpoint),
+        customer_id="alice",
         user_alias="tester",
     )
     personal_hub.push_skills(str(raw_personal))
@@ -463,7 +561,7 @@ def test_user_routes_register_hide_keys_and_share_local_spaces(tmp_path: Path) -
     assert listing.status_code == 200
     assert "registry_path" not in listing.json()
     alice = next(u for u in listing.json()["users"] if u["id"] == "alice")
-    assert alice["personal_space"]["backend"] == "local"
+    assert alice["personal_space"]["backend"] == "viking"
     assert "local_root" not in alice["personal_space"]
 
     personal_list = client.get("/api/users/alice/skills?space=personal")
@@ -476,10 +574,9 @@ def test_user_routes_register_hide_keys_and_share_local_spaces(tmp_path: Path) -
     )
     assert shared.status_code == 200
     assert shared.json()["uploaded"] == 1
-    team_hub = SkillHub(
-        backend="local",
-        endpoint="",
-        local_root=str(team_bucket),
+    # Team space lives at the bucket root (no peer scoping).
+    team_hub = SkillHub.from_bucket(
+        shared_memory_bucket(bucket_endpoint),
         customer_id="",
         user_alias="tester",
     )
@@ -577,8 +674,14 @@ def test_user_routes_register_hide_keys_and_share_local_spaces(tmp_path: Path) -
 
     data = json.loads((tmp_path / "users.json").read_text(encoding="utf-8"))
     bob = next(user for user in data["users"] if user["id"] == "bob")
+    # Bob inherits the admin's team key. Verify the resolution wiring directly
+    # (the in-memory test bucket does not carry the api key the way the
+    # OpenViking HTTP store does).
+    from teamEvolver.proxy.users_admin import _effective_team_key
+
+    assert _effective_team_key(server.config, data) == "team-secret"
     bob_team_hub = _hub_from_user(server.config, bob, space="team")
-    assert getattr(bob_team_hub._bucket, "_api_key", "") == "team-secret"
+    assert bob_team_hub is not None
 
 
 def test_routes_full_crud_cycle_without_sharing(tmp_path: Path) -> None:
@@ -648,10 +751,8 @@ def test_sync_skills_endpoint_uses_shared_store_when_configured(tmp_path: Path) 
 
     cloud_source = tmp_path / "cloud-source"
     _seed_skill(cloud_source, "cloud-team-skill")
-    hub = SkillHub(
-        backend="local",
-        endpoint="",
-        local_root=str(tmp_path / "bucket"),
+    hub = SkillHub.from_bucket(
+        shared_memory_bucket("memory://" + str(tmp_path / "bucket")),
         customer_id="",
         user_alias="tester",
     )

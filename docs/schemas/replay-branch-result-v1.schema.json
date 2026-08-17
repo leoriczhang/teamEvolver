@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://teamevolver.local/schemas/replay-branch-result-v1.schema.json",
+  "title": "teamEvolver Replay Branch Result V1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "protocol_version",
+    "request_id",
+    "branch",
+    "runtime",
+    "status",
+    "metrics",
+    "output",
+    "trace",
+    "artifacts"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "teamevolver.replay-branch-result.v1"
+    },
+    "protocol_version": {
+      "pattern": "^1\\."
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "branch": {
+      "enum": [
+        "baseline",
+        "candidate"
+      ]
+    },
+    "runtime": {
+      "type": [
+        "object",
+        "string"
+      ]
+    },
+    "status": {
+      "enum": [
+        "succeeded",
+        "failed",
+        "unsupported"
+      ]
+    },
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "interaction_turns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tool_call_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_tokens": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "output": {
+      "type": "object"
+    },
+    "trace": {
+      "type": "object"
+    },
+    "artifacts": {
+      "type": "array"
+    },
+    "error": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "elapsed_seconds": {
+      "type": "number",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,12 +1,13 @@
 """Prompt Studio: make the skill-evolution pipeline transparent and editable.
 
-The skill-optimization pipeline runs a fixed chain of stages; five of them call
+The skill-optimization pipeline runs a fixed chain of stages; its model-backed stages call
 an LLM with a system prompt that fully determines behavior. Historically those
 prompts were module-level constants — a black box from the console. This module
 turns them into first-class, inspectable, editable, and testable objects:
 
-    ingest → summarize → judge → group-by-skill → (evolve_skill | create_skill)
-           → true-replay validate → publish
+    ingest → session_filter → summarize → judge → group-by-skill
+           → (evolve_skill | create_skill) → dataset_synthesis
+           → true-replay/checklist validate → publish
 
 Responsibilities:
   * ``PIPELINE_STAGES`` — the chain graph for visualization (nodes + edges,
@@ -40,6 +41,7 @@ from typing import Any, Callable, Optional
 logger = logging.getLogger(__name__)
 
 _OVERRIDES_ENV = "TEAMEVOLVER_PROMPT_OVERRIDES_PATH"
+_STAGE_SETTINGS_ENV = "TEAMEVOLVER_STAGE_SETTINGS_PATH"
 
 
 def _overrides_path() -> Path:
@@ -47,6 +49,13 @@ def _overrides_path() -> Path:
     if override:
         return Path(override).expanduser()
     return Path.home() / ".teamEvolver" / "prompt_overrides.json"
+
+
+def _stage_settings_path() -> Path:
+    override = str(os.environ.get(_STAGE_SETTINGS_ENV, "") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".teamEvolver" / "stage_settings.json"
 
 
 # ------------------------------------------------------------------ #
@@ -61,7 +70,14 @@ PIPELINE_STAGES: dict[str, Any] = {
             "id": "ingest",
             "label": "会话入队 Ingest",
             "kind": "io",
-            "description": "会话经 /ingest_session 或 Langfuse 拉取入队，价值分类后进入进化批次。",
+            "description": "会话经 /ingest_session 或 Langfuse 拉取后进入价值分类。",
+        },
+        {
+            "id": "session_filter",
+            "label": "价值分类 Session Filter",
+            "kind": "llm",
+            "prompt_id": "session_filter",
+            "description": "判断会话属于可复用技能证据、用户记忆、普通任务还是闲聊。",
         },
         {
             "id": "summarize",
@@ -118,6 +134,13 @@ PIPELINE_STAGES: dict[str, Any] = {
             "description": "基于初始 Query 逐轮披露未满足 Checklist；完成后对比基线的轮次/工具调用/Token。",
         },
         {
+            "id": "replay_checklist",
+            "label": "Checklist 裁判",
+            "kind": "llm",
+            "prompt_id": "replay_checklist",
+            "description": "依据回复、工具轨迹和真实工作区产物逐条判断 Checklist 是否满足。",
+        },
+        {
             "id": "publish",
             "label": "发布 Publish",
             "kind": "io",
@@ -125,7 +148,8 @@ PIPELINE_STAGES: dict[str, Any] = {
         },
     ],
     "edges": [
-        {"from": "ingest", "to": "summarize"},
+        {"from": "ingest", "to": "session_filter"},
+        {"from": "session_filter", "to": "summarize"},
         {"from": "summarize", "to": "judge"},
         {"from": "judge", "to": "group"},
         {"from": "group", "to": "evolve_skill"},
@@ -136,7 +160,8 @@ PIPELINE_STAGES: dict[str, Any] = {
         {"from": "create_skill", "to": "dataset_synthesis"},
         {"from": "merge", "to": "dataset_synthesis"},
         {"from": "dataset_synthesis", "to": "validate"},
-        {"from": "validate", "to": "publish"},
+        {"from": "validate", "to": "replay_checklist"},
+        {"from": "replay_checklist", "to": "publish"},
     ],
 }
 
@@ -188,7 +213,31 @@ def _dataset_synthesis_default() -> str:
     return dataset_synthesizer._SYNTHESIZE_SYSTEM
 
 
+def _session_filter_default() -> str:
+    from .. import session_filter
+
+    return session_filter._SESSION_CLASSIFIER_SYSTEM
+
+
+def _replay_checklist_default() -> str:
+    from .. import true_replay
+
+    return true_replay._CHECKLIST_JUDGE_SYSTEM
+
+
 _STAGE_CATALOG: dict[str, dict[str, Any]] = {
+    "session_filter": {
+        "id": "session_filter",
+        "label": "价值分类 Session Filter",
+        "module": "teamEvolver.session_filter",
+        "symbol": "_SESSION_CLASSIFIER_SYSTEM",
+        "resolver": _session_filter_default,
+        "injects_shared_blocks": False,
+        "temperature": 0.0,
+        "max_tokens": 512,
+        "variables": ["session summary: requests, tools, interactions, metrics"],
+        "description": "决定会话是否进入进化队列，并区分团队 Skill 证据与用户 Memory 候选。",
+    },
     "summarize": {
         "id": "summarize",
         "label": "会话总结 Summarize",
@@ -197,6 +246,7 @@ _STAGE_CATALOG: dict[str, dict[str, Any]] = {
         "resolver": _summarize_default,
         "injects_shared_blocks": False,
         "temperature": 0.2,
+        "max_tokens": 100000,
         "variables": ["session (JSON payload: interactions, tool calls, scores)"],
         "description": "对单个会话生成轨迹感知分析摘要，供后续评分与进化使用。",
     },
@@ -208,6 +258,7 @@ _STAGE_CATALOG: dict[str, dict[str, Any]] = {
         "resolver": _judge_default,
         "injects_shared_blocks": False,
         "temperature": 0.1,
+        "max_tokens": 32768,
         "variables": ["session payload: trajectory, summary, artifacts, prior scores"],
         "description": "对缺少可靠分数的会话补打分，输出 JSON 维度分。",
     },
@@ -219,6 +270,7 @@ _STAGE_CATALOG: dict[str, dict[str, Any]] = {
         "resolver": _evolve_default_raw,
         "injects_shared_blocks": True,
         "temperature": 0.4,
+        "max_tokens": 16384,
         "variables": [
             "{skill_name}",
             "current skill block",
@@ -237,6 +289,7 @@ _STAGE_CATALOG: dict[str, dict[str, Any]] = {
         "resolver": _create_default_raw,
         "injects_shared_blocks": True,
         "temperature": 0.4,
+        "max_tokens": 16384,
         "variables": ["cross-cycle evidence", "evaluation cohort", "session evidence", "existing skill names"],
         "description": "对 no-skill 会话桶：判断是否存在可复用模式并生成新技能。",
     },
@@ -248,6 +301,7 @@ _STAGE_CATALOG: dict[str, dict[str, Any]] = {
         "resolver": _merge_default,
         "injects_shared_blocks": False,
         "temperature": 0.3,
+        "max_tokens": 8192,
         "variables": ["Version A (existing skill)", "Version B (incoming skill)"],
         "description": "同名技能两个进化版本冲突时合并为一个更优版本。",
     },
@@ -259,6 +313,7 @@ _STAGE_CATALOG: dict[str, dict[str, Any]] = {
         "resolver": _dataset_synthesis_default,
         "injects_shared_blocks": False,
         "temperature": 0.3,
+        "max_tokens": 16384,
         "variables": [
             "{case_count}",
             "{min_requirements}",
@@ -269,6 +324,18 @@ _STAGE_CATALOG: dict[str, dict[str, Any]] = {
             "replay seeds",
         ],
         "description": "从 Session 与跨周期 SOP evidence 同步生成带 Checklist 的渐进式 test datasets。",
+    },
+    "replay_checklist": {
+        "id": "replay_checklist",
+        "label": "真回放 Checklist 裁判",
+        "module": "teamEvolver.true_replay",
+        "symbol": "_CHECKLIST_JUDGE_SYSTEM",
+        "resolver": _replay_checklist_default,
+        "injects_shared_blocks": False,
+        "temperature": 0.0,
+        "max_tokens": 8192,
+        "variables": ["checklist", "interactions", "tool trajectory", "workspace artifacts"],
+        "description": "逐条核验真回放结果是否满足 Checklist；只允许依据可观察证据判定。",
     },
 }
 
@@ -308,6 +375,98 @@ def _save_overrides(overrides: dict[str, str]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(overrides, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
+
+
+def _load_stage_settings() -> dict[str, dict[str, Any]]:
+    path = _stage_settings_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8") or "{}")
+    except (ValueError, OSError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        str(stage_id): dict(value)
+        for stage_id, value in data.items()
+        if stage_id in _STAGE_CATALOG and isinstance(value, dict)
+    }
+
+
+def _save_stage_settings(settings: dict[str, dict[str, Any]]) -> None:
+    path = _stage_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(settings, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+
+
+def set_stage_settings(stage_id: str, settings: dict[str, Any]) -> None:
+    """Persist per-stage model sampling overrides."""
+    entry = _STAGE_CATALOG.get(stage_id)
+    if not entry:
+        raise KeyError(f"unknown prompt stage: {stage_id}")
+    if not isinstance(settings, dict):
+        raise ValueError("stage settings must be an object")
+    try:
+        temperature = float(
+            settings.get("temperature", entry["temperature"])
+        )
+        max_tokens = int(settings.get("max_tokens", entry["max_tokens"]))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("temperature and max_tokens must be numeric") from exc
+    if not 0 <= temperature <= 2:
+        raise ValueError("temperature must be between 0 and 2")
+    if max_tokens < 1:
+        raise ValueError("max_tokens must be at least 1")
+    model = str(settings.get("model") or "").strip()
+    overrides = _load_stage_settings()
+    normalized = {
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    defaults = {
+        "model": "",
+        "temperature": float(entry["temperature"]),
+        "max_tokens": int(entry["max_tokens"]),
+    }
+    if normalized == defaults:
+        overrides.pop(stage_id, None)
+    else:
+        overrides[stage_id] = normalized
+    _save_stage_settings(overrides)
+
+
+def reset_stage_settings(stage_id: str) -> None:
+    if stage_id not in _STAGE_CATALOG:
+        raise KeyError(f"unknown prompt stage: {stage_id}")
+    overrides = _load_stage_settings()
+    if stage_id in overrides:
+        overrides.pop(stage_id, None)
+        _save_stage_settings(overrides)
+
+
+def stage_call_options(stage_id: str) -> dict[str, Any]:
+    """Return live model kwargs for one stage."""
+    entry = _STAGE_CATALOG.get(stage_id)
+    if not entry:
+        raise KeyError(f"unknown prompt stage: {stage_id}")
+    override = _load_stage_settings().get(stage_id, {})
+    options: dict[str, Any] = {
+        "temperature": float(
+            override.get("temperature", entry["temperature"])
+        ),
+        "max_tokens": int(override.get("max_tokens", entry["max_tokens"])),
+    }
+    model = str(override.get("model") or "").strip()
+    if model:
+        options["model"] = model
+    return options
 
 
 def set_override(stage_id: str, prompt: str) -> None:
@@ -381,11 +540,13 @@ def _shared_blocks() -> dict[str, str]:
 def list_prompts() -> list[dict[str, Any]]:
     """Summary of every editable stage prompt (no full bodies)."""
     overrides = _load_overrides()
+    stage_settings = _load_stage_settings()
     items: list[dict[str, Any]] = []
     for stage_id, entry in _STAGE_CATALOG.items():
         default = _default_prompt(stage_id)
         overridden = stage_id in overrides and overrides[stage_id].strip() != ""
         raw = overrides[stage_id] if overridden else default
+        runtime = stage_call_options(stage_id)
         items.append(
             {
                 "id": stage_id,
@@ -393,7 +554,10 @@ def list_prompts() -> list[dict[str, Any]]:
                 "description": entry["description"],
                 "module": entry["module"],
                 "symbol": entry["symbol"],
-                "temperature": entry["temperature"],
+                "temperature": runtime["temperature"],
+                "max_tokens": runtime["max_tokens"],
+                "model": runtime.get("model", ""),
+                "settings_overridden": stage_id in stage_settings,
                 "injects_shared_blocks": entry["injects_shared_blocks"],
                 "overridden": overridden,
                 "char_count": len(raw),
@@ -411,13 +575,20 @@ def get_prompt(stage_id: str) -> dict[str, Any]:
     default = _default_prompt(stage_id)
     raw, overridden = _raw_effective(stage_id)
     expanded = _expand_shared_blocks(stage_id, raw)
+    runtime = stage_call_options(stage_id)
+    stage_settings = _load_stage_settings()
     payload: dict[str, Any] = {
         "id": stage_id,
         "label": entry["label"],
         "description": entry["description"],
         "module": entry["module"],
         "symbol": entry["symbol"],
-        "temperature": entry["temperature"],
+        "temperature": runtime["temperature"],
+        "max_tokens": runtime["max_tokens"],
+        "model": runtime.get("model", ""),
+        "default_temperature": float(entry["temperature"]),
+        "default_max_tokens": int(entry["max_tokens"]),
+        "settings_overridden": stage_id in stage_settings,
         "injects_shared_blocks": entry["injects_shared_blocks"],
         "variables": list(entry["variables"]),
         "overridden": overridden,
@@ -433,12 +604,14 @@ def get_prompt(stage_id: str) -> dict[str, Any]:
 def pipeline_graph() -> dict[str, Any]:
     """Chain graph annotated with which nodes have editable prompts + override flags."""
     overrides = _load_overrides()
+    settings = _load_stage_settings()
     nodes = []
     for node in PIPELINE_STAGES["nodes"]:
         item = dict(node)
         prompt_id = item.get("prompt_id")
         if prompt_id and prompt_id in _STAGE_CATALOG:
             item["overridden"] = prompt_id in overrides and overrides[prompt_id].strip() != ""
+            item["settings_overridden"] = prompt_id in settings
         nodes.append(item)
     return {"nodes": nodes, "edges": list(PIPELINE_STAGES["edges"])}
 
@@ -456,6 +629,21 @@ def build_stage_messages(stage_id: str, session: dict[str, Any], *, system_promp
     """
     if stage_id not in _STAGE_CATALOG:
         raise KeyError(f"unknown prompt stage: {stage_id}")
+
+    if stage_id == "session_filter":
+        from ..session_filter import _session_summary
+
+        return [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    _session_summary(session),
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            },
+        ]
 
     if stage_id == "summarize":
         from .stages.summarize import _build_session_payload
@@ -565,6 +753,37 @@ def build_stage_messages(stage_id: str, session: dict[str, Any], *, system_promp
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
 
+    if stage_id == "replay_checklist":
+        checklist = [
+            {"id": "C01", "text": "完成用户要求并给出可验证结果", "kind": "output"}
+        ]
+        payload = {
+            "checklist": checklist,
+            "interactions": [
+                {
+                    "interaction_num": 1,
+                    "prompt": str(
+                        ((session.get("turns") or [{}])[0] or {}).get(
+                            "prompt_text"
+                        )
+                        or ""
+                    ),
+                    "response": str(
+                        ((session.get("turns") or [{}])[0] or {}).get(
+                            "response_text"
+                        )
+                        or ""
+                    ),
+                }
+            ],
+            "tool_trajectory": "(test runner reconstructs this in live replay)",
+            "workspace_artifacts": [],
+        }
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ]
+
     raise KeyError(f"unsupported stage for test: {stage_id}")
 
 
@@ -583,8 +802,6 @@ async def run_stage_test(
     """
     if stage_id not in _STAGE_CATALOG:
         raise KeyError(f"unknown prompt stage: {stage_id}")
-    entry = _STAGE_CATALOG[stage_id]
-
     # Resolve the system prompt to use: explicit test text, else effective.
     if system_prompt and system_prompt.strip():
         resolved_system = _expand_shared_blocks(stage_id, system_prompt)
@@ -593,11 +810,7 @@ async def run_stage_test(
 
     messages = build_stage_messages(stage_id, session, system_prompt=resolved_system)
     llm = llm_factory()
-    output = await llm.chat(
-        messages,
-        max_tokens=8192,
-        temperature=float(entry.get("temperature") or 0.3),
-    )
+    output = await llm.chat(messages, **stage_call_options(stage_id))
     return {
         "stage_id": stage_id,
         "system_prompt": messages[0]["content"],

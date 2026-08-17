@@ -23,6 +23,7 @@ import pytest
 def _isolated_overrides(tmp_path, monkeypatch):
     """Point overrides at a temp file so tests never touch ~/.teamEvolver."""
     monkeypatch.setenv("TEAMEVOLVER_PROMPT_OVERRIDES_PATH", str(tmp_path / "prompt_overrides.json"))
+    monkeypatch.setenv("TEAMEVOLVER_STAGE_SETTINGS_PATH", str(tmp_path / "stage_settings.json"))
     # Reload not required: prompt_studio reads the env var on each call.
     yield
 
@@ -61,6 +62,8 @@ def test_all_stages_resolve_nonempty_defaults():
         "create_skill",
         "merge",
         "dataset_synthesis",
+        "session_filter",
+        "replay_checklist",
     }
     for stage_id in ps.STAGE_IDS:
         detail = ps.get_prompt(stage_id)
@@ -83,6 +86,8 @@ def test_pipeline_graph_shape():
         "create_skill",
         "merge",
         "dataset_synthesis",
+        "session_filter",
+        "replay_checklist",
     }
     for node in llm_nodes.values():
         assert node.get("prompt_id") in ps.STAGE_IDS
@@ -118,6 +123,30 @@ def test_empty_override_rejected():
     ps = _ps()
     with pytest.raises(ValueError):
         ps.set_override("summarize", "   ")
+
+
+def test_stage_settings_override_live_call_options():
+    ps = _ps()
+    ps.set_stage_settings(
+        "judge",
+        {"model": "judge-model", "temperature": 0.6, "max_tokens": 4096},
+    )
+
+    detail = ps.get_prompt("judge")
+    assert detail["settings_overridden"] is True
+    assert detail["model"] == "judge-model"
+    assert ps.stage_call_options("judge") == {
+        "model": "judge-model",
+        "temperature": 0.6,
+        "max_tokens": 4096,
+    }
+
+    ps.reset_stage_settings("judge")
+    assert ps.get_prompt("judge")["settings_overridden"] is False
+    assert ps.stage_call_options("judge") == {
+        "temperature": 0.1,
+        "max_tokens": 32768,
+    }
 
 
 def test_unknown_stage_raises():

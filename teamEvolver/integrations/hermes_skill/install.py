@@ -27,10 +27,14 @@ NOT a blanket auto-accept, so no other hook is affected. Verify with
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import platform
 import shlex
 import shutil
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -75,7 +79,9 @@ def _dump_yaml(path: Path, data: dict) -> None:
 
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), "utf-8")
+    os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+    os.chmod(path, 0o600)
 
 
 def _wire_hook(config_path: Path, command: str, timeout: int) -> str:
@@ -117,6 +123,36 @@ def _wire_hook(config_path: Path, command: str, timeout: int) -> str:
     config_path.parent.mkdir(parents=True, exist_ok=True)
     _dump_yaml(config_path, data)
     return "updated" if matching else "added"
+
+
+def _install_context_provider(
+    source_root: Path,
+    home: Path,
+    *,
+    enable: bool,
+) -> str:
+    if not enable:
+        return "skipped"
+    source = source_root / "hermes_context_provider"
+    target = home / "plugins" / "team_evolver"
+    if not source.is_dir():
+        raise SystemExit(f"missing Hermes Context provider: {source}")
+    target.mkdir(parents=True, exist_ok=True)
+    for name in ("__init__.py", "plugin.yaml"):
+        shutil.copy2(source / name, target / name)
+    config_path = home / "config.yaml"
+    config = _load_yaml(config_path)
+    if not isinstance(config, dict):
+        config = {}
+    memory = config.get("memory")
+    if not isinstance(memory, dict):
+        memory = {}
+    previous = str(memory.get("provider") or "")
+    memory["provider"] = "team_evolver"
+    config["memory"] = memory
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    _dump_yaml(config_path, config)
+    return "already-present" if previous == "team_evolver" else "enabled"
 
 
 def _command_script(command: str) -> str:
@@ -185,8 +221,102 @@ def _approve_hook(home: Path, command: str) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(raw, ensure_ascii=False, indent=2), "utf-8")
+    os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+    os.chmod(path, 0o600)
     return "re-approved" if already else "approved"
+
+
+def _machine_fingerprint() -> str:
+    for path in (Path("/etc/machine-id"), Path("/var/lib/dbus/machine-id")):
+        try:
+            value = path.read_text("utf-8").strip()
+        except OSError:
+            continue
+        if value:
+            return value
+    return f"{platform.node()}:{os.getuid() if hasattr(os, 'getuid') else 0}"
+
+
+def _integration_id(home: Path) -> tuple[str, str]:
+    profile_id = hashlib.sha256(str(home.resolve()).encode("utf-8")).hexdigest()[:12]
+    machine_id = hashlib.sha256(_machine_fingerprint().encode("utf-8")).hexdigest()[:12]
+    return f"hermes:{machine_id}:{profile_id}", profile_id
+
+
+def _register_agent(
+    *,
+    base_url: str,
+    api_key: str,
+    integration_id: str,
+    profile_id: str,
+    rotate_token: bool,
+) -> str:
+    payload = {
+        "schema_version": "teamevolver.agent-registration.v1",
+        "protocol_version": "1.0",
+        "agent_id": integration_id,
+        "runtime_type": "hermes",
+        "runtime_version": "1",
+        "display_name": f"Hermes ({profile_id})",
+        "capabilities": {
+            "session.ingest.v1": {"delivery": "profile-spool"},
+            "replay.branch.v1": {
+                "transport": "local",
+                "max_interactions": 20,
+                "supports_materials": True,
+                "supports_artifacts": True,
+                "supports_full_trace": True,
+                "idempotent": False,
+            },
+            "context.workspace.v1": {
+                "scopes": [
+                    "personal_memory",
+                    "team_memory",
+                    "personal_skills",
+                    "team_skills",
+                ],
+                "operations": [
+                    "resolve",
+                    "read",
+                    "skills",
+                    "remember",
+                    "forget",
+                    "session",
+                ],
+            },
+            "memory.personal.read.v1": {},
+            "memory.personal.write.v1": {},
+            "memory.team.read.v1": {},
+            "skill.personal.read.v1": {},
+            "skill.team.read.v1": {},
+            "skill.team.evolve.v1": {},
+            "skill.bundle.v1": {"formats": ["bundle_v1"]},
+        },
+        "metadata": {"profile_id": profile_id},
+        "rotate_access_token": bool(rotate_token),
+    }
+    request = urllib.request.Request(
+        base_url.rstrip("/") + "/internal/agents/register",
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            **({"Authorization": f"Bearer {api_key}"} if api_key else {}),
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            result = json.loads(response.read().decode("utf-8") or "{}")
+    except (urllib.error.URLError, urllib.error.HTTPError, ValueError) as exc:
+        print(f"[install] Agent V1 registration skipped: {exc}")
+        return ""
+    credentials = (
+        result.get("credentials")
+        if isinstance(result, dict) and isinstance(result.get("credentials"), dict)
+        else {}
+    )
+    return str(credentials.get("agent_access_token") or "")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -201,6 +331,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hermes-home", default=None, help="Hermes home (default $HERMES_HOME or ~/.hermes)")
     parser.add_argument("--python", default="python3", help="interpreter used in the hook command")
     parser.add_argument("--timeout", type=int, default=20, help="hook timeout seconds (default 20)")
+    parser.add_argument(
+        "--rotate-workspace-token",
+        action="store_true",
+        help="rotate the profile-scoped Agent workspace token",
+    )
+    parser.add_argument(
+        "--no-context-provider",
+        action="store_true",
+        help="do not install/activate the teamEvolver Hermes MemoryProvider",
+    )
     parser.add_argument("--no-hook", action="store_true", help="only install files + feed.json, skip config.yaml")
     parser.add_argument(
         "--no-approve",
@@ -221,9 +361,44 @@ def main(argv: list[str] | None = None) -> int:
         shutil.copy2(src, dst_dir / name)
     print(f"[install] copied skill -> {dst_dir}")
 
-    feed = {"user_alias": args.user, "base_url": args.url, "api_key": args.api_key}
-    (dst_dir / "feed.json").write_text(json.dumps(feed, ensure_ascii=False, indent=2), "utf-8")
+    integration_id, profile_id = _integration_id(home)
+    workspace_token = _register_agent(
+        base_url=args.url,
+        api_key=args.api_key,
+        integration_id=integration_id,
+        profile_id=profile_id,
+        rotate_token=args.rotate_workspace_token,
+    )
+    existing_feed = {}
+    feed_path = dst_dir / "feed.json"
+    try:
+        existing_feed = json.loads(feed_path.read_text("utf-8"))
+    except (OSError, ValueError):
+        existing_feed = {}
+    feed = {
+        "protocol_version": "1.0",
+        "integration_id": integration_id,
+        "profile_id": profile_id,
+        "user_alias": args.user,
+        "external_subject": args.user,
+        "base_url": args.url,
+        "api_key": args.api_key,
+        "workspace_token": workspace_token
+        or str(existing_feed.get("workspace_token") or ""),
+    }
+    feed_path.write_text(
+        json.dumps(feed, ensure_ascii=False, indent=2),
+        "utf-8",
+    )
+    os.chmod(feed_path, 0o600)
     print(f"[install] wrote feed.json (user={args.user}, url={args.url})")
+    provider_status = _install_context_provider(
+        src_dir.parent,
+        home,
+        enable=bool(workspace_token or feed["workspace_token"])
+        and not args.no_context_provider,
+    )
+    print(f"[install] Context MemoryProvider: {provider_status}")
 
     if args.no_hook:
         print("[install] --no-hook: skipped config.yaml wiring (no approval either)")

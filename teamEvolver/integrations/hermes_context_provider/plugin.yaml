@@ -1,0 +1,6 @@
+name: team_evolver
+version: 1.0.0
+description: "teamEvolver Context Workspace provider for personal/team Memory and Skill context."
+requires_env: []
+hooks:
+  - on_session_end

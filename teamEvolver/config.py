@@ -3,7 +3,25 @@
 from dataclasses import dataclass, field
 
 VOLCENGINE_OPENVIKING_ENDPOINT = "https://api.vikingdb.cn-beijing.volces.com/openviking"
+# Default endpoint for a locally self-hosted ``openviking-server`` (see
+# https://docs.openviking.ai server quickstart — Uvicorn binds :1933).
+LOCAL_OPENVIKING_ENDPOINT = "http://localhost:1933"
 TEAM_SKILL_ROOT_PREFIX = "team-skill-evolver"
+
+
+def resolve_viking_endpoint(deployment: str, endpoint: str = "") -> str:
+    """Resolve the effective OpenViking endpoint for a deployment mode.
+
+    An explicit non-empty ``endpoint`` always wins (advanced override).
+    Otherwise ``local`` maps to the self-hosted server address and any other
+    value (``cloud`` / empty) maps to the Volcengine-hosted endpoint.
+    """
+    override = str(endpoint or "").strip()
+    if override:
+        return override
+    if str(deployment or "").strip().lower() == "local":
+        return LOCAL_OPENVIKING_ENDPOINT
+    return VOLCENGINE_OPENVIKING_ENDPOINT
 
 
 @dataclass
@@ -11,6 +29,11 @@ class TeamEvolverConfig:
     # Internal source path used by admin routes that need to persist runtime
     # config updates back to the same file.
     _config_file: str = field(default="", repr=False)
+
+    # ------------------------------------------------------------------ #
+    # Team identity                                                       #
+    # ------------------------------------------------------------------ #
+    team_display_name: str = "Team"
 
     # ------------------------------------------------------------------ #
     # Model                                                               #
@@ -59,12 +82,16 @@ class TeamEvolverConfig:
     openrouter_data_policy: str = ""
 
     # ------------------------------------------------------------------ #
-    # Skill sharing (OpenViking / local object storage)                   #
+    # Skill sharing (OpenViking object storage)                           #
     # ------------------------------------------------------------------ #
+    # Sharing always uses the OpenViking (``viking``) backend. The only choice
+    # is the deployment: ``cloud`` (Volcengine-hosted) or ``local`` (a
+    # self-hosted ``openviking-server``). They differ only by endpoint.
     sharing_enabled: bool = True
     sharing_backend: str = "viking"
+    # Deployment target for the OpenViking backend: ``cloud`` or ``local``.
+    sharing_viking_deployment: str = "cloud"
     sharing_endpoint: str = ""
-    sharing_local_root: str = ""
     # Optional override for skill assets. When empty, sharing_backend keeps its
     # legacy behavior and is used for both skills and session artifacts.
     sharing_skill_backend: str = ""
@@ -72,8 +99,10 @@ class TeamEvolverConfig:
     # backend is reserved for the Skill registry.
     sharing_session_backend: str = ""
 
-    # OpenViking backend (sharing.backend = "viking").
-    sharing_viking_endpoint: str = VOLCENGINE_OPENVIKING_ENDPOINT
+    # OpenViking backend (sharing.backend = "viking"). When empty the endpoint
+    # is derived from ``sharing_viking_deployment`` (cloud vs local); a
+    # non-empty value is an explicit advanced override.
+    sharing_viking_endpoint: str = ""
     # Backward-compatible fallback key. Prefer the scoped keys below when both
     # personal and team OpenViking spaces are configured.
     sharing_viking_api_key: str = ""
@@ -81,6 +110,9 @@ class TeamEvolverConfig:
     sharing_viking_personal_api_keys: list[str] = field(default_factory=list)
     sharing_viking_team_api_key: str = ""
     sharing_viking_account: str = "default"
+    # OpenViking user namespace used as the default personal-memory space.
+    # Individual teamEvolver users may override this in their personal space.
+    sharing_viking_personal_user: str = ""
     sharing_viking_user: str = "default"
     # wire constant: OpenViking agent namespace shared with Hermes /
     # Default shared skill namespace
@@ -114,6 +146,12 @@ class TeamEvolverConfig:
     # Evolve server integration                                           #
     # ------------------------------------------------------------------ #
     evolve_server_url: str = "http://127.0.0.1:52010"
+    evolve_use_session_judge: bool = True
+    evolve_publish_mode: str = "validated"
+    evolve_validation_max_rejections: int = 1
+    evolve_human_review_enabled: bool = True
+    evolve_human_review_timeout_seconds: int = 86400
+    evolve_interval_seconds: int = 600
     evolve_evidence_enabled: bool = True
     evolve_evidence_max_entries: int = 400
     evolve_evidence_recent_limit: int = 20
@@ -137,10 +175,9 @@ class TeamEvolverConfig:
     # ------------------------------------------------------------------ #
     # DreamCycle team-memory maintenance                                  #
     # ------------------------------------------------------------------ #
-    # DreamCycle reads the personal keys configured under ``sharing`` and
-    # writes through the same team key used by team skill evolution. It runs
-    # an external ``dreamcycle`` engine, so it stays opt-in: enable it
-    # explicitly and, if desired, let the service auto-start its daemon.
+    # Full DreamCycle runs natively in teamEvolver: five maintenance jobs,
+    # ReAct tool calls, policy enforcement, reports, scheduling and history.
+    # Legacy command/two-prompt fields remain readable for config migration.
     dreamcycle_enabled: bool = False
     dreamcycle_auto_start: bool = False
     dreamcycle_daemon_command: str = "dreamcycle --daemon"
@@ -149,6 +186,40 @@ class TeamEvolverConfig:
     dreamcycle_llm_base_url: str = ""
     dreamcycle_llm_api_key: str = ""
     dreamcycle_llm_model: str = ""
+    dreamcycle_llm_max_tokens: int = 4096
+    dreamcycle_temperature: float = 0.3
+    dreamcycle_embed_model: str = ""
+    dreamcycle_embed_base_url: str = ""
+    dreamcycle_embed_api_key: str = ""
+    dreamcycle_dedup_merge_threshold: float = 0.86
+    dreamcycle_dedup_warn_threshold: float = 0.72
+    dreamcycle_active_start_hour: int = 0
+    dreamcycle_active_end_hour: int = 6
+    dreamcycle_rounds_per_window: int = 3
+    dreamcycle_round_interval_minutes: int = 90
+    dreamcycle_max_turns_per_job: int = 25
+    dreamcycle_max_consecutive_errors: int = 3
+    dreamcycle_retry_delay_seconds: int = 300
+    dreamcycle_customer_id: str = ""
+    dreamcycle_state_dir: str = ""
+    dreamcycle_log_level: str = "INFO"
+    dreamcycle_enabled_jobs: list[str] = field(
+        default_factory=lambda: [
+            "team_overview",
+            "deduplication",
+            "cleanup",
+            "onboarding_check",
+            "consolidate",
+        ]
+    )
+    dreamcycle_job_prompts: dict[str, str] = field(default_factory=dict)
+    dreamcycle_job_settings: dict[str, dict] = field(default_factory=dict)
+    # Deprecated simplified-engine compatibility.
+    dreamcycle_interval_seconds: int = 86400
+    dreamcycle_max_source_items: int = 100
+    dreamcycle_max_source_chars: int = 120000
+    dreamcycle_extract_prompt: str = ""
+    dreamcycle_consolidate_prompt: str = ""
 
     # ------------------------------------------------------------------ #
     # Background validation                                               #

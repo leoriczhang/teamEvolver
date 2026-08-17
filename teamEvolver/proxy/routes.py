@@ -15,6 +15,7 @@ import re
 import secrets
 import time
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,25 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from ..config import (
+    LOCAL_OPENVIKING_ENDPOINT,
+    VOLCENGINE_OPENVIKING_ENDPOINT,
+    resolve_viking_endpoint,
+)
 from ..config_store import ConfigStore
+from ..integrations.agent_protocol import (
+    AgentProtocolError,
+    is_v1_payload,
+    normalize_session_envelope,
+)
+from ..integrations.agent_registry import (
+    issue_agent_access_token,
+    list_agents,
+    public_agent_record,
+    register_agent,
+    verify_agent_access_token,
+)
+from ..integrations.context_workspace import verify_context_usage
 from ..mining_lifecycle import (
     MiningLifecycleError,
     list_mined_skill_statuses,
@@ -52,6 +71,8 @@ from .users_admin import (
     _save_registry,
     _upsert_user,
     _verify_password,
+    resolve_agent_subject_user_id,
+    resolve_registered_user_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,6 +115,484 @@ def _model_settings_payload(config, store_data: dict[str, Any]) -> dict[str, Any
         "max_tokens": int(getattr(config, "llm_max_tokens", 0) or llm.get("max_tokens") or 100000),
         "temperature": float(temperature),
         "api_key_present": bool(api_key),
+    }
+
+
+def _team_settings_payload(config, store_data: dict[str, Any]) -> dict[str, Any]:
+    team = (
+        store_data.get("team")
+        if isinstance(store_data.get("team"), dict)
+        else {}
+    )
+    configured = str(team.get("display_name") or "Team").strip() or "Team"
+    override_source = ""
+    environment_override = str(
+        os.environ.get("EVOLVE_TEAM_DISPLAY_NAME") or ""
+    ).strip()
+    if environment_override:
+        override_source = "EVOLVE_TEAM_DISPLAY_NAME"
+    effective = str(
+        environment_override
+        or getattr(config, "team_display_name", "")
+        or configured
+        or "Team"
+    ).strip()
+    return {
+        "display_name": effective or "Team",
+        "configured_display_name": configured,
+        "environment_override": environment_override,
+        "override_source": override_source,
+    }
+
+
+def _evolve_settings_payload(config, store_data: dict[str, Any]) -> dict[str, Any]:
+    """Return the tunable evolution/validation process without secret values."""
+    evolve = (
+        store_data.get("evolve")
+        if isinstance(store_data.get("evolve"), dict)
+        else {}
+    )
+    validation = (
+        store_data.get("validation")
+        if isinstance(store_data.get("validation"), dict)
+        else {}
+    )
+    dreamcycle = (
+        store_data.get("dreamcycle")
+        if isinstance(store_data.get("dreamcycle"), dict)
+        else {}
+    )
+    dreamcycle_key = str(
+        dreamcycle.get("llm_api_key")
+        or getattr(config, "dreamcycle_llm_api_key", "")
+        or ""
+    )
+    dreamcycle_embed_key = str(
+        dreamcycle.get("embed_api_key")
+        or getattr(config, "dreamcycle_embed_api_key", "")
+        or dreamcycle_key
+        or ""
+    )
+    from ..integrations.dreamcycle_runtime import available_jobs
+
+    dreamcycle_job_prompts = (
+        dreamcycle.get("job_prompts")
+        if isinstance(dreamcycle.get("job_prompts"), dict)
+        else {}
+    )
+    dreamcycle_job_settings = (
+        dreamcycle.get("job_settings")
+        if isinstance(dreamcycle.get("job_settings"), dict)
+        else {}
+    )
+    default_job_runtime = {
+        "model": "",
+        "base_url": "",
+        "temperature": float(
+            dreamcycle.get("temperature", 0.3)
+            if dreamcycle.get("temperature") is not None
+            else 0.3
+        ),
+        "max_tokens": int(
+            dreamcycle.get("llm_max_tokens", 4096) or 4096
+        ),
+        "max_turns": int(
+            dreamcycle.get("max_turns_per_job", 25) or 25
+        ),
+        "max_errors": int(
+            dreamcycle.get("max_consecutive_errors", 3) or 3
+        ),
+    }
+    raw_enabled_jobs = dreamcycle.get(
+        "enabled_jobs",
+        [
+            "team_overview",
+            "deduplication",
+            "cleanup",
+            "onboarding_check",
+            "consolidate",
+        ],
+    )
+    enabled_jobs = {
+        str(item).strip()
+        for item in (
+            raw_enabled_jobs
+            if isinstance(raw_enabled_jobs, (list, tuple, set))
+            else str(raw_enabled_jobs or "").replace("\n", ",").split(",")
+        )
+        if str(item).strip()
+    }
+    environment_overrides = {
+        name: str(os.environ[name])
+        for name in (
+            "EVOLVE_TEAM_DISPLAY_NAME",
+            "EVOLVE_MODEL",
+            "EVOLVE_LLM_MAX_TOKENS",
+            "EVOLVE_LLM_TEMPERATURE",
+            "EVOLVE_USE_SESSION_JUDGE",
+            "EVOLVE_PUBLISH_MODE",
+            "EVOLVE_VALIDATION_MAX_REJECTIONS",
+            "EVOLVE_HUMAN_REVIEW_ENABLED",
+            "EVOLVE_HUMAN_REVIEW_TIMEOUT_SECONDS",
+            "EVOLVE_INTERVAL",
+            "EVOLVE_EVIDENCE_ENABLED",
+            "EVOLVE_EVIDENCE_MAX_ENTRIES",
+            "EVOLVE_EVIDENCE_RECENT_LIMIT",
+            "EVOLVE_EVIDENCE_HISTORICAL_LIMIT",
+            "EVOLVE_EVIDENCE_REPLAY_CASES_PER_WINDOW",
+            "EVOLVE_EVIDENCE_CHANGE_DEBT_THRESHOLD",
+            "EVOLVE_DATASET_SYNTHESIS_ENABLED",
+            "EVOLVE_DATASET_TEST_CASES",
+            "EVOLVE_DATASET_MIN_REQUIREMENTS",
+            "EVOLVE_DATASET_MAX_REQUIREMENTS",
+            "EVOLVE_DATASET_DISCLOSURE_BATCH_SIZE",
+            "EVOLVE_CANDIDATE_COALESCE_ENABLED",
+        )
+        if name in os.environ
+    }
+    return {
+        "environment_overrides": environment_overrides,
+        "evolve": {
+            "use_session_judge": bool(
+                evolve.get(
+                    "use_session_judge",
+                    getattr(config, "evolve_use_session_judge", True),
+                )
+            ),
+            "publish_mode": str(
+                evolve.get("publish_mode")
+                or getattr(config, "evolve_publish_mode", "validated")
+                or "validated"
+            ),
+            "validation_max_rejections": int(
+                evolve.get("validation_max_rejections")
+                or getattr(
+                    config,
+                    "evolve_validation_max_rejections",
+                    1,
+                )
+                or 1
+            ),
+            "human_review_enabled": bool(
+                evolve.get(
+                    "human_review_enabled",
+                    getattr(config, "evolve_human_review_enabled", True),
+                )
+            ),
+            "human_review_timeout_seconds": int(
+                evolve.get("human_review_timeout_seconds")
+                or getattr(
+                    config,
+                    "evolve_human_review_timeout_seconds",
+                    86400,
+                )
+                or 86400
+            ),
+            "interval_seconds": int(
+                evolve.get("interval_seconds")
+                or getattr(config, "evolve_interval_seconds", 600)
+                or 600
+            ),
+            "evidence_enabled": bool(
+                evolve.get(
+                    "evidence_enabled",
+                    getattr(config, "evolve_evidence_enabled", True),
+                )
+            ),
+            "evidence_max_entries": int(
+                evolve.get("evidence_max_entries")
+                or getattr(config, "evolve_evidence_max_entries", 400)
+                or 400
+            ),
+            "evidence_recent_limit": int(
+                evolve.get("evidence_recent_limit")
+                or getattr(config, "evolve_evidence_recent_limit", 20)
+                or 20
+            ),
+            "evidence_historical_limit": int(
+                evolve.get(
+                    "evidence_historical_limit",
+                    getattr(config, "evolve_evidence_historical_limit", 20),
+                )
+                or 0
+            ),
+            "evidence_replay_cases_per_window": int(
+                evolve.get("evidence_replay_cases_per_window")
+                or getattr(
+                    config,
+                    "evolve_evidence_replay_cases_per_window",
+                    1,
+                )
+                or 1
+            ),
+            "evidence_change_debt_threshold": int(
+                evolve.get("evidence_change_debt_threshold")
+                or getattr(
+                    config,
+                    "evolve_evidence_change_debt_threshold",
+                    3,
+                )
+                or 3
+            ),
+            "dataset_synthesis_enabled": bool(
+                evolve.get(
+                    "dataset_synthesis_enabled",
+                    getattr(config, "evolve_dataset_synthesis_enabled", True),
+                )
+            ),
+            "dataset_test_cases": int(
+                evolve.get("dataset_test_cases")
+                or getattr(config, "evolve_dataset_test_cases", 2)
+                or 2
+            ),
+            "dataset_min_requirements": int(
+                evolve.get("dataset_min_requirements")
+                or getattr(config, "evolve_dataset_min_requirements", 12)
+                or 12
+            ),
+            "dataset_max_requirements": int(
+                evolve.get("dataset_max_requirements")
+                or getattr(config, "evolve_dataset_max_requirements", 24)
+                or 24
+            ),
+            "dataset_disclosure_batch_size": int(
+                evolve.get("dataset_disclosure_batch_size")
+                or getattr(
+                    config,
+                    "evolve_dataset_disclosure_batch_size",
+                    4,
+                )
+                or 4
+            ),
+            "candidate_coalesce_enabled": bool(
+                evolve.get(
+                    "candidate_coalesce_enabled",
+                    getattr(
+                        config,
+                        "evolve_candidate_coalesce_enabled",
+                        True,
+                    ),
+                )
+            ),
+            "bundle_text_extensions": list(
+                getattr(
+                    config,
+                    "evolve_bundle_text_extensions",
+                    evolve.get("bundle_text_extensions") or [".py", ".sh"],
+                )
+                or [".py", ".sh"]
+            ),
+            "bundle_max_file_bytes": int(
+                evolve.get("bundle_max_file_bytes")
+                or getattr(config, "evolve_bundle_max_file_bytes", 262144)
+                or 262144
+            ),
+            "bundle_max_prompt_bytes": int(
+                evolve.get("bundle_max_prompt_bytes")
+                or getattr(config, "evolve_bundle_max_prompt_bytes", 786432)
+                or 786432
+            ),
+            "bundle_allow_delete": bool(
+                evolve.get(
+                    "bundle_allow_delete",
+                    getattr(config, "evolve_bundle_allow_delete", True),
+                )
+            ),
+            "bundle_static_checks_enabled": bool(
+                evolve.get(
+                    "bundle_static_checks_enabled",
+                    getattr(
+                        config,
+                        "evolve_bundle_static_checks_enabled",
+                        True,
+                    ),
+                )
+            ),
+        },
+        "validation": {
+            "enabled": bool(
+                validation.get(
+                    "enabled",
+                    getattr(config, "validation_enabled", True),
+                )
+            ),
+            "mode": str(
+                validation.get("mode")
+                or getattr(config, "validation_mode", "true_replay")
+                or "true_replay"
+            ),
+            "idle_after_seconds": int(
+                validation.get("idle_after_seconds")
+                or getattr(config, "validation_idle_after_seconds", 300)
+                or 300
+            ),
+            "poll_interval_seconds": int(
+                validation.get("poll_interval_seconds")
+                or getattr(config, "validation_poll_interval_seconds", 60)
+                or 60
+            ),
+            "max_jobs_per_day": int(
+                validation.get(
+                    "max_jobs_per_day",
+                    getattr(config, "validation_max_jobs_per_day", 5),
+                )
+                or 0
+            ),
+            "max_concurrency": int(
+                validation.get("max_concurrency")
+                or getattr(config, "validation_max_concurrency", 1)
+                or 1
+            ),
+            "required_results": int(
+                validation.get("required_results")
+                or getattr(config, "validation_required_results", 3)
+                or 3
+            ),
+            "required_approvals": int(
+                validation.get("required_approvals")
+                or getattr(config, "validation_required_approvals", 2)
+                or 2
+            ),
+        },
+        "memory_maintenance": {
+            "enabled": bool(
+                dreamcycle.get(
+                    "enabled",
+                    getattr(config, "dreamcycle_enabled", False),
+                )
+            ),
+            "auto_start": bool(
+                dreamcycle.get(
+                    "auto_start",
+                    getattr(config, "dreamcycle_auto_start", False),
+                )
+            ),
+            "model": str(
+                dreamcycle.get("llm_model")
+                or getattr(config, "dreamcycle_llm_model", "")
+                or ""
+            ),
+            "base_url": str(
+                dreamcycle.get("llm_base_url")
+                or getattr(config, "dreamcycle_llm_base_url", "")
+                or ""
+            ),
+            "api_key_present": bool(dreamcycle_key),
+            "engine": "teamEvolver-native-dreamcycle",
+            "full_capabilities": True,
+            "llm_max_tokens": int(
+                dreamcycle.get("llm_max_tokens", 4096) or 4096
+            ),
+            "temperature": float(
+                dreamcycle.get("temperature", 0.3)
+                if dreamcycle.get("temperature") is not None
+                else 0.3
+            ),
+            "agent_id": str(
+                getattr(config, "sharing_viking_user", "") or ""
+            ),
+            "customer_id": str(
+                dreamcycle.get("customer_id")
+                or dreamcycle.get("peer_id")
+                or ""
+            ),
+            "maintained_space": (
+                (
+                    "viking://user/peers/"
+                    f"{dreamcycle.get('customer_id') or dreamcycle.get('peer_id')}/"
+                    "memories/"
+                )
+                if dreamcycle.get("customer_id") or dreamcycle.get("peer_id")
+                else "viking://user/memories/"
+            ),
+            "embed_model": str(dreamcycle.get("embed_model") or ""),
+            "embed_base_url": str(dreamcycle.get("embed_base_url") or ""),
+            "embed_api_key_present": bool(dreamcycle_embed_key),
+            "semantic_dedup_enabled": bool(
+                str(dreamcycle.get("embed_model") or "").strip()
+                and dreamcycle_embed_key
+            ),
+            "dedup_merge_threshold": float(
+                dreamcycle.get("dedup_merge_threshold", 0.86)
+                if dreamcycle.get("dedup_merge_threshold") is not None
+                else 0.86
+            ),
+            "dedup_warn_threshold": float(
+                dreamcycle.get("dedup_warn_threshold", 0.72)
+                if dreamcycle.get("dedup_warn_threshold") is not None
+                else 0.72
+            ),
+            "tools": [
+                "viking_search",
+                "viking_read",
+                "viking_read_many",
+                "viking_browse",
+                "viking_remember",
+                "viking_forget",
+                "viking_merge",
+                "list_customers",
+                "memory_audit",
+                "memory_sanitize",
+                "save_report",
+                "shared_notes",
+            ],
+            "scheduler": {
+                "active_start_hour": int(
+                    dreamcycle.get("active_start_hour", 0) or 0
+                ),
+                "active_end_hour": int(
+                    dreamcycle.get("active_end_hour", 6)
+                    if dreamcycle.get("active_end_hour") is not None
+                    else 6
+                ),
+                "rounds_per_window": int(
+                    dreamcycle.get("rounds_per_window", 3) or 3
+                ),
+                "round_interval_minutes": int(
+                    dreamcycle.get("round_interval_minutes", 90) or 90
+                ),
+                "max_turns_per_job": int(
+                    dreamcycle.get("max_turns_per_job", 25) or 25
+                ),
+                "max_consecutive_errors": int(
+                    dreamcycle.get("max_consecutive_errors", 3) or 3
+                ),
+                "retry_delay_seconds": int(
+                    dreamcycle.get("retry_delay_seconds", 300) or 300
+                ),
+            },
+            "jobs": [
+                {
+                    **job,
+                    "enabled": job["id"] in enabled_jobs,
+                    "effective_prompt": str(
+                        dreamcycle_job_prompts.get(job["id"])
+                        or job["default_prompt"]
+                    ),
+                    "overridden": bool(
+                        dreamcycle_job_prompts.get(job["id"])
+                    ),
+                    "runtime": {
+                        **default_job_runtime,
+                        **(
+                            dreamcycle_job_settings.get(job["id"])
+                            if isinstance(
+                                dreamcycle_job_settings.get(job["id"]),
+                                dict,
+                            )
+                            else {}
+                        ),
+                    },
+                    "default_runtime": default_job_runtime,
+                    "settings_overridden": bool(
+                        dreamcycle_job_settings.get(job["id"])
+                    ),
+                }
+                for job in available_jobs(
+                    str(getattr(config, "team_display_name", "") or "Team")
+                )
+            ],
+        },
     }
 
 
@@ -207,8 +706,24 @@ def _check_ingest_api_key(request: Request) -> None:
         return
     header = str(request.headers.get("authorization") or "").strip()
     token = header[7:].strip() if header.lower().startswith("bearer ") else header
-    if token != expected:
+    if not secrets.compare_digest(token, expected):
         raise HTTPException(status_code=401, detail="invalid ingest api key")
+
+
+def _bearer_token(request: Request) -> str:
+    header = str(request.headers.get("authorization") or "").strip()
+    return header[7:].strip() if header.lower().startswith("bearer ") else header
+
+
+def _check_v1_control_plane_key(request: Request) -> None:
+    expected = str(os.environ.get("EVOLVE_INGEST_API_KEY") or "").strip()
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail="EVOLVE_INGEST_API_KEY is required for Agent Protocol V1 registration",
+        )
+    if not secrets.compare_digest(_bearer_token(request), expected):
+        raise HTTPException(status_code=401, detail="invalid Agent control-plane key")
 
 
 def _check_model_proxy_api_key(request: Request) -> None:
@@ -239,13 +754,19 @@ def _upstream_chat_headers(config) -> dict[str, str]:
     }
 
 
+_CCR_MODEL_OVERRIDE = "deepseek-v4-flash-ga-260731"
+
+
 def _model_proxy_payload(config, body: Any) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="request body must be an object")
     payload = dict(body)
     configured_model = str(getattr(config, "llm_model_id", "") or "").strip()
     requested_model = str(payload.get("model") or "").strip()
-    if configured_model and requested_model in {"", "teamEvolver-model"}:
+    lowered = requested_model.lower()
+    if lowered.startswith("ccr/"):
+        payload["model"] = _CCR_MODEL_OVERRIDE
+    elif configured_model and requested_model in {"", "teamEvolver-model"}:
         payload["model"] = configured_model
     return payload
 
@@ -949,6 +1470,7 @@ def _skill_diff_payload(job: dict[str, Any], config=None) -> dict[str, Any]:
 def _storage_status(config) -> dict[str, Any]:
     backend = str(getattr(config, "sharing_backend", "") or "").strip().lower()
     endpoint = str(getattr(config, "sharing_viking_endpoint", "") or getattr(config, "sharing_endpoint", "") or "")
+    deployment = str(getattr(config, "sharing_viking_deployment", "") or "cloud")
     namespace = "resources" if backend == "viking" else backend or "none"
     api_key_present = bool(
         str(getattr(config, "sharing_viking_team_api_key", "") or "")
@@ -956,6 +1478,7 @@ def _storage_status(config) -> dict[str, Any]:
     )
     payload: dict[str, Any] = {
         "backend": backend or "none",
+        "deployment": deployment,
         "endpoint": endpoint,
         "namespace": namespace,
         "api_key_present": api_key_present,
@@ -1139,6 +1662,9 @@ class RoutesMixin:
         self._register_skills_admin_routes(app)
         self._register_skill_lab_routes(app)
         self._register_users_admin_routes(app)
+        self._register_openviking_workspace_routes(app)
+        self._register_memory_debug_routes(app)
+        self._register_agent_context_routes(app)
         self._register_skillminer_routes(app)
 
         @app.get("/")
@@ -1363,6 +1889,66 @@ class RoutesMixin:
             resp.delete_cookie(_SESSION_COOKIE, path="/")
             return resp
 
+        @app.get("/api/team-settings")
+        async def api_get_team_settings():
+            config_file = str(
+                getattr(owner.config, "_config_file", "") or ""
+            ).strip()
+            store = (
+                ConfigStore(config_file=Path(config_file))
+                if config_file
+                else ConfigStore()
+            )
+            return JSONResponse(
+                content=_team_settings_payload(owner.config, store.load())
+            )
+
+        @app.post("/api/team-settings")
+        async def api_save_team_settings(request: Request):
+            _require_admin_user(_session_user(request))
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail="team settings body must be an object",
+                )
+            display_name = " ".join(
+                str(body.get("display_name") or "").split()
+            )
+            if not display_name:
+                raise HTTPException(
+                    status_code=400,
+                    detail="display_name is required",
+                )
+            if len(display_name) > 120:
+                raise HTTPException(
+                    status_code=400,
+                    detail="display_name must be at most 120 characters",
+                )
+
+            config_file = str(
+                getattr(owner.config, "_config_file", "") or ""
+            ).strip()
+            store = (
+                ConfigStore(config_file=Path(config_file))
+                if config_file
+                else ConfigStore()
+            )
+            data = store.load()
+            data.setdefault("team", {})["display_name"] = display_name
+            store.save(data)
+            config = store.to_config()
+            config = replace(
+                config,
+                users_registry_path=str(
+                    getattr(owner.config, "users_registry_path", "") or ""
+                ),
+            )
+            await owner._reload_openviking_integrations(config)
+            return JSONResponse(
+                content=_team_settings_payload(config, data)
+            )
+
         @app.get("/api/evolve-model")
         async def api_get_evolve_model():
             config_file = str(
@@ -1400,7 +1986,14 @@ class RoutesMixin:
                 raise HTTPException(status_code=400, detail="invalid max_tokens or temperature") from exc
             temperature = max(0.0, min(2.0, temperature))
 
-            store = ConfigStore()
+            config_file = str(
+                getattr(owner.config, "_config_file", "") or ""
+            ).strip()
+            store = (
+                ConfigStore(config_file=Path(config_file))
+                if config_file
+                else ConfigStore()
+            )
             data = store.load()
             llm = data.setdefault("llm", {})
             existing_key = str(llm.get("api_key") or owner.config.llm_api_key or "")
@@ -1420,8 +2013,559 @@ class RoutesMixin:
                 }
             )
             store.save(data)
-            owner.config = store.to_config()
+            await owner._reload_openviking_integrations(store.to_config())
+            owner._stop_skillminer()
             return JSONResponse(content=_model_settings_payload(owner.config, data))
+
+        @app.get("/api/evolve-settings")
+        async def api_get_evolve_settings():
+            config_file = str(
+                getattr(owner.config, "_config_file", "") or ""
+            ).strip()
+            store = (
+                ConfigStore(config_file=Path(config_file))
+                if config_file
+                else ConfigStore()
+            )
+            return JSONResponse(
+                content=_evolve_settings_payload(owner.config, store.load())
+            )
+
+        @app.post("/api/evolve-settings")
+        async def api_save_evolve_settings(request: Request):
+            _require_admin_user(_session_user(request))
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail="evolution settings body must be an object",
+                )
+            evolve_in = body.get("evolve")
+            validation_in = body.get("validation")
+            memory_in = body.get("memory_maintenance")
+            if not isinstance(evolve_in, dict):
+                evolve_in = {}
+            if not isinstance(validation_in, dict):
+                validation_in = {}
+            if not isinstance(memory_in, dict):
+                memory_in = {}
+
+            config_file = str(
+                getattr(owner.config, "_config_file", "") or ""
+            ).strip()
+            store = (
+                ConfigStore(config_file=Path(config_file))
+                if config_file
+                else ConfigStore()
+            )
+            data = store.load()
+            evolve = data.setdefault("evolve", {})
+            validation = data.setdefault("validation", {})
+            dreamcycle = data.setdefault("dreamcycle", {})
+
+            def _bounded_int(
+                source: dict[str, Any],
+                key: str,
+                current: Any,
+                *,
+                minimum: int,
+                maximum: int,
+            ) -> int:
+                raw = source.get(key, current)
+                try:
+                    value = int(raw)
+                except (TypeError, ValueError) as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{key} must be an integer",
+                    ) from exc
+                return max(minimum, min(maximum, value))
+
+            for key in (
+                "use_session_judge",
+                "human_review_enabled",
+                "evidence_enabled",
+                "dataset_synthesis_enabled",
+                "candidate_coalesce_enabled",
+                "bundle_allow_delete",
+                "bundle_static_checks_enabled",
+            ):
+                if key in evolve_in:
+                    evolve[key] = bool(evolve_in[key])
+            publish_mode = str(
+                evolve_in.get("publish_mode")
+                or evolve.get("publish_mode")
+                or "validated"
+            ).strip().lower()
+            if publish_mode not in {"direct", "validated"}:
+                raise HTTPException(
+                    status_code=400,
+                    detail="publish_mode must be direct or validated",
+                )
+            evolve["publish_mode"] = publish_mode
+            evolve["validation_max_rejections"] = _bounded_int(
+                evolve_in,
+                "validation_max_rejections",
+                evolve.get("validation_max_rejections", 1),
+                minimum=1,
+                maximum=100,
+            )
+            evolve["human_review_timeout_seconds"] = _bounded_int(
+                evolve_in,
+                "human_review_timeout_seconds",
+                evolve.get("human_review_timeout_seconds", 86400),
+                minimum=1,
+                maximum=365 * 86400,
+            )
+            evolve["interval_seconds"] = _bounded_int(
+                evolve_in,
+                "interval_seconds",
+                evolve.get("interval_seconds", 600),
+                minimum=1,
+                maximum=365 * 86400,
+            )
+            evolve["evidence_max_entries"] = _bounded_int(
+                evolve_in,
+                "evidence_max_entries",
+                evolve.get("evidence_max_entries", 400),
+                minimum=1,
+                maximum=100000,
+            )
+            evolve["evidence_recent_limit"] = _bounded_int(
+                evolve_in,
+                "evidence_recent_limit",
+                evolve.get("evidence_recent_limit", 20),
+                minimum=1,
+                maximum=1000,
+            )
+            evolve["evidence_historical_limit"] = _bounded_int(
+                evolve_in,
+                "evidence_historical_limit",
+                evolve.get("evidence_historical_limit", 20),
+                minimum=0,
+                maximum=1000,
+            )
+            evolve["evidence_replay_cases_per_window"] = _bounded_int(
+                evolve_in,
+                "evidence_replay_cases_per_window",
+                evolve.get("evidence_replay_cases_per_window", 1),
+                minimum=1,
+                maximum=100,
+            )
+            evolve["evidence_change_debt_threshold"] = _bounded_int(
+                evolve_in,
+                "evidence_change_debt_threshold",
+                evolve.get("evidence_change_debt_threshold", 3),
+                minimum=1,
+                maximum=100,
+            )
+            evolve["dataset_test_cases"] = _bounded_int(
+                evolve_in,
+                "dataset_test_cases",
+                evolve.get("dataset_test_cases", 2),
+                minimum=1,
+                maximum=6,
+            )
+            evolve["dataset_min_requirements"] = _bounded_int(
+                evolve_in,
+                "dataset_min_requirements",
+                evolve.get("dataset_min_requirements", 12),
+                minimum=1,
+                maximum=500,
+            )
+            evolve["dataset_max_requirements"] = _bounded_int(
+                evolve_in,
+                "dataset_max_requirements",
+                evolve.get("dataset_max_requirements", 24),
+                minimum=evolve["dataset_min_requirements"],
+                maximum=1000,
+            )
+            evolve["dataset_disclosure_batch_size"] = _bounded_int(
+                evolve_in,
+                "dataset_disclosure_batch_size",
+                evolve.get("dataset_disclosure_batch_size", 4),
+                minimum=1,
+                maximum=100,
+            )
+            evolve["bundle_max_file_bytes"] = _bounded_int(
+                evolve_in,
+                "bundle_max_file_bytes",
+                evolve.get("bundle_max_file_bytes", 262144),
+                minimum=1024,
+                maximum=50 * 1024 * 1024,
+            )
+            evolve["bundle_max_prompt_bytes"] = _bounded_int(
+                evolve_in,
+                "bundle_max_prompt_bytes",
+                evolve.get("bundle_max_prompt_bytes", 786432),
+                minimum=1024,
+                maximum=100 * 1024 * 1024,
+            )
+            if "bundle_text_extensions" in evolve_in:
+                raw_extensions = evolve_in.get("bundle_text_extensions")
+                if isinstance(raw_extensions, str):
+                    raw_extensions = raw_extensions.replace("\n", ",").split(",")
+                if not isinstance(raw_extensions, list):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="bundle_text_extensions must be a list or comma-separated string",
+                    )
+                extensions = []
+                for raw in raw_extensions:
+                    item = str(raw or "").strip().lower().lstrip(".")
+                    if item and "/" not in item and "\\" not in item:
+                        extension = f".{item}"
+                        if extension not in extensions:
+                            extensions.append(extension)
+                evolve["bundle_text_extensions"] = extensions or [".py", ".sh"]
+
+            if "enabled" in validation_in:
+                validation["enabled"] = bool(validation_in["enabled"])
+            mode = str(
+                validation_in.get("mode")
+                or validation.get("mode")
+                or "true_replay"
+            ).strip().lower().replace("-", "_")
+            if mode not in {"replay", "true_replay"}:
+                raise HTTPException(
+                    status_code=400,
+                    detail="validation mode must be replay or true_replay",
+                )
+            validation["mode"] = mode
+            for key, minimum, maximum, fallback in (
+                ("idle_after_seconds", 0, 86400, 300),
+                ("poll_interval_seconds", 1, 86400, 60),
+                ("max_jobs_per_day", 0, 10000, 5),
+                ("max_concurrency", 1, 100, 1),
+                ("required_results", 1, 100, 3),
+                ("required_approvals", 1, 100, 2),
+            ):
+                validation[key] = _bounded_int(
+                    validation_in,
+                    key,
+                    validation.get(key, fallback),
+                    minimum=minimum,
+                    maximum=maximum,
+                )
+            if validation["required_approvals"] > validation["required_results"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail="required_approvals cannot exceed required_results",
+                )
+
+            for key in ("enabled", "auto_start"):
+                if key in memory_in:
+                    dreamcycle[key] = bool(memory_in[key])
+            if "model" in memory_in:
+                dreamcycle["llm_model"] = str(memory_in.get("model") or "").strip()
+            if "base_url" in memory_in:
+                dreamcycle["llm_base_url"] = str(
+                    memory_in.get("base_url") or ""
+                ).strip()
+            if "llm_max_tokens" in memory_in:
+                dreamcycle["llm_max_tokens"] = _bounded_int(
+                    memory_in,
+                    "llm_max_tokens",
+                    dreamcycle.get("llm_max_tokens", 4096),
+                    minimum=1,
+                    maximum=131072,
+                )
+            if "temperature" in memory_in:
+                try:
+                    temperature = float(memory_in["temperature"])
+                except (TypeError, ValueError) as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="DreamCycle temperature must be numeric",
+                    ) from exc
+                dreamcycle["temperature"] = max(
+                    0.0,
+                    min(2.0, temperature),
+                )
+            if "customer_id" in memory_in:
+                dreamcycle["customer_id"] = str(
+                    memory_in.get("customer_id") or ""
+                ).strip()
+                dreamcycle.pop("peer_id", None)
+            for source_key, target_key in (
+                ("embed_model", "embed_model"),
+                ("embed_base_url", "embed_base_url"),
+            ):
+                if source_key in memory_in:
+                    dreamcycle[target_key] = str(
+                        memory_in.get(source_key) or ""
+                    ).strip()
+            for key, fallback in (
+                ("dedup_merge_threshold", 0.86),
+                ("dedup_warn_threshold", 0.72),
+            ):
+                if key not in memory_in:
+                    continue
+                try:
+                    value = float(memory_in[key])
+                except (TypeError, ValueError) as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"DreamCycle {key} must be numeric",
+                    ) from exc
+                dreamcycle[key] = max(-1.0, min(1.0, value))
+            if (
+                float(dreamcycle.get("dedup_warn_threshold", 0.72))
+                > float(dreamcycle.get("dedup_merge_threshold", 0.86))
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "DreamCycle dedup_warn_threshold cannot exceed "
+                        "dedup_merge_threshold"
+                    ),
+                )
+
+            scheduler_in = memory_in.get("scheduler")
+            if scheduler_in is not None and not isinstance(
+                scheduler_in,
+                dict,
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="memory_maintenance.scheduler must be an object",
+                )
+            scheduler_in = scheduler_in or {}
+            for key, minimum, maximum, fallback in (
+                ("active_start_hour", 0, 23, 0),
+                ("active_end_hour", 0, 23, 6),
+                ("rounds_per_window", 1, 24, 3),
+                ("round_interval_minutes", 1, 1440, 90),
+                ("max_turns_per_job", 1, 200, 25),
+                ("max_consecutive_errors", 1, 100, 3),
+                ("retry_delay_seconds", 1, 86400, 300),
+            ):
+                dreamcycle[key] = _bounded_int(
+                    scheduler_in,
+                    key,
+                    dreamcycle.get(key, fallback),
+                    minimum=minimum,
+                    maximum=maximum,
+                )
+
+            jobs_in = memory_in.get("jobs")
+            if jobs_in is not None:
+                if not isinstance(jobs_in, list):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="memory_maintenance.jobs must be a list",
+                    )
+                from ..integrations.dreamcycle_runtime import available_jobs
+
+                catalog = {
+                    job["id"]: job
+                    for job in available_jobs(
+                        str(
+                            getattr(
+                                owner.config,
+                                "team_display_name",
+                                "",
+                            )
+                            or "Team"
+                        )
+                    )
+                }
+                enabled_jobs: list[str] = []
+                job_prompts: dict[str, str] = {}
+                job_settings: dict[str, dict[str, Any]] = {}
+                default_runtime = {
+                    "model": "",
+                    "base_url": "",
+                    "temperature": float(
+                        dreamcycle.get("temperature", 0.3)
+                        if dreamcycle.get("temperature") is not None
+                        else 0.3
+                    ),
+                    "max_tokens": int(
+                        dreamcycle.get("llm_max_tokens", 4096) or 4096
+                    ),
+                    "max_turns": int(
+                        dreamcycle.get("max_turns_per_job", 25) or 25
+                    ),
+                    "max_errors": int(
+                        dreamcycle.get("max_consecutive_errors", 3) or 3
+                    ),
+                }
+                for raw_job in jobs_in:
+                    if not isinstance(raw_job, dict):
+                        continue
+                    job_id = str(raw_job.get("id") or "").strip()
+                    if job_id not in catalog:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"unknown DreamCycle job: {job_id}",
+                        )
+                    if bool(raw_job.get("enabled", True)):
+                        enabled_jobs.append(job_id)
+                    prompt = str(
+                        raw_job.get("effective_prompt")
+                        or raw_job.get("prompt")
+                        or ""
+                    ).strip()
+                    if not prompt:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"DreamCycle {job_id} prompt cannot be empty",
+                        )
+                    if prompt != str(catalog[job_id]["default_prompt"]):
+                        job_prompts[job_id] = prompt
+                    runtime = raw_job.get("runtime")
+                    if runtime is not None and not isinstance(runtime, dict):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"DreamCycle {job_id} runtime must be an object",
+                        )
+                    runtime = runtime or {}
+                    try:
+                        float(
+                            runtime.get(
+                                "temperature",
+                                default_runtime["temperature"],
+                            )
+                        )
+                        for numeric_key in (
+                            "max_tokens",
+                            "max_turns",
+                            "max_errors",
+                        ):
+                            int(
+                                runtime.get(
+                                    numeric_key,
+                                    default_runtime[numeric_key],
+                                )
+                            )
+                    except (TypeError, ValueError) as exc:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"DreamCycle {job_id} runtime numeric "
+                                "parameters are invalid"
+                            ),
+                        ) from exc
+                    normalized_runtime = {
+                        "model": str(runtime.get("model") or "").strip(),
+                        "base_url": str(
+                            runtime.get("base_url") or ""
+                        ).strip(),
+                        "temperature": max(
+                            0.0,
+                            min(
+                                2.0,
+                                float(
+                                    runtime.get(
+                                        "temperature",
+                                        default_runtime["temperature"],
+                                    )
+                                ),
+                            ),
+                        ),
+                        "max_tokens": max(
+                            1,
+                            min(
+                                131072,
+                                int(
+                                    runtime.get(
+                                        "max_tokens",
+                                        default_runtime["max_tokens"],
+                                    )
+                                ),
+                            ),
+                        ),
+                        "max_turns": max(
+                            1,
+                            min(
+                                200,
+                                int(
+                                    runtime.get(
+                                        "max_turns",
+                                        default_runtime["max_turns"],
+                                    )
+                                ),
+                            ),
+                        ),
+                        "max_errors": max(
+                            1,
+                            min(
+                                100,
+                                int(
+                                    runtime.get(
+                                        "max_errors",
+                                        default_runtime["max_errors"],
+                                    )
+                                ),
+                            ),
+                        ),
+                    }
+                    if normalized_runtime != default_runtime:
+                        job_settings[job_id] = normalized_runtime
+                dreamcycle["enabled_jobs"] = enabled_jobs
+                dreamcycle["job_prompts"] = job_prompts
+                dreamcycle["job_settings"] = job_settings
+
+            # Deprecated simplified-engine settings remain accepted so old
+            # clients can upgrade without a coordinated deployment.
+            for key, minimum, maximum, fallback in (
+                ("interval_seconds", 60, 365 * 86400, 86400),
+                ("max_source_items", 1, 10000, 100),
+                ("max_source_chars", 1000, 10_000_000, 120000),
+            ):
+                dreamcycle[key] = _bounded_int(
+                    memory_in,
+                    key,
+                    dreamcycle.get(key, fallback),
+                    minimum=minimum,
+                    maximum=maximum,
+                )
+            if "prompts" in memory_in:
+                prompt_input = memory_in.get("prompts")
+                if not isinstance(prompt_input, dict):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="memory_maintenance.prompts must be an object",
+                    )
+                prompts = dreamcycle.setdefault("prompts", {})
+                for key in ("extract", "consolidate"):
+                    if key in prompt_input:
+                        value = str(prompt_input.get(key) or "").strip()
+                        if not value:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"DreamCycle {key} prompt cannot be empty",
+                            )
+                        prompts[key] = value
+            existing_key = str(
+                dreamcycle.get("llm_api_key")
+                or getattr(owner.config, "dreamcycle_llm_api_key", "")
+                or ""
+            )
+            if bool(memory_in.get("clear_api_key", False)):
+                existing_key = ""
+            if str(memory_in.get("api_key") or "").strip():
+                existing_key = str(memory_in["api_key"]).strip()
+            dreamcycle["llm_api_key"] = existing_key
+            existing_embed_key = str(
+                dreamcycle.get("embed_api_key")
+                or getattr(owner.config, "dreamcycle_embed_api_key", "")
+                or ""
+            )
+            if bool(memory_in.get("clear_embed_api_key", False)):
+                existing_embed_key = ""
+            if str(memory_in.get("embed_api_key") or "").strip():
+                existing_embed_key = str(
+                    memory_in["embed_api_key"]
+                ).strip()
+            dreamcycle["embed_api_key"] = existing_embed_key
+
+            store.save(data)
+            await owner._reload_openviking_integrations(store.to_config())
+            return JSONResponse(
+                content=_evolve_settings_payload(owner.config, data)
+            )
 
         @app.get("/api/langfuse-config")
         async def api_get_langfuse_config():
@@ -1567,7 +2711,7 @@ class RoutesMixin:
             if not api_key or not base_url or not model:
                 raise HTTPException(
                     status_code=503,
-                    detail="进化模型未配置，无法测试 prompt。请先在「进化模型」中配置。",
+                    detail="进化模型未配置，无法测试 prompt。请先在「全局模型」中配置。",
                 )
             return AsyncLLMClient(
                 api_key=api_key,
@@ -1598,10 +2742,12 @@ class RoutesMixin:
             body = await request.json()
             if not isinstance(body, dict):
                 raise HTTPException(status_code=400, detail="body must be an object")
-            prompt = str(body.get("prompt") or "")
             ps = _prompt_studio()
             try:
-                ps.set_override(stage_id, prompt)
+                if "prompt" in body:
+                    ps.set_override(stage_id, str(body.get("prompt") or ""))
+                if "settings" in body:
+                    ps.set_stage_settings(stage_id, body.get("settings"))
             except KeyError as exc:
                 raise HTTPException(status_code=404, detail=f"unknown prompt stage: {stage_id}") from exc
             except ValueError as exc:
@@ -1614,6 +2760,7 @@ class RoutesMixin:
             ps = _prompt_studio()
             try:
                 ps.reset_override(stage_id)
+                ps.reset_stage_settings(stage_id)
             except KeyError as exc:
                 raise HTTPException(status_code=404, detail=f"unknown prompt stage: {stage_id}") from exc
             return JSONResponse(content=ps.get_prompt(stage_id))
@@ -1733,12 +2880,93 @@ class RoutesMixin:
 
         @app.post("/ingest_session")
         async def ingest_session(request: Request):
-            _check_ingest_api_key(request)
             body = await _read_limited_json_body(request)
+            agent_record: dict[str, Any] | None = None
+            if is_v1_payload(body):
+                agent_record = verify_agent_access_token(
+                    owner.config,
+                    _bearer_token(request),
+                    required_scope="session.ingest",
+                )
+                if agent_record is None:
+                    raise HTTPException(
+                        status_code=401,
+                        detail="invalid or insufficient Agent access token",
+                    )
+            else:
+                _check_ingest_api_key(request)
+            try:
+                body = normalize_session_envelope(body)
+            except AgentProtocolError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             session_id = _safe_session_id(body.get("session_id"))
             session = dict(body)
             session["session_id"] = session_id
             session.setdefault("user_alias", str(getattr(owner.config, "sharing_user_alias", "") or "anonymous"))
+            runtime = session.get("runtime") if isinstance(session.get("runtime"), dict) else {}
+            if agent_record is not None and str(
+                runtime.get("integration_id") or ""
+            ) != str(agent_record.get("agent_id") or ""):
+                raise HTTPException(
+                    status_code=403,
+                    detail="session runtime.integration_id does not match access token",
+                )
+            runtime_context = (
+                dict(session.get("runtime_context"))
+                if isinstance(session.get("runtime_context"), dict)
+                else {}
+            )
+            runtime_type = str(runtime.get("type") or session.get("source") or "")
+            external_username = str(
+                runtime_context.get("username")
+                or session.get("user_alias")
+                or ""
+            )
+            if agent_record is not None:
+                local_user_id = resolve_agent_subject_user_id(
+                    owner.config,
+                    integration_id=str(agent_record.get("agent_id") or ""),
+                    runtime_type=runtime_type,
+                    external_subject=str(
+                        runtime_context.get("external_subject")
+                        or external_username
+                    ),
+                    allow_legacy_runtime_mapping=False,
+                )
+                if not local_user_id:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="SUBJECT_NOT_MAPPED",
+                    )
+            else:
+                local_user_id = resolve_registered_user_id(
+                    owner.config,
+                    runtime_type=runtime_type,
+                    external_username=external_username,
+                    preferred_user_id=str(
+                        runtime_context.get("team_evolver_user_id") or ""
+                    ),
+                )
+            if local_user_id:
+                runtime_context["team_evolver_user_id"] = local_user_id
+                session["runtime_context"] = runtime_context
+            if agent_record is not None:
+                try:
+                    session["turns"] = verify_context_usage(
+                        owner.config,
+                        agent_id=str(agent_record.get("agent_id") or ""),
+                        user_id=local_user_id,
+                        turns=[
+                            dict(turn)
+                            for turn in session.get("turns") or []
+                            if isinstance(turn, dict)
+                        ],
+                    )
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"invalid context_usage: {exc}",
+                    ) from exc
             return await _ingest_session_dict(owner, session)
 
         async def _ingest_langfuse_session(session: dict[str, Any]) -> dict[str, Any]:
@@ -1857,38 +3085,39 @@ class RoutesMixin:
                 raise HTTPException(status_code=502, detail=f"langfuse pull failed: {exc}") from exc
             return JSONResponse(content=result)
 
-        @app.post("/internal/agentshub/openviking-config")
-        async def sync_agentshub_openviking_config(request: Request):
-            """Merge one AgentsHub peer's personal source and shared team target."""
-            _check_ingest_api_key(request)
-            body = await _read_limited_json_body(request)
-            endpoint = str(body.get("endpoint") or "").strip()
-            account = str(body.get("account") or "").strip()
-            personal_key = str(body.get("personal_api_key") or "").strip()
-            # AgentsHub sends every registered user's personal key as an array so
-            # DreamCycle can read each user's OpenViking space (scope=all). Fall
-            # back to the singular field for older AgentsHub builds.
-            raw_personal_keys = body.get("personal_api_keys")
-            personal_keys_in = (
-                [str(item or "").strip() for item in raw_personal_keys]
-                if isinstance(raw_personal_keys, list)
-                else []
-            )
-            team_key = str(body.get("team_api_key") or "").strip()
-            if not endpoint or not team_key:
-                raise HTTPException(
-                    status_code=400,
-                    detail="endpoint and team_api_key are required",
-                )
-            from ..integrations.dreamcycle import parse_openviking_key
+        async def _register_agent_runtime(body: dict[str, Any]) -> dict[str, Any]:
+            """Register an Agent and optionally merge cloud OpenViking sources.
 
-            key_account, team_user = parse_openviking_key(team_key)
-            if not team_user:
-                raise HTTPException(
-                    status_code=400,
-                    detail="team_api_key does not encode an OpenViking user",
+            The durable teamEvolver config is authoritative. In local deployment
+            mode an external Agent may register capabilities/endpoints, but it
+            cannot replace the local OpenViking endpoint or credentials.
+            """
+            try:
+                agent = register_agent(owner.config, body)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            access_token = ""
+            if str(agent.get("compatibility") or "") == "compatible" and set(
+                agent.get("capability_ids") or []
+            ).intersection({"session.ingest.v1", "context.workspace.v1"}):
+                agent, access_token = issue_agent_access_token(
+                    owner.config,
+                    agent_id=str(agent.get("agent_id") or ""),
+                    rotate=bool(body.get("rotate_access_token", False)),
                 )
+            registration_fields: dict[str, Any] = {
+                "agent": public_agent_record(agent),
+            }
+            if access_token:
+                registration_fields["credentials"] = {
+                    "agent_access_token": access_token,
+                    "token_type": "Bearer",
+                    "scopes": list(
+                        (agent.get("access_auth") or {}).get("scopes") or []
+                    ),
+                }
 
+            storage = body.get("storage") if isinstance(body.get("storage"), dict) else {}
             config_file = str(
                 getattr(owner.config, "_config_file", "") or ""
             ).strip()
@@ -1899,6 +3128,64 @@ class RoutesMixin:
             )
             data = store.load()
             sharing = data.setdefault("sharing", {})
+            deployment = str(sharing.get("viking_deployment") or "cloud").strip().lower()
+            durable_config = store.to_config()
+            if deployment == "local":
+                current_endpoint = str(
+                    getattr(owner.config, "sharing_viking_endpoint", "") or ""
+                ).rstrip("/")
+                durable_endpoint = str(
+                    durable_config.sharing_viking_endpoint or ""
+                ).rstrip("/")
+                if current_endpoint != durable_endpoint:
+                    await owner._reload_openviking_integrations(durable_config)
+                return {
+                    "ok": True,
+                    **registration_fields,
+                    "storage_authority": "teamEvolver",
+                    "storage_updated": False,
+                    "storage_ignored_reason": "local_deployment_is_authoritative",
+                    "account": durable_config.sharing_viking_account,
+                    "team_user": durable_config.sharing_viking_user,
+                    "personal_source_count": len(
+                        durable_config.sharing_viking_personal_api_keys or []
+                    ),
+                }
+
+            endpoint = str(storage.get("endpoint") or "").strip()
+            account = str(storage.get("account") or "").strip()
+            personal_user = str(storage.get("personal_user") or "").strip()
+            configured_team_user = str(storage.get("team_user") or "").strip()
+            personal_key = str(storage.get("personal_api_key") or "").strip()
+            raw_personal_keys = storage.get("personal_api_keys")
+            personal_keys_in = (
+                [str(item or "").strip() for item in raw_personal_keys]
+                if isinstance(raw_personal_keys, list)
+                else []
+            )
+            team_key = str(storage.get("team_api_key") or "").strip()
+            if not endpoint and not team_key:
+                return {
+                    "ok": True,
+                    **registration_fields,
+                    "storage_authority": "teamEvolver",
+                    "storage_updated": False,
+                }
+            if not endpoint or not team_key:
+                raise HTTPException(
+                    status_code=400,
+                    detail="storage.endpoint and storage.team_api_key must be provided together",
+                )
+
+            from ..integrations.dreamcycle import parse_openviking_key
+
+            key_account, encoded_team_user = parse_openviking_key(team_key)
+            team_user = encoded_team_user or configured_team_user
+            if not team_user:
+                raise HTTPException(
+                    status_code=400,
+                    detail="storage.team_user is required when the team key has no encoded user",
+                )
             existing = sharing.get("viking_personal_api_keys")
             source_keys = (
                 list(existing)
@@ -1912,12 +3199,7 @@ class RoutesMixin:
             legacy_personal = str(
                 sharing.get("viking_personal_api_key") or ""
             ).strip()
-            if legacy_personal:
-                source_keys.append(legacy_personal)
-            if personal_key:
-                source_keys.append(personal_key)
-            if personal_keys_in:
-                source_keys.extend(personal_keys_in)
+            source_keys.extend([legacy_personal, personal_key, *personal_keys_in])
             source_keys = list(
                 dict.fromkeys(
                     key
@@ -1925,25 +3207,23 @@ class RoutesMixin:
                     if (key := str(raw or "").strip()) and key != team_key
                 )
             )
-
             sharing.update(
                 {
                     "enabled": True,
                     "backend": "viking",
                     "viking_endpoint": endpoint,
                     "viking_account": key_account or account,
+                    "viking_personal_user": personal_user,
                     "viking_user": team_user,
                     "viking_team_api_key": team_key,
                     "viking_personal_api_keys": source_keys,
                 }
             )
-            # Keep the singular field for older teamEvolver integrations.
             if personal_key:
                 sharing["viking_personal_api_key"] = personal_key
             data.setdefault("dreamcycle", {}).update(
                 {"enabled": True, "auto_start": True}
             )
-            # Remove the short-lived duplicate DreamCycle credential fields.
             for key in (
                 "viking_endpoint",
                 "viking_api_key",
@@ -1954,12 +3234,66 @@ class RoutesMixin:
             store.save(data)
             config = store.to_config()
             await owner._reload_openviking_integrations(config)
-
             return {
                 "ok": True,
+                **registration_fields,
+                "storage_authority": "shared_agent_config",
+                "storage_updated": True,
                 "account": key_account or account,
                 "team_user": team_user,
                 "personal_source_count": len(source_keys),
+            }
+
+        @app.post("/internal/agents/register")
+        async def register_agent_runtime(request: Request):
+            body = await _read_limited_json_body(request)
+            if is_v1_payload(body):
+                _check_v1_control_plane_key(request)
+            else:
+                _check_ingest_api_key(request)
+            return await _register_agent_runtime(body)
+
+        @app.post("/internal/agentshub/openviking-config")
+        async def sync_agentshub_openviking_config(request: Request):
+            """Backward-compatible adapter for older AgentsHub builds."""
+            _check_ingest_api_key(request)
+            body = await _read_limited_json_body(request)
+            return await _register_agent_runtime(
+                {
+                    "agent_id": str(body.get("agent_id") or "agentshub"),
+                    "runtime_type": "agentshub",
+                    "display_name": "AgentsHub",
+                    "capabilities": [
+                        "session_ingest",
+                        "true_replay",
+                        "skill_sync",
+                        "openviking_context",
+                    ],
+                    "endpoints": body.get("endpoints") or {},
+                    "metadata": body.get("metadata") or {},
+                    "storage": {
+                        "endpoint": body.get("endpoint"),
+                        "account": body.get("account"),
+                        "personal_user": body.get("personal_user"),
+                        "team_user": body.get("team_user"),
+                        "personal_api_key": body.get("personal_api_key"),
+                        "personal_api_keys": body.get("personal_api_keys"),
+                        "team_api_key": body.get("team_api_key"),
+                    },
+                }
+            )
+
+        @app.get("/api/agent-integrations")
+        async def api_agent_integrations():
+            return {
+                "agents": [
+                    public_agent_record(agent)
+                    for agent in list_agents(owner.config)
+                ],
+                "storage_authority": "teamEvolver",
+                "storage_deployment": str(
+                    getattr(owner.config, "sharing_viking_deployment", "") or "cloud"
+                ),
             }
 
         @app.get("/healthz")
@@ -1982,8 +3316,135 @@ class RoutesMixin:
         async def dreamcycle_status():
             return owner._dreamcycle_status()
 
+        @app.get("/trigger-dreamcycle/dry-run")
+        async def dreamcycle_dry_run(request: Request):
+            _require_admin_user(_session_user(request))
+            return owner._dreamcycle_dry_run()
+
+        @app.get("/trigger-dreamcycle/memory-changes")
+        async def dreamcycle_memory_changes(
+            request: Request,
+            limit: int = 100,
+        ):
+            _require_admin_user(_session_user(request))
+            if not 1 <= limit <= 500:
+                raise HTTPException(
+                    status_code=400,
+                    detail="limit must be between 1 and 500",
+                )
+            return owner._dreamcycle_memory_changes(limit=limit)
+
+        @app.post("/trigger-dreamcycle/reset")
+        async def dreamcycle_reset(request: Request):
+            _require_admin_user(_session_user(request))
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail="DreamCycle reset body must be an object",
+                )
+            remote = bool(body.get("remote", False))
+            dry_run = bool(body.get("dry_run", True))
+            if not dry_run:
+                expected = (
+                    "ARCHIVE_REMOTE_MEMORY"
+                    if remote
+                    else "RESET_LOCAL_STATE"
+                )
+                if str(body.get("confirmation") or "") != expected:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"confirmation must equal {expected}",
+                    )
+            result = owner._dreamcycle_reset(
+                remote=remote,
+                dry_run=dry_run,
+            )
+            if result.get("status") == "running":
+                return JSONResponse(content=result, status_code=409)
+            return result
+
         @app.get("/storage/status")
         async def storage_status():
+            return JSONResponse(content=_storage_status(owner.config))
+
+        @app.get("/api/sharing-config")
+        async def api_get_sharing_config():
+            data = ConfigStore().load()
+            sharing = data.get("sharing", {}) if isinstance(data.get("sharing"), dict) else {}
+            deployment = str(sharing.get("viking_deployment") or "cloud").strip().lower()
+            if deployment not in {"cloud", "local"}:
+                deployment = "cloud"
+            return JSONResponse(
+                content={
+                    "enabled": bool(sharing.get("enabled", True)),
+                    "backend": "viking",
+                    "deployment": deployment,
+                    "endpoint": resolve_viking_endpoint(
+                        deployment, str(sharing.get("viking_endpoint", "") or "")
+                    ),
+                    "endpoint_override": str(sharing.get("viking_endpoint", "") or ""),
+                    "cloud_endpoint": VOLCENGINE_OPENVIKING_ENDPOINT,
+                    "local_endpoint": LOCAL_OPENVIKING_ENDPOINT,
+                    "account": str(sharing.get("viking_account") or "default"),
+                    "personal_user": str(
+                        sharing.get("viking_personal_user") or ""
+                    ),
+                    "team_user": str(sharing.get("viking_user") or "default"),
+                    "root_prefix": str(
+                        sharing.get("viking_root_prefix") or "team-skill-evolver"
+                    ),
+                    "team_api_key_present": bool(sharing.get("viking_team_api_key") or sharing.get("viking_api_key")),
+                    "personal_api_key_present": bool(sharing.get("viking_personal_api_key")),
+                }
+            )
+
+        @app.post("/api/sharing-config")
+        async def api_save_sharing_config(request: Request):
+            _require_admin_user(_session_user(request))
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise HTTPException(status_code=400, detail="sharing settings body must be an object")
+            deployment = str(body.get("deployment") or "cloud").strip().lower()
+            if deployment not in {"cloud", "local"}:
+                raise HTTPException(
+                    status_code=400, detail="deployment must be 'cloud' or 'local'"
+                )
+            store = ConfigStore()
+            data = store.load()
+            sharing = data.setdefault("sharing", {})
+            sharing["enabled"] = bool(body.get("enabled", sharing.get("enabled", True)))
+            sharing["backend"] = "viking"
+            sharing["viking_deployment"] = deployment
+            # An explicit endpoint override is optional; empty means "derive
+            # from the cloud/local deployment default".
+            if "endpoint_override" in body:
+                sharing["viking_endpoint"] = str(body.get("endpoint_override") or "").strip()
+            if "account" in body:
+                sharing["viking_account"] = str(body.get("account") or "default").strip()
+            if "personal_user" in body:
+                sharing["viking_personal_user"] = str(
+                    body.get("personal_user") or ""
+                ).strip()
+            if "team_user" in body:
+                sharing["viking_user"] = str(
+                    body.get("team_user") or "default"
+                ).strip()
+            if "root_prefix" in body:
+                sharing["viking_root_prefix"] = str(
+                    body.get("root_prefix") or "team-skill-evolver"
+                ).strip().strip("/")
+            if "personal_api_key" in body:
+                sharing["viking_personal_api_key"] = str(
+                    body.get("personal_api_key") or ""
+                ).strip()
+            if "team_api_key" in body:
+                sharing["viking_team_api_key"] = str(
+                    body.get("team_api_key") or ""
+                ).strip()
+            store.save(data)
+            owner.config = store.to_config()
+            await owner._reload_openviking_integrations(owner.config)
             return JSONResponse(content=_storage_status(owner.config))
 
         @app.get("/status")

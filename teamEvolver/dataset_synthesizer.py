@@ -7,12 +7,19 @@ datasets that become the candidate's True Replay contract.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import re
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional
 
+from .dataset_store import (
+    SkillDatasetStore,
+    dataset_material_integrity,
+)
+from .session_materials import collect_session_materials
 from .storage import is_not_found_error
 
 DATASET_FORMAT = "teamEvolver-progressive-test-v1"
@@ -39,6 +46,12 @@ For every test case:
 4. source_session_ids: the session ids that ground the case.
 5. evidence_window: "recent" or "historical".
 6. name: a concise human-readable test name.
+
+Every generated case must be runnable from the dataset by itself. If the source
+task used files or directories but their bytes are not present in the supplied
+evidence, do not reference those paths. Instead, inline a compact realistic
+fixture under a `材料：` section in query. Never invent a filename, archive,
+input directory, or material that the replay environment cannot provide.
 
 The replay protocol reveals only query on interaction 1. After each interaction
 an independent checklist judge identifies unmet requirements; only the next
@@ -71,6 +84,15 @@ def _effective_synthesize_system() -> str:
         return effective_prompt("dataset_synthesis", _SYNTHESIZE_SYSTEM)
     except Exception:
         return _SYNTHESIZE_SYSTEM
+
+
+def _synthesis_call_options() -> dict[str, Any]:
+    try:
+        from .evolve.prompt_studio import stage_call_options
+
+        return stage_call_options("dataset_synthesis")
+    except Exception:  # noqa: BLE001 - retain stable stage defaults
+        return {"max_tokens": 16_384, "temperature": 0.3}
 
 
 def render_synthesis_prompt(
@@ -236,6 +258,7 @@ def _normalize_dataset(
     batch_size: int,
     default_window: str,
     synthesis_mode: str,
+    materials: Optional[list[dict[str, Any]]] = None,
 ) -> Optional[dict[str, Any]]:
     query = str(raw.get("query") or raw.get("instruction") or "").strip()
     if not query:
@@ -262,7 +285,18 @@ def _normalize_dataset(
         query=query,
         source_session_ids=source_ids,
     )
-    return {
+    dataset_materials = [
+        dict(item)
+        for item in materials or []
+        if isinstance(item, Mapping)
+        and item.get("path")
+        and (
+            not source_ids
+            or not item.get("source_session_id")
+            or str(item.get("source_session_id")) in source_ids
+        )
+    ]
+    dataset = {
         "dataset_id": dataset_id,
         "dataset_format": DATASET_FORMAT,
         "skill_name": skill_name,
@@ -277,6 +311,7 @@ def _normalize_dataset(
         "synthesis_mode": synthesis_mode,
         "requirement_count": len(requirements),
         "minimum_requirement_target": min_requirements,
+        "materials": dataset_materials,
         "progressive_disclosure": {
             "enabled": True,
             "initial_visibility": "query_only",
@@ -285,6 +320,16 @@ def _normalize_dataset(
         },
         "created_at": _utc_now_iso(),
     }
+    if not dataset_material_integrity(
+        dataset,
+        available_paths=[
+            str(item.get("path") or "")
+            for item in dataset_materials
+            if item.get("content_b64")
+        ],
+    )["complete"]:
+        return None
+    return dataset
 
 
 def _requirements_from_session(session: Mapping[str, Any]) -> list[str]:
@@ -312,6 +357,7 @@ def _fallback_datasets(
     max_requirements: int,
     batch_size: int,
     case_count: int,
+    materials: Optional[list[dict[str, Any]]] = None,
 ) -> list[dict[str, Any]]:
     grounded_requirements: list[str] = []
     for claim in _team_evidence_claims(candidate_skill):
@@ -352,6 +398,7 @@ def _fallback_datasets(
             batch_size=batch_size,
             default_window="recent" if index == 0 else "historical",
             synthesis_mode="grounded_fallback",
+            materials=materials,
         )
         if dataset:
             datasets.append(dataset)
@@ -377,6 +424,7 @@ async def synthesize_evolution_datasets(
     max_requirements = max(min_requirements, int(max_requirements or 24))
     batch_size = max(1, int(batch_size or 1))
     compact_sessions = [_session_payload(session) for session in sessions[:50]]
+    source_materials = collect_session_materials(sessions)
     payload = {
         "skill_name": skill_name,
         "candidate_skill": {
@@ -409,8 +457,7 @@ async def synthesize_evolution_datasets(
                     "content": json.dumps(payload, ensure_ascii=False),
                 },
             ],
-            max_tokens=16_384,
-            temperature=0.3,
+            **_synthesis_call_options(),
             trace_name=f"team-skill-evolver:dataset_synthesis:{skill_name}",
             trace_tags=[
                 "team-skill-evolver",
@@ -445,6 +492,7 @@ async def synthesize_evolution_datasets(
             batch_size=batch_size,
             default_window="recent" if index == 0 else "historical",
             synthesis_mode="model",
+            materials=source_materials,
         )
         if dataset:
             datasets.append(dataset)
@@ -459,28 +507,49 @@ async def synthesize_evolution_datasets(
         max_requirements=max_requirements,
         batch_size=batch_size,
         case_count=case_count,
+        materials=source_materials,
     )
 
 
 def dataset_to_replay_case(dataset: Mapping[str, Any]) -> dict[str, Any]:
     """Project a synthesized dataset into the True Replay job contract."""
+    source = (
+        dataset.get("source")
+        if isinstance(dataset.get("source"), Mapping)
+        else {}
+    )
     checklist = [
         dict(item)
         for item in dataset.get("checklist") or []
         if isinstance(item, Mapping) and item.get("text")
     ]
+    if not checklist:
+        checklist = checklist_items(
+            flatten_requirements(dataset.get("requirements")),
+            flatten_requirements(dataset.get("trajectory_requirements")),
+        )
     source_ids = [
         str(item or "")
-        for item in dataset.get("source_session_ids") or []
+        for item in (
+            dataset.get("source_session_ids")
+            or source.get("source_session_ids")
+            or []
+        )
         if str(item or "")
     ]
+    session_id = str(
+        source.get("session_id")
+        or (source_ids[0] if source_ids else "")
+        or ""
+    )
     return {
         "case_id": str(dataset.get("dataset_id") or ""),
         "dataset_id": str(dataset.get("dataset_id") or ""),
         "dataset_format": str(dataset.get("dataset_format") or DATASET_FORMAT),
-        "session_id": source_ids[0] if source_ids else "",
+        "skill_name": str(dataset.get("skill_name") or ""),
+        "session_id": session_id,
         "source_session_ids": source_ids,
-        "turn_num": 1,
+        "turn_num": int(source.get("turn_num") or 1),
         "instruction": str(dataset.get("query") or ""),
         "query": str(dataset.get("query") or ""),
         "requirements": flatten_requirements(dataset.get("requirements")),
@@ -491,7 +560,16 @@ def dataset_to_replay_case(dataset: Mapping[str, Any]) -> dict[str, Any]:
         "progressive_disclosure": dict(
             dataset.get("progressive_disclosure") or {}
         ),
-        "evidence_window": str(dataset.get("evidence_window") or "recent"),
+        "materials": [
+            dict(item)
+            for item in dataset.get("materials") or []
+            if isinstance(item, Mapping) and item.get("path")
+        ],
+        "evidence_window": str(
+            dataset.get("evidence_window")
+            or source.get("evidence_window")
+            or "recent"
+        ),
     }
 
 
@@ -521,6 +599,25 @@ class SynthesizedDatasetStore:
         source_session_ids: list[str],
         candidate_revision: int,
     ) -> dict[str, Any]:
+        now = _utc_now_iso()
+        stored_datasets = []
+        for raw in datasets:
+            item = dict(raw)
+            item["materials"] = [
+                {
+                    key: material.get(key)
+                    for key in (
+                        "path",
+                        "size",
+                        "sha256",
+                        "source_session_id",
+                    )
+                    if material.get(key) is not None
+                }
+                for material in raw.get("materials") or []
+                if isinstance(material, Mapping) and material.get("path")
+            ]
+            stored_datasets.append(item)
         payload = {
             "schema_version": 1,
             "dataset_format": DATASET_FORMAT,
@@ -528,13 +625,118 @@ class SynthesizedDatasetStore:
             "generation_id": generation_id,
             "candidate_revision": int(candidate_revision or 1),
             "source_session_ids": list(dict.fromkeys(source_session_ids)),
-            "datasets": datasets,
-            "created_at": _utc_now_iso(),
+            "datasets": stored_datasets,
+            "created_at": now,
         }
         self._bucket.put_object(
             self._key(skill_name, generation_id),
             json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
         )
+        repository = SkillDatasetStore(self._bucket, prefix=self._prefix)
+        for raw in datasets:
+            if not isinstance(raw, Mapping) or not raw.get("dataset_id"):
+                continue
+            dataset_id = str(raw.get("dataset_id") or "")
+            existing = repository.load_dataset(
+                skill_name=skill_name,
+                dataset_id=dataset_id,
+            )
+            existing_source = (
+                existing.get("source")
+                if isinstance((existing or {}).get("source"), Mapping)
+                else {}
+            )
+            # Editable lab datasets may be selected as fixed regressions. The
+            # generation audit references them but must not make them read-only.
+            if existing and (
+                str(existing_source.get("kind") or "") != "evolution"
+                or not bool(existing.get("read_only", True))
+                or bool(existing_source.get("user_edited"))
+            ):
+                continue
+            generation_ids = list(
+                dict.fromkeys(
+                    [
+                        *(
+                            existing_source.get("generation_ids")
+                            if isinstance(
+                                existing_source.get("generation_ids"),
+                                list,
+                            )
+                            else []
+                        ),
+                        generation_id,
+                    ]
+                )
+            )
+            dataset_source_ids = [
+                str(item or "")
+                for item in raw.get("source_session_ids") or []
+                if str(item or "")
+            ]
+            decoded_materials: list[tuple[str, bytes]] = []
+            material_sources: dict[str, str] = {}
+            for material in raw.get("materials") or []:
+                if not isinstance(material, Mapping) or not material.get("path"):
+                    continue
+                rel_path = str(material.get("path") or "")
+                try:
+                    data = base64.b64decode(
+                        str(material.get("content_b64") or ""),
+                        validate=True,
+                    )
+                except (binascii.Error, ValueError):
+                    continue
+                decoded_materials.append((rel_path, data))
+                material_sources[rel_path] = str(
+                    material.get("source_session_id") or ""
+                )
+            material_records = (
+                repository.replace_materials(
+                    skill_name=skill_name,
+                    dataset_id=dataset_id,
+                    files=decoded_materials,
+                )
+                if decoded_materials
+                else list((existing or {}).get("materials") or [])
+            )
+            for record in material_records:
+                source_session_id = material_sources.get(
+                    str(record.get("path") or "")
+                )
+                if source_session_id:
+                    record["source_session_id"] = source_session_id
+            dataset_payload = dict(raw)
+            dataset_payload["materials"] = material_records
+            repository.save_dataset(
+                {
+                    **dataset_payload,
+                    "skill_name": skill_name,
+                    "source": {
+                        "kind": "evolution",
+                        "job_id": generation_id,
+                        "generation_ids": generation_ids,
+                        "source_session_ids": dataset_source_ids,
+                        "session_id": (
+                            dataset_source_ids[0]
+                            if dataset_source_ids
+                            else ""
+                        ),
+                        "evidence_window": str(
+                            raw.get("evidence_window") or "recent"
+                        ),
+                        "candidate_revision": int(candidate_revision or 1),
+                    },
+                    "read_only": True,
+                    "enabled_for_evolution": False,
+                    "created_at": str(
+                        (existing or {}).get("created_at")
+                        or raw.get("created_at")
+                        or now
+                    ),
+                    "updated_at": now,
+                }
+            )
         return payload
 
     def load_generation(

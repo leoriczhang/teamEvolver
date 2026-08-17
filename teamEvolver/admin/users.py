@@ -48,13 +48,6 @@ def registry_path(config) -> Path:
     return Path(path).expanduser() if path else DEFAULT_USERS_PATH
 
 
-def local_root(config, user_id: str, *, team: bool) -> str:
-    base = registry_path(config).parent / "skill_spaces"
-    if team:
-        return str(base / "team")
-    return str(base / "users" / slug(user_id) / "personal")
-
-
 def load_registry(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"users": []}
@@ -116,19 +109,21 @@ def normalize_space(raw: Any, existing: dict[str, Any] | None = None) -> dict[st
             api_key = str(key_value)
         else:
             api_key = str(current.get("viking_api_key") or "")
-    return {"backend": "viking" if api_key else "local", "viking_api_key": api_key}
+    return {"backend": "viking", "viking_api_key": api_key}
 
 
 def public_space_secret(space: dict[str, Any]) -> dict[str, Any]:
     api_key = str((space or {}).get("viking_api_key") or "")
-    if api_key:
-        return {"backend": "viking", "viking_api_key": api_key, "api_key_present": True}
-    return {"backend": "local", "viking_api_key": "", "api_key_present": False}
+    return {
+        "backend": "viking",
+        "viking_api_key": api_key,
+        "api_key_present": bool(api_key),
+    }
 
 
 def public_space(space: dict[str, Any]) -> dict[str, Any]:
     return {
-        "backend": str(space.get("backend") or "local"),
+        "backend": "viking",
         "api_key_present": bool(space.get("viking_api_key")),
     }
 
@@ -192,31 +187,21 @@ def hub_from_user(config, user: dict[str, Any], *, space: str) -> SkillHub:
         raise HTTPException(status_code=400, detail=f"unsupported skill space: {space}")
     is_team = space == "team"
     space_cfg = (user.get("team_space") if is_team else user.get("personal_space")) or {}
-    backend = str(space_cfg.get("backend") or "local")
     user_id = str(user.get("id") or "")
-    if backend == "viking":
-        return SkillHub(
-            backend="viking",
-            endpoint="",
-            local_root="",
-            customer_id="" if is_team else user_id,
-            user_alias=str(user.get("display_name") or user_id or "anonymous"),
-            viking_endpoint=DEFAULT_OPENVIKING_ENDPOINT,
-            viking_api_key=str(space_cfg.get("viking_api_key") or ""),
-            viking_account=DEFAULT_ACCOUNT,
-            viking_user=DEFAULT_USER,
-            viking_agent=DEFAULT_AGENT,
-            viking_agent_id="",
-            viking_root_prefix=DEFAULT_ROOT_PREFIX,
-            viking_group_id="",
-            viking_namespace="resources",
-        )
     return SkillHub(
-        backend="local",
+        backend="viking",
         endpoint="",
-        local_root=local_root(config, user_id, team=is_team),
-        customer_id="",
+        customer_id="" if is_team else user_id,
         user_alias=str(user.get("display_name") or user_id or "anonymous"),
+        viking_endpoint=DEFAULT_OPENVIKING_ENDPOINT,
+        viking_api_key=str(space_cfg.get("viking_api_key") or ""),
+        viking_account=DEFAULT_ACCOUNT,
+        viking_user=DEFAULT_USER,
+        viking_agent=DEFAULT_AGENT,
+        viking_agent_id="",
+        viking_root_prefix=DEFAULT_ROOT_PREFIX,
+        viking_group_id="",
+        viking_namespace="resources",
     )
 
 

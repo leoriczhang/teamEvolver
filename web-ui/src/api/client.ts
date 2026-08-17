@@ -34,10 +34,37 @@ export interface StatusResp {
 
 export interface StorageStatus {
   backend?: string;
+  deployment?: string;
   endpoint?: string;
   namespace?: string;
   api_key_present?: boolean;
   reachable?: boolean;
+  reason?: string;
+}
+
+export type VikingDeployment = "cloud" | "local";
+
+export interface SharingConfig {
+  enabled?: boolean;
+  backend?: string;
+  deployment?: VikingDeployment;
+  endpoint?: string;
+  endpoint_override?: string;
+  cloud_endpoint?: string;
+  local_endpoint?: string;
+  account?: string;
+  personal_user?: string;
+  team_user?: string;
+  root_prefix?: string;
+  team_api_key_present?: boolean;
+  personal_api_key_present?: boolean;
+}
+
+export interface TeamSettings {
+  display_name: string;
+  configured_display_name: string;
+  environment_override?: string;
+  override_source?: string;
 }
 
 export interface QueueSession {
@@ -430,6 +457,118 @@ export interface EvolveModelTestResp {
   response?: string;
 }
 
+export interface EvolveProcessSettings {
+  environment_overrides?: Record<string, string>;
+  evolve: {
+    use_session_judge: boolean;
+    publish_mode: "direct" | "validated";
+    validation_max_rejections: number;
+    human_review_enabled: boolean;
+    human_review_timeout_seconds: number;
+    interval_seconds: number;
+    evidence_enabled: boolean;
+    evidence_max_entries: number;
+    evidence_recent_limit: number;
+    evidence_historical_limit: number;
+    evidence_replay_cases_per_window: number;
+    evidence_change_debt_threshold: number;
+    dataset_synthesis_enabled: boolean;
+    dataset_test_cases: number;
+    dataset_min_requirements: number;
+    dataset_max_requirements: number;
+    dataset_disclosure_batch_size: number;
+    candidate_coalesce_enabled: boolean;
+    bundle_text_extensions: string[];
+    bundle_max_file_bytes: number;
+    bundle_max_prompt_bytes: number;
+    bundle_allow_delete: boolean;
+    bundle_static_checks_enabled: boolean;
+  };
+  validation: {
+    enabled: boolean;
+    mode: "replay" | "true_replay";
+    idle_after_seconds: number;
+    poll_interval_seconds: number;
+    max_jobs_per_day: number;
+    max_concurrency: number;
+    required_results: number;
+    required_approvals: number;
+  };
+  memory_maintenance: {
+    enabled: boolean;
+    auto_start: boolean;
+    model: string;
+    base_url: string;
+    api_key?: string;
+    clear_api_key?: boolean;
+    api_key_present?: boolean;
+    engine?: string;
+    full_capabilities?: boolean;
+    llm_max_tokens: number;
+    temperature: number;
+    agent_id?: string;
+    customer_id?: string;
+    maintained_space?: string;
+    embed_model?: string;
+    embed_base_url?: string;
+    embed_api_key?: string;
+    clear_embed_api_key?: boolean;
+    embed_api_key_present?: boolean;
+    semantic_dedup_enabled?: boolean;
+    dedup_merge_threshold?: number;
+    dedup_warn_threshold?: number;
+    tools?: string[];
+    scheduler: {
+      active_start_hour: number;
+      active_end_hour: number;
+      rounds_per_window: number;
+      round_interval_minutes: number;
+      max_turns_per_job: number;
+      max_consecutive_errors: number;
+      retry_delay_seconds: number;
+    };
+    jobs: Array<{
+      id: string;
+      label: string;
+      description: string;
+      priority: number;
+      enabled: boolean;
+      overridden?: boolean;
+      settings_overridden?: boolean;
+      default_prompt: string;
+      effective_prompt: string;
+      runtime: {
+        model: string;
+        base_url: string;
+        temperature: number;
+        max_tokens: number;
+        max_turns: number;
+        max_errors: number;
+      };
+      default_runtime: {
+        model: string;
+        base_url: string;
+        temperature: number;
+        max_tokens: number;
+        max_turns: number;
+        max_errors: number;
+      };
+      tasks: Array<{
+        id: string;
+        description: string;
+        priority: string;
+      }>;
+    }>;
+    interval_seconds?: number;
+    max_source_items?: number;
+    max_source_chars?: number;
+    prompts?: {
+      extract: string;
+      consolidate: string;
+    };
+  };
+}
+
 // ---- Skills management --------------------------------------------------- //
 
 export interface SkillListItem {
@@ -477,6 +616,17 @@ export interface SkillLabDataset {
     stop_when?: string;
   };
   materials?: SkillLabMaterial[];
+  enabled_for_evolution?: boolean;
+  material_integrity?: {
+    status?: "complete" | "missing" | "not_required";
+    mode?: "none" | "inline" | "uploaded" | "mixed" | "external";
+    complete?: boolean;
+    inline?: boolean;
+    required_paths?: string[];
+    available_paths?: string[];
+    missing_paths?: string[];
+    message?: string;
+  };
   source?: {
     kind?: string;
     job_id?: string;
@@ -614,10 +764,11 @@ export function cloudNote(cloud?: CloudResult): string {
 
 // ---- User management ----------------------------------------------------- //
 
-export type SkillSpaceBackend = "" | "local" | "viking";
+export type SkillSpaceBackend = "" | "viking";
 
 export interface SkillSpaceConfig {
   backend?: SkillSpaceBackend;
+  viking_user?: string;
   viking_api_key?: string;
   clear_viking_api_key?: boolean;
   api_key_present?: boolean;
@@ -629,12 +780,42 @@ export interface UserProfile {
   display_name?: string;
   email?: string;
   role?: "user" | "admin";
+  agent_identities?: Record<string, string>;
+  agent_subjects?: Array<{
+    integration_id: string;
+    runtime_type: string;
+    external_subject: string;
+  }>;
   password?: string;
   password_set?: boolean;
   personal_space?: SkillSpaceConfig;
   team_space?: SkillSpaceConfig;
   created_at?: string;
   updated_at?: string;
+}
+
+export interface AgentIntegration {
+  agent_id: string;
+  runtime_type: string;
+  display_name?: string;
+  protocol_version?: string;
+  runtime_version?: string;
+  compatibility?: "compatible" | "legacy" | string;
+  status?: string;
+  capabilities?: string[];
+  capability_ids?: string[];
+  capability_details?: Record<string, Record<string, unknown>>;
+  endpoints?: Record<string, string>;
+  access_token_configured?: boolean;
+  access_scopes?: string[];
+  access_token_rotated_at?: string;
+  updated_at?: string;
+}
+
+export interface AgentIntegrationsResp {
+  agents: AgentIntegration[];
+  storage_authority?: string;
+  storage_deployment?: string;
 }
 
 export interface UsersListResp {
@@ -790,6 +971,9 @@ export interface PromptSummary {
   module?: string;
   symbol?: string;
   temperature?: number;
+  max_tokens?: number;
+  model?: string;
+  settings_overridden?: boolean;
   injects_shared_blocks?: boolean;
   overridden?: boolean;
   char_count?: number;
@@ -802,6 +986,8 @@ export interface PromptDetail extends PromptSummary {
   effective_prompt: string;
   expanded_prompt?: string;
   shared_blocks?: Record<string, string>;
+  default_temperature?: number;
+  default_max_tokens?: number;
 }
 
 export interface PromptStudioSession {

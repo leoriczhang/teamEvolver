@@ -17,6 +17,7 @@ EVALUATION.md 作为评分标准，检验使用效果。
 复用 run_pipeline.py 的 hermes 引导逻辑（HERMES_HOME / ARK_API_KEY / bin 定位）。
 """
 
+import os
 import shutil
 import subprocess
 import sys
@@ -108,7 +109,12 @@ def deploy_test_skill(skill_dir, skill_name):
     return dst
 
 
-def run_hermes(cmd_args, hermes_env, timeout=600):
+DEFAULT_HERMES_TIMEOUT = int(
+    os.environ.get("SKILLMINER_ONESHOT_TIMEOUT", "1800") or 1800
+)
+
+
+def run_hermes(cmd_args, hermes_env, timeout=DEFAULT_HERMES_TIMEOUT):
     """跑一次 hermes oneshot，返回 (ok, stdout)。复用 run_pipeline 的噪声过滤/错误判定。
 
     经由 run_pipeline 的进程注册表执行，「中止」可通过 terminate_active_procs

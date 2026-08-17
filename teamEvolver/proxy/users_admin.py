@@ -75,17 +75,6 @@ def _registry_path(config) -> Path:
     return Path(path).expanduser() if path else _DEFAULT_USERS_PATH
 
 
-def _local_base(config) -> Path:
-    return _registry_path(config).parent / "skill_spaces"
-
-
-def _local_root(config, user_id: str, *, team: bool) -> str:
-    base = _local_base(config)
-    if team:
-        return str(base / "team")
-    return str(base / "users" / _slug(user_id) / "personal")
-
-
 def _load_registry(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"users": []}
@@ -104,7 +93,9 @@ def _save_registry(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o600)
     tmp.replace(path)
+    os.chmod(path, 0o600)
 
 
 def _normalize_role(value: Any, existing: str = "user") -> str:
@@ -114,19 +105,68 @@ def _normalize_role(value: Any, existing: str = "user") -> str:
     return role
 
 
+def _normalize_agent_identities(
+    raw: Any,
+    existing: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    source = raw if isinstance(raw, dict) else (existing or {})
+    identities: dict[str, str] = {}
+    for runtime_type, username in source.items():
+        raw_runtime = str(runtime_type or "").strip()
+        if not raw_runtime:
+            continue
+        runtime = _slug(raw_runtime).lower()
+        external_username = str(username or "").strip()
+        if runtime and external_username:
+            identities[runtime] = external_username[:200]
+    return identities
+
+
+def _normalize_agent_subjects(
+    raw: Any,
+    existing: list[dict[str, Any]] | None = None,
+) -> list[dict[str, str]]:
+    source = raw if isinstance(raw, list) else (existing or [])
+    normalized: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in source:
+        if not isinstance(item, dict):
+            continue
+        integration_id = str(item.get("integration_id") or "").strip()[:160]
+        external_subject = str(item.get("external_subject") or "").strip()[:300]
+        runtime_type = str(item.get("runtime_type") or "").strip().lower()[:80]
+        if not integration_id or not external_subject:
+            continue
+        key = (integration_id, external_subject)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(
+            {
+                "integration_id": integration_id,
+                "runtime_type": runtime_type,
+                "external_subject": external_subject,
+            }
+        )
+    return normalized
+
+
 def _normalize_space(raw: Any, existing: dict[str, Any] | None = None) -> dict[str, Any]:
     """Normalize a skill space.
 
     Only the OpenViking key is configurable. All endpoint/account/user/agent
-    routing fields and local roots are derived internally.
+    routing fields are derived internally, and the backend is always
+    OpenViking (``viking``) — cloud or local self-hosted.
     """
     incoming = raw if isinstance(raw, dict) else {}
     current = existing if isinstance(existing, dict) else {}
     if incoming.get("clear_viking_api_key"):
-        api_key = ""
         return {
-            "backend": "local",
-            "viking_api_key": api_key,
+            "backend": "viking",
+            "viking_api_key": "",
+            "viking_user": str(
+                incoming.get("viking_user", current.get("viking_user", "")) or ""
+            ).strip(),
         }
     key_value = incoming.get("viking_api_key", None)
     if key_value not in (None, ""):
@@ -134,8 +174,11 @@ def _normalize_space(raw: Any, existing: dict[str, Any] | None = None) -> dict[s
     else:
         api_key = str(current.get("viking_api_key") or "")
     return {
-        "backend": "viking" if api_key else "local",
+        "backend": "viking",
         "viking_api_key": api_key,
+        "viking_user": str(
+            incoming.get("viking_user", current.get("viking_user", "")) or ""
+        ).strip(),
     }
 
 
@@ -163,8 +206,9 @@ def _verify_password(password: str, encoded: str) -> bool:
 
 def _public_space(space: dict[str, Any]) -> dict[str, Any]:
     return {
-        "backend": str(space.get("backend") or "local"),
+        "backend": "viking",
         "api_key_present": bool(space.get("viking_api_key")),
+        "viking_user": str(space.get("viking_user") or ""),
     }
 
 
@@ -204,9 +248,10 @@ def _effective_public_space(config, user: dict[str, Any], *, space: str) -> dict
 def _public_space_secret(space: dict[str, Any], *, inherited: bool = False) -> dict[str, Any]:
     key = str(space.get("viking_api_key") or "")
     return {
-        "backend": "viking" if inherited else str(space.get("backend") or "local"),
+        "backend": "viking",
         "api_key_present": bool(key) or inherited,
         "viking_api_key": "" if inherited else key,
+        "viking_user": str(space.get("viking_user") or ""),
         "inherited_from_admin": bool(inherited),
     }
 
@@ -223,6 +268,12 @@ def _public_user(user: dict[str, Any], config=None) -> dict[str, Any]:
         "display_name": user.get("display_name", ""),
         "email": user.get("email", ""),
         "role": user.get("role", "user"),
+        "agent_identities": dict(user.get("agent_identities") or {}),
+        "agent_subjects": [
+            dict(item)
+            for item in user.get("agent_subjects") or []
+            if isinstance(item, dict)
+        ],
         "password_set": bool(user.get("password_hash")),
         "personal_space": personal_space,
         "team_space": team_space,
@@ -236,6 +287,140 @@ def _find_user(data: dict[str, Any], user_id: str) -> tuple[int, dict[str, Any]]
         if str(user.get("id") or "") == user_id:
             return idx, user
     raise HTTPException(status_code=404, detail=f"user not found: {user_id}")
+
+
+def _validate_unique_agent_identities(
+    data: dict[str, Any],
+    candidate: dict[str, Any],
+) -> None:
+    candidate_id = str(candidate.get("id") or "")
+    identities = candidate.get("agent_identities") or {}
+    for user in data.get("users") or []:
+        if str(user.get("id") or "") == candidate_id:
+            continue
+        existing = (
+            user.get("agent_identities")
+            if isinstance(user.get("agent_identities"), dict)
+            else {}
+        )
+        for runtime, username in identities.items():
+            if str(existing.get(runtime) or "").strip() == username:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"{runtime} username {username!r} is already mapped "
+                        f"to user {user.get('id')!r}"
+                    ),
+                )
+
+
+def _validate_unique_agent_subjects(
+    data: dict[str, Any],
+    candidate: dict[str, Any],
+) -> None:
+    candidate_id = str(candidate.get("id") or "")
+    subjects = {
+        (
+            str(item.get("integration_id") or ""),
+            str(item.get("external_subject") or ""),
+        )
+        for item in candidate.get("agent_subjects") or []
+        if isinstance(item, dict)
+    }
+    for user in data.get("users") or []:
+        if str(user.get("id") or "") == candidate_id:
+            continue
+        for item in user.get("agent_subjects") or []:
+            if not isinstance(item, dict):
+                continue
+            key = (
+                str(item.get("integration_id") or ""),
+                str(item.get("external_subject") or ""),
+            )
+            if key in subjects:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Agent subject {key[0]} / {key[1]!r} is already "
+                        f"mapped to user {user.get('id')!r}"
+                    ),
+                )
+
+
+def resolve_registered_user_id(
+    config,
+    *,
+    runtime_type: str,
+    external_username: str,
+    preferred_user_id: str = "",
+) -> str:
+    """Resolve an Agent-side username to a teamEvolver user id."""
+    data = _load_registry(_registry_path(config))
+    users = [item for item in data.get("users") or [] if isinstance(item, dict)]
+    runtime = str(runtime_type or "").strip().lower()
+    external = str(external_username or "").strip()
+    resolved = ""
+    if runtime and external:
+        for user in users:
+            identities = (
+                user.get("agent_identities")
+                if isinstance(user.get("agent_identities"), dict)
+                else {}
+            )
+            if str(identities.get(runtime) or "").strip() == external:
+                resolved = str(user.get("id") or "")
+                break
+    if not resolved and external and any(
+        str(user.get("id") or "") == external for user in users
+    ):
+        resolved = external
+    preferred = str(preferred_user_id or "").strip()
+    if preferred and resolved and preferred != resolved:
+        return ""
+    return resolved
+
+
+def resolve_agent_subject_user_id(
+    config,
+    *,
+    integration_id: str,
+    runtime_type: str,
+    external_subject: str,
+    allow_legacy_runtime_mapping: bool = True,
+) -> str:
+    """Resolve a V1 subject without trusting caller-supplied local user ids."""
+    integration = str(integration_id or "").strip()
+    runtime = str(runtime_type or "").strip().lower()
+    subject = str(external_subject or "").strip()
+    if not integration or not runtime or not subject:
+        return ""
+    data = _load_registry(_registry_path(config))
+    users = [item for item in data.get("users") or [] if isinstance(item, dict)]
+    for user in users:
+        subjects = (
+            user.get("agent_subjects")
+            if isinstance(user.get("agent_subjects"), list)
+            else []
+        )
+        for item in subjects:
+            if not isinstance(item, dict):
+                continue
+            if (
+                str(item.get("integration_id") or "").strip() == integration
+                and str(item.get("external_subject") or "").strip() == subject
+            ):
+                return str(user.get("id") or "")
+    if not allow_legacy_runtime_mapping:
+        return ""
+    for user in users:
+        identities = (
+            user.get("agent_identities")
+            if isinstance(user.get("agent_identities"), dict)
+            else {}
+        )
+        if str(identities.get(runtime) or "").strip() == subject:
+            return str(user.get("id") or "")
+    return ""
 
 
 def _upsert_user(data: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
@@ -255,6 +440,14 @@ def _upsert_user(data: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
         "display_name": str(body.get("display_name", (existing or {}).get("display_name", user_id)) or user_id),
         "email": str(body.get("email", (existing or {}).get("email", "")) or ""),
         "role": _normalize_role(body.get("role"), str((existing or {}).get("role") or "user")),
+        "agent_identities": _normalize_agent_identities(
+            body.get("agent_identities"),
+            (existing or {}).get("agent_identities"),
+        ),
+        "agent_subjects": _normalize_agent_subjects(
+            body.get("agent_subjects"),
+            (existing or {}).get("agent_subjects"),
+        ),
         "password_hash": str((existing or {}).get("password_hash") or ""),
         "personal_space": _normalize_space(body.get("personal_space"), (existing or {}).get("personal_space")),
         "team_space": _normalize_space(body.get("team_space"), (existing or {}).get("team_space")),
@@ -263,6 +456,10 @@ def _upsert_user(data: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
     }
     if str(body.get("password") or ""):
         user["password_hash"] = _hash_password(str(body.get("password") or ""))
+    if not user["personal_space"].get("viking_user"):
+        user["personal_space"]["viking_user"] = user_id
+    _validate_unique_agent_identities(data, user)
+    _validate_unique_agent_subjects(data, user)
     if idx is None:
         data.setdefault("users", []).append(user)
     else:
@@ -278,36 +475,26 @@ def _hub_from_user(config, user: dict[str, Any], *, space: str) -> SkillHub:
     space_cfg = (user.get("team_space") if is_team else user.get("personal_space")) or {}
     inherited_team_key = _effective_team_key(config) if is_team else ""
     effective_key = _space_key(space_cfg) or (inherited_team_key if is_team else "")
-    backend = "viking" if effective_key else str(space_cfg.get("backend") or "local")
     user_id = str(user.get("id") or "")
-    if backend == "viking":
-        fallback_key = (
-            inherited_team_key
-            if is_team
-            else str(getattr(config, "sharing_viking_personal_api_key", "") or "")
-        ) or str(getattr(config, "sharing_viking_api_key", "") or "")
-        return SkillHub(
-            backend="viking",
-            endpoint="",
-            local_root="",
-            customer_id="" if is_team else user_id,
-            user_alias=str(user.get("display_name") or user_id or "anonymous"),
-            viking_endpoint=str(getattr(config, "sharing_viking_endpoint", "") or _DEFAULT_OPENVIKING_ENDPOINT),
-            viking_api_key=effective_key or fallback_key,
-            viking_account=str(getattr(config, "sharing_viking_account", "") or _DEFAULT_ACCOUNT),
-            viking_user=str(getattr(config, "sharing_viking_user", "") or _DEFAULT_USER),
-            viking_agent=str(getattr(config, "sharing_viking_agent", "") or _DEFAULT_AGENT),
-            viking_agent_id=str(getattr(config, "sharing_viking_agent_id", "") or ""),
-            viking_root_prefix=str(getattr(config, "sharing_viking_root_prefix", "") or _DEFAULT_ROOT_PREFIX),
-            viking_group_id=str(getattr(config, "sharing_viking_group_id", "") or ""),
-            viking_namespace="resources",
-        )
+    fallback_key = (
+        inherited_team_key
+        if is_team
+        else str(getattr(config, "sharing_viking_personal_api_key", "") or "")
+    ) or str(getattr(config, "sharing_viking_api_key", "") or "")
     return SkillHub(
-        backend="local",
+        backend="viking",
         endpoint="",
-        local_root=_local_root(config, user_id, team=is_team),
-        customer_id="",
+        customer_id="" if is_team else user_id,
         user_alias=str(user.get("display_name") or user_id or "anonymous"),
+        viking_endpoint=str(getattr(config, "sharing_viking_endpoint", "") or _DEFAULT_OPENVIKING_ENDPOINT),
+        viking_api_key=effective_key or fallback_key,
+        viking_account=str(getattr(config, "sharing_viking_account", "") or _DEFAULT_ACCOUNT),
+        viking_user=str(getattr(config, "sharing_viking_user", "") or _DEFAULT_USER),
+        viking_agent=str(getattr(config, "sharing_viking_agent", "") or _DEFAULT_AGENT),
+        viking_agent_id=str(getattr(config, "sharing_viking_agent_id", "") or ""),
+        viking_root_prefix=str(getattr(config, "sharing_viking_root_prefix", "") or _DEFAULT_ROOT_PREFIX),
+        viking_group_id=str(getattr(config, "sharing_viking_group_id", "") or ""),
+        viking_namespace="resources",
     )
 
 
@@ -364,11 +551,11 @@ def _sync_user_space_keys_to_config(config, user: dict[str, Any]) -> Any:
     if not config_file:
         if personal_key:
             config.sharing_viking_personal_api_key = personal_key
-        elif (user.get("personal_space") or {}).get("backend") == "local":
+        else:
             config.sharing_viking_personal_api_key = ""
         if team_key:
             config.sharing_viking_team_api_key = team_key
-        elif (user.get("team_space") or {}).get("backend") == "local":
+        else:
             config.sharing_viking_team_api_key = ""
         if personal_key or team_key:
             config.sharing_enabled = True
@@ -380,11 +567,11 @@ def _sync_user_space_keys_to_config(config, user: dict[str, Any]) -> Any:
     sharing = data.setdefault("sharing", {})
     if personal_key:
         sharing["viking_personal_api_key"] = personal_key
-    elif (user.get("personal_space") or {}).get("backend") == "local":
+    else:
         sharing["viking_personal_api_key"] = ""
     if team_key:
         sharing["viking_team_api_key"] = team_key
-    elif (user.get("team_space") or {}).get("backend") == "local":
+    else:
         sharing["viking_team_api_key"] = ""
     if personal_key or team_key:
         sharing["enabled"] = True
@@ -438,6 +625,37 @@ class UsersAdminMixin:
             user = _upsert_user(data, body)
             _save_registry(path, data)
             owner.config = _sync_user_space_keys_to_config(owner.config, user)
+            return JSONResponse(content=_public_user(user, owner.config))
+
+        @app.put("/api/users/{user_id}/profile")
+        async def api_update_own_profile(
+            user_id: str,
+            body: dict[str, Any],
+            request: Request,
+        ):
+            _require_self_or_admin(request, user_id)
+            path = _registry_path(owner.config)
+            data = _load_registry(path)
+            _idx, existing = _find_user(data, user_id)
+            payload = {
+                "id": user_id,
+                "display_name": body.get(
+                    "display_name", existing.get("display_name", user_id)
+                ),
+                "email": body.get("email", existing.get("email", "")),
+                "role": existing.get("role", "user"),
+                "password": body.get("password", ""),
+                "personal_space": body.get(
+                    "personal_space", existing.get("personal_space", {})
+                ),
+                "team_space": existing.get("team_space", {}),
+                "agent_identities": body.get(
+                    "agent_identities", existing.get("agent_identities", {})
+                ),
+                "agent_subjects": existing.get("agent_subjects", []),
+            }
+            user = _upsert_user(data, payload)
+            _save_registry(path, data)
             return JSONResponse(content=_public_user(user, owner.config))
 
         @app.delete("/api/users/{user_id}")

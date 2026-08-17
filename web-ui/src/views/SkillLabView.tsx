@@ -47,6 +47,7 @@ type DatasetDraft = {
   requirements: string;
   trajectory_requirements: string;
   disclosure_batch_size: number;
+  enabled_for_evolution: boolean;
 };
 
 const EMPTY_DATASET: DatasetDraft = {
@@ -55,6 +56,7 @@ const EMPTY_DATASET: DatasetDraft = {
   requirements: "",
   trajectory_requirements: "",
   disclosure_batch_size: 4,
+  enabled_for_evolution: false,
 };
 
 const METRICS = [
@@ -147,7 +149,7 @@ export default function SkillLabView({
       setSkillName(nextName);
       await Promise.all([loadSkill(nextName), loadWorkspace(nextName)]);
     } catch (error: any) {
-      toastErr("加载 Skills 实验台失败", error.message);
+      toastErr("加载实验评测失败", error.message);
     } finally {
       setLoading(false);
     }
@@ -231,6 +233,7 @@ export default function SkillLabView({
       requirements: dataset.requirements || "",
       trajectory_requirements: dataset.trajectory_requirements || "",
       disclosure_batch_size: dataset.progressive_disclosure?.batch_size || 4,
+      enabled_for_evolution: !!dataset.enabled_for_evolution,
     });
     setDatasetFiles([]);
     setExistingMaterials(dataset.materials || []);
@@ -365,9 +368,10 @@ export default function SkillLabView({
   async function deleteDataset(dataset: SkillLabDataset) {
     if (!window.confirm(`确认删除数据集「${dataset.name}」？`)) return;
     try {
-      await api(`/api/skill-lab/datasets/${encodeURIComponent(dataset.dataset_id)}`, {
-        method: "DELETE",
-      });
+      await api(
+        `/api/skill-lab/datasets/${encodeURIComponent(dataset.dataset_id)}?skill_name=${encodeURIComponent(skillName)}`,
+        { method: "DELETE" }
+      );
       toastOk("数据集已删除");
       await loadWorkspace(skillName);
     } catch (error: any) {
@@ -378,6 +382,16 @@ export default function SkillLabView({
   async function startRun() {
     if (!skillName || !selectedDatasetId) {
       toastErr("请先选择实验数据集");
+      return;
+    }
+    const selected = datasets.find(
+      (item) => item.dataset_id === selectedDatasetId
+    );
+    if (selected?.material_integrity?.complete === false) {
+      toastErr(
+        "数据集材料不完整",
+        (selected.material_integrity.missing_paths || []).join("、")
+      );
       return;
     }
     setRunning(true);
@@ -414,10 +428,6 @@ export default function SkillLabView({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             skill_name: skillName,
-            case_count: 2,
-            min_requirements: 12,
-            max_requirements: 24,
-            disclosure_batch_size: 4,
           }),
         }
       );
@@ -449,14 +459,24 @@ export default function SkillLabView({
 
   const manualCount = datasets.filter((item) => item.source?.kind !== "evolution").length;
   const evolvedCount = datasets.filter((item) => item.source?.kind === "evolution").length;
+  const regressionCount = datasets.filter((item) => item.enabled_for_evolution).length;
   const completedCount = runs.filter((run) => run.status === "completed").length;
+  const selectedDataset = datasets.find(
+    (item) => item.dataset_id === selectedDatasetId
+  );
+  const editingDataset = datasets.find(
+    (item) => item.dataset_id === datasetDraft.dataset_id
+  );
+  const hasInlineMaterial = hasInlineMaterialSection(datasetDraft.query);
+  const inlineMaterial = inlineMaterialText(datasetDraft.query);
 
   return (
     <div className="mx-auto max-w-[1440px] px-[22px] py-[22px]">
       <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">
         <StatCard label="当前 Skill" value={skillName || "未选择"} mono />
-        <StatCard label="手工数据集" value={manualCount} />
+        <StatCard label="可编辑数据集" value={manualCount} />
         <StatCard label="进化挖掘数据集" value={evolvedCount} />
+        <StatCard label="固定回归集" value={regressionCount} />
         <StatCard label="已完成实验" value={completedCount} />
       </div>
 
@@ -491,7 +511,9 @@ export default function SkillLabView({
               {!datasets.length && <option value="">请先创建数据集</option>}
               {datasets.map((item) => (
                 <option key={item.dataset_id} value={item.dataset_id}>
-                  {item.source?.kind === "evolution"
+                  {item.enabled_for_evolution
+                    ? "[回归] "
+                    : item.source?.kind === "evolution"
                     ? "[进化] "
                     : item.source?.kind === "synthesized"
                       ? "[合成] "
@@ -523,8 +545,18 @@ export default function SkillLabView({
           </Field>
           <Button
             className="ml-auto"
-            disabled={!skillName || !selectedDatasetId || running}
+            disabled={
+              !skillName
+              || !selectedDatasetId
+              || selectedDataset?.material_integrity?.complete === false
+              || running
+            }
             onClick={startRun}
+            title={
+              selectedDataset?.material_integrity?.complete === false
+                ? "请先编辑数据集并补齐输入材料"
+                : undefined
+            }
           >
             <Play className="size-4" /> {running ? "启动中…" : "运行 True Replay"}
           </Button>
@@ -576,7 +608,7 @@ export default function SkillLabView({
 
         <div>
           <Panel
-            title="实验数据集"
+            title="Skill 数据集"
             count={`${datasets.length} 个`}
             extra={
               <div className="flex gap-2">
@@ -624,6 +656,7 @@ export default function SkillLabView({
                     const selected = dataset.dataset_id === selectedDatasetId;
                     const evolved = dataset.source?.kind === "evolution";
                     const synthesized = dataset.source?.kind === "synthesized";
+                    const materialIntegrity = dataset.material_integrity;
                     return (
                       <div
                         key={dataset.dataset_id}
@@ -640,6 +673,18 @@ export default function SkillLabView({
                               <Pill tone={evolved ? "purple" : synthesized ? "green" : "blue"}>
                                 {evolved ? "进化同步生成" : synthesized ? "Session / SOP 合成" : "手工"}
                               </Pill>
+                              {dataset.enabled_for_evolution && (
+                                <Pill tone="amber">固定回归</Pill>
+                              )}
+                              {materialIntegrity?.status === "missing" ? (
+                                <Pill tone="red">
+                                  缺材料 {materialIntegrity.missing_paths?.length || 1}
+                                </Pill>
+                              ) : materialIntegrity?.mode === "inline" ? (
+                                <Pill tone="green">内嵌材料</Pill>
+                              ) : materialIntegrity?.status === "complete" ? (
+                                <Pill tone="green">材料齐全</Pill>
+                              ) : null}
                               {!!dataset.materials?.length && (
                                 <Pill tone="gray">{dataset.materials.length} 个材料</Pill>
                               )}
@@ -660,19 +705,18 @@ export default function SkillLabView({
                             </div>
                           </div>
                           <div className="flex shrink-0 gap-1.5" onClick={(event) => event.stopPropagation()}>
-                            {evolved ? (
+                            <Button variant="outline" size="sm" onClick={() => editDataset(dataset)}>
+                              编辑
+                            </Button>
+                            {evolved && (
                               <Button variant="outline" size="sm" onClick={() => cloneDataset(dataset)}>
                                 <Copy className="size-3.5" /> 复制
                               </Button>
-                            ) : (
-                              <>
-                                <Button variant="outline" size="sm" onClick={() => editDataset(dataset)}>
-                                  编辑
-                                </Button>
-                                <Button variant="destructive" size="sm" onClick={() => deleteDataset(dataset)}>
-                                  <Trash2 className="size-3.5" />
-                                </Button>
-                              </>
+                            )}
+                            {!evolved && (
+                              <Button variant="destructive" size="sm" onClick={() => deleteDataset(dataset)}>
+                                <Trash2 className="size-3.5" />
+                              </Button>
                             )}
                           </div>
                         </div>
@@ -697,10 +741,17 @@ export default function SkillLabView({
         <DialogContent className="flex max-h-[90vh] w-full !max-w-[860px] flex-col overflow-hidden p-0">
           <DialogHeader className="border-b border-line px-5 py-4">
             <DialogTitle>
-              {datasetDraft.dataset_id ? "编辑手工数据集" : "新建手工数据集"}
+              {datasetDraft.dataset_id ? "编辑数据集" : "新建手工数据集"}
             </DialogTitle>
           </DialogHeader>
           <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
+            {editingDataset?.material_integrity?.status === "missing" && (
+              <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-xs leading-relaxed text-destructive">
+                当前数据集缺少输入材料：
+                {(editingDataset.material_integrity.missing_paths || []).join("、")}。
+                请在本次编辑中上传对应文件，或把必要内容直接写入 Query 的“材料：”段落。
+              </div>
+            )}
             <Field label="名称">
               <Input
                 value={datasetDraft.name}
@@ -715,6 +766,25 @@ export default function SkillLabView({
                 onChange={(event) => setDatasetDraft({ ...datasetDraft, query: event.target.value })}
               />
             </Field>
+            {hasInlineMaterial && (
+              <Field
+                label="内嵌材料"
+                hint="来自初始 Query 的“材料：”段落；这里的修改会同步回 Query。"
+              >
+                <Textarea
+                  rows={8}
+                  value={inlineMaterial}
+                  className="mono max-h-[280px] overflow-y-auto text-xs leading-relaxed"
+                  onChange={(event) => setDatasetDraft({
+                    ...datasetDraft,
+                    query: replaceInlineMaterial(
+                      datasetDraft.query,
+                      event.target.value,
+                    ),
+                  })}
+                />
+              </Field>
+            )}
             <ChecklistEditor
               label="要求 Checklist"
               hint="首轮隐藏；每条独立编辑，作为逐轮完成条件，不计算综合分数。"
@@ -747,6 +817,23 @@ export default function SkillLabView({
                 })}
               />
             </Field>
+            <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-background p-3">
+              <input
+                type="checkbox"
+                className="mt-0.5 size-4"
+                checked={datasetDraft.enabled_for_evolution}
+                onChange={(event) => setDatasetDraft({
+                  ...datasetDraft,
+                  enabled_for_evolution: event.target.checked,
+                })}
+              />
+              <span>
+                <span className="block text-xs font-semibold">设为固定回归集</span>
+                <span className="mt-1 block text-[11px] leading-relaxed text-muted-foreground">
+                  后续该 Skill 进化时优先使用此数据集进行 True Replay；未勾选时仅用于实验台。
+                </span>
+              </span>
+            </label>
             <Field
               label="相关材料"
               hint={
@@ -755,6 +842,16 @@ export default function SkillLabView({
                   : "材料按文件名写入两个隔离工作区，Query 可使用相对路径引用。"
               }
             >
+              {hasInlineMaterial && (
+                <div className="mb-3 rounded-lg border border-success/30 bg-success/5 p-3">
+                  <div className="text-xs font-semibold text-success">
+                    已包含内嵌材料
+                  </div>
+                  <div className="mt-1 text-[11px] text-muted-foreground">
+                    共 {inlineMaterial.length.toLocaleString()} 个字符，可在上方“内嵌材料”编辑框中修改；无需重复上传附件。
+                  </div>
+                </div>
+              )}
               <Input
                 className="mb-2"
                 value={materialRoot}
@@ -844,6 +941,7 @@ export default function SkillLabView({
 function DatasetDetail({ dataset }: { dataset: SkillLabDataset }) {
   const requirements = checklistLines(dataset.requirements);
   const trajectory = checklistLines(dataset.trajectory_requirements);
+  const materialIntegrity = dataset.material_integrity;
   const sourceSessionIds = Array.from(new Set([
     ...(dataset.source?.source_session_ids || []),
     ...(dataset.source?.session_id ? [dataset.source.session_id] : []),
@@ -859,6 +957,14 @@ function DatasetDetail({ dataset }: { dataset: SkillLabDataset }) {
           <Pill tone="blue">初始 Query</Pill>
           <Pill tone="amber">{requirements.length} 条 Checklist</Pill>
           <Pill tone="purple">{trajectory.length} 条轨迹要求</Pill>
+          {dataset.enabled_for_evolution && <Pill tone="amber">固定回归集</Pill>}
+          {materialIntegrity?.status === "missing" ? (
+            <Pill tone="red">材料不完整</Pill>
+          ) : materialIntegrity?.mode === "inline" ? (
+            <Pill tone="green">内嵌材料</Pill>
+          ) : materialIntegrity?.status === "complete" ? (
+            <Pill tone="green">材料齐全</Pill>
+          ) : null}
           <Pill tone="gray">
             每轮披露 {dataset.progressive_disclosure?.batch_size || 4} 条
           </Pill>
@@ -883,7 +989,18 @@ function DatasetDetail({ dataset }: { dataset: SkillLabDataset }) {
       </DatasetSection>
 
       <DatasetSection title={`相关材料（${dataset.materials?.length || 0}）`}>
-        {dataset.materials?.length ? (
+        {materialIntegrity?.status === "missing" ? (
+          <div className="space-y-2">
+            <div className="text-xs font-semibold text-destructive">
+              缺少回放所需材料，运行前必须补齐。
+            </div>
+            {(materialIntegrity.missing_paths || []).map((path) => (
+              <div key={path} className="mono rounded border border-destructive/30 bg-destructive/5 px-2.5 py-2 text-xs text-destructive">
+                {path}
+              </div>
+            ))}
+          </div>
+        ) : dataset.materials?.length ? (
           <div className="space-y-1.5">
             {dataset.materials.map((material) => (
               <div key={material.path} className="flex items-center justify-between gap-3 rounded border border-border px-2.5 py-2 text-xs">
@@ -892,9 +1009,13 @@ function DatasetDetail({ dataset }: { dataset: SkillLabDataset }) {
               </div>
             ))}
           </div>
+        ) : materialIntegrity?.mode === "inline" ? (
+          <pre className="mono max-h-[280px] overflow-auto whitespace-pre-wrap break-words rounded-md border border-success/30 bg-success/5 p-3 text-[11px] leading-relaxed">
+            {inlineMaterialText(dataset.query) || "材料已直接写入初始 Query。"}
+          </pre>
         ) : sourceSessionIds.length ? (
           <span className="text-xs text-muted-foreground">
-            无独立上传材料；回放时复用来源 Session 的环境与沙盒快照。
+            当前 Query 不依赖外部输入文件；来源 Session 仅用于追溯和运行时上下文。
           </span>
         ) : (
           <span className="text-xs text-muted-foreground">无相关材料。</span>
@@ -1388,6 +1509,25 @@ function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+const INLINE_MATERIAL_SECTION_RE =
+  /(^|\n)([ \t]*(?:材料|素材|输入数据|参考资料)\s*[：:])[ \t]*\n?([\s\S]*)$/i;
+
+function inlineMaterialText(query?: string): string {
+  const match = INLINE_MATERIAL_SECTION_RE.exec(String(query || ""));
+  return match?.[3]?.trim() || "";
+}
+
+function hasInlineMaterialSection(query?: string): boolean {
+  return INLINE_MATERIAL_SECTION_RE.test(String(query || ""));
+}
+
+function replaceInlineMaterial(query: string, material: string): string {
+  const match = INLINE_MATERIAL_SECTION_RE.exec(String(query || ""));
+  if (!match || match.index == null) return query;
+  const prefix = query.slice(0, match.index);
+  return `${prefix}${match[1]}${match[2]}\n${material}`;
 }
 
 function checklistLines(value?: string): string[] {

@@ -148,18 +148,17 @@ def test_sync_hook_pulls_from_teamEvolver_service_without_openviking_key(tmp_pat
 
 
 def test_sync_hook_pulls_local_backend_from_config(tmp_path: Path, monkeypatch) -> None:
-    bucket = tmp_path / "bucket"
+    endpoint = "memory://" + str(tmp_path / "bucket")
     source = tmp_path / "source"
     skill_dir = source / "team-skill"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("---\nname: team-skill\ndescription: demo\n---\n\n# Demo\n", "utf-8")
 
     from teamEvolver.skills.hub import SkillHub
+    from teamEvolver.storage import shared_memory_bucket
 
-    SkillHub(
-        backend="local",
-        endpoint="",
-        local_root=str(bucket),
+    SkillHub.from_bucket(
+        shared_memory_bucket(endpoint),
         customer_id="",
         user_alias="tester",
     ).push_skills(str(source))
@@ -170,8 +169,8 @@ def test_sync_hook_pulls_local_backend_from_config(tmp_path: Path, monkeypatch) 
         json.dumps(
             {
                 "target_dir": str(target),
-                "backend": "local",
-                "local_root": str(bucket),
+                "backend": "viking",
+                "viking_endpoint": endpoint,
                 "min_interval_seconds": 0,
             }
         ),

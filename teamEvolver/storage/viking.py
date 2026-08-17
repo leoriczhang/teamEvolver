@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import io
-from typing import Iterator
+from typing import Any, Iterator, Mapping
 
 from .base import ObjectInfo, _BytesObject, read_bytes
 
@@ -44,12 +46,16 @@ class OpenVikingObjectStore:
     Contract mapping:
 
     - ``put_object(key, data)`` →  ``POST /api/v1/content/write``
-    - ``get_object(key)`` →  ``GET /api/v1/content/read?uri=...``
+    - ``get_object(key)`` →  ``GET /api/v1/content/download?uri=...``
     - ``delete_object(key)`` →  ``DELETE /api/v1/fs?uri=...``
     - ``iter_objects(prefix)`` →  recursive walk via ``GET /api/v1/fs/ls``
     """
 
     _NOT_FOUND_TOKENS = ("NOT_FOUND", "NoSuchURI", "RESOURCE_NOT_FOUND")
+    native_batch_write = True
+    _BATCH_MAX_OPERATIONS = 256
+    _BATCH_MAX_FILE_BYTES = 8 * 1024 * 1024
+    _BATCH_MAX_TOTAL_BYTES = 16 * 1024 * 1024
 
     def __init__(
         self,
@@ -167,23 +173,142 @@ class OpenVikingObjectStore:
             raise RuntimeError(err_msg)
         return data or {}
 
+    def _request_bytes(self, method: str, path: str, **kwargs) -> bytes:
+        url = f"{self._endpoint}{path}"
+        kwargs.setdefault("timeout", self._timeout)
+        headers = kwargs.pop("headers", None) or self._headers()
+        resp = self._httpx.request(method, url, headers=headers, **kwargs)
+        if resp.status_code >= 400:
+            try:
+                data = resp.json()
+            except Exception:
+                data = None
+            err_msg = ""
+            if isinstance(data, dict):
+                err = data.get("error") or {}
+                if isinstance(err, dict):
+                    err_msg = (
+                        f"{err.get('code', 'HTTP_ERROR')}: "
+                        f"{err.get('message', '')}"
+                    )
+            if not err_msg:
+                err_msg = f"HTTP {resp.status_code}: {resp.text[:200]}"
+            if any(tok in err_msg for tok in self._NOT_FOUND_TOKENS):
+                raise FileNotFoundError(err_msg)
+            raise RuntimeError(err_msg)
+        return bytes(resp.content)
+
     # ------------------------------------------------------------------ #
     # Object store contract                                               #
     # ------------------------------------------------------------------ #
 
     def get_object(self, key: str) -> _BytesObject:
         uri = self._uri(key)
-        data = self._request("GET", "/api/v1/content/read", params={"uri": uri})
-        result = data.get("result") if isinstance(data, dict) else None
-        if isinstance(result, str):
-            content = result
-        elif isinstance(result, dict):
-            content = result.get("content") or result.get("text") or ""
-        else:
-            content = ""
+        content = self._request_bytes(
+            "GET",
+            "/api/v1/content/download",
+            params={"uri": uri},
+        )
         if not content:
             raise FileNotFoundError(f"OpenViking: empty/missing object: {uri}")
-        return _BytesObject(content.encode("utf-8") if isinstance(content, str) else bytes(content), key)
+        return _BytesObject(content, key)
+
+    @staticmethod
+    def _batch_hash(data: bytes) -> str:
+        return "sha256:" + hashlib.sha256(data).hexdigest()
+
+    def object_precondition(self, key: str) -> dict[str, str]:
+        """Capture the current object state for a later conditional batch write."""
+        try:
+            current = self.get_object(key).read()
+        except FileNotFoundError:
+            return {"kind": "create_if_absent"}
+        return {
+            "kind": "replace_if_hash",
+            "base_hash": self._batch_hash(current),
+        }
+
+    def batch_write(
+        self,
+        objects: Mapping[str, bytes | str | io.IOBase],
+        *,
+        preconditions: Mapping[str, Mapping[str, str]] | None = None,
+        wait: bool = True,
+        timeout: float | None = None,
+        telemetry: bool = True,
+    ) -> dict[str, Any]:
+        """Write one conditional batch below this store's configured root.
+
+        Callers may capture preconditions before preparing derived records and
+        pass them back here. When omitted, this method snapshots each target
+        immediately before submitting the batch.
+        """
+        if not objects:
+            raise ValueError("batch_write requires at least one object")
+        if len(objects) > self._BATCH_MAX_OPERATIONS:
+            raise ValueError(
+                f"batch_write supports at most {self._BATCH_MAX_OPERATIONS} objects"
+            )
+
+        prepared: dict[str, bytes] = {
+            str(key): read_bytes(value) for key, value in objects.items()
+        }
+        total_bytes = sum(len(value) for value in prepared.values())
+        oversized = [
+            key
+            for key, value in prepared.items()
+            if len(value) > self._BATCH_MAX_FILE_BYTES
+        ]
+        if oversized:
+            raise ValueError(f"batch_write object exceeds 8 MiB: {oversized[0]}")
+        if total_bytes > self._BATCH_MAX_TOTAL_BYTES:
+            raise ValueError("batch_write total content exceeds 16 MiB")
+
+        captured = {
+            key: dict((preconditions or {}).get(key) or self.object_precondition(key))
+            for key in prepared
+        }
+        root_uri = self._base_uri().rstrip("/")
+        try:
+            self._request(
+                "POST",
+                "/api/v1/fs/mkdir",
+                json={"uri": root_uri},
+            )
+        except RuntimeError as exc:
+            if not any(token in str(exc) for token in ("ALREADY_EXISTS", "CONFLICT")):
+                raise
+        operations: list[dict[str, Any]] = []
+        for key, value in sorted(prepared.items()):
+            operation: dict[str, Any] = {
+                "uri": self._uri(key),
+                "precondition": captured[key],
+            }
+            try:
+                operation["content"] = value.decode("utf-8")
+            except UnicodeDecodeError:
+                operation["content_base64"] = base64.b64encode(value).decode("ascii")
+            operations.append(operation)
+
+        payload: dict[str, Any] = {
+            "root_uri": root_uri,
+            "operations": operations,
+            "wait": bool(wait),
+            "telemetry": bool(telemetry),
+        }
+        if timeout is not None:
+            payload["timeout"] = float(timeout)
+        response = self._request(
+            "POST",
+            "/api/v1/content/batch-write",
+            json=payload,
+        )
+        result = response.get("result") if isinstance(response, dict) else None
+        if not isinstance(result, dict):
+            raise RuntimeError("OpenViking batch-write returned no result")
+        if response.get("telemetry") is not None:
+            result = {**result, "telemetry": response["telemetry"]}
+        return result
 
     def put_object(self, key: str, data: bytes | str | io.IOBase) -> None:
         uri = self._uri(key)
@@ -194,13 +319,8 @@ class OpenVikingObjectStore:
             content = body.decode("utf-8")
             payload = {"uri": uri, "content": content}
         except UnicodeDecodeError:
-            import base64
-
-            payload = {
-                "uri": uri,
-                "content": base64.b64encode(body).decode("ascii"),
-                "encoding": "base64",
-            }
+            self.batch_write({key: body})
+            return
         # Strategy: replace (handles existing files of any extension) ->
         # create (new files with allowed extensions) -> append (new files
         # with restricted extensions like .jsonl).

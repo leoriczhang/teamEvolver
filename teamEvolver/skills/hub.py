@@ -70,12 +70,13 @@ class SkillHub:
         viking_group_id: str = "",
         viking_namespace: str = "resources",
     ):
-        # For the viking backend the endpoint may arrive via viking_endpoint.
-        effective_endpoint = endpoint or (viking_endpoint if backend == "viking" else "")
+        # ``local_root`` is accepted for backward-compatible call sites but no
+        # longer used: the only backend is OpenViking (cloud or local
+        # self-hosted), selected purely by endpoint.
+        effective_endpoint = endpoint or viking_endpoint
         self._bucket = build_object_store(
             backend=backend,
             endpoint=effective_endpoint,
-            local_root=local_root,
             viking_account=viking_account,
             viking_user=viking_user,
             viking_agent=viking_agent,
@@ -88,6 +89,25 @@ class SkillHub:
         # Per-customer (peer) scope for isolated artifacts. Empty = agent level.
         self._customer_id = str(customer_id or "").strip("/")
         self._user_alias = user_alias or os.environ.get("USER", "anonymous")
+
+    @classmethod
+    def from_bucket(
+        cls,
+        bucket,
+        *,
+        customer_id: str = "",
+        user_alias: str = "",
+    ) -> "SkillHub":
+        """Build a hub around an already-constructed object store.
+
+        Bypasses backend/endpoint resolution — useful for tests and mock-mode
+        callers that supply an in-process store directly.
+        """
+        hub = cls.__new__(cls)
+        hub._bucket = bucket
+        hub._customer_id = str(customer_id or "").strip("/")
+        hub._user_alias = user_alias or os.environ.get("USER", "anonymous")
+        return hub
 
     # ------------------------------------------------------------------ #
     # Config-driven constructors                                           #
@@ -113,7 +133,6 @@ class SkillHub:
         sharing_backend = str(getattr(config, "sharing_backend", "") or "").strip().lower()
         backend = str(getattr(config, backend_field, "") or "").strip().lower() or sharing_backend
         endpoint = str(getattr(config, "sharing_endpoint", "") or "")
-        local_root = str(getattr(config, "sharing_local_root", "") or "")
         viking_endpoint = str(getattr(config, "sharing_viking_endpoint", "") or "")
         legacy_viking_api_key = str(getattr(config, "sharing_viking_api_key", "") or "")
         personal_viking_api_key = str(getattr(config, "sharing_viking_personal_api_key", "") or "")
@@ -125,24 +144,20 @@ class SkillHub:
         has_viking_key = bool(viking_api_key)
         sharing_enabled = bool(getattr(config, "sharing_enabled", False))
 
+        # Only the OpenViking backend is supported (cloud or local self-hosted).
         if allow_none:
-            resolved = normalize_backend(backend, endpoint=endpoint, local_root=local_root)
-            if not resolved and local_root:
-                resolved = "local"
+            resolved = normalize_backend(backend, endpoint=viking_endpoint)
             if not resolved and viking_endpoint and (sharing_enabled or has_viking_key):
                 resolved = "viking"
             if not resolved:
                 return None
             backend = resolved
         else:
-            if backend == "viking" or (not backend and viking_endpoint and (sharing_enabled or has_viking_key)):
-                backend = "viking"
-            backend = backend or ("local" if local_root else "")
+            backend = "viking"
 
         return cls(
             backend=backend,
             endpoint=endpoint,
-            local_root=local_root,
             customer_id=customer_id,
             user_alias=getattr(config, "sharing_user_alias", ""),
             viking_endpoint=viking_endpoint,
@@ -182,7 +197,7 @@ class SkillHub:
     def object_storage_from_config(cls, config) -> Optional["SkillHub"]:
         """Build the object-store hub for skills and non-skill artifacts.
 
-        Returns ``None`` when no local/viking object storage is configured.
+        Returns ``None`` when no OpenViking object storage is configured.
         """
         return cls._build(
             config,

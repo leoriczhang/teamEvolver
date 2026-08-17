@@ -278,6 +278,15 @@ def _effective_summarize_system() -> str:
         return _SUMMARIZE_SESSION_SYSTEM
 
 
+def _summarize_call_options() -> dict[str, Any]:
+    try:
+        from ..prompt_studio import stage_call_options
+
+        return stage_call_options("summarize")
+    except Exception:  # noqa: BLE001 - retain stable stage defaults
+        return {"max_tokens": 100000, "temperature": 0.2}
+
+
 def _build_session_payload(session: dict) -> dict[str, Any]:
     """Build a compact representation of the session for the LLM.
 
@@ -335,6 +344,36 @@ def _build_session_payload(session: dict) -> dict[str, Any]:
         te = t.get("tool_errors") or []
         if te:
             interaction["tool_errors"] = te
+        usage = (
+            t.get("context_usage")
+            if isinstance(t.get("context_usage"), dict)
+            and t.get("context_usage", {}).get("verified") is True
+            else {}
+        )
+        if usage:
+            interaction["context_usage"] = {
+                "context_snapshot_id": str(
+                    usage.get("context_snapshot_id") or ""
+                ),
+                "skill_refs": [
+                    {
+                        "context_ref": str(item.get("context_ref") or ""),
+                        "scope": str(item.get("scope") or ""),
+                        "qualified_skill_id": str(
+                            item.get("qualified_skill_id") or ""
+                        ),
+                        "version": str(item.get("version") or ""),
+                        "operation": str(item.get("operation") or ""),
+                    }
+                    for item in usage.get("skill_refs") or []
+                    if isinstance(item, dict)
+                ],
+                "feedback": (
+                    dict(usage.get("feedback"))
+                    if isinstance(usage.get("feedback"), dict)
+                    else {}
+                ),
+            }
         interactions.append(interaction)
 
     payload: dict[str, Any] = {
@@ -376,6 +415,7 @@ def _extract_session_metadata(session: dict) -> None:
     injected_skills: set[str] = set()
     prm_scores: list[float] = []
     has_tool_errors = False
+    verified_feedback: list[dict[str, Any]] = []
 
     for turn in session.get("turns", []):
         for item in turn.get("read_skills") or []:
@@ -390,6 +430,25 @@ def _extract_session_metadata(session: dict) -> None:
             name = item.get("skill_name", "").strip() if isinstance(item, dict) else str(item or "").strip()
             if name:
                 injected_skills.add(name)
+        usage = (
+            turn.get("context_usage")
+            if isinstance(turn.get("context_usage"), dict)
+            and turn.get("context_usage", {}).get("verified") is True
+            else {}
+        )
+        for item in usage.get("skill_refs") or []:
+            if not isinstance(item, dict) or item.get("scope") != "team_skills":
+                continue
+            qualified = str(
+                item.get("qualified_skill_id")
+                or item.get("skill_name")
+                or ""
+            ).strip()
+            name = qualified.removeprefix("team:")
+            if name:
+                skills.add(name)
+        if usage.get("skill_refs") and isinstance(usage.get("feedback"), dict):
+            verified_feedback.append(dict(usage["feedback"]))
         prm = turn.get("prm_score")
         if prm is not None:
             prm_scores.append(prm)
@@ -406,6 +465,7 @@ def _extract_session_metadata(session: dict) -> None:
     session["_prm_scores"] = prm_scores
     session["_avg_prm"] = round(sum(prm_scores) / len(prm_scores), 3) if prm_scores else None
     session["_has_tool_errors"] = has_tool_errors
+    session["_verified_skill_feedback"] = verified_feedback
 
 
 # ------------------------------------------------------------------ #
@@ -421,7 +481,7 @@ async def summarize_session(llm: AsyncLLMClient, session: dict) -> str:
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
     try:
-        return await llm.chat(messages, max_tokens=100000, temperature=0.2)
+        return await llm.chat(messages, **_summarize_call_options())
     except Exception as e:
         logger.warning(
             "[Summarizer] LLM call failed for session %s: %s",

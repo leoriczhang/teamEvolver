@@ -3,7 +3,13 @@ import { Panel, StatCard, Pill, Dot } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { api, type EvolveModelSettings, type EvolveModelTestResp, type UserProfile } from "@/api/client";
+import {
+  api,
+  type EvolveModelSettings,
+  type EvolveModelTestResp,
+  type EvolveProcessSettings,
+  type UserProfile,
+} from "@/api/client";
 import { toastErr, toastOk } from "@/lib/toast";
 
 const emptySettings = (): EvolveModelSettings => ({
@@ -15,6 +21,72 @@ const emptySettings = (): EvolveModelSettings => ({
   api_key: "",
 });
 
+const emptyProcessSettings = (): EvolveProcessSettings => ({
+  evolve: {
+    use_session_judge: true,
+    publish_mode: "validated",
+    validation_max_rejections: 1,
+    human_review_enabled: true,
+    human_review_timeout_seconds: 86400,
+    interval_seconds: 600,
+    evidence_enabled: true,
+    evidence_max_entries: 400,
+    evidence_recent_limit: 20,
+    evidence_historical_limit: 20,
+    evidence_replay_cases_per_window: 1,
+    evidence_change_debt_threshold: 3,
+    dataset_synthesis_enabled: true,
+    dataset_test_cases: 2,
+    dataset_min_requirements: 12,
+    dataset_max_requirements: 24,
+    dataset_disclosure_batch_size: 4,
+    candidate_coalesce_enabled: true,
+    bundle_text_extensions: [".py", ".sh"],
+    bundle_max_file_bytes: 262144,
+    bundle_max_prompt_bytes: 786432,
+    bundle_allow_delete: true,
+    bundle_static_checks_enabled: true,
+  },
+  validation: {
+    enabled: true,
+    mode: "true_replay",
+    idle_after_seconds: 300,
+    poll_interval_seconds: 60,
+    max_jobs_per_day: 5,
+    max_concurrency: 1,
+    required_results: 3,
+    required_approvals: 2,
+  },
+  memory_maintenance: {
+    enabled: false,
+    auto_start: false,
+    model: "",
+    base_url: "",
+    api_key: "",
+    engine: "teamEvolver-native",
+    full_capabilities: true,
+    llm_max_tokens: 4096,
+    temperature: 0.3,
+    scheduler: {
+      active_start_hour: 0,
+      active_end_hour: 6,
+      rounds_per_window: 3,
+      round_interval_minutes: 90,
+      max_turns_per_job: 25,
+      max_consecutive_errors: 3,
+      retry_delay_seconds: 300,
+    },
+    jobs: [],
+    interval_seconds: 86400,
+    max_source_items: 100,
+    max_source_chars: 120000,
+    prompts: {
+      extract: "",
+      consolidate: "",
+    },
+  },
+});
+
 export default function ModelSettingsView({
   active,
   user,
@@ -23,6 +95,9 @@ export default function ModelSettingsView({
   user?: UserProfile | null;
 }) {
   const [settings, setSettings] = useState<EvolveModelSettings>(() => emptySettings());
+  const [processSettings, setProcessSettings] = useState<EvolveProcessSettings>(
+    () => emptyProcessSettings()
+  );
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -34,8 +109,18 @@ export default function ModelSettingsView({
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await api<EvolveModelSettings>("/api/evolve-model");
+      const [data, process] = await Promise.all([
+        api<EvolveModelSettings>("/api/evolve-model"),
+        api<EvolveProcessSettings>("/api/evolve-settings"),
+      ]);
       setSettings({ ...data, api_key: "" });
+      setProcessSettings({
+        ...process,
+        memory_maintenance: {
+          ...process.memory_maintenance,
+          api_key: "",
+        },
+      });
       setClearKey(false);
       setTestResult(null);
     } catch (e: any) {
@@ -69,7 +154,7 @@ export default function ModelSettingsView({
       });
       setSettings({ ...saved, api_key: "" });
       setClearKey(false);
-      toastOk("模型配置已保存", saved.model);
+      toastOk("全局模型已保存", saved.model);
     } catch (e: any) {
       toastErr("保存模型配置失败", e.message);
     } finally {
@@ -105,9 +190,14 @@ export default function ModelSettingsView({
   return (
     <div className="mx-auto max-w-[1080px] px-[22px] py-[22px]">
       <div className="content-toolbar">
-        <div className="flex items-center gap-2 text-[12px] font-[700] text-[#464c5e]">
-          <Dot state={settings.api_key_present ? "on" : "off"} />
-          {settings.api_key_present ? "模型凭据已配置" : "模型凭据尚未配置"}
+        <div>
+          <div className="flex items-center gap-2 text-[12px] font-[700] text-[#464c5e]">
+            <Dot state={settings.api_key_present ? "on" : "off"} />
+            {settings.api_key_present ? "模型凭据已配置" : "模型凭据尚未配置"}
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            配置全局模型默认值。阶段 Prompt、模型采样和过程参数在“进化链路”中对应维护。
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>刷新</Button>
@@ -115,7 +205,7 @@ export default function ModelSettingsView({
             {testing ? "测试中…" : "测试模型"}
           </Button>
           <Button size="sm" onClick={save} disabled={!isAdmin || saving}>
-            保存配置
+            保存全部
           </Button>
         </div>
       </div>
@@ -126,6 +216,18 @@ export default function ModelSettingsView({
         <StatCard label="API Key" value={settings.api_key_present ? "已配置" : "未配置"} />
         <StatCard label="编辑权限" value={isAdmin ? "管理员" : "只读"} />
       </div>
+
+      {!!Object.keys(processSettings.environment_overrides || {}).length && (
+        <div className="mb-5 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs leading-relaxed text-amber-900">
+          <div className="font-semibold">检测到服务端环境变量覆盖</div>
+          <div className="mt-1">
+            {Object.entries(processSettings.environment_overrides || {})
+              .map(([key, value]) => `${key}=${value}`)
+              .join(" · ")}
+          </div>
+          <div className="mt-1">这些值优先于页面持久化配置；调整部署环境后重启服务才能解除覆盖。</div>
+        </div>
+      )}
 
       <Panel
         title="进化模型"
@@ -233,6 +335,12 @@ export default function ModelSettingsView({
           </div>
         </div>
       </Panel>
+
+      <div className="mt-5 rounded-xl border border-border bg-surface p-4 text-xs leading-6 text-muted-foreground">
+        阶段专属 Prompt、模型采样和过程参数已统一收敛到“进化链路”；此页只维护全局模型默认值。
+      </div>
+
+
     </div>
   );
 }

@@ -12,19 +12,37 @@ from teamEvolver.session_filter import (
     SessionValueClassifier,
     heuristic_classify_session,
 )
+from teamEvolver.session_store import SessionStore
+from teamEvolver.storage import is_not_found_error
+
+
+def _config(tmp_path: Path) -> TeamEvolverConfig:
+    return TeamEvolverConfig(
+        sharing_enabled=True,
+        sharing_backend="viking",
+        sharing_session_backend="viking",
+        sharing_viking_endpoint="memory://" + str(tmp_path),
+        sharing_skill_reload_mode="off",
+        llm_api_key="",
+    )
 
 
 def _server(tmp_path: Path) -> ProxyServer:
-    return ProxyServer(
-        config=TeamEvolverConfig(
-            sharing_enabled=True,
-            sharing_backend="local",
-            sharing_session_backend="local",
-            sharing_local_root=str(tmp_path),
-            sharing_skill_reload_mode="off",
-            llm_api_key="",
-        )
-    )
+    return ProxyServer(config=_config(tmp_path))
+
+
+def _store(tmp_path: Path) -> SessionStore:
+    return SessionStore.from_config(_config(tmp_path))
+
+
+def _queued_exists(store: SessionStore, session_id: str) -> bool:
+    try:
+        store._bucket.get_object(store.queue_key(session_id))
+        return True
+    except Exception as exc:
+        if is_not_found_error(exc):
+            return False
+        raise
 
 
 def test_ingest_skips_chitchat_sessions(tmp_path: Path) -> None:
@@ -45,7 +63,7 @@ def test_ingest_skips_chitchat_sessions(tmp_path: Path) -> None:
     body = resp.json()
     assert body["status"] == "skipped"
     assert body["queued"] is False
-    assert not (tmp_path / "sessions" / "hello-1.json").exists()
+    assert not _queued_exists(_store(tmp_path), "hello-1")
 
 
 def test_injected_skills_alone_do_not_make_chitchat_valuable() -> None:
@@ -145,7 +163,10 @@ def test_ingest_queues_valuable_sessions(tmp_path: Path) -> None:
     body = resp.json()
     assert body["status"] == "queued"
     assert body["queued"] is True
-    stored = json.loads((tmp_path / "sessions" / "valuable-1.json").read_text("utf-8"))
+    store = _store(tmp_path)
+    stored = json.loads(
+        store._bucket.get_object(store.queue_key("valuable-1")).read().decode("utf-8")
+    )
     assert stored["session_id"] == "valuable-1"
     assert stored["value_judge"]["decision"] == "valuable"
 
@@ -214,8 +235,9 @@ def test_reingesting_unchanged_processed_session_is_skipped(tmp_path: Path) -> N
 
         # Simulate the external evolve engine consuming the session: the queue
         # entry is removed while the archive copy remains.
-        (tmp_path / "sessions" / "dup-1.json").unlink()
-        assert (tmp_path / "session_archive" / "dup-1.json").exists()
+        store = _store(tmp_path)
+        store._bucket.delete_object(store.queue_key("dup-1"))
+        assert store._bucket.get_object(store.archive_key("dup-1"))
 
         again = client.post("/ingest_session", json=payload)
 
@@ -223,7 +245,7 @@ def test_reingesting_unchanged_processed_session_is_skipped(tmp_path: Path) -> N
     assert body["status"] == "duplicate"
     assert body["queued"] is False
     # Not re-queued.
-    assert not (tmp_path / "sessions" / "dup-1.json").exists()
+    assert not _queued_exists(_store(tmp_path), "dup-1")
 
 
 def test_reingesting_continued_session_with_new_turn_requeues(tmp_path: Path) -> None:
@@ -246,7 +268,8 @@ def test_reingesting_continued_session_with_new_turn_requeues(tmp_path: Path) ->
             },
         )
         assert first.json()["status"] == "queued"
-        (tmp_path / "sessions" / "cont-1.json").unlink()
+        store = _store(tmp_path)
+        store._bucket.delete_object(store.queue_key("cont-1"))
 
         again = client.post(
             "/ingest_session",
@@ -265,4 +288,4 @@ def test_reingesting_continued_session_with_new_turn_requeues(tmp_path: Path) ->
         )
 
     assert again.json()["status"] == "queued"
-    assert (tmp_path / "sessions" / "cont-1.json").exists()
+    assert _queued_exists(_store(tmp_path), "cont-1")

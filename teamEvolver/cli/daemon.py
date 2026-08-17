@@ -213,8 +213,13 @@ def start(port: int | None, daemon: bool, log_file: str | None):
         sys.exit(1)
 
     if daemon:
+        configured_port = _effective_service_port(cs, None)
+        # Do not create a temporary config snapshot when the requested port is
+        # already the durable value. Internal Agent registration and admin
+        # updates must keep writing the real config file in daemon mode.
+        daemon_port = port if port and port != configured_port else None
         pid, log_path = _spawn_daemon_process(
-            port,
+            daemon_port,
             log_file,
             effective_port=_effective_service_port(cs, port),
         )

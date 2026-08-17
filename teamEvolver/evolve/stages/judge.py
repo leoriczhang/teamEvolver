@@ -120,6 +120,15 @@ def _effective_judge_system() -> str:
         return _JUDGE_SYSTEM
 
 
+def _judge_call_options() -> dict[str, Any]:
+    try:
+        from ..prompt_studio import stage_call_options
+
+        return stage_call_options("judge")
+    except Exception:  # noqa: BLE001 - retain stable stage defaults
+        return {"max_tokens": 32768, "temperature": 0.1}
+
+
 def _extract_json_object(text: str) -> Optional[dict[str, Any]]:
     raw = str(text or "")
     raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
@@ -433,7 +442,7 @@ async def judge_session(
         # emitting any content; on large sessions the reasoning alone can exceed
         # 8k and return empty content (finish_reason=length). Keep this high, and
         # the client also auto-doubles the budget on an empty length-capped reply.
-        raw = await llm.chat(messages, max_tokens=32768, temperature=0.1)
+        raw = await llm.chat(messages, **_judge_call_options())
     except Exception as exc:
         logger.warning(
             "[SessionJudge] LLM call failed for session %s: %s",

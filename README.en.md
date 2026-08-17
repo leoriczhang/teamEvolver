@@ -68,7 +68,7 @@ Hermes and other agents keep their native runtime model. teamEvolver delivers te
     </td>
     <td width="25%" valign="top">
       <h3>Team Sync</h3>
-      <p>Use local object storage or OpenViking-compatible object storage, with personal keys as evidence sources and the team key as the publication target.</p>
+      <p>Backed by OpenViking object storage with two deployments — cloud (Volcengine-hosted) and local self-hosted — with personal keys as evidence sources and the team key as the publication target.</p>
     </td>
     <td width="25%" valign="top">
       <h3>Web Console</h3>
@@ -95,7 +95,7 @@ flowchart LR
         Registry["Skill Registry"]
         Evidence["Evidence Windows"]
         Validation["Validation Queue"]
-        DreamCycle["DreamCycle Supervisor"]
+        DreamCycle["Native Memory Evolution"]
     end
 
     subgraph Storage["Shared Storage"]
@@ -167,7 +167,7 @@ teamEvolver config evolve.evidence_enabled true
 teamEvolver config evolve.evidence_recent_limit 12
 teamEvolver config evolve.evidence_historical_limit 12
 teamEvolver config evolve.evidence_change_debt_threshold 3
-# DreamCycle is optional and disabled by default; it drives an external dreamcycle engine
+# DreamCycle is native to teamEvolver and disabled by default; no external package is required
 # to maintain long-term team memory. Once enabled, it reads personal-key sources and
 # writes to the team-key space above.
 # Additional AgentsHub peers merge their personal keys through the internal config API.
@@ -269,8 +269,21 @@ The console includes:
 - **Filter Audit**: review valuable / chitchat decisions, mode, confidence, and reasons before sessions enter evolution.
 - **System Health**: check service, storage, and key API availability.
 - **Skill Management**: manage personal and team skills, including zip upload.
-- **User Management**: manage users, roles, and personal/team storage credentials.
+- **Memory Management**: manage personal and shared team memory files through OpenViking.
+- **OpenViking Workspace**: browse personal, team, and Skill context trees and open the full Studio.
+- **User Management**: manage the team display name, users, roles, and personal/team storage credentials.
 - **Model Settings**: configure an optional validation model and test connectivity.
+
+Administrators can edit the team display name under **Users & Permissions →
+Team Identity**, or set it through the CLI:
+
+```bash
+teamEvolver config team.display_name "My Team"
+```
+
+Deployments may override the persisted value with `EVOLVE_TEAM_DISPLAY_NAME`.
+DreamCycle uses the effective name in team overviews, prompts, and Memory
+sanitization.
 
 ---
 
@@ -292,9 +305,24 @@ OpenViking space roles:
 - `sharing.viking_team_api_key`: the shared target for team skills, validation jobs, validation results, and DreamCycle output.
 - `sharing.viking_root_prefix`: the cross-agent namespace, defaulting to `team-skill-evolver`.
 
-When multiple AgentsHub peers connect, the service merges personal key sources through `/internal/agentshub/openviking-config` while keeping the same team key as the publication target.
+Agents register their runtime type, capabilities, replay endpoint, and Skill-sync endpoint through `/internal/agents/register`. The legacy `/internal/agentshub/openviking-config` route remains as an AgentsHub compatibility adapter. In local deployment mode, teamEvolver owns the OpenViking connection and external Agents cannot replace its endpoint or credentials.
 
-For self-hosted OpenViking Server deployments, see [volcengine/OpenViking](https://github.com/volcengine/OpenViking) and override the default service URL with `teamEvolver config sharing.viking_endpoint "<your-server-url>"`.
+For the local open-source deployment, use the checked-out OpenViking source and its bundled Web Studio:
+
+```bash
+bash scripts/start_local_openviking.sh
+teamEvolver config sharing.viking_deployment local
+teamEvolver config sharing.viking_endpoint ""
+teamEvolver start
+```
+
+The script defaults to `~/OpenViking` and `~/.openviking/ov.conf`, builds Web Studio when needed, and serves it at `http://127.0.0.1:1933/studio/`. Override the runtime with `OPENVIKING_PYTHON`, `OPENVIKING_REPO`, or `OPENVIKING_CONFIG`.
+
+When local `ov.conf` sets `server.root_api_key`, configure that local key in the teamEvolver administrator's personal and team OpenViking spaces. A cloud key cannot authenticate to the local server.
+
+The teamEvolver console proxies OpenViking's native filesystem and content APIs. Personal and team memory use explicit user namespaces under `viking://user/<user>/memories`; the existing Skill registry remains under `viking://resources/team-skill-evolver/`. Credentials are injected server-side and every request is confined to its selected root.
+
+Any Agent runtime can integrate by posting a stable `agent_id`, `runtime_type`, capabilities, and non-secret health/replay/Skill-sync endpoints to `/internal/agents/register`. Sessions continue to enter through `/ingest_session` and identify their runtime through `runtime.type` and `runtime.integration_id`; True Replay resolves the registered endpoint dynamically.
 
 Do not commit real API keys. Use local configuration, environment variables, or your deployment platform's secret manager.
 
@@ -304,11 +332,11 @@ Do not commit real API keys. Use local configuration, environment variables, or 
 
 DreamCycle maintains long-term team experience. The validation queue evaluates candidate skills through real or simulated replay. Both reuse the same OpenViking object-store boundary:
 
-> DreamCycle is optional and disabled by default. It is executed by the standalone [dreamcycle](https://github.com/leoriczhang/dreamcycle) engine; teamEvolver only injects the Key/LLM environment and triggers it on demand. Make `dreamcycle` runnable on the host first (install that project, or point `dreamcycle.daemon_command` / `dreamcycle.trigger_command` at your entry point), then enable it explicitly:
+> DreamCycle is now embedded in teamEvolver with its complete capability set: five maintenance jobs, multi-turn ReAct tool use, OpenViking read/write/archive operations, policy audits, reports, overnight multi-round scheduling, and persisted execution history. No external package is required.
 
 ```bash
 teamEvolver config dreamcycle.enabled true       # turn on the optional maintenance
-teamEvolver config dreamcycle.auto_start true    # optional: let the service start a daemon
+teamEvolver config dreamcycle.auto_start true    # optional: run periodically in the service
 teamEvolver config dreamcycle.llm_api_key "<llm-key>"
 teamEvolver config dreamcycle.llm_model "<model-id>"
 ```
@@ -391,7 +419,7 @@ teamEvolver/
 │   ├── config_store/     # local config store
 │   ├── proxy/            # service routes, console, and admin APIs
 │   ├── skills/           # SKILL.md management, bundling, sync
-│   ├── storage/          # local / OpenViking storage backends
+│   ├── storage/          # OpenViking storage backend (cloud / local)
 │   ├── integrations/     # Hermes / DreamCycle integration
 │   ├── validation/       # shared validation queue, results, and worker
 │   ├── true_replay.py    # true A/B replay

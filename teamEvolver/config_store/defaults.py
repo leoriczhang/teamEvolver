@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..config import TEAM_SKILL_ROOT_PREFIX, VOLCENGINE_OPENVIKING_ENDPOINT
+from ..config import TEAM_SKILL_ROOT_PREFIX
 
 CONFIG_DIR = Path.home() / ".teamEvolver"
 CONFIG_FILE = CONFIG_DIR / "config.yaml"
@@ -16,6 +16,9 @@ _SKILL_RELOAD_MODES = {"off", "poll", "callback"}
 _MIN_SKILL_RELOAD_INTERVAL_SECONDS = 5
 
 _DEFAULTS: dict = {
+    "team": {
+        "display_name": "Team",
+    },
     "llm": {
         "provider": "custom",
         "model_id": "doubao-seed-evolving",
@@ -42,11 +45,16 @@ _DEFAULTS: dict = {
     "sharing": {
         "enabled": True,
         "backend": "viking",
+        # Deployment target for OpenViking: ``cloud`` (Volcengine-hosted) or
+        # ``local`` (self-hosted openviking-server). Drives the endpoint when
+        # ``viking_endpoint`` is left empty.
+        "viking_deployment": "cloud",
         "endpoint": "",
-        "local_root": "",
         "skill_backend": "",
         "session_backend": "",
-        "viking_endpoint": VOLCENGINE_OPENVIKING_ENDPOINT,
+        # Empty means "derive from viking_deployment"; set a value only to
+        # override the cloud/local default endpoint.
+        "viking_endpoint": "",
         # Backward-compatible fallback. Prefer the scoped keys when the caller
         # has separate personal and team OpenViking credentials.
         "viking_api_key": "",
@@ -54,6 +62,7 @@ _DEFAULTS: dict = {
         "viking_personal_api_keys": [],
         "viking_team_api_key": "",
         "viking_account": "default",
+        "viking_personal_user": "",
         "viking_user": "default",
         # wire constant: OpenViking agent namespace, do not rename
         "viking_agent": TEAM_SKILL_ROOT_PREFIX,
@@ -71,6 +80,12 @@ _DEFAULTS: dict = {
     },
     "evolve": {
         "server_url": "http://127.0.0.1:52010",
+        "use_session_judge": True,
+        "publish_mode": "validated",
+        "validation_max_rejections": 1,
+        "human_review_enabled": True,
+        "human_review_timeout_seconds": 86400,
+        "interval_seconds": 600,
         "evidence_enabled": True,
         "evidence_max_entries": 400,
         "evidence_recent_limit": 20,
@@ -89,6 +104,21 @@ _DEFAULTS: dict = {
         "bundle_allow_delete": True,
         "bundle_static_checks_enabled": True,
     },
+    "mining": {
+        "model": {},
+        "pipeline": {
+            "max_rounds": 3,
+            "max_retries": 2,
+            "retry_backoff_seconds": 0.8,
+            "oneshot_timeout_seconds": 1800,
+            "step1_validation_retries": 1,
+            "strict_step1": True,
+            "benchmark_target_total": 16,
+            "benchmark_difficulty_dist": "easy:4,medium:7,hard:5",
+            "benchmark_max_turns": 5,
+        },
+        "prompts": {},
+    },
     "dreamcycle": {
         "enabled": False,
         "auto_start": False,
@@ -98,6 +128,40 @@ _DEFAULTS: dict = {
         "llm_base_url": "",
         "llm_api_key": "",
         "llm_model": "",
+        "llm_max_tokens": 4096,
+        "temperature": 0.3,
+        "embed_model": "",
+        "embed_base_url": "",
+        "embed_api_key": "",
+        "dedup_merge_threshold": 0.86,
+        "dedup_warn_threshold": 0.72,
+        "active_start_hour": 0,
+        "active_end_hour": 6,
+        "rounds_per_window": 3,
+        "round_interval_minutes": 90,
+        "max_turns_per_job": 25,
+        "max_consecutive_errors": 3,
+        "retry_delay_seconds": 300,
+        "customer_id": "",
+        "state_dir": "",
+        "log_level": "INFO",
+        "enabled_jobs": [
+            "team_overview",
+            "deduplication",
+            "cleanup",
+            "onboarding_check",
+            "consolidate",
+        ],
+        "job_prompts": {},
+        "job_settings": {},
+        # Deprecated simplified-engine fields retained for migration.
+        "interval_seconds": 86400,
+        "max_source_items": 100,
+        "max_source_chars": 120000,
+        "prompts": {
+            "extract": "",
+            "consolidate": "",
+        },
     },
     "validation": {
         "enabled": True,
@@ -132,12 +196,15 @@ _DEFAULTS: dict = {
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
-    result = dict(base)
+    result = {
+        key: _deep_merge({}, value) if isinstance(value, dict) else value
+        for key, value in base.items()
+    }
     for k, v in override.items():
         if k in result and isinstance(result[k], dict) and isinstance(v, dict):
             result[k] = _deep_merge(result[k], v)
         else:
-            result[k] = v
+            result[k] = _deep_merge({}, v) if isinstance(v, dict) else v
     return result
 
 
@@ -169,11 +236,15 @@ def _first_non_empty(mapping: dict[str, Any], *keys: str, default: str = "") -> 
 
 
 def _infer_sharing_backend(sharing: dict[str, Any]) -> str:
+    """Resolve the sharing backend.
+
+    Only ``viking`` (OpenViking) is supported. A legacy ``local`` value (or any
+    other) collapses to ``viking``; the empty string is returned only when
+    sharing is neither enabled nor carries any viking credential/endpoint.
+    """
     backend = str(sharing.get("backend", "") or "").strip().lower()
     if backend:
-        return backend
-    if sharing.get("local_root"):
-        return "local"
+        return "viking"
     has_viking_key = any(
         sharing.get(key)
         for key in (
@@ -184,9 +255,15 @@ def _infer_sharing_backend(sharing: dict[str, Any]) -> str:
             "viking_resources_api_key",
         )
     )
-    if sharing.get("viking_endpoint") and (sharing.get("enabled") or has_viking_key):
+    if sharing.get("enabled") or has_viking_key or sharing.get("viking_endpoint"):
         return "viking"
     return ""
+
+
+def _normalize_viking_deployment(value: Any, default: str = "cloud") -> str:
+    """Normalize the OpenViking deployment mode to ``cloud`` or ``local``."""
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"cloud", "local"} else default
 
 
 def _normalize_validation_mode(value: Any) -> str:

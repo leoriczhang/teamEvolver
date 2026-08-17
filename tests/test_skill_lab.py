@@ -4,6 +4,7 @@ import base64
 import time
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from teamEvolver.config import TeamEvolverConfig
@@ -44,9 +45,9 @@ def _config(tmp_path: Path) -> TeamEvolverConfig:
         skills_dir=str(skills_dir),
         users_registry_path=str(tmp_path / "users.json"),
         sharing_enabled=True,
-        sharing_backend="local",
-        sharing_session_backend="local",
-        sharing_local_root=str(tmp_path / "store"),
+        sharing_backend="viking",
+        sharing_session_backend="viking",
+        sharing_viking_endpoint="memory://" + str(tmp_path / "store"),
         sharing_user_alias="tester",
     )
 
@@ -165,6 +166,69 @@ def test_synthesized_evolution_tests_are_exposed_as_read_only_datasets(
     assert datasets[0]["source"]["session_id"] == "session-1"
     assert "read materials" in datasets[0]["trajectory_requirements"]
     assert "输出结论" in datasets[0]["requirements"]
+
+
+def test_canonical_evolution_dataset_becomes_editable_without_losing_source(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = SkillLabStore.from_config(config)
+    store._datasets.save_dataset(
+        {
+            "dataset_id": "evolution-locked",
+            "skill_name": "demo-skill",
+            "name": "Evolution test",
+            "query": "执行进化测试。",
+            "requirements": ["输出结论"],
+            "source": {"kind": "evolution", "job_id": "job-1"},
+            "read_only": True,
+            "enabled_for_evolution": False,
+        }
+    )
+
+    edited = store.save_dataset(
+        {
+            "dataset_id": "evolution-locked",
+            "skill_name": "demo-skill",
+            "name": "Edited evolution test",
+            "query": "执行编辑后的进化测试。",
+            "requirements": "1. 输出结论",
+        }
+    )
+
+    assert edited["read_only"] is False
+    assert edited["source"]["kind"] == "evolution"
+    assert edited["source"]["job_id"] == "job-1"
+    assert edited["source"]["user_edited"] is True
+    assert edited["name"] == "Edited evolution test"
+
+
+def test_dataset_with_external_input_requires_real_material(
+    tmp_path: Path,
+) -> None:
+    store = SkillLabStore.from_config(_config(tmp_path))
+    payload = {
+        "skill_name": "demo-skill",
+        "name": "CSV input",
+        "query": "请读取 q1_materials/input.csv 并输出结论。",
+        "requirements": "1. 输出结论",
+    }
+
+    with pytest.raises(ValueError, match="q1_materials/input.csv"):
+        store.save_dataset(payload, files=[])
+
+    saved = store.save_dataset(
+        payload,
+        files=[
+            {
+                "path": "q1_materials/input.csv",
+                "content_b64": base64.b64encode(b"name,value\nA,1\n").decode(),
+            }
+        ],
+    )
+
+    assert saved["material_integrity"]["complete"] is True
+    assert saved["material_integrity"]["mode"] == "uploaded"
 
 
 def test_legacy_bare_replay_cases_are_hidden_and_formal_datasets_are_deduped(
@@ -315,6 +379,7 @@ def test_skill_lab_routes_list_and_create_dataset(tmp_path: Path) -> None:
             "name": "Manual",
             "query": "执行任务。",
             "requirements": "1. 完成",
+            "enabled_for_evolution": True,
             "files": [],
         },
     )
@@ -326,7 +391,72 @@ def test_skill_lab_routes_list_and_create_dataset(tmp_path: Path) -> None:
     assert created.status_code == 200
     assert listed.status_code == 200
     assert listed.json()["manual_count"] == 1
+    assert listed.json()["regression_count"] == 1
     assert listed.json()["datasets"][0]["query"] == "执行任务。"
+    assert listed.json()["datasets"][0]["skill_name"] == "demo-skill"
+    assert listed.json()["datasets"][0]["enabled_for_evolution"] is True
+
+
+def test_skill_lab_route_edits_projected_evolution_dataset(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ValidationStore.from_config(config).save_job(
+        {
+            "job_id": "job-inline-material",
+            "candidate_skill_name": "demo-skill",
+            "candidate_skill": {"name": "demo-skill"},
+            "test_datasets": [
+                {
+                    "dataset_id": "synth-inline-material",
+                    "name": "产品复盘材料直接生成 HTML",
+                    "query": (
+                        "根据以下内容制作 HTML 演示稿，保存到 artifacts/retro.html。\n\n"
+                        "材料：\n- 解决率：71%\n- 样本量：待补充"
+                    ),
+                    "requirements": ["输出 8 页演示稿"],
+                    "trajectory_requirements": [
+                        "写入 artifacts/retro.html",
+                    ],
+                    "source_session_ids": ["session-1"],
+                    "evidence_window": "historical",
+                }
+            ],
+        }
+    )
+    server = ProxyServer(config, skill_manager=SkillManager(config.skills_dir))
+    client = _authed_client(server)
+
+    listed = client.get(
+        "/api/skill-lab/datasets",
+        params={"skill_name": "demo-skill"},
+    )
+    projected = next(
+        item
+        for item in listed.json()["datasets"]
+        if item["dataset_id"] == "synth-inline-material"
+    )
+    assert projected["read_only"] is True
+    assert projected["material_integrity"]["mode"] == "inline"
+
+    edited = client.post(
+        "/api/skill-lab/datasets",
+        json={
+            "dataset_id": "synth-inline-material",
+            "skill_name": "demo-skill",
+            "name": "编辑后的产品复盘测试",
+            "query": projected["query"],
+            "requirements": "1. 输出 8 页演示稿\n2. 保留待补充占位",
+            "trajectory_requirements": projected["trajectory_requirements"],
+        },
+    )
+
+    assert edited.status_code == 200
+    payload = edited.json()
+    assert payload["read_only"] is False
+    assert payload["source"]["kind"] == "evolution"
+    assert payload["source"]["job_id"] == "job-inline-material"
+    assert payload["source"]["user_edited"] is True
 
 
 def test_skill_lab_route_imports_dataset_markdown_with_materials(
@@ -480,7 +610,10 @@ def test_skill_lab_can_synthesize_editable_dataset_from_history(
         return [
             {
                 "name": "历史合成测试",
-                "query": "执行新的同类任务",
+                "query": (
+                    "执行新的同类任务。\n\n"
+                    "材料：\n- 来源：历史样本\n- 数值：42"
+                ),
                 "requirements": ["输出结果", "标注来源"],
                 "trajectory_requirements": ["读取材料"],
                 "source_session_ids": ["session-history"],

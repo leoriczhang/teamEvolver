@@ -10,9 +10,20 @@ import os
 from typing import Any
 
 
+_CCR_MODEL_OVERRIDE = "deepseek-v4-flash-ga-260731"
+
+
+def _resolve_alias_model(model: str) -> str:
+    raw = str(model or "").strip()
+    if raw.lower().startswith("ccr/"):
+        return _CCR_MODEL_OVERRIDE
+    return raw
+
+
 def _normalize_temperature(model: str, requested: float) -> float:
-    normalized = str(model or "").strip().lower()
-    if normalized in {"kimi-k2.5", "ccr/kimi-k2.5"}:
+    resolved = _resolve_alias_model(model)
+    normalized = str(resolved or "").strip().lower()
+    if normalized in {"kimi-k2.5"}:
         return 1
     return requested
 
@@ -31,6 +42,9 @@ class AsyncLLMClient:
         model: str = "gpt-4o",
         max_tokens: int = 100000,
         temperature: float = 0.4,
+        timeout_seconds: float = 600.0,
+        connect_timeout_seconds: float = 30.0,
+        max_retries: int = 6,
     ) -> None:
         import httpx
         from openai import OpenAI
@@ -42,11 +56,16 @@ class AsyncLLMClient:
             # report missing credentials when no key has been configured.
             api_key=resolved_api_key or "not-configured",
             base_url=base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-            timeout=httpx.Timeout(600.0, connect=30.0),  # 10 min max per request
+            timeout=httpx.Timeout(
+                max(1.0, float(timeout_seconds)),
+                connect=max(1.0, float(connect_timeout_seconds)),
+            ),
         )
         self.model = model or os.environ.get("EVOLVE_MODEL", "gpt-4o")
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.timeout_seconds = max(1.0, float(timeout_seconds))
+        self.max_retries = max(1, int(max_retries))
 
     async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
         """Send a chat completion request and return the assistant content."""
@@ -60,11 +79,17 @@ class AsyncLLMClient:
         trace_session_id = str(kwargs.pop("trace_session_id", "") or "").strip()
         trace_user_id = str(kwargs.pop("trace_user_id", "") or "").strip()
         requested_temperature = kwargs.pop("temperature", self.temperature)
+        requested_model = _resolve_alias_model(
+            str(kwargs.pop("model", self.model) or self.model)
+        )
         merged = {
-            "model": self.model,
+            "model": requested_model,
             "messages": messages,
             "max_completion_tokens": kwargs.pop("max_tokens", self.max_tokens),
-            "temperature": _normalize_temperature(self.model, requested_temperature),
+            "temperature": _normalize_temperature(
+                requested_model,
+                requested_temperature,
+            ),
             **kwargs,
         }
 
@@ -75,8 +100,7 @@ class AsyncLLMClient:
         budget_bumps_left = 3
         budget_ceiling = 131072
 
-        max_retries = 6
-        for attempt in range(max_retries):
+        for attempt in range(self.max_retries):
             try:
                 trace_scope = nullcontext()
                 if trace_name or trace_tags or trace_metadata or trace_session_id or trace_user_id:
@@ -118,7 +142,7 @@ class AsyncLLMClient:
                     continue
                 if status_code == 400 and "Stream must be set to true" in body_text:
                     return await self._chat_via_stream(merged)
-                if attempt < max_retries - 1:
+                if attempt < self.max_retries - 1:
                     import random
 
                     wait = min(2**attempt + random.uniform(0, 1), 30)

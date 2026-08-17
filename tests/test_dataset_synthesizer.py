@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 
 import pytest
@@ -12,12 +13,13 @@ from teamEvolver.dataset_synthesizer import (
     flatten_requirements,
     synthesize_evolution_datasets,
 )
+from teamEvolver.dataset_store import SkillDatasetStore
 from teamEvolver.progressive_replay import (
     next_disclosure_prompt,
     progressive_replay_decision,
     select_replay_cases,
 )
-from teamEvolver.storage import LocalObjectStore
+from teamEvolver.storage import InMemoryObjectStore
 from teamEvolver.true_replay import compare_efficiency
 
 
@@ -49,7 +51,10 @@ async def test_synthesizer_uses_sessions_evidence_and_candidate_skill() -> None:
                     "test_datasets": [
                         {
                             "name": "组合规划测试",
-                            "query": "请基于材料给出组合规划。",
+                            "query": (
+                                "请基于以下材料给出组合规划。\n\n"
+                                "材料：\n- 预算：100 万元\n- 风险上限：20%"
+                            ),
                             "requirements": [
                                 f"要求 {index}" for index in range(1, 13)
                             ],
@@ -247,11 +252,28 @@ def test_progressive_jobs_replay_all_cases_while_legacy_keeps_one_per_window() -
 
 
 def test_synthesized_dataset_store_round_trip(tmp_path) -> None:
-    store = SynthesizedDatasetStore(LocalObjectStore(tmp_path))
+    bucket = InMemoryObjectStore(str(tmp_path))
+    store = SynthesizedDatasetStore(bucket)
     saved = store.save_generation(
         skill_name="demo-skill",
         generation_id="job-1",
-        datasets=[{"dataset_id": "synth-1", "query": "Do work"}],
+        datasets=[
+            {
+                "dataset_id": "synth-1",
+                "query": "Do work",
+                "requirements": ["Write output"],
+                "source_session_ids": ["session-1"],
+                "materials": [
+                    {
+                        "path": "uploads/input.txt",
+                        "content_b64": base64.b64encode(b"source material").decode(
+                            "ascii"
+                        ),
+                        "source_session_id": "session-1",
+                    }
+                ],
+            }
+        ],
         source_session_ids=["session-1"],
         candidate_revision=2,
     )
@@ -263,3 +285,47 @@ def test_synthesized_dataset_store_round_trip(tmp_path) -> None:
 
     assert loaded == saved
     assert loaded["candidate_revision"] == 2
+    registered = SkillDatasetStore(bucket).load_dataset(
+        skill_name="demo-skill",
+        dataset_id="synth-1",
+    )
+    assert registered is not None
+    assert registered["skill_name"] == "demo-skill"
+    assert registered["source"]["kind"] == "evolution"
+    assert registered["source"]["job_id"] == "job-1"
+    assert registered["read_only"] is True
+    assert SkillDatasetStore(bucket).read_materials(registered) == [
+        ("uploads/input.txt", b"source material")
+    ]
+
+    SkillDatasetStore(bucket).save_dataset(
+        {
+            **registered,
+            "name": "User-edited regression",
+            "read_only": False,
+            "source": {
+                **registered["source"],
+                "user_edited": True,
+            },
+        }
+    )
+    store.save_generation(
+        skill_name="demo-skill",
+        generation_id="job-2",
+        datasets=[
+            {
+                "dataset_id": "synth-1",
+                "query": "Replacement from automation",
+                "requirements": ["Different requirement"],
+            }
+        ],
+        source_session_ids=["session-2"],
+        candidate_revision=3,
+    )
+    preserved = SkillDatasetStore(bucket).load_dataset(
+        skill_name="demo-skill",
+        dataset_id="synth-1",
+    )
+    assert preserved is not None
+    assert preserved["name"] == "User-edited regression"
+    assert preserved["source"]["user_edited"] is True

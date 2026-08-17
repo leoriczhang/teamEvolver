@@ -70,9 +70,9 @@ async def test_validation_worker_discards_result_for_stale_candidate_revision(
     worker = ValidationWorker(
         TeamEvolverConfig(
             sharing_enabled=True,
-            sharing_backend="local",
-            sharing_session_backend="local",
-            sharing_local_root=str(tmp_path),
+            sharing_backend="viking",
+            sharing_session_backend="viking",
+            sharing_viking_endpoint="memory://" + str(tmp_path),
             llm_api_key="",
             validation_enabled=True,
         ),
@@ -106,9 +106,9 @@ async def test_validation_worker_discards_result_for_stale_candidate_revision(
 def test_source_tenant_ids_come_from_agentshub_session(tmp_path) -> None:
     config = TeamEvolverConfig(
         sharing_enabled=True,
-        sharing_backend="local",
-        sharing_session_backend="local",
-        sharing_local_root=str(tmp_path),
+        sharing_backend="viking",
+        sharing_session_backend="viking",
+        sharing_viking_endpoint="memory://" + str(tmp_path),
         llm_api_key="",
         validation_enabled=True,
     )
@@ -133,9 +133,9 @@ async def test_wait_for_published_commit_returns_manifest_version_and_sha(
 ) -> None:
     config = TeamEvolverConfig(
         sharing_enabled=True,
-        sharing_backend="local",
-        sharing_session_backend="local",
-        sharing_local_root=str(tmp_path / "store"),
+        sharing_backend="viking",
+        sharing_session_backend="viking",
+        sharing_viking_endpoint="memory://" + str(tmp_path / "store"),
         llm_api_key="",
         validation_enabled=True,
     )

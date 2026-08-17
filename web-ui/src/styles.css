@@ -6,11 +6,11 @@
   box-sizing: border-box;
 }
 
-/* ==== teamEvolver warm-paper design system ============================== *
- *  Warm, translucent application shell + cool neutral work surfaces.      *
- *  Teal is the only brand accent; primary actions stay close to black.     */
+/* ==== teamEvolver pearl-white design system ============================= *
+ *  Pearl-white application shell + cool neutral work surfaces.            *
+ *  Teal is the brand accent; primary actions stay close to black.          */
 :root {
-  --background: #f7f5ef;
+  --background: #f6f7f9;
   --foreground: #18181a;
   --surface: #ffffff;
   --surface-raised: #ffffff;
@@ -18,7 +18,7 @@
   --surface-subtle: #f8f9fb;
   --border: #e3e7f1;
   --border-strong: #cfd5e1;
-  --border-warm: #ded7cc;
+  --border-soft: #dfe3eb;
   --line: #edf0f5;
   --muted: #f2f3f7;
   --muted-soft: #858b9c;
@@ -26,22 +26,20 @@
   --accent-soft: #e7f4f1;
   --accent-foreground: #ffffff;
   --danger: #d20b0b;
-  --warning: #ff7f00;
+  --warning: #6e5aad;
   --success: #2cb360;
   --ink-soft: #464c5e;
-  --copper: #a56b4f;
-  --olive: #778255;
-  --shadow-float: 0 20px 54px rgba(37, 32, 24, 0.1);
-  --shadow-soft: 0 10px 30px rgba(37, 32, 24, 0.055);
+  --shadow-float: 0 20px 54px rgba(15, 23, 42, 0.1);
+  --shadow-soft: 0 10px 30px rgba(15, 23, 42, 0.055);
   --shadow-cta: 0 8px 18px rgba(24, 24, 26, 0.16);
   --font-body: "Inter", "IBM Plex Sans", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
   --font-display: "Inter", "IBM Plex Sans", "Noto Sans SC", "PingFang SC", system-ui, sans-serif;
   --font-code: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   --font-mono: var(--font-code);
   --page-gradient-a: rgba(15, 118, 110, 0.075);
-  --page-gradient-top: #fbfaf6;
-  --page-gradient-bottom: #f3f0e8;
-  --panel-bg: rgba(249, 247, 241, 0.82);
+  --page-gradient-top: #fdfdfe;
+  --page-gradient-bottom: #f1f3f7;
+  --panel-bg: rgba(248, 249, 252, 0.88);
   --card: #ffffff;
   --card-foreground: #18181a;
   --popover: #ffffff;
@@ -57,16 +55,16 @@
   --chart-1: #0f766e;
   --chart-2: #1a71ff;
   --chart-3: #2cb360;
-  --chart-4: #ff7f00;
+  --chart-4: #7563b2;
   --chart-5: #858b9c;
   --radius: 0.625rem;
-  --sidebar: rgba(249, 247, 241, 0.82);
+  --sidebar: rgba(248, 249, 252, 0.88);
   --sidebar-foreground: #626b80;
   --sidebar-primary: #18181a;
   --sidebar-primary-foreground: #ffffff;
   --sidebar-accent: rgba(255, 255, 255, 0.6);
   --sidebar-accent-foreground: #18181a;
-  --sidebar-border: #ded7cc;
+  --sidebar-border: #dfe3eb;
   --sidebar-ring: #18181a;
 }
 
@@ -79,8 +77,8 @@ body,
 body {
   margin: 0;
   background:
-    linear-gradient(rgba(120, 112, 96, 0.025) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(120, 112, 96, 0.025) 1px, transparent 1px),
+    linear-gradient(rgba(79, 91, 117, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(79, 91, 117, 0.025) 1px, transparent 1px),
     radial-gradient(70% 60% at 0% 0%, var(--page-gradient-a), transparent 62%),
     linear-gradient(180deg, var(--page-gradient-top) 0%, var(--background) 58%, var(--page-gradient-bottom) 100%);
   background-attachment: fixed;
@@ -175,6 +173,14 @@ select,
   --color-line: var(--line);
   --color-border-strong: var(--border-strong);
   --color-muted-soft: var(--muted-soft);
+  --color-amber-50: #f5f3fb;
+  --color-amber-200: #ded9ee;
+  --color-amber-300: #c9c1e2;
+  --color-amber-500: #7563b2;
+  --color-amber-600: #6553a0;
+  --color-amber-700: #56458c;
+  --color-amber-800: #473973;
+  --color-amber-900: #382d5b;
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -199,10 +205,20 @@ select,
 
 .app-sidebar {
   width: 232px;
-  border-color: var(--border-warm);
+  border-color: var(--border-soft);
   background: var(--sidebar);
   box-shadow: 1px 0 0 rgba(255, 255, 255, 0.42);
   backdrop-filter: blur(18px) saturate(1.2);
+}
+
+.sidebar-nav-section + .sidebar-nav-section {
+  margin-top: 4px;
+  border-top: 1px solid rgba(207, 213, 225, 0.58);
+  padding-top: 4px;
+}
+
+.sidebar-group-label {
+  color: #7b8396;
 }
 
 .app-main {
@@ -219,15 +235,15 @@ select,
   align-items: center;
   justify-content: space-between;
   gap: 18px;
-  border-bottom: 1px solid var(--border-warm);
-  background: rgba(251, 250, 246, 0.78);
+  border-bottom: 1px solid var(--border-soft);
+  background: rgba(250, 251, 253, 0.86);
   padding: 12px 22px;
   backdrop-filter: blur(16px) saturate(1.15);
 }
 
 .section-tabs {
-  border-bottom: 1px solid var(--border-warm);
-  background: rgba(249, 247, 241, 0.62);
+  border-bottom: 1px solid var(--border-soft);
+  background: rgba(247, 248, 251, 0.78);
   padding-inline: 22px;
   backdrop-filter: blur(12px);
 }
@@ -359,7 +375,7 @@ select,
 }
 
 /* ======================================================================== *
- *  Console bespoke helpers (ported from console.html, warm palette)        *
+ *  Console bespoke helpers (ported from console.html, pearl palette)       *
  * ======================================================================== */
 
 /* ---- Connection / status dots ---- */
@@ -382,7 +398,7 @@ select,
 }
 .dot.run {
   background: var(--warning);
-  box-shadow: 0 0 0 3px rgba(255, 127, 0, 0.12);
+  box-shadow: 0 0 0 3px rgba(110, 90, 173, 0.14);
   animation: dot-pulse 1.2s infinite;
 }
 @keyframes dot-pulse {
@@ -415,8 +431,8 @@ select,
   border-color: transparent;
 }
 .pill.amber {
-  background: #fff2e5;
-  color: #b85d00;
+  background: #f2f0f8;
+  color: #5b4a91;
   border-color: transparent;
 }
 .pill.red {
@@ -517,7 +533,7 @@ pre.content {
   height: 100%;
   min-height: 0;
   flex-direction: column;
-  background: #f4f2ec;
+  background: #f2f4f7;
 }
 
 .markdown-toolbar {
@@ -526,8 +542,8 @@ pre.content {
   align-items: center;
   gap: 8px;
   overflow-x: auto;
-  border-bottom: 1px solid var(--border-warm);
-  background: rgba(251, 250, 246, 0.94);
+  border-bottom: 1px solid var(--border-soft);
+  background: rgba(250, 251, 253, 0.96);
   padding: 8px 14px;
   scrollbar-width: thin;
 }
@@ -545,7 +561,7 @@ pre.content {
 }
 
 .markdown-tool-button:hover {
-  background: #ebe8e0;
+  background: #e9ecf2;
   color: var(--foreground);
 }
 
@@ -559,7 +575,7 @@ pre.content {
   display: flex;
   gap: 2px;
   border-radius: 8px;
-  background: #ebe8e0;
+  background: #e9ecf2;
   padding: 2px;
 }
 
@@ -580,7 +596,7 @@ pre.content {
 .markdown-mode-switch button[aria-selected="true"] {
   background: #fff;
   color: var(--foreground);
-  box-shadow: 0 1px 3px rgba(37, 32, 24, 0.12);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.12);
 }
 
 .markdown-workspace-body {
@@ -593,7 +609,7 @@ pre.content {
 .markdown-outline {
   overflow-y: auto;
   border-right: 1px solid var(--border);
-  background: #f9f7f1;
+  background: #f7f8fb;
   padding: 18px 10px;
 }
 
@@ -612,7 +628,7 @@ pre.content {
   overflow-y: auto;
   border: 0;
   background: #fff;
-  box-shadow: 0 1px 2px rgba(37, 32, 24, 0.04), 0 14px 40px rgba(37, 32, 24, 0.06);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 14px 40px rgba(15, 23, 42, 0.06);
 }
 
 .markdown-source-editor {
@@ -850,11 +866,11 @@ td.link {
 .login-hero {
   position: relative;
   overflow: hidden;
-  color: #f8f6ef;
+  color: #f8fafc;
   background:
     radial-gradient(120% 120% at 84% 12%, rgba(31, 139, 129, 0.48), transparent 55%),
-    radial-gradient(130% 130% at 8% 92%, rgba(165, 107, 79, 0.34), transparent 52%),
-    linear-gradient(140deg, #174942 0%, #173630 48%, #182522 100%);
+    radial-gradient(130% 130% at 8% 92%, rgba(101, 83, 160, 0.38), transparent 52%),
+    linear-gradient(140deg, #174942 0%, #173a38 48%, #1b2730 100%);
 }
 
 /* Floating light orbs for a flashy backdrop */
@@ -963,7 +979,7 @@ td.link {
   border-radius: 999px;
   font-size: 12.5px;
   font-weight: 600;
-  color: rgba(244, 242, 236, 0.92);
+  color: rgba(248, 250, 252, 0.92);
   background: rgba(255, 255, 255, 0.075);
   border: 1px solid rgba(255, 255, 255, 0.13);
   backdrop-filter: blur(4px);

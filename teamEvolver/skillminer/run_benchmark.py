@@ -61,14 +61,18 @@ OVERALL_SCORE = {"优秀": 1.0, "合格": 0.6, "不合格": 0.0}
 DIM_SCORE = {"通过": 1.0, "部分通过": 0.5, "不通过": 0.0, "不适用": None}
 
 # 多轮对话默认参数
-DEFAULT_MAX_TURNS = 5          # 被测 skill 最多回应几轮
+DEFAULT_MAX_TURNS = int(
+    os.environ.get("SKILLMINER_BENCHMARK_MAX_TURNS", "5") or 5
+)  # 被测 skill 最多回应几轮
 DIALOGUE_END_MARK = "[[对话结束]]"   # 模拟参与者判定诉求已解决时输出的收尾标记
 
 # benchmark 难度分布超参数
 DIFFICULTY_LEVELS = ["easy", "medium", "hard"]
 # 默认目标难度分布（比例，会按目标题量归一化成各档题数写进出题 prompt）
 DEFAULT_DIFFICULTY_DIST = {"easy": 0.25, "medium": 0.45, "hard": 0.30}
-DEFAULT_TARGET_TOTAL = 16      # 目标题量（用于把比例换算成各档题数）
+DEFAULT_TARGET_TOTAL = int(
+    os.environ.get("SKILLMINER_BENCHMARK_TARGET_TOTAL", "16") or 16
+)  # 目标题量（用于把比例换算成各档题数）
 
 
 def parse_difficulty_dist(spec):
@@ -226,7 +230,7 @@ def build_benchmark_prompt(skill_text, eval_text, out_path, difficulty_counts=No
         )
     else:
         diff_line = ""
-    return (
+    default_prompt = (
         BENCHMARK_SECURITY_POLICY +
         "你是一名 Agent 技能的【评测基准（benchmark）构建专家】。下面给你一个技能定义"
         "（SKILL.md）和它配套的评测标准（EVALUATION.md）。请据此构建一套**可自动化跑分"
@@ -297,6 +301,16 @@ def build_benchmark_prompt(skill_text, eval_text, out_path, difficulty_counts=No
         f"{skill_text}\n\n"
         "==== 评测标准 EVALUATION.md ====\n"
         f"{eval_text}\n"
+    )
+    return rp.apply_prompt_override(
+        "benchmark_generation",
+        default_prompt,
+        {
+            "{{difficulty_instruction}}": diff_line,
+            "{{output_path}}": out_path,
+            "{{skill_text}}": skill_text,
+            "{{evaluation_text}}": eval_text,
+        },
     )
 
 
@@ -451,7 +465,11 @@ def build_phase(skill_dir, skill_name, hermes_env, difficulty_counts=None):
     # 构建器已经在 prompt 中拿到完整的 SKILL/EVALUATION，只需向受控路径写文件。
     # 将 Hermes 工具面缩到 file，阻断终端、代码执行、网络和其他无关能力；路径级
     # 边界继续由上面的明确指令约束。后续 JSON 解析、规范化与 LIFT 转换均由本进程完成。
-    ok, out = rst.run_hermes(["-t", "file", "-z", prompt], hermes_env, timeout=1500)
+    ok, out = rst.run_hermes(
+        ["-t", "file", "-z", prompt],
+        hermes_env,
+        timeout=rp.HERMES_ONESHOT_TIMEOUT,
+    )
     if not ok:
         print(f"  ✗ 题库生成失败：{out[:200]}")
         return None
@@ -547,11 +565,16 @@ def load_existing_benchmark(skill_dir):
 # ============================================================
 def usage_prompt_for(question):
     """把一道题的情境包装成给被测 skill 的处理请求（单轮模式用）。"""
-    return (
+    default_prompt = (
         "你正在使用一个领域 skill 处理以下业务情境。请给出完整、可执行的处理方案。\n\n"
         f"【情境】{question['input']}\n\n"
         "请给出：(1) 处理步骤序列；(2) 对相关对象实际要说/做的内容；"
         "(3) 关键判断依据（引用你所依据的规则）。"
+    )
+    return rp.apply_prompt_override(
+        "benchmark_usage",
+        default_prompt,
+        {"{{question_input}}": question["input"]},
     )
 
 
@@ -582,7 +605,7 @@ def customer_turn_prompt(question, transcript):
     sim = question["customer_sim"]
     hidden = "\n".join(f"    - {h}" for h in sim["hidden_facts"]) or "    - （无额外隐藏事实）"
     pressure = "\n".join(f"    - {p}" for p in sim["pressure_tactics"]) or "    - （无特别施压手段，正常表达不满即可）"
-    return (
+    default_prompt = (
         BENCHMARK_SECURITY_POLICY +
         "你现在要**扮演该情境中的参与者**，与一名正在使用领域 skill 的执行人员进行对话。"
         "你不是助手，不要跳出角色，不要评价对方、不要给建议，只说该参与者会说的话。\n\n"
@@ -607,6 +630,21 @@ def customer_turn_prompt(question, transcript):
         f"  - 如果被测 skill 已经**真正满足了结束条件**（{sim['stop_when']}），"
         f"就表达认可并在**末尾单独一行输出** {DIALOGUE_END_MARK} 表示你愿意结束对话。\n"
         "  - 其他任何情况都**不要**输出结束标记，继续把你的诉求追下去。"
+    )
+    return rp.apply_prompt_override(
+        "benchmark_participant",
+        default_prompt,
+        {
+            "{{persona}}": sim["persona"],
+            "{{goal}}": sim["goal"],
+            "{{hidden_facts}}": hidden,
+            "{{reveal_rules}}": sim["reveal_rules"],
+            "{{pressure_tactics}}": pressure,
+            "{{question_input}}": question["input"],
+            "{{transcript}}": _render_history(transcript),
+            "{{stop_when}}": sim["stop_when"],
+            "{{dialogue_end_mark}}": DIALOGUE_END_MARK,
+        },
     )
 
 
@@ -634,7 +672,20 @@ def skill_reply_prompt(question, transcript):
     )
     if first_turn:
         task += "\n  - 这是你的开场，请先做好接待与初步响应。"
-    return role_hint + ctx + task
+    default_prompt = role_hint + ctx + task
+    return rp.apply_prompt_override(
+        "benchmark_skill_reply",
+        default_prompt,
+        {
+            "{{question_input}}": question["input"],
+            "{{transcript}}": _render_history(transcript),
+            "{{first_turn_instruction}}": (
+                "\n  - 这是你的开场，请先做好接待与初步响应。"
+                if first_turn
+                else ""
+            ),
+        },
+    )
 
 
 def run_dialogue(skill_name, question, hermes_env, max_turns=DEFAULT_MAX_TURNS):
@@ -713,7 +764,7 @@ def judge_prompt_for(question, answer, eval_text):
     el = gold["expected_label"]
     label_str = "；".join(f"{k}={v}" for k, v in el.items()) if el else "（本题无分类锚点）"
     dims = "、".join(question["target_dimensions"]) or "（未标注，请自行判断触及维度）"
-    return (
+    default_prompt = (
         BENCHMARK_SECURITY_POLICY +
         "你是一名严格的领域评审员。请依据下面的《评测标准 EVALUATION》，对被考核者"
         "针对该业务情境给出的处理方案进行打分。\n\n"
@@ -746,6 +797,19 @@ def judge_prompt_for(question, answer, eval_text):
         "==== 被考核者的处理方案 ====\n"
         f"{answer}\n"
     )
+    return rp.apply_prompt_override(
+        "benchmark_judge_single",
+        default_prompt,
+        {
+            "{{dimensions}}": dims,
+            "{{evaluation_text}}": eval_text,
+            "{{expected_labels}}": label_str,
+            "{{must_hit}}": gold["must_hit"],
+            "{{must_avoid}}": gold["must_avoid"],
+            "{{question_input}}": question["input"],
+            "{{answer}}": answer,
+        },
+    )
 
 
 def judge_prompt_dialogue(question, transcript, meta, eval_text):
@@ -761,7 +825,7 @@ def judge_prompt_dialogue(question, transcript, meta, eval_text):
     pressure = "；".join(sim["pressure_tactics"]) or "（无）"
     end_desc = "参与者主动认可并结束了对话" if meta.get("ended_by_customer") else \
                "对话跑满上限仍未达成收尾条件（可能是被测 skill 迟迟未解决目标）"
-    return (
+    default_prompt = (
         BENCHMARK_SECURITY_POLICY +
         "你是一名严格的领域评审员。下面是一名被测 skill 使用者与一位（由 AI 扮演的）情境参与者的"
         "**完整多轮对话记录**。请依据《评测标准 EVALUATION》和本题 gold 锚点，对被测 skill 在整段对话中的"
@@ -808,6 +872,23 @@ def judge_prompt_dialogue(question, transcript, meta, eval_text):
         f"{question['input']}\n\n"
         "==== 完整对话记录（参与者 ↔ 被测 skill） ====\n"
         f"{_render_history(transcript)}\n"
+    )
+    return rp.apply_prompt_override(
+        "benchmark_judge_dialogue",
+        default_prompt,
+        {
+            "{{dimensions}}": dims,
+            "{{evaluation_text}}": eval_text,
+            "{{expected_labels}}": label_str,
+            "{{must_hit}}": gold["must_hit"],
+            "{{must_avoid}}": gold["must_avoid"],
+            "{{participant_goal}}": sim["goal"],
+            "{{hidden_facts}}": hidden,
+            "{{pressure_tactics}}": pressure,
+            "{{ending}}": end_desc,
+            "{{question_input}}": question["input"],
+            "{{transcript}}": _render_history(transcript),
+        },
     )
 
 
