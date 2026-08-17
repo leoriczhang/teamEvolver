@@ -1,6 +1,8 @@
 services:
   teamevolver:
-    image: teamevolver:985f0a6
+    # Set TEAMEVOLVER_IMAGE when deploying a versioned image; local compose
+    # builds keep a stable default tag without pinning an obsolete commit.
+    image: "${TEAMEVOLVER_IMAGE:-teamevolver:latest}"
     build:
       context: .
       dockerfile: Dockerfile
