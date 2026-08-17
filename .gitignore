@@ -36,3 +36,8 @@ skillgene/
 docs/node_modules/
 docs/.vitepress/cache/
 docs/.vitepress/dist/
+
+# Confidential internal documents
+docs/design/
+docs/prd/
+docs/research/
