@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 
 import click
 
@@ -66,6 +67,41 @@ def _require_sharing(cs: ConfigStore):
     return cfg, hub
 
 
+def _push_via_mutations(cfg, hub, *, skill_filter=None) -> dict:
+    from ..skills import layout
+    from ..skills.mutations import SkillMutationCommand, SkillMutationService
+
+    service = SkillMutationService.from_hub(hub, config=cfg)
+    paths = layout.skill_md_paths(cfg.skills_dir)
+    summary = {
+        "uploaded": 0,
+        "skipped": 0,
+        "filtered": 0,
+        "submitted": 0,
+        "total_local": len(paths),
+        "event_ids": [],
+    }
+    operation_id = uuid.uuid4().hex
+    for path in paths:
+        name = os.path.basename(os.path.dirname(path))
+        commit = service.execute(
+            SkillMutationCommand(
+                action="update",
+                name=name,
+                mutation_id=f"cli-push-{operation_id}-{name}",
+                skills_dir=cfg.skills_dir,
+                skill_filter=skill_filter,
+                metadata={"source": "cli"},
+            )
+        )
+        result = dict(commit.get("result") or {})
+        for key in ("uploaded", "skipped", "filtered", "submitted"):
+            summary[key] += int(result.get(key) or 0)
+        if commit.get("event_id"):
+            summary["event_ids"].append(commit["event_id"])
+    return summary
+
+
 @click.group()
 def skills():
     """Skill management commands."""
@@ -94,7 +130,11 @@ def skills_push(no_filter):
                 }
             except Exception:
                 pass
-    result = hub.push_skills(cfg.skills_dir, skill_filter=skill_filter)
+    result = _push_via_mutations(
+        cfg,
+        hub,
+        skill_filter=skill_filter,
+    )
     click.echo(
         f"Done: {result['uploaded']} uploaded, "
         f"{result['skipped']} unchanged, "
@@ -131,9 +171,8 @@ def skills_sync():
     cs = ConfigStore()
     cfg, hub = _require_sharing(cs)
     click.echo(f"Syncing skills with {_sharing_target(cfg)} ...")
-    result = hub.sync_skills(cfg.skills_dir)
-    pr = result["pull"]
-    ps = result["push"]
+    pr = hub.pull_skills(cfg.skills_dir, mirror=False)
+    ps = _push_via_mutations(cfg, hub)
     click.echo(
         f"Pull: {pr['downloaded']} downloaded, {pr['skipped']} unchanged\n"
         f"Push: {ps['uploaded']} uploaded, {ps['skipped']} unchanged"

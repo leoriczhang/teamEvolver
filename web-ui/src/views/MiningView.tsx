@@ -775,11 +775,9 @@ export default function MiningView({
     setSourceFileContent(null);
     setSourcePreviewLoading(true);
     try {
-      const result = await api<{
-        files: KnowledgeSourceFile[];
-        total_files: number;
-        truncated: boolean;
-      }>(`/api/mining/sources/files?source_path=${encodeURIComponent(source.path)}`);
+      const result = await api<{ files: KnowledgeSourceFile[]; truncated: boolean }>(
+        `/api/mining/sources/files?source_path=${encodeURIComponent(source.path)}`
+      );
       const files = result.files || [];
       setSourceFiles(files);
       setSourceFilesTruncated(Boolean(result.truncated));
@@ -1917,82 +1915,29 @@ export default function MiningView({
       >
         <DialogContent className="flex h-[82vh] w-[calc(100vw-32px)] flex-col overflow-hidden gap-0 p-0 !max-w-[1160px]">
           <DialogHeader className="border-b border-border bg-surface px-5 py-4">
-            <div className="min-w-0 pr-8">
-              <DialogTitle className="truncate">知识源内容 · {sourcePreview ? sourceDisplayName(sourcePreview.path) : ""}</DialogTitle>
-              <div className="mt-1 text-[11px] text-muted-foreground">
-                已完成规范化后的文档内容，可直接用于挖掘任务。
-              </div>
-            </div>
+            <DialogTitle>知识源内容 · {sourcePreview ? sourceDisplayName(sourcePreview.path) : ""}</DialogTitle>
           </DialogHeader>
           <div className="grid min-h-0 flex-1 md:grid-cols-[300px_minmax(0,1fr)]">
-            <aside className="min-h-0 border-b border-border bg-surface-subtle md:border-b-0 md:border-r">
-              <div className="flex items-center justify-between border-b border-border px-4 py-3 text-[11px] font-semibold text-muted-foreground">
-                <span>文件列表</span>
-                <span>{sourceFiles.length} 个</span>
-              </div>
-              <div className="min-h-0 overflow-auto p-2">
-                {sourcePreviewLoading ? (
-                  <div className="p-3 text-xs text-muted-foreground">正在加载文件…</div>
-                ) : sourceFiles.length === 0 ? (
-                  <div className="p-3 text-xs text-muted-foreground">该知识源暂无可查看文档。</div>
-                ) : (
-                  <div className="space-y-1">
-                    {sourceFiles.map((file) => (
-                      <button
-                        key={file.relative_path}
-                        type="button"
-                        onClick={() => sourcePreview && loadKnowledgeSourceFile(sourcePreview, file)}
-                        className={cn(
-                          "w-full rounded-md px-3 py-2 text-left transition-colors",
-                          selectedSourceFile?.relative_path === file.relative_path
-                            ? "bg-accent-soft text-accent"
-                            : "hover:bg-background"
-                        )}
-                      >
-                        <div className="flex min-w-0 items-center gap-2">
-                          <FileText className="size-3.5 shrink-0" />
-                          <span className="mono min-w-0 flex-1 truncate text-[12px] font-semibold">{file.relative_path}</span>
-                        </div>
-                        <div className="mt-1 pl-5.5 text-[10.5px] text-muted-foreground">
-                          {formatBytes(file.size_bytes)} · {formatDateTime(file.updated_at)}
-                        </div>
-                      </button>
-                    ))}
-                    {sourceFilesTruncated && (
-                      <div className="px-3 py-2 text-[10.5px] leading-relaxed text-muted-foreground">
-                        为保证浏览速度，仅显示前 1000 个文件。
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
+            <aside className="min-h-0 overflow-auto border-b border-border bg-surface-subtle p-2 md:border-b-0 md:border-r">
+              {sourcePreviewLoading ? <div className="p-3 text-xs text-muted-foreground">正在加载文件…</div> : sourceFiles.length === 0 ? (
+                <div className="p-3 text-xs text-muted-foreground">该知识源暂无可查看文档。</div>
+              ) : sourceFiles.map((file) => (
+                <button key={file.relative_path} type="button" onClick={() => sourcePreview && loadKnowledgeSourceFile(sourcePreview, file)} className={cn("mb-1 w-full rounded-md px-3 py-2 text-left", selectedSourceFile?.relative_path === file.relative_path ? "bg-accent-soft text-accent" : "hover:bg-background")}>
+                  <div className="flex min-w-0 items-center gap-2"><FileText className="size-3.5 shrink-0" /><span className="mono truncate text-[12px] font-semibold">{file.relative_path}</span></div>
+                  <div className="mt-1 pl-5 text-[10.5px] text-muted-foreground">{formatBytes(file.size_bytes)} · {formatDateTime(file.updated_at)}</div>
+                </button>
+              ))}
+              {sourceFilesTruncated && <div className="px-3 py-2 text-[10.5px] text-muted-foreground">仅显示前 1000 个文件。</div>}
             </aside>
             <section className="flex min-h-0 flex-col bg-background">
-              {sourceFileLoading ? (
-                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">正在读取文档…</div>
-              ) : !selectedSourceFile ? (
+              {sourceFileLoading ? <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">正在读取文档…</div> : !selectedSourceFile ? (
                 <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">从左侧选择一个文档查看内容。</div>
               ) : !sourceFileContent?.preview_available ? (
-                <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center text-sm text-muted-foreground">
-                  <FileCode2 className="size-7 text-muted-soft" />
-                  <span>{sourceFileContent?.message || "该文件暂不支持在线预览。"}</span>
-                </div>
-              ) : (
-                <>
-                  <div className="flex items-center justify-between gap-3 border-b border-border px-5 py-3">
-                    <div className="min-w-0">
-                      <div className="mono truncate text-[12px] font-semibold">{sourceFileContent.name}</div>
-                      <div className="mt-1 text-[10.5px] text-muted-foreground">{formatBytes(sourceFileContent.size_bytes)} · UTF-8 文本</div>
-                    </div>
-                    {sourceFileContent.truncated && (
-                      <Pill tone="amber">仅显示前 1 MB</Pill>
-                    )}
-                  </div>
-                  <pre className="mono min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words bg-[#0f172a] p-5 text-[12px] leading-relaxed text-[#dbe4f0]">
-                    {sourceFileContent.content}
-                  </pre>
-                </>
-              )}
+                <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground">{sourceFileContent?.message || "该文件暂不支持在线预览。"}</div>
+              ) : <>
+                <div className="flex items-center justify-between border-b border-border px-5 py-3"><span className="mono truncate text-[12px] font-semibold">{sourceFileContent.name}</span>{sourceFileContent.truncated && <Pill tone="amber">仅显示前 1 MB</Pill>}</div>
+                <pre className="mono min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words bg-[#0f172a] p-5 text-[12px] leading-relaxed text-[#dbe4f0]">{sourceFileContent.content}</pre>
+              </>}
             </section>
           </div>
         </DialogContent>

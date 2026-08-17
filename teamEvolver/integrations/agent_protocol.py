@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import ipaddress
 import hashlib
+import ipaddress
 import json
 from typing import Any
 from urllib.parse import urlparse
@@ -165,6 +165,9 @@ def normalize_registration(payload: dict[str, Any]) -> dict[str, Any]:
         ).strip(),
         "agent_id": agent_id,
         "runtime_type": runtime_type.lower(),
+        "runtime_class": str(
+            payload.get("runtime_class") or runtime_type
+        ).strip().lower(),
         "capabilities": names,
         "capability_ids": canonical,
         "capability_details": details,

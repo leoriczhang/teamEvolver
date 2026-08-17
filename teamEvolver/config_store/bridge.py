@@ -65,6 +65,7 @@ class ConfigStore:
         self.config_file.parent.mkdir(parents=True, exist_ok=True)
         with open(self.config_file, "w", encoding="utf-8") as f:
             yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
+        os.chmod(self.config_file, 0o600)
 
     def get(self, dotpath: str) -> Any:
         data = self.load()

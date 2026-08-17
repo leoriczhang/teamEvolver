@@ -38,6 +38,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -926,6 +927,7 @@ def _run_worker(spec_path: str) -> None:
     """Executed in a child process. Reads a spec JSON, sets the frozen env vars
     BEFORE importing hermes, runs one conversation, writes the trajectory out."""
     spec = json.loads(Path(spec_path).read_text("utf-8"))
+    _require_private_network_namespace()
 
     # These must be set before importing any hermes module (import-time frozen).
     os.environ["HOME"] = spec["home"]
@@ -957,6 +959,15 @@ def _run_worker(spec_path: str) -> None:
             ),
         )
         sidecar.start()
+        spec["harness"]["base_url"] = re.sub(
+            r"^http://127\.0\.0\.1:0/",
+            f"http://127.0.0.1:{sidecar.port}/",
+            str(spec["harness"].get("base_url") or ""),
+        )
+        _write_sandbox_harness_config(
+            Path(spec["hermes_home"]),
+            spec["harness"],
+        )
         # ``hermes_origin`` is a local checkout path to inject on sys.path, or
         # empty/absent to import an installed ``hermes-agent`` package as-is.
         origin = spec.get("hermes_origin")
@@ -1166,6 +1177,9 @@ def _worker_environment(
         "PATH": path,
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONPATH": str(_REPO_ROOT),
+        "TEAMEVOLVER_REPLAY_HOST_NETNS_INODE": str(
+            os.stat("/proc/self/ns/net").st_ino
+        ),
         "TMPDIR": str(tmp_dir),
     }
     if broker_socket_path is not None:
@@ -1185,6 +1199,23 @@ def _worker_environment(
         if value and Path(value).exists():
             env[key] = value
     return {key: value for key, value in env.items() if value}
+
+
+def _require_private_network_namespace() -> None:
+    """Fail closed when systemd ignored PrivateNetwork on this host."""
+    try:
+        host_inode = int(
+            os.environ["TEAMEVOLVER_REPLAY_HOST_NETNS_INODE"]
+        )
+        worker_inode = int(os.stat("/proc/self/ns/net").st_ino)
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "cannot verify replay network namespace"
+        ) from exc
+    if worker_inode == host_inode:
+        raise RuntimeError(
+            "PrivateNetwork isolation is unavailable on this host"
+        )
 
 
 def _systemd_sandbox_command(
@@ -1320,7 +1351,7 @@ def spawn_branch(
     )
     broker_token = secrets.token_urlsafe(32)
     broker_socket_path = branch_home / ".model-broker.sock"
-    broker_sidecar_port = 43128
+    broker_sidecar_port = 0
     try:
         with replay_model_broker(
             base_url=str(harness.get("base_url") or ""),

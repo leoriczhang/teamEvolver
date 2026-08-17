@@ -8,8 +8,8 @@ from pathlib import Path
 
 import yaml
 
-from teamEvolver.integrations.hermes_skill import install
-from teamEvolver.integrations.hermes_skill import push_session
+from teamEvolver.integrations.hermes_delivery import HermesDeliverySpool
+from teamEvolver.integrations.hermes_skill import install, push_session
 from teamEvolver.integrations.hermes_skill.push_session import _read_session
 
 
@@ -151,8 +151,12 @@ def test_capture_keeps_system_tool_messages_and_skill_attribution(tmp_path: Path
     }
 
 
-def test_feed_installer_replaces_same_script_with_new_python(tmp_path: Path) -> None:
+def test_feed_installer_replaces_same_script_with_new_python(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     home = tmp_path / ".hermes"
+    monkeypatch.setattr(install, "_register_agent", lambda **_kwargs: "")
     base_args = [
         "--user",
         "tester",
@@ -185,6 +189,15 @@ def test_feed_installer_replaces_same_script_with_new_python(tmp_path: Path) -> 
     assert feed["profile_id"]
     assert feed["external_subject"] == "tester"
     assert feed_path.stat().st_mode & 0o777 == 0o600
+    assert (
+        home / "skills" / "teamEvolver-feed" / "hermes_delivery.py"
+    ).is_file()
+    registration_spool = list(
+        (home / "teamEvolver-feed-spool").glob(
+            "hermes_delivery_*.json"
+        )
+    )
+    assert len(registration_spool) == 1
 
 
 def test_v1_hermes_session_binds_profile_and_subject(tmp_path: Path) -> None:
@@ -254,6 +267,7 @@ def test_feed_installer_enables_context_provider_after_v1_registration(
     provider = home / "plugins" / "team_evolver"
     assert (provider / "__init__.py").is_file()
     assert (provider / "plugin.yaml").is_file()
+    assert (provider / "hermes_delivery.py").is_file()
     config = yaml.safe_load((home / "config.yaml").read_text("utf-8"))
     assert config["memory"]["provider"] == "team_evolver"
     feed = json.loads(
@@ -270,8 +284,12 @@ def test_failed_hermes_delivery_is_spooled_and_retried(
 ) -> None:
     cfg = {"spool_dir": str(tmp_path / "spool")}
     session = {"session_id": "session-1", "turns": [{}]}
-    push_session._spool(session, cfg)
-    spool_file = tmp_path / "spool" / "session-1.json"
+    delivery = push_session._spool(session, cfg)
+    spool_file = (
+        tmp_path
+        / "spool"
+        / f"{delivery['delivery_id']}.json"
+    )
     assert spool_file.is_file()
     assert spool_file.stat().st_mode & 0o777 == 0o600
 
@@ -290,6 +308,70 @@ def test_failed_hermes_delivery_is_spooled_and_retried(
 
     assert calls == [True]
     assert not spool_file.exists()
+
+
+def test_hermes_spool_orders_context_and_supports_dead_letter_admin(
+    tmp_path: Path,
+) -> None:
+    spool = HermesDeliverySpool(
+        tmp_path / "spool",
+        integration_id="hermes:test",
+    )
+    append = spool.enqueue(
+        kind="context.append",
+        aggregate_id="ctx-1",
+        sequence=1,
+        payload={"event_id": "event-1"},
+    )
+    commit = spool.enqueue(
+        kind="context.commit",
+        aggregate_id="ctx-1",
+        sequence=9_000,
+        payload={"context_session_id": "ctx-1"},
+    )
+    sent = []
+
+    result = spool.deliver(
+        commit["delivery_id"],
+        lambda row: sent.append(row["kind"]) or {"ok": True},
+        force=True,
+    )
+    assert result["blocked"] is True
+    assert sent == []
+
+    for _ in range(8):
+        failed = spool.deliver(
+            append["delivery_id"],
+            lambda _row: (_ for _ in ()).throw(RuntimeError("offline")),
+            force=True,
+        )
+    assert failed["status"] == "dead_letter"
+    assert spool.health()["dead_letter"] == 1
+
+    spool.retry(append["delivery_id"])
+    recovered = spool.deliver(
+        append["delivery_id"],
+        lambda row: sent.append(row["kind"]) or {"ok": True},
+        force=True,
+    )
+    assert recovered["status"] == "acked"
+    committed = spool.deliver(
+        commit["delivery_id"],
+        lambda row: sent.append(row["kind"]) or {"ok": True},
+        force=True,
+    )
+    assert committed["status"] == "acked"
+    assert sent == ["context.append", "context.commit"]
+
+    discard = spool.enqueue(
+        kind="session.ingest",
+        aggregate_id="session-2",
+        sequence=10_000,
+        payload={"session_id": "session-2"},
+    )
+    spool.discard(discard["delivery_id"], reason="invalid fixture")
+    assert spool.health()["backlog"] == 0
+    assert (tmp_path / "spool" / "discard-audit.jsonl").is_file()
 
 
 def test_embedded_skillminer_hermes_never_posts_session(monkeypatch) -> None:

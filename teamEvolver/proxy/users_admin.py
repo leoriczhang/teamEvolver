@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import tempfile
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -423,6 +424,174 @@ def resolve_agent_subject_user_id(
     return ""
 
 
+def sync_agent_subject_mappings(
+    config,
+    *,
+    integration_id: str,
+    runtime_type: str,
+    mappings: list[dict[str, Any]],
+    authoritative: bool = False,
+) -> dict[str, Any]:
+    """Apply control-plane subject mappings without provisioning local users."""
+    integration = str(integration_id or "").strip()
+    runtime = str(runtime_type or "").strip().lower()
+    if not integration or not runtime:
+        raise ValueError("integration_id and runtime_type are required")
+    if len(mappings) > 500:
+        raise ValueError("at most 500 subject mappings are allowed")
+
+    desired: dict[str, str] = {}
+    conflicts: list[dict[str, str]] = []
+    invalid_count = 0
+    for item in mappings:
+        if not isinstance(item, dict):
+            invalid_count += 1
+            continue
+        external_subject = str(item.get("external_subject") or "").strip()
+        raw_user_id = str(
+            item.get("team_evolver_user_id")
+            or item.get("user_id")
+            or ""
+        ).strip()
+        if not external_subject or not raw_user_id:
+            invalid_count += 1
+            continue
+        try:
+            user_id = _slug(raw_user_id)
+        except HTTPException:
+            invalid_count += 1
+            continue
+        previous = desired.get(external_subject)
+        if previous and previous != user_id:
+            conflicts.append(
+                {
+                    "external_subject": external_subject,
+                    "existing_user_id": previous,
+                    "requested_user_id": user_id,
+                }
+            )
+            continue
+        desired[external_subject] = user_id
+
+    path = _registry_path(config)
+    data = _load_registry(path)
+    users = [
+        item
+        for item in data.get("users") or []
+        if isinstance(item, dict)
+    ]
+    users_by_id = {
+        str(item.get("id") or ""): item
+        for item in users
+        if str(item.get("id") or "")
+    }
+    available = {
+        subject: user_id
+        for subject, user_id in desired.items()
+        if user_id in users_by_id
+    }
+    missing_user_ids = sorted(set(desired.values()) - set(users_by_id))
+
+    removed_count = 0
+    if authoritative:
+        for user in users:
+            user_id = str(user.get("id") or "")
+            retained: list[dict[str, Any]] = []
+            for item in user.get("agent_subjects") or []:
+                if (
+                    not isinstance(item, dict)
+                    or str(item.get("integration_id") or "").strip()
+                    != integration
+                ):
+                    retained.append(item)
+                    continue
+                subject = str(item.get("external_subject") or "").strip()
+                target = available.get(subject)
+                if target == user_id or (
+                    subject in desired and subject not in available
+                ):
+                    retained.append(item)
+                else:
+                    removed_count += 1
+            user["agent_subjects"] = retained
+
+    added_count = 0
+    unchanged_count = 0
+    mapped_subjects: set[str] = set()
+    for external_subject, user_id in available.items():
+        owner_id = ""
+        for candidate in users:
+            for item in candidate.get("agent_subjects") or []:
+                if (
+                    isinstance(item, dict)
+                    and str(item.get("integration_id") or "").strip()
+                    == integration
+                    and str(item.get("external_subject") or "").strip()
+                    == external_subject
+                ):
+                    owner_id = str(candidate.get("id") or "")
+                    break
+            if owner_id:
+                break
+        if owner_id and owner_id != user_id:
+            conflicts.append(
+                {
+                    "external_subject": external_subject,
+                    "existing_user_id": owner_id,
+                    "requested_user_id": user_id,
+                }
+            )
+            continue
+
+        user = users_by_id[user_id]
+        existing = next(
+            (
+                item
+                for item in user.get("agent_subjects") or []
+                if isinstance(item, dict)
+                and str(item.get("integration_id") or "").strip()
+                == integration
+                and str(item.get("external_subject") or "").strip()
+                == external_subject
+            ),
+            None,
+        )
+        if existing is not None:
+            unchanged_count += 1
+        else:
+            subjects = list(user.get("agent_subjects") or [])
+            subjects.append(
+                {
+                    "integration_id": integration,
+                    "runtime_type": runtime,
+                    "external_subject": external_subject,
+                }
+            )
+            user["agent_subjects"] = _normalize_agent_subjects(subjects)
+            added_count += 1
+        mapped_subjects.add(external_subject)
+
+    changed = bool(added_count or removed_count)
+    if changed:
+        for user in users:
+            _validate_unique_agent_subjects(data, user)
+        data["users"] = sorted(
+            users,
+            key=lambda item: str(item.get("id") or ""),
+        )
+        _save_registry(path, data)
+
+    return {
+        "mapped_count": len(mapped_subjects),
+        "added_count": added_count,
+        "unchanged_count": unchanged_count,
+        "removed_count": removed_count,
+        "invalid_count": invalid_count,
+        "missing_user_ids": missing_user_ids,
+        "conflicts": conflicts,
+    }
+
+
 def _upsert_user(data: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
     raw_id = body.get("id") or body.get("user_id") or body.get("name") or body.get("email")
     user_id = _slug(str(raw_id or ""))
@@ -527,7 +696,30 @@ def _copy_skills(
             bundle = source_hub._download_skill_bundle(name, rec)
             write_skill_bundle(os.path.join(tmp_skills, name), bundle, clean=True)
             names.append(name)
-        result = target_hub.push_skills(tmp_skills, include_names=names)
+        from ..skills.mutations import (
+            SkillMutationCommand,
+            SkillMutationService,
+        )
+
+        service = SkillMutationService.from_hub(target_hub)
+        commits = [
+            service.execute(
+                SkillMutationCommand(
+                    action="publish",
+                    name=name,
+                    mutation_id=f"user-share-{uuid.uuid4().hex}",
+                    skills_dir=tmp_skills,
+                )
+            )
+            for name in names
+        ]
+        result = {
+            "uploaded": len(commits),
+            "skipped": 0,
+            "filtered": 0,
+            "total_local": len(names),
+            "event_ids": [item["event_id"] for item in commits],
+        }
         result["shared_names"] = names
         result["missing_names"] = missing
         return result

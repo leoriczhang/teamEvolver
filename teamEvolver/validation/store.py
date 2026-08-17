@@ -9,15 +9,17 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import uuid
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from ..skills.bundle import candidate_skill_bundle, encode_bundle_payload
 from ..storage import build_object_store, is_not_found_error, peer_key_prefix
 
 logger = logging.getLogger(__name__)
+_CLAIM_LOCK = threading.RLock()
 
 
 def _utc_now_iso() -> str:
@@ -85,6 +87,12 @@ class ValidationStore:
 
     def _evaluation_key(self, job_id: str) -> str:
         return f"{self._prefix()}validation_evaluations/{job_id}.json"
+
+    def _claim_key(self, job_id: str, user_alias: str) -> str:
+        return (
+            f"{self._prefix()}validation_claims/"
+            f"{job_id}/{user_alias}.json"
+        )
 
     def _decision_index_key(self) -> str:
         return f"{self._prefix()}validation_decision_index.json"
@@ -201,6 +209,109 @@ class ValidationStore:
                     exc,
                 )
             return None
+
+    def claim_job(
+        self,
+        job_id: str,
+        user_alias: str,
+        *,
+        revision: int,
+        lease_seconds: int = 1_500,
+    ) -> str | None:
+        """Atomically lease one job revision to one validator process."""
+        key = self._claim_key(job_id, user_alias)
+        now = datetime.now(timezone.utc)
+        with _CLAIM_LOCK:
+            existing: dict[str, Any] = {}
+            precondition: dict[str, str] | None = None
+            try:
+                existing = json.loads(
+                    self._bucket.get_object(key).read().decode("utf-8")
+                )
+            except Exception as exc:
+                if not is_not_found_error(exc):
+                    logger.warning(
+                        "[ValidationStore] failed to read claim %s: %s",
+                        key,
+                        exc,
+                    )
+                    return None
+            if bool(getattr(self._bucket, "native_batch_write", False)):
+                precondition = self._bucket.object_precondition(key)
+            try:
+                expires_at = datetime.fromisoformat(
+                    str(existing.get("expires_at") or "")
+                )
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                expires_at = now
+            if (
+                existing
+                and int(existing.get("candidate_revision") or 0)
+                == int(revision)
+                and expires_at > now
+            ):
+                return None
+            token = uuid.uuid4().hex
+            claim = {
+                "job_id": job_id,
+                "user_alias": user_alias,
+                "candidate_revision": int(revision),
+                "token": token,
+                "claimed_at": now.isoformat(),
+                "expires_at": (
+                    now
+                    + timedelta(seconds=max(30, int(lease_seconds)))
+                ).isoformat(),
+            }
+            ensure_parent = getattr(self._bucket, "ensure_parent", None)
+            if callable(ensure_parent):
+                ensure_parent(key)
+            data = json.dumps(
+                claim,
+                ensure_ascii=False,
+                indent=2,
+            ).encode("utf-8")
+            if bool(getattr(self._bucket, "native_batch_write", False)):
+                try:
+                    self._bucket.batch_write(
+                        {key: data},
+                        preconditions={key: dict(precondition or {})},
+                    )
+                except Exception:
+                    return None
+            else:
+                self._bucket.put_object(key, data)
+            try:
+                persisted = json.loads(
+                    self._bucket.get_object(key).read().decode("utf-8")
+                )
+            except Exception:
+                return None
+            return token if persisted.get("token") == token else None
+
+    def release_job_claim(
+        self,
+        job_id: str,
+        user_alias: str,
+        token: str,
+    ) -> bool:
+        key = self._claim_key(job_id, user_alias)
+        with _CLAIM_LOCK:
+            try:
+                claim = json.loads(
+                    self._bucket.get_object(key).read().decode("utf-8")
+                )
+            except Exception:
+                return False
+            if str(claim.get("token") or "") != str(token or ""):
+                return False
+            try:
+                self._bucket.delete_object(key)
+            except Exception:
+                return False
+            return True
 
     def list_results(self, job_id: str) -> list[dict[str, Any]]:
         prefix = f"{self._prefix()}validation_results/{job_id}/"

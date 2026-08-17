@@ -257,6 +257,7 @@ class ReplayModelSidecar:
             ("127.0.0.1", self.port),
             Handler,
         )
+        self.port = int(self.server.server_address[1])
         self.thread = threading.Thread(
             target=self.server.serve_forever,
             name="teamevolver-replay-model-sidecar",

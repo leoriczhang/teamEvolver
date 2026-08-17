@@ -1,5 +1,7 @@
 # Coding Agent Integration Guide
 
+> **Deprecated**: This guide has been restructured. See [Hermes Integration](/en/agent-integrations/03-hermes) for the current version.
+
 This document is for coding agents that need to connect Hermes machines to a central teamEvolver service and enable team skill sync, session upload, and automatic evolution.
 
 ## Single-Port Contract

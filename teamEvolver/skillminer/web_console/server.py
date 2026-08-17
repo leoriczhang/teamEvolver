@@ -169,14 +169,7 @@ def _input_source_detail(path):
 
 
 def _knowledge_source_file(source_path, relative_path):
-    """Resolve one visible file inside a knowledge source safely.
-
-    ``source_path`` is intentionally still constrained through
-    :func:`_knowledge_source_dir`; ``relative_path`` is then resolved beneath
-    that directory and may never escape it.  This keeps the preview endpoint
-    strictly read-only for the selected data source rather than turning it
-    into a generic project file browser.
-    """
+    """Resolve one visible file inside a knowledge source safely."""
     source_dir = _knowledge_source_dir(source_path)
     if not source_dir.is_dir():
         raise FileNotFoundError("知识源不存在")

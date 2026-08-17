@@ -31,3 +31,13 @@ teamEvolver/skillminer/.knowledge_locks/
 artifacts/
 ppt/
 skillgene/
+
+# Docs site
+docs/node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
+
+# Confidential internal documents
+docs/design/
+docs/prd/
+docs/research/

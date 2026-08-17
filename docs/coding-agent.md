@@ -1,6 +1,8 @@
 # Coding Agent 接入指南
 
-本文档给 coding agent 使用，用于把 Hermes 机器接入中心 teamEvolver 服务，形成“团队技能同步 + 会话回流 + 自动进化”的闭环。
+> **Deprecated**: This guide has been restructured. See [Hermes Integration](/zh/agent-integrations/03-hermes) for the current version.
+
+本文档给 coding agent 使用，用于把 Hermes 机器接入中心 teamEvolver 服务，形成"团队技能同步 + 会话回流 + 自动进化"的闭环。
 
 ## 单端口约定
 

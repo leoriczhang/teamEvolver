@@ -5,7 +5,6 @@ from pathlib import Path
 from teamEvolver.config import TeamEvolverConfig
 from teamEvolver.evolve import EvolveServer, EvolveServerConfig
 
-
 ROOT = Path(__file__).resolve().parents[1]
 FORBIDDEN_SOURCE_MARKERS = (
     "team_evolve_agent",
@@ -47,6 +46,7 @@ def test_agent_protocol_install_resources_are_present() -> None:
     integrations = ROOT / "teamEvolver" / "integrations"
 
     assert (integrations / "agent_protocol.py").is_file()
+    assert (integrations / "hermes_delivery.py").is_file()
     assert (
         integrations / "hermes_context_provider" / "__init__.py"
     ).is_file()

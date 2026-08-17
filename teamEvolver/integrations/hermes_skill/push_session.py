@@ -35,6 +35,11 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+try:
+    from teamEvolver.integrations.hermes_delivery import HermesDeliverySpool
+except ImportError:
+    from hermes_delivery import HermesDeliverySpool
+
 # --- constants -------------------------------------------------------------
 # No default base_url on purpose: the teamEvolver service address must be
 # supplied explicitly (env / feed.json). If it is missing we skip silently
@@ -371,6 +376,7 @@ def _v1_session(session: dict, cfg: dict, user: str) -> dict:
                 ),
                 "profile_id": profile_id,
                 "source_session_id": str(session.get("session_id") or ""),
+                "delivery_outbox": _delivery_spool(cfg).health(),
             },
         }
     )
@@ -422,18 +428,120 @@ def _spool_dir(cfg: dict) -> Path:
     )
 
 
-def _spool(session: dict, cfg: dict) -> None:
-    path = _spool_dir(cfg)
-    path.mkdir(parents=True, exist_ok=True)
-    target = path / f"{session.get('session_id') or 'unknown'}.json"
-    temporary = target.with_suffix(".json.tmp")
+def _delivery_spool(cfg: dict) -> HermesDeliverySpool:
+    return HermesDeliverySpool(
+        _spool_dir(cfg),
+        integration_id=str(cfg.get("integration_id") or "hermes:local"),
+    )
+
+
+def _spool(session: dict, cfg: dict) -> dict:
+    return _delivery_spool(cfg).enqueue(
+        kind="session.ingest",
+        aggregate_id=str(session.get("session_id") or "unknown"),
+        sequence=10_000,
+        payload=session,
+    )
+
+
+def _save_workspace_token(cfg: dict, token: str) -> None:
+    token = str(token or "").strip()
+    if not token:
+        return
+    path = _config_path()
+    current = dict(cfg)
+    current["workspace_token"] = token
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(
-        json.dumps(session, ensure_ascii=False),
-        encoding="utf-8",
+        json.dumps(current, ensure_ascii=False, indent=2),
+        "utf-8",
     )
     os.chmod(temporary, 0o600)
-    os.replace(temporary, target)
-    os.chmod(target, 0o600)
+    os.replace(temporary, path)
+    os.chmod(path, 0o600)
+    cfg["workspace_token"] = token
+
+
+def _post_json(
+    base_url: str,
+    path: str,
+    payload: dict,
+    api_key: str,
+    *,
+    timeout: int = 20,
+) -> dict:
+    request = urllib.request.Request(
+        base_url.rstrip("/") + path,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            **({"Authorization": f"Bearer {api_key}"} if api_key else {}),
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        result = json.loads(response.read().decode("utf-8") or "{}")
+    if not isinstance(result, dict):
+        raise RuntimeError("teamEvolver acknowledgement is not an object")
+    return result
+
+
+def _delivery_sender(
+    cfg: dict,
+    *,
+    base_url: str,
+    user: str,
+    legacy_api_key: str,
+):
+    def send(delivery: dict) -> dict:
+        kind = str(delivery.get("kind") or "")
+        payload = dict(delivery.get("payload") or {})
+        workspace_token = str(cfg.get("workspace_token") or "")
+        if kind == "registration.ensure":
+            result = _post_json(
+                base_url,
+                "/internal/agents/register",
+                payload,
+                legacy_api_key,
+            )
+            credentials = (
+                result.get("credentials")
+                if isinstance(result.get("credentials"), dict)
+                else {}
+            )
+            _save_workspace_token(
+                cfg,
+                str(credentials.get("agent_access_token") or ""),
+            )
+            return result
+        if kind == "session.ingest":
+            if not _post(
+                base_url,
+                payload,
+                user,
+                workspace_token or legacy_api_key,
+            ):
+                raise RuntimeError("session ingest was not acknowledged")
+            return {"ingested": True}
+        context_paths = {
+            "context.start": "/internal/agents/context/sessions/start",
+            "context.append": "/internal/agents/context/sessions/append",
+            "context.commit": "/internal/agents/context/sessions/commit",
+        }
+        if kind in context_paths:
+            if not workspace_token:
+                raise RuntimeError("workspace token is not available")
+            return _post_json(
+                base_url,
+                context_paths[kind],
+                payload,
+                workspace_token,
+                timeout=30,
+            )
+        raise ValueError(f"unsupported Hermes delivery kind: {kind}")
+
+    return send
 
 
 def _flush_spool(
@@ -442,23 +550,32 @@ def _flush_spool(
     base_url: str,
     user: str,
     api_key: str,
-) -> None:
+) -> dict[str, int]:
     path = _spool_dir(cfg)
-    if not path.is_dir():
-        return
-    for item in sorted(path.glob("*.json"))[:20]:
+    spool = _delivery_spool(cfg)
+    path.mkdir(parents=True, exist_ok=True)
+    for item in sorted(path.glob("*.json")):
+        if item.name.startswith("hermes_delivery_"):
+            continue
         try:
             session = json.loads(item.read_text("utf-8"))
         except (OSError, ValueError):
             continue
-        if not isinstance(session, dict):
+        if not isinstance(session, dict) or not session.get("session_id"):
             continue
-        if not _post(base_url, session, user, api_key):
-            break
+        _spool(session, cfg)
         try:
             item.unlink()
         except OSError:
             pass
+    return spool.flush(
+        _delivery_sender(
+            cfg,
+            base_url=base_url,
+            user=user,
+            legacy_api_key=api_key,
+        )
+    )
 
 
 def main() -> int:
@@ -498,25 +615,37 @@ def main() -> int:
         or cfg.get("api_key")
         or ""
     )
-    api_key = workspace_token or legacy_key
 
     session = _read_session(_state_db_path(cfg), session_id)
     if not session:
         _log(f"session {session_id} had no foldable turns; skipped")
         return 0
 
-    if workspace_token:
-        session = _v1_session(session, cfg, user)
     _flush_spool(
         cfg,
         base_url=base_url,
         user=user,
-        api_key=api_key,
+        api_key=legacy_key,
     )
-    delivered = _post(base_url, session, user, api_key)
-    if not delivered:
-        _spool(session, cfg)
-    else:
+    workspace_token = str(
+        os.environ.get("TEAMEVOLVER_WORKSPACE_TOKEN")
+        or cfg.get("workspace_token")
+        or ""
+    )
+    if workspace_token:
+        session = _v1_session(session, cfg, user)
+    delivery = _spool(session, cfg)
+    result = _delivery_spool(cfg).deliver(
+        str(delivery["delivery_id"]),
+        _delivery_sender(
+            cfg,
+            base_url=base_url,
+            user=user,
+            legacy_api_key=legacy_key,
+        ),
+        force=True,
+    )
+    if result.get("status") == "acked":
         try:
             _context_usage_path(session_id).unlink()
         except OSError:
