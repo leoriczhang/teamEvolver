@@ -24,6 +24,7 @@ from ..integrations.dreamcycle_runtime import (
 from ..observability import configure_langfuse, flush_langfuse
 from ..skills.manager import SkillManager
 from .agent_context import AgentContextMixin
+from .docs import DocsMixin
 from .memory_debug import MemoryDebugMixin
 from .openviking_workspace import OpenVikingWorkspaceMixin
 from .routes import RoutesMixin
@@ -49,6 +50,7 @@ class ProxyServer(
     OpenVikingWorkspaceMixin,
     MemoryDebugMixin,
     AgentContextMixin,
+    DocsMixin,
 ):
     """teamEvolver service: console, skill sync, user management, and validation.
 

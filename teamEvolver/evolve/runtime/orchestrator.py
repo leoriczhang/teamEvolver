@@ -39,6 +39,7 @@ from ...dataset_synthesizer import (
     flatten_requirements,
     synthesize_evolution_datasets,
 )
+from ...integrations.agent_registry import list_agents
 from ...observability import (
     langfuse_observation,
     update_langfuse_observation,
@@ -58,6 +59,11 @@ from ...skills.bundle import (
 from ...storage import InMemoryObjectStore, build_object_store, is_not_found_error
 from ...validation import ValidationStore
 from ...validation.bundle_checks import validate_candidate_bundle
+from ...validation.runtime_compatibility import (
+    evaluate_runtime_compatibility,
+    prepare_runtime_validation,
+    runtime_type_for_case,
+)
 from ..kernel.bundle_changes import (
     BundleChangeError,
     materialize_bundle_changes,
@@ -706,6 +712,13 @@ class EvolveServer(EvolveEngineMixin):
             "description": skill.get("description", ""),
             "category": skill.get("category", "general"),
         }
+        runtime_policy = (
+            skill.get("runtime_policy")
+            if isinstance(skill.get("runtime_policy"), dict)
+            else {}
+        )
+        if runtime_policy:
+            manifest[name]["runtime_policy"] = dict(runtime_policy)
         try:
             if native_batch:
                 publish_skill_bundle_batch(
@@ -845,6 +858,10 @@ class EvolveServer(EvolveEngineMixin):
             "description": parsed.get("description") or existing.get("description", ""),
             "category": parsed.get("category") or existing.get("category", "general"),
         }
+        if isinstance(existing.get("runtime_policy"), dict):
+            manifest[name]["runtime_policy"] = dict(
+                existing["runtime_policy"]
+            )
         try:
             if native_batch:
                 publish_skill_bundle_batch(
@@ -1482,6 +1499,22 @@ class EvolveServer(EvolveEngineMixin):
             for case in replay_cases:
                 case["evidence_window"] = "recent"
             normalized_windows["recent"] = replay_cases
+        runtime_preparation = prepare_runtime_validation(
+            skill=skill,
+            sessions=sessions,
+            replay_cases=replay_cases,
+            agents=list_agents(self.config),
+        )
+        replay_cases = list(runtime_preparation["replay_cases"])
+        runtime_policy = dict(runtime_preparation["policy"])
+        compatibility_cases = [
+            case
+            for case in replay_cases
+            if str(case.get("evidence_window") or "") == "compatibility"
+        ]
+        if compatibility_cases:
+            normalized_windows["compatibility"] = compatibility_cases
+        skill = {**skill, "runtime_policy": runtime_policy}
 
         previous = existing if isinstance(existing, dict) else {}
         session_ids = merge_unique(
@@ -1564,6 +1597,7 @@ class EvolveServer(EvolveEngineMixin):
             ),
             "replay_cases": replay_cases,
             "replay_case_windows": normalized_windows,
+            "runtime_validation_policy": runtime_policy,
             "evidence_key": str(evidence_key or name),
             "evolution_context": evolution_context or {},
             "coalesced_count": int(previous.get("coalesced_count") or 0)
@@ -1695,11 +1729,23 @@ class EvolveServer(EvolveEngineMixin):
                 else:
                     inconclusive += 1
 
+            runtime_gate = evaluate_runtime_compatibility(
+                (
+                    job.get("runtime_validation_policy")
+                    if isinstance(job.get("runtime_validation_policy"), dict)
+                    else {}
+                ),
+                results,
+            )
             publish_ready = (
                 len(results) >= self.config.validation_required_results
                 and accepted >= self.config.validation_required_approvals
+                and runtime_gate["status"] == "passed"
             )
-            reject_ready = rejected >= self.config.validation_max_rejections
+            reject_ready = (
+                rejected >= self.config.validation_max_rejections
+                or runtime_gate["status"] == "rejected"
+            )
 
             if publish_ready:
                 candidate_skill = job.get("candidate_skill")
@@ -1740,6 +1786,7 @@ class EvolveServer(EvolveEngineMixin):
                         "accepted_count": accepted,
                         "rejected_count": rejected,
                         "inconclusive_count": inconclusive,
+                        "runtime_gate": runtime_gate,
                         "evaluation": best_result,
                     },
                 )
@@ -1769,6 +1816,7 @@ class EvolveServer(EvolveEngineMixin):
                             "accepted_count": accepted,
                             "rejected_count": rejected,
                             "inconclusive_count": inconclusive,
+                            "runtime_gate": runtime_gate,
                         },
                     }
                 )
@@ -1784,6 +1832,7 @@ class EvolveServer(EvolveEngineMixin):
                         "accepted_count": accepted,
                         "rejected_count": rejected,
                         "inconclusive_count": inconclusive,
+                        "runtime_gate": runtime_gate,
                     },
                 )
                 summary["rejected"] += 1
@@ -1822,9 +1871,16 @@ class EvolveServer(EvolveEngineMixin):
                 "inconclusive_count": inconclusive,
                 "required_results": self.config.validation_required_results,
                 "required_approvals": self.config.validation_required_approvals,
+                "runtime_gate": runtime_gate,
             }
             escalation_reason = ""
-            if len(results) >= self.config.validation_required_results:
+            if runtime_gate["status"] in {
+                "blocked",
+                "pending",
+                "inconclusive",
+            }:
+                escalation_reason = runtime_gate["reason"]
+            elif len(results) >= self.config.validation_required_results:
                 escalation_reason = (
                     "client validation inconclusive: enough results collected but "
                     "candidate is neither clearly better nor clearly worse than baseline"
@@ -2376,6 +2432,10 @@ class EvolveServer(EvolveEngineMixin):
 
         selected = select_replay_cases(replay_cases)
         window_results: list[tuple[str, dict[str, Any]]] = []
+        results_by_runtime: dict[
+            str,
+            list[tuple[str, dict[str, Any]]],
+        ] = {}
         for window, case_index in selected:
             try:
                 verdict = await asyncio.to_thread(_invoke, case_index)
@@ -2384,10 +2444,43 @@ class EvolveServer(EvolveEngineMixin):
                     f"true replay timed out after {exc.timeout}s for {window} window"
                 ) from exc
             window_results.append((window, verdict))
-        return self._aggregate_replay_windows(
+            runtime_type = (
+                runtime_type_for_case(replay_cases[case_index])
+                or "unknown"
+            )
+            results_by_runtime.setdefault(runtime_type, []).append(
+                (window, verdict)
+            )
+        aggregate = self._aggregate_replay_windows(
             window_results,
             max_interactions=max_interactions,
         )
+        runtime_validation = {
+            runtime_type: self._aggregate_replay_windows(
+                runtime_results,
+                max_interactions=max_interactions,
+            )
+            for runtime_type, runtime_results in results_by_runtime.items()
+        }
+        runtime_gate = evaluate_runtime_compatibility(
+            (
+                job.get("runtime_validation_policy")
+                if isinstance(job.get("runtime_validation_policy"), dict)
+                else {}
+            ),
+            [{"runtime_validation": runtime_validation}],
+        )
+        aggregate["runtime_validation"] = runtime_validation
+        aggregate["runtime_gate"] = runtime_gate
+        if runtime_gate["status"] != "passed":
+            aggregate["accepted"] = False
+            aggregate["verdict"] = (
+                "reject"
+                if runtime_gate["status"] == "rejected"
+                else "inconclusive"
+            )
+            aggregate["reason"] = runtime_gate["reason"]
+        return aggregate
 
     async def review_validate_candidate(
         self, job_id: str, *, reviewer: str = "staffdeck-reviewer", mode: str = "auto"
@@ -2423,7 +2516,24 @@ class EvolveServer(EvolveEngineMixin):
             except ValueError as exc:
                 return {"status": "error", "job_id": job_id, "error": str(exc)}
 
-            publish = True if mode == "force" else bool(replay.get("accepted"))
+            runtime_gate = (
+                replay.get("runtime_gate")
+                if isinstance(replay.get("runtime_gate"), dict)
+                else evaluate_runtime_compatibility(
+                    (
+                        job.get("runtime_validation_policy")
+                        if isinstance(
+                            job.get("runtime_validation_policy"),
+                            dict,
+                        )
+                        else {}
+                    ),
+                    [],
+                )
+            )
+            publish = (
+                True if mode == "force" else bool(replay.get("accepted"))
+            ) and runtime_gate.get("status") == "passed"
             candidate_revision = max(1, int(job.get("candidate_revision") or 1))
             policy = (
                 replay.get("decision_policy")
@@ -2450,6 +2560,10 @@ class EvolveServer(EvolveEngineMixin):
                     if isinstance(item, dict)
                 ),
                 "replay_summary": replay,
+                "runtime_validation": dict(
+                    replay.get("runtime_validation") or {}
+                ),
+                "runtime_gate": runtime_gate,
             }
             await self._call_storage(
                 self._validation_store.save_result, job_id, reviewer, result_record
@@ -2475,6 +2589,7 @@ class EvolveServer(EvolveEngineMixin):
                     "rejected_count": 1,
                     "reviewed_by": reviewer,
                     "mode": mode,
+                    "runtime_gate": runtime_gate,
                     "evaluation": result_record,
                 }
                 await self._call_storage(self._validation_store.save_decision, job_id, decision)
@@ -2503,6 +2618,7 @@ class EvolveServer(EvolveEngineMixin):
                 "rejected_count": 0,
                 "reviewed_by": reviewer,
                 "mode": mode,
+                "runtime_gate": runtime_gate,
                 "evaluation": result_record,
             }
             await self._call_storage(self._validation_store.save_decision, job_id, decision)

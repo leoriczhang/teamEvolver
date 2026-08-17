@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import http.server
 import os
-import socket
 import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
+import pytest
 
 from teamEvolver.integrations.replay_model_broker import (
     ReplayModelSidecar,
@@ -17,6 +17,7 @@ from teamEvolver.replay_metrics import objective_replay_decision
 from teamEvolver.true_replay import (
     _agentshub_endpoint,
     _native_agent_runtime,
+    _require_private_network_namespace,
     _source_identity_error,
     _systemd_sandbox_command,
     _worker_environment,
@@ -25,8 +26,8 @@ from teamEvolver.true_replay import (
     build_sandbox,
     compare_efficiency,
     count_tool_calls,
-    spawn_branch,
     spawn_agentshub_branch,
+    spawn_branch,
 )
 
 
@@ -402,9 +403,6 @@ def test_replay_model_broker_keeps_real_key_in_parent(
     thread.start()
     try:
         port = int(upstream.server_address[1])
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            sidecar_port = int(probe.getsockname()[1])
         socket_path = tmp_path / "model-broker.sock"
         with replay_model_broker(
             base_url=f"http://127.0.0.1:{port}/v1",
@@ -415,13 +413,13 @@ def test_replay_model_broker_keeps_real_key_in_parent(
         ) as broker:
             sidecar = ReplayModelSidecar(
                 socket_path=socket_path,
-                port=sidecar_port,
+                port=0,
                 timeout_seconds=5,
             )
             sidecar.start()
             try:
                 response = httpx.post(
-                    broker.worker_base_url(sidecar_port)
+                    broker.worker_base_url(sidecar.port)
                     + "/chat/completions",
                     headers={
                         "Authorization": "Bearer ephemeral-worker-token"
@@ -437,6 +435,18 @@ def test_replay_model_broker_keeps_real_key_in_parent(
         upstream.shutdown()
         upstream.server_close()
         thread.join(timeout=5)
+
+
+def test_local_replay_fails_closed_when_private_network_was_ignored(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "TEAMEVOLVER_REPLAY_HOST_NETNS_INODE",
+        str(os.stat("/proc/self/ns/net").st_ino),
+    )
+
+    with pytest.raises(RuntimeError, match="PrivateNetwork"):
+        _require_private_network_namespace()
 
 
 def test_local_replay_fails_closed_when_sandbox_is_unavailable(

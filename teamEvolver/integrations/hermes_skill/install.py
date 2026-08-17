@@ -261,6 +261,7 @@ def _registration_payload(
         "protocol_version": "1.0",
         "agent_id": integration_id,
         "runtime_type": "hermes",
+        "runtime_class": "hermes",
         "runtime_version": "1",
         "display_name": f"Hermes ({profile_id})",
         "capabilities": {
@@ -272,6 +273,7 @@ def _registration_payload(
                 "supports_artifacts": True,
                 "supports_full_trace": True,
                 "idempotent": False,
+                "tools": ["terminal", "file", "browser", "web"],
             },
             "context.workspace.v1": {
                 "scopes": [
@@ -297,7 +299,11 @@ def _registration_payload(
             "skill.team.evolve.v1": {},
             "skill.bundle.v1": {"formats": ["bundle_v1"]},
         },
-        "metadata": {"profile_id": profile_id},
+        "metadata": {
+            "profile_id": profile_id,
+            "platform": platform.system().lower(),
+            "tools": ["terminal", "file", "browser", "web"],
+        },
         "rotate_access_token": bool(rotate_token),
     }
 

@@ -87,7 +87,7 @@ The complete Skill Evolution pipeline, eight editable prompts, model and process
 ```mermaid
 flowchart TB
     subgraph Sources["Evidence Sources"]
-        AgentsHub["AgentsHub / Pi"]
+        Pi["Pi Agent"]
         Hermes["Hermes"]
         Generic["Agent Protocol V1"]
         LFIn["Langfuse Sessions"]
@@ -120,7 +120,7 @@ flowchart TB
     API <--> Sessions
     API <--> Memories
     Replay <--> Snapshots
-    Mutation --> AgentsHub
+    Mutation --> Pi
     Mutation --> Hermes
     Mutation --> Generic
 ```
@@ -165,7 +165,7 @@ The repository includes the production console build. Run the frontend build onl
 
 ## Agent Integration
 
-Use [Agent Integration Protocol V1](./docs/agent-integration-protocol-v1.md):
+Use [Agent Integration Protocol V1](./docs/en/agent-integrations/02-protocol-v1.md):
 
 | Capability | Agent responsibility |
 | --- | --- |
@@ -207,19 +207,28 @@ teamEvolver/
 │   └── storage/         # OpenViking storage adapters
 ├── web-ui/              # React + TypeScript console source
 ├── tests/               # Unit, integration, protocol, and replay tests
-└── docs/                # Protocols, schemas, PRD, and design notes
+└── docs/                # Markdown documentation sources (bilingual zh/en, browsable in-console)
 ```
 
 ## Documentation
 
-| Document | Scope |
+Documentation is maintained as Markdown source files in `docs/`, available in both English and Chinese. After logging into the console, the built-in reader under "Docs → Documentation" in the left sidebar supports sidebar tree navigation, full-text search, language switching, and Markdown/GFM/code block/table rendering:
+
+| Section | Content |
 | --- | --- |
-| [Agent Integration Protocol V1](./docs/agent-integration-protocol-v1.md) | Registration, auth, Context, Session, Replay, and Skill Sync contracts |
-| [Protocol Schemas](./docs/schemas/) | V1 JSON Schemas |
-| [Coding Agent Integration](./docs/coding-agent.en.md) | Coding Agent and Hermes installation and synchronization |
-| [Master PRD](./docs/prd/team-evolver-master-prd.md) | Product scope, roles, and acceptance criteria |
-| [Loop Engineering](./docs/loop-engineering-teamevolver.html) | End-to-end evolution loop |
-| [OpenViking Research](./docs/research/openviking-product-capabilities-beyond-compile-snapshot.md) | Context and snapshot capability analysis |
+| Getting Started | [Introduction](./docs/en/getting-started/01-introduction.md), [Quick Start](./docs/en/getting-started/02-quickstart.md), [Installation](./docs/en/getting-started/03-installation.md) |
+| Concepts | [Architecture](./docs/en/concepts/01-architecture.md), [Evolution Loop](./docs/en/concepts/02-evolution-loop.md), [Skills](./docs/en/concepts/03-skills.md), [Memory & DreamCycle](./docs/en/concepts/04-memory.md), [True Replay](./docs/en/concepts/06-true-replay.md) |
+| Guides | [Configuration](./docs/en/guides/01-configuration.md), [Deployment](./docs/en/guides/02-deployment.md), [Web Console](./docs/en/guides/03-console.md), [Observability](./docs/en/guides/04-observability.md), [Troubleshooting](./docs/en/guides/06-troubleshooting.md) |
+| Agent Integrations | [Overview](./docs/en/agent-integrations/01-overview.md), [Protocol V1 Spec](./docs/en/agent-integrations/02-protocol-v1.md), [Hermes Integration](./docs/en/agent-integrations/03-hermes.md), [Custom Agent](./docs/en/agent-integrations/05-custom-agent.md) |
+| API Reference | [Overview](./docs/en/api/01-overview.md), [Agent Register](./docs/en/api/02-agent-register.md), [Session Ingest](./docs/en/api/03-session-ingest.md), [Context Workspace](./docs/en/api/04-context-workspace.md), [Skills Admin](./docs/en/api/09-skills-admin.md) |
+| Design Notes | [Master PRD](./docs/design/01-master-prd.md), [DreamCycle Evaluation](./docs/design/02-dreamcycle-snapshot-evaluation.md), [OpenViking Research](./docs/design/03-openviking-capabilities.md) |
+
+### Documentation sync convention
+
+When modifying code, update the corresponding docs following the [Docs Maintenance Guide](./docs/en/api/99-docs-maintenance.md). Run `node docs/scripts/check-docs-refs.mjs` before committing to verify all code references and links are valid.
+
+- [Protocol JSON Schemas](./docs/schemas/)
+- [中文文档](./docs/zh/getting-started/01-introduction.md)
 
 ## Development Verification
 

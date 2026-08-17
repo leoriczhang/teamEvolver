@@ -1659,6 +1659,9 @@ class RoutesMixin:
         dist_assets = os.path.join(dist_dir, "assets")
         if os.path.isdir(dist_assets):
             app.mount("/assets", StaticFiles(directory=dist_assets), name="assets")
+        docs_assets = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "docs", "assets"))
+        if os.path.isdir(docs_assets):
+            app.mount("/docs-assets", StaticFiles(directory=docs_assets), name="docs-assets")
 
         def _session_user(request: Request) -> dict | None:
             token = request.cookies.get(_SESSION_COOKIE, "")
@@ -1716,6 +1719,7 @@ class RoutesMixin:
         self._register_memory_debug_routes(app)
         self._register_agent_context_routes(app)
         self._register_skillminer_routes(app)
+        self._register_docs_routes(app)
 
         @app.get("/")
         @app.get("/console")

@@ -71,3 +71,18 @@ def test_decision_index_reconciles_to_latest_decision_file(tmp_path: Path) -> No
 
     assert row["decision"]["version"] == 7
     assert row["decided_at"] == "2026-08-10T00:00:00+00:00"
+
+
+def test_validation_claim_allows_one_owner_and_requires_matching_release(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+
+    first = store.claim_job("job-1", "validator", revision=2)
+    duplicate = store.claim_job("job-1", "validator", revision=2)
+
+    assert first
+    assert duplicate is None
+    assert store.release_job_claim("job-1", "validator", "wrong") is False
+    assert store.release_job_claim("job-1", "validator", first) is True
+    assert store.claim_job("job-1", "validator", revision=2)

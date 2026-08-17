@@ -23,6 +23,10 @@ from ..progressive_replay import (
 )
 from ..skills.bundle import bundle_tree_sha256, candidate_skill_bundle
 from .bundle_checks import validate_candidate_bundle
+from .runtime_compatibility import (
+    evaluate_runtime_compatibility,
+    runtime_type_for_case,
+)
 from .store import ValidationStore
 
 logger = logging.getLogger(__name__)
@@ -217,7 +221,11 @@ class ValidationWorker:
                 },
             }
         replay: dict[str, Any] = {}
-        if str(getattr(self.config, "validation_mode", "true_replay") or "true_replay").strip().lower() == "true_replay":
+        validation_mode = str(
+            getattr(self.config, "validation_mode", "true_replay")
+            or "true_replay"
+        ).strip().lower()
+        if validation_mode == "true_replay":
             job_id = str(job.get("job_id") or "")
             if job_id:
                 try:
@@ -227,6 +235,11 @@ class ValidationWorker:
                         job.get("replay_cases") or []
                     )
                     window_results: list[tuple[str, dict[str, Any]]] = []
+                    results_by_runtime: dict[
+                        str,
+                        list[tuple[str, dict[str, Any]]],
+                    ] = {}
+                    replay_cases = list(job.get("replay_cases") or [])
                     for window, case_index in selected:
                         result = await asyncio.to_thread(
                             evaluate_job,
@@ -239,9 +252,45 @@ class ValidationWorker:
                             ),
                         )
                         window_results.append((window, result))
+                        runtime_type = (
+                            runtime_type_for_case(replay_cases[case_index])
+                            or "unknown"
+                        )
+                        results_by_runtime.setdefault(
+                            runtime_type,
+                            [],
+                        ).append((window, result))
                     replay = self._aggregate_true_replay_windows(
                         window_results,
                     )
+                    runtime_validation = {
+                        runtime_type: self._aggregate_true_replay_windows(
+                            runtime_results
+                        )
+                        for runtime_type, runtime_results
+                        in results_by_runtime.items()
+                    }
+                    runtime_gate = evaluate_runtime_compatibility(
+                        (
+                            job.get("runtime_validation_policy")
+                            if isinstance(
+                                job.get("runtime_validation_policy"),
+                                dict,
+                            )
+                            else {}
+                        ),
+                        [{"runtime_validation": runtime_validation}],
+                    )
+                    replay["runtime_validation"] = runtime_validation
+                    replay["runtime_gate"] = runtime_gate
+                    if runtime_gate["status"] != "passed":
+                        replay["accepted"] = False
+                        replay["verdict"] = (
+                            "reject"
+                            if runtime_gate["status"] == "rejected"
+                            else "inconclusive"
+                        )
+                        replay["reason"] = runtime_gate["reason"]
                     if replay.get("status") == "evaluated":
                         policy = (
                             replay.get("decision_policy")
@@ -269,6 +318,8 @@ class ValidationWorker:
                             "reason": reason,
                             "static_validation": static_validation,
                             "replay_summary": replay,
+                            "runtime_validation": runtime_validation,
+                            "runtime_gate": runtime_gate,
                         }
                     logger.info("[ValidationWorker] true replay skipped for %s: %s", job_id, replay.get("reason"))
                 except Exception as exc:  # noqa: BLE001
@@ -337,14 +388,50 @@ class ValidationWorker:
                 )
                 summary.skipped_jobs += 1
                 continue
+            candidate_revision = max(
+                1,
+                int(job.get("candidate_revision") or 1),
+            )
+            claim_token = self._store.claim_job(
+                job_id,
+                self._user_alias,
+                revision=candidate_revision,
+                lease_seconds=(
+                    max(
+                        300,
+                        int(
+                            getattr(
+                                self.config,
+                                "validation_replay_timeout_seconds",
+                                600,
+                            )
+                            or 600
+                        )
+                        * 2
+                        + 300,
+                    )
+                ),
+            )
+            if not claim_token:
+                logger.info(
+                    "[ValidationWorker] skipped %s because another process "
+                    "holds the validation lease",
+                    job_id,
+                )
+                summary.skipped_jobs += 1
+                continue
             try:
                 result = await self._validate_job(job)
             except Exception as exc:
                 logger.warning("[ValidationWorker] job %s failed: %s", job_id, exc)
+                self._store.release_job_claim(
+                    job_id,
+                    self._user_alias,
+                    claim_token,
+                )
                 summary.skipped_jobs += 1
                 continue
 
-            candidate_revision = max(1, int(job.get("candidate_revision") or 1))
             latest = self._store.load_job(job_id)
             latest_revision = (
                 max(1, int(latest.get("candidate_revision") or 1))
@@ -357,6 +444,11 @@ class ValidationWorker:
                     job_id,
                     candidate_revision,
                     latest_revision,
+                )
+                self._store.release_job_claim(
+                    job_id,
+                    self._user_alias,
+                    claim_token,
                 )
                 summary.skipped_jobs += 1
                 continue
@@ -375,6 +467,11 @@ class ValidationWorker:
             # distributed publish quorum reads per-validator results. Persist
             # both projections so automatic validation is immediately visible.
             self._store.save_evaluation(job_id, result)
+            self._store.release_job_claim(
+                job_id,
+                self._user_alias,
+                claim_token,
+            )
             self._jobs_completed_today += 1
             summary.validated_jobs += 1
             logger.info(

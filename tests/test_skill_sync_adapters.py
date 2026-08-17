@@ -119,3 +119,50 @@ async def test_publish_sync_reports_no_capable_agents(monkeypatch) -> None:
 
     assert result["status"] == "no_capable_agents"
     assert result["results"] == {}
+
+
+@pytest.mark.anyio
+async def test_runtime_specific_skill_is_not_sent_to_incompatible_agent(
+    monkeypatch,
+) -> None:
+    _Client.calls.clear()
+    monkeypatch.setattr(
+        skill_sync_adapters,
+        "list_agents",
+        lambda _config: [
+            {
+                "agent_id": "hermes:profile",
+                "runtime_type": "hermes",
+                "runtime_class": "hermes",
+                "status": "active",
+                "capability_ids": ["skill.sync.v1"],
+                "endpoints": {
+                    "skill_sync_url": "https://agent.example/custom-sync"
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(skill_sync_adapters.httpx, "AsyncClient", _Client)
+
+    result = await skill_sync_adapters.sync_skill_event(
+        SimpleNamespace(validation_agentshub_api_key=""),
+        {
+            "event_id": "event-runtime-specific",
+            "mutation_id": "mutation-1",
+            "action": "publish",
+            "skills": [
+                {
+                    "name": "agentshub-only",
+                    "runtime_policy": {
+                        "supported_runtimes": ["agentshub"],
+                        "distribution_runtimes": ["agentshub"],
+                    },
+                }
+            ],
+            "tenant_ids": [],
+        },
+    )
+
+    assert result["status"] == "synced"
+    assert result["results"]["hermes:profile"]["status"] == "cancelled"
+    assert _Client.calls == []

@@ -146,6 +146,9 @@ def register_agent(config, payload: dict[str, Any]) -> dict[str, Any]:
             "runtime_version": str(normalized.get("runtime_version") or ""),
             "agent_id": agent_id,
             "runtime_type": runtime_type,
+            "runtime_class": str(
+                normalized.get("runtime_class") or runtime_type
+            ),
             "display_name": str(
                 normalized.get("display_name")
                 or existing.get("display_name")

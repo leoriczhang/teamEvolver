@@ -11,6 +11,7 @@ from typing import Any
 
 import httpx
 
+from ..validation.runtime_compatibility import skill_supports_runtime
 from .agent_protocol import CAP_SKILL_SYNC
 from .agent_registry import list_agents
 
@@ -178,6 +179,25 @@ async def sync_skill_event(
                 "attempted": False,
             }
             continue
+        agent_skills = [
+            skill
+            for skill in skills
+            if skill_supports_runtime(
+                skill,
+                str(
+                    agent.get("runtime_class")
+                    or agent.get("runtime_type")
+                    or ""
+                ),
+            )
+        ]
+        if not agent_skills:
+            results[agent_id] = {
+                "status": "cancelled",
+                "reason": "Skill does not support this runtime class",
+                "attempted": False,
+            }
+            continue
         delivery_tenants = _target_tenant_ids(agent, tenant_ids)
         if tenant_ids and not delivery_tenants:
             continue
@@ -221,10 +241,10 @@ async def sync_skill_event(
             "event_id": event_id,
             "action": action,
             "job_id": mutation_id,
-            "skills": skills,
+            "skills": agent_skills,
             # Compatibility fields for the current AgentsHub callback.
             "tenant_ids": delivery_tenants,
-            "expected_skills": skills,
+            "expected_skills": agent_skills,
         }
         try:
             async with httpx.AsyncClient(
@@ -243,7 +263,7 @@ async def sync_skill_event(
             matched, reason = _ack_matches(
                 body,
                 action=action,
-                skills=skills,
+                skills=agent_skills,
                 tenant_ids=delivery_tenants,
             )
             if not matched:

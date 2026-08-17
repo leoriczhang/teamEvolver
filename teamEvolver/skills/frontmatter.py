@@ -192,3 +192,14 @@ def enrich_manifest_entry(entry: dict[str, Any], skill_path: str) -> None:
     category = resolve_category(fm)
     if category:
         entry["category"] = category
+    portable = fm.get("portable")
+    supported = fm.get("supported_runtimes")
+    if isinstance(portable, bool) or isinstance(supported, (list, tuple, set)):
+        entry["runtime_policy"] = {
+            "portable": bool(portable),
+            "supported_runtimes": [
+                str(item).strip().lower()
+                for item in supported or []
+                if str(item).strip()
+            ],
+        }

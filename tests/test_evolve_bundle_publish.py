@@ -152,6 +152,29 @@ def test_publish_versions_and_rollback_preserve_complete_bundle(
     assert restored_manifest["tree_sha256"] == bundle_tree_sha256(restored)
 
 
+def test_identical_publish_reuses_committed_version(
+    tmp_path: Path,
+) -> None:
+    server = _server(tmp_path)
+    skill = _skill(
+        "# Stable",
+        {"scripts/run.py": b"print('stable')\n"},
+    )
+
+    assert server._upload_skill(skill, "create_skill") == "uploaded"
+    assert (
+        server._upload_skill(skill, "create_skill")
+        == "uploaded_idempotent"
+    )
+
+    manifest = load_manifest(
+        server._skill_bucket,
+        server._skill_prefix,
+    )
+    assert manifest["bundle-demo"]["version"] == 1
+    assert server._id_registry.get_version("bundle-demo") == 1
+
+
 def test_native_openviking_publish_batches_bundle_manifest_and_registry(
     tmp_path: Path,
 ) -> None:

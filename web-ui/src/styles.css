@@ -999,3 +999,189 @@ td.link {
     animation: none;
   }
 }
+
+/* ==== Docs reader styles ================================================ */
+.docs-content {
+  color: #24292f;
+  line-height: 1.7;
+  font-size: 14.5px;
+}
+.docs-content .docs-h1 {
+  font-size: 28px;
+  font-weight: 800;
+  margin: 0 0 18px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+  color: #18181a;
+  letter-spacing: -0.01em;
+}
+.docs-content .docs-h2 {
+  font-size: 22px;
+  font-weight: 780;
+  margin: 32px 0 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+  color: #18181a;
+}
+.docs-content .docs-h3 {
+  font-size: 17px;
+  font-weight: 750;
+  margin: 24px 0 10px;
+  color: #1c1d1f;
+}
+.docs-content .docs-h4 {
+  font-size: 15px;
+  font-weight: 700;
+  margin: 20px 0 8px;
+  color: #1c1d1f;
+}
+.docs-content .docs-p {
+  margin: 0 0 14px;
+}
+.docs-content .docs-ul,
+.docs-content .docs-ol {
+  margin: 0 0 14px;
+  padding-left: 24px;
+}
+.docs-content .docs-li {
+  margin-bottom: 6px;
+}
+.docs-content .docs-li > p {
+  margin: 0;
+}
+.docs-content .docs-ul {
+  list-style: disc;
+}
+.docs-content .docs-ol {
+  list-style: decimal;
+}
+.docs-content .docs-inline-code {
+  background: #f2f3f7;
+  color: #c7254e;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+.docs-content .docs-pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 16px 18px;
+  border-radius: 10px;
+  overflow-x: auto;
+  margin: 14px 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.docs-content .docs-pre code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 13px;
+}
+.docs-content .docs-blockquote {
+  border-left: 4px solid var(--accent);
+  background: var(--accent-soft);
+  margin: 14px 0;
+  padding: 10px 16px;
+  border-radius: 0 8px 8px 0;
+  color: #2d3748;
+  font-size: 14px;
+}
+.docs-content .docs-blockquote p {
+  margin: 0;
+}
+.docs-content .docs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+.docs-content .docs-table th {
+  background: #f8f9fb;
+  font-weight: 700;
+  text-align: left;
+  padding: 10px 14px;
+  border-bottom: 2px solid var(--border);
+  color: #18181a;
+}
+.docs-content .docs-table td {
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.docs-content .docs-table tr:last-child td {
+  border-bottom: none;
+}
+.docs-content .docs-table tr:hover td {
+  background: #f8f9fb;
+}
+.docs-content a {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 500;
+}
+.docs-content a:hover {
+  text-decoration: underline;
+}
+.docs-content img {
+  display: block;
+  max-width: 100%;
+  margin: 18px auto;
+}
+.docs-content .docs-hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 28px 0;
+}
+.docs-content strong {
+  font-weight: 700;
+  color: #18181a;
+}
+.docs-content kbd {
+  display: inline-block;
+  padding: 2px 6px;
+  font-size: 12px;
+  font-family: ui-monospace, monospace;
+  background: #f8f9fb;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 1px 0 var(--border);
+  font-weight: 600;
+}
+.docs-content .callout {
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin: 14px 0;
+  font-size: 14px;
+}
+.docs-content .callout-title {
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+.docs-content .api-endpoint {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: ui-monospace, monospace;
+  font-weight: 700;
+  margin-right: 6px;
+}
+.docs-content .api-endpoint.get { background: #dbeafe; color: #1e40af; }
+.docs-content .api-endpoint.post { background: #dcfce7; color: #166534; }
+.docs-content .api-endpoint.put { background: #fef3c7; color: #92400e; }
+.docs-content .api-endpoint.delete { background: #fee2e2; color: #991b1b; }
+.docs-content .code-entry {
+  background: #f2f3f7;
+  color: #6b21a8;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12.5px;
+  font-family: ui-monospace, monospace;
+}
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}

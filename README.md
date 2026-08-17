@@ -87,7 +87,7 @@ Checklist 是完成门禁，不是加权分数。通过门禁后，True Replay �
 ```mermaid
 flowchart TB
     subgraph Sources["Evidence Sources"]
-        AgentsHub["AgentsHub / Pi"]
+        Pi["Pi Agent"]
         Hermes["Hermes"]
         Generic["Agent Protocol V1"]
         LFIn["Langfuse Sessions"]
@@ -120,7 +120,7 @@ flowchart TB
     API <--> Sessions
     API <--> Memories
     Replay <--> Snapshots
-    Mutation --> AgentsHub
+    Mutation --> Pi
     Mutation --> Hermes
     Mutation --> Generic
 ```
@@ -207,19 +207,28 @@ teamEvolver/
 │   └── storage/         # OpenViking 存储适配
 ├── web-ui/              # React + TypeScript 控制台源码
 ├── tests/               # 单元、集成、协议和回放测试
-└── docs/                # 协议、Schema、PRD 与专题文档
+└── docs/                # Markdown 文档源（中/英双语，控制台内可阅读和搜索）
 ```
 
 ## 文档
 
-| 文档 | 内容 |
+文档以 Markdown 源文件维护在 `docs/` 目录下，提供中/英双语版本。登录控制台后，左侧导航栏"文档 → 使用文档"内置阅读器支持目录树浏览、全文搜索、中英文切换与 Markdown/GFM/代码块/表格渲染：
+
+| 章节 | 内容 |
 | --- | --- |
-| [Agent Integration Protocol V1](./docs/agent-integration-protocol-v1.md) | 注册、鉴权、Context、Session、Replay 和 Skill Sync 契约 |
-| [Protocol Schemas](./docs/schemas/) | V1 JSON Schema |
-| [Coding Agent 接入](./docs/coding-agent.md) | Coding Agent / Hermes 侧安装与同步 |
-| [Master PRD](./docs/prd/team-evolver-master-prd.md) | 产品范围、角色和验收标准 |
-| [Loop Engineering](./docs/loop-engineering-teamevolver.html) | 完整进化闭环说明 |
-| [OpenViking 调研](./docs/research/openviking-product-capabilities-beyond-compile-snapshot.md) | Context 与 Snapshot 能力评估 |
+| 开始使用 | [产品简介](./docs/zh/getting-started/01-introduction.md)、[快速开始](./docs/zh/getting-started/02-quickstart.md)、[安装部署](./docs/zh/getting-started/03-installation.md) |
+| 核心概念 | [架构总览](./docs/zh/concepts/01-architecture.md)、[进化闭环](./docs/zh/concepts/02-evolution-loop.md)、[Skill 体系](./docs/zh/concepts/03-skills.md)、[Memory & DreamCycle](./docs/zh/concepts/04-memory.md)、[True Replay](./docs/zh/concepts/06-true-replay.md) |
+| 使用指南 | [配置参考](./docs/zh/guides/01-configuration.md)、[生产部署](./docs/zh/guides/02-deployment.md)、[Web 控制台](./docs/zh/guides/03-console.md)、[可观测性](./docs/zh/guides/04-observability.md)、[故障排查](./docs/zh/guides/06-troubleshooting.md) |
+| Agent 接入 | [接入概览](./docs/zh/agent-integrations/01-overview.md)、[Protocol V1 规范](./docs/zh/agent-integrations/02-protocol-v1.md)、[Hermes 接入](./docs/zh/agent-integrations/03-hermes.md)、[自定义接入](./docs/zh/agent-integrations/05-custom-agent.md) |
+| API 参考 | [API 概览](./docs/zh/api/01-overview.md)、[Agent 注册](./docs/zh/api/02-agent-register.md)、[Session 上报](./docs/zh/api/03-session-ingest.md)、[Context Workspace](./docs/zh/api/04-context-workspace.md)、[Skill 管理](./docs/zh/api/09-skills-admin.md) |
+| 设计文档 | [Master PRD](./docs/design/01-master-prd.md)、[DreamCycle 评估](./docs/design/02-dreamcycle-snapshot-evaluation.md)、[OpenViking 能力调研](./docs/design/03-openviking-capabilities.md) |
+
+### 文档同步约定
+
+修改代码后需同步更新文档时，请遵循 [文档维护指南](./docs/zh/api/99-docs-maintenance.md)。提交前运行 `node docs/scripts/check-docs-refs.mjs` 验证所有代码引用和链接有效。
+
+- [Protocol JSON Schemas](./docs/schemas/)
+- [English Documentation](./docs/en/getting-started/01-introduction.md)
 
 ## 开发验证
 

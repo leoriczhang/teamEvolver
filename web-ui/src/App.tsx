@@ -3,7 +3,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { Activity, Brain, ClipboardCheck, Filter, FolderTree, History, LayoutDashboard, BookOpenText, Users, SlidersHorizontal, LogOut, RefreshCw, Sparkles, Clock, Repeat2, ShieldCheck, TrendingUp, Zap, Database, Workflow, ListChecks, ChevronsUpDown, DownloadCloud, TerminalSquare } from "lucide-react";
+import { Activity, Brain, ClipboardCheck, Filter, FolderTree, History, LayoutDashboard, BookOpenText, BookOpen, Users, SlidersHorizontal, LogOut, RefreshCw, Sparkles, Clock, Repeat2, ShieldCheck, TrendingUp, Zap, Database, Workflow, ListChecks, ChevronsUpDown, DownloadCloud, TerminalSquare } from "lucide-react";
 import { api, type AuthStatus, type UserProfile } from "@/api/client";
 import { PageHeader } from "@/components/common";
 import { toastErr, toastOk } from "@/lib/toast";
@@ -20,6 +20,7 @@ import EvolutionWorkspaceView from "@/views/EvolutionWorkspaceView";
 import MemoryWorkspaceView from "@/views/MemoryWorkspaceView";
 import MiningView, { type MinePage } from "@/views/MiningView";
 import OpenVikingWorkspaceView from "@/views/OpenVikingWorkspaceShell";
+import DocsView from "@/views/DocsView";
 
 type ViewKey =
   | "mine-overview"
@@ -35,7 +36,8 @@ type ViewKey =
   | "memories"
   | "workspace"
   | "users"
-  | "model";
+  | "model"
+  | "docs";
 type DashTab = "overview" | "candidates" | "audit" | "filter";
 type MiningViewKey = "mine-overview" | "mine-sources" | "mine-jobs" | "mine-model";
 type StandaloneViewKey = Exclude<ViewKey, MiningViewKey | "dashboard">;
@@ -87,6 +89,13 @@ const NAV_SECTIONS: {
       { key: "model", label: "全局模型", icon: SlidersHorizontal },
       { key: "users", label: "用户与权限", icon: Users },
       { key: "health", label: "运行状态", icon: Activity },
+    ],
+  },
+  {
+    id: "docs",
+    label: "文档",
+    items: [
+      { key: "docs", label: "使用文档", icon: BookOpen },
     ],
   },
 ];
@@ -179,6 +188,13 @@ const STANDALONE_PAGES: StandalonePageConfig[] = [
     description: "汇总服务、存储、模型、Agent、用户和技能状态，定位平台运行问题。",
     badge: "平台治理",
     render: ({ active, user }) => <HealthView active={active} user={user} />,
+  },
+  {
+    key: "docs",
+    title: "使用文档",
+    description: "查阅 teamEvolver 的快速入门、核心概念、Agent 接入、API 参考、设计文档与常见问题。",
+    badge: "文档",
+    render: ({ active }) => <DocsView active={active} />,
   },
 ];
 
