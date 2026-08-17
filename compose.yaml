@@ -1,0 +1,33 @@
+services:
+  teamevolver:
+    image: teamevolver:985f0a6
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: teamevolver
+    restart: unless-stopped
+    ports:
+      - "${TEAMEVOLVER_PORT:-52010}:52010"
+    environment:
+      TZ: Asia/Shanghai
+      TEAMEVOLVER_PORT: "52010"
+    volumes:
+      # Console account, model configuration, and service state.
+      - ./runtime/config:/var/lib/teamEvolver/.teamEvolver
+      # User-uploaded knowledge sources and all mining outputs.
+      - ./runtime/skillminer/data:/app/teamEvolver/skillminer/data
+      - ./runtime/skillminer/originals:/app/teamEvolver/skillminer/.knowledge_originals
+      - ./runtime/skillminer/jobs:/app/teamEvolver/skillminer/mining_jobs
+      - ./runtime/skillminer/sample-packages:/app/teamEvolver/skillminer/sample_packages
+      - ./runtime/skillminer/semantic-reports:/app/teamEvolver/skillminer/semantic_reports
+      - ./runtime/skillminer/compiled-skills:/app/teamEvolver/skillminer/compiled_skill
+      - ./runtime/skillminer/benchmarks:/app/teamEvolver/skillminer/benchmark_results
+      - ./runtime/skillminer/reflection-rounds:/app/teamEvolver/skillminer/reflection_rounds
+      - ./runtime/skillminer/run-history:/app/teamEvolver/skillminer/run_history
+      - ./runtime/skillminer/lift-datasets:/app/teamEvolver/skillminer/lift_datasets
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:52010/health', timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s

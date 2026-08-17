@@ -263,6 +263,28 @@ def test_config_schema_reports_real_source_and_artifact_readiness(tmp_path, monk
     }]
 
 
+def test_knowledge_source_file_preview_lists_visible_files_and_stays_in_source(tmp_path, monkeypatch):
+    source_dir = tmp_path / "data" / "customer-service"
+    nested = source_dir / "faq"
+    nested.mkdir(parents=True)
+    (source_dir / "overview.md").write_text("# 客服知识", encoding="utf-8")
+    (nested / "refund.md").write_text("退款时效为 3 个工作日", encoding="utf-8")
+    (source_dir / ".internal.md").write_text("hidden", encoding="utf-8")
+    (tmp_path / "secret.md").write_text("secret", encoding="utf-8")
+    monkeypatch.setattr(server, "PROJECT_ROOT", tmp_path)
+
+    listing = server.list_knowledge_source_files("data/customer-service")
+
+    assert listing["source_path"] == "data/customer-service"
+    assert [item["relative_path"] for item in listing["files"]] == ["faq/refund.md", "overview.md"]
+    preview = server.read_knowledge_source_file("data/customer-service", "faq/refund.md")
+    assert preview["preview_available"] is True
+    assert preview["content"] == "退款时效为 3 个工作日"
+
+    with pytest.raises(ValueError):
+        server.read_knowledge_source_file("data/customer-service", "../../secret.md")
+
+
 def test_mining_history_merges_rounds_with_next_run_preexisting_snapshot(tmp_path, monkeypatch):
     round_skill = (
         tmp_path / "reflection_rounds" / "20260805_150618_777997" /

@@ -185,6 +185,24 @@ interface ArtifactContent {
   size_bytes: number;
 }
 
+interface KnowledgeSourceFile {
+  relative_path: string;
+  name: string;
+  size_bytes: number;
+  updated_at: string;
+}
+
+interface KnowledgeSourceFileContent {
+  source_path: string;
+  relative_path: string;
+  name: string;
+  size_bytes: number;
+  preview_available: boolean;
+  truncated: boolean;
+  content: string;
+  message: string;
+}
+
 interface MiningConfig {
   input_dirs: string[];
   input_sources: InputSource[];
@@ -345,6 +363,13 @@ export default function MiningView({
   const [renameSourceName, setRenameSourceName] = useState("");
   const [renameSourceError, setRenameSourceError] = useState("");
   const [renamePendingPath, setRenamePendingPath] = useState("");
+  const [sourcePreview, setSourcePreview] = useState<InputSource | null>(null);
+  const [sourceFiles, setSourceFiles] = useState<KnowledgeSourceFile[]>([]);
+  const [sourceFilesTruncated, setSourceFilesTruncated] = useState(false);
+  const [sourcePreviewLoading, setSourcePreviewLoading] = useState(false);
+  const [selectedSourceFile, setSelectedSourceFile] = useState<KnowledgeSourceFile | null>(null);
+  const [sourceFileContent, setSourceFileContent] = useState<KnowledgeSourceFileContent | null>(null);
+  const [sourceFileLoading, setSourceFileLoading] = useState("");
   const cancelledRenamePath = useRef("");
   const [jobFilter, setJobFilter] = useState<"all" | "active" | "completed" | "failed">("all");
   const [selectedJobId, setSelectedJobId] = useState("");
@@ -723,6 +748,46 @@ export default function MiningView({
       toastErr("合并知识源失败", e.message);
     } finally {
       setSourceMutating(false);
+    }
+  }
+
+  async function loadKnowledgeSourceFile(source: InputSource, file: KnowledgeSourceFile) {
+    setSelectedSourceFile(file);
+    setSourceFileLoading(file.relative_path);
+    setSourceFileContent(null);
+    try {
+      const result = await api<KnowledgeSourceFileContent>(
+        `/api/mining/sources/content?source_path=${encodeURIComponent(source.path)}&relative_path=${encodeURIComponent(file.relative_path)}`
+      );
+      setSourceFileContent(result);
+    } catch (e: any) {
+      toastErr("读取知识文件失败", e.message);
+    } finally {
+      setSourceFileLoading("");
+    }
+  }
+
+  async function openKnowledgeSourcePreview(source: InputSource) {
+    setSourcePreview(source);
+    setSourceFiles([]);
+    setSourceFilesTruncated(false);
+    setSelectedSourceFile(null);
+    setSourceFileContent(null);
+    setSourcePreviewLoading(true);
+    try {
+      const result = await api<{
+        files: KnowledgeSourceFile[];
+        total_files: number;
+        truncated: boolean;
+      }>(`/api/mining/sources/files?source_path=${encodeURIComponent(source.path)}`);
+      const files = result.files || [];
+      setSourceFiles(files);
+      setSourceFilesTruncated(Boolean(result.truncated));
+      if (files[0]) await loadKnowledgeSourceFile(source, files[0]);
+    } catch (e: any) {
+      toastErr("加载知识源内容失败", e.message);
+    } finally {
+      setSourcePreviewLoading(false);
     }
   }
 
@@ -1471,6 +1536,14 @@ export default function MiningView({
                           <Button
                             size="sm"
                             variant="outline"
+                            disabled={source.document_count === 0}
+                            onClick={() => openKnowledgeSourcePreview(source)}
+                          >
+                            <Eye className="size-3.5" /> 查看内容
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
                             disabled={!source.ready}
                             onClick={() => {
                               selectInputDir(source.path);
@@ -1826,6 +1899,101 @@ export default function MiningView({
                 <Trash2 className="size-3.5" /> {sourceMutating ? "删除中…" : "确认删除"}
               </Button>
             </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!sourcePreview}
+        onOpenChange={(open) => {
+          if (!open) {
+            setSourcePreview(null);
+            setSourceFiles([]);
+            setSelectedSourceFile(null);
+            setSourceFileContent(null);
+            setSourceFileLoading("");
+          }
+        }}
+      >
+        <DialogContent className="flex h-[82vh] w-[calc(100vw-32px)] flex-col overflow-hidden gap-0 p-0 !max-w-[1160px]">
+          <DialogHeader className="border-b border-border bg-surface px-5 py-4">
+            <div className="min-w-0 pr-8">
+              <DialogTitle className="truncate">知识源内容 · {sourcePreview ? sourceDisplayName(sourcePreview.path) : ""}</DialogTitle>
+              <div className="mt-1 text-[11px] text-muted-foreground">
+                已完成规范化后的文档内容，可直接用于挖掘任务。
+              </div>
+            </div>
+          </DialogHeader>
+          <div className="grid min-h-0 flex-1 md:grid-cols-[300px_minmax(0,1fr)]">
+            <aside className="min-h-0 border-b border-border bg-surface-subtle md:border-b-0 md:border-r">
+              <div className="flex items-center justify-between border-b border-border px-4 py-3 text-[11px] font-semibold text-muted-foreground">
+                <span>文件列表</span>
+                <span>{sourceFiles.length} 个</span>
+              </div>
+              <div className="min-h-0 overflow-auto p-2">
+                {sourcePreviewLoading ? (
+                  <div className="p-3 text-xs text-muted-foreground">正在加载文件…</div>
+                ) : sourceFiles.length === 0 ? (
+                  <div className="p-3 text-xs text-muted-foreground">该知识源暂无可查看文档。</div>
+                ) : (
+                  <div className="space-y-1">
+                    {sourceFiles.map((file) => (
+                      <button
+                        key={file.relative_path}
+                        type="button"
+                        onClick={() => sourcePreview && loadKnowledgeSourceFile(sourcePreview, file)}
+                        className={cn(
+                          "w-full rounded-md px-3 py-2 text-left transition-colors",
+                          selectedSourceFile?.relative_path === file.relative_path
+                            ? "bg-accent-soft text-accent"
+                            : "hover:bg-background"
+                        )}
+                      >
+                        <div className="flex min-w-0 items-center gap-2">
+                          <FileText className="size-3.5 shrink-0" />
+                          <span className="mono min-w-0 flex-1 truncate text-[12px] font-semibold">{file.relative_path}</span>
+                        </div>
+                        <div className="mt-1 pl-5.5 text-[10.5px] text-muted-foreground">
+                          {formatBytes(file.size_bytes)} · {formatDateTime(file.updated_at)}
+                        </div>
+                      </button>
+                    ))}
+                    {sourceFilesTruncated && (
+                      <div className="px-3 py-2 text-[10.5px] leading-relaxed text-muted-foreground">
+                        为保证浏览速度，仅显示前 1000 个文件。
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </aside>
+            <section className="flex min-h-0 flex-col bg-background">
+              {sourceFileLoading ? (
+                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">正在读取文档…</div>
+              ) : !selectedSourceFile ? (
+                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">从左侧选择一个文档查看内容。</div>
+              ) : !sourceFileContent?.preview_available ? (
+                <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center text-sm text-muted-foreground">
+                  <FileCode2 className="size-7 text-muted-soft" />
+                  <span>{sourceFileContent?.message || "该文件暂不支持在线预览。"}</span>
+                </div>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between gap-3 border-b border-border px-5 py-3">
+                    <div className="min-w-0">
+                      <div className="mono truncate text-[12px] font-semibold">{sourceFileContent.name}</div>
+                      <div className="mt-1 text-[10.5px] text-muted-foreground">{formatBytes(sourceFileContent.size_bytes)} · UTF-8 文本</div>
+                    </div>
+                    {sourceFileContent.truncated && (
+                      <Pill tone="amber">仅显示前 1 MB</Pill>
+                    )}
+                  </div>
+                  <pre className="mono min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words bg-[#0f172a] p-5 text-[12px] leading-relaxed text-[#dbe4f0]">
+                    {sourceFileContent.content}
+                  </pre>
+                </>
+              )}
+            </section>
           </div>
         </DialogContent>
       </Dialog>

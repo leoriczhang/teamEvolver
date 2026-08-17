@@ -56,6 +56,8 @@ MAX_KNOWLEDGE_UPLOAD_BYTES = 40 * 1024 * 1024
 MAX_KNOWLEDGE_REQUEST_BYTES = 56 * 1024 * 1024
 MAX_TRAJECTORY_BENCHMARK_REQUEST_BYTES = 16 * 1024 * 1024
 MAX_EDITABLE_ARTIFACT_BYTES = 2 * 1024 * 1024
+MAX_KNOWLEDGE_PREVIEW_BYTES = 1 * 1024 * 1024
+MAX_KNOWLEDGE_PREVIEW_FILES = 1_000
 
 
 def _import_legacy_runtime_data():
@@ -163,6 +165,87 @@ def _input_source_detail(path):
         "total_bytes": sum(file.stat().st_size for file in files),
         "ready": bool(files) and ingestion["status"] == "ready",
         "ingestion": ingestion,
+    }
+
+
+def _knowledge_source_file(source_path, relative_path):
+    """Resolve one visible file inside a knowledge source safely.
+
+    ``source_path`` is intentionally still constrained through
+    :func:`_knowledge_source_dir`; ``relative_path`` is then resolved beneath
+    that directory and may never escape it.  This keeps the preview endpoint
+    strictly read-only for the selected data source rather than turning it
+    into a generic project file browser.
+    """
+    source_dir = _knowledge_source_dir(source_path)
+    if not source_dir.is_dir():
+        raise FileNotFoundError("知识源不存在")
+    raw = str(relative_path or "").strip().replace("\\", "/")
+    if not raw or raw.startswith("/"):
+        raise ValueError("缺少知识文件路径")
+    target = (source_dir / raw).resolve()
+    if source_dir not in target.parents or target == source_dir:
+        raise ValueError("知识文件路径越界")
+    if any(part.startswith(".") for part in target.relative_to(source_dir).parts):
+        raise ValueError("不能查看隐藏文件")
+    if not target.is_file():
+        raise FileNotFoundError("知识文件不存在")
+    return source_dir, target
+
+
+def list_knowledge_source_files(source_path):
+    """List visible normalized documents in one source for the web preview."""
+    source_dir = _knowledge_source_dir(source_path)
+    if not source_dir.is_dir():
+        raise FileNotFoundError("知识源不存在")
+    files = _visible_files(source_dir)
+    limited = files[:MAX_KNOWLEDGE_PREVIEW_FILES]
+    return {
+        "ok": True,
+        "source_path": f"data/{source_dir.name}",
+        "files": [
+            {
+                "relative_path": path.relative_to(source_dir).as_posix(),
+                "name": path.name,
+                "size_bytes": path.stat().st_size,
+                "updated_at": datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(timespec="seconds"),
+            }
+            for path in limited
+        ],
+        "total_files": len(files),
+        "truncated": len(files) > len(limited),
+    }
+
+
+def read_knowledge_source_file(source_path, relative_path):
+    """Read a bounded UTF-8 text preview from a normalized knowledge file."""
+    source_dir, target = _knowledge_source_file(source_path, relative_path)
+    size_bytes = target.stat().st_size
+    with target.open("rb") as stream:
+        raw = stream.read(MAX_KNOWLEDGE_PREVIEW_BYTES + 1)
+    if b"\x00" in raw[:8192]:
+        return {
+            "ok": True,
+            "source_path": f"data/{source_dir.name}",
+            "relative_path": target.relative_to(source_dir).as_posix(),
+            "name": target.name,
+            "size_bytes": size_bytes,
+            "preview_available": False,
+            "truncated": False,
+            "content": "",
+            "message": "该文件不是可在线预览的文本文件。",
+        }
+    preview = raw[:MAX_KNOWLEDGE_PREVIEW_BYTES]
+    return {
+        "ok": True,
+        "source_path": f"data/{source_dir.name}",
+        "relative_path": target.relative_to(source_dir).as_posix(),
+        "name": target.name,
+        "size_bytes": size_bytes,
+        "preview_available": True,
+        "truncated": size_bytes > len(preview),
+        "content": preview.decode("utf-8-sig", errors="replace"),
+        "message": "",
     }
 
 
@@ -2337,6 +2420,27 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 source_dir = _knowledge_source_dir((query.get("source_path") or ["data/input"])[0])
                 self._send_json({"ok": True, "source": _input_source_detail(source_dir)})
+            except ValueError as exc:
+                self._send_json({"ok": False, "msg": str(exc)}, code=400)
+        elif path == "/api/sources/files":
+            query = parse_qs(parsed.query)
+            try:
+                self._send_json(list_knowledge_source_files(
+                    (query.get("source_path") or ["data/input"])[0]
+                ))
+            except FileNotFoundError as exc:
+                self._send_json({"ok": False, "msg": str(exc)}, code=404)
+            except ValueError as exc:
+                self._send_json({"ok": False, "msg": str(exc)}, code=400)
+        elif path == "/api/sources/content":
+            query = parse_qs(parsed.query)
+            try:
+                self._send_json(read_knowledge_source_file(
+                    (query.get("source_path") or ["data/input"])[0],
+                    (query.get("relative_path") or [""])[0],
+                ))
+            except FileNotFoundError as exc:
+                self._send_json({"ok": False, "msg": str(exc)}, code=404)
             except ValueError as exc:
                 self._send_json({"ok": False, "msg": str(exc)}, code=400)
         elif path.startswith("/api/jobs/"):
