@@ -11,6 +11,9 @@ services:
     environment:
       TZ: Asia/Shanghai
       TEAMEVOLVER_PORT: "52010"
+      # The image contains the pinned OpenViking CLI.  This remains
+      # overridable for diagnostics without depending on a host installation.
+      OPENVIKING_CLI_BIN: "${OPENVIKING_CLI_BIN:-/usr/local/bin/ov}"
     volumes:
       # Console account, model configuration, and service state.
       - ./runtime/config:/var/lib/teamEvolver/.teamEvolver

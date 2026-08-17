@@ -103,6 +103,34 @@ def test_parallel_jobs_are_isolated_persisted_and_expose_artifacts(tmp_path):
     assert all(restored.get_job(job_id)["status"] == "succeeded" for job_id in job_ids)
 
 
+def test_delete_completed_job_removes_workspace_and_keeps_knowledge_source(tmp_path):
+    _prepare_project(tmp_path)
+    manager = MiningJobManager(tmp_path, max_parallel=1)
+    job = manager.create_jobs({
+        "name": "delete after completion",
+        "input_dir": "data/alpha",
+        "max_rounds": 1,
+    })[0]
+    _wait_finished(manager, [job["job_id"]])
+
+    job_dir = tmp_path / "mining_jobs" / job["job_id"]
+    assert (job_dir / "workspace" / "compiled_skill" / "demo" / "SKILL.md").is_file()
+
+    result = manager.delete_job(job["job_id"])
+
+    assert result["ok"] is True
+    assert result["deleted_files"] > 0
+    assert not job_dir.exists()
+    assert job["job_id"] not in {item["job_id"] for item in manager.list_jobs()}
+    assert (tmp_path / "data" / "alpha" / "alpha.md").is_file()
+    try:
+        manager.get_job(job["job_id"])
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("deleted mining job remained addressable")
+
+
 def test_loading_manager_without_start_is_read_only(tmp_path):
     _prepare_project(tmp_path)
     job_id = "mine-existing-waiting"

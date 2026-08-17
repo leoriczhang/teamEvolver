@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from unittest.mock import AsyncMock
 
 import pytest
@@ -125,6 +126,15 @@ def test_workspace_config_exposes_all_scopes_and_local_studio(tmp_path) -> None:
         "personal_workspace",
         "team_workspace",
     }
+
+
+def test_workspace_cli_binary_uses_explicit_image_path(tmp_path, monkeypatch) -> None:
+    cli = tmp_path / "ov"
+    cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    cli.chmod(0o755)
+    monkeypatch.setenv("OPENVIKING_CLI_BIN", os.fspath(cli))
+
+    assert OpenVikingWorkspaceMixin._workspace_cli_binary() == os.fspath(cli)
 
 
 def test_workspace_list_normalizes_openviking_entries(tmp_path) -> None:

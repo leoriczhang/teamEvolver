@@ -435,6 +435,43 @@ class MiningJobManager:
                 process.terminate()
             return self._public_job(job, include_detail=True)
 
+    def delete_job(self, job_id: str) -> dict[str, Any]:
+        """Permanently remove one terminal task and its isolated workspace.
+
+        A job workspace contains the input snapshot, logs, checkpoints, and
+        every mined artifact.  Active process groups must be stopped first:
+        removing their workspace while they are writing would make the monitor
+        race with the filesystem and leave an indeterminate task state.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                raise KeyError(job_id)
+            if job.get("status") in _ACTIVE_STATES:
+                raise MiningJobError("运行中的挖掘任务请先停止，停止完成后才能删除")
+            process = self._processes.get(job_id)
+            if process is not None and process.poll() is None:
+                raise MiningJobError("挖掘进程仍在运行，请先停止任务")
+            job_dir = self._job_dir(job_id).resolve()
+            if job_dir.parent != self.jobs_root.resolve():
+                raise MiningJobError("挖掘任务目录无效")
+            artifact_count = sum(1 for path in job_dir.rglob("*") if path.is_file()) if job_dir.is_dir() else 0
+
+            # Keep the registry intact if deletion fails, so the user can
+            # retry instead of losing the only pointer to partially retained
+            # output files.
+            if job_dir.exists():
+                shutil.rmtree(job_dir)
+            self._jobs.pop(job_id, None)
+            self._processes.pop(job_id, None)
+
+        self._dispatch()
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "deleted_files": artifact_count,
+        }
+
     def submit_checkpoint_answer(
         self,
         job_id: str,

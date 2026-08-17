@@ -574,6 +574,71 @@ def get_mining_job(job_id):
     return JOBS.get_job(str(job_id))
 
 
+def _legacy_job_target(root, name):
+    """Resolve one legacy archive child without permitting traversal."""
+    base = Path(root).resolve()
+    target = (base / str(name or "")).resolve()
+    if target.parent != base:
+        raise ValueError("历史挖掘任务目录无效")
+    return target
+
+
+def _delete_legacy_mining_job(run_id):
+    """Remove the archives that are owned by one pre-job-manager run."""
+    run_id = str(run_id or "").strip()
+    job = get_mining_job(f"legacy:{run_id}")
+    if str(job.get("status")) in {"running", "waiting"}:
+        raise mj.MiningJobError("运行中的挖掘任务请先停止，停止完成后才能删除")
+
+    targets = []
+    if run_id == "current":
+        # "current" is the old pipeline's unarchived final output.
+        targets.extend([
+            (PROJECT_ROOT / "compiled_skill").resolve(),
+            (PROJECT_ROOT / "semantic_reports").resolve(),
+        ])
+    elif run_id.startswith("legacy_before_"):
+        container = _legacy_job_target(PROJECT_ROOT / "run_history", run_id.removeprefix("legacy_before_"))
+        targets.append(container / "preexisting")
+    else:
+        targets.append(_legacy_job_target(PROJECT_ROOT / "reflection_rounds", run_id))
+        session_ids = sorted(
+            (path.name for path in (PROJECT_ROOT / "reflection_rounds").iterdir() if path.is_dir()),
+            reverse=True,
+        ) if (PROJECT_ROOT / "reflection_rounds").is_dir() else []
+        history_root = PROJECT_ROOT / "run_history"
+        for container in sorted(history_root.iterdir()) if history_root.is_dir() else []:
+            snapshot = container / "preexisting"
+            if not snapshot.is_dir():
+                continue
+            preceding = next((sid for sid in session_ids if sid < container.name), None)
+            if preceding == run_id:
+                targets.append(snapshot)
+
+    deleted_files = 0
+    for target in targets:
+        target = target.resolve()
+        if not target.is_dir():
+            continue
+        deleted_files += sum(1 for path in target.rglob("*") if path.is_file())
+        shutil.rmtree(target)
+        # A history container only holds a moved-aside snapshot; clean its
+        # now-empty parent but never remove a non-empty shared directory.
+        parent = target.parent
+        if parent.name != "run_history" and parent.parent == (PROJECT_ROOT / "run_history").resolve():
+            with contextlib.suppress(OSError):
+                parent.rmdir()
+    return {"ok": True, "job_id": f"legacy:{run_id}", "deleted_files": deleted_files}
+
+
+def delete_mining_job(job_id):
+    """Delete a mining task and all artifacts owned by that task only."""
+    identifier = str(job_id or "").strip()
+    if identifier.startswith("legacy:"):
+        return _delete_legacy_mining_job(identifier.removeprefix("legacy:"))
+    return JOBS.delete_job(identifier)
+
+
 def _knowledge_source_dir(source_path):
     """Resolve one direct child of data/ without allowing path traversal."""
     raw = str(source_path or "data/input").strip().replace("\\", "/").rstrip("/")
@@ -2739,7 +2804,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         parsed = urlparse(self.path)
         path = parsed.path
-        if path.startswith("/api/sources/"):
+        if path.startswith("/api/jobs/"):
+            job_id = unquote(path.removeprefix("/api/jobs/").strip("/"))
+            try:
+                self._send_json(delete_mining_job(job_id))
+            except KeyError:
+                self._send_json({"ok": False, "msg": "挖掘任务不存在"}, code=404)
+            except mj.MiningJobError as e:
+                self._send_json({"ok": False, "msg": str(e)}, code=409)
+            except ValueError as e:
+                self._send_json({"ok": False, "msg": str(e)}, code=400)
+            except OSError as e:
+                self._send_json({"ok": False, "msg": f"删除挖掘任务失败：{e}"}, code=500)
+        elif path.startswith("/api/sources/"):
             source_name = unquote(path.removeprefix("/api/sources/").strip("/"))
             try:
                 self._send_json(delete_knowledge_source(source_name))

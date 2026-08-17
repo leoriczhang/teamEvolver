@@ -339,6 +339,8 @@ export default function MiningView({
   const [selectedJobId, setSelectedJobId] = useState("");
   const [selectedJob, setSelectedJob] = useState<MiningJob | null>(null);
   const [jobActionPending, setJobActionPending] = useState(false);
+  const [deleteJob, setDeleteJob] = useState<MiningJob | null>(null);
+  const [jobDeleting, setJobDeleting] = useState(false);
   const [checkpointAnswers, setCheckpointAnswers] = useState<Record<string, string>>({});
   const [checkpointSubmitting, setCheckpointSubmitting] = useState(false);
   const [knowledgeSupplementExpanded, setKnowledgeSupplementExpanded] = useState(false);
@@ -758,6 +760,28 @@ export default function MiningView({
     }
   }
 
+  async function deleteMiningJob() {
+    if (!deleteJob) return;
+    setJobDeleting(true);
+    try {
+      const result = await api<{ job_id: string; deleted_files: number }>(
+        `/api/mining/jobs/${encodeURIComponent(deleteJob.job_id)}`,
+        { method: "DELETE" }
+      );
+      if (selectedJobId === deleteJob.job_id) {
+        setSelectedJobId("");
+        setSelectedJob(null);
+      }
+      setDeleteJob(null);
+      await mining.refreshJobs(false);
+      toastOk("挖掘任务已删除", `已一并删除 ${result.deleted_files || 0} 个任务文件和产物`);
+    } catch (e: any) {
+      toastErr("删除挖掘任务失败", e.message);
+    } finally {
+      setJobDeleting(false);
+    }
+  }
+
   async function submitCheckpointAnswers(job: MiningJob) {
     const checkpoint = job.pending_checkpoint;
     if (!checkpoint) return;
@@ -878,11 +902,18 @@ export default function MiningView({
               {job.document_count !== null && <span>{job.document_count} 个文档</span>}
             </div>
           </div>
-          {isActiveJob(job.status) && !job.legacy && (
-            <Button size="sm" variant="outline" disabled={jobActionPending || job.status === "stopping"} onClick={() => stopJob(job)}>
-              <CircleStop className="size-3.5" /> {job.status === "stopping" ? "停止中" : "停止"}
-            </Button>
-          )}
+          <div className="flex shrink-0 items-center gap-2">
+            {isActiveJob(job.status) && !job.legacy && (
+              <Button size="sm" variant="outline" disabled={jobActionPending || job.status === "stopping"} onClick={() => stopJob(job)}>
+                <CircleStop className="size-3.5" /> {job.status === "stopping" ? "停止中" : "停止"}
+              </Button>
+            )}
+            {!isActiveJob(job.status) && (
+              <Button size="sm" variant="outline" className="text-destructive hover:border-destructive/50 hover:bg-destructive/5 hover:text-destructive" onClick={() => setDeleteJob(job)}>
+                <Trash2 className="size-3.5" /> 删除任务
+              </Button>
+            )}
+          </div>
         </div>
 
         {hasKnowledgeSupplement && (
@@ -1779,6 +1810,29 @@ export default function MiningView({
               <Button variant="outline" onClick={() => setDeleteSource(null)}>取消</Button>
               <Button disabled={sourceMutating} onClick={deleteKnowledgeSource} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
                 <Trash2 className="size-3.5" /> {sourceMutating ? "删除中…" : "确认删除"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!deleteJob} onOpenChange={(open) => !open && !jobDeleting && setDeleteJob(null)}>
+        <DialogContent className="w-full !max-w-[480px]">
+          <DialogHeader>
+            <DialogTitle>删除挖掘任务</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <p className="text-sm leading-relaxed text-muted-foreground">
+              确定删除任务 <span className="font-semibold text-foreground">{deleteJob?.name || ""}</span>？
+              此操作会永久删除该任务的输入快照、运行日志、知识补充记录以及全部 Skill、语义报告和 Benchmark 产物，不能恢复。
+            </p>
+            <p className="rounded-lg border border-amber-300/70 bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-900">
+              已提交到进化候选区的内容不会被删除；它们由进化模块独立管理。
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" disabled={jobDeleting} onClick={() => setDeleteJob(null)}>取消</Button>
+              <Button disabled={jobDeleting} onClick={deleteMiningJob} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+                <Trash2 className="size-3.5" /> {jobDeleting ? "删除中…" : "确认删除任务"}
               </Button>
             </div>
           </div>

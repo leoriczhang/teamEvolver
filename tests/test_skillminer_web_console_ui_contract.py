@@ -1027,11 +1027,51 @@ def test_skillminer_ui_omits_redundant_microcopy():
     ):
         assert redundant not in mining_view
     assert "对已编译的 skill 做 benchmark 跑分" not in legacy_console
-
     # Non-obvious safeguards and destructive-action consequences remain visible.
     assert "不会覆盖同名文件" in mining_view
     assert "个文档会一并删除" in mining_view
     assert "超出后自动排队" in mining_view
+
+
+def test_mining_task_deletion_contract_is_available_in_api_and_ui():
+    repository_root = Path(__file__).resolve().parents[1]
+    mining_view = (repository_root / "web-ui" / "src" / "views" / "MiningView.tsx").read_text(
+        encoding="utf-8"
+    )
+    server_source = (repository_root / "teamEvolver" / "skillminer" / "web_console" / "server.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'method: "DELETE"' in mining_view
+    assert "删除挖掘任务" in mining_view
+    assert "全部 Skill、语义报告和 Benchmark 产物" in mining_view
+    assert "def delete_mining_job(job_id):" in server_source
+    assert 'path.startswith("/api/jobs/")' in server_source
+
+
+def test_deleting_legacy_mining_job_removes_its_archived_outputs(tmp_path, monkeypatch):
+    session_id = "20260818_120000_000001"
+    next_session_id = "20260818_130000_000001"
+    round_artifact = (
+        tmp_path / "reflection_rounds" / session_id / "round_1"
+        / "compiled_skill" / "demo" / "SKILL.md"
+    )
+    round_artifact.parent.mkdir(parents=True)
+    round_artifact.write_text("# Demo", encoding="utf-8")
+    final_artifact = (
+        tmp_path / "run_history" / next_session_id / "preexisting"
+        / "compiled_skill" / "demo" / "BENCHMARK.md"
+    )
+    final_artifact.parent.mkdir(parents=True)
+    final_artifact.write_text("# Benchmark", encoding="utf-8")
+    monkeypatch.setattr(server, "PROJECT_ROOT", tmp_path)
+
+    result = server.delete_mining_job(f"legacy:{session_id}")
+
+    assert result["ok"] is True
+    assert result["deleted_files"] == 2
+    assert not (tmp_path / "reflection_rounds" / session_id).exists()
+    assert not (tmp_path / "run_history" / next_session_id).exists()
 
 
 def test_new_source_upload_snapshots_files_and_uses_one_transaction():
