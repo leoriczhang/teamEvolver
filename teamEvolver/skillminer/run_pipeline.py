@@ -292,32 +292,27 @@ def apply_prompt_override(stage_id, default_prompt, replacements=None):
 def _apply_configured_model():
     """Materialize the current unified model config into the isolated Hermes home.
 
-    ``/api/mining/model`` persists to the teamEvolver config store.  Read it at
-    task start instead of trusting the bridge process environment, which is a
-    startup-time snapshot and could otherwise overwrite a newer UI save.
+    Read the teamEvolver global LLM config at task start instead of trusting the
+    bridge process environment, which is a startup-time snapshot and could
+    otherwise overwrite a newer global-model save.
     """
     use_unified_config = str(
         os.environ.get("SKILLMINER_USE_UNIFIED_MODEL_CONFIG") or ""
     ).lower() in {"1", "true", "yes", "on"}
     team_data = _load_team_evolver_data() if use_unified_config else {}
-    mining = team_data.get("mining") if isinstance(team_data.get("mining"), dict) else {}
-    configured_model = mining.get("model") if isinstance(mining.get("model"), dict) else {}
     global_model = team_data.get("llm") if isinstance(team_data.get("llm"), dict) else {}
     model_id = str(
-        configured_model.get("model_id")
-        or global_model.get("model_id")
+        global_model.get("model_id")
         or os.environ.get("SKILLMINER_MODEL_ID")
         or ""
     ).strip()
     base_url = str(
-        configured_model.get("base_url")
-        or global_model.get("api_base")
+        global_model.get("api_base")
         or os.environ.get("SKILLMINER_MODEL_BASE_URL")
         or ""
     ).strip()
     api_key = str(
-        configured_model.get("api_key")
-        or global_model.get("api_key")
+        global_model.get("api_key")
         or os.environ.get("SKILLMINER_MODEL_API_KEY")
         or ""
     ).strip()
@@ -345,25 +340,21 @@ def _apply_configured_model():
         if api_key:
             model["api_key"] = api_key
         model["provider"] = str(
-            configured_model.get("provider")
-            or global_model.get("provider")
+            global_model.get("provider")
             or os.environ.get("SKILLMINER_MODEL_PROVIDER")
             or "custom"
         )
         model["max_tokens"] = int(
-            configured_model.get("max_tokens")
-            or global_model.get("max_tokens")
+            global_model.get("max_tokens")
             or os.environ.get("SKILLMINER_MODEL_MAX_TOKENS", "100000")
             or 100000
         )
         model["context_length"] = int(
-            configured_model.get("context_length")
+            global_model.get("context_length")
             or os.environ.get("SKILLMINER_MODEL_CONTEXT_LENGTH", "240000")
             or 240000
         )
-        if configured_model.get("temperature") is not None:
-            model["temperature"] = float(configured_model["temperature"])
-        elif global_model.get("temperature") is not None:
+        if global_model.get("temperature") is not None:
             model["temperature"] = float(global_model["temperature"])
         config_path.write_text(
             yaml.safe_dump(data, allow_unicode=True, sort_keys=False),

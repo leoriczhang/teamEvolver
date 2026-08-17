@@ -13,7 +13,6 @@ talk to a single origin.
 
 from __future__ import annotations
 
-import copy
 import logging
 import os
 import socket
@@ -30,10 +29,8 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from ..config_store import ConfigStore
 from ..mining_settings import (
-    mining_model_form_payload,
     reset_prompt,
     settings_payload,
-    update_mining_model_form,
     update_settings,
 )
 
@@ -103,16 +100,6 @@ class SkillMinerBridgeMixin:
                 else ConfigStore()
             )
             data = store.load()
-            mining = (
-                data.get("mining")
-                if isinstance(data.get("mining"), dict)
-                else {}
-            )
-            model = (
-                mining.get("model")
-                if isinstance(mining.get("model"), dict)
-                else {}
-            )
             llm = data.get("llm") if isinstance(data.get("llm"), dict) else {}
             effective = settings_payload(data)
             effective_model = effective["model"]
@@ -135,8 +122,7 @@ class SkillMinerBridgeMixin:
                 effective_model.get("context_length") or 240000
             )
             api_key = str(
-                model.get("api_key")
-                or llm.get("api_key")
+                llm.get("api_key")
                 or getattr(self.config, "llm_api_key", "")
                 or ""
             ).strip()
@@ -359,98 +345,28 @@ class SkillMinerBridgeMixin:
                 )
             return None
 
-        def _model_api_key(store_data: dict) -> str:
-            mining = store_data.get("mining")
-            mining = mining if isinstance(mining, dict) else {}
-            model = mining.get("model")
-            model = model if isinstance(model, dict) else {}
-            llm = store_data.get("llm")
-            llm = llm if isinstance(llm, dict) else {}
-            return str(
-                model.get("api_key")
-                or llm.get("api_key")
-                or getattr(owner.config, "llm_api_key", "")
-                or ""
-            ).strip()
-
-        async def _test_mining_model(store_data: dict, body: dict) -> dict:
-            preview = copy.deepcopy(store_data)
-            result = update_mining_model_form(preview, body)
-            api_key = _model_api_key(preview)
-            if not api_key:
-                raise ValueError("请先填写并保存 API Key")
-            endpoint = str(result["base_url"]).rstrip("/")
-            if not endpoint.endswith("/chat/completions"):
-                endpoint += "/chat/completions"
-            started = time.monotonic()
-            try:
-                async with httpx.AsyncClient(timeout=60.0) as client:
-                    response = await client.post(
-                        endpoint,
-                        headers={
-                            "Authorization": f"Bearer {api_key}",
-                            "Content-Type": "application/json",
-                        },
-                        json={
-                            "model": result["model"],
-                            "messages": [{"role": "user", "content": "Reply with exactly: OK"}],
-                            "max_tokens": 8,
-                            "temperature": 0,
-                        },
-                    )
-            except httpx.HTTPError as exc:
-                raise ValueError(f"模型接口不可达：{exc}") from exc
-            latency_ms = int((time.monotonic() - started) * 1000)
-            if response.status_code >= 400:
-                detail = response.text[:300].replace(api_key, "***")
-                raise ValueError(f"模型接口返回 HTTP {response.status_code}：{detail}")
-            try:
-                payload = response.json()
-            except ValueError:
-                payload = {}
-            choices = payload.get("choices") if isinstance(payload, dict) else []
-            message = (
-                choices[0].get("message")
-                if isinstance(choices, list) and choices and isinstance(choices[0], dict)
-                else {}
-            )
-            content = str(message.get("content") or "") if isinstance(message, dict) else ""
-            return {
-                "ok": True,
-                "model": result["model"],
-                "latency_ms": latency_ms,
-                "response": content[:500],
-            }
-
         @app.get("/api/mining/model")
         async def mining_model_get():
-            return JSONResponse(content=mining_model_form_payload(_store().load()))
+            return JSONResponse(
+                status_code=410,
+                content={"detail": "挖掘模型已复用全局模型，请在“全局模型”中查看和配置"},
+            )
 
         @app.post("/api/mining/model")
         async def mining_model_save(request: Request):
-            denied = _require_admin(request)
-            if denied is not None:
-                return denied
-            try:
-                body = await request.json()
-                store = _store()
-                data = store.load()
-                payload = update_mining_model_form(data, body)
-                store.save(data)
-            except (ValueError, TypeError) as exc:
-                return JSONResponse(status_code=400, content={"detail": str(exc)})
-            return JSONResponse(content=payload)
+            del request
+            return JSONResponse(
+                status_code=410,
+                content={"detail": "挖掘模型已复用全局模型，请在“全局模型”中统一配置"},
+            )
 
         @app.post("/api/mining/model/test")
         async def mining_model_test(request: Request):
-            denied = _require_admin(request)
-            if denied is not None:
-                return denied
-            try:
-                body = await request.json()
-                return JSONResponse(content=await _test_mining_model(_store().load(), body))
-            except (ValueError, TypeError) as exc:
-                return JSONResponse(status_code=400, content={"detail": str(exc)})
+            del request
+            return JSONResponse(
+                status_code=410,
+                content={"detail": "请在“全局模型”中测试并保存模型配置"},
+            )
 
         @app.get("/api/mining/settings")
         async def mining_settings_get():

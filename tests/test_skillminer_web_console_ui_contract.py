@@ -19,6 +19,8 @@ from web_console import server  # noqa: E402
 
 from teamEvolver.mining_settings import (  # noqa: E402
     mining_model_form_payload,
+    settings_payload,
+    update_settings,
     update_mining_model_form,
 )
 
@@ -93,7 +95,7 @@ skills:
     assert "skills" not in persisted
 
 
-def test_unified_mining_model_form_persists_the_config_used_by_new_jobs():
+def test_mining_model_form_is_read_only_and_uses_the_global_model():
     data = {
         "llm": {
             "model_id": "global-model",
@@ -102,33 +104,18 @@ def test_unified_mining_model_form_persists_the_config_used_by_new_jobs():
         }
     }
 
-    saved = update_mining_model_form(
-        data,
-        {
-            "model": "mining-model",
-            "base_url": "https://mining.example/v1/",
-            "max_tokens": 8192,
-            "temperature": 0.3,
-            "api_key": "mining-secret",
-        },
-    )
+    with pytest.raises(ValueError, match="全局模型"):
+        update_mining_model_form(data, {"model": "mining-model"})
 
-    assert saved["model"] == "mining-model"
-    assert saved["base_url"] == "https://mining.example/v1"
-    assert saved["api_key_present"] is True
-    assert "api_key" not in saved
-    assert data["mining"]["model"] == {
-        "provider": "custom",
-        "model_id": "mining-model",
-        "base_url": "https://mining.example/v1",
-        "max_tokens": 8192,
-        "temperature": 0.3,
-        "api_key": "mining-secret",
-    }
-    assert mining_model_form_payload(data)["model"] == "mining-model"
+    form = mining_model_form_payload(data)
+    assert form["model"] == "global-model"
+    assert form["base_url"] == "https://global.example/v1"
+    assert form["api_key_present"] is True
+    assert "api_key" not in form
+    assert "mining" not in data
 
 
-def test_embedded_model_view_and_pipeline_prefer_unified_mining_config(tmp_path, monkeypatch):
+def test_embedded_model_view_and_pipeline_use_global_model_even_with_legacy_override(tmp_path, monkeypatch):
     config_file = tmp_path / "team-evolver.yaml"
     config_file.write_text(
         """
@@ -162,11 +149,52 @@ mining:
     server.rp._apply_configured_model()
     materialized = yaml.safe_load((hermes_home / "config.yaml").read_text("utf-8"))
 
-    assert visible["model"] == "mining-model"
-    assert visible["base_url"] == "https://mining.example/v1"
-    assert materialized["model"]["default"] == "mining-model"
-    assert materialized["model"]["base_url"] == "https://mining.example/v1"
-    assert materialized["model"]["api_key"] == "mining-secret"
+    assert visible["model"] == "global-model"
+    assert visible["base_url"] == "https://global.example/v1"
+    assert materialized["model"]["default"] == "global-model"
+    assert materialized["model"]["base_url"] == "https://global.example/v1"
+    assert materialized["model"]["api_key"] == "global-secret"
+    with pytest.raises(ValueError, match="全局模型"):
+        server.save_mining_model_settings({"model": "another-model"})
+
+
+def test_mining_settings_ignore_and_remove_legacy_model_overrides():
+    data = {
+        "llm": {
+            "provider": "custom",
+            "model_id": "global-model",
+            "api_base": "https://global.example/v1",
+            "api_key": "global-secret",
+            "max_tokens": 4096,
+            "temperature": 0.4,
+        },
+        "mining": {
+            "model": {
+                "model_id": "legacy-mining-model",
+                "base_url": "https://legacy.example/v1",
+                "api_key": "legacy-secret",
+            },
+            "pipeline": {"max_rounds": 2},
+        },
+    }
+
+    visible = settings_payload(data)
+    assert visible["model"]["model"] == "global-model"
+    assert visible["model"]["base_url"] == "https://global.example/v1"
+    assert visible["model"]["inherits_global"] is True
+
+    update_settings(data, {"pipeline": {"max_rounds": 4}})
+    assert "model" not in data["mining"]
+
+
+def test_mining_ui_has_no_separate_model_configuration_entry():
+    project_root = Path(__file__).resolve().parents[1]
+    app_source = (project_root / "web-ui" / "src" / "App.tsx").read_text(encoding="utf-8")
+    mining_source = (project_root / "web-ui" / "src" / "views" / "MiningView.tsx").read_text(encoding="utf-8")
+
+    assert '"mine-model"' not in app_source
+    assert 'page === "model"' not in mining_source
+    assert '"/api/mining/model"' not in mining_source
 
 
 def test_mining_model_test_uses_current_form_values(tmp_path, monkeypatch):

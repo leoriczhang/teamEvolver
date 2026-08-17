@@ -18,15 +18,6 @@ interface MiningPromptSetting {
 }
 
 interface MiningWhiteboxSettings {
-  model: {
-    provider: string;
-    model: string;
-    base_url: string;
-    max_tokens: number;
-    context_length: number;
-    api_key_present?: boolean;
-    inherits_global?: boolean;
-  };
   pipeline: {
     max_rounds: number;
     max_retries: number;
@@ -98,7 +89,7 @@ export default function MiningWhiteboxPanel({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ...settings,
+          pipeline: settings.pipeline,
           prompts: settings.prompts.map((prompt) => ({
             id: prompt.id,
             prompt: prompt.effective_prompt,

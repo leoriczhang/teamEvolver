@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { PageHeader, Panel, StatCard, Pill, Dot, type PillTone } from "@/components/common";
+import { PageHeader, Panel, StatCard, Pill, type PillTone } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -38,7 +38,7 @@ import {
  * MiningView — SkillMiner「文档 → Skill」挖掘流水线控制台。
  *
  * 集成后 teamEvolver 统一控制台「挖掘」分组的落地页。挖掘能力在左侧边栏拆成
- * 4 个独立菜单项（总览 / 知识源 / 挖掘任务 / 模型配置），本组件
+ * 3 个独立菜单项（总览 / 知识源 / 挖掘任务），本组件
  * 按 `page` 渲染对应页面。
  *
  * 后端已接入：teamEvolver 服务把内嵌的 SkillMiner 控制台（子进程）反向代理到
@@ -46,16 +46,12 @@ import {
  * ``/api/mining/jobs`` 创建、调度和跟踪持久化挖掘任务。
  */
 
-export type MinePage = "overview" | "sources" | "jobs" | "model";
+export type MinePage = "overview" | "sources" | "jobs";
 
 const PAGE_META: Record<MinePage, { title: string; description: string }> = {
   overview: { title: "挖掘总览", description: "查看知识源、挖掘任务与产物编译状态，快速掌握 SkillMiner 当前工作负载。" },
   sources: { title: "知识源", description: "管理用于技能挖掘的文档目录，支持上传、新建、重命名、合并与删除。" },
   jobs: { title: "挖掘任务", description: "并行创建和跟踪挖掘任务；任务完成后可审核、编辑产物并提交进化。" },
-  model: {
-    title: "挖掘配置",
-    description: "配置 SkillMiner 使用的模型、挖掘 Prompt 与 Benchmark 评估规则，并检查当前连接状态。",
-  },
 };
 
 // ---- Backend types (subset of SkillMiner /api/config & SSE events) -------- //
@@ -209,7 +205,6 @@ interface MiningConfig {
   default_input_dir: string;
   max_rounds_default: number;
   max_rounds_range: [number, number];
-  model: MiningModelSettings;
   compiled_skills: string[];
   compiled_skill_details: CompiledSkillDetail[];
   benchmark: {
@@ -218,37 +213,6 @@ interface MiningConfig {
   };
   checkpoints: { key: string; label: string; desc: string }[];
 }
-
-interface MiningModelSettings {
-  provider: string;
-  id?: string;
-  model: string;
-  base_url: string;
-  max_tokens: number;
-  temperature: number;
-  api_key?: string;
-  api_key_present: boolean;
-  configured: boolean;
-  clear_api_key?: boolean;
-}
-
-interface MiningModelTestResult {
-  ok: boolean;
-  model: string;
-  latency_ms: number;
-  response: string;
-}
-
-const emptyMiningModelSettings = (): MiningModelSettings => ({
-  provider: "openai-compatible",
-  model: "",
-  base_url: "",
-  max_tokens: 32768,
-  temperature: 0.2,
-  api_key: "",
-  api_key_present: false,
-  configured: false,
-});
 
 interface KnowledgeUploadResult {
   ok: boolean;
@@ -386,12 +350,6 @@ export default function MiningView({
   const [loadingArtifact, setLoadingArtifact] = useState("");
   const [submittingJobId, setSubmittingJobId] = useState("");
   const [createJobOpen, setCreateJobOpen] = useState(false);
-  const [modelSettings, setModelSettings] = useState<MiningModelSettings>(() => emptyMiningModelSettings());
-  const [modelSaving, setModelSaving] = useState(false);
-  const [modelTesting, setModelTesting] = useState(false);
-  const [modelRefreshing, setModelRefreshing] = useState(false);
-  const [clearModelKey, setClearModelKey] = useState(false);
-  const [modelTestResult, setModelTestResult] = useState<MiningModelTestResult | null>(null);
   const artifactIsMarkdown = isMarkdownArtifact(artifactPreview);
 
   // Sync default rounds from config once loaded.
@@ -409,13 +367,6 @@ export default function MiningView({
     }
     onInputDirChange?.(next);
   }, [config, preferredInputDir]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (page !== "model" || !config?.model) return;
-    setModelSettings({ ...emptyMiningModelSettings(), ...config.model, api_key: "" });
-    setClearModelKey(false);
-    setModelTestResult(null);
-  }, [page, config]);
 
   useEffect(() => {
     if (!active || page !== "jobs" || !selectedJobId) return;
@@ -912,68 +863,6 @@ export default function MiningView({
     }
   }
 
-  async function refreshMiningModel() {
-    setModelRefreshing(true);
-    try {
-      const settings = await api<MiningModelSettings>("/api/mining/model");
-      setModelSettings({ ...emptyMiningModelSettings(), ...settings, api_key: "" });
-      setClearModelKey(false);
-      setModelTestResult(null);
-    } catch (e: any) {
-      toastErr("加载挖掘模型失败", e.message);
-    } finally {
-      setModelRefreshing(false);
-    }
-  }
-
-  async function saveMiningModel() {
-    setModelSaving(true);
-    try {
-      const saved = await api<MiningModelSettings>("/api/mining/model", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...modelSettings,
-          max_tokens: Number(modelSettings.max_tokens || 32768),
-          temperature: Number(modelSettings.temperature ?? 0.2),
-          clear_api_key: clearModelKey,
-        }),
-      });
-      setModelSettings({ ...emptyMiningModelSettings(), ...saved, api_key: "" });
-      setClearModelKey(false);
-      setModelTestResult(null);
-      await mining.refreshConfig();
-      toastOk("挖掘模型配置已保存", `${saved.model} · 后续任务自动生效`);
-    } catch (e: any) {
-      toastErr("保存挖掘模型失败", e.message);
-    } finally {
-      setModelSaving(false);
-    }
-  }
-
-  async function testMiningModel() {
-    setModelTesting(true);
-    setModelTestResult(null);
-    try {
-      const result = await api<MiningModelTestResult>("/api/mining/model/test", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...modelSettings,
-          max_tokens: Number(modelSettings.max_tokens || 32768),
-          temperature: Number(modelSettings.temperature ?? 0.2),
-          clear_api_key: clearModelKey,
-        }),
-      });
-      setModelTestResult(result);
-      toastOk("模型连通性正常", `${result.latency_ms} ms · ${result.response || "已返回"}`);
-    } catch (e: any) {
-      toastErr("模型测试失败", e.message);
-    } finally {
-      setModelTesting(false);
-    }
-  }
-
   function renderJobDetail(job: MiningJob) {
     const durableGaps = job.knowledge_gaps?.questions || [];
     const supplementQuestions = job.pending_checkpoint?.questions || durableGaps;
@@ -1343,6 +1232,8 @@ export default function MiningView({
               </ul>
             )}
           </Panel>
+
+          <MiningWhiteboxPanel active={active} user={_user} />
         </div>
       )}
 
@@ -1737,15 +1628,8 @@ export default function MiningView({
                   />
                 </label>
 
-                <div>
-                  <span className="mb-1.5 block text-xs font-semibold text-muted-foreground">模型</span>
-                  <div className="mono rounded-lg border border-border bg-background px-3 py-2 text-[11px] text-muted-foreground">
-                    {config?.model?.model || config?.model?.id || "请先配置挖掘模型"}
-                  </div>
-                </div>
-
                 <div className="rounded-lg border border-border bg-background/70 p-3 text-[11px] leading-relaxed text-muted-foreground">
-                  任务创建时固化知识源快照。最多同时运行 {mining.jobSummary.max_parallel} 个任务，超出后自动排队。
+                  新任务会自动复用“全局模型”配置，并固化知识源快照。最多同时运行 {mining.jobSummary.max_parallel} 个任务，超出后自动排队。
                 </div>
 
                 <div className="flex justify-end gap-2 pt-1">
@@ -2043,134 +1927,6 @@ export default function MiningView({
         </DialogContent>
       </Dialog>
 
-      {/* ---- 模型配置 ---- */}
-      {page === "model" && (
-        <div className="mx-auto max-w-[1080px] px-[22px] py-[22px]">
-          <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(170px,1fr))] gap-3.5">
-            <StatCard label="当前模型" value={modelSettings.model || "未配置"} />
-            <StatCard label="Base URL" value={modelSettings.base_url || "未配置"} mono />
-            <StatCard
-              label="API Key"
-              value={clearModelKey ? "将清空" : modelSettings.api_key ? "待保存" : modelSettings.api_key_present ? "已配置" : "未配置"}
-            />
-            <StatCard label="接口协议" value="OpenAI 兼容" />
-          </div>
-
-          <Panel
-            title="挖掘模型配置"
-            extra={
-              <div className="flex flex-wrap items-center justify-end gap-2">
-                <span className="inline-flex items-center gap-2 text-xs text-muted-foreground">
-                  <Dot state={modelSettings.configured ? "on" : "off"} />
-                  <Pill tone={modelSettings.configured ? "green" : "gray"}>
-                    {modelSettings.configured ? "配置已生效" : "待配置"}
-                  </Pill>
-                </span>
-                <Button variant="outline" size="sm" onClick={refreshMiningModel} disabled={modelRefreshing || modelSaving || modelTesting}>
-                  <RotateCcw className={cn("size-3.5", modelRefreshing && "animate-spin")} />
-                  {modelRefreshing ? "刷新中…" : "刷新"}
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={testMiningModel}
-                  disabled={modelTesting || modelSaving || !modelSettings.model.trim() || !modelSettings.base_url.trim()}
-                >
-                  {modelTesting ? "测试中…" : "测试连接"}
-                </Button>
-                <Button
-                  size="sm"
-                  onClick={saveMiningModel}
-                  disabled={modelSaving || modelTesting || !modelSettings.model.trim() || !modelSettings.base_url.trim()}
-                >
-                  {modelSaving ? "保存中…" : "保存配置"}
-                </Button>
-              </div>
-            }
-          >
-            <div className="space-y-5 p-4">
-              <div className="grid gap-3.5 md:grid-cols-2">
-                <MField label="模型名称 *">
-                  <Input
-                    value={modelSettings.model}
-                    placeholder="例如：doubao-seed-1-6-250615"
-                    onChange={(event) => setModelSettings({ ...modelSettings, model: event.target.value })}
-                    maxLength={200}
-                  />
-                </MField>
-                <MField label="Base URL">
-                  <Input
-                    value={modelSettings.base_url}
-                    placeholder="https://example.com/v1"
-                    onChange={(event) => setModelSettings({ ...modelSettings, base_url: event.target.value })}
-                  />
-                </MField>
-              </div>
-
-              <div className="grid gap-3.5 md:grid-cols-2">
-                <MField label={`API Key${modelSettings.api_key_present ? "（已配置，留空保留）" : " *"}`}>
-                  <Input
-                    type="password"
-                    value={modelSettings.api_key || ""}
-                    disabled={clearModelKey}
-                    placeholder={modelSettings.api_key_present ? "输入新值可替换现有 Key" : "请输入模型 API Key"}
-                    onChange={(event) => setModelSettings({ ...modelSettings, api_key: event.target.value })}
-                  />
-                </MField>
-                <MField label="最大输出 Token">
-                  <Input
-                    type="number"
-                    min={1}
-                    max={131072}
-                    value={modelSettings.max_tokens}
-                    onChange={(event) => setModelSettings({ ...modelSettings, max_tokens: Number(event.target.value) })}
-                  />
-                </MField>
-              </div>
-
-              <div className="grid gap-3.5 md:grid-cols-2">
-                <MField label="Temperature">
-                  <Input
-                    type="number"
-                    min={0}
-                    max={2}
-                    step={0.1}
-                    value={modelSettings.temperature}
-                    onChange={(event) => setModelSettings({ ...modelSettings, temperature: Number(event.target.value) })}
-                  />
-                </MField>
-                <div className="flex items-end pb-2">
-                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <input
-                      type="checkbox"
-                      checked={clearModelKey}
-                      onChange={(event) => {
-                        setClearModelKey(event.target.checked);
-                        if (event.target.checked) setModelSettings({ ...modelSettings, api_key: "" });
-                      }}
-                    />
-                    清空项目中已保存的 API Key
-                  </label>
-                </div>
-              </div>
-
-              {modelTestResult && (
-                <div className="rounded-lg border border-success/30 bg-success/5 p-3 text-xs leading-relaxed">
-                  <div className="mb-1 font-semibold text-success">模型测试通过</div>
-                  <div className="text-muted-foreground">
-                    {modelTestResult.model} · {modelTestResult.latency_ms} ms · 返回：{modelTestResult.response || "（空）"}
-                  </div>
-                </div>
-              )}
-
-              <div className="rounded-lg border border-border bg-background/60 p-3 text-xs leading-relaxed text-muted-foreground">
-                保存后，新创建或尚未启动的挖掘任务会自动使用这套配置；已经运行的任务继续使用启动时的配置。
-              </div>
-            </div>
-          </Panel>
-          <MiningWhiteboxPanel active={active} user={_user} />
-        </div>
-      )}
     </div>
   );
 }
@@ -2301,15 +2057,6 @@ function formatRuntimeLog(line: string) {
     .replace(/HERMES_OK/g, "MODEL_OK")
     .replace(/\.hermes_home/g, ".model_runtime")
     .replace(/hermes/gi, "模型运行时");
-}
-
-function MField({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <Label className="mb-1.5 block text-xs font-semibold text-muted-foreground">{label}</Label>
-      {children}
-    </div>
-  );
 }
 
 function formatBytes(value: number) {

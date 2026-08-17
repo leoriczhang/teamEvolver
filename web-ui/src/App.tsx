@@ -26,7 +26,6 @@ type ViewKey =
   | "mine-overview"
   | "mine-sources"
   | "mine-jobs"
-  | "mine-model"
   | "dashboard"
   | "langfuse"
   | "skill-lab"
@@ -39,14 +38,13 @@ type ViewKey =
   | "model"
   | "docs";
 type DashTab = "overview" | "candidates" | "audit" | "filter";
-type MiningViewKey = "mine-overview" | "mine-sources" | "mine-jobs" | "mine-model";
+type MiningViewKey = "mine-overview" | "mine-sources" | "mine-jobs";
 type StandaloneViewKey = Exclude<ViewKey, MiningViewKey | "dashboard">;
 
 const MINE_PAGES: { key: MiningViewKey; page: MinePage }[] = [
   { key: "mine-overview", page: "overview" },
   { key: "mine-sources", page: "sources" },
   { key: "mine-jobs", page: "jobs" },
-  { key: "mine-model", page: "model" },
 ];
 
 const NAV_SECTIONS: {
@@ -61,7 +59,6 @@ const NAV_SECTIONS: {
       { key: "mine-overview", label: "挖掘总览", icon: LayoutDashboard },
       { key: "mine-sources", label: "知识源", icon: Database },
       { key: "mine-jobs", label: "挖掘任务", icon: ListChecks },
-      { key: "mine-model", label: "挖掘配置", icon: SlidersHorizontal },
     ],
   },
   {
@@ -171,7 +168,7 @@ const STANDALONE_PAGES: StandalonePageConfig[] = [
   {
     key: "model",
     title: "全局模型",
-    description: "配置进化链路继承的全局模型默认值；阶段专属参数在进化链路中维护。",
+    description: "统一配置进化与技能挖掘共用的模型、Base URL 和 API Key；阶段专属参数在进化链路中维护。",
     badge: "平台治理",
     render: ({ active, user }) => <ModelSettingsView active={active} user={user} />,
   },

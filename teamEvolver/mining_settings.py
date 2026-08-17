@@ -10,7 +10,6 @@ import sys
 import threading
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 _SKILLMINER_ROOT = Path(__file__).resolve().parent / "skillminer"
 
@@ -258,11 +257,6 @@ def settings_payload(store_data: dict[str, Any]) -> dict[str, Any]:
         if isinstance(store_data.get("llm"), dict)
         else {}
     )
-    model = (
-        mining.get("model")
-        if isinstance(mining.get("model"), dict)
-        else {}
-    )
     pipeline = (
         mining.get("pipeline")
         if isinstance(mining.get("pipeline"), dict)
@@ -273,9 +267,7 @@ def settings_payload(store_data: dict[str, Any]) -> dict[str, Any]:
         if isinstance(mining.get("prompts"), dict)
         else {}
     )
-    raw_temperature = model.get("temperature")
-    if raw_temperature is None:
-        raw_temperature = llm.get("temperature", 0.2)
+    raw_temperature = llm.get("temperature", 0.2)
     try:
         temperature = float(raw_temperature)
     except (TypeError, ValueError):
@@ -300,30 +292,14 @@ def settings_payload(store_data: dict[str, Any]) -> dict[str, Any]:
         )
     return {
         "model": {
-            "provider": str(
-                model.get("provider")
-                or llm.get("provider")
-                or "custom"
-            ),
-            "model": str(model.get("model_id") or llm.get("model_id") or ""),
-            "base_url": str(
-                model.get("base_url")
-                or llm.get("api_base")
-                or ""
-            ),
-            "max_tokens": int(
-                model.get("max_tokens")
-                or llm.get("max_tokens")
-                or 100000
-            ),
-            "context_length": int(
-                model.get("context_length") or 240000
-            ),
+            "provider": str(llm.get("provider") or "custom"),
+            "model": str(llm.get("model_id") or ""),
+            "base_url": str(llm.get("api_base") or ""),
+            "max_tokens": int(llm.get("max_tokens") or 100000),
+            "context_length": int(llm.get("context_length") or 240000),
             "temperature": max(0.0, min(2.0, temperature)),
-            "api_key_present": bool(
-                model.get("api_key") or llm.get("api_key")
-            ),
-            "inherits_global": not bool(model),
+            "api_key_present": bool(llm.get("api_key")),
+            "inherits_global": True,
         },
         "pipeline": {
             key: pipeline.get(key, default)
@@ -340,42 +316,17 @@ def update_settings(
     if not isinstance(body, dict):
         raise ValueError("mining settings body must be an object")
     mining = store_data.setdefault("mining", {})
-    model = mining.setdefault("model", {})
     pipeline = mining.setdefault("pipeline", {})
     prompts = mining.setdefault("prompts", {})
-    model_in = body.get("model") if isinstance(body.get("model"), dict) else {}
     pipeline_in = (
         body.get("pipeline")
         if isinstance(body.get("pipeline"), dict)
         else {}
     )
 
-    if bool(model_in.get("inherits_global", False)):
-        mining["model"] = {}
-    else:
-        for source, target in (
-            ("provider", "provider"),
-            ("model", "model_id"),
-            ("base_url", "base_url"),
-        ):
-            if source in model_in:
-                model[target] = str(model_in.get(source) or "").strip()
-        for key, default, minimum, maximum in (
-            ("max_tokens", 100000, 1, 1_000_000),
-            ("context_length", 240000, 1024, 4_000_000),
-        ):
-            if key in model_in:
-                try:
-                    value = int(model_in.get(key, default))
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(f"{key} must be an integer") from exc
-                model[key] = max(minimum, min(maximum, value))
-        existing_key = str(model.get("api_key") or "")
-        if bool(model_in.get("clear_api_key", False)):
-            existing_key = ""
-        if str(model_in.get("api_key") or "").strip():
-            existing_key = str(model_in["api_key"]).strip()
-        model["api_key"] = existing_key
+    # Mining always consumes the global ``llm`` settings.  Drop a legacy
+    # per-mining override on any save so it cannot be revived accidentally.
+    mining.pop("model", None)
 
     integer_fields = {
         "max_rounds": (1, 20),
@@ -436,12 +387,7 @@ def update_settings(
 
 
 def mining_model_form_payload(store_data: dict[str, Any]) -> dict[str, Any]:
-    """Return the model form used by the SkillMiner console without a secret.
-
-    The unified console owns the effective model configuration in
-    ``mining.model``.  Keeping this adapter here prevents the legacy
-    SkillMiner form from maintaining a second, divergent Hermes-only value.
-    """
+    """Return the global model as a read-only legacy compatibility payload."""
     model = settings_payload(store_data)["model"]
     model_id = str(model.get("model") or "").strip()
     base_url = str(model.get("base_url") or "").strip()
@@ -460,64 +406,9 @@ def mining_model_form_payload(store_data: dict[str, Any]) -> dict[str, Any]:
 def update_mining_model_form(
     store_data: dict[str, Any], body: dict[str, Any]
 ) -> dict[str, Any]:
-    """Validate and persist the legacy model form into ``mining.model``."""
-    if not isinstance(body, dict):
-        raise ValueError("模型配置必须是对象")
-
-    model_id = str(body.get("model") or body.get("id") or "").strip()
-    if not model_id:
-        raise ValueError("请填写模型名称")
-    if len(model_id) > 200 or any(ch in model_id for ch in "\r\n"):
-        raise ValueError("模型名称格式不正确")
-
-    base_url = str(body.get("base_url") or "").strip().rstrip("/")
-    parsed_url = urlparse(base_url)
-    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
-        raise ValueError("Base URL 必须是有效的 HTTP(S) 地址")
-
-    try:
-        max_tokens = int(body.get("max_tokens") or 32768)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("最大输出 Token 必须是整数") from exc
-    if not 1 <= max_tokens <= 131072:
-        raise ValueError("最大输出 Token 必须在 1 到 131072 之间")
-
-    try:
-        temperature = float(
-            body.get("temperature") if body.get("temperature") is not None else 0.2
-        )
-    except (TypeError, ValueError) as exc:
-        raise ValueError("Temperature 必须是数字") from exc
-    if not 0 <= temperature <= 2:
-        raise ValueError("Temperature 必须在 0 到 2 之间")
-
-    incoming_key = str(body.get("api_key") or "").strip()
-    if any(ch in incoming_key for ch in "\r\n") or len(incoming_key) > 4096:
-        raise ValueError("API Key 格式不正确")
-
-    mining = store_data.setdefault("mining", {})
-    if not isinstance(mining, dict):
-        mining = {}
-        store_data["mining"] = mining
-    current = mining.get("model")
-    if not isinstance(current, dict):
-        current = {}
-    model = dict(current)
-    model.update(
-        {
-            "provider": str(body.get("provider") or model.get("provider") or "custom").strip() or "custom",
-            "model_id": model_id,
-            "base_url": base_url,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
-    )
-    if bool(body.get("clear_api_key", False)):
-        model.pop("api_key", None)
-    elif incoming_key:
-        model["api_key"] = incoming_key
-    mining["model"] = model
-    return mining_model_form_payload(store_data)
+    """Reject retired mining model writes instead of creating a second key."""
+    del store_data, body
+    raise ValueError("挖掘模型已复用全局模型，请在“全局模型”中统一配置")
 
 
 def reset_prompt(store_data: dict[str, Any], stage_id: str) -> dict[str, Any]:

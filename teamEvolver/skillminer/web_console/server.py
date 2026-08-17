@@ -2027,11 +2027,11 @@ def _load_model_config_document():
 
 
 def _load_unified_mining_model_settings():
-    """Read the teamEvolver-owned mining model when embedded in its console.
+    """Read the teamEvolver-owned global model when embedded in its console.
 
     The standalone SkillMiner console still uses ``.hermes_home/config.yaml``.
     When the parent service passes ``TEAMEVOLVER_CONFIG_FILE``, that file is the
-    source of truth for both the visible form and a newly created task.
+    source of truth for every new mining task.
     """
     enabled = str(
         os.environ.get("SKILLMINER_USE_UNIFIED_MODEL_CONFIG") or ""
@@ -2050,26 +2050,20 @@ def _load_unified_mining_model_settings():
         return None
     if not isinstance(document, dict):
         return None
-    mining = document.get("mining") if isinstance(document.get("mining"), dict) else {}
-    model = mining.get("model") if isinstance(mining.get("model"), dict) else {}
     llm = document.get("llm") if isinstance(document.get("llm"), dict) else {}
-    model_id = str(model.get("model_id") or llm.get("model_id") or "").strip()
-    base_url = str(model.get("base_url") or llm.get("api_base") or "").strip()
-    if not model_id and not base_url:
-        return None
+    model_id = str(llm.get("model_id") or "").strip()
+    base_url = str(llm.get("api_base") or "").strip()
     try:
-        max_tokens = int(model.get("max_tokens") or llm.get("max_tokens") or 32768)
+        max_tokens = int(llm.get("max_tokens") or 32768)
     except (TypeError, ValueError):
         max_tokens = 32768
     try:
         temperature = float(
-            model.get("temperature")
-            if model.get("temperature") is not None
-            else llm.get("temperature", 0.2)
+            llm.get("temperature", 0.2)
         )
     except (TypeError, ValueError):
         temperature = 0.2
-    api_key = str(model.get("api_key") or llm.get("api_key") or "").strip()
+    api_key = str(llm.get("api_key") or "").strip()
     return {
         "provider": "openai-compatible",
         "id": model_id,
@@ -2182,6 +2176,8 @@ def _normalize_mining_model_payload(body, document=None):
 
 def save_mining_model_settings(body):
     """Persist the editable mining model settings for subsequent jobs."""
+    if _load_unified_mining_model_settings() is not None:
+        raise ValueError("挖掘模型已复用全局模型，请在“全局模型”中统一配置")
     with MODEL_CONFIG_LOCK:
         document = _load_model_config_document()
         normalized, _ = _normalize_mining_model_payload(body, document)
@@ -2221,6 +2217,8 @@ def save_mining_model_settings(body):
 
 def test_mining_model_settings(body):
     """Probe the OpenAI-compatible endpoint using edited or saved settings."""
+    if _load_unified_mining_model_settings() is not None:
+        raise ValueError("请在“全局模型”中测试模型配置")
     document = _load_model_config_document()
     normalized, api_key = _normalize_mining_model_payload(body, document)
     if not api_key:

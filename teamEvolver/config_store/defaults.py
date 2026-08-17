@@ -105,7 +105,6 @@ _DEFAULTS: dict = {
         "bundle_static_checks_enabled": True,
     },
     "mining": {
-        "model": {},
         "pipeline": {
             "max_rounds": 3,
             "max_retries": 2,

@@ -196,7 +196,7 @@ export default function ModelSettingsView({
             {settings.api_key_present ? "模型凭据已配置" : "模型凭据尚未配置"}
           </div>
           <div className="mt-1 text-xs text-muted-foreground">
-            配置全局模型默认值。阶段 Prompt、模型采样和过程参数在“进化链路”中对应维护。
+            配置进化与技能挖掘共用的全局模型。阶段 Prompt、模型采样和过程参数在“进化链路”中对应维护。
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -230,7 +230,7 @@ export default function ModelSettingsView({
       )}
 
       <Panel
-        title="进化模型"
+        title="全局模型（进化与挖掘）"
         extra={
           <span className="inline-flex items-center gap-2 text-xs text-muted-foreground">
             <Dot state={settings.api_key_present ? "on" : "off"} />
