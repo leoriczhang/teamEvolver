@@ -150,6 +150,31 @@ def parse_skill_md(path: str) -> Optional[dict[str, Any]]:
     return result
 
 
+def parse_skill_md_text(raw: str) -> Optional[dict[str, str]]:
+    """Parse ``SKILL.md`` *text* into ``{name, description}`` (or ``None``).
+
+    A text-only counterpart to :func:`parse_skill_md` for callers that already
+    hold the document body (e.g. a resolved OpenViking read) and must derive a
+    skill's identity without touching disk. Returns ``None`` when the document
+    lacks frontmatter or the required ``name``/``description`` fields.
+    """
+    split = _split_frontmatter(str(raw or ""))
+    if split is None:
+        return None
+    fm_text, _body = split
+    try:
+        fm = yaml.safe_load(fm_text) or {}
+    except yaml.YAMLError:
+        return None
+    if not isinstance(fm, dict):
+        return None
+    name = str(fm.get("name", "")).strip()
+    description = str(fm.get("description", "")).strip()
+    if not name or not description:
+        return None
+    return {"name": name, "description": description}
+
+
 def enrich_manifest_entry(entry: dict[str, Any], skill_path: str) -> None:
     """Fill ``description``/``category`` in a manifest *entry* from ``SKILL.md``.
 

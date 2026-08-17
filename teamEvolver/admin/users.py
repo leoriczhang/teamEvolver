@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import tempfile
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -229,7 +230,30 @@ def copy_skills(*, source_hub: SkillHub, target_hub: SkillHub, requested: set[st
             bundle = source_hub._download_skill_bundle(name, rec)
             write_skill_bundle(os.path.join(tmp_skills, name), bundle, clean=True)
             names.append(name)
-        result = target_hub.push_skills(tmp_skills, include_names=names)
+        from teamEvolver.skills.mutations import (
+            SkillMutationCommand,
+            SkillMutationService,
+        )
+
+        service = SkillMutationService.from_hub(target_hub)
+        commits = [
+            service.execute(
+                SkillMutationCommand(
+                    action="publish",
+                    name=name,
+                    mutation_id=f"user-share-{uuid.uuid4().hex}",
+                    skills_dir=tmp_skills,
+                )
+            )
+            for name in names
+        ]
+        result = {
+            "uploaded": len(commits),
+            "skipped": 0,
+            "filtered": 0,
+            "total_local": len(names),
+            "event_ids": [item["event_id"] for item in commits],
+        }
         result["shared_names"] = names
         result["missing_names"] = missing
         return result

@@ -12,7 +12,24 @@ class _Response:
         return None
 
     def json(self):
-        return {"ok": True, "verification": {"matched": True}}
+        return {
+            "ok": True,
+            "results": {
+                "tenant-a": {
+                    "verification": {
+                        "skills": [
+                            {
+                                "name": "demo-skill",
+                                "matched": True,
+                                "actual_version": 3,
+                                "actual_sha256": "sha",
+                                "actual_tree_sha256": "tree",
+                            }
+                        ]
+                    }
+                }
+            },
+        }
 
 
 class _Client:

@@ -38,8 +38,13 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    from teamEvolver.integrations.hermes_delivery import HermesDeliverySpool
+except ImportError:
+    from hermes_delivery import HermesDeliverySpool
+
 SKILL_NAME = "teamEvolver-feed"
-BUNDLE_FILES = ("SKILL.md", "push_session.py")
+BUNDLE_FILES = ("SKILL.md", "push_session.py", "hermes_delivery.py")
 # Hermes gates every shell hook behind a first-use approval recorded in this
 # file. When Hermes installs the skill non-interactively (agent-driven, no
 # TTY) that first-fire prompt can never happen, so the hook is silently
@@ -140,6 +145,7 @@ def _install_context_provider(
     target.mkdir(parents=True, exist_ok=True)
     for name in ("__init__.py", "plugin.yaml"):
         shutil.copy2(source / name, target / name)
+    shutil.copy2(source_root / "hermes_delivery.py", target / "hermes_delivery.py")
     config_path = home / "config.yaml"
     config = _load_yaml(config_path)
     if not isinstance(config, dict):
@@ -244,15 +250,13 @@ def _integration_id(home: Path) -> tuple[str, str]:
     return f"hermes:{machine_id}:{profile_id}", profile_id
 
 
-def _register_agent(
+def _registration_payload(
     *,
-    base_url: str,
-    api_key: str,
     integration_id: str,
     profile_id: str,
     rotate_token: bool,
-) -> str:
-    payload = {
+) -> dict:
+    return {
         "schema_version": "teamevolver.agent-registration.v1",
         "protocol_version": "1.0",
         "agent_id": integration_id,
@@ -296,6 +300,21 @@ def _register_agent(
         "metadata": {"profile_id": profile_id},
         "rotate_access_token": bool(rotate_token),
     }
+
+
+def _register_agent(
+    *,
+    base_url: str,
+    api_key: str,
+    integration_id: str,
+    profile_id: str,
+    rotate_token: bool,
+) -> str:
+    payload = _registration_payload(
+        integration_id=integration_id,
+        profile_id=profile_id,
+        rotate_token=rotate_token,
+    )
     request = urllib.request.Request(
         base_url.rstrip("/") + "/internal/agents/register",
         data=json.dumps(payload).encode("utf-8"),
@@ -355,7 +374,11 @@ def main(argv: list[str] | None = None) -> int:
     dst_dir.mkdir(parents=True, exist_ok=True)
 
     for name in BUNDLE_FILES:
-        src = src_dir / name
+        src = (
+            src_dir / name
+            if (src_dir / name).exists()
+            else src_dir.parent / name
+        )
         if not src.exists():
             raise SystemExit(f"missing bundle file: {src}")
         shutil.copy2(src, dst_dir / name)
@@ -383,6 +406,7 @@ def main(argv: list[str] | None = None) -> int:
         "external_subject": args.user,
         "base_url": args.url,
         "api_key": args.api_key,
+        "spool_dir": str(home / "teamEvolver-feed-spool"),
         "workspace_token": workspace_token
         or str(existing_feed.get("workspace_token") or ""),
     }
@@ -392,11 +416,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     os.chmod(feed_path, 0o600)
     print(f"[install] wrote feed.json (user={args.user}, url={args.url})")
+    if not feed["workspace_token"]:
+        HermesDeliverySpool(
+            Path(feed["spool_dir"]),
+            integration_id=integration_id,
+        ).enqueue(
+            kind="registration.ensure",
+            aggregate_id=integration_id,
+            sequence=1,
+            payload=_registration_payload(
+                integration_id=integration_id,
+                profile_id=profile_id,
+                rotate_token=args.rotate_workspace_token,
+            ),
+        )
     provider_status = _install_context_provider(
         src_dir.parent,
         home,
-        enable=bool(workspace_token or feed["workspace_token"])
-        and not args.no_context_provider,
+        enable=not args.no_context_provider,
     )
     print(f"[install] Context MemoryProvider: {provider_status}")
 

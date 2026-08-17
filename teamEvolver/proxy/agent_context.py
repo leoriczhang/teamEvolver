@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from ..integrations.agent_protocol import CONTEXT_RESULT_SCHEMA_V1
 from ..integrations.agent_registry import verify_agent_access_token
 from ..integrations.context_workspace import ContextStateStore, stable_hash
+from ..skills.frontmatter import parse_skill_md_text
 from .openviking_workspace import (
     _normalize_entries,
     _OpenVikingRequestError,
@@ -74,6 +75,42 @@ def _text(value: Any, limit: int) -> str:
     if isinstance(value, dict):
         value = value.get("content") or value.get("text") or ""
     return str(value or "")[: max(0, limit)]
+
+
+def _interleave_scope_entries(
+    scope_names: list[str],
+    results: list[list[dict[str, Any]]],
+) -> list[tuple[str, dict[str, Any]]]:
+    """Preserve per-scope ranking without letting one scope consume the budget."""
+    scoped = list(zip(scope_names, results))
+    depth = max((len(entries) for _name, entries in scoped), default=0)
+    return [
+        (scope_name, entries[index])
+        for index in range(depth)
+        for scope_name, entries in scoped
+        if index < len(entries)
+    ]
+
+
+def _skill_root_uri(scope_root: str, uri: str) -> str:
+    """Return the ``.../skills/<slug>`` root for a skill file hit, or ``""``.
+
+    OpenViking semantic search returns individual files inside a skill
+    (``SKILL.md``, ``versions/vN/SKILL.md``, ``.abstract.md`` …). A skill's
+    identity is its first path segment under the skills root, never the matched
+    file name — otherwise every skill collides on ``SKILL.md``.
+    """
+    prefix = scope_root.rstrip("/") + "/"
+    cleaned = str(uri or "").rstrip("/")
+    if not cleaned.startswith(prefix):
+        return ""
+    slug = cleaned[len(prefix):].split("/", 1)[0]
+    # Hidden metadata files living directly under the skills root
+    # (".overview.md", ".abstract.md" ...) are not skills.
+    if not slug or slug.startswith("."):
+        return ""
+    return f"{prefix}{slug}"
+
 
 
 class AgentContextMixin:
@@ -161,6 +198,51 @@ class AgentContextMixin:
                 return []
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
         return _search_entries(result)
+
+    async def _agent_skill_meta(
+        self,
+        user: dict[str, Any],
+        scope: Any,
+        *,
+        skill_root_uri: str,
+    ) -> dict[str, str]:
+        """Resolve a skill root's identity + recency for cross-scope dedup.
+
+        Returns ``{name, description, modified_at}``. ``name``/``description``
+        come from the root ``SKILL.md`` frontmatter (the skill's true identity,
+        not the matched file name); ``modified_at`` is the root directory's
+        ``modTime`` so duplicates can be resolved latest-wins. Falls back to the
+        root slug with an empty description/mtime when metadata is unavailable,
+        so a skill still resolves.
+        """
+        slug = skill_root_uri.rstrip("/").rsplit("/", 1)[-1]
+        name, description = slug, ""
+        try:
+            value = await self._agent_context_read_value(
+                user,
+                scope,
+                uri=f"{skill_root_uri.rstrip('/')}/SKILL.md",
+                level="full",
+            )
+        except HTTPException:
+            value = None
+        parsed = parse_skill_md_text(_text(value, _MAX_READ_CHARS)) if value else None
+        if parsed:
+            name, description = parsed["name"], parsed["description"]
+        modified_at = ""
+        try:
+            stat = await self._workspace_request(
+                user,
+                scope,
+                "GET",
+                "/api/v1/fs/stat",
+                params={"uri": skill_root_uri},
+            )
+        except _OpenVikingRequestError:
+            stat = None
+        if isinstance(stat, dict):
+            modified_at = str(stat.get("modTime") or stat.get("modified_at") or "")
+        return {"name": name, "description": description, "modified_at": modified_at}
 
     async def _agent_context_read_value(
         self,
@@ -431,75 +513,128 @@ class AgentContextMixin:
             session_id = str(body.get("context_session_id") or "")
             items: list[dict[str, Any]] = []
             used_chars = 0
-            effective_skills: dict[str, str] = {}
-            for scope_name, entries in zip(selected_names, results):
+            # Cross-scope skill dedup keyed on identity (name + description),
+            # not folder slug: personal and team copies of the same evolved
+            # skill must collapse to one selected entry, latest wins.
+            effective_skills: dict[tuple[str, str], dict[str, Any]] = {}
+            seen_scope_roots: set[tuple[str, str]] = set()
+            warnings: list[dict[str, str]] = []
+            for scope_name, entry in _interleave_scope_entries(
+                selected_names,
+                results,
+            ):
+                if len(items) >= max_items or used_chars >= max_chars:
+                    break
                 selected_scope = scopes[scope_name]
-                for entry in entries:
-                    if len(items) >= max_items or used_chars >= max_chars:
-                        break
-                    try:
-                        uri = _validate_uri(
-                            selected_scope,
-                            entry.get("uri") or entry.get("path"),
-                            allow_root=False,
-                        )
-                    except HTTPException:
+                try:
+                    uri = _validate_uri(
+                        selected_scope,
+                        entry.get("uri") or entry.get("path"),
+                        allow_root=False,
+                    )
+                except HTTPException:
+                    continue
+                kind = selected_scope.kind.rstrip("s")
+                skill_meta: dict[str, str] | None = None
+                if kind == "skill":
+                    root_uri = _skill_root_uri(selected_scope.root_uri, uri)
+                    if not root_uri:
                         continue
+                    uri = root_uri
+                    # Collapse the several file hits (SKILL.md, versions/…) that
+                    # a single skill emits into one entry per scope root.
+                    scope_key = (scope_name, uri)
+                    if scope_key in seen_scope_roots:
+                        continue
+                    seen_scope_roots.add(scope_key)
+                    skill_meta = await owner._agent_skill_meta(
+                        user,
+                        selected_scope,
+                        skill_root_uri=uri,
+                    )
+                    name = skill_meta["name"]
+                else:
                     name = str(
                         entry.get("name")
                         or entry.get("title")
                         or uri.rsplit("/", 1)[-1]
                     )
-                    l0 = _text(
-                        entry.get("abstract")
-                        or entry.get("summary")
-                        or entry.get("content"),
-                        min(1_000, max_chars - used_chars),
-                    )
-                    used_chars += len(l0)
-                    kind = selected_scope.kind.rstrip("s")
-                    context_ref, receipt = state.issue_ref(
-                        agent_id=str(record.get("agent_id") or ""),
-                        user_id=str(user.get("id") or ""),
-                        session_id=session_id,
-                        scope=scope_name,
-                        uri=uri,
-                        kind=kind,
-                        version=str(entry.get("version") or entry.get("sha256") or ""),
-                    )
-                    item = {
-                        "scope": scope_name,
-                        "kind": kind,
-                        "context_ref": context_ref,
-                        "receipt": receipt,
-                        "title": name,
-                        "path_alias": f"{scope_name}:{stable_hash(uri)[:12]}",
-                        "l0": l0,
-                        "l1": _text(entry.get("overview"), 4_000),
-                        "version": str(entry.get("version") or ""),
-                        "content_hash": str(
-                            entry.get("sha256")
-                            or entry.get("hash")
-                            or stable_hash(l0)
-                        ),
-                        "provenance": {
-                            "integration_id": record.get("agent_id"),
-                            "space": selected_scope.space,
-                        },
-                        "selected": True,
-                    }
-                    if kind == "skill":
-                        qualified = (
-                            "personal" if scope_name == "personal_skills" else "team"
-                        ) + f":{name}"
-                        item["qualified_skill_id"] = qualified
-                        previous = effective_skills.get(name)
-                        if previous and scope_name == "team_skills":
-                            item["selected"] = False
-                            item["shadowed_by"] = previous
-                        elif scope_name == "personal_skills":
-                            effective_skills[name] = qualified
-                    items.append(item)
+                l0 = _text(
+                    entry.get("abstract")
+                    or entry.get("summary")
+                    or entry.get("content"),
+                    min(1_000, max_chars - used_chars),
+                )
+                used_chars += len(l0)
+                context_ref, receipt = state.issue_ref(
+                    agent_id=str(record.get("agent_id") or ""),
+                    user_id=str(user.get("id") or ""),
+                    session_id=session_id,
+                    scope=scope_name,
+                    uri=uri,
+                    kind=kind,
+                    version=str(entry.get("version") or entry.get("sha256") or ""),
+                )
+                item = {
+                    "scope": scope_name,
+                    "kind": kind,
+                    "context_ref": context_ref,
+                    "receipt": receipt,
+                    "title": name,
+                    "path_alias": f"{scope_name}:{stable_hash(uri)[:12]}",
+                    "l0": l0,
+                    "l1": _text(entry.get("overview"), 4_000),
+                    "version": str(entry.get("version") or ""),
+                    "content_hash": str(
+                        entry.get("sha256")
+                        or entry.get("hash")
+                        or stable_hash(l0)
+                    ),
+                    "provenance": {
+                        "integration_id": record.get("agent_id"),
+                        "space": selected_scope.space,
+                    },
+                    "selected": True,
+                }
+                if kind == "skill" and skill_meta is not None:
+                    qualified = (
+                        "personal" if scope_name == "personal_skills" else "team"
+                    ) + f":{name}"
+                    item["qualified_skill_id"] = qualified
+                    item["modified_at"] = skill_meta["modified_at"]
+                    # Identity is name + description. A team copy that only
+                    # differs by folder slug still collides here.
+                    identity = (name, skill_meta["description"])
+                    previous = effective_skills.get(identity)
+                    if previous is None:
+                        effective_skills[identity] = item
+                    else:
+                        # Latest wins; a modTime tie favours the caller's own
+                        # personal copy so behaviour is deterministic.
+                        item_mtime = str(item["modified_at"])
+                        prev_mtime = str(previous.get("modified_at") or "")
+                        if item_mtime == prev_mtime:
+                            newer = scope_name == "personal_skills"
+                        else:
+                            newer = item_mtime > prev_mtime
+                        loser, winner = (
+                            (previous, item) if newer else (item, previous)
+                        )
+                        loser["selected"] = False
+                        loser["shadowed_by"] = winner["qualified_skill_id"]
+                        winner["selected"] = True
+                        winner.pop("shadowed_by", None)
+                        if newer:
+                            effective_skills[identity] = item
+                        warnings.append(
+                            {
+                                "code": "DUPLICATE_SKILL",
+                                "skill_name": name,
+                                "selected": winner["qualified_skill_id"],
+                                "shadowed": loser["qualified_skill_id"],
+                            }
+                        )
+                items.append(item)
             snapshot_id = "ctxsnap_" + stable_hash(
                 {
                     "agent": record.get("agent_id"),
@@ -538,6 +673,7 @@ class AgentContextMixin:
                         {"context_ref": item["context_ref"], **item["receipt"]}
                         for item in items
                     ],
+                    "warnings": warnings,
                     "budget": {
                         "max_items": max_items,
                         "max_chars": max_chars,

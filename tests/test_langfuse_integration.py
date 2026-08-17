@@ -407,6 +407,7 @@ def test_config_store_maps_langfuse_tracing_settings(tmp_path) -> None:
     assert config.langfuse_tracing_release == "abc123"
     assert config.langfuse_tracing_sample_rate == 0.25
     assert config.langfuse_tracing_capture_content is False
+    assert (tmp_path / "config.yaml").stat().st_mode & 0o777 == 0o600
 
 
 def test_langfuse_tracing_runtime_redacts_content() -> None:

@@ -13,6 +13,14 @@ from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
 
+try:
+    from teamEvolver.integrations.hermes_delivery import HermesDeliverySpool
+except ImportError:
+    try:
+        from .hermes_delivery import HermesDeliverySpool
+    except ImportError:
+        from hermes_delivery import HermesDeliverySpool
+
 
 def _hermes_home() -> Path:
     configured = str(os.environ.get("HERMES_HOME") or "").strip()
@@ -120,6 +128,73 @@ class TeamEvolverMemoryProvider(MemoryProvider):
             ),
         }
 
+    def _delivery_spool(self) -> HermesDeliverySpool:
+        configured = str(self._config.get("spool_dir") or "").strip()
+        return HermesDeliverySpool(
+            (
+                Path(configured).expanduser()
+                if configured
+                else _hermes_home() / "teamEvolver-feed-spool"
+            ),
+            integration_id=str(
+                self._config.get("integration_id") or "hermes:local"
+            ),
+        )
+
+    def _delivery_sender(self, delivery: dict[str, Any]) -> dict[str, Any]:
+        paths = {
+            "context.start": "/internal/agents/context/sessions/start",
+            "context.append": "/internal/agents/context/sessions/append",
+            "context.commit": "/internal/agents/context/sessions/commit",
+        }
+        kind = str(delivery.get("kind") or "")
+        if kind not in paths:
+            raise ValueError(f"unsupported Context delivery kind: {kind}")
+        return self._request(
+            "POST",
+            paths[kind],
+            body=dict(delivery.get("payload") or {}),
+            timeout=30.0 if kind == "context.commit" else 15.0,
+        )
+
+    def _durable_context_request(
+        self,
+        *,
+        kind: str,
+        aggregate_id: str,
+        sequence: int,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not str(self._config.get("integration_id") or ""):
+            paths = {
+                "context.start": "/internal/agents/context/sessions/start",
+                "context.append": "/internal/agents/context/sessions/append",
+                "context.commit": "/internal/agents/context/sessions/commit",
+            }
+            return self._request(
+                "POST",
+                paths[kind],
+                body=body,
+                timeout=30.0 if kind == "context.commit" else 15.0,
+            )
+        spool = self._delivery_spool()
+        delivery = spool.enqueue(
+            kind=kind,
+            aggregate_id=aggregate_id,
+            sequence=sequence,
+            payload=body,
+        )
+        result = spool.deliver(
+            str(delivery["delivery_id"]),
+            self._delivery_sender,
+            force=True,
+        )
+        if result.get("status") != "acked":
+            raise RuntimeError(
+                str(result.get("last_error") or "Context delivery is pending")
+            )
+        return dict(result.get("ack") or {})
+
     def _start_session(self, session_id: str) -> None:
         self._session_id = session_id
         self._context_session_id = ""
@@ -129,9 +204,10 @@ class TeamEvolverMemoryProvider(MemoryProvider):
         if not session_id or not self.is_available():
             return
         try:
-            result = self._request(
-                "POST",
-                "/internal/agents/context/sessions/start",
+            result = self._durable_context_request(
+                kind="context.start",
+                aggregate_id=session_id,
+                sequence=1,
                 body={
                     **self._identity(),
                     "external_session_id": session_id,
@@ -242,6 +318,7 @@ class TeamEvolverMemoryProvider(MemoryProvider):
             return
 
         def sync() -> None:
+            deliveries: list[dict[str, Any]] = []
             for role, content in (
                 ("user", user_content),
                 ("assistant", assistant_content),
@@ -251,11 +328,12 @@ class TeamEvolverMemoryProvider(MemoryProvider):
                 with self._lock:
                     self._sequence += 1
                     sequence = self._sequence
-                try:
-                    self._request(
-                        "POST",
-                        "/internal/agents/context/sessions/append",
-                        body={
+                deliveries.append(
+                    self._delivery_spool().enqueue(
+                        kind="context.append",
+                        aggregate_id=self._context_session_id,
+                        sequence=sequence,
+                        payload={
                             "context_session_id": self._context_session_id,
                             "event_id": (
                                 f"{self._session_id}:{sequence}:{role}"
@@ -265,8 +343,12 @@ class TeamEvolverMemoryProvider(MemoryProvider):
                             "content": str(content),
                         },
                     )
-                except Exception:
-                    return
+                )
+            if deliveries:
+                self._delivery_spool().flush(
+                    self._delivery_sender,
+                    limit=max(20, len(deliveries)),
+                )
 
         if self._sync_thread and self._sync_thread.is_alive():
             self._sync_thread.join(timeout=2.0)
@@ -280,14 +362,14 @@ class TeamEvolverMemoryProvider(MemoryProvider):
         if not self._context_session_id:
             return
         try:
-            self._request(
-                "POST",
-                "/internal/agents/context/sessions/commit",
+            self._durable_context_request(
+                kind="context.commit",
+                aggregate_id=self._context_session_id,
+                sequence=9_000,
                 body={
                     "context_session_id": self._context_session_id,
                     "used_context_refs": sorted(self._used_context_refs),
                 },
-                timeout=30.0,
             )
             with self._lock:
                 self._used_context_refs.clear()

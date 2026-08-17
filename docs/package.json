@@ -1,0 +1,15 @@
+{
+  "name": "teamevolver-docs",
+  "version": "0.1.0",
+  "private": true,
+  "description": "teamEvolver documentation site",
+  "scripts": {
+    "dev": "vitepress dev",
+    "build": "vitepress build",
+    "preview": "vitepress preview",
+    "check:refs": "node scripts/check-docs-refs.mjs"
+  },
+  "devDependencies": {
+    "vitepress": "^1.5.0"
+  }
+}

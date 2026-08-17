@@ -18,6 +18,10 @@ from teamEvolver.integrations.dreamcycle import (
 )
 from teamEvolver.integrations.dreamcycle_runtime import FullDreamCycleSupervisor
 from teamEvolver.proxy import ProxyServer
+from teamEvolver.proxy.users_admin import (
+    _save_registry,
+    resolve_agent_subject_user_id,
+)
 
 
 def _key(account: str, user: str) -> str:
@@ -341,6 +345,77 @@ def test_generic_agent_registration_cannot_override_local_storage(
     agents = json.loads((tmp_path / "agents.json").read_text())["agents"]
     assert agents[0]["agent_id"] == "agentshub:tenant-a"
     assert agents[0]["capabilities"] == ["session_ingest", "true_replay"]
+
+
+def test_v1_registration_syncs_existing_subject_mappings(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("TEAMEVOLVER_EMBEDDED_EVOLVE_ENABLED", "0")
+    monkeypatch.setenv("EVOLVE_INGEST_API_KEY", "control-plane-secret")
+    config_file = tmp_path / "config.yaml"
+    store = ConfigStore(config_file)
+    data = store.load()
+    data["sharing"]["viking_deployment"] = "local"
+    store.save(data)
+    users_path = tmp_path / "users.json"
+    _save_registry(
+        users_path,
+        {
+            "users": [
+                {
+                    "id": "alice",
+                    "agent_subjects": [],
+                }
+            ]
+        },
+    )
+    config = replace(
+        store.to_config(),
+        users_registry_path=str(users_path),
+    )
+    server = ProxyServer(config)
+
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/internal/agents/register",
+            headers={"Authorization": "Bearer control-plane-secret"},
+            json={
+                "schema_version": "teamevolver.agent-registration.v1",
+                "protocol_version": "1.0",
+                "agent_id": "agentshub:tenant-a",
+                "runtime_type": "agentshub",
+                "capabilities": {
+                    "session.ingest.v1": {},
+                    "context.workspace.v1": {},
+                },
+                "subject_mappings_authoritative": True,
+                "subject_mappings": [
+                    {
+                        "external_subject": "agents-alice",
+                        "team_evolver_user_id": "alice",
+                    },
+                    {
+                        "external_subject": "agents-bob",
+                        "team_evolver_user_id": "bob",
+                    },
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["subject_sync"]["mapped_count"] == 1
+    assert response.json()["subject_sync"]["missing_user_ids"] == ["bob"]
+    assert (
+        resolve_agent_subject_user_id(
+            config,
+            integration_id="agentshub:tenant-a",
+            runtime_type="agentshub",
+            external_subject="agents-alice",
+            allow_legacy_runtime_mapping=False,
+        )
+        == "alice"
+    )
 
 
 @pytest.mark.anyio

@@ -603,6 +603,43 @@ class EvolveServer(EvolveEngineMixin):
         )
         return prepared
 
+    def _record_committed_skill_mutation(
+        self,
+        *,
+        action: str,
+        expected: dict[str, Any],
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        from ...skills.hub import SkillHub
+        from ...skills.mutations import SkillMutationService
+
+        mutation_id = "evolve-" + hashlib.sha256(
+            json.dumps(
+                {
+                    "action": action,
+                    "name": expected.get("name"),
+                    "version": expected.get("version"),
+                    "sha256": expected.get("sha256"),
+                    "tree_sha256": expected.get("tree_sha256"),
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()[:32]
+        service = SkillMutationService.from_hub(
+            SkillHub.from_bucket(
+                self._skill_bucket,
+                user_alias="teamEvolver",
+            ),
+            config=self.config,
+        )
+        return service.record_committed(
+            action=action,
+            mutation_id=mutation_id,
+            expected=expected,
+            tenant_ids=[],
+            metadata=metadata,
+        )
+
     def _upload_skill(self, skill: dict, action: str) -> str:
         name = skill.get("name", "")
         if not name:
@@ -632,6 +669,7 @@ class EvolveServer(EvolveEngineMixin):
             )
         else:
             manifest = self._load_remote_skills()
+        existed = name in manifest
 
         skill_id = self._id_registry.get_or_create(name)
         bundle = candidate_skill_bundle(skill)
@@ -702,6 +740,14 @@ class EvolveServer(EvolveEngineMixin):
             skill_id,
             version,
             f"{self._skill_prefix}skills/{name}/",
+        )
+        self._record_committed_skill_mutation(
+            action="update" if existed else "publish",
+            expected=manifest[name],
+            metadata={
+                "source": "evolve",
+                "proposed_action": action,
+            },
         )
         return "uploaded"
 
@@ -837,6 +883,15 @@ class EvolveServer(EvolveEngineMixin):
             from_version,
             target_version,
             new_version,
+        )
+        self._record_committed_skill_mutation(
+            action="rollback",
+            expected=manifest[name],
+            metadata={
+                "source": "evolve",
+                "rolled_back_to": target_version,
+                "from_version": from_version,
+            },
         )
         return {
             "status": "rolled_back",

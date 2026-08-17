@@ -2,493 +2,235 @@
 
 <div align="center">
 
-## A Skill Library, Sync Console, DreamCycle, and Validation Workbench for Agent Teams
+### The Capability Evolution Control Plane for Agent Teams
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-Service-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![React](https://img.shields.io/badge/Console-React%20%2B%20TypeScript-61DAFB.svg?logo=react&logoColor=111)](https://react.dev/)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![中文](https://img.shields.io/badge/README-中文-111827.svg)](./README.md)
+[![FastAPI](https://img.shields.io/badge/FastAPI-Control%20Plane-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![React](https://img.shields.io/badge/Console-React%20%2B%20TypeScript-149ECA.svg?logo=react&logoColor=white)](https://react.dev/)
+[![OpenViking](https://img.shields.io/badge/Context-OpenViking-0F766E.svg)](https://github.com/volcengine/OpenViking)
+[![License](https://img.shields.io/badge/License-MIT-18181B.svg)](./LICENSE)
+[![中文](https://img.shields.io/badge/README-中文-2563EB.svg)](./README.md)
 
-**Turn real agent experience into reusable, synced, validated `SKILL.md` assets for your team.**
+**Turn real Agent Sessions into reusable, validated, and governed team Skills and team Memory.**
 
 </div>
 
 ---
 
-## Table of Contents
+## Product
 
-- [Why teamEvolver?](#why-teamevolver)
-- [Design Principles](#design-principles)
-- [Core Capabilities](#core-capabilities)
-- [Architecture](#architecture)
-- [Manual Installation](#manual-installation)
-- [Console Map](#console-map)
-- [OpenViking / Object Storage](#openviking--object-storage)
-- [Langfuse Sessions and Observability](#langfuse-sessions-and-observability)
-- [DreamCycle and Validation Queue](#dreamcycle-and-validation-queue)
-- [True Replay: Validate Skills with Real Trajectories](#true-replay-validate-skills-with-real-trajectories)
-- [Project Layout](#project-layout)
-- [Development](#development)
-- [Roadmap](#roadmap)
+teamEvolver runs outside the Agent runtime and owns continuous capability evolution and governance. It receives real Sessions and domain material, extracts traceable Evidence, proposes Skill Candidates or Memory Changes, and closes the loop through static checks, True Replay, human gates, versioned publication, and controlled distribution.
 
----
+It is neither another Agent runtime nor a file synchronization script:
 
-## Why teamEvolver?
+- Agents keep their own models, tools, workspaces, and execution loops.
+- teamEvolver owns Evidence, evolution, validation, versions, audit, and release.
+- OpenViking stores team Skills, Memory, Sessions, and replay snapshots.
+- Langfuse can independently provide Session ingestion and evolution observability.
 
-Agents can already complete complex tasks, but team skills often remain a loose set of files on one machine:
+## Evolution Loop
 
-- **Hard to share**: the same experience gets copied across members, machines, and agents.
-- **Hard to separate**: personal preferences, customer facts, and team SOPs can mix, creating privacy and contamination risk.
-- **Hard to version**: skill origin, publisher, version state, and live team content are difficult to keep aligned.
-- **Hard to trust**: a skill may look polished, but there is little evidence that it improves task outcomes.
+```mermaid
+flowchart LR
+    A["Real Sessions / Domain Material"] --> B["Evidence Classification"]
+    B --> C["Skill Candidate"]
+    B --> D["Memory Change"]
+    C --> E["Test Dataset"]
+    E --> F["True Replay<br/>Baseline vs Candidate"]
+    F --> G["Candidate Review"]
+    G --> H["Versioned Release"]
+    H --> I["Agent Skill Sync"]
+    D --> J["DreamCycle"]
+    J --> K["Memory True Replay"]
+    K --> L["Team Memory"]
+```
 
-**teamEvolver is not about making agents remember more; it is a safe pipeline from real sessions to team capability.**
-It turns scattered sessions into comparable evidence, separates personal and team assets, and publishes team skills through replay validation and version governance.
-
----
-
-## Design Principles
-
-- **Central evidence**: retain sessions, tool calls, success strategies, and failure reasons so cross-user patterns become visible.
-- **Layered assets**: decide whether knowledge is shareable before deciding whether it should become `skill` or `memory`; personal assets stay isolated, team assets are published deliberately.
-- **Validated release**: team `SKILL.md` assets pass aggregation, redaction, deduplication, replay validation, versioning, and rollback gates.
-- **Evidence-first evolution**: new candidates carry recent evidence, historical evidence, and replay cases, so decisions do not depend on one success or one failure.
-
-Hermes and other agents keep their native runtime model. teamEvolver delivers team skills through synced directories and hooks, so the agent's native skill system remains in control.
-
----
+A Checklist is a completion gate, not a weighted score. Once the gate passes, True Replay compares efficiency by interaction turns, tool calls, and total tokens, in that order.
 
 ## Core Capabilities
 
-<table>
-  <tr>
-    <td width="25%" valign="top">
-      <h3>Skill Library</h3>
-      <p>Read, create, edit, delete, package, and import standard <code>SKILL.md</code> bundles while preserving frontmatter and attachments.</p>
-    </td>
-    <td width="25%" valign="top">
-      <h3>Team Sync</h3>
-      <p>Backed by OpenViking object storage with two deployments — cloud (Volcengine-hosted) and local self-hosted — with personal keys as evidence sources and the team key as the publication target.</p>
-    </td>
-    <td width="25%" valign="top">
-      <h3>Web Console</h3>
-      <p>A built-in React + TypeScript console for skills, users, candidate review, health checks, and model settings.</p>
-    </td>
-    <td width="25%" valign="top">
-      <h3>True Replay</h3>
-      <p>Run baseline and candidate branches in isolated sandboxes and validate skill changes with real tool trajectories.</p>
-    </td>
-  </tr>
-</table>
+| Module | Current capability |
+| --- | --- |
+| Sessions and Evidence | V1 Session ingest, Langfuse pull, value classification, recent/historical Evidence windows, filter audit |
+| Skill Evolution | Summarize, judge, group, improve/create/merge, and same-source Test Dataset synthesis |
+| True Replay | Run Baseline and Candidate in the real Agent Runtime; inspect Checklist completion, traces, artifacts, and efficiency |
+| Candidate Governance | Review, replay-gated or forced publish, version detail, full Bundle diff, rollback, and audit |
+| Memory Evolution | DreamCycle team overview, deduplication, cleanup, onboarding discoverability, consolidation, and Memory Replay |
+| Skill Workspace | Create, edit, import, version, and test `SKILL.md` plus multi-file Bundles |
+| Context Workspace | Resolve and read personal/team Memory and Skills with levelled content, receipts, and usage attribution |
+| SkillMiner | Compile domain documents into Skills, semantic reports, `EVALUATION.md`, and internal Benchmarks |
+| Agent Protocol V1 | Registration, identity mapping, Context, Session ingest, Replay Branch, and Skill Sync |
+| Observability | Langfuse Session import plus model, tool, Skill Evolution, and DreamCycle tracing |
 
-The default configuration is now shaped for the full loop: skill sync, OpenViking team storage, session filtering, evidence windows, DreamCycle, validation queues, and candidate review can all be connected directly.
+Every team Skill mutation goes through `SkillMutationService`, which owns commit records, tombstones, a durable outbox, and per-Agent delivery state.
 
----
+## Console
+
+### Operations Overview
+
+The complete Session queue and history, pending candidates, replay decisions, and Skill versions.
+
+<a href="./docs/assets/teamEvolver-console-dashboard.png">
+  <img src="./docs/assets/teamEvolver-console-dashboard.png" alt="Complete teamEvolver operations overview" width="100%">
+</a>
+
+### White-box Evolution Pipeline
+
+The complete Skill Evolution pipeline, eight editable prompts, model and process settings, and real input/output testing.
+
+<a href="./docs/assets/teamEvolver-evolution-pipeline.png">
+  <img src="./docs/assets/teamEvolver-evolution-pipeline.png" alt="Complete teamEvolver evolution pipeline" width="100%">
+</a>
 
 ## Architecture
 
 ```mermaid
-flowchart LR
-    subgraph Team["teamEvolver Team Service"]
-        Console["Web Console"]
-        API["FastAPI Service"]
-        Registry["Skill Registry"]
-        Evidence["Evidence Windows"]
-        Validation["Validation Queue"]
-        DreamCycle["Native Memory Evolution"]
+flowchart TB
+    subgraph Sources["Evidence Sources"]
+        AgentsHub["AgentsHub / Pi"]
+        Hermes["Hermes"]
+        Generic["Agent Protocol V1"]
+        LFIn["Langfuse Sessions"]
+        Docs["Domain Documents"]
     end
 
-    subgraph Storage["Shared Storage"]
-        Local["Local Object Store"]
-        Viking["OpenViking-compatible Store"]
+    subgraph Control["teamEvolver Control Plane :52010"]
+        Console["React Console"]
+        API["FastAPI"]
+        Evolution["Skill Evolution"]
+        Replay["Validation Worker / True Replay"]
+        Memory["DreamCycle"]
+        Mutation["SkillMutationService / Outbox"]
     end
 
-    subgraph Agent["Agent Machines"]
-        Sync["teamEvolver-sync Hook"]
-        Feed["teamEvolver-feed Hook"]
-        Dir["Synced SKILL.md Directory"]
-        Hermes["Hermes Native Skills"]
+    subgraph Context["OpenViking"]
+        Sessions["Sessions / Evidence"]
+        Skills["Team Skills / Versions"]
+        Memories["Personal + Team Memory"]
+        Snapshots["Replay Snapshots"]
     end
 
+    Sources --> API
     Console --> API
-    API --> Registry
-    API --> Evidence
-    API --> Validation
-    API --> DreamCycle
-    API <--> Local
-    API <--> Viking
-    DreamCycle --> Viking
-    Validation <--> Viking
-    Sync --> Viking
-    Sync --> Dir
-    Dir --> Hermes
-    Hermes --> Feed
-    Feed --> API
+    API --> Evolution
+    API --> Replay
+    API --> Memory
+    Evolution --> Mutation
+    Mutation <--> Skills
+    API <--> Sessions
+    API <--> Memories
+    Replay <--> Snapshots
+    Mutation --> AgentsHub
+    Mutation --> Hermes
+    Mutation --> Generic
 ```
 
-The recommended path is shared storage, local sync, and native agent loading. Commands such as `skills_list`, `skill_view`, and `/skills` continue to come from the agent itself; teamEvolver only makes sure the team skill library reaches the machine reliably.
+The console, evolution engine, validation queue, DreamCycle, SkillMiner, and Agent integrations share one FastAPI service and one configuration source.
 
----
+## Quick Start
 
-## Manual Installation
-
-If external network access fails, run:
+Requires Python 3.10+. The full install provisions Hermes inside the project virtual environment for document mining and True Replay.
 
 ```bash
-export http_proxy="http://sys-proxy-rd-relay.byted.org:8118"
-export https_proxy="http://sys-proxy-rd-relay.byted.org:8118"
-export no_proxy="localhost,.byted.org,byted.org,.bytedance.net,bytedance.net,127.0.0.0/8,169.254.0.0/16,100.64.0.0/10,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8,::1,fe80::/10,fd00::/8,33.0.0.0/8,2605:340:CD00::/40,64:ff9b::/96,64:ff9b:1::/48"
-```
-
-### Server: Deploy teamEvolver
-
-```bash
-export TEAMEVOLVER_HOST="<server-ip-or-hostname>"
-
 git clone https://github.com/leoriczhang/teamEvolver.git
 cd teamEvolver
-python -m venv .venv
+
+python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
 python -m pip install -e ".[all]"
-npm --prefix web-ui install
-npm --prefix web-ui run build
 
-teamEvolver config service.host 0.0.0.0
 teamEvolver config service.port 52010
-teamEvolver config skills.enabled true
-teamEvolver config skills.dir ./skills
-teamEvolver config sharing.enabled true
-teamEvolver config sharing.backend viking
-teamEvolver config sharing.viking_team_api_key "<team-key>"
-teamEvolver config sharing.viking_personal_api_key "<personal-key>"
-teamEvolver config sharing.viking_root_prefix "team-skill-evolver"
-teamEvolver config evolve.evidence_enabled true
-teamEvolver config evolve.evidence_recent_limit 12
-teamEvolver config evolve.evidence_historical_limit 12
-teamEvolver config evolve.evidence_change_debt_threshold 3
-# DreamCycle is native to teamEvolver and disabled by default; no external package is required
-# to maintain long-term team memory. Once enabled, it reads personal-key sources and
-# writes to the team-key space above.
-# Additional AgentsHub peers merge their personal keys through the internal config API.
-teamEvolver config dreamcycle.enabled true
-teamEvolver config dreamcycle.auto_start true
-teamEvolver config validation.enabled true
-teamEvolver config validation.mode replay
-teamEvolver config validation.required_results 3
-teamEvolver config validation.required_approvals 2
-teamEvolver config validation.agentshub_url "http://<agentshub-host>:5173"
-
-mkdir -p skills
-teamEvolver start --daemon --port 52010
+teamEvolver start --daemon
 teamEvolver status
-curl -fsS "http://127.0.0.1:52010/health"
-curl -fsS "http://127.0.0.1:52010/status"
-curl -fsS "http://127.0.0.1:52010/trigger-dreamcycle/status"
 ```
 
-```text
-http://<server-ip-or-hostname>:52010/console
-```
+Open `http://127.0.0.1:52010/`. Create the initial administrator, then configure:
 
-On first launch, initialize the admin account. The default username and password are both `admin`; change them after deployment.
+1. **Global Model**: OpenAI-compatible Base URL, model, and API key.
+2. **OpenViking**: local or cloud deployment with personal and team spaces.
+3. **Agent Integration**: register runtimes, map external subjects, and enable Session, Context, Replay, and Skill Sync.
+4. **Langfuse**: optionally enable Session pull or tracing; they are independent.
 
-### Client: Deploy Hermes
+Common commands:
 
 ```bash
-export TEAMEVOLVER_REPO="/path/to/teamEvolver"
-export HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-export TEAMEVOLVER_URL="http://<server-ip-or-hostname>:52010"
-export TEAMEVOLVER_USER="<unique-user-alias-for-this-machine>"
-export TEAMEVOLVER_API_KEY=""
-TEAMEVOLVER_AUTH_ARGS=()
-[ -n "$TEAMEVOLVER_API_KEY" ] && TEAMEVOLVER_AUTH_ARGS=(--api-key "$TEAMEVOLVER_API_KEY")
-
-python "$TEAMEVOLVER_REPO/teamEvolver/integrations/hermes_skill_sync/install.py" \
-  --hermes-home "$HERMES_HOME" \
-  --python python3 \
-  --backend service \
-  --url "$TEAMEVOLVER_URL" \
-  --user "$TEAMEVOLVER_USER" \
-  "${TEAMEVOLVER_AUTH_ARGS[@]}"
-
-python "$TEAMEVOLVER_REPO/teamEvolver/integrations/hermes_skill/install.py" \
-  --hermes-home "$HERMES_HOME" \
-  --python python3 \
-  --user "$TEAMEVOLVER_USER" \
-  --url "$TEAMEVOLVER_URL" \
-  "${TEAMEVOLVER_AUTH_ARGS[@]}"
-
-python "$HERMES_HOME/skills/teamEvolver-sync/sync_skills.py"
-hermes hooks list
-curl -fsS "$TEAMEVOLVER_URL/status"
-```
-
-If Hermes is already running, execute this in the Hermes session:
-
-```text
-/reload-skills
-```
-
-Full coding agent integration instructions live in [docs/coding-agent.en.md](./docs/coding-agent.en.md).
-
----
-
-## Console Map
-
-<div align="center">
-  <img src="docs/assets/teamEvolver-console-dashboard.png" width="900" alt="teamEvolver console evolution dashboard screenshot">
-  <br>
-  <sub>teamEvolver Console: evolution dashboard, team skill status, storage connectivity, and management entry points.</sub>
-</div>
-
-```mermaid
-flowchart TB
-    Home["Evolution Dashboard"]
-    Candidates["Candidate Review"]
-    Audit["Evolution Audit"]
-    Filter["Filter Audit"]
-    Health["System Health"]
-    Skills["Skill Management"]
-    Users["User Management"]
-    Model["Model Settings"]
-
-    Home --> Candidates
-    Home --> Audit
-    Home --> Filter
-    Home --> Health
-    Skills --> Users
-    Candidates --> Model
-```
-
-The console includes:
-
-- **Evolution Dashboard**: storage connectivity, skill count, candidate queue, and service status.
-- **Candidate Review**: inspect candidate skills before publication, with optional True Replay validation.
-- **Evolution Audit**: review skill-evolution records.
-- **Filter Audit**: review valuable / chitchat decisions, mode, confidence, and reasons before sessions enter evolution.
-- **System Health**: check service, storage, and key API availability.
-- **Skill Management**: manage personal and team skills, including zip upload.
-- **Memory Management**: manage personal and shared team memory files through OpenViking.
-- **OpenViking Workspace**: browse personal, team, and Skill context trees and open the full Studio.
-- **User Management**: manage the team display name, users, roles, and personal/team storage credentials.
-- **Model Settings**: configure an optional validation model and test connectivity.
-
-Administrators can edit the team display name under **Users & Permissions →
-Team Identity**, or set it through the CLI:
-
-```bash
-teamEvolver config team.display_name "My Team"
-```
-
-Deployments may override the persisted value with `EVOLVE_TEAM_DISPLAY_NAME`.
-DreamCycle uses the effective name in team overviews, prompts, and Memory
-sanitization.
-
----
-
-## OpenViking / Object Storage
-
-Remote sync uses teamEvolver's object-store abstraction. The default endpoint uses VolcEngine-hosted OpenViking:
-
-```bash
-teamEvolver config sharing.enabled true
-teamEvolver config sharing.backend viking
-teamEvolver config sharing.viking_team_api_key "<team-key>"
-teamEvolver config sharing.viking_personal_api_key "<personal-key>"
-teamEvolver config sharing.viking_root_prefix "team-skill-evolver"
-```
-
-OpenViking space roles:
-
-- `sharing.viking_personal_api_key`: the current machine or user's personal evidence source.
-- `sharing.viking_team_api_key`: the shared target for team skills, validation jobs, validation results, and DreamCycle output.
-- `sharing.viking_root_prefix`: the cross-agent namespace, defaulting to `team-skill-evolver`.
-
-Agents register their runtime type, capabilities, replay endpoint, and Skill-sync endpoint through `/internal/agents/register`. The legacy `/internal/agentshub/openviking-config` route remains as an AgentsHub compatibility adapter. In local deployment mode, teamEvolver owns the OpenViking connection and external Agents cannot replace its endpoint or credentials.
-
-For the local open-source deployment, use the checked-out OpenViking source and its bundled Web Studio:
-
-```bash
-bash scripts/start_local_openviking.sh
-teamEvolver config sharing.viking_deployment local
-teamEvolver config sharing.viking_endpoint ""
-teamEvolver start
-```
-
-The script defaults to `~/OpenViking` and `~/.openviking/ov.conf`, builds Web Studio when needed, and serves it at `http://127.0.0.1:1933/studio/`. Override the runtime with `OPENVIKING_PYTHON`, `OPENVIKING_REPO`, or `OPENVIKING_CONFIG`.
-
-When local `ov.conf` sets `server.root_api_key`, configure that local key in the teamEvolver administrator's personal and team OpenViking spaces. A cloud key cannot authenticate to the local server.
-
-The teamEvolver console proxies OpenViking's native filesystem and content APIs. Personal and team memory use explicit user namespaces under `viking://user/<user>/memories`; the existing Skill registry remains under `viking://resources/team-skill-evolver/`. Credentials are injected server-side and every request is confined to its selected root.
-
-Any Agent runtime can integrate by posting a stable `agent_id`, `runtime_type`, capabilities, and non-secret health/replay/Skill-sync endpoints to `/internal/agents/register`. Sessions continue to enter through `/ingest_session` and identify their runtime through `runtime.type` and `runtime.integration_id`; True Replay resolves the registered endpoint dynamically.
-
-Do not commit real API keys. Use local configuration, environment variables, or your deployment platform's secret manager.
-
----
-
-## Langfuse Sessions and Observability
-
-Langfuse can import sessions and observe Skill evolution, team Memory,
-model generations, embeddings, and tool calls.
-
-```bash
-teamEvolver config langfuse.host "http://127.0.0.1:3000"
-teamEvolver config langfuse.public_key "pk-lf-..."
-teamEvolver config langfuse.secret_key "sk-lf-..."
-teamEvolver config langfuse.tracing_enabled true
-```
-
-`langfuse.enabled` controls session imports; `langfuse.tracing_enabled` controls
-trace export. Set `langfuse.tracing_capture_content` to `false` to redact model
-and tool content. Tracing failures never stop evolution or Memory maintenance.
-
----
-
-## DreamCycle and Validation Queue
-
-DreamCycle maintains long-term team experience. The validation queue evaluates candidate skills through real or simulated replay. Both reuse the same OpenViking object-store boundary:
-
-> DreamCycle is now embedded in teamEvolver with its complete capability set: five maintenance jobs, multi-turn ReAct tool use, OpenViking read/write/archive operations, policy audits, reports, overnight multi-round scheduling, and persisted execution history. No external package is required.
-
-```bash
-teamEvolver config dreamcycle.enabled true       # turn on the optional maintenance
-teamEvolver config dreamcycle.auto_start true    # optional: run periodically in the service
-teamEvolver config dreamcycle.llm_api_key "<llm-key>"
-teamEvolver config dreamcycle.llm_model "<model-id>"
-```
-
-1. `teamEvolver-feed` uploads real sessions, and the entry point first classifies valuable / chitchat sessions.
-2. The evolution loop builds candidate skills from recent evidence, historical evidence, and replay cases.
-3. DreamCycle reads personal key sources and writes to the team key space, so personal preferences are not published directly as team SOPs.
-4. Candidate skills enter `validation_jobs/`, and clients write `validation_results/` when they are idle.
-5. The console aggregates Verify score, Replay score, rejection reasons, and human decisions before publishing, rejecting, or deleting a candidate.
-
-Common operations:
-
-```bash
+teamEvolver status
+teamEvolver doctor
 teamEvolver config show
-curl -fsS "http://127.0.0.1:52010/trigger-dreamcycle/status"
-curl -fsS -X POST "http://127.0.0.1:52010/trigger-dreamcycle"
-curl -fsS "http://127.0.0.1:52010/validation/candidates"
+teamEvolver stop
 ```
 
-Validation uses lightweight replay by default. After the Hermes True Replay runtime is available, switch to real branch replay:
+The repository includes the production console build. Run the frontend build only when changing `web-ui/`.
 
-```bash
-teamEvolver config validation.mode true_replay
-teamEvolver config validation.max_jobs_per_day 5
-teamEvolver config validation.max_concurrency 1
+## Agent Integration
+
+Use [Agent Integration Protocol V1](./docs/agent-integration-protocol-v1.md):
+
+| Capability | Agent responsibility |
+| --- | --- |
+| `session.ingest.v1` | Submit complete Sessions, tool traces, tokens, Skill usage, and Context references |
+| `context.workspace.v1` | Resolve and read personal/team Context through short-lived `context_ref` values |
+| `replay.branch.v1` | Synchronously execute one isolated Baseline or Candidate branch |
+| `skill.sync.v1` | Receive released Bundles and verify version plus SHA-256 before installation |
+
+A V1 token identifies an Integration, never a user. Each request supplies a stable `external_subject`, mapped by an administrator:
+
+```text
+integration_id + external_subject -> teamEvolver user
 ```
 
----
+OpenViking credentials, model credentials, and team-Memory write privileges remain on the teamEvolver server.
 
-## True Replay: Validate Skills with Real Trajectories
+## Safety and Consistency
 
-Plain-text A/B checks can only compare answers. True Replay starts real agents in isolated environments and runs baseline and candidate branches. If a task is incomplete, judge feedback becomes the next user message in the same session. The primary comparison dimensions are:
+- Replay materializes only the required runtime configuration, never a complete production database.
+- Candidate processes do not receive upstream model credentials; model access uses an ephemeral broker.
+- External side effects fail closed unless they can be replayed deterministically.
+- Context references are server-issued and bound to Integration, Subject, Session, and expiry.
+- Team Memory and team Skills are read-only to regular Agents; personal-Memory writes require Subject mapping.
+- Skill publish, rollback, delete, and sync use one mutation path and a durable outbox.
+- Langfuse tracing is fail-open and never blocks evolution or Memory maintenance.
 
-1. User/agent interaction turns needed to complete the task; fewer is better.
-2. Tool-call count; fewer calls usually indicate a more direct execution path.
-3. Total tokens, with input/output/cache/reasoning details retained.
-
-```mermaid
-flowchart LR
-    Job["Candidate Job"] --> Base["Baseline Sandbox"]
-    Job --> Cand["Candidate Sandbox"]
-    Base --> TraceA["Tool Trace A"]
-    Cand --> TraceB["Tool Trace B"]
-    TraceA --> Score["Replay Scoring"]
-    TraceB --> Score
-    Score --> Decision["Keep / Revise / Publish"]
-```
-
-Install dependencies:
-
-```bash
-python -m pip install -e ".[truereplay]"
-```
-
-Replay a shared validation job:
-
-```bash
-python -m teamEvolver.true_replay --job-id <validation-job-id> --json
-```
-
-Replay a local JSON job file:
-
-```bash
-python -m teamEvolver.true_replay --job-file ./candidate_job.json --dry-run
-python -m teamEvolver.true_replay --job-file ./candidate_job.json --json
-```
-
-True Replay creates temporary `HOME` and `HERMES_HOME` directories for both branches and does not modify your real agent configuration. To use a local agent checkout, set `HERMES_ORIGIN`.
-
-In console candidate review, admins can re-evaluate, validate publish, force publish, or delete the same candidate. Automatic publication should consider Verify score, Replay score, efficiency metrics, and rejection reasons together, not a single score alone.
-
----
-
-## Project Layout
+## Repository Layout
 
 ```text
 teamEvolver/
 ├── teamEvolver/
-│   ├── cli/              # teamEvolver command line
-│   ├── config_store/     # local config store
-│   ├── proxy/            # service routes, console, and admin APIs
-│   ├── skills/           # SKILL.md management, bundling, sync
-│   ├── storage/          # OpenViking storage backend (cloud / local)
-│   ├── integrations/     # Hermes / DreamCycle integration
-│   ├── validation/       # shared validation queue, results, and worker
-│   ├── true_replay.py    # true A/B replay
-│   └── web/              # built console assets
-├── web-ui/               # React + TypeScript console source
-├── tests/
-├── scripts/
-└── pyproject.toml
+│   ├── evolve/          # Evidence, Skill Evolution, Dataset, release
+│   ├── validation/      # Candidate queue and True Replay worker
+│   ├── dreamcycle/      # Team-Memory evolution and Memory Replay
+│   ├── integrations/    # Agent V1, Hermes, Langfuse, replay adapters
+│   ├── proxy/           # FastAPI, console, and Workspace interfaces
+│   ├── skillminer/      # Document-to-Skill mining
+│   ├── skills/          # Bundles, versions, and SkillMutationService
+│   └── storage/         # OpenViking storage adapters
+├── web-ui/              # React + TypeScript console source
+├── tests/               # Unit, integration, protocol, and replay tests
+└── docs/                # Protocols, schemas, PRD, and design notes
 ```
 
----
+## Documentation
 
-## Development
+| Document | Scope |
+| --- | --- |
+| [Agent Integration Protocol V1](./docs/agent-integration-protocol-v1.md) | Registration, auth, Context, Session, Replay, and Skill Sync contracts |
+| [Protocol Schemas](./docs/schemas/) | V1 JSON Schemas |
+| [Coding Agent Integration](./docs/coding-agent.en.md) | Coding Agent and Hermes installation and synchronization |
+| [Master PRD](./docs/prd/team-evolver-master-prd.md) | Product scope, roles, and acceptance criteria |
+| [Loop Engineering](./docs/loop-engineering-teamevolver.html) | End-to-end evolution loop |
+| [OpenViking Research](./docs/research/openviking-product-capabilities-beyond-compile-snapshot.md) | Context and snapshot capability analysis |
+
+## Development Verification
 
 ```bash
-python -m pip install -e ".[dev,all]"
-python -m pytest
+python -m pip install -e ".[all,dev]"
+npm --prefix web-ui ci
+bash scripts/verify_local.sh
 ```
 
-Build the console and Python package:
-
-```bash
-npm --prefix web-ui install
-npm --prefix web-ui run build
-python -m pip install build
-python -m build
-```
-
----
-
-## Roadmap
-
-- Improve DreamCycle policy: separate personal memory, team memory, and publishable skills more precisely.
-- Expand True Replay: add multi-case replay, visual artifact QA, and more stable efficiency baselines.
-- Strengthen candidate governance: support multi-person approval, bulk rejection, post-release rollback, and finer version diffs.
-- Improve console workflows: add live validation artifact previews, queue trends, and cross-user contribution stats.
-
----
-
-## References
-
-Related projects and references:
-- [SkillClaw](https://github.com/AMAP-ML/SkillClaw): a multi-agent skill evolution project.
-- [OpenSpace](https://github.com/HKUDS/OpenSpace): a quality-first skill hub for AI agents.
-- [Hermes Agent](https://github.com/nousresearch/hermes-agent): optional runtime dependency for True Replay.
-- [FastAPI](https://fastapi.tiangolo.com/): the teamEvolver service framework.
-- [React](https://react.dev/) and [TypeScript](https://www.typescriptlang.org/): the teamEvolver console stack.
-
----
+`verify_local.sh` runs Python compilation, the test suite, and the production frontend build.
 
 ## License
 
-MIT
+[MIT](./LICENSE)

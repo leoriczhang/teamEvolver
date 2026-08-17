@@ -511,15 +511,27 @@ class ValidationWorker:
         job: dict[str, Any],
         expected: dict[str, Any],
     ) -> dict[str, Any]:
-        from ..integrations.skill_sync_adapters import sync_published_skill
+        from ..skills.mutations import SkillMutationService
 
         job_id = str(job.get("job_id") or "")
-        payload = await sync_published_skill(
-            self.config,
-            job_id=job_id,
+        service = SkillMutationService.from_config(self.config)
+        commit = service.record_committed(
+            action="publish",
+            mutation_id=job_id,
             expected=expected,
             tenant_ids=self._source_tenant_ids(job),
         )
+        service.reconcile()
+        delivery = await service.drain()
+        payload = {
+            "event_id": commit["event_id"],
+            "status": (
+                "synced"
+                if delivery["failed"] == 0
+                else "pending"
+            ),
+            "delivery": delivery,
+        }
         decision = self._store.load_decision(job_id)
         if decision:
             decision["agent_sync"] = {

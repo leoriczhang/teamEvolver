@@ -310,6 +310,25 @@ class OpenVikingObjectStore:
             result = {**result, "telemetry": response["telemetry"]}
         return result
 
+    def ensure_parent(self, key: str) -> None:
+        """Create every parent directory required by an object key."""
+        clean = str(key or "").strip().replace("\\", "/").strip("/")
+        parts = clean.split("/")[:-1]
+        for index in range(1, len(parts) + 1):
+            uri = self._uri("/".join(parts[:index])).rstrip("/")
+            try:
+                self._request(
+                    "POST",
+                    "/api/v1/fs/mkdir",
+                    json={"uri": uri},
+                )
+            except RuntimeError as exc:
+                if not any(
+                    token in str(exc)
+                    for token in ("ALREADY_EXISTS", "CONFLICT")
+                ):
+                    raise
+
     def put_object(self, key: str, data: bytes | str | io.IOBase) -> None:
         uri = self._uri(key)
         body = read_bytes(data)

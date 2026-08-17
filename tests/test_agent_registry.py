@@ -15,6 +15,11 @@ from teamEvolver.integrations.agent_registry import (
     resolve_runtime_agent,
     verify_agent_access_token,
 )
+from teamEvolver.proxy.users_admin import (
+    _save_registry,
+    resolve_agent_subject_user_id,
+    sync_agent_subject_mappings,
+)
 
 
 def _config(tmp_path):
@@ -136,3 +141,93 @@ def test_exact_integration_resolution_does_not_cross_tenant(tmp_path) -> None:
         agent_id="demo:missing",
         allow_runtime_fallback=False,
     ) is None
+
+
+def test_control_plane_subject_sync_maps_existing_users_authoritatively(
+    tmp_path,
+) -> None:
+    config = _config(tmp_path)
+    _save_registry(
+        tmp_path / "users.json",
+        {
+            "users": [
+                {
+                    "id": "alice",
+                    "agent_subjects": [],
+                },
+                {
+                    "id": "bob",
+                    "agent_subjects": [
+                        {
+                            "integration_id": "demo:tenant-a",
+                            "runtime_type": "demo",
+                            "external_subject": "old-bob",
+                        }
+                    ],
+                },
+            ]
+        },
+    )
+
+    result = sync_agent_subject_mappings(
+        config,
+        integration_id="demo:tenant-a",
+        runtime_type="demo",
+        mappings=[
+            {
+                "external_subject": "external-alice",
+                "team_evolver_user_id": "alice",
+            },
+            {
+                "external_subject": "external-charlie",
+                "team_evolver_user_id": "charlie",
+            },
+        ],
+        authoritative=True,
+    )
+
+    assert result == {
+        "mapped_count": 1,
+        "added_count": 1,
+        "unchanged_count": 0,
+        "removed_count": 1,
+        "invalid_count": 0,
+        "missing_user_ids": ["charlie"],
+        "conflicts": [],
+    }
+    assert (
+        resolve_agent_subject_user_id(
+            config,
+            integration_id="demo:tenant-a",
+            runtime_type="demo",
+            external_subject="external-alice",
+            allow_legacy_runtime_mapping=False,
+        )
+        == "alice"
+    )
+    assert (
+        resolve_agent_subject_user_id(
+            config,
+            integration_id="demo:tenant-a",
+            runtime_type="demo",
+            external_subject="old-bob",
+            allow_legacy_runtime_mapping=False,
+        )
+        == ""
+    )
+
+    repeated = sync_agent_subject_mappings(
+        config,
+        integration_id="demo:tenant-a",
+        runtime_type="demo",
+        mappings=[
+            {
+                "external_subject": "external-alice",
+                "team_evolver_user_id": "alice",
+            }
+        ],
+        authoritative=True,
+    )
+    assert repeated["mapped_count"] == 1
+    assert repeated["added_count"] == 0
+    assert repeated["unchanged_count"] == 1

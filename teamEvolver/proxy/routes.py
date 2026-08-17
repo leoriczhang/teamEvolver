@@ -59,6 +59,7 @@ from ..session_filter import SessionValueClassifier
 from ..session_store import SessionStore
 from ..skills import frontmatter
 from ..skills.hub import SkillHub
+from ..skills.mutations import SkillMutationService
 from ..skills.render import build_skill_md
 from ..storage import is_not_found_error
 from ..validation.store import ValidationStore
@@ -73,6 +74,7 @@ from .users_admin import (
     _verify_password,
     resolve_agent_subject_user_id,
     resolve_registered_user_id,
+    sync_agent_subject_mappings,
 )
 
 logger = logging.getLogger(__name__)
@@ -3206,6 +3208,33 @@ class RoutesMixin:
                         (agent.get("access_auth") or {}).get("scopes") or []
                     ),
                 }
+            raw_subject_mappings = body.get("subject_mappings")
+            if is_v1_payload(body) and raw_subject_mappings is not None:
+                if not isinstance(raw_subject_mappings, list):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="subject_mappings must be a list",
+                    )
+                try:
+                    registration_fields["subject_sync"] = (
+                        sync_agent_subject_mappings(
+                            owner.config,
+                            integration_id=str(agent.get("agent_id") or ""),
+                            runtime_type=str(agent.get("runtime_type") or ""),
+                            mappings=raw_subject_mappings,
+                            authoritative=bool(
+                                body.get(
+                                    "subject_mappings_authoritative",
+                                    False,
+                                )
+                            ),
+                        )
+                    )
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=str(exc),
+                    ) from exc
 
             storage = body.get("storage") if isinstance(body.get("storage"), dict) else {}
             config_file = str(
@@ -3375,15 +3404,71 @@ class RoutesMixin:
 
         @app.get("/api/agent-integrations")
         async def api_agent_integrations():
+            skill_outbox = (
+                SkillMutationService.from_config(owner.config).health()
+                if getattr(owner.config, "sharing_enabled", False)
+                else {
+                    "backlog": 0,
+                    "oldest_age_seconds": 0,
+                    "dead_letter": 0,
+                    "last_error": "",
+                }
+            )
             return {
                 "agents": [
                     public_agent_record(agent)
                     for agent in list_agents(owner.config)
                 ],
+                "skill_sync_outbox": skill_outbox,
                 "storage_authority": "teamEvolver",
                 "storage_deployment": str(
                     getattr(owner.config, "sharing_viking_deployment", "") or "cloud"
                 ),
+            }
+
+        @app.post("/api/agent-integrations/skill-sync/{event_id}/retry")
+        async def api_retry_skill_sync(
+            event_id: str,
+            body: dict[str, Any],
+            request: Request,
+        ):
+            _require_admin_user(getattr(request.state, "console_user", None))
+            try:
+                event = SkillMutationService.from_config(owner.config).retry(
+                    event_id,
+                    integration_id=str(body.get("integration_id") or ""),
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="event not found") from exc
+            return {
+                "event_id": event_id,
+                "status": event.get("status"),
+            }
+
+        @app.post("/api/agent-integrations/skill-sync/{event_id}/discard")
+        async def api_discard_skill_sync(
+            event_id: str,
+            body: dict[str, Any],
+            request: Request,
+        ):
+            admin = getattr(request.state, "console_user", None)
+            _require_admin_user(admin)
+            try:
+                event = SkillMutationService.from_config(owner.config).discard(
+                    event_id,
+                    integration_id=str(body.get("integration_id") or ""),
+                    actor=str(
+                        (admin or {}).get("username")
+                        or (admin or {}).get("id")
+                        or "admin"
+                    ),
+                    reason=str(body.get("reason") or ""),
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="event not found") from exc
+            return {
+                "event_id": event_id,
+                "status": event.get("status"),
             }
 
         @app.get("/healthz")

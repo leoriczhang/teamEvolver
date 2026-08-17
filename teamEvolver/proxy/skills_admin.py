@@ -19,6 +19,7 @@ import binascii
 import logging
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -250,11 +251,25 @@ class SkillsAdminMixin:
         if not getattr(self.config, "sharing_enabled", False):
             return {"synced": False, "reason": "sharing_disabled"}
         try:
-            from ..skills.hub import SkillHub
+            from ..skills.mutations import (
+                SkillMutationCommand,
+                SkillMutationService,
+            )
 
-            hub = SkillHub.team_from_config(self.config)
-            result = hub.push_skills(self._skills_dir(), include_names=[name])
-            return {"synced": True, "action": "push", **result}
+            commit = SkillMutationService.from_config(self.config).execute(
+                SkillMutationCommand(
+                    action="update",
+                    name=name,
+                    mutation_id=f"admin-update-{uuid.uuid4().hex}",
+                    skills_dir=self._skills_dir(),
+                )
+            )
+            return {
+                "synced": True,
+                "action": "push",
+                "event_id": commit["event_id"],
+                **dict(commit.get("result") or {}),
+            }
         except Exception as e:  # noqa: BLE001 - cloud errors are advisory
             logger.warning("[SkillsAdmin] cloud push failed for %s: %s", name, e)
             return {"synced": False, "reason": str(e)}
@@ -264,11 +279,24 @@ class SkillsAdminMixin:
         if not getattr(self.config, "sharing_enabled", False):
             return {"synced": False, "reason": "sharing_disabled"}
         try:
-            from ..skills.hub import SkillHub
+            from ..skills.mutations import (
+                SkillMutationCommand,
+                SkillMutationService,
+            )
 
-            hub = SkillHub.team_from_config(self.config)
-            result = hub.delete_skill(name)
-            return {"synced": True, "action": "delete", **result}
+            commit = SkillMutationService.from_config(self.config).execute(
+                SkillMutationCommand(
+                    action="delete",
+                    name=name,
+                    mutation_id=f"admin-delete-{uuid.uuid4().hex}",
+                )
+            )
+            return {
+                "synced": True,
+                "action": "delete",
+                "event_id": commit["event_id"],
+                **dict(commit.get("result") or {}),
+            }
         except Exception as e:  # noqa: BLE001 - cloud errors are advisory
             logger.warning("[SkillsAdmin] cloud delete failed for %s: %s", name, e)
             return {"synced": False, "reason": str(e)}
@@ -438,15 +466,36 @@ class SkillsAdminMixin:
                 from ..skills import layout
                 from ..skills.bundle import write_skill_bundle
                 from ..skills.hub import SkillHub
+                from ..skills.mutations import (
+                    SkillMutationCommand,
+                    SkillMutationService,
+                )
 
                 hub = SkillHub.team_from_config(owner.config)
-                result = hub.rollback_skill(name, int(target_version))
+                commit = SkillMutationService.from_hub(
+                    hub,
+                    config=owner.config,
+                ).execute(
+                    SkillMutationCommand(
+                        action="rollback",
+                        name=name,
+                        mutation_id=f"admin-rollback-{uuid.uuid4().hex}",
+                        target_version=int(target_version),
+                    )
+                )
+                result = dict(commit.get("result") or {})
+                result["event_id"] = commit["event_id"]
             except FileNotFoundError as e:
                 raise HTTPException(status_code=404, detail=str(e)) from e
             except Exception as e:  # noqa: BLE001
                 raise HTTPException(status_code=400, detail=f"rollback failed: {e}") from e
 
-            bundle = result.pop("bundle", None)
+            new_version = int(result.get("new_version") or 0)
+            bundle = (
+                hub._read_version_bundle(name, new_version)
+                if new_version > 0
+                else None
+            )
             if isinstance(bundle, dict) and bundle:
                 try:
                     detail = hub.get_version_detail(name, int(result.get("new_version") or 0))

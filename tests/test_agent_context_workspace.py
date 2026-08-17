@@ -201,6 +201,255 @@ def test_resolve_returns_opaque_refs_and_read_uses_bound_uri(tmp_path) -> None:
     assert personal_snapshot["expanded"]["full"] == "private expanded memory"
 
 
+def test_resolve_interleaves_scopes_before_applying_global_item_limit(
+    tmp_path,
+) -> None:
+    client, owner, token, _config = _client(tmp_path)
+
+    async def fake_request(_user, scope, method, path, **kwargs):
+        assert path == "/api/v1/search/search"
+        root = kwargs["json"]["target_uri"]
+        return [
+            {
+                "uri": f"{root}/result-{index}.md",
+                "name": f"{scope.name}-result-{index}",
+                "abstract": f"{scope.name} summary {index}",
+            }
+            for index in range(4)
+        ]
+
+    owner._workspace_request = AsyncMock(side_effect=fake_request)
+    response = client.post(
+        "/internal/agents/context/resolve",
+        headers=_headers(token),
+        json={
+            "integration_id": "demo:tenant-a",
+            "external_subject": "external-alice",
+            "query": "shared release practices",
+            "scopes": ["personal_memory", "team_memory"],
+            "max_items": 4,
+        },
+    )
+
+    assert response.status_code == 200
+    scopes = [item["scope"] for item in response.json()["items"]]
+    assert scopes == [
+        "personal_memory",
+        "team_memory",
+        "personal_memory",
+        "team_memory",
+    ]
+
+
+def _skill_md(name: str, description: str) -> str:
+    return f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"
+
+
+def _skill_search_owner(tmp_path, skills, mtimes=None):
+    """Wire an owner whose search returns file-level skill hits.
+
+    ``skills`` maps scope name -> list of ``(slug, name, description)`` so a
+    single logical skill can surface as several file hits (SKILL.md plus
+    versioned copies), exactly like OpenViking semantic search does.
+    ``mtimes`` optionally maps scope name -> ISO modTime returned by fs/stat,
+    letting a test drive latest-wins deterministically.
+    """
+    client, owner, token, config = _client(tmp_path)
+    mtimes = mtimes or {}
+    bodies: dict[str, str] = {}
+    per_scope_hits: dict[str, list[dict]] = {}
+    for scope_name, entries in skills.items():
+        hits: list[dict] = []
+        for slug, name, description in entries:
+            for rel in ("SKILL.md", "versions/v1/SKILL.md"):
+                uri = f"{{scope_root}}/{slug}/{rel}"
+                hits.append({"uri": uri, "abstract": f"{name} abstract"})
+            bodies[slug] = _skill_md(name, description)
+        per_scope_hits[scope_name] = hits
+
+    async def fake_request(_user, scope, method, path, **kwargs):
+        if path == "/api/v1/search/search":
+            root = scope.root_uri.rstrip("/")
+            return [
+                {**hit, "uri": hit["uri"].format(scope_root=root)}
+                for hit in per_scope_hits.get(scope.name, [])
+            ]
+        if path == "/api/v1/fs/stat":
+            return {"modTime": mtimes.get(scope.name, "")}
+        if path in {
+            "/api/v1/content/read",
+            "/api/v1/content/abstract",
+            "/api/v1/content/overview",
+        }:
+            uri = str(kwargs.get("params", {}).get("uri") or "")
+            for slug, body in bodies.items():
+                if f"/{slug}/" in uri or uri.endswith(f"/{slug}"):
+                    return {"content": body}
+            return {"content": ""}
+        raise AssertionError((method, path, kwargs))
+
+    owner._workspace_request = AsyncMock(side_effect=fake_request)
+    return client, owner, token, config
+
+
+def test_resolve_uses_skill_root_identity_not_filename(tmp_path) -> None:
+    client, _owner, token, _config = _skill_search_owner(
+        tmp_path,
+        {
+            "team_skills": [
+                ("frontend-design", "frontend-design", "Craft distinct UIs."),
+                ("html-ppt-methodology", "html-ppt-methodology", "Build decks."),
+            ]
+        },
+    )
+
+    response = client.post(
+        "/internal/agents/context/resolve",
+        headers=_headers(token),
+        json={
+            "external_subject": "external-alice",
+            "query": "frontend design and decks",
+            "scopes": ["team_skills"],
+            "max_items": 12,
+        },
+    )
+
+    assert response.status_code == 200
+    skills = [item for item in response.json()["items"] if item["kind"] == "skill"]
+    # Two distinct skills, each surfaced once by its root slug — never by the
+    # shared ``SKILL.md`` filename, and never shadowing one another.
+    assert {item["title"] for item in skills} == {
+        "frontend-design",
+        "html-ppt-methodology",
+    }
+    assert all(item["selected"] is True for item in skills)
+    assert all("shadowed_by" not in item for item in skills)
+    assert {item["qualified_skill_id"] for item in skills} == {
+        "team:frontend-design",
+        "team:html-ppt-methodology",
+    }
+    for item in skills:
+        assert item["context_ref"]
+
+
+def test_resolve_ignores_hidden_root_metadata_files(tmp_path) -> None:
+    client, owner, token, _config = _client(tmp_path)
+
+    async def fake_request(_user, scope, method, path, **kwargs):
+        root = scope.root_uri.rstrip("/")
+        if path == "/api/v1/search/search":
+            # A real skill plus root-level hidden metadata files that search
+            # also returns — these must never be treated as skills.
+            return [
+                {"uri": f"{root}/.overview.md", "abstract": "root overview"},
+                {"uri": f"{root}/.abstract.md", "abstract": "root abstract"},
+                {"uri": f"{root}/frontend-design/SKILL.md", "abstract": "fd"},
+            ]
+        if path == "/api/v1/fs/stat":
+            return {"modTime": ""}
+        return {"content": _skill_md("frontend-design", "Craft distinct UIs.")}
+
+    owner._workspace_request = AsyncMock(side_effect=fake_request)
+    response = client.post(
+        "/internal/agents/context/resolve",
+        headers=_headers(token),
+        json={
+            "external_subject": "external-alice",
+            "query": "frontend",
+            "scopes": ["team_skills"],
+            "max_items": 12,
+        },
+    )
+
+    assert response.status_code == 200
+    skills = [item for item in response.json()["items"] if item["kind"] == "skill"]
+    assert {item["title"] for item in skills} == {"frontend-design"}
+    assert not any(item["title"].startswith(".") for item in skills)
+
+
+def test_resolve_dedupes_same_skill_across_scopes_latest_wins(tmp_path) -> None:
+    client, _owner, token, _config = _skill_search_owner(
+        tmp_path,
+        {
+            "personal_skills": [
+                ("frontend-design", "frontend-design", "Craft distinct UIs."),
+            ],
+            "team_skills": [
+                ("frontend-design", "frontend-design", "Craft distinct UIs."),
+            ],
+        },
+    )
+
+    response = client.post(
+        "/internal/agents/context/resolve",
+        headers=_headers(token),
+        json={
+            "external_subject": "external-alice",
+            "query": "frontend design",
+            "scopes": ["personal_skills", "team_skills"],
+            "max_items": 12,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    skills = [item for item in body["items"] if item["kind"] == "skill"]
+    selected = [item for item in skills if item["selected"]]
+    shadowed = [item for item in skills if not item["selected"]]
+    # A duplicate (same name + description) resolves to exactly one selected
+    # skill; the older team copy is shadowed by the latest personal one.
+    assert len(selected) == 1
+    assert selected[0]["scope"] == "personal_skills"
+    assert shadowed and shadowed[0]["scope"] == "team_skills"
+    assert shadowed[0]["shadowed_by"] == "personal:frontend-design"
+    warnings = body.get("warnings") or []
+    assert any(
+        w.get("code") == "DUPLICATE_SKILL"
+        and w.get("skill_name") == "frontend-design"
+        for w in warnings
+    )
+
+
+def test_resolve_duplicate_latest_team_copy_wins_over_personal(tmp_path) -> None:
+    client, _owner, token, _config = _skill_search_owner(
+        tmp_path,
+        {
+            "personal_skills": [
+                ("frontend-design", "frontend-design", "Craft distinct UIs."),
+            ],
+            "team_skills": [
+                ("frontend-design", "frontend-design", "Craft distinct UIs."),
+            ],
+        },
+        mtimes={
+            "personal_skills": "2026-01-01T00:00:00Z",
+            "team_skills": "2026-08-01T00:00:00Z",
+        },
+    )
+
+    response = client.post(
+        "/internal/agents/context/resolve",
+        headers=_headers(token),
+        json={
+            "external_subject": "external-alice",
+            "query": "frontend design",
+            "scopes": ["personal_skills", "team_skills"],
+            "max_items": 12,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    skills = [item for item in body["items"] if item["kind"] == "skill"]
+    selected = [item for item in skills if item["selected"]]
+    # The newer team copy wins even though a personal copy exists.
+    assert len(selected) == 1
+    assert selected[0]["scope"] == "team_skills"
+    shadowed = [item for item in skills if not item["selected"]]
+    assert shadowed and shadowed[0]["scope"] == "personal_skills"
+    assert shadowed[0]["shadowed_by"] == "team:frontend-design"
+
+
 def test_context_ref_is_bound_to_integration(tmp_path) -> None:
     client, owner, token, config = _client(tmp_path)
     owner._workspace_request = AsyncMock(

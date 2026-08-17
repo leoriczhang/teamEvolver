@@ -69,6 +69,26 @@ V1 registration must not include OpenViking endpoints or keys. A successful
 first registration, or an explicit token rotation, returns
 `credentials.agent_access_token` once. The registry stores only its SHA-256.
 
+The control plane may synchronize mappings for users that already exist in
+teamEvolver:
+
+```json
+{
+  "subject_mappings_authoritative": true,
+  "subject_mappings": [
+    {
+      "external_subject": "user-123",
+      "team_evolver_user_id": "alice"
+    }
+  ]
+}
+```
+
+This extension is accepted only on the control-plane-authenticated registration
+route. It never provisions users or credentials. Unknown target users are
+reported in `subject_sync.missing_user_ids`; authoritative synchronization
+removes stale mappings for the same integration.
+
 ## Identity
 
 The access token identifies an integration, not a user. Every Context request
@@ -124,7 +144,9 @@ requests until Commit consumes them; teamEvolver's local OpenViking service
 stores this pending state in the Session's `.usage.jsonl`.
 
 Default injection should use L0/L1. Full content or a Skill bundle requires an
-explicit `read`.
+explicit `read`. When a global item budget spans multiple requested scopes,
+results must be interleaved by scope before the budget is applied so a large
+personal space cannot starve team Memory or Skill context.
 
 ## Session Ingest
 

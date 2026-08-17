@@ -26,6 +26,7 @@ class Launcher:
         self._stop_event = threading.Event()
         self._validation_worker = None
         self._validation_task = None
+        self._skill_sync_task = None
 
     # ------------------------------------------------------------------ #
     # Public interface                                                     #
@@ -136,6 +137,12 @@ class Launcher:
             except Exception as e:
                 logger.warning("[Launcher] failed to start validation worker: %s", e)
 
+        if getattr(cfg, "sharing_enabled", False):
+            self._skill_sync_task = asyncio.create_task(
+                self._run_skill_sync_outbox(cfg)
+            )
+            logger.info("[Launcher] durable Skill sync outbox started")
+
         try:
             while not self._stop_event.is_set():
                 await asyncio.sleep(1.0)
@@ -146,6 +153,33 @@ class Launcher:
                 await asyncio.gather(self._validation_task, return_exceptions=True)
                 self._validation_task = None
             self._validation_worker = None
+            if self._skill_sync_task is not None:
+                self._skill_sync_task.cancel()
+                await asyncio.gather(
+                    self._skill_sync_task,
+                    return_exceptions=True,
+                )
+                self._skill_sync_task = None
+
+    async def _run_skill_sync_outbox(self, cfg) -> None:
+        from .skills.mutations import SkillMutationService
+
+        service = SkillMutationService.from_config(cfg)
+        while not self._stop_event.is_set():
+            try:
+                repaired = service.reconcile()
+                result = await service.drain()
+                if repaired or result["synced"] or result["failed"]:
+                    logger.info(
+                        "[Launcher] Skill outbox repaired=%d synced=%d failed=%d pending=%d",
+                        repaired,
+                        result["synced"],
+                        result["failed"],
+                        result["pending"],
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[Launcher] Skill outbox drain failed: %s", exc)
+            await asyncio.sleep(5.0)
 
     # ------------------------------------------------------------------ #
     # PID / signals                                                        #
