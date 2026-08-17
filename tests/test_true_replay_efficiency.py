@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import http.server
 import os
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
+
+from teamEvolver.integrations.replay_model_broker import replay_model_broker
 from teamEvolver.replay_metrics import objective_replay_decision
 from teamEvolver.true_replay import (
     _agentshub_endpoint,
-    _model_endpoint_networks,
     _native_agent_runtime,
     _source_identity_error,
     _systemd_sandbox_command,
@@ -306,21 +310,6 @@ def test_baseline_sandbox_installs_current_skill(tmp_path) -> None:
     assert (tmp_path / "baseline" / ".hermes" / "config.yaml").stat().st_mode & 0o777 == 0o600
 
 
-def test_model_endpoint_networks_freezes_resolved_addresses(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "teamEvolver.true_replay.socket.getaddrinfo",
-        lambda *_args, **_kwargs: [
-            (2, 1, 6, "", ("203.0.113.7", 443)),
-            (10, 1, 6, "", ("2001:db8::7", 443, 0, 0)),
-        ],
-    )
-
-    networks = _model_endpoint_networks("https://model.example.test/v1")
-
-    assert "203.0.113.7/32" in networks
-    assert "2001:db8::7/128" in networks
-
-
 def test_worker_environment_does_not_inherit_secrets_or_proxies(
     monkeypatch,
     tmp_path,
@@ -349,7 +338,6 @@ def test_worker_environment_does_not_inherit_secrets_or_proxies(
 
 
 def test_systemd_sandbox_command_enforces_filesystem_network_and_clean_env(
-    monkeypatch,
     tmp_path,
 ) -> None:
     harness = {
@@ -362,11 +350,6 @@ def test_systemd_sandbox_command_enforces_filesystem_network_and_clean_env(
     sandbox = build_sandbox(tmp_path, "candidate", harness, None)
     spec_path = Path(sandbox["home"]) / ".replay_spec.json"
     spec_path.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(
-        "teamEvolver.true_replay._model_endpoint_networks",
-        lambda _url: ["127.0.0.1/32"],
-    )
-
     command = _systemd_sandbox_command(
         worker_python=os.sys.executable,
         spec_path=spec_path,
@@ -381,11 +364,59 @@ def test_systemd_sandbox_command_enforces_filesystem_network_and_clean_env(
     assert "ProtectSystem=strict" in command
     assert "ProtectHome=yes" in command
     assert "IPAddressDeny=any" in command
-    assert "IPAddressAllow=127.0.0.1/32" in command
+    assert "IPAddressAllow=127.0.0.0/8" in command
+    assert "IPAddressAllow=::1/128" in command
     assert "RuntimeMaxSec=90s" in command
     assert "/usr/bin/env" in command
     assert "-i" in command
     assert "must-not-appear-in-command" not in rendered
+
+
+def test_replay_model_broker_keeps_real_key_in_parent() -> None:
+    captured: dict[str, str] = {}
+
+    class Upstream(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            captured["authorization"] = str(
+                self.headers.get("Authorization") or ""
+            )
+            length = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(length)
+            body = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = int(upstream.server_address[1])
+        with replay_model_broker(
+            base_url=f"http://127.0.0.1:{port}/v1",
+            api_key="real-parent-key",
+            token="ephemeral-worker-token",
+            timeout_seconds=5,
+        ) as broker:
+            response = httpx.post(
+                broker.worker_base_url + "/chat/completions",
+                headers={
+                    "Authorization": "Bearer ephemeral-worker-token"
+                },
+                json={"model": "model-a", "messages": []},
+                timeout=5,
+            )
+        assert response.json() == {"ok": True}
+        assert captured["authorization"] == "Bearer real-parent-key"
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=5)
 
 
 def test_local_replay_fails_closed_when_sandbox_is_unavailable(
