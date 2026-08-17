@@ -39,7 +39,6 @@ import base64
 import json
 import os
 import secrets
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -1244,6 +1243,7 @@ def spawn_branch(
     case: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Spawn a worker subprocess for one branch and collect its trajectory."""
+    del tmp
     try:
         worker_python = resolve_replay_python()
     except Exception as exc:  # noqa: BLE001 - replay must fail closed.
@@ -1255,44 +1255,115 @@ def spawn_branch(
         }
     branch_home = Path(sandbox["home"])
     out_file = branch_home / ".replay_result.json"
-    spec = {
-        "branch": branch,
-        "home": sandbox["home"],
-        "hermes_home": sandbox["hermes_home"],
-        "workspace": sandbox["workspace"],
-        # A local checkout to inject on sys.path, or "" to import the installed
-        # hermes-agent package. Resolved once here so both branches agree.
-        "hermes_origin": resolve_hermes_origin() or "",
-        "instruction": instruction,
-        "harness": harness,
-        "skill_content": (skill or {}).get("content"),
-        "checklist": list((case or {}).get("checklist") or []),
-        "progressive_disclosure": dict(
-            (case or {}).get("progressive_disclosure") or {}
-        ),
-        "max_iterations": 25,
-        "max_interactions": max(1, int(max_interactions or 4)),
-        "checklist_judge": _checklist_judge_config(),
-        "out_path": str(out_file),
-    }
-    spec_path = branch_home / ".replay_spec.json"
-    spec_path.write_text(json.dumps(spec, ensure_ascii=False), "utf-8")
-    os.chmod(spec_path, 0o600)  # spec carries the api_key
-
     unit_name = (
         f"teamevolver-replay-{os.getpid()}-{branch}-"
         f"{uuid.uuid4().hex[:10]}"
     )
+    broker_token = secrets.token_urlsafe(32)
     try:
-        command = _systemd_sandbox_command(
-            worker_python=worker_python,
-            spec_path=spec_path,
-            sandbox=sandbox,
-            harness=harness,
-            timeout=timeout,
-            case=case,
-            unit_name=unit_name,
-        )
+        with replay_model_broker(
+            base_url=str(harness.get("base_url") or ""),
+            api_key=str(harness.get("api_key") or ""),
+            token=broker_token,
+            timeout_seconds=timeout,
+        ) as broker:
+            worker_harness = {
+                **harness,
+                "base_url": broker.worker_base_url,
+                "api_key": broker_token,
+            }
+            _write_sandbox_harness_config(
+                Path(sandbox["hermes_home"]),
+                worker_harness,
+            )
+            spec = {
+                "branch": branch,
+                "home": sandbox["home"],
+                "hermes_home": sandbox["hermes_home"],
+                "workspace": sandbox["workspace"],
+                # A local checkout to inject on sys.path, or "" to import the
+                # installed hermes-agent package. Both branches resolve this
+                # before launch.
+                "hermes_origin": resolve_hermes_origin() or "",
+                "instruction": instruction,
+                "harness": worker_harness,
+                "skill_content": (skill or {}).get("content"),
+                "checklist": list((case or {}).get("checklist") or []),
+                "progressive_disclosure": dict(
+                    (case or {}).get("progressive_disclosure") or {}
+                ),
+                "max_iterations": 25,
+                "max_interactions": max(
+                    1,
+                    int(max_interactions or 4),
+                ),
+                "checklist_judge": _checklist_judge_config(),
+                "out_path": str(out_file),
+            }
+            spec_path = branch_home / ".replay_spec.json"
+            spec_path.write_text(
+                json.dumps(spec, ensure_ascii=False),
+                "utf-8",
+            )
+            os.chmod(spec_path, 0o600)
+            command = _systemd_sandbox_command(
+                worker_python=worker_python,
+                spec_path=spec_path,
+                sandbox=sandbox,
+                harness=worker_harness,
+                timeout=timeout,
+                case=case,
+                unit_name=unit_name,
+            )
+            print(
+                f"  ▶ running {branch} branch "
+                f"(real tool loop, timeout {timeout}s)…",
+                flush=True,
+            )
+            try:
+                process = subprocess.run(
+                    command,
+                    cwd=str(_REPO_ROOT),
+                    env=_systemd_launcher_environment(),
+                    timeout=max(15, int(timeout) + 15),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                subprocess.run(
+                    [
+                        _SYSTEMCTL,
+                        "--user",
+                        "stop",
+                        f"{unit_name}.service",
+                    ],
+                    env=_systemd_launcher_environment(),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
+                    check=False,
+                )
+                return {
+                    "branch": branch,
+                    "ok": False,
+                    "error_code": "TIMEOUT",
+                    "error": f"timeout after {timeout}s",
+                }
+            if not out_file.exists():
+                detail = str(process.stderr or "").strip()[-2000:]
+                return {
+                    "branch": branch,
+                    "ok": False,
+                    "error_code": "REPLAY_SANDBOX_FAILED",
+                    "error": (
+                        "sandboxed worker produced no output "
+                        f"(rc={process.returncode})"
+                        + (f": {detail}" if detail else "")
+                    ),
+                }
+            return json.loads(out_file.read_text("utf-8"))
     except Exception as exc:  # noqa: BLE001 - no unsafe direct fallback.
         return {
             "branch": branch,
@@ -1300,52 +1371,6 @@ def spawn_branch(
             "error_code": "REPLAY_SANDBOX_UNAVAILABLE",
             "error": f"replay sandbox unavailable: {type(exc).__name__}: {exc}",
         }
-    print(f"  ▶ running {branch} branch (real tool loop, timeout {timeout}s)…", flush=True)
-    try:
-        process = subprocess.run(
-            command,
-            cwd=str(_REPO_ROOT),
-            env=_systemd_launcher_environment(),
-            timeout=max(15, int(timeout) + 15),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        subprocess.run(
-            [_SYSTEMCTL, "--user", "stop", f"{unit_name}.service"],
-            env=_systemd_launcher_environment(),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=10,
-            check=False,
-        )
-        return {
-            "branch": branch,
-            "ok": False,
-            "error_code": "TIMEOUT",
-            "error": f"timeout after {timeout}s",
-        }
-    except OSError as exc:
-        return {
-            "branch": branch,
-            "ok": False,
-            "error_code": "REPLAY_SANDBOX_UNAVAILABLE",
-            "error": f"cannot launch replay sandbox: {type(exc).__name__}: {exc}",
-        }
-    if not out_file.exists():
-        detail = str(process.stderr or "").strip()[-2000:]
-        return {
-            "branch": branch,
-            "ok": False,
-            "error_code": "REPLAY_SANDBOX_FAILED",
-            "error": (
-                f"sandboxed worker produced no output (rc={process.returncode})"
-                + (f": {detail}" if detail else "")
-            ),
-        }
-    return json.loads(out_file.read_text("utf-8"))
 
 
 # ---------------------------------------------------------------------------
