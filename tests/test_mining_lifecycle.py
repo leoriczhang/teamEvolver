@@ -176,6 +176,49 @@ def test_completed_job_workspace_can_submit_edited_artifacts(tmp_path: Path) -> 
     assert submitted["job"]["source"]["mining_job_id"] == job_id
 
 
+def test_completed_job_workspace_submits_current_benchmark_json(tmp_path: Path) -> None:
+    """The task-detail hand-off must accept the current non-JSONL artifact."""
+    miner_root = tmp_path / "skillminer"
+    job_id = "mine-progressive-json"
+    job_dir = miner_root / "mining_jobs" / job_id
+    workspace = job_dir / "workspace"
+    skill_dir = _write_mined_skill(workspace)
+    (skill_dir / "benchmark.jsonl").unlink()
+    progressive_benchmark.write_document(
+        skill_dir / "benchmark.json",
+        progressive_benchmark.build_document(
+            "demo-skill",
+            [{
+                "id": "BM-01",
+                "input": "Handle this support case.",
+                "requirements": [f"criterion {index}" for index in range(1, 13)],
+                "trajectory_requirements": ["confirm facts"],
+            }],
+        ),
+    )
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "job.json").write_text(
+        json.dumps({"job_id": job_id, "status": "succeeded"}),
+        encoding="utf-8",
+    )
+
+    workspace_root = resolve_mined_job_skill_root(
+        job_id,
+        "demo-skill",
+        skillminer_root=miner_root,
+    )
+    submitted = submit_mined_skill(
+        _store(tmp_path),
+        "demo-skill",
+        skillminer_root=workspace_root,
+        mining_job_id=job_id,
+    )
+
+    assert submitted["created"] is True
+    assert submitted["job"]["source"]["mining_job_id"] == job_id
+    assert submitted["job"]["source"]["question_count"] == 1
+
+
 def test_non_completed_job_cannot_enter_evolution(tmp_path: Path) -> None:
     miner_root = tmp_path / "skillminer"
     job_id = "mine-running"

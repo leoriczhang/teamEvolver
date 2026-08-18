@@ -50,6 +50,10 @@ WORKDIR /app
 
 COPY pyproject.toml README.md README.en.md LICENSE ./
 COPY teamEvolver/ ./teamEvolver/
+# The docs browser resolves its Markdown tree from /app/docs.  Keep the
+# repository documentation inside the runtime image so the console behaves
+# the same in Docker as it does when run from the source checkout.
+COPY docs/ ./docs/
 COPY --from=web-builder /build/teamEvolver/web/dist ./teamEvolver/web/dist/
 COPY --from=openviking-cli /usr/local/bin/ov /usr/local/bin/ov
 COPY docker/entrypoint.sh /usr/local/bin/teamEvolver-entrypoint
