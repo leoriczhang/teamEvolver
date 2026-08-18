@@ -309,6 +309,7 @@ export default function MiningView({
   const { config } = mining;
 
   const [rounds, setRounds] = useState(3);
+  const [humanCheckpoints, setHumanCheckpoints] = useState(true);
   const [taskName, setTaskName] = useState("");
   const [starting, setStarting] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -353,11 +354,16 @@ export default function MiningView({
   const [submittingJobId, setSubmittingJobId] = useState("");
   const [createJobOpen, setCreateJobOpen] = useState(false);
   const artifactIsMarkdown = isMarkdownArtifact(artifactPreview);
+  const defaultRoundsInitialized = useRef(false);
 
-  // Sync default rounds from config once loaded.
+  // Config refreshes every two seconds.  Apply its default only once, so a
+  // user's in-progress slider choice is never overwritten by that polling.
   useEffect(() => {
     if (!config) return;
-    if (config.max_rounds_default) setRounds(config.max_rounds_default);
+    if (!defaultRoundsInitialized.current && config.max_rounds_default) {
+      setRounds(config.max_rounds_default);
+      defaultRoundsInitialized.current = true;
+    }
     const next = preferredInputDir && config.input_dirs.includes(preferredInputDir)
       ? preferredInputDir
       : selectedInputDir && config.input_dirs.includes(selectedInputDir)
@@ -628,6 +634,7 @@ export default function MiningView({
           name: taskName.trim() || `${selectedSource?.path.split("/").pop() || "知识源"} 挖掘任务`,
           input_dir: inputDir,
           max_rounds: rounds,
+          human_checkpoints: humanCheckpoints,
         }),
       });
       const created = response.jobs?.[0];
@@ -1657,6 +1664,22 @@ export default function MiningView({
                     onChange={(event) => setRounds(Number(event.target.value))}
                     className="w-full accent-[var(--accent)]"
                   />
+                </label>
+
+                <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-border bg-background p-3.5 transition-colors hover:border-accent/50">
+                  <input
+                    type="checkbox"
+                    checked={humanCheckpoints}
+                    disabled={starting}
+                    onChange={(event) => setHumanCheckpoints(event.target.checked)}
+                    className="mt-0.5 size-4 accent-[var(--accent)]"
+                  />
+                  <span>
+                    <span className="block text-[12px] font-semibold">启用知识补充</span>
+                    <span className="mt-1 block text-[11px] leading-relaxed text-muted-foreground">
+                      发现影响 Skill 编译的关键知识缺口时暂停并以表单提问；关闭后任务会直接完成当前挖掘流程。
+                    </span>
+                  </span>
                 </label>
 
                 <div className="rounded-lg border border-border bg-background/70 p-3 text-[11px] leading-relaxed text-muted-foreground">

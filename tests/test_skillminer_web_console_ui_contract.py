@@ -1049,6 +1049,18 @@ def test_mining_task_deletion_contract_is_available_in_api_and_ui():
     assert 'path.startswith("/api/jobs/")' in server_source
 
 
+def test_new_mining_task_preserves_round_selection_and_sends_checkpoint_choice():
+    repository_root = Path(__file__).resolve().parents[1]
+    mining_view = (repository_root / "web-ui" / "src" / "views" / "MiningView.tsx").read_text(
+        encoding="utf-8"
+    )
+
+    assert "const [humanCheckpoints, setHumanCheckpoints] = useState(true);" in mining_view
+    assert "defaultRoundsInitialized" in mining_view
+    assert "human_checkpoints: humanCheckpoints" in mining_view
+    assert "启用知识补充" in mining_view
+
+
 def test_deleting_legacy_mining_job_removes_its_archived_outputs(tmp_path, monkeypatch):
     session_id = "20260818_120000_000001"
     next_session_id = "20260818_130000_000001"
