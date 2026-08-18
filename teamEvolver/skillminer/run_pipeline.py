@@ -848,14 +848,21 @@ def build_final_benchmark(hermes_env):
 
 
 def finalize_pipeline_artifacts(hermes_env, round_idx, session_tag):
-    """Build, validate and archive the lifecycle-ready final artifact set."""
-    if not build_final_benchmark(hermes_env):
-        return False
+    """Build and archive final artifacts without discarding recoverable output.
+
+    A low-confidence or partially repaired Benchmark is still a reviewable
+    artifact.  Only a technical failure to produce any final Skill should make
+    the job fail; quality warnings are persisted alongside the artifacts.
+    """
+    benchmark_ready = build_final_benchmark(hermes_env)
     # archive_round 早于终止判定执行；再次归档最终轮，把新增的 Benchmark
     # 同步进逐轮审计快照，同时保留 workspace/compiled_skill 作为最终真源。
     archive_round(round_idx, session_tag)
-    print("  📦 最终 Benchmark 已同步到本轮归档")
-    return True
+    if benchmark_ready:
+        print("  📦 最终 Benchmark 已同步到本轮归档")
+    else:
+        print("  ⚠️ 最终 Benchmark 未完整生成，已保留当前 Skill 产物与归档供人工复核")
+    return benchmark_ready
 
 
 def parse_skill_confidence(skill_md_path):
@@ -1403,11 +1410,17 @@ def main():
         prev_gap_count = info["gap_count"]
         round_idx += 1
 
-    # 反思轮数只决定 Skill 如何收敛。无论最大轮数是 1 还是更多，都必须基于
-    # 最终版本构建一次 Benchmark，完整通过后才允许任务以成功状态结束。
-    if overall_success:
-        if not finalize_pipeline_artifacts(hermes_env, round_idx, session_tag):
-            overall_success = False
+    # 反思轮数只决定 Skill 如何收敛。无论最大轮数是 1 还是更多，都应尝试
+    # 基于最终版本构建 Benchmark。低置信度/格式告警会写入质量报告，而非丢弃
+    # 已生成的 Skill；是否可谨慎提交由任务层的产物质量标记决定。
+    benchmark_ready = finalize_pipeline_artifacts(hermes_env, round_idx, session_tag)
+    if not benchmark_ready:
+        print("⚠️ 最终 Benchmark 存在不完整项，已作为产物质量告警保留")
+
+    # 如果至少保留了一份可读的最终 Skill，即使某一反思步骤或 Benchmark
+    # 降级，也让任务正常结束；真正没有任何 Skill 产物时仍返回失败。
+    if find_compiled_skill_md() is not None:
+        overall_success = True
 
     # ---- 收尾汇报 ----
     print("\n" + "=" * 60)

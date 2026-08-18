@@ -14,6 +14,7 @@ from teamEvolver.mining_lifecycle import (
     resolve_mined_skill_dir,
     submit_mined_skill,
 )
+from teamEvolver.skillminer import benchmark_format as progressive_benchmark
 from teamEvolver.storage import InMemoryObjectStore
 from teamEvolver.validation.store import ValidationStore
 
@@ -111,10 +112,34 @@ def test_submit_requires_complete_artifacts_and_rejects_path_escape(tmp_path: Pa
     skill_dir = _write_mined_skill(miner_root)
     (skill_dir / "benchmark.jsonl").unlink()
 
-    with pytest.raises(MiningLifecycleError, match="benchmark.jsonl"):
+    with pytest.raises(MiningLifecycleError, match="benchmark.json"):
         submit_mined_skill(_store(tmp_path), "demo-skill", skillminer_root=miner_root)
     with pytest.raises(MiningLifecycleError):
         resolve_mined_skill_dir("../demo-skill", skillminer_root=miner_root)
+
+
+def test_submit_mined_skill_accepts_progressive_benchmark_json(tmp_path: Path) -> None:
+    miner_root = tmp_path / "skillminer"
+    skill_dir = _write_mined_skill(miner_root)
+    (skill_dir / "benchmark.jsonl").unlink()
+    benchmark = progressive_benchmark.build_document(
+        "demo-skill",
+        [{
+            "id": "BM-01",
+            "input": "Handle this support case.",
+            "gold": {"must_hit": [f"criterion {index}" for index in range(1, 13)]},
+            "trajectory_requirements": ["confirm facts"],
+        }],
+    )
+    progressive_benchmark.write_document(skill_dir / "benchmark.json", benchmark)
+
+    submitted = submit_mined_skill(_store(tmp_path), "demo-skill", skillminer_root=miner_root)
+
+    assert submitted["created"] is True
+    assert submitted["job"]["source"]["question_count"] == 1
+    assert submitted["job"]["replay_cases"][0]["gold"]["must_hit"] == [
+        f"criterion {index}" for index in range(1, 13)
+    ]
 
 
 def test_completed_job_workspace_can_submit_edited_artifacts(tmp_path: Path) -> None:

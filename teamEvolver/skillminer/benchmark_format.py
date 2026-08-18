@@ -20,6 +20,26 @@ PROGRESSIVE_DISCLOSURE = {
     "stop_when": "all_checklist_items_satisfied",
 }
 
+# The progressive-test format needs enough independent checks to make an
+# automated score meaningful.  A model occasionally returns 11 (or fewer)
+# otherwise-valid checks.  We preserve its checks and only append conservative
+# evidence/guardrail checks; the companion quality report makes that downgrade
+# visible to the reviewer instead of dropping the whole mining result.
+_SUPPLEMENTAL_REQUIREMENT_TEMPLATES = (
+    "说明结论的适用前提、信息来源和适用范围。",
+    "信息不足时主动澄清，不把未验证信息当作事实。",
+    "明确权限边界；需要授权或升级时给出下一步。",
+    "给出可执行的处理步骤及完成条件。",
+    "说明关键例外、风险或不可承诺的部分。",
+    "避免编造规则、数值、时限或处理结果。",
+    "将建议与可追溯证据或待核验项对应。",
+    "在结论无法确认时明确标注不确定性和人工复核建议。",
+    "覆盖用户当前诉求，不遗漏关键限制条件。",
+    "输出清晰、可核验且不与已知材料矛盾。",
+    "遵守安全、合规和隐私保护边界。",
+    "在处理结束前确认后续责任人、渠道或复核方式。",
+)
+
 
 def _unique_texts(value: Any) -> list[str]:
     if isinstance(value, str):
@@ -56,6 +76,25 @@ def _requirements(question: dict[str, Any]) -> list[str]:
     requirements.extend(_unique_texts(gold.get("must_hit")))
     requirements.extend(_negative_requirement(item) for item in _unique_texts(gold.get("must_avoid")))
     return _unique_texts(requirements)[:MAXIMUM_REQUIREMENT_COUNT]
+
+
+def _complete_requirements(requirements: list[str]) -> tuple[list[str], list[str]]:
+    """Pad a short rubric with explicitly conservative review requirements.
+
+    The original model output stays first and is never rewritten.  The return
+    value includes only the generated supplement so callers can disclose that
+    the resulting benchmark is lower-confidence.
+    """
+    completed = list(requirements[:MAXIMUM_REQUIREMENT_COUNT])
+    added: list[str] = []
+    for candidate in _SUPPLEMENTAL_REQUIREMENT_TEMPLATES:
+        if len(completed) >= MINIMUM_REQUIREMENT_TARGET:
+            break
+        if candidate in completed:
+            continue
+        completed.append(candidate)
+        added.append(candidate)
+    return completed, added
 
 
 def _trajectory_requirements(question: dict[str, Any]) -> list[str]:
@@ -168,6 +207,47 @@ def build_document(
         "datasets": datasets,
         "created_at": timestamp,
     }
+
+
+def build_document_with_quality(
+    skill_name: str,
+    questions: list[dict[str, Any]],
+    *,
+    candidate_revision: int = 1,
+    created_at: str | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Build a format-valid document and report any conservative repairs.
+
+    This is intentionally separate from :func:`build_document`: callers that
+    need strict validation can still use the exact model rubric, while the
+    mining lifecycle can finish with a clearly marked, review-required output.
+    """
+    normalized: list[dict[str, Any]] = []
+    quality_warnings: list[dict[str, Any]] = []
+    for index, question in enumerate(questions, start=1):
+        item = dict(question)
+        original = _requirements(item)
+        completed, added = _complete_requirements(original)
+        item["requirements"] = completed
+        normalized.append(item)
+        if added:
+            quality_warnings.append({
+                "code": "requirements_auto_completed",
+                "dataset_index": index,
+                "dataset_name": _dataset_name(item, index),
+                "original_requirement_count": len(original),
+                "added_requirement_count": len(added),
+                "message": (
+                    f"第 {index} 个 Benchmark 的模型评分锚点只有 {len(original)} 项；"
+                    f"已补入 {len(added)} 项保守核验要求，需人工复核。"
+                ),
+            })
+    return build_document(
+        skill_name,
+        normalized,
+        candidate_revision=candidate_revision,
+        created_at=created_at,
+    ), quality_warnings
 
 
 def validate_document(payload: Any, *, expected_skill_name: str | None = None) -> list[str]:

@@ -438,6 +438,47 @@ def render_benchmark_md(questions, skill_name):
     return "\n".join(lines)
 
 
+def _fallback_question(skill_name, reason):
+    """Return a deliberately conservative benchmark when generation is unusable.
+
+    The fallback is not presented as a high-quality domain test.  It lets a
+    reviewer inspect, edit, and (if appropriate) cautiously submit the complete
+    artifact bundle instead of losing an otherwise useful compiled Skill.
+    """
+    return {
+        "id": "BM-FALLBACK-01",
+        "name": "待人工复核的保守评测场景",
+        "target_dimensions": ["证据边界", "信息补全", "人工复核"],
+        "difficulty": "medium",
+        "input": (
+            f"请依据 {skill_name} 处理一条典型业务请求。当前自动生成的评测材料不完整，"
+            "请先说明已知事实、待核验信息、权限边界和下一步，再给出保守处理建议。"
+        ),
+        "gold": {"must_hit": []},
+        "trajectory_requirements": [
+            "主动确认当前材料是否足以形成结论。",
+            "信息或权限不足时建议人工复核，不做越权承诺。",
+        ],
+        "source_session_ids": [],
+        "source": f"fallback: {reason}",
+        "in_corpus": False,
+    }
+
+
+def _write_quality_report(skill_dir, *, warnings, question_count):
+    """Persist review guidance next to the benchmark without changing its schema."""
+    payload = {
+        "schema_version": 1,
+        "status": "degraded" if warnings else "ready",
+        "question_count": question_count,
+        "warnings": warnings,
+        "generated_at": datetime.now().isoformat(),
+    }
+    path = skill_dir / "benchmark_quality.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def build_phase(skill_dir, skill_name, hermes_env, difficulty_counts=None):
     """阶段一：生成题库，写 benchmark.json + BENCHMARK.md。返回 questions 列表。
 
@@ -451,54 +492,71 @@ def build_phase(skill_dir, skill_name, hermes_env, difficulty_counts=None):
               f"medium {difficulty_counts['medium']} / hard {difficulty_counts['hard']} "
               f"（共 {sum(difficulty_counts.values())} 道）")
     skill_text, eval_text, _ = load_skill_and_eval(skill_dir)
+    quality_warnings = []
+    questions = []
     if not eval_text:
-        print("  ✗ 该 skill 缺少 EVALUATION.md，无法构建 benchmark")
-        return None
+        quality_warnings.append({
+            "code": "evaluation_missing",
+            "message": "缺少 EVALUATION.md，已生成保守的待人工复核 Benchmark。",
+        })
+        print("  ⚠️ 缺少 EVALUATION.md，改为生成待人工复核的保守 Benchmark")
 
     # 让 hermes（自主 agent）把题库 JSON 写到这个受控路径，脚本再读回
     raw_json_path = skill_dir / "benchmark_bank.json"
     if raw_json_path.exists():
         raw_json_path.unlink()
-    prompt = build_benchmark_prompt(skill_text, eval_text, str(raw_json_path),
-                                    difficulty_counts=difficulty_counts)
-    print("  生成中（读 SKILL.md + EVALUATION.md，构造题库）...")
-    # 构建器已经在 prompt 中拿到完整的 SKILL/EVALUATION，只需向受控路径写文件。
-    # 将 Hermes 工具面缩到 file，阻断终端、代码执行、网络和其他无关能力；路径级
-    # 边界继续由上面的明确指令约束。后续 JSON 解析、规范化与 LIFT 转换均由本进程完成。
-    ok, out = rst.run_hermes(
-        ["-t", "file", "-z", prompt],
-        hermes_env,
-        timeout=rp.HERMES_ONESHOT_TIMEOUT,
-    )
-    if not ok:
-        print(f"  ✗ 题库生成失败：{out[:200]}")
-        return None
+    if eval_text:
+        prompt = build_benchmark_prompt(skill_text, eval_text, str(raw_json_path),
+                                        difficulty_counts=difficulty_counts)
+        print("  生成中（读 SKILL.md + EVALUATION.md，构造题库）...")
+        # 构建器已经在 prompt 中拿到完整的 SKILL/EVALUATION，只需向受控路径写文件。
+        # 将 Hermes 工具面缩到 file，阻断终端、代码执行、网络和其他无关能力；路径级
+        # 边界继续由上面的明确指令约束。后续 JSON 解析、规范化与 LIFT 转换均由本进程完成。
+        ok, out = rst.run_hermes(
+            ["-t", "file", "-z", prompt],
+            hermes_env,
+            timeout=rp.HERMES_ONESHOT_TIMEOUT,
+        )
+        if not ok:
+            quality_warnings.append({
+                "code": "benchmark_generation_failed",
+                "message": f"自动题库生成失败，已生成保守 fallback Benchmark：{out[:200]}",
+            })
+            print(f"  ⚠️ 题库生成失败，改为保守 fallback：{out[:200]}")
+        else:
+            # 优先读 agent 落盘的文件；读不到再退回从 stdout 抽 JSON
+            raw = None
+            if raw_json_path.exists():
+                try:
+                    raw = json.loads(raw_json_path.read_text(encoding="utf-8"))
+                    print(f"    从落盘文件读回题库：{raw_json_path.relative_to(PROJECT_ROOT)}")
+                except Exception as e:
+                    print(f"    ⚠️ 落盘文件解析失败（{e}），改从 stdout 抽取")
+            if raw is None:
+                raw = extract_json(out, prefer_type="list")
+            questions = normalize_questions(raw)
 
-    # 优先读 agent 落盘的文件；读不到再退回从 stdout 抽 JSON
-    raw = None
-    if raw_json_path.exists():
-        try:
-            raw = json.loads(raw_json_path.read_text(encoding="utf-8"))
-            print(f"    从落盘文件读回题库：{raw_json_path.relative_to(PROJECT_ROOT)}")
-        except Exception as e:
-            print(f"    ⚠️ 落盘文件解析失败（{e}），改从 stdout 抽取")
-    if raw is None:
-        raw = extract_json(out, prefer_type="list")
-
-    questions = normalize_questions(raw)
     if not questions:
-        print("  ✗ 未能解析出题库 JSON（落盘文件与 stdout 均失败）")
-        (skill_dir / "benchmark_raw_output.txt").write_text(out, encoding="utf-8")
-        print(f"    原始输出已存：{(skill_dir / 'benchmark_raw_output.txt').relative_to(PROJECT_ROOT)}")
-        return None
+        quality_warnings.append({
+            "code": "benchmark_fallback",
+            "message": "未能解析有效题库，已生成待人工复核的保守 Benchmark。",
+        })
+        if "out" in locals():
+            (skill_dir / "benchmark_raw_output.txt").write_text(out, encoding="utf-8")
+            print(f"    原始输出已存：{(skill_dir / 'benchmark_raw_output.txt').relative_to(PROJECT_ROOT)}")
+        questions = [_fallback_question(skill_name, "自动题库生成或解析失败")]
 
-    benchmark_payload = bf.build_document(skill_name, questions)
+    benchmark_payload, repaired = bf.build_document_with_quality(skill_name, questions)
+    quality_warnings.extend(repaired)
     format_errors = bf.validate_document(benchmark_payload, expected_skill_name=skill_name)
     if format_errors:
-        print("  ✗ 生成内容不符合 teamEvolver-progressive-test-v1：")
+        # This is intentionally a warning: the Skill/Evaluation pair is still
+        # preserved and reviewers can inspect the generated draft.  The normal
+        # repair path above makes short rubric lists schema-valid.
+        quality_warnings.extend({"code": "benchmark_format_warning", "message": error} for error in format_errors)
+        print("  ⚠️ Benchmark 仍有格式告警：")
         for error in format_errors:
             print(f"    - {error}")
-        return None
 
     json_path = skill_dir / "benchmark.json"
     bf.write_document(json_path, benchmark_payload)
@@ -507,6 +565,11 @@ def build_phase(skill_dir, skill_name, hermes_env, difficulty_counts=None):
     (skill_dir / "benchmark.jsonl").unlink(missing_ok=True)
     md_path = skill_dir / "BENCHMARK.md"
     md_path.write_text(render_benchmark_md(questions, skill_name), encoding="utf-8")
+    quality_path = _write_quality_report(
+        skill_dir,
+        warnings=quality_warnings,
+        question_count=len(questions),
+    )
 
     # 维度覆盖统计
     covered = {}
@@ -516,6 +579,8 @@ def build_phase(skill_dir, skill_name, hermes_env, difficulty_counts=None):
     print(f"  ✓ 生成 {len(questions)} 道题")
     print(f"    - {json_path.relative_to(PROJECT_ROOT)}（teamEvolver progressive-test）")
     print(f"    - {md_path.relative_to(PROJECT_ROOT)}（人读视图）")
+    if quality_warnings:
+        print(f"    ⚠️ 质量标记：{quality_path.relative_to(PROJECT_ROOT)}（{len(quality_warnings)} 项，需谨慎提交）")
     print(f"    维度覆盖：{len(covered)} 个维度被触及")
 
     # benchmark.json 是 SkillMiner 生成的 teamEvolver progressive-test 题库。

@@ -32,6 +32,7 @@ import {
   Pencil,
   Save,
   Send,
+  ShieldAlert,
 } from "lucide-react";
 
 /**
@@ -104,6 +105,24 @@ interface MiningRound {
   skills?: CompiledSkillDetail[];
 }
 
+interface MiningArtifactQualityItem {
+  kind: "skill" | "evaluation" | "benchmark";
+  state: "ready" | "caution" | "incomplete";
+  label: string;
+  detail: string;
+}
+
+interface MiningArtifactQuality {
+  has_skill: boolean;
+  level: "ready" | "caution" | "incomplete";
+  label: string;
+  confidence: "生产级" | "候选级" | "草稿级" | "unknown" | string;
+  summary: string;
+  warnings: string[];
+  artifacts: MiningArtifactQualityItem[];
+  can_submit: boolean;
+}
+
 type MiningJobStatus =
   | "preparing"
   | "queued"
@@ -140,6 +159,7 @@ interface MiningJob {
     total: number;
     questions: HumanCheckpointQuestion[];
   } | null;
+  artifact_quality?: MiningArtifactQuality | null;
 }
 
 interface HumanCheckpointQuestion {
@@ -858,10 +878,21 @@ export default function MiningView({
 
   async function submitJobToEvolution(job: MiningJob) {
     if (job.status !== "succeeded") return;
+    const quality = job.artifact_quality;
+    if (quality && !quality.can_submit) {
+      toastErr("当前产物尚不能提交", quality.warnings[0] || "请先补齐评测定义后再提交到进化。");
+      return;
+    }
     const skillNames = jobSkillNames(job);
     if (!skillNames.length) {
       toastErr("无法提交到进化", "任务中没有完整的 Skill 产物");
       return;
+    }
+    if (quality && quality.level !== "ready") {
+      const warning = quality.warnings.slice(0, 3).join("\n") || quality.summary;
+      if (!window.confirm(`该任务的产物标记为“${quality.label}”。\n\n${warning}\n\n仍要提交到进化候选区吗？`)) {
+        return;
+      }
     }
     setSubmittingJobId(job.job_id);
     try {
@@ -1041,6 +1072,53 @@ export default function MiningView({
           </div>
         )}
 
+        {job.artifact_quality && (
+          <div className={cn(
+            "rounded-xl border p-4",
+            job.artifact_quality.level === "ready"
+              ? "border-success/35 bg-success/5"
+              : job.artifact_quality.level === "incomplete"
+                ? "border-destructive/30 bg-destructive/5"
+                : "border-amber-300/70 bg-amber-50/80"
+          )}>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="flex min-w-0 items-center gap-2.5">
+                <ShieldAlert className={cn(
+                  "size-4 shrink-0",
+                  job.artifact_quality.level === "ready" ? "text-success" : job.artifact_quality.level === "incomplete" ? "text-destructive" : "text-amber-700"
+                )} />
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[13px] font-bold">产物质量</span>
+                    <Pill tone={artifactQualityTone(job.artifact_quality.level)}>{job.artifact_quality.label}</Pill>
+                    <span className="text-[11px] text-muted-foreground">Skill 置信档：{job.artifact_quality.confidence === "unknown" ? "未声明" : job.artifact_quality.confidence}</span>
+                  </div>
+                  <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{job.artifact_quality.summary}</p>
+                </div>
+              </div>
+              {job.artifact_quality.level !== "ready" && (
+                <span className="text-[10.5px] font-medium text-amber-800">提交进化前会再次确认</span>
+              )}
+            </div>
+            <div className="mt-3 grid gap-2 md:grid-cols-3">
+              {job.artifact_quality.artifacts.map((artifact) => (
+                <div key={artifact.kind} className="rounded-lg border border-border/80 bg-background/80 px-3 py-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] font-semibold">{artifactLabel(artifact.kind)}</span>
+                    <Pill tone={artifactQualityTone(artifact.state)}>{artifact.label}</Pill>
+                  </div>
+                  <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">{artifact.detail}</p>
+                </div>
+              ))}
+            </div>
+            {job.artifact_quality.warnings.length > 0 && (
+              <ul className="mt-3 space-y-1 border-t border-current/10 pt-3 text-[10.5px] leading-relaxed text-muted-foreground">
+                {job.artifact_quality.warnings.map((warning, index) => <li key={`${warning}-${index}`} className="select-text">• {warning}</li>)}
+              </ul>
+            )}
+          </div>
+        )}
+
         {isActiveJob(job.status) ? (
           <div className="space-y-4">
             <div className="grid gap-4 lg:grid-cols-[minmax(360px,0.8fr)_minmax(0,1.2fr)]">
@@ -1104,11 +1182,11 @@ export default function MiningView({
                 {job.status === "succeeded" && (
                   <Button
                     size="sm"
-                    disabled={submittingJobId === job.job_id || !jobSkillNames(job).length}
+                    disabled={submittingJobId === job.job_id || !jobSkillNames(job).length || job.artifact_quality?.can_submit === false}
                     onClick={() => submitJobToEvolution(job)}
                   >
                     <Send className="size-3.5" />
-                    {submittingJobId === job.job_id ? "提交中…" : "提交到进化"}
+                    {submittingJobId === job.job_id ? "提交中…" : job.artifact_quality && job.artifact_quality.level !== "ready" ? "谨慎提交到进化" : "提交到进化"}
                   </Button>
                 )}
               </div>
@@ -2103,6 +2181,12 @@ function artifactTone(kind: MiningArtifact["kind"]) {
   if (kind === "skill") return "purple";
   if (kind === "semantic") return "blue";
   return "gray";
+}
+
+function artifactQualityTone(state: MiningArtifactQuality["level"] | MiningArtifactQualityItem["state"]): PillTone {
+  if (state === "ready") return "green";
+  if (state === "incomplete") return "red";
+  return "amber";
 }
 
 function artifactLabel(kind: MiningArtifact["kind"]) {

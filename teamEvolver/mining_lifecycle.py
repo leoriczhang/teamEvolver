@@ -18,6 +18,7 @@ from typing import Any, Iterable, Optional
 
 from .skills.bundle import bundle_tree_sha256, read_skill_bundle
 from .skills.frontmatter import parse_skill_md
+from .skillminer import benchmark_format as progressive_benchmark
 from .validation.store import ValidationStore
 
 SKILLMINER_ROOT = Path(__file__).resolve().parent / "skillminer"
@@ -131,10 +132,37 @@ def resolve_mined_skill_dir(
 
 
 def load_internal_benchmark(skill_dir: Path | str) -> list[dict[str, Any]]:
-    """Load and validate SkillMiner's internal JSONL evaluation dataset."""
-    path = Path(skill_dir) / "benchmark.jsonl"
+    """Load the current progressive JSON format or the legacy JSONL dataset."""
+    root = Path(skill_dir)
+    progressive_path = root / "benchmark.json"
+    if progressive_path.is_file():
+        payload, errors = progressive_benchmark.read_document(progressive_path)
+        if payload is None or errors:
+            detail = "；".join(errors) if errors else "无法读取题库"
+            raise MiningLifecycleError(f"benchmark.json 不可用：{detail}")
+        rows = []
+        for index, dataset in enumerate(payload.get("datasets") or [], start=1):
+            if not isinstance(dataset, dict):
+                continue
+            instruction = str(dataset.get("query") or "").strip()
+            if not instruction:
+                continue
+            rows.append({
+                "id": str(dataset.get("dataset_id") or f"BM-{index:02d}"),
+                "input": instruction,
+                "gold": {"must_hit": list(dataset.get("requirements") or [])},
+                "trajectory_requirements": list(dataset.get("trajectory_requirements") or []),
+                "source_session_ids": list(dataset.get("source_session_ids") or []),
+                "source": str(dataset.get("name") or ""),
+                "dataset_format": progressive_benchmark.DATASET_FORMAT,
+            })
+        if not rows:
+            raise MiningLifecycleError("benchmark.json 没有可用题目")
+        return rows
+
+    path = root / "benchmark.jsonl"
     if not path.is_file():
-        raise MiningLifecycleError("缺少 benchmark.jsonl，请先生成 Benchmark")
+        raise MiningLifecycleError("缺少 benchmark.json 或 benchmark.jsonl，请先生成 Benchmark")
     rows: list[dict[str, Any]] = []
     for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():

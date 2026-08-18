@@ -212,6 +212,16 @@ def test_mining_task_identity_artifacts_and_errors_are_selectable_for_copying():
     assert "description: 'select-text cursor-text whitespace-pre-wrap break-words'" in toaster_source
 
 
+def test_mining_ui_surfaces_artifact_quality_and_confirms_cautious_submission():
+    project_root = Path(__file__).resolve().parents[1]
+    mining_source = (project_root / "web-ui" / "src" / "views" / "MiningView.tsx").read_text(encoding="utf-8")
+
+    assert "artifact_quality?: MiningArtifactQuality | null" in mining_source
+    assert "产物质量" in mining_source
+    assert "谨慎提交到进化" in mining_source
+    assert "window.confirm" in mining_source
+
+
 def test_mining_model_test_uses_current_form_values(tmp_path, monkeypatch):
     config_path = tmp_path / ".hermes_home" / "config.yaml"
     config_path.parent.mkdir(parents=True)

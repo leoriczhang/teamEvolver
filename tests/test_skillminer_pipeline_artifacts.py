@@ -57,6 +57,56 @@ def test_progressive_benchmark_matches_skillgene_schema():
     assert bf.validate_document(payload, expected_skill_name="demo") == []
 
 
+def test_progressive_benchmark_repairs_short_rubrics_and_reports_review_warning():
+    payload, warnings = bf.build_document_with_quality(
+        "demo",
+        [{
+            "id": "BM-short",
+            "input": "测试短评分锚点",
+            "gold": {"must_hit": [f"原始要求 {index}" for index in range(1, 12)]},
+            "trajectory_requirements": ["确认信息不足处"],
+        }],
+    )
+
+    assert bf.validate_document(payload, expected_skill_name="demo") == []
+    assert payload["datasets"][0]["requirement_count"] == 12
+    assert len(warnings) == 1
+    assert warnings[0]["original_requirement_count"] == 11
+    assert warnings[0]["added_requirement_count"] == 1
+
+
+def test_benchmark_builder_keeps_short_rubric_as_degraded_final_artifact(tmp_path, monkeypatch):
+    skill_dir = tmp_path / "compiled_skill" / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Demo\n\n置信档：候选级\n", encoding="utf-8")
+    (skill_dir / "EVALUATION.md").write_text("# Evaluation\n", encoding="utf-8")
+    monkeypatch.setattr(rb, "PROJECT_ROOT", tmp_path)
+
+    def fake_run_hermes(_args, _env, timeout):
+        assert timeout == rp.HERMES_ONESHOT_TIMEOUT
+        raw = [{
+            "id": "BM-01",
+            "input": "测试场景",
+            "gold": {"must_hit": [f"原始要求 {index}" for index in range(1, 12)]},
+            "trajectory_requirements": ["确认关键信息"],
+        }]
+        (skill_dir / "benchmark_bank.json").write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+        return True, "题库已写入"
+
+    monkeypatch.setattr(rb.rst, "run_hermes", fake_run_hermes)
+
+    questions = rb.build_phase(skill_dir, "demo", {"TOKEN": "configured"})
+
+    assert len(questions) == 1
+    payload, errors = bf.read_document(skill_dir / "benchmark.json")
+    assert errors == []
+    assert bf.validate_document(payload, expected_skill_name="demo") == []
+    quality = json.loads((skill_dir / "benchmark_quality.json").read_text(encoding="utf-8"))
+    assert quality["status"] == "degraded"
+    assert quality["warnings"][0]["code"] == "requirements_auto_completed"
+    assert (skill_dir / "BENCHMARK.md").is_file()
+
+
 def test_hermes_discovery_uses_project_venv_and_ignores_global_path(tmp_path, monkeypatch):
     repository = tmp_path / "repository"
     global_bin = tmp_path / "global-bin"

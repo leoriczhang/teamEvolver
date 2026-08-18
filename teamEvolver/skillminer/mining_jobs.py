@@ -39,6 +39,7 @@ _ARTIFACT_NAMES = {
     "BENCHMARK.md": "benchmark",
     "benchmark.json": "benchmark",
     "benchmark_bank.json": "benchmark",
+    "benchmark_quality.json": "benchmark",
 }
 _ACTIVE_STATES = {"preparing", "queued", "running", "waiting", "stopping"}
 _PHASE_RE = re.compile(r"\[第\s*(\d+)\s*轮\]\[Step\s*([123])/3\]")
@@ -239,6 +240,7 @@ class MiningJobManager:
                 "return_code": None,
                 "error": "",
                 "stop_reason": "",
+                "artifact_quality": None,
                 "human_checkpoints": bool(request.get("human_checkpoints", True)),
             }
             job_dir = self._job_dir(job_id)
@@ -368,21 +370,24 @@ class MiningJobManager:
             if was_stopping:
                 job["status"] = "stopped"
                 job["stop_reason"] = job.get("stop_reason") or "用户手动停止"
-            elif return_code == 0:
-                artifact_errors = self._completion_artifact_errors(job)
-                if artifact_errors:
-                    job["status"] = "failed"
-                    job["error"] = "挖掘产物不完整：" + "；".join(artifact_errors)
-                else:
-                    job["status"] = "succeeded"
-                    job["phase"] = {"step1": "done", "step2": "done", "step3": "done"}
             else:
-                job["status"] = "failed"
-                artifact_errors = self._completion_artifact_errors(job)
-                if artifact_errors:
-                    job["error"] = "最终产物生成失败：" + "；".join(artifact_errors)
+                quality = self._assess_artifact_quality(job, return_code=return_code)
+                job["artifact_quality"] = quality
+                if quality["has_skill"]:
+                    # A compiled Skill is a useful terminal result even when
+                    # reflection stopped early or a Benchmark needed repair.
+                    # Preserve it as a completed task and surface the exact
+                    # review warnings instead of mislabelling it as a crash.
+                    job["status"] = "succeeded"
+                    job["error"] = ""
+                    job["phase"] = {"step1": "done", "step2": "done", "step3": "done"}
                 else:
-                    job["error"] = f"流水线进程退出码：{return_code}"
+                    job["status"] = "failed"
+                    artifact_errors = self._completion_artifact_errors(job)
+                    if artifact_errors:
+                        job["error"] = "最终产物生成失败：" + "；".join(artifact_errors)
+                    else:
+                        job["error"] = f"流水线进程退出码：{return_code}"
             self._processes.pop(job_id, None)
             checkpoint_dir = self._job_dir(job_id) / "checkpoints"
             (checkpoint_dir / "pending.json").unlink(missing_ok=True)
@@ -412,6 +417,101 @@ class MiningJobManager:
             format_errors.extend(bf.validate_document(payload, expected_skill_name=skill_dir.name))
         errors.extend(f"benchmark.json：{error}" for error in dict.fromkeys(format_errors))
         return errors
+
+    def _assess_artifact_quality(self, job: dict[str, Any], *, return_code: int) -> dict[str, Any]:
+        """Describe review risk without turning recoverable output into failure."""
+        workspace = self.project_root / str(job.get("workspace") or "")
+        compiled_root = workspace / "compiled_skill"
+        skill_files = sorted(compiled_root.glob("*/SKILL.md")) if compiled_root.is_dir() else []
+        if len(skill_files) != 1:
+            return {
+                "has_skill": False,
+                "level": "incomplete",
+                "label": "无可用最终 Skill",
+                "confidence": "unknown",
+                "summary": f"未生成唯一的 SKILL.md（实际 {len(skill_files)} 个）。",
+                "warnings": [f"应有且仅有一个 SKILL.md，实际为 {len(skill_files)} 个"],
+                "artifacts": [],
+                "can_submit": False,
+            }
+
+        skill_dir = skill_files[0].parent
+        text = skill_files[0].read_text(encoding="utf-8", errors="ignore")
+        match = re.search(r"(?:置信档|判定结果)\**\s*[：:]\s*\**\s*(生产级|候选级|草稿级)", text)
+        confidence = match.group(1) if match else "unknown"
+        warnings: list[str] = []
+        artifacts: list[dict[str, str]] = []
+        evaluation = skill_dir / "EVALUATION.md"
+        benchmark_md = skill_dir / "BENCHMARK.md"
+        benchmark_json = skill_dir / "benchmark.json"
+        benchmark_quality = skill_dir / "benchmark_quality.json"
+
+        artifacts.append({
+            "kind": "skill",
+            "state": "ready" if confidence in {"生产级", "候选级"} else "caution",
+            "label": f"{confidence if confidence != 'unknown' else '未声明'} Skill",
+            "detail": "Skill 已生成；请结合下方质量标记审核。",
+        })
+        if evaluation.is_file() and evaluation.stat().st_size:
+            artifacts.append({"kind": "evaluation", "state": "ready", "label": "评测定义已生成", "detail": "可人工编辑与复核。"})
+        else:
+            warnings.append("缺少 EVALUATION.md，不能直接进入进化评审。")
+            artifacts.append({"kind": "evaluation", "state": "incomplete", "label": "评测定义缺失", "detail": "请补充 EVALUATION.md 后再提交。"})
+
+        if benchmark_md.is_file() and benchmark_md.stat().st_size and benchmark_json.is_file() and benchmark_json.stat().st_size:
+            artifacts.append({"kind": "benchmark", "state": "ready", "label": "Benchmark 已生成", "detail": "题库文件与人读视图均已落盘。"})
+            payload, format_errors = bf.read_document(benchmark_json)
+            if payload is not None:
+                format_errors.extend(bf.validate_document(payload, expected_skill_name=skill_dir.name))
+            warnings.extend(f"Benchmark 格式：{error}" for error in dict.fromkeys(format_errors))
+        else:
+            warnings.append("缺少完整 Benchmark（benchmark.json 或 BENCHMARK.md）。")
+            artifacts.append({"kind": "benchmark", "state": "incomplete", "label": "Benchmark 不完整", "detail": "可查看现有 Skill，但建议补齐题库后再提交。"})
+
+        if benchmark_quality.is_file():
+            try:
+                report = json.loads(benchmark_quality.read_text(encoding="utf-8"))
+                for item in report.get("warnings") or []:
+                    if isinstance(item, dict):
+                        message = str(item.get("message") or "").strip()
+                    else:
+                        message = str(item or "").strip()
+                    if message:
+                        warnings.append(message)
+            except (OSError, json.JSONDecodeError):
+                warnings.append("Benchmark 质量报告无法解析，请人工检查 benchmark_quality.json。")
+
+        stop_reason = str(job.get("stop_reason") or "").strip()
+        if stop_reason and any(token in stop_reason for token in ("未下降", "最大轮数", "无补充素材")):
+            warnings.append(f"反思环提前结束：{stop_reason}")
+        if return_code != 0:
+            warnings.append(f"流水线以退出码 {return_code} 结束；已保留可用产物，请查看日志。")
+
+        unique_warnings = list(dict.fromkeys(warnings))
+        incomplete = any(item["state"] == "incomplete" for item in artifacts)
+        if incomplete:
+            level, label = "incomplete", "产物不完整"
+        elif unique_warnings or confidence in {"草稿级", "unknown"}:
+            level, label = "caution", "谨慎提交"
+        elif confidence == "生产级":
+            level, label = "ready", "可提交"
+        else:
+            level, label = "caution", "候选级 · 建议复核"
+        summary = (
+            "产物已生成，但存在需要人工复核的风险项。"
+            if unique_warnings or incomplete
+            else "产物完整，可进入进化评审。"
+        )
+        return {
+            "has_skill": True,
+            "level": level,
+            "label": label,
+            "confidence": confidence,
+            "summary": summary,
+            "warnings": unique_warnings,
+            "artifacts": artifacts,
+            "can_submit": bool(evaluation.is_file() and evaluation.stat().st_size),
+        }
 
     def stop_job(self, job_id: str) -> dict[str, Any]:
         with self._lock:

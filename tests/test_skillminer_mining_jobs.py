@@ -157,7 +157,7 @@ def test_loading_manager_without_start_is_read_only(tmp_path):
     assert pending_path.is_file()
 
 
-def test_zero_exit_with_missing_benchmark_is_not_marked_succeeded(tmp_path):
+def test_zero_exit_with_missing_benchmark_completes_with_incomplete_quality_marker(tmp_path):
     _prepare_project(tmp_path)
     (tmp_path / "run_pipeline.py").write_text(
         """from pathlib import Path
@@ -179,13 +179,14 @@ print('编译产物契约校验通过')
 
     finished = _wait_finished(manager, [job["job_id"]])[0]
 
-    assert finished["status"] == "failed"
-    assert "挖掘产物不完整" in finished["error"]
-    assert "BENCHMARK.md" in finished["error"]
-    assert "benchmark.json" in finished["error"]
+    assert finished["status"] == "succeeded"
+    assert finished["error"] == ""
+    assert finished["artifact_quality"]["level"] == "incomplete"
+    assert finished["artifact_quality"]["can_submit"] is True
+    assert any("Benchmark" in warning for warning in finished["artifact_quality"]["warnings"])
 
 
-def test_nonzero_exit_reports_missing_final_artifacts(tmp_path):
+def test_nonzero_exit_keeps_partial_skill_as_completed_with_review_warning(tmp_path):
     _prepare_project(tmp_path)
     (tmp_path / "run_pipeline.py").write_text(
         """from pathlib import Path
@@ -207,10 +208,9 @@ raise SystemExit(1)
 
     finished = _wait_finished(manager, [job["job_id"]])[0]
 
-    assert finished["status"] == "failed"
-    assert "最终产物生成失败" in finished["error"]
-    assert "BENCHMARK.md" in finished["error"]
-    assert "benchmark.json" in finished["error"]
+    assert finished["status"] == "succeeded"
+    assert finished["artifact_quality"]["level"] == "incomplete"
+    assert any("退出码" in warning for warning in finished["artifact_quality"]["warnings"])
 
 
 def test_waiting_job_exposes_form_checkpoint_and_accepts_answers(tmp_path):
