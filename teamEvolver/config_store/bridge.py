@@ -527,6 +527,8 @@ class ConfigStore:
             langfuse_default_trace_name=str(
                 langfuse.get("default_trace_name", "") or ""
             ),
+            langfuse_mapper_enabled=bool(langfuse.get("mapper_enabled", False)),
+            langfuse_mapper_code=str(langfuse.get("mapper_code", "") or ""),
         )
 
     def describe(self) -> str:

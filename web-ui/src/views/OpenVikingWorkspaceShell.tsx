@@ -140,6 +140,42 @@ function isPersonalScope(scope: ScopeName) {
   return scope.startsWith("personal_");
 }
 
+const DIRECTORY_PURPOSES: Record<string, string> = {
+  skills: "团队正式技能库，Pi Agent / Hermes 读取源",
+  "manifest.json": "技能清单索引：名称 → 版本/哈希",
+  "evolve_skill_registry.json": "技能 ID 登记表，保证 ID 跨节点稳定",
+  skill_lab: "技能实验室：datasets 数据集 / runs 实验结果",
+  skill_datasets: "技能测试集，按 <skill>/<dataset> 组织",
+  evolution_datasets: "从历史会话合成的进化数据集",
+  skill_evidence: "技能效果证据：注入次数、有效性",
+  skill_version_context: "技能版本上下文，真回放对比基线",
+  sessions: "待消费会话队列，进化引擎消费后删除",
+  session_archive: "会话永久归档",
+  session_filter_audit: "会话过滤决策审计（为何入队/跳过）",
+  session_ledger: "会话总账：queued→consumed 状态流转",
+  "session_index.json": "会话元信息索引，供控制台快速浏览",
+  skill_mutation_commits: "技能变更提交存档（publish/delete）",
+  skill_sync_outbox: "技能同步发件箱，待下发各运行时",
+  candidate_skills: "候选技能暂存区，尚未进入正式 skills/",
+  validation_jobs: "验证任务，由进化服务产出",
+  validation_claims: "任务认领锁，防止重复验证",
+  validation_results: "各客户端独立验证结果",
+  validation_evaluations: "多方结果聚合评估",
+  validation_decisions: "最终发布/拒绝裁决",
+  "validation_decision_index.json": "裁决总索引，供快速检索",
+  human_review: "人工复核任务队列（自动裁决拿不准时）",
+  "memory-changes": "记忆变更总账，支持真回放验证记忆改动",
+  "memory-replays": "记忆改动的真回放记录",
+  peers: "按客户/用户隔离区，个人技能落在 peers/<账号>/skills",
+  knowledge: "OpenViking 顶层数据类别（memories/resources/skills 并列）",
+  ".abstract.md": "OpenViking 自动生成的目录 L0 摘要",
+  ".overview.md": "OpenViking 自动生成的目录 L1 概览",
+};
+
+function directoryPurpose(entry: WorkspaceEntry): string {
+  return DIRECTORY_PURPOSES[entry.name] || "";
+}
+
 const MARKDOWN_EXTENSIONS = new Set(["md", "markdown", "mdx"]);
 const HTML_EXTENSIONS = new Set(["html", "htm"]);
 const JSON_EXTENSIONS = new Set(["json", "jsonl"]);
@@ -834,11 +870,13 @@ function TreeRow({
 }) {
   const isExpanded = forceExpanded || expanded.has(node.entry.uri);
   const isCurrentDirectory = node.entry.is_dir && currentUri === node.entry.uri;
+  // Known top-level entries carry an inline Chinese purpose annotation.
+  const purpose = depth === 1 ? directoryPurpose(node.entry) : "";
   return (
     <>
       <button
         type="button"
-        title={node.entry.uri}
+        title={purpose ? `${node.entry.uri}\n${purpose}` : node.entry.uri}
         className={cn(
           "group flex w-full items-center gap-1 py-1.5 pr-2 text-left text-xs hover:bg-muted/70",
           selectedUri === node.entry.uri && "bg-muted",
@@ -865,9 +903,16 @@ function TreeRow({
         ) : (
           <FileIcon name={node.entry.name} />
         )}
-        <span className="min-w-0 flex-1 truncate">{node.entry.name}</span>
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className="truncate">{node.entry.name}</span>
+          {purpose && (
+            <span className="truncate text-[10px] font-normal text-muted-foreground">
+              {purpose}
+            </span>
+          )}
+        </span>
         {!node.entry.is_dir && node.entry.size != null && (
-          <span className="hidden shrink-0 text-[9px] text-muted-foreground group-hover:inline">
+          <span className="hidden shrink-0 self-center text-[9px] text-muted-foreground group-hover:inline">
             {formatBytes(node.entry.size)}
           </span>
         )}

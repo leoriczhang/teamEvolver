@@ -221,6 +221,32 @@ Langfuse observability and session pull configuration. Langfuse integration has 
 | `default_release` | string | `""` | Default release filter. |
 | `default_version` | string | `""` | Default version filter. |
 | `default_trace_name` | string | `""` | Default trace name filter. |
+| `mapper_enabled` | boolean | `false` | Enable the custom trace mapper. When on, a user-authored `map_trace` runs for every trace during a pull. |
+| `mapper_code` | string | `""` | Source of the user-authored `map_trace(trace, observations)` function returning a (possibly partial) standard evolution turn. |
+
+#### Custom Trace Mapping (Standard Evolution Format)
+
+Langfuse traces and observations share one shape; observations only add nesting through `parentObservationId`. Mapping them into the standard evolution turn is otherwise mechanical, so beyond the built-in mapping teamEvolver lets an admin own that step with a small function:
+
+```python
+def map_trace(trace, observations):
+    # trace:        dict — one Langfuse trace (input/output/metadata/...)
+    # observations: list[dict] — its observations (flat, nested via parentObservationId)
+    # return:       dict — a standard-format evolution turn. A partial dict is
+    #               deep-merged over the built-in mapping; return None to accept
+    #               the built-in mapping as-is.
+    usage = (trace.get("metadata") or {}).get("usage") or {}
+    return {
+        "prompt_text": str(trace.get("input") or ""),
+        "response_text": str(trace.get("output") or ""),
+        "metrics": {"total_tokens": int(usage.get("total") or 0)},
+    }
+```
+
+- The function runs in a restricted namespace: `json / re / math / datetime` are available, while `import` and filesystem access are disabled. Only admins may edit it (it is executable configuration).
+- The return value is **deep-merged** over the built-in mapping — override only the fields you care about; the rest fall back to the built-in logic.
+- The console's Langfuse page has a "Custom Trace Mapping" panel to edit the code, insert the reference template, and dry-run it against a bundled sample or a pasted trace, comparing the mapped turn to the built-in mapping side by side. A "Standard Format" button in the panel header opens a dialog documenting the evolution turn format (every field's meaning plus a worked example).
+- If the code raises during a pull, that session falls back to the built-in mapping so one bad trace never fails the whole batch.
 
 ### mining Section
 

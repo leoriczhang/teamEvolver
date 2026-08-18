@@ -23,6 +23,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 from .langfuse_client import LangfuseClient, LangfuseError, SessionFilters
 from .langfuse_convert import convert_langfuse_session
+from .langfuse_mapper import build_trace_mapper_from_config
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +159,10 @@ async def pull_sessions(
     filters = build_filters_from_config(config, overrides)
     cap = max_sessions or int(getattr(config, "langfuse_max_sessions", 100) or 100)
 
+    # Operator-authored per-trace mapper (None when disabled or code is empty).
+    # Compile once per pull so a broken mapper is reported consistently.
+    trace_mapper = build_trace_mapper_from_config(config)
+
     session_ids = client.list_session_ids(filters, max_sessions=cap)
     results: list[dict[str, Any]] = []
     counts = {"queued": 0, "skipped": 0, "duplicate": 0, "empty": 0, "error": 0}
@@ -165,7 +170,7 @@ async def pull_sessions(
     for session_id in session_ids:
         try:
             session, traces = client.fetch_session_with_traces(session_id)
-            converted = convert_langfuse_session(session, traces)
+            converted = _convert_session(session, traces, trace_mapper)
         except LangfuseError as exc:
             logger.warning("[Langfuse] failed to fetch session %s: %s", session_id, exc)
             counts["error"] += 1
@@ -212,6 +217,30 @@ async def pull_sessions(
         "counts": counts,
         "results": results,
     }
+
+
+def _convert_session(
+    session: dict[str, Any],
+    traces: list[dict[str, Any]],
+    trace_mapper: Optional[Callable[..., dict[str, Any]]],
+) -> dict[str, Any]:
+    """Convert one session, falling back to the built-in mapping on mapper error.
+
+    A custom mapper is operator-authored and may raise on an unexpected trace
+    shape. Rather than fail the whole pull, we log once and re-run the built-in
+    conversion for that session so ingestion still proceeds.
+    """
+    if trace_mapper is None:
+        return convert_langfuse_session(session, traces)
+    try:
+        return convert_langfuse_session(session, traces, mapper=trace_mapper)
+    except Exception as exc:  # noqa: BLE001 - operator mapper can raise anything
+        logger.warning(
+            "[Langfuse] custom mapper failed for session %s; using built-in mapping: %s",
+            session.get("id") or session.get("session_id") or "?",
+            exc,
+        )
+        return convert_langfuse_session(session, traces)
 
 
 def _has_meaningful_content(session: dict[str, Any]) -> bool:

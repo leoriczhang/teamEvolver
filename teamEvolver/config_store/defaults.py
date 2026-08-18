@@ -198,6 +198,12 @@ _DEFAULTS: dict = {
         "default_release": "",
         "default_version": "",
         "default_trace_name": "",
+        # Operator-authored trace mapper. When ``mapper_enabled`` is true and
+        # ``mapper_code`` defines ``map_trace(trace, observations)``, that
+        # function produces the evolution turn (deep-merged over the built-in
+        # mapping). Empty/disabled falls back to the built-in converter.
+        "mapper_enabled": False,
+        "mapper_code": "",
     },
 }
 

@@ -690,6 +690,16 @@ def _langfuse_settings_payload(config, store_data: dict[str, Any]) -> dict[str, 
         "default_trace_name": str(
             langfuse.get("default_trace_name") or getattr(config, "langfuse_default_trace_name", "") or ""
         ),
+        "mapper_enabled": bool(
+            langfuse.get("mapper_enabled", getattr(config, "langfuse_mapper_enabled", False))
+        ),
+        # The mapper code is operator-authored and meant to be viewed/edited in
+        # the console, so (unlike secrets) it is echoed back verbatim.
+        "mapper_code": str(
+            langfuse.get("mapper_code")
+            if langfuse.get("mapper_code") is not None
+            else getattr(config, "langfuse_mapper_code", "") or ""
+        ),
     }
 
 
@@ -2712,6 +2722,31 @@ class RoutesMixin:
                     ),
                 )
 
+            # Operator-authored trace mapper. Persist the code even while
+            # disabled (so a draft survives), but reject enabling code that does
+            # not compile / lacks a map_trace entry point, mirroring how the
+            # console dry-run tester reports errors.
+            mapper_enabled = bool(body.get("mapper_enabled", langfuse.get("mapper_enabled", False)))
+            if "mapper_code" in body:
+                mapper_code = str(body.get("mapper_code") or "")
+            else:
+                mapper_code = str(langfuse.get("mapper_code") or "")
+            if mapper_enabled and mapper_code.strip():
+                from ..integrations.langfuse_mapper import MapperError, compile_mapper
+
+                try:
+                    compile_mapper(mapper_code)
+                except MapperError as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"trace mapper 无法启用：{exc}",
+                    ) from exc
+            elif mapper_enabled and not mapper_code.strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail="启用自定义 trace mapper 前必须填写 map_trace 代码",
+                )
+
             langfuse.update(
                 {
                     "enabled": enabled,
@@ -2742,6 +2777,8 @@ class RoutesMixin:
                     "default_release": str(body.get("default_release") or "").strip(),
                     "default_version": str(body.get("default_version") or "").strip(),
                     "default_trace_name": str(body.get("default_trace_name") or "").strip(),
+                    "mapper_enabled": mapper_enabled,
+                    "mapper_code": mapper_code,
                 }
             )
             store.save(data)
@@ -3179,6 +3216,60 @@ class RoutesMixin:
                 )
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(status_code=502, detail=f"langfuse pull failed: {exc}") from exc
+            return JSONResponse(content=result)
+
+        @app.get("/langfuse/mapper/template")
+        async def langfuse_mapper_template():
+            """Return the reference mapper code, bundled sample, and format spec."""
+            from ..integrations.langfuse_mapper import (
+                TURN_KEYS,
+                default_mapper_code,
+                sample_trace_payload,
+                standard_format_spec,
+            )
+
+            return JSONResponse(
+                content={
+                    "template": default_mapper_code(),
+                    "sample": sample_trace_payload(),
+                    "turn_keys": list(TURN_KEYS),
+                    "spec": standard_format_spec(),
+                }
+            )
+
+        @app.post("/langfuse/mapper/test")
+        async def langfuse_mapper_test(request: Request):
+            """Dry-run an operator's trace mapper against a pasted or sample trace.
+
+            Admin-only (the mapper is executable config). The request body is
+            ``{"code": "...", "trace": <{trace, observations} | trace dict>?}``;
+            when ``trace`` is omitted a small bundled sample is used so the
+            operator can iterate before wiring up a live Langfuse pull.
+            """
+            _require_admin_user(_session_user(request))
+            from ..integrations.langfuse_mapper import (
+                run_mapper_preview,
+                sample_trace_payload,
+            )
+
+            body = await request.json() if await request.body() else {}
+            if not isinstance(body, dict):
+                body = {}
+            code = str(body.get("code") or "")
+            if not code.strip():
+                raise HTTPException(status_code=400, detail="mapper code is required")
+            payload = body.get("trace")
+            used_sample = payload in (None, "", {}, [])
+            if used_sample:
+                payload = sample_trace_payload()
+            try:
+                turn_num = max(1, int(body.get("turn_num") or 1))
+            except (TypeError, ValueError):
+                turn_num = 1
+            result = await asyncio.to_thread(
+                run_mapper_preview, code, payload, turn_num=turn_num
+            )
+            result["used_sample"] = used_sample
             return JSONResponse(content=result)
 
         async def _register_agent_runtime(body: dict[str, Any]) -> dict[str, Any]:

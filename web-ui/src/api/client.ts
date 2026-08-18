@@ -1035,6 +1035,9 @@ export interface LangfuseConfig {
   default_release?: string;
   default_version?: string;
   default_trace_name?: string;
+  // Operator-authored per-trace mapper (executable config; admin-only writes).
+  mapper_enabled?: boolean;
+  mapper_code?: string;
   // write-only fields (never returned by the server):
   secret_key?: string;
   clear_public_key?: boolean;
@@ -1045,6 +1048,38 @@ export interface LangfuseTestResp {
   ok: boolean;
   host?: string;
   total_sessions?: number | null;
+}
+
+// Dry-run result for a custom trace mapper (POST /langfuse/mapper/test).
+export interface LangfuseMapperTestResp {
+  ok: boolean;
+  error?: string;
+  turn?: Record<string, unknown>;
+  builtin?: Record<string, unknown>;
+  observation_count?: number;
+  used_sample?: boolean;
+}
+
+// Reference mapper template + bundled sample (GET /langfuse/mapper/template).
+export interface LangfuseMapperFormatField {
+  key: string;
+  type: string;
+  required: boolean | string;
+  desc: string;
+}
+
+export interface LangfuseMapperFormatSpec {
+  title: string;
+  summary: string;
+  fields: LangfuseMapperFormatField[];
+  example: Record<string, unknown>;
+}
+
+export interface LangfuseMapperTemplateResp {
+  template: string;
+  sample: Record<string, unknown>;
+  turn_keys: string[];
+  spec?: LangfuseMapperFormatSpec;
 }
 
 // ---- Prompt Studio (transparent skill-evolution pipeline) --------------- //

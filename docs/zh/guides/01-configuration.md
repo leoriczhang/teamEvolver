@@ -221,6 +221,31 @@ Langfuse 可观测性与会话拉取配置。Langfuse 集成分为两种独立�
 | `default_release` | string | `""` | 默认拉取过滤的版本。 |
 | `default_version` | string | `""` | 默认拉取过滤的版本号。 |
 | `default_trace_name` | string | `""` | 默认拉取过滤的 Trace 名称。 |
+| `mapper_enabled` | boolean | `false` | 是否启用自定义 Trace 映射。启用后拉取时对每个 trace 调用用户编写的 `map_trace`。 |
+| `mapper_code` | string | `""` | 用户编写的 `map_trace(trace, observations)` 函数源码，返回（可部分的）进化标准 turn。 |
+
+#### 自定义 Trace 映射（进化标准格式）
+
+Langfuse 的 trace 与 observation 结构统一，observation 仅通过 `parentObservationId` 形成嵌套。将其映射为进化所需的标准格式本质上是机械的，因此除内置映射外，teamEvolver 允许管理员编写一个函数亲自掌控这一步：
+
+```python
+def map_trace(trace, observations):
+    # trace:        dict —— 单个 Langfuse trace（input/output/metadata/...）
+    # observations: list[dict] —— 该 trace 的 observation（扁平列表，靠 parentObservationId 嵌套）
+    # 返回:         dict —— 进化标准格式的 turn；返回部分字段会深合并到内置映射之上，
+    #               返回 None 表示完全沿用内置映射。
+    usage = (trace.get("metadata") or {}).get("usage") or {}
+    return {
+        "prompt_text": str(trace.get("input") or ""),
+        "response_text": str(trace.get("output") or ""),
+        "metrics": {"total_tokens": int(usage.get("total") or 0)},
+    }
+```
+
+- 函数在受限环境中执行：内置 `json / re / math / datetime`，禁用 `import` 与文件访问。仅管理员可编辑（属于可执行配置）。
+- 返回值会**深合并**到内置映射结果之上——只需覆盖关心的字段，其余自动回退到内置逻辑。
+- 在控制台 Langfuse 页的「自定义 Trace 映射」面板可编辑、插入参考模板，并对内置样例或粘贴的 trace 试运行，直接对比映射结果与内置映射。面板右上角的「标准格式说明」按钮会弹出进化标准格式（各字段含义 + 完整示例）的说明。
+- 若代码在拉取时抛错，该会话会自动回退到内置映射，不会中断整批拉取。
 
 ### mining 节
 

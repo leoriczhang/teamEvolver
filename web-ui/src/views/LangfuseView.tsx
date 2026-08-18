@@ -9,10 +9,23 @@ import {
 } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   api,
   type LangfuseConfig,
   type LangfuseFilters,
+  type LangfuseMapperFormatSpec,
+  type LangfuseMapperTemplateResp,
+  type LangfuseMapperTestResp,
   type LangfusePullResp,
   type LangfuseSessionsResp,
   type LangfuseSessionPreview,
@@ -68,6 +81,8 @@ interface ConfigForm {
   tracing_release: string;
   tracing_sample_rate: string;
   tracing_capture_content: boolean;
+  mapper_enabled: boolean;
+  mapper_code: string;
 }
 
 const EMPTY_CONFIG: ConfigForm = {
@@ -84,6 +99,8 @@ const EMPTY_CONFIG: ConfigForm = {
   tracing_release: "",
   tracing_sample_rate: "1",
   tracing_capture_content: true,
+  mapper_enabled: false,
+  mapper_code: "",
 };
 
 function splitList(value: string): string[] {
@@ -172,6 +189,8 @@ export default function LangfuseView({
       tracing_release: cfg.tracing_release || "",
       tracing_sample_rate: String(cfg.tracing_sample_rate ?? 1),
       tracing_capture_content: cfg.tracing_capture_content !== false,
+      mapper_enabled: !!cfg.mapper_enabled,
+      mapper_code: cfg.mapper_code || "",
     });
   }, []);
 
@@ -238,6 +257,8 @@ export default function LangfuseView({
         tracing_release: cfgForm.tracing_release.trim(),
         tracing_sample_rate: Number(cfgForm.tracing_sample_rate),
         tracing_capture_content: cfgForm.tracing_capture_content,
+        mapper_enabled: cfgForm.mapper_enabled,
+        mapper_code: cfgForm.mapper_code,
       };
       // Only send secrets when the operator typed a new value.
       if (cfgForm.public_key.trim()) payload.public_key = cfgForm.public_key.trim();
@@ -526,6 +547,17 @@ export default function LangfuseView({
         )}
       </Panel>
 
+      {/* ---- White-box: user-authored trace mapper ---- */}
+      <TraceMapperPanel
+        isAdmin={isAdmin}
+        enabled={cfgForm.mapper_enabled}
+        code={cfgForm.mapper_code}
+        onToggle={(v) => setCfgForm((f) => ({ ...f, mapper_enabled: v }))}
+        onCodeChange={(v) => setCfgForm((f) => ({ ...f, mapper_code: v }))}
+        onSave={saveConfig}
+        saving={savingCfg}
+      />
+
       {/* ---- Session-attribute filters ---- */}
       <Panel
         title="会话属性筛选"
@@ -765,5 +797,343 @@ function FormField({
 function Td({ children, className = "" }: { children: ReactNode; className?: string }) {
   return (
     <td className={`border-b border-line px-4 py-2.5 align-top text-sm ${className}`}>{children}</td>
+  );
+}
+
+// White-box editor + dry-run tester for the operator-authored trace mapper.
+// The mapper is a Python function `map_trace(trace, observations)` that returns
+// a partial teamEvolver evolution turn; the server deep-merges it over the
+// built-in mapping. Editing/testing is admin-only (it is executable config).
+function TraceMapperPanel({
+  isAdmin,
+  enabled,
+  code,
+  onToggle,
+  onCodeChange,
+  onSave,
+  saving,
+}: {
+  isAdmin: boolean;
+  enabled: boolean;
+  code: string;
+  onToggle: (value: boolean) => void;
+  onCodeChange: (value: string) => void;
+  onSave: () => void | Promise<void>;
+  saving: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [traceJson, setTraceJson] = useState("");
+  const [testing, setTesting] = useState(false);
+  const [loadingTpl, setLoadingTpl] = useState(false);
+  const [result, setResult] = useState<LangfuseMapperTestResp | null>(null);
+  const [spec, setSpec] = useState<LangfuseMapperFormatSpec | null>(null);
+  const [specOpen, setSpecOpen] = useState(false);
+  const [loadingSpec, setLoadingSpec] = useState(false);
+
+  // The mapper endpoints were added to the evolve service; when the console
+  // talks to an older running service the routes 404. Surface a clear hint to
+  // restart rather than a bare "加载失败".
+  function describeMapperError(e: any): string {
+    const msg = String(e?.message || e || "");
+    if (/404|not found|Method Not Allowed|405/i.test(msg)) {
+      return "该接口不存在，通常是服务未重启。请重启 teamEvolver 服务后重试。";
+    }
+    return msg;
+  }
+
+  async function fetchTemplate(): Promise<LangfuseMapperTemplateResp> {
+    const tpl = await api<LangfuseMapperTemplateResp>("/langfuse/mapper/template");
+    if (tpl.spec) setSpec(tpl.spec);
+    return tpl;
+  }
+
+  async function insertTemplate() {
+    setLoadingTpl(true);
+    try {
+      const tpl = await fetchTemplate();
+      if (!code.trim() || window.confirm("用参考模板覆盖当前代码？")) {
+        onCodeChange(tpl.template);
+      }
+      if (!traceJson.trim()) {
+        setTraceJson(JSON.stringify(tpl.sample, null, 2));
+      }
+    } catch (e: any) {
+      toastErr("加载模板失败", describeMapperError(e));
+    } finally {
+      setLoadingTpl(false);
+    }
+  }
+
+  async function showSpec() {
+    setSpecOpen(true);
+    if (spec) return;
+    setLoadingSpec(true);
+    try {
+      const tpl = await fetchTemplate();
+      if (!tpl.spec) {
+        toastErr("加载标准格式说明失败", "服务未返回格式说明，请重启服务后重试。");
+      }
+    } catch (e: any) {
+      toastErr("加载标准格式说明失败", describeMapperError(e));
+    } finally {
+      setLoadingSpec(false);
+    }
+  }
+
+  async function runTest() {
+    if (!code.trim()) {
+      toastErr("无法测试", "请先填写 map_trace 代码");
+      return;
+    }
+    let traceArg: unknown = undefined;
+    const raw = traceJson.trim();
+    if (raw) {
+      try {
+        traceArg = JSON.parse(raw);
+      } catch (e: any) {
+        toastErr("样例 JSON 无法解析", e.message);
+        return;
+      }
+    }
+    setTesting(true);
+    setResult(null);
+    try {
+      const data = await api<LangfuseMapperTestResp>("/langfuse/mapper/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code, trace: traceArg }),
+      });
+      setResult(data);
+      if (data.ok) {
+        toastOk("映射成功", data.used_sample ? "使用内置样例 trace" : "使用自定义 trace");
+      } else {
+        toastErr("映射失败", data.error || "未知错误");
+      }
+    } catch (e: any) {
+      toastErr("测试请求失败", e.message);
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  return (
+    <>
+    <Panel
+      title="自定义 Trace 映射（进化标准格式）"
+      extra={
+        <div className="flex items-center gap-2">
+          <Pill tone={enabled ? "green" : "gray"}>{enabled ? "已启用" : "未启用"}</Pill>
+          <Button variant="outline" size="sm" onClick={showSpec} disabled={loadingSpec}>
+            {loadingSpec ? "加载中…" : "标准格式说明"}
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => setOpen((v) => !v)}>
+            {open ? "收起" : "编辑"}
+          </Button>
+        </div>
+      }
+    >
+      {!open && (
+        <div className="px-4 py-3 text-xs text-muted-foreground">
+          {enabled
+            ? "已启用自定义映射：拉取时对每个 trace 调用 map_trace(trace, observations)，结果深合并到内置映射之上。"
+            : "未启用。拉取会话时使用内置的 Langfuse → 进化格式映射。点击「编辑」可自定义。"}
+        </div>
+      )}
+      {open && (
+        <div className="space-y-4 p-4">
+          {!isAdmin && (
+            <div className="rounded-lg border border-border bg-background/60 p-3 text-xs text-muted-foreground">
+              当前账号不是管理员，只能查看映射代码，无法保存或测试。
+            </div>
+          )}
+          <div className="rounded-lg border border-border bg-background/60 p-3 text-xs text-muted-foreground">
+            编写 <code className="mono">map_trace(trace, observations)</code>，返回一个（可以是部分的）进化标准
+            turn 字典；未返回的字段会回退到内置映射，返回 <code className="mono">None</code> 表示完全使用内置映射。
+            可用 <code className="mono">json / re / math / datetime</code>，出于安全考虑禁用了{" "}
+            <code className="mono">import</code> 与文件访问。
+          </div>
+          <label className="flex items-center gap-2 text-sm font-semibold">
+            <input
+              type="checkbox"
+              disabled={!isAdmin}
+              checked={enabled}
+              onChange={(e) => onToggle(e.target.checked)}
+            />
+            拉取时启用自定义 trace 映射
+          </label>
+          <FormField label="map_trace 代码（Python）">
+            <Textarea
+              disabled={!isAdmin}
+              value={code}
+              spellCheck={false}
+              onChange={(e) => onCodeChange(e.target.value)}
+              placeholder={"def map_trace(trace, observations):\n    return {\"prompt_text\": str(trace.get(\"input\") or \"\")}"}
+              className="mono h-64 text-xs"
+            />
+          </FormField>
+          <FormField
+            label="测试用 trace（JSON，可留空使用内置样例）"
+            hint="支持 {trace, observations} 或直接是内嵌 observations 的 trace 对象。"
+          >
+            <Textarea
+              disabled={!isAdmin}
+              value={traceJson}
+              spellCheck={false}
+              onChange={(e) => setTraceJson(e.target.value)}
+              placeholder='{"trace": {...}, "observations": [...]}'
+              className="mono h-40 text-xs"
+            />
+          </FormField>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button size="sm" onClick={onSave} disabled={!isAdmin || saving}>
+              {saving ? "保存中…" : "保存映射"}
+            </Button>
+            <Button variant="outline" size="sm" onClick={runTest} disabled={!isAdmin || testing}>
+              {testing ? "映射中…" : "试运行映射"}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={insertTemplate} disabled={!isAdmin || loadingTpl}>
+              {loadingTpl ? "加载中…" : "插入参考模板"}
+            </Button>
+            <span className="ml-auto text-xs text-muted-foreground">
+              保存后立即生效，无需重启服务。启用前会校验代码可编译。
+            </span>
+          </div>
+          {result && (
+            <div className="space-y-2">
+              {result.ok ? (
+                <>
+                  <div className="text-xs text-muted-foreground">
+                    映射成功 · {result.used_sample ? "内置样例" : "自定义 trace"} · observations:{" "}
+                    {result.observation_count ?? "—"}
+                  </div>
+                  <div className="grid gap-3 lg:grid-cols-2">
+                    <MapperResultBlock title="映射结果（标准格式 turn）" value={result.turn} />
+                    <MapperResultBlock title="内置映射（对照）" value={result.builtin} />
+                  </div>
+                </>
+              ) : (
+                <div className="rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700 whitespace-pre-wrap">
+                  {result.error || "映射失败"}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </Panel>
+    <StandardFormatDialog open={specOpen} onOpenChange={setSpecOpen} spec={spec} loading={loadingSpec} />
+    </>
+  );
+}
+
+// Read-only dialog documenting the standard evolution turn format that a mapper
+// must produce. Content comes from GET /langfuse/mapper/template's `spec`, so it
+// stays in lockstep with the server-side ingest contract.
+function StandardFormatDialog({
+  open,
+  onOpenChange,
+  spec,
+  loading,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  spec: LangfuseMapperFormatSpec | null;
+  loading: boolean;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-[860px]">
+        <DialogHeader>
+          <DialogTitle>{spec?.title || "进化标准格式（Evolution Turn）"}</DialogTitle>
+          {spec?.summary && <DialogDescription>{spec.summary}</DialogDescription>}
+        </DialogHeader>
+        {loading && <div className="py-6 text-center text-sm text-muted-foreground">加载中…</div>}
+        {!loading && !spec && (
+          <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            无法加载格式说明。若服务为旧版本，请重启 teamEvolver 服务后重试。
+          </div>
+        )}
+        {!loading && spec && (
+          <div className="space-y-4">
+            <ListViewport maxHeight="340px">
+              <table className="w-full border-collapse">
+                <thead>
+                  <tr>
+                    {["字段", "类型", "必填", "说明"].map((h) => (
+                      <th
+                        key={h}
+                        className="sticky top-0 border-b border-line bg-surface-subtle px-3 py-2 text-left text-xs font-semibold text-muted-foreground"
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {spec.fields.map((f) => (
+                    <tr key={f.key}>
+                      <td className="border-b border-line px-3 py-2 align-top">
+                        <code className="mono text-xs">{f.key}</code>
+                      </td>
+                      <td className="border-b border-line px-3 py-2 align-top text-xs text-muted-foreground">
+                        {f.type}
+                      </td>
+                      <td className="border-b border-line px-3 py-2 align-top text-xs">
+                        {f.required === true ? (
+                          <Pill tone="red">必填</Pill>
+                        ) : f.required ? (
+                          <Pill tone="amber">{String(f.required)}</Pill>
+                        ) : (
+                          <span className="text-muted-soft">可选</span>
+                        )}
+                      </td>
+                      <td className="border-b border-line px-3 py-2 align-top text-xs text-muted-foreground">
+                        {f.desc}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </ListViewport>
+            <div>
+              <div className="mb-1.5 text-xs font-semibold text-muted-foreground">示例（一个 turn）</div>
+              <ListViewport maxHeight="280px">
+                <pre className="mono whitespace-pre-wrap break-all p-3 text-[11px] leading-relaxed">
+                  {JSON.stringify(spec.example, null, 2)}
+                </pre>
+              </ListViewport>
+            </div>
+          </div>
+        )}
+        <DialogFooter>
+          <DialogClose asChild>
+            <Button variant="outline" size="sm">
+              关闭
+            </Button>
+          </DialogClose>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function MapperResultBlock({
+  title,
+  value,
+}: {
+  title: string;
+  value?: Record<string, unknown>;
+}) {
+  return (
+    <div className="rounded-lg border border-line bg-surface-subtle">
+      <div className="border-b border-line px-3 py-2 text-xs font-semibold text-muted-foreground">
+        {title}
+      </div>
+      <ListViewport maxHeight="320px">
+        <pre className="mono whitespace-pre-wrap break-all p-3 text-[11px] leading-relaxed">
+          {JSON.stringify(value ?? {}, null, 2)}
+        </pre>
+      </ListViewport>
+    </div>
   );
 }

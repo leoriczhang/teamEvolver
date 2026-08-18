@@ -19,7 +19,7 @@ parts (``[{"type": "text", "text": "..."}]``).
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Callable, Optional
 
 # Cap any single text body so ingested payloads stay reasonable, mirroring the
 # Hermes push hook (push_session.MAX_CHARS). Keep this generous for 256k+
@@ -202,8 +202,18 @@ def _tool_results_from_messages(messages: list[dict[str, Any]]) -> list[dict[str
 def convert_trace_to_turn(
     trace: dict[str, Any],
     turn_num: int,
+    *,
+    mapper: Optional[Callable[..., dict[str, Any]]] = None,
 ) -> dict[str, Any]:
-    """Convert one Langfuse trace (with full observations) into a turn dict."""
+    """Convert one Langfuse trace (with full observations) into a turn dict.
+
+    When ``mapper`` is provided it is called as
+    ``mapper(trace, observations, turn_num, builtin_turn)`` and its result
+    replaces the returned turn. The built-in turn is always computed first and
+    passed as ``builtin_turn`` so an operator's :class:`TraceMapper` can
+    deep-merge a partial override over it. A mapper that raises is the caller's
+    responsibility to handle (the pull pipeline logs and falls back).
+    """
     observations = trace.get("observations") if isinstance(trace.get("observations"), list) else []
 
     input_messages = _normalize_messages(trace.get("input"), default_role="user")
@@ -268,7 +278,7 @@ def convert_trace_to_turn(
     # log tool executions as spans rather than message tool_calls.
     tool_call_count = len(tool_calls) or non_generation_spans
 
-    return {
+    turn = {
         "turn_num": turn_num,
         "trace_id": str(trace.get("id") or ""),
         "prompt_text": "\n".join(prompts).strip()[:MAX_CHARS],
@@ -300,6 +310,12 @@ def convert_trace_to_turn(
         },
     }
 
+    if mapper is None:
+        return turn
+    # The operator-authored mapper owns the final shape; it receives the flat
+    # observation list plus the built-in turn as a deep-merge baseline.
+    return mapper(trace, list(observations), turn_num, turn)
+
 
 def _dominant(values: list[str]) -> str:
     if not values:
@@ -310,16 +326,41 @@ def _dominant(values: list[str]) -> str:
     return max(counts, key=counts.get)
 
 
+def _metric_int(turn: dict[str, Any], key: str) -> int:
+    """Read one integer metric from a turn, tolerating custom-mapper output.
+
+    A user mapper may omit ``metrics`` entirely or set a non-numeric value; in
+    those cases we contribute 0 to the session-level aggregate rather than
+    raising, so one odd turn never fails a whole pull.
+    """
+    if not isinstance(turn, dict):
+        return 0
+    metrics = turn.get("metrics")
+    if not isinstance(metrics, dict):
+        return 0
+    try:
+        return int(metrics.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def convert_langfuse_session(
     session: dict[str, Any],
     traces: list[dict[str, Any]],
+    *,
+    mapper: Optional[Callable[..., dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """Convert a Langfuse session plus its full traces into a teamEvolver session.
 
-    ``session`` is the object returned by ``GET /api/public/sessions/{id}`` (or a
+    ``session`` is the object returned by ``GET /api/public/sessions/513386726504_AWS_us-west-1`` (or a
     minimal ``{"id": ...}`` when only the id is known). ``traces`` is a list of
     ``TraceWithFullDetails`` (each including its ``observations``), which the
     caller has already fetched and may pre-filter/sort.
+
+    ``mapper`` is an optional operator-authored per-trace mapper (see
+    :mod:`~teamEvolver.integrations.langfuse_mapper`). It is applied to every
+    trace; the resulting turns still feed the same session-level aggregation so
+    metrics/titles stay consistent regardless of who produced the turn.
     """
     session_id = str(session.get("id") or session.get("session_id") or "").strip()
 
@@ -330,17 +371,20 @@ def convert_langfuse_session(
 
     turns: list[dict[str, Any]] = []
     for index, trace in enumerate(ordered_traces, start=1):
-        turns.append(convert_trace_to_turn(trace, index))
+        turns.append(convert_trace_to_turn(trace, index, mapper=mapper))
 
-    total_input = sum(int(turn["metrics"]["input_tokens"]) for turn in turns)
-    total_output = sum(int(turn["metrics"]["output_tokens"]) for turn in turns)
-    total_tokens = sum(int(turn["metrics"]["total_tokens"]) for turn in turns)
-    tool_call_count = sum(int(turn["metrics"]["tool_call_count"]) for turn in turns)
-    api_call_count = sum(int(turn["metrics"]["api_call_count"]) for turn in turns)
+    # A custom mapper may drop/rename metric keys, so read them defensively.
+    total_input = sum(_metric_int(turn, "input_tokens") for turn in turns)
+    total_output = sum(_metric_int(turn, "output_tokens") for turn in turns)
+    total_tokens = sum(_metric_int(turn, "total_tokens") for turn in turns)
+    tool_call_count = sum(_metric_int(turn, "tool_call_count") for turn in turns)
+    api_call_count = sum(_metric_int(turn, "api_call_count") for turn in turns)
 
     messages: list[dict[str, Any]] = []
     for turn in turns:
-        messages.extend(turn["messages"])
+        turn_messages = turn.get("messages")
+        if isinstance(turn_messages, list):
+            messages.extend(turn_messages)
 
     user_ids = [str(t.get("userId") or "").strip() for t in ordered_traces if t.get("userId")]
     environments = [

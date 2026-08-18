@@ -272,3 +272,8 @@ class TeamEvolverConfig:
     langfuse_default_release: str = ""
     langfuse_default_version: str = ""
     langfuse_default_trace_name: str = ""
+    # Operator-authored trace mapper: when enabled, ``langfuse_mapper_code``
+    # defines ``map_trace(trace, observations)`` and produces the evolution turn
+    # (deep-merged over the built-in mapping). Disabled/empty uses the built-in.
+    langfuse_mapper_enabled: bool = False
+    langfuse_mapper_code: str = ""
