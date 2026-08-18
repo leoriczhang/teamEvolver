@@ -25,6 +25,11 @@ const Toaster = ({ ...props }: ToasterProps) => {
       toastOptions={{
         classNames: {
           toast: 'cn-toast',
+          // Runtime errors often contain request IDs, paths, and provider messages.
+          // Keep these human-readable values selectable so they can be copied into
+          // a ticket or shared while diagnosing a deployment.
+          title: 'select-text cursor-text',
+          description: 'select-text cursor-text whitespace-pre-wrap break-words',
         },
       }}
       {...props}

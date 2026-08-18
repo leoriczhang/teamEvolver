@@ -197,6 +197,21 @@ def test_mining_ui_has_no_separate_model_configuration_entry():
     assert '"/api/mining/model"' not in mining_source
 
 
+def test_mining_task_identity_artifacts_and_errors_are_selectable_for_copying():
+    project_root = Path(__file__).resolve().parents[1]
+    mining_source = (project_root / "web-ui" / "src" / "views" / "MiningView.tsx").read_text(encoding="utf-8")
+    toaster_source = (project_root / "web-ui" / "src" / "components" / "ui" / "sonner.tsx").read_text(encoding="utf-8")
+
+    # Task names, task IDs, artifact paths, runtime logs and terminal errors are
+    # all useful diagnostic values. They must remain copyable even when nested
+    # inside an interactive task row or toast.
+    assert mining_source.count("select-text") >= 9
+    assert "job.job_id}</span>" in mining_source
+    assert "job.error || job.stop_reason" in mining_source
+    assert "title: 'select-text cursor-text'" in toaster_source
+    assert "description: 'select-text cursor-text whitespace-pre-wrap break-words'" in toaster_source
+
+
 def test_mining_model_test_uses_current_form_values(tmp_path, monkeypatch):
     config_path = tmp_path / ".hermes_home" / "config.yaml"
     config_path.parent.mkdir(parents=True)

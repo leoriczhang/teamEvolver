@@ -902,10 +902,10 @@ export default function MiningView({
       <div className="space-y-4 border-t border-accent/20 bg-accent-soft/35 px-5 py-5">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <div className="truncate text-[15px] font-bold">{job.name}</div>
+            <div className="select-text truncate text-[15px] font-bold">{job.name}</div>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
               <Pill tone={jobStatusMeta(job.status).tone as any}>{jobStatusMeta(job.status).label}</Pill>
-              {job.input_dir && <span className="mono">{sourceDisplayName(job.input_dir)}</span>}
+              {job.input_dir && <span className="mono select-text">{sourceDisplayName(job.input_dir)}</span>}
               {job.document_count !== null && <span>{job.document_count} 个文档</span>}
             </div>
           </div>
@@ -1087,7 +1087,7 @@ export default function MiningView({
               <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold text-[#cbd5e1]">
                 <Clock3 className="size-3.5" /> 实时日志
               </div>
-              <div className="mono max-h-64 min-h-40 overflow-auto whitespace-pre-wrap break-words text-[10.5px] leading-relaxed text-[#cbd5e1]">
+              <div className="mono max-h-64 min-h-40 overflow-auto whitespace-pre-wrap break-words text-[10.5px] leading-relaxed text-[#cbd5e1] select-text">
                 {job.logs?.length
                   ? job.logs.map((line, index) => <div key={index}>{formatRuntimeLog(line)}</div>)
                   : <span className="text-muted-soft">任务正在准备，暂无日志。</span>}
@@ -1125,10 +1125,10 @@ export default function MiningView({
                   >
                     <FileText className="size-4 shrink-0 text-accent" />
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[12px] font-semibold">
+                      <span className="block truncate text-[12px] font-semibold select-text">
                         {artifact.skill_name ? `${artifact.skill_name} / ${artifact.name}` : artifact.name}
                       </span>
-                      <span className="mono block truncate text-[9.5px] text-muted-soft">{artifact.path}</span>
+                      <span className="mono block truncate text-[9.5px] text-muted-soft select-text">{artifact.path}</span>
                     </span>
                     <Pill tone={artifactTone(artifact.kind) as any}>{artifactLabel(artifact.kind)}</Pill>
                     {job.status === "succeeded"
@@ -1138,7 +1138,7 @@ export default function MiningView({
                 ))}
               </div>
             ) : (
-              <div className="rounded-lg border border-dashed border-border p-6 text-center text-xs text-muted-soft">
+              <div className="select-text whitespace-pre-wrap break-words rounded-lg border border-dashed border-border p-6 text-center text-xs text-muted-soft">
                 {job.error || job.stop_reason || "该任务没有产生可预览产物。"}
               </div>
             )}
@@ -1184,7 +1184,7 @@ export default function MiningView({
                       <div className="min-w-0">
                         <button
                           type="button"
-                          className="block max-w-full truncate text-left text-[13px] font-bold hover:text-accent"
+                          className="block max-w-full truncate text-left text-[13px] font-bold hover:text-accent select-text"
                           onClick={() => {
                             setSelectedJobId(job.job_id);
                             setSelectedJob(job);
@@ -1252,7 +1252,7 @@ export default function MiningView({
                   <li key={job.job_id} className="flex items-center justify-between gap-3 px-4 py-3 text-[13px]">
                     <button
                       type="button"
-                      className="min-w-0 flex-1 truncate text-left font-semibold hover:text-accent"
+                      className="min-w-0 flex-1 truncate text-left font-semibold hover:text-accent select-text"
                       onClick={() => {
                         setSelectedJobId(job.job_id);
                         setSelectedJob(job);
@@ -1569,10 +1569,10 @@ export default function MiningView({
                       >
                         <span><Pill tone={status.tone as any}>{status.label}</Pill></span>
                         <span className="min-w-0 pr-4">
-                          <span className="block truncate font-semibold">{job.name}</span>
-                          <span className="mono mt-0.5 block truncate text-[10px] text-muted-soft">{job.job_id}</span>
+                          <span className="block truncate font-semibold select-text">{job.name}</span>
+                          <span className="mono mt-0.5 block truncate text-[10px] text-muted-soft select-text">{job.job_id}</span>
                         </span>
-                        <span className="mono truncate pr-3 text-[11px] text-muted-foreground">
+                        <span className="mono truncate pr-3 text-[11px] text-muted-foreground select-text">
                           {job.input_dir ? sourceDisplayName(job.input_dir) : "历史归档"}
                         </span>
                         <span className="text-[11px] text-muted-foreground">{formatDateTime(job.created_at)}</span>
