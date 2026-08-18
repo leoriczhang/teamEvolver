@@ -390,6 +390,22 @@ def test_admin_write_uses_openviking_content_api_and_team_key(tmp_path) -> None:
     assert headers["X-OpenViking-Account"] == "workspace-a"
     assert headers["X-OpenViking-User"] == "default"
 
+
+def test_personal_workspace_inherits_team_key_when_personal_key_is_unset(tmp_path) -> None:
+    alice = _user("alice", "admin")
+    alice["personal_space"].pop("viking_api_key")
+    _client(tmp_path, current=alice)
+    owner = _WorkspaceOwner(TeamEvolverConfig(
+        users_registry_path=str(tmp_path / "users.json"),
+        sharing_viking_endpoint="http://127.0.0.1:1933",
+    ))
+    scope = _scope_map(owner.config, "alice", is_admin=True)["personal_memory"]
+
+    headers = owner._workspace_headers(alice, scope)
+
+    assert headers["X-API-Key"] == "team-key"
+
+
 def test_memory_debug_searches_personal_and_team_with_agent_budget(tmp_path) -> None:
     alice = _user("alice", "admin")
     client, owner = _client(tmp_path, current=alice)

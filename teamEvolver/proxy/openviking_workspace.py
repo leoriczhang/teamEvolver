@@ -347,6 +347,13 @@ class OpenVikingWorkspaceMixin:
             api_key = _space_key(user.get("personal_space") or {}) or str(
                 getattr(self.config, "sharing_viking_personal_api_key", "") or ""
             )
+            # A deployment commonly has one OpenViking service credential for
+            # the team. Personal workspaces remain scoped by their
+            # OpenViking user and URI headers, so fall back to that credential
+            # only when a personal credential has not been configured.
+            api_key = api_key or _space_key(user.get("team_space") or {}) or _effective_team_key(
+                self.config
+            )
         api_key = api_key or str(getattr(self.config, "sharing_viking_api_key", "") or "")
         headers = {
             "Accept": "application/json",
