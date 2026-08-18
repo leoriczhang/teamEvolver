@@ -13,6 +13,10 @@ services:
     environment:
       TZ: Asia/Shanghai
       TEAMEVOLVER_PORT: "52010"
+      # Prefer the source copied to /app over the wheel installed by pip.
+      # This keeps the main service and its embedded SkillMiner subprocess on
+      # the same release, and makes the mounted runtime directories effective.
+      PYTHONPATH: /app
       # The image contains the pinned OpenViking CLI.  This remains
       # overridable for diagnostics without depending on a host installation.
       OPENVIKING_CLI_BIN: "${OPENVIKING_CLI_BIN:-/usr/local/bin/ov}"

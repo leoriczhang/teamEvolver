@@ -43,6 +43,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOME=/var/lib/teamEvolver \
     VIRTUAL_ENV=/opt/teamEvolver-venv \
     PATH=/opt/teamEvolver-venv/bin:$PATH \
+    PYTHONPATH=/app \
     TEAMEVOLVER_HERMES_BIN=/opt/teamEvolver-venv/bin/hermes \
     OPENVIKING_CLI_BIN=/usr/local/bin/ov
 
