@@ -63,6 +63,7 @@ type WorkspaceConfig = {
   studio_url?: string;
   cli_available?: boolean;
   cli_full_access?: boolean;
+  personal_access_configured?: boolean;
   user_id: string;
   scopes: Record<ScopeName, ScopeConfig>;
 };
@@ -126,6 +127,18 @@ const SCOPE_LABELS: Record<ScopeName, string> = {
   personal_workspace: "个人 Workspace",
   team_workspace: "团队 Workspace",
 };
+
+function initialScope(mode: WorkspaceMode, config?: WorkspaceConfig | null): ScopeName {
+  const scopes = MODE_SCOPES[mode];
+  if (config?.personal_access_configured === false) {
+    return scopes.find((name) => name.startsWith("team_")) || scopes[0];
+  }
+  return scopes[0];
+}
+
+function isPersonalScope(scope: ScopeName) {
+  return scope.startsWith("personal_");
+}
 
 const MARKDOWN_EXTENSIONS = new Set(["md", "markdown", "mdx"]);
 const HTML_EXTENSIONS = new Set(["html", "htm"]);
@@ -237,7 +250,7 @@ export default function OpenVikingWorkspaceShell({
           `/api/openviking/workspace/config?user_id=${encodeURIComponent(userId)}`,
         );
         setConfig(result);
-        const nextScope = MODE_SCOPES[mode][0];
+        const nextScope = initialScope(mode, result);
         setScopeName(nextScope);
         const root = result.scopes?.[nextScope]?.root_uri || "";
         setCurrentUri(root);
@@ -271,7 +284,7 @@ export default function OpenVikingWorkspaceShell({
 
   useEffect(() => {
     if (!active || !config) return;
-    const first = MODE_SCOPES[mode][0];
+    const first = initialScope(mode, config);
     setScopeName(first);
     const root = config.scopes?.[first]?.root_uri;
     if (root) void loadTree(first, activeUserId, root);
@@ -451,21 +464,28 @@ export default function OpenVikingWorkspaceShell({
     <div className="w-full px-4 pb-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-surface px-3 py-2">
         <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-          {scopeNames.map((name) => (
-            <button
-              key={name}
-              type="button"
-              onClick={() => void chooseScope(name)}
-              className={cn(
-                "rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors",
-                scopeName === name
-                  ? "bg-sidebar-primary text-white"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
-              )}
-            >
-              {SCOPE_LABELS[name]}
-            </button>
-          ))}
+          {scopeNames.map((name) => {
+            const unavailable = config.personal_access_configured === false && isPersonalScope(name);
+            return (
+              <button
+                key={name}
+                type="button"
+                disabled={unavailable}
+                title={unavailable ? "请先在用户管理中配置个人 OpenViking 凭证" : undefined}
+                onClick={() => void chooseScope(name)}
+                className={cn(
+                  "rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors",
+                  scopeName === name
+                    ? "bg-sidebar-primary text-white"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                  unavailable && "cursor-not-allowed opacity-45 hover:bg-transparent hover:text-muted-foreground",
+                )}
+              >
+                {SCOPE_LABELS[name]}
+                {unavailable ? "（需个人凭证）" : ""}
+              </button>
+            );
+          })}
           <span className="mx-1 h-5 w-px bg-border" />
           <Pill tone={selectedScope?.can_write ? "green" : "gray"}>
             {selectedScope?.can_write ? "可管理" : "只读"}

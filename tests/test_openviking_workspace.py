@@ -117,6 +117,7 @@ def test_workspace_config_exposes_all_scopes_and_local_studio(tmp_path) -> None:
     body = response.json()
     assert body["deployment"] == "local"
     assert body["studio_url"] == "http://127.0.0.1:1933/studio/"
+    assert body["personal_access_configured"] is True
     assert body["scopes"]["team_workspace"]["can_write"] is True
     assert set(body["scopes"]) == {
         "personal_memory",
@@ -394,7 +395,7 @@ def test_admin_write_uses_openviking_content_api_and_team_key(tmp_path) -> None:
 def test_personal_workspace_inherits_team_key_when_personal_key_is_unset(tmp_path) -> None:
     alice = _user("alice", "admin")
     alice["personal_space"].pop("viking_api_key")
-    _client(tmp_path, current=alice)
+    client, _ = _client(tmp_path, current=alice)
     owner = _WorkspaceOwner(TeamEvolverConfig(
         users_registry_path=str(tmp_path / "users.json"),
         sharing_viking_endpoint="http://127.0.0.1:1933",
@@ -404,6 +405,9 @@ def test_personal_workspace_inherits_team_key_when_personal_key_is_unset(tmp_pat
     headers = owner._workspace_headers(alice, scope)
 
     assert headers["X-API-Key"] == "team-key"
+    assert client.get("/api/openviking/workspace/config?user_id=alice").json()[
+        "personal_access_configured"
+    ] is False
 
 
 def test_memory_debug_searches_personal_and_team_with_agent_budget(tmp_path) -> None:

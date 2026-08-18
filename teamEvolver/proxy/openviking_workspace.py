@@ -497,6 +497,10 @@ class OpenVikingWorkspaceMixin:
                 if isinstance(user.get("personal_space"), dict)
                 else {}
             )
+            personal_access_configured = bool(
+                _space_key(personal_space)
+                or str(getattr(owner.config, "sharing_viking_personal_api_key", "") or "")
+            )
             scopes = _scope_map(
                 owner.config,
                 str(user.get("id") or ""),
@@ -516,6 +520,11 @@ class OpenVikingWorkspaceMixin:
                 "cli_available": cli_available,
                 "cli_full_access": is_admin,
                 "user_id": str(user.get("id") or ""),
+                # A team credential intentionally does not imply permission to
+                # read viking://user/<person>/... . The console uses this flag
+                # to select the usable team scope until a personal credential
+                # has been supplied in user administration.
+                "personal_access_configured": personal_access_configured,
                 "scopes": {
                     name: {
                         "name": scope.name,
