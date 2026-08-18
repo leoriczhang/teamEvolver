@@ -389,12 +389,23 @@ class FileCheckpointClient:
                 time.sleep(0.2)
         finally:
             pending_path.unlink(missing_ok=True)
-        answer_path.unlink(missing_ok=True)
         answers = {
             str(key): str(value).strip()
             for key, value in (answer.get("answers") or {}).items()
             if str(value).strip()
         }
+        # ``pending.json`` and ``answer.json`` are intentionally transient IPC
+        # files. Persist an immutable copy before clearing them so a multi-round
+        # task can show every knowledge supplementation form and its answer in
+        # the task detail after the worker has resumed.
+        history_record = {
+            **payload,
+            "answers": answers,
+            "stop": bool(answer.get("stop")),
+            "submitted_at": answer.get("submitted_at") or time.time(),
+        }
+        _write_json_atomic(self.root / "history" / f"{checkpoint_id}.json", history_record)
+        answer_path.unlink(missing_ok=True)
         print(f"HUMAN_CHECKPOINT_ANSWERED::{checkpoint_id}", flush=True)
         return answers, bool(answer.get("stop"))
 

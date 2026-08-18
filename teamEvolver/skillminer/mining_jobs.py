@@ -649,6 +649,99 @@ class MiningJobManager:
             return None
         return {"total": len(questions), "questions": questions}
 
+    @staticmethod
+    def _round_number(path: Path) -> int:
+        try:
+            return int(path.name.removeprefix("round_"))
+        except ValueError:
+            return 0
+
+    def _knowledge_supplements(self, job: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return every knowledge-supplement round, including legacy jobs.
+
+        New tasks persist the exact checkpoint form and submitted answers under
+        ``checkpoints/history``. Older tasks did not keep that IPC history, so
+        reconstruct their per-round questions from the archived semantic report
+        instead of collapsing them into the final round's diagnosis.
+        """
+        workspace = self.project_root / str(job.get("workspace") or "")
+        checkpoint_root = self._job_dir(job["job_id"]) / "checkpoints" / "history"
+        rounds: list[dict[str, Any]] = []
+        checkpoint_rounds: set[tuple[int, str]] = set()
+
+        if checkpoint_root.is_dir():
+            for path in sorted(checkpoint_root.glob("*.json")):
+                try:
+                    record = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                questions = record.get("questions")
+                if not isinstance(questions, list) or not questions:
+                    continue
+                round_idx = int(record.get("round") or 0)
+                checkpoint = str(record.get("checkpoint") or "knowledge_supplement")
+                checkpoint_rounds.add((round_idx, checkpoint))
+                rounds.append({
+                    "round": round_idx,
+                    "checkpoint": checkpoint,
+                    "title": str(record.get("title") or f"第 {round_idx} 轮知识补充"),
+                    "intro": str(record.get("intro") or ""),
+                    "questions": questions,
+                    "answers": record.get("answers") if isinstance(record.get("answers"), dict) else {},
+                    "submitted_at": str(record.get("submitted_at") or ""),
+                    "source": "checkpoint",
+                })
+
+        archived_rounds: set[int] = set()
+        rounds_root = workspace / "reflection_rounds"
+        if rounds_root.is_dir():
+            for reports_root in sorted(rounds_root.glob("*/round_*/semantic_reports")):
+                round_idx = self._round_number(reports_root.parent)
+                archived_rounds.add(round_idx)
+                if (round_idx, "after_semantic") in checkpoint_rounds:
+                    continue
+                questions, total = hc.extract_gap_questions_from_semantic_reports(reports_root, limit=50)
+                if questions:
+                    rounds.append({
+                        "round": round_idx,
+                        "checkpoint": "after_semantic",
+                        "title": f"第 {round_idx} 轮发现 {total} 个关键知识缺口",
+                        "intro": "根据该轮归档的语义报告恢复；该历史任务未保留当时填写的答案。",
+                        "questions": questions,
+                        "answers": {},
+                        "submitted_at": "",
+                        "source": "semantic_report",
+                    })
+
+        # The latest round lives at the workspace root. Add it only when it
+        # has not yet been archived, e.g. while a task is waiting for input.
+        current_round = int(job.get("current_round") or 0)
+        reports_root = workspace / "semantic_reports"
+        if reports_root.is_dir() and current_round not in archived_rounds and (
+            current_round,
+            "after_semantic",
+        ) not in checkpoint_rounds:
+            questions, total = hc.extract_gap_questions_from_semantic_reports(reports_root, limit=50)
+            if questions:
+                rounds.append({
+                    "round": current_round,
+                    "checkpoint": "after_semantic",
+                    "title": f"第 {current_round or 1} 轮发现 {total} 个关键知识缺口",
+                    "intro": "根据当前轮的语义报告生成。",
+                    "questions": questions,
+                    "answers": {},
+                    "submitted_at": "",
+                    "source": "semantic_report",
+                })
+
+        return sorted(rounds, key=lambda item: (
+            int(item.get("round") or 0),
+            str(item.get("submitted_at") or ""),
+            str(item.get("checkpoint") or ""),
+        ))
+
     def _artifact_rows(self, root: Path) -> list[dict[str, Any]]:
         rows = []
         if not root.is_dir():
@@ -702,6 +795,7 @@ class MiningJobManager:
             pending = self._pending_checkpoint(job)
             result["pending_checkpoint"] = pending
             result["knowledge_gaps"] = self._knowledge_gaps(job)
+            result["knowledge_supplements"] = self._knowledge_supplements(job)
             if pending and result.get("status") == "running":
                 result["status"] = "waiting"
         return result

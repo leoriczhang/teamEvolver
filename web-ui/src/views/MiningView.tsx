@@ -159,6 +159,7 @@ interface MiningJob {
     total: number;
     questions: HumanCheckpointQuestion[];
   } | null;
+  knowledge_supplements?: KnowledgeSupplementRound[];
   artifact_quality?: MiningArtifactQuality | null;
 }
 
@@ -183,6 +184,17 @@ interface HumanCheckpoint {
   intro: string;
   questions: HumanCheckpointQuestion[];
   allow_stop?: boolean;
+}
+
+interface KnowledgeSupplementRound {
+  round: number;
+  checkpoint: string;
+  title: string;
+  intro?: string;
+  questions: HumanCheckpointQuestion[];
+  answers?: Record<string, string>;
+  submitted_at?: string;
+  source: "checkpoint" | "semantic_report";
 }
 
 interface MiningJobSummary {
@@ -927,8 +939,9 @@ export default function MiningView({
 
   function renderJobDetail(job: MiningJob) {
     const durableGaps = job.knowledge_gaps?.questions || [];
+    const supplementRounds = job.knowledge_supplements || [];
     const supplementQuestions = job.pending_checkpoint?.questions || durableGaps;
-    const hasKnowledgeSupplement = supplementQuestions.length > 0;
+    const hasKnowledgeSupplement = supplementQuestions.length > 0 || supplementRounds.length > 0;
     return (
       <div className="space-y-4 border-t border-accent/20 bg-accent-soft/35 px-5 py-5">
         <div className="flex items-start justify-between gap-3">
@@ -964,7 +977,9 @@ export default function MiningView({
                     <span className="text-[14px] font-bold">知识补充</span>
                     {job.pending_checkpoint
                       ? <Pill tone="amber">等待填写</Pill>
-                      : <Pill tone="amber">{job.knowledge_gaps?.total || durableGaps.length} 项缺口</Pill>}
+                      : supplementRounds.length > 0
+                        ? <Pill tone="amber">{supplementRounds.length} 轮记录</Pill>
+                        : <Pill tone="amber">{job.knowledge_gaps?.total || durableGaps.length} 项缺口</Pill>}
                     {job.pending_checkpoint && (
                       <span className="text-[11px] text-amber-800">
                         第 {job.pending_checkpoint.round} 轮 · {job.pending_checkpoint.questions.length} 个问题
@@ -1046,8 +1061,17 @@ export default function MiningView({
                         <ArrowRight className="size-3.5" />
                       </Button>
                     </div>
+                    {supplementRounds.length > 0 && (
+                      <div className="mt-5 border-t border-amber-200 pt-4">
+                        <div className="mb-3 text-[12px] font-bold text-amber-900">已完成的补证记录</div>
+                        <KnowledgeSupplementHistory rounds={supplementRounds} />
+                      </div>
+                    )}
                   </>
                 ) : (
+                  supplementRounds.length > 0 ? (
+                    <KnowledgeSupplementHistory rounds={supplementRounds} />
+                  ) : (
                   <div className="grid gap-3 lg:grid-cols-2">
                     {durableGaps.map((question, index) => (
                       <div key={`${question.qid}-${index}`} className="rounded-xl border border-amber-200/80 bg-background p-3.5">
@@ -1066,6 +1090,7 @@ export default function MiningView({
                       </div>
                     ))}
                   </div>
+                  )
                 )}
               </div>
             )}
@@ -2194,6 +2219,57 @@ function artifactLabel(kind: MiningArtifact["kind"]) {
   if (kind === "skill") return "Skill";
   if (kind === "semantic") return "语义报告";
   return "评测定义";
+}
+
+function KnowledgeSupplementHistory({ rounds }: { rounds: KnowledgeSupplementRound[] }) {
+  return (
+    <div className="space-y-3">
+      {rounds.map((record, recordIndex) => (
+        <section key={`${record.round}-${record.checkpoint}-${recordIndex}`} className="overflow-hidden rounded-xl border border-amber-200/80 bg-background">
+          <div className="flex flex-wrap items-start justify-between gap-2 border-b border-amber-100 bg-amber-50/70 px-3.5 py-3">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[13px] font-bold">第 {record.round || 1} 轮知识补充</span>
+                <Pill tone={record.source === "checkpoint" ? "green" : "amber"}>
+                  {record.source === "checkpoint" ? "已提交" : "历史恢复"}
+                </Pill>
+                <span className="text-[10.5px] text-muted-foreground">
+                  {record.checkpoint === "after_semantic" ? "Skill 生成前" : record.checkpoint}
+                </span>
+              </div>
+              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{record.title}</p>
+              {record.intro && <p className="mt-1 text-[10px] leading-relaxed text-muted-soft">{record.intro}</p>}
+            </div>
+            {record.submitted_at && <span className="text-[10px] text-muted-soft">{formatDateTime(record.submitted_at)}</span>}
+          </div>
+          <div className="grid gap-3 p-3.5 lg:grid-cols-2">
+            {record.questions.map((question, index) => {
+              const answer = record.answers?.[question.qid]?.trim();
+              return (
+                <div key={`${question.qid}-${index}`} className="rounded-lg border border-amber-100 bg-amber-50/20 p-3">
+                  <div className="mb-2 flex flex-wrap items-center gap-2">
+                    <span className="grid size-5 place-items-center rounded-full bg-amber-500 text-[10px] font-bold text-white">{index + 1}</span>
+                    {question.severity && <Pill tone={question.severity === "高" ? "red" : "amber"}>{question.severity}优先级</Pill>}
+                    {question.field_label && <span className="text-[10px] font-semibold text-amber-800">{question.field_label}</span>}
+                  </div>
+                  <div className="text-[12.5px] font-semibold leading-relaxed">{question.question}</div>
+                  {question.context && <div className="mt-2 rounded-md border-l-2 border-accent/40 bg-accent-soft px-2 py-1.5 text-[10px] leading-relaxed text-muted-foreground">{question.context}</div>}
+                  {answer ? (
+                    <div className="mt-2 rounded-md border border-success/25 bg-success/5 px-2.5 py-2 text-[11px] leading-relaxed text-foreground">
+                      <span className="mr-1 font-semibold text-success">已补充：</span>
+                      <span className="select-text whitespace-pre-wrap">{answer}</span>
+                    </div>
+                  ) : (
+                    <div className="mt-2 text-[10px] text-muted-soft">未填写答案；该缺口仍需人工核对。</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
 }
 
 function isMarkdownArtifact(artifact: Pick<ArtifactContent, "name" | "path"> | null) {

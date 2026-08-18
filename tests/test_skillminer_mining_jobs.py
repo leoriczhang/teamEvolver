@@ -289,3 +289,42 @@ def test_job_detail_persists_semantic_knowledge_gaps_without_pending_checkpoint(
     assert detail["knowledge_gaps"]["total"] == 1
     assert detail["knowledge_gaps"]["questions"][0]["qid"] == "gap-01"
     assert "分子、分母" in detail["knowledge_gaps"]["questions"][0]["question"]
+
+
+def test_job_detail_preserves_every_round_of_knowledge_supplementation(tmp_path):
+    _prepare_project(tmp_path)
+    manager = MiningJobManager(tmp_path, max_parallel=1)
+    job = manager.create_jobs({
+        "name": "multiple supplement rounds",
+        "input_dir": "data/alpha",
+        "max_rounds": 3,
+        "human_checkpoints": False,
+    })[0]
+    _wait_finished(manager, [job["job_id"]])
+    workspace = manager.project_root / manager._jobs[job["job_id"]]["workspace"]
+    reports = """## [结构化缺口清单]
+| 缺口ID | 缺口描述 | 影响结构 | 严重度 | 跨批次 | 来源 |
+|---|---|---|---|---|---|
+| GAP-01 | 第 {round_idx} 轮的指标阈值缺失 | U-{round_idx} | 高 | 否 | 轮次 {round_idx} 资料 |
+"""
+    for round_idx in (1, 2):
+        target = workspace / "reflection_rounds" / "session-a" / f"round_{round_idx}" / "semantic_reports"
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "report.md").write_text(reports.format(round_idx=round_idx), encoding="utf-8")
+
+    history = manager._job_dir(job["job_id"]) / "checkpoints" / "history"
+    history.mkdir(parents=True)
+    (history / "after_semantic-r3.json").write_text(json.dumps({
+        "checkpoint": "after_semantic",
+        "round": 3,
+        "title": "第 3 轮关键知识补充",
+        "questions": [{"qid": "gap-03", "question": "请填写第 3 轮阈值？"}],
+        "answers": {"gap-03": "72 小时"},
+        "submitted_at": "2026-08-18T00:00:00Z",
+    }, ensure_ascii=False), encoding="utf-8")
+
+    detail = manager.get_job(job["job_id"])
+
+    assert [item["round"] for item in detail["knowledge_supplements"]] == [1, 2, 3]
+    assert detail["knowledge_supplements"][2]["answers"] == {"gap-03": "72 小时"}
+    assert detail["knowledge_supplements"][0]["source"] == "semantic_report"

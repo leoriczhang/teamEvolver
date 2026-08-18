@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import tempfile
+import json
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -56,6 +59,38 @@ class SemanticGapQuestionTests(unittest.TestCase):
         self.assertIn("关键知识缺口 GAP-07", context)
         self.assertIn("阈值0.03%", context)
         self.assertIn("权威领域知识", context)
+
+    def test_checkpoint_persists_auditable_history_after_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            client = hc.FileCheckpointClient(root, enabled=True)
+            result: dict[str, object] = {}
+
+            def ask() -> None:
+                result["value"] = client.ask(
+                    "after_semantic", 2, "第 2 轮补证", "请补充", [{
+                        "qid": "gap-02", "question": "请填写阈值？",
+                    }],
+                )
+
+            thread = threading.Thread(target=ask)
+            thread.start()
+            pending_path = root / "pending.json"
+            for _ in range(30):
+                if pending_path.exists():
+                    break
+                time.sleep(0.05)
+            pending = json.loads(pending_path.read_text(encoding="utf-8"))
+            (root / "answer.json").write_text(json.dumps({
+                "question_id": pending["id"], "answers": {"gap-02": "48 小时"},
+            }, ensure_ascii=False), encoding="utf-8")
+            thread.join(timeout=3)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(result["value"], ({"gap-02": "48 小时"}, False))
+            history = json.loads(next((root / "history").glob("*.json")).read_text(encoding="utf-8"))
+            self.assertEqual(history["round"], 2)
+            self.assertEqual(history["answers"], {"gap-02": "48 小时"})
 
 
 if __name__ == "__main__":
