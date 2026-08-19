@@ -40,7 +40,7 @@ class EvolveServerConfig:
     viking_endpoint: str = ""
     viking_api_key: str = ""
     viking_account: str = "default"
-    viking_user: str = "default"
+    viking_user: str = "team"
     viking_agent: str = "team-skill-evolver"
     # Identity fields sent to OpenViking for attribution. Evolved skills are
     # written to the resources namespace; customer_id may still scope isolated
@@ -180,7 +180,7 @@ class EvolveServerConfig:
             viking_endpoint=os.environ.get("EVOLVE_VIKING_ENDPOINT", ""),
             viking_api_key=_first_env("EVOLVE_VIKING_TEAM_API_KEY", "EVOLVE_VIKING_API_KEY"),
             viking_account=os.environ.get("EVOLVE_VIKING_ACCOUNT", "default"),
-            viking_user=os.environ.get("EVOLVE_VIKING_USER", "default"),
+            viking_user=os.environ.get("EVOLVE_VIKING_USER", "team"),
             viking_agent=os.environ.get("EVOLVE_VIKING_AGENT", "team-skill-evolver"),
             viking_agent_id=_first_env("EVOLVE_VIKING_AGENT_ID", "EVOLVE_VIKING_USER_ID"),
             viking_customer_id=_first_env("EVOLVE_VIKING_CUSTOMER_ID", "EVOLVE_VIKING_PEER_ID"),
@@ -305,7 +305,7 @@ class EvolveServerConfig:
                 or ""
             ),
             viking_account=str(getattr(config, "sharing_viking_account", "") or "default"),
-            viking_user=str(getattr(config, "sharing_viking_user", "") or "default"),
+            viking_user=str(getattr(config, "sharing_viking_user", "") or "team"),
             viking_agent=str(getattr(config, "sharing_viking_agent", "") or "team-skill-evolver"),
             viking_agent_id=str(getattr(config, "sharing_viking_agent_id", "") or ""),
             viking_customer_id=str(getattr(config, "sharing_viking_customer_id", "") or ""),

@@ -29,7 +29,8 @@ from .users_admin import (
 
 _SCOPES = {
     "personal_memory", "team_memory", "personal_skills", "team_skills",
-    "personal_workspace", "team_workspace",
+    "personal_resources", "team_resources",
+    "personal_workspace", "team_workspace", "platform_assets",
 }
 _MAX_CONTENT_BYTES = 2 * 1024 * 1024
 _MAX_TREE_NODES = 10_000
@@ -86,7 +87,10 @@ def _scope_map(
         or user_id
         or getattr(config, "sharing_viking_personal_user", "")
     ).strip()
-    team_owner = str(getattr(config, "sharing_viking_user", "") or "default").strip()
+    # Team-owned Agent context is always isolated under the canonical
+    # OpenViking user ``team``. It must never fall back to ``default``, which
+    # is an OpenViking bootstrap identity rather than a team workspace.
+    team_owner = "team"
     personal = f"viking://user/{personal_owner}"
     peer = f"{shared}/peers/{user_id}"
     return {
@@ -122,6 +126,22 @@ def _scope_map(
             is_admin,
             team_owner,
         ),
+        "personal_resources": _WorkspaceScope(
+            "personal_resources",
+            f"{personal}/resources",
+            "personal",
+            "resources",
+            True,
+            personal_owner,
+        ),
+        "team_resources": _WorkspaceScope(
+            "team_resources",
+            f"viking://user/{team_owner}/resources",
+            "team",
+            "resources",
+            is_admin,
+            team_owner,
+        ),
         "personal_workspace": _WorkspaceScope(
             "personal_workspace",
             personal,
@@ -136,6 +156,18 @@ def _scope_map(
             "team",
             "workspace",
             is_admin,
+            team_owner,
+        ),
+        # Self-evolution platform's own storage under the team resources root
+        # (sessions, candidate_skills, validation_*, memory-changes, skill_lab,
+        # ...). These are internal artifacts that an Agent cannot reference, so
+        # the console exposes them read-only in a separate "平台资产" view.
+        "platform_assets": _WorkspaceScope(
+            "platform_assets",
+            shared,
+            "team",
+            "platform",
+            False,
             team_owner,
         ),
     }
@@ -497,9 +529,21 @@ class OpenVikingWorkspaceMixin:
                 if isinstance(user.get("personal_space"), dict)
                 else {}
             )
-            personal_access_configured = bool(
+            # A dedicated personal OpenViking key always grants personal access.
+            # In a local (Trusted) deployment the server credential plus the
+            # X-OpenViking-User header is sufficient to reach
+            # viking://user/<person>/..., so no per-user credential is needed —
+            # auto-grant personal access whenever a usable server key exists.
+            has_personal_key = bool(
                 _space_key(personal_space)
                 or str(getattr(owner.config, "sharing_viking_personal_api_key", "") or "")
+            )
+            has_server_key = bool(
+                _effective_team_key(owner.config)
+                or str(getattr(owner.config, "sharing_viking_api_key", "") or "")
+            )
+            personal_access_configured = has_personal_key or (
+                deployment == "local" and has_server_key
             )
             scopes = _scope_map(
                 owner.config,
@@ -517,6 +561,13 @@ class OpenVikingWorkspaceMixin:
                 "deployment": deployment,
                 "endpoint": endpoint,
                 "studio_url": f"{endpoint}/studio/" if deployment == "local" and endpoint else "",
+                "studio_user_url": (
+                    f"{endpoint}/studio/home?account="
+                    f"{str(getattr(owner.config, 'sharing_viking_account', '') or 'default')}"
+                    f"&user={str(user.get('id') or '')}"
+                    if deployment == "local" and endpoint and user.get("id")
+                    else ""
+                ),
                 "cli_available": cli_available,
                 "cli_full_access": is_admin,
                 "user_id": str(user.get("id") or ""),
@@ -763,6 +814,105 @@ class OpenVikingWorkspaceMixin:
                 is_admin=is_admin,
             )
             return JSONResponse(content=result)
+
+        @app.get("/api/openviking/workspace/aggregate")
+        async def workspace_aggregate(
+            request: Request,
+            user_id: str = Query(default=""),
+            kind: str = Query(default="all"),
+        ):
+            """Union of personal + team entries for a user, tagged by source.
+
+            Returns three grouped lists — skills, memories, resources — each
+            entry annotated with ``source`` (``personal`` / ``team``) so the
+            console can render a single unified library while retaining the
+            provenance the user needs to decide where to edit.
+            """
+            requested = str(kind or "all").strip().lower()
+            valid_kinds = {"skills", "memory", "resources", "all"}
+            if requested not in valid_kinds:
+                raise HTTPException(status_code=400, detail=f"unsupported kind: {kind}")
+            user, is_admin = owner._workspace_actor(request, user_id)
+            personal_space = (
+                user.get("personal_space")
+                if isinstance(user.get("personal_space"), dict)
+                else {}
+            )
+            scopes = _scope_map(
+                owner.config,
+                str(user.get("id") or ""),
+                is_admin=is_admin,
+                personal_user=str(personal_space.get("viking_user") or ""),
+            )
+
+            async def _entries(scope_name: str) -> list[dict[str, Any]]:
+                scope = scopes[scope_name]
+                try:
+                    raw = await owner._workspace_request(
+                        user,
+                        scope,
+                        "GET",
+                        "/api/v1/fs/ls",
+                        params={
+                            "uri": scope.root_uri,
+                            "output": "original",
+                            "show_all_hidden": "false",
+                            "node_limit": 500,
+                            "sort_by": "name",
+                            "sort_order": "asc",
+                        },
+                    )
+                except _OpenVikingRequestError:
+                    return []
+                items = _normalize_entries(raw)
+                for entry in items:
+                    entry["source"] = scope.space
+                    entry["scope"] = scope.name
+                    entry["scope_root_uri"] = scope.root_uri
+                    entry["can_write"] = scope.can_write
+                return items
+
+            groups: dict[str, list[dict[str, Any]]] = {}
+            if requested in {"skills", "all"}:
+                personal = await _entries("personal_skills")
+                team = await _entries("team_skills")
+                groups["skills"] = personal + team
+            if requested in {"memory", "all"}:
+                personal = await _entries("personal_memory")
+                team = await _entries("team_memory")
+                groups["memory"] = personal + team
+            if requested in {"resources", "all"}:
+                personal = await _entries("personal_resources")
+                team = await _entries("team_resources")
+                groups["resources"] = personal + team
+
+            summary = {
+                key: {
+                    "total": len(items),
+                    "personal": sum(1 for i in items if i.get("source") == "personal"),
+                    "team": sum(1 for i in items if i.get("source") == "team"),
+                }
+                for key, items in groups.items()
+            }
+            return JSONResponse(
+                content={
+                    "user_id": str(user.get("id") or ""),
+                    "is_admin": is_admin,
+                    "groups": groups,
+                    "summary": summary,
+                    "scopes": {
+                        name: {
+                            "name": scope.name,
+                            "root_uri": scope.root_uri,
+                            "space": scope.space,
+                            "kind": scope.kind,
+                            "can_write": scope.can_write,
+                            "openviking_user": scope.openviking_user,
+                        }
+                        for name, scope in scopes.items()
+                    },
+                }
+            )
 
         @app.delete("/api/openviking/workspace")
         async def workspace_delete(

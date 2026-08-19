@@ -3,12 +3,11 @@ import { Toaster } from "@/components/ui/sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { Activity, Brain, ClipboardCheck, Filter, FolderTree, History, LayoutDashboard, BookOpenText, BookOpen, Users, SlidersHorizontal, LogOut, RefreshCw, Sparkles, Clock, Repeat2, ShieldCheck, TrendingUp, Zap, Database, Workflow, ListChecks, ChevronsUpDown, DownloadCloud, TerminalSquare } from "lucide-react";
+import { Activity, ClipboardCheck, Filter, FolderTree, History, LayoutDashboard, BookOpen, Users, SlidersHorizontal, LogOut, RefreshCw, Sparkles, Clock, Repeat2, ShieldCheck, TrendingUp, Zap, Database, ListChecks, ChevronsUpDown, DownloadCloud, TerminalSquare, HardDrive } from "lucide-react";
 import { api, type AuthStatus, type UserProfile } from "@/api/client";
 import { PageHeader } from "@/components/common";
 import { toastErr, toastOk } from "@/lib/toast";
 import DashboardView from "@/views/DashboardView";
-import SkillsWorkspaceView from "@/views/SkillsWorkspaceView";
 import UsersView from "@/views/UsersView";
 import ModelSettingsView from "@/views/ModelSettingsView";
 import CandidateReviewView from "@/views/CandidateReviewView";
@@ -17,9 +16,10 @@ import AuditView from "@/views/AuditView";
 import SessionFilterView from "@/views/SessionFilterView";
 import LangfuseView from "@/views/LangfuseView";
 import EvolutionWorkspaceView from "@/views/EvolutionWorkspaceView";
-import MemoryWorkspaceView from "@/views/MemoryWorkspaceView";
 import MiningView, { type MinePage } from "@/views/MiningView";
 import OpenVikingWorkspaceView from "@/views/OpenVikingWorkspaceShell";
+import SkillLabView from "@/views/SkillLabView";
+import MemoryLabView from "@/views/MemoryLabView";
 import DocsView from "@/views/DocsView";
 
 type ViewKey =
@@ -28,12 +28,10 @@ type ViewKey =
   | "mine-jobs"
   | "dashboard"
   | "langfuse"
-  | "skill-lab"
   | "prompt-studio"
   | "health"
-  | "skills"
-  | "memories"
   | "workspace"
+  | "platform"
   | "users"
   | "model"
   | "docs";
@@ -74,9 +72,8 @@ const NAV_SECTIONS: {
     id: "assets",
     label: "资产中心",
     items: [
-      { key: "skills", label: "Skills Workspace", icon: BookOpenText },
-      { key: "memories", label: "Memory Workspace", icon: Brain },
-      { key: "workspace", label: "上下文空间", icon: FolderTree },
+      { key: "workspace", label: "Agent 工作空间", icon: FolderTree },
+      { key: "platform", label: "平台资产", icon: HardDrive },
     ],
   },
   {
@@ -138,32 +135,28 @@ const STANDALONE_PAGES: StandalonePageConfig[] = [
     render: ({ active, user }) => <EvolutionWorkspaceView active={active} user={user} />,
   },
   {
-    key: "skill-lab",
-    title: "Skill Lab",
-    description: "兼容入口：Skill Lab 已归入 Skills Workspace。",
-    badge: "Skills Workspace",
-    render: ({ active, user }) => <SkillsWorkspaceView active={active} user={user} initialTab="lab" />,
-  },
-  {
-    key: "skills",
-    title: "Skills Workspace",
-    description: "统一管理个人与团队技能、OpenViking 技能目录和 Skill Lab 实验评测。",
-    badge: "Agent Workspace",
-    render: ({ active, user }) => <SkillsWorkspaceView active={active} user={user} />,
-  },
-  {
-    key: "memories",
-    title: "Memory Workspace",
-    description: "管理个人与团队 Memory，并调试 Agent Query 实际召回和注入的上下文。",
-    badge: "Agent Workspace",
-    render: ({ active, user }) => <MemoryWorkspaceView active={active} user={user} />,
-  },
-  {
     key: "workspace",
-    title: "上下文空间",
-    description: "浏览个人、团队和 Skill 的上下文空间，统一查看文件、摘要和原生 OpenViking 资源。",
-    badge: "OpenViking",
-    render: ({ active, user }) => <OpenVikingWorkspaceView active={active} mode="workspace" user={user} />,
+    title: "Agent 工作空间",
+    description: "Agent 能引用的个人与团队资产：Skills、Memory 和资源，统一在 OpenViking 文件管理界面中呈现。",
+    badge: "Agent 可引用",
+    render: ({ active, user }) => (
+      <OpenVikingWorkspaceView
+        active={active}
+        mode="workspace"
+        user={user}
+        labs={{
+          skill: <SkillLabView active={active} user={user} />,
+          memory: <MemoryLabView active={active} user={user} />,
+        }}
+      />
+    ),
+  },
+  {
+    key: "platform",
+    title: "平台资产",
+    description: "自进化平台自己的存储：会话队列、候选技能、验证任务、记忆变更与 Skill Lab 等中间产物，Agent 无法引用，仅供平台运行与排查。",
+    badge: "平台内部",
+    render: ({ active, user }) => <OpenVikingWorkspaceView active={active} mode="platform" user={user} />,
   },
   {
     key: "model",
@@ -304,7 +297,7 @@ export default function App() {
           </div>
           <div className="sidebar-brand-copy">
             <div className="text-[14px] font-[800] leading-tight">teamEvolver</div>
-            <div className="mt-0.5 text-[9.5px] font-[600] text-muted-soft">技能生命周期工作台</div>
+            <div className="mt-0.5 text-[9.5px] font-[600] text-muted-soft">团队记忆与技能进化平台</div>
           </div>
         </div>
         <nav className="sidebar-nav flex flex-1 flex-col gap-0.5 overflow-auto px-2.5 py-3" aria-label="主导航">
@@ -368,7 +361,7 @@ export default function App() {
                   return;
                 }
                 if (destination === "skills") {
-                  setView("skills");
+                  setView("workspace");
                   return;
                 }
                 setView(`mine-${destination}` as ViewKey);

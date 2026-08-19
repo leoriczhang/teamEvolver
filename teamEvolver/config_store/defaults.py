@@ -63,7 +63,7 @@ _DEFAULTS: dict = {
         "viking_team_api_key": "",
         "viking_account": "default",
         "viking_personal_user": "",
-        "viking_user": "default",
+        "viking_user": "team",
         # wire constant: OpenViking agent namespace, do not rename
         "viking_agent": TEAM_SKILL_ROOT_PREFIX,
         "viking_agent_id": "",

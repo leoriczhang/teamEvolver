@@ -64,6 +64,94 @@ class MemoryTrueReplayRunner:
         }:
             raise ValueError("Memory Change does not have replayable Snapshots")
 
+        before_content, after_content = self._memory_variants(change)
+        return self._execute_replay(
+            change_id=change_id,
+            candidate_revision=str(change.get("after_hash") or change_id),
+            title=self._memory_title(change),
+            before_path=str(change.get("before_path") or ""),
+            after_path=str(change.get("after_path") or ""),
+            before_content=before_content,
+            after_content=after_content,
+            treatment_meta={
+                "before_oid": str(change.get("before_oid") or ""),
+                "after_oid": str(change.get("after_oid") or ""),
+                "action": str(change.get("action") or ""),
+            },
+            query=query,
+            checklist=checklist,
+            source_session_id=source_session_id,
+            max_interactions=max_interactions,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def run_adhoc(
+        self,
+        *,
+        memory_path: str,
+        before_content: str,
+        after_content: str,
+        query: str,
+        checklist: list[Any],
+        scope: str = "team_memory",
+        source_session_id: str = "",
+        max_interactions: int = 4,
+        timeout_seconds: int = 600,
+    ) -> dict[str, Any]:
+        """Replay an unsaved Memory edit (workspace draft) against its stored version.
+
+        Unlike :meth:`run`, this does not require a persisted Memory Change: the
+        ``before``/``after`` content is supplied directly (e.g. the stored file
+        vs the workspace draft), so the console can A/B a Memory edit before it
+        is committed. Replays persist under a synthetic, path-stable change id.
+        """
+        relative = self._memory_relative_path(memory_path) or (memory_path or "").strip()
+        if not relative:
+            raise ValueError("memory_path is required")
+        change_id = f"adhoc:{self._sha256(relative)[:16]}"
+        title = PurePosixPath(relative).name or "team-memory"
+        return self._execute_replay(
+            change_id=change_id,
+            candidate_revision=self._sha256(after_content or "")[:16] or change_id,
+            title=title,
+            before_path=relative,
+            after_path=relative,
+            before_content=before_content,
+            after_content=after_content,
+            treatment_meta={
+                "before_oid": "",
+                "after_oid": "",
+                "action": "archive" if not str(after_content or "").strip() else "update",
+                "adhoc": True,
+                "memory_path": relative,
+                "scope": scope,
+            },
+            query=query,
+            checklist=checklist,
+            source_session_id=source_session_id,
+            max_interactions=max_interactions,
+            timeout_seconds=timeout_seconds,
+            scope=scope,
+        )
+
+    def _execute_replay(
+        self,
+        *,
+        change_id: str,
+        candidate_revision: str,
+        title: str,
+        before_path: str,
+        after_path: str,
+        before_content: str,
+        after_content: str,
+        treatment_meta: Mapping[str, Any],
+        query: str,
+        checklist: list[Any],
+        source_session_id: str = "",
+        max_interactions: int = 4,
+        timeout_seconds: int = 600,
+        scope: str = "team_memory",
+    ) -> dict[str, Any]:
         instruction = str(query or "").strip()
         if not instruction:
             raise ValueError("query is required")
@@ -86,7 +174,6 @@ class MemoryTrueReplayRunner:
             )
 
         replay_id = f"mrp_{uuid.uuid4().hex}"
-        before_content, after_content = self._memory_variants(change)
         before_treatment_hash = self._sha256(before_content)
         after_treatment_hash = self._sha256(after_content)
         if before_treatment_hash == after_treatment_hash:
@@ -94,7 +181,11 @@ class MemoryTrueReplayRunner:
 
         shared_snapshot = self._shared_context_snapshot(
             session,
-            change=change,
+            before_path=before_path,
+            after_path=after_path,
+            before_hash=before_treatment_hash,
+            after_hash=after_treatment_hash,
+            change_id=change_id,
         )
         shared_context_hash = self._stable_hash(shared_snapshot)
         manifest = {
@@ -128,7 +219,8 @@ class MemoryTrueReplayRunner:
                 branch="baseline",
                 content=before_content,
                 content_hash=before_treatment_hash,
-                title=self._memory_title(change),
+                title=title,
+                scope=scope,
             ),
             "candidate": self._with_treatment(
                 shared_snapshot,
@@ -136,12 +228,13 @@ class MemoryTrueReplayRunner:
                 branch="candidate",
                 content=after_content,
                 content_hash=after_treatment_hash,
-                title=self._memory_title(change),
+                title=title,
+                scope=scope,
             ),
         }
         job = {
             "job_id": replay_id,
-            "candidate_revision": str(change.get("after_hash") or change_id),
+            "candidate_revision": candidate_revision,
             "candidate_skill": {},
             "current_skill": None,
             "include_full_trace": False,
@@ -224,11 +317,9 @@ class MemoryTrueReplayRunner:
             "timeout_seconds": timeout,
             "shared_context_hash": shared_context_hash,
             "treatment": {
-                "before_oid": str(change.get("before_oid") or ""),
-                "after_oid": str(change.get("after_oid") or ""),
+                **dict(treatment_meta),
                 "before_hash": before_treatment_hash,
                 "after_hash": after_treatment_hash,
-                "action": str(change.get("action") or ""),
             },
             "accepted": bool(policy.get("accepted")),
             "verdict": str(policy.get("verdict") or "reject"),
@@ -336,7 +427,11 @@ class MemoryTrueReplayRunner:
         self,
         session: Mapping[str, Any],
         *,
-        change: Mapping[str, Any],
+        before_path: str,
+        after_path: str,
+        before_hash: str,
+        after_hash: str,
+        change_id: str,
     ) -> dict[str, Any]:
         turn = self._source_turn(session)
         usage = (
@@ -352,13 +447,13 @@ class MemoryTrueReplayRunner:
         )
         snapshot = dict(snapshot or {})
         treatment_paths = {
-            self._memory_relative_path(change.get("before_path")),
-            self._memory_relative_path(change.get("after_path")),
+            self._memory_relative_path(before_path),
+            self._memory_relative_path(after_path),
         }
         treatment_paths.discard("")
         treatment_hashes = {
-            str(change.get("before_hash") or ""),
-            str(change.get("after_hash") or ""),
+            str(before_hash or ""),
+            str(after_hash or ""),
         }
         treatment_hashes.discard("")
         snapshot["items"] = [
@@ -372,7 +467,7 @@ class MemoryTrueReplayRunner:
         ]
         snapshot["snapshot_id"] = (
             str(snapshot.get("snapshot_id") or "")
-            or f"memory-replay-shared:{change.get('change_id')}"
+            or f"memory-replay-shared:{change_id}"
         )
         return snapshot
 
@@ -385,6 +480,7 @@ class MemoryTrueReplayRunner:
         content: str,
         content_hash: str,
         title: str,
+        scope: str = "team_memory",
     ) -> dict[str, Any]:
         snapshot = {
             **dict(shared),
@@ -398,7 +494,7 @@ class MemoryTrueReplayRunner:
         if content:
             snapshot["items"].append(
                 {
-                    "scope": "team_memory",
+                    "scope": scope or "team_memory",
                     "kind": "memory",
                     "title": title,
                     "content_hash": content_hash,

@@ -113,7 +113,8 @@ class TeamEvolverConfig:
     # OpenViking user namespace used as the default personal-memory space.
     # Individual teamEvolver users may override this in their personal space.
     sharing_viking_personal_user: str = ""
-    sharing_viking_user: str = "default"
+    # Canonical OpenViking user for team-owned Agent context.
+    sharing_viking_user: str = "team"
     # wire constant: OpenViking agent namespace shared with Hermes /
     # Default shared skill namespace
     # (viking://resources/team-skill-evolver/...).

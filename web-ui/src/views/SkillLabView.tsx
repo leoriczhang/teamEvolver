@@ -68,14 +68,20 @@ const METRICS = [
 export default function SkillLabView({
   active,
   user,
+  lockedSkillName = "",
+  externalDraftMd,
+  embedded = false,
 }: {
   active: boolean;
   user?: UserProfile | null;
+  lockedSkillName?: string;
+  externalDraftMd?: string;
+  embedded?: boolean;
 }) {
   const [skills, setSkills] = useState<SkillListResp["skills"]>([]);
-  const [skillName, setSkillName] = useState("");
+  const [skillName, setSkillName] = useState(lockedSkillName);
   const [skill, setSkill] = useState<SkillDetail | null>(null);
-  const [draftMd, setDraftMd] = useState("");
+  const [draftMd, setDraftMd] = useState(externalDraftMd ?? "");
   const [datasets, setDatasets] = useState<SkillLabDataset[]>([]);
   const [selectedDatasetId, setSelectedDatasetId] = useState("");
   const [runs, setRuns] = useState<SkillLabRun[]>([]);
@@ -92,6 +98,7 @@ export default function SkillLabView({
   const [savingDataset, setSavingDataset] = useState(false);
   const [importingDataset, setImportingDataset] = useState(false);
   const [synthesizing, setSynthesizing] = useState(false);
+  const [synthesizeSessionIds, setSynthesizeSessionIds] = useState("");
   const [maxInteractions, setMaxInteractions] = useState(8);
   const [timeoutSeconds, setTimeoutSeconds] = useState(600);
   const loaded = useRef(false);
@@ -103,13 +110,15 @@ export default function SkillLabView({
   const loadSkill = useCallback(async (name: string) => {
     if (!name) {
       setSkill(null);
-      setDraftMd("");
+      if (externalDraftMd == null) setDraftMd("");
       return;
     }
     const detail = await api<SkillDetail>(`/api/skills/${encodeURIComponent(name)}`);
     setSkill(detail);
-    setDraftMd(detail.skill_md || "");
-  }, []);
+    // Embedded evaluation keeps the caller-provided draft as the candidate;
+    // standalone lab initialises the editor from the stored skill.
+    if (externalDraftMd == null) setDraftMd(detail.skill_md || "");
+  }, [externalDraftMd]);
 
   const loadWorkspace = useCallback(async (name: string) => {
     if (!name) {
@@ -142,9 +151,11 @@ export default function SkillLabView({
       const nextSkills = skillResp.skills || [];
       setSkills(nextSkills);
       const nextName = (
-        skillName && nextSkills.some((item) => item.name === skillName)
-          ? skillName
-          : nextSkills[0]?.name || ""
+        lockedSkillName
+          ? lockedSkillName
+          : skillName && nextSkills.some((item) => item.name === skillName)
+            ? skillName
+            : nextSkills[0]?.name || ""
       );
       setSkillName(nextName);
       await Promise.all([loadSkill(nextName), loadWorkspace(nextName)]);
@@ -153,7 +164,7 @@ export default function SkillLabView({
     } finally {
       setLoading(false);
     }
-  }, [loadSkill, loadWorkspace, skillName]);
+  }, [loadSkill, loadWorkspace, skillName, lockedSkillName]);
 
   useEffect(() => {
     if (active && !loaded.current) {
@@ -161,6 +172,18 @@ export default function SkillLabView({
       refresh();
     }
   }, [active, refresh]);
+
+  // Embedded mode: reload when the caller switches the locked skill, and keep
+  // the candidate draft mirrored from the workspace editor.
+  useEffect(() => {
+    if (!lockedSkillName || !active) return;
+    setSkillName(lockedSkillName);
+    void Promise.all([loadSkill(lockedSkillName), loadWorkspace(lockedSkillName)]);
+  }, [lockedSkillName, active, loadSkill, loadWorkspace]);
+
+  useEffect(() => {
+    if (externalDraftMd != null) setDraftMd(externalDraftMd);
+  }, [externalDraftMd]);
 
   useEffect(() => {
     if (!active || !runs.some((run) => run.status === "running")) return;
@@ -421,6 +444,10 @@ export default function SkillLabView({
     if (!skillName) return;
     setSynthesizing(true);
     try {
+      const sessionIds = synthesizeSessionIds
+        .split(/[\s,，]+/)
+        .map((item) => item.trim())
+        .filter(Boolean);
       const result = await api<{ datasets: SkillLabDataset[]; count: number; source_session_count: number }>(
         "/api/skill-lab/datasets/synthesize",
         {
@@ -428,6 +455,7 @@ export default function SkillLabView({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             skill_name: skillName,
+            ...(sessionIds.length ? { session_ids: sessionIds } : {}),
           }),
         }
       );
@@ -471,7 +499,7 @@ export default function SkillLabView({
   const inlineMaterial = inlineMaterialText(datasetDraft.query);
 
   return (
-    <div className="mx-auto max-w-[1440px] px-[22px] py-[22px]">
+    <div className={cn(embedded ? "px-1 py-1" : "mx-auto max-w-[1440px] px-[22px] py-[22px]")}>
       <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">
         <StatCard label="当前 Skill" value={skillName || "未选择"} mono />
         <StatCard label="可编辑数据集" value={manualCount} />
@@ -493,8 +521,9 @@ export default function SkillLabView({
           <Field label="Skill">
             <select
               value={skillName}
+              disabled={!!lockedSkillName}
               onChange={(event) => selectSkill(event.target.value)}
-              className="h-8 min-w-[260px] rounded-lg border border-border bg-background px-2 text-xs font-semibold outline-none"
+              className="h-8 min-w-[260px] rounded-lg border border-border bg-background px-2 text-xs font-semibold outline-none disabled:opacity-70"
             >
               {!skills.length && <option value="">暂无 Skill</option>}
               {skills.map((item) => (
@@ -565,27 +594,33 @@ export default function SkillLabView({
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1.05fr)_minmax(420px,0.95fr)]">
         <Panel
-          title="SKILL.md 实验草稿"
-          count={dirty ? "未保存变更" : "与技能库一致"}
+          title={embedded ? "候选草稿（来自工作空间编辑器）" : "SKILL.md 实验草稿"}
+          count={dirty ? "与已保存版本有差异 · 作为 Candidate" : "与技能库一致"}
           extra={
-            <div className="flex gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={!dirty}
-                onClick={() => setDraftMd(skill?.skill_md || "")}
-              >
-                <RotateCcw className="size-3.5" /> 重置
-              </Button>
-              <Button
-                size="sm"
-                disabled={!isAdmin || !dirty || savingSkill}
-                onClick={saveSkill}
-                title={isAdmin ? "保存到正式技能库并立即生效" : "仅管理员可保存正式 Skill"}
-              >
-                <Save className="size-3.5" /> {savingSkill ? "保存中…" : "保存到技能库"}
-              </Button>
-            </div>
+            embedded ? (
+              <span className="text-[11px] text-muted-foreground">
+                Baseline=已保存版本 · Candidate=当前编辑内容
+              </span>
+            ) : (
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={!dirty}
+                  onClick={() => setDraftMd(skill?.skill_md || "")}
+                >
+                  <RotateCcw className="size-3.5" /> 重置
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={!isAdmin || !dirty || savingSkill}
+                  onClick={saveSkill}
+                  title={isAdmin ? "保存到正式技能库并立即生效" : "仅管理员可保存正式 Skill"}
+                >
+                  <Save className="size-3.5" /> {savingSkill ? "保存中…" : "保存到技能库"}
+                </Button>
+              </div>
+            )
           }
         >
           {!skill ? (
@@ -594,12 +629,20 @@ export default function SkillLabView({
             <div className="p-4">
               <Textarea
                 value={draftMd}
+                readOnly={embedded}
                 onChange={(event) => setDraftMd(event.target.value)}
                 spellCheck={false}
-                className="mono h-[520px] min-h-0 max-h-[520px] resize-none overflow-y-auto [field-sizing:fixed] text-[12px] leading-relaxed"
+                className={cn(
+                  "mono h-[520px] min-h-0 max-h-[520px] resize-none overflow-y-auto [field-sizing:fixed] text-[12px] leading-relaxed",
+                  embedded && "bg-muted/40",
+                )}
               />
               <div className="mt-2 flex justify-between text-[11px] text-muted-foreground">
-                <span>实验使用当前编辑内容，不要求先保存。</span>
+                <span>
+                  {embedded
+                    ? "在工作空间左侧编辑 SKILL.md，改动会作为 Candidate 参与本次实验。"
+                    : "实验使用当前编辑内容，不要求先保存。"}
+                </span>
                 <span>{draftMd.length.toLocaleString()} 字符</span>
               </div>
             </div>
@@ -647,6 +690,20 @@ export default function SkillLabView({
               </div>
             }
           >
+            <div className="flex flex-wrap items-center gap-2 border-b border-line bg-muted/30 px-4 py-2.5">
+              <span className="text-[11px] font-semibold text-muted-foreground">
+                指定 Session 重放
+              </span>
+              <Input
+                value={synthesizeSessionIds}
+                onChange={(event) => setSynthesizeSessionIds(event.target.value)}
+                placeholder="填入 Langfuse / 历史 Session ID（逗号分隔），留空则用近期会话"
+                className="h-8 min-w-[280px] flex-1 text-xs"
+              />
+              <span className="text-[10px] text-muted-soft">
+                先在「Langfuse 接入」拉取会话，再填 Session ID → 生成数据集 → True Replay
+              </span>
+            </div>
             {!datasets.length ? (
               <Empty>暂无数据集。可手工填写 Query、要求、轨迹要求并上传材料。</Empty>
             ) : (

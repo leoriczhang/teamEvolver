@@ -289,6 +289,34 @@ def apply_prompt_override(stage_id, default_prompt, replacements=None):
     return prompt
 
 
+# teamEvolver stores its own provider labels (notably ``openai`` for "an
+# OpenAI-compatible endpoint at a custom base_url", e.g. Volcengine Ark). Hermes
+# has no provider literally named ``openai`` — its generic OpenAI-compatible
+# provider is ``custom``, which binds to the matching ``custom_providers`` entry
+# by base_url. Translate the teamEvolver label to a Hermes-valid one so the
+# isolated Hermes config never carries an unknown provider. This mirrors the
+# main True-Replay flow, which always writes ``provider: custom``.
+_TEAMEVOLVER_TO_HERMES_PROVIDER = {
+    "openai": "custom",
+    "openai-compatible": "custom",
+    "ark": "custom",
+    "volcengine": "custom",
+    "volcengine-ark": "custom",
+    "": "custom",
+}
+
+
+def _normalize_hermes_provider(provider):
+    """Map a teamEvolver provider label onto a provider Hermes accepts."""
+    raw = str(provider or "").strip()
+    if not raw:
+        return "custom"
+    # Explicit ``custom:<name>`` references are already Hermes-native.
+    if raw.lower().startswith("custom"):
+        return raw
+    return _TEAMEVOLVER_TO_HERMES_PROVIDER.get(raw.lower(), raw)
+
+
 def _apply_configured_model():
     """Materialize the current unified model config into the isolated Hermes home.
 
@@ -339,7 +367,7 @@ def _apply_configured_model():
             model["base_url"] = base_url
         if api_key:
             model["api_key"] = api_key
-        model["provider"] = str(
+        model["provider"] = _normalize_hermes_provider(
             global_model.get("provider")
             or os.environ.get("SKILLMINER_MODEL_PROVIDER")
             or "custom"

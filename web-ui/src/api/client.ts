@@ -915,6 +915,26 @@ export interface ShareResult {
   missing_names?: string[];
 }
 
+export interface PublishRequest {
+  request_id: string;
+  requester_id: string;
+  requester_name?: string;
+  skill_names: string[];
+  note?: string;
+  status: "pending" | "approved" | "rejected";
+  created_at?: string;
+  updated_at?: string;
+  decided_by?: string;
+  decided_at?: string;
+  decision_note?: string;
+  result?: ShareResult;
+}
+
+export interface PublishRequestListResp {
+  requests: PublishRequest[];
+  pending_count: number;
+}
+
 // ---- Console auth -------------------------------------------------------- //
 
 export interface AuthStatus {

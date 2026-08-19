@@ -31,6 +31,8 @@ _AGENT_SCOPES = (
     "team_memory",
     "personal_skills",
     "team_skills",
+    "personal_resources",
+    "team_resources",
 )
 _MAX_QUERY_CHARS = 8_000
 _MAX_REMEMBER_BYTES = 128 * 1024

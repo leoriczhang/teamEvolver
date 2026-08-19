@@ -3675,6 +3675,57 @@ class RoutesMixin:
                 limit=limit,
             )
 
+        @app.post("/api/openviking/memory/true-replay")
+        async def memory_adhoc_true_replay(request: Request):
+            """A/B replay an unsaved Memory edit: stored version vs draft.
+
+            Backs the workspace "Memory 真回放" panel — Baseline uses the
+            stored file content, Candidate uses the workspace draft, both
+            share the rest of a Source Session's context.
+            """
+            _session_user(request)
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Memory replay body must be an object",
+                )
+            raw_checklist = body.get("checklist")
+            if isinstance(raw_checklist, str):
+                checklist = [
+                    line.strip()
+                    for line in raw_checklist.splitlines()
+                    if line.strip()
+                ]
+            elif isinstance(raw_checklist, list):
+                checklist = list(raw_checklist)
+            else:
+                checklist = []
+            try:
+                return await asyncio.to_thread(
+                    owner._run_dreamcycle_memory_replay_adhoc,
+                    memory_path=str(body.get("memory_path") or ""),
+                    before_content=str(body.get("before_content") or ""),
+                    after_content=str(body.get("after_content") or ""),
+                    query=str(body.get("query") or ""),
+                    checklist=checklist,
+                    scope=str(body.get("scope") or "team_memory"),
+                    source_session_id=str(
+                        body.get("source_session_id") or ""
+                    ),
+                    max_interactions=int(
+                        body.get("max_interactions") or 4
+                    ),
+                    timeout_seconds=int(
+                        body.get("timeout_seconds") or 600
+                    ),
+                )
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=str(exc),
+                ) from exc
+
         @app.post("/trigger-dreamcycle/reset")
         async def dreamcycle_reset(request: Request):
             _require_admin_user(_session_user(request))
@@ -3731,7 +3782,7 @@ class RoutesMixin:
                     "personal_user": str(
                         sharing.get("viking_personal_user") or ""
                     ),
-                    "team_user": str(sharing.get("viking_user") or "default"),
+                    "team_user": str(sharing.get("viking_user") or "team"),
                     "root_prefix": str(
                         sharing.get("viking_root_prefix") or "team-skill-evolver"
                     ),

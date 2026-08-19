@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -8,8 +8,13 @@ import {
   FileCode2,
   FileJson,
   FileText,
+  FlaskConical,
   Folder,
+  FolderTree,
   FolderOpen,
+  GitCompare,
+  Beaker,
+  Brain,
   Loader2,
   Plus,
   RefreshCw,
@@ -23,7 +28,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { api, type UserProfile, type UsersListResp } from "@/api/client";
+import { api, type MemoryReplayBranch, type MemoryTrueReplay, type UserProfile, type UsersListResp } from "@/api/client";
 import { Empty, Pill } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import {
@@ -37,26 +42,30 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { toastErr, toastOk } from "@/lib/toast";
 import { cn } from "@/lib/utils";
+import SkillLabView from "@/views/SkillLabView";
 
-type WorkspaceMode = "memory" | "skills" | "workspace";
-type ScopeName =
+type WorkspaceMode = "workspace" | "platform";
+export type ScopeName =
   | "personal_memory"
   | "team_memory"
   | "personal_skills"
   | "team_skills"
+  | "personal_resources"
+  | "team_resources"
   | "personal_workspace"
-  | "team_workspace";
+  | "team_workspace"
+  | "platform_assets";
 
-type ScopeConfig = {
+export type ScopeConfig = {
   name: ScopeName;
   root_uri: string;
   space: "personal" | "team";
-  kind: "memory" | "skills" | "workspace";
+  kind: "memory" | "skills" | "resources" | "workspace" | "platform";
   can_write: boolean;
   openviking_user?: string;
 };
 
-type WorkspaceConfig = {
+export type WorkspaceConfig = {
   enabled: boolean;
   deployment: "cloud" | "local" | string;
   endpoint: string;
@@ -68,7 +77,7 @@ type WorkspaceConfig = {
   scopes: Record<ScopeName, ScopeConfig>;
 };
 
-type WorkspaceEntry = {
+export type WorkspaceEntry = {
   uri: string;
   name: string;
   is_dir: boolean;
@@ -78,7 +87,7 @@ type WorkspaceEntry = {
   relative_path?: string;
 };
 
-type TreeResponse = {
+export type TreeResponse = {
   scope: ScopeName;
   root_uri: string;
   uri: string;
@@ -108,36 +117,109 @@ type TerminalRecord = {
   running?: boolean;
 };
 
-const MODE_SCOPES: Record<WorkspaceMode, ScopeName[]> = {
-  skills: ["personal_skills", "team_skills"],
-  memory: ["personal_memory", "team_memory"],
-  workspace: [
-    "personal_workspace",
-    "team_workspace",
-    "personal_skills",
-    "team_skills",
-  ],
+type SpaceKey = "personal" | "team" | "platform";
+
+// A "space" is what the console shows as one workspace tab. Agent-referable
+// assets are split across physical roots (skills vs memories vs the user
+// root), so each space aggregates its member scopes and renders them under
+// labeled group folders. Platform storage is a single read-only scope.
+type SpaceConfig = {
+  key: SpaceKey;
+  label: string;
+  // Member scopes shown as top-level group folders, in display order.
+  members: { scope: ScopeName; label: string }[];
 };
+
+const WORKSPACE_SPACES: SpaceConfig[] = [
+  {
+    key: "personal",
+    label: "个人 Workspace",
+    members: [
+      { scope: "personal_skills", label: "技能 Skills" },
+      { scope: "personal_memory", label: "记忆 Memory" },
+      { scope: "personal_resources", label: "资源 Resources" },
+    ],
+  },
+  {
+    key: "team",
+    label: "团队 Workspace",
+    members: [
+      { scope: "team_skills", label: "技能 Skills" },
+      { scope: "team_memory", label: "记忆 Memory" },
+      { scope: "team_resources", label: "资源 Resources" },
+    ],
+  },
+];
+
+const PLATFORM_SPACE: SpaceConfig = {
+  key: "platform",
+  label: "平台内部存储",
+  members: [{ scope: "platform_assets", label: "平台资产" }],
+};
+
+// Platform-internal directories under the team resources root. Agent-referable
+// directories (skills / peers / knowledge) are intentionally excluded — those
+// belong to the Agent workspace, not the platform assets view.
+const PLATFORM_DIR_ALLOWLIST = new Set<string>([
+  "skill_lab",
+  "skill_datasets",
+  "evolution_datasets",
+  "skill_evidence",
+  "skill_version_context",
+  "sessions",
+  "session_archive",
+  "session_filter_audit",
+  "session_ledger",
+  "session_index.json",
+  "skill_mutation_commits",
+  "skill_sync_outbox",
+  "candidate_skills",
+  "validation_jobs",
+  "validation_claims",
+  "validation_results",
+  "validation_evaluations",
+  "validation_decisions",
+  "validation_decision_index.json",
+  "human_review",
+  "memory-changes",
+  "memory-replays",
+  "manifest.json",
+  "evolve_skill_registry.json",
+]);
+
+function spacesForMode(mode: WorkspaceMode): SpaceConfig[] {
+  return mode === "platform" ? [PLATFORM_SPACE] : WORKSPACE_SPACES;
+}
 
 const SCOPE_LABELS: Record<ScopeName, string> = {
   personal_memory: "个人 Memory",
   team_memory: "团队 Memory",
   personal_skills: "个人 Skill",
   team_skills: "团队 Skill",
+  personal_resources: "个人 Resources",
+  team_resources: "团队 Resources",
   personal_workspace: "个人 Workspace",
   team_workspace: "团队 Workspace",
+  platform_assets: "平台资产",
 };
 
-function initialScope(mode: WorkspaceMode, config?: WorkspaceConfig | null): ScopeName {
-  const scopes = MODE_SCOPES[mode];
-  if (config?.personal_access_configured === false) {
-    return scopes.find((name) => name.startsWith("team_")) || scopes[0];
-  }
-  return scopes[0];
+function isPersonalSpace(space: SpaceKey) {
+  return space === "personal";
 }
 
-function isPersonalScope(scope: ScopeName) {
-  return scope.startsWith("personal_");
+// Synthetic URIs for the per-scope group folders shown at a space's tree root.
+const GROUP_URI_PREFIX = "group://";
+function groupUri(scope: ScopeName): string {
+  return `${GROUP_URI_PREFIX}${scope}`;
+}
+
+function initialSpace(mode: WorkspaceMode, config?: WorkspaceConfig | null): SpaceConfig {
+  const list = spacesForMode(mode);
+  // If personal credentials/roots are unavailable, open the team space first.
+  if (mode === "workspace" && config?.personal_access_configured === false) {
+    return list.find((space) => space.key === "team") || list[0];
+  }
+  return list[0];
 }
 
 const DIRECTORY_PURPOSES: Record<string, string> = {
@@ -199,23 +281,32 @@ export default function OpenVikingWorkspaceShell({
   active,
   mode,
   user,
+  labs,
 }: {
   active: boolean;
   mode: WorkspaceMode;
   user?: UserProfile | null;
+  labs?: {
+    skill: ReactNode;
+    memory: ReactNode;
+  };
 }) {
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [activeUserId, setActiveUserId] = useState(
     () => window.localStorage.getItem("teamEvolver.activeUserId") || user?.id || "",
   );
   const [config, setConfig] = useState<WorkspaceConfig | null>(null);
-  const [scopeName, setScopeName] = useState<ScopeName>(MODE_SCOPES[mode][0]);
-  const [treeResponse, setTreeResponse] = useState<TreeResponse | null>(null);
+  const [surface, setSurface] = useState<"workspace" | "skill-lab" | "memory-lab">("workspace");
+  const spaces = spacesForMode(mode);
+  const [activeSpaceKey, setActiveSpaceKey] = useState<SpaceKey>(spaces[0].key);
+  // Merged entries across a space's member scopes; each entry keeps its full
+  // URI so the owning scope can be resolved for per-file operations.
+  const [entries, setEntries] = useState<WorkspaceEntry[]>([]);
   const [currentUri, setCurrentUri] = useState("");
   const [selected, setSelected] = useState<WorkspaceEntry | null>(null);
   const [content, setContent] = useState("");
   const [originalContent, setOriginalContent] = useState("");
-  const [viewMode, setViewMode] = useState<"preview" | "source">("preview");
+  const [viewMode, setViewMode] = useState<"preview" | "source" | "diff">("preview");
   const [directoryLevel, setDirectoryLevel] = useState<"l0" | "l1">("l0");
   const [directoryLevels, setDirectoryLevels] = useState({
     l0: "",
@@ -231,34 +322,106 @@ export default function OpenVikingWorkspaceShell({
   const [createName, setCreateName] = useState("");
   const [createContent, setCreateContent] = useState("");
 
-  const scopeNames = MODE_SCOPES[mode];
-  const selectedScope = config?.scopes?.[scopeName];
-  const isDirty = !!selected && content !== originalContent;
+  const activeSpace = spaces.find((item) => item.key === activeSpaceKey) || spaces[0];
+  const spaceScopes = useMemo(
+    () => activeSpace.members
+      .map((member) => config?.scopes?.[member.scope])
+      .filter((scope): scope is ScopeConfig => !!scope),
+    [activeSpace, config],
+  );
+  // Resolve which member scope owns a given URI (longest matching root wins).
+  const scopeForUri = useCallback(
+    (uri: string): ScopeConfig | undefined => {
+      const clean = (uri || "").replace(/\/+$/, "");
+      let best: ScopeConfig | undefined;
+      for (const scope of spaceScopes) {
+        const root = scope.root_uri.replace(/\/+$/, "");
+        if ((clean === root || clean.startsWith(`${root}/`)) &&
+          (!best || scope.root_uri.length > best.root_uri.length)) {
+          best = scope;
+        }
+      }
+      return best;
+    },
+    [spaceScopes],
+  );
+  const selectedScope = selected ? scopeForUri(selected.uri) : undefined;
+  const isDirty = !!selected && !selected.is_dir && content !== originalContent;
+    const currentScope = scopeForUri(currentUri);
+    const activeWritableScope =
+      currentScope?.can_write
+        ? currentScope
+        : spaceScopes.find((scope) => scope.can_write) || spaceScopes[0];
+    const terminalScope =
+      currentScope?.name ||
+      selectedScope?.name ||
+      activeWritableScope?.name ||
+      activeSpace.members[0]?.scope;
+  // Which experiment the current selection supports: skills → True Replay,
+  // memory → injection comparison. Derived from the owning scope + file.
+  const evalKind: "skills" | "memory" | null = selectedScope?.kind === "skills"
+    ? "skills"
+    : selectedScope?.kind === "memory"
+      ? "memory"
+      : null;
+  const evalSkillName = useMemo(
+    () => (evalKind === "skills" && selectedScope
+      ? skillNameFromUri(selectedScope.root_uri, selected?.uri || currentUri)
+      : ""),
+    [evalKind, selectedScope, selected?.uri, currentUri],
+  );
+  const [evalOpen, setEvalOpen] = useState(false);
+  // Build one synthetic group-folder per member scope; real entries hang under
+  // it, so a space renders as a single tree with labeled asset groups.
   const tree = useMemo(
-    () => buildTree(treeResponse?.entries || [], selectedScope?.root_uri || ""),
-    [treeResponse, selectedScope?.root_uri],
+    () => buildSpaceTree(activeSpace, spaceScopes, entries),
+    [activeSpace, spaceScopes, entries],
   );
   const filteredTree = useMemo(
     () => filterTree(tree, filter.trim().toLowerCase()),
     [filter, tree],
   );
 
-  const loadTree = useCallback(
+  const loadSpace = useCallback(
     async (
-      chosenScope: ScopeName,
+      space: SpaceConfig,
       chosenUser: string,
-      rootUri: string,
+      cfg: WorkspaceConfig,
       resetSelection = true,
     ) => {
-      if (!chosenUser || !rootUri) return;
+      if (!chosenUser) return;
+      const members = space.members
+        .map((member) => cfg.scopes?.[member.scope])
+        .filter((scope): scope is ScopeConfig => !!scope);
+      if (!members.length) return;
       setLoading(true);
       try {
-        const result = await api<TreeResponse>(
-          `/api/openviking/workspace/tree?scope=${encodeURIComponent(chosenScope)}&user_id=${encodeURIComponent(chosenUser)}&uri=${encodeURIComponent(rootUri)}`,
+        const results = await Promise.all(
+          members.map(async (scope) => {
+            try {
+              const result = await api<TreeResponse>(
+                `/api/openviking/workspace/tree?scope=${encodeURIComponent(scope.name)}&user_id=${encodeURIComponent(chosenUser)}&uri=${encodeURIComponent(scope.root_uri)}`,
+              );
+              let list = result.entries || [];
+              // Platform view: only surface platform-internal directories.
+              if (scope.kind === "platform") {
+                const root = scope.root_uri.replace(/\/+$/, "");
+                list = list.filter((entry) => {
+                  const rel = entry.uri.replace(/\/+$/, "").slice(root.length + 1);
+                  const top = rel.split("/")[0] || entry.name;
+                  return PLATFORM_DIR_ALLOWLIST.has(top);
+                });
+              }
+              return list;
+            } catch {
+              return [] as WorkspaceEntry[];
+            }
+          }),
         );
-        setTreeResponse(result);
+        const merged = results.flat();
+        setEntries(merged);
         if (resetSelection) {
-          setCurrentUri(result.root_uri);
+          setCurrentUri(members[0].root_uri);
           setSelected(null);
           setContent("");
           setOriginalContent("");
@@ -267,7 +430,7 @@ export default function OpenVikingWorkspaceShell({
           setDirectoryLevels({ l0: "", l1: "" });
           setFilter("");
         }
-        setExpanded(new Set());
+        setExpanded(new Set(members.map((scope) => groupUri(scope.name))));
       } catch (error: any) {
         toastErr("加载 OpenViking 文件树失败", error.message);
       } finally {
@@ -286,12 +449,10 @@ export default function OpenVikingWorkspaceShell({
           `/api/openviking/workspace/config?user_id=${encodeURIComponent(userId)}`,
         );
         setConfig(result);
-        const nextScope = initialScope(mode, result);
-        setScopeName(nextScope);
-        const root = result.scopes?.[nextScope]?.root_uri || "";
-        setCurrentUri(root);
-        if (result.enabled && root) {
-          await loadTree(nextScope, userId, root);
+        const first = initialSpace(mode, result);
+        setActiveSpaceKey(first.key);
+        if (result.enabled) {
+          await loadSpace(first, userId, result);
         }
       } catch (error: any) {
         toastErr("读取 OpenViking 配置失败", error.message);
@@ -299,7 +460,7 @@ export default function OpenVikingWorkspaceShell({
         setLoading(false);
       }
     },
-    [loadTree, mode],
+    [loadSpace, mode],
   );
 
   useEffect(() => {
@@ -320,24 +481,34 @@ export default function OpenVikingWorkspaceShell({
 
   useEffect(() => {
     if (!active || !config) return;
-    const first = initialScope(mode, config);
-    setScopeName(first);
-    const root = config.scopes?.[first]?.root_uri;
-    if (root) void loadTree(first, activeUserId, root);
+    const first = initialSpace(mode, config);
+    setActiveSpaceKey(first.key);
+    void loadSpace(first, activeUserId, config);
   }, [mode]);
 
-  async function chooseScope(next: ScopeName) {
-    setScopeName(next);
-    const root = config?.scopes?.[next]?.root_uri;
-    if (root) await loadTree(next, activeUserId, root);
+  async function chooseSpace(next: SpaceConfig) {
+    setSurface("workspace");
+    setActiveSpaceKey(next.key);
+    if (config) await loadSpace(next, activeUserId, config);
   }
 
   async function refreshTree(resetSelection = false) {
-    const root = selectedScope?.root_uri;
-    if (root) await loadTree(scopeName, activeUserId, root, resetSelection);
+    if (config) await loadSpace(activeSpace, activeUserId, config, resetSelection);
   }
 
   async function openEntry(entry: WorkspaceEntry) {
+    // Synthetic group folders only toggle expansion; no backing URI to read.
+    if (entry.uri.startsWith(GROUP_URI_PREFIX)) {
+      setExpanded((previous) => {
+        const next = new Set(previous);
+        if (next.has(entry.uri)) next.delete(entry.uri);
+        else next.add(entry.uri);
+        return next;
+      });
+      return;
+    }
+    const owner = scopeForUri(entry.uri);
+    if (!owner) return;
     if (entry.is_dir) {
       setSelected(entry);
       setCurrentUri(entry.uri);
@@ -354,7 +525,7 @@ export default function OpenVikingWorkspaceShell({
       setDirectoryLevelLoading(true);
       try {
         const base =
-          `/api/openviking/workspace/level?scope=${encodeURIComponent(scopeName)}` +
+          `/api/openviking/workspace/level?scope=${encodeURIComponent(owner.name)}` +
           `&user_id=${encodeURIComponent(activeUserId)}` +
           `&uri=${encodeURIComponent(entry.uri)}`;
         const [l0, l1] = await Promise.all([
@@ -377,7 +548,7 @@ export default function OpenVikingWorkspaceShell({
     setLoading(true);
     try {
       const result = await api<{ content: string }>(
-        `/api/openviking/workspace/content?scope=${encodeURIComponent(scopeName)}&user_id=${encodeURIComponent(activeUserId)}&uri=${encodeURIComponent(entry.uri)}`,
+        `/api/openviking/workspace/content?scope=${encodeURIComponent(owner.name)}&user_id=${encodeURIComponent(activeUserId)}&uri=${encodeURIComponent(entry.uri)}`,
       );
       setContent(result.content || "");
       setOriginalContent(result.content || "");
@@ -399,7 +570,7 @@ export default function OpenVikingWorkspaceShell({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           user_id: activeUserId,
-          scope: scopeName,
+          scope: selectedScope.name,
           uri: selected.uri,
           content,
           mode: "replace",
@@ -419,7 +590,7 @@ export default function OpenVikingWorkspaceShell({
     setCreateType(type);
     setCreateName("");
     setCreateContent(
-      type === "file" && mode === "memory" ? "# 新记忆\n\n" : "",
+      type === "file" && selectedScope?.kind === "memory" ? "# 新记忆\n\n" : "",
     );
     setCreateOpen(true);
   }
@@ -428,6 +599,11 @@ export default function OpenVikingWorkspaceShell({
     const name = createName.trim().replace(/^\/+|\/+$/g, "");
     if (!name) {
       toastErr("请输入名称");
+      return;
+    }
+    const owner = scopeForUri(currentUri);
+    if (!owner) {
+      toastErr("请先在某个资产分组内选择位置");
       return;
     }
     const uri = `${currentUri.replace(/\/+$/, "")}/${name}`;
@@ -439,7 +615,7 @@ export default function OpenVikingWorkspaceShell({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             user_id: activeUserId,
-            scope: scopeName,
+            scope: owner.name,
             uri,
           }),
         });
@@ -449,7 +625,7 @@ export default function OpenVikingWorkspaceShell({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             user_id: activeUserId,
-            scope: scopeName,
+            scope: owner.name,
             uri,
             content: createContent,
             mode: "create",
@@ -471,7 +647,7 @@ export default function OpenVikingWorkspaceShell({
     if (!window.confirm(`确认删除「${selected.name}」？`)) return;
     try {
       await api(
-        `/api/openviking/workspace?scope=${encodeURIComponent(scopeName)}&user_id=${encodeURIComponent(activeUserId)}&uri=${encodeURIComponent(selected.uri)}`,
+        `/api/openviking/workspace?scope=${encodeURIComponent(selectedScope.name)}&user_id=${encodeURIComponent(activeUserId)}&uri=${encodeURIComponent(selected.uri)}`,
         { method: "DELETE" },
       );
       toastOk("已从 OpenViking 删除", selected.name);
@@ -500,37 +676,74 @@ export default function OpenVikingWorkspaceShell({
     <div className="w-full px-4 pb-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-surface px-3 py-2">
         <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-          {scopeNames.map((name) => {
-            const unavailable = config.personal_access_configured === false && isPersonalScope(name);
+            {spaces.map((space) => {
+            const unavailable =
+              mode === "workspace" &&
+              config.personal_access_configured === false && isPersonalSpace(space.key);
             return (
               <button
-                key={name}
+                  key={space.key}
                 type="button"
                 disabled={unavailable}
                 title={unavailable ? "请先在用户管理中配置个人 OpenViking 凭证" : undefined}
-                onClick={() => void chooseScope(name)}
+                  onClick={() => void chooseSpace(space)}
                 className={cn(
                   "rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors",
-                  scopeName === name
+                    activeSpaceKey === space.key
                     ? "bg-sidebar-primary text-white"
                     : "text-muted-foreground hover:bg-muted hover:text-foreground",
                   unavailable && "cursor-not-allowed opacity-45 hover:bg-transparent hover:text-muted-foreground",
                 )}
               >
-                {SCOPE_LABELS[name]}
+                  {space.label}
                 {unavailable ? "（需个人凭证）" : ""}
               </button>
             );
           })}
           <span className="mx-1 h-5 w-px bg-border" />
-          <Pill tone={selectedScope?.can_write ? "green" : "gray"}>
-            {selectedScope?.can_write ? "可管理" : "只读"}
-          </Pill>
+          {mode === "platform" ? (
+            <Pill tone="gray">平台内部 · 只读</Pill>
+          ) : (
+              <Pill tone={selectedScope?.can_write ? "green" : "gray"}>
+                {selected && !selected.is_dir ? (selectedScope?.can_write ? "可管理" : "只读") : "选择资产分组内的文件"}
+            </Pill>
+          )}
           <span className="truncate font-mono text-[11px] text-muted-foreground">
-            {selectedScope?.root_uri}
+            {selected?.uri || currentUri || activeSpace.label}
           </span>
         </div>
         <div className="flex items-center gap-1.5">
+          {mode === "workspace" && labs && (
+            <div
+              className="mr-1 flex rounded-lg border border-border bg-muted p-0.5"
+              role="tablist"
+              aria-label="Agent 工作空间视图"
+            >
+              {[
+                { key: "workspace" as const, label: "Workspace", icon: FolderTree },
+                { key: "skill-lab" as const, label: "Skill Lab", icon: Beaker },
+                { key: "memory-lab" as const, label: "Memory Lab", icon: Brain },
+              ].map(({ key, label, icon: Icon }) => (
+                <button
+                  key={key}
+                  type="button"
+                  role="tab"
+                  aria-selected={surface === key}
+                  title={label}
+                  onClick={() => setSurface(key)}
+                  className={cn(
+                    "flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[11px] font-semibold transition-colors",
+                    surface === key
+                      ? "bg-background text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  <Icon className="size-3.5" />
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
           {users.length > 1 && (
             <select
               value={activeUserId}
@@ -567,20 +780,25 @@ export default function OpenVikingWorkspaceShell({
         </div>
       </div>
 
-      <div
-        className="grid min-h-[560px] overflow-hidden rounded-xl border border-border bg-surface shadow-sm xl:grid-cols-[minmax(270px,0.78fr)_minmax(420px,1.35fr)_minmax(330px,0.9fr)]"
-        style={{ height: "clamp(560px, calc(100vh - 176px), 840px)" }}
-      >
+      {surface === "skill-lab" && labs ? (
+        <div className="min-h-0">{labs.skill}</div>
+      ) : surface === "memory-lab" && labs ? (
+        <div className="min-h-0">{labs.memory}</div>
+      ) : (
+        <div
+          className="grid min-h-[560px] overflow-hidden rounded-xl border border-border bg-surface shadow-sm xl:grid-cols-[minmax(270px,0.78fr)_minmax(420px,1.35fr)_minmax(330px,0.9fr)]"
+          style={{ height: "clamp(560px, calc(100vh - 176px), 840px)" }}
+        >
         <section className="flex min-h-0 flex-col border-r border-border">
           <header className="flex h-12 shrink-0 items-center justify-between border-b border-border px-3">
             <div className="flex items-center gap-2 text-sm font-semibold">
               <FolderOpen className="size-4 text-amber-600" />
               文件树
               <span className="text-[11px] font-normal text-muted-foreground">
-                {treeResponse?.entries.length || 0}
+                  {entries.length}
               </span>
             </div>
-            {selectedScope?.can_write && (
+              {currentScope?.can_write && (
               <div className="flex items-center gap-1">
                 <Button
                   variant="ghost"
@@ -626,13 +844,13 @@ export default function OpenVikingWorkspaceShell({
               type="button"
               className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-semibold hover:bg-muted/70"
               onClick={() => {
-                if (selectedScope?.root_uri) setCurrentUri(selectedScope.root_uri);
+                  if (spaceScopes[0]?.root_uri) setCurrentUri(spaceScopes[0].root_uri);
               }}
             >
               <FolderOpen className="size-4 shrink-0 text-amber-600" />
-              <span className="truncate">{SCOPE_LABELS[scopeName]}</span>
+                <span className="truncate">{activeSpace.label}</span>
             </button>
-            {loading && !treeResponse ? (
+              {loading && !entries.length ? (
               <div className="flex items-center justify-center gap-2 py-10 text-xs text-muted-foreground">
                 <Loader2 className="size-4 animate-spin" />
                 加载文件树…
@@ -715,8 +933,45 @@ export default function OpenVikingWorkspaceShell({
                   >
                     <Code2 className="size-3.5" /> 源码
                   </button>
+                  <button
+                    type="button"
+                    title={isDirty ? "查看与已保存版本的行级差异" : "草稿与已保存版本一致"}
+                    className={cn(
+                      "flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold",
+                      viewMode === "diff" && "bg-background shadow-sm",
+                      !isDirty && "opacity-50",
+                    )}
+                    onClick={() => setViewMode("diff")}
+                  >
+                    <GitCompare className="size-3.5" /> 差异
+                    {isDirty && (
+                      <span className="ml-0.5 size-1.5 rounded-full bg-amber-500" />
+                    )}
+                  </button>
                 </div>
               ) : null}
+              {selected && !selected.is_dir && evalKind === "skills" && evalSkillName && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  title={`用数据集对 ${evalSkillName} 跑 True Replay（Baseline=已存版本，Candidate=当前草稿）`}
+                  onClick={() => setEvalOpen(true)}
+                >
+                  <FlaskConical className="size-4" />
+                  True Replay
+                </Button>
+              )}
+              {selected && !selected.is_dir && evalKind === "memory" && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  title="对比改动前后 Agent 召回/注入的记忆上下文"
+                  onClick={() => setEvalOpen(true)}
+                >
+                  <FlaskConical className="size-4" />
+                  注入对比
+                </Button>
+              )}
               {selected && !selected.is_dir && selectedScope?.can_write && (
                 <>
                   <Button
@@ -757,6 +1012,8 @@ export default function OpenVikingWorkspaceShell({
                 onChange={(event) => setContent(event.target.value)}
                 className="h-full min-h-0 resize-none rounded-none border-0 p-4 font-mono text-xs leading-5 focus-visible:ring-0"
               />
+            ) : viewMode === "diff" ? (
+              <DiffView original={originalContent} next={content} />
             ) : (
               <FilePreview entry={selected} content={content} />
             )}
@@ -780,17 +1037,18 @@ export default function OpenVikingWorkspaceShell({
         </section>
 
         <OpenVikingTerminal
-          currentUri={currentUri || selectedScope?.root_uri || ""}
+            currentUri={currentUri || selectedScope?.root_uri || activeWritableScope?.root_uri || ""}
           config={config}
-          scopeName={scopeName}
+            scopeName={terminalScope}
           userId={activeUserId}
           onOpenUri={(uri) => {
-            const entry = treeResponse?.entries.find((item) => item.uri === uri);
+              const entry = entries.find((item) => item.uri === uri);
             if (entry) void openEntry(entry);
           }}
           onRefresh={() => void refreshTree()}
         />
-      </div>
+        </div>
+      )}
 
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent className="!max-w-[640px]">
@@ -815,7 +1073,7 @@ export default function OpenVikingWorkspaceShell({
               placeholder={
                 createType === "directory"
                   ? "目录名"
-                  : mode === "memory"
+                  : selectedScope?.kind === "memory"
                     ? "memory-name.md"
                     : "文件名"
               }
@@ -845,6 +1103,41 @@ export default function OpenVikingWorkspaceShell({
               创建
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={evalOpen} onOpenChange={setEvalOpen}>
+        <DialogContent className="flex h-[92vh] w-full !max-w-[1400px] flex-col overflow-hidden p-0">
+          <DialogHeader className="border-b border-line px-5 py-3">
+            <DialogTitle className="flex items-center gap-2">
+              <FlaskConical className="size-4" />
+              {evalKind === "skills"
+                ? `Skill 实验评估 · ${evalSkillName}`
+                : "Memory 注入对比"}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
+            {evalKind === "skills" && evalSkillName ? (
+              <SkillLabView
+                active={evalOpen}
+                user={user}
+                embedded
+                lockedSkillName={evalSkillName}
+                externalDraftMd={content}
+              />
+              ) : evalKind === "memory" && selectedScope ? (
+              <MemoryInjectionCompare
+                userId={activeUserId}
+                  scopeName={selectedScope.name}
+                  scopeLabel={SCOPE_LABELS[selectedScope.name]}
+                fileName={selected?.name || ""}
+                memoryUri={selected?.uri || ""}
+                originalContent={originalContent}
+                draftContent={content}
+                isDirty={isDirty}
+              />
+            ) : null}
+          </div>
         </DialogContent>
       </Dialog>
     </div>
@@ -1415,6 +1708,42 @@ function buildTree(entries: WorkspaceEntry[], rootUri: string): TreeNode[] {
   return roots;
 }
 
+// Build a space's tree: one synthetic group folder per member scope, each
+// containing that scope's real subtree. A single-member space (platform)
+// skips the wrapper and shows the entries directly.
+function buildSpaceTree(
+  space: SpaceConfig,
+  scopes: ScopeConfig[],
+  entries: WorkspaceEntry[],
+): TreeNode[] {
+  if (scopes.length <= 1) {
+    const only = scopes[0];
+    return only ? buildTree(entries, only.root_uri) : [];
+  }
+  const groups: TreeNode[] = [];
+  for (const member of space.members) {
+    const scope = scopes.find((item) => item.name === member.scope);
+    if (!scope) continue;
+    const children = buildTree(
+      entries.filter((entry) => {
+        const root = scope.root_uri.replace(/\/+$/, "");
+        const uri = entry.uri.replace(/\/+$/, "");
+        return uri === root || uri.startsWith(`${root}/`);
+      }),
+      scope.root_uri,
+    );
+    groups.push({
+      entry: {
+        uri: groupUri(scope.name),
+        name: member.label,
+        is_dir: true,
+      },
+      children,
+    });
+  }
+  return groups;
+}
+
 function filterTree(nodes: TreeNode[], query: string): TreeNode[] {
   if (!query) return nodes;
   const output: TreeNode[] = [];
@@ -1439,6 +1768,17 @@ function parentUri(uri: string) {
   const schemeEnd = clean.indexOf("://");
   const slash = clean.lastIndexOf("/");
   return slash > schemeEnd + 2 ? clean.slice(0, slash) : clean;
+}
+
+// A skill lives at <skills_root>/<skill_name>/... — take the first path
+// segment under the scope root as the skill name for True Replay.
+function skillNameFromUri(rootUri: string, uri: string): string {
+  const root = rootUri.replace(/\/+$/, "");
+  const target = (uri || "").replace(/\/+$/, "");
+  if (!root || !target.startsWith(`${root}/`)) return "";
+  const rest = target.slice(root.length + 1);
+  const segment = rest.split("/")[0] || "";
+  return segment.toLowerCase() === "skill.md" ? "" : segment;
 }
 
 function fileExtension(name: string) {
@@ -1469,4 +1809,488 @@ function formatBytes(value?: number | string | null) {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+type DiffLine = {
+  type: "equal" | "add" | "del";
+  text: string;
+  oldNumber?: number;
+  newNumber?: number;
+};
+
+// Line-level LCS diff so the editor can show git-style colored changes
+// between the stored file (originalContent) and the working draft (content).
+function computeLineDiff(original: string, next: string): DiffLine[] {
+  const a = original.length ? original.split("\n") : [];
+  const b = next.length ? next.split("\n") : [];
+  const rows = a.length;
+  const cols = b.length;
+  const lcs: number[][] = Array.from({ length: rows + 1 }, () =>
+    new Array<number>(cols + 1).fill(0),
+  );
+  for (let i = rows - 1; i >= 0; i -= 1) {
+    for (let j = cols - 1; j >= 0; j -= 1) {
+      lcs[i][j] =
+        a[i] === b[j]
+          ? lcs[i + 1][j + 1] + 1
+          : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+    }
+  }
+  const diff: DiffLine[] = [];
+  let i = 0;
+  let j = 0;
+  let oldNumber = 1;
+  let newNumber = 1;
+  while (i < rows && j < cols) {
+    if (a[i] === b[j]) {
+      diff.push({ type: "equal", text: a[i], oldNumber: oldNumber++, newNumber: newNumber++ });
+      i += 1;
+      j += 1;
+    } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
+      diff.push({ type: "del", text: a[i], oldNumber: oldNumber++ });
+      i += 1;
+    } else {
+      diff.push({ type: "add", text: b[j], newNumber: newNumber++ });
+      j += 1;
+    }
+  }
+  while (i < rows) diff.push({ type: "del", text: a[i++], oldNumber: oldNumber++ });
+  while (j < cols) diff.push({ type: "add", text: b[j++], newNumber: newNumber++ });
+  return diff;
+}
+
+function DiffView({ original, next }: { original: string; next: string }) {
+  const lines = useMemo(() => computeLineDiff(original, next), [original, next]);
+  const added = lines.filter((line) => line.type === "add").length;
+  const removed = lines.filter((line) => line.type === "del").length;
+  if (!added && !removed) {
+    return (
+      <div className="flex h-full items-center justify-center p-8">
+        <Empty>草稿与已保存版本一致，暂无改动。</Empty>
+      </div>
+    );
+  }
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex shrink-0 items-center gap-3 border-b border-border bg-surface-subtle px-4 py-2 text-[11px] font-semibold">
+        <span className="text-[#1a7f37]">+{added} 新增</span>
+        <span className="text-[#cf222e]">-{removed} 删除</span>
+        <span className="text-muted-foreground">与已保存版本对比</span>
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto font-mono text-[11px] leading-5">
+        {lines.map((line, index) => (
+          <div
+            key={index}
+            className={cn(
+              "flex border-l-2 border-transparent whitespace-pre-wrap break-words",
+              line.type === "add" && "border-[#2da44e] bg-[#e6ffec]",
+              line.type === "del" && "border-[#cf222e] bg-[#ffebe9]",
+            )}
+          >
+            <span className="w-10 shrink-0 select-none border-r border-border/60 px-1 text-right text-muted-soft">
+              {line.oldNumber ?? ""}
+            </span>
+            <span className="w-10 shrink-0 select-none border-r border-border/60 px-1 text-right text-muted-soft">
+              {line.newNumber ?? ""}
+            </span>
+            <span
+              className={cn(
+                "w-4 shrink-0 select-none text-center",
+                line.type === "add" && "font-semibold text-[#1a7f37]",
+                line.type === "del" && "font-semibold text-[#cf222e]",
+                line.type === "equal" && "text-muted-soft",
+              )}
+            >
+              {line.type === "add" ? "+" : line.type === "del" ? "-" : ""}
+            </span>
+            <span className="flex-1 px-2">{line.text || "\u00a0"}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+type MemoryDebugItem = {
+  scope: string;
+  space: string;
+  title: string;
+  path_alias: string;
+  l0?: string;
+  l1?: string;
+  score?: number;
+};
+
+type MemoryDebugResult = {
+  items: MemoryDebugItem[];
+  agent_context: string;
+  budget: {
+    used_items: number;
+    used_chars: number;
+    max_items: number;
+    max_chars: number;
+    truncated: boolean;
+  };
+};
+
+// Memory experiment panel with two modes:
+//  - 注入对比: preview what Agent Context retrieves/injects for a query.
+//  - 真回放 A/B: run the Agent twice (stored memory vs draft) and compare
+//    turns / tool calls / tokens, same engine as Skill True Replay.
+type MemoryReplayResult = MemoryTrueReplay;
+
+export function MemoryInjectionCompare({
+  userId,
+  scopeName,
+  scopeLabel,
+  fileName,
+  memoryUri,
+  originalContent,
+  draftContent,
+  isDirty,
+}: {
+  userId: string;
+  scopeName: ScopeName;
+  scopeLabel: string;
+  fileName: string;
+  memoryUri: string;
+  originalContent: string;
+  draftContent: string;
+  isDirty: boolean;
+}) {
+  const [tab, setTab] = useState<"inject" | "replay">("inject");
+  const [query, setQuery] = useState("");
+  const [result, setResult] = useState<MemoryDebugResult | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const [replayChecklist, setReplayChecklist] = useState("");
+  const [replaySessionId, setReplaySessionId] = useState("");
+  const [replayResult, setReplayResult] = useState<MemoryReplayResult | null>(null);
+  const [replaying, setReplaying] = useState(false);
+
+  async function runDebug() {
+    if (!query.trim() || !userId) return;
+    setLoading(true);
+    try {
+      setResult(
+        await api<MemoryDebugResult>("/api/openviking/memory/debug", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            user_id: userId,
+            query,
+            max_items: 12,
+            max_chars: 16000,
+          }),
+        }),
+      );
+    } catch (error: any) {
+      toastErr("Memory 注入调试失败", error.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function runReplay() {
+    if (!query.trim()) {
+      toastErr("请先填写 Agent Query");
+      return;
+    }
+    if (!replayChecklist.trim()) {
+      toastErr("请至少填写一条 Checklist");
+      return;
+    }
+    setReplaying(true);
+    setReplayResult(null);
+    try {
+      const replay = await api<MemoryReplayResult>(
+        "/api/openviking/memory/true-replay",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            memory_path: memoryUri,
+            scope: scopeName,
+            before_content: originalContent,
+            after_content: draftContent,
+            query,
+            checklist: replayChecklist,
+            ...(replaySessionId.trim()
+              ? { source_session_id: replaySessionId.trim() }
+              : {}),
+          }),
+        },
+      );
+      setReplayResult(replay);
+      toastOk("Memory 真回放完成", replay.replay_id || "");
+    } catch (error: any) {
+      toastErr("Memory 真回放失败", error.message);
+    } finally {
+      setReplaying(false);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex rounded-lg bg-muted p-0.5 text-xs font-semibold">
+        <button
+          type="button"
+          className={cn(
+            "flex-1 rounded-md px-3 py-1.5",
+            tab === "inject" ? "bg-background shadow-sm" : "text-muted-foreground",
+          )}
+          onClick={() => setTab("inject")}
+        >
+          注入对比（快速预览）
+        </button>
+        <button
+          type="button"
+          className={cn(
+            "flex-1 rounded-md px-3 py-1.5",
+            tab === "replay" ? "bg-background shadow-sm" : "text-muted-foreground",
+          )}
+          onClick={() => setTab("replay")}
+        >
+          真回放 A/B（深度验证）
+        </button>
+      </div>
+
+      <section className="rounded-lg border border-border bg-surface">
+        <div className="border-b border-line px-4 py-2.5 text-sm font-semibold">
+          记忆改动差异 · {scopeLabel} / {fileName || "未选择"}
+        </div>
+        <div className="h-[220px]">
+          <DiffView original={originalContent} next={draftContent} />
+        </div>
+      </section>
+
+      {tab === "inject" ? (
+        <section className="rounded-lg border border-border bg-surface">
+          <div className="border-b border-line bg-amber-500/5 px-4 py-2 text-[11px] leading-relaxed text-amber-700">
+            注入对比读取当前已保存的记忆，展示某 Query 会召回并注入哪些上下文。
+            {isDirty && " 草稿尚未保存，预览基于已保存版本；如需验证草稿改动请用「真回放 A/B」。"}
+          </div>
+          <div className="flex flex-wrap items-end gap-3 border-b border-line px-4 py-3">
+            <label className="min-w-[320px] flex-1 text-xs font-semibold text-muted-foreground">
+              Agent Query
+              <Input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => event.key === "Enter" && void runDebug()}
+                className="mt-1"
+                placeholder="输入 Agent 当前任务，查看会召回并注入哪些个人 / 团队 Memory"
+              />
+            </label>
+            <Button onClick={() => void runDebug()} disabled={loading || !query.trim()}>
+              <Search className="size-4" />
+              {loading ? "检索中…" : "模拟注入"}
+            </Button>
+          </div>
+          {result ? (
+            <div className="grid gap-4 p-4 lg:grid-cols-[1fr_1.1fr]">
+              <div>
+                <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
+                  检索命中
+                  <Pill tone="gray">
+                    {result.budget.used_items} 条 · {result.budget.used_chars} 字符
+                  </Pill>
+                </div>
+                <div className="max-h-[420px] space-y-2 overflow-auto">
+                  {result.items.length ? (
+                    result.items.map((item) => (
+                      <div
+                        key={`${item.scope}-${item.path_alias}`}
+                        className="rounded-md border border-border p-3"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Pill tone={item.space === "personal" ? "blue" : "purple"}>
+                            {item.space === "personal" ? "个人" : "团队"}
+                          </Pill>
+                          <strong className="text-xs">{item.title}</strong>
+                          {item.score != null && (
+                            <span className="ml-auto text-[10px] text-muted-foreground">
+                              score {item.score}
+                            </span>
+                          )}
+                        </div>
+                        <p className="mt-1.5 whitespace-pre-wrap text-[11px] leading-6 text-muted-foreground">
+                          {item.l0 || item.l1 || "无摘要"}
+                        </p>
+                      </div>
+                    ))
+                  ) : (
+                    <Empty>该 Query 未命中任何 Memory。</Empty>
+                  )}
+                </div>
+              </div>
+              <div>
+                <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
+                  实际注入 Agent 的上下文
+                  <Pill tone={result.budget.truncated ? "amber" : "green"}>
+                    {result.budget.truncated ? "已截断" : "预算内"}
+                  </Pill>
+                </div>
+                <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-background p-3 font-mono text-[11px] leading-6">
+                  {result.agent_context || "（无注入内容）"}
+                </pre>
+              </div>
+            </div>
+          ) : (
+            <div className="p-4">
+              <Empty>输入 Agent Query 后，可查看个人与团队 Memory 命中及最终注入文本。</Empty>
+            </div>
+          )}
+        </section>
+      ) : (
+        <section className="rounded-lg border border-border bg-surface">
+          <div className="border-b border-line bg-blue-500/5 px-4 py-2 text-[11px] leading-relaxed text-blue-700">
+            真回放 A/B：在同一 Source Session 上下文中，Baseline 注入已保存版本、Candidate 注入当前草稿，
+            各跑一次 Agent，对比轮次 / Tool / Tokens 与 Checklist 完成度。
+            {!isDirty && " 当前草稿与已保存版本一致，请先在左侧编辑记忆再回放。"}
+          </div>
+          <div className="space-y-3 border-b border-line px-4 py-3">
+            <label className="block text-xs font-semibold text-muted-foreground">
+              Agent Query
+              <Input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                className="mt-1"
+                placeholder="Agent 要完成的任务，例如：为客户 A 公司起草迁移方案"
+              />
+            </label>
+            <label className="block text-xs font-semibold text-muted-foreground">
+              完成 Checklist（每行一条）
+              <Textarea
+                value={replayChecklist}
+                onChange={(event) => setReplayChecklist(event.target.value)}
+                rows={4}
+                className="mono mt-1 text-xs"
+                placeholder={"例如：\n引用了正确的迁移流程\n输出包含关键联系人"}
+              />
+            </label>
+            <div className="flex flex-wrap items-end gap-3">
+              <label className="min-w-[280px] flex-1 text-xs font-semibold text-muted-foreground">
+                指定 Source Session（可选）
+                <Input
+                  value={replaySessionId}
+                  onChange={(event) => setReplaySessionId(event.target.value)}
+                  className="mt-1"
+                  placeholder="留空则自动选取近期可回放会话"
+                />
+              </label>
+              <Button
+                onClick={() => void runReplay()}
+                disabled={replaying || !isDirty || !query.trim() || !replayChecklist.trim()}
+              >
+                <FlaskConical className="size-4" />
+                {replaying ? "回放中…" : "运行真回放 A/B"}
+              </Button>
+            </div>
+          </div>
+          <div className="p-4">
+            {replaying ? (
+              <div className="flex items-center justify-center gap-2 py-10 text-xs text-muted-foreground">
+                <Loader2 className="size-4 animate-spin" />
+                正在并行执行 Baseline / Candidate 分支…
+              </div>
+            ) : replayResult ? (
+              <MemoryReplayResultView result={replayResult} />
+            ) : (
+              <Empty>填写 Query 与 Checklist 后运行，可对比改动前后 Agent 的真实执行差异。</Empty>
+            )}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
+const MEMORY_METRICS = [
+  { key: "interaction_turns", label: "轮次" },
+  { key: "tool_call_count", label: "Tool 调用" },
+  { key: "total_tokens", label: "Tokens" },
+] as const;
+
+function MemoryReplayResultView({ result }: { result: MemoryReplayResult }) {
+  const dimensions = result.efficiency?.dimensions || {};
+  const verdictTone =
+    result.verdict === "accept" ? "green" : result.verdict === "reject" ? "red" : "amber";
+  const verdictLabel =
+    result.verdict === "accept" ? "改动更优" : result.verdict === "reject" ? "改动退化" : "无显著差异";
+  const replayCase = result.cases?.[0];
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <Pill tone={verdictTone}>{verdictLabel}</Pill>
+        <Pill tone={result.status === "evaluated" ? "green" : "red"}>
+          {result.status === "evaluated" ? "已评估" : "失败"}
+        </Pill>
+        {result.reason && (
+          <span className="text-[11px] text-muted-foreground">{result.reason}</span>
+        )}
+      </div>
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
+        {MEMORY_METRICS.map((metric) => {
+          const dim = dimensions[metric.key] || {};
+          const delta = Number(dim.delta || 0);
+          return (
+            <div key={metric.key} className="rounded-lg border border-border bg-surface p-3">
+              <div className="mb-1.5 text-[11px] font-semibold text-muted-foreground">
+                {metric.label}
+              </div>
+              <div className="flex items-baseline gap-1.5 text-base font-bold">
+                <span>{Number(dim.baseline || 0).toLocaleString()}</span>
+                <span className="text-muted-soft">→</span>
+                <span>{Number(dim.candidate || 0).toLocaleString()}</span>
+              </div>
+              <div
+                className={cn(
+                  "mt-1 text-[11px] font-semibold",
+                  delta > 0 ? "text-emerald-600" : delta < 0 ? "text-rose-600" : "text-muted-foreground",
+                )}
+              >
+                {delta > 0 ? `减少 ${delta.toLocaleString()}` : delta < 0 ? `增加 ${Math.abs(delta).toLocaleString()}` : "持平"}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="grid gap-3 lg:grid-cols-2">
+        <MemoryReplayBranchView title="Baseline · 已保存版本" branch={replayCase?.baseline} tone="gray" />
+        <MemoryReplayBranchView title="Candidate · 当前草稿" branch={replayCase?.candidate} tone="blue" />
+      </div>
+    </div>
+  );
+}
+
+function MemoryReplayBranchView({
+  title,
+  branch,
+  tone,
+}: {
+  title: string;
+  branch?: MemoryReplayBranch;
+  tone: "gray" | "blue";
+}) {
+  return (
+    <section className="overflow-hidden rounded-lg border border-border bg-background/40">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-surface-subtle px-4 py-2.5">
+        <span className="text-xs font-semibold">{title}</span>
+        <div className="flex flex-wrap gap-1.5">
+          <Pill tone={tone}>{branch?.interaction_turns ?? 0} 轮</Pill>
+          <Pill tone={tone}>{branch?.tool_call_count ?? 0} tools</Pill>
+          <Pill tone={tone}>{Number(branch?.total_tokens || 0).toLocaleString()} tokens</Pill>
+          <Pill tone={branch?.ok ? "green" : "red"}>{branch?.ok ? "完成" : "失败"}</Pill>
+        </div>
+      </div>
+      {branch?.error && (
+        <pre className="mono whitespace-pre-wrap break-words border-b border-line bg-rose-50 p-3 text-[11px] text-rose-700">
+          {branch.error}
+        </pre>
+      )}
+      <pre className="mono max-h-[280px] overflow-auto whitespace-pre-wrap break-words p-3 text-[11px] leading-6">
+        {branch?.final_response || "（无输出）"}
+      </pre>
+    </section>
+  );
 }

@@ -163,7 +163,7 @@ class SkillHub:
             viking_endpoint=viking_endpoint,
             viking_api_key=viking_api_key,
             viking_account=str(getattr(config, "sharing_viking_account", "") or "default"),
-            viking_user=str(getattr(config, "sharing_viking_user", "") or "default"),
+            viking_user=str(getattr(config, "sharing_viking_user", "") or "team"),
             viking_agent=str(getattr(config, "sharing_viking_agent", "") or _VIKING_ROOT_PREFIX),
             viking_agent_id=str(getattr(config, "sharing_viking_agent_id", "") or ""),
             viking_root_prefix=str(getattr(config, "sharing_viking_root_prefix", "") or _VIKING_ROOT_PREFIX),

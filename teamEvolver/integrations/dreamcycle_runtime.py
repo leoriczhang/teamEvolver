@@ -529,6 +529,31 @@ class FullDreamCycleSupervisor:
             timeout_seconds=timeout_seconds,
         )
 
+    def run_memory_replay_adhoc(
+        self,
+        *,
+        memory_path: str,
+        before_content: str,
+        after_content: str,
+        query: str,
+        checklist: list[Any],
+        scope: str = "team_memory",
+        source_session_id: str = "",
+        max_interactions: int = 4,
+        timeout_seconds: int = 600,
+    ) -> dict[str, Any]:
+        return self._memory_replay.run_adhoc(
+            memory_path=memory_path,
+            before_content=before_content,
+            after_content=after_content,
+            query=query,
+            checklist=checklist,
+            scope=scope,
+            source_session_id=source_session_id,
+            max_interactions=max_interactions,
+            timeout_seconds=timeout_seconds,
+        )
+
     def memory_replays(
         self,
         *,

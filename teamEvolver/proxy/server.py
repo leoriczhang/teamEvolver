@@ -32,7 +32,7 @@ from .skill_lab import SkillLabMixin
 from .skillminer_bridge import SkillMinerBridgeMixin
 from .skills_admin import SkillsAdminMixin
 from .uploads import UploadsMixin
-from .users_admin import UsersAdminMixin
+from .users_admin import UsersAdminMixin, sync_openviking_user
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,10 @@ class ProxyServer(
         self._embedded_evolve_task: Optional[asyncio.Task] = None
         self._embedded_evolve_init_failed = False
         configure_langfuse(config)
+        # Team-owned memories/resources use the canonical OpenViking ``team``
+        # user. Ensure it exists on every deployment; the sync helper is
+        # idempotent and fail-open when OpenViking is unavailable.
+        sync_openviking_user(config, "team")
         self._dreamcycle = DreamCycleSupervisor(config)
 
         self.app = self._build_app()
@@ -177,6 +181,31 @@ class ProxyServer(
             change_id=change_id,
             query=query,
             checklist=checklist,
+            source_session_id=source_session_id,
+            max_interactions=max_interactions,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def _run_dreamcycle_memory_replay_adhoc(
+        self,
+        *,
+        memory_path: str,
+        before_content: str,
+        after_content: str,
+        query: str,
+        checklist: list,
+        scope: str = "team_memory",
+        source_session_id: str = "",
+        max_interactions: int = 4,
+        timeout_seconds: int = 600,
+    ) -> dict:
+        return self._dreamcycle.run_memory_replay_adhoc(
+            memory_path=memory_path,
+            before_content=before_content,
+            after_content=after_content,
+            query=query,
+            checklist=checklist,
+            scope=scope,
             source_session_id=source_session_id,
             max_interactions=max_interactions,
             timeout_seconds=timeout_seconds,

@@ -14,6 +14,8 @@ import { toastOk, toastErr } from "@/lib/toast";
 import {
   api,
   cloudNote,
+  type PublishRequest,
+  type PublishRequestListResp,
   type ShareResult,
   type SkillListItem,
   type SkillListResp,
@@ -21,10 +23,11 @@ import {
   type UsersListResp,
 } from "@/api/client";
 import SkillEditModal from "./skills/SkillEditModal";
+import PersonalSkillEditModal from "./skills/PersonalSkillEditModal";
 import ImportZipModal from "./skills/ImportZipModal";
 import { cn } from "@/lib/utils";
 
-type SkillSubPage = "personal" | "team";
+type SkillSubPage = "personal" | "team" | "requests";
 type ShareDirection = "personal_to_team" | "team_to_personal";
 
 export default function SkillsView({
@@ -45,7 +48,9 @@ export default function SkillsView({
   const [loading, setLoading] = useState(false);
   const [sharingNow, setSharingNow] = useState(false);
   const [editName, setEditName] = useState<string | null | undefined>(undefined);
+  const [personalEditName, setPersonalEditName] = useState<string | null | undefined>(undefined);
   const [importing, setImporting] = useState(false);
+  const [publishRequests, setPublishRequests] = useState<PublishRequest[]>([]);
   const loaded = useRef(false);
 
   const activeUser = useMemo(
@@ -56,6 +61,9 @@ export default function SkillsView({
   const canEditTeam = !!isAdmin;
   const teamSkills = teamResp?.skills || [];
   const sharing = !!teamResp?.sharing_enabled;
+  const pendingRequestCount = publishRequests.filter((r) => r.status === "pending").length;
+  // A user may edit their own personal space; admins may edit anyone's.
+  const canEditPersonal = !!activeUser && (isAdmin || activeUser.id === user?.id);
 
   const refreshUsers = useCallback(async () => {
     const data = await api<UsersListResp>("/api/users");
@@ -70,6 +78,15 @@ export default function SkillsView({
   const refreshTeam = useCallback(async () => {
     const data = await api<SkillListResp>("/api/skills");
     setTeamResp(data);
+  }, []);
+
+  const refreshRequests = useCallback(async () => {
+    try {
+      const data = await api<PublishRequestListResp>("/api/skill-publish-requests");
+      setPublishRequests(data.requests || []);
+    } catch {
+      setPublishRequests([]);
+    }
   }, []);
 
   const refreshUserSpace = useCallback(async (userId: string, space: "personal" | "team") => {
@@ -96,6 +113,7 @@ export default function SkillsView({
       const userId = await refreshUsers();
       await Promise.all([
         refreshTeam(),
+        refreshRequests(),
         refreshUserSpace(userId, "personal"),
         refreshUserSpace(userId, "team"),
       ]);
@@ -104,7 +122,7 @@ export default function SkillsView({
     } finally {
       setLoading(false);
     }
-  }, [refreshTeam, refreshUserSpace, refreshUsers]);
+  }, [refreshTeam, refreshRequests, refreshUserSpace, refreshUsers]);
 
   useEffect(() => {
     if (active && !loaded.current) {
@@ -139,8 +157,9 @@ export default function SkillsView({
       toastErr("请选择技能");
       return;
     }
+    // Non-admins cannot publish directly; they submit a request for review.
     if (direction === "personal_to_team" && !isAdmin) {
-      toastErr("权限不足", "只有管理员可以把个人技能发布到团队空间");
+      await submitPublishRequest(names);
       return;
     }
     setSharingNow(true);
@@ -156,6 +175,61 @@ export default function SkillsView({
       toastErr("分享失败", e.message);
     } finally {
       setSharingNow(false);
+    }
+  }
+
+  async function submitPublishRequest(names: string[]) {
+    if (!activeUserId || !names.length) {
+      toastErr("请选择要申请发布的技能");
+      return;
+    }
+    setSharingNow(true);
+    try {
+      await api<PublishRequest>(
+        `/api/users/${encodeURIComponent(activeUserId)}/publish-requests`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ skill_names: names }),
+        },
+      );
+      toastOk("已提交发布申请", `等待管理员确认（${names.length} 个技能）`);
+      setSelectedPersonal(new Set());
+      await refreshRequests();
+    } catch (e: any) {
+      toastErr("提交申请失败", e.message);
+    } finally {
+      setSharingNow(false);
+    }
+  }
+
+  async function decideRequest(requestId: string, action: "approve" | "reject") {
+    const verb = action === "approve" ? "批准" : "驳回";
+    if (!window.confirm(`确认${verb}该发布申请？`)) return;
+    try {
+      await api<PublishRequest>(
+        `/api/skill-publish-requests/${encodeURIComponent(requestId)}/${action}`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+      );
+      toastOk(`已${verb}发布申请`);
+      await refreshAll();
+    } catch (e: any) {
+      toastErr(`${verb}失败`, e.message);
+    }
+  }
+
+  async function delPersonalSkill(name: string) {
+    if (!activeUserId) return;
+    if (!window.confirm(`确认删除个人技能「${name}」？`)) return;
+    try {
+      await api(
+        `/api/users/${encodeURIComponent(activeUserId)}/skills/${encodeURIComponent(name)}?space=personal`,
+        { method: "DELETE" },
+      );
+      toastOk("已删除个人技能", name);
+      await refreshUserSpace(activeUserId, "personal");
+    } catch (e: any) {
+      toastErr("删除失败", e.message);
     }
   }
 
@@ -201,6 +275,9 @@ export default function SkillsView({
         <SubTab active={subPage === "team"} onClick={() => setSubPage("team")}>
           团队技能
         </SubTab>
+        <SubTab active={subPage === "requests"} onClick={() => setSubPage("requests")}>
+          发布审批{pendingRequestCount ? ` (${pendingRequestCount})` : ""}
+        </SubTab>
       </div>
 
       {subPage === "personal" ? (
@@ -209,12 +286,16 @@ export default function SkillsView({
           skills={personalSkills}
           selected={selectedPersonal}
           setSelected={setSelectedPersonal}
-          canPublish={!!activeUser && !!isAdmin}
+          isAdmin={!!isAdmin}
+          canEdit={canEditPersonal}
           sharingNow={sharingNow}
           onRefresh={() => activeUserId && refreshUserSpace(activeUserId, "personal")}
           onPublish={() => share("personal_to_team", selectedPersonalNames)}
+          onCreate={() => setPersonalEditName(null)}
+          onEdit={(name) => setPersonalEditName(name)}
+          onDelete={delPersonalSkill}
         />
-      ) : (
+      ) : subPage === "team" ? (
         <TeamSkillsPage
           activeUser={activeUser}
           isAdmin={!!isAdmin}
@@ -231,9 +312,23 @@ export default function SkillsView({
           onDelete={delTeamSkill}
           onShareToPersonal={() => share("team_to_personal", selectedTeamNames)}
         />
+      ) : (
+        <RequestsPage
+          requests={publishRequests}
+          isAdmin={!!isAdmin}
+          onRefresh={refreshRequests}
+          onDecide={decideRequest}
+        />
       )}
 
       <SkillEditModal name={editName} open={editName !== undefined} onClose={() => setEditName(undefined)} onSaved={refreshAll} />
+      <PersonalSkillEditModal
+        userId={activeUserId}
+        name={personalEditName}
+        open={personalEditName !== undefined}
+        onClose={() => setPersonalEditName(undefined)}
+        onSaved={() => activeUserId && refreshUserSpace(activeUserId, "personal")}
+      />
       <ImportZipModal open={importing} onClose={() => setImporting(false)} onImported={refreshAll} />
     </div>
   );
@@ -244,28 +339,38 @@ function PersonalSkillsPage({
   skills,
   selected,
   setSelected,
-  canPublish,
+  isAdmin,
+  canEdit,
   sharingNow,
   onRefresh,
   onPublish,
+  onCreate,
+  onEdit,
+  onDelete,
 }: {
   activeUser: UserProfile | null;
   skills: SkillListItem[];
   selected: Set<string>;
   setSelected: (next: Set<string>) => void;
-  canPublish: boolean;
+  isAdmin: boolean;
+  canEdit: boolean;
   sharingNow: boolean;
   onRefresh: () => void;
   onPublish: () => void;
+  onCreate: () => void;
+  onEdit: (name: string) => void;
+  onDelete: (name: string) => void;
 }) {
   const categories = new Set(skills.map((s) => s.category || "general"));
+  // Admins publish directly; everyone else submits a request for approval.
+  const publishLabel = isAdmin ? "发布到团队" : "申请发布";
   return (
     <>
       <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">
         <StatCard label="个人技能" value={skills.length} />
         <StatCard label="分类数" value={categories.size} />
         <StatCard label="当前用户" value={activeUser ? activeUser.display_name || activeUser.id : "未选择"} />
-        <StatCard label="发布权限" value={canPublish ? "可发布到团队" : "仅可接收团队技能"} />
+        <StatCard label="发布方式" value={isAdmin ? "可直接发布" : "申请后管理员确认"} />
       </div>
 
       <Panel
@@ -274,16 +379,26 @@ function PersonalSkillsPage({
         extra={
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" size="sm" onClick={onRefresh}>刷新个人技能</Button>
-            <Button size="sm" disabled={!canPublish || !selected.size || sharingNow} onClick={onPublish}>
-              发布到团队 ({selected.size})
+            <Button variant="outline" size="sm" disabled={!canEdit} onClick={onCreate}>+ 新建个人技能</Button>
+            <Button size="sm" disabled={!activeUser || !selected.size || sharingNow} onClick={onPublish}>
+              {publishLabel} ({selected.size})
             </Button>
           </div>
         }
       >
         {!activeUser ? (
           <Empty>请先选择用户。</Empty>
-        ) : !skills.length ? (
-          <Empty>个人空间暂无技能。可以到“团队技能”子页从团队分发到个人。</Empty>
+        ) : (
+          <div className="border-b border-line bg-surface-subtle px-4 py-3 text-xs leading-relaxed text-muted-foreground">
+            {canEdit
+              ? isAdmin
+                ? "你可以新建、编辑、删除个人技能，并直接发布到团队空间。"
+                : "你可以新建、编辑、删除自己的个人技能；发布到团队需提交申请，由管理员在“发布审批”中确认。"
+              : "仅可浏览该用户的个人技能。"}
+          </div>
+        )}
+        {!activeUser ? null : !skills.length ? (
+          <Empty>个人空间暂无技能。可新建个人技能，或到“团队技能”子页从团队分发到个人。</Empty>
         ) : (
           <SkillTable
             skills={skills}
@@ -291,6 +406,10 @@ function PersonalSkillsPage({
             selected={selected}
             onToggle={(name) => toggleSet(selected, setSelected, name)}
             onToggleAll={() => toggleAll(skills, selected, setSelected)}
+            actions={canEdit}
+            canEdit={canEdit}
+            onEdit={onEdit}
+            onDelete={onDelete}
           />
         )}
       </Panel>
@@ -392,6 +511,105 @@ function TeamSkillsPage({
         )}
       </Panel>
     </>
+  );
+}
+
+function RequestsPage({
+  requests,
+  isAdmin,
+  onRefresh,
+  onDecide,
+}: {
+  requests: PublishRequest[];
+  isAdmin: boolean;
+  onRefresh: () => void;
+  onDecide: (requestId: string, action: "approve" | "reject") => void;
+}) {
+  const pager = usePagedItems(requests);
+  const statusTone: Record<PublishRequest["status"], "amber" | "green" | "gray"> = {
+    pending: "amber",
+    approved: "green",
+    rejected: "gray",
+  };
+  const statusLabel: Record<PublishRequest["status"], string> = {
+    pending: "待审批",
+    approved: "已批准",
+    rejected: "已驳回",
+  };
+  return (
+    <Panel
+      title={isAdmin ? "个人技能发布审批" : "我的发布申请"}
+      count={`(${requests.length})`}
+      extra={
+        <Button variant="outline" size="sm" onClick={onRefresh}>
+          刷新申请
+        </Button>
+      }
+    >
+      <div className="border-b border-line bg-surface-subtle px-4 py-3 text-xs leading-relaxed text-muted-foreground">
+        {isAdmin
+          ? "普通用户提交的个人技能发布申请集中在此审批；批准后技能才会写入团队空间。"
+          : "你提交的发布申请状态显示在这里，批准后个人技能才会进入团队空间。"}
+      </div>
+      {!requests.length ? (
+        <Empty>暂无发布申请。</Empty>
+      ) : (
+        <>
+          <ListViewport>
+            <table className="w-full border-collapse">
+              <thead>
+                <tr>
+                  {["申请人", "技能", "状态", "提交时间", "处理"].map((h) => (
+                    <th key={h} className="border-b border-line px-4 py-2.5 text-left text-xs font-semibold text-muted-foreground">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {pager.items.map((r) => (
+                  <tr key={r.request_id}>
+                    <td className="border-b border-line px-4 py-2.5 align-top text-[12.5px]">
+                      {r.requester_name || r.requester_id}
+                    </td>
+                    <td className="max-w-[360px] border-b border-line px-4 py-2.5 align-top">
+                      <div className="flex flex-wrap gap-1">
+                        {r.skill_names.map((n) => (
+                          <Pill key={n} tone="blue">{n}</Pill>
+                        ))}
+                      </div>
+                    </td>
+                    <td className="border-b border-line px-4 py-2.5 align-top">
+                      <Pill tone={statusTone[r.status]}>{statusLabel[r.status]}</Pill>
+                    </td>
+                    <td className="border-b border-line px-4 py-2.5 align-top text-xs text-muted-foreground">
+                      {fmtTime(r.created_at)}
+                    </td>
+                    <td className="border-b border-line px-4 py-2.5 align-top">
+                      {isAdmin && r.status === "pending" ? (
+                        <div className="flex gap-1.5">
+                          <Button size="sm" onClick={() => onDecide(r.request_id, "approve")}>
+                            批准
+                          </Button>
+                          <Button variant="destructive" size="sm" onClick={() => onDecide(r.request_id, "reject")}>
+                            驳回
+                          </Button>
+                        </div>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">
+                          {r.decided_by ? `${r.decided_by}` : "—"}
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </ListViewport>
+          <PaginationControls {...pager} onPageChange={pager.setPage} />
+        </>
+      )}
+    </Panel>
   );
 }
 

@@ -166,7 +166,7 @@ class NativeDreamCycleSupervisor:
             endpoint = str(getattr(self.config, "sharing_viking_endpoint", "") or "").rstrip("/")
             team_key = str(getattr(self.config, "sharing_viking_team_api_key", "") or getattr(self.config, "sharing_viking_api_key", ""))
             _account, encoded_user = parse_openviking_key(team_key)
-            team_user = encoded_user or str(getattr(self.config, "sharing_viking_user", "") or "default")
+            team_user = encoded_user or str(getattr(self.config, "sharing_viking_user", "") or "team")
             max_items = max(1, int(getattr(self.config, "dreamcycle_max_source_items", 100) or 100))
             max_chars = max(1000, int(getattr(self.config, "dreamcycle_max_source_chars", 120000) or 120000))
             with httpx.Client(base_url=endpoint, timeout=30) as client:

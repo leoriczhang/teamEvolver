@@ -192,7 +192,7 @@ class EvolveServer(EvolveEngineMixin):
                 backend="viking",
                 endpoint=getattr(config, "viking_endpoint", "") or config.storage_endpoint,
                 viking_account=getattr(config, "viking_account", "") or "default",
-                viking_user=getattr(config, "viking_user", "") or "default",
+                viking_user=getattr(config, "viking_user", "") or "team",
                 viking_agent=getattr(config, "viking_agent", "") or "team-skill-evolver",
                 viking_api_key=getattr(config, "viking_api_key", "") or "",
                 viking_agent_id=getattr(config, "viking_agent_id", "") or "",

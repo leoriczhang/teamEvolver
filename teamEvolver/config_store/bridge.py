@@ -194,7 +194,14 @@ class ConfigStore:
             sharing_viking_personal_user=str(
                 sharing.get("viking_personal_user", "") or ""
             ),
-            sharing_viking_user=str(sharing.get("viking_user", "") or "default"),
+            # ``default`` was the legacy bootstrap identity. Team-owned
+            # memories/resources now live under the canonical ``team`` user.
+            sharing_viking_user=(
+                "team"
+                if str(sharing.get("viking_user", "") or "team").strip()
+                in {"", "default"}
+                else str(sharing.get("viking_user", "")).strip()
+            ),
             sharing_viking_agent=str(
                 sharing.get("viking_agent", "") or TEAM_SKILL_ROOT_PREFIX
             ),

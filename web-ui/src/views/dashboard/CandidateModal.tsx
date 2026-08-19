@@ -7,6 +7,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Pill, Empty, ListViewport, PaginationControls, usePagedItems } from "@/components/common";
+import UnifiedDiffView from "@/components/UnifiedDiffView";
 import { cn } from "@/lib/utils";
 import type {
   Candidate,
@@ -290,7 +291,7 @@ export default function CandidateModal({
                   <span className="mono">{file.path}</span>
                 </summary>
                 {file.diff ? (
-                  <pre className="mt-2 max-h-[360px] overflow-auto whitespace-pre-wrap text-[11px]">{file.diff}</pre>
+                    <UnifiedDiffView diff={file.diff} className="mt-2 max-h-[360px]" />
                 ) : (
                   <div className="mt-2 text-xs text-muted-foreground">
                     二进制文件或无可展示文本差异，{file.old_size || 0} → {file.new_size || 0} bytes
@@ -307,7 +308,7 @@ export default function CandidateModal({
         {skillDiff && (
           <details className="rounded-lg border border-border p-3">
             <summary className="cursor-pointer text-xs font-semibold">查看 Unified Diff</summary>
-            <pre className="mt-2 max-h-[360px] overflow-auto whitespace-pre-wrap text-[11px]">{skillDiff}</pre>
+              <UnifiedDiffView diff={skillDiff} className="mt-2 max-h-[360px]" />
           </details>
         )}
         <SecTitle>🔁 A/B 回放明细（基线 vs 候选）</SecTitle>
