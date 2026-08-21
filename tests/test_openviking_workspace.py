@@ -80,12 +80,14 @@ def test_scope_map_uses_native_personal_memory_and_shared_team_roots() -> None:
     assert scopes["personal_skills"].root_uri == (
         "viking://resources/team-skill-evolver/peers/alice/skills"
     )
-    assert scopes["team_memory"].root_uri == (
-        "viking://user/team-space/memories"
-    )
+    assert scopes["team_memory"].root_uri == "viking://user/team/memories"
     assert scopes["team_skills"].root_uri == (
         "viking://resources/team-skill-evolver/skills"
     )
+    assert scopes["personal_resources"].root_uri == (
+        "viking://user/personal-space/resources"
+    )
+    assert scopes["team_resources"].root_uri == "viking://resources/team"
     assert scopes["personal_memory"].can_write is True
     assert scopes["team_memory"].can_write is False
 
@@ -124,8 +126,11 @@ def test_workspace_config_exposes_all_scopes_and_local_studio(tmp_path) -> None:
         "team_memory",
         "personal_skills",
         "team_skills",
+        "personal_resources",
+        "team_resources",
         "personal_workspace",
         "team_workspace",
+        "platform_assets",
     }
 
 
@@ -351,7 +356,7 @@ def test_regular_user_cannot_write_team_memory(tmp_path) -> None:
         json={
             "scope": "team_memory",
             "user_id": "alice",
-            "uri": "viking://user/default/memories/shared.md",
+            "uri": "viking://user/team/memories/shared.md",
             "content": "shared",
         },
     )
@@ -370,7 +375,7 @@ def test_admin_write_uses_openviking_content_api_and_team_key(tmp_path) -> None:
         json={
             "scope": "team_memory",
             "user_id": "alice",
-            "uri": "viking://user/default/memories/shared.md",
+            "uri": "viking://user/team/memories/shared.md",
             "content": "shared memory",
             "mode": "create",
         },
@@ -380,7 +385,7 @@ def test_admin_write_uses_openviking_content_api_and_team_key(tmp_path) -> None:
     call = owner._workspace_request.await_args
     assert call.args[2:4] == ("POST", "/api/v1/content/write")
     assert call.kwargs["json"] == {
-        "uri": "viking://user/default/memories/shared.md",
+        "uri": "viking://user/team/memories/shared.md",
         "content": "shared memory",
         "mode": "create",
         "wait": False,
@@ -389,7 +394,7 @@ def test_admin_write_uses_openviking_content_api_and_team_key(tmp_path) -> None:
     headers = owner._workspace_headers(alice, scope)
     assert headers["X-API-Key"] == "team-key"
     assert headers["X-OpenViking-Account"] == "workspace-a"
-    assert headers["X-OpenViking-User"] == "default"
+    assert headers["X-OpenViking-User"] == "team"
 
 
 def test_personal_workspace_inherits_team_key_when_personal_key_is_unset(tmp_path) -> None:
@@ -407,7 +412,7 @@ def test_personal_workspace_inherits_team_key_when_personal_key_is_unset(tmp_pat
     assert headers["X-API-Key"] == "team-key"
     assert client.get("/api/openviking/workspace/config?user_id=alice").json()[
         "personal_access_configured"
-    ] is False
+    ] is True
 
 
 def test_memory_debug_searches_personal_and_team_with_agent_budget(tmp_path) -> None:
@@ -424,7 +429,7 @@ def test_memory_debug_searches_personal_and_team_with_agent_budget(tmp_path) -> 
                 "score": 0.95,
             }]}
         return {"items": [{
-            "uri": "viking://user/default/memories/team-rule.md",
+            "uri": "viking://user/team/memories/team-rule.md",
             "name": "team-rule.md",
             "abstract": "团队发布需要 True Replay",
             "score": 0.88,

@@ -899,6 +899,7 @@ export interface AgentIntegrationsResp {
   agents: AgentIntegration[];
   storage_authority?: string;
   storage_deployment?: string;
+  default_team_user?: string;
 }
 
 export interface UsersListResp {

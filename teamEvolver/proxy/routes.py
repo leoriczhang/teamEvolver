@@ -75,6 +75,7 @@ from .users_admin import (
     resolve_agent_subject_user_id,
     resolve_registered_user_id,
     sync_agent_subject_mappings,
+    sync_openviking_user,
 )
 
 logger = logging.getLogger(__name__)
@@ -1829,8 +1830,9 @@ class RoutesMixin:
             }
             path = _registry_path(owner.config)
             data = _load_registry(path)
-            user = _upsert_user(data, payload)
+            user = _upsert_user(data, payload, config=owner.config)
             _save_registry(path, data)
+            sync_openviking_user(owner.config, str(user.get("id") or ""))
             token = secrets.token_urlsafe(32)
             owner._console_sessions[token] = {
                 "user_id": user.get("id"),
@@ -1917,8 +1919,9 @@ class RoutesMixin:
                 "role": "user",
                 "password": password,
             }
-            user = _upsert_user(data, payload)
+            user = _upsert_user(data, payload, config=owner.config)
             _save_registry(path, data)
+            sync_openviking_user(owner.config, str(user.get("id") or ""))
             token = secrets.token_urlsafe(32)
             owner._console_sessions[token] = {
                 "user_id": user.get("id"),
@@ -3518,6 +3521,9 @@ class RoutesMixin:
                 "storage_authority": "teamEvolver",
                 "storage_deployment": str(
                     getattr(owner.config, "sharing_viking_deployment", "") or "cloud"
+                ),
+                "default_team_user": str(
+                    getattr(owner.config, "sharing_viking_user", "") or "team"
                 ),
             }
 

@@ -23,6 +23,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from teamEvolver.config import TeamEvolverConfig
+from teamEvolver.integrations.agent_registry import register_agent
 from teamEvolver.proxy import ProxyServer
 from teamEvolver.proxy.users_admin import _hub_from_user, resolve_registered_user_id
 from teamEvolver.skills import editor
@@ -682,6 +683,74 @@ def test_user_routes_register_hide_keys_and_share_local_spaces(tmp_path: Path) -
     assert _effective_team_key(server.config, data) == "team-secret"
     bob_team_hub = _hub_from_user(server.config, bob, space="team")
     assert bob_team_hub is not None
+
+
+def test_local_user_registration_defaults_workspace_and_agent_subject(
+    tmp_path: Path,
+) -> None:
+    server = _make_server(tmp_path)
+    server.config.sharing_viking_deployment = "local"
+    server.config.sharing_viking_user = "team"
+    register_agent(
+        server.config,
+        {
+            "schema_version": "teamevolver.agent-registration.v1",
+            "protocol_version": "1.0",
+            "agent_id": "agentshub:tenant-demo",
+            "runtime_type": "agentshub",
+            "runtime_version": "1",
+            "capabilities": [
+                "context.workspace.v1",
+                "memory.personal.write.v1",
+            ],
+            "endpoints": {},
+        },
+    )
+    client = _authed_client(server)
+
+    created = client.post(
+        "/api/users",
+        json={
+            "id": "alice",
+            "password": "password123",
+            "personal_space": {"viking_user": "legacy-alice"},
+            "team_space": {},
+        },
+    )
+
+    assert created.status_code == 200
+    body = created.json()
+    assert body["personal_space"]["viking_user"] == "alice"
+    assert body["team_space"]["viking_user"] == "team"
+    assert body["agent_subjects"] == [
+        {
+            "integration_id": "agentshub:tenant-demo",
+            "runtime_type": "agentshub",
+            "external_subject": "alice",
+        }
+    ]
+
+    customized = client.post(
+        "/api/users",
+        json={
+            "id": "alice",
+            "personal_space": {"viking_user": "still-not-used"},
+            "team_space": {"viking_user": "custom-team"},
+            "agent_subjects": [
+                {
+                    "integration_id": "agentshub:tenant-demo",
+                    "runtime_type": "agentshub",
+                    "external_subject": "agents-alice",
+                }
+            ],
+        },
+    )
+
+    assert customized.status_code == 200
+    updated = customized.json()
+    assert updated["personal_space"]["viking_user"] == "alice"
+    assert updated["team_space"]["viking_user"] == "custom-team"
+    assert updated["agent_subjects"][0]["external_subject"] == "agents-alice"
 
 
 def test_routes_full_crud_cycle_without_sharing(tmp_path: Path) -> None:

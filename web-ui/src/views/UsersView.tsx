@@ -24,7 +24,7 @@ import {
 import { toastErr, toastOk } from "@/lib/toast";
 import { fmtTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { RefreshCw } from "lucide-react";
+import { Link2, Plus, RefreshCw, RotateCcw } from "lucide-react";
 
 type UserRole = "user" | "admin";
 type FormUser = UserProfile & {
@@ -75,17 +75,26 @@ export default function UsersView({
   const [savingTeam, setSavingTeam] = useState(false);
   const [loading, setLoading] = useState(false);
   const [integrations, setIntegrations] = useState<AgentIntegration[]>([]);
+  const [storageDeployment, setStorageDeployment] = useState("cloud");
+  const [defaultTeamUser, setDefaultTeamUser] = useState("team");
   const [teamSettings, setTeamSettings] = useState<TeamSettings | null>(null);
   const [teamNameDraft, setTeamNameDraft] = useState("");
   const loaded = useRef(false);
 
   const users = resp?.users || [];
   const isAdmin = user?.role === "admin";
+  const isLocalOpenViking = storageDeployment === "local";
   const userPager = usePagedItems(users);
   const selectedUser = useMemo(() => users.find((u) => u.id === selectedId) || null, [users, selectedId]);
+  const hasCustomAgentSubject = integrations.some((integration) => {
+    const subject = form.agent_subjects?.find(
+      (item) => item.integration_id === integration.agent_id
+    )?.external_subject;
+    return !!subject && subject !== form.id;
+  });
   const adminCount = users.filter((u) => u.role === "admin").length;
-  const openVikingSpaces = users.reduce((n, u) => {
-    return n + (u.personal_space?.api_key_present ? 1 : 0) + (u.team_space?.api_key_present ? 1 : 0);
+  const workspaceBindings = users.reduce((n, u) => {
+    return n + (u.personal_space?.viking_user ? 1 : 0) + (u.team_space?.viking_user ? 1 : 0);
   }, 0);
 
   const refresh = useCallback(async (notify = false) => {
@@ -98,6 +107,8 @@ export default function UsersView({
       ]);
       setResp(data);
       setIntegrations(integrationData.agents || []);
+      setStorageDeployment(integrationData.storage_deployment || "cloud");
+      setDefaultTeamUser(integrationData.default_team_user || "team");
       setTeamSettings(teamData);
       setTeamNameDraft(teamData.configured_display_name || teamData.display_name || "Team");
       if (!selectedId && !isAdmin && data.users[0]) {
@@ -148,13 +159,44 @@ export default function UsersView({
   async function saveUser() {
     setSaving(true);
     try {
+      const integrationIds = new Set(integrations.map((item) => item.agent_id));
+      const agentSubjects = [
+        ...(form.agent_subjects || []).filter(
+          (item) => !integrationIds.has(item.integration_id)
+        ),
+        ...integrations.map((integration) => ({
+          integration_id: integration.agent_id,
+          runtime_type: integration.runtime_type,
+          external_subject:
+            form.agent_subjects?.find(
+              (item) => item.integration_id === integration.agent_id
+            )?.external_subject.trim() || form.id.trim(),
+        })),
+      ].filter((item) => item.external_subject);
+      const payload: FormUser = {
+        ...form,
+        agent_subjects: agentSubjects,
+        ...(isLocalOpenViking
+          ? {
+              personal_space: {
+                backend: "viking",
+                viking_user: form.id.trim(),
+              },
+              team_space: {
+                backend: "viking",
+                viking_user:
+                  form.team_space.viking_user?.trim() || defaultTeamUser,
+              },
+            }
+          : {}),
+      };
       const target = isAdmin
         ? "/api/users"
         : `/api/users/${encodeURIComponent(form.id)}/profile`;
       const saved = await api<UserProfile>(target, {
         method: isAdmin ? "POST" : "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
+        body: JSON.stringify(payload),
       });
       toastOk("已保存用户", saved.id);
       setSelectedId(saved.id);
@@ -212,7 +254,12 @@ export default function UsersView({
           <RefreshCw className={loading ? "size-3.5 animate-spin" : "size-3.5"} />
           {loading ? "刷新中…" : "刷新"}
         </Button>
-        {isAdmin && <Button size="sm" onClick={newUser}>+ 注册用户</Button>}
+        {isAdmin && (
+          <Button size="sm" onClick={newUser}>
+            <Plus className="size-3.5" />
+            注册用户
+          </Button>
+        )}
       </div>
 
       <div className="mb-5">
@@ -262,7 +309,7 @@ export default function UsersView({
       <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">
         <StatCard label="注册用户" value={users.length} />
         <StatCard label="管理员" value={adminCount} />
-        <StatCard label="已配置云空间" value={openVikingSpaces} />
+        <StatCard label="Workspace 绑定" value={workspaceBindings} />
         <StatCard label="当前选择" value={selectedId || "新用户"} />
       </div>
 
@@ -349,76 +396,110 @@ export default function UsersView({
               </Field>
             </div>
 
-            <div className="rounded-lg border border-border bg-background/60 p-4">
-              <div className="mb-1 text-sm font-bold">Agent 用户身份映射</div>
-              <div className="mb-3 text-xs text-muted-foreground">
-                V1 按具体 integration + external subject 精确映射；未映射时 Context API 拒绝访问，不再按用户名猜测。
-              </div>
-              <div className="grid gap-3 md:grid-cols-2">
-                {integrations.map((integration) => (
-                  <Field
-                    key={integration.agent_id}
-                    label={`${integration.display_name || integration.runtime_type} · ${integration.agent_id}`}
-                  >
-                    <Input
-                      disabled={!isAdmin}
-                      value={
-                        form.agent_subjects?.find(
-                          (item) => item.integration_id === integration.agent_id
-                        )?.external_subject || ""
-                      }
-                      placeholder="Agent 侧稳定 subject"
-                      onChange={(event) => {
-                        const externalSubject = event.target.value;
-                        const next = (form.agent_subjects || []).filter(
-                          (item) => item.integration_id !== integration.agent_id
-                        );
-                        if (externalSubject.trim()) {
-                          next.push({
-                            integration_id: integration.agent_id,
-                            runtime_type: integration.runtime_type,
-                            external_subject: externalSubject,
-                          });
-                        }
-                        setForm({ ...form, agent_subjects: next });
-                      }}
-                    />
-                  </Field>
-                ))}
-              </div>
-              {!integrations.length && (
-                <div className="rounded-lg border border-dashed border-border p-3 text-xs text-muted-foreground">
-                  暂无已注册 Agent。Agent 完成 V1 注册后可在此绑定 subject。
+            <details className="rounded-lg border border-border bg-background/60">
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3">
+                <span className="flex min-w-0 items-center gap-2 text-sm font-bold">
+                  <Link2 className="size-4 shrink-0 text-muted-foreground" />
+                  Agent 身份映射
+                </span>
+                <Pill tone={hasCustomAgentSubject ? "amber" : "green"}>
+                  {hasCustomAgentSubject ? "已自定义" : "默认同名"}
+                </Pill>
+              </summary>
+              <div className="border-t border-line p-4">
+                <div className="grid gap-3 md:grid-cols-2">
+                  {integrations.map((integration) => {
+                    const mapped = form.agent_subjects?.find(
+                      (item) => item.integration_id === integration.agent_id
+                    )?.external_subject;
+                    const subject = mapped || form.id;
+                    const customized = !!mapped && mapped !== form.id;
+                    return (
+                      <Field
+                        key={integration.agent_id}
+                        label={`${integration.display_name || integration.runtime_type} · ${integration.agent_id}`}
+                      >
+                        <div className="flex gap-2">
+                          <Input
+                            disabled={!isAdmin}
+                            value={subject}
+                            placeholder="填写用户 ID 后自动绑定"
+                            onChange={(event) => {
+                              const externalSubject = event.target.value;
+                              const next = (form.agent_subjects || []).filter(
+                                (item) => item.integration_id !== integration.agent_id
+                              );
+                              if (
+                                externalSubject.trim()
+                                && externalSubject.trim() !== form.id.trim()
+                              ) {
+                                next.push({
+                                  integration_id: integration.agent_id,
+                                  runtime_type: integration.runtime_type,
+                                  external_subject: externalSubject,
+                                });
+                              }
+                              setForm({ ...form, agent_subjects: next });
+                            }}
+                          />
+                          <Button
+                            variant="outline"
+                            size="icon"
+                            type="button"
+                            title="恢复同名绑定"
+                            disabled={!isAdmin || !customized}
+                            onClick={() =>
+                              setForm({
+                                ...form,
+                                agent_subjects: (form.agent_subjects || []).filter(
+                                  (item) => item.integration_id !== integration.agent_id
+                                ),
+                              })
+                            }
+                          >
+                            <RotateCcw className="size-3.5" />
+                          </Button>
+                        </div>
+                      </Field>
+                    );
+                  })}
                 </div>
-              )}
-              <details className="mt-3 rounded-lg border border-border bg-background">
-                <summary className="cursor-pointer px-3 py-2 text-xs font-semibold">
-                  Legacy runtime 用户名映射
-                </summary>
-                <div className="grid gap-3 border-t border-line p-3 md:grid-cols-2">
-                  {runtimeOptions(integrations).map((integration) => (
-                    <Field
-                      key={integration.runtime_type}
-                      label={`${integration.display_name || integration.runtime_type} 用户名`}
-                    >
-                      <Input
-                        value={form.agent_identities?.[integration.runtime_type] || ""}
-                        placeholder={form.id || "同名用户"}
-                        onChange={(event) =>
-                          setForm({
-                            ...form,
-                            agent_identities: {
-                              ...(form.agent_identities || {}),
-                              [integration.runtime_type]: event.target.value,
-                            },
-                          })
-                        }
-                      />
-                    </Field>
-                  ))}
-                </div>
-              </details>
-            </div>
+                {!integrations.length && (
+                  <div className="text-xs text-muted-foreground">
+                    暂无已注册 Agent，接入后将使用用户 ID 自动绑定。
+                  </div>
+                )}
+                {!isLocalOpenViking && (
+                  <details className="mt-3 border-t border-line pt-3">
+                    <summary className="cursor-pointer text-xs font-semibold">
+                      Legacy runtime 映射
+                    </summary>
+                    <div className="mt-3 grid gap-3 md:grid-cols-2">
+                      {runtimeOptions(integrations).map((integration) => (
+                        <Field
+                          key={integration.runtime_type}
+                          label={`${integration.display_name || integration.runtime_type} 用户名`}
+                        >
+                          <Input
+                            value={form.agent_identities?.[integration.runtime_type] || ""}
+                            placeholder={form.id || "同名用户"}
+                            onChange={(event) =>
+                              setForm({
+                                ...form,
+                                agent_identities: {
+                                  ...(form.agent_identities || {}),
+                                  [integration.runtime_type]: event.target.value,
+                                },
+                              })
+                            }
+                          />
+                        </Field>
+                      ))}
+                    </div>
+                  </details>
+                )}
+              </div>
+            </details>
 
             <Field label={selectedId ? "重置密码（留空不变）" : "登录密码 *"}>
               <Input
@@ -429,28 +510,64 @@ export default function UsersView({
               />
             </Field>
 
-            <div className="grid gap-3.5 md:grid-cols-2">
-              <KeyEditor
-                title="个人 skill 空间"
-                space="personal"
-                canReveal={!!selectedId}
-                value={form.personal_space}
-                onChange={(personal_space) => setForm({ ...form, personal_space })}
-                onReveal={revealSpaceKey}
-              />
-              <KeyEditor
-                title="团队 skill 空间"
-                space="team"
-                canReveal={!!selectedId}
-                value={form.team_space}
-                onChange={(team_space) => setForm({ ...form, team_space })}
-                onReveal={revealSpaceKey}
-                disabled={!isAdmin}
-              />
-            </div>
+            {isLocalOpenViking ? (
+              <div className="grid gap-3.5 md:grid-cols-2">
+                <WorkspaceBinding
+                  title="个人 Workspace"
+                  value={form.id.trim()}
+                  placeholder="填写用户 ID 后自动绑定"
+                  status="自动绑定"
+                  disabled
+                />
+                <WorkspaceBinding
+                  title="团队 Workspace"
+                  value={form.team_space.viking_user || defaultTeamUser}
+                  placeholder={`系统默认 · ${defaultTeamUser}`}
+                  status={
+                    form.team_space.viking_user
+                    && form.team_space.viking_user !== defaultTeamUser
+                      ? "自定义"
+                      : `默认 · ${defaultTeamUser}`
+                  }
+                  disabled={!isAdmin}
+                  onChange={(vikingUser) =>
+                    setForm({
+                      ...form,
+                      team_space: {
+                        ...form.team_space,
+                        backend: "viking",
+                        viking_user: vikingUser,
+                      },
+                    })
+                  }
+                />
+              </div>
+            ) : (
+              <div className="grid gap-3.5 md:grid-cols-2">
+                <KeyEditor
+                  title="个人 Workspace"
+                  space="personal"
+                  canReveal={!!selectedId}
+                  value={form.personal_space}
+                  onChange={(personal_space) => setForm({ ...form, personal_space })}
+                  onReveal={revealSpaceKey}
+                />
+                <KeyEditor
+                  title="团队 Workspace"
+                  space="team"
+                  canReveal={!!selectedId}
+                  value={form.team_space}
+                  onChange={(team_space) => setForm({ ...form, team_space })}
+                  onReveal={revealSpaceKey}
+                  disabled={!isAdmin}
+                />
+              </div>
+            )}
 
             <div className="rounded-lg border border-border bg-background/60 p-3 text-xs leading-relaxed text-muted-foreground">
-              不填写 Key 时使用系统默认凭据；普通用户可维护自己的 OpenViking 用户空间和 Agent 用户名。部署、endpoint、account、团队用户与 root prefix 由管理员在“运行状态”页配置。
+              {isLocalOpenViking
+                ? "本地 Trusted 模式使用系统 Root Key，无需配置个人 Key。"
+                : "留空使用系统默认凭据；部署、endpoint、account 与团队用户由管理员统一配置。"}
             </div>
 
             <div className="flex flex-wrap justify-end gap-2">
@@ -465,7 +582,7 @@ export default function UsersView({
 }
 
 function SpacePill({ space }: { space?: SkillSpaceConfig }) {
-  const cloud = !!space?.api_key_present;
+  const cloud = !!space?.viking_user || !!space?.api_key_present;
   return (
     <span className="inline-flex items-center gap-1.5">
       <Dot state={cloud ? "on" : "off"} />
@@ -473,6 +590,39 @@ function SpacePill({ space }: { space?: SkillSpaceConfig }) {
         {space?.viking_user || (cloud ? (space?.inherited_from_admin ? "OpenViking · 继承" : "OpenViking") : "默认空间")}
       </Pill>
     </span>
+  );
+}
+
+function WorkspaceBinding({
+  title,
+  value,
+  placeholder,
+  status,
+  disabled = false,
+  onChange,
+}: {
+  title: string;
+  value: string;
+  placeholder: string;
+  status: string;
+  disabled?: boolean;
+  onChange?: (value: string) => void;
+}) {
+  return (
+    <div className="border border-border bg-background/60 p-4">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <div className="text-sm font-bold">{title}</div>
+        <Pill tone={status === "自定义" ? "amber" : "green"}>{status}</Pill>
+      </div>
+      <Field label="OpenViking User">
+        <Input
+          value={value}
+          disabled={disabled}
+          placeholder={placeholder}
+          onChange={(event) => onChange?.(event.target.value)}
+        />
+      </Field>
+    </div>
   );
 }
 

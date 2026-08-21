@@ -1038,13 +1038,36 @@ class AgentContextMixin:
                 external_session_id=external_session_id,
             )
             personal_scope = owner._agent_context_scopes(user)["personal_memory"]
-            await owner._workspace_request(
-                user,
-                personal_scope,
-                "POST",
-                "/api/v1/sessions",
-                json={"session_id": session["openviking_session_id"]},
-            )
+            openviking_created = bool(session.get("openviking_created", False))
+            if not openviking_created:
+                should_create = created
+                if not created:
+                    try:
+                        await owner._workspace_request(
+                            user,
+                            personal_scope,
+                            "GET",
+                            (
+                                "/api/v1/sessions/"
+                                f"{session['openviking_session_id']}"
+                            ),
+                        )
+                    except _OpenVikingRequestError as exc:
+                        if exc.status_code != 404 and "NOT_FOUND" not in str(exc):
+                            raise
+                        should_create = True
+                if should_create:
+                    await owner._workspace_request(
+                        user,
+                        personal_scope,
+                        "POST",
+                        "/api/v1/sessions",
+                        json={"session_id": session["openviking_session_id"]},
+                    )
+                session = state.mark_openviking_created(
+                    session["context_session_id"],
+                    agent_id=str(record.get("agent_id") or ""),
+                )
             state.audit(
                 action="session.start",
                 agent_id=str(record.get("agent_id") or ""),

@@ -115,6 +115,8 @@ def test_describe_requires_exact_subject_mapping(tmp_path) -> None:
         "team_memory",
         "personal_skills",
         "team_skills",
+        "personal_resources",
+        "team_resources",
     }
     assert response.json()["scopes"]["team_memory"]["operations"] == [
         "resolve",
@@ -533,6 +535,19 @@ def test_context_session_append_and_commit_are_idempotent(tmp_path) -> None:
     )
     assert started.status_code == 200
     context_session_id = started.json()["context_session_id"]
+    duplicate_start = client.post(
+        "/internal/agents/context/sessions/start",
+        headers=_headers(token),
+        json={
+            "external_subject": "external-alice",
+            "external_session_id": "conversation-1",
+        },
+    )
+    assert duplicate_start.status_code == 200
+    assert duplicate_start.json() == {
+        "context_session_id": context_session_id,
+        "created": False,
+    }
 
     event = {
         "context_session_id": context_session_id,
@@ -580,8 +595,55 @@ def test_context_session_append_and_commit_are_idempotent(tmp_path) -> None:
         for call in owner._workspace_request.await_args_list
         if call.args[3].endswith("/commit")
     ]
+    create_calls = [
+        call
+        for call in owner._workspace_request.await_args_list
+        if call.args[2:4] == ("POST", "/api/v1/sessions")
+    ]
+    assert len(create_calls) == 1
     assert len(message_calls) == 1
     assert len(commit_calls) == 1
+
+
+def test_context_session_start_recovers_unconfirmed_openviking_create(
+    tmp_path,
+) -> None:
+    client, owner, token, config = _client(tmp_path)
+    state = ContextStateStore(config)
+    pending, created = state.start_session(
+        agent_id="demo:tenant-a",
+        user_id="alice",
+        external_session_id="conversation-pending",
+    )
+    assert created is True
+    assert pending["openviking_created"] is False
+    owner._workspace_request = AsyncMock(return_value={"ok": True})
+
+    recovered = client.post(
+        "/internal/agents/context/sessions/start",
+        headers=_headers(token),
+        json={
+            "external_subject": "external-alice",
+            "external_session_id": "conversation-pending",
+        },
+    )
+
+    assert recovered.status_code == 200
+    assert recovered.json() == {
+        "context_session_id": pending["context_session_id"],
+        "created": False,
+    }
+    calls = owner._workspace_request.await_args_list
+    assert len(calls) == 1
+    assert calls[0].args[2:4] == (
+        "GET",
+        f"/api/v1/sessions/{pending['openviking_session_id']}",
+    )
+    stored = state.get_session(
+        pending["context_session_id"],
+        agent_id="demo:tenant-a",
+    )
+    assert stored["openviking_created"] is True
 
 
 def test_context_skill_inventory_refs_commit_in_same_session(

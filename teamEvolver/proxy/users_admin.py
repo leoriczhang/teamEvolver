@@ -597,7 +597,33 @@ def sync_agent_subject_mappings(
     }
 
 
-def _upsert_user(data: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
+def _default_agent_subjects(config, user_id: str) -> list[dict[str, str]]:
+    if config is None:
+        return []
+    from ..integrations.agent_registry import list_agents
+
+    subjects: list[dict[str, str]] = []
+    for integration in list_agents(config):
+        integration_id = str(integration.get("agent_id") or "").strip()
+        runtime_type = str(integration.get("runtime_type") or "").strip().lower()
+        if not integration_id or not runtime_type:
+            continue
+        subjects.append(
+            {
+                "integration_id": integration_id,
+                "runtime_type": runtime_type,
+                "external_subject": user_id,
+            }
+        )
+    return subjects
+
+
+def _upsert_user(
+    data: dict[str, Any],
+    body: dict[str, Any],
+    *,
+    config=None,
+) -> dict[str, Any]:
     raw_id = body.get("id") or body.get("user_id") or body.get("name") or body.get("email")
     user_id = _slug(str(raw_id or ""))
     existing: dict[str, Any] | None = None
@@ -609,6 +635,9 @@ def _upsert_user(data: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
             break
 
     created_at = str((existing or {}).get("created_at") or _now())
+    agent_subjects = body.get("agent_subjects")
+    if existing is None and "agent_subjects" not in body:
+        agent_subjects = _default_agent_subjects(config, user_id)
     user = {
         "id": user_id,
         "display_name": str(body.get("display_name", (existing or {}).get("display_name", user_id)) or user_id),
@@ -619,7 +648,7 @@ def _upsert_user(data: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
             (existing or {}).get("agent_identities"),
         ),
         "agent_subjects": _normalize_agent_subjects(
-            body.get("agent_subjects"),
+            agent_subjects,
             (existing or {}).get("agent_subjects"),
         ),
         "password_hash": str((existing or {}).get("password_hash") or ""),
@@ -630,8 +659,16 @@ def _upsert_user(data: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
     }
     if str(body.get("password") or ""):
         user["password_hash"] = _hash_password(str(body.get("password") or ""))
-    if not user["personal_space"].get("viking_user"):
+    local_openviking = (
+        str(getattr(config, "sharing_viking_deployment", "") or "").lower()
+        == "local"
+    )
+    if local_openviking or not user["personal_space"].get("viking_user"):
         user["personal_space"]["viking_user"] = user_id
+    if not user["team_space"].get("viking_user"):
+        user["team_space"]["viking_user"] = str(
+            getattr(config, "sharing_viking_user", "") or _DEFAULT_USER
+        )
     _validate_unique_agent_identities(data, user)
     _validate_unique_agent_subjects(data, user)
     if idx is None:
@@ -994,7 +1031,7 @@ class UsersAdminMixin:
             _require_admin_request(request)
             path = _registry_path(owner.config)
             data = _load_registry(path)
-            user = _upsert_user(data, body)
+            user = _upsert_user(data, body, config=owner.config)
             _save_registry(path, data)
             owner.config = _sync_user_space_keys_to_config(owner.config, user)
             sync_report = sync_openviking_user(owner.config, str(user.get("id") or ""))
@@ -1029,7 +1066,7 @@ class UsersAdminMixin:
                 ),
                 "agent_subjects": existing.get("agent_subjects", []),
             }
-            user = _upsert_user(data, payload)
+            user = _upsert_user(data, payload, config=owner.config)
             _save_registry(path, data)
             return JSONResponse(content=_public_user(user, owner.config))
 

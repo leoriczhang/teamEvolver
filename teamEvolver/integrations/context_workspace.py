@@ -321,6 +321,7 @@ class ContextStateStore:
                 "last_sequence": 0,
                 "events": {},
                 "submitted_usage_keys": [],
+                "openviking_created": False,
                 "committed": False,
                 "created_at": _now(),
                 "updated_at": _now(),
@@ -328,6 +329,22 @@ class ContextStateStore:
             data["sessions"][context_session_id] = record
             self._save(data)
             return dict(record), True
+
+    def mark_openviking_created(
+        self,
+        context_session_id: str,
+        *,
+        agent_id: str,
+    ) -> dict[str, Any]:
+        with _STATE_LOCK:
+            data = self._load()
+            session = data["sessions"].get(context_session_id)
+            if not isinstance(session, dict) or session.get("agent_id") != agent_id:
+                raise KeyError("context session not found")
+            session["openviking_created"] = True
+            session["updated_at"] = _now()
+            self._save(data)
+            return dict(session)
 
     def get_session(
         self,

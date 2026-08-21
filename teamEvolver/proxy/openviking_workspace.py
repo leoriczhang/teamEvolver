@@ -136,7 +136,7 @@ def _scope_map(
         ),
         "team_resources": _WorkspaceScope(
             "team_resources",
-            f"viking://user/{team_owner}/resources",
+            "viking://resources/team",
             "team",
             "resources",
             is_admin,
