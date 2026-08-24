@@ -292,6 +292,9 @@ class ConfigStore:
             evolve_candidate_coalesce_enabled=bool(
                 evolve.get("candidate_coalesce_enabled", True)
             ),
+            evolve_max_parallel_groups=max(
+                1, int(evolve.get("max_parallel_groups", 4) or 4)
+            ),
             evolve_bundle_text_extensions=_normalize_extensions(
                 evolve.get("bundle_text_extensions", [".py", ".sh"])
             ),

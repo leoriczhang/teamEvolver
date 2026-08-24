@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from unittest.mock import AsyncMock
 
@@ -8,17 +9,17 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from teamEvolver.config import TeamEvolverConfig
+from teamEvolver.proxy.memory_debug import MemoryDebugMixin
 from teamEvolver.proxy.openviking_workspace import (
     OpenVikingWorkspaceMixin,
     _expand_cli_workspace_args,
     _normalize_cli_argv,
     _scope_map,
     _scope_regular_cli_search,
-    _validate_uri,
     _validate_regular_cli_scope,
+    _validate_uri,
 )
 from teamEvolver.proxy.users_admin import _save_registry
-from teamEvolver.proxy.memory_debug import MemoryDebugMixin
 
 
 class _WorkspaceOwner(OpenVikingWorkspaceMixin, MemoryDebugMixin):
@@ -395,6 +396,105 @@ def test_admin_write_uses_openviking_content_api_and_team_key(tmp_path) -> None:
     assert headers["X-API-Key"] == "team-key"
     assert headers["X-OpenViking-Account"] == "workspace-a"
     assert headers["X-OpenViking-User"] == "team"
+
+
+def test_batch_workspace_write_groups_scopes_with_hash_preconditions(tmp_path) -> None:
+    alice = _user("alice")
+    client, owner = _client(tmp_path, current=alice)
+    memory_uri = "viking://user/alice/memories/profile.md"
+    skill_uri = (
+        "viking://resources/team-skill-evolver/peers/alice/skills/demo/SKILL.md"
+    )
+    owner._workspace_request = AsyncMock(
+        side_effect=[
+            "old memory",
+            {"content": "old skill"},
+            {"updated": [memory_uri]},
+            {"updated": [skill_uri]},
+        ]
+    )
+
+    response = client.post(
+        "/api/openviking/workspace/batch-content",
+        json={
+            "user_id": "alice",
+            "changes": [
+                {
+                    "scope": "personal_memory",
+                    "uri": memory_uri,
+                    "original_content": "old memory",
+                    "content": "new memory",
+                },
+                {
+                    "scope": "personal_skills",
+                    "uri": skill_uri,
+                    "original_content": "old skill",
+                    "content": "new skill",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["changed_count"] == 2
+    calls = owner._workspace_request.await_args_list
+    assert [call.args[3] for call in calls] == [
+        "/api/v1/content/read",
+        "/api/v1/content/read",
+        "/api/v1/content/batch-write",
+        "/api/v1/content/batch-write",
+    ]
+    memory_batch = calls[2].kwargs["json"]
+    assert memory_batch["root_uri"] == "viking://user/alice/memories"
+    assert memory_batch["operations"] == [{
+        "uri": memory_uri,
+        "content": "new memory",
+        "precondition": {
+            "kind": "replace_if_hash",
+            "base_hash": "sha256:" + hashlib.sha256(b"old memory").hexdigest(),
+        },
+    }]
+    assert calls[3].kwargs["json"]["root_uri"].endswith("/peers/alice/skills")
+
+
+def test_batch_workspace_write_rejects_stale_edit_before_writing(tmp_path) -> None:
+    alice = _user("alice")
+    client, owner = _client(tmp_path, current=alice)
+    memory_uri = "viking://user/alice/memories/profile.md"
+    skill_uri = (
+        "viking://resources/team-skill-evolver/peers/alice/skills/demo/SKILL.md"
+    )
+    owner._workspace_request = AsyncMock(
+        side_effect=["newer server memory", "old skill"]
+    )
+
+    response = client.post(
+        "/api/openviking/workspace/batch-content",
+        json={
+            "user_id": "alice",
+            "changes": [
+                {
+                    "scope": "personal_memory",
+                    "uri": memory_uri,
+                    "original_content": "old memory",
+                    "content": "draft memory",
+                },
+                {
+                    "scope": "personal_skills",
+                    "uri": skill_uri,
+                    "original_content": "old skill",
+                    "content": "draft skill",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 409
+    assert memory_uri in response.json()["detail"]
+    assert all(
+        call.args[3] == "/api/v1/content/read"
+        for call in owner._workspace_request.await_args_list
+    )
 
 
 def test_personal_workspace_inherits_team_key_when_personal_key_is_unset(tmp_path) -> None:

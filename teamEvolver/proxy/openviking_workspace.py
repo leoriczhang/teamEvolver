@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import shlex
 import shutil
 import tempfile
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -33,6 +34,8 @@ _SCOPES = {
     "personal_workspace", "team_workspace", "platform_assets",
 }
 _MAX_CONTENT_BYTES = 2 * 1024 * 1024
+_MAX_BATCH_CHANGES = 100
+_MAX_BATCH_CONTENT_BYTES = 16 * 1024 * 1024
 _MAX_TREE_NODES = 10_000
 _MAX_CLI_OUTPUT_BYTES = 512 * 1024
 _CLI_TIMEOUT_SECONDS = 300
@@ -314,6 +317,16 @@ def _error_message(response: httpx.Response, data: Any) -> str:
         if data.get("detail"):
             return str(data["detail"])
     return f"OpenViking HTTP {response.status_code}: {response.text[:300]}"
+
+
+def _content_text(result: Any) -> str:
+    if isinstance(result, dict):
+        return str(result.get("content") or result.get("text") or "")
+    return str(result or "")
+
+
+def _content_hash(content: str) -> str:
+    return f"sha256:{hashlib.sha256(content.encode('utf-8')).hexdigest()}"
 
 
 class OpenVikingWorkspaceMixin:
@@ -693,13 +706,9 @@ class OpenVikingWorkspaceMixin:
                 )
             except _OpenVikingRequestError as exc:
                 raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-            if isinstance(result, dict):
-                content = result.get("content") or result.get("text") or ""
-            else:
-                content = result or ""
             return JSONResponse(content={
                 "scope": selected.name, "uri": target,
-                "content": str(content), "can_write": selected.can_write,
+                "content": _content_text(result), "can_write": selected.can_write,
             })
 
         @app.get("/api/openviking/workspace/level")
@@ -772,6 +781,151 @@ class OpenVikingWorkspaceMixin:
                 raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
             return JSONResponse(content={
                 "saved": True, "scope": selected.name, "uri": target, "result": result,
+            })
+
+        @app.post("/api/openviking/workspace/batch-content")
+        async def workspace_batch_write(request: Request, body: dict[str, Any]):
+            changes = body.get("changes")
+            if not isinstance(changes, list) or not changes:
+                raise HTTPException(status_code=400, detail="changes must be a non-empty list")
+            if len(changes) > _MAX_BATCH_CHANGES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"a workspace edit can contain at most {_MAX_BATCH_CHANGES} files",
+                )
+
+            requested_user_id = str(body.get("user_id") or "")
+            prepared: list[dict[str, Any]] = []
+            seen: set[tuple[str, str]] = set()
+            total_bytes = 0
+            for index, change in enumerate(changes):
+                if not isinstance(change, dict):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"change {index + 1} must be an object",
+                    )
+                user, selected = owner._workspace_scope(
+                    request,
+                    requested_user_id,
+                    str(change.get("scope") or ""),
+                )
+                owner._require_scope_write(selected)
+                if selected.kind not in {"memory", "skills"}:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="batch editing is limited to Memory and Skill files",
+                    )
+                target = _validate_uri(selected, change.get("uri"), allow_root=False)
+                key = (selected.name, target)
+                if key in seen:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"duplicate workspace change: {target}",
+                    )
+                seen.add(key)
+                original = change.get("original_content")
+                content = change.get("content")
+                if not isinstance(original, str) or not isinstance(content, str):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"workspace change content must be text: {target}",
+                    )
+                content_bytes = len(content.encode("utf-8"))
+                if content_bytes > _MAX_CONTENT_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"workspace files cannot exceed 2 MB: {target}",
+                    )
+                total_bytes += content_bytes
+                prepared.append({
+                    "user": user,
+                    "scope": selected,
+                    "uri": target,
+                    "original": original,
+                    "content": content,
+                })
+            if total_bytes > _MAX_BATCH_CONTENT_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail="workspace edit content cannot exceed 16 MB in total",
+                )
+
+            conflicts: list[str] = []
+            for change in prepared:
+                try:
+                    current = await owner._workspace_request(
+                        change["user"],
+                        change["scope"],
+                        "GET",
+                        "/api/v1/content/read",
+                        params={
+                            "uri": change["uri"],
+                            "offset": 0,
+                            "limit": -1,
+                            "raw": "true",
+                        },
+                    )
+                except _OpenVikingRequestError as exc:
+                    raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+                current_content = _content_text(current)
+                # Retrying after a lost response is safe when the desired bytes
+                # already landed, even though the original base no longer matches.
+                if current_content not in {change["original"], change["content"]}:
+                    conflicts.append(change["uri"])
+            if conflicts:
+                shown = ", ".join(conflicts[:5])
+                suffix = f" and {len(conflicts) - 5} more" if len(conflicts) > 5 else ""
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"workspace files changed since editing began: {shown}{suffix}",
+                )
+
+            groups: dict[str, dict[str, Any]] = {}
+            for change in prepared:
+                selected = change["scope"]
+                group = groups.setdefault(
+                    selected.name,
+                    {
+                        "user": change["user"],
+                        "scope": selected,
+                        "operations": [],
+                    },
+                )
+                group["operations"].append({
+                    "uri": change["uri"],
+                    "content": change["content"],
+                    "precondition": {
+                        "kind": "replace_if_hash",
+                        "base_hash": _content_hash(change["original"]),
+                    },
+                })
+
+            results: list[dict[str, Any]] = []
+            for group in groups.values():
+                selected = group["scope"]
+                try:
+                    result = await owner._workspace_request(
+                        group["user"],
+                        selected,
+                        "POST",
+                        "/api/v1/content/batch-write",
+                        json={
+                            "root_uri": selected.root_uri,
+                            "operations": group["operations"],
+                            "wait": False,
+                        },
+                    )
+                except _OpenVikingRequestError as exc:
+                    raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+                results.append({
+                    "scope": selected.name,
+                    "root_uri": selected.root_uri,
+                    "result": result,
+                })
+            return JSONResponse(content={
+                "saved": True,
+                "changed_count": len(prepared),
+                "results": results,
             })
 
         @app.post("/api/openviking/workspace/mkdir")

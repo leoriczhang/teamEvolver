@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -470,6 +471,137 @@ async def test_repeated_skip_debt_is_visible_to_next_planner_cycle(
     assert contexts[2]["total_evidence_sessions"] == 3
 
 
+@pytest.mark.anyio
+async def test_run_once_evolves_skill_groups_concurrently(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Independent skill groups + the no-skill branch run in parallel and each
+    produces its own candidate without clobbering the shared registry."""
+    import asyncio
+
+    active = 0
+    peak = 0
+
+    async def _observe_concurrency() -> None:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        try:
+            await asyncio.sleep(0.05)
+        finally:
+            active -= 1
+
+    async def fake_evolve(
+        _llm,
+        skill_name,
+        _sessions,
+        _current_skill,
+        _existing_skill_names,
+        *,
+        evolution_context=None,
+    ):
+        await _observe_concurrency()
+        return {
+            "action": DecisionAction.IMPROVE,
+            "rationale": f"improve {skill_name}",
+            "skill": {
+                "name": skill_name,
+                "description": f"desc {skill_name}",
+                "content": f"# {skill_name}\n\nupdated body\n",
+                "category": "general",
+            },
+            "evidence_classification": {
+                "team_skill": [
+                    {
+                        "claim": f"reusable rule for {skill_name}",
+                        "supporting_session_ids": ["s"],
+                        "causal_link": "observed",
+                    }
+                ],
+                "user_memory": [],
+                "task_requirement": [],
+                "agent_runtime": [],
+                "insufficient_evidence": [],
+            },
+        }
+
+    async def fake_create(
+        _llm,
+        _sessions,
+        _existing_skill_names,
+        *,
+        evolution_context=None,
+    ):
+        await _observe_concurrency()
+        return {
+            "action": DecisionAction.CREATE,
+            "rationale": "new pattern",
+            "skill": {
+                "name": "fresh-skill",
+                "description": "brand new",
+                "content": "# fresh-skill\n\nnew body\n",
+                "category": "general",
+            },
+            "evidence_classification": {
+                "team_skill": [
+                    {
+                        "claim": "reusable new rule",
+                        "supporting_session_ids": ["s"],
+                        "causal_link": "observed",
+                    }
+                ],
+                "user_memory": [],
+                "task_requirement": [],
+                "agent_runtime": [],
+                "insufficient_evidence": [],
+            },
+        }
+
+    monkeypatch.setattr(orchestrator_module, "evolve_skill_from_sessions", fake_evolve)
+    monkeypatch.setattr(orchestrator_module, "create_skill_from_sessions", fake_create)
+
+    server = EvolveServer(
+        EvolveServerConfig(
+            llm_api_key="test-key",
+            publish_mode="immediate",
+            dataset_synthesis_enabled=False,
+            bundle_static_checks_enabled=False,
+            use_session_judge=False,
+            max_parallel_groups=4,
+        ),
+        mock=True,
+        mock_root=str(tmp_path),
+    )
+    # Two skill groups (explicit references) + one no-skill session. Sessions
+    # live under the ``sessions/`` prefix the drain step scans.
+    for idx, skill in enumerate(("alpha-skill", "beta-skill")):
+        session = _session(f"has-skill-{idx}")
+        session["turns"][0]["read_skills"] = [{"skill_name": skill}]
+        server._bucket.put_object(
+            f"sessions/sess-{idx}.json",
+            json.dumps(session).encode("utf-8"),
+        )
+    server._bucket.put_object(
+        "sessions/sess-noskill.json",
+        json.dumps(_session("no-skill-1")).encode("utf-8"),
+    )
+
+    summary = await server._run_once()
+
+    evolved_names = {
+        record.get("skill_name")
+        for record in summary["evolutions"]
+        if record.get("uploaded")
+    }
+    assert {"alpha-skill", "beta-skill", "fresh-skill"} <= evolved_names
+    # All branches were in flight together (proves real parallelism).
+    assert peak >= 2
+    # Registry recorded every skill — no clobbering under fan-out.
+    for name in ("alpha-skill", "beta-skill", "fresh-skill"):
+        assert server._id_registry.get_version(name) >= 1
+
+
 def test_dual_window_gate_aggregates_metrics_across_windows() -> None:
     recent = {
         "status": "evaluated",
@@ -584,6 +716,7 @@ def test_team_config_maps_cross_cycle_evidence_settings(monkeypatch, tmp_path) -
         evolve_evidence_replay_cases_per_window=2,
         evolve_evidence_change_debt_threshold=4,
         evolve_candidate_coalesce_enabled=False,
+        evolve_max_parallel_groups=6,
     )
 
     config = EvolveServerConfig.from_teamEvolver_config(source)
@@ -594,3 +727,4 @@ def test_team_config_maps_cross_cycle_evidence_settings(monkeypatch, tmp_path) -
     assert config.evidence_replay_cases_per_window == 2
     assert config.evidence_change_debt_threshold == 4
     assert config.candidate_coalesce_enabled is False
+    assert config.max_parallel_groups == 6

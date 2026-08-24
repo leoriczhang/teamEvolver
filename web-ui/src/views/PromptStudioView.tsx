@@ -485,46 +485,99 @@ function PipelineChain({
   if (!graph?.nodes?.length) {
     return <Empty>链路加载中…</Empty>;
   }
-  // Render as an ordered horizontal flow. The catalog is authored in flow order,
-  // so a simple wrapped row with arrows communicates the chain clearly.
+  // Derive layered columns from the real edges (longest-path levelling) so
+  // parallel branches — e.g. Evolve 与 Create 同时从 Group 分叉 — render as
+  // stacked cards in one column instead of a misleading single line. A node's
+  // level is 1 + the max level of its predecessors.
+  const predecessors = new Map<string, string[]>();
+  for (const edge of graph.edges) {
+    predecessors.set(edge.to, [...(predecessors.get(edge.to) || []), edge.from]);
+  }
+  const levelOf = new Map<string, number>();
+  const computeLevel = (id: string, seen: Set<string>): number => {
+    const cached = levelOf.get(id);
+    if (cached !== undefined) return cached;
+    // Guard against cycles (the graph is a DAG, but stay defensive).
+    if (seen.has(id)) return 0;
+    seen.add(id);
+    const preds = predecessors.get(id) || [];
+    const level = preds.length
+      ? Math.max(...preds.map((p) => computeLevel(p, seen))) + 1
+      : 0;
+    levelOf.set(id, level);
+    return level;
+  };
+  for (const node of graph.nodes) computeLevel(node.id, new Set());
+
+  const columns: PipelineNode[][] = [];
+  for (const node of graph.nodes) {
+    const level = levelOf.get(node.id) ?? 0;
+    (columns[level] ||= []).push(node);
+  }
+  const filledColumns = columns.filter(Boolean);
+
+  // A node reachable by more than one distinct upstream branch (e.g. Merge,
+  // which only runs when a same-name conflict occurs) is conditional, not a
+  // guaranteed step. Flag it so the chain doesn't imply it always fires.
+  const isConditional = (id: string) => (predecessors.get(id) || []).length > 1;
+
   return (
-    <div className="flex flex-wrap items-stretch gap-2">
-      {graph.nodes.map((node, i) => {
-        const isLlm = node.kind === "llm";
-        const clickable = isLlm && !!node.prompt_id;
-        const selected = clickable && node.prompt_id === selectedPrompt;
-        return (
-          <div key={node.id} className="flex items-stretch gap-2">
-            <button
-              type="button"
-              disabled={!clickable}
-              onClick={() => clickable && node.prompt_id && onPick(node.prompt_id)}
-              title={node.description}
-              className={cn(
-                "flex w-[150px] flex-col gap-1 rounded-lg border p-2.5 text-left transition-colors",
-                selected
-                  ? "border-sidebar-primary bg-accent-soft"
-                  : clickable
-                    ? "border-blue-300 bg-blue-50/40 hover:border-sidebar-primary"
-                    : "border-border bg-surface-subtle",
-                !clickable && "cursor-default"
-              )}
-            >
-              <span className="flex items-center justify-between gap-1">
-                <Pill tone={KIND_TONE[node.kind]}>{KIND_LABEL[node.kind]}</Pill>
-                {node.overridden && <Pill tone="amber">改</Pill>}
+    <div className="flex items-stretch gap-1.5 overflow-x-auto pb-1">
+      {filledColumns.map((column, colIndex) => (
+        <div key={colIndex} className="flex items-stretch gap-1.5">
+          <div className="flex flex-col justify-center gap-2">
+            {column.map((node) => {
+              const isLlm = node.kind === "llm";
+              const clickable = isLlm && !!node.prompt_id;
+              const selected = clickable && node.prompt_id === selectedPrompt;
+              const conditional = isConditional(node.id);
+              return (
+                <button
+                  key={node.id}
+                  type="button"
+                  disabled={!clickable}
+                  onClick={() => clickable && node.prompt_id && onPick(node.prompt_id)}
+                  title={
+                    conditional
+                      ? `${node.description || node.label}（条件触发：仅在满足前置条件时执行）`
+                      : node.description
+                  }
+                  className={cn(
+                    "flex w-[150px] flex-col gap-1 rounded-lg border p-2.5 text-left transition-colors",
+                    selected
+                      ? "border-sidebar-primary bg-accent-soft"
+                      : clickable
+                        ? "border-blue-300 bg-blue-50/40 hover:border-sidebar-primary"
+                        : "border-border bg-surface-subtle",
+                    conditional && "border-dashed",
+                    !clickable && "cursor-default"
+                  )}
+                >
+                  <span className="flex flex-wrap items-center justify-between gap-1">
+                    <Pill tone={KIND_TONE[node.kind]}>{KIND_LABEL[node.kind]}</Pill>
+                    <span className="flex items-center gap-1">
+                      {conditional && <Pill tone="gray">条件</Pill>}
+                      {node.overridden && <Pill tone="amber">改</Pill>}
+                    </span>
+                  </span>
+                  <span className="text-[12.5px] font-semibold leading-tight">{node.label}</span>
+                  <span className="line-clamp-3 text-[10.5px] leading-snug text-muted-foreground">
+                    {node.description}
+                  </span>
+                </button>
+              );
+            })}
+            {column.length > 1 && (
+              <span className="text-center text-[10px] font-semibold text-muted-soft">
+                并行分支
               </span>
-              <span className="text-[12.5px] font-semibold leading-tight">{node.label}</span>
-              <span className="line-clamp-3 text-[10.5px] leading-snug text-muted-foreground">
-                {node.description}
-              </span>
-            </button>
-            {i < graph.nodes.length - 1 && (
-              <span className="flex items-center text-muted-soft">→</span>
             )}
           </div>
-        );
-      })}
+          {colIndex < filledColumns.length - 1 && (
+            <span className="flex items-center text-muted-soft">→</span>
+          )}
+        </div>
+      ))}
     </div>
   );
 }

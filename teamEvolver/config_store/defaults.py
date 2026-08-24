@@ -98,6 +98,7 @@ _DEFAULTS: dict = {
         "dataset_max_requirements": 24,
         "dataset_disclosure_batch_size": 4,
         "candidate_coalesce_enabled": True,
+        "max_parallel_groups": 4,
         "bundle_text_extensions": [".py", ".sh"],
         "bundle_max_file_bytes": 262144,
         "bundle_max_prompt_bytes": 786432,

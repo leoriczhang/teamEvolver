@@ -165,6 +165,7 @@ class TeamEvolverConfig:
     evolve_dataset_max_requirements: int = 24
     evolve_dataset_disclosure_batch_size: int = 4
     evolve_candidate_coalesce_enabled: bool = True
+    evolve_max_parallel_groups: int = 4
     evolve_bundle_text_extensions: list[str] = field(
         default_factory=lambda: [".py", ".sh"]
     )

@@ -157,6 +157,12 @@ class EvolveServer(EvolveEngineMixin):
         # registry (observed as a manifest that loses freshly-evolved skills).
         # Lazily created on first use to stay bound to the running loop.
         self._run_lock: asyncio.Lock | None = None
+        # Serializes the immediate-publish upload path. Skill groups may evolve
+        # concurrently, but ``_resolve_and_upload`` does a non-atomic
+        # read-modify-write of the shared manifest/registry in a worker thread,
+        # so concurrent uploads would clobber each other. Lazily created to stay
+        # bound to the running loop.
+        self._upload_lock: asyncio.Lock | None = None
         # Background true-replay evaluations kicked off when a candidate is queued.
         # Held so they aren't garbage-collected mid-flight (asyncio only keeps a
         # weak reference to bare tasks).
@@ -1000,6 +1006,12 @@ class EvolveServer(EvolveEngineMixin):
         return existing_sha != incoming_sha
 
     async def _resolve_and_upload(self, skill: dict, action_type: str) -> tuple[str, bool]:
+        # Serialize the read-modify-write upload so concurrently-evolved skill
+        # groups never clobber each other's manifest/registry entries.
+        async with self._get_upload_lock():
+            return await self._resolve_and_upload_locked(skill, action_type)
+
+    async def _resolve_and_upload_locked(self, skill: dict, action_type: str) -> tuple[str, bool]:
         name = skill.get("name", "")
         if action_type == DecisionAction.MERGE:
             upload_status = await self._call_storage(
@@ -3839,27 +3851,63 @@ class EvolveServer(EvolveEngineMixin):
             manifest = await self._call_storage(self._load_remote_skills)
             existing_skill_names = [item.get("name", "") for item in manifest.values()]
 
-            if grouped_sessions:
-                logger.info("[EvolveServer] evolving %d skill group(s)", skill_group_count)
-            for skill_name, skill_sessions in grouped_sessions.items():
-                try:
-                    record = await self._evolve_skill_group(skill_name, skill_sessions, existing_skill_names)
-                except Exception as exc:
-                    logger.error("[EvolveServer] skill '%s' evolve failed: %s", skill_name, exc)
-                    had_processing_error = True
-                    continue
-                if record:
-                    evolution_records.append(record)
+            # Skill groups and the no-skill create are independent branches: the
+            # slow work (LLM planning + dataset synthesis) is read-only w.r.t.
+            # shared state, and the one racy write (immediate-publish upload) is
+            # serialized by ``_upload_lock``. Fan them out concurrently, bounded
+            # by ``max_parallel_groups`` so we don't overwhelm the model/storage.
+            branch_count = skill_group_count + (1 if no_skill_sessions else 0)
+            if branch_count:
+                logger.info(
+                    "[EvolveServer] evolving %d skill group(s) + %d no-skill branch "
+                    "(max parallel=%d)",
+                    skill_group_count,
+                    1 if no_skill_sessions else 0,
+                    self.config.max_parallel_groups,
+                )
+            semaphore = asyncio.Semaphore(max(1, self.config.max_parallel_groups))
 
-            if no_skill_sessions:
-                logger.info("[EvolveServer] processing %d no-skill sessions", len(no_skill_sessions))
-                try:
-                    evolution_records.extend(
-                        await self._handle_no_skill_sessions(no_skill_sessions, existing_skill_names)
+            async def _run_skill_group(name: str, group: list[dict]) -> list[dict]:
+                async with semaphore:
+                    try:
+                        record = await self._evolve_skill_group(
+                            name, group, existing_skill_names
+                        )
+                    except Exception as exc:
+                        logger.error("[EvolveServer] skill '%s' evolve failed: %s", name, exc)
+                        raise
+                    return [record] if record else []
+
+            async def _run_no_skill(group: list[dict]) -> list[dict]:
+                async with semaphore:
+                    logger.info(
+                        "[EvolveServer] processing %d no-skill sessions", len(group)
                     )
-                except Exception as exc:
-                    logger.error("[EvolveServer] no-skill evolve failed: %s", exc)
-                    had_processing_error = True
+                    return await self._handle_no_skill_sessions(
+                        group, existing_skill_names
+                    )
+
+            branches: list[tuple[str, Any]] = [
+                (skill_name, _run_skill_group(skill_name, skill_sessions))
+                for skill_name, skill_sessions in grouped_sessions.items()
+            ]
+            if no_skill_sessions:
+                branches.append((NO_SKILL_KEY, _run_no_skill(no_skill_sessions)))
+
+            if branches:
+                results = await asyncio.gather(
+                    *(coro for _, coro in branches),
+                    return_exceptions=True,
+                )
+                for (branch_name, _), result in zip(branches, results):
+                    if isinstance(result, Exception):
+                        if branch_name == NO_SKILL_KEY:
+                            logger.error(
+                                "[EvolveServer] no-skill evolve failed: %s", result
+                            )
+                        had_processing_error = True
+                        continue
+                    evolution_records.extend(result)
         else:
             logger.info("[EvolveServer] queue empty - checking pending validation publish jobs")
 
@@ -3973,6 +4021,12 @@ class EvolveServer(EvolveEngineMixin):
         if self._run_lock is None:
             self._run_lock = asyncio.Lock()
         return self._run_lock
+
+    def _get_upload_lock(self) -> asyncio.Lock:
+        """Lazily create the per-loop upload lock (see ``__init__``)."""
+        if self._upload_lock is None:
+            self._upload_lock = asyncio.Lock()
+        return self._upload_lock
 
     def create_http_app(self):
         from dataclasses import replace

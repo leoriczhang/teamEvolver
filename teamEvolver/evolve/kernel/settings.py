@@ -83,6 +83,10 @@ class EvolveServerConfig:
     dataset_max_requirements: int = 24
     dataset_disclosure_batch_size: int = 4
     candidate_coalesce_enabled: bool = True
+    # Max skill groups (plus the no-skill create) evolved concurrently per cycle.
+    # Groups are independent branches; the only shared write (immediate-publish
+    # upload) is serialized separately, so this only bounds LLM/dataset fan-out.
+    max_parallel_groups: int = 4
     bundle_text_extensions: list[str] = field(
         default_factory=lambda: [".py", ".sh"]
     )
@@ -138,6 +142,7 @@ class EvolveServerConfig:
         self.dataset_disclosure_batch_size = max(
             1, int(self.dataset_disclosure_batch_size or 1)
         )
+        self.max_parallel_groups = max(1, int(self.max_parallel_groups or 1))
         normalized_extensions: list[str] = []
         raw_extensions = self.bundle_text_extensions
         if isinstance(raw_extensions, str):
@@ -227,6 +232,9 @@ class EvolveServerConfig:
                 "EVOLVE_CANDIDATE_COALESCE_ENABLED", "1"
             ).lower()
             not in {"0", "false", "no"},
+            max_parallel_groups=int(
+                os.environ.get("EVOLVE_MAX_PARALLEL_GROUPS", "4")
+            ),
             bundle_text_extensions=os.environ.get(
                 "EVOLVE_BUNDLE_TEXT_EXTENSIONS", ".py,.sh"
             ).split(","),
@@ -428,6 +436,12 @@ class EvolveServerConfig:
                 else "0",
             ).lower()
             not in {"0", "false", "no"},
+            max_parallel_groups=int(
+                os.environ.get(
+                    "EVOLVE_MAX_PARALLEL_GROUPS",
+                    str(getattr(config, "evolve_max_parallel_groups", 4) or 4),
+                )
+            ),
             bundle_text_extensions=list(
                 getattr(config, "evolve_bundle_text_extensions", [".py", ".sh"])
                 or [".py", ".sh"]

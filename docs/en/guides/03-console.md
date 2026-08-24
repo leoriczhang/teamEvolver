@@ -13,6 +13,19 @@ teamEvolver start
 # Open http://127.0.0.1:52010
 ```
 
+## Agent Workspace
+
+The Agent Workspace combines personal and team Skills, Memory, and Resources that Agents can reference. It opens in read-only **browse mode** by default.
+
+To update multiple Memory or Skill files:
+
+1. Click **Edit** in the top toolbar.
+2. Open and modify any number of Memory or Skill files. Drafts remain available while switching files or personal/team Workspaces.
+3. Click **Finish editing** to review every line-level Diff in one window.
+4. Click **Save changes** to submit the complete change set. The server checks each file against its content hash from the start of the edit session. If another writer changed a file, the submission is rejected and all drafts remain available.
+
+Resources, team assets without write permission, and platform assets always remain read-only.
+
 ## Dashboard
 
 Dashboard is console homepage providing global view of system operational status.

@@ -16,7 +16,7 @@ import {
   Beaker,
   Brain,
   Loader2,
-  Plus,
+  Pencil,
   RefreshCw,
   Save,
   Search,
@@ -115,6 +115,14 @@ type TerminalRecord = {
   command: string;
   result?: CliResult;
   running?: boolean;
+};
+
+type WorkspaceDraft = {
+  uri: string;
+  name: string;
+  scope: ScopeName;
+  originalContent: string;
+  content: string;
 };
 
 type SpaceKey = "personal" | "team" | "platform";
@@ -317,10 +325,9 @@ export default function OpenVikingWorkspaceShell({
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [createOpen, setCreateOpen] = useState(false);
-  const [createType, setCreateType] = useState<"file" | "directory">("file");
-  const [createName, setCreateName] = useState("");
-  const [createContent, setCreateContent] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [drafts, setDrafts] = useState<Record<string, WorkspaceDraft>>({});
+  const [reviewOpen, setReviewOpen] = useState(false);
 
   const activeSpace = spaces.find((item) => item.key === activeSpaceKey) || spaces[0];
   const spaceScopes = useMemo(
@@ -346,7 +353,20 @@ export default function OpenVikingWorkspaceShell({
     [spaceScopes],
   );
   const selectedScope = selected ? scopeForUri(selected.uri) : undefined;
-  const isDirty = !!selected && !selected.is_dir && content !== originalContent;
+  const draftList = useMemo(
+    () => Object.values(drafts).sort((left, right) => left.uri.localeCompare(right.uri)),
+    [drafts],
+  );
+  const dirtyUris = useMemo(() => new Set(draftList.map((draft) => draft.uri)), [draftList]);
+  const isDirty = !!selected && dirtyUris.has(selected.uri);
+  const canEditSelected = !!(
+    editing &&
+    selectedScope?.can_write &&
+    (selectedScope.kind === "memory" || selectedScope.kind === "skills")
+  );
+  const hasEditableScopes = spaceScopes.some(
+    (scope) => scope.can_write && (scope.kind === "memory" || scope.kind === "skills"),
+  );
     const currentScope = scopeForUri(currentUri);
     const activeWritableScope =
       currentScope?.can_write
@@ -486,6 +506,16 @@ export default function OpenVikingWorkspaceShell({
     void loadSpace(first, activeUserId, config);
   }, [mode]);
 
+  useEffect(() => {
+    if (!draftList.length) return;
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
+  }, [draftList.length]);
+
   async function chooseSpace(next: SpaceConfig) {
     setSurface("workspace");
     setActiveSpaceKey(next.key);
@@ -545,6 +575,14 @@ export default function OpenVikingWorkspaceShell({
     }
     setSelected(entry);
     setCurrentUri(parentUri(entry.uri));
+    const draft = drafts[entry.uri];
+    if (draft) {
+      setContent(draft.content);
+      setOriginalContent(draft.originalContent);
+      setViewMode("source");
+      setDirectoryLevels({ l0: "", l1: "" });
+      return;
+    }
     setLoading(true);
     try {
       const result = await api<{ content: string }>(
@@ -552,7 +590,11 @@ export default function OpenVikingWorkspaceShell({
       );
       setContent(result.content || "");
       setOriginalContent(result.content || "");
-      setViewMode("preview");
+      setViewMode(
+        editing && owner.can_write && (owner.kind === "memory" || owner.kind === "skills")
+          ? "source"
+          : "preview",
+      );
       setDirectoryLevels({ l0: "", l1: "" });
     } catch (error: any) {
       toastErr("读取文件失败", error.message);
@@ -561,102 +603,99 @@ export default function OpenVikingWorkspaceShell({
     }
   }
 
-  async function saveContent() {
-    if (!selected || !selectedScope?.can_write) return;
-    setSaving(true);
-    try {
-      await api("/api/openviking/workspace/content", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          user_id: activeUserId,
-          scope: selectedScope.name,
-          uri: selected.uri,
-          content,
-          mode: "replace",
-        }),
-      });
-      setOriginalContent(content);
-      toastOk("已保存到 OpenViking", selected.name);
-      await refreshTree();
-    } catch (error: any) {
-      toastErr("保存失败", error.message);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  function startCreate(type: "file" | "directory") {
-    setCreateType(type);
-    setCreateName("");
-    setCreateContent(
-      type === "file" && selectedScope?.kind === "memory" ? "# 新记忆\n\n" : "",
-    );
-    setCreateOpen(true);
-  }
-
-  async function createEntry() {
-    const name = createName.trim().replace(/^\/+|\/+$/g, "");
-    if (!name) {
-      toastErr("请输入名称");
-      return;
-    }
-    const owner = scopeForUri(currentUri);
-    if (!owner) {
-      toastErr("请先在某个资产分组内选择位置");
-      return;
-    }
-    const uri = `${currentUri.replace(/\/+$/, "")}/${name}`;
-    setSaving(true);
-    try {
-      if (createType === "directory") {
-        await api("/api/openviking/workspace/mkdir", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            user_id: activeUserId,
-            scope: owner.name,
-            uri,
-          }),
-        });
+  function updateDraftContent(nextContent: string) {
+    setContent(nextContent);
+    if (!selected || selected.is_dir || !selectedScope || !canEditSelected) return;
+    setDrafts((previous) => {
+      const next = { ...previous };
+      if (nextContent === originalContent) {
+        delete next[selected.uri];
       } else {
-        await api("/api/openviking/workspace/content", {
+        next[selected.uri] = {
+          uri: selected.uri,
+          name: selected.name,
+          scope: selectedScope.name,
+          originalContent,
+          content: nextContent,
+        };
+      }
+      return next;
+    });
+  }
+
+  function beginEditing() {
+    if (!hasEditableScopes) return;
+    setEditing(true);
+    if (
+      selected &&
+      !selected.is_dir &&
+      selectedScope?.can_write &&
+      (selectedScope.kind === "memory" || selectedScope.kind === "skills")
+    ) {
+      setViewMode("source");
+    }
+  }
+
+  function discardEditing(requireConfirmation = true) {
+    if (
+      requireConfirmation &&
+      draftList.length &&
+      !window.confirm("确认放弃 " + draftList.length + " 个文件的全部未保存改动？")
+    ) {
+      return false;
+    }
+    const selectedDraft = selected ? drafts[selected.uri] : undefined;
+    if (selectedDraft) {
+      setContent(selectedDraft.originalContent);
+      setOriginalContent(selectedDraft.originalContent);
+    }
+    setDrafts({});
+    setEditing(false);
+    setReviewOpen(false);
+    setViewMode("preview");
+    return true;
+  }
+
+  function finishEditing() {
+    if (!draftList.length) {
+      discardEditing(false);
+      return;
+    }
+    setReviewOpen(true);
+  }
+
+  async function saveDrafts() {
+    if (!draftList.length) return;
+    setSaving(true);
+    try {
+      await api<{ saved: boolean; changed_count: number }>(
+        "/api/openviking/workspace/batch-content",
+        {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             user_id: activeUserId,
-            scope: owner.name,
-            uri,
-            content: createContent,
-            mode: "create",
+            changes: draftList.map((draft) => ({
+              scope: draft.scope,
+              uri: draft.uri,
+              original_content: draft.originalContent,
+              content: draft.content,
+            })),
           }),
-        });
-      }
-      toastOk(createType === "directory" ? "目录已创建" : "文件已创建", name);
-      setCreateOpen(false);
+        },
+      );
+      const selectedDraft = selected ? drafts[selected.uri] : undefined;
+      if (selectedDraft) setOriginalContent(selectedDraft.content);
+      setDrafts({});
+      setEditing(false);
+      setReviewOpen(false);
+      setViewMode("preview");
+      toastOk("工作区改动已保存", "共 " + draftList.length + " 个文件");
       await refreshTree();
     } catch (error: any) {
-      toastErr("创建失败", error.message);
+      toastErr("批量保存失败，草稿已保留", error.message);
     } finally {
       setSaving(false);
-    }
-  }
-
-  async function deleteEntry() {
-    if (!selected || !selectedScope?.can_write) return;
-    if (!window.confirm(`确认删除「${selected.name}」？`)) return;
-    try {
-      await api(
-        `/api/openviking/workspace?scope=${encodeURIComponent(selectedScope.name)}&user_id=${encodeURIComponent(activeUserId)}&uri=${encodeURIComponent(selected.uri)}`,
-        { method: "DELETE" },
-      );
-      toastOk("已从 OpenViking 删除", selected.name);
-      setSelected(null);
-      setContent("");
-      setOriginalContent("");
-      await refreshTree();
-    } catch (error: any) {
-      toastErr("删除失败", error.message);
     }
   }
 
@@ -704,10 +743,11 @@ export default function OpenVikingWorkspaceShell({
           {mode === "platform" ? (
             <Pill tone="gray">平台内部 · 只读</Pill>
           ) : (
-              <Pill tone={selectedScope?.can_write ? "green" : "gray"}>
-                {selected && !selected.is_dir ? (selectedScope?.can_write ? "可管理" : "只读") : "选择资产分组内的文件"}
+            <Pill tone={editing ? "amber" : "gray"}>
+              {editing ? "编辑模式 · " + draftList.length + " 个改动" : "浏览模式 · 只读"}
             </Pill>
           )}
+          {selectedScope && <Pill tone="blue">{SCOPE_LABELS[selectedScope.name]}</Pill>}
           <span className="truncate font-mono text-[11px] text-muted-foreground">
             {selected?.uri || currentUri || activeSpace.label}
           </span>
@@ -730,12 +770,14 @@ export default function OpenVikingWorkspaceShell({
                   role="tab"
                   aria-selected={surface === key}
                   title={label}
+                  disabled={editing && key !== "workspace"}
                   onClick={() => setSurface(key)}
                   className={cn(
                     "flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[11px] font-semibold transition-colors",
                     surface === key
                       ? "bg-background text-foreground shadow-sm"
                       : "text-muted-foreground hover:text-foreground",
+                    editing && key !== "workspace" && "cursor-not-allowed opacity-45",
                   )}
                 >
                   <Icon className="size-3.5" />
@@ -747,6 +789,8 @@ export default function OpenVikingWorkspaceShell({
           {users.length > 1 && (
             <select
               value={activeUserId}
+              disabled={editing}
+              title={editing ? "请先完成或取消当前编辑" : "切换用户"}
               onChange={(event) => {
                 setActiveUserId(event.target.value);
                 window.localStorage.setItem("teamEvolver.activeUserId", event.target.value);
@@ -760,6 +804,36 @@ export default function OpenVikingWorkspaceShell({
                 </option>
               ))}
             </select>
+          )}
+          {mode === "workspace" && surface === "workspace" && (
+            editing ? (
+              <>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={saving}
+                  onClick={() => void discardEditing()}
+                >
+                  <X className="size-4" />
+                  取消编辑
+                </Button>
+                <Button size="sm" disabled={saving} onClick={finishEditing}>
+                  <GitCompare className="size-4" />
+                  {draftList.length ? "完成编辑 " + draftList.length : "完成编辑"}
+                </Button>
+              </>
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={!hasEditableScopes}
+                title={hasEditableScopes ? "编辑多个 Memory 或 Skill 文件" : "当前空间没有可编辑资产"}
+                onClick={beginEditing}
+              >
+                <Pencil className="size-4" />
+                编辑
+              </Button>
+            )
           )}
           {config.studio_url && (
             <Button asChild variant="outline" size="sm">
@@ -798,26 +872,9 @@ export default function OpenVikingWorkspaceShell({
                   {entries.length}
               </span>
             </div>
-              {currentScope?.can_write && (
-              <div className="flex items-center gap-1">
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  title="新建目录"
-                  onClick={() => startCreate("directory")}
-                >
-                  <Folder className="size-4" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  title="新建文件"
-                  onClick={() => startCreate("file")}
-                >
-                  <Plus className="size-4" />
-                </Button>
-              </div>
-            )}
+              {editing && (
+                <Pill tone="amber">{draftList.length ? draftList.length + " 个文件已修改" : "等待修改"}</Pill>
+              )}
           </header>
           <div className="shrink-0 border-b border-border p-2.5">
             <div className="relative">
@@ -865,6 +922,7 @@ export default function OpenVikingWorkspaceShell({
                   forceExpanded={!!filter.trim()}
                   selectedUri={selected?.uri || ""}
                   currentUri={currentUri}
+                  dirtyUris={dirtyUris}
                   onOpen={openEntry}
                 />
               ))
@@ -933,7 +991,7 @@ export default function OpenVikingWorkspaceShell({
                   >
                     <Code2 className="size-3.5" /> 源码
                   </button>
-                  <button
+                  {editing && <button
                     type="button"
                     title={isDirty ? "查看与已保存版本的行级差异" : "草稿与已保存版本一致"}
                     className={cn(
@@ -947,10 +1005,10 @@ export default function OpenVikingWorkspaceShell({
                     {isDirty && (
                       <span className="ml-0.5 size-1.5 rounded-full bg-amber-500" />
                     )}
-                  </button>
+                  </button>}
                 </div>
               ) : null}
-              {selected && !selected.is_dir && evalKind === "skills" && evalSkillName && (
+              {editing && isDirty && selected && !selected.is_dir && evalKind === "skills" && evalSkillName && (
                 <Button
                   variant="outline"
                   size="sm"
@@ -972,26 +1030,6 @@ export default function OpenVikingWorkspaceShell({
                   注入对比
                 </Button>
               )}
-              {selected && !selected.is_dir && selectedScope?.can_write && (
-                <>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    title="删除"
-                    onClick={() => void deleteEntry()}
-                  >
-                    <Trash2 className="size-4 text-destructive" />
-                  </Button>
-                  <Button
-                    size="sm"
-                    disabled={!isDirty || saving}
-                    onClick={() => void saveContent()}
-                  >
-                    <Save className="size-4" />
-                    保存
-                  </Button>
-                </>
-              )}
             </div>
           </header>
           <div className="min-h-0 flex-1 overflow-hidden bg-background">
@@ -1008,9 +1046,13 @@ export default function OpenVikingWorkspaceShell({
             ) : viewMode === "source" ? (
               <Textarea
                 value={content}
-                readOnly={!selectedScope?.can_write}
-                onChange={(event) => setContent(event.target.value)}
-                className="h-full min-h-0 resize-none rounded-none border-0 p-4 font-mono text-xs leading-5 focus-visible:ring-0"
+                readOnly={!canEditSelected}
+                aria-label={canEditSelected ? "编辑文件内容" : "只读文件内容"}
+                onChange={(event) => updateDraftContent(event.target.value)}
+                className={cn(
+                  "h-full min-h-0 resize-none rounded-none border-0 p-4 font-mono text-xs leading-5 focus-visible:ring-0",
+                  !canEditSelected && "cursor-default bg-muted/20",
+                )}
               />
             ) : viewMode === "diff" ? (
               <DiffView original={originalContent} next={content} />
@@ -1026,7 +1068,8 @@ export default function OpenVikingWorkspaceShell({
                   : "OpenViking L1 Overview"
                 : fileKind(selected?.name || "")}
             </span>
-            <span>
+            <span className="flex items-center gap-2">
+              {isDirty && <span className="font-semibold text-amber-700">已加入变更集</span>}
               {(selected?.is_dir
                 ? directoryLevels[directoryLevel].length
                 : content.length
@@ -1050,57 +1093,78 @@ export default function OpenVikingWorkspaceShell({
         </div>
       )}
 
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="!max-w-[640px]">
-          <DialogHeader>
-            <DialogTitle>
-              {createType === "directory" ? "新建目录" : "新建文件"}
+      <Dialog
+        open={reviewOpen}
+        onOpenChange={(open) => {
+          if (!saving) setReviewOpen(open);
+        }}
+      >
+        <DialogContent
+          showCloseButton={!saving}
+          className="flex h-[88vh] w-full !max-w-[1180px] flex-col gap-0 overflow-hidden p-0"
+        >
+          <DialogHeader className="shrink-0 border-b border-line px-5 py-4">
+            <DialogTitle className="flex flex-wrap items-center gap-2">
+              <GitCompare className="size-4" />
+              工作区改动
+              <Pill tone="amber">{draftList.length} 个文件</Pill>
             </DialogTitle>
+            <p className="text-xs text-muted-foreground">
+              确认后统一写入 OpenViking；如果文件已被其他人更新，本次提交会被拒绝并保留草稿。
+            </p>
           </DialogHeader>
-          <div className="space-y-3">
-            <div>
-              <div className="mb-1.5 text-xs font-semibold text-muted-foreground">
-                当前位置
-              </div>
-              <code className="block break-all rounded-lg bg-muted p-2 text-xs">
-                {currentUri}
-              </code>
-            </div>
-            <Input
-              autoFocus
-              value={createName}
-              onChange={(event) => setCreateName(event.target.value)}
-              placeholder={
-                createType === "directory"
-                  ? "目录名"
-                  : selectedScope?.kind === "memory"
-                    ? "memory-name.md"
-                    : "文件名"
-              }
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && createType === "directory") {
-                  void createEntry();
-                }
-              }}
-            />
-            {createType === "file" && (
-              <Textarea
-                value={createContent}
-                onChange={(event) => setCreateContent(event.target.value)}
-                className="min-h-[260px] font-mono text-xs"
-                placeholder="文件内容"
-              />
-            )}
+          <div className="min-h-0 flex-1 space-y-3 overflow-auto bg-muted/30 p-4">
+            {draftList.map((draft, index) => {
+              const stats = diffStats(draft.originalContent, draft.content);
+              return (
+                <section
+                  key={draft.uri}
+                  className="overflow-hidden rounded-lg border border-border bg-background"
+                >
+                  <header className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className="grid size-6 shrink-0 place-items-center rounded-md bg-muted font-mono text-[10px] font-bold text-muted-foreground">
+                        {String(index + 1).padStart(2, "0")}
+                      </span>
+                      <div className="min-w-0">
+                        <div className="truncate text-xs font-semibold">{draft.name}</div>
+                        <div className="truncate font-mono text-[10px] text-muted-foreground">
+                          {draft.uri}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <Pill tone="blue">{SCOPE_LABELS[draft.scope]}</Pill>
+                      <span className="text-[10px] font-semibold text-[#1a7f37]">
+                        +{stats.added}
+                      </span>
+                      <span className="text-[10px] font-semibold text-[#cf222e]">
+                        -{stats.removed}
+                      </span>
+                    </div>
+                  </header>
+                  <div className="h-[280px]">
+                    <DiffView original={draft.originalContent} next={draft.content} compact />
+                  </div>
+                </section>
+              );
+            })}
           </div>
-          <DialogFooter className="px-0 pb-0">
-            <Button variant="outline" onClick={() => setCreateOpen(false)}>
-              取消
-            </Button>
+          <DialogFooter className="mx-0 mb-0 shrink-0 px-5 py-3">
             <Button
-              disabled={saving || !createName.trim()}
-              onClick={() => void createEntry()}
+              variant="destructive"
+              disabled={saving}
+              onClick={() => void discardEditing()}
             >
-              创建
+              <Trash2 className="size-4" />
+              放弃全部
+            </Button>
+            <Button variant="outline" disabled={saving} onClick={() => setReviewOpen(false)}>
+              返回编辑
+            </Button>
+            <Button disabled={saving || !draftList.length} onClick={() => void saveDrafts()}>
+              {saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
+              {saving ? "正在保存" : "确认保存 " + draftList.length + " 个文件"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1151,6 +1215,7 @@ function TreeRow({
   forceExpanded,
   selectedUri,
   currentUri,
+  dirtyUris,
   onOpen,
 }: {
   node: TreeNode;
@@ -1159,6 +1224,7 @@ function TreeRow({
   forceExpanded: boolean;
   selectedUri: string;
   currentUri: string;
+  dirtyUris: Set<string>;
   onOpen: (entry: WorkspaceEntry) => void;
 }) {
   const isExpanded = forceExpanded || expanded.has(node.entry.uri);
@@ -1204,6 +1270,12 @@ function TreeRow({
             </span>
           )}
         </span>
+        {dirtyUris.has(node.entry.uri) && (
+          <span
+            className="size-2 shrink-0 rounded-full bg-amber-500"
+            title="该文件有未保存改动"
+          />
+        )}
         {!node.entry.is_dir && node.entry.size != null && (
           <span className="hidden shrink-0 self-center text-[9px] text-muted-foreground group-hover:inline">
             {formatBytes(node.entry.size)}
@@ -1221,6 +1293,7 @@ function TreeRow({
             forceExpanded={forceExpanded}
             selectedUri={selectedUri}
             currentUri={currentUri}
+            dirtyUris={dirtyUris}
             onOpen={onOpen}
           />
         ))}
@@ -1859,7 +1932,23 @@ function computeLineDiff(original: string, next: string): DiffLine[] {
   return diff;
 }
 
-function DiffView({ original, next }: { original: string; next: string }) {
+function diffStats(original: string, next: string) {
+  const lines = computeLineDiff(original, next);
+  return {
+    added: lines.filter((line) => line.type === "add").length,
+    removed: lines.filter((line) => line.type === "del").length,
+  };
+}
+
+function DiffView({
+  original,
+  next,
+  compact = false,
+}: {
+  original: string;
+  next: string;
+  compact?: boolean;
+}) {
   const lines = useMemo(() => computeLineDiff(original, next), [original, next]);
   const added = lines.filter((line) => line.type === "add").length;
   const removed = lines.filter((line) => line.type === "del").length;
@@ -1872,11 +1961,13 @@ function DiffView({ original, next }: { original: string; next: string }) {
   }
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center gap-3 border-b border-border bg-surface-subtle px-4 py-2 text-[11px] font-semibold">
-        <span className="text-[#1a7f37]">+{added} 新增</span>
-        <span className="text-[#cf222e]">-{removed} 删除</span>
-        <span className="text-muted-foreground">与已保存版本对比</span>
-      </div>
+      {!compact && (
+        <div className="flex shrink-0 items-center gap-3 border-b border-border bg-surface-subtle px-4 py-2 text-[11px] font-semibold">
+          <span className="text-[#1a7f37]">+{added} 新增</span>
+          <span className="text-[#cf222e]">-{removed} 删除</span>
+          <span className="text-muted-foreground">与已保存版本对比</span>
+        </div>
+      )}
       <div className="min-h-0 flex-1 overflow-auto font-mono text-[11px] leading-5">
         {lines.map((line, index) => (
           <div
