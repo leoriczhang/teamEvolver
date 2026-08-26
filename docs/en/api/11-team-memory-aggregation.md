@@ -41,6 +41,7 @@ List the aggregatable Users under an Account (the team service user is excluded)
 
 | Field | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `endpoint` | string | No | OpenViking HTTP(S) endpoint; defaults to `sharing.viking_endpoint` |
 | `account_id` | string | No | OpenViking Account ID; defaults to `sharing.viking_account` when empty |
 | `admin_key` | string | Yes | OpenViking Admin Key; scoped to this request, never persisted or returned |
 
@@ -48,6 +49,7 @@ List the aggregatable Users under an Account (the team service user is excluded)
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `endpoint` | string | Normalized OpenViking endpoint actually used |
 | `account_id` | string | The account actually used |
 | `users` | array[string] | Aggregatable user_id list |
 
@@ -83,6 +85,7 @@ Start a background aggregation task; returns 202 with the initial Run object imm
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
+| `endpoint` | string | No | OpenViking HTTP(S) endpoint for this run; defaults to `sharing.viking_endpoint` |
 | `account_id` | string | No | Target account; defaults to `sharing.viking_account` |
 | `admin_key` | string | Yes | OpenViking Admin Key; retained only while the background task executes and excluded from the Run object |
 | `target_uri` | string | No | Final output URI for this run; must be under `viking://resources/<path>`; defaults to the configured output root |
@@ -115,6 +118,7 @@ Query a task's live progress (group-level status).
 | Field | Type | Description |
 |-------|------|-------------|
 | `task_id` | string | Task ID |
+| `endpoint` | string | OpenViking endpoint actually used by this run |
 | `account_id` | string | Target account |
 | `target_uri` | string | Normalized final output URI for this run |
 | `status` | string | `pending`, `running`, `completed`, `failed` |
@@ -221,13 +225,14 @@ The response contains every `GET /api/aggregation/settings` field plus `"ok": tr
 curl -X POST \
   -H "Content-Type: application/json" \
   "http://localhost:52010/api/aggregation/users" \
-  -d '{"account_id":"default","admin_key":"<openviking-admin-key>"}'
+  -d '{"endpoint":"https://openviking.example.com","account_id":"default","admin_key":"<openviking-admin-key>"}'
 ```
 
 Response:
 
 ```json
 {
+  "endpoint": "https://openviking.example.com",
   "account_id": "default",
   "users": ["alice", "bob", "chenghan", "zhangpengkun"]
 }
@@ -239,7 +244,7 @@ Response:
 curl -X POST \
   -H "Content-Type: application/json" \
   "http://localhost:52010/api/aggregation/run" \
-  -d '{"account_id":"default","admin_key":"<openviking-admin-key>","target_uri":"viking://resources/engineering-memory","user_ids":["chenghan","zhangpengkun"],"mode":"incremental"}'
+  -d '{"endpoint":"https://openviking.example.com","account_id":"default","admin_key":"<openviking-admin-key>","target_uri":"viking://resources/engineering-memory","user_ids":["chenghan","zhangpengkun"],"mode":"incremental"}'
 ```
 
 Response (202):
@@ -247,6 +252,7 @@ Response (202):
 ```json
 {
   "task_id": "agg_r4nd0m-capability-token",
+  "endpoint": "https://openviking.example.com",
   "account_id": "default",
   "target_uri": "viking://resources/engineering-memory",
   "status": "running",
@@ -269,6 +275,7 @@ Response (completed):
 ```json
 {
   "task_id": "agg_r4nd0m-capability-token",
+  "endpoint": "https://openviking.example.com",
   "account_id": "default",
   "target_uri": "viking://resources/engineering-memory",
   "status": "completed",
@@ -309,7 +316,7 @@ curl -X PUT -b "teamEvolver_console_session=<token>" \
 curl -X POST \
   -H "Content-Type: application/json" \
   "http://localhost:52010/api/aggregation/run" \
-  -d '{"account_id":"default","admin_key":"<openviking-admin-key>","target_uri":"viking://resources/engineering-memory","user_ids":["alice","bob"]}'
+  -d '{"endpoint":"https://openviking.example.com","account_id":"default","admin_key":"<openviking-admin-key>","target_uri":"viking://resources/engineering-memory","user_ids":["alice","bob"]}'
 ```
 
 ### Inspect and change the default output directory
@@ -335,6 +342,9 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 | 400 | `aggregation users body must be an object` | User-enumeration body is not a JSON object |
 | 400 | `aggregation run body must be an object` | Run body is not a JSON object |
 | 400 | `admin_key is required` | No valid OpenViking Admin Key was supplied |
+| 400 | `endpoint must be a string` | `endpoint` is not a string |
+| 400 | `endpoint is required` | The request omitted the endpoint and no default endpoint is configured |
+| 400 | `endpoint must be a valid HTTP(S) URL` | The endpoint scheme or URL structure is invalid |
 | 400 | `target_uri must be a string` | `target_uri` is not a string |
 | 400 | `target_uri must be a valid path under viking://resources/<path>` | URI is invalid, targets the resources root, or leaves the shared resources namespace |
 | 400 | (upstream message) | OpenViking is unreachable or the Admin Key is unauthorized |
@@ -356,7 +366,7 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 | `phase1_concurrency` | 6 | Phase 1 concurrency |
 | `merge_fan_in` | 12 | Phase 2 tree-reduce fan-in width (2–15) |
 | `compile_runtime_timeout_seconds` | 3000 | Per-compile runtime timeout |
-| `state_dir` | empty (default `~/.teamEvolver/aggregation`) | Storage dir for incremental state and Skill content; state is isolated by Account and target URI |
+| `state_dir` | empty (default `~/.teamEvolver/aggregation`) | Storage dir for incremental state and Skill content; state is isolated by endpoint, Account, and target URI |
 
 Config is registered in three places: `teamEvolver/config_store/defaults.py`, `teamEvolver/config_store/bridge.py`, `teamEvolver/config.py`.
 
@@ -369,6 +379,7 @@ Config is registered in three places: `teamEvolver/config_store/defaults.py`, `t
 ### Identity and permissions
 
 - `admin_key` is required for every user-enumeration and aggregation-run request and exists only for the request/background-worker lifetime. It is never persisted or returned.
+- `endpoint` can be overridden per request and is not persisted. It must be an HTTP(S) URL without user information, query parameters, or fragments.
 - Aggregation does not read a fallback credential from persisted configuration.
 - Phase 1 uses the Admin Key with the target user identity to read each user's Memory.
 - `task_id` is a high-entropy random value. Callers without a TeamEvolver identity use it to query one task; listing all tasks remains restricted to console administrators.

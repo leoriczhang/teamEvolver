@@ -19,7 +19,7 @@ Team Memory uses an account-shared Resources namespace rather than one user's pr
 
 The console entry **Evolution Pipeline → Team Memory Evolution** uses `MemoryAggregationService` and `ov compile`:
 
-1. An administrator submits an optional OpenViking Account ID and a required Admin Key.
+1. An administrator submits an optional OpenViking endpoint and Account ID plus a required Admin Key.
 2. The service enumerates users with the request-scoped Admin Key and excludes the team service user; the Key is not persisted.
 3. The administrator selects users and chooses incremental or full mode.
 4. Phase 1 reads each user's Memory with the Admin Key and target user identity, then concurrently creates per-user staging output.

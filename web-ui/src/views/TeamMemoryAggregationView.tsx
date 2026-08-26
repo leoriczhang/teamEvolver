@@ -21,6 +21,7 @@ type AggregationGroup = {
 type AggregationRun = {
   task_id: string;
   account_id: string;
+  endpoint: string;
   target_uri: string;
   status: "pending" | "running" | "completed" | "failed";
   started_at?: number;
@@ -56,6 +57,7 @@ export default function TeamMemoryAggregationView({
   active: boolean;
   user?: UserProfile | null;
 }) {
+  const [endpoint, setEndpoint] = useState("");
   const [accountId, setAccountId] = useState("");
   const [adminKey, setAdminKey] = useState("");
   const [mode, setMode] = useState<"incremental" | "full">("incremental");
@@ -214,6 +216,7 @@ export default function TeamMemoryAggregationView({
         if (runs.length > 0) {
           const latest = runs[0];
           setRun(latest);
+          if (latest.endpoint) setEndpoint(latest.endpoint);
           if (latest.account_id) setAccountId((prev) => prev || latest.account_id);
           if (latest.target_uri) setTargetUri(latest.target_uri);
           if (latest.status === "running" || latest.status === "pending") {
@@ -234,6 +237,7 @@ export default function TeamMemoryAggregationView({
   }
 
   async function listUsers() {
+    const requestedEndpoint = endpoint.trim();
     const account = accountId.trim();
     const credential = adminKey.trim();
     if (!credential) {
@@ -242,12 +246,17 @@ export default function TeamMemoryAggregationView({
     }
     setListing(true);
     try {
-      const data = await api<{ account_id: string; users: string[] }>(
+      const data = await api<{
+        endpoint: string;
+        account_id: string;
+        users: string[];
+      }>(
         "/api/aggregation/users",
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            endpoint: requestedEndpoint || undefined,
             account_id: account || undefined,
             admin_key: credential,
           }),
@@ -256,6 +265,7 @@ export default function TeamMemoryAggregationView({
       const list = data.users || [];
       setUsers(list);
       setSelected(new Set(list)); // default: all selected
+      if (!requestedEndpoint && data.endpoint) setEndpoint(data.endpoint);
       if (!account && data.account_id) setAccountId(data.account_id);
       toastOk("已列出用户", `${list.length} 个可聚合用户`);
     } catch (e: any) {
@@ -290,6 +300,7 @@ export default function TeamMemoryAggregationView({
   }
 
   async function confirmAggregate() {
+    const requestedEndpoint = endpoint.trim();
     const account = accountId.trim();
     const credential = adminKey.trim();
     const userIds = Array.from(selected);
@@ -312,6 +323,7 @@ export default function TeamMemoryAggregationView({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          endpoint: requestedEndpoint || undefined,
           account_id: account || undefined,
           admin_key: credential,
           mode,
@@ -365,6 +377,19 @@ export default function TeamMemoryAggregationView({
 
           {/* Step 1: account + list users */}
           <div className="flex flex-wrap items-end gap-3">
+            <label className="flex min-w-[320px] flex-1 flex-col gap-1 text-[12px] font-[700]">
+              OpenViking Endpoint（可选）
+              <Input
+                value={endpoint}
+                disabled={running}
+                onChange={(e) => {
+                  setEndpoint(e.target.value);
+                  clearUserSelection();
+                }}
+                placeholder="留空则使用系统默认 Endpoint"
+                className="font-mono"
+              />
+            </label>
             <label className="flex flex-col gap-1 text-[12px] font-[700]">
               OpenViking Account ID（可选）
               <Input
@@ -585,6 +610,8 @@ export default function TeamMemoryAggregationView({
               </div>
             )}
             <div className="mb-2 break-all font-mono text-[11px] text-muted-foreground">
+              OpenViking：{run.endpoint}
+              <br />
               输出：{run.target_uri}
             </div>
             <div className="overflow-hidden rounded-md border border-border">

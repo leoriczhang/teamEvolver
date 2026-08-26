@@ -181,7 +181,7 @@ DreamCycle memory maintenance engine configuration. DreamCycle is teamEvolver's 
 
 ### aggregation Section
 
-Cross-user team-Memory aggregation configuration. Each request supplies an optional Account ID and a required OpenViking Admin Key. The Admin Key is not persisted; the pipeline consolidates Memory into account-shared Resources through `ov compile`.
+Cross-user team-Memory aggregation configuration. Each request may override the OpenViking endpoint and Account ID and must supply an Admin Key. The Admin Key is not persisted; the pipeline consolidates Memory into account-shared Resources through the OpenViking HTTP compile interface.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|

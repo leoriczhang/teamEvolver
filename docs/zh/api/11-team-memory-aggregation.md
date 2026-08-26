@@ -40,6 +40,7 @@
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
+| `endpoint` | string | 否 | OpenViking HTTP(S) Endpoint；留空则使用 `sharing.viking_endpoint` |
 | `account_id` | string | 否 | OpenViking Account ID；留空则使用 `sharing.viking_account` |
 | `admin_key` | string | 是 | OpenViking Admin Key；仅用于本次请求，不持久化、不返回 |
 
@@ -47,6 +48,7 @@
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
+| `endpoint` | string | 规范化后的实际 OpenViking Endpoint |
 | `account_id` | string | 实际使用的 account |
 | `users` | array[string] | 可聚合的 user_id 列表 |
 
@@ -82,6 +84,7 @@
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
+| `endpoint` | string | 否 | 本次任务使用的 OpenViking HTTP(S) Endpoint；留空则使用 `sharing.viking_endpoint` |
 | `account_id` | string | 否 | 目标 account；留空则使用 `sharing.viking_account` |
 | `admin_key` | string | 是 | OpenViking Admin Key；仅在后台任务执行期间保留，不进入 Run 对象 |
 | `target_uri` | string | 否 | 本次任务的最终输出 URI，必须位于 `viking://resources/<path>`；不传则使用全局默认目录 |
@@ -114,6 +117,7 @@
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `task_id` | string | 任务 ID |
+| `endpoint` | string | 本次任务实际使用的 OpenViking Endpoint |
 | `account_id` | string | 目标 account |
 | `target_uri` | string | 本次任务规范化后的最终输出 URI |
 | `status` | string | `pending`、`running`、`completed`、`failed` |
@@ -220,13 +224,14 @@
 curl -X POST \
   -H "Content-Type: application/json" \
   "http://localhost:52010/api/aggregation/users" \
-  -d '{"account_id":"default","admin_key":"<openviking-admin-key>"}'
+  -d '{"endpoint":"https://openviking.example.com","account_id":"default","admin_key":"<openviking-admin-key>"}'
 ```
 
 响应示例：
 
 ```json
 {
+  "endpoint": "https://openviking.example.com",
   "account_id": "default",
   "users": ["alice", "bob", "chenghan", "zhangpengkun"]
 }
@@ -238,7 +243,7 @@ curl -X POST \
 curl -X POST \
   -H "Content-Type: application/json" \
   "http://localhost:52010/api/aggregation/run" \
-  -d '{"account_id":"default","admin_key":"<openviking-admin-key>","target_uri":"viking://resources/engineering-memory","user_ids":["chenghan","zhangpengkun"],"mode":"incremental"}'
+  -d '{"endpoint":"https://openviking.example.com","account_id":"default","admin_key":"<openviking-admin-key>","target_uri":"viking://resources/engineering-memory","user_ids":["chenghan","zhangpengkun"],"mode":"incremental"}'
 ```
 
 响应示例（202）：
@@ -246,6 +251,7 @@ curl -X POST \
 ```json
 {
   "task_id": "agg_r4nd0m-capability-token",
+  "endpoint": "https://openviking.example.com",
   "account_id": "default",
   "target_uri": "viking://resources/engineering-memory",
   "status": "running",
@@ -268,6 +274,7 @@ curl \
 ```json
 {
   "task_id": "agg_r4nd0m-capability-token",
+  "endpoint": "https://openviking.example.com",
   "account_id": "default",
   "target_uri": "viking://resources/engineering-memory",
   "status": "completed",
@@ -308,7 +315,7 @@ curl -X PUT -b "teamEvolver_console_session=<token>" \
 curl -X POST \
   -H "Content-Type: application/json" \
   "http://localhost:52010/api/aggregation/run" \
-  -d '{"account_id":"default","admin_key":"<openviking-admin-key>","target_uri":"viking://resources/engineering-memory","user_ids":["alice","bob"]}'
+  -d '{"endpoint":"https://openviking.example.com","account_id":"default","admin_key":"<openviking-admin-key>","target_uri":"viking://resources/engineering-memory","user_ids":["alice","bob"]}'
 ```
 
 ### 查看并修改默认输出目录
@@ -334,6 +341,9 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 | 400 | `aggregation users body must be an object` | 用户枚举请求体不是 JSON object |
 | 400 | `aggregation run body must be an object` | 运行请求体不是 JSON object |
 | 400 | `admin_key is required` | 未提供有效的 OpenViking Admin Key |
+| 400 | `endpoint must be a string` | `endpoint` 不是字符串 |
+| 400 | `endpoint is required` | 请求未传 Endpoint，且系统未配置默认 Endpoint |
+| 400 | `endpoint must be a valid HTTP(S) URL` | Endpoint 协议或 URL 结构非法 |
 | 400 | `target_uri must be a string` | `target_uri` 不是字符串 |
 | 400 | `target_uri must be a valid path under viking://resources/<path>` | URI 非法、指向资源根或不在共享资源命名空间 |
 | 400 | （上游错误信息） | OpenViking 不可达或 Admin Key 无权访问 |
@@ -355,7 +365,7 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 | `phase1_concurrency` | 6 | Phase 1 并发度 |
 | `merge_fan_in` | 12 | Phase 2 tree-reduce 扇入宽度（2–15） |
 | `compile_runtime_timeout_seconds` | 3000 | 单次 compile 运行超时 |
-| `state_dir` | 空（默认 `~/.teamEvolver/aggregation`） | 增量状态与 Skill 内容存储目录；状态按 Account 与目标 URI 隔离 |
+| `state_dir` | 空（默认 `~/.teamEvolver/aggregation`） | 增量状态与 Skill 内容存储目录；状态按 Endpoint、Account 与目标 URI 隔离 |
 
 配置三处登记：`teamEvolver/config_store/defaults.py`、`teamEvolver/config_store/bridge.py`、`teamEvolver/config.py`。
 
@@ -368,6 +378,7 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 ### 身份与权限
 
 - `admin_key` 是每次用户枚举和聚合运行的必填输入，只在请求及后台 worker 生命周期内使用；服务端不持久化，也不通过任何响应返回。
+- `endpoint` 可按请求覆盖且不持久化，只接受不含用户信息、查询参数或片段的 HTTP(S) URL。
 - 聚合不会从持久化配置读取备用凭据。
 - Phase 1 使用 Admin Key 和目标用户身份读取各用户记忆。
 - `task_id` 使用高熵随机值；无 TeamEvolver 身份的调用方凭该 ID 查询单个任务。任务列表仍只对控制台管理员开放。

@@ -19,7 +19,7 @@ Memory 是可检索的长期事实、背景、偏好与团队共识。它为 Age
 
 当前控制台中的「进化链路 → 团队 Memory 自进化」使用 `MemoryAggregationService` 和 `ov compile`：
 
-1. 管理员提交可选的 OpenViking Account ID 和必填的 Admin Key。
+1. 管理员提交可选的 OpenViking Endpoint、Account ID 和必填的 Admin Key。
 2. 服务端使用本次请求的 Admin Key 枚举用户，排除 team 服务用户；Key 不持久化。
 3. 管理员全选、反选或逐个选择参与用户，并选择增量或全量模式。
 4. Phase 1 使用 Admin Key 和目标用户身份读取每个用户的 Memory，并并发生成 per-user staging。

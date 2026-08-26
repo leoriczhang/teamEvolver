@@ -107,7 +107,10 @@ class CompileClient:
         }
 
     def _client(self) -> httpx.AsyncClient:
-        return httpx.AsyncClient(timeout=max(30.0, self.timeout_seconds + 30.0))
+        return httpx.AsyncClient(
+            timeout=max(30.0, self.timeout_seconds + 30.0),
+            follow_redirects=False,
+        )
 
     async def install_skill(
         self,

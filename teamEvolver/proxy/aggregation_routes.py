@@ -40,10 +40,10 @@ class AggregationMixin:
             self._aggregation_service_instance = service
         return service
 
-    def _aggregation_request_credentials(
+    def _aggregation_request_context(
         self,
         body: dict,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, str]:
         account_id = str(
             body.get("account_id")
             or getattr(self.config, "sharing_viking_account", "")
@@ -52,7 +52,14 @@ class AggregationMixin:
         raw_admin_key = body.get("admin_key")
         if not isinstance(raw_admin_key, str) or not raw_admin_key.strip():
             raise HTTPException(status_code=400, detail="admin_key is required")
-        return account_id, raw_admin_key.strip()
+        raw_endpoint = body.get("endpoint")
+        if raw_endpoint is not None and not isinstance(raw_endpoint, str):
+            raise HTTPException(status_code=400, detail="endpoint must be a string")
+        try:
+            endpoint = self._aggregation_service().resolve_endpoint(raw_endpoint)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return account_id, raw_admin_key.strip(), endpoint
 
     @staticmethod
     def _require_admin(request: Request) -> None:
@@ -95,16 +102,23 @@ class AggregationMixin:
                     status_code=400,
                     detail="aggregation users body must be an object",
                 )
-            account_id, admin_key = self._aggregation_request_credentials(body)
+            account_id, admin_key, endpoint = self._aggregation_request_context(body)
             service = self._aggregation_service()
             try:
                 users = await service.list_account_users(
                     account_id,
                     admin_key=admin_key,
+                    endpoint=endpoint,
                 )
             except Exception as exc:  # noqa: BLE001 - surface as 400 for the console
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return JSONResponse({"account_id": account_id, "users": users})
+            return JSONResponse(
+                {
+                    "endpoint": endpoint,
+                    "account_id": account_id,
+                    "users": users,
+                }
+            )
 
         @app.get("/api/aggregation/runs")
         async def api_aggregation_runs(request: Request):
@@ -123,7 +137,7 @@ class AggregationMixin:
                     status_code=400,
                     detail="aggregation run body must be an object",
                 )
-            account_id, admin_key = self._aggregation_request_credentials(body)
+            account_id, admin_key, endpoint = self._aggregation_request_context(body)
             kinds = body.get("kinds")
             kinds = [str(k) for k in kinds] if isinstance(kinds, list) else None
             user_ids = body.get("user_ids")
@@ -140,7 +154,11 @@ class AggregationMixin:
 
             service = self._aggregation_service()
             try:
-                run = service.new_run(account_id, target_uri=target_uri)
+                run = service.new_run(
+                    account_id,
+                    endpoint=endpoint,
+                    target_uri=target_uri,
+                )
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
 

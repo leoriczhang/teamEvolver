@@ -54,6 +54,7 @@ class GroupResult:
 class AggregationRun:
     task_id: str
     account_id: str
+    endpoint: str
     target_uri: str
     status: str = "pending"  # pending | running | completed | failed
     started_at: float = field(default_factory=time.time)
@@ -65,6 +66,7 @@ class AggregationRun:
         return {
             "task_id": self.task_id,
             "account_id": self.account_id,
+            "endpoint": self.endpoint,
             "target_uri": self.target_uri,
             "status": self.status,
             "started_at": self.started_at,
@@ -96,6 +98,44 @@ class MemoryAggregationService:
 
     def _endpoint(self) -> str:
         return str(getattr(self.config, "sharing_viking_endpoint", "") or "").rstrip("/")
+
+    @staticmethod
+    def normalize_endpoint(endpoint: str) -> str:
+        """Validate and normalize an OpenViking HTTP endpoint."""
+        value = str(endpoint or "").strip().rstrip("/")
+        parsed = urlsplit(value)
+        try:
+            parsed.port
+        except ValueError as exc:
+            raise ValueError("endpoint must be a valid HTTP(S) URL") from exc
+        decoded_path = unquote(parsed.path)
+        if (
+            len(value) > 2048
+            or parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or any(char.isspace() or ord(char) < 32 for char in value)
+            or "\\" in decoded_path
+            or any(
+                segment in {".", ".."}
+                or any(char.isspace() or ord(char) < 32 for char in segment)
+                for segment in decoded_path.split("/")
+            )
+        ):
+            raise ValueError("endpoint must be a valid HTTP(S) URL")
+        return value
+
+    def resolve_endpoint(self, endpoint: Optional[str] = None) -> str:
+        """Resolve a run endpoint, falling back to the configured deployment."""
+        requested = str(endpoint or "").strip()
+        if not requested:
+            requested = self._endpoint()
+        if not requested:
+            raise ValueError("endpoint is required")
+        return self.normalize_endpoint(requested)
 
     def _team_user(self) -> str:
         return str(getattr(self.config, "sharing_viking_user", "") or "team")
@@ -190,6 +230,7 @@ class MemoryAggregationService:
         self,
         account_id: str,
         target_uri: Optional[str] = None,
+        endpoint: Optional[str] = None,
     ) -> Path:
         base = str(getattr(self.config, "aggregation_state_dir", "") or "").strip()
         root = Path(base).expanduser() if base else Path.home() / ".teamEvolver" / "aggregation"
@@ -197,11 +238,19 @@ class MemoryAggregationService:
             getattr(self.config, "sharing_viking_account", "") or "default"
         )
         resolved_target = self.resolve_target_uri(target_uri)
+        resolved_endpoint = self.resolve_endpoint(endpoint)
+        configured_endpoint = (
+            self.normalize_endpoint(self._endpoint()) if self._endpoint() else ""
+        )
         legacy_target = "viking://resources/shared-knowledge"
         safe_account = re.sub(r"[^A-Za-z0-9._-]+", "-", account_id).strip("-")
-        if account_id == configured_account and resolved_target == legacy_target:
+        if (
+            account_id == configured_account
+            and resolved_target == legacy_target
+            and resolved_endpoint == configured_endpoint
+        ):
             return root / f"state-{safe_account or 'default'}.json"
-        identity = f"{account_id}\0{resolved_target}"
+        identity = f"{resolved_endpoint}\0{account_id}\0{resolved_target}"
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:10]
         return root / f"state-{safe_account or 'account'}-{digest}.json"
 
@@ -255,11 +304,13 @@ class MemoryAggregationService:
         account_id: str,
         *,
         target_uri: Optional[str] = None,
+        endpoint: Optional[str] = None,
     ) -> AggregationRun:
         task_id = f"agg_{secrets.token_urlsafe(24)}"
         run = AggregationRun(
             task_id=task_id,
             account_id=account_id,
+            endpoint=self.resolve_endpoint(endpoint),
             target_uri=self.resolve_target_uri(target_uri),
         )
         with self._lock:
@@ -279,10 +330,11 @@ class MemoryAggregationService:
         account_id: str,
         *,
         admin_key: str,
+        endpoint: Optional[str] = None,
     ) -> list[str]:
         """List aggregatable users under an account with a request credential."""
         builder = AccountSourceBuilder(
-            endpoint=self._endpoint(),
+            endpoint=self.resolve_endpoint(endpoint),
             admin_key=str(admin_key or "").strip(),
             account_id=account_id,
             shared_knowledge_prefix=self._prefix(),
@@ -338,7 +390,7 @@ class MemoryAggregationService:
     ) -> None:
         import asyncio
 
-        endpoint = self._endpoint()
+        endpoint = run.endpoint
         agent_id = str(getattr(self.config, "sharing_viking_agent", "") or "team-skill-evolver")
         builder = AccountSourceBuilder(
             endpoint=endpoint,
@@ -365,7 +417,7 @@ class MemoryAggregationService:
         skill_fp = skill_fingerprint(skill_body)
         kinds = self._kinds(kinds)
         state = AggregationState.load(
-            self._state_path(run.account_id, run.target_uri),
+            self._state_path(run.account_id, run.target_uri, run.endpoint),
             run.account_id,
         )
         # A skill change forces every user to recompile (rule 3).
