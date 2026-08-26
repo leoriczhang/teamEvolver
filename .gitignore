@@ -41,3 +41,8 @@ docs/.vitepress/dist/
 docs/design/
 docs/prd/
 docs/research/
+
+# Local runtime
+openviking/
+CLAUDE.local.md
+STATE.md
