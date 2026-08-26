@@ -131,13 +131,13 @@ export default function HealthView({
       name: "对象存储",
       ok: !!storage?.reachable,
       detail: storage
-        ? `OpenViking · ${storage.deployment === "local" ? "本地自建" : "云端"} · ${storage.reachable ? "可达" : "不可达"}`
+        ? `OpenViking · ${storage.deployment === "local" ? "自建" : "火山云"} · ${storage.reachable ? "可达" : "不可达"}`
         : "无法读取 /storage/status",
       action: storage?.reachable
         ? undefined
         : storage?.deployment === "local"
-          ? "确认本地 openviking-server 已在 http://localhost:1933 运行"
-          : "检查云端 OpenViking Key 与网络连通",
+          ? "确认自建 openviking-server 已启动且网络可达（Endpoint 覆盖地址是否正确）"
+          : "检查火山云 OpenViking Key 与网络连通",
     },
     {
       name: "进化模型",
@@ -286,7 +286,7 @@ export default function HealthView({
         <div className="grid gap-3 p-4 md:grid-cols-2">
           <Info
             label="存储后端"
-            value={`OpenViking · ${storage?.deployment === "local" ? "本地自建" : "云端"}`}
+            value={`OpenViking · ${storage?.deployment === "local" ? "自建" : "火山云"}`}
             state={storage?.reachable ? "on" : "err"}
           />
           <Info label="存储命名空间" value={storage?.namespace || "未返回"} />
@@ -385,13 +385,13 @@ function DeploymentPanel({
   const options: Array<{ key: VikingDeployment; title: string; desc: string }> = [
     {
       key: "cloud",
-      title: "云上 OpenViking",
-      desc: "使用火山托管的 OpenViking 服务，适合团队共享。",
+      title: "火山云 OpenViking",
+      desc: "使用火山引擎托管的 OpenViking 服务，开箱即用。",
     },
     {
       key: "local",
-      title: "本地 OpenViking",
-      desc: "连接本机自建的 openviking-server（默认 http://localhost:1933）。",
+      title: "自建 OpenViking",
+      desc: "连接自建的 openviking-server（本机或远程机器，默认 localhost:1933，可在下方 Endpoint 覆盖中填写远程地址）。",
     },
   ];
 
@@ -428,7 +428,7 @@ function DeploymentPanel({
 
         <div>
           <div className="mb-1.5 text-xs font-semibold text-muted-foreground">
-            Endpoint 覆盖（可选，留空使用所选部署的默认地址）
+            Endpoint 覆盖（自建远程地址填这里，如 http://10.37.243.72:1933；留空使用默认地址）
           </div>
           <Input
             value={override}
