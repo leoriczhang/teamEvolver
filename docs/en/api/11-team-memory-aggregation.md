@@ -6,7 +6,7 @@ The Team Memory Aggregation API (Interface 1) aggregates the personal memories o
 
 Aggregation uses a two-phase, tree-reduce model. It requires no OpenViking source changes:
 
-- **Phase 1 (per-user staging):** for each selected User, compile uses the OpenViking Admin Key supplied in the request and reads that user's Memory. Output goes to a work root beside the final directory, for example `viking://resources/shared-knowledge-staging/<uid>`. The aggregation Skill is installed into that user's own Skill space first so the same identity can read it.
+- **Phase 1 (per-user staging):** for each selected User, compile uses the resolved OpenViking Root/Admin credential and reads that user's Memory. Output goes to a work root beside the final directory, for example `viking://resources/shared-knowledge-staging/<uid>`. The aggregation Skill is installed into that user's own Skill space first so the same identity can read it.
 - **Phase 2 (tree-reduce merge):** as the team user, all staging roots are merged in bounded batches of `merge_fan_in` (default 12, ≤15) across cascading levels, down to the final `viking://resources/shared-knowledge/` root. Tree-reduce keeps every compile under the 16-source hard limit, supporting 100+ users.
 
 Additional behavior: concurrent Phase 1 (`phase1_concurrency`), content-fingerprint incremental skipping (unchanged users reuse prior staging), and failure isolation with resumable reruns. Staging and `_merge` paths stay under the work root and never pollute the final team-Memory root or its L0/L1 summaries.
@@ -27,7 +27,7 @@ The teamEvolver host does not need the `ov` CLI, access to
 
 ## 2. Endpoints and Parameters
 
-The reusable execution surface, `POST /api/aggregation/users`, `POST /api/aggregation/run`, and `GET /api/aggregation/status/{task_id}`, does not depend on TeamEvolver Cookies, users, or roles. User enumeration and aggregation runs use the OpenViking Admin Key in the request body. The Key is not persisted and never appears in task state or responses. `runs`, `settings`, and Skill editing remain console-management endpoints protected by TeamEvolver administrator authentication.
+The reusable execution surface, `POST /api/aggregation/users`, `POST /api/aggregation/run`, and `GET /api/aggregation/status/{task_id}`, does not depend on TeamEvolver Cookies, users, or roles. External callers provide exactly one request-scoped credential: `root_key` for Trusted mode or `admin_key` for API-key mode. Credentials are never persisted or included in task state or responses. The TeamEvolver console omits both fields and, for an authenticated administrator, falls back to the configured Trusted Root Key. `runs`, `settings`, and Skill editing remain console-management endpoints protected by TeamEvolver administrator authentication.
 
 ---
 
@@ -35,7 +35,7 @@ The reusable execution surface, `POST /api/aggregation/users`, `POST /api/aggreg
 
 List the aggregatable Users under an Account (the team service user is excluded). Powers the console flow "enter Account → list users → select".
 
-**Auth:** No TeamEvolver authentication; the upstream validates the OpenViking Admin Key in the request body
+**Auth:** External callers need no TeamEvolver identity and provide exactly one of `root_key` or `admin_key`; console administrators may omit both and use the configured Root Key
 
 **Request Body:**
 
@@ -43,7 +43,8 @@ List the aggregatable Users under an Account (the team service user is excluded)
 |-----------|------|----------|-------------|
 | `endpoint` | string | No | OpenViking HTTP(S) endpoint; defaults to `sharing.viking_endpoint` |
 | `account_id` | string | No | OpenViking Account ID; defaults to `sharing.viking_account` when empty |
-| `admin_key` | string | Yes | OpenViking Admin Key; scoped to this request, never persisted or returned |
+| `root_key` | string | One of two | Root Key for Trusted mode |
+| `admin_key` | string | One of two | Admin Key for non-Trusted/API-key mode |
 
 **Response fields:**
 
@@ -51,6 +52,7 @@ List the aggregatable Users under an Account (the team service user is excluded)
 |-------|------|-------------|
 | `endpoint` | string | Normalized OpenViking endpoint actually used |
 | `account_id` | string | The account actually used |
+| `auth_mode` | string | `trusted` or `api_key` |
 | `users` | array[string] | Aggregatable user_id list |
 
 Code entry: `teamEvolver/proxy/aggregation_routes.py` (`api_aggregation_users`)
@@ -79,7 +81,7 @@ Code entry: `teamEvolver/proxy/aggregation_routes.py` (`api_aggregation_runs`)
 
 Start a background aggregation task; returns 202 with the initial Run object immediately. The task runs in a worker thread; poll progress via the `status` endpoint.
 
-**Auth:** No TeamEvolver authentication; the upstream validates the OpenViking Admin Key in the request body
+**Auth:** External callers need no TeamEvolver identity and provide exactly one of `root_key` or `admin_key`; console administrators may omit both and use the configured Root Key
 
 **Request Body:**
 
@@ -87,7 +89,8 @@ Start a background aggregation task; returns 202 with the initial Run object imm
 |-------|------|----------|-------------|
 | `endpoint` | string | No | OpenViking HTTP(S) endpoint for this run; defaults to `sharing.viking_endpoint` |
 | `account_id` | string | No | Target account; defaults to `sharing.viking_account` |
-| `admin_key` | string | Yes | OpenViking Admin Key; retained only while the background task executes and excluded from the Run object |
+| `root_key` | string | One of two | Root Key for Trusted mode |
+| `admin_key` | string | One of two | Admin Key for non-Trusted/API-key mode |
 | `target_uri` | string | No | Final output URI for this run; must be under `viking://resources/<path>`; defaults to the configured output root |
 | `user_ids` | array[string] | No | Allowlist of users to aggregate; omit to aggregate all eligible users |
 | `kinds` | array[string] | No | Memory categories to aggregate; omit to use the default set |
@@ -95,7 +98,7 @@ Start a background aggregation task; returns 202 with the initial Run object imm
 
 **Response (202):** initial Run object (`status` is `pending`/`running`).
 
-`target_uri` is scoped to this run and does not mutate persisted settings. The service derives a separate sibling work root and incremental state for each target URI, so staging data and fingerprints are not reused across output locations. `admin_key` is excluded from the 202 response, task list, and status response.
+`target_uri` is scoped to this run and does not mutate persisted settings. Incremental state is isolated by endpoint, Account, authentication mode, and target URI. Neither credential appears in the 202 response, task list, or status response.
 
 Code entry: `teamEvolver/proxy/aggregation_routes.py` (`api_aggregation_run`)
 
@@ -120,6 +123,7 @@ Query a task's live progress (group-level status).
 | `task_id` | string | Task ID |
 | `endpoint` | string | OpenViking endpoint actually used by this run |
 | `account_id` | string | Target account |
+| `auth_mode` | string | `trusted` or `api_key` |
 | `target_uri` | string | Normalized final output URI for this run |
 | `status` | string | `pending`, `running`, `completed`, `failed` |
 | `started_at` | number | Start timestamp |
@@ -234,6 +238,7 @@ Response:
 {
   "endpoint": "https://openviking.example.com",
   "account_id": "default",
+  "auth_mode": "api_key",
   "users": ["alice", "bob", "chenghan", "zhangpengkun"]
 }
 ```
@@ -254,6 +259,7 @@ Response (202):
   "task_id": "agg_r4nd0m-capability-token",
   "endpoint": "https://openviking.example.com",
   "account_id": "default",
+  "auth_mode": "api_key",
   "target_uri": "viking://resources/engineering-memory",
   "status": "running",
   "started_at": 1756100000.0,
@@ -277,6 +283,7 @@ Response (completed):
   "task_id": "agg_r4nd0m-capability-token",
   "endpoint": "https://openviking.example.com",
   "account_id": "default",
+  "auth_mode": "api_key",
   "target_uri": "viking://resources/engineering-memory",
   "status": "completed",
   "groups": [
@@ -319,6 +326,22 @@ curl -X POST \
   -d '{"endpoint":"https://openviking.example.com","account_id":"default","admin_key":"<openviking-admin-key>","target_uri":"viking://resources/engineering-memory","user_ids":["alice","bob"]}'
 ```
 
+### Use a Trusted Root Key
+
+For an external call to a Trusted deployment, replace `admin_key` with
+`root_key`:
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  "http://localhost:52010/api/aggregation/run" \
+  -d '{"endpoint":"https://openviking.example.com","account_id":"default","root_key":"<openviking-root-key>","target_uri":"viking://resources/engineering-memory","user_ids":["alice","bob"]}'
+```
+
+Console requests omit both fields. After TeamEvolver administrator
+authentication, the server uses its configured Root Key and keeps Trusted mode
+as the default.
+
 ### Inspect and change the default output directory
 
 ```bash
@@ -341,7 +364,11 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 | 403 | `team memory aggregation requires an administrator` | A non-admin caller accessed a management endpoint |
 | 400 | `aggregation users body must be an object` | User-enumeration body is not a JSON object |
 | 400 | `aggregation run body must be an object` | Run body is not a JSON object |
-| 400 | `admin_key is required` | No valid OpenViking Admin Key was supplied |
+| 400 | `exactly one of root_key or admin_key is required` | An external request omitted its credential |
+| 400 | `root_key and admin_key are mutually exclusive` | Both credential types were supplied |
+| 400 | `root_key must be a string` | `root_key` has the wrong type |
+| 400 | `admin_key must be a string` | `admin_key` has the wrong type |
+| 400 | `trusted root key is not configured` | The console Trusted path has no configured Root Key |
 | 400 | `endpoint must be a string` | `endpoint` is not a string |
 | 400 | `endpoint is required` | The request omitted the endpoint and no default endpoint is configured |
 | 400 | `endpoint must be a valid HTTP(S) URL` | The endpoint scheme or URL structure is invalid |
@@ -378,10 +405,11 @@ Config is registered in three places: `teamEvolver/config_store/defaults.py`, `t
 
 ### Identity and permissions
 
-- `admin_key` is required for every user-enumeration and aggregation-run request and exists only for the request/background-worker lifetime. It is never persisted or returned.
+- External calls provide exactly one credential: `root_key` selects `trusted`; `admin_key` selects `api_key`. Neither credential is persisted or returned.
+- The console remains backward compatible: an administrator session may omit credentials and use `sharing.viking_team_api_key` as the Trusted Root Key.
 - `endpoint` can be overridden per request and is not persisted. It must be an HTTP(S) URL without user information, query parameters, or fragments.
-- Aggregation does not read a fallback credential from persisted configuration.
-- Phase 1 uses the Admin Key with the target user identity to read each user's Memory.
+- Phase 1 uses the selected credential with the target user identity to read each user's Memory.
+- Current OpenViking API-key mode ignores `X-OpenViking-User`, and a standard Admin role cannot read another user's private Memory. The `admin_key` branch therefore requires an OpenViking deployment that provides Admin cross-user delegation; otherwise the upstream returns a permission error.
 - `task_id` is a high-entropy random value. Callers without a TeamEvolver identity use it to query one task; listing all tasks remains restricted to console administrators.
 - Expose execution endpoints only over HTTPS or a trusted network so the Admin Key is protected in transit.
 - Final output is written to the run's `target_uri`, or to `viking://resources/<shared_knowledge_prefix>/` when omitted; intermediate artifacts stay in that target's sibling work root.

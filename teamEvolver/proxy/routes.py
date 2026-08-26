@@ -1722,12 +1722,17 @@ class RoutesMixin:
         @app.middleware("http")
         async def require_console_auth(request: Request, call_next):
             path = request.url.path
+            reusable_aggregation = _is_reusable_aggregation_path(path)
             requires_auth = (
                 path.startswith("/api/")
                 and not path.startswith("/api/auth/")
-                and not _is_reusable_aggregation_path(path)
+                and not reusable_aggregation
             )
-            if requires_auth:
+            if reusable_aggregation:
+                user = _session_user(request)
+                if user is not None:
+                    request.state.console_user = user
+            elif requires_auth:
                 if _users_empty():
                     return JSONResponse(status_code=401, content={"detail": "setup required", "needs_setup": True})
                 user = _session_user(request)

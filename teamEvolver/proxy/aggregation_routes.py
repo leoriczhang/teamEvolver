@@ -1,11 +1,11 @@
 """HTTP routes for cross-user memory aggregation (interface 1).
 
 The reusable execution endpoints do not depend on TeamEvolver sessions or
-roles. OpenViking access uses the request-scoped Admin Key supplied to the
-users/run endpoints. Management endpoints remain console-admin-only.
+roles. OpenViking access uses one request-scoped Root/Admin credential.
+Management endpoints remain console-admin-only.
 
 - ``POST /api/aggregation/run``       -> start a background aggregation task
-- ``POST /api/aggregation/users``     -> list users with an OpenViking Admin Key
+- ``POST /api/aggregation/users``     -> list users with an OpenViking credential
 - ``GET  /api/aggregation/status/{id}`` -> poll a task's per-category progress
 - ``GET  /api/aggregation/okf-skill`` -> read the default OKF Skill body
 - ``PUT  /api/aggregation/okf-skill`` -> (placeholder) persist an edited Skill
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import dataclass
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -28,6 +29,14 @@ from ..config_store import ConfigStore
 from .users_admin import _request_user
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _AggregationRequestContext:
+    endpoint: str
+    account_id: str
+    api_key: str
+    auth_mode: str
 
 
 class AggregationMixin:
@@ -42,16 +51,14 @@ class AggregationMixin:
 
     def _aggregation_request_context(
         self,
+        request: Request,
         body: dict,
-    ) -> tuple[str, str, str]:
+    ) -> _AggregationRequestContext:
         account_id = str(
             body.get("account_id")
             or getattr(self.config, "sharing_viking_account", "")
             or "default"
         ).strip()
-        raw_admin_key = body.get("admin_key")
-        if not isinstance(raw_admin_key, str) or not raw_admin_key.strip():
-            raise HTTPException(status_code=400, detail="admin_key is required")
         raw_endpoint = body.get("endpoint")
         if raw_endpoint is not None and not isinstance(raw_endpoint, str):
             raise HTTPException(status_code=400, detail="endpoint must be a string")
@@ -59,7 +66,52 @@ class AggregationMixin:
             endpoint = self._aggregation_service().resolve_endpoint(raw_endpoint)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return account_id, raw_admin_key.strip(), endpoint
+
+        raw_root_key = body.get("root_key")
+        raw_admin_key = body.get("admin_key")
+        if raw_root_key is not None and not isinstance(raw_root_key, str):
+            raise HTTPException(status_code=400, detail="root_key must be a string")
+        if raw_admin_key is not None and not isinstance(raw_admin_key, str):
+            raise HTTPException(status_code=400, detail="admin_key must be a string")
+        root_key = str(raw_root_key or "").strip()
+        admin_key = str(raw_admin_key or "").strip()
+        if root_key and admin_key:
+            raise HTTPException(
+                status_code=400,
+                detail="root_key and admin_key are mutually exclusive",
+            )
+
+        if root_key:
+            api_key = root_key
+            auth_mode = "trusted"
+        elif admin_key:
+            api_key = admin_key
+            auth_mode = "api_key"
+        else:
+            user = _request_user(request)
+            if str(user.get("role") or "") != "admin":
+                raise HTTPException(
+                    status_code=400,
+                    detail="exactly one of root_key or admin_key is required",
+                )
+            api_key = str(
+                getattr(self.config, "sharing_viking_team_api_key", "")
+                or getattr(self.config, "sharing_viking_api_key", "")
+                or ""
+            ).strip()
+            if not api_key:
+                raise HTTPException(
+                    status_code=400,
+                    detail="trusted root key is not configured",
+                )
+            auth_mode = "trusted"
+
+        return _AggregationRequestContext(
+            endpoint=endpoint,
+            account_id=account_id,
+            api_key=api_key,
+            auth_mode=auth_mode,
+        )
 
     @staticmethod
     def _require_admin(request: Request) -> None:
@@ -102,20 +154,21 @@ class AggregationMixin:
                     status_code=400,
                     detail="aggregation users body must be an object",
                 )
-            account_id, admin_key, endpoint = self._aggregation_request_context(body)
+            context = self._aggregation_request_context(request, body)
             service = self._aggregation_service()
             try:
                 users = await service.list_account_users(
-                    account_id,
-                    admin_key=admin_key,
-                    endpoint=endpoint,
+                    context.account_id,
+                    api_key=context.api_key,
+                    endpoint=context.endpoint,
                 )
             except Exception as exc:  # noqa: BLE001 - surface as 400 for the console
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return JSONResponse(
                 {
-                    "endpoint": endpoint,
-                    "account_id": account_id,
+                    "endpoint": context.endpoint,
+                    "account_id": context.account_id,
+                    "auth_mode": context.auth_mode,
                     "users": users,
                 }
             )
@@ -137,7 +190,7 @@ class AggregationMixin:
                     status_code=400,
                     detail="aggregation run body must be an object",
                 )
-            account_id, admin_key, endpoint = self._aggregation_request_context(body)
+            context = self._aggregation_request_context(request, body)
             kinds = body.get("kinds")
             kinds = [str(k) for k in kinds] if isinstance(kinds, list) else None
             user_ids = body.get("user_ids")
@@ -155,8 +208,9 @@ class AggregationMixin:
             service = self._aggregation_service()
             try:
                 run = service.new_run(
-                    account_id,
-                    endpoint=endpoint,
+                    context.account_id,
+                    endpoint=context.endpoint,
+                    auth_mode=context.auth_mode,
                     target_uri=target_uri,
                 )
             except ValueError as exc:
@@ -168,7 +222,7 @@ class AggregationMixin:
                     kinds=kinds,
                     full=full,
                     user_ids=user_ids,
-                    admin_key=admin_key,
+                    api_key=context.api_key,
                 )
 
             threading.Thread(target=_worker, daemon=True).start()

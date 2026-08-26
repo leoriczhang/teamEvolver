@@ -11,8 +11,8 @@ Design notes and rationale live in
 ``docs/design/cross-user-memory-aggregation.md`` (OpenViking repo carries the
 capability research). Key constraints honored here:
 
-- Cross-user reads use the request-scoped OpenViking Admin Key supplied by the
-  console administrator; the credential is not persisted in aggregation state.
+- Cross-user reads use a request-scoped OpenViking Root/Admin credential; the
+  credential is not persisted in aggregation state.
 - ``ov compile`` currently caps sources at 16 and outputs at 128, so work is
   batched per memory category rather than one giant task.
 - The compile memory target cannot be a bare ``.../memories`` root, which is

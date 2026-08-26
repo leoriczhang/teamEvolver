@@ -181,7 +181,7 @@ DreamCycle 记忆维护引擎配置。DreamCycle 是 teamEvolver 的自动化记
 
 ### aggregation 节
 
-跨 User 团队 Memory 聚合配置。OpenViking Endpoint 和 Account ID 可由每次请求覆盖，Admin Key 由请求必填且不持久化；链路通过 OpenViking HTTP compile 接口汇总到 Account 共享的 Resources 目录。
+跨 User 团队 Memory 聚合配置。控制台默认使用 `sharing` 中配置的 Endpoint、Account 和 Trusted Root Key；独立接口可覆盖 Endpoint、Account，并在 `root_key`（Trusted）与 `admin_key`（API-key）之间二选一。请求凭据不持久化。
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|

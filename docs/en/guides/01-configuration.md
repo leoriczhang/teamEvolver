@@ -181,7 +181,7 @@ DreamCycle memory maintenance engine configuration. DreamCycle is teamEvolver's 
 
 ### aggregation Section
 
-Cross-user team-Memory aggregation configuration. Each request may override the OpenViking endpoint and Account ID and must supply an Admin Key. The Admin Key is not persisted; the pipeline consolidates Memory into account-shared Resources through the OpenViking HTTP compile interface.
+Cross-user team-Memory aggregation configuration. The console defaults to the Endpoint, Account, and Trusted Root Key configured under `sharing`. Independent callers may override the Endpoint and Account and provide exactly one of `root_key` (Trusted) or `admin_key` (API-key). Request credentials are not persisted.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|

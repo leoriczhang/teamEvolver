@@ -1,7 +1,7 @@
 """Orchestration for cross-user memory aggregation.
 
-Pipeline (all steps below use the OpenViking Admin Key supplied for the
-current request):
+Pipeline (all steps below use the OpenViking Root/Admin credential resolved
+for the current request):
 
 1. Resolve account users via the Admin API.
 2. Expand each user + memory category into source URIs and plan compile
@@ -55,6 +55,7 @@ class AggregationRun:
     task_id: str
     account_id: str
     endpoint: str
+    auth_mode: str
     target_uri: str
     status: str = "pending"  # pending | running | completed | failed
     started_at: float = field(default_factory=time.time)
@@ -67,6 +68,7 @@ class AggregationRun:
             "task_id": self.task_id,
             "account_id": self.account_id,
             "endpoint": self.endpoint,
+            "auth_mode": self.auth_mode,
             "target_uri": self.target_uri,
             "status": self.status,
             "started_at": self.started_at,
@@ -231,6 +233,7 @@ class MemoryAggregationService:
         account_id: str,
         target_uri: Optional[str] = None,
         endpoint: Optional[str] = None,
+        auth_mode: str = "trusted",
     ) -> Path:
         base = str(getattr(self.config, "aggregation_state_dir", "") or "").strip()
         root = Path(base).expanduser() if base else Path.home() / ".teamEvolver" / "aggregation"
@@ -248,9 +251,12 @@ class MemoryAggregationService:
             account_id == configured_account
             and resolved_target == legacy_target
             and resolved_endpoint == configured_endpoint
+            and auth_mode == "trusted"
         ):
             return root / f"state-{safe_account or 'default'}.json"
-        identity = f"{resolved_endpoint}\0{account_id}\0{resolved_target}"
+        identity = (
+            f"{resolved_endpoint}\0{account_id}\0{resolved_target}\0{auth_mode}"
+        )
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:10]
         return root / f"state-{safe_account or 'account'}-{digest}.json"
 
@@ -305,12 +311,16 @@ class MemoryAggregationService:
         *,
         target_uri: Optional[str] = None,
         endpoint: Optional[str] = None,
+        auth_mode: str = "trusted",
     ) -> AggregationRun:
+        if auth_mode not in {"trusted", "api_key"}:
+            raise ValueError("auth_mode must be trusted or api_key")
         task_id = f"agg_{secrets.token_urlsafe(24)}"
         run = AggregationRun(
             task_id=task_id,
             account_id=account_id,
             endpoint=self.resolve_endpoint(endpoint),
+            auth_mode=auth_mode,
             target_uri=self.resolve_target_uri(target_uri),
         )
         with self._lock:
@@ -329,13 +339,13 @@ class MemoryAggregationService:
         self,
         account_id: str,
         *,
-        admin_key: str,
+        api_key: str,
         endpoint: Optional[str] = None,
     ) -> list[str]:
         """List aggregatable users under an account with a request credential."""
         builder = AccountSourceBuilder(
             endpoint=self.resolve_endpoint(endpoint),
-            admin_key=str(admin_key or "").strip(),
+            api_key=str(api_key or "").strip(),
             account_id=account_id,
             shared_knowledge_prefix=self._prefix(),
             max_users_per_batch=self._max_users_per_batch(),
@@ -350,20 +360,20 @@ class MemoryAggregationService:
         kinds: Optional[list[str]] = None,
         full: bool = False,
         user_ids: Optional[list[str]] = None,
-        admin_key: str,
+        api_key: str,
     ) -> None:
         """Execute the aggregation synchronously (call inside a worker thread)."""
         run.status = "running"
         try:
-            credential = str(admin_key or "").strip()
+            credential = str(api_key or "").strip()
             if not credential:
-                raise ValueError("admin_key is required")
+                raise ValueError("OpenViking API key is required")
             self._run_inner(
                 run,
                 kinds=kinds,
                 full=full,
                 user_ids=user_ids,
-                admin_key=credential,
+                api_key=credential,
             )
             run.status = "completed"
         except SourceExpansionError as exc:
@@ -386,7 +396,7 @@ class MemoryAggregationService:
         kinds,
         full: bool,
         user_ids=None,
-        admin_key: str,
+        api_key: str,
     ) -> None:
         import asyncio
 
@@ -394,7 +404,7 @@ class MemoryAggregationService:
         agent_id = str(getattr(self.config, "sharing_viking_agent", "") or "team-skill-evolver")
         builder = AccountSourceBuilder(
             endpoint=endpoint,
-            admin_key=admin_key,
+            api_key=api_key,
             account_id=run.account_id,
             shared_knowledge_prefix=run.target_uri.removeprefix(
                 "viking://resources/"
@@ -417,7 +427,12 @@ class MemoryAggregationService:
         skill_fp = skill_fingerprint(skill_body)
         kinds = self._kinds(kinds)
         state = AggregationState.load(
-            self._state_path(run.account_id, run.target_uri, run.endpoint),
+            self._state_path(
+                run.account_id,
+                run.target_uri,
+                run.endpoint,
+                run.auth_mode,
+            ),
             run.account_id,
         )
         # A skill change forces every user to recompile (rule 3).
@@ -430,7 +445,7 @@ class MemoryAggregationService:
                 users=users,
                 kinds=kinds,
                 endpoint=endpoint,
-                admin_key=admin_key,
+                api_key=api_key,
                 agent_id=agent_id,
                 skill_name=skill_name,
                 skill_body=skill_body,
@@ -456,7 +471,7 @@ class MemoryAggregationService:
             endpoint=endpoint,
             account_id=run.account_id,
             user_id=self._team_user(),
-            api_key=admin_key,
+            api_key=api_key,
             agent_id=agent_id,
             timeout_seconds=self._runtime_timeout(),
         )
@@ -493,7 +508,7 @@ class MemoryAggregationService:
         users: list,
         kinds: list,
         endpoint: str,
-        admin_key: str,
+        api_key: str,
         agent_id: str,
         skill_name: str,
         skill_body: str,
@@ -508,7 +523,7 @@ class MemoryAggregationService:
             *(
                 self._stage_one_user(
                     run=run, user_id=uid, kinds=kinds, endpoint=endpoint,
-                    admin_key=admin_key, agent_id=agent_id, skill_name=skill_name,
+                    api_key=api_key, agent_id=agent_id, skill_name=skill_name,
                     skill_body=skill_body, state=state, force_all=force_all, sem=sem,
                 )
                 for uid in users
@@ -523,7 +538,7 @@ class MemoryAggregationService:
         user_id: str,
         kinds: list,
         endpoint: str,
-        admin_key: str,
+        api_key: str,
         agent_id: str,
         skill_name: str,
         skill_body: str,
@@ -540,7 +555,7 @@ class MemoryAggregationService:
             group_key = f"stage:{user_id}"
             # Probe which categories this user actually has, and fingerprint them.
             present, source_fp = await self._probe_user_sources(
-                user_id, kinds, endpoint, admin_key, run.account_id
+                user_id, kinds, endpoint, api_key, run.account_id
             )
             if not present:
                 self._append_group(run, GroupResult(
@@ -563,7 +578,7 @@ class MemoryAggregationService:
 
             client = CompileClient(
                 endpoint=endpoint, account_id=run.account_id, user_id=user_id,
-                api_key=admin_key, agent_id=agent_id, timeout_seconds=self._runtime_timeout(),
+                api_key=api_key, agent_id=agent_id, timeout_seconds=self._runtime_timeout(),
             )
             install = await client.install_skill(
                 skill_name=skill_name, skill_body=skill_body,
@@ -611,7 +626,7 @@ class MemoryAggregationService:
             run.groups.append(group)
 
     async def _probe_user_sources(
-        self, user_id: str, kinds: list, endpoint: str, admin_key: str, account_id: str
+        self, user_id: str, kinds: list, endpoint: str, api_key: str, account_id: str
     ):
         """Return (present_kinds, source_fingerprint) for a user's memory.
 
@@ -623,7 +638,7 @@ class MemoryAggregationService:
         import httpx
 
         headers = {
-            "X-API-Key": admin_key,
+            "X-API-Key": api_key,
             "X-OpenViking-Account": account_id,
             "X-OpenViking-User": user_id,
         }

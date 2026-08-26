@@ -6,7 +6,7 @@
 
 聚合采用「两阶段 + 分层归并」模型，全程不修改 OpenViking 源码：
 
-- **Phase 1（per-user staging）**：对每个选中的 User，使用请求传入的 OpenViking Admin Key 运行 compile 并读取该用户的记忆。产物写入最终目录的同级工作根，例如 `viking://resources/shared-knowledge-staging/<uid>`。OKF Skill 先安装到该用户自己的 skills 空间，供同身份读取。
+- **Phase 1（per-user staging）**：对每个选中的 User，使用解析后的 OpenViking Root/Admin 凭据运行 compile 并读取该用户的记忆。产物写入最终目录的同级工作根，例如 `viking://resources/shared-knowledge-staging/<uid>`。OKF Skill 先安装到该用户自己的 skills 空间，供同身份读取。
 - **Phase 2（tree-reduce 合并）**：以 team 用户身份，将所有 staging 根按 `merge_fan_in`（默认 12，≤15）分批做多级归并，最终合并到 `viking://resources/shared-knowledge/`。分层归并保证每次 compile 源数不超过 16 的硬上限，支持 100+ 用户。
 
 其它特性：Phase 1 并发执行（`phase1_concurrency`）、内容指纹增量跳过（未变更用户复用上次 staging）、失败隔离与断点续跑（单用户失败不影响整体，下次仅重试失败/变更项）。中转和 `_merge` 目录始终位于工作根，不会进入最终团队 Memory 根或污染其 L0/L1 摘要。
@@ -26,7 +26,7 @@
 
 ## 2. 接口和参数说明
 
-可复用执行面 `POST /api/aggregation/users`、`POST /api/aggregation/run` 和 `GET /api/aggregation/status/{task_id}` 不依赖 TeamEvolver Cookie、用户或角色。用户枚举和聚合运行使用请求体中的 OpenViking Admin Key；该 Key 不持久化，也不会进入任务状态或响应。`runs`、`settings` 和 Skill 编辑仍属于控制台管理面，需要 TeamEvolver 管理员认证。
+可复用执行面 `POST /api/aggregation/users`、`POST /api/aggregation/run` 和 `GET /api/aggregation/status/{task_id}` 不依赖 TeamEvolver Cookie、用户或角色。外部调用在请求体中二选一传入 `root_key`（Trusted 模式）或 `admin_key`（API-key 模式）；凭据不持久化，也不会进入任务状态或响应。TeamEvolver 控制台不传凭据，由已登录管理员身份回退到系统配置的 Trusted Root Key。`runs`、`settings` 和 Skill 编辑仍属于控制台管理面，需要 TeamEvolver 管理员认证。
 
 ---
 
@@ -34,7 +34,7 @@
 
 列出指定 Account 下可聚合的 User（已排除 team 服务用户）。用于控制台「输入 Account → 列出用户 → 勾选」流程。
 
-**认证：** 无 TeamEvolver 认证；请求体中的 OpenViking Admin Key 由上游校验
+**认证：** 外部调用无需 TeamEvolver 认证，`root_key` 与 `admin_key` 二选一；控制台管理员可省略并使用系统 Root Key
 
 **Request Body：**
 
@@ -42,7 +42,8 @@
 |------|------|------|------|
 | `endpoint` | string | 否 | OpenViking HTTP(S) Endpoint；留空则使用 `sharing.viking_endpoint` |
 | `account_id` | string | 否 | OpenViking Account ID；留空则使用 `sharing.viking_account` |
-| `admin_key` | string | 是 | OpenViking Admin Key；仅用于本次请求，不持久化、不返回 |
+| `root_key` | string | 二选一 | Trusted 模式 Root Key |
+| `admin_key` | string | 二选一 | 非 Trusted / API-key 模式 Admin Key |
 
 **响应字段：**
 
@@ -50,6 +51,7 @@
 |------|------|------|
 | `endpoint` | string | 规范化后的实际 OpenViking Endpoint |
 | `account_id` | string | 实际使用的 account |
+| `auth_mode` | string | `trusted` 或 `api_key` |
 | `users` | array[string] | 可聚合的 user_id 列表 |
 
 代码入口：`teamEvolver/proxy/aggregation_routes.py` (`api_aggregation_users`)
@@ -78,7 +80,7 @@
 
 启动一次后台聚合任务，立即返回 202 与初始 Run 对象。任务在 worker 线程中执行，通过 `status` 接口轮询进度。
 
-**认证：** 无 TeamEvolver 认证；请求体中的 OpenViking Admin Key 由上游校验
+**认证：** 外部调用无需 TeamEvolver 认证，`root_key` 与 `admin_key` 二选一；控制台管理员可省略并使用系统 Root Key
 
 **Request Body：**
 
@@ -86,7 +88,8 @@
 |------|------|------|------|
 | `endpoint` | string | 否 | 本次任务使用的 OpenViking HTTP(S) Endpoint；留空则使用 `sharing.viking_endpoint` |
 | `account_id` | string | 否 | 目标 account；留空则使用 `sharing.viking_account` |
-| `admin_key` | string | 是 | OpenViking Admin Key；仅在后台任务执行期间保留，不进入 Run 对象 |
+| `root_key` | string | 二选一 | Trusted 模式 Root Key |
+| `admin_key` | string | 二选一 | 非 Trusted / API-key 模式 Admin Key |
 | `target_uri` | string | 否 | 本次任务的最终输出 URI，必须位于 `viking://resources/<path>`；不传则使用全局默认目录 |
 | `user_ids` | array[string] | 否 | 参与聚合的用户白名单；不传则聚合该 account 全部可聚合用户 |
 | `kinds` | array[string] | 否 | 参与聚合的记忆类别；不传则使用默认类别集合 |
@@ -94,7 +97,7 @@
 
 **响应（202）：** 初始 Run 对象（`status` 为 `pending`/`running`）。
 
-`target_uri` 是运行级参数，不修改持久化设置。服务会为每个目标 URI 派生独立的同级工作目录和增量状态；因此不同输出位置之间不会错误复用 staging 或指纹。`admin_key` 不会出现在 202 响应、任务列表或状态查询结果中。
+`target_uri` 是运行级参数，不修改持久化设置。服务会按 Endpoint、Account、认证模式和目标 URI 隔离增量状态。`root_key` 和 `admin_key` 都不会出现在 202 响应、任务列表或状态查询结果中。
 
 代码入口：`teamEvolver/proxy/aggregation_routes.py` (`api_aggregation_run`)
 
@@ -119,6 +122,7 @@
 | `task_id` | string | 任务 ID |
 | `endpoint` | string | 本次任务实际使用的 OpenViking Endpoint |
 | `account_id` | string | 目标 account |
+| `auth_mode` | string | `trusted` 或 `api_key` |
 | `target_uri` | string | 本次任务规范化后的最终输出 URI |
 | `status` | string | `pending`、`running`、`completed`、`failed` |
 | `started_at` | number | 开始时间戳 |
@@ -233,6 +237,7 @@ curl -X POST \
 {
   "endpoint": "https://openviking.example.com",
   "account_id": "default",
+  "auth_mode": "api_key",
   "users": ["alice", "bob", "chenghan", "zhangpengkun"]
 }
 ```
@@ -253,6 +258,7 @@ curl -X POST \
   "task_id": "agg_r4nd0m-capability-token",
   "endpoint": "https://openviking.example.com",
   "account_id": "default",
+  "auth_mode": "api_key",
   "target_uri": "viking://resources/engineering-memory",
   "status": "running",
   "started_at": 1756100000.0,
@@ -276,6 +282,7 @@ curl \
   "task_id": "agg_r4nd0m-capability-token",
   "endpoint": "https://openviking.example.com",
   "account_id": "default",
+  "auth_mode": "api_key",
   "target_uri": "viking://resources/engineering-memory",
   "status": "completed",
   "groups": [
@@ -318,6 +325,19 @@ curl -X POST \
   -d '{"endpoint":"https://openviking.example.com","account_id":"default","admin_key":"<openviking-admin-key>","target_uri":"viking://resources/engineering-memory","user_ids":["alice","bob"]}'
 ```
 
+### 使用 Trusted Root Key
+
+外部调用 Trusted 部署时，将 `admin_key` 替换为 `root_key`：
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  "http://localhost:52010/api/aggregation/run" \
+  -d '{"endpoint":"https://openviking.example.com","account_id":"default","root_key":"<openviking-root-key>","target_uri":"viking://resources/engineering-memory","user_ids":["alice","bob"]}'
+```
+
+控制台调用不提交这两个字段，由 TeamEvolver 管理员会话授权后使用系统配置的 Root Key，默认保持 Trusted 模式。
+
 ### 查看并修改默认输出目录
 
 ```bash
@@ -340,7 +360,11 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 | 403 | `team memory aggregation requires an administrator` | 非管理员调用管理接口 |
 | 400 | `aggregation users body must be an object` | 用户枚举请求体不是 JSON object |
 | 400 | `aggregation run body must be an object` | 运行请求体不是 JSON object |
-| 400 | `admin_key is required` | 未提供有效的 OpenViking Admin Key |
+| 400 | `exactly one of root_key or admin_key is required` | 外部请求未提供凭据 |
+| 400 | `root_key and admin_key are mutually exclusive` | 同时提供了两种凭据 |
+| 400 | `root_key must be a string` | `root_key` 类型错误 |
+| 400 | `admin_key must be a string` | `admin_key` 类型错误 |
+| 400 | `trusted root key is not configured` | 控制台 Trusted 路径没有可用的系统 Root Key |
 | 400 | `endpoint must be a string` | `endpoint` 不是字符串 |
 | 400 | `endpoint is required` | 请求未传 Endpoint，且系统未配置默认 Endpoint |
 | 400 | `endpoint must be a valid HTTP(S) URL` | Endpoint 协议或 URL 结构非法 |
@@ -377,10 +401,11 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 
 ### 身份与权限
 
-- `admin_key` 是每次用户枚举和聚合运行的必填输入，只在请求及后台 worker 生命周期内使用；服务端不持久化，也不通过任何响应返回。
+- 外部调用必须二选一：`root_key` 对应 `trusted`，`admin_key` 对应 `api_key`；服务端不持久化，也不通过任何响应返回凭据。
+- 控制台保持兼容：管理员会话可不传凭据，使用 `sharing.viking_team_api_key` 作为 Trusted Root Key。
 - `endpoint` 可按请求覆盖且不持久化，只接受不含用户信息、查询参数或片段的 HTTP(S) URL。
-- 聚合不会从持久化配置读取备用凭据。
-- Phase 1 使用 Admin Key 和目标用户身份读取各用户记忆。
+- Phase 1 使用所选凭据和目标用户身份读取各用户记忆。
+- 当前 OpenViking API-key 模式会忽略 `X-OpenViking-User`，标准 Admin 角色也不能读取其他用户的私有 Memory；`admin_key` 分支需要目标 OpenViking 部署提供 Admin 跨用户委托能力，否则会返回权限错误。
 - `task_id` 使用高熵随机值；无 TeamEvolver 身份的调用方凭该 ID 查询单个任务。任务列表仍只对控制台管理员开放。
 - 部署方应通过 HTTPS 或受信网络暴露执行接口，避免 Admin Key 在传输过程中泄露。
 - 最终产物写入运行请求的 `target_uri`，未传时回退到 `viking://resources/<shared_knowledge_prefix>/`；中间产物只写入该目标的同级工作根。

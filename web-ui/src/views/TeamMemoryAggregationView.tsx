@@ -22,6 +22,7 @@ type AggregationRun = {
   task_id: string;
   account_id: string;
   endpoint: string;
+  auth_mode: "trusted" | "api_key";
   target_uri: string;
   status: "pending" | "running" | "completed" | "failed";
   started_at?: number;
@@ -57,9 +58,7 @@ export default function TeamMemoryAggregationView({
   active: boolean;
   user?: UserProfile | null;
 }) {
-  const [endpoint, setEndpoint] = useState("");
   const [accountId, setAccountId] = useState("");
-  const [adminKey, setAdminKey] = useState("");
   const [mode, setMode] = useState<"incremental" | "full">("incremental");
   const [targetUri, setTargetUri] = useState("");
   const [users, setUsers] = useState<string[] | null>(null);
@@ -216,7 +215,6 @@ export default function TeamMemoryAggregationView({
         if (runs.length > 0) {
           const latest = runs[0];
           setRun(latest);
-          if (latest.endpoint) setEndpoint(latest.endpoint);
           if (latest.account_id) setAccountId((prev) => prev || latest.account_id);
           if (latest.target_uri) setTargetUri(latest.target_uri);
           if (latest.status === "running" || latest.status === "pending") {
@@ -237,18 +235,13 @@ export default function TeamMemoryAggregationView({
   }
 
   async function listUsers() {
-    const requestedEndpoint = endpoint.trim();
     const account = accountId.trim();
-    const credential = adminKey.trim();
-    if (!credential) {
-      toastErr("未填写 Admin Key", "请输入 OpenViking Admin Key");
-      return;
-    }
     setListing(true);
     try {
       const data = await api<{
         endpoint: string;
         account_id: string;
+        auth_mode: "trusted" | "api_key";
         users: string[];
       }>(
         "/api/aggregation/users",
@@ -256,16 +249,13 @@ export default function TeamMemoryAggregationView({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            endpoint: requestedEndpoint || undefined,
             account_id: account || undefined,
-            admin_key: credential,
           }),
         }
       );
       const list = data.users || [];
       setUsers(list);
       setSelected(new Set(list)); // default: all selected
-      if (!requestedEndpoint && data.endpoint) setEndpoint(data.endpoint);
       if (!account && data.account_id) setAccountId(data.account_id);
       toastOk("已列出用户", `${list.length} 个可聚合用户`);
     } catch (e: any) {
@@ -300,15 +290,9 @@ export default function TeamMemoryAggregationView({
   }
 
   async function confirmAggregate() {
-    const requestedEndpoint = endpoint.trim();
     const account = accountId.trim();
-    const credential = adminKey.trim();
     const userIds = Array.from(selected);
     const outputUri = targetUri.trim();
-    if (!credential) {
-      toastErr("未填写 Admin Key", "请输入 OpenViking Admin Key");
-      return;
-    }
     if (userIds.length === 0) {
       toastErr("未选择用户", "请至少勾选一个用户");
       return;
@@ -323,16 +307,13 @@ export default function TeamMemoryAggregationView({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          endpoint: requestedEndpoint || undefined,
           account_id: account || undefined,
-          admin_key: credential,
           mode,
           target_uri: outputUri,
           user_ids: userIds,
         }),
       });
       setRun(started);
-      setAdminKey("");
       toastOk("聚合已触发", `${userIds.length} 个用户 · ${started.task_id}`);
       pollStatus(started.task_id);
     } catch (e: any) {
@@ -372,24 +353,11 @@ export default function TeamMemoryAggregationView({
             <code>{currentSkillLabel}</code>
             定义。流程：输入 Account → 列出用户 → 勾选/反选 → 确认聚合。
             产物在 account 内全员可检索，每次任务可独立指定输出 URI。
-            Admin Key 仅用于本次请求，不会进入任务状态或持久化配置。
+            控制台默认使用系统配置的 Trusted Root Key。
           </div>
 
           {/* Step 1: account + list users */}
           <div className="flex flex-wrap items-end gap-3">
-            <label className="flex min-w-[320px] flex-1 flex-col gap-1 text-[12px] font-[700]">
-              OpenViking Endpoint（可选）
-              <Input
-                value={endpoint}
-                disabled={running}
-                onChange={(e) => {
-                  setEndpoint(e.target.value);
-                  clearUserSelection();
-                }}
-                placeholder="留空则使用系统默认 Endpoint"
-                className="font-mono"
-              />
-            </label>
             <label className="flex flex-col gap-1 text-[12px] font-[700]">
               OpenViking Account ID（可选）
               <Input
@@ -401,21 +369,6 @@ export default function TeamMemoryAggregationView({
                 }}
                 placeholder="留空则使用当前配置的 account"
                 className="w-[280px]"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-[12px] font-[700]">
-              OpenViking Admin Key
-              <Input
-                type="password"
-                value={adminKey}
-                disabled={running}
-                autoComplete="off"
-                onChange={(e) => {
-                  setAdminKey(e.target.value);
-                  clearUserSelection();
-                }}
-                placeholder="必填，不会持久化"
-                className="w-[280px] font-mono"
               />
             </label>
             <label className="flex flex-col gap-1 text-[12px] font-[700]">
@@ -439,7 +392,7 @@ export default function TeamMemoryAggregationView({
                 className="font-mono"
               />
             </label>
-            <Button onClick={listUsers} disabled={listing || !adminKey.trim()}>
+            <Button onClick={listUsers} disabled={listing}>
               <Users className="mr-1.5 size-4" />
               {listing ? "列出中…" : "列出用户"}
             </Button>
@@ -610,7 +563,7 @@ export default function TeamMemoryAggregationView({
               </div>
             )}
             <div className="mb-2 break-all font-mono text-[11px] text-muted-foreground">
-              OpenViking：{run.endpoint}
+              OpenViking：{run.endpoint} · {run.auth_mode}
               <br />
               输出：{run.target_uri}
             </div>

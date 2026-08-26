@@ -26,7 +26,7 @@ _MAX_HTTP_OUTPUT_CHARS = 512 * 1024
 
 @dataclass
 class CompileClient:
-    """Run OpenViking compile operations with a request-scoped Admin Key."""
+    """Run OpenViking compile operations with a request-scoped API key."""
 
     endpoint: str
     account_id: str
