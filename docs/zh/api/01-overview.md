@@ -105,7 +105,7 @@ Agent 协议 API 使用 `protocol_version` 字段进行版本控制。当前版�
 | [Session 查询](./08-sessions-api.md) | 查询队列中 Session 和已处理会话 |
 | [Skill 管理](./09-skills-admin.md) | Skill CRUD、发布、回滚、版本管理 |
 | [验证与 Candidate](./10-validation.md) | 候选 Skill 审核、批准、驳回、Replay 结果 |
-| [团队记忆聚合](./11-team-memory-aggregation.md) | 跨 User 记忆聚合为团队共享知识、任务进度、OKF Skill 编辑 |
+| [团队记忆聚合](./11-team-memory-aggregation.md) | 跨 User 记忆聚合为团队共享记忆、任务进度、聚合 Skill 编辑 |
 
 ### 文档维护
 

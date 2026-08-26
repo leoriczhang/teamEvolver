@@ -99,10 +99,10 @@ def _scope_map(
     # be empty; it must never fall back to ``default`` (an OpenViking bootstrap
     # identity rather than a team workspace).
     team_owner = str(getattr(config, "sharing_viking_user", "") or "team").strip() or "team"
-    # Team memory now lives in the account-shared knowledge base produced by the
+    # Team memory now lives in the account-shared output produced by the
     # aggregation pipeline (viking://resources/<prefix>), not under the team
     # user's private memory namespace. This aligns the workspace view with where
-    # aggregated team knowledge is actually written and readable account-wide.
+    # aggregated team memory is actually written and readable account-wide.
     agg_prefix = str(
         getattr(config, "aggregation_shared_knowledge_prefix", "") or "shared-knowledge"
     ).strip().strip("/")

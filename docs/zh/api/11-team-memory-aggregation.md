@@ -2,7 +2,7 @@
 
 ## 1. API 实现介绍
 
-团队记忆聚合 API（Interface 1）用于将一个 OpenViking Account 下多个 User 的个人记忆，通过 `ov compile` 聚合为 account 共享的团队知识库（OKF 格式），产物落在 `viking://resources/shared-knowledge/` 下，account 内全员可检索。
+团队记忆聚合 API（Interface 1）用于将一个 OpenViking Account 下多个 User 的个人记忆，通过 `ov compile` 聚合为 account 共享的团队记忆。产物默认落在 `viking://resources/shared-knowledge/` 下，实际输出目录可配置，account 内全员可检索。
 
 聚合采用「两阶段 + 分层归并」模型，全程不修改 OpenViking 源码、不切换认证模式：
 
@@ -266,9 +266,9 @@ curl -X PUT -b "teamEvolver_console_session=<token>" \
 
 | 配置项（`aggregation.*`） | 默认值 | 说明 |
 |------|--------|------|
-| `shared_knowledge_prefix` | `shared-knowledge` | 产物根目录前缀（在 `viking://resources/` 下） |
+| `shared_knowledge_prefix` | `shared-knowledge` | 团队记忆产物根目录前缀（在 `viking://resources/` 下） |
 | `staging_dir` | `_staging` | Phase 1 暂存子目录 |
-| `okf_skill_uri` | `viking://agent/skills/team-memory-okf` | OKF Skill 名称来源（取末段作为 skill 名） |
+| `okf_skill_uri` | `viking://agent/skills/team-memory-okf` | 聚合 Skill 名称来源（取末段作为 skill 名）；输出格式由该 Skill 定义 |
 | `kinds` | 空（用内置默认集） | 参与聚合的记忆类别 |
 | `max_users_per_batch` | 12 | Phase 1 单次 compile 源数上限（< 16） |
 | `phase1_concurrency` | 6 | Phase 1 并发度 |

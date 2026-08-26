@@ -74,18 +74,22 @@ export default function TeamMemoryAggregationView({
   const [prefixDirty, setPrefixDirty] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [settingsError, setSettingsError] = useState("");
 
   const isAdmin = String(user?.role || "") === "admin";
 
   const loadSettings = useCallback(async () => {
+    setSettingsLoaded(false);
+    setSettingsError("");
     try {
       const data = await api<AggregationSettings>("/api/aggregation/settings");
       setSettings(data);
       setPrefixInput(data.shared_knowledge_prefix);
       setPrefixDirty(false);
       setSettingsLoaded(true);
-    } catch {
+    } catch (e: any) {
       setSettings(null);
+      setSettingsError(e.message || "无法加载配置");
       setSettingsLoaded(true);
     }
   }, []);
@@ -299,6 +303,10 @@ export default function TeamMemoryAggregationView({
 
   const running = run?.status === "running" || run?.status === "pending";
   const allSelected = users != null && selected.size === users.length && users.length > 0;
+  const currentTargetLabel = !settingsLoaded
+    ? "加载中…"
+    : settings?.target_root || "未加载";
+  const currentSkillLabel = settings?.okf_skill_uri || skill?.skill_name || "当前聚合 Skill";
 
   return (
     <div className="mt-3 flex flex-col gap-3">
@@ -306,9 +314,11 @@ export default function TeamMemoryAggregationView({
         <div className="flex flex-col gap-3 p-3.5">
           <div className="text-[13px] leading-relaxed text-muted-foreground">
             将一个 OpenViking Account 下选定 User 的个人记忆，通过 ov compile 聚合为{" "}
-            <code>{settings?.target_root || "viking://resources/shared-knowledge"}</code>
-            下的团队共享知识（OKF 格式）。流程：输入 Account → 列出用户 →
-            勾选/反选 → 确认聚合。产物在 account 内全员可检索。
+            <code>{currentTargetLabel}</code>
+            下的团队共享记忆；具体输出格式与页面结构由{" "}
+            <code>{currentSkillLabel}</code>
+            定义。流程：输入 Account → 列出用户 → 勾选/反选 → 确认聚合。
+            产物在 account 内全员可检索，输出目录可在下方配置。
           </div>
 
           {/* Step 1: account + list users */}
@@ -411,7 +421,7 @@ export default function TeamMemoryAggregationView({
         title="输出目录配置"
         extra={
           <span className="text-[12px] text-muted-foreground">
-            当前：<code>{settings?.target_root || "加载中…"}</code>
+            当前：<code>{currentTargetLabel}</code>
           </span>
         }
       >
@@ -422,7 +432,7 @@ export default function TeamMemoryAggregationView({
             <div className="flex flex-col gap-3">
               <div className="grid gap-3 md:grid-cols-2">
                 <label className="flex flex-col gap-1 text-[12px] font-[700]">
-                  团队共享知识前缀（输出目录）
+                  团队记忆前缀（输出目录）
                   <Input
                     value={prefixInput}
                     disabled={!isAdmin || savingSettings}
@@ -474,7 +484,15 @@ export default function TeamMemoryAggregationView({
               )}
             </div>
           ) : (
-            <div className="text-[12px] text-muted-foreground">无法加载配置</div>
+            <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-surface p-3">
+              <div className="text-[12px] text-muted-foreground">
+                无法加载配置{settingsError ? `：${settingsError}` : ""}
+              </div>
+              <Button size="sm" variant="outline" onClick={loadSettings}>
+                <RefreshCw className="mr-1.5 size-4" />
+                重试
+              </Button>
+            </div>
           )}
         </div>
       </Panel>
@@ -573,7 +591,7 @@ export default function TeamMemoryAggregationView({
         >
           <div className="p-3.5">
             <p className="text-[12px] text-muted-foreground">
-              该 Skill 定义 OKF 格式（Frontmatter、Type 映射、交叉引用）与聚合规则，
+              该 Skill 定义聚合输出格式、页面结构、交叉引用与聚合规则，
               供 ov compile 消费。聚合运行时会自动安装到各身份的 skills 空间。
               {editingSkill ? "编辑后点击保存，下次聚合生效。" : "点击右上角「编辑」可修改。"}
             </p>

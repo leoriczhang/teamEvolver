@@ -47,6 +47,25 @@ class AggregationMixin:
                 detail="team memory aggregation requires an administrator",
             )
 
+    @staticmethod
+    def _aggregation_settings_payload(agg: dict) -> dict:
+        prefix = str(agg.get("shared_knowledge_prefix") or "shared-knowledge")
+        staging = str(agg.get("staging_dir") or "staging")
+        clean_prefix = prefix.strip("/")
+        clean_staging = staging.strip("/")
+        return {
+            "enabled": bool(agg.get("enabled", False)),
+            "shared_knowledge_prefix": prefix,
+            "target_root": f"viking://resources/{clean_prefix}",
+            "staging_dir": staging,
+            "work_root": f"viking://resources/{clean_prefix}-{clean_staging}",
+            "okf_skill_uri": str(
+                agg.get("okf_skill_uri") or "viking://agent/skills/team-memory-okf"
+            ),
+            "key_seed": str(agg.get("key_seed") or "teamevolver-aggregation"),
+            "kinds": agg.get("kinds") or [],
+        }
+
     def _register_aggregation_routes(self, app: FastAPI) -> None:
 
         @app.get("/api/aggregation/users")
@@ -159,20 +178,7 @@ class AggregationMixin:
             )
             data = store.load()
             agg = data.get("aggregation", {}) if isinstance(data.get("aggregation"), dict) else {}
-            prefix = str(agg.get("shared_knowledge_prefix") or "shared-knowledge")
-            target_root = f"viking://resources/{prefix.strip('/')}"
-            staging = str(agg.get("staging_dir") or "staging")
-            work_root = f"viking://resources/{prefix.strip('/')}-{staging.strip('/')}"
-            return JSONResponse({
-                "enabled": bool(agg.get("enabled", False)),
-                "shared_knowledge_prefix": prefix,
-                "target_root": target_root,
-                "staging_dir": staging,
-                "work_root": work_root,
-                "okf_skill_uri": str(agg.get("okf_skill_uri") or "viking://agent/skills/team-memory-okf"),
-                "key_seed": str(agg.get("key_seed") or "teamevolver-aggregation"),
-                "kinds": agg.get("kinds") or [],
-            })
+            return JSONResponse(self._aggregation_settings_payload(agg))
 
         @app.post("/api/aggregation/settings")
         async def api_aggregation_settings_save(request: Request):
@@ -220,12 +226,6 @@ class AggregationMixin:
             self.config = new_config
             await self._reload_openviking_integrations(new_config)
 
-            prefix = str(agg.get("shared_knowledge_prefix") or "shared-knowledge")
-            staging = str(agg.get("staging_dir") or "staging")
-            return JSONResponse({
-                "ok": True,
-                "shared_knowledge_prefix": prefix,
-                "target_root": f"viking://resources/{prefix.strip('/')}",
-                "staging_dir": staging,
-                "work_root": f"viking://resources/{prefix.strip('/')}-{staging.strip('/')}",
-            })
+            payload = self._aggregation_settings_payload(agg)
+            payload["ok"] = True
+            return JSONResponse(payload)

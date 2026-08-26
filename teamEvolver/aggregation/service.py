@@ -598,10 +598,10 @@ class MemoryAggregationService:
             current = next_level
             level += 1
 
-        # Final round: <= fan_in sources into the shared-knowledge root.
+        # Final round: <= fan_in sources into the team-memory root.
         res = await client.run_batch(
             source_uris=current, target_uri=target_root, skill_uri=skill_uri,
-            reason="Final merge of staged/intermediate knowledge into the team shared knowledge base.",
+            reason="Final merge of staged/intermediate memory into the team shared memory.",
             runtime_timeout_seconds=self._runtime_timeout(),
         )
         if res.get("ok"):

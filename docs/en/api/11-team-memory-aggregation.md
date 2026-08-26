@@ -2,7 +2,7 @@
 
 ## 1. API Overview
 
-The Team Memory Aggregation API (Interface 1) aggregates the personal memories of multiple Users under one OpenViking Account into an account-shared team knowledge base (OKF format) via `ov compile`. Output lands under `viking://resources/shared-knowledge/` and is retrievable by every user in the account.
+The Team Memory Aggregation API (Interface 1) aggregates the personal memories of multiple Users under one OpenViking Account into account-shared team memory via `ov compile`. Output defaults to `viking://resources/shared-knowledge/`, the actual target directory is configurable, and every user in the account can retrieve it.
 
 Aggregation uses a two-phase, tree-reduce model. It requires no OpenViking source changes and no auth-mode switch:
 
@@ -266,9 +266,9 @@ curl -X PUT -b "teamEvolver_console_session=<token>" \
 
 | Config key (`aggregation.*`) | Default | Description |
 |------|---------|-------------|
-| `shared_knowledge_prefix` | `shared-knowledge` | Output root prefix (under `viking://resources/`) |
+| `shared_knowledge_prefix` | `shared-knowledge` | Team memory output root prefix (under `viking://resources/`) |
 | `staging_dir` | `_staging` | Phase 1 staging subdirectory |
-| `okf_skill_uri` | `viking://agent/skills/team-memory-okf` | Source of the OKF Skill name (trailing segment used as the skill name) |
+| `okf_skill_uri` | `viking://agent/skills/team-memory-okf` | Source of the aggregation Skill name (trailing segment used as the skill name); output format is defined by this Skill |
 | `kinds` | empty (built-in default set) | Memory categories to aggregate |
 | `max_users_per_batch` | 12 | Per-compile source cap in Phase 1 (< 16) |
 | `phase1_concurrency` | 6 | Phase 1 concurrency |
