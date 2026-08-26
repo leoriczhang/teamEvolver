@@ -163,6 +163,44 @@ _DEFAULTS: dict = {
             "consolidate": "",
         },
     },
+    "aggregation": {
+        # ov compile-based cross-user memory aggregation (replaces DreamCycle).
+        "enabled": False,
+        # Output lands under viking://resources/<prefix>/<kind>. resources is
+        # account-shared and supports a full artifact tree, unlike a user's
+        # memory root.
+        "shared_knowledge_prefix": "shared-knowledge",
+        # User-editable OKF Skill consumed by ov compile.
+        "okf_skill_uri": "viking://agent/skills/team-memory-okf",
+        "insight_skill_uri": "",
+        # Trusted/root service key used to enumerate users and mint per-user
+        # keys. Falls back to the team/service key when empty.
+        "root_api_key": "",
+        # Fixed seed for deterministic per-user key derivation via the admin
+        # regenerate-key endpoint. Same (user, seed) always yields the same key,
+        # making runs idempotent. NOTE: first use rebinds each user's key to the
+        # seed-derived one (old key invalidated).
+        "key_seed": "teamevolver-aggregation",
+        # Scratch dir suffix for per-user staging + tree-reduce intermediates.
+        # Lives in a SIBLING root (viking://resources/<prefix>-<staging_dir>),
+        # never inside the final knowledge root, so the team-memory view stays
+        # clean of _merge/staging artifacts.
+        "staging_dir": "staging",
+        # Memory categories to aggregate (empty -> built-in default set).
+        "kinds": [],
+        # Keep below the ov compile 16-source ceiling; large accounts split
+        # into multiple compile tasks per category.
+        "max_users_per_batch": 12,
+        # Phase 1 per-user compiles run concurrently up to this many at once.
+        # Raise for faster large-account runs; lower to reduce server load.
+        "phase1_concurrency": 6,
+        # Tree-reduce fan-in width for Phase 2 merges. Each merge compile takes
+        # at most this many sources; groups of groups cascade until one root
+        # remains. Kept < 16 to respect the ov compile source ceiling.
+        "merge_fan_in": 12,
+        "compile_runtime_timeout_seconds": 3000,
+        "state_dir": "",
+    },
     "validation": {
         "enabled": True,
         "mode": "true_replay",

@@ -3,7 +3,7 @@ import { Brain, Sparkles } from "lucide-react";
 
 import type { UserProfile } from "@/api/client";
 import { cn } from "@/lib/utils";
-import MemoryEvolutionView from "@/views/MemoryEvolutionView";
+import TeamMemoryAggregationView from "@/views/TeamMemoryAggregationView";
 import PromptStudioView from "@/views/PromptStudioView";
 
 type EvolutionTab = "skills" | "memory";
@@ -51,7 +51,7 @@ export default function EvolutionWorkspaceView({
         <PromptStudioView active={active && tab === "skills"} user={user} />
       </div>
       <div className={cn(tab !== "memory" && "hidden")}>
-        <MemoryEvolutionView active={active && tab === "memory"} user={user} />
+        <TeamMemoryAggregationView active={active && tab === "memory"} user={user} />
       </div>
     </div>
   );

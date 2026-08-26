@@ -94,6 +94,14 @@ def _scope_map(
     # OpenViking user ``team``. It must never fall back to ``default``, which
     # is an OpenViking bootstrap identity rather than a team workspace.
     team_owner = "team"
+    # Team memory now lives in the account-shared knowledge base produced by the
+    # aggregation pipeline (viking://resources/<prefix>), not under the team
+    # user's private memory namespace. This aligns the workspace view with where
+    # aggregated team knowledge is actually written and readable account-wide.
+    agg_prefix = str(
+        getattr(config, "aggregation_shared_knowledge_prefix", "") or "shared-knowledge"
+    ).strip().strip("/")
+    team_memory_root = f"viking://resources/{agg_prefix}"
     personal = f"viking://user/{personal_owner}"
     peer = f"{shared}/peers/{user_id}"
     return {
@@ -107,7 +115,7 @@ def _scope_map(
         ),
         "team_memory": _WorkspaceScope(
             "team_memory",
-            f"viking://user/{team_owner}/memories",
+            team_memory_root,
             "team",
             "memory",
             is_admin,

@@ -1649,7 +1649,9 @@ class RoutesMixin:
             owner._ready_event.set()
             owner._start_skill_reload_polling()
             owner._start_embedded_evolve()
-            owner._start_dreamcycle()
+            # DreamCycle is superseded by the ov compile-based cross-user memory
+            # aggregation (see teamEvolver/aggregation/). It no longer auto-starts;
+            # team memory is now maintained under viking://resources/shared-knowledge/.
             try:
                 owner._start_skillminer()
             except Exception:
@@ -1731,6 +1733,7 @@ class RoutesMixin:
         self._register_agent_context_routes(app)
         self._register_skillminer_routes(app)
         self._register_docs_routes(app)
+        self._register_aggregation_routes(app)
 
         @app.get("/")
         @app.get("/console")
@@ -3438,9 +3441,9 @@ class RoutesMixin:
             )
             if personal_key:
                 sharing["viking_personal_api_key"] = personal_key
-            data.setdefault("dreamcycle", {}).update(
-                {"enabled": True, "auto_start": True}
-            )
+            # DreamCycle is retired in favor of the ov compile-based cross-user
+            # memory aggregation (teamEvolver/aggregation/), so agent
+            # registration no longer auto-enables or auto-starts it.
             for key in (
                 "viking_endpoint",
                 "viking_api_key",

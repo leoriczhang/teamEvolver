@@ -224,6 +224,23 @@ class TeamEvolverConfig:
     dreamcycle_consolidate_prompt: str = ""
 
     # ------------------------------------------------------------------ #
+    # Cross-user memory aggregation (ov compile; replaces DreamCycle)     #
+    # ------------------------------------------------------------------ #
+    aggregation_enabled: bool = False
+    aggregation_shared_knowledge_prefix: str = "shared-knowledge"
+    aggregation_okf_skill_uri: str = "viking://agent/skills/team-memory-okf"
+    aggregation_insight_skill_uri: str = ""
+    aggregation_root_api_key: str = ""
+    aggregation_key_seed: str = "teamevolver-aggregation"
+    aggregation_staging_dir: str = "staging"
+    aggregation_kinds: list[str] = field(default_factory=list)
+    aggregation_max_users_per_batch: int = 12
+    aggregation_phase1_concurrency: int = 6
+    aggregation_merge_fan_in: int = 12
+    aggregation_compile_runtime_timeout_seconds: int = 3000
+    aggregation_state_dir: str = ""
+
+    # ------------------------------------------------------------------ #
     # Background validation                                               #
     # ------------------------------------------------------------------ #
     # Enabled by default so the server's validated publish_mode has clients

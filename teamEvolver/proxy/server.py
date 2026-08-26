@@ -24,6 +24,7 @@ from ..integrations.dreamcycle_runtime import (
 from ..observability import configure_langfuse, flush_langfuse
 from ..skills.manager import SkillManager
 from .agent_context import AgentContextMixin
+from .aggregation_routes import AggregationMixin
 from .docs import DocsMixin
 from .memory_debug import MemoryDebugMixin
 from .openviking_workspace import OpenVikingWorkspaceMixin
@@ -50,6 +51,7 @@ class ProxyServer(
     OpenVikingWorkspaceMixin,
     MemoryDebugMixin,
     AgentContextMixin,
+    AggregationMixin,
     DocsMixin,
 ):
     """teamEvolver service: console, skill sync, user management, and validation.
@@ -259,7 +261,8 @@ class ProxyServer(
                 "[EvolveServer] OpenViking sync did not change evolve config; "
                 "keeping the active cycle"
             )
-        self._start_dreamcycle()
+        # DreamCycle is retired; a credential reload no longer restarts it.
+        # Team memory is maintained via the ov compile aggregation service.
 
     # ------------------------------------------------------------------ #
     # Embedded evolve server                                               #

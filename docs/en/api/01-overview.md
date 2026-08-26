@@ -105,6 +105,7 @@ Some Agent Protocol interfaces return structured error codes (string constants),
 | [Session Queries](./08-sessions-api.md) | Query queued Sessions and processed conversations |
 | [Skill Management](./09-skills-admin.md) | Skill CRUD, publish, rollback, version management |
 | [Validation and Candidates](./10-validation.md) | Candidate Skill review, approval, rejection, Replay results |
+| [Team Memory Aggregation](./11-team-memory-aggregation.md) | Aggregate cross-user memories into shared team knowledge, task progress, OKF Skill editing |
 
 ### Documentation Maintenance
 

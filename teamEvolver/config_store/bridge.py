@@ -113,6 +113,7 @@ class ConfigStore:
         evolve = data.get("evolve", {})
         dreamcycle = data.get("dreamcycle", {})
         validation = data.get("validation", {})
+        aggregation = data.get("aggregation", {}) if isinstance(data.get("aggregation"), dict) else {}
         dreamcycle_prompts = dreamcycle.get("prompts") if isinstance(dreamcycle.get("prompts"), dict) else {}
         dreamcycle_job_prompts = (
             dreamcycle.get("job_prompts")
@@ -465,6 +466,36 @@ class ConfigStore:
             dreamcycle_consolidate_prompt=str(
                 dreamcycle_prompts.get("consolidate", "")
             ),
+            aggregation_enabled=bool(aggregation.get("enabled", False)),
+            aggregation_shared_knowledge_prefix=str(
+                aggregation.get("shared_knowledge_prefix", "") or "shared-knowledge"
+            ),
+            aggregation_okf_skill_uri=str(
+                aggregation.get("okf_skill_uri", "")
+                or "viking://agent/skills/team-memory-okf"
+            ),
+            aggregation_insight_skill_uri=str(
+                aggregation.get("insight_skill_uri", "") or ""
+            ),
+            aggregation_root_api_key=str(aggregation.get("root_api_key", "") or ""),
+            aggregation_key_seed=str(
+                aggregation.get("key_seed", "") or "teamevolver-aggregation"
+            ),
+            aggregation_staging_dir=str(aggregation.get("staging_dir", "") or "staging"),
+            aggregation_kinds=_normalize_string_list(aggregation.get("kinds")),
+            aggregation_max_users_per_batch=max(
+                1, int(aggregation.get("max_users_per_batch", 12) or 12)
+            ),
+            aggregation_phase1_concurrency=max(
+                1, int(aggregation.get("phase1_concurrency", 6) or 6)
+            ),
+            aggregation_merge_fan_in=max(
+                2, min(15, int(aggregation.get("merge_fan_in", 12) or 12))
+            ),
+            aggregation_compile_runtime_timeout_seconds=max(
+                60, int(aggregation.get("compile_runtime_timeout_seconds", 3000) or 3000)
+            ),
+            aggregation_state_dir=str(aggregation.get("state_dir", "") or ""),
             validation_enabled=bool(validation.get("enabled", True)),
             validation_mode=_normalize_validation_mode(validation.get("mode", "true_replay")),
             validation_idle_after_seconds=int(validation.get("idle_after_seconds", 300)),
