@@ -286,6 +286,6 @@ curl -X PUT -b "teamEvolver_console_session=<token>" \
 
 ### 身份与权限
 
-- 聚合需要 trusted/root 服务身份（配置 `aggregation.root_api_key`，缺省回退到 team/service key）。
-- Phase 1 以「root key + 用户 header」读取各用户自己的记忆，属合法自读，不涉及 ROOT 跨用户读取。
+- 聚合需要 trusted 服务身份。默认直接复用管理员配置的 OpenViking Key（兼容存储在 `sharing.viking_team_api_key`）；`aggregation.root_api_key` 仅作为高级覆盖项。
+- Phase 1 以「service/admin key + 用户 header」模拟目标用户身份，读取各用户自己的记忆。
 - 产物写入 `viking://resources/`（account 共享、任意角色可写），无需 ROOT。

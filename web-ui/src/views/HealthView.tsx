@@ -41,6 +41,7 @@ type SharingUpdate = {
   team_user: string;
   root_prefix: string;
   personal_api_key?: string;
+  service_api_key?: string;
   team_api_key?: string;
 };
 
@@ -372,7 +373,7 @@ function DeploymentPanel({
         team_user: teamUser.trim() || "default",
         root_prefix: rootPrefix.trim() || "team-skill-evolver",
         ...(personalKeyDirty ? { personal_api_key: personalKey } : {}),
-        ...(teamKeyDirty ? { team_api_key: teamKey } : {}),
+        ...(teamKeyDirty ? { service_api_key: teamKey, team_api_key: teamKey } : {}),
       });
       setDirty(false);
     } catch (e: any) {
@@ -462,12 +463,16 @@ function DeploymentPanel({
             onChange={(value) => { setPersonalKey(value); setPersonalKeyDirty(true); setDirty(true); }}
           />
           <ConfigInput
-            label={`团队 API Key${sharing?.team_api_key_present ? "（已配置，留空保留）" : ""}`}
+            label={`服务 API Key（复用管理员 Key）${(sharing?.service_api_key_present ?? sharing?.team_api_key_present) ? "（已配置，留空保留）" : ""}`}
             value={teamKey}
             type="password"
             disabled={!isAdmin}
             onChange={(value) => { setTeamKey(value); setTeamKeyDirty(true); setDirty(true); }}
           />
+        </div>
+
+        <div className="rounded-lg border border-border bg-background/60 p-3 text-xs leading-relaxed text-muted-foreground">
+          服务 API Key 复用管理员配置的 OpenViking Key，用于写入团队资源、技能同步和团队记忆聚合；普通用户无需单独配置或持有明文 Key。
         </div>
 
         {isAdmin ? (

@@ -56,6 +56,7 @@ export interface SharingConfig {
   personal_user?: string;
   team_user?: string;
   root_prefix?: string;
+  service_api_key_present?: boolean;
   team_api_key_present?: boolean;
   personal_api_key_present?: boolean;
 }
@@ -653,6 +654,24 @@ export interface EvolveProcessSettings {
 }
 
 // ---- Skills management --------------------------------------------------- //
+
+export interface AggregationSettings {
+  enabled: boolean;
+  shared_knowledge_prefix: string;
+  target_root: string;
+  staging_dir: string;
+  work_root: string;
+  okf_skill_uri: string;
+  key_seed: string;
+  kinds: string[];
+}
+
+export interface AggregationSettingsUpdate {
+  shared_knowledge_prefix?: string;
+  staging_dir?: string;
+  okf_skill_uri?: string;
+  kinds?: string[];
+}
 
 export interface SkillListItem {
   name: string;

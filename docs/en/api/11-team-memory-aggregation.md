@@ -21,7 +21,7 @@ Implementation:
 
 ## 2. Endpoints and Parameters
 
-All `/api/aggregation/*` endpoints require console **administrator** authentication (admin role). The pipeline itself uses a trusted/root service identity to run compile.
+All `/api/aggregation/*` endpoints require console **administrator** authentication (admin role). The pipeline itself uses a trusted service identity to run compile, normally reusing the admin-configured OpenViking key.
 
 ---
 
@@ -286,6 +286,6 @@ Config is registered in three places: `teamEvolver/config_store/defaults.py`, `t
 
 ### Identity and permissions
 
-- Aggregation requires a trusted/root service identity (`aggregation.root_api_key`, falling back to the team/service key).
-- Phase 1 reads each user's own memory as "root key + user header" — a legal self-read, not a ROOT cross-user read.
+- Aggregation requires a trusted service identity. By default it directly reuses the admin-configured OpenViking key (stored in `sharing.viking_team_api_key` for compatibility); `aggregation.root_api_key` is only an advanced override.
+- Phase 1 reads each user's own memory as "service/admin key + user header", simulating the target user identity.
 - Output is written to `viking://resources/` (account-shared, writable by any role); no ROOT required.

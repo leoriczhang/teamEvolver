@@ -419,7 +419,7 @@ def test_v1_registration_syncs_existing_subject_mappings(
 
 
 @pytest.mark.anyio
-async def test_personal_source_sync_does_not_restart_evolve(monkeypatch) -> None:
+async def test_personal_source_sync_does_not_restart_evolve_or_dreamcycle(monkeypatch) -> None:
     config = TeamEvolverConfig(
         sharing_viking_endpoint="https://openviking.example",
         sharing_viking_team_api_key=_key("acct", "team-space"),
@@ -454,7 +454,7 @@ async def test_personal_source_sync_does_not_restart_evolve(monkeypatch) -> None
 
     assert ("evolve-stop", True) not in calls
     assert ("evolve-start",) not in calls
-    assert ("dream",) in calls
+    assert ("dream",) not in calls
 
 
 @pytest.mark.anyio

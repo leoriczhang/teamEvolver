@@ -56,10 +56,12 @@ _DEFAULTS: dict = {
         # override the cloud/local default endpoint.
         "viking_endpoint": "",
         # Backward-compatible fallback. Prefer the scoped keys when the caller
-        # has separate personal and team OpenViking credentials.
+        # has separate personal and service OpenViking credentials.
         "viking_api_key": "",
         "viking_personal_api_key": "",
         "viking_personal_api_keys": [],
+        # Service/admin OpenViking key used for team resources, skill sync, and
+        # aggregation. The field name is kept for existing config files.
         "viking_team_api_key": "",
         "viking_account": "default",
         "viking_personal_user": "",
@@ -173,8 +175,8 @@ _DEFAULTS: dict = {
         # User-editable OKF Skill consumed by ov compile.
         "okf_skill_uri": "viking://agent/skills/team-memory-okf",
         "insight_skill_uri": "",
-        # Trusted/root service key used to enumerate users and mint per-user
-        # keys. Falls back to the team/service key when empty.
+        # Optional aggregation-only override. Empty means reuse the admin
+        # service key from sharing.viking_team_api_key.
         "root_api_key": "",
         # Fixed seed for deterministic per-user key derivation via the admin
         # regenerate-key endpoint. Same (user, seed) always yields the same key,

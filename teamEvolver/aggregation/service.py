@@ -1,6 +1,7 @@
 """Orchestration for cross-user memory aggregation.
 
-Pipeline (all steps below use a trusted/root service identity):
+Pipeline (all steps below use a trusted service identity, normally the admin
+OpenViking key):
 
 1. Resolve account users via the Admin API.
 2. Expand each user + memory category into source URIs and plan compile
@@ -91,7 +92,8 @@ class MemoryAggregationService:
         return str(getattr(self.config, "sharing_viking_endpoint", "") or "").rstrip("/")
 
     def _root_key(self) -> str:
-        # Prefer a dedicated aggregation service key; fall back to the team key.
+        # Prefer an explicit aggregation override; otherwise reuse the admin's
+        # OpenViking key stored as the service/team credential.
         return str(
             getattr(self.config, "aggregation_root_api_key", "")
             or getattr(self.config, "sharing_viking_team_api_key", "")
@@ -103,7 +105,8 @@ class MemoryAggregationService:
         return str(getattr(self.config, "sharing_viking_user", "") or "team")
 
     def _team_key(self) -> str:
-        # Key the team/service user runs the merge pass with.
+        # The merge pass runs as the team/service user but reuses the admin
+        # service credential by default; no separate team-content key is needed.
         return str(
             getattr(self.config, "sharing_viking_team_api_key", "")
             or getattr(self.config, "aggregation_root_api_key", "")

@@ -134,6 +134,7 @@ def _apply_overrides(config, cfg: dict[str, Any]):
         "endpoint": "sharing_viking_endpoint",
         "viking_endpoint": "sharing_viking_endpoint",
         "viking_api_key": "sharing_viking_api_key",
+        "service_api_key": "sharing_viking_team_api_key",
         "team_api_key": "sharing_viking_team_api_key",
         "viking_team_api_key": "sharing_viking_team_api_key",
         "viking_account": "sharing_viking_account",
@@ -158,7 +159,15 @@ def _apply_overrides(config, cfg: dict[str, Any]):
         )
     if any(
         cfg.get(key)
-        for key in ("backend", "sharing_backend", "endpoint", "viking_endpoint", "viking_api_key", "team_api_key")
+        for key in (
+            "backend",
+            "sharing_backend",
+            "endpoint",
+            "viking_endpoint",
+            "viking_api_key",
+            "service_api_key",
+            "team_api_key",
+        )
     ):
         config.sharing_enabled = bool(cfg.get("sharing_enabled", True))
     return config
@@ -293,7 +302,7 @@ def _pull(target_dir: Path, cfg: dict[str, Any]) -> dict[str, Any]:
     if backend == "viking" and not (
         getattr(config, "sharing_viking_team_api_key", "") or getattr(config, "sharing_viking_api_key", "")
     ):
-        return {"status": "skipped", "reason": "missing_team_api_key"}
+        return {"status": "skipped", "reason": "missing_service_api_key"}
     hub = SkillHub.team_from_config(config)
     result = hub.pull_skills(str(target_dir), mirror=bool(cfg.get("mirror", False)))
     return {"status": "ok", **result}

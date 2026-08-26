@@ -92,7 +92,7 @@ Skill sharing and OpenViking cloud sync configuration.
 | `viking_api_key` | string | `""` | Generic API key (backward compatible; per-scope keys recommended). |
 | `viking_personal_api_key` | string | `""` | Personal space API key. |
 | `viking_personal_api_keys` | list | `[]` | List of multiple personal space API keys. |
-| `viking_team_api_key` | string | `""` | Team space API key. |
+| `viking_team_api_key` | string | `""` | Service/admin API key (compatibility field name) for team resources, skill sync, and team-memory aggregation; normally reuses the admin OpenViking key. |
 | `viking_root_prefix` | string | `"team-skill-evolver"` | Namespace root prefix for teamEvolver resources in OpenViking; do not modify casually. |
 | `viking_agent` | string | (constant) | OpenViking Agent namespace, fixed by code constant. |
 | `viking_account` | string | `"default"` | Viking account identifier. |
@@ -341,6 +341,8 @@ sharing:
   backend: "viking"
   viking_deployment: "cloud"
   viking_personal_api_key: "vk-xxxxxxxx"
+  # Compatibility field name; semantically the service/admin key,
+  # normally the admin OpenViking key.
   viking_team_api_key: "vk-yyyyyyyy"
   skill_reload_mode: "poll"
   skill_reload_interval_seconds: 30

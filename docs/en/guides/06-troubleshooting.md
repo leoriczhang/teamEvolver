@@ -112,7 +112,7 @@ Typically caused by abnormal process crash (OOM, kill -9) not cleaning PID file.
 
 3. Verify API Key configuration:
    - `sharing.viking_personal_api_key` (personal space)
-   - `sharing.viking_team_api_key` (team space)
+   - `sharing.viking_team_api_key` (service/admin key, compatibility field name)
    - Or generic `sharing.viking_api_key`
 
 4. Check endpoint configuration:

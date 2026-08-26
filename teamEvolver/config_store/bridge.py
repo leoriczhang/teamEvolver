@@ -620,7 +620,7 @@ class ConfigStore:
                     or sharing.get("viking_api_key")
                     or ""
                 )
-                team_key = (
+                service_key = (
                     sharing.get("viking_team_api_key")
                     or sharing.get("viking_resources_api_key")
                     or sharing.get("viking_api_key")
@@ -632,7 +632,7 @@ class ConfigStore:
                     "sharing.viking_root_prefix: "
                     f"{sharing.get('viking_root_prefix', '') or TEAM_SKILL_ROOT_PREFIX}",
                     f"sharing.viking_personal_api_key: {'present' if personal_key else 'missing'}",
-                    f"sharing.viking_team_api_key: {'present' if team_key else 'missing'}",
+                    f"sharing.service_api_key: {'present' if service_key else 'missing'}",
                 ]
             lines += [
                 f"sharing.agent_id:    {sharing.get('viking_agent_id', '') or '(default)'}",
@@ -665,7 +665,7 @@ class ConfigStore:
             f"dreamcycle.auto_start: {dreamcycle.get('auto_start', False)}",
             "dreamcycle.personal_sources: "
             f"{len(_normalize_string_list(sharing.get('viking_personal_api_keys', [])))}",
-            "dreamcycle.team_target: "
+            "dreamcycle.service_target: "
             f"{'configured' if sharing.get('viking_team_api_key') else 'missing'}",
             f"validation.enabled: {validation.get('enabled', True)}",
             f"validation.mode: {_normalize_validation_mode(validation.get('mode', 'true_replay'))}",

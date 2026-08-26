@@ -92,7 +92,7 @@ HTTP 服务监听配置。
 | `viking_api_key` | string | `""` | 通用 API 密钥（向后兼容，推荐使用分域密钥）。 |
 | `viking_personal_api_key` | string | `""` | 个人空间 API 密钥。 |
 | `viking_personal_api_keys` | list | `[]` | 多个个人空间 API 密钥列表。 |
-| `viking_team_api_key` | string | `""` | 团队空间 API 密钥。 |
+| `viking_team_api_key` | string | `""` | 服务/admin API Key（兼容字段名），用于团队资源、技能同步与团队记忆聚合；默认复用管理员 OpenViking Key。 |
 | `viking_root_prefix` | string | `"team-skill-evolver"` | OpenViking 中 teamEvolver 资源的命名空间根前缀，请勿随意修改。 |
 | `viking_agent` | string | (常量) | OpenViking Agent 命名空间，由代码常量固定。 |
 | `viking_account` | string | `"default"` | Viking 账户标识。 |
@@ -340,6 +340,7 @@ sharing:
   backend: "viking"
   viking_deployment: "cloud"
   viking_personal_api_key: "vk-xxxxxxxx"
+  # 兼容字段名；语义为服务/admin key，通常直接使用管理员 OpenViking Key。
   viking_team_api_key: "vk-yyyyyyyy"
   skill_reload_mode: "poll"
   skill_reload_interval_seconds: 30

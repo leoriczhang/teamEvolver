@@ -60,7 +60,8 @@ teamEvolver config service.host 0.0.0.0
 teamEvolver config service.port 52010
 teamEvolver config sharing.enabled true
 teamEvolver config sharing.backend viking
-# teamEvolver config sharing.viking_team_api_key "<team-key>"
+# Compatibility field name; set the service/admin key here, normally the admin OpenViking key.
+# teamEvolver config sharing.viking_team_api_key "<admin-openviking-key>"
 # teamEvolver config sharing.viking_personal_api_key "<personal-key>"
 # teamEvolver config sharing.viking_root_prefix "team-skill-evolver"
 
@@ -81,7 +82,7 @@ Related code: `teamEvolver/proxy/server.py` (service startup logic), `teamEvolve
 
 ## Hermes Machine Setup
 
-Hermes machines should **NOT** configure OpenViking team key. Recommend all going through teamEvolver service backend: local machine only knows `TEAMEVOLVER_URL` and `TEAMEVOLVER_USER`; underlying OpenViking endpoint, key, root prefix remain in central teamEvolver service.
+Hermes machines should **NOT** configure an OpenViking service/admin key. Recommend all going through teamEvolver service backend: local machine only knows `TEAMEVOLVER_URL` and `TEAMEVOLVER_USER`; underlying OpenViking endpoint, key, root prefix remain in central teamEvolver service.
 
 ### Install Team Skill Sync Hook
 
@@ -234,5 +235,5 @@ Related code: `teamEvolver/proxy/attribution.py`
 - If `52010/trigger` returns 404, indicates central service not current single-port version, or not restarted to latest code.
 - If `52010/ingest_session` returns `session_id is required`, indicates service reachable; this is expected validation error for empty body.
 - If skills not syncing, first check `/storage/status`, then check central machine OpenViking configuration.
-- Do not distribute OpenViking team key to every Hermes machine; default using `--backend service`.
+- Do not distribute the OpenViking service/admin key to every Hermes machine; default using `--backend service`.
 - If TTY authorization prompt appears during hook testing, check installation script correctly wrote allowlist approval file (located at `$HERMES_HOME/hooks/allowlist/`).

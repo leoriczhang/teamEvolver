@@ -1,6 +1,7 @@
 """HTTP routes for cross-user memory aggregation (interface 1).
 
-Endpoints (admin-only; the pipeline uses a trusted/root service identity):
+Endpoints (admin-only; the pipeline uses a trusted service identity, normally
+the admin OpenViking key):
 
 - ``POST /api/aggregation/run``       -> start a background aggregation task
 - ``GET  /api/aggregation/status/{id}`` -> poll a task's per-category progress
@@ -21,6 +22,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from ..aggregation import MemoryAggregationService
+from ..config_store import ConfigStore
 from .users_admin import _request_user
 
 logger = logging.getLogger(__name__)
@@ -142,3 +144,88 @@ class AggregationMixin:
             # The saved body is installed into each identity's own skills space on
             # the next aggregation run, so no separate publish step is needed here.
             return JSONResponse({"ok": True, "body": service.skill_body()})
+
+        @app.get("/api/aggregation/settings")
+        async def api_aggregation_settings(request: Request):
+            self._mark_request_activity()
+            self._require_admin(request)
+            config_file = str(
+                getattr(self.config, "_config_file", "") or ""
+            ).strip()
+            store = (
+                ConfigStore(config_file=__import__("pathlib").Path(config_file))
+                if config_file
+                else ConfigStore()
+            )
+            data = store.load()
+            agg = data.get("aggregation", {}) if isinstance(data.get("aggregation"), dict) else {}
+            prefix = str(agg.get("shared_knowledge_prefix") or "shared-knowledge")
+            target_root = f"viking://resources/{prefix.strip('/')}"
+            staging = str(agg.get("staging_dir") or "staging")
+            work_root = f"viking://resources/{prefix.strip('/')}-{staging.strip('/')}"
+            return JSONResponse({
+                "enabled": bool(agg.get("enabled", False)),
+                "shared_knowledge_prefix": prefix,
+                "target_root": target_root,
+                "staging_dir": staging,
+                "work_root": work_root,
+                "okf_skill_uri": str(agg.get("okf_skill_uri") or "viking://agent/skills/team-memory-okf"),
+                "key_seed": str(agg.get("key_seed") or "teamevolver-aggregation"),
+                "kinds": agg.get("kinds") or [],
+            })
+
+        @app.post("/api/aggregation/settings")
+        async def api_aggregation_settings_save(request: Request):
+            self._mark_request_activity()
+            self._require_admin(request)
+            try:
+                body = await request.json()
+            except ValueError:
+                body = {}
+            if not isinstance(body, dict):
+                raise HTTPException(status_code=400, detail="aggregation settings body must be an object")
+
+            config_file = str(
+                getattr(self.config, "_config_file", "") or ""
+            ).strip()
+            store = (
+                ConfigStore(config_file=__import__("pathlib").Path(config_file))
+                if config_file
+                else ConfigStore()
+            )
+            data = store.load()
+            agg = data.setdefault("aggregation", {})
+
+            if "shared_knowledge_prefix" in body:
+                prefix = str(body.get("shared_knowledge_prefix") or "").strip().strip("/")
+                if not prefix:
+                    raise HTTPException(status_code=400, detail="shared_knowledge_prefix is required")
+                if len(prefix) > 120:
+                    raise HTTPException(status_code=400, detail="shared_knowledge_prefix must be at most 120 characters")
+                agg["shared_knowledge_prefix"] = prefix
+
+            if "staging_dir" in body:
+                agg["staging_dir"] = str(body.get("staging_dir") or "staging").strip().strip("/")
+
+            if "okf_skill_uri" in body:
+                agg["okf_skill_uri"] = str(body.get("okf_skill_uri") or "").strip()
+
+            if "kinds" in body:
+                raw_kinds = body.get("kinds")
+                if isinstance(raw_kinds, list):
+                    agg["kinds"] = [str(k).strip() for k in raw_kinds if str(k).strip()]
+
+            store.save(data)
+            new_config = store.to_config()
+            self.config = new_config
+            await self._reload_openviking_integrations(new_config)
+
+            prefix = str(agg.get("shared_knowledge_prefix") or "shared-knowledge")
+            staging = str(agg.get("staging_dir") or "staging")
+            return JSONResponse({
+                "ok": True,
+                "shared_knowledge_prefix": prefix,
+                "target_root": f"viking://resources/{prefix.strip('/')}",
+                "staging_dir": staging,
+                "work_root": f"viking://resources/{prefix.strip('/')}-{staging.strip('/')}",
+            })

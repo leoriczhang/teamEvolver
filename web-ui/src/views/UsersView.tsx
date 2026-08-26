@@ -684,7 +684,7 @@ function KeyEditor({
             type={visible ? "text" : "password"}
             disabled={disabled}
             value={value.viking_api_key || ""}
-            placeholder={inherited ? "继承管理员团队 Key，不回显明文" : configured ? "已配置，输入新值可替换" : "留空使用默认 OpenViking 空间"}
+            placeholder={inherited ? "继承管理员服务 Key，不回显明文" : configured ? "已配置，输入新值可替换" : "留空使用默认 OpenViking 空间"}
             onChange={(e) => onChange({ ...value, viking_api_key: e.target.value, clear_viking_api_key: false })}
           />
           <Button
@@ -708,7 +708,7 @@ function KeyEditor({
           </Button>
         </div>
         <div className="mt-1.5 text-[11px] text-muted-soft">
-          默认隐藏；点击“显示”才读取明文。继承管理员团队 Key 时不会回显明文；保存时留空会保留原 Key，清空后保存才删除。
+          默认隐藏；点击“显示”才读取明文。继承管理员服务 Key 时不会回显明文；保存时留空会保留原 Key，清空后保存才删除。
         </div>
       </Field>
       <Field label="OpenViking 用户空间">

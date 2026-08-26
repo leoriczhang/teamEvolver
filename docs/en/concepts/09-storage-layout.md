@@ -13,7 +13,7 @@ The mapping is defined in `_scope_map()` in `teamEvolver/proxy/openviking_worksp
 | `personal_memory` | `viking://user/{personal user}/memories` | personal | memory | ✅ |
 | `personal_skills` | `viking://resources/team-skill-evolver/peers/{account}/skills` | personal | skills | ✅ |
 | `personal_workspace` | `viking://user/{personal user}` | personal | workspace root | ✅ |
-| `team_memory` | `viking://user/{team user}/memories` | team | memory | ❌ admin only |
+| `team_memory` | `viking://resources/shared-knowledge` | team | memory | ❌ admin only |
 | `team_skills` | `viking://resources/team-skill-evolver/skills` | team | skills | ❌ admin only |
 | `team_workspace` | `viking://resources/team-skill-evolver` | team | workspace root | ❌ admin only |
 
@@ -23,12 +23,14 @@ URI variables:
 |----------|--------|---------|
 | `root_prefix` | `sharing.viking_root_prefix` | `team-skill-evolver` (data-contract constant, do not rename) |
 | `personal user` | user `personal_space.viking_user` → account ID → `sharing.viking_personal_user` | account ID |
-| `team user` | `sharing.viking_user` | `default` |
+| `team user` | `sharing.viking_user` | `team` |
 | `account` | `id` in the user registry | — |
+| `shared_knowledge_prefix` | `aggregation.shared_knowledge_prefix` | `shared-knowledge` |
 
 ### Namespace split
 
-- **Memory** lives in the `viking://user/{user}/` namespace, isolated per person.
+- **Personal memory** lives in the `viking://user/{user}/` namespace, isolated per person.
+- **Aggregated team memory** lives in `viking://resources/{shared_knowledge_prefix}/`, shared for account-wide retrieval.
 - **Skills and shared resources** live in the `viking://resources/{root_prefix}/` namespace, shared by the team.
 - **Personal skills** are isolated inside the shared namespace via a `peers/{account}/` path segment — see `peer_key_prefix()` in `teamEvolver/storage/base.py`.
 
@@ -38,12 +40,12 @@ Credentials used when calling OpenViking are resolved in `_workspace_headers()` 
 
 | Space | API key resolution order |
 |-------|--------------------------|
-| team | user `team_space` key → admin team key (inherited) → `sharing.viking_team_api_key` → `sharing.viking_api_key` |
+| team | user `team_space` key → admin service key (inherited) → `sharing.viking_team_api_key` (compatibility field; semantically the service/admin key) → `sharing.viking_api_key` |
 | personal | user `personal_space` key → `sharing.viking_personal_api_key` → `sharing.viking_api_key` |
 
-Three identity headers are always sent: `X-OpenViking-Account` (default `default`), `X-OpenViking-User` (personal = account ID, team = `default`), and `X-OpenViking-Agent` (`team-skill-evolver`). **When the API key is empty (e.g. a locally self-hosted OpenViking), the `X-API-Key` and `Authorization` headers are omitted** and isolation relies on the three identity headers alone; the URI mapping is identical for local and cloud, differing only by endpoint (see `resolve_viking_endpoint()` in `teamEvolver/config.py`).
+Three identity headers are always sent: `X-OpenViking-Account` (default `default`), `X-OpenViking-User` (personal = account ID, team = `team`), and `X-OpenViking-Agent` (`team-skill-evolver`). **When the API key is empty (e.g. a locally self-hosted OpenViking), the `X-API-Key` and `Authorization` headers are omitted** and isolation relies on the three identity headers alone; the URI mapping is identical for local and cloud, differing only by endpoint (see `resolve_viking_endpoint()` in `teamEvolver/config.py`).
 
-Regular users need not configure a team key; they inherit the first admin's team key automatically, via `_effective_team_key()` in `teamEvolver/proxy/users_admin.py`.
+Regular users need not configure a service/admin key. The service directly reuses the admin-configured OpenViking key as the service key; regular users inherit only server-mediated access to team assets, not the plaintext key. The compatibility implementation lives in `_effective_team_key()` in `teamEvolver/proxy/users_admin.py`.
 
 ## Team Workspace Directory Map
 

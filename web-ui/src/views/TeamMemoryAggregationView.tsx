@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Panel } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { api, type UserProfile } from "@/api/client";
+import { api, type AggregationSettings, type AggregationSettingsUpdate, type UserProfile } from "@/api/client";
 import { toastErr, toastOk } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { RefreshCw, Play, Users, CheckSquare, Square } from "lucide-react";
@@ -69,7 +69,49 @@ export default function TeamMemoryAggregationView({
   const pollRef = useRef<number | null>(null);
   const loaded = useRef(false);
 
+  const [settings, setSettings] = useState<AggregationSettings | null>(null);
+  const [prefixInput, setPrefixInput] = useState("");
+  const [prefixDirty, setPrefixDirty] = useState(false);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+
   const isAdmin = String(user?.role || "") === "admin";
+
+  const loadSettings = useCallback(async () => {
+    try {
+      const data = await api<AggregationSettings>("/api/aggregation/settings");
+      setSettings(data);
+      setPrefixInput(data.shared_knowledge_prefix);
+      setPrefixDirty(false);
+      setSettingsLoaded(true);
+    } catch {
+      setSettings(null);
+      setSettingsLoaded(true);
+    }
+  }, []);
+
+  const saveSettings = useCallback(async () => {
+    if (!prefixDirty || !settings) return;
+    setSavingSettings(true);
+    try {
+      const body: AggregationSettingsUpdate = {
+        shared_knowledge_prefix: prefixInput.trim().replace(/^\/+|\/+$/g, ""),
+      };
+      const data = await api<AggregationSettings>("/api/aggregation/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      setSettings(data);
+      setPrefixInput(data.shared_knowledge_prefix);
+      setPrefixDirty(false);
+      toastOk("已保存", `输出目录已更新为 ${data.target_root}`);
+    } catch (e: any) {
+      toastErr("保存失败", e.message);
+    } finally {
+      setSavingSettings(false);
+    }
+  }, [prefixDirty, settings, prefixInput]);
 
   const loadSkill = useCallback(async () => {
     try {
@@ -150,6 +192,7 @@ export default function TeamMemoryAggregationView({
     if (!active || loaded.current) return;
     loaded.current = true;
     loadSkill();
+    loadSettings();
     (async () => {
       try {
         const data = await api<{ runs: AggregationRun[] }>("/api/aggregation/runs");
@@ -166,7 +209,7 @@ export default function TeamMemoryAggregationView({
         // no active runs / not reachable — ignore
       }
     })();
-  }, [active, loadSkill, pollStatus]);
+  }, [active, loadSkill, loadSettings, pollStatus]);
 
   useEffect(() => stopPolling, [stopPolling]);
 
@@ -263,7 +306,7 @@ export default function TeamMemoryAggregationView({
         <div className="flex flex-col gap-3 p-3.5">
           <div className="text-[13px] leading-relaxed text-muted-foreground">
             将一个 OpenViking Account 下选定 User 的个人记忆，通过 ov compile 聚合为{" "}
-            <code>viking://resources/shared-knowledge/</code>
+            <code>{settings?.target_root || "viking://resources/shared-knowledge"}</code>
             下的团队共享知识（OKF 格式）。流程：输入 Account → 列出用户 →
             勾选/反选 → 确认聚合。产物在 account 内全员可检索。
           </div>
@@ -360,6 +403,78 @@ export default function TeamMemoryAggregationView({
                 )}
               </div>
             </div>
+          )}
+        </div>
+      </Panel>
+
+      <Panel
+        title="输出目录配置"
+        extra={
+          <span className="text-[12px] text-muted-foreground">
+            当前：<code>{settings?.target_root || "加载中…"}</code>
+          </span>
+        }
+      >
+        <div className="p-3.5">
+          {!settingsLoaded ? (
+            <div className="text-[12px] text-muted-foreground">加载中…</div>
+          ) : settings ? (
+            <div className="flex flex-col gap-3">
+              <div className="grid gap-3 md:grid-cols-2">
+                <label className="flex flex-col gap-1 text-[12px] font-[700]">
+                  团队共享知识前缀（输出目录）
+                  <Input
+                    value={prefixInput}
+                    disabled={!isAdmin || savingSettings}
+                    placeholder="shared-knowledge"
+                    onChange={(e) => {
+                      setPrefixInput(e.target.value);
+                      setPrefixDirty(true);
+                    }}
+                  />
+                  <span className="text-[11px] font-normal text-muted-foreground">
+                    最终路径：<code className="mono break-all">viking://resources/{prefixInput.trim().replace(/^\/+|\/+$/g, "") || "shared-knowledge"}</code>
+                  </span>
+                </label>
+                <div className="flex flex-col gap-1 text-[12px] font-[700]">
+                  其他信息
+                  <div className="rounded-md border border-border bg-surface p-2 font-normal text-[11px] text-muted-foreground">
+                    <div>staging 目录：<code>{settings.work_root}</code></div>
+                    <div>OKF Skill URI：<code>{settings.okf_skill_uri}</code></div>
+                    <div>Key Seed：<code>{settings.key_seed}</code></div>
+                  </div>
+                </div>
+              </div>
+
+              {isAdmin ? (
+                <div className="flex justify-end gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={savingSettings || !prefixDirty}
+                    onClick={() => {
+                      setPrefixInput(settings.shared_knowledge_prefix);
+                      setPrefixDirty(false);
+                    }}
+                  >
+                    重置
+                  </Button>
+                  <Button
+                    size="sm"
+                    disabled={savingSettings || !prefixDirty}
+                    onClick={saveSettings}
+                  >
+                    {savingSettings ? "保存中…" : "保存输出目录"}
+                  </Button>
+                </div>
+              ) : (
+                <div className="rounded-lg border border-border bg-background/60 p-3 text-xs text-muted-foreground">
+                  仅管理员可修改聚合输出目录。
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="text-[12px] text-muted-foreground">无法加载配置</div>
           )}
         </div>
       </Panel>

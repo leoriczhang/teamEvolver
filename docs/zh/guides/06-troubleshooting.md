@@ -112,7 +112,7 @@ journalctl -u teamevolver -n 100 --no-pager
 
 3. 验证 API Key 配置：
    - `sharing.viking_personal_api_key`（个人空间）
-   - `sharing.viking_team_api_key`（团队空间）
+   - `sharing.viking_team_api_key`（服务/admin Key，兼容字段名）
    - 或通用的 `sharing.viking_api_key`
 
 4. 检查端点配置：

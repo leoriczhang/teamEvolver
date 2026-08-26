@@ -108,6 +108,9 @@ class TeamEvolverConfig:
     sharing_viking_api_key: str = ""
     sharing_viking_personal_api_key: str = ""
     sharing_viking_personal_api_keys: list[str] = field(default_factory=list)
+    # Service/admin OpenViking key used for team resources, skill sync, and
+    # aggregation. The historical field name is retained for config
+    # compatibility; deployments usually reuse the admin user's key here.
     sharing_viking_team_api_key: str = ""
     sharing_viking_account: str = "default"
     # OpenViking user namespace used as the default personal-memory space.
@@ -230,6 +233,8 @@ class TeamEvolverConfig:
     aggregation_shared_knowledge_prefix: str = "shared-knowledge"
     aggregation_okf_skill_uri: str = "viking://agent/skills/team-memory-okf"
     aggregation_insight_skill_uri: str = ""
+    # Optional aggregation-only override. Empty means reuse
+    # sharing_viking_team_api_key, which is the admin/service key.
     aggregation_root_api_key: str = ""
     aggregation_key_seed: str = "teamevolver-aggregation"
     aggregation_staging_dir: str = "staging"

@@ -13,7 +13,7 @@ teamEvolver 的所有持久化数据都存放在 OpenViking 后端。本文说�
 | `personal_memory` | `viking://user/{个人 user}/memories` | 个人 | 记忆 | ✅ |
 | `personal_skills` | `viking://resources/team-skill-evolver/peers/{账号}/skills` | 个人 | 技能 | ✅ |
 | `personal_workspace` | `viking://user/{个人 user}` | 个人 | 工作区根 | ✅ |
-| `team_memory` | `viking://user/{团队 user}/memories` | 团队 | 记忆 | ❌ 仅管理员 |
+| `team_memory` | `viking://resources/shared-knowledge` | 团队 | 记忆 | ❌ 仅管理员 |
 | `team_skills` | `viking://resources/team-skill-evolver/skills` | 团队 | 技能 | ❌ 仅管理员 |
 | `team_workspace` | `viking://resources/team-skill-evolver` | 团队 | 工作区根 | ❌ 仅管理员 |
 
@@ -23,12 +23,14 @@ URI 中的变量：
 |------|------|--------|
 | `root_prefix` | `sharing.viking_root_prefix` | `team-skill-evolver`（数据契约常量，不可重命名） |
 | `个人 user` | 用户 `personal_space.viking_user` → 账号 ID → `sharing.viking_personal_user` | 账号 ID |
-| `团队 user` | `sharing.viking_user` | `default` |
+| `团队 user` | `sharing.viking_user` | `team` |
 | `账号` | 用户注册表中的 `id` | — |
+| `shared_knowledge_prefix` | `aggregation.shared_knowledge_prefix` | `shared-knowledge` |
 
 ### 命名空间划分
 
-- **记忆**走 `viking://user/{user}/` 命名空间，按人隔离。
+- **个人记忆**走 `viking://user/{user}/` 命名空间，按人隔离。
+- **团队记忆聚合产物**走 `viking://resources/{shared_knowledge_prefix}/`，由 Account 内共享检索。
 - **技能与共享资源**走 `viking://resources/{root_prefix}/` 命名空间，团队共享。
 - **个人技能**在共享命名空间内通过 `peers/{账号}/` 路径段做隔离，见 `teamEvolver/storage/base.py` 的 `peer_key_prefix()`。
 
@@ -38,12 +40,12 @@ URI 中的变量：
 
 | 空间 | API Key 解析顺序 |
 |------|------------------|
-| 团队 | 用户 `team_space` Key → 管理员团队 Key（继承）→ `sharing.viking_team_api_key` → `sharing.viking_api_key` |
+| 团队 | 用户 `team_space` Key → 管理员服务 Key（继承）→ `sharing.viking_team_api_key`（兼容字段，语义为 service/admin key）→ `sharing.viking_api_key` |
 | 个人 | 用户 `personal_space` Key → `sharing.viking_personal_api_key` → `sharing.viking_api_key` |
 
-三个身份头始终发送：`X-OpenViking-Account`（默认 `default`）、`X-OpenViking-User`（个人=账号 ID，团队=`default`）、`X-OpenViking-Agent`（`team-skill-evolver`）。**当 API Key 为空时（如本地自托管 OpenViking），`X-API-Key` 与 `Authorization` 头不发送**，仅靠上述三个身份头隔离；本地/云端的 URI 映射规则完全一致，仅端点不同（见 `teamEvolver/config.py` 的 `resolve_viking_endpoint()`）。
+三个身份头始终发送：`X-OpenViking-Account`（默认 `default`）、`X-OpenViking-User`（个人=账号 ID，团队=`team`）、`X-OpenViking-Agent`（`team-skill-evolver`）。**当 API Key 为空时（如本地自托管 OpenViking），`X-API-Key` 与 `Authorization` 头不发送**，仅靠上述三个身份头隔离；本地/云端的 URI 映射规则完全一致，仅端点不同（见 `teamEvolver/config.py` 的 `resolve_viking_endpoint()`）。
 
-普通用户无需配置团队 Key，会自动继承第一个管理员配置的团队 Key，见 `teamEvolver/proxy/users_admin.py` 的 `_effective_team_key()`。
+普通用户无需配置服务/admin Key。服务端直接复用管理员配置的 OpenViking Key 作为 service key，普通用户只继承“可通过服务端访问团队资产”的能力，不持有明文 Key；兼容实现见 `teamEvolver/proxy/users_admin.py` 的 `_effective_team_key()`。
 
 ## 团队 Workspace 目录全景
 

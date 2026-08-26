@@ -60,7 +60,8 @@ teamEvolver config service.host 0.0.0.0
 teamEvolver config service.port 52010
 teamEvolver config sharing.enabled true
 teamEvolver config sharing.backend viking
-# teamEvolver config sharing.viking_team_api_key "<team-key>"
+# 兼容字段名；这里填写服务/admin key，通常复用管理员 OpenViking Key。
+# teamEvolver config sharing.viking_team_api_key "<admin-openviking-key>"
 # teamEvolver config sharing.viking_personal_api_key "<personal-key>"
 # teamEvolver config sharing.viking_root_prefix "team-skill-evolver"
 
@@ -81,7 +82,7 @@ curl -fsS -X POST "$TEAMEVOLVER_URL/trigger"
 
 ## Hermes 机器设置
 
-Hermes 机器**不要**配置 OpenViking team key。推荐全部走 teamEvolver 服务后端：本机只知道 `TEAMEVOLVER_URL` 和 `TEAMEVOLVER_USER`，底层 OpenViking endpoint、key、root prefix 留在中心 teamEvolver 服务里。
+Hermes 机器**不要**配置 OpenViking 服务/admin key。推荐全部走 teamEvolver 服务后端：本机只知道 `TEAMEVOLVER_URL` 和 `TEAMEVOLVER_USER`，底层 OpenViking endpoint、key、root prefix 留在中心 teamEvolver 服务里。
 
 ### 安装团队技能同步 Hook
 
@@ -234,5 +235,5 @@ hooks:
 - 如果 `52010/trigger` 返回 404，说明中心服务不是当前单端口版，或没有重启到最新代码。
 - 如果 `52010/ingest_session` 返回 `session_id is required`，说明服务可达；这是空 body 的预期校验错误。
 - 如果同步不到技能，先查 `/storage/status`，再查中心机 OpenViking 配置。
-- 不要把 OpenViking team key 分发到每台 Hermes 机器；默认使用 `--backend service`。
+- 不要把 OpenViking 服务/admin key 分发到每台 Hermes 机器；默认使用 `--backend service`。
 - 如果 hook 测试时出现 TTY 授权提示，检查安装脚本是否正确写入了 allowlist approval 文件（位于 `$HERMES_HOME/hooks/allowlist/`）。

@@ -90,10 +90,15 @@ def _scope_map(
         or user_id
         or getattr(config, "sharing_viking_personal_user", "")
     ).strip()
-    # Team-owned Agent context is always isolated under the canonical
-    # OpenViking user ``team``. It must never fall back to ``default``, which
-    # is an OpenViking bootstrap identity rather than a team workspace.
-    team_owner = "team"
+    # Identity used to reach account-shared team resources. It is only the
+    # ``X-OpenViking-User`` header value for viking://resources/* access (which
+    # is account-shared and role-agnostic), not a private storage owner. Read it
+    # from config (``sharing_viking_user``, default ``team``) so deployments can
+    # point it at any real account user instead of the hardcoded ``team`` name.
+    # trusted mode still requires *some* concrete user header, so this must not
+    # be empty; it must never fall back to ``default`` (an OpenViking bootstrap
+    # identity rather than a team workspace).
+    team_owner = str(getattr(config, "sharing_viking_user", "") or "team").strip() or "team"
     # Team memory now lives in the account-shared knowledge base produced by the
     # aggregation pipeline (viking://resources/<prefix>), not under the team
     # user's private memory namespace. This aligns the workspace view with where

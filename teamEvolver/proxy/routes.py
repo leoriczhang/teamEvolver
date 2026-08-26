@@ -3383,7 +3383,9 @@ class RoutesMixin:
                 if isinstance(raw_personal_keys, list)
                 else []
             )
-            team_key = str(storage.get("team_api_key") or "").strip()
+            team_key = str(
+                storage.get("service_api_key") or storage.get("team_api_key") or ""
+            ).strip()
             if not endpoint and not team_key:
                 return {
                     "ok": True,
@@ -3394,7 +3396,7 @@ class RoutesMixin:
             if not endpoint or not team_key:
                 raise HTTPException(
                     status_code=400,
-                    detail="storage.endpoint and storage.team_api_key must be provided together",
+                    detail="storage.endpoint and storage.service_api_key must be provided together",
                 )
 
             from ..integrations.dreamcycle import parse_openviking_key
@@ -3404,7 +3406,7 @@ class RoutesMixin:
             if not team_user:
                 raise HTTPException(
                     status_code=400,
-                    detail="storage.team_user is required when the team key has no encoded user",
+                    detail="storage.team_user is required when the service key has no encoded user",
                 )
             existing = sharing.get("viking_personal_api_keys")
             source_keys = (
@@ -3795,6 +3797,7 @@ class RoutesMixin:
                     "root_prefix": str(
                         sharing.get("viking_root_prefix") or "team-skill-evolver"
                     ),
+                    "service_api_key_present": bool(sharing.get("viking_team_api_key") or sharing.get("viking_api_key")),
                     "team_api_key_present": bool(sharing.get("viking_team_api_key") or sharing.get("viking_api_key")),
                     "personal_api_key_present": bool(sharing.get("viking_personal_api_key")),
                 }
@@ -3839,9 +3842,9 @@ class RoutesMixin:
                 sharing["viking_personal_api_key"] = str(
                     body.get("personal_api_key") or ""
                 ).strip()
-            if "team_api_key" in body:
+            if "service_api_key" in body or "team_api_key" in body:
                 sharing["viking_team_api_key"] = str(
-                    body.get("team_api_key") or ""
+                    body.get("service_api_key") or body.get("team_api_key") or ""
                 ).strip()
             store.save(data)
             owner.config = store.to_config()

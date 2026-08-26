@@ -219,11 +219,12 @@ def _public_space(space: dict[str, Any]) -> dict[str, Any]:
 
 
 def _effective_team_key(config, data: dict[str, Any] | None = None) -> str:
-    """Return the inherited team OpenViking key.
+    """Return the inherited service OpenViking key.
 
     The team space is a shared asset. Regular users should default to the
-    administrator's team OpenViking key, but the key must not be copied into
-    every user profile or exposed through the normal secret endpoint.
+    administrator's OpenViking key as a service credential, but the key must not
+    be copied into every user profile or exposed through the normal secret
+    endpoint.
     """
     registry = data if isinstance(data, dict) else _load_registry(_registry_path(config))
     users = registry.get("users") or []
@@ -947,8 +948,9 @@ def sync_openviking_user(config, user_id: str) -> dict[str, Any]:
 def _sync_user_space_keys_to_config(config, user: dict[str, Any]) -> Any:
     """Mirror the selected user's OpenViking space keys into global config.
 
-    Team skill sync reads ``sharing.viking_*_api_key`` from the service config.
-    User management stores the same credentials in the registry for per-user
+    Team skill sync reads the service credential from
+    ``sharing.viking_team_api_key`` for backwards compatibility. User
+    management stores the same admin key in the registry for per-user
     operations, so keep the runtime config in sync whenever a user is saved.
     """
     config_file = str(getattr(config, "_config_file", "") or "").strip()

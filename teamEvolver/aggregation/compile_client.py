@@ -3,7 +3,7 @@
 Two transports are possible (see the design doc). This module uses transport
 **A**: shell out to the ``ov`` binary, reusing the exact conf/env contract that
 ``OpenVikingWorkspaceMixin._workspace_cli`` already established (temp
-``ovcli.conf`` with ``root_api_key`` for cross-user reads, ``output=json``,
+``ovcli.conf`` with a service credential, ``output=json``,
 localized/anti-color env). We do not import that mixin to avoid a Request-bound
 call path; instead we build the same conf here from plain credentials so the
 aggregation service can run in a background task without an HTTP request.
@@ -37,13 +37,13 @@ class CompileBinaryUnavailable(RuntimeError):
 class CompileClient:
     """Run ``ov compile`` for one batch under a chosen OpenViking identity.
 
-    Aggregation avoids ROOT cross-user reads. Instead it runs compile in two
-    identity modes:
+    Aggregation runs compile in two identity modes using a service credential
+    that normally reuses the admin OpenViking key:
 
-    - **per-user** (``user_id`` + that user's own ``api_key``): reads that
+    - **per-user** (``user_id`` + service ``api_key``): reads that
       user's own memory into a per-user staging directory under
-      ``viking://resources/...``. Fully legal, no ROOT needed.
-    - **team** (``user_id`` = the team/service user + team key): merges the
+      ``viking://resources/...`` through trusted user simulation.
+    - **team** (``user_id`` = the team/service user + service key): merges the
       staged per-user products into the shared-knowledge target. The
       ``resources`` namespace is writable by any role.
 
@@ -56,8 +56,8 @@ class CompileClient:
     account_id: str
     # The OpenViking user this compile runs as. Trusted mode requires it.
     user_id: str = ""
-    # The API key matching ``user_id`` (a user's own key for per-user reads, or
-    # the team/service key for the merge pass).
+    # Service credential, normally the admin OpenViking key. Trusted mode uses
+    # it with ``user_id`` to simulate the target identity.
     api_key: str = ""
     agent_id: str = "team-skill-evolver"
     binary_override: str = ""
