@@ -1,7 +1,8 @@
 """HTTP routes for cross-user memory aggregation (interface 1).
 
-Endpoints are console-admin-only. OpenViking access uses the request-scoped
-Admin Key supplied to the users/run endpoints:
+The reusable execution endpoints do not depend on TeamEvolver sessions or
+roles. OpenViking access uses the request-scoped Admin Key supplied to the
+users/run endpoints. Management endpoints remain console-admin-only.
 
 - ``POST /api/aggregation/run``       -> start a background aggregation task
 - ``POST /api/aggregation/users``     -> list users with an OpenViking Admin Key
@@ -85,8 +86,6 @@ class AggregationMixin:
 
         @app.post("/api/aggregation/users")
         async def api_aggregation_users(request: Request):
-            self._mark_request_activity()
-            self._require_admin(request)
             try:
                 body = await request.json()
             except ValueError:
@@ -115,8 +114,6 @@ class AggregationMixin:
 
         @app.post("/api/aggregation/run", status_code=202)
         async def api_aggregation_run(request: Request):
-            self._mark_request_activity()
-            self._require_admin(request)
             try:
                 body = await request.json()
             except ValueError:
@@ -160,9 +157,7 @@ class AggregationMixin:
             return JSONResponse(status_code=202, content=run.to_public())
 
         @app.get("/api/aggregation/status/{task_id}")
-        async def api_aggregation_status(task_id: str, request: Request):
-            self._mark_request_activity()
-            self._require_admin(request)
+        async def api_aggregation_status(task_id: str):
             status = self._aggregation_service().status(task_id)
             if status is None:
                 raise HTTPException(status_code=404, detail="unknown aggregation task")

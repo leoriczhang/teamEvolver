@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import secrets
 import threading
 import time
 from dataclasses import dataclass, field
@@ -255,7 +256,7 @@ class MemoryAggregationService:
         *,
         target_uri: Optional[str] = None,
     ) -> AggregationRun:
-        task_id = f"agg_{int(time.time() * 1000):x}"
+        task_id = f"agg_{secrets.token_urlsafe(24)}"
         run = AggregationRun(
             task_id=task_id,
             account_id=account_id,

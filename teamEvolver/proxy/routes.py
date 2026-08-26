@@ -855,6 +855,13 @@ def _is_embedded_evolve_path(path: str) -> bool:
     )
 
 
+def _is_reusable_aggregation_path(path: str) -> bool:
+    return path in {
+        "/api/aggregation/users",
+        "/api/aggregation/run",
+    } or path.startswith("/api/aggregation/status/")
+
+
 def _max_session_body_bytes() -> int:
     try:
         value = int(os.environ.get("TEAMEVOLVER_MAX_SESSION_BODY_BYTES", str(32 * 1024 * 1024)) or 0)
@@ -1715,7 +1722,12 @@ class RoutesMixin:
         @app.middleware("http")
         async def require_console_auth(request: Request, call_next):
             path = request.url.path
-            if path.startswith("/api/") and not path.startswith("/api/auth/"):
+            requires_auth = (
+                path.startswith("/api/")
+                and not path.startswith("/api/auth/")
+                and not _is_reusable_aggregation_path(path)
+            )
+            if requires_auth:
                 if _users_empty():
                     return JSONResponse(status_code=401, content={"detail": "setup required", "needs_setup": True})
                 user = _session_user(request)
@@ -3797,7 +3809,10 @@ class RoutesMixin:
                     "root_prefix": str(
                         sharing.get("viking_root_prefix") or "team-skill-evolver"
                     ),
-                    "service_api_key_present": bool(sharing.get("viking_team_api_key") or sharing.get("viking_api_key")),
+                    "service_api_key_present": bool(
+                        sharing.get("viking_team_api_key")
+                        or sharing.get("viking_api_key")
+                    ),
                     "team_api_key_present": bool(sharing.get("viking_team_api_key") or sharing.get("viking_api_key")),
                     "personal_api_key_present": bool(sharing.get("viking_personal_api_key")),
                 }

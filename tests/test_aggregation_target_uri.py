@@ -29,6 +29,8 @@ def test_run_target_uri_is_normalized_and_isolates_work_and_state(tmp_path) -> N
         target_uri="  viking://resources/engineering/team-memory/  ",
     )
 
+    assert default_run.task_id != run.task_id
+    assert len(run.task_id) >= 32
     assert default_run.target_uri == "viking://resources/shared-knowledge"
     assert run.target_uri == "viking://resources/engineering/team-memory"
     assert run.to_public()["target_uri"] == run.target_uri
@@ -146,10 +148,8 @@ def test_run_route_accepts_an_independent_target_uri(tmp_path, monkeypatch) -> N
 
     monkeypatch.setattr(aggregation_routes.threading, "Thread", ImmediateThread)
     client = TestClient(server.app)
-    assert client.post(
-        "/api/auth/bootstrap",
-        json={"username": "admin", "display_name": "Admin", "password": "secret"},
-    ).status_code == 200
+    assert client.get("/api/aggregation/runs").status_code == 401
+    assert client.get("/api/aggregation/settings").status_code == 401
 
     missing_key = client.post(
         "/api/aggregation/run",
@@ -192,6 +192,11 @@ def test_run_route_accepts_an_independent_target_uri(tmp_path, monkeypatch) -> N
     assert captured["run_admin_key"] == "admin-secret"
     assert captured["run_user_ids"] == ["alice"]
     assert "admin-secret" not in response.text
+    status = client.get(
+        f"/api/aggregation/status/{response.json()['task_id']}"
+    )
+    assert status.status_code == 200
+    assert "admin-secret" not in status.text
 
     invalid = client.post(
         "/api/aggregation/run",

@@ -19,9 +19,14 @@
 - 增量状态：`teamEvolver/aggregation/state.py`（`AggregationState`）
 - OKF Skill 默认模板：`teamEvolver/aggregation/okf_skill.py`（`DEFAULT_OKF_SKILL_BODY`）
 
+`CompileClient` 直接调用 OpenViking HTTP 接口：通过 `POST /api/v1/skills`
+以内联内容安装聚合 Skill，再通过 `POST /bot/v1/compile` 创建任务并轮询
+`GET /bot/v1/compile/{task_id}`。teamEvolver 宿主机不需要安装 `ov` CLI，
+也不需要访问 OpenViking 容器内的 `/app/.venv/bin/ov` 或共享临时目录。
+
 ## 2. 接口和参数说明
 
-所有 `/api/aggregation/*` 接口均需控制台**管理员**认证（admin 角色）。用户枚举和聚合运行还要求在请求体中提交 OpenViking Admin Key；该 Key 不持久化，也不会进入任务状态或响应。
+可复用执行面 `POST /api/aggregation/users`、`POST /api/aggregation/run` 和 `GET /api/aggregation/status/{task_id}` 不依赖 TeamEvolver Cookie、用户或角色。用户枚举和聚合运行使用请求体中的 OpenViking Admin Key；该 Key 不持久化，也不会进入任务状态或响应。`runs`、`settings` 和 Skill 编辑仍属于控制台管理面，需要 TeamEvolver 管理员认证。
 
 ---
 
@@ -29,7 +34,7 @@
 
 列出指定 Account 下可聚合的 User（已排除 team 服务用户）。用于控制台「输入 Account → 列出用户 → 勾选」流程。
 
-**认证：** 控制台 Cookie（管理员）
+**认证：** 无 TeamEvolver 认证；请求体中的 OpenViking Admin Key 由上游校验
 
 **Request Body：**
 
@@ -71,7 +76,7 @@
 
 启动一次后台聚合任务，立即返回 202 与初始 Run 对象。任务在 worker 线程中执行，通过 `status` 接口轮询进度。
 
-**认证：** 控制台 Cookie（管理员）
+**认证：** 无 TeamEvolver 认证；请求体中的 OpenViking Admin Key 由上游校验
 
 **Request Body：**
 
@@ -96,13 +101,13 @@
 
 查询指定任务的实时进度（分组级状态）。
 
-**认证：** 控制台 Cookie（管理员）
+**认证：** 无 TeamEvolver 认证；持有不可猜测的 `task_id` 即可查询对应任务
 
 **路径参数：**
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `task_id` | string | 是 | 任务 ID（`run` 接口返回的 `task_id`） |
+| `task_id` | string | 是 | `run` 返回的随机任务 ID；应作为状态查询凭据妥善保管 |
 
 **Run 对象字段：**
 
@@ -212,7 +217,7 @@
 ### 列出可聚合用户
 
 ```bash
-curl -X POST -b "teamEvolver_console_session=<token>" \
+curl -X POST \
   -H "Content-Type: application/json" \
   "http://localhost:52010/api/aggregation/users" \
   -d '{"account_id":"default","admin_key":"<openviking-admin-key>"}'
@@ -230,7 +235,7 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 ### 触发聚合（选定用户 + 增量模式）
 
 ```bash
-curl -X POST -b "teamEvolver_console_session=<token>" \
+curl -X POST \
   -H "Content-Type: application/json" \
   "http://localhost:52010/api/aggregation/run" \
   -d '{"account_id":"default","admin_key":"<openviking-admin-key>","target_uri":"viking://resources/engineering-memory","user_ids":["chenghan","zhangpengkun"],"mode":"incremental"}'
@@ -240,7 +245,7 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 
 ```json
 {
-  "task_id": "agg_1a03c010043",
+  "task_id": "agg_r4nd0m-capability-token",
   "account_id": "default",
   "target_uri": "viking://resources/engineering-memory",
   "status": "running",
@@ -254,15 +259,15 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 ### 轮询任务进度
 
 ```bash
-curl -b "teamEvolver_console_session=<token>" \
-  "http://localhost:52010/api/aggregation/status/agg_1a03c010043"
+curl \
+  "http://localhost:52010/api/aggregation/status/agg_r4nd0m-capability-token"
 ```
 
 响应示例（完成）：
 
 ```json
 {
-  "task_id": "agg_1a03c010043",
+  "task_id": "agg_r4nd0m-capability-token",
   "account_id": "default",
   "target_uri": "viking://resources/engineering-memory",
   "status": "completed",
@@ -300,10 +305,10 @@ curl -X PUT -b "teamEvolver_console_session=<token>" \
 `POST /api/aggregation/run` 可直接指定完整 URI，不需要先修改全局设置：
 
 ```bash
-curl -X POST -b "teamEvolver_console_session=<token>" \
+curl -X POST \
   -H "Content-Type: application/json" \
   "http://localhost:52010/api/aggregation/run" \
-  -d '{"account_id":"default","target_uri":"viking://resources/engineering-memory","user_ids":["alice","bob"]}'
+  -d '{"account_id":"default","admin_key":"<openviking-admin-key>","target_uri":"viking://resources/engineering-memory","user_ids":["alice","bob"]}'
 ```
 
 ### 查看并修改默认输出目录
@@ -324,8 +329,8 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 
 | HTTP 状态码 | 错误信息 | 原因 |
 |------------|---------|------|
-| 401 | `login required` | 未登录 |
-| 403 | `team memory aggregation requires an administrator` | 非管理员访问 |
+| 401 | `login required` | 未登录却调用 `runs`、`settings` 或 Skill 管理接口 |
+| 403 | `team memory aggregation requires an administrator` | 非管理员调用管理接口 |
 | 400 | `aggregation users body must be an object` | 用户枚举请求体不是 JSON object |
 | 400 | `aggregation run body must be an object` | 运行请求体不是 JSON object |
 | 400 | `admin_key is required` | 未提供有效的 OpenViking Admin Key |
@@ -365,4 +370,6 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 - `admin_key` 是每次用户枚举和聚合运行的必填输入，只在请求及后台 worker 生命周期内使用；服务端不持久化，也不通过任何响应返回。
 - 聚合不会从持久化配置读取备用凭据。
 - Phase 1 使用 Admin Key 和目标用户身份读取各用户记忆。
+- `task_id` 使用高熵随机值；无 TeamEvolver 身份的调用方凭该 ID 查询单个任务。任务列表仍只对控制台管理员开放。
+- 部署方应通过 HTTPS 或受信网络暴露执行接口，避免 Admin Key 在传输过程中泄露。
 - 最终产物写入运行请求的 `target_uri`，未传时回退到 `viking://resources/<shared_knowledge_prefix>/`；中间产物只写入该目标的同级工作根。

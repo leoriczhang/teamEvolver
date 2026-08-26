@@ -1,75 +1,113 @@
-"""``ov compile`` invocation for a single aggregation batch.
+"""HTTP adapter for OpenViking Skill installation and compile tasks.
 
-Two transports are possible (see the design doc). This module uses transport
-**A**: shell out to the ``ov`` binary, reusing the exact conf/env contract that
-``OpenVikingWorkspaceMixin._workspace_cli`` already established (temp
-``ovcli.conf`` with a service credential, ``output=json``,
-localized/anti-color env). We do not import that mixin to avoid a Request-bound
-call path; instead we build the same conf here from plain credentials so the
-aggregation service can run in a background task without an HTTP request.
+The aggregation worker talks to OpenViking's public HTTP interface directly:
 
-Transport B (direct ``POST /bot/v1/compile`` + poll) is the intended
-productionization target and can replace :meth:`CompileClient.run_batch`
-without changing the service layer.
+- ``POST /api/v1/skills`` installs the editable Skill from inline content.
+- ``POST /bot/v1/compile`` creates a compile task.
+- ``GET /bot/v1/compile/{task_id}`` polls it to a terminal state.
+
+No local ``ov`` binary or shared filesystem is required. This matters when
+OpenViking runs in a separate container and its CLI is not installed on the
+teamEvolver host.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import os
-import re
-import shutil
-import tempfile
+import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
-_ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-_MAX_CLI_OUTPUT_BYTES = 512 * 1024
+import httpx
 
-
-class CompileBinaryUnavailable(RuntimeError):
-    """Raised when no usable ``ov`` binary is found."""
+_MAX_HTTP_OUTPUT_CHARS = 512 * 1024
 
 
 @dataclass
 class CompileClient:
-    """Run ``ov compile`` for one batch under a chosen OpenViking identity.
-
-    Aggregation runs compile in two identity modes using the request-scoped
-    OpenViking Admin Key:
-
-    - **per-user** (``user_id`` + Admin Key): reads that user's memory into a
-      per-user staging directory under ``viking://resources/...``.
-    - **team** (``user_id`` = the team/service user + Admin Key): merges the
-      staged per-user products into the shared-knowledge target. The
-      ``resources`` namespace is writable by any role.
-    """
+    """Run OpenViking compile operations with a request-scoped Admin Key."""
 
     endpoint: str
     account_id: str
-    # The OpenViking user this compile runs as.
     user_id: str = ""
-    # Request-scoped OpenViking Admin Key.
     api_key: str = ""
     agent_id: str = "team-skill-evolver"
-    binary_override: str = ""
     timeout_seconds: float = 3000.0
 
-    def _binary(self) -> str:
-        candidates = [
-            self.binary_override.strip(),
-            os.environ.get("OPENVIKING_CLI_BIN", "").strip(),
-            str(Path.home() / "OpenViking" / "target" / "release" / "ov"),
-            shutil.which("ov") or "",
+    def _headers(self) -> dict[str, str]:
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "X-API-Key": self.api_key,
+            "Authorization": f"Bearer {self.api_key}",
+            "X-OpenViking-Account": self.account_id,
+            "X-OpenViking-Actor-Peer": self.agent_id,
+        }
+        if self.user_id.strip():
+            headers["X-OpenViking-User"] = self.user_id.strip()
+        return headers
+
+    @staticmethod
+    def _payload(response: httpx.Response) -> Any:
+        try:
+            payload = response.json()
+        except ValueError:
+            return {}
+        if (
+            isinstance(payload, dict)
+            and payload.get("status") == "ok"
+            and "result" in payload
+        ):
+            return payload["result"]
+        return payload
+
+    @staticmethod
+    def _error_message(response: httpx.Response, payload: Any) -> str:
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict):
+                message = str(error.get("message") or "").strip()
+                if message:
+                    return message[:_MAX_HTTP_OUTPUT_CHARS]
+            detail = payload.get("detail")
+            if isinstance(detail, dict):
+                detail = detail.get("message") or detail.get("code")
+            if detail:
+                return str(detail)[:_MAX_HTTP_OUTPUT_CHARS]
+        return str(response.text or f"HTTP {response.status_code}")[
+            :_MAX_HTTP_OUTPUT_CHARS
         ]
-        for candidate in candidates:
-            if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                return candidate
-        raise CompileBinaryUnavailable(
-            "OpenViking CLI binary is unavailable; set OPENVIKING_CLI_BIN"
-        )
+
+    @staticmethod
+    def _success(operation: str, payload: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "exit_code": 0,
+            "command": ["http", operation],
+            "stdout": json.dumps(payload, ensure_ascii=False),
+            "stderr": "",
+            "result": payload,
+        }
+
+    @classmethod
+    def _failure(
+        cls,
+        operation: str,
+        response: httpx.Response,
+        payload: Any,
+    ) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "exit_code": response.status_code,
+            "command": ["http", operation],
+            "stdout": "",
+            "stderr": cls._error_message(response, payload),
+            "result": payload,
+        }
+
+    def _client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(timeout=max(30.0, self.timeout_seconds + 30.0))
 
     async def install_skill(
         self,
@@ -78,36 +116,34 @@ class CompileClient:
         skill_body: str,
         parent_uri: str = "viking://agent/skills",
     ) -> dict[str, Any]:
-        """Publish a SKILL.md into an OpenViking skills namespace.
-
-        Writes the body to a temp ``<skill_name>/SKILL.md`` and runs
-        ``ov skills add <dir> --parent-auto-create <parent_uri> --wait --yes``.
-        Idempotent enough for setup: re-adding updates the skill content.
-        """
-        binary = self._binary()
-        conf = {
-            "url": self.endpoint,
-            "api_key": self.api_key or None,
-            "account": self.account_id,
-            "agent_id": self.agent_id,
-            "timeout": float(self.timeout_seconds),
-            "output": "json",
-            "echo_command": False,
-            "show_progress": False,
+        """Install inline Skill content without exposing a host-local path."""
+        operation = "POST /api/v1/skills"
+        body = {
+            "data": skill_body,
+            "wait": True,
+            "timeout": self.timeout_seconds,
+            "target_uri": parent_uri,
         }
-        if self.user_id.strip():
-            conf["user"] = self.user_id.strip()
-        with tempfile.TemporaryDirectory(prefix="teamEvolver-agg-skill-") as src_dir:
-            skill_dir = os.path.join(src_dir, skill_name)
-            os.makedirs(skill_dir, exist_ok=True)
-            with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as handle:
-                handle.write(skill_body)
-            argv = [
-                "skills", "add", skill_dir,
-                "--parent-auto-create", parent_uri,
-                "--wait", "--yes",
-            ]
-            return await self._exec(binary, argv, conf)
+        try:
+            async with self._client() as client:
+                response = await client.post(
+                    f"{self.endpoint.rstrip('/')}/api/v1/skills",
+                    json=body,
+                    headers=self._headers(),
+                )
+        except httpx.HTTPError as exc:
+            return {
+                "ok": False,
+                "exit_code": -1,
+                "command": ["http", operation, skill_name],
+                "stdout": "",
+                "stderr": f"OpenViking Skill upload failed: {exc}",
+                "result": None,
+            }
+        payload = self._payload(response)
+        if not response.is_success:
+            return self._failure(operation, response, payload)
+        return self._success(operation, payload)
 
     async def run_batch(
         self,
@@ -118,95 +154,108 @@ class CompileClient:
         reason: str = "",
         runtime_timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
-        """Compile ``source_uris`` into ``target_uri`` with ``skill_uri``.
-
-        Returns a structured result dict: ``ok``, ``exit_code``, ``command``,
-        ``stdout``, ``stderr``, plus a best-effort parsed ``result`` when the
-        CLI emits JSON.
-        """
+        """Create and poll one OpenViking compile task over HTTP."""
         if not source_uris:
             return {"ok": True, "skipped": True, "reason": "no sources"}
-        binary = self._binary()
-        argv: list[str] = ["compile"]
-        for uri in source_uris:
-            argv += ["--from", uri]
-        argv += ["--to", target_uri, "--skill", skill_uri, "--wait"]
+
+        operation = "POST /bot/v1/compile"
+        body: dict[str, Any] = {
+            "from": list(source_uris),
+            "to": target_uri,
+            "skill": skill_uri,
+        }
         if reason.strip():
-            argv += ["--reason", reason.strip()]
+            body["reason"] = reason.strip()
         if runtime_timeout_seconds:
-            argv += ["--runtime-timeout", str(int(runtime_timeout_seconds))]
+            body["runtime_timeout_seconds"] = float(runtime_timeout_seconds)
 
-        conf = {
-            "url": self.endpoint,
-            "api_key": self.api_key or None,
-            "account": self.account_id,
-            "agent_id": self.agent_id,
-            "timeout": float(self.timeout_seconds),
-            "output": "json",
-            "echo_command": False,
-            "show_progress": False,
-        }
-        if self.user_id.strip():
-            conf["user"] = self.user_id.strip()
-        return await self._exec(binary, argv, conf)
-
-    async def _exec(
-        self, binary: str, argv: list[str], conf: dict[str, Any]
-    ) -> dict[str, Any]:
-        with tempfile.TemporaryDirectory(prefix="teamEvolver-agg-ovcli-") as temp_dir:
-            config_path = os.path.join(temp_dir, "ovcli.conf")
-            settings_path = os.path.join(temp_dir, ".openviking", "ovcli.settings.conf")
-            os.makedirs(os.path.dirname(settings_path), exist_ok=True)
-            with open(config_path, "w", encoding="utf-8") as handle:
-                json.dump(conf, handle, ensure_ascii=True)
-            with open(settings_path, "w", encoding="utf-8") as handle:
-                json.dump({"language": "zh-CN"}, handle, ensure_ascii=True)
-            os.chmod(config_path, 0o600)
-            os.chmod(settings_path, 0o600)
-            env = os.environ.copy()
-            env["HOME"] = temp_dir
-            env["OPENVIKING_CLI_CONFIG_FILE"] = config_path
-            env["OPENVIKING_LANG"] = "zh-CN"
-            env["NO_COLOR"] = "1"
-            process = await asyncio.create_subprocess_exec(
-                binary,
-                *argv,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-            )
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
-                    timeout=self.timeout_seconds + 30,
+        try:
+            async with self._client() as client:
+                response = await client.post(
+                    f"{self.endpoint.rstrip('/')}/bot/v1/compile",
+                    json=body,
+                    headers=self._headers(),
                 )
-            except (TimeoutError, asyncio.TimeoutError):
-                process.kill()
-                await process.communicate()
-                return {
-                    "ok": False,
-                    "exit_code": -1,
-                    "command": ["ov", *argv],
-                    "stdout": "",
-                    "stderr": f"ov compile timed out after {self.timeout_seconds}s",
-                }
-        output = _ANSI_ESCAPE_RE.sub(
-            "", stdout[:_MAX_CLI_OUTPUT_BYTES].decode("utf-8", errors="replace")
-        ).strip()
-        error = _ANSI_ESCAPE_RE.sub(
-            "", stderr[:_MAX_CLI_OUTPUT_BYTES].decode("utf-8", errors="replace")
-        ).strip()
-        parsed: Any = None
-        if output:
-            try:
-                parsed = json.loads(output)
-            except ValueError:
-                parsed = None
-        return {
-            "ok": process.returncode == 0,
-            "exit_code": process.returncode,
-            "command": ["ov", *argv],
-            "stdout": output,
-            "stderr": error,
-            "result": parsed,
-        }
+                accepted = self._payload(response)
+                if not response.is_success:
+                    return self._failure(operation, response, accepted)
+                task_id = (
+                    str(accepted.get("task_id") or "").strip()
+                    if isinstance(accepted, dict)
+                    else ""
+                )
+                if not task_id:
+                    return {
+                        "ok": False,
+                        "exit_code": -1,
+                        "command": ["http", operation],
+                        "stdout": json.dumps(accepted, ensure_ascii=False),
+                        "stderr": "OpenViking compile response did not include task_id",
+                        "result": accepted,
+                    }
+
+                deadline = time.monotonic() + max(1.0, self.timeout_seconds)
+                polling = 0.5
+                status_operation = f"GET /bot/v1/compile/{task_id}"
+                while True:
+                    if time.monotonic() >= deadline:
+                        return {
+                            "ok": False,
+                            "exit_code": -1,
+                            "command": ["http", status_operation],
+                            "stdout": "",
+                            "stderr": (
+                                f"OpenViking compile timed out after "
+                                f"{self.timeout_seconds}s; task_id={task_id}"
+                            ),
+                            "result": accepted,
+                        }
+                    status_response = await client.get(
+                        f"{self.endpoint.rstrip('/')}/bot/v1/compile/{task_id}",
+                        headers=self._headers(),
+                    )
+                    task = self._payload(status_response)
+                    if not status_response.is_success:
+                        return self._failure(
+                            status_operation,
+                            status_response,
+                            task,
+                        )
+                    status = (
+                        str(task.get("status") or "").lower()
+                        if isinstance(task, dict)
+                        else ""
+                    )
+                    if status == "completed":
+                        result = task.get("result")
+                        return self._success(
+                            status_operation,
+                            result if result is not None else task,
+                        )
+                    if status in {"failed", "cancelled"}:
+                        error = task.get("error") if isinstance(task, dict) else None
+                        if isinstance(error, dict):
+                            detail = str(
+                                error.get("message") or error.get("code") or status
+                            )
+                        else:
+                            detail = str(error or f"compile task {status}")
+                        return {
+                            "ok": False,
+                            "exit_code": 1,
+                            "command": ["http", status_operation],
+                            "stdout": json.dumps(task, ensure_ascii=False),
+                            "stderr": detail[:_MAX_HTTP_OUTPUT_CHARS],
+                            "result": task,
+                        }
+                    await asyncio.sleep(polling)
+                    polling = min(2.0, polling * 2)
+        except httpx.HTTPError as exc:
+            return {
+                "ok": False,
+                "exit_code": -1,
+                "command": ["http", operation],
+                "stdout": "",
+                "stderr": f"OpenViking compile request failed: {exc}",
+                "result": None,
+            }
