@@ -1,10 +1,10 @@
 # 存储空间与目录布局
 
-teamEvolver 的所有持久化数据都存放在 OpenViking 后端。本文说明两件事：teamEvolver **账号如何映射到 OpenViking 空间**，以及**团队 Workspace 根目录下每个目录/文件的用途**。它是理解进化闭环数据流的基础。
+teamEvolver 的共享资产和进化产物存放在 OpenViking；服务配置、控制台 Session 和部分运行状态保存在 `~/.teamEvolver/`。本文说明 teamEvolver **账号如何映射到 OpenViking 空间**，以及 Agent 可引用资产与平台内部资产如何分区。
 
 ## 账号 ↔ OpenViking 空间映射
 
-一个 teamEvolver 账号并不会在 OpenViking 侧独占一个租户，而是被解析成 **API Key（认证）+ URI 路径（定位）** 两件事。每个账号被映射到 6 个作用域（Scope），分为个人（personal）与团队（team）两类。
+一个 teamEvolver 账号并不会在 OpenViking 侧独占一个租户，而是被解析成 **API Key（认证）+ URI 路径（定位）** 两件事。当前工作区暴露 9 个作用域（Scope），其中 `platform_assets` 只展示平台内部数据。
 
 映射规则定义在 `teamEvolver/proxy/openviking_workspace.py` 的 `_scope_map()` 中。
 
@@ -12,10 +12,13 @@ teamEvolver 的所有持久化数据都存放在 OpenViking 后端。本文说�
 |--------|-------------------|------|------|--------------|
 | `personal_memory` | `viking://user/{个人 user}/memories` | 个人 | 记忆 | ✅ |
 | `personal_skills` | `viking://resources/team-skill-evolver/peers/{账号}/skills` | 个人 | 技能 | ✅ |
+| `personal_resources` | `viking://user/{个人 user}/resources` | 个人 | 资源 | ✅ |
 | `personal_workspace` | `viking://user/{个人 user}` | 个人 | 工作区根 | ✅ |
 | `team_memory` | `viking://resources/shared-knowledge` | 团队 | 记忆 | ❌ 仅管理员 |
 | `team_skills` | `viking://resources/team-skill-evolver/skills` | 团队 | 技能 | ❌ 仅管理员 |
+| `team_resources` | `viking://resources/team` | 团队 | 资源 | ❌ 仅管理员 |
 | `team_workspace` | `viking://resources/team-skill-evolver` | 团队 | 工作区根 | ❌ 仅管理员 |
+| `platform_assets` | `viking://resources/team-skill-evolver` | 平台 | 内部产物 | ❌ 始终只读 |
 
 URI 中的变量：
 
@@ -31,7 +34,7 @@ URI 中的变量：
 
 - **个人记忆**走 `viking://user/{user}/` 命名空间，按人隔离。
 - **团队记忆聚合产物**走 `viking://resources/{shared_knowledge_prefix}/`，由 Account 内共享检索。
-- **技能与共享资源**走 `viking://resources/{root_prefix}/` 命名空间，团队共享。
+- **团队技能和平台产物**走 `viking://resources/{root_prefix}/`；**团队 Resources** 单独映射到 `viking://resources/team/`。
 - **个人技能**在共享命名空间内通过 `peers/{账号}/` 路径段做隔离，见 `teamEvolver/storage/base.py` 的 `peer_key_prefix()`。
 
 ### API Key 与身份头
@@ -41,15 +44,15 @@ URI 中的变量：
 | 空间 | API Key 解析顺序 |
 |------|------------------|
 | 团队 | 用户 `team_space` Key → 管理员服务 Key（继承）→ `sharing.viking_team_api_key`（兼容字段，语义为 service/admin key）→ `sharing.viking_api_key` |
-| 个人 | 用户 `personal_space` Key → `sharing.viking_personal_api_key` → `sharing.viking_api_key` |
+| 个人 | 用户 `personal_space` Key → `sharing.viking_personal_api_key` → 用户 `team_space` Key / 管理员服务 Key → `sharing.viking_api_key` |
 
-三个身份头始终发送：`X-OpenViking-Account`（默认 `default`）、`X-OpenViking-User`（个人=账号 ID，团队=`team`）、`X-OpenViking-Agent`（`team-skill-evolver`）。**当 API Key 为空时（如本地自托管 OpenViking），`X-API-Key` 与 `Authorization` 头不发送**，仅靠上述三个身份头隔离；本地/云端的 URI 映射规则完全一致，仅端点不同（见 `teamEvolver/config.py` 的 `resolve_viking_endpoint()`）。
+三个身份头始终发送：`X-OpenViking-Account`（默认 `default`）、`X-OpenViking-User`（个人使用绑定用户，团队使用 `sharing.viking_user`，默认 `team`）、`X-OpenViking-Agent`（`team-skill-evolver`）。**当 API Key 为空时，`X-API-Key` 与 `Authorization` 头不发送**；本地/云端的 URI 映射规则一致，仅端点不同（见 `teamEvolver/config.py` 的 `resolve_viking_endpoint()`）。
 
-普通用户无需配置服务/admin Key。服务端直接复用管理员配置的 OpenViking Key 作为 service key，普通用户只继承“可通过服务端访问团队资产”的能力，不持有明文 Key；兼容实现见 `teamEvolver/proxy/users_admin.py` 的 `_effective_team_key()`。
+Trusted 自建模式下，只要服务端已有可用服务 Key，个人空间即可通过服务 Key + `X-OpenViking-User` 自动关联，无需逐个用户录入 Key。普通用户只获得服务端代理访问能力，不会收到明文凭据；兼容实现见 `teamEvolver/proxy/users_admin.py` 的 `_effective_team_key()`。
 
-## 团队 Workspace 目录全景
+## 平台资产目录全景
 
-团队 Workspace（`viking://resources/team-skill-evolver/`）是整个进化闭环的共享数据库。根目录下的条目按 7 个功能组划分。
+`viking://resources/team-skill-evolver/` 同时承载团队 Skill 与进化闭环内部数据。控制台「平台资产」只展示 allowlist 中的平台目录，不会把 `peers/` 等 Agent 资产混入内部视图。根目录下的条目按 7 个功能组划分。
 
 ### 1. 技能库（成品）
 
@@ -135,13 +138,16 @@ Agent 会话采集
 
 【并行】DreamCycle 维护团队记忆 → memory-changes/（变更账本）
 【隔离】peers/{账号}/ 存放个人级数据（个人技能等）
+【聚合】viking://user/<user>/memories/
+      → viking://resources/<shared_knowledge_prefix>-<staging_dir>/（中转）
+      → viking://resources/<shared_knowledge_prefix>/（团队 Memory）
 ```
 
 > 注：`skill_mutation_commits/` 与 `skill_sync_outbox/` 是技能变更流水——每次 publish/delete 先写提交存档，再投递到同步发件箱下发各运行时，最后更新 `skills/` 与 `manifest.json`。见 `teamEvolver/skills/mutations.py`。
 
 ## 控制台可视化
 
-在控制台「资产中心 → 上下文空间」中切换到**团队 Workspace**，文件树会为上述已知目录内联显示中文用途说明，浏览时即见即懂。前端实现见 `web-ui/src/views/OpenVikingWorkspaceShell.tsx`。管理员还可在同一界面通过内置 OpenViking CLI 与 Studio 入口直接查数据。
+控制台「资产中心 → Agent 工作空间」将个人/团队的 Skills、Memory、Resources 分组展示，并提供浏览模式、编辑模式、多文件 Diff 和批量条件写。Skill Lab 与 Memory Lab 位于同一页面的顶部视图切换中。「资产中心 → 平台资产」只读展示 Session、Candidate、Validation、Evidence 等内部目录。管理员还可使用内置 OpenViking CLI；自建部署会显示 Studio 入口。前端实现见 `web-ui/src/views/OpenVikingWorkspaceShell.tsx`。
 
 ## 代码入口
 
@@ -155,6 +161,7 @@ Agent 会话采集
 | 验证存储 | `teamEvolver/validation/store.py` |
 | 技能变更 | `teamEvolver/skills/mutations.py` |
 | DreamCycle 记忆变更 | `teamEvolver/dreamcycle/memory_changes.py` |
+| 跨 User 团队 Memory 聚合 | `teamEvolver/aggregation/service.py` |
 | 端点解析（云端/本地） | `teamEvolver/config.py` |
 
 ## 相关文档

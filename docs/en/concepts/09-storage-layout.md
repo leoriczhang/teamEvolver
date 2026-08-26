@@ -1,10 +1,10 @@
 # Storage Spaces and Directory Layout
 
-All of teamEvolver's persistent data lives in the OpenViking backend. This document explains two things: how a teamEvolver **account maps to OpenViking spaces**, and **what every directory/file under the team Workspace root is for**. It is the foundation for understanding the evolution-loop data flow.
+teamEvolver keeps shared assets and evolution artifacts in OpenViking. Service configuration, console Sessions, and some runtime state remain under `~/.teamEvolver/`. This document explains how a teamEvolver **account maps to OpenViking spaces** and how Agent-referable assets are separated from platform-internal data.
 
 ## Account ↔ OpenViking Space Mapping
 
-A teamEvolver account does not own a dedicated OpenViking tenant. Instead it resolves into two things: an **API key (authentication) + a URI path (location)**. Each account maps to 6 scopes, split into personal and team categories.
+A teamEvolver account does not own a dedicated OpenViking tenant. Instead it resolves into two things: an **API key (authentication) + a URI path (location)**. The current workspace exposes nine scopes; `platform_assets` is reserved for read-only internal data.
 
 The mapping is defined in `_scope_map()` in `teamEvolver/proxy/openviking_workspace.py`.
 
@@ -12,10 +12,13 @@ The mapping is defined in `_scope_map()` in `teamEvolver/proxy/openviking_worksp
 |-------|---------------------|-------|------|--------------------------|
 | `personal_memory` | `viking://user/{personal user}/memories` | personal | memory | ✅ |
 | `personal_skills` | `viking://resources/team-skill-evolver/peers/{account}/skills` | personal | skills | ✅ |
+| `personal_resources` | `viking://user/{personal user}/resources` | personal | resources | ✅ |
 | `personal_workspace` | `viking://user/{personal user}` | personal | workspace root | ✅ |
 | `team_memory` | `viking://resources/shared-knowledge` | team | memory | ❌ admin only |
 | `team_skills` | `viking://resources/team-skill-evolver/skills` | team | skills | ❌ admin only |
+| `team_resources` | `viking://resources/team` | team | resources | ❌ admin only |
 | `team_workspace` | `viking://resources/team-skill-evolver` | team | workspace root | ❌ admin only |
+| `platform_assets` | `viking://resources/team-skill-evolver` | platform | internal artifacts | ❌ always read-only |
 
 URI variables:
 
@@ -31,7 +34,7 @@ URI variables:
 
 - **Personal memory** lives in the `viking://user/{user}/` namespace, isolated per person.
 - **Aggregated team memory** lives in `viking://resources/{shared_knowledge_prefix}/`, shared for account-wide retrieval.
-- **Skills and shared resources** live in the `viking://resources/{root_prefix}/` namespace, shared by the team.
+- **Team Skills and platform artifacts** live under `viking://resources/{root_prefix}/`; **team Resources** map separately to `viking://resources/team/`.
 - **Personal skills** are isolated inside the shared namespace via a `peers/{account}/` path segment — see `peer_key_prefix()` in `teamEvolver/storage/base.py`.
 
 ### API keys and identity headers
@@ -41,15 +44,15 @@ Credentials used when calling OpenViking are resolved in `_workspace_headers()` 
 | Space | API key resolution order |
 |-------|--------------------------|
 | team | user `team_space` key → admin service key (inherited) → `sharing.viking_team_api_key` (compatibility field; semantically the service/admin key) → `sharing.viking_api_key` |
-| personal | user `personal_space` key → `sharing.viking_personal_api_key` → `sharing.viking_api_key` |
+| personal | user `personal_space` key → `sharing.viking_personal_api_key` → user `team_space` key / admin service key → `sharing.viking_api_key` |
 
-Three identity headers are always sent: `X-OpenViking-Account` (default `default`), `X-OpenViking-User` (personal = account ID, team = `team`), and `X-OpenViking-Agent` (`team-skill-evolver`). **When the API key is empty (e.g. a locally self-hosted OpenViking), the `X-API-Key` and `Authorization` headers are omitted** and isolation relies on the three identity headers alone; the URI mapping is identical for local and cloud, differing only by endpoint (see `resolve_viking_endpoint()` in `teamEvolver/config.py`).
+Three identity headers are always sent: `X-OpenViking-Account` (default `default`), `X-OpenViking-User` (the bound personal user for personal scopes; `sharing.viking_user`, default `team`, for team scopes), and `X-OpenViking-Agent` (`team-skill-evolver`). **When the API key is empty, the `X-API-Key` and `Authorization` headers are omitted**. URI mapping is identical for local and cloud deployments; only the endpoint differs (see `resolve_viking_endpoint()` in `teamEvolver/config.py`).
 
-Regular users need not configure a service/admin key. The service directly reuses the admin-configured OpenViking key as the service key; regular users inherit only server-mediated access to team assets, not the plaintext key. The compatibility implementation lives in `_effective_team_key()` in `teamEvolver/proxy/users_admin.py`.
+In Trusted self-hosted mode, a configured service key plus `X-OpenViking-User` automatically associates personal spaces, so a key need not be entered for every user. Regular users receive server-mediated access only and never receive plaintext credentials. The compatibility implementation lives in `_effective_team_key()` in `teamEvolver/proxy/users_admin.py`.
 
-## Team Workspace Directory Map
+## Platform Asset Directory Map
 
-The team Workspace (`viking://resources/team-skill-evolver/`) is the shared database for the whole evolution loop. The entries under its root fall into 7 functional groups.
+`viking://resources/team-skill-evolver/` contains both team Skills and internal evolution data. The console's **Platform Assets** view only exposes allowlisted internal directories and does not mix `peers/` or other Agent assets into that view. Entries under this root fall into seven functional groups.
 
 ### 1. Skill library (finished artifacts)
 
@@ -135,13 +138,16 @@ Agent session ingest
 
 [Parallel] DreamCycle maintains team memory → memory-changes/ (change ledger)
 [Isolation] peers/{account}/ holds per-user data (personal skills, etc.)
+[Aggregation] viking://user/<user>/memories/
+            → viking://resources/<shared_knowledge_prefix>-<staging_dir>/ (work data)
+            → viking://resources/<shared_knowledge_prefix>/ (team Memory)
 ```
 
 > Note: `skill_mutation_commits/` and `skill_sync_outbox/` form the skill-change pipeline — every publish/delete first writes a commit record, is then delivered to the sync outbox for runtimes, and finally updates `skills/` and `manifest.json`. See `teamEvolver/skills/mutations.py`.
 
 ## Console Visualization
 
-In the console under "Assets → Context Space", switch to the **Team Workspace**; the file tree shows inline Chinese purpose descriptions for the known directories above, so the layout is self-explanatory while browsing. The frontend implementation is `web-ui/src/views/OpenVikingWorkspaceShell.tsx`. Admins can also inspect data directly via the built-in OpenViking CLI and Studio entry on the same screen.
+**Asset Center → Agent Workspace** groups personal/team Skills, Memory, and Resources and supports browse mode, edit mode, multi-file Diff review, and conditional batch writes. Skill Lab and Memory Lab are available from the same page's top-level view switcher. **Asset Center → Platform Assets** provides a read-only view of internal Session, Candidate, Validation, and Evidence paths. Administrators can also use the built-in OpenViking CLI; self-hosted deployments show a Studio link. The frontend implementation is `web-ui/src/views/OpenVikingWorkspaceShell.tsx`.
 
 ## Code Entry Points
 
@@ -155,6 +161,7 @@ In the console under "Assets → Context Space", switch to the **Team Workspace*
 | Validation storage | `teamEvolver/validation/store.py` |
 | Skill mutations | `teamEvolver/skills/mutations.py` |
 | DreamCycle memory changes | `teamEvolver/dreamcycle/memory_changes.py` |
+| Cross-user team-Memory aggregation | `teamEvolver/aggregation/service.py` |
 | Endpoint resolution (cloud/local) | `teamEvolver/config.py` |
 
 ## Related Docs

@@ -34,6 +34,17 @@ tags: [code-review, backend]  # 标签
 ---
 ```
 
+## 个人 Skill 与团队 Skill
+
+| 维度 | 个人 Skill | 团队 Skill |
+|------|------------|------------|
+| 默认路径 | `viking://resources/team-skill-evolver/peers/<account>/skills/` | `viking://resources/team-skill-evolver/skills/` |
+| 编辑权限 | 用户本人或管理员 | 管理员 |
+| Agent 使用 | 仅映射到该用户的 Agent | 已授权团队 Agent |
+| 发布 | 普通用户提交发布申请；管理员可直接复制 | 通过 Candidate 或管理员变更进入版本链 |
+
+个人 Skill 可以在 Agent 工作空间中直接编辑。普通用户提交 personal→team 发布申请后，管理员在发布审批中确认；team→personal 复制可用于给个人空间安装团队 Skill。
+
 ## Skill 版本管理
 
 teamEvolver 中的 Skill 有三种状态：
@@ -44,38 +55,19 @@ teamEvolver 中的 Skill 有三种状态：
 | **候选（Candidate）** | 验证/审核中，不覆盖已发布版本 | 不影响生产 Agent |
 | **历史（Archived）** | 被新版本取代，但保留完整内容和审计链 | 不可直接使用，可回滚 |
 
-版本号遵循语义化版本（SemVer）：
-- **MAJOR**：不兼容的 Skill 结构变更
-- **MINOR**：向后兼容的功能新增
-- **PATCH**：向后兼容的问题修复
-
-`SkillMutationService` 维护所有版本的 commit 记录和 tombstone 标记。
+团队 Skill 的共享注册表使用单调递增整数版本（`v1`、`v2`……）。回滚会把历史 Bundle 重新发布为一个更高的新版本，不会移动或删除旧版本。`SkillMutationService` 维护 commit、tombstone 和同步 outbox。
 
 ## Skill 生命周期
 
+```text
+Evidence → 静态检查 → Candidate → True Replay
+                                  ├─ 门禁通过 → 发布新版本 → Skill Sync
+                                  ├─ 灰区 → 人工复核 → 发布或拒绝
+                                  └─ 门禁失败 → 拒绝或继续修改
+管理员强制发布 ───────────────────────────────┘
 ```
-  创建/修改
-      │
-      ▼
-  ┌──────────┐    未通过    ┌──────────┐
-  │ Candidate │───────────►│  归档     │
-  └────┬─────┘             └──────────┘
-       │ 通过静态检查
-       ▼
-  ┌──────────┐    失败      ┌──────────┐
-  │TrueReplay│───────────►│ 拒绝/修改 │
-  └────┬─────┘             └──────────┘
-       │ Checklist + 效率达标
-       ▼
-  ┌──────────┐    拒绝      ┌──────────┐
-  │人工审核  │───────────►│ 拒绝/修改 │
-  └────┬─────┘             └──────────┘
-       │ 通过
-       ▼
-  ┌──────────┐
-  │ 发布生效  │◄── 回滚 ── 历史版本
-  └──────────┘
-```
+
+`publish_mode: validated` 使用 Candidate 验证队列；满足结果数、通过数和运行时兼容门禁后可以自动发布，灰区可进入人工复核。`publish_mode: direct` 跳过验证队列。
 
 ## 技能同步
 
@@ -111,8 +103,8 @@ Hermes 通过 `pre_llm_call` hook 实现自动拉取：
 |------|-------|--------|
 | 内容性质 | 可执行的任务方法（步骤、流程） | 可检索的事实和背景 |
 | 是否规定执行流程 | 是，明确操作步骤 | 否，不规定完整流程 |
-| 验证方式 | True Replay 对比验证 | DreamCycle 语义去重/合并 |
-| 更新门禁 | 严格（自动+人工） | 宽松（按风险自动或人工） |
+| 验证方式 | True Replay 对比验证 | Memory Lab/Memory Replay；聚合内容由聚合 Skill 约束 |
+| 更新门禁 | Candidate 门禁、管理员发布或发布申请 | Agent 只写个人 Memory；团队 Memory 仅管理员/进化链路可写 |
 | 典型例子 | "如何做 Code Review"、"如何写单测" | "团队用的是 pnpm"、"服务端口是 52010" |
 
 ## 代码入口

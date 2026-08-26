@@ -2,7 +2,7 @@
 
 ## 1. API Implementation Overview
 
-The Skill Management API provides CRUD operations, version management, publish/rollback, and cloud sync functionality for the local Skill library. These interfaces are used by the web console and require administrator privileges (console Session Cookie + admin role). All changes are automatically synced to shared cloud storage (OpenViking) and trigger Skill Sync webhooks to notify registered Agents.
+The Skill Management API provides team-Skill CRUD, version rollback, and cloud sync, plus personal-Skill editing, personal/team copying, and publish requests. These endpoints require a console login; team-Skill writes and publish-request decisions require administrator access. Team-Skill changes sync to OpenViking and notify registered Agents through the Skill Sync outbox.
 
 Code implementation: `teamEvolver/proxy/skills_admin.py` (`SkillsAdminMixin`)
 Skill editor: `teamEvolver/skills/editor.py`
@@ -10,7 +10,7 @@ Cloud sync: `teamEvolver/skills/mutations.py` (`SkillMutationService`), `teamEvo
 
 ## 2. Interface and Parameter Specification
 
-All `/api/skills/*` interfaces require console administrator authentication.
+All endpoints require a console login. Team-Skill writes, rollback, and publish-request decisions require administrator access; regular users may manage their own personal Skills.
 
 ---
 
@@ -34,7 +34,6 @@ List all Skills in the local Skill library.
 | `name` | string | Skill name |
 | `description` | string | Description |
 | `category` | string | Category |
-| `version` | integer | Local version number |
 | `files` | array[string] | Included file list |
 
 ---
@@ -77,7 +76,7 @@ Create or update a Skill.
 |-------|------|-------------|
 | `name` | string | Skill name |
 | `created` | boolean | Whether newly created |
-| `path` | string | Local directory path |
+| `dir` | string | Local directory path |
 | `loaded_skills` | integer | Total Skill count after reload |
 | `cloud` | object | Cloud sync result |
 | `cloud.synced` | boolean | Whether sync succeeded |
@@ -212,20 +211,6 @@ Get detailed content and evolution context for a specified version.
 
 ---
 
-### POST /api/skills/{name}/publish
-
-Publish a Skill (triggers cloud sync and Skill Sync webhook). This interface is typically called automatically by the evolution process, but admins can also trigger it manually.
-
-**Authentication:** Console Cookie (admin required)
-
-**Path Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `name` | string | Yes | Skill name |
-
----
-
 ### POST /api/skills/{name}/rollback
 
 Roll back a Skill to a specified version. This re-publishes the target version content as a new version and syncs to cloud and local.
@@ -255,20 +240,23 @@ Roll back a Skill to a specified version. This re-publishes the target version c
 
 ---
 
-### DELETE /api/skills/{name}/versions/{ver}
+### Personal Skills and Team Publication
 
-Delete specified version history (cloud only, does not affect current version).
+The following endpoints are implemented by `teamEvolver/proxy/users_admin.py`:
 
-**Authentication:** Console Cookie (admin required)
+| Method and path | Permission | Purpose |
+|-----------------|------------|---------|
+| `GET /api/users/{user_id}/skills?space=personal|team` | User or administrator | List Skills in one space |
+| `GET /api/users/{user_id}/skills/{name}?space=personal|team` | User or administrator | Read one Skill |
+| `POST /api/users/{user_id}/skills` | User or administrator; team space is admin-only | Create or update a personal/team Skill |
+| `DELETE /api/users/{user_id}/skills/{name}?space=personal|team` | User or administrator; team space is admin-only | Delete a Skill |
+| `POST /api/users/{user_id}/share` | User or administrator; personal→team is admin-only | Copy selected Skills between personal and team spaces |
+| `GET /api/skill-publish-requests` | Logged-in user | Users see their own requests; administrators see all requests |
+| `POST /api/users/{user_id}/publish-requests` | User or administrator | Request publication of personal Skills to the team space |
+| `POST /api/skill-publish-requests/{request_id}/approve` | Administrator | Approve and copy Skills into the team space |
+| `POST /api/skill-publish-requests/{request_id}/reject` | Administrator | Reject a publish request |
 
-**Path Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `name` | string | Yes | Skill name |
-| `ver` | integer | Yes | Version number |
-
----
+A personal-Skill save body uses `space`, `name`, and full `skill_md`; alternatively provide `description`, `category`, and `body` and let the server build `SKILL.md`. Regular users cannot write the team space directly and must submit a publish request.
 
 ### GET /sync/skills
 
@@ -305,7 +293,6 @@ Example response:
       "name": "database-debugging",
       "description": "Database troubleshooting guide",
       "category": "backend",
-      "version": 3,
       "files": ["SKILL.md", "references/mysql-troubleshooting.md"]
     }
   ]

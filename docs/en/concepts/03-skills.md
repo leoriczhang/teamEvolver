@@ -34,6 +34,17 @@ tags: [code-review, backend]  # Tags
 ---
 ```
 
+## Personal and Team Skills
+
+| Dimension | Personal Skill | Team Skill |
+|-----------|----------------|------------|
+| Default path | `viking://resources/team-skill-evolver/peers/<account>/skills/` | `viking://resources/team-skill-evolver/skills/` |
+| Edit permission | User or administrator | Administrator |
+| Agent use | Agents mapped to that user | Authorized team Agents |
+| Publication | Regular users submit a publish request; administrators can copy directly | Candidate or administrator mutation enters the version chain |
+
+Personal Skills can be edited directly in Agent Workspace. A regular user submits a personal-to-team publish request for administrator approval; team-to-personal copying can install a team Skill into a personal space.
+
 ## Skill Version Management
 
 Skills in teamEvolver have three states:
@@ -44,38 +55,19 @@ Skills in teamEvolver have three states:
 | **Candidate** | Under validation/review, does not overwrite published version | Does not affect production Agents |
 | **Archived** | Superseded by new version, but complete content and audit chain preserved | Not directly usable, can be rolled back to |
 
-Version numbers follow Semantic Versioning (SemVer):
-- **MAJOR**: Incompatible Skill structure changes
-- **MINOR**: Backward-compatible feature additions
-- **PATCH**: Backward-compatible bug fixes
-
-`SkillMutationService` maintains commit records and tombstone markers for all versions.
+The shared team-Skill registry uses monotonically increasing integer versions (`v1`, `v2`, ...). Rollback republishes a historical Bundle as a newer version and never moves or deletes old versions. `SkillMutationService` owns commits, tombstones, and the sync outbox.
 
 ## Skill Lifecycle
 
+```text
+Evidence → static checks → Candidate → True Replay
+                                  ├─ gates pass → new version → Skill Sync
+                                  ├─ gray zone → human review → publish or reject
+                                  └─ gates fail → reject or revise
+Administrator force-publish ─────────────────────┘
 ```
-  Create/Modify
-      │
-      ▼
-  ┌──────────┐    Fail      ┌──────────┐
-  │ Candidate │───────────►│ Archived  │
-  └────┬─────┘             └──────────┘
-       │ Pass static checks
-       ▼
-  ┌──────────┐    Fail      ┌──────────┐
-  │TrueReplay│───────────►│ Reject/Modify │
-  └────┬─────┘             └──────────┘
-       │ Checklist + Efficiency met
-       ▼
-  ┌──────────┐    Reject    ┌──────────┐
-  │Human Review│──────────►│ Reject/Modify │
-  └────┬─────┘             └──────────┘
-       │ Approve
-       ▼
-  ┌──────────┐
-  │ Published │◄── Rollback ── Historical versions
-  └──────────┘
-```
+
+`publish_mode: validated` uses the Candidate validation queue. A Candidate may publish automatically after result-count, approval-count, and runtime-compatibility gates pass; gray-zone results can enter human review. `publish_mode: direct` bypasses the validation queue.
 
 ## Skill Synchronization
 
@@ -111,8 +103,8 @@ Installation script at [hermes_skill_sync/install.py](file:///home/zhangpengkun/
 |-----------|-------|--------|
 | Content nature | Executable task methods (steps, workflows) | Retrievable facts and context |
 | Prescribes execution flow | Yes, explicit steps | No, does not prescribe complete workflow |
-| Validation method | True Replay comparative validation | DreamCycle semantic dedup/merge |
-| Update gate | Strict (automatic + human) | Lenient (automatic or human per risk) |
+| Validation method | True Replay comparison | Memory Lab/Memory Replay; aggregation output constrained by its Skill |
+| Update gate | Candidate gates, administrator release, or publish request | Agents write only personal Memory; only administrators/evolution paths write team Memory |
 | Typical examples | "How to do Code Review", "How to write unit tests" | "Team uses pnpm", "Service port is 52010" |
 
 ## Code Entry Points

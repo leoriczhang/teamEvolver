@@ -1,133 +1,133 @@
 # Memory 体系
 
-Memory 是可检索的长期事实、背景、偏好与团队共识。与 Skill 不同，Memory 不直接规定完整任务执行流程——它为 Agent 提供上下文背景，而非操作步骤。teamEvolver 将 Memory 分为个人资产和团队资产两层，由 DreamCycle 持续维护和进化。
+Memory 是可检索的长期事实、背景、偏好与团队共识。它为 Agent 提供上下文，而不是像 Skill 一样规定完整任务流程。teamEvolver 将 Memory 分为个人资产和团队资产，并用独立的聚合、维护、实验和审计链路管理它们。
 
 ## 个人 Memory 与团队 Memory
 
-teamEvolver 中的 Memory 按归属分为两类：
-
 | 维度 | 个人 Memory | 团队 Memory |
-|------|------------|------------|
-| 存储路径 | `viking://user/peers/{peer}/memories/` | `viking://user/memories/` |
-| 写入权限 | 仅对应个人 Agent 可写 | 仅 DreamCycle 维护引擎可写 |
-| 共享范围 | 归属于单个用户，不默认共享 | 经共享性判断后对团队成员和 Agent 可用 |
-| 内容来源 | 用户偏好、个人工作习惯、特定上下文 | 跨多人反复出现的共性经验、团队共识、长期有效的事实 |
-| 进化方式 | Agent 直接写入/遗忘，无需门禁 | DreamCycle 聚合、去重、清理、合并，按风险自动或人工处理 |
+|------|-------------|-------------|
+| 默认路径 | `viking://user/<user>/memories/` | `viking://resources/shared-knowledge/` |
+| 可配置项 | 每个用户的 `personal_space.viking_user` | `aggregation.shared_knowledge_prefix` |
+| Agent 权限 | 通过 Context Workspace 的 `remember` / `forget` 写自己的 Memory | 只读 |
+| 控制台权限 | 本人可编辑自己的 Memory；管理员可切换用户 | 仅管理员可编辑 |
+| 主要来源 | 用户偏好、工作习惯、个人事实和 Session 抽取结果 | 多个用户中反复出现并经过聚合的共性知识 |
+| 进化方式 | Agent 写入、Workspace 编辑、Memory Lab 实验 | 跨 User 聚合、管理员批量编辑、可选 DreamCycle 维护和 Memory Replay |
 
-Agent 通过 Context Workspace 接口的 `remember`/`forget` 操作只能写入个人 Memory；团队 Memory 只能通过 DreamCycle 的 Memory Evolution 流程变更。
+团队 Memory 使用 Account 共享的 Resources 命名空间，不属于某个用户的私有 `memories/`。这使授权用户可以检索同一份团队产物，同时仍由 teamEvolver 控制写权限。
 
-## DreamCycle
+## 跨 User 团队 Memory 聚合
 
-DreamCycle 是团队 Memory 的持续进化过程。它在预设的时间窗口内按优先级运行一组维护 Job，对团队 Memory 进行聚合、去重、清理、概况维护和可发现性维护。
+当前控制台中的「进化链路 → 团队 Memory 自进化」使用 `MemoryAggregationService` 和 `ov compile`：
 
-DreamCycle 默认**不启用**。需在配置中设置 `dreamcycle.enabled: true` 才会启动调度器。
+1. 管理员提交可选的 OpenViking Account ID 和必填的 Admin Key。
+2. 服务端使用本次请求的 Admin Key 枚举用户，排除 team 服务用户；Key 不持久化。
+3. 管理员全选、反选或逐个选择参与用户，并选择增量或全量模式。
+4. Phase 1 使用 Admin Key 和目标用户身份读取每个用户的 Memory，并并发生成 per-user staging。
+5. Phase 2 以最多 15 个源为一组做 tree-reduce，最终写入团队 Memory 根。
+
+默认目录：
+
+```text
+个人源     viking://user/<user>/memories/<kind>/
+工作根     viking://resources/shared-knowledge-staging/
+最终根     viking://resources/shared-knowledge/
+```
+
+`shared_knowledge_prefix` 和 `staging_dir` 可配置。工作根始终是最终根的同级目录，中间 `_merge` 文件不会进入最终根，也不会污染最终目录的 L0/L1 摘要。
+
+### 聚合 Skill
+
+聚合输出结构由「团队记忆聚合 Skill」定义。管理员可在控制台直接编辑完整 `SKILL.md`，内容默认持久化到 `~/.teamEvolver/aggregation/okf_skill.md`。下一次聚合时，服务会把它安装到每个参与身份自己的 Skill 空间。
+
+Skill 内容变化会使下一次增量运行重新编译全部选中用户。用户 Memory 内容未变化且上次 staging 成功时，增量模式会复用已有 staging。
+
+### 规模与失败恢复
+
+- Phase 1 默认最大并发为 6。
+- `merge_fan_in` 默认 12，运行时限制为 2–15，避免超过 compile 的 16 源上限。
+- 单用户失败不会中止其他用户；下一次增量运行会重试失败或内容变化的用户。
+- 页面刷新后可恢复当前服务进程内的最近任务；服务重启会清空任务列表，但不会清除磁盘上的指纹状态。
+
+完整接口见 [团队记忆聚合 API](../api/11-team-memory-aggregation.md)。
+
+## DreamCycle 维护
+
+DreamCycle 是可选的 Memory 维护引擎，负责对其配置目标执行概况维护、去重、清理、可发现性检查和整合。它默认关闭，设置 `dreamcycle.enabled: true` 后才启用调度。
 
 ### 调度窗口
 
-DreamCycle 使用基于时间窗口的调度策略：
-
-- **活跃时段**：`dreamcycle.active_start_hour=0`、`dreamcycle.active_end_hour=6`，默认凌晨 0:00–6:00 运行
-- **每轮次间隔**：`dreamcycle.round_interval_minutes=90`，每轮之间间隔 90 分钟
-- **每晚轮次**：`dreamcycle.rounds_per_window=3`，每晚最多执行 3 轮
-- **单 Job 最大轮次**：`dreamcycle.max_turns_per_job=25`，每个 Job 最多 25 个 ReAct 推理轮次
-
-调度器支持跨午夜窗口配置（如 `active_start_hour=22, active_end_hour=6`）。支持守护进程模式（`--daemon`）和单次执行模式（`--once`，忽略时间窗口立即运行一轮）。
+- `active_start_hour=0`、`active_end_hour=6`：默认活跃窗口为 0:00–6:00
+- `rounds_per_window=3`：每个窗口最多 3 轮
+- `round_interval_minutes=90`：轮次间隔 90 分钟
+- `max_turns_per_job=25`：单个 Job 最大 ReAct 轮次
 
 ### 维护 Job
 
-DreamCycle 按优先级顺序执行以下 Job：
+| Job | 职责 |
+|-----|------|
+| `team_overview` | 维护团队概况和入口信息 |
+| `deduplication` | 使用语义相似度识别并合并重复内容 |
+| `cleanup` | 归档过期、低价值或被替代的内容 |
+| `onboarding_check` | 检查新人能否发现团队、项目、工具和流程 |
+| `consolidate` | 从多个来源提炼去个人化的共性知识 |
 
-| Job | 优先级 | 职责 |
-|-----|--------|------|
-| `team_overview` | 10（最先执行） | 维护团队概况：成员名单、角色职责、当前项目汇总、常用服务/工具/地址信息 |
-| `dedup`（deduplication） | 20 | 语义去重：识别语义重复或高度重叠的团队 Memory 条目并合并/归档，使用嵌入模型做相似度检测 |
-| `cleanup` | 30 | 清理过期内容：归档已完成项目的过程细节、超过 30 天的临时信息、被新版本取代的旧版本、调试产物和检查报告 |
-| `onboarding_check` | 40 | 新人可发现性检查：模拟新人搜索"团队做什么""有哪些人""做什么项目""用什么工具""工作流程"，验证核心入口存在 |
-| `consolidate` | 50（最低优先级，机会性执行） | 跨成员整合：从各 peer 的个人 Memory 中提炼**≥2 个不同 peer**独立出现的共性模式，去个人化后沉淀为团队 Memory |
+DreamCycle 仍保留独立的 ReAct Job、策略工具和调度配置。它不是跨 User `ov compile` 聚合 API 的别名，两条链路可以独立启用。
 
-> **注意**：`consolidate` Job 对个人 Memory 只有只读权限，严禁搬运个人 Memory 原文到团队 Memory，必须提炼为抽象后的共性结论并剥离个人身份信息。
+## Memory Change 与 True Replay
 
-### 语义去重
+DreamCycle 写入会通过 `MemoryChangeLedger` 记录 before/after Snapshot OID、内容 hash、diff hash、来源引用、策略理由和执行结果。记录使用 `teamevolver.memory-change.v1`，存放在平台根下的 `memory-changes/`。
 
-DreamCycle 使用嵌入模型做语义相似度检测，两个阈值控制去重行为：
+`MemoryTrueReplayRunner` 可以把变更前内容作为 Baseline、变更后内容作为 Candidate，在冻结 Context 下执行 A/B Replay。Checklist 仍是完成门禁；通过后按交互轮次、工具调用数、Token 依次比较效率。结果存放在 `memory-replays/<change_id>/`。
 
-- **`dreamcycle.dedup_merge_threshold=0.86`**：余弦相似度 ≥0.86 时，视为同一内容，触发合并
-- **`dreamcycle.dedup_warn_threshold=0.72`**：相似度介于 0.72–0.86 之间时，标记为可能重复，由 LLM 判断是否需要合并
+## Workspace 与 Memory Lab
 
-未配置嵌入模型（`dreamcycle.embed_model` 为空）时，语义去重被禁用，去重判断退化为仅由 LLM 基于文本判断，不使用词法重叠。
+「资产中心 → Agent 工作空间」同时展示个人和团队 Memory：
 
-### Memory Change Ledger
+- 浏览目录、文件及 L0/L1 摘要
+- 管理员或资产所有者进入编辑模式
+- 跨多个文件保留草稿，统一查看 Diff 后批量保存
+- 通过内容哈希前置条件防止覆盖并发修改
 
-DreamCycle 的每一次 Memory 写入（新增/合并/归档/清理）都通过 `MemoryChangeLedger` 记录为不可变的变更记录：
+Memory Lab 用于编辑不落盘的草稿，并比较改动前后的 Context 注入或 True Replay 结果。实验不会自动修改正式 Memory。
 
-1. **变更前快照**：写入前对受影响路径做 OpenViking Snapshot commit，记录 `before_oid` 和 `before_hash`
-2. **变更执行**：通过 Viking 工具（remember/forget/merge/sanitize）执行实际写入
-3. **变更后快照**：写入后再做一次 Snapshot commit，记录 `after_oid`、`after_hash` 和 `diff_hash`
-4. **持久化记录**：将完整的变更记录（change_id、run_id、job_name、action、target_paths、source_refs、reason、before/after 快照引用、决策结果）写入 `memory-changes/{date}/{change_id}.json`
-
-变更记录的 schema 版本为 `teamevolver.memory-change.v1`，每条记录包含完整审计链：actor（默认 `teamEvolver:dreamcycle`）、started_at、completed_at、result（applied/partial/failed/noop）、snapshot_status。
-
-### Blackboard
-
-同一轮 DreamCycle 的所有 Job 共享一个 Blackboard 实例，用于跨 Job 传递已处理的 URI 事实和中间观察结果，避免重复读取和处理同一 Memory 条目。每个 Job 使用独立的 ReAct 引擎实例，但共享工具注册表和 Blackboard。
-
-## Memory Replay
-
-DreamCycle 对已应用的 Memory Change 支持内容级 True Replay 验证（`MemoryTrueReplayRunner`）。与 Skill 的 True Replay 类似，Memory Replay 并行执行两个分支：
-
-- **Baseline 分支**：加载变更前的 Memory 内容（before_oid 对应的快照）
-- **Candidate 分支**：加载变更后的 Memory 内容（after_oid 对应的快照）
-
-两个分支共享冻结的 Context 投影（通过 `shared_context_hash` 保证一致性），差异仅限于被变更的 Memory 条目本身。验证使用相同的 Checklist 门禁和效率比较规则（轮次→工具调用→Token）。
-
-Memory Replay 的结果 schema 版本为 `teamevolver.memory-true-replay.v1`，记录在 `memory-replays/{change_id}/{replay_id}.json`。
-
-## DreamCycle 与 OpenViking 的关系
-
-DreamCycle 的所有 Memory 读写都通过 OpenViking API 完成，不直接操作本地文件系统：
-
-- **认证身份**：DreamCycle 以配置的 `agent_id`（通过 `OPENVIKING_AGENT_ID` 或 OpenViking API Key 解析）作为 OpenViking 用户身份（`X-OpenViking-User`）
-- **维护空间**：默认维护自身用户的 `viking://user/memories/`；配置 `customer_id`（`OPENVIKING_CUSTOMER_ID`）时，维护范围收窄到 `viking://user/peers/{customer_id}/memories/`
-- **读取范围**：读工具可以跨所有用户（含 peers）搜索和读取；写/归档工具严格限制在认证用户自身的 Memory 空间
-- **快照能力**：利用 OpenViking Snapshot 做变更前后的内容版本捕获，支持 diff 和回滚到历史快照
-- **测试后端**：支持 `memory://` 协议的进程内 InMemoryObjectStore，仅用于单元测试和 mock 模式，不作为用户可见的存储后端
-
-> **提示**：`teamEvolver/storage/memory.py` 提供的是测试专用的内存对象存储，并非 DreamCycle 的 Memory 存储后端。DreamCycle 的持久化存储始终是 OpenViking。
-
-## 配置参考
+## 配置示例
 
 ```yaml
+aggregation:
+  enabled: true
+  shared_knowledge_prefix: shared-knowledge
+  staging_dir: staging
+  phase1_concurrency: 6
+  merge_fan_in: 12
+
 dreamcycle:
-  enabled: false               # 是否启用 DreamCycle 调度器
-  active_start_hour: 0         # 活跃窗口开始小时（默认 0 点）
-  active_end_hour: 6           # 活跃窗口结束小时（默认 6 点）
-  rounds_per_window: 3         # 每晚最多执行轮次
-  round_interval_minutes: 90   # 轮次间隔分钟数
-  max_turns_per_job: 25        # 单 Job 最大 ReAct 推理轮次
-  dedup_merge_threshold: 0.86  # 语义合并阈值
-  dedup_warn_threshold: 0.72   # 语义告警阈值
-  embed_model: ""              # 嵌入模型名，为空则禁用语义去重
+  enabled: false
+  active_start_hour: 0
+  active_end_hour: 6
+  rounds_per_window: 3
+  round_interval_minutes: 90
+  max_turns_per_job: 25
+  dedup_merge_threshold: 0.86
+  dedup_warn_threshold: 0.72
 ```
 
 ## 代码入口
 
 | 模块 | 路径 |
 |------|------|
-| DreamCycle 调度器 | [dreamcycle/scheduler.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/dreamcycle/scheduler.py) |
-| DreamCycle 配置 | [dreamcycle/config.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/dreamcycle/config.py) |
-| Memory Change 账本 | [dreamcycle/memory_changes.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/dreamcycle/memory_changes.py) |
-| Memory Replay 运行器 | [dreamcycle/memory_replay.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/dreamcycle/memory_replay.py) |
-| Blackboard | [dreamcycle/blackboard.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/dreamcycle/blackboard.py) |
-| ReAct 引擎 | [dreamcycle/react/engine.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/dreamcycle/react/engine.py) |
-| Job 基类与具体 Job | [dreamcycle/jobs/](file:///home/zhangpengkun/teamEvolver/teamEvolver/dreamcycle/jobs/) |
-| Viking 工具集 | [dreamcycle/tools/viking.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/dreamcycle/tools/viking.py) |
-| 内存对象存储（测试用） | [storage/memory.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/storage/memory.py) |
-| OpenViking 存储客户端 | [storage/viking.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/storage/viking.py) |
-| 默认配置值 | [config_store/defaults.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/config_store/defaults.py) |
+| 跨 User 聚合服务 | `teamEvolver/aggregation/service.py` |
+| 聚合路由与设置 | `teamEvolver/proxy/aggregation_routes.py` |
+| 聚合 Skill | `teamEvolver/aggregation/okf_skill.py` |
+| Workspace 作用域与批量写 | `teamEvolver/proxy/openviking_workspace.py` |
+| DreamCycle 调度器 | `teamEvolver/dreamcycle/scheduler.py` |
+| Memory Change 账本 | `teamEvolver/dreamcycle/memory_changes.py` |
+| Memory Replay | `teamEvolver/dreamcycle/memory_replay.py` |
+| OpenViking 存储客户端 | `teamEvolver/storage/viking.py` |
 
 ## 相关文档
 
-- [架构总览](./01-architecture)：DreamCycle 在系统架构中的位置
-- [进化闭环](./02-evolution-loop)：Memory Evolution 在进化闭环中的阶段
-- [Skill 体系](./03-skills)：Skill 与 Memory 的边界对比
-- [True Replay](./06-true-replay)：Memory Replay 使用的验证机制
+- [存储空间与目录布局](./09-storage-layout.md)
+- [True Replay](./06-true-replay.md)
+- [配置参考](../guides/01-configuration.md)
+- [Web 控制台](../guides/03-console.md)
+- [团队记忆聚合 API](../api/11-team-memory-aggregation.md)

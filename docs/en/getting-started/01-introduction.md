@@ -10,19 +10,25 @@ Agent Runtimes are responsible for executing tasks, while teamEvolver is respons
 - **Candidate Generation**: Generates Skill Candidates and Memory Change proposals based on Evidence
 - **Grounded Validation**: Runs Baseline and Candidate in parallel in isolated real Agent Runtimes via True Replay
 - **Gated Release**: Checklist completion gate + efficiency comparison (rounds/tool calls/Token) + admin review
-- **Continuous Evolution**: DreamCycle periodically performs team Memory aggregation, deduplication, cleanup, and profile maintenance
+- **Continuous Evolution**: DreamCycle maintains existing team Memory, while the cross-user aggregation pipeline uses an editable Skill and `ov compile` to consolidate personal experience into a shared team directory
 
 ## Relationship with OpenViking
 
-teamEvolver uses OpenViking as its sole persistent storage backend and does not use any local ObjectStore:
+teamEvolver uses OpenViking to persist shared assets and evolution artifacts; local storage is limited to configuration, login Sessions, and runtime state:
 
 | Data Type | Location in OpenViking |
 |-----------|------------------------|
-| Team Skill | Versioned Skill Bundles under `viking://skills/` |
-| Team Memory | Long-term memory entries under `viking://memory/team/` |
-| Personal Memory | Personal memory entries under `viking://memory/personal/<user>/` |
-| Session Archive | Complete trajectories and Evidence under `viking://sessions/` |
-| Snapshot | Frozen Context projections under `viking://snapshots/` |
+| Team Skill | Versioned Skill Bundles under `viking://resources/team-skill-evolver/skills/` |
+| Personal Skill | `viking://resources/team-skill-evolver/peers/<account>/skills/` |
+| Team Memory | `viking://resources/shared-knowledge/` by default; the prefix is configurable |
+| Personal Memory | `viking://user/<user>/memories/` |
+| Sessions and evolution artifacts | `sessions/`, `session_archive/`, `candidate_skills/`, `validation_*`, and related paths under `viking://resources/team-skill-evolver/` |
+| Snapshot | Account-scoped OpenViking Snapshot history, addressed by immutable commit OIDs |
+
+The console exposes these assets through two distinct entries:
+
+- **Agent Workspace** contains personal/team Skills, Memory, and Resources that Agents can reference, with direct access to Skill Lab and Memory Lab.
+- **Platform Assets** contains read-only internal artifacts such as Sessions, Candidates, Validation records, and Evidence; Agents cannot reference this storage.
 
 ## Use Cases
 
@@ -38,7 +44,7 @@ teamEvolver explicitly does not take on the following responsibilities:
 - **Does Not Execute Tasks**: Has no own Agent Runtime; all Replays execute in connected Runtimes
 - **Does Not Replace Agent Configuration**: The Agent's own model, tools, and system Prompt remain managed by the Runtime
 - **Does Not Perform Centralized Inference**: LLM calls in the evolution Pipeline are configurable but only assist analysis; they do not replace Runtime inference
-- **Does Not Perform Unautomatic Releases**: Skill releases must pass Checklist gates and human review
+- **Does Not Bypass Governance Boundaries**: The default `validated` mode requires Checklist, result-count, and runtime-compatibility gates; gray-zone results enter human review, while administrators may explicitly choose `direct` or force a release
 
 ## Next Steps
 

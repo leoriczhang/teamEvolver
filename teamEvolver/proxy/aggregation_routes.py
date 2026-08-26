@@ -1,9 +1,10 @@
 """HTTP routes for cross-user memory aggregation (interface 1).
 
-Endpoints (admin-only; the pipeline uses a trusted service identity, normally
-the admin OpenViking key):
+Endpoints are console-admin-only. OpenViking access uses the request-scoped
+Admin Key supplied to the users/run endpoints:
 
 - ``POST /api/aggregation/run``       -> start a background aggregation task
+- ``POST /api/aggregation/users``     -> list users with an OpenViking Admin Key
 - ``GET  /api/aggregation/status/{id}`` -> poll a task's per-category progress
 - ``GET  /api/aggregation/okf-skill`` -> read the default OKF Skill body
 - ``PUT  /api/aggregation/okf-skill`` -> (placeholder) persist an edited Skill
@@ -38,6 +39,20 @@ class AggregationMixin:
             self._aggregation_service_instance = service
         return service
 
+    def _aggregation_request_credentials(
+        self,
+        body: dict,
+    ) -> tuple[str, str]:
+        account_id = str(
+            body.get("account_id")
+            or getattr(self.config, "sharing_viking_account", "")
+            or "default"
+        ).strip()
+        raw_admin_key = body.get("admin_key")
+        if not isinstance(raw_admin_key, str) or not raw_admin_key.strip():
+            raise HTTPException(status_code=400, detail="admin_key is required")
+        return account_id, raw_admin_key.strip()
+
     @staticmethod
     def _require_admin(request: Request) -> None:
         user = _request_user(request)
@@ -68,20 +83,26 @@ class AggregationMixin:
 
     def _register_aggregation_routes(self, app: FastAPI) -> None:
 
-        @app.get("/api/aggregation/users")
+        @app.post("/api/aggregation/users")
         async def api_aggregation_users(request: Request):
             self._mark_request_activity()
             self._require_admin(request)
-            account_id = str(
-                request.query_params.get("account_id")
-                or getattr(self.config, "sharing_viking_account", "")
-                or "default"
-            ).strip()
-            if not account_id:
-                raise HTTPException(status_code=400, detail="account_id is required")
+            try:
+                body = await request.json()
+            except ValueError:
+                body = {}
+            if not isinstance(body, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail="aggregation users body must be an object",
+                )
+            account_id, admin_key = self._aggregation_request_credentials(body)
             service = self._aggregation_service()
             try:
-                users = await service.list_account_users(account_id)
+                users = await service.list_account_users(
+                    account_id,
+                    admin_key=admin_key,
+                )
             except Exception as exc:  # noqa: BLE001 - surface as 400 for the console
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return JSONResponse({"account_id": account_id, "users": users})
@@ -100,26 +121,40 @@ class AggregationMixin:
                 body = await request.json()
             except ValueError:
                 body = {}
-            account_id = str(
-                (body or {}).get("account_id")
-                or getattr(self.config, "sharing_viking_account", "")
-                or "default"
-            ).strip()
-            if not account_id:
-                raise HTTPException(status_code=400, detail="account_id is required")
-            kinds = (body or {}).get("kinds")
+            if not isinstance(body, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail="aggregation run body must be an object",
+                )
+            account_id, admin_key = self._aggregation_request_credentials(body)
+            kinds = body.get("kinds")
             kinds = [str(k) for k in kinds] if isinstance(kinds, list) else None
-            user_ids = (body or {}).get("user_ids")
+            user_ids = body.get("user_ids")
             user_ids = (
                 [str(u) for u in user_ids] if isinstance(user_ids, list) else None
             )
-            full = str((body or {}).get("mode") or "").lower() == "full"
+            full = str(body.get("mode") or "").lower() == "full"
+            target_uri = body.get("target_uri")
+            if target_uri is not None and not isinstance(target_uri, str):
+                raise HTTPException(
+                    status_code=400,
+                    detail="target_uri must be a string",
+                )
 
             service = self._aggregation_service()
-            run = service.new_run(account_id)
+            try:
+                run = service.new_run(account_id, target_uri=target_uri)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
             def _worker() -> None:
-                service.run(run, kinds=kinds, full=full, user_ids=user_ids)
+                service.run(
+                    run,
+                    kinds=kinds,
+                    full=full,
+                    user_ids=user_ids,
+                    admin_key=admin_key,
+                )
 
             threading.Thread(target=_worker, daemon=True).start()
             return JSONResponse(status_code=202, content=run.to_public())
@@ -207,7 +242,10 @@ class AggregationMixin:
                 if not prefix:
                     raise HTTPException(status_code=400, detail="shared_knowledge_prefix is required")
                 if len(prefix) > 120:
-                    raise HTTPException(status_code=400, detail="shared_knowledge_prefix must be at most 120 characters")
+                    raise HTTPException(
+                        status_code=400,
+                        detail="shared_knowledge_prefix must be at most 120 characters",
+                    )
                 agg["shared_knowledge_prefix"] = prefix
 
             if "staging_dir" in body:

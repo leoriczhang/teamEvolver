@@ -12,15 +12,15 @@ Progressive Replay decision: `teamEvolver/progressive_replay.py`
 
 ## 2. Interface and Parameter Specification
 
-All `/api/validation/*` interfaces require console administrator authentication (write operations require admin role).
+All `/api/validation/*` endpoints require a console login. Release decisions and Candidate deletion require the administrator role.
 
 ---
 
-### GET /validation/candidates
+### GET /api/validation/candidates
 
-List candidate Skills. This endpoint has no authentication requirement (path starts with `/validation/` not `/api/validation/`, shared with console). The full management interface is `/api/validation/candidates`.
+List Candidates.
 
-**Authentication:** Console Cookie (required for `/api/validation/candidates`); no authentication (`/validation/candidates` as compatibility path)
+**Authentication:** Console Cookie. The compatibility endpoint `GET /validation/candidates` is provided by the embedded evolution service and does not require a console Cookie; expose it only on a trusted network.
 
 **Query Parameters:**
 
@@ -189,14 +189,6 @@ Delete a candidate record.
 Code entry point: `teamEvolver/proxy/routes.py:4168` (`api_validation_candidate_delete`)
 
 ---
-
-### POST /api/validation/candidates/{job_id}/approve
-
-Approve candidate for publication (convenience alias for `validate` interface, mode=auto).
-
-### POST /api/validation/candidates/{job_id}/reject
-
-Reject candidate (convenience alias for `validate` interface, forces rejection).
 
 ## 3. Usage Examples
 

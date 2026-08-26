@@ -1,6 +1,6 @@
 # 架构总览
 
-teamEvolver 是一个单体 FastAPI 服务（默认端口 52010），内嵌进化引擎、DreamCycle 调度器和 React 控制台。所有持久化状态通过 OpenViking API 存取。
+teamEvolver 是一个单体 FastAPI 服务（默认端口 52010），内嵌进化引擎、团队 Memory 聚合、DreamCycle、验证 Worker、SkillMiner 和 React 控制台。共享资产与进化产物通过 OpenViking 存取；YAML 配置、控制台 Session 和部分运行状态保存在 `~/.teamEvolver/`。
 
 ## 系统架构图
 
@@ -54,7 +54,7 @@ teamEvolver 是一个单体 FastAPI 服务（默认端口 52010），内嵌进�
 
 FastAPI 应用组装入口，负责：
 - 注册所有 HTTP 路由（控制台静态文件、健康检查、Agent 协议接口、管理接口）
-- 初始化 Langfuse 追踪、DreamCycle 调度器、后台验证 Worker
+- 初始化 Langfuse 追踪、DreamCycle、团队 Memory 聚合和后台验证 Worker
 - 挂载内嵌的静态前端（来自 `teamEvolver/web/dist/`）
 
 ### Agent Protocol V1 ([agent_protocol.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/integrations/agent_protocol.py))
@@ -110,8 +110,12 @@ FastAPI 应用组装入口，负责：
 - `dedup` — 语义去重
 - `cleanup` — 清理过期和低价值 Memory
 - `consolidate` — 合并相关 Memory 条目
-- `onboarding` — 新用户入职引导
+- `onboarding_check` — 新人可发现性检查
 - 默认在凌晨 0-6 点窗口运行
+
+### 团队 Memory 聚合（[aggregation/](file:///home/zhangpengkun/teamEvolver/teamEvolver/aggregation/)）
+
+管理员从控制台选择 OpenViking Account 用户后，聚合服务以受控并发执行 per-user compile，再通过有界 tree-reduce 写入 `viking://resources/<shared_knowledge_prefix>/`。中转目录位于最终目录同级，并使用指纹状态支持增量跳过。
 
 ### Validation Worker ([validation/worker.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/validation/worker.py))
 
@@ -135,7 +139,8 @@ teamEvolver 统一使用 **52010** 单端口承载所有能力：
 | `/ingest_session` | POST | Agent Session 上报 |
 | `/internal/agents/*` | * | Agent Protocol V1 内部接口 |
 | `/trigger` | POST | 手动触发进化周期 |
-| `/api/*` | * | 控制台管理 API |
+| `/api/aggregation/*` | * | 团队 Memory 聚合、任务与设置 |
+| `/api/*` | * | 其他控制台管理 API |
 
 ## 代码入口
 
@@ -148,4 +153,6 @@ teamEvolver 统一使用 **52010** 单端口承载所有能力：
 | Skill 管理 | [skills/](file:///home/zhangpengkun/teamEvolver/teamEvolver/skills/) |
 | Agent 集成 | [integrations/](file:///home/zhangpengkun/teamEvolver/teamEvolver/integrations/) |
 | DreamCycle | [dreamcycle/](file:///home/zhangpengkun/teamEvolver/teamEvolver/dreamcycle/) |
+| 团队 Memory 聚合 | [aggregation/](file:///home/zhangpengkun/teamEvolver/teamEvolver/aggregation/) |
+| 配置存储 | [config_store/](file:///home/zhangpengkun/teamEvolver/teamEvolver/config_store/) |
 | 前端源码 | [web-ui/src/](file:///home/zhangpengkun/teamEvolver/web-ui/src/) |

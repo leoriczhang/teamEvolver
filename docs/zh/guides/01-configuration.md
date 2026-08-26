@@ -88,7 +88,7 @@ HTTP 服务监听配置。
 | `enabled` | boolean | `true` | 是否启用技能云端共享。 |
 | `backend` | string | `"viking"` | 共享后端，目前仅支持 `"viking"`（OpenViking）。 |
 | `viking_deployment` | string | `"cloud"` | OpenViking 部署模式：`"cloud"`（火山引擎托管）或 `"local"`（自托管 openviking-server）。 |
-| `viking_endpoint` | string | `""` | OpenViking API 端点。留空时根据 `viking_deployment` 自动推导。 |
+| `viking_endpoint` | string | `""` | OpenViking API 端点覆盖。留空时根据 `viking_deployment` 推导；远程自建实例填写其可达 URL。 |
 | `viking_api_key` | string | `""` | 通用 API 密钥（向后兼容，推荐使用分域密钥）。 |
 | `viking_personal_api_key` | string | `""` | 个人空间 API 密钥。 |
 | `viking_personal_api_keys` | list | `[]` | 多个个人空间 API 密钥列表。 |
@@ -96,7 +96,7 @@ HTTP 服务监听配置。
 | `viking_root_prefix` | string | `"team-skill-evolver"` | OpenViking 中 teamEvolver 资源的命名空间根前缀，请勿随意修改。 |
 | `viking_agent` | string | (常量) | OpenViking Agent 命名空间，由代码常量固定。 |
 | `viking_account` | string | `"default"` | Viking 账户标识。 |
-| `viking_user` | string | `"default"` | Viking 用户标识。 |
+| `viking_user` | string | `"team"` | 访问团队共享资源时发送的 OpenViking 用户标识。 |
 | `viking_personal_user` | string | `""` | 个人空间用户名。 |
 | `viking_customer_id` | string | `""` | 客户 ID，用于 DreamCycle 记忆空间定位。 |
 | `viking_group_id` | string | `""` | 分组 ID。 |
@@ -119,7 +119,7 @@ HTTP 服务监听配置。
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `interval_seconds` | integer | `600` | 进化轮次间隔（秒），即每隔多久执行一次进化循环。 |
-| `publish_mode` | string | `"validated"` | 候选技能发布模式：`"validated"`（校验通过后自动发布）、`"manual"`（全部人工审核）、`"off"`（不自动发布）。 |
+| `publish_mode` | string | `"validated"` | 候选 Skill 发布模式：`"validated"`（进入验证与审核链路）或 `"direct"`（直接发布）。 |
 | `human_review_enabled` | boolean | `true` | 是否启用人工审核流程。 |
 | `human_review_timeout_seconds` | integer | `86400` | 人工审核超时时间（秒），默认 24 小时。 |
 | `evidence_enabled` | boolean | `true` | 是否启用证据收集机制。 |
@@ -136,6 +136,7 @@ HTTP 服务监听配置。
 | `validation_max_rejections` | integer | `1` | 连续拒绝多少次后暂停该技能的进化。 |
 | `use_session_judge` | boolean | `true` | 是否使用会话价值分类器。 |
 | `candidate_coalesce_enabled` | boolean | `true` | 是否启用候选合并。 |
+| `max_parallel_groups` | integer | `4` | 单个进化周期并行处理的 Skill 分组上限。 |
 | `bundle_text_extensions` | list | `[".py", ".sh"]` | 技能包中视为文本文件的扩展名列表。 |
 | `bundle_max_file_bytes` | integer | `262144` | 技能包单个文件最大字节数（256KB）。 |
 | `bundle_max_prompt_bytes` | integer | `786432` | 技能包最大 Prompt 字节数（768KB）。 |
@@ -177,6 +178,25 @@ DreamCycle 记忆维护引擎配置。DreamCycle 是 teamEvolver 的自动化记
 | `viking_agent` | string | `"dreamcycle"` | DreamCycle 在 OpenViking 中的 Agent 命名空间。 |
 | `job_prompts` | dict | `{}` | 各 Job 的 Prompt 覆盖配置。 |
 | `job_settings` | dict | `{}` | 各 Job 的运行时参数覆盖配置。 |
+
+### aggregation 节
+
+跨 User 团队 Memory 聚合配置。Account ID 和 OpenViking Admin Key 由每次请求提供，其中 Account ID 可选、Admin Key 必填且不持久化；链路通过 `ov compile` 汇总到 Account 共享的 Resources 目录。
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | boolean | `false` | 聚合功能的配置标记。聚合仍由管理员在控制台显式触发。 |
+| `shared_knowledge_prefix` | string | `"shared-knowledge"` | 最终团队 Memory 根：`viking://resources/<prefix>/`。可在「进化链路 → 团队 Memory 自进化」热更新。 |
+| `okf_skill_uri` | string | `"viking://agent/skills/team-memory-okf"` | 聚合 Skill 标识；执行时取末段作为 Skill 名，并将当前可编辑内容安装到参与身份自己的 Skill 空间。 |
+| `insight_skill_uri` | string | `""` | 预留的洞察 Skill 标识，当前聚合执行链路尚未使用。 |
+| `key_seed` | string | `"teamevolver-aggregation"` | 兼容保留字段；当前执行链路不使用它生成用户 Key。 |
+| `staging_dir` | string | `"staging"` | 工作根后缀。默认 staging 位于同级 `viking://resources/shared-knowledge-staging/`，不会污染最终目录的 L0/L1 摘要。 |
+| `kinds` | list | `[]` | 个人 Memory 类别；空列表使用内置集合 `profile/entities/preferences/events/cases/patterns/trajectories/experiences/tools/skills`。 |
+| `max_users_per_batch` | integer | `12` | 单个用户 Phase 1 compile 最多读取的类别数，运行时上限为 15。 |
+| `phase1_concurrency` | integer | `6` | Phase 1 用户级 compile 最大并发数。 |
+| `merge_fan_in` | integer | `12` | tree-reduce 每轮合并的最大源数，运行时限制为 2–15。 |
+| `compile_runtime_timeout_seconds` | integer | `3000` | 单个 compile 任务的运行超时秒数，最小 60。 |
+| `state_dir` | string | `""` | 聚合状态目录；留空使用 `~/.teamEvolver/aggregation/`。 |
 
 ### validation 节
 
@@ -338,10 +358,13 @@ skills:
 sharing:
   enabled: true
   backend: "viking"
-  viking_deployment: "cloud"
-  viking_personal_api_key: "vk-xxxxxxxx"
+  viking_deployment: "local"
+  # 自建服务在其他机器时填写其可达地址；留空则使用 http://localhost:1933
+  viking_endpoint: "http://10.0.0.8:1933"
+  viking_account: "default"
+  viking_user: "team"
   # 兼容字段名；语义为服务/admin key，通常直接使用管理员 OpenViking Key。
-  viking_team_api_key: "vk-yyyyyyyy"
+  viking_team_api_key: "root-or-trusted-key"
   skill_reload_mode: "poll"
   skill_reload_interval_seconds: 30
 
@@ -356,7 +379,7 @@ evolve:
   validation_max_rejections: 1
 
 dreamcycle:
-  enabled: true
+  enabled: false
   auto_start: false
   active_start_hour: 0
   active_end_hour: 6
@@ -367,6 +390,13 @@ dreamcycle:
     - cleanup
     - onboarding_check
     - consolidate
+
+aggregation:
+  enabled: true
+  shared_knowledge_prefix: "shared-knowledge"
+  staging_dir: "staging"
+  phase1_concurrency: 6
+  merge_fan_in: 12
 
 validation:
   enabled: true
@@ -395,6 +425,8 @@ langfuse:
 - DreamCycle 参数（`dreamcycle.*`）
 - Langfuse 参数（`langfuse.*`）
 - Skill Miner 参数（`mining.*`）
+- OpenViking 部署、Endpoint、Account 与服务 Key（通过「运行状态」）
+- 团队 Memory 输出前缀（通过「进化链路 → 团队 Memory 自进化」）
 - Prompt 覆盖（通过 Prompt Studio）
 
-通过 CLI `teamEvolver config set` 修改的配置会在下次进化轮次开始时自动加载。
+通过 CLI `teamEvolver config <key> <value>` 修改的其他配置，建议重启服务后使用。

@@ -1,7 +1,7 @@
 """Orchestration for cross-user memory aggregation.
 
-Pipeline (all steps below use a trusted service identity, normally the admin
-OpenViking key):
+Pipeline (all steps below use the OpenViking Admin Key supplied for the
+current request):
 
 1. Resolve account users via the Admin API.
 2. Expand each user + memory category into source URIs and plan compile
@@ -17,12 +17,15 @@ runs :meth:`run` inside a background thread and polls :attr:`status`.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import unquote, urlsplit
 
 from .compile_client import CompileClient
 from .okf_skill import DEFAULT_OKF_SKILL_BODY, skill_fingerprint
@@ -50,6 +53,7 @@ class GroupResult:
 class AggregationRun:
     task_id: str
     account_id: str
+    target_uri: str
     status: str = "pending"  # pending | running | completed | failed
     started_at: float = field(default_factory=time.time)
     finished_at: Optional[float] = None
@@ -60,6 +64,7 @@ class AggregationRun:
         return {
             "task_id": self.task_id,
             "account_id": self.account_id,
+            "target_uri": self.target_uri,
             "status": self.status,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
@@ -91,28 +96,8 @@ class MemoryAggregationService:
     def _endpoint(self) -> str:
         return str(getattr(self.config, "sharing_viking_endpoint", "") or "").rstrip("/")
 
-    def _root_key(self) -> str:
-        # Prefer an explicit aggregation override; otherwise reuse the admin's
-        # OpenViking key stored as the service/team credential.
-        return str(
-            getattr(self.config, "aggregation_root_api_key", "")
-            or getattr(self.config, "sharing_viking_team_api_key", "")
-            or getattr(self.config, "sharing_viking_api_key", "")
-            or ""
-        )
-
     def _team_user(self) -> str:
         return str(getattr(self.config, "sharing_viking_user", "") or "team")
-
-    def _team_key(self) -> str:
-        # The merge pass runs as the team/service user but reuses the admin
-        # service credential by default; no separate team-content key is needed.
-        return str(
-            getattr(self.config, "sharing_viking_team_api_key", "")
-            or getattr(self.config, "aggregation_root_api_key", "")
-            or getattr(self.config, "sharing_viking_api_key", "")
-            or ""
-        )
 
     def _prefix(self) -> str:
         return str(
@@ -124,7 +109,7 @@ class MemoryAggregationService:
         # The OKF skill is installed into each participating identity's OWN
         # skills space (viking://user/<uid>/skills/<name>) so compile — which
         # runs as that identity — can read it. agent/skills is globally readable
-        # but not writable under trusted mode, so per-identity install is used.
+        # but not writable for this flow, so per-identity install is used.
         from .okf_skill import DEFAULT_OKF_SKILL_NAME
 
         configured = str(getattr(self.config, "aggregation_okf_skill_uri", "") or "")
@@ -138,22 +123,55 @@ class MemoryAggregationService:
     def _staging_dir(self) -> str:
         return str(getattr(self.config, "aggregation_staging_dir", "") or "_staging")
 
-    def _work_root(self) -> str:
+    @staticmethod
+    def normalize_target_uri(target_uri: str) -> str:
+        """Validate and normalize a final aggregation target URI."""
+        value = str(target_uri or "").strip().rstrip("/")
+        parsed = urlsplit(value)
+        segments = parsed.path.lstrip("/").split("/") if parsed.path else []
+        decoded_segments = [unquote(segment) for segment in segments]
+        if (
+            len(value) > 512
+            or parsed.scheme != "viking"
+            or parsed.netloc != "resources"
+            or parsed.query
+            or parsed.fragment
+            or not segments
+            or any(
+                not segment
+                or segment in {".", ".."}
+                or "/" in segment
+                or "\\" in segment
+                or any(char.isspace() or ord(char) < 32 for char in segment)
+                for segment in decoded_segments
+            )
+        ):
+            raise ValueError(
+                "target_uri must be a valid path under "
+                "viking://resources/<path>"
+            )
+        return f"viking://resources/{'/'.join(segments)}"
+
+    def resolve_target_uri(self, target_uri: Optional[str] = None) -> str:
+        """Resolve a run target, falling back to the configured default."""
+        requested = str(target_uri or "").strip()
+        return self.normalize_target_uri(requested or self._target_root())
+
+    def _work_root(self, target_uri: Optional[str] = None) -> str:
         # Scratch space for per-user staging and tree-reduce intermediates. Kept
-        # as a SIBLING of the final knowledge root (viking://resources/<prefix>),
+        # as a SIBLING of the final knowledge root,
         # never inside it, so the final team-memory root contains only the
         # aggregated knowledge — no _staging/_merge leaking into the workspace
         # view or the root's L0/L1 summaries.
-        prefix = self._prefix().strip("/")
         staging = self._staging_dir().strip("/")
-        return f"viking://resources/{prefix}-{staging}"
+        return f"{self.resolve_target_uri(target_uri)}-{staging}"
 
-    def _staging_uri(self, user_id: str) -> str:
+    def _staging_uri(self, user_id: str, target_uri: Optional[str] = None) -> str:
         # One staging root per user (unified-knowledge layout). The OKF skill
         # lays out entities/, events/, tools/ ... subdirectories INSIDE this
         # root, so the target itself must not carry a per-kind path segment
         # (that produced the entities/entities double-nesting).
-        return f"{self._work_root()}/{user_id}"
+        return f"{self._work_root(target_uri)}/{user_id}"
 
     def _target_root(self) -> str:
         prefix = self._prefix().strip("/")
@@ -167,11 +185,24 @@ class MemoryAggregationService:
             return [str(k).strip() for k in configured if str(k).strip()]
         return list(DEFAULT_MEMORY_KINDS)
 
-    def _state_path(self) -> Path:
+    def _state_path(
+        self,
+        account_id: str,
+        target_uri: Optional[str] = None,
+    ) -> Path:
         base = str(getattr(self.config, "aggregation_state_dir", "") or "").strip()
         root = Path(base).expanduser() if base else Path.home() / ".teamEvolver" / "aggregation"
-        account = str(getattr(self.config, "sharing_viking_account", "") or "default")
-        return root / f"state-{account}.json"
+        configured_account = str(
+            getattr(self.config, "sharing_viking_account", "") or "default"
+        )
+        resolved_target = self.resolve_target_uri(target_uri)
+        legacy_target = "viking://resources/shared-knowledge"
+        safe_account = re.sub(r"[^A-Za-z0-9._-]+", "-", account_id).strip("-")
+        if account_id == configured_account and resolved_target == legacy_target:
+            return root / f"state-{safe_account or 'default'}.json"
+        identity = f"{account_id}\0{resolved_target}"
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:10]
+        return root / f"state-{safe_account or 'account'}-{digest}.json"
 
     def _max_users_per_batch(self) -> int:
         return int(getattr(self.config, "aggregation_max_users_per_batch", 12) or 12)
@@ -218,9 +249,18 @@ class MemoryAggregationService:
             run = self._runs.get(task_id)
             return run.to_public() if run else None
 
-    def new_run(self, account_id: str) -> AggregationRun:
+    def new_run(
+        self,
+        account_id: str,
+        *,
+        target_uri: Optional[str] = None,
+    ) -> AggregationRun:
         task_id = f"agg_{int(time.time() * 1000):x}"
-        run = AggregationRun(task_id=task_id, account_id=account_id)
+        run = AggregationRun(
+            task_id=task_id,
+            account_id=account_id,
+            target_uri=self.resolve_target_uri(target_uri),
+        )
         with self._lock:
             self._runs[task_id] = run
         return run
@@ -233,11 +273,16 @@ class MemoryAggregationService:
             )[: max(1, limit)]
             return [r.to_public() for r in runs]
 
-    async def list_account_users(self, account_id: str) -> list[str]:
-        """List aggregatable users under an account (admin/root identity)."""
+    async def list_account_users(
+        self,
+        account_id: str,
+        *,
+        admin_key: str,
+    ) -> list[str]:
+        """List aggregatable users under an account with a request credential."""
         builder = AccountSourceBuilder(
             endpoint=self._endpoint(),
-            root_api_key=self._root_key(),
+            admin_key=str(admin_key or "").strip(),
             account_id=account_id,
             shared_knowledge_prefix=self._prefix(),
             max_users_per_batch=self._max_users_per_batch(),
@@ -252,11 +297,21 @@ class MemoryAggregationService:
         kinds: Optional[list[str]] = None,
         full: bool = False,
         user_ids: Optional[list[str]] = None,
+        admin_key: str,
     ) -> None:
         """Execute the aggregation synchronously (call inside a worker thread)."""
         run.status = "running"
         try:
-            self._run_inner(run, kinds=kinds, full=full, user_ids=user_ids)
+            credential = str(admin_key or "").strip()
+            if not credential:
+                raise ValueError("admin_key is required")
+            self._run_inner(
+                run,
+                kinds=kinds,
+                full=full,
+                user_ids=user_ids,
+                admin_key=credential,
+            )
             run.status = "completed"
         except SourceExpansionError as exc:
             run.status = "failed"
@@ -278,17 +333,19 @@ class MemoryAggregationService:
         kinds,
         full: bool,
         user_ids=None,
+        admin_key: str,
     ) -> None:
         import asyncio
 
         endpoint = self._endpoint()
-        admin_key = self._root_key()
         agent_id = str(getattr(self.config, "sharing_viking_agent", "") or "team-skill-evolver")
         builder = AccountSourceBuilder(
             endpoint=endpoint,
-            root_api_key=admin_key,
+            admin_key=admin_key,
             account_id=run.account_id,
-            shared_knowledge_prefix=self._prefix(),
+            shared_knowledge_prefix=run.target_uri.removeprefix(
+                "viking://resources/"
+            ),
             max_users_per_batch=self._max_users_per_batch(),
             excluded_user_ids=frozenset({self._team_user()}),
         )
@@ -306,7 +363,10 @@ class MemoryAggregationService:
         skill_name = self._skill_name()
         skill_fp = skill_fingerprint(skill_body)
         kinds = self._kinds(kinds)
-        state = AggregationState.load(self._state_path(), run.account_id)
+        state = AggregationState.load(
+            self._state_path(run.account_id, run.target_uri),
+            run.account_id,
+        )
         # A skill change forces every user to recompile (rule 3).
         force_all = full or (state.skill_fingerprint != skill_fp)
 
@@ -332,7 +392,7 @@ class MemoryAggregationService:
         if not staged_roots:
             run.groups.append(
                 GroupResult(
-                    group_key="merge", kind="(all)", target_uri=self._target_root(),
+                    group_key="merge", kind="(all)", target_uri=run.target_uri,
                     source_count=0, status="skipped", detail="no staged sources",
                 )
             )
@@ -343,7 +403,7 @@ class MemoryAggregationService:
             endpoint=endpoint,
             account_id=run.account_id,
             user_id=self._team_user(),
-            api_key=self._team_key(),
+            api_key=admin_key,
             agent_id=agent_id,
             timeout_seconds=self._runtime_timeout(),
         )
@@ -423,7 +483,7 @@ class MemoryAggregationService:
         Returns the staging URI when output exists (fresh or reused), else None.
         """
         async with sem:
-            staging_uri = self._staging_uri(user_id)
+            staging_uri = self._staging_uri(user_id, run.target_uri)
             group_key = f"stage:{user_id}"
             # Probe which categories this user actually has, and fingerprint them.
             present, source_fp = await self._probe_user_sources(
@@ -506,6 +566,7 @@ class MemoryAggregationService:
         modTime so unchanged memory reuses prior staging (incremental).
         """
         import hashlib
+
         import httpx
 
         headers = {
@@ -561,8 +622,8 @@ class MemoryAggregationService:
         matter how many users participate.
         """
         fan_in = self._merge_fan_in()
-        target_root = self._target_root()
-        work_root = self._work_root()
+        target_root = run.target_uri
+        work_root = self._work_root(run.target_uri)
 
         current = list(staged_roots)
         level = 0

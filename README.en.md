@@ -19,7 +19,7 @@
 
 ## Product
 
-teamEvolver runs outside the Agent runtime and owns continuous capability evolution and governance. It receives real Sessions and domain material, extracts traceable Evidence, proposes Skill Candidates or Memory Changes, and closes the loop through static checks, True Replay, human gates, versioned publication, and controlled distribution.
+teamEvolver runs outside the Agent runtime and owns continuous capability evolution and governance. It receives real Sessions and domain material, extracts traceable Evidence, proposes Skill Candidates or Memory Changes, and closes the loop through static checks, True Replay, optional human gates, versioned publication, and controlled distribution.
 
 It is neither another Agent runtime nor a file synchronization script:
 
@@ -55,9 +55,9 @@ A Checklist is a completion gate, not a weighted score. Once the gate passes, Tr
 | Skill Evolution | Summarize, judge, group, improve/create/merge, and same-source Test Dataset synthesis |
 | True Replay | Run Baseline and Candidate in the real Agent Runtime; inspect Checklist completion, traces, artifacts, and efficiency |
 | Candidate Governance | Review, replay-gated or forced publish, version detail, full Bundle diff, rollback, and audit |
-| Memory Evolution | DreamCycle team overview, deduplication, cleanup, onboarding discoverability, consolidation, and Memory Replay |
-| Skill Workspace | Create, edit, import, version, and test `SKILL.md` plus multi-file Bundles |
-| Context Workspace | Resolve and read personal/team Memory and Skills with levelled content, receipts, and usage attribution |
+| Memory Evolution | DreamCycle maintenance, cross-user team-memory aggregation, editable aggregation Skill, incremental compilation, and Memory Replay |
+| Agent Workspace | Browse personal/team Skills, Memory, and Resources in one file manager with multi-file Diff review and batch save |
+| Skill / Memory Lab | Build datasets from historical Sessions and run Baseline/Candidate True Replay on Skill or Memory drafts |
 | SkillMiner | Compile domain documents into Skills, semantic reports, `EVALUATION.md`, and internal Benchmarks |
 | Agent Protocol V1 | Registration, identity mapping, Context, Session ingest, Replay Branch, and Skill Sync |
 | Observability | Langfuse Session import plus model, tool, Skill Evolution, and DreamCycle tracing |
@@ -99,7 +99,7 @@ flowchart TB
         API["FastAPI"]
         Evolution["Skill Evolution"]
         Replay["Validation Worker / True Replay"]
-        Memory["DreamCycle"]
+        Memory["DreamCycle / Team Memory Aggregation"]
         Mutation["SkillMutationService / Outbox"]
     end
 
@@ -145,12 +145,23 @@ teamEvolver start --daemon
 teamEvolver status
 ```
 
-Open `http://127.0.0.1:52010/`. Create the initial administrator, then configure:
+Open `http://127.0.0.1:52010/`. The first visit opens the administrator bootstrap screen. The form defaults to `admin`; use a strong password in production. After signing in, configure:
 
 1. **Global Model**: OpenAI-compatible Base URL, model, and API key.
-2. **OpenViking**: local or cloud deployment with personal and team spaces.
-3. **Agent Integration**: register runtimes, map external subjects, and enable Session, Context, Replay, and Skill Sync.
-4. **Langfuse**: optionally enable Session pull or tracing; they are independent.
+2. **Runtime Status → OpenViking Deployment**: choose Volcengine Cloud or self-hosted. For a remote self-hosted server, set the endpoint override, for example `http://10.0.0.8:1933`.
+3. **Users & Permissions**: configure users, roles, Agent Subject mappings, and personal/team Workspace bindings. Local Trusted mode can reuse the service key instead of requiring one key per user.
+4. **Agent Integration**: register runtimes and enable Session, Context, Replay, and Skill Sync.
+5. **Langfuse Integration**: optionally enable Session pull, outbound tracing, or a custom Trace mapper.
+
+The console is organized into five areas:
+
+| Area | Main entries |
+| --- | --- |
+| Skill Mining | Overview, knowledge sources, mining jobs |
+| Evolution Loop | Operations, candidate review, evolution/filter audit, Langfuse, Skill/team-Memory evolution |
+| Asset Center | Agent Workspace, Skill Lab, Memory Lab, platform assets |
+| Governance | Global model, users and permissions, runtime status |
+| Documentation | Built-in bilingual reader and search |
 
 Common commands:
 
@@ -162,6 +173,13 @@ teamEvolver stop
 ```
 
 The repository includes the production console build. Run the frontend build only when changing `web-ui/`.
+
+Docker Compose is also supported. The image builds the console, installs the full Python dependency set, bundles the OpenViking CLI, and stores runtime data under the repository's `runtime/` directory:
+
+```bash
+docker compose up -d --build
+docker compose ps
+```
 
 ## Agent Integration
 
@@ -200,8 +218,10 @@ teamEvolver/
 │   ├── evolve/          # Evidence, Skill Evolution, Dataset, release
 │   ├── validation/      # Candidate queue and True Replay worker
 │   ├── dreamcycle/      # Team-Memory evolution and Memory Replay
+│   ├── aggregation/     # Cross-user team-Memory aggregation and incremental state
 │   ├── integrations/    # Agent V1, Hermes, Langfuse, replay adapters
 │   ├── proxy/           # FastAPI, console, and Workspace interfaces
+│   ├── config_store/    # YAML defaults, persistence, and runtime bridge
 │   ├── skillminer/      # Document-to-Skill mining
 │   ├── skills/          # Bundles, versions, and SkillMutationService
 │   └── storage/         # OpenViking storage adapters
@@ -220,7 +240,7 @@ Documentation is maintained as Markdown source files in `docs/`, available in bo
 | Concepts | [Architecture](./docs/en/concepts/01-architecture.md), [Evolution Loop](./docs/en/concepts/02-evolution-loop.md), [Skills](./docs/en/concepts/03-skills.md), [Memory & DreamCycle](./docs/en/concepts/04-memory.md), [True Replay](./docs/en/concepts/06-true-replay.md) |
 | Guides | [Configuration](./docs/en/guides/01-configuration.md), [Deployment](./docs/en/guides/02-deployment.md), [Web Console](./docs/en/guides/03-console.md), [Observability](./docs/en/guides/04-observability.md), [Troubleshooting](./docs/en/guides/06-troubleshooting.md) |
 | Agent Integrations | [Overview](./docs/en/agent-integrations/01-overview.md), [Protocol V1 Spec](./docs/en/agent-integrations/02-protocol-v1.md), [Hermes Integration](./docs/en/agent-integrations/03-hermes.md), [Custom Agent](./docs/en/agent-integrations/05-custom-agent.md) |
-| API Reference | [Overview](./docs/en/api/01-overview.md), [Agent Register](./docs/en/api/02-agent-register.md), [Session Ingest](./docs/en/api/03-session-ingest.md), [Context Workspace](./docs/en/api/04-context-workspace.md), [Skills Admin](./docs/en/api/09-skills-admin.md) |
+| API Reference | [Overview](./docs/en/api/01-overview.md), [Agent Register](./docs/en/api/02-agent-register.md), [Session Ingest](./docs/en/api/03-session-ingest.md), [Context Workspace](./docs/en/api/04-context-workspace.md), [Skills Admin](./docs/en/api/09-skills-admin.md), [Team Memory Aggregation](./docs/en/api/11-team-memory-aggregation.md) |
 | Design Notes | [Master PRD](./docs/design/01-master-prd.md), [DreamCycle Evaluation](./docs/design/02-dreamcycle-snapshot-evaluation.md), [OpenViking Research](./docs/design/03-openviking-capabilities.md) |
 
 ### Documentation sync convention

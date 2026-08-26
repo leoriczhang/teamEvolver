@@ -127,7 +127,7 @@ DreamCycle 产出的团队 Memory Change（合并、去重、清理后的 Memory
 | Candidate 来源 | 待发布的 Skill Candidate | Memory Change 的 `after_content`（DreamCycle 产出的合并/去重后内容） |
 | Snapshot 替换 | 替换 `skill_bundles[]` 中目标 Skill 的条目 | 替换 `memory_entries[]` 中被变更 Memory 的条目 |
 | 触发时机 | Skill Evolution 管线 Validate 阶段 | DreamCycle 完成合并后手动/自动触发 |
-| 入口 API | `POST /api/validation/candidates/{id}/replay` | `POST /api/dreamcycle/memory-replay` |
+| 入口 API | `POST /api/validation/candidates/{job_id}/evaluate` | 已落账变更：`POST /trigger-dreamcycle/memory-changes/{change_id}/true-replay`；Workspace 草稿：`POST /api/openviking/memory/true-replay` |
 
 ### 执行流程
 

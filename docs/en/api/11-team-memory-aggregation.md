@@ -4,12 +4,12 @@
 
 The Team Memory Aggregation API (Interface 1) aggregates the personal memories of multiple Users under one OpenViking Account into account-shared team memory via `ov compile`. Output defaults to `viking://resources/shared-knowledge/`, the actual target directory is configurable, and every user in the account can retrieve it.
 
-Aggregation uses a two-phase, tree-reduce model. It requires no OpenViking source changes and no auth-mode switch:
+Aggregation uses a two-phase, tree-reduce model. It requires no OpenViking source changes:
 
-- **Phase 1 (per-user staging):** for each selected User, compile runs *as that user* (root key on the wire + `X-OpenViking-User: <uid>` header) and reads only that user's own memory (legal self-read, no ROOT cross-user read). Output goes to the user's staging root `viking://resources/shared-knowledge/_staging/<uid>`. The OKF Skill is installed into that user's own skills space first so the same identity can read it.
+- **Phase 1 (per-user staging):** for each selected User, compile uses the OpenViking Admin Key supplied in the request and reads that user's Memory. Output goes to a work root beside the final directory, for example `viking://resources/shared-knowledge-staging/<uid>`. The aggregation Skill is installed into that user's own Skill space first so the same identity can read it.
 - **Phase 2 (tree-reduce merge):** as the team user, all staging roots are merged in bounded batches of `merge_fan_in` (default 12, ≤15) across cascading levels, down to the final `viking://resources/shared-knowledge/` root. Tree-reduce keeps every compile under the 16-source hard limit, supporting 100+ users.
 
-Additional behavior: concurrent Phase 1 (`phase1_concurrency`), content-fingerprint incremental skipping (unchanged users reuse prior staging), and failure isolation with resumable reruns (a single user's failure does not abort the run; the next run retries only failed/changed users).
+Additional behavior: concurrent Phase 1 (`phase1_concurrency`), content-fingerprint incremental skipping (unchanged users reuse prior staging), and failure isolation with resumable reruns. Staging and `_merge` paths stay under the work root and never pollute the final team-Memory root or its L0/L1 summaries.
 
 Implementation:
 - Routes: `teamEvolver/proxy/aggregation_routes.py` (`AggregationMixin`)
@@ -21,21 +21,22 @@ Implementation:
 
 ## 2. Endpoints and Parameters
 
-All `/api/aggregation/*` endpoints require console **administrator** authentication (admin role). The pipeline itself uses a trusted service identity to run compile, normally reusing the admin-configured OpenViking key.
+All `/api/aggregation/*` endpoints require console **administrator** authentication (admin role). User enumeration and aggregation runs also require an OpenViking Admin Key in the request body. The Key is not persisted and never appears in task state or responses.
 
 ---
 
-### GET /api/aggregation/users
+### POST /api/aggregation/users
 
 List the aggregatable Users under an Account (the team service user is excluded). Powers the console flow "enter Account → list users → select".
 
 **Auth:** Console Cookie (admin)
 
-**Query parameters:**
+**Request Body:**
 
-| Parameter | Type | Required | Description |
+| Field | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `account_id` | string | No | OpenViking Account ID; defaults to configured `sharing_viking_account` when empty |
+| `account_id` | string | No | OpenViking Account ID; defaults to `sharing.viking_account` when empty |
+| `admin_key` | string | Yes | OpenViking Admin Key; scoped to this request, never persisted or returned |
 
 **Response fields:**
 
@@ -44,7 +45,7 @@ List the aggregatable Users under an Account (the team service user is excluded)
 | `account_id` | string | The account actually used |
 | `users` | array[string] | Aggregatable user_id list |
 
-Code entry: `teamEvolver/proxy/aggregation_routes.py:51` (`api_aggregation_users`)
+Code entry: `teamEvolver/proxy/aggregation_routes.py` (`api_aggregation_users`)
 
 ---
 
@@ -60,9 +61,9 @@ List recent aggregation tasks (newest first, up to 20). Used to **recover progre
 |-------|------|-------------|
 | `runs` | array | Task list (Run objects, see below) |
 
-> Note: task state lives in server memory; restarting the teamEvolver process clears the list (any in-flight compile continues on the OpenViking side, but local progress is no longer tracked).
+> Note: task state lives in server memory. Restarting teamEvolver clears the list, and in-process work is not guaranteed to continue. Persisted incremental fingerprints are unaffected.
 
-Code entry: `teamEvolver/proxy/aggregation_routes.py:69` (`api_aggregation_runs`)
+Code entry: `teamEvolver/proxy/aggregation_routes.py` (`api_aggregation_runs`)
 
 ---
 
@@ -76,14 +77,18 @@ Start a background aggregation task; returns 202 with the initial Run object imm
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `account_id` | string | No | Target account; defaults to configured `sharing_viking_account` |
+| `account_id` | string | No | Target account; defaults to `sharing.viking_account` |
+| `admin_key` | string | Yes | OpenViking Admin Key; retained only while the background task executes and excluded from the Run object |
+| `target_uri` | string | No | Final output URI for this run; must be under `viking://resources/<path>`; defaults to the configured output root |
 | `user_ids` | array[string] | No | Allowlist of users to aggregate; omit to aggregate all eligible users |
 | `kinds` | array[string] | No | Memory categories to aggregate; omit to use the default set |
 | `mode` | string | No | `incremental` (default, recompile only changed/failed users) or `full` (force recompile all) |
 
 **Response (202):** initial Run object (`status` is `pending`/`running`).
 
-Code entry: `teamEvolver/proxy/aggregation_routes.py:75` (`api_aggregation_run`)
+`target_uri` is scoped to this run and does not mutate persisted settings. The service derives a separate sibling work root and incremental state for each target URI, so staging data and fingerprints are not reused across output locations. `admin_key` is excluded from the 202 response, task list, and status response.
+
+Code entry: `teamEvolver/proxy/aggregation_routes.py` (`api_aggregation_run`)
 
 ---
 
@@ -105,6 +110,7 @@ Query a task's live progress (group-level status).
 |-------|------|-------------|
 | `task_id` | string | Task ID |
 | `account_id` | string | Target account |
+| `target_uri` | string | Normalized final output URI for this run |
 | `status` | string | `pending`, `running`, `completed`, `failed` |
 | `started_at` | number | Start timestamp |
 | `finished_at` | number\|null | Finish timestamp (null while running) |
@@ -122,7 +128,7 @@ Query a task's live progress (group-level status).
 | `status` | string | `ok`, `skipped`, `failed` |
 | `detail` | string | Note (e.g. `unchanged (reused staging)`, error message) |
 
-Code entry: `teamEvolver/proxy/aggregation_routes.py:107` (`api_aggregation_status`)
+Code entry: `teamEvolver/proxy/aggregation_routes.py` (`api_aggregation_status`)
 
 ---
 
@@ -140,7 +146,7 @@ Read the currently effective Team Memory Aggregation Skill (the user-edited cont
 | `body` | string | SKILL.md content |
 | `editable` | boolean | Always true |
 
-Code entry: `teamEvolver/proxy/aggregation_routes.py:116` (`api_aggregation_okf_skill`)
+Code entry: `teamEvolver/proxy/aggregation_routes.py` (`api_aggregation_okf_skill`)
 
 ---
 
@@ -163,15 +169,53 @@ Save the user-edited Team Memory Aggregation Skill. The content is persisted to 
 | `ok` | boolean | Whether the save succeeded |
 | `body` | string | Saved content |
 
-Code entry: `teamEvolver/proxy/aggregation_routes.py:129` (`api_aggregation_okf_skill_save`)
+Code entry: `teamEvolver/proxy/aggregation_routes.py` (`api_aggregation_okf_skill_save`)
+
+---
+
+### GET /api/aggregation/settings
+
+Read aggregation settings and their computed paths.
+
+**Auth:** Console Cookie (admin)
+
+| Response field | Type | Description |
+|----------------|------|-------------|
+| `enabled` | boolean | Aggregation marker in configuration |
+| `shared_knowledge_prefix` | string | Default output prefix used when a run omits `target_uri` |
+| `target_root` | string | Computed final root, such as `viking://resources/shared-knowledge` |
+| `staging_dir` | string | Work-root suffix |
+| `work_root` | string | Computed sibling work root, such as `viking://resources/shared-knowledge-staging` |
+| `okf_skill_uri` | string | Aggregation Skill identifier |
+| `key_seed` | string | Compatibility field; the current runtime does not derive user keys from it |
+| `kinds` | array[string] | Explicit Memory categories; empty means the built-in set |
+
+---
+
+### POST /api/aggregation/settings
+
+Persist editable aggregation settings through `ConfigStore`, then hot-reload OpenViking, DreamCycle, and embedded evolution integrations.
+
+**Auth:** Console Cookie (admin)
+
+| Request Body field | Type | Required | Description |
+|--------------------|------|----------|-------------|
+| `shared_knowledge_prefix` | string | No | Default output prefix, used only when a run omits `target_uri` |
+| `staging_dir` | string | No | Sibling work-root suffix |
+| `okf_skill_uri` | string | No | Aggregation Skill identifier |
+| `kinds` | array[string] | No | Memory category list; empty items are removed |
+
+The response contains every `GET /api/aggregation/settings` field plus `"ok": true`.
 
 ## 3. Usage Examples
 
 ### List aggregatable users
 
 ```bash
-curl -b "teamEvolver_console_session=<token>" \
-  "http://localhost:52010/api/aggregation/users?account_id=default"
+curl -X POST -b "teamEvolver_console_session=<token>" \
+  -H "Content-Type: application/json" \
+  "http://localhost:52010/api/aggregation/users" \
+  -d '{"account_id":"default","admin_key":"<openviking-admin-key>"}'
 ```
 
 Response:
@@ -189,7 +233,7 @@ Response:
 curl -X POST -b "teamEvolver_console_session=<token>" \
   -H "Content-Type: application/json" \
   "http://localhost:52010/api/aggregation/run" \
-  -d '{"account_id": "default", "user_ids": ["chenghan", "zhangpengkun"], "mode": "incremental"}'
+  -d '{"account_id":"default","admin_key":"<openviking-admin-key>","target_uri":"viking://resources/engineering-memory","user_ids":["chenghan","zhangpengkun"],"mode":"incremental"}'
 ```
 
 Response (202):
@@ -198,6 +242,7 @@ Response (202):
 {
   "task_id": "agg_1a03c010043",
   "account_id": "default",
+  "target_uri": "viking://resources/engineering-memory",
   "status": "running",
   "started_at": 1756100000.0,
   "finished_at": null,
@@ -219,11 +264,12 @@ Response (completed):
 {
   "task_id": "agg_1a03c010043",
   "account_id": "default",
+  "target_uri": "viking://resources/engineering-memory",
   "status": "completed",
   "groups": [
-    {"group_key": "stage:chenghan", "kind": "(all)", "target_uri": "viking://resources/shared-knowledge/_staging/chenghan", "source_count": 1, "status": "ok", "detail": ""},
-    {"group_key": "stage:zhangpengkun", "kind": "(all)", "target_uri": "viking://resources/shared-knowledge/_staging/zhangpengkun", "source_count": 8, "status": "ok", "detail": ""},
-    {"group_key": "merge", "kind": "(all)", "target_uri": "viking://resources/shared-knowledge", "source_count": 2, "status": "ok", "detail": "merged"}
+    {"group_key": "stage:chenghan", "kind": "(all)", "target_uri": "viking://resources/engineering-memory-staging/chenghan", "source_count": 1, "status": "ok", "detail": ""},
+    {"group_key": "stage:zhangpengkun", "kind": "(all)", "target_uri": "viking://resources/engineering-memory-staging/zhangpengkun", "source_count": 8, "status": "ok", "detail": ""},
+    {"group_key": "merge", "kind": "(all)", "target_uri": "viking://resources/engineering-memory", "source_count": 2, "status": "ok", "detail": "merged"}
   ]
 }
 ```
@@ -249,6 +295,29 @@ curl -X PUT -b "teamEvolver_console_session=<token>" \
   -d '{"body": "---\nname: team-memory-okf\n...\n---\n# ..."}'
 ```
 
+### Specify the output URI for one run
+
+`POST /api/aggregation/run` accepts a complete target URI without changing global settings:
+
+```bash
+curl -X POST -b "teamEvolver_console_session=<token>" \
+  -H "Content-Type: application/json" \
+  "http://localhost:52010/api/aggregation/run" \
+  -d '{"account_id":"default","target_uri":"viking://resources/engineering-memory","user_ids":["alice","bob"]}'
+```
+
+### Inspect and change the default output directory
+
+```bash
+curl -b "teamEvolver_console_session=<token>" \
+  "http://localhost:52010/api/aggregation/settings"
+
+curl -X POST -b "teamEvolver_console_session=<token>" \
+  -H "Content-Type: application/json" \
+  "http://localhost:52010/api/aggregation/settings" \
+  -d '{"shared_knowledge_prefix": "engineering-memory"}'
+```
+
 ## 4. Response Contract and Error Handling
 
 ### Error codes
@@ -257,24 +326,31 @@ curl -X PUT -b "teamEvolver_console_session=<token>" \
 |------------|---------|-------|
 | 401 | `login required` | Not logged in |
 | 403 | `team memory aggregation requires an administrator` | Non-admin access |
-| 400 | `account_id is required` | No account provided and no default configured |
-| 400 | (upstream message) | Listing users failed (e.g. OpenViking unreachable, missing root/trusted key) |
+| 400 | `aggregation users body must be an object` | User-enumeration body is not a JSON object |
+| 400 | `aggregation run body must be an object` | Run body is not a JSON object |
+| 400 | `admin_key is required` | No valid OpenViking Admin Key was supplied |
+| 400 | `target_uri must be a string` | `target_uri` is not a string |
+| 400 | `target_uri must be a valid path under viking://resources/<path>` | URI is invalid, targets the resources root, or leaves the shared resources namespace |
+| 400 | (upstream message) | OpenViking is unreachable or the Admin Key is unauthorized |
 | 400 | `skill body must not be empty` | Saving empty Skill content |
+| 400 | `aggregation settings body must be an object` | Settings body is not a JSON object |
+| 400 | `shared_knowledge_prefix is required` | Output prefix is empty |
+| 400 | `shared_knowledge_prefix must be at most 120 characters` | Output prefix is too long |
 | 404 | `unknown aggregation task` | task_id does not exist |
 
 ### Related configuration
 
 | Config key (`aggregation.*`) | Default | Description |
 |------|---------|-------------|
-| `shared_knowledge_prefix` | `shared-knowledge` | Team memory output root prefix (under `viking://resources/`) |
-| `staging_dir` | `_staging` | Phase 1 staging subdirectory |
+| `shared_knowledge_prefix` | `shared-knowledge` | Default team-memory output prefix when a run omits `target_uri` |
+| `staging_dir` | `staging` | Sibling work-root suffix; combined as `<prefix>-<staging_dir>` |
 | `okf_skill_uri` | `viking://agent/skills/team-memory-okf` | Source of the aggregation Skill name (trailing segment used as the skill name); output format is defined by this Skill |
 | `kinds` | empty (built-in default set) | Memory categories to aggregate |
 | `max_users_per_batch` | 12 | Per-compile source cap in Phase 1 (< 16) |
 | `phase1_concurrency` | 6 | Phase 1 concurrency |
 | `merge_fan_in` | 12 | Phase 2 tree-reduce fan-in width (2–15) |
 | `compile_runtime_timeout_seconds` | 3000 | Per-compile runtime timeout |
-| `state_dir` | empty (default `~/.teamEvolver/aggregation`) | Storage dir for incremental state and Skill content |
+| `state_dir` | empty (default `~/.teamEvolver/aggregation`) | Storage dir for incremental state and Skill content; state is isolated by Account and target URI |
 
 Config is registered in three places: `teamEvolver/config_store/defaults.py`, `teamEvolver/config_store/bridge.py`, `teamEvolver/config.py`.
 
@@ -286,6 +362,7 @@ Config is registered in three places: `teamEvolver/config_store/defaults.py`, `t
 
 ### Identity and permissions
 
-- Aggregation requires a trusted service identity. By default it directly reuses the admin-configured OpenViking key (stored in `sharing.viking_team_api_key` for compatibility); `aggregation.root_api_key` is only an advanced override.
-- Phase 1 reads each user's own memory as "service/admin key + user header", simulating the target user identity.
-- Output is written to `viking://resources/` (account-shared, writable by any role); no ROOT required.
+- `admin_key` is required for every user-enumeration and aggregation-run request and exists only for the request/background-worker lifetime. It is never persisted or returned.
+- Aggregation does not read a fallback credential from persisted configuration.
+- Phase 1 uses the Admin Key with the target user identity to read each user's Memory.
+- Final output is written to the run's `target_uri`, or to `viking://resources/<shared_knowledge_prefix>/` when omitted; intermediate artifacts stay in that target's sibling work root.

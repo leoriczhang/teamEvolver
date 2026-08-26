@@ -134,8 +134,11 @@ python3 run_pipeline.py --input data/input --no-strict-step1
 
 ```
 compiled_skill/<skill-name>/
-├── SKILL.md          # Generated executable skill
-└── EVALUATION.md     # Evaluation criteria
+├── SKILL.md               # Generated executable Skill
+├── EVALUATION.md          # Evaluation definition
+├── benchmark.json         # Progressive Benchmark contract
+├── BENCHMARK.md           # Human-readable question set
+└── benchmark_quality.json # Quality checks and warnings, when generated
 ```
 
 ### 5. Build & Run Benchmark
@@ -280,7 +283,8 @@ Skill Miner sets multiple human review nodes during execution to ensure mining q
 1. **Step 1 Sample Package Review** (optional, controlled by `strict_step1`): When sample package segmentation quality below standard, abort waiting for manual correction of input documents or adjustment of segmentation strategy
 2. **Skill Output Review**: Manual inspection of SKILL.md and EVALUATION.md accuracy after compilation
 3. **Benchmark Question Review**: Auto-generated questions require manual verification of scenario rationality and gold answer accuracy
-4. **LIFT Pre-Publish Review**: Must pass manual review approval before publishing to external LIFT workspace
+4. **Artifact Quality Review**: A job may succeed with warnings once it has one usable `SKILL.md`; before Candidate submission, complete `EVALUATION.md` and inspect `benchmark.json` plus `BENCHMARK.md`
+5. **LIFT Pre-Publish Review**: Must pass manual review approval before publishing to external LIFT workspace
 
 Human checkpoint logic at `teamEvolver/skillminer/human_checkpoints.py`, test file `test_skillminer_human_checkpoints.py`.
 
@@ -312,18 +316,19 @@ Frontend code at `teamEvolver/skillminer/web_console/static/` (`index.html`, `ap
 
 After starting teamEvolver main service, unified console also provides Skill Miner entry:
 
-- Mining task submission and status monitoring
+- Parallel mining-job submission, persisted state, stop, and delete
+- Job recovery, knowledge-supplement history, and copyable diagnostics
+- Final Skill, EVALUATION, Benchmark completeness, and quality warnings
 - Model configuration (independent of global LLM configuration)
 - Pipeline parameter configuration
 - Prompt white-box editing (10 editable Prompts)
 - Benchmark runs and result viewing
-- LIFT integration review and publishing
 - Coverage report viewing
 - Trajectory Benchmark submission
 
 ## LIFT Integration
 
-After Skill Miner generates `benchmark.jsonl`, auto-generates LIFT pending-review drafts written to `lift_datasets/drafts/`. To disable:
+Skill Miner prefers `benchmark.json` (with legacy `benchmark.jsonl` fallback) and generates LIFT pending-review drafts under `lift_datasets/drafts/`. To disable:
 
 ```bash
 export SKILLMINER_LIFT_AUTO_DRAFT=0
@@ -349,12 +354,13 @@ export TEAMEVOLVER_LIFT_PYTHON=/absolute/path/to/python
 
 ### Publishing Flow
 
-1. Enter evaluation center in unified console
-2. Create LIFT draft from Skill with generated Benchmark
-3. Check questions one by one and edit `query`, content requirements, trajectory requirements; confirm warmup/holdout split
-4. Save and pass structural validation, click "Human Review Passed"
-5. Click "Publish to LIFT"
-6. Select runtime and start; view run logs in real-time
+The current main navigation does not mount a standalone Evaluation Center. LIFT bridge capabilities are available under `/api/mining/lift/*`, and deployments that need the UI can mount the repository `EvalView` separately:
+
+1. Create a LIFT draft from a Skill with a generated Benchmark.
+2. Edit `query`, content requirements, and trajectory requirements and confirm the warmup/holdout split.
+3. Save, pass structural validation, and call the approve endpoint.
+4. Only an `approved` draft can be sent to the publish endpoint.
+5. Configure a runtime, call the run endpoint, and query status for progress.
 
 Post-publish data structure:
 
@@ -477,7 +483,7 @@ teamEvolver/skillminer/
 ├── data/input/              # Domain documents to mine (user-provided)
 ├── sample_packages/         # Step 1 artifacts
 ├── semantic_reports/        # Step 2 artifacts
-├── compiled_skill/          # Step 3 artifacts: SKILL.md, EVALUATION.md
+├── compiled_skill/          # Step 3: SKILL.md, EVALUATION.md, benchmark.json, BENCHMARK.md
 ├── reflection_rounds/       # Reflection round intermediate artifacts
 ├── run_history/             # Previous batch outputs saved when new task starts
 ├── benchmark_sessions/      # Multiple build snapshots, intersections, stability reruns

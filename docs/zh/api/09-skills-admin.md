@@ -2,7 +2,7 @@
 
 ## 1. API 实现介绍
 
-Skill 管理 API 提供本地 Skill 库的 CRUD 操作、版本管理、发布回滚和云端同步功能。这些接口供 Web 控制台使用，需要管理员权限（控制台 Session Cookie + admin 角色）。所有变更会自动同步到共享云存储（OpenViking）并触发 Skill Sync webhook 通知已注册的 Agent。
+Skill 管理 API 提供团队 Skill 的 CRUD、版本回滚和云端同步，也提供个人 Skill 编辑、个人与团队空间复制以及发布申请。这些接口供 Web 控制台使用并要求登录；团队 Skill 写操作和发布申请裁决要求管理员。团队 Skill 变更会同步到 OpenViking，并通过 Skill Sync outbox 通知已注册的 Agent。
 
 代码实现：`teamEvolver/proxy/skills_admin.py`（`SkillsAdminMixin`）
 Skill 编辑器：`teamEvolver/skills/editor.py`
@@ -10,7 +10,7 @@ Skill 编辑器：`teamEvolver/skills/editor.py`
 
 ## 2. 接口和参数说明
 
-所有 `/api/skills/*` 接口需要控制台管理员认证。
+所有接口都需要控制台登录。团队 Skill 写操作、回滚和发布申请裁决要求管理员权限；普通用户可管理自己的个人 Skill。
 
 ---
 
@@ -34,8 +34,9 @@ Skill 编辑器：`teamEvolver/skills/editor.py`
 | `name` | string | Skill 名称 |
 | `description` | string | 描述 |
 | `category` | string | 分类 |
-| `version` | integer | 本地版本号 |
 | `files` | array[string] | 包含的文件列表 |
+| `file_count` | integer | Bundle 文件数 |
+| `updated_at` | string | `SKILL.md` 最后修改时间（UTC ISO-8601） |
 
 ---
 
@@ -77,7 +78,7 @@ Skill 编辑器：`teamEvolver/skills/editor.py`
 |------|------|------|
 | `name` | string | Skill 名称 |
 | `created` | boolean | 是否新创建 |
-| `path` | string | 本地目录路径 |
+| `dir` | string | 本地目录路径 |
 | `loaded_skills` | integer | 重新加载后的 Skill 总数 |
 | `cloud` | object | 云端同步结果 |
 | `cloud.synced` | boolean | 同步是否成功 |
@@ -212,20 +213,6 @@ Skill 编辑器：`teamEvolver/skills/editor.py`
 
 ---
 
-### POST /api/skills/{name}/publish
-
-发布 Skill（触发云端同步和 Skill Sync webhook）。此接口通常由进化流程自动调用，管理员也可手动触发。
-
-**认证：** 控制台 Cookie（必须 admin）
-
-**路径参数：**
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `name` | string | 是 | Skill 名称 |
-
----
-
 ### POST /api/skills/{name}/rollback
 
 回滚 Skill 到指定版本。会将目标版本内容重新发布为新版本，并同步到云端和本地。
@@ -255,20 +242,23 @@ Skill 编辑器：`teamEvolver/skills/editor.py`
 
 ---
 
-### DELETE /api/skills/{name}/versions/{ver}
+### 个人 Skill 与团队发布
 
-删除指定版本的历史记录（仅云端，不影响当前版本）。
+以下接口由 `teamEvolver/proxy/users_admin.py` 提供：
 
-**认证：** 控制台 Cookie（必须 admin）
+| 方法与路径 | 权限 | 用途 |
+|------------|------|------|
+| `GET /api/users/{user_id}/skills?space=personal|team` | 本人或管理员 | 列出指定空间的 Skill |
+| `GET /api/users/{user_id}/skills/{name}?space=personal|team` | 本人或管理员 | 读取一个 Skill |
+| `POST /api/users/{user_id}/skills` | 本人或管理员；team 空间仅管理员 | 创建或更新个人/团队 Skill |
+| `DELETE /api/users/{user_id}/skills/{name}?space=personal|team` | 本人或管理员；team 空间仅管理员 | 删除 Skill |
+| `POST /api/users/{user_id}/share` | 本人或管理员；personal→team 仅管理员 | 在个人和团队空间间复制选中的 Skill |
+| `GET /api/skill-publish-requests` | 登录用户 | 普通用户看自己的申请，管理员看全部申请 |
+| `POST /api/users/{user_id}/publish-requests` | 本人或管理员 | 提交个人 Skill 到团队空间的发布申请 |
+| `POST /api/skill-publish-requests/{request_id}/approve` | 管理员 | 批准并复制 Skill 到团队空间 |
+| `POST /api/skill-publish-requests/{request_id}/reject` | 管理员 | 驳回发布申请 |
 
-**路径参数：**
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `name` | string | 是 | Skill 名称 |
-| `ver` | integer | 是 | 版本号 |
-
----
+保存个人 Skill 的请求体使用 `space`、`name` 与完整 `skill_md`；也可以提供 `description`、`category`、`body` 让服务端构建 `SKILL.md`。普通用户不能直接写团队空间，只能提交发布申请。
 
 ### GET /sync/skills
 
@@ -305,7 +295,6 @@ curl -b "teamEvolver_console_session=<token>" \
       "name": "database-debugging",
       "description": "Database troubleshooting guide",
       "category": "backend",
-      "version": 3,
       "files": ["SKILL.md", "references/mysql-troubleshooting.md"]
     }
   ]

@@ -24,10 +24,10 @@ Documentation must be updated synchronously in the following situations:
 docs/
 ├── zh/                   # Chinese documentation
 │   ├── getting-started/  # Getting started (01-03)
-│   ├── concepts/         # Core concepts (01-08)
+│   ├── concepts/         # Core concepts (01-09)
 │   ├── guides/           # User guides (01-08)
 │   ├── agent-integrations/  # Agent integration docs (01-05)
-│   ├── api/              # API reference docs (01-10, 99)
+│   ├── api/              # API reference docs (01-11, 99)
 │   ├── faq/              # Frequently asked questions
 │   └── about/            # About
 ├── en/                   # English documentation (mirrors zh/ structure)

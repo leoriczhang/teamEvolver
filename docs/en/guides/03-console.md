@@ -1,287 +1,166 @@
 # Web Console User Guide
 
-teamEvolver provides a full-featured Web console for monitoring evolution status, managing skills, configuring parameters, reviewing candidates, etc. Console starts by default with `teamEvolver start`, accessible at `http://<host>:<port>` (default `http://127.0.0.1:52010`).
+The teamEvolver console and API share one FastAPI service, available by default at `http://127.0.0.1:52010/`. Frontend source lives in `web-ui/src/`, and the production build lives in `teamEvolver/web/dist/`.
 
-Frontend source at `web-ui/src/`, build artifacts at `teamEvolver/web/dist/`.
+## Login and Bootstrap
 
-## Accessing Console
+When no users exist, the first visit opens the administrator bootstrap screen. The form defaults to username and password `admin`; replace the password before submitting in production. After bootstrap, other members may register regular accounts from the login screen, and administrators can adjust roles and Workspace bindings under **Users & Permissions**.
 
-After starting service, open service address in browser to access. If user authentication enabled, first access requires login. Default admin account created via CLI.
+The console uses an HttpOnly Session Cookie. Regular users can view and edit only their own personal assets. Administrators can switch users and manage team assets.
 
-```bash
-teamEvolver start
-# Open http://127.0.0.1:52010
-```
+## Navigation
+
+| Area | Pages | Purpose |
+|------|-------|---------|
+| Skill Mining | Overview, Knowledge Sources, Mining Jobs | Manage document sources, run the three-stage SkillMiner pipeline, review and submit artifacts |
+| Evolution Loop | Operations, Langfuse Integration, Evolution Pipeline | Follow Session → Candidate → Replay → Publish and configure Skill/Memory evolution |
+| Asset Center | Agent Workspace, Platform Assets | Manage Agent-referable assets or inspect internal storage read-only |
+| Governance | Global Model, Users & Permissions, Runtime Status | Manage models, identities, OpenViking deployment, and system health |
+| Documentation | Documentation | Read and search repository Markdown in English or Chinese |
+
+Pages can be opened directly with `?view=<key>`, for example `/?view=workspace` or `/?view=health`.
+
+## Skill Mining
+
+### Overview
+
+Summarizes knowledge sources, mining jobs, artifacts, and runtime state with shortcuts to common actions.
+
+### Knowledge Sources
+
+The source page supports:
+
+- Uploading documents and tracking post-processing
+- Creating, renaming, merging, and deleting source directories
+- Browsing source files and readiness state
+- Carrying a selected directory directly into a new mining job
+
+### Mining Jobs
+
+Each job runs these stages:
+
+1. Sample package construction
+2. Semantic discovery
+3. Skill and `EVALUATION.md` compilation
+4. Optional reflection rounds and Benchmark execution
+
+Jobs support parallel execution, stop, delete, copyable diagnostics, human evidence supplements, and resume. Completed Markdown artifacts can be previewed or edited, then submitted to the Candidate validation pipeline.
+
+## Evolution Loop
+
+### Operations
+
+The Operations page has four tabs:
+
+- **Overview**: service status, Session queue and history, Candidate summary, and Skill versions
+- **Candidate Review**: Candidate detail, Bundle Diff, True Replay evidence, and release decision
+- **Evolution Audit**: Sessions consumed, Candidates generated, and release outcome for every cycle
+- **Filter Audit**: pre-ingest Session value classification and skip reasons
+
+A Candidate must first pass the Checklist completion gate. Efficiency is then compared in order by interaction turns, tool calls, and tokens. Administrators can publish according to the evaluation or force a release when they explicitly accept the risk.
+
+### Langfuse Integration
+
+The Langfuse page manages two independent paths:
+
+- **Inbound Session pull** previews and imports Sessions filtered by environment, user, tags, release, version, or trace name.
+- **Outbound tracing** records teamEvolver's internal model and tool calls.
+
+Administrators can also edit `map_trace(trace, observations)`, dry-run it against a bundled sample or pasted Trace, and compare custom output with the built-in mapping. A mapper error falls back for that Session without aborting the whole import.
+
+### Evolution Pipeline
+
+The top-level tabs are:
+
+- **Skill Evolution**: pipeline graph, editable Prompts, stage model options, process settings, and real input/output tests
+- **Team Memory Evolution**: cross-user memory aggregation
+
+Team-Memory aggregation follows three explicit steps:
+
+1. Enter or confirm the OpenViking Account and choose incremental or full mode.
+2. Load Account users and select them with select-all, clear, or invert controls.
+3. Confirm the selection, start the background task, and poll group progress.
+
+After a page refresh, the console restores the latest task from the service. Restarting the service process clears this run list. Administrators can edit the **Team Memory Aggregation Skill** and configure the final output prefix on the same page. The default final root is `viking://resources/shared-knowledge/`; work data stays in the sibling `viking://resources/shared-knowledge-staging/`.
 
 ## Agent Workspace
 
-The Agent Workspace combines personal and team Skills, Memory, and Resources that Agents can reference. It opens in read-only **browse mode** by default.
+The Agent Workspace shows only assets that an Agent can reference:
 
-To update multiple Memory or Skill files:
+| Workspace | Contents |
+|-----------|----------|
+| Personal Workspace | Personal Skills, personal Memory, personal Resources |
+| Team Workspace | Team Skills, team Memory, team Resources |
 
-1. Click **Edit** in the top toolbar.
-2. Open and modify any number of Memory or Skill files. Drafts remain available while switching files or personal/team Workspaces.
-3. Click **Finish editing** to review every line-level Diff in one window.
-4. Click **Save changes** to submit the complete change set. The server checks each file against its content hash from the start of the edit session. If another writer changed a file, the submission is rejected and all drafts remain available.
+The tree supports search, Markdown/JSON/code previews, source view, and directory L0/L1 summaries. Self-hosted OpenViking deployments expose a Studio link. An embedded CLI is also available when the `ov` binary is installed.
 
-Resources, team assets without write permission, and platform assets always remain read-only.
+### Multi-file Editing
 
-## Dashboard
+1. Click **Edit** to enter edit mode.
+2. Modify multiple Memory or Skill files. Drafts remain available while switching files or Workspaces.
+3. Click **Finish editing** to review each numbered line-level Diff.
+4. Click **Save changes** to submit the batch.
 
-Dashboard is console homepage providing global view of system operational status.
+The server compares content hashes captured when editing began. If another writer changed any file, it returns 409 and preserves all drafts. Each file is limited to 2 MB; one batch may contain at most 100 files and 16 MB. Resources and platform assets are not writable through this editor.
 
-![Console Dashboard](/assets/teamEvolver-console-dashboard.png)
+### Skill Lab
 
-### Status Cards
+Skill Lab treats the saved Skill as Baseline and the current draft as Candidate. It can manage or synthesize datasets from historical Sessions, run real A/B Replay, and compare Checklist results, branch output, turns, tool calls, and tokens. Experiments do not automatically overwrite the released Skill.
 
-Status cards at page top show core metrics:
+### Memory Lab
 
-- **Service Status**: Shows whether service running normally, plus PID and port info
-- **Evolution Cycle**: Shows last evolution time, next scheduled evolution time, current round status
-- **Queue Status**: Number of sessions waiting processing
-- **Total Skills**: Number of skills in local skill library
-- **Candidates Awaiting Review**: Number of candidate skills awaiting human review or under validation
-- **DreamCycle Status**: Memory maintenance engine operational status (if enabled)
+Memory Lab selects a text file from personal or team Memory, edits an experiment-only draft, and compares Context injection or True Replay before and after the change. Drafts are not automatically written to OpenViking; save validated changes through the Workspace edit flow.
 
-### Session Queue
+## Platform Assets
 
-Shows list of sessions currently waiting to enter evolution pipeline, including:
+Platform Assets is read-only and exposes only directories required by teamEvolver itself, including:
 
-- Session ID
-- Session title/summary
-- Ingestion time
-- User alias
-- Value classification result (valuable/skipped/duplicate)
-- Injected skills list
-- Metric scores
+- `sessions/`, `session_archive/`, `session_ledger/`
+- `candidate_skills/`, `validation_*`
+- `skill_lab/`, `skill_datasets/`, `evolution_datasets/`
+- `skill_evidence/`, `memory-changes/`, `memory-replays/`
+- `skill_mutation_commits/`, `skill_sync_outbox/`
 
-Click individual session to view complete conversation content, tool call trajectory, and scoring details.
+These paths are not offered directly to Agents as Workspace assets.
 
-### Session History
+## Governance
 
-Shows historical sessions and evolution cycle records. Each cycle record contains:
+### Global Model
 
-- Timestamp
-- Participating session count
-- Evolved skill groupings
-- Skills uploaded to cloud count
-- Queued candidates count
-- Scoring results and decision reasons
+Administrators configure an OpenAI-compatible Base URL, Model ID, API Key, Max Tokens, and Temperature and can test the connection directly. Saving hot-reloads the global model used by evolution and mining. Stage-specific overrides remain under **Evolution Pipeline**.
 
-Can filter by session ID to view evolution triggered by specific sessions.
+### Users & Permissions
 
-### Candidates Awaiting Review
+This page manages:
 
-Shows list of candidate skills under validation or awaiting human review. Each candidate displays:
+- Team display name
+- User account, role, display name, email, and password
+- Agent identity mappings in the form `integration_id + external_subject`
+- Personal and team OpenViking Workspace bindings
 
-- Skill name
-- Proposed action (improve/optimize_description/create)
-- Current validation status (evaluating/open/rejected/published)
-- Replay efficiency comparison (turns, tool calls, Token changes)
-- Checklist pass status
-- Submission time
+Trusted self-hosted OpenViking automatically binds personal spaces to same-named users and uses the service key for server-mediated access. Cloud deployments can assign a dedicated personal credential. Regular users can read only their own profile and credential status; administrators manage all users.
 
-Click candidate to enter detailed review page, view skill diff, replay details, Checklist report, and make approve/reject decisions.
+### Runtime Status
 
-### Skill Versions
+Runtime Status aggregates checks for the service, OpenViking, model, user registry, team Skills, and Agent Integrations and reports queue and Candidate counts.
 
-Shows version history for each skill in skill library, including:
+The **OpenViking Deployment** panel supports:
 
-- Skill name
-- Current version number
-- Last update time
-- Version change notes
-- Effectiveness metrics (injection count, effectiveness rate)
+- Volcengine Cloud OpenViking
+- Self-hosted OpenViking on the same machine
+- Remote self-hosted OpenViking through an endpoint override
+- Account, default personal user, team user, resource root prefix, and service/personal keys
 
-## Evolution Pipeline View
+Saving hot-reloads OpenViking, DreamCycle, and embedded evolution integrations without restarting the main process.
 
-Evolution pipeline view provides complete 11-stage pipeline visualization and debugging capabilities.
+## Built-in Documentation
 
-![Evolution Pipeline](/assets/teamEvolver-evolution-pipeline.png)
+**Documentation** automatically scans `docs/zh/`, `docs/en/`, and `docs/design/`. The reader supports a directory tree, full-text search, language switching, GFM tables, code blocks, and repository images.
 
-### Pipeline Stages
+## Related Documentation
 
-Pipeline contains following 11 stage nodes (8 LLM stages + 3 logical/IO/gate nodes):
-
-| Stage | Type | Description |
-|-------|------|-------------|
-| Ingest (Session enqueue) | IO | Sessions enter queue via `/ingest_session` or Langfuse pull |
-| Session Filter (Value classification) | LLM | Determines whether session is skill evidence, user memory, ordinary task, or chitchat |
-| Summarize (Session summary) | LLM | Builds lossless trajectory and generates trajectory-aware summary |
-| Judge (Session scoring) | LLM | Supplements quality/efficiency/tool-usage dimension scores for sessions |
-| Group (Group by skill) | Logic | Buckets sessions by referenced skills; no-skill sessions go to no-skill bucket |
-| Evolve (Improve skill) | LLM | Decides improve/optimize/create/skip for existing skills based on evidence |
-| Create (Create skill) | LLM | Identifies reusable patterns from no-skill bucket and generates new skills |
-| Merge (Conflict merge) | LLM | Merges two evolved versions of same-named skill |
-| Dataset Synthesis (Test set generation) | LLM | Generates progressive test datasets with Checklist |
-| Validate (True replay validation) | Gate | Discloses Checklist round-by-round based on initial Query, compares efficiency baseline |
-| Replay Checklist (Checklist judge) | LLM | Verifies replay results satisfy Checklist item by item |
-| Publish (Release) | IO | Candidates passing validation written to skill library and synced to cloud |
-
-Nodes connected by directed edges, visualizing data flow.
-
-### Editable Prompts
-
-Click any LLM stage node to view and edit system Prompt used by that stage. See [Prompt Studio Guide](./08-prompt-studio.md) for details.
-
-### Model Parameter Tuning
-
-Each LLM stage supports independent model parameter configuration:
-
-- **Temperature**: Sampling temperature (0.0-2.0)
-- **Max Tokens**: Maximum output tokens
-- **Model**: Can specify model used for that stage (empty uses global LLM config)
-
-### Test Panel
-
-Each LLM stage provides test panel to:
-
-1. Select a real historical session as test input
-2. Edit Prompt (temporary test, not saved)
-3. Run test, view actual System Message, User Message and model output sent by that stage
-4. Compare output differences before and after modification
-5. Save as Prompt override when satisfied
-
-## Skill Management
-
-Skill management page for managing local skill library and cloud-synced skills.
-
-### Skill List
-
-Shows all skills, supports filtering by name, category, status:
-
-- Skill name and description
-- Category
-- Version number
-- Last modified time
-- Injection count and effectiveness statistics
-- Local/cloud sync status
-
-### Skill Editor
-
-Click skill to enter online editor:
-
-- Supports Markdown format editing of SKILL.md
-- Real-time preview rendering
-- Edit Frontmatter metadata (name, description, category, tags)
-- Effective immediately after saving
-- Provides version history and rollback functionality
-
-### Skill Import/Export
-
-- **Import**: Supports batch importing skills via ZIP file, or drag-and-drop uploading single SKILL.md
-- **Export**: Export selected skills as ZIP package
-- **Cloud Sync**: Manually trigger pull/push/sync operations
-  - Pull: Pull shared skills from OpenViking
-  - Push: Push local skills to cloud (filtered by quality gates)
-  - Sync: Bidirectional sync (pull then push)
-
-### Skill Versions
-
-Each skill maintains complete version history:
-
-- Auto version numbers (v1, v2, ...)
-- Version difference comparison (diff view)
-- One-click rollback to any historical version
-- Version notes (who modified when for what reason)
-
-Version rollback operations generate new version record; history not deleted.
-
-## Memory Workspace
-
-Memory workspace for managing teamEvolver user memory space (DreamCycle required).
-
-- **Memory List**: View all memory entries in current memory space
-- **Memory Search**: Semantic search memory content
-- **Memory Editor**: Manually add, modify, or delete memories
-- **Memory Audit**: View modification logs to memories by DreamCycle Jobs
-- **Blackboard**: DreamCycle collaboration blackboard showing current reasoning state
-
-## DreamCycle Studio
-
-DreamCycle Studio for configuring and monitoring memory maintenance engine.
-
-- **Job Switches**: Enable/disable individual DreamCycle Jobs (team_overview, deduplication, cleanup, onboarding_check, consolidate)
-- **Schedule Configuration**: Set active time window, rounds per window, round interval
-- **Job Prompt Editor**: Customize system Prompt per Job
-- **Job Parameters**: Configure model parameters per Job (temperature, max_tokens, model)
-- **Run History**: View execution reports for each DreamCycle window
-- **Manual Trigger**: Immediately trigger one DreamCycle run
-- **Memory Health**: View memory deduplication rate, coverage, and other metrics
-
-## Langfuse Integration Panel
-
-Langfuse panel for configuring and monitoring Langfuse integration status.
-
-- **Connection Status**: Shows whether can connect to Langfuse service
-- **Inbound Pull Configuration**: Configure filters for pulling sessions from Langfuse (environment, user_id, tags, etc.)
-- **Outbound Tracing Configuration**: Configure LLM call tracing parameters (sample rate, environment tags, content capture toggle)
-- **Credential Management**: Set public_key and secret_key (keys not echoed back, only shows whether configured)
-- **Manual Pull**: Manually trigger one Langfuse session pull
-- **SDK Status**: Shows whether Langfuse Python SDK installed, tracing initialized
-
-## Model Settings
-
-Model settings page for configuring global LLM parameters:
-
-- **Provider**: Model provider
-- **Base URL**: API endpoint address
-- **Model ID**: Model name
-- **Max Tokens**: Maximum output tokens
-- **Temperature**: Default sampling temperature
-- **API Key**: API key (masked after input, plaintext not returned)
-
-Changes take effect immediately without service restart.
-
-## User Management
-
-User management page (admin only) for console user account management:
-
-- **User List**: Shows all users, roles, last login time
-- **Create User**: Add new users, set username, password, role (admin/user)
-- **Role Management**: Modify user roles
-- **Reset Password**: Reset user passwords
-- **Agent Mapping**: View and manage Agent subject to user mappings (for access control during Agent integration)
-- **Disable/Enable**: Disable or enable user accounts
-
-## Audit Log
-
-Audit log records all important configuration changes and operations:
-
-- Configuration item modifications (who, when, changed what, old/new values)
-- Skill changes (create, modify, delete, publish, rollback)
-- Candidate review decisions (approve/reject, reviewer, reason)
-- User management operations (create user, modify role, reset password)
-- Langfuse pull and push operations
-- Manually triggered evolution/DreamCycle runs
-
-Logs support filtering by time range, operation type, operator.
-
-## Health Status Page
-
-Health status page provides system internal state details:
-
-- Component health status (LLM connection, OpenViking connection, Langfuse connection, session storage, validation Worker)
-- Configuration snapshot (excluding keys)
-- Queue depth and processing latency
-- Recent error logs
-- Resource usage
-
-## OpenViking Workspace
-
-If OpenViking shared backend configured, can browse cloud-shared skills and resources via console:
-
-- Browse team space and personal space
-- View shared skill details
-- Import skills directly from cloud to local
-- Manage Viking path prefixes and permissions
-
-## Skill Miner Console
-
-Skill Miner provides independent Web console for document-to-skill mining workflow; see [Skill Miner Guide](./07-skill-miner.md). Unified console also provides Skill Miner entry including:
-
-- Mining task submission and status monitoring
-- Benchmark runs and result viewing
-- LIFT integration review and publishing
-- Coverage report viewing
-- Mining Prompt white-box configuration
+- [Configuration Reference](./01-configuration.md)
+- [Skill Miner Guide](./07-skill-miner.md)
+- [Prompt Studio Guide](./08-prompt-studio.md)
+- [Storage Spaces and Directory Layout](../concepts/09-storage-layout.md)
+- [Team Memory Aggregation API](../api/11-team-memory-aggregation.md)

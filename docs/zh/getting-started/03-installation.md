@@ -7,18 +7,18 @@
 | Python | 3.10+ | 运行 teamEvolver 后端 |
 | pip | 23.0+ | 安装 Python 包 |
 | Node.js | 18+ | 仅修改前端时需要 |
-| OpenViking | 0.4+ | 持久化后端，本地或云端 |
+| OpenViking | 兼容当前 Content、Session、Snapshot 与 Compile API | 持久化后端，本地、远程自建或火山云 |
 | 操作系统 | Linux / macOS | Windows 需 WSL2 |
 
 ## 安装方式
 
-### pip 安装（推荐）
+### PyPI 安装
 
 ```bash
 pip install teamEvolver
 ```
 
-### 源码安装
+### 源码安装（使用当前仓库版本）
 
 ```bash
 git clone https://github.com/leoriczhang/teamEvolver.git
@@ -48,9 +48,20 @@ npm run build
 # 产物输出到 teamEvolver/web/dist/
 ```
 
+### Docker Compose
+
+仓库根目录提供 `Dockerfile` 与 `compose.yaml`。镜像会构建控制台、安装 `.[all]` 依赖并捆绑固定版本的 OpenViking CLI：
+
+```bash
+docker compose up -d --build
+docker compose ps
+```
+
+默认映射宿主机端口 `52010`，可通过 `TEAMEVOLVER_PORT` 修改。配置与 SkillMiner 运行产物保存在 `runtime/` 挂载目录；升级镜像不会删除这些数据。
+
 ## 初始配置
 
-运行 `teamEvolver config` 交互式设置，或直接编辑 `~/.teamEvolver/config.yaml`。
+使用 `teamEvolver config <key> <value>` 写入配置，或直接编辑 `~/.teamEvolver/config.yaml`。CLI 不是交互式向导；第一次执行任意设置命令时会创建配置文件。
 
 ### 最小可运行配置
 
@@ -70,16 +81,21 @@ sharing:
   backend: viking
   viking_deployment: local
   viking_endpoint: http://localhost:1933
-  viking_api_key: "your-openviking-key"
+  viking_account: default
+  viking_user: team
+  viking_team_api_key: "your-service-or-admin-key"
 
 evolve:
-  enabled: true
   publish_mode: validated
   human_review_enabled: true
 
 validation:
   enabled: true
   mode: true_replay
+
+aggregation:
+  enabled: true
+  shared_knowledge_prefix: shared-knowledge
 ```
 
 ### 配置项位置
@@ -87,9 +103,10 @@ validation:
 | 路径 | 说明 |
 |------|------|
 | `~/.teamEvolver/config.yaml` | 主配置文件 |
-| `~/.teamEvolver/skills/` | 本地 Skill 缓存目录 |
+| `~/.hermes/skills/` | 默认本地 Skill 目录 |
+| `~/.teamEvolver/aggregation/` | 团队记忆聚合 Skill、指纹与增量状态 |
 | `~/.teamEvolver/teamEvolver.pid` | Daemon PID 文件 |
-| `~/.teamEvolver/logs/` | 日志目录 |
+| `~/.teamEvolver/teamEvolver.log` | 默认 Daemon 日志 |
 
 ## 启动与管理
 
@@ -121,7 +138,7 @@ teamEvolver stop
 
 ```bash
 # Daemon 模式下
-tail -f ~/.teamEvolver/logs/teamEvolver.log
+tail -f ~/.teamEvolver/teamEvolver.log
 ```
 
 ## 验证安装
@@ -134,7 +151,7 @@ curl -fsS http://localhost:52010/health
 curl -fsS http://localhost:52010/status | python -m json.tool
 
 # 3. 访问控制台
-# 浏览器打开 http://localhost:52010/console
+# 浏览器打开 http://localhost:52010/
 
 # 4. 运行测试（源码安装时）
 python -m pytest tests/ -v

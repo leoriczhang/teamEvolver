@@ -1,6 +1,6 @@
 # Architecture Overview
 
-teamEvolver is a monolithic FastAPI service (default port 52010), embedding an evolution engine, DreamCycle scheduler, and React console. All persistent state is accessed through the OpenViking API.
+teamEvolver is a monolithic FastAPI service (default port 52010) that embeds the evolution engine, team-Memory aggregation, DreamCycle, validation Worker, SkillMiner, and React console. Shared assets and evolution artifacts use OpenViking; YAML configuration, console Sessions, and some runtime state remain under `~/.teamEvolver/`.
 
 ## System Architecture Diagram
 
@@ -54,7 +54,7 @@ teamEvolver is a monolithic FastAPI service (default port 52010), embedding an e
 
 FastAPI application assembly entry point, responsible for:
 - Registering all HTTP routes (console static files, health checks, Agent protocol interfaces, admin interfaces)
-- Initializing Langfuse tracing, DreamCycle scheduler, background validation Worker
+- Initializing Langfuse tracing, DreamCycle, team-Memory aggregation, and the background validation Worker
 - Mounting embedded static frontend (from `teamEvolver/web/dist/`)
 
 ### Agent Protocol V1 ([agent_protocol.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/integrations/agent_protocol.py))
@@ -110,8 +110,12 @@ Continuous team Memory evolution:
 - `dedup` — Semantic deduplication
 - `cleanup` — Cleans up expired and low-value Memory
 - `consolidate` — Merges related Memory entries
-- `onboarding` — New user onboarding guidance
+- `onboarding_check` — Newcomer discoverability checks
 - Default runs during 0-6 AM window
+
+### Team-Memory Aggregation ([aggregation/](file:///home/zhangpengkun/teamEvolver/teamEvolver/aggregation/))
+
+After an administrator selects OpenViking Account users, the aggregation service runs per-user compiles with bounded concurrency, then writes `viking://resources/<shared_knowledge_prefix>/` through bounded tree-reduce. Work data stays in a sibling root, and persisted fingerprints enable incremental skipping.
 
 ### Validation Worker ([validation/worker.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/validation/worker.py))
 
@@ -135,7 +139,8 @@ teamEvolver uses a single **52010** port for all capabilities:
 | `/ingest_session` | POST | Agent Session ingestion |
 | `/internal/agents/*` | * | Agent Protocol V1 internal interfaces |
 | `/trigger` | POST | Manually trigger evolution cycle |
-| `/api/*` | * | Console admin API |
+| `/api/aggregation/*` | * | Team-Memory aggregation, runs, and settings |
+| `/api/*` | * | Other console management APIs |
 
 ## Code Entry Points
 
@@ -148,4 +153,6 @@ teamEvolver uses a single **52010** port for all capabilities:
 | Skill management | [skills/](file:///home/zhangpengkun/teamEvolver/teamEvolver/skills/) |
 | Agent integration | [integrations/](file:///home/zhangpengkun/teamEvolver/teamEvolver/integrations/) |
 | DreamCycle | [dreamcycle/](file:///home/zhangpengkun/teamEvolver/teamEvolver/dreamcycle/) |
+| Team-Memory aggregation | [aggregation/](file:///home/zhangpengkun/teamEvolver/teamEvolver/aggregation/) |
+| Configuration store | [config_store/](file:///home/zhangpengkun/teamEvolver/teamEvolver/config_store/) |
 | Frontend source | [web-ui/src/](file:///home/zhangpengkun/teamEvolver/web-ui/src/) |

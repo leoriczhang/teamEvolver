@@ -37,27 +37,21 @@ class CompileBinaryUnavailable(RuntimeError):
 class CompileClient:
     """Run ``ov compile`` for one batch under a chosen OpenViking identity.
 
-    Aggregation runs compile in two identity modes using a service credential
-    that normally reuses the admin OpenViking key:
+    Aggregation runs compile in two identity modes using the request-scoped
+    OpenViking Admin Key:
 
-    - **per-user** (``user_id`` + service ``api_key``): reads that
-      user's own memory into a per-user staging directory under
-      ``viking://resources/...`` through trusted user simulation.
-    - **team** (``user_id`` = the team/service user + service key): merges the
+    - **per-user** (``user_id`` + Admin Key): reads that user's memory into a
+      per-user staging directory under ``viking://resources/...``.
+    - **team** (``user_id`` = the team/service user + Admin Key): merges the
       staged per-user products into the shared-knowledge target. The
       ``resources`` namespace is writable by any role.
-
-    In trusted mode a concrete ``user_id`` is required (the server rejects a
-    user-less non-admin data request), so both modes always send a user; the
-    difference is whose key/identity is used.
     """
 
     endpoint: str
     account_id: str
-    # The OpenViking user this compile runs as. Trusted mode requires it.
+    # The OpenViking user this compile runs as.
     user_id: str = ""
-    # Service credential, normally the admin OpenViking key. Trusted mode uses
-    # it with ``user_id`` to simulate the target identity.
+    # Request-scoped OpenViking Admin Key.
     api_key: str = ""
     agent_id: str = "team-skill-evolver"
     binary_override: str = ""
@@ -152,8 +146,6 @@ class CompileClient:
             "echo_command": False,
             "show_progress": False,
         }
-        # Trusted mode requires a concrete user for non-admin data paths. The
-        # identity's power comes from whose api_key this is, not from ROOT.
         if self.user_id.strip():
             conf["user"] = self.user_id.strip()
         return await self._exec(binary, argv, conf)

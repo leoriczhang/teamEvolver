@@ -14,7 +14,7 @@ teamEvolver uses a single unified port `52010` for all HTTP interfaces, includin
 
 ## Authentication
 
-teamEvolver API uses three authentication mechanisms:
+teamEvolver API uses three authentication mechanisms, plus a small set of unauthenticated health and compatibility endpoints:
 
 | Authentication Method | Applicable Scenarios | Header Format |
 |----------------------|---------------------|---------------|
@@ -103,9 +103,22 @@ Some Agent Protocol interfaces return structured error codes (string constants),
 |---------|-------------|
 | [Health and Status](./07-health-status.md) | Health checks, service status, manual evolution trigger |
 | [Session Queries](./08-sessions-api.md) | Query queued Sessions and processed conversations |
-| [Skill Management](./09-skills-admin.md) | Skill CRUD, publish, rollback, version management |
-| [Validation and Candidates](./10-validation.md) | Candidate Skill review, approval, rejection, Replay results |
-| [Team Memory Aggregation](./11-team-memory-aggregation.md) | Aggregate cross-user memories into shared team knowledge, task progress, OKF Skill editing |
+| [Skill Management](./09-skills-admin.md) | Team/personal Skill CRUD, publish requests, rollback, and versions |
+| [Validation and Candidates](./10-validation.md) | Candidate queries, Replay evaluation, release decisions, and deletion |
+| [Team Memory Aggregation](./11-team-memory-aggregation.md) | Cross-user aggregation, run recovery, aggregation Skill, and output settings |
+
+### Console-internal interfaces
+
+The following `/api/*` endpoints serve the built-in console and require a console Session Cookie. They evolve with the console and are not part of the stable Agent Protocol V1 compatibility surface:
+
+| Prefix | Purpose | Main documentation |
+|--------|---------|--------------------|
+| `/api/auth/*`, `/api/users/*`, `/api/team-settings` | Login, administrator bootstrap, users, and identity mapping | [Web Console](../guides/03-console.md) |
+| `/api/openviking/workspace/*` | Workspace browsing, L0/L1, conditional batch writes, and CLI | [Storage Layout](../concepts/09-storage-layout.md) |
+| `/api/skill-lab/*`, `/api/openviking/memory/*` | Skill/Memory experiments and True Replay | [Web Console](../guides/03-console.md) |
+| `/api/mining/*` | Knowledge sources, mining jobs, artifacts, and LIFT | [Skill Miner Guide](../guides/07-skill-miner.md) |
+| `/api/langfuse-config`, `/langfuse/*` | Langfuse configuration, pull, mapping, and status | [Observability Guide](../guides/04-observability.md) |
+| `/api/docs/*` | Built-in document tree, page reads, and search | [Documentation Maintenance](./99-docs-maintenance.md) |
 
 ### Documentation Maintenance
 

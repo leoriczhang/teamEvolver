@@ -88,7 +88,7 @@ Skill sharing and OpenViking cloud sync configuration.
 | `enabled` | boolean | `true` | Whether to enable cloud skill sharing. |
 | `backend` | string | `"viking"` | Sharing backend; currently only `"viking"` (OpenViking) supported. |
 | `viking_deployment` | string | `"cloud"` | OpenViking deployment mode: `"cloud"` (Volcengine hosted) or `"local"` (self-hosted openviking-server). |
-| `viking_endpoint` | string | `""` | OpenViking API endpoint. Empty auto-derives based on `viking_deployment`. |
+| `viking_endpoint` | string | `""` | OpenViking API endpoint override. Empty derives from `viking_deployment`; set a reachable URL for a remote self-hosted instance. |
 | `viking_api_key` | string | `""` | Generic API key (backward compatible; per-scope keys recommended). |
 | `viking_personal_api_key` | string | `""` | Personal space API key. |
 | `viking_personal_api_keys` | list | `[]` | List of multiple personal space API keys. |
@@ -96,7 +96,7 @@ Skill sharing and OpenViking cloud sync configuration.
 | `viking_root_prefix` | string | `"team-skill-evolver"` | Namespace root prefix for teamEvolver resources in OpenViking; do not modify casually. |
 | `viking_agent` | string | (constant) | OpenViking Agent namespace, fixed by code constant. |
 | `viking_account` | string | `"default"` | Viking account identifier. |
-| `viking_user` | string | `"default"` | Viking user identifier. |
+| `viking_user` | string | `"team"` | OpenViking user identifier sent when accessing shared team resources. |
 | `viking_personal_user` | string | `""` | Personal space username. |
 | `viking_customer_id` | string | `""` | Customer ID for DreamCycle memory space targeting. |
 | `viking_group_id` | string | `""` | Group ID. |
@@ -119,7 +119,7 @@ Evolution pipeline core parameter configuration.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `interval_seconds` | integer | `600` | Evolution round interval in seconds; how often evolution cycle executes. |
-| `publish_mode` | string | `"validated"` | Candidate skill publish mode: `"validated"` (auto-publish after validation passes), `"manual"` (all human review), `"off"` (no auto-publish). |
+| `publish_mode` | string | `"validated"` | Candidate Skill release mode: `"validated"` (validation and review path) or `"direct"` (publish immediately). |
 | `human_review_enabled` | boolean | `true` | Whether to enable human review workflow. |
 | `human_review_timeout_seconds` | integer | `86400` | Human review timeout in seconds; default 24 hours. |
 | `evidence_enabled` | boolean | `true` | Whether to enable evidence collection mechanism. |
@@ -136,6 +136,7 @@ Evolution pipeline core parameter configuration.
 | `validation_max_rejections` | integer | `1` | Pause evolution for skill after consecutive rejections count. |
 | `use_session_judge` | boolean | `true` | Whether to use session value classifier. |
 | `candidate_coalesce_enabled` | boolean | `true` | Whether to enable candidate coalescing. |
+| `max_parallel_groups` | integer | `4` | Maximum Skill groups processed concurrently in one evolution cycle. |
 | `bundle_text_extensions` | list | `[".py", ".sh"]` | Extensions treated as text files in skill bundles. |
 | `bundle_max_file_bytes` | integer | `262144` | Maximum single file bytes in skill bundles (256KB). |
 | `bundle_max_prompt_bytes` | integer | `786432` | Maximum prompt bytes in skill bundles (768KB). |
@@ -177,6 +178,25 @@ DreamCycle memory maintenance engine configuration. DreamCycle is teamEvolver's 
 | `viking_agent` | string | `"dreamcycle"` | DreamCycle Agent namespace in OpenViking. |
 | `job_prompts` | dict | `{}` | Per-Job Prompt override configuration. |
 | `job_settings` | dict | `{}` | Per-Job runtime parameter override configuration. |
+
+### aggregation Section
+
+Cross-user team-Memory aggregation configuration. Each request supplies an optional Account ID and a required OpenViking Admin Key. The Admin Key is not persisted; the pipeline consolidates Memory into account-shared Resources through `ov compile`.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `enabled` | boolean | `false` | Configuration marker for aggregation. An administrator still starts every run explicitly in the console. |
+| `shared_knowledge_prefix` | string | `"shared-knowledge"` | Final team-Memory root: `viking://resources/<prefix>/`. Hot-reload it under **Evolution Pipeline → Team Memory Evolution**. |
+| `okf_skill_uri` | string | `"viking://agent/skills/team-memory-okf"` | Aggregation Skill identifier. The runtime uses the trailing name and installs the editable content into each participating identity's Skill space. |
+| `insight_skill_uri` | string | `""` | Reserved insight-Skill identifier; the current aggregation runtime does not consume it. |
+| `key_seed` | string | `"teamevolver-aggregation"` | Compatibility field; the current runtime does not derive user keys from it. |
+| `staging_dir` | string | `"staging"` | Work-root suffix. The default staging root is the sibling `viking://resources/shared-knowledge-staging/`, keeping intermediate data out of final L0/L1 summaries. |
+| `kinds` | list | `[]` | Personal Memory categories. Empty uses `profile/entities/preferences/events/cases/patterns/trajectories/experiences/tools/skills`. |
+| `max_users_per_batch` | integer | `12` | Maximum categories read by one user's Phase 1 compile, capped at 15 at runtime. |
+| `phase1_concurrency` | integer | `6` | Maximum concurrent per-user Phase 1 compiles. |
+| `merge_fan_in` | integer | `12` | Maximum tree-reduce sources per merge, constrained to 2–15. |
+| `compile_runtime_timeout_seconds` | integer | `3000` | Per-compile timeout in seconds, minimum 60. |
+| `state_dir` | string | `""` | Aggregation state directory; empty uses `~/.teamEvolver/aggregation/`. |
 
 ### validation Section
 
@@ -339,11 +359,14 @@ skills:
 sharing:
   enabled: true
   backend: "viking"
-  viking_deployment: "cloud"
-  viking_personal_api_key: "vk-xxxxxxxx"
+  viking_deployment: "local"
+  # Set a reachable URL for a remote self-hosted server; empty uses http://localhost:1933
+  viking_endpoint: "http://10.0.0.8:1933"
+  viking_account: "default"
+  viking_user: "team"
   # Compatibility field name; semantically the service/admin key,
   # normally the admin OpenViking key.
-  viking_team_api_key: "vk-yyyyyyyy"
+  viking_team_api_key: "root-or-trusted-key"
   skill_reload_mode: "poll"
   skill_reload_interval_seconds: 30
 
@@ -358,7 +381,7 @@ evolve:
   validation_max_rejections: 1
 
 dreamcycle:
-  enabled: true
+  enabled: false
   auto_start: false
   active_start_hour: 0
   active_end_hour: 6
@@ -369,6 +392,13 @@ dreamcycle:
     - cleanup
     - onboarding_check
     - consolidate
+
+aggregation:
+  enabled: true
+  shared_knowledge_prefix: "shared-knowledge"
+  staging_dir: "staging"
+  phase1_concurrency: 6
+  merge_fan_in: 12
 
 validation:
   enabled: true
@@ -397,6 +427,8 @@ Most configuration items require service restart after modification. Following c
 - DreamCycle parameters (`dreamcycle.*`)
 - Langfuse parameters (`langfuse.*`)
 - Skill Miner parameters (`mining.*`)
+- OpenViking deployment, endpoint, Account, and service key (through **Runtime Status**)
+- Team-Memory output prefix (through **Evolution Pipeline → Team Memory Evolution**)
 - Prompt overrides (via Prompt Studio)
 
-Configurations modified via CLI `teamEvolver config set` auto-load at next evolution round start.
+Restart the service after changing other settings through `teamEvolver config <key> <value>`.

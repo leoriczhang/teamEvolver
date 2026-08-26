@@ -168,7 +168,7 @@ Typically caused by abnormal process crash (OOM, kill -9) not cleaning PID file.
 
 **Solution**:
 
-1. Access user management page in console
+1. Access the **Users & Permissions** page in the console
 2. Find corresponding Agent, configure subject-to-user mapping
 3. Or confirm user identifiers like `sharing.viking_personal_user` correct in configuration
 

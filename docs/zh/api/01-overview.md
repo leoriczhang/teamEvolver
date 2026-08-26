@@ -14,7 +14,7 @@ teamEvolver 统一使用单端口 `52010` 承载所有 HTTP 接口，包括健�
 
 ## 认证方式
 
-teamEvolver API 使用三种认证机制：
+teamEvolver API 使用三种认证机制，并保留少量无认证的健康与兼容端点：
 
 | 认证方式 | 适用场景 | Header 格式 |
 |----------|---------|-------------|
@@ -103,9 +103,22 @@ Agent 协议 API 使用 `protocol_version` 字段进行版本控制。当前版�
 |------|------|
 | [健康与状态](./07-health-status.md) | 健康检查、服务状态、手动触发进化 |
 | [Session 查询](./08-sessions-api.md) | 查询队列中 Session 和已处理会话 |
-| [Skill 管理](./09-skills-admin.md) | Skill CRUD、发布、回滚、版本管理 |
-| [验证与 Candidate](./10-validation.md) | 候选 Skill 审核、批准、驳回、Replay 结果 |
-| [团队记忆聚合](./11-team-memory-aggregation.md) | 跨 User 记忆聚合为团队共享记忆、任务进度、聚合 Skill 编辑 |
+| [Skill 管理](./09-skills-admin.md) | 团队/个人 Skill CRUD、发布申请、回滚与版本管理 |
+| [验证与 Candidate](./10-validation.md) | Candidate 查询、Replay 评估、发布决策与删除 |
+| [团队记忆聚合](./11-team-memory-aggregation.md) | 跨 User 聚合、任务恢复、聚合 Skill 与输出目录设置 |
+
+### 控制台内部接口
+
+以下 `/api/*` 端点服务于内置控制台，必须使用控制台 Session Cookie。它们随控制台同步演进，不属于 Agent Protocol V1 的稳定兼容面：
+
+| 前缀 | 用途 | 主要文档 |
+|------|------|----------|
+| `/api/auth/*`、`/api/users/*`、`/api/team-settings` | 登录、首次管理员初始化、用户与身份映射 | [Web 控制台](../guides/03-console.md) |
+| `/api/openviking/workspace/*` | Workspace 浏览、L0/L1、条件批量写、CLI | [存储空间与目录布局](../concepts/09-storage-layout.md) |
+| `/api/skill-lab/*`、`/api/openviking/memory/*` | Skill / Memory 实验与 True Replay | [Web 控制台](../guides/03-console.md) |
+| `/api/mining/*` | 知识源、挖掘任务、产物与 LIFT | [Skill Miner 指南](../guides/07-skill-miner.md) |
+| `/api/langfuse-config`、`/langfuse/*` | Langfuse 配置、拉取、映射和状态 | [可观测性指南](../guides/04-observability.md) |
+| `/api/docs/*` | 内置文档目录、页面读取和搜索 | [文档维护指南](./99-docs-maintenance.md) |
 
 ### 文档维护
 

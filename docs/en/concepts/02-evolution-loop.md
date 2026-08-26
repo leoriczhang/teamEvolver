@@ -96,22 +96,14 @@ Can rollback to historical versions at any time:
 | Manual trigger | `POST /trigger` executes one evolution cycle immediately |
 | Session-driven | Automatically wakes when sufficient Evidence accumulates |
 
-## Disabling Evolution
+## Publish Modes
 
-When automatic publishing is not desired, set:
+`evolve.publish_mode` accepts exactly two values:
 
-```yaml
-evolve:
-  publish_mode: manual  # Do not auto-publish, only generate Candidates
-  human_review_enabled: true
-```
+- `validated`: Candidates enter the validation queue. The background process may publish after result-count, approval-count, and runtime-compatibility gates pass; gray-zone results enter human review when `human_review_enabled` is on.
+- `direct`: Evolution output is published directly without the Candidate validation queue.
 
-Or disable completely:
-
-```yaml
-evolve:
-  enabled: false
-```
+There is no `evolve.enabled` master switch. To pause periodic scanning, stop the service or suspend the evolution process at the deployment layer rather than using an undefined setting.
 
 ## Related Documentation
 

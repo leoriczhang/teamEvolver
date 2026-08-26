@@ -44,6 +44,13 @@ class ConfigStore:
     def exists(self) -> bool:
         return self.config_file.exists()
 
+    @staticmethod
+    def _strip_deprecated_aggregation_credentials(data: dict) -> dict:
+        aggregation = data.get("aggregation")
+        if isinstance(aggregation, dict):
+            aggregation.pop("root_api_key", None)
+        return data
+
     def load(self) -> dict:
         if not self.config_file.exists():
             return _deep_merge({}, _DEFAULTS)
@@ -52,7 +59,9 @@ class ConfigStore:
 
             with open(self.config_file, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
-            merged = _deep_merge(_DEFAULTS, data)
+            merged = self._strip_deprecated_aggregation_credentials(
+                _deep_merge(_DEFAULTS, data)
+            )
             if "service" not in data and isinstance(data.get("proxy"), dict):
                 merged["service"] = dict(merged.get("proxy") or {})
             return merged
@@ -62,9 +71,12 @@ class ConfigStore:
     def save(self, data: dict):
         import yaml
 
+        sanitized = self._strip_deprecated_aggregation_credentials(
+            _deep_merge({}, data)
+        )
         self.config_file.parent.mkdir(parents=True, exist_ok=True)
         with open(self.config_file, "w", encoding="utf-8") as f:
-            yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
+            yaml.dump(sanitized, f, default_flow_style=False, allow_unicode=True)
         os.chmod(self.config_file, 0o600)
 
     def get(self, dotpath: str) -> Any:
@@ -477,7 +489,6 @@ class ConfigStore:
             aggregation_insight_skill_uri=str(
                 aggregation.get("insight_skill_uri", "") or ""
             ),
-            aggregation_root_api_key=str(aggregation.get("root_api_key", "") or ""),
             aggregation_key_seed=str(
                 aggregation.get("key_seed", "") or "teamevolver-aggregation"
             ),

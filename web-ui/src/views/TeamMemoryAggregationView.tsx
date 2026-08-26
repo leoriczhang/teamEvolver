@@ -21,6 +21,7 @@ type AggregationGroup = {
 type AggregationRun = {
   task_id: string;
   account_id: string;
+  target_uri: string;
   status: "pending" | "running" | "completed" | "failed";
   started_at?: number;
   finished_at?: number | null;
@@ -56,7 +57,9 @@ export default function TeamMemoryAggregationView({
   user?: UserProfile | null;
 }) {
   const [accountId, setAccountId] = useState("");
+  const [adminKey, setAdminKey] = useState("");
   const [mode, setMode] = useState<"incremental" | "full">("incremental");
+  const [targetUri, setTargetUri] = useState("");
   const [users, setUsers] = useState<string[] | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [listing, setListing] = useState(false);
@@ -85,6 +88,7 @@ export default function TeamMemoryAggregationView({
       const data = await api<AggregationSettings>("/api/aggregation/settings");
       setSettings(data);
       setPrefixInput(data.shared_knowledge_prefix);
+      setTargetUri((current) => current.trim() ? current : data.target_root);
       setPrefixDirty(false);
       setSettingsLoaded(true);
     } catch (e: any) {
@@ -106,8 +110,14 @@ export default function TeamMemoryAggregationView({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
+      const previousDefault = settings.target_root;
       setSettings(data);
       setPrefixInput(data.shared_knowledge_prefix);
+      setTargetUri((current) =>
+        !current.trim() || current === previousDefault
+          ? data.target_root
+          : current
+      );
       setPrefixDirty(false);
       toastOk("已保存", `输出目录已更新为 ${data.target_root}`);
     } catch (e: any) {
@@ -205,6 +215,7 @@ export default function TeamMemoryAggregationView({
           const latest = runs[0];
           setRun(latest);
           if (latest.account_id) setAccountId((prev) => prev || latest.account_id);
+          if (latest.target_uri) setTargetUri(latest.target_uri);
           if (latest.status === "running" || latest.status === "pending") {
             pollStatus(latest.task_id);
           }
@@ -217,13 +228,30 @@ export default function TeamMemoryAggregationView({
 
   useEffect(() => stopPolling, [stopPolling]);
 
+  function clearUserSelection() {
+    setUsers(null);
+    setSelected(new Set());
+  }
+
   async function listUsers() {
     const account = accountId.trim();
+    const credential = adminKey.trim();
+    if (!credential) {
+      toastErr("未填写 Admin Key", "请输入 OpenViking Admin Key");
+      return;
+    }
     setListing(true);
     try {
-      const params = account ? `?account_id=${encodeURIComponent(account)}` : "";
       const data = await api<{ account_id: string; users: string[] }>(
-        `/api/aggregation/users${params}`
+        "/api/aggregation/users",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            account_id: account || undefined,
+            admin_key: credential,
+          }),
+        }
       );
       const list = data.users || [];
       setUsers(list);
@@ -263,9 +291,19 @@ export default function TeamMemoryAggregationView({
 
   async function confirmAggregate() {
     const account = accountId.trim();
+    const credential = adminKey.trim();
     const userIds = Array.from(selected);
+    const outputUri = targetUri.trim();
+    if (!credential) {
+      toastErr("未填写 Admin Key", "请输入 OpenViking Admin Key");
+      return;
+    }
     if (userIds.length === 0) {
       toastErr("未选择用户", "请至少勾选一个用户");
+      return;
+    }
+    if (!outputUri) {
+      toastErr("未指定输出 URI", "请输入 viking://resources/ 下的目标路径");
       return;
     }
     setTriggering(true);
@@ -275,11 +313,14 @@ export default function TeamMemoryAggregationView({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           account_id: account || undefined,
+          admin_key: credential,
           mode,
+          target_uri: outputUri,
           user_ids: userIds,
         }),
       });
       setRun(started);
+      setAdminKey("");
       toastOk("聚合已触发", `${userIds.length} 个用户 · ${started.task_id}`);
       pollStatus(started.task_id);
     } catch (e: any) {
@@ -305,7 +346,7 @@ export default function TeamMemoryAggregationView({
   const allSelected = users != null && selected.size === users.length && users.length > 0;
   const currentTargetLabel = !settingsLoaded
     ? "加载中…"
-    : settings?.target_root || "未加载";
+    : targetUri.trim() || settings?.target_root || "未指定";
   const currentSkillLabel = settings?.okf_skill_uri || skill?.skill_name || "当前聚合 Skill";
 
   return (
@@ -318,18 +359,38 @@ export default function TeamMemoryAggregationView({
             下的团队共享记忆；具体输出格式与页面结构由{" "}
             <code>{currentSkillLabel}</code>
             定义。流程：输入 Account → 列出用户 → 勾选/反选 → 确认聚合。
-            产物在 account 内全员可检索，输出目录可在下方配置。
+            产物在 account 内全员可检索，每次任务可独立指定输出 URI。
+            Admin Key 仅用于本次请求，不会进入任务状态或持久化配置。
           </div>
 
           {/* Step 1: account + list users */}
           <div className="flex flex-wrap items-end gap-3">
             <label className="flex flex-col gap-1 text-[12px] font-[700]">
-              OpenViking Account ID
+              OpenViking Account ID（可选）
               <Input
                 value={accountId}
-                onChange={(e) => setAccountId(e.target.value)}
+                disabled={running}
+                onChange={(e) => {
+                  setAccountId(e.target.value);
+                  clearUserSelection();
+                }}
                 placeholder="留空则使用当前配置的 account"
                 className="w-[280px]"
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-[12px] font-[700]">
+              OpenViking Admin Key
+              <Input
+                type="password"
+                value={adminKey}
+                disabled={running}
+                autoComplete="off"
+                onChange={(e) => {
+                  setAdminKey(e.target.value);
+                  clearUserSelection();
+                }}
+                placeholder="必填，不会持久化"
+                className="w-[280px] font-mono"
               />
             </label>
             <label className="flex flex-col gap-1 text-[12px] font-[700]">
@@ -343,7 +404,17 @@ export default function TeamMemoryAggregationView({
                 <option value="full">全量（强制全部重编译）</option>
               </select>
             </label>
-            <Button onClick={listUsers} disabled={listing}>
+            <label className="flex min-w-[320px] flex-1 flex-col gap-1 text-[12px] font-[700]">
+              本次输出 URI
+              <Input
+                value={targetUri}
+                disabled={running}
+                placeholder="viking://resources/shared-knowledge"
+                onChange={(e) => setTargetUri(e.target.value)}
+                className="font-mono"
+              />
+            </label>
+            <Button onClick={listUsers} disabled={listing || !adminKey.trim()}>
               <Users className="mr-1.5 size-4" />
               {listing ? "列出中…" : "列出用户"}
             </Button>
@@ -418,7 +489,7 @@ export default function TeamMemoryAggregationView({
       </Panel>
 
       <Panel
-        title="输出目录配置"
+        title="默认输出目录配置"
         extra={
           <span className="text-[12px] text-muted-foreground">
             当前：<code>{currentTargetLabel}</code>
@@ -513,6 +584,9 @@ export default function TeamMemoryAggregationView({
                 {run.error}
               </div>
             )}
+            <div className="mb-2 break-all font-mono text-[11px] text-muted-foreground">
+              输出：{run.target_uri}
+            </div>
             <div className="overflow-hidden rounded-md border border-border">
               <table className="w-full text-[12px]">
                 <thead className="bg-muted/40 text-left font-[700]">

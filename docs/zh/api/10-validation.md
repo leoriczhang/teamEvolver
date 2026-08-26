@@ -12,15 +12,15 @@ True Replay 引擎：`teamEvolver/true_replay.py`
 
 ## 2. 接口和参数说明
 
-所有 `/api/validation/*` 接口需要控制台管理员认证（写操作需要 admin 角色）。
+所有 `/api/validation/*` 接口需要控制台登录；发布决策和删除 Candidate 需要管理员角色。
 
 ---
 
-### GET /validation/candidates
+### GET /api/validation/candidates
 
-列出候选 Skill。此端点无认证要求（路径以 `/validation/` 开头而非 `/api/validation/`，与控制台共享）。完整管理接口为 `/api/validation/candidates`。
+列出 Candidate。
 
-**认证：** 控制台 Cookie（`/api/validation/candidates` 需要）；无认证（`/validation/candidates` 为兼容路径）
+**认证：** 控制台 Cookie。兼容端点 `GET /validation/candidates` 由嵌入式进化服务提供，不要求控制台 Cookie；只应在受信网络中使用。
 
 **Query 参数：**
 
@@ -189,14 +189,6 @@ True Replay 引擎：`teamEvolver/true_replay.py`
 代码入口：`teamEvolver/proxy/routes.py:4168` (`api_validation_candidate_delete`)
 
 ---
-
-### POST /api/validation/candidates/{job_id}/approve
-
-批准候选发布（`validate` 接口的便捷别名，mode=auto）。
-
-### POST /api/validation/candidates/{job_id}/reject
-
-驳回候选（`validate` 接口的便捷别名，强制驳回）。
 
 ## 3. 使用示例
 

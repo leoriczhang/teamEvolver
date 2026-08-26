@@ -134,8 +134,11 @@ python3 run_pipeline.py --input data/input --no-strict-step1
 
 ```
 compiled_skill/<skill-name>/
-├── SKILL.md          # 生成的可执行技能
-└── EVALUATION.md     # 评测标准
+├── SKILL.md               # 生成的可执行 Skill
+├── EVALUATION.md          # 评测定义
+├── benchmark.json         # 渐进披露 Benchmark 契约
+├── BENCHMARK.md           # 人工可读题库
+└── benchmark_quality.json # 质量检查与 warning（生成时）
 ```
 
 ### 5. 构建并运行 Benchmark
@@ -280,7 +283,8 @@ Skill Miner 运行过程中设置了多个人工审核节点，确保挖掘质�
 1. **Step 1 样本包审核**（可选，由 `strict_step1` 控制）：样本包切分质量不达标时中止，等待人工修正输入文档或调整切分策略
 2. **Skill 产出审核**：编译完成后人工检查 SKILL.md 和 EVALUATION.md 的准确性
 3. **Benchmark 题目审核**：自动生成的题目需要人工验证情境合理性和 gold 答案准确性
-4. **LIFT 发布前审核**：在发布到外部 LIFT 工作区前，必须通过人工审核批准
+4. **产物质量审核**：只要生成唯一 `SKILL.md`，任务可在保留 warning 的情况下成功；提交 Candidate 前仍需补齐 `EVALUATION.md`，并检查 `benchmark.json` 与 `BENCHMARK.md`
+5. **LIFT 发布前审核**：在发布到外部 LIFT 工作区前，必须通过人工审核批准
 
 人工检查点逻辑位于 `teamEvolver/skillminer/human_checkpoints.py`，测试文件为 `test_skillminer_human_checkpoints.py`。
 
@@ -312,18 +316,19 @@ python3 web_console/server.py
 
 启动 teamEvolver 主服务后，统一控制台中也提供了 Skill Miner 入口：
 
-- 挖掘任务提交和状态监控
+- 挖掘任务并行提交、持久化状态、停止与删除
+- 任务恢复、知识补证历史和可复制诊断
+- 最终 Skill、EVALUATION、Benchmark 完整性与质量 warning
 - 模型配置（可独立于全局 LLM 配置）
 - Pipeline 参数配置
 - Prompt 白盒编辑（10 个可编辑 Prompt）
 - Benchmark 运行和结果查看
-- LIFT 集成审核和发布
 - 覆盖报告查看
 - 轨迹 Benchmark 提交
 
 ## LIFT 集成
 
-Skill Miner 生成 `benchmark.jsonl` 后会自动生成 LIFT 待审核草稿，写入 `lift_datasets/drafts/`。如需禁用：
+Skill Miner 优先读取 `benchmark.json`（兼容旧 `benchmark.jsonl`）并生成 LIFT 待审核草稿，写入 `lift_datasets/drafts/`。如需禁用：
 
 ```bash
 export SKILLMINER_LIFT_AUTO_DRAFT=0
@@ -349,12 +354,13 @@ export TEAMEVOLVER_LIFT_PYTHON=/absolute/path/to/python
 
 ### 发布流程
 
-1. 在统一控制台进入评测中心
-2. 从已生成 Benchmark 的 Skill 创建 LIFT 草稿
-3. 逐题检查并编辑 `query`、内容要求和轨迹要求，确认 warmup/holdout 划分
-4. 保存并通过结构校验，点击"人工审核通过"
-5. 点击"发布到 LIFT"
-6. 选择 runtime 并启动，实时查看运行日志
+当前主导航未挂载独立「评测中心」。LIFT 桥接能力通过 `/api/mining/lift/*` 提供，也可在需要的部署中单独挂载仓库内的 `EvalView`：
+
+1. 从已生成 Benchmark 的 Skill 创建 LIFT 草稿。
+2. 逐题编辑 `query`、内容要求和轨迹要求，确认 warmup/holdout 划分。
+3. 保存并通过结构校验，再调用 approve 接口完成审核。
+4. 只有 `approved` 草稿可通过 publish 接口发布。
+5. 配置 runtime 后调用 run 接口，并通过 status 查询运行状态。
 
 发布后数据结构：
 
@@ -477,7 +483,7 @@ teamEvolver/skillminer/
 ├── data/input/              # 待挖掘的领域文档（用户提供）
 ├── sample_packages/         # Step 1 产物
 ├── semantic_reports/        # Step 2 产物
-├── compiled_skill/          # Step 3 产物：SKILL.md、EVALUATION.md
+├── compiled_skill/          # Step 3：SKILL.md、EVALUATION.md、benchmark.json、BENCHMARK.md
 ├── reflection_rounds/       # 反思环各轮中间产物
 ├── run_history/             # 新任务启动时保存的上一批生成物
 ├── benchmark_sessions/      # 多次构建快照、交集、稳定性复跑

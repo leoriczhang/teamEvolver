@@ -38,6 +38,24 @@ teamEvolver status
 teamEvolver stop
 ```
 
+### Docker Compose 模式
+
+仓库根目录的 `compose.yaml` 会构建前端、安装完整 Python 依赖并捆绑 OpenViking CLI。它不会在同一容器中启动 OpenViking Server，仍需连接独立的云端或自建实例。
+
+```bash
+docker compose up -d --build
+docker compose ps
+docker compose logs -f teamevolver
+```
+
+可通过 `TEAMEVOLVER_PORT` 修改宿主机端口，通过 `TEAMEVOLVER_IMAGE` 指定版本化镜像。配置和 SkillMiner 产物挂载到 `runtime/`。连接宿主机或其他机器上的自建 OpenViking 时，`sharing.viking_endpoint` 必须使用容器可访问的地址；容器内的 `localhost:1933` 指向容器自身。
+
+停止服务但保留数据：
+
+```bash
+docker compose down
+```
+
 ### systemd 模式（推荐用于生产环境）
 
 对于生产环境，建议使用 systemd 管理进程，可以实现开机自启、自动重启、日志聚合等能力。

@@ -38,6 +38,24 @@ teamEvolver status
 teamEvolver stop
 ```
 
+### Docker Compose Mode
+
+The repository `compose.yaml` builds the frontend, installs all Python dependencies, and bundles the OpenViking CLI. It does not run OpenViking Server in the same container; connect a separate cloud or self-hosted instance.
+
+```bash
+docker compose up -d --build
+docker compose ps
+docker compose logs -f teamevolver
+```
+
+Set `TEAMEVOLVER_PORT` to change the host port and `TEAMEVOLVER_IMAGE` to use a versioned image. Configuration and SkillMiner artifacts are mounted under `runtime/`. When connecting OpenViking on the host or another machine, `sharing.viking_endpoint` must be reachable from the container; `localhost:1933` inside the container refers to the container itself.
+
+Stop the service while preserving data:
+
+```bash
+docker compose down
+```
+
 ### systemd Mode (recommended for production)
 
 For production environments, systemd is recommended for process management, enabling auto-start on boot, automatic restart, log aggregation, etc.

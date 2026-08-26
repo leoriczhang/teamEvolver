@@ -96,22 +96,14 @@ Candidate 创建时不影响已发布的团队资产，仅存在于验证队列�
 | 手动触发 | `POST /trigger` 立即执行一次进化周期 |
 | Session 驱动 | 积累足够 Evidence 时自动唤醒 |
 
-## 关闭进化
+## 发布模式
 
-不希望自动发布时，设置：
+`evolve.publish_mode` 只接受两个值：
 
-```yaml
-evolve:
-  publish_mode: manual  # 不自动发布，仅生成 Candidate
-  human_review_enabled: true
-```
+- `validated`：Candidate 进入验证队列；满足结果数、通过数和运行时兼容门禁后可由后台发布，灰区在启用 `human_review_enabled` 时进入人工复核。
+- `direct`：进化结果直接发布，不经过 Candidate 验证队列。
 
-或完全禁用：
-
-```yaml
-evolve:
-  enabled: false
-```
+当前没有 `evolve.enabled` 总开关。需要暂停自动扫描时，应停止服务或在部署层暂停进化进程，不要使用未定义的配置项。
 
 ## 相关文档
 

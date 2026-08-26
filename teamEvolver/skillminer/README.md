@@ -14,7 +14,7 @@
 6. **轨迹 Benchmark 独立挖掘**：直接接收 teamEvolver/SkillGen 或 OpenAI messages 风格轨迹，生成 held-out Benchmark；不进入样本包、语义发现、Skill 编译或 LIFT 流程。
 7. **多次构建 · 交集 · 稳定性复跑**：把多次构建的题库存为快照、求交集，再对交集项各跑多个 session，观察 skill 在多轮对话下的行为稳定性。
 8. **覆盖报告**：统计语义单元采纳率、GAP 消解率和维度证据覆盖。
-9. **Web 控制台**：提供真实运行、知识补证、跑分和覆盖报告入口。
+9. **Web 控制台**：提供知识源管理、并行持久化任务、停止/删除、知识补证、产物质量 warning、编辑与提交进化。
 10. **LIFT 适配**：把 SkillMiner 题库转换为 LIFT Suite v1 与 Markdown 场景，经人工编辑、校验、批准后再发布到外部 LIFT 工作区，并可从统一控制台启动评测。
 
 ## 项目结构
@@ -45,7 +45,7 @@
 ```text
 sample_packages/      # Step 1 产物：样本包 + 全局/分包笔记
 semantic_reports/     # Step 2 产物：各样本包的语义分析报告
-compiled_skill/       # Step 3 产物：<skill-name>/SKILL.md、EVALUATION.md、benchmark.*
+compiled_skill/       # Step 3：SKILL.md、EVALUATION.md、benchmark.json、BENCHMARK.md
 reflection_rounds/    # 反思环各轮的中间产物
 run_history/          # 新任务启动时隔离保存的上一批生成物
 benchmark_sessions/   # 快照、交集清单与多 session 复跑留档
@@ -113,8 +113,11 @@ python3 run_pipeline.py --input data/input --max-rounds 1
 4. 查看输出：
 
 ```text
-compiled_skill/<skill-name>/SKILL.md
-compiled_skill/<skill-name>/EVALUATION.md
+compiled_skill/<skill-name>/
+├── SKILL.md
+├── EVALUATION.md
+├── benchmark.json
+└── BENCHMARK.md
 ```
 
 5. 生成并执行 benchmark：
@@ -199,7 +202,7 @@ manifest.json         # 来源摘要、难度和维度统计
 
 ## LIFT 集成与人工审核
 
-SkillMiner 生成 `benchmark.jsonl` 后，会默认同时生成一个 LIFT 待审核草稿。该动作只写入本项目的 `lift_datasets/drafts/`，不会直接修改 LIFT。若暂时不需要自动生成，可设置：
+SkillMiner 优先读取 `benchmark.json`（兼容旧 `benchmark.jsonl`）并默认生成一个 LIFT 待审核草稿。该动作只写入本项目的 `lift_datasets/drafts/`，不会直接修改 LIFT。若暂时不需要自动生成，可设置：
 
 ```bash
 export SKILLMINER_LIFT_AUTO_DRAFT=0
@@ -222,7 +225,7 @@ export TEAMEVOLVER_LIFT_ROOT=/absolute/path/to/LIFT
 export TEAMEVOLVER_LIFT_PYTHON=/absolute/path/to/python
 ```
 
-启动 teamEvolver 控制台后进入“评测中心”，按以下顺序操作：
+当前主导航未挂载独立“评测中心”。请通过 `/api/mining/lift/*` 使用下列流程，或在需要的部署中单独挂载仓库内的 `EvalView`：
 
 1. 从已生成 benchmark 的 Skill 创建 LIFT 草稿。
 2. 逐题检查并编辑 `query`、内容要求和轨迹要求，确认 warmup/holdout 划分。
@@ -277,6 +280,12 @@ python3 web_console/server.py
 ```
 
 打开 `http://127.0.0.1:8765`。控制台只提供真实流水线运行，不包含模拟运行模式。
+
+### 统一控制台
+
+启动 teamEvolver 主服务后，优先使用「技能挖掘」下的挖掘总览、知识源和挖掘任务。统一控制台支持多个隔离任务排队/并行运行，服务重启后恢复任务记录，并可停止或删除任务。
+
+任务生成唯一 `SKILL.md` 后可标记成功，同时保留反思提前结束、Benchmark 不完整或格式问题等质量 warning。提交到 Candidate 前仍需检查 `EVALUATION.md`、`benchmark.json` 和 `BENCHMARK.md`；知识补证表单与答案会按轮次保留。
 
 ## 常用命令
 

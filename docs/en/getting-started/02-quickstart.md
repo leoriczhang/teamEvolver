@@ -1,6 +1,6 @@
 # Quick Start
 
-This guide will help you run a local teamEvolver instance, connect a Hermes Agent, and complete your first evolution closed loop in 5 minutes.
+This guide starts teamEvolver locally, connects it to OpenViking, and gets you into an executable Skill and Memory evolution workflow.
 
 ## Prerequisites
 
@@ -27,8 +27,11 @@ teamEvolver config service.host 0.0.0.0
 # Configure OpenViking backend
 teamEvolver config sharing.enabled true
 teamEvolver config sharing.backend viking
+teamEvolver config sharing.viking_deployment local
 teamEvolver config sharing.viking_endpoint "http://localhost:1933"
-teamEvolver config sharing.viking_api_key "your-openviking-key"
+teamEvolver config sharing.viking_account "default"
+teamEvolver config sharing.viking_user "team"
+teamEvolver config sharing.viking_team_api_key "your-service-or-admin-key"
 
 # Configure LLM for evolution
 teamEvolver config llm.api_base "https://ark.cn-beijing.volces.com/api/v3"
@@ -54,14 +57,17 @@ curl http://localhost:52010/status
 # {"running":true,...}
 ```
 
-## 4. Open the Console
+For a self-hosted OpenViking server on another machine, set `sharing.viking_endpoint` to a reachable URL such as `http://10.0.0.8:1933`. You can also save and hot-reload these settings after login under **Governance → Runtime Status → OpenViking Deployment**.
 
-Visit [http://localhost:52010/console](http://localhost:52010/console) in your browser to see:
+## 4. Bootstrap and Open the Console
 
-- Service running status, queued sessions count, registered skills count
-- Session history queue
-- Skill Candidates awaiting review
-- Evolution pipeline configuration panel
+Visit [http://localhost:52010/](http://localhost:52010/). The first visit opens the administrator bootstrap screen, with `admin` prefilled; use a strong password in production. After setup, the console provides:
+
+- Knowledge sources and mining jobs under **Skill Mining**
+- Operations, candidate review, Langfuse, and Skill/team-Memory evolution under **Evolution Loop**
+- Agent Workspace, Skill Lab, Memory Lab, and Platform Assets under **Asset Center**
+- Model, users and permissions, OpenViking deployment, and health under **Governance**
+- Built-in English and Chinese documentation with search
 
 ![Console Dashboard](/assets/teamEvolver-console-dashboard.png)
 
@@ -98,13 +104,24 @@ After installation, restart Hermes; new sessions will automatically be reported 
 curl -X POST http://localhost:52010/trigger
 ```
 
-This immediately triggers one evolution cycle: pulling Sessions from queue → extracting Evidence → generating Candidates → True Replay validation → awaiting review.
+This immediately runs one evolution cycle: dequeue Sessions → extract Evidence → generate Candidates. In `validated` mode, Candidates then enter True Replay and release gates.
 
 ## 7. Stop the Service
 
 ```bash
 teamEvolver stop
 ```
+
+## Docker Compose
+
+Use the repository image when you do not want to prepare a local Python/Hermes environment. The image builds the console, installs all dependencies, and bundles the OpenViking CLI:
+
+```bash
+docker compose up -d --build
+docker compose ps
+```
+
+The service remains available at `http://localhost:52010/`; configuration and SkillMiner artifacts persist under `runtime/`.
 
 ## Next Steps
 

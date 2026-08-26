@@ -168,7 +168,7 @@ journalctl -u teamevolver -n 100 --no-pager
 
 **解决方法**：
 
-1. 访问控制台的用户管理页面
+1. 访问控制台「用户与权限」页面
 2. 找到对应 Agent，配置 subject 到用户的映射
 3. 或在配置中确认 `sharing.viking_personal_user` 等用户标识正确
 

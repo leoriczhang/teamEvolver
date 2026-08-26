@@ -7,18 +7,18 @@
 | Python | 3.10+ | Runs the teamEvolver backend |
 | pip | 23.0+ | Installs Python packages |
 | Node.js | 18+ | Only required when modifying the frontend |
-| OpenViking | 0.4+ | Persistent storage backend, local or cloud |
+| OpenViking | Compatible with the current Content, Session, Snapshot, and Compile APIs | Persistent backend, local, remote self-hosted, or Volcengine Cloud |
 | Operating System | Linux / macOS | Windows requires WSL2 |
 
 ## Installation Methods
 
-### pip Installation (Recommended)
+### PyPI Installation
 
 ```bash
 pip install teamEvolver
 ```
 
-### Source Installation
+### Source Installation (Current Repository Version)
 
 ```bash
 git clone https://github.com/leoriczhang/teamEvolver.git
@@ -48,9 +48,20 @@ npm run build
 # Artifacts output to teamEvolver/web/dist/
 ```
 
+### Docker Compose
+
+The repository root includes `Dockerfile` and `compose.yaml`. The image builds the console, installs the `.[all]` dependency set, and bundles a pinned OpenViking CLI:
+
+```bash
+docker compose up -d --build
+docker compose ps
+```
+
+Port `52010` is exposed by default and can be changed with `TEAMEVOLVER_PORT`. Configuration and SkillMiner artifacts persist in the mounted `runtime/` directory and survive image upgrades.
+
 ## Initial Configuration
 
-Run `teamEvolver config` for interactive setup, or directly edit `~/.teamEvolver/config.yaml`.
+Use `teamEvolver config <key> <value>` to write settings, or edit `~/.teamEvolver/config.yaml` directly. The CLI is not an interactive wizard; the first set command creates the configuration file.
 
 ### Minimal Runnable Configuration
 
@@ -70,16 +81,21 @@ sharing:
   backend: viking
   viking_deployment: local
   viking_endpoint: http://localhost:1933
-  viking_api_key: "your-openviking-key"
+  viking_account: default
+  viking_user: team
+  viking_team_api_key: "your-service-or-admin-key"
 
 evolve:
-  enabled: true
   publish_mode: validated
   human_review_enabled: true
 
 validation:
   enabled: true
   mode: true_replay
+
+aggregation:
+  enabled: true
+  shared_knowledge_prefix: shared-knowledge
 ```
 
 ### Configuration File Locations
@@ -87,9 +103,10 @@ validation:
 | Path | Description |
 |------|-------------|
 | `~/.teamEvolver/config.yaml` | Main configuration file |
-| `~/.teamEvolver/skills/` | Local Skill cache directory |
+| `~/.hermes/skills/` | Default local Skill directory |
+| `~/.teamEvolver/aggregation/` | Team-memory aggregation Skill, fingerprints, and incremental state |
 | `~/.teamEvolver/teamEvolver.pid` | Daemon PID file |
-| `~/.teamEvolver/logs/` | Log directory |
+| `~/.teamEvolver/teamEvolver.log` | Default daemon log |
 
 ## Startup & Management
 
@@ -121,7 +138,7 @@ teamEvolver stop
 
 ```bash
 # In Daemon mode
-tail -f ~/.teamEvolver/logs/teamEvolver.log
+tail -f ~/.teamEvolver/teamEvolver.log
 ```
 
 ## Verify Installation
@@ -134,7 +151,7 @@ curl -fsS http://localhost:52010/health
 curl -fsS http://localhost:52010/status | python -m json.tool
 
 # 3. Access console
-# Open http://localhost:52010/console in browser
+# Open http://localhost:52010/ in browser
 
 # 4. Run tests (for source installation)
 python -m pytest tests/ -v

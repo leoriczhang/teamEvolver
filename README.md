@@ -19,7 +19,7 @@
 
 ## 产品定位
 
-teamEvolver 位于 Agent 运行时之外，负责团队能力的持续进化与治理。它接收真实 Session 和领域资料，提取可追溯 Evidence，生成 Skill Candidate 或 Memory Change，再经过静态检查、True Replay、人工门禁、版本发布和受控分发形成闭环。
+teamEvolver 位于 Agent 运行时之外，负责团队能力的持续进化与治理。它接收真实 Session 和领域资料，提取可追溯 Evidence，生成 Skill Candidate 或 Memory Change，再经过静态检查、True Replay、按需人工门禁、版本发布和受控分发形成闭环。
 
 它不是另一个 Agent Runtime，也不是文件同步脚本：
 
@@ -55,9 +55,9 @@ Checklist 是完成门禁，不是加权分数。通过门禁后，True Replay �
 | Skill Evolution | 总结、裁判、分组、改进/新建/冲突合并、同源 Test Dataset 生成 |
 | True Replay | 在真实 Agent Runtime 中并行运行 Baseline/Candidate，校验 Checklist、轨迹、产物和效率 |
 | Candidate Governance | 候选评审、强制/按回放发布、版本详情、完整 Bundle Diff、回滚与审计 |
-| Memory Evolution | DreamCycle 团队概况、去重、清理、新人可发现性、个人经验团队化及 Memory Replay |
-| Skill Workspace | `SKILL.md` 与多文件 Bundle 的创建、编辑、导入、版本管理和 Skill Lab |
-| Context Workspace | 个人/团队 Memory 与 Skill 的检索、分级读取、引用回执和使用归因 |
+| Memory Evolution | DreamCycle 维护、跨 User 团队记忆聚合、可编辑聚合 Skill、增量编译及 Memory Replay |
+| Agent Workspace | 在一个文件管理界面浏览个人/团队 Skills、Memory、Resources，支持多文件 Diff 与批量保存 |
+| Skill / Memory Lab | 用历史 Session 构建数据集，对 Skill 草稿或 Memory 草稿执行 Baseline/Candidate 真回放 |
 | SkillMiner | 从文档知识源生成 Skill、语义报告、`EVALUATION.md` 和内部 Benchmark |
 | Agent Protocol V1 | 注册、身份映射、Context、Session ingest、Replay Branch、Skill Sync |
 | Observability | Langfuse Session 导入，以及模型、工具、Skill Evolution、DreamCycle 全链路追踪 |
@@ -99,7 +99,7 @@ flowchart TB
         API["FastAPI"]
         Evolution["Skill Evolution"]
         Replay["Validation Worker / True Replay"]
-        Memory["DreamCycle"]
+        Memory["DreamCycle / Team Memory Aggregation"]
         Mutation["SkillMutationService / Outbox"]
     end
 
@@ -145,12 +145,23 @@ teamEvolver start --daemon
 teamEvolver status
 ```
 
-打开 `http://127.0.0.1:52010/`。首次访问创建管理员，然后在控制台配置：
+打开 `http://127.0.0.1:52010/`。首次访问会直接进入管理员初始化页，默认表单值为 `admin`，请在生产环境改用强密码。登录后按以下顺序配置：
 
 1. **全局模型**：OpenAI-compatible Base URL、Model 与 API Key。
-2. **OpenViking**：选择本地或云端部署，配置个人空间与团队空间。
-3. **Agent Integration**：注册 Runtime，映射外部 Subject，启用 Session、Context、Replay 和 Skill Sync。
-4. **Langfuse**：按需启用 Session 拉取或链路追踪，两者可独立开关。
+2. **运行状态 → OpenViking 部署**：选择火山云或自建服务；远程自建实例通过 Endpoint 覆盖填写，例如 `http://10.0.0.8:1933`。
+3. **用户与权限**：配置用户、角色、Agent Subject 映射和个人/团队 Workspace 绑定。本地 Trusted 模式可复用服务 Key，无需给每个用户手工填写 Key。
+4. **Agent Integration**：注册 Runtime，启用 Session、Context、Replay 和 Skill Sync。
+5. **Langfuse 接入**：按需启用 Session 拉取、出站链路追踪或自定义 Trace 映射。
+
+控制台当前按五个区域组织：
+
+| 区域 | 主要入口 |
+| --- | --- |
+| 技能挖掘 | 挖掘总览、知识源、挖掘任务 |
+| 进化闭环 | 运行总览、候选评审、进化审计、过滤审计、Langfuse、Skills/团队 Memory 自进化 |
+| 资产中心 | Agent 工作空间、Skill Lab、Memory Lab、平台资产 |
+| 平台治理 | 全局模型、用户与权限、运行状态 |
+| 文档 | 内置双语文档阅读与搜索 |
 
 常用命令：
 
@@ -162,6 +173,13 @@ teamEvolver stop
 ```
 
 源码已包含构建后的控制台；只有修改 `web-ui/` 时才需要执行前端构建。
+
+也可以直接使用 Docker Compose。镜像会构建控制台、安装完整 Python 依赖并捆绑 OpenViking CLI，运行数据保存在仓库的 `runtime/` 目录：
+
+```bash
+docker compose up -d --build
+docker compose ps
+```
 
 ## Agent 接入
 
@@ -200,8 +218,10 @@ teamEvolver/
 │   ├── evolve/          # Evidence、Skill Evolution、Dataset、发布
 │   ├── validation/      # Candidate 队列与 True Replay Worker
 │   ├── dreamcycle/      # 团队 Memory 进化与 Memory Replay
+│   ├── aggregation/     # 跨 User 团队记忆聚合与增量状态
 │   ├── integrations/    # Agent V1、Hermes、Langfuse、Replay Adapter
 │   ├── proxy/           # FastAPI、控制台与 Workspace 接口
+│   ├── config_store/    # YAML 配置默认值、持久化与运行时桥接
 │   ├── skillminer/      # 文档技能挖掘
 │   ├── skills/          # Bundle、版本与 SkillMutationService
 │   └── storage/         # OpenViking 存储适配
@@ -220,7 +240,7 @@ teamEvolver/
 | 核心概念 | [架构总览](./docs/zh/concepts/01-architecture.md)、[进化闭环](./docs/zh/concepts/02-evolution-loop.md)、[Skill 体系](./docs/zh/concepts/03-skills.md)、[Memory & DreamCycle](./docs/zh/concepts/04-memory.md)、[True Replay](./docs/zh/concepts/06-true-replay.md) |
 | 使用指南 | [配置参考](./docs/zh/guides/01-configuration.md)、[生产部署](./docs/zh/guides/02-deployment.md)、[Web 控制台](./docs/zh/guides/03-console.md)、[可观测性](./docs/zh/guides/04-observability.md)、[故障排查](./docs/zh/guides/06-troubleshooting.md) |
 | Agent 接入 | [接入概览](./docs/zh/agent-integrations/01-overview.md)、[Protocol V1 规范](./docs/zh/agent-integrations/02-protocol-v1.md)、[Hermes 接入](./docs/zh/agent-integrations/03-hermes.md)、[自定义接入](./docs/zh/agent-integrations/05-custom-agent.md) |
-| API 参考 | [API 概览](./docs/zh/api/01-overview.md)、[Agent 注册](./docs/zh/api/02-agent-register.md)、[Session 上报](./docs/zh/api/03-session-ingest.md)、[Context Workspace](./docs/zh/api/04-context-workspace.md)、[Skill 管理](./docs/zh/api/09-skills-admin.md) |
+| API 参考 | [API 概览](./docs/zh/api/01-overview.md)、[Agent 注册](./docs/zh/api/02-agent-register.md)、[Session 上报](./docs/zh/api/03-session-ingest.md)、[Context Workspace](./docs/zh/api/04-context-workspace.md)、[Skill 管理](./docs/zh/api/09-skills-admin.md)、[团队记忆聚合](./docs/zh/api/11-team-memory-aggregation.md) |
 | 设计文档 | [Master PRD](./docs/design/01-master-prd.md)、[DreamCycle 评估](./docs/design/02-dreamcycle-snapshot-evaluation.md)、[OpenViking 能力调研](./docs/design/03-openviking-capabilities.md) |
 
 ### 文档同步约定

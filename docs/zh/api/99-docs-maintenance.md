@@ -24,10 +24,10 @@
 docs/
 ├── zh/                   # 中文文档
 │   ├── getting-started/  # 开始使用（01-03）
-│   ├── concepts/         # 核心概念（01-08）
+│   ├── concepts/         # 核心概念（01-09）
 │   ├── guides/           # 使用指南（01-08）
 │   ├── agent-integrations/  # Agent 接入文档（01-05）
-│   ├── api/              # API 参考文档（01-10, 99）
+│   ├── api/              # API 参考文档（01-11, 99）
 │   ├── faq/              # 常见问题
 │   └── about/            # 关于
 ├── en/                   # 英文文档（镜像 zh/ 结构）

@@ -175,13 +175,7 @@ _DEFAULTS: dict = {
         # User-editable OKF Skill consumed by ov compile.
         "okf_skill_uri": "viking://agent/skills/team-memory-okf",
         "insight_skill_uri": "",
-        # Optional aggregation-only override. Empty means reuse the admin
-        # service key from sharing.viking_team_api_key.
-        "root_api_key": "",
-        # Fixed seed for deterministic per-user key derivation via the admin
-        # regenerate-key endpoint. Same (user, seed) always yields the same key,
-        # making runs idempotent. NOTE: first use rebinds each user's key to the
-        # seed-derived one (old key invalidated).
+        # Compatibility field; the current runtime does not derive user keys.
         "key_seed": "teamevolver-aggregation",
         # Scratch dir suffix for per-user staging + tree-reduce intermediates.
         # Lives in a SIBLING root (viking://resources/<prefix>-<staging_dir>),

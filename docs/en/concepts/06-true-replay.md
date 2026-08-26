@@ -127,7 +127,7 @@ DreamCycle-produced team Memory Changes (merged, deduplicated, cleaned memory en
 | Candidate source | Skill Candidate pending release | Memory Change's `after_content` (DreamCycle merge/dedup output) |
 | Snapshot replacement | Replace target Skill entry in `skill_bundles[]` | Replace changed Memory entry in `memory_entries[]` |
 | Trigger | Skill Evolution pipeline Validate stage | Triggered manually/automatically after DreamCycle completes merge |
-| Entry API | `POST /api/validation/candidates/{id}/replay` | `POST /api/dreamcycle/memory-replay` |
+| Entry API | `POST /api/validation/candidates/{job_id}/evaluate` | Recorded change: `POST /trigger-dreamcycle/memory-changes/{change_id}/true-replay`; Workspace draft: `POST /api/openviking/memory/true-replay` |
 
 ### Execution Flow
 

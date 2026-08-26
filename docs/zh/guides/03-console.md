@@ -1,287 +1,166 @@
 # Web 控制台用户指南
 
-teamEvolver 提供功能完善的 Web 控制台，用于监控进化状态、管理技能、配置参数、审核候选等。控制台默认随 `teamEvolver start` 启动，访问地址为 `http://<host>:<port>`（默认 `http://127.0.0.1:52010`）。
+teamEvolver 控制台与 API 共用一个 FastAPI 服务，默认地址为 `http://127.0.0.1:52010/`。前端源码位于 `web-ui/src/`，生产构建位于 `teamEvolver/web/dist/`。
 
-前端源码位于 `web-ui/src/`，构建产物位于 `teamEvolver/web/dist/`。
+## 登录与初始化
 
-## 访问控制台
+首次访问时，如果系统还没有用户，控制台会打开管理员初始化页。表单默认填入账号和密码 `admin`，生产环境应在提交前改用强密码。初始化完成后，其他成员可以在登录页注册普通用户；管理员可在「用户与权限」中调整角色和空间绑定。
 
-启动服务后，在浏览器中打开服务地址即可访问。如果启用了用户认证，首次访问需要登录。默认管理员账号需要通过 CLI 创建。
+控制台登录使用 HttpOnly Session Cookie。普通用户只能查看和编辑自己的个人资产；管理员可以切换用户并管理团队资产。
 
-```bash
-teamEvolver start
-# 打开 http://127.0.0.1:52010
-```
+## 导航结构
+
+| 一级区域 | 页面 | 用途 |
+|----------|------|------|
+| 技能挖掘 | 挖掘总览、知识源、挖掘任务 | 管理文档知识源，运行三阶段 SkillMiner，审核和提交产物 |
+| 进化闭环 | 运行总览、Langfuse 接入、进化链路 | 查看 Session → Candidate → Replay → Publish 状态，配置 Skill 与 Memory 进化 |
+| 资产中心 | Agent 工作空间、平台资产 | 管理 Agent 可引用资产，或只读检查平台内部存储 |
+| 平台治理 | 全局模型、用户与权限、运行状态 | 管理模型、身份、OpenViking 部署和系统健康 |
+| 文档 | 使用文档 | 阅读和搜索仓库内的中英文 Markdown 文档 |
+
+页面可通过 `?view=<key>` 直接打开，例如 `/?view=workspace` 或 `/?view=health`。
+
+## 技能挖掘
+
+### 挖掘总览
+
+汇总知识源、挖掘任务、产物和运行状态，并提供常用入口。
+
+### 知识源
+
+知识源页面支持：
+
+- 上传文档并执行后处理
+- 创建、重命名、合并和删除知识源目录
+- 浏览源文件及处理状态
+- 将选定目录直接带入新挖掘任务
+
+### 挖掘任务
+
+每个任务按以下阶段运行：
+
+1. 样本包构建
+2. 语义发现
+3. Skill 与 `EVALUATION.md` 编译
+4. 可选反思轮次与 Benchmark
+
+任务支持并行执行、停止、删除、失败诊断复制、人工补证和继续运行。完成后可以预览或编辑 Markdown 产物，并将 Skill 提交到 Candidate 验证链路。
+
+## 进化闭环
+
+### 运行总览
+
+「运行总览」包含四个标签页：
+
+- **总览**：服务状态、Session 队列和历史、候选摘要、Skill 版本
+- **候选评审**：Candidate 详情、Bundle Diff、True Replay 结果和发布决策
+- **进化审计**：每个进化周期消费的 Session、生成的 Candidate 和发布结果
+- **过滤审计**：Session 在入队前的价值分类和跳过原因
+
+Candidate 必须先满足 Checklist 完成门禁，再按交互轮次、工具调用数、Token 用量依次比较效率。管理员可以按评估结果发布，也可以在明确知晓风险时强制发布。
+
+### Langfuse 接入
+
+Langfuse 页面把两条相互独立的链路放在一起管理：
+
+- **入站 Session 拉取**：按 environment、user、tags、release、version、trace name 等条件预览和导入 Session
+- **出站链路追踪**：记录 teamEvolver 内部模型与工具调用
+
+管理员还可以编辑 `map_trace(trace, observations)`，用内置样例或粘贴的 Trace 试运行，并对比自定义映射与内置映射结果。映射失败时单条 Session 回退到内置转换，不中断整批导入。
+
+### 进化链路
+
+页面顶部提供两个标签：
+
+- **Skills 自进化**：展示进化阶段图、可编辑 Prompt、阶段模型参数、过程参数和真实输入/输出测试
+- **团队 Memory 自进化**：执行跨 User 记忆聚合
+
+团队 Memory 聚合采用三步操作：
+
+1. 输入或确认 OpenViking Account，选择增量或全量模式。
+2. 拉取 Account 用户列表，使用全选、全不选或反选确定参与用户。
+3. 明确确认后启动后台任务，并持续轮询分组进度。
+
+页面刷新后会从服务端恢复最近任务；服务进程重启会清空这份运行列表。管理员可在同页编辑「团队记忆聚合 Skill」，并配置最终输出前缀。默认最终目录为 `viking://resources/shared-knowledge/`，中转数据位于同级 `viking://resources/shared-knowledge-staging/`。
 
 ## Agent 工作空间
 
-Agent 工作空间统一展示 Agent 可引用的个人与团队 Skills、Memory 和 Resources。页面默认处于**浏览模式**，文件内容只读。
+Agent 工作空间只展示 Agent 可引用的资产，分为：
 
-批量修改 Memory 或 Skill 时：
+| Workspace | 内容 |
+|-----------|------|
+| 个人 Workspace | 个人 Skills、个人 Memory、个人 Resources |
+| 团队 Workspace | 团队 Skills、团队 Memory、团队 Resources |
 
-1. 点击顶部“编辑”进入编辑模式。
-2. 依次打开并修改多个 Memory 或 Skill 文件；切换文件或个人/团队 Workspace 不会丢失草稿。
-3. 点击“完成编辑”，在同一个窗口审阅全部文件的行级 Diff。
-4. 点击“确认保存”统一提交变更。服务端会校验编辑开始时的内容哈希；文件若已被其他人更新，本次提交会被拒绝，所有草稿继续保留。
+文件树支持搜索、Markdown/JSON/代码预览、源码查看和目录 L0/L1 摘要。自建 OpenViking 会提供 Studio 链接；系统检测到 `ov` CLI 时还会显示内置 CLI。
 
-Resources、无写权限的团队资产和平台资产始终只读。
+### 多文件编辑
 
-## Dashboard 仪表盘
+1. 点击「编辑」进入编辑模式。
+2. 依次修改多个 Memory 或 Skill 文件；切换文件或 Workspace 不会丢失草稿。
+3. 点击「完成编辑」，逐条查看带编号的行级 Diff。
+4. 点击「确认保存」批量提交。
 
-仪表盘是控制台的首页，提供系统运行状态的全局视图。
+服务端会比较编辑开始时的内容哈希。任一文件已被其他写入者修改时返回 409，所有草稿继续保留。单文件上限 2 MB，单次最多 100 个文件、总计 16 MB。Resources 与平台资产不允许通过该编辑器写入。
 
-![控制台仪表盘](/assets/teamEvolver-console-dashboard.png)
+### Skill Lab
 
-### 状态卡片
+Skill Lab 使用已保存的 Skill 作为 Baseline、当前草稿作为 Candidate。可以管理或从历史 Session 合成测试集，运行真实 A/B Replay，并查看 Checklist、分支输出、轮次、工具调用和 Token 对比。实验结果不会自动覆盖正式 Skill。
 
-页面顶部的状态卡片展示核心指标：
+### Memory Lab
 
-- **服务状态**：显示当前服务是否正常运行，以及 PID 和端口信息
-- **进化循环**：显示上次进化时间、下次预计进化时间、当前轮次状态
-- **队列状态**：等待处理的会话数量
-- **技能总数**：本地技能库中的技能数量
-- **待审核候选**：等待人工审核或正在校验的候选技能数量
-- **DreamCycle 状态**：记忆维护引擎的运行状态（若启用）
+Memory Lab 从个人或团队 Memory 中选择文本文件，编辑只用于实验的草稿，并比较改动前后的 Context 注入或 True Replay 结果。草稿不会自动写回 OpenViking；确认有效后再回到 Workspace 编辑流程保存。
 
-### 会话队列
+## 平台资产
 
-展示当前等待进入进化流水线的会话列表，包含以下信息：
+平台资产是只读视图，只展示 teamEvolver 自身运行所需的目录，例如：
 
-- 会话 ID
-- 会话标题/摘要
-- 摄入时间
-- 用户别名
-- 价值分类结果（valuable/skipped/duplicate）
-- 注入的技能列表
-- 指标分数
+- `sessions/`、`session_archive/`、`session_ledger/`
+- `candidate_skills/`、`validation_*`
+- `skill_lab/`、`skill_datasets/`、`evolution_datasets/`
+- `skill_evidence/`、`memory-changes/`、`memory-replays/`
+- `skill_mutation_commits/`、`skill_sync_outbox/`
 
-点击单条会话可查看完整对话内容、工具调用轨迹和评分详情。
+这些内容不会作为 Agent Workspace 资产直接提供给 Agent。
 
-### 会话历史
+## 平台治理
 
-展示历史会话和进化周期记录。每个周期记录包含：
+### 全局模型
 
-- 时间戳
-- 参与会话数量
-- 进化的技能分组
-- 上传到云端的技能数量
-- 排队的候选数量
-- 评分结果和决策理由
+管理员可配置 OpenAI-compatible Base URL、Model ID、API Key、Max Tokens 和 Temperature，并直接测试连接。保存后会热更新进化与挖掘使用的全局模型；阶段级覆盖仍在「进化链路」中管理。
 
-可按会话 ID 过滤查看特定会话触发的进化。
+### 用户与权限
 
-### 待审核候选
+该页面管理：
 
-展示正在校验或等待人工审核的候选技能列表。每个候选显示：
+- 团队显示名称
+- 用户账号、角色、显示名、邮箱和密码
+- `integration_id + external_subject` 的 Agent 身份映射
+- 个人与团队 OpenViking Workspace 绑定
 
-- 技能名称
-- 提议动作（improve/optimize_description/create）
-- 当前校验状态（evaluating/open/rejected/published）
-- 回放效率对比（轮次、工具调用、Token 变化）
-- Checklist 通过情况
-- 提交时间
+Trusted 自建 OpenViking 会自动把个人空间绑定到同名用户，并复用服务 Key 完成服务端访问。云端部署可为用户配置独立个人凭据。普通用户只能读取自己的资料和密钥状态，管理员可以管理全部用户。
 
-点击候选可进入详细审核页面，查看技能差异、回放详情、Checklist 报告，并做出通过/拒绝决策。
+### 运行状态
 
-### 技能版本
+运行状态页聚合服务、OpenViking、模型、用户注册表、团队 Skill 和 Agent Integration 的检查结果，并显示队列与 Candidate 数量。
 
-展示技能库中每个技能的版本历史，包括：
+「OpenViking 部署」面板支持：
 
-- 技能名称
-- 当前版本号
-- 最后更新时间
-- 版本变更说明
-- 效果指标（注入次数、有效率）
+- 火山云 OpenViking
+- 本机自建 OpenViking
+- 远程自建 OpenViking，通过 Endpoint 覆盖填写可达地址
+- Account、默认个人用户、团队用户、资源根前缀和服务/个人 Key
 
-## 进化流水线视图
+保存后服务会热重载 OpenViking、DreamCycle 和嵌入式进化集成，无需重启主进程。
 
-进化流水线视图提供完整的 11 阶段流水线可视化和调试能力。
+## 内置文档
 
-![进化流水线](/assets/teamEvolver-evolution-pipeline.png)
+「文档 → 使用文档」自动扫描 `docs/zh/`、`docs/en/` 和 `docs/design/`。阅读器支持目录树、全文搜索、中英文切换、GFM 表格、代码块和仓库图片。
 
-### 流水线阶段
+## 相关文档
 
-流水线包含以下 11 个阶段节点（8 个 LLM 阶段 + 3 个逻辑/IO/门禁节点）：
-
-| 阶段 | 类型 | 说明 |
-|------|------|------|
-| Ingest（会话入队） | IO | 会话经 `/ingest_session` 或 Langfuse 拉取后进入队列 |
-| Session Filter（价值分类） | LLM | 判断会话属于技能证据、用户记忆、普通任务还是闲聊 |
-| Summarize（会话总结） | LLM | 构建无损轨迹并生成轨迹感知摘要 |
-| Judge（会话评分） | LLM | 对会话补打质量/效率/工具使用维度分 |
-| Group（按技能分组） | 逻辑 | 按引用的技能将会话分桶，无技能归入 no-skill 桶 |
-| Evolve（改进技能） | LLM | 对已有技能基于证据决定改进/优化/新建/跳过 |
-| Create（新建技能） | LLM | 从 no-skill 桶识别可复用模式并生成新技能 |
-| Merge（冲突合并） | LLM | 合并同名技能的两个进化版本 |
-| Dataset Synthesis（测试集生成） | LLM | 生成带 Checklist 的渐进式测试数据集 |
-| Validate（真回放校验） | 门禁 | 基于初始 Query 逐轮披露 Checklist，对比效率基线 |
-| Replay Checklist（Checklist 裁判） | LLM | 逐条核验回放结果是否满足 Checklist |
-| Publish（发布） | IO | 通过校验的候选写入技能库并同步云端 |
-
-节点之间通过有向边连接，可视化展示数据流向。
-
-### 可编辑 Prompt
-
-点击任何 LLM 阶段节点，可以查看和编辑该阶段使用的系统 Prompt。详见 [Prompt Studio 指南](./08-prompt-studio.md)。
-
-### 模型参数调优
-
-每个 LLM 阶段支持独立配置模型参数：
-
-- **Temperature**：采样温度（0.0-2.0）
-- **Max Tokens**：最大输出 token 数
-- **Model**：可指定该阶段使用的模型（留空则使用全局 LLM 配置）
-
-### 测试面板
-
-每个 LLM 阶段提供测试面板，可以：
-
-1. 选择一个真实历史会话作为测试输入
-2. 编辑 Prompt（临时测试，不保存）
-3. 运行测试，查看该阶段实际发送的 System Message、User Message 和模型输出
-4. 对比修改前后的输出差异
-5. 满意后保存为 Prompt 覆盖
-
-## 技能管理
-
-技能管理页面用于管理本地技能库和云端同步的技能。
-
-### 技能列表
-
-展示所有技能，支持按名称、分类、状态过滤：
-
-- 技能名称和描述
-- 分类（category）
-- 版本号
-- 最后修改时间
-- 注入次数和有效率统计
-- 本地/云端同步状态
-
-### 技能编辑
-
-点击技能进入在线编辑器：
-
-- 支持 Markdown 格式编辑 SKILL.md
-- 实时预览渲染效果
-- 编辑 Frontmatter 元数据（名称、描述、分类、标签）
-- 保存后立即生效
-- 提供版本历史和回滚功能
-
-### 技能导入导出
-
-- **导入**：支持 ZIP 文件批量导入技能，或通过拖拽上传单个 SKILL.md
-- **导出**：将选中技能导出为 ZIP 包
-- **云端同步**：手动触发 pull/push/sync 操作
-  - Pull：从 OpenViking 拉取共享技能
-  - Push：将本地技能推送到云端（受质量门槛过滤）
-  - Sync：双向同步（先 pull 再 push）
-
-### 技能版本
-
-每个技能维护完整的版本历史：
-
-- 自动版本号（v1, v2, ...）
-- 版本差异对比（diff 视图）
-- 一键回滚到任意历史版本
-- 版本备注（谁在何时因为什么原因修改）
-
-版本回滚操作会生成一个新版本记录，不会删除历史。
-
-## Memory 工作区
-
-Memory 工作区用于管理 teamEvolver 的用户记忆空间（需要启用 DreamCycle）。
-
-- **记忆列表**：查看当前记忆空间中的所有记忆条目
-- **记忆搜索**：语义搜索记忆内容
-- **记忆编辑**：手动添加、修改或删除记忆
-- **记忆审计**：查看 DreamCycle 各 Job 对记忆的修改日志
-- **Blackboard**：DreamCycle 协作黑板，展示当前推理状态
-
-## DreamCycle Studio
-
-DreamCycle Studio 用于配置和监控记忆维护引擎。
-
-- **Job 开关**：启用/禁用各个 DreamCycle Job（team_overview、deduplication、cleanup、onboarding_check、consolidate）
-- **调度配置**：设置活跃时间窗口、每窗口轮次、轮次间隔
-- **Job Prompt 编辑**：为每个 Job 自定义系统 Prompt
-- **Job 参数**：配置每个 Job 的模型参数（temperature、max_tokens、model）
-- **运行历史**：查看每次 DreamCycle 窗口的执行报告
-- **手动触发**：立即触发一次 DreamCycle 运行
-- **记忆健康度**：查看记忆去重率、覆盖率等指标
-
-## Langfuse 集成面板
-
-Langfuse 面板用于配置和监控 Langfuse 集成状态。
-
-- **连接状态**：显示是否能连接到 Langfuse 服务
-- **入站拉取配置**：配置从 Langfuse 拉取会话的过滤条件（environment、user_id、tags 等）
-- **出站追踪配置**：配置 LLM 调用追踪参数（采样率、环境标签、内容捕获开关）
-- **凭证管理**：设置 public_key 和 secret_key（密钥不回显，仅显示是否已配置）
-- **手动拉取**：手动触发一次 Langfuse 会话拉取
-- **SDK 状态**：显示 Langfuse Python SDK 是否已安装、追踪是否已初始化
-
-## 模型设置
-
-模型设置页面用于配置全局 LLM 参数：
-
-- **Provider**：模型提供商
-- **Base URL**：API 端点地址
-- **Model ID**：模型名称
-- **Max Tokens**：最大输出 token
-- **Temperature**：默认采样温度
-- **API Key**：API 密钥（输入后掩码显示，不返回明文）
-
-修改后立即生效，无需重启服务。
-
-## 用户管理
-
-用户管理页面（仅管理员可见）用于控制台用户账号管理：
-
-- **用户列表**：显示所有用户、角色、最后登录时间
-- **创建用户**：添加新用户，设置用户名、密码、角色（admin/user）
-- **角色管理**：修改用户角色
-- **重置密码**：重置用户密码
-- **Agent 映射**：查看和管理 Agent subject 到用户的映射关系（用于 Agent 接入时的权限控制）
-- **禁用/启用**：禁用或启用用户账号
-
-## 审计日志
-
-审计日志记录所有重要的配置变更和操作：
-
-- 配置项修改（谁、何时、改了什么、旧值/新值）
-- 技能变更（创建、修改、删除、发布、回滚）
-- 候选审核决策（通过/拒绝、审核人、理由）
-- 用户管理操作（创建用户、修改角色、重置密码）
-- Langfuse 拉取和推送操作
-- 手动触发的进化/DreamCycle 运行
-
-日志支持按时间范围、操作类型、操作人过滤。
-
-## 健康状态页面
-
-健康状态页面提供系统内部状态详情：
-
-- 各组件健康状态（LLM 连接、OpenViking 连接、Langfuse 连接、会话存储、校验 Worker）
-- 配置快照（不含密钥）
-- 队列深度和处理延迟
-- 最近错误日志
-- 资源使用情况
-
-## OpenViking 工作区
-
-如果配置了 OpenViking 共享后端，可以通过控制台浏览云端共享的技能和资源：
-
-- 浏览团队空间和个人空间
-- 查看共享技能详情
-- 从云端直接导入技能到本地
-- 管理 Viking 路径前缀和权限
-
-## Skill Miner 控制台
-
-Skill Miner 提供独立的 Web 控制台用于文档到技能的挖掘工作流，详见 [Skill Miner 指南](./07-skill-miner.md)。统一控制台中也提供了 Skill Miner 入口，包括：
-
-- 挖掘任务提交和状态监控
-- Benchmark 运行和结果查看
-- LIFT 集成审核和发布
-- 覆盖报告查看
-- 挖掘 Prompt 白盒配置
+- [配置参考](./01-configuration.md)
+- [Skill Miner 指南](./07-skill-miner.md)
+- [Prompt Studio 指南](./08-prompt-studio.md)
+- [存储空间与目录布局](../concepts/09-storage-layout.md)
+- [团队记忆聚合 API](../api/11-team-memory-aggregation.md)
