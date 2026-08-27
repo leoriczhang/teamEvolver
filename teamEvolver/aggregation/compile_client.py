@@ -37,7 +37,7 @@ class CompileClient:
     agent_id: str = "team-skill-evolver"
     timeout_seconds: float = 3000.0
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, *, shared_skill: bool = False) -> dict[str, str]:
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -48,6 +48,11 @@ class CompileClient:
         }
         if self.user_id.strip():
             headers["X-OpenViking-User"] = self.user_id.strip()
+        if shared_skill:
+            # Shared Skill publication needs the trusted admin assertion and
+            # must not be narrowed to one actor-peer view.
+            headers["X-OpenViking-Role"] = "admin"
+            headers.pop("X-OpenViking-Actor-Peer", None)
         return headers
 
     @staticmethod
@@ -163,7 +168,10 @@ class CompileClient:
                     "POST",
                     f"{self.endpoint.rstrip('/')}/api/v1/skills",
                     json=body,
-                    headers=self._headers(),
+                    headers=self._headers(
+                        shared_skill=parent_uri.rstrip("/")
+                        == "viking://agent/skills"
+                    ),
                 )
         except httpx.HTTPError as exc:
             return {
@@ -182,6 +190,7 @@ class CompileClient:
     async def get_skill(self, *, skill_name: str) -> dict[str, Any]:
         """Read the account-shared Skill with a content-addressed revision."""
         operation = f"GET /api/v1/skills/{skill_name}"
+        expected_root_uri = f"viking://agent/skills/{skill_name}".rstrip("/")
         try:
             async with self._client() as client:
                 response = await self._request_with_retry(
@@ -194,7 +203,7 @@ class CompileClient:
                         "include_files": "true",
                         "include_integrity": "true",
                     },
-                    headers=self._headers(),
+                    headers=self._headers(shared_skill=True),
                 )
         except httpx.HTTPError as exc:
             return {
@@ -208,6 +217,20 @@ class CompileClient:
         payload = self._payload(response)
         if not response.is_success:
             return self._failure(operation, response, payload)
+        actual_root_uri = (
+            str(payload.get("root_uri") or "").rstrip("/")
+            if isinstance(payload, dict)
+            else ""
+        )
+        if actual_root_uri != expected_root_uri:
+            return {
+                "ok": False,
+                "exit_code": 404,
+                "command": ["http", operation],
+                "stdout": "",
+                "stderr": f"Shared Skill not found at {expected_root_uri}",
+                "result": payload,
+            }
         return self._success(operation, payload)
 
     async def publish_shared_skill(
@@ -238,7 +261,7 @@ class CompileClient:
                             "PUT",
                             f"{self.endpoint.rstrip('/')}/api/v1/skills/{skill_name}",
                             json=body,
-                            headers=self._headers(),
+                            headers=self._headers(shared_skill=True),
                         )
                 except httpx.HTTPError as exc:
                     return {

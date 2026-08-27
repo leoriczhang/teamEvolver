@@ -218,6 +218,46 @@ def test_inventory_fingerprint_is_stable_across_listing_order(monkeypatch) -> No
     assert first.files == second.files
 
 
+def test_inventory_listing_is_non_recursive_and_time_bounded(monkeypatch) -> None:
+    client_options: list[dict] = []
+    calls: list[dict] = []
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            del args
+            client_options.append(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, _url, *, params, headers):
+            del headers
+            calls.append(params)
+            return _Response(200, {"status": "ok", "result": []})
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    client = DeterministicStagingClient(
+        endpoint="http://openviking.example",
+        account_id="default",
+        source_user_id="alice",
+        source_api_key="alice-secret",
+        target_user_id="admin",
+        target_api_key="admin-secret",
+        timeout_seconds=3000,
+    )
+
+    asyncio.run(client.inspect(["events"]))
+
+    # A large memory tree must never be fetched via one recursive listing:
+    # OpenViking has no pagination there and a deep tree walk 504s. Staging
+    # descends with cheap non-recursive listings on a short, dedicated timeout.
+    assert calls[0]["recursive"] == "false"
+    assert client_options[0]["timeout"] == 60.0
+
+
 def test_snapshot_discards_pending_copy_when_source_changes(monkeypatch) -> None:
     source = StagingSource(
         uri="viking://user/alice/memories/events/a.md",

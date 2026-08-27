@@ -123,31 +123,51 @@ def test_phase_one_uses_bounded_workers_for_ten_thousand_users(
     assert pending_tasks < 100
 
 
-def test_staging_inventory_scans_each_users_memory_tree_once(monkeypatch) -> None:
+def test_staging_inventory_walks_deep_memory_without_recursive_listing(
+    monkeypatch,
+) -> None:
+    """A large/deep memory tree is enumerated with cheap non-recursive listings.
+
+    A single recursive whole-tree ``ls`` is what makes OpenViking time out
+    (504) on users with real memory, because that endpoint has no pagination
+    and a high ``node_limit`` forces a deep tree walk. Staging must instead
+    descend directory-by-directory so arbitrarily large memory is collected in
+    full, without ever issuing a recursive listing and without truncation.
+    """
     calls = []
 
-    class Response:
-        status_code = 200
-        is_success = True
+    # Immediate children per directory URI (non-recursive listing shape).
+    tree = {
+        "viking://user/alice/memories": [
+            {"uri": "viking://user/alice/memories/profile.md", "isDir": False,
+             "size": 10, "modTime": "2026-08-01T00:00:00Z"},
+            {"uri": "viking://user/alice/memories/events", "isDir": True},
+            {"uri": "viking://user/alice/memories/secrets", "isDir": True},
+        ],
+        "viking://user/alice/memories/events": [
+            {"uri": "viking://user/alice/memories/events/launch.md", "isDir": False,
+             "size": 20, "modTime": "2026-08-02T00:00:00Z"},
+            {"uri": "viking://user/alice/memories/events/2026", "isDir": True},
+        ],
+        "viking://user/alice/memories/events/2026": [
+            {"uri": "viking://user/alice/memories/events/2026/q1.md", "isDir": False,
+             "size": 30, "modTime": "2026-08-03T00:00:00Z"},
+        ],
+        # Not a requested kind; must never be listed or collected.
+        "viking://user/alice/memories/secrets": [
+            {"uri": "viking://user/alice/memories/secrets/key.md", "isDir": False,
+             "size": 40, "modTime": "2026-08-04T00:00:00Z"},
+        ],
+    }
 
-        @staticmethod
-        def json():
-            return {
-                "result": [
-                    {
-                        "uri": "viking://user/alice/memories/profile.md",
-                        "rel_path": "profile.md",
-                        "isDir": False,
-                        "modTime": "2026-08-01T00:00:00Z",
-                    },
-                    {
-                        "uri": "viking://user/alice/memories/events/event.md",
-                        "rel_path": "events/event.md",
-                        "isDir": False,
-                        "modTime": "2026-08-02T00:00:00Z",
-                    },
-                ]
-            }
+    class Response:
+        def __init__(self, payload):
+            self.status_code = 200
+            self.is_success = True
+            self._payload = payload
+
+        def json(self):
+            return {"status": "ok", "result": self._payload}
 
     class FakeAsyncClient:
         def __init__(self, *args, **kwargs):
@@ -160,8 +180,8 @@ def test_staging_inventory_scans_each_users_memory_tree_once(monkeypatch) -> Non
             return None
 
         async def get(self, url, *, params, headers):
-            calls.append((url, params, headers))
-            return Response()
+            calls.append((url, dict(params), headers))
+            return Response(tree.get(params["uri"], []))
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
     client = DeterministicStagingClient(
@@ -173,13 +193,22 @@ def test_staging_inventory_scans_each_users_memory_tree_once(monkeypatch) -> Non
         target_api_key="team-secret",
     )
 
-    inventory = asyncio.run(client.inspect(["profile", "events", "tools"]))
+    inventory = asyncio.run(client.inspect(["profile", "events"]))
 
-    assert {source.kind for source in inventory.files} == {"profile", "events"}
+    # Deep files are fully collected, not just the first directory level.
+    assert [source.relative_path for source in inventory.files] == [
+        "events/2026/q1.md",
+        "events/launch.md",
+        "profile.md",
+    ]
     assert inventory.fingerprint.startswith("sha256:")
-    assert len(calls) == 1
-    assert calls[0][1]["uri"] == "viking://user/alice/memories"
-    assert calls[0][1]["recursive"] == "true"
+    # Every listing is non-recursive (the fix), regardless of tree depth.
+    assert calls, "inspect issued no listing calls"
+    assert all(call[1]["recursive"] == "false" for call in calls)
+    listed_uris = {call[1]["uri"] for call in calls}
+    assert "viking://user/alice/memories/events/2026" in listed_uris
+    # Unrequested top-level kinds are never descended into.
+    assert "viking://user/alice/memories/secrets" not in listed_uris
 
 
 def test_run_status_details_are_bounded_for_large_accounts() -> None:

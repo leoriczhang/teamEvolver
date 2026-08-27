@@ -243,6 +243,80 @@ def test_publish_shared_skill_updates_once_and_returns_revision(monkeypatch) -> 
     assert update[2]["version_message"] == "Update aggregation rules"
 
 
+def test_publish_shared_skill_does_not_accept_user_skill_fallback(monkeypatch) -> None:
+    calls = []
+    installed = False
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url, *, params, headers):
+            assert headers["X-OpenViking-Role"] == "admin"
+            assert "X-OpenViking-Actor-Peer" not in headers
+            calls.append(("GET", url, params))
+            root_uri = (
+                "viking://agent/skills/team-memory-okf"
+                if installed
+                else "viking://user/team/skills/team-memory-okf"
+            )
+            return _FakeResponse(
+                200,
+                {
+                    "status": "ok",
+                    "result": {
+                        "root_uri": root_uri,
+                        "content": "shared body",
+                        "revision": "shared-revision",
+                    },
+                },
+            )
+
+        async def post(self, url, *, json, headers):
+            nonlocal installed
+            assert headers["X-OpenViking-Role"] == "admin"
+            assert "X-OpenViking-Actor-Peer" not in headers
+            calls.append(("POST", url, json))
+            installed = True
+            return _FakeResponse(
+                200,
+                {
+                    "status": "ok",
+                    "result": {
+                        "root_uri": "viking://agent/skills/team-memory-okf",
+                    },
+                },
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    client = CompileClient(
+        endpoint="http://openviking.example",
+        account_id="default",
+        user_id="team",
+        api_key="root-secret",
+        timeout_seconds=5,
+    )
+
+    result = asyncio.run(
+        client.publish_shared_skill(
+            skill_name="team-memory-okf",
+            skill_body="shared body",
+            version_message="Publish shared aggregation Skill",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["root_uri"] == "viking://agent/skills/team-memory-okf"
+    assert [call[0] for call in calls] == ["GET", "POST", "GET"]
+    assert calls[1][2]["target_uri"] == "viking://agent/skills"
+
+
 def test_compile_submit_retries_transient_connection_failure(monkeypatch) -> None:
     attempts = 0
 

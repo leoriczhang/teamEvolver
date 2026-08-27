@@ -18,8 +18,11 @@ from typing import Any, Iterable
 import httpx
 
 _STAGING_FORMAT = "teamevolver-memory-snapshot-v1"
-_SOURCE_FILE_LIMIT = 100_000
-_SOURCE_NODE_LIMIT = _SOURCE_FILE_LIMIT + 1
+# Per-directory listing bound. The tree is walked one directory at a time
+# (non-recursive), so this caps entries within a single directory, not the
+# whole memory tree. Total memory size is unbounded across directories.
+_SOURCE_NODE_LIMIT = 10_000
+_INSPECT_TIMEOUT_SECONDS = 60.0
 _CHUNK_TARGET_BYTES = 4 * 1024 * 1024
 _BATCH_TARGET_BYTES = 12 * 1024 * 1024
 _BATCH_MAX_OPERATIONS = 200
@@ -97,9 +100,14 @@ class DeterministicStagingClient:
             api_key=self.target_api_key,
         )
 
-    def _client(self) -> httpx.AsyncClient:
+    def _client(self, *, timeout_seconds: float | None = None) -> httpx.AsyncClient:
+        timeout = (
+            max(1.0, timeout_seconds)
+            if timeout_seconds is not None
+            else max(30.0, self.timeout_seconds + 30.0)
+        )
         return httpx.AsyncClient(
-            timeout=max(30.0, self.timeout_seconds + 30.0),
+            timeout=timeout,
             follow_redirects=False,
         )
 
@@ -171,71 +179,113 @@ class DeterministicStagingClient:
         first = relative_path.split("/", 1)[0]
         return first[:-3] if first.endswith(".md") else first
 
+    async def _list_dir(
+        self,
+        client: httpx.AsyncClient,
+        uri: str,
+    ) -> list[dict[str, Any]]:
+        """Return the immediate children of one directory (non-recursive).
+
+        A missing directory (e.g. a requested kind the user never created) is
+        treated as empty so the walk simply skips it.
+        """
+        try:
+            response = await self._request_with_retry(
+                client,
+                "GET",
+                f"{self.endpoint.rstrip('/')}/api/v1/fs/ls",
+                params={
+                    "uri": uri,
+                    "recursive": "false",
+                    "node_limit": str(_SOURCE_NODE_LIMIT),
+                    "output": "original",
+                },
+                headers=self._source_headers,
+            )
+        except httpx.HTTPError as exc:
+            raise StagingError(f"OpenViking Memory inventory failed: {exc}") from exc
+        if response.status_code == 404:
+            return []
+        if not response.is_success:
+            raise StagingError(
+                f"OpenViking Memory inventory failed: {self._error_message(response)}"
+            )
+        payload = self._payload(response)
+        if not isinstance(payload, list):
+            raise StagingError(
+                "OpenViking Memory inventory returned an invalid response"
+            )
+        return payload
+
     async def inspect(self, kinds: Iterable[str]) -> StagingInventory:
-        """List selected Memory files once and compute a stable inventory hash."""
+        """Enumerate selected Memory files and compute a stable inventory hash.
+
+        Enumeration walks the tree breadth-first with cheap **non-recursive**
+        directory listings, descending only into requested kinds. A single
+        recursive whole-tree listing is deliberately avoided: OpenViking's
+        ``fs/ls`` has no pagination, so a recursive walk of a real user's
+        memory forces a deep server-side traversal that times out (504). Per
+        directory listings stay small and bounded no matter how large or deep
+        the memory is, so arbitrarily large memory is copied in full.
+        """
         selected = tuple(
             sorted({str(kind).strip() for kind in kinds if str(kind).strip()})
         )
         requested = set(selected)
         source_root = f"viking://user/{self.source_user_id}/memories"
-        try:
-            async with self._client() as client:
-                response = await self._request_with_retry(
-                    client,
-                    "GET",
-                    f"{self.endpoint.rstrip('/')}/api/v1/fs/ls",
-                    params={
-                        "uri": source_root,
-                        "recursive": "true",
-                        "node_limit": str(_SOURCE_NODE_LIMIT),
-                        "output": "original",
-                    },
-                    headers=self._source_headers,
-                )
-        except httpx.HTTPError as exc:
-            raise StagingError(f"OpenViking Memory inventory failed: {exc}") from exc
-        if response.status_code == 404:
-            entries: list[Any] = []
-        elif not response.is_success:
-            raise StagingError(
-                f"OpenViking Memory inventory failed: {self._error_message(response)}"
-            )
-        else:
-            payload = self._payload(response)
-            if not isinstance(payload, list):
-                raise StagingError(
-                    "OpenViking Memory inventory returned an invalid response"
-                )
-            entries = payload
-        if len(entries) >= _SOURCE_NODE_LIMIT:
-            raise StagingError(
-                "OpenViking Memory inventory exceeds the deterministic staging "
-                f"limit of {_SOURCE_FILE_LIMIT} entries"
-            )
 
         files: list[StagingSource] = []
-        for entry in entries:
-            if not isinstance(entry, dict) or bool(entry.get("isDir")):
-                continue
-            relative_path = self._relative_path(entry, source_root)
-            if PurePosixPath(relative_path).name.startswith("."):
-                continue
-            kind = self._kind_for_path(relative_path)
-            if kind not in requested:
-                continue
-            uri = str(entry.get("uri") or "").strip()
-            if not uri.startswith(f"{source_root}/"):
-                raise StagingError(f"source URI escaped the Memory root: {uri!r}")
-            size = entry.get("size")
-            files.append(
-                StagingSource(
-                    uri=uri,
-                    relative_path=relative_path,
-                    kind=kind,
-                    size=int(size) if isinstance(size, int) and size >= 0 else 0,
-                    modified_at=str(entry.get("modTime") or ""),
+        seen_uris: set[str] = set()
+        async with self._client(timeout_seconds=_INSPECT_TIMEOUT_SECONDS) as client:
+            # Start at the memory root and descend only into requested kinds.
+            # The kind is the top-level path component, so this uniformly
+            # handles a top-level file (``profile.md``) and a kind directory
+            # (``events/...``) at any depth.
+            pending: list[str] = [source_root]
+            first_level = True
+            while pending:
+                results = await asyncio.gather(
+                    *(self._list_dir(client, uri) for uri in pending)
                 )
-            )
+                pending = []
+                for entries in results:
+                    for entry in entries:
+                        if not isinstance(entry, dict):
+                            continue
+                        uri = str(entry.get("uri") or "").strip()
+                        if not uri.startswith(f"{source_root}/"):
+                            raise StagingError(
+                                f"source URI escaped the Memory root: {uri!r}"
+                            )
+                        if uri in seen_uris:
+                            continue
+                        seen_uris.add(uri)
+                        relative_path = self._relative_path(entry, source_root)
+                        kind = self._kind_for_path(relative_path)
+                        # Below the root every node already sits inside a
+                        # requested kind; at the root, gate on the kind name.
+                        if first_level and kind not in requested:
+                            continue
+                        if bool(entry.get("isDir")):
+                            pending.append(uri)
+                            continue
+                        if PurePosixPath(relative_path).name.startswith("."):
+                            continue
+                        if kind not in requested:
+                            continue
+                        size = entry.get("size")
+                        files.append(
+                            StagingSource(
+                                uri=uri,
+                                relative_path=relative_path,
+                                kind=kind,
+                                size=int(size)
+                                if isinstance(size, int) and size >= 0
+                                else 0,
+                                modified_at=str(entry.get("modTime") or ""),
+                            )
+                        )
+                first_level = False
         files.sort(key=lambda item: (item.relative_path, item.uri))
 
         digest = hashlib.sha256()
