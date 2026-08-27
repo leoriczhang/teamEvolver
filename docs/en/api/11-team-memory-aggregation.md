@@ -8,7 +8,7 @@ Aggregation uses an account-shared Skill with a two-phase, tree-reduce model:
 
 - **Shared Skill preparation:** the aggregation Skill is published once at `viking://agent/skills/team-memory-okf`. A run pins its content-addressed revision; the Skill is used only by Phase 2 compile tasks.
 - **Phase 1 (deterministic staging):** each User identity reads its visible Memory text and writes a stable JSONL snapshot containing source URIs and content hashes. This phase invokes neither a model nor a Skill. A snapshot is written to a temporary directory and atomically moved to an immutable source-fingerprint path.
-- **Phase 2 (tree-reduce merge):** as the team/admin identity and with the pinned Skill revision, staging snapshots are merged in bounded batches of `merge_fan_in` (default 4, ≤15). Above `partition_threshold`, output is published into stable hash partitions below the final root.
+- **Phase 2 (tree-reduce merge):** as the team/admin identity and with the pinned Skill revision, staging snapshots are merged in bounded batches of `merge_fan_in` (default 4, ≤15). Above `partition_threshold`, stable hash partitions exist only in the private work root and are reduced again into the final semantic tree.
 
 Additional behavior: concurrent Phase 1 (`phase1_concurrency`), source-fingerprint incremental skipping, failure isolation, and resumable reruns. Staging and `_merge` live under the merge identity's private Resources tree; only final team Memory is written to account-shared `viking://resources/...`. Skill changes invalidate merge output without recopying user Memory.
 
@@ -137,8 +137,8 @@ Query a task's live progress (group-level status).
 | `finished_at` | number\|null | Finish timestamp (null while running) |
 | `error` | string | Failure reason (when failed) |
 | `source_user_count` | integer | Number of selected source users |
-| `publish_mode` | string | `single` or `partitioned` |
-| `partition_count` | integer | Active publish partitions |
+| `publish_mode` | string | `single` or `semantic` |
+| `partition_count` | integer | Private temporary partitions used by the run |
 | `estimated_merge_tasks` | integer | Planned merge compile count |
 | `group_total` | integer | Total processed groups |
 | `group_counts` | object | Group totals by `ok`, `skipped`, and `failed` |
@@ -420,8 +420,8 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 | `phase1_concurrency` | 6 | Maximum concurrent per-user snapshot copies |
 | `merge_fan_in` | 4 | Phase 2 tree-reduce fan-in width (2–15) |
 | `merge_concurrency` | 4 | Concurrent merge groups |
-| `partition_threshold` | 512 | User count that enables partitioned publication |
-| `partition_count` | 256 | Fixed hash partition count |
+| `partition_threshold` | 512 | User count that enables private partitioned reduction |
+| `partition_count` | 256 | Fixed private hash partition count |
 | `run_detail_limit` | 2000 | Maximum retained status detail rows |
 | `compile_runtime_timeout_seconds` | 3000 | Per-compile runtime timeout |
 | `state_dir` | empty (default `~/.teamEvolver/aggregation`) | Storage dir for incremental state and Skill content; state is isolated by endpoint, Account, and target URI |
@@ -431,9 +431,9 @@ Config is registered in three places: `teamEvolver/config_store/defaults.py`, `t
 ### Limits and scale
 
 - `ov compile` has a hard limit of 16 sources per task and 128 output pages/files.
-- Phase 2 keeps every compile at or below `merge_fan_in` (≤15) sources. Runs above 512 users publish stable partitions so the 128-page per-compile output limit does not cap the complete team corpus.
+- Phase 2 keeps every compile at or below `merge_fan_in` (≤15) sources. Runs above 512 users use stable private partitions, then perform a final semantic reduction into `target_uri`; hash directories never appear in the shared output.
 - Phase 1 makes no model calls. Incremental runs recopy only changed/failed users and recompile only affected merge branches.
-- A deterministic 10,000-user planning test verifies bounded worker count, all 256 stable partitions, and roughly 3,600 merge tasks for a full initial run. This is operationally resumable, not instantaneous.
+- A deterministic 10,000-user planning test verifies bounded worker count, all 256 private partitions, and roughly 3,700 merge tasks for a full initial run. This is operationally resumable, not instantaneous; the final result remains a Skill-defined distilled view.
 - Skill uploads and compile submissions retry connection-establishment failures up to three times with exponential backoff. Other POST failures are not replayed because the upstream may already have accepted the request. Compile-status polling is an idempotent GET and retries transient transport failures.
 
 ### Compile capacity diagnostics

@@ -200,8 +200,8 @@ API-key mode reads existing plaintext User Keys from the Admin user list and nev
 | `phase1_concurrency` | integer | `6` | Maximum concurrent per-user deterministic snapshots. |
 | `merge_fan_in` | integer | `4` | Maximum tree-reduce sources per merge, constrained to 2–15. |
 | `merge_concurrency` | integer | `4` | Maximum concurrent merge groups. |
-| `partition_threshold` | integer | `512` | Staged-user count above which output uses fixed hash partitions. |
-| `partition_count` | integer | `256` | Stable publish partition count, constrained to 16–1024. |
+| `partition_threshold` | integer | `512` | Staged-user count above which merge uses private fixed hash partitions. |
+| `partition_count` | integer | `256` | Private temporary partition count, constrained to 16–1024. |
 | `run_detail_limit` | integer | `2000` | Maximum group detail rows retained in a live status payload. |
 | `compile_runtime_timeout_seconds` | integer | `3000` | Per-compile timeout in seconds, minimum 60. |
 | `state_dir` | string | `""` | Aggregation state directory; empty uses `~/.teamEvolver/aggregation/`. |

@@ -312,7 +312,7 @@ def test_compile_submit_retries_transient_connection_failure(monkeypatch) -> Non
     assert attempts == 2
 
 
-def test_partition_manifest_upsert_and_stale_partition_delete(monkeypatch) -> None:
+def test_stale_public_partition_delete(monkeypatch) -> None:
     calls = []
 
     class FakeAsyncClient:
@@ -325,33 +325,11 @@ def test_partition_manifest_upsert_and_stale_partition_delete(monkeypatch) -> No
         async def __aexit__(self, exc_type, exc, tb):
             return None
 
-        async def post(self, url, *, json, headers):
-            calls.append(("POST", url, json, headers))
-            return _FakeResponse(
-                200,
-                {"status": "ok", "result": {"updated": [json["operations"][0]["uri"]]}},
-            )
-
         async def delete(self, url, *, params, headers):
             calls.append(("DELETE", url, params, headers))
             return _FakeResponse(
                 200,
                 {"status": "ok", "result": {"uri": params["uri"]}},
-            )
-
-        async def get(self, url, *, params, headers):
-            calls.append(("GET", url, params, headers))
-            return _FakeResponse(
-                200,
-                {
-                    "status": "ok",
-                    "result": [
-                        {
-                            "uri": "viking://resources/team-memory/partitions",
-                            "isDir": True,
-                        }
-                    ],
-                },
             )
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
@@ -363,31 +341,11 @@ def test_partition_manifest_upsert_and_stale_partition_delete(monkeypatch) -> No
         timeout_seconds=5,
     )
 
-    upserted = asyncio.run(
-        client.upsert_text(
-            root_uri="viking://resources/team-memory",
-            uri="viking://resources/team-memory/index.md",
-            content="# Team Memory\n",
-        )
-    )
     deleted = asyncio.run(
         client.delete_uri(
             uri="viking://resources/team-memory/partitions/ff",
         )
     )
-    listed = asyncio.run(
-        client.list_children(uri="viking://resources/team-memory")
-    )
 
-    assert upserted["ok"] is True
     assert deleted["ok"] is True
-    assert listed["ok"] is True
-    assert calls[0][2]["operations"] == [
-        {
-            "uri": "viking://resources/team-memory/index.md",
-            "content": "# Team Memory\n",
-            "mode": "upsert",
-        }
-    ]
-    assert calls[1][2]["recursive"] == "true"
-    assert calls[2][2]["recursive"] == "false"
+    assert calls[0][2]["recursive"] == "true"

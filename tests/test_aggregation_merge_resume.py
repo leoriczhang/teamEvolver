@@ -315,8 +315,8 @@ def test_ten_thousand_users_are_assigned_to_stable_publish_partitions(
     estimated_tasks = sum(
         service._tree_compile_task_count(len(items))
         for items in partitions.values()
-    )
-    assert 3_000 < estimated_tasks < 4_000
+    ) + service._tree_compile_task_count(len(partitions))
+    assert 3_600 < estimated_tasks < 3_700
     original_assignment = {
         uri: partition
         for partition, items in partitions.items()
@@ -347,7 +347,7 @@ def test_ten_thousand_users_are_assigned_to_stable_publish_partitions(
     assert updated_partition == original_assignment[roots[1]]
 
 
-def test_large_account_publishes_partitions_instead_of_one_lossy_root(
+def test_large_account_uses_private_partitions_then_publishes_semantic_root(
     tmp_path,
 ) -> None:
     service = MemoryAggregationService(
@@ -399,20 +399,15 @@ def test_large_account_publishes_partitions_instead_of_one_lossy_root(
         )
     state.save(skill_fingerprint="skill-v1")
     compile_targets: list[str] = []
-    manifests: list[tuple[str, str]] = []
 
     class Client:
         async def run_batch(self, **kwargs):
             compile_targets.append(kwargs["target_uri"])
             return {"ok": True}
 
-        async def upsert_text(self, *, root_uri, uri, content):
-            assert root_uri == target_uri
-            manifests.append((uri, content))
-            return {"ok": True}
-
         async def delete_uri(self, *, uri):
-            raise AssertionError(f"unexpected stale partition: {uri}")
+            assert uri == f"{target_uri}/partitions"
+            return {"ok": True}
 
     async def scenario() -> None:
         run = service.new_run(
@@ -432,17 +427,19 @@ def test_large_account_publishes_partitions_instead_of_one_lossy_root(
         assert any(
             group.group_key == "merge"
             and group.status == "ok"
-            and "partitions" in group.detail
+            and group.target_uri == target_uri
             for group in run.groups
         )
 
     asyncio.run(scenario())
 
     assert compile_targets
-    assert target_uri not in compile_targets
+    assert compile_targets[-1] == target_uri
     assert all(
-        target.startswith(f"{target_uri}/partitions/")
-        or target.startswith(f"{work_root}/_merge/partitions/")
+        target == target_uri or target.startswith(f"{work_root}/_merge/")
         for target in compile_targets
     )
-    assert manifests[0][0] == f"{target_uri}/index.md"
+    assert not any(
+        target.startswith(f"{target_uri}/partitions/")
+        for target in compile_targets
+    )

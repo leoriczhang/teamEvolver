@@ -265,50 +265,6 @@ class CompileClient:
             return current
         return await self.get_skill(skill_name=skill_name)
 
-    async def upsert_text(
-        self,
-        *,
-        root_uri: str,
-        uri: str,
-        content: str,
-    ) -> dict[str, Any]:
-        """Upsert one deterministic text file below a resource root."""
-        operation = "POST /api/v1/content/batch-write"
-        body = {
-            "root_uri": root_uri,
-            "operations": [
-                {
-                    "uri": uri,
-                    "content": content,
-                    "mode": "upsert",
-                }
-            ],
-            "wait": True,
-            "timeout": self.timeout_seconds,
-        }
-        try:
-            async with self._client() as client:
-                response = await self._request_with_retry(
-                    client,
-                    "POST",
-                    f"{self.endpoint.rstrip('/')}/api/v1/content/batch-write",
-                    json=body,
-                    headers=self._headers(),
-                )
-        except httpx.HTTPError as exc:
-            return {
-                "ok": False,
-                "exit_code": -1,
-                "command": ["http", operation],
-                "stdout": "",
-                "stderr": f"OpenViking content upsert failed: {exc}",
-                "result": None,
-            }
-        payload = self._payload(response)
-        if not response.is_success:
-            return self._failure(operation, response, payload)
-        return self._success(operation, payload)
-
     async def delete_uri(self, *, uri: str) -> dict[str, Any]:
         """Delete an obsolete resource subtree."""
         operation = "DELETE /api/v1/fs"
@@ -340,39 +296,6 @@ class CompileClient:
         if not response.is_success:
             return self._failure(operation, response, payload)
         return self._success(operation, payload)
-
-    async def list_children(self, *, uri: str) -> dict[str, Any]:
-        """List direct children of a resource directory."""
-        operation = "GET /api/v1/fs/ls"
-        try:
-            async with self._client() as client:
-                response = await self._request_with_retry(
-                    client,
-                    "GET",
-                    f"{self.endpoint.rstrip('/')}/api/v1/fs/ls",
-                    params={
-                        "uri": uri,
-                        "recursive": "false",
-                        "node_limit": "10000",
-                        "output": "original",
-                    },
-                    headers=self._headers(),
-                )
-        except httpx.HTTPError as exc:
-            return {
-                "ok": False,
-                "exit_code": -1,
-                "command": ["http", operation],
-                "stdout": "",
-                "stderr": f"OpenViking content list failed: {exc}",
-                "result": None,
-            }
-        payload = self._payload(response)
-        if response.status_code == 404:
-            return self._success(operation, [])
-        if not response.is_success:
-            return self._failure(operation, response, payload)
-        return self._success(operation, payload if isinstance(payload, list) else [])
 
     async def run_batch(
         self,

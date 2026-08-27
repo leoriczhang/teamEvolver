@@ -8,7 +8,7 @@
 
 - **共享 Skill 准备**：聚合 Skill 只发布一次到 `viking://agent/skills/team-memory-okf`。每次任务固定其内容 revision；该 Skill 只在 Phase 2 的 compile 中生效。
 - **Phase 1（确定性 staging）**：使用每个 User 的身份读取可见 Memory 原文，按稳定顺序写成带来源 URI 和内容哈希的 JSONL 快照。此阶段不调用模型、不执行 Skill。快照先写临时目录，再原子移动到由源指纹命名的不可变目录。
-- **Phase 2（tree-reduce 合并）**：以 team/admin 身份和固定 Skill revision，将 staging 快照按 `merge_fan_in`（默认 4，≤15）分批做多级归并；超过 `partition_threshold` 后，在最终根下按固定哈希分区发布。
+- **Phase 2（tree-reduce 合并）**：以 team/admin 身份和固定 Skill revision，将 staging 快照按 `merge_fan_in`（默认 4，≤15）分批做多级归并；超过 `partition_threshold` 后，固定哈希分区只存在于私有工作根，随后再次归并成最终语义目录。
 
 其它特性：Phase 1 并发执行（`phase1_concurrency`）、源指纹增量跳过、失败隔离与断点续跑。staging 和 `_merge` 位于 merge 身份的私有 Resources 空间；只有最终团队 Memory 写入 account 共享的 `viking://resources/...`。修改 Skill 只使 merge 失效，不会重新复制用户原文。
 
@@ -137,8 +137,8 @@ API-key 模式要求 OpenViking Admin 用户列表返回完整 `api_key`。如�
 | `finished_at` | number\|null | 结束时间戳（未结束为 null） |
 | `error` | string | 失败原因（失败时） |
 | `source_user_count` | integer | 本次选择的源用户数 |
-| `publish_mode` | string | `single` 或 `partitioned` |
-| `partition_count` | integer | 当前发布分区数 |
+| `publish_mode` | string | `single` 或 `semantic` |
+| `partition_count` | integer | 本次使用的私有临时分区数 |
 | `estimated_merge_tasks` | integer | 预计 merge compile 数 |
 | `group_total` | integer | 已处理分组总数 |
 | `group_counts` | object | `ok`、`skipped`、`failed` 分组计数 |
@@ -425,8 +425,8 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 | `phase1_concurrency` | 6 | Phase 1 并发快照用户数 |
 | `merge_fan_in` | 4 | Phase 2 tree-reduce 扇入宽度（2–15） |
 | `merge_concurrency` | 4 | merge 分组并发数 |
-| `partition_threshold` | 512 | 启用分区发布的用户数阈值 |
-| `partition_count` | 256 | 固定哈希分区数 |
+| `partition_threshold` | 512 | 启用私有分区归并的用户数阈值 |
+| `partition_count` | 256 | 固定私有哈希分区数 |
 | `run_detail_limit` | 2000 | 实时状态保留的最大明细数 |
 | `compile_runtime_timeout_seconds` | 3000 | 单次 compile 运行超时 |
 | `state_dir` | 空（默认 `~/.teamEvolver/aggregation`） | 增量状态与 Skill 内容存储目录；状态按 Endpoint、Account 与目标 URI 隔离 |
@@ -436,9 +436,9 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 ### 上限与规模
 
 - `ov compile` 单任务源数硬上限为 16，产物数上限为 128。
-- Phase 2 保证每次 compile 源数 ≤ `merge_fan_in`（≤15）。超过 512 用户后按固定分区发布，避免单次 compile 的 128 页上限截断整个团队语料。
+- Phase 2 保证每次 compile 源数 ≤ `merge_fan_in`（≤15）。超过 512 用户后使用稳定私有分区，再归并到 `target_uri`；共享输出中不会出现哈希目录。
 - Phase 1 不产生模型调用；日常增量运行仅重复制变化/失败用户，并重编译受影响的 merge 分支。
-- 确定性的 10,000 用户规划测试验证了有界 worker、256 个稳定分区，以及首次全量约 3,600 次 merge compile。该规模可断点续跑，但不是即时任务。
+- 确定性的 10,000 用户规划测试验证了有界 worker、256 个私有分区，以及首次全量约 3,700 次 merge compile。该规模可断点续跑但不是即时任务；最终结果仍是 Skill 定义的提炼视图。
 - Skill 上传和 compile 提交只对连接建立失败做最多 3 次指数退避重试，避免重复提交已被上游接受的 POST；compile 状态轮询是幂等 GET，可对瞬时传输错误重试。
 
 ### Compile 容量诊断

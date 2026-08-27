@@ -36,7 +36,7 @@ type AggregationRun = {
   group_total?: number;
   groups_truncated?: boolean;
   source_user_count?: number;
-  publish_mode?: "single" | "partitioned";
+  publish_mode?: "single" | "semantic";
   partition_count?: number;
   estimated_merge_tasks?: number;
 };
@@ -556,7 +556,7 @@ export default function TeamMemoryAggregationView({
                     <div>用户上限：<code>{settings.account_user_limit}</code></div>
                     <div>staging 并发：<code>{settings.phase1_concurrency}</code></div>
                     <div>merge：<code>{settings.merge_fan_in} × {settings.merge_concurrency}</code></div>
-                    <div>分区发布：<code>{settings.partition_threshold}+ → {settings.partition_count}</code></div>
+                    <div>私有临时分区：<code>{settings.partition_threshold}+ → {settings.partition_count}</code></div>
                   </div>
                 </div>
               </div>
@@ -644,8 +644,8 @@ export default function TeamMemoryAggregationView({
                 <span>失败 {run.group_counts.failed || 0}</span>
                 <span>用户 {run.source_user_count || 0}</span>
                 <span>
-                  {run.publish_mode === "partitioned"
-                    ? `${run.partition_count || 0} 个发布分区`
+                  {run.publish_mode === "semantic"
+                    ? `${run.partition_count || 0} 个临时分区 → 语义根`
                     : "单根发布"}
                 </span>
                 <span>预计 merge {run.estimated_merge_tasks || 0}</span>

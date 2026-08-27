@@ -1153,6 +1153,7 @@ class MemoryAggregationService:
     ) -> bool:
         """Publish one root for small runs or stable partitions for large runs."""
         if len(staged_roots) <= self._partition_threshold():
+            previous_mode = str(state.metadata.get("publish_mode") or "")
             run.publish_mode = "single"
             run.partition_count = 1
             run.estimated_merge_tasks = self._tree_compile_task_count(
@@ -1171,7 +1172,16 @@ class MemoryAggregationService:
             if not completed:
                 state.save(skill_fingerprint=state.skill_fingerprint)
                 return False
-            if state.metadata.get("publish_mode") == "partitioned":
+            if previous_mode in {"partitioned", "semantic_partition_reduce"}:
+                deleted = await client.delete_uri(
+                    uri=(
+                        f"{run.work_root or self._work_root(run.target_uri)}"
+                        "/_merge/partitions"
+                    )
+                )
+                if not deleted.get("ok"):
+                    return False
+            if previous_mode == "partitioned":
                 deleted = await client.delete_uri(
                     uri=f"{run.target_uri}/partitions"
                 )
@@ -1184,12 +1194,12 @@ class MemoryAggregationService:
             return True
 
         partitions = self._partition_staged_roots(staged_roots)
-        run.publish_mode = "partitioned"
+        run.publish_mode = "semantic"
         run.partition_count = len(partitions)
         run.estimated_merge_tasks = sum(
             self._tree_compile_task_count(len(roots))
             for roots in partitions.values()
-        )
+        ) + self._tree_compile_task_count(len(partitions))
         width = max(2, len(f"{self._partition_count() - 1:x}"))
         partition_plans = [
             (f"{partition:0{width}x}", roots)
@@ -1208,10 +1218,13 @@ class MemoryAggregationService:
                 skill_revision=skill_revision,
                 force_all=force_all,
                 state=state,
-                target_root=f"{run.target_uri}/partitions/{label}",
+                target_root=(
+                    f"{run.work_root or self._work_root(run.target_uri)}"
+                    f"/_merge/partitions/{label}/semantic"
+                ),
                 merge_work_root=(
                     f"{run.work_root or self._work_root(run.target_uri)}"
-                    f"/_merge/partitions/{label}"
+                    f"/_merge/partitions/{label}/tree"
                 ),
                 group_prefix=f"merge:partition:{label}",
                 compact_state=False,
@@ -1227,134 +1240,71 @@ class MemoryAggregationService:
             state.save(skill_fingerprint=state.skill_fingerprint)
             return False
 
-        previous_mode = str(state.metadata.get("publish_mode") or "")
-        if not previous_mode and isinstance(state.groups.get("merge"), dict):
-            previous_mode = "single"
-        if previous_mode == "single":
-            listed = await client.list_children(uri=run.target_uri)
-            if not listed.get("ok"):
-                return False
-            for entry in listed.get("result") or []:
-                child_uri = str(entry.get("uri") or "") if isinstance(entry, dict) else ""
-                if (
-                    not child_uri
-                    or child_uri == f"{run.target_uri}/partitions"
-                    or child_uri == f"{run.target_uri}/index.md"
-                ):
-                    continue
-                deleted = await client.delete_uri(uri=child_uri)
-                if not deleted.get("ok"):
-                    return False
-
         active_labels = [label for label, _completed in outcomes]
         previous_labels = {
             str(label)
             for label in state.metadata.get("active_partitions", [])
         }
-        stale_labels = sorted(previous_labels - set(active_labels))
-        for label in stale_labels:
-            stale_uri = f"{run.target_uri}/partitions/{label}"
-            deleted = await client.delete_uri(uri=stale_uri)
+        for label in sorted(previous_labels - set(active_labels)):
+            deleted = await client.delete_uri(
+                uri=(
+                    f"{run.work_root or self._work_root(run.target_uri)}"
+                    f"/_merge/partitions/{label}"
+                )
+            )
             if not deleted.get("ok"):
-                detail = (
-                    deleted.get("stderr")
-                    or deleted.get("stdout")
-                    or "partition cleanup failed"
-                )[:400]
-                self._append_group(run, GroupResult(
-                    group_key=f"merge:partition:{label}",
-                    kind="(all)",
-                    target_uri=stale_uri,
-                    source_count=0,
-                    status="failed",
-                    detail=detail,
-                ))
-                state.save(skill_fingerprint=state.skill_fingerprint)
                 return False
-
         partition_roots = [
-            f"{run.target_uri}/partitions/{label}"
+            (
+                f"{run.work_root or self._work_root(run.target_uri)}"
+                f"/_merge/partitions/{label}/semantic"
+            )
             for label in active_labels
         ]
-        manifest_fingerprint = self._merge_input_fingerprint(
-            [(uri, label) for uri, label in zip(partition_roots, active_labels)],
+        partition_fingerprints = {
+            root: str(
+                state.groups.get(
+                    f"merge:partition:{label}",
+                    {},
+                ).get("source_fingerprint") or ""
+            )
+            for label, root in zip(active_labels, partition_roots)
+        }
+        completed = await self._tree_reduce_merge(
+            run=run,
+            staged_roots=partition_roots,
+            client=client,
+            skill_uri=skill_uri,
             skill_revision=skill_revision,
+            force_all=force_all,
+            state=state,
+            target_root=run.target_uri,
+            merge_work_root=(
+                f"{run.work_root or self._work_root(run.target_uri)}"
+                "/_merge/final"
+            ),
+            group_prefix="merge",
+            compact_state=False,
+            source_fingerprints=partition_fingerprints,
         )
-        if (
-            force_all
-            or state.metadata.get("partition_manifest_fingerprint")
-            != manifest_fingerprint
-        ):
-            links = "\n".join(
-                f"- [Partition {label}]({uri})"
-                for label, uri in zip(active_labels, partition_roots)
-            )
-            manifest = (
-                "---\n"
-                "type: team-memory-index\n"
-                "title: Team Memory\n"
-                "---\n\n"
-                "# Team Memory\n\n"
-                f"Users: {len(staged_roots)}\n\n"
-                f"{links}\n"
-            )
-            published = await client.upsert_text(
-                root_uri=run.target_uri,
-                uri=f"{run.target_uri}/index.md",
-                content=manifest,
-            )
-            if not published.get("ok"):
-                detail = (
-                    published.get("stderr")
-                    or published.get("stdout")
-                    or "partition index publish failed"
-                )[:400]
-                self._append_group(run, GroupResult(
-                    group_key="merge",
-                    kind="(all)",
-                    target_uri=run.target_uri,
-                    source_count=len(active_labels),
-                    status="failed",
-                    detail=detail,
-                ))
-                state.save(skill_fingerprint=state.skill_fingerprint)
-                return False
+        if not completed:
+            state.save(skill_fingerprint=state.skill_fingerprint)
+            return False
 
-        aggregate_fingerprint = self._merge_input_fingerprint(
-            [
-                (
-                    root,
-                    str(
-                        state.groups.get(
-                            f"merge:partition:{label}",
-                            {},
-                        ).get("source_fingerprint") or ""
-                    ),
-                )
-                for label, root in zip(active_labels, partition_roots)
-            ],
-            skill_revision=skill_revision,
-        )
-        state.mark_ok("merge", aggregate_fingerprint)
+        if state.metadata.get("publish_mode") == "partitioned":
+            deleted = await client.delete_uri(
+                uri=f"{run.target_uri}/partitions"
+            )
+            if not deleted.get("ok"):
+                return False
         state.metadata.update(
             {
-                "publish_mode": "partitioned",
+                "publish_mode": "semantic_partition_reduce",
                 "active_partitions": active_labels,
-                "partition_manifest_fingerprint": manifest_fingerprint,
             }
         )
+        state.metadata.pop("partition_manifest_fingerprint", None)
         state.save(skill_fingerprint=state.skill_fingerprint)
-        self._append_group(run, GroupResult(
-            group_key="merge",
-            kind="(all)",
-            target_uri=run.target_uri,
-            source_count=len(active_labels),
-            status="ok",
-            detail=(
-                f"published {len(active_labels)} stable hash partitions "
-                f"for {len(staged_roots)} users"
-            ),
-        ))
         return True
 
     async def _tree_reduce_merge(
@@ -1371,6 +1321,7 @@ class MemoryAggregationService:
         merge_work_root: Optional[str] = None,
         group_prefix: str = "merge",
         compact_state: bool = True,
+        source_fingerprints: Optional[dict[str, str]] = None,
     ) -> bool:
         """Merge staging roots into the final root via bounded-fan-in tree reduce.
 
@@ -1395,10 +1346,12 @@ class MemoryAggregationService:
             ),
             run.account_id,
         )
-        staging_fingerprints = self._staging_source_fingerprints(
-            run=run,
-            state=state,
-            staged_roots=staged_roots,
+        staging_fingerprints = source_fingerprints or (
+            self._staging_source_fingerprints(
+                run=run,
+                state=state,
+                staged_roots=staged_roots,
+            )
         )
         current = [
             (

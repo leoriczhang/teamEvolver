@@ -23,7 +23,7 @@ The console entry **Evolution Pipeline → Team Memory Evolution** uses `MemoryA
 2. The service enumerates users with the Root/Admin Key. API-key mode also reads existing plaintext User Keys and excludes the team service user.
 3. The administrator selects users and chooses incremental or full mode.
 4. Phase 1 uses each User identity to read visible Memory text and deterministically copy it into the merge identity's private staging space; it invokes no model or Skill.
-5. Phase 2 uses the pinned Skill revision to tree-reduce groups of at most 15 sources. Large accounts publish fixed hash partitions instead of collapsing all content into one 128-page compile result.
+5. Phase 2 uses the pinned Skill revision to tree-reduce groups of at most 15 sources. Large accounts use fixed hash partitions only as private intermediate products, then run a final cross-partition semantic reduction into the configured team-Memory root.
 
 Default paths:
 
@@ -46,8 +46,9 @@ Changing the Skill invalidates affected merge output without recopying unchanged
 - Phase 1 snapshot-copy concurrency defaults to 6.
 - User inventory is fetched in stable 1,000-user pages, with a default safety limit of 50,000.
 - `merge_fan_in` defaults to 4 and is constrained to 2–15 to stay below the 16-source compile limit.
-- Accounts above 512 staged users publish up to 256 stable hash partitions. Adding or changing a user invalidates only that partition.
+- Accounts above 512 staged users use up to 256 stable private partitions. Adding or changing a user invalidates only that partition and the affected path to the final semantic root.
 - A 10,000-user full run currently plans roughly 3,600 merge compiles. It is resumable, but runtime and model cost remain deployment-dependent.
+- The final shared tree still follows the user-edited Skill's semantic directories. It is a distilled team-memory view; immutable raw snapshots remain private.
 - One user failure does not stop the others; the next incremental run retries failed or changed users.
 - Group checkpoints are appended immediately. Restarting the process clears the live run list but not completed snapshots or merge checkpoints.
 

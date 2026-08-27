@@ -200,8 +200,8 @@ API-key 模式读取 Admin 用户列表中的现存用户明文 Key，不执行 
 | `phase1_concurrency` | integer | `6` | Phase 1 用户级确定性快照最大并发数。 |
 | `merge_fan_in` | integer | `4` | tree-reduce 每轮合并的最大源数，运行时限制为 2–15。 |
 | `merge_concurrency` | integer | `4` | merge 分组最大并发数。 |
-| `partition_threshold` | integer | `512` | staging 用户超过该值后启用固定哈希分区发布。 |
-| `partition_count` | integer | `256` | 固定发布分区数，范围 16–1024。 |
+| `partition_threshold` | integer | `512` | staging 用户超过该值后启用私有固定哈希分区归并。 |
+| `partition_count` | integer | `256` | 私有临时分区数，范围 16–1024。 |
 | `run_detail_limit` | integer | `2000` | 实时状态中最多保留的分组明细数。 |
 | `compile_runtime_timeout_seconds` | integer | `3000` | 单个 compile 任务的运行超时秒数，最小 60。 |
 | `state_dir` | string | `""` | 聚合状态目录；留空使用 `~/.teamEvolver/aggregation/`。 |
