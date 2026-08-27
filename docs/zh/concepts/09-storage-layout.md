@@ -139,7 +139,7 @@ Agent 会话采集
 【并行】DreamCycle 维护团队记忆 → memory-changes/（变更账本）
 【隔离】peers/{账号}/ 存放个人级数据（个人技能等）
 【聚合】viking://user/<user>/memories/
-      → viking://resources/<shared_knowledge_prefix>-<staging_dir>/（中转）
+      → viking://user/<merge-user>/resources/teamEvolver/<staging_dir>/<target-hash>/（私有中转）
       → viking://resources/<shared_knowledge_prefix>/（团队 Memory）
 ```
 

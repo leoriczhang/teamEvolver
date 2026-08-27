@@ -86,8 +86,66 @@ def test_admin_user_inventory_reads_plaintext_keys_without_exposing_repr(
     assert [record.user_id for record in records] == ["admin", "alice", "team"]
     assert records[1].api_key == "alice-secret"
     assert "alice-secret" not in repr(records[1])
-    assert captured["params"] == {"limit": 10_000}
+    assert captured["params"] == {"limit": 1_000, "offset": 0}
     assert captured["headers"]["X-API-Key"] == "admin-secret"
+
+
+def test_admin_user_inventory_paginates_beyond_ten_thousand(monkeypatch) -> None:
+    total_users = 10_005
+    offsets: list[int] = []
+
+    class PageResponse:
+        status_code = 200
+        text = ""
+
+        def __init__(self, users: list[dict]) -> None:
+            self._users = users
+
+        def json(self) -> dict:
+            return {"status": "ok", "result": self._users}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, _url, *, params, headers):
+            del headers
+            offset = int(params["offset"])
+            limit = int(params["limit"])
+            offsets.append(offset)
+            end = min(total_users, offset + limit)
+            return PageResponse(
+                [
+                    {
+                        "user_id": f"user-{index:05d}",
+                        "role": "user",
+                        "api_key": f"key-{index:05d}",
+                    }
+                    for index in range(offset, end)
+                ]
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    builder = AccountSourceBuilder(
+        endpoint="https://openviking.example",
+        api_key="admin-secret",
+        account_id="default",
+        account_user_limit=20_000,
+        account_user_page_size=1_000,
+    )
+
+    records = asyncio.run(builder.list_account_user_credentials())
+
+    assert len(records) == total_users
+    assert records[0].user_id == "user-00000"
+    assert records[-1].user_id == "user-10004"
+    assert offsets == list(range(0, 11_000, 1_000))
 
 
 def test_api_key_mode_assigns_existing_user_keys_and_admin_merge_identity(

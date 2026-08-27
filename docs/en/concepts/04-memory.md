@@ -22,31 +22,34 @@ The console entry **Evolution Pipeline → Team Memory Evolution** uses `MemoryA
 1. The console defaults to the configured Endpoint, Account, and Trusted Root Key; the independent interface also supports API-key mode through `admin_key`.
 2. The service enumerates users with the Root/Admin Key. API-key mode also reads existing plaintext User Keys and excludes the team service user.
 3. The administrator selects users and chooses incremental or full mode.
-4. Phase 1 uses Root-Key identity assertion in Trusted mode and each User's own Key in API-key mode, then concurrently creates per-user staging output.
-5. Phase 2 tree-reduces groups of at most 15 sources into the final team-Memory root.
+4. Phase 1 uses each User identity to read visible Memory text and deterministically copy it into the merge identity's private staging space; it invokes no model or Skill.
+5. Phase 2 uses the pinned Skill revision to tree-reduce groups of at most 15 sources. Large accounts publish fixed hash partitions instead of collapsing all content into one 128-page compile result.
 
 Default paths:
 
 ```text
 Personal source  viking://user/<user>/memories/<kind>/
-Work root        viking://resources/shared-knowledge-staging/
+Work root        viking://user/<merge-user>/resources/teamEvolver/staging/<target-hash>/
 Final root       viking://resources/shared-knowledge/
 ```
 
-`shared_knowledge_prefix` and `staging_dir` are configurable. The work root is always a sibling of the final root, so intermediate `_merge` artifacts never enter the final tree or affect its L0/L1 summaries.
+`shared_knowledge_prefix` and `staging_dir` are configurable. The work root belongs to the merge identity's private Resources, so raw snapshots and `_merge` intermediates are not exposed through account-shared Resources. The final root contains only aggregated team Memory.
 
 ### Aggregation Skill
 
-The **Team Memory Aggregation Skill** defines the output structure. Administrators edit the complete `SKILL.md` in the console; it persists to `~/.teamEvolver/aggregation/okf_skill.md` by default. On the next run, the service installs it into each participating identity's own Skill space.
+The **Team Memory Aggregation Skill** defines the output structure. Administrators edit the complete `SKILL.md` in the console; it is published to the account-shared `viking://agent/skills/team-memory-okf` location with a version snapshot. The Skill executes only during Phase 2 merge.
 
-Changing the Skill forces the next incremental run to recompile all selected users. When a user's Memory is unchanged and its previous staging succeeded, incremental mode reuses that staging output.
+Changing the Skill invalidates affected merge output without recopying unchanged users. Incremental mode reuses an unchanged user's existing deterministic snapshot.
 
 ### Scale and Recovery
 
-- Phase 1 concurrency defaults to 6.
-- `merge_fan_in` defaults to 12 and is constrained to 2–15 to stay below the 16-source compile limit.
+- Phase 1 snapshot-copy concurrency defaults to 6.
+- User inventory is fetched in stable 1,000-user pages, with a default safety limit of 50,000.
+- `merge_fan_in` defaults to 4 and is constrained to 2–15 to stay below the 16-source compile limit.
+- Accounts above 512 staged users publish up to 256 stable hash partitions. Adding or changing a user invalidates only that partition.
+- A 10,000-user full run currently plans roughly 3,600 merge compiles. It is resumable, but runtime and model cost remain deployment-dependent.
 - One user failure does not stop the others; the next incremental run retries failed or changed users.
-- A page refresh restores recent runs from the current service process. Restarting the process clears the run list but not persisted fingerprints.
+- Group checkpoints are appended immediately. Restarting the process clears the live run list but not completed snapshots or merge checkpoints.
 
 See [Team Memory Aggregation API](../api/11-team-memory-aggregation.md) for the complete contract.
 
@@ -97,8 +100,13 @@ aggregation:
   enabled: true
   shared_knowledge_prefix: shared-knowledge
   staging_dir: staging
+  account_user_limit: 50000
+  account_user_page_size: 1000
   phase1_concurrency: 6
-  merge_fan_in: 12
+  merge_fan_in: 4
+  merge_concurrency: 4
+  partition_threshold: 512
+  partition_count: 256
 
 dreamcycle:
   enabled: false

@@ -15,9 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import time
-import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,42 +24,6 @@ import httpx
 _MAX_HTTP_OUTPUT_CHARS = 512 * 1024
 _HTTP_RETRY_ATTEMPTS = 3
 _HTTP_RETRY_BASE_SECONDS = 0.25
-
-
-# #region debug-point instrumentation:aggregation-compile-stall
-async def _debug_event(
-    hypothesis_id: str,
-    location: str,
-    message: str,
-    data: dict[str, Any],
-) -> None:
-    if os.environ.get("DEBUG_SESSION_ID") != "aggregation-compile-stall":
-        return
-    payload = json.dumps(
-        {
-            "sessionId": "aggregation-compile-stall",
-            "runId": os.environ.get("DEBUG_RUN_ID", "pre-fix"),
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "msg": f"[DEBUG] {message}",
-            "data": data,
-            "ts": int(time.time() * 1000),
-        }
-    ).encode()
-
-    def send() -> None:
-        request = urllib.request.Request(
-            os.environ.get("DEBUG_SERVER_URL", "http://127.0.0.1:7777/event"),
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        urllib.request.urlopen(request, timeout=0.5).read()
-
-    try:
-        await asyncio.to_thread(send)
-    except Exception:
-        pass
-# #endregion
 
 
 @dataclass
@@ -170,21 +132,9 @@ class CompileClient:
             try:
                 request = getattr(client, method.lower())
                 return await request(url, **kwargs)
-            except retryable as exc:
+            except retryable:
                 if attempt >= _HTTP_RETRY_ATTEMPTS:
                     raise
-                # #region debug-point E:compile-transport-retry
-                await _debug_event(
-                    "E",
-                    "aggregation.compile_client:_request_with_retry",
-                    "retrying transient OpenViking transport failure",
-                    {
-                        "method": method.upper(),
-                        "attempt": attempt,
-                        "error_type": type(exc).__name__,
-                    },
-                )
-                # #endregion
                 await asyncio.sleep(_HTTP_RETRY_BASE_SECONDS * (2 ** (attempt - 1)))
         raise RuntimeError("unreachable")
 
@@ -194,6 +144,7 @@ class CompileClient:
         skill_name: str,
         skill_body: str,
         parent_uri: str = "viking://agent/skills",
+        version_message: str = "",
     ) -> dict[str, Any]:
         """Install inline Skill content without exposing a host-local path."""
         operation = "POST /api/v1/skills"
@@ -203,6 +154,8 @@ class CompileClient:
             "timeout": self.timeout_seconds,
             "target_uri": parent_uri,
         }
+        if version_message.strip():
+            body["version_message"] = version_message.strip()
         try:
             async with self._client() as client:
                 response = await self._request_with_retry(
@@ -226,12 +179,208 @@ class CompileClient:
             return self._failure(operation, response, payload)
         return self._success(operation, payload)
 
+    async def get_skill(self, *, skill_name: str) -> dict[str, Any]:
+        """Read the account-shared Skill with a content-addressed revision."""
+        operation = f"GET /api/v1/skills/{skill_name}"
+        try:
+            async with self._client() as client:
+                response = await self._request_with_retry(
+                    client,
+                    "GET",
+                    f"{self.endpoint.rstrip('/')}/api/v1/skills/{skill_name}",
+                    params={
+                        "target_uri": "viking://agent/skills",
+                        "include_content": "true",
+                        "include_files": "true",
+                        "include_integrity": "true",
+                    },
+                    headers=self._headers(),
+                )
+        except httpx.HTTPError as exc:
+            return {
+                "ok": False,
+                "exit_code": -1,
+                "command": ["http", operation],
+                "stdout": "",
+                "stderr": f"OpenViking Skill read failed: {exc}",
+                "result": None,
+            }
+        payload = self._payload(response)
+        if not response.is_success:
+            return self._failure(operation, response, payload)
+        return self._success(operation, payload)
+
+    async def publish_shared_skill(
+        self,
+        *,
+        skill_name: str,
+        skill_body: str,
+        version_message: str,
+    ) -> dict[str, Any]:
+        """Create or replace one shared Skill, then return its exact revision."""
+        current = await self.get_skill(skill_name=skill_name)
+        if current.get("ok"):
+            detail = current.get("result") or {}
+            if str(detail.get("content") or "") != skill_body:
+                operation = f"PUT /api/v1/skills/{skill_name}"
+                body = {
+                    "data": skill_body,
+                    "wait": True,
+                    "timeout": self.timeout_seconds,
+                    "target_uri": "viking://agent/skills",
+                    "expected_revision": str(detail.get("revision") or ""),
+                    "version_message": version_message,
+                }
+                try:
+                    async with self._client() as client:
+                        response = await self._request_with_retry(
+                            client,
+                            "PUT",
+                            f"{self.endpoint.rstrip('/')}/api/v1/skills/{skill_name}",
+                            json=body,
+                            headers=self._headers(),
+                        )
+                except httpx.HTTPError as exc:
+                    return {
+                        "ok": False,
+                        "exit_code": -1,
+                        "command": ["http", operation],
+                        "stdout": "",
+                        "stderr": f"OpenViking shared Skill update failed: {exc}",
+                        "result": None,
+                    }
+                payload = self._payload(response)
+                if not response.is_success:
+                    return self._failure(operation, response, payload)
+        elif int(current.get("exit_code") or 0) == 404:
+            created = await self.install_skill(
+                skill_name=skill_name,
+                skill_body=skill_body,
+                parent_uri="viking://agent/skills",
+                version_message=version_message,
+            )
+            if not created.get("ok"):
+                return created
+        else:
+            return current
+        return await self.get_skill(skill_name=skill_name)
+
+    async def upsert_text(
+        self,
+        *,
+        root_uri: str,
+        uri: str,
+        content: str,
+    ) -> dict[str, Any]:
+        """Upsert one deterministic text file below a resource root."""
+        operation = "POST /api/v1/content/batch-write"
+        body = {
+            "root_uri": root_uri,
+            "operations": [
+                {
+                    "uri": uri,
+                    "content": content,
+                    "mode": "upsert",
+                }
+            ],
+            "wait": True,
+            "timeout": self.timeout_seconds,
+        }
+        try:
+            async with self._client() as client:
+                response = await self._request_with_retry(
+                    client,
+                    "POST",
+                    f"{self.endpoint.rstrip('/')}/api/v1/content/batch-write",
+                    json=body,
+                    headers=self._headers(),
+                )
+        except httpx.HTTPError as exc:
+            return {
+                "ok": False,
+                "exit_code": -1,
+                "command": ["http", operation],
+                "stdout": "",
+                "stderr": f"OpenViking content upsert failed: {exc}",
+                "result": None,
+            }
+        payload = self._payload(response)
+        if not response.is_success:
+            return self._failure(operation, response, payload)
+        return self._success(operation, payload)
+
+    async def delete_uri(self, *, uri: str) -> dict[str, Any]:
+        """Delete an obsolete resource subtree."""
+        operation = "DELETE /api/v1/fs"
+        try:
+            async with self._client() as client:
+                response = await self._request_with_retry(
+                    client,
+                    "DELETE",
+                    f"{self.endpoint.rstrip('/')}/api/v1/fs",
+                    params={
+                        "uri": uri,
+                        "recursive": "true",
+                        "wait": "false",
+                    },
+                    headers=self._headers(),
+                )
+        except httpx.HTTPError as exc:
+            return {
+                "ok": False,
+                "exit_code": -1,
+                "command": ["http", operation],
+                "stdout": "",
+                "stderr": f"OpenViking content delete failed: {exc}",
+                "result": None,
+            }
+        payload = self._payload(response)
+        if response.status_code == 404:
+            return self._success(operation, {"uri": uri, "missing": True})
+        if not response.is_success:
+            return self._failure(operation, response, payload)
+        return self._success(operation, payload)
+
+    async def list_children(self, *, uri: str) -> dict[str, Any]:
+        """List direct children of a resource directory."""
+        operation = "GET /api/v1/fs/ls"
+        try:
+            async with self._client() as client:
+                response = await self._request_with_retry(
+                    client,
+                    "GET",
+                    f"{self.endpoint.rstrip('/')}/api/v1/fs/ls",
+                    params={
+                        "uri": uri,
+                        "recursive": "false",
+                        "node_limit": "10000",
+                        "output": "original",
+                    },
+                    headers=self._headers(),
+                )
+        except httpx.HTTPError as exc:
+            return {
+                "ok": False,
+                "exit_code": -1,
+                "command": ["http", operation],
+                "stdout": "",
+                "stderr": f"OpenViking content list failed: {exc}",
+                "result": None,
+            }
+        payload = self._payload(response)
+        if response.status_code == 404:
+            return self._success(operation, [])
+        if not response.is_success:
+            return self._failure(operation, response, payload)
+        return self._success(operation, payload if isinstance(payload, list) else [])
+
     async def run_batch(
         self,
         *,
         source_uris: tuple[str, ...] | list[str],
         target_uri: str,
         skill_uri: str,
+        skill_revision: str = "",
         reason: str = "",
         runtime_timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
@@ -245,23 +394,12 @@ class CompileClient:
             "to": target_uri,
             "skill": skill_uri,
         }
+        if skill_revision.strip():
+            body["skill_revision"] = skill_revision.strip()
         if reason.strip():
             body["reason"] = reason.strip()
 
-        # #region debug-point E:compile-submit
-        await _debug_event(
-            "E",
-            "aggregation.compile_client:run_batch:submit",
-            "compile submit starting",
-            {
-                "endpoint": self.endpoint,
-                "source_count": len(source_uris),
-                "timeout_seconds": self.timeout_seconds,
-            },
-        )
-        # #endregion
         task_id = ""
-        request_phase = "submit"
         try:
             async with self._client() as client:
                 response = await self._request_with_retry(
@@ -289,19 +427,9 @@ class CompileClient:
                         "result": accepted,
                     }
 
-                # #region debug-point A:compile-accepted
-                await _debug_event(
-                    "A",
-                    "aggregation.compile_client:run_batch:accepted",
-                    "compile task accepted",
-                    {"task_id": task_id},
-                )
-                # #endregion
                 deadline = time.monotonic() + max(1.0, self.timeout_seconds)
                 polling = 0.5
                 status_operation = f"GET /bot/v1/compile/{task_id}"
-                last_status = ""
-                request_phase = "poll"
                 while True:
                     if time.monotonic() >= deadline:
                         return {
@@ -334,24 +462,6 @@ class CompileClient:
                         if isinstance(task, dict)
                         else ""
                     )
-                    if status != last_status:
-                        # #region debug-point B:compile-status
-                        await _debug_event(
-                            "B",
-                            "aggregation.compile_client:run_batch:poll",
-                            "compile status changed",
-                            {
-                                "task_id": task_id,
-                                "status": status,
-                                "stage": (
-                                    str(task.get("stage") or "")
-                                    if isinstance(task, dict)
-                                    else ""
-                                ),
-                            },
-                        )
-                        # #endregion
-                        last_status = status
                     if status == "completed":
                         result = task.get("result")
                         return self._success(
@@ -377,18 +487,6 @@ class CompileClient:
                     await asyncio.sleep(polling)
                     polling = min(2.0, polling * 2)
         except httpx.HTTPError as exc:
-            # #region debug-point E:compile-transport-error
-            await _debug_event(
-                "E",
-                "aggregation.compile_client:run_batch:transport_error",
-                "compile transport failed",
-                {
-                    "phase": request_phase,
-                    "task_id": task_id,
-                    "error_type": type(exc).__name__,
-                },
-            )
-            # #endregion
             return {
                 "ok": False,
                 "exit_code": -1,

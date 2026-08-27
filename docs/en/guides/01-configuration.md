@@ -189,14 +189,20 @@ API-key mode reads existing plaintext User Keys from the Admin user list and nev
 |-----------|------|---------|-------------|
 | `enabled` | boolean | `false` | Configuration marker for aggregation. An administrator still starts every run explicitly in the console. |
 | `shared_knowledge_prefix` | string | `"shared-knowledge"` | Final team-Memory root: `viking://resources/<prefix>/`. Hot-reload it under **Evolution Pipeline → Team Memory Evolution**. |
-| `okf_skill_uri` | string | `"viking://agent/skills/team-memory-okf"` | Aggregation Skill identifier. The runtime uses the trailing name and installs the editable content into each participating identity's Skill space. |
+| `okf_skill_uri` | string | `"viking://agent/skills/team-memory-okf"` | Account-shared aggregation Skill; all participating identities read the same content and revision. |
 | `insight_skill_uri` | string | `""` | Reserved insight-Skill identifier; the current aggregation runtime does not consume it. |
 | `key_seed` | string | `"teamevolver-aggregation"` | Compatibility field; the current runtime does not derive user keys from it. |
-| `staging_dir` | string | `"staging"` | Work-root suffix. The default staging root is the sibling `viking://resources/shared-knowledge-staging/`, keeping intermediate data out of final L0/L1 summaries. |
+| `staging_dir` | string | `"staging"` | Work-directory segment under the merge identity's private Resources; raw snapshots are not written to account-shared Resources. |
 | `kinds` | list | `[]` | Personal Memory categories. Empty uses `profile/entities/preferences/events/cases/patterns/trajectories/experiences/tools/skills`. |
-| `max_users_per_batch` | integer | `12` | Maximum categories read by one user's Phase 1 compile, capped at 15 at runtime. |
-| `phase1_concurrency` | integer | `6` | Maximum concurrent per-user Phase 1 compiles. |
-| `merge_fan_in` | integer | `12` | Maximum tree-reduce sources per merge, constrained to 2–15. |
+| `max_users_per_batch` | integer | `12` | Compatibility field; deterministic staging does not consume it. |
+| `account_user_limit` | integer | `50000` | Safety limit for one Account-wide run. |
+| `account_user_page_size` | integer | `1000` | Stable user-inventory page size; maximum 1000. |
+| `phase1_concurrency` | integer | `6` | Maximum concurrent per-user deterministic snapshots. |
+| `merge_fan_in` | integer | `4` | Maximum tree-reduce sources per merge, constrained to 2–15. |
+| `merge_concurrency` | integer | `4` | Maximum concurrent merge groups. |
+| `partition_threshold` | integer | `512` | Staged-user count above which output uses fixed hash partitions. |
+| `partition_count` | integer | `256` | Stable publish partition count, constrained to 16–1024. |
+| `run_detail_limit` | integer | `2000` | Maximum group detail rows retained in a live status payload. |
 | `compile_runtime_timeout_seconds` | integer | `3000` | Per-compile timeout in seconds, minimum 60. |
 | `state_dir` | string | `""` | Aggregation state directory; empty uses `~/.teamEvolver/aggregation/`. |
 
@@ -399,8 +405,14 @@ aggregation:
   enabled: true
   shared_knowledge_prefix: "shared-knowledge"
   staging_dir: "staging"
+  account_user_limit: 50000
+  account_user_page_size: 1000
   phase1_concurrency: 6
-  merge_fan_in: 12
+  merge_fan_in: 4
+  merge_concurrency: 4
+  partition_threshold: 512
+  partition_count: 256
+  run_detail_limit: 2000
 
 validation:
   enabled: true

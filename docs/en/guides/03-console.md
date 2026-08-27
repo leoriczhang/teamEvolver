@@ -81,7 +81,7 @@ Team-Memory aggregation follows three explicit steps:
 2. Load Account users and select them with select-all, clear, or invert controls.
 3. Confirm the selection, start the background task, and poll group progress.
 
-After a page refresh, the console restores the latest task from the service. Restarting the service process clears this run list. Administrators can edit the **Team Memory Aggregation Skill** and configure the final output prefix on the same page. The default final root is `viking://resources/shared-knowledge/`; work data stays in the sibling `viking://resources/shared-knowledge-staging/`.
+After a page refresh, the console restores the latest task from the service. Restarting the service process clears this run list. Administrators can edit the **Team Memory Aggregation Skill** and configure the final output prefix on the same page. The default final root is `viking://resources/shared-knowledge/`; Phase 1 raw snapshots and merge intermediates stay in the merge identity's private Resources, and the Skill runs only during merge.
 
 ## Agent Workspace
 

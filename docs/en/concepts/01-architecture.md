@@ -115,7 +115,7 @@ Continuous team Memory evolution:
 
 ### Team-Memory Aggregation ([aggregation/](file:///home/zhangpengkun/teamEvolver/teamEvolver/aggregation/))
 
-After an administrator selects OpenViking Account users, the aggregation service runs per-user compiles with bounded concurrency, then writes `viking://resources/<shared_knowledge_prefix>/` through bounded tree-reduce. Work data stays in a sibling root, and persisted fingerprints enable incremental skipping.
+After an administrator selects OpenViking Account users, the aggregation service creates model-free deterministic per-user snapshots with bounded concurrency, then writes `viking://resources/<shared_knowledge_prefix>/` through bounded tree-reduce compile. Raw snapshots and intermediates stay in the merge identity's private Resources, and persisted fingerprints enable incremental skipping.
 
 ### Validation Worker ([validation/worker.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/validation/worker.py))
 

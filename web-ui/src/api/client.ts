@@ -664,6 +664,14 @@ export interface AggregationSettings {
   okf_skill_uri: string;
   key_seed: string;
   kinds: string[];
+  account_user_limit: number;
+  account_user_page_size: number;
+  phase1_concurrency: number;
+  merge_fan_in: number;
+  merge_concurrency: number;
+  partition_threshold: number;
+  partition_count: number;
+  run_detail_limit: number;
 }
 
 export interface AggregationSettingsUpdate {
@@ -671,6 +679,14 @@ export interface AggregationSettingsUpdate {
   staging_dir?: string;
   okf_skill_uri?: string;
   kinds?: string[];
+  account_user_limit?: number;
+  account_user_page_size?: number;
+  phase1_concurrency?: number;
+  merge_fan_in?: number;
+  merge_concurrency?: number;
+  partition_threshold?: number;
+  partition_count?: number;
+  run_detail_limit?: number;
 }
 
 export interface SkillListItem {

@@ -227,7 +227,7 @@ class TeamEvolverConfig:
     dreamcycle_consolidate_prompt: str = ""
 
     # ------------------------------------------------------------------ #
-    # Cross-user memory aggregation (ov compile; replaces DreamCycle)     #
+    # Cross-user memory aggregation (deterministic staging + ov compile)  #
     # ------------------------------------------------------------------ #
     aggregation_enabled: bool = False
     aggregation_shared_knowledge_prefix: str = "shared-knowledge"
@@ -237,8 +237,14 @@ class TeamEvolverConfig:
     aggregation_staging_dir: str = "staging"
     aggregation_kinds: list[str] = field(default_factory=list)
     aggregation_max_users_per_batch: int = 12
+    aggregation_account_user_limit: int = 50_000
+    aggregation_account_user_page_size: int = 1_000
     aggregation_phase1_concurrency: int = 6
-    aggregation_merge_fan_in: int = 12
+    aggregation_merge_fan_in: int = 4
+    aggregation_merge_concurrency: int = 4
+    aggregation_partition_threshold: int = 512
+    aggregation_partition_count: int = 256
+    aggregation_run_detail_limit: int = 2_000
     aggregation_compile_runtime_timeout_seconds: int = 3000
     aggregation_state_dir: str = ""
 

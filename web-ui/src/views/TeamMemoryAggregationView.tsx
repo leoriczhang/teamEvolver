@@ -24,16 +24,28 @@ type AggregationRun = {
   endpoint: string;
   auth_mode: "trusted" | "api_key";
   target_uri: string;
+  work_root?: string;
+  skill_uri?: string;
+  skill_revision?: string;
   status: "pending" | "running" | "completed" | "failed";
   started_at?: number;
   finished_at?: number | null;
   error?: string;
   groups: AggregationGroup[];
+  group_counts?: Record<GroupStatus, number>;
+  group_total?: number;
+  groups_truncated?: boolean;
+  source_user_count?: number;
+  publish_mode?: "single" | "partitioned";
+  partition_count?: number;
+  estimated_merge_tasks?: number;
 };
 
 type OkfSkill = {
   skill_name?: string;
   skill_uri?: string;
+  revision?: string;
+  source?: "openviking" | "local_fallback";
   body: string;
   editable: boolean;
 };
@@ -63,12 +75,14 @@ export default function TeamMemoryAggregationView({
   const [targetUri, setTargetUri] = useState("");
   const [users, setUsers] = useState<string[] | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [userFilter, setUserFilter] = useState("");
   const [listing, setListing] = useState(false);
   const [run, setRun] = useState<AggregationRun | null>(null);
   const [skill, setSkill] = useState<OkfSkill | null>(null);
   const [triggering, setTriggering] = useState(false);
   const [editingSkill, setEditingSkill] = useState(false);
   const [skillDraft, setSkillDraft] = useState("");
+  const [skillVersionMessage, setSkillVersionMessage] = useState("");
   const [savingSkill, setSavingSkill] = useState(false);
   const pollRef = useRef<number | null>(null);
   const loaded = useRef(false);
@@ -145,21 +159,37 @@ export default function TeamMemoryAggregationView({
   function cancelEditSkill() {
     setEditingSkill(false);
     setSkillDraft("");
+    setSkillVersionMessage("");
   }
 
   async function saveSkill() {
     setSavingSkill(true);
     try {
-      const data = await api<{ ok: boolean; body: string }>(
+      const data = await api<{ ok: boolean; body: string; skill_uri?: string; revision?: string }>(
         "/api/aggregation/okf-skill",
         {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ body: skillDraft }),
+          body: JSON.stringify({
+            body: skillDraft,
+            version_message:
+              skillVersionMessage.trim() || "Update TeamEvolver aggregation Skill",
+          }),
         }
       );
-      setSkill((prev) => (prev ? { ...prev, body: data.body } : prev));
+      setSkill((prev) =>
+        prev
+          ? {
+              ...prev,
+              body: data.body,
+              skill_uri: data.skill_uri || prev.skill_uri,
+              revision: data.revision || prev.revision,
+              source: "openviking",
+            }
+          : prev
+      );
       setEditingSkill(false);
+      setSkillVersionMessage("");
       toastOk("已保存", "团队记忆聚合 Skill 已更新，下次聚合生效");
     } catch (e: any) {
       toastErr("保存失败", e.message);
@@ -187,7 +217,10 @@ export default function TeamMemoryAggregationView({
           if (next.status === "completed" || next.status === "failed") {
             stopPolling();
             if (next.status === "completed") {
-              toastOk("聚合完成", `${next.groups.length} 个分组`);
+              toastOk(
+                "聚合完成",
+                `${next.group_total ?? next.groups.length} 个分组`
+              );
             } else {
               toastErr("聚合失败", next.error || "");
             }
@@ -232,6 +265,7 @@ export default function TeamMemoryAggregationView({
   function clearUserSelection() {
     setUsers(null);
     setSelected(new Set());
+    setUserFilter("");
   }
 
   async function listUsers() {
@@ -310,7 +344,7 @@ export default function TeamMemoryAggregationView({
           account_id: account || undefined,
           mode,
           target_uri: outputUri,
-          user_ids: userIds,
+          user_ids: allSelected ? undefined : userIds,
         }),
       });
       setRun(started);
@@ -337,6 +371,10 @@ export default function TeamMemoryAggregationView({
 
   const running = run?.status === "running" || run?.status === "pending";
   const allSelected = users != null && selected.size === users.length && users.length > 0;
+  const normalizedUserFilter = userFilter.trim().toLowerCase();
+  const visibleUsers = (users || [])
+    .filter((uid) => !normalizedUserFilter || uid.toLowerCase().includes(normalizedUserFilter))
+    .slice(0, 500);
   const currentTargetLabel = !settingsLoaded
     ? "加载中…"
     : targetUri.trim() || settings?.target_root || "未指定";
@@ -347,7 +385,7 @@ export default function TeamMemoryAggregationView({
       <Panel title="跨 User 记忆聚合">
         <div className="flex flex-col gap-3 p-3.5">
           <div className="text-[13px] leading-relaxed text-muted-foreground">
-            将一个 OpenViking Account 下选定 User 的个人记忆，通过 ov compile 聚合为{" "}
+            先确定性复制选定 User 的个人记忆，再通过 ov compile merge 为{" "}
             <code>{currentTargetLabel}</code>
             下的团队共享记忆；具体输出格式与页面结构由{" "}
             <code>{currentSkillLabel}</code>
@@ -379,7 +417,7 @@ export default function TeamMemoryAggregationView({
                 className="h-9 rounded-md border border-border bg-surface px-2 text-[13px]"
               >
                 <option value="incremental">增量（仅变更/失败用户）</option>
-                <option value="full">全量（强制全部重编译）</option>
+                <option value="full">全量（重新校验快照并重做 merge）</option>
               </select>
             </label>
             <label className="flex min-w-[320px] flex-1 flex-col gap-1 text-[12px] font-[700]">
@@ -409,6 +447,12 @@ export default function TeamMemoryAggregationView({
                 <span className="text-[12px] font-[700]">
                   可聚合用户 {selected.size}/{users.length}
                 </span>
+                <Input
+                  value={userFilter}
+                  onChange={(event) => setUserFilter(event.target.value)}
+                  placeholder="筛选用户"
+                  className="ml-2 h-8 w-[220px]"
+                />
                 <div className="ml-auto flex gap-2">
                   <Button size="sm" variant="outline" onClick={selectAll}>
                     <CheckSquare className="mr-1 size-3.5" /> 全选
@@ -426,24 +470,33 @@ export default function TeamMemoryAggregationView({
                   该 account 下没有可聚合的用户。
                 </div>
               ) : (
-                <div className="grid grid-cols-2 gap-x-4 gap-y-1 p-3 sm:grid-cols-3 md:grid-cols-4">
-                  {users.map((uid) => (
-                    <label
-                      key={uid}
-                      className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-[12px] hover:bg-muted/50"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={selected.has(uid)}
-                        onChange={() => toggleUser(uid)}
-                        className="size-3.5"
-                      />
-                      <span className="truncate font-mono" title={uid}>
-                        {uid}
-                      </span>
-                    </label>
-                  ))}
-                </div>
+                <>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-1 p-3 sm:grid-cols-3 md:grid-cols-4">
+                    {visibleUsers.map((uid) => (
+                      <label
+                        key={uid}
+                        className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-[12px] hover:bg-muted/50"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selected.has(uid)}
+                          onChange={() => toggleUser(uid)}
+                          className="size-3.5"
+                        />
+                        <span className="truncate font-mono" title={uid}>
+                          {uid}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                  {(normalizedUserFilter
+                    ? users.filter((uid) => uid.toLowerCase().includes(normalizedUserFilter)).length
+                    : users.length) > visibleUsers.length && (
+                    <div className="border-t border-border px-3 py-2 text-[11px] text-muted-foreground">
+                      当前显示前 {visibleUsers.length} 个匹配用户
+                    </div>
+                  )}
+                </>
               )}
               <div className="flex items-center gap-3 border-t border-border px-3 py-2">
                 <Button
@@ -498,9 +551,12 @@ export default function TeamMemoryAggregationView({
                 <div className="flex flex-col gap-1 text-[12px] font-[700]">
                   其他信息
                   <div className="rounded-md border border-border bg-surface p-2 font-normal text-[11px] text-muted-foreground">
-                    <div>staging 目录：<code>{settings.work_root}</code></div>
+                    <div>私有 staging 模板：<code>{settings.work_root}</code></div>
                     <div>OKF Skill URI：<code>{settings.okf_skill_uri}</code></div>
-                    <div>Key Seed：<code>{settings.key_seed}</code></div>
+                    <div>用户上限：<code>{settings.account_user_limit}</code></div>
+                    <div>staging 并发：<code>{settings.phase1_concurrency}</code></div>
+                    <div>merge：<code>{settings.merge_fan_in} × {settings.merge_concurrency}</code></div>
+                    <div>分区发布：<code>{settings.partition_threshold}+ → {settings.partition_count}</code></div>
                   </div>
                 </div>
               </div>
@@ -566,7 +622,36 @@ export default function TeamMemoryAggregationView({
               OpenViking：{run.endpoint} · {run.auth_mode}
               <br />
               输出：{run.target_uri}
+              {run.work_root && (
+                <>
+                  <br />
+                  私有中转：{run.work_root}
+                </>
+              )}
+              {run.skill_uri && (
+                <>
+                  <br />
+                  Skill：{run.skill_uri}
+                  {run.skill_revision ? ` @ ${run.skill_revision.slice(0, 12)}` : ""}
+                </>
+              )}
             </div>
+            {run.group_counts && (
+              <div className="mb-2 flex flex-wrap gap-3 text-[11px] text-muted-foreground">
+                <span>已处理 {run.group_total || 0}</span>
+                <span>已更新 {run.group_counts.ok || 0}</span>
+                <span>复用 {run.group_counts.skipped || 0}</span>
+                <span>失败 {run.group_counts.failed || 0}</span>
+                <span>用户 {run.source_user_count || 0}</span>
+                <span>
+                  {run.publish_mode === "partitioned"
+                    ? `${run.partition_count || 0} 个发布分区`
+                    : "单根发布"}
+                </span>
+                <span>预计 merge {run.estimated_merge_tasks || 0}</span>
+                {run.groups_truncated && <span>明细仅保留部分记录</span>}
+              </div>
+            )}
             <div className="overflow-hidden rounded-md border border-border">
               <table className="w-full text-[12px]">
                 <thead className="bg-muted/40 text-left font-[700]">
@@ -620,6 +705,7 @@ export default function TeamMemoryAggregationView({
             <div className="flex items-center gap-2">
               <code className="text-[11px] text-muted-foreground">
                 {skill.skill_name || skill.skill_uri}
+                {skill.revision ? ` @ ${skill.revision.slice(0, 12)}` : ""}
               </code>
               {!editingSkill ? (
                 <Button size="sm" variant="outline" onClick={beginEditSkill}>
@@ -646,16 +732,24 @@ export default function TeamMemoryAggregationView({
           <div className="p-3.5">
             <p className="text-[12px] text-muted-foreground">
               该 Skill 定义聚合输出格式、页面结构、交叉引用与聚合规则，
-              供 ov compile 消费。聚合运行时会自动安装到各身份的 skills 空间。
-              {editingSkill ? "编辑后点击保存，下次聚合生效。" : "点击右上角「编辑」可修改。"}
+              供 merge 阶段的 ov compile 消费。Phase 1 仅复制原始 Memory，不执行 Skill。
+              Skill 发布在 OpenViking 账号级共享 skills 空间，所有 merge 使用同一 revision。
+              {editingSkill ? "编辑后点击保存并立即发布。" : "点击右上角「编辑」可修改。"}
             </p>
             {editingSkill ? (
-              <textarea
-                value={skillDraft}
-                onChange={(e) => setSkillDraft(e.target.value)}
-                spellCheck={false}
-                className="mt-2 h-[420px] w-full resize-y rounded-md border border-border bg-surface p-3 font-mono text-[11px] leading-relaxed outline-none focus-visible:ring-2 focus-visible:ring-foreground/10"
-              />
+              <div className="mt-2 flex flex-col gap-2">
+                <Input
+                  value={skillVersionMessage}
+                  onChange={(e) => setSkillVersionMessage(e.target.value)}
+                  placeholder="版本说明"
+                />
+                <textarea
+                  value={skillDraft}
+                  onChange={(e) => setSkillDraft(e.target.value)}
+                  spellCheck={false}
+                  className="h-[420px] w-full resize-y rounded-md border border-border bg-surface p-3 font-mono text-[11px] leading-relaxed outline-none focus-visible:ring-2 focus-visible:ring-foreground/10"
+                />
+              </div>
             ) : (
               <pre className="mt-2 max-h-[360px] overflow-auto rounded-md border border-border bg-muted/30 p-3 text-[11px] leading-relaxed">
                 {skill.body}

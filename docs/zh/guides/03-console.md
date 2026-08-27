@@ -81,7 +81,7 @@ Langfuse 页面把两条相互独立的链路放在一起管理：
 2. 拉取 Account 用户列表，使用全选、全不选或反选确定参与用户。
 3. 明确确认后启动后台任务，并持续轮询分组进度。
 
-页面刷新后会从服务端恢复最近任务；服务进程重启会清空这份运行列表。管理员可在同页编辑「团队记忆聚合 Skill」，并配置最终输出前缀。默认最终目录为 `viking://resources/shared-knowledge/`，中转数据位于同级 `viking://resources/shared-knowledge-staging/`。
+页面刷新后会从服务端恢复最近任务；服务进程重启会清空这份运行列表。管理员可在同页编辑「团队记忆聚合 Skill」，并配置最终输出前缀。默认最终目录为 `viking://resources/shared-knowledge/`；Phase 1 原文快照和 merge 中间产物位于 merge 身份的私有 Resources，Skill 仅在 merge 阶段执行。
 
 ## Agent 工作空间
 

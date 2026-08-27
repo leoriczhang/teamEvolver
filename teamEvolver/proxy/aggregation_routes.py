@@ -133,12 +133,39 @@ class AggregationMixin:
             "shared_knowledge_prefix": prefix,
             "target_root": f"viking://resources/{clean_prefix}",
             "staging_dir": staging,
-            "work_root": f"viking://resources/{clean_prefix}-{clean_staging}",
+            "work_root": (
+                "viking://user/{merge_user}/resources/teamEvolver/"
+                f"{clean_staging}/<target-hash>"
+            ),
             "okf_skill_uri": str(
                 agg.get("okf_skill_uri") or "viking://agent/skills/team-memory-okf"
             ),
             "key_seed": str(agg.get("key_seed") or "teamevolver-aggregation"),
             "kinds": agg.get("kinds") or [],
+            "account_user_limit": max(
+                1, int(agg.get("account_user_limit", 50_000) or 50_000)
+            ),
+            "account_user_page_size": max(
+                1, min(1_000, int(agg.get("account_user_page_size", 1_000) or 1_000))
+            ),
+            "phase1_concurrency": max(
+                1, int(agg.get("phase1_concurrency", 6) or 6)
+            ),
+            "merge_fan_in": max(
+                2, min(15, int(agg.get("merge_fan_in", 4) or 4))
+            ),
+            "merge_concurrency": max(
+                1, int(agg.get("merge_concurrency", 4) or 4)
+            ),
+            "partition_threshold": max(
+                16, int(agg.get("partition_threshold", 512) or 512)
+            ),
+            "partition_count": max(
+                16, min(1_024, int(agg.get("partition_count", 256) or 256))
+            ),
+            "run_detail_limit": max(
+                100, int(agg.get("run_detail_limit", 2_000) or 2_000)
+            ),
         }
 
     def _register_aggregation_routes(self, app: FastAPI) -> None:
@@ -240,10 +267,20 @@ class AggregationMixin:
             self._mark_request_activity()
             self._require_admin(request)
             service = self._aggregation_service()
+            context = self._aggregation_request_context(request, {})
+            shared = await service.get_shared_skill(
+                endpoint=context.endpoint,
+                account_id=context.account_id,
+                api_key=context.api_key,
+                user_id=service._team_user(),
+            )
             return JSONResponse(
                 {
                     "skill_name": service._skill_name(),
-                    "body": service.skill_body(),
+                    "skill_uri": service._shared_skill_uri(),
+                    "revision": str((shared or {}).get("revision") or ""),
+                    "body": str((shared or {}).get("content") or service.skill_body()),
+                    "source": "openviking" if shared else "local_fallback",
                     "editable": True,
                 }
             )
@@ -257,14 +294,31 @@ class AggregationMixin:
             except ValueError:
                 payload = {}
             body = str((payload or {}).get("body") or "")
+            version_message = str(
+                (payload or {}).get("version_message")
+                or "Update TeamEvolver aggregation Skill"
+            ).strip()
             service = self._aggregation_service()
+            context = self._aggregation_request_context(request, {})
             try:
-                service.save_skill_body(body)
+                shared = await service.publish_shared_skill(
+                    body=body,
+                    endpoint=context.endpoint,
+                    account_id=context.account_id,
+                    api_key=context.api_key,
+                    user_id=service._team_user(),
+                    version_message=version_message,
+                )
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            # The saved body is installed into each identity's own skills space on
-            # the next aggregation run, so no separate publish step is needed here.
-            return JSONResponse({"ok": True, "body": service.skill_body()})
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "skill_uri": service._shared_skill_uri(),
+                    "revision": str(shared.get("revision") or ""),
+                    "body": str(shared.get("content") or body),
+                }
+            )
 
         @app.get("/api/aggregation/settings")
         async def api_aggregation_settings(request: Request):
@@ -316,7 +370,17 @@ class AggregationMixin:
                 agg["shared_knowledge_prefix"] = prefix
 
             if "staging_dir" in body:
-                agg["staging_dir"] = str(body.get("staging_dir") or "staging").strip().strip("/")
+                staging_dir = str(
+                    body.get("staging_dir") or "staging"
+                ).strip().strip("/")
+                try:
+                    MemoryAggregationService._safe_path_segment(
+                        staging_dir,
+                        field_name="aggregation staging_dir",
+                    )
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                agg["staging_dir"] = staging_dir
 
             if "okf_skill_uri" in body:
                 agg["okf_skill_uri"] = str(body.get("okf_skill_uri") or "").strip()
@@ -325,6 +389,33 @@ class AggregationMixin:
                 raw_kinds = body.get("kinds")
                 if isinstance(raw_kinds, list):
                     agg["kinds"] = [str(k).strip() for k in raw_kinds if str(k).strip()]
+
+            numeric_limits = {
+                "account_user_limit": (1, 1_000_000),
+                "account_user_page_size": (1, 1_000),
+                "phase1_concurrency": (1, 64),
+                "merge_fan_in": (2, 15),
+                "merge_concurrency": (1, 64),
+                "partition_threshold": (16, 100_000),
+                "partition_count": (16, 1_024),
+                "run_detail_limit": (100, 20_000),
+            }
+            for key, (minimum, maximum) in numeric_limits.items():
+                if key not in body:
+                    continue
+                try:
+                    value = int(body[key])
+                except (TypeError, ValueError) as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{key} must be an integer",
+                    ) from exc
+                if not minimum <= value <= maximum:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{key} must be between {minimum} and {maximum}",
+                    )
+                agg[key] = value
 
             store.save(data)
             new_config = store.to_config()

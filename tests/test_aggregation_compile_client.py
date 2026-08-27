@@ -108,6 +108,7 @@ def test_http_transport_uploads_inline_skill_and_runs_compile_without_host_cli(
             source_uris=["viking://user/alice/memories/events"],
             target_uri="viking://resources/team-memory",
             skill_uri="viking://user/alice/skills/team-memory-okf",
+            skill_revision="revision-1",
             runtime_timeout_seconds=123,
         )
         return installed, compiled
@@ -124,6 +125,7 @@ def test_http_transport_uploads_inline_skill_and_runs_compile_without_host_cli(
     assert calls[1][2]["from"] == [
         "viking://user/alice/memories/events"
     ]
+    assert calls[1][2]["skill_revision"] == "revision-1"
     assert "runtime_timeout_seconds" not in calls[1][2]
     assert all(call[3]["X-API-Key"] == "admin-secret" for call in calls)
     assert all(
@@ -178,6 +180,67 @@ def test_http_transport_returns_sanitized_upstream_error(monkeypatch) -> None:
     assert result["exit_code"] == 401
     assert result["stderr"] == "Admin Key rejected"
     assert "admin-secret" not in json.dumps(result)
+
+
+def test_publish_shared_skill_updates_once_and_returns_revision(monkeypatch) -> None:
+    calls = []
+    reads = 0
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url, *, params, headers):
+            nonlocal reads
+            reads += 1
+            calls.append(("GET", url, params))
+            content = "old" if reads == 1 else "new"
+            revision = "rev-old" if reads == 1 else "rev-new"
+            return _FakeResponse(
+                200,
+                {
+                    "status": "ok",
+                    "result": {
+                        "root_uri": "viking://agent/skills/team-memory-okf",
+                        "content": content,
+                        "revision": revision,
+                    },
+                },
+            )
+
+        async def put(self, url, *, json, headers):
+            calls.append(("PUT", url, json))
+            return _FakeResponse(200, {"status": "ok", "result": {"action": "update"}})
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    client = CompileClient(
+        endpoint="http://openviking.example",
+        account_id="default",
+        user_id="admin",
+        api_key="admin-secret",
+        timeout_seconds=5,
+    )
+
+    result = asyncio.run(
+        client.publish_shared_skill(
+            skill_name="team-memory-okf",
+            skill_body="new",
+            version_message="Update aggregation rules",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["revision"] == "rev-new"
+    update = next(call for call in calls if call[0] == "PUT")
+    assert update[2]["target_uri"] == "viking://agent/skills"
+    assert update[2]["expected_revision"] == "rev-old"
+    assert update[2]["version_message"] == "Update aggregation rules"
 
 
 def test_compile_submit_retries_transient_connection_failure(monkeypatch) -> None:
@@ -247,3 +310,84 @@ def test_compile_submit_retries_transient_connection_failure(monkeypatch) -> Non
     assert result["ok"] is True
     assert result["result"]["page_count"] == 1
     assert attempts == 2
+
+
+def test_partition_manifest_upsert_and_stale_partition_delete(monkeypatch) -> None:
+    calls = []
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, *, json, headers):
+            calls.append(("POST", url, json, headers))
+            return _FakeResponse(
+                200,
+                {"status": "ok", "result": {"updated": [json["operations"][0]["uri"]]}},
+            )
+
+        async def delete(self, url, *, params, headers):
+            calls.append(("DELETE", url, params, headers))
+            return _FakeResponse(
+                200,
+                {"status": "ok", "result": {"uri": params["uri"]}},
+            )
+
+        async def get(self, url, *, params, headers):
+            calls.append(("GET", url, params, headers))
+            return _FakeResponse(
+                200,
+                {
+                    "status": "ok",
+                    "result": [
+                        {
+                            "uri": "viking://resources/team-memory/partitions",
+                            "isDir": True,
+                        }
+                    ],
+                },
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    client = CompileClient(
+        endpoint="http://openviking.example",
+        account_id="default",
+        user_id="admin",
+        api_key="admin-secret",
+        timeout_seconds=5,
+    )
+
+    upserted = asyncio.run(
+        client.upsert_text(
+            root_uri="viking://resources/team-memory",
+            uri="viking://resources/team-memory/index.md",
+            content="# Team Memory\n",
+        )
+    )
+    deleted = asyncio.run(
+        client.delete_uri(
+            uri="viking://resources/team-memory/partitions/ff",
+        )
+    )
+    listed = asyncio.run(
+        client.list_children(uri="viking://resources/team-memory")
+    )
+
+    assert upserted["ok"] is True
+    assert deleted["ok"] is True
+    assert listed["ok"] is True
+    assert calls[0][2]["operations"] == [
+        {
+            "uri": "viking://resources/team-memory/index.md",
+            "content": "# Team Memory\n",
+            "mode": "upsert",
+        }
+    ]
+    assert calls[1][2]["recursive"] == "true"
+    assert calls[2][2]["recursive"] == "false"

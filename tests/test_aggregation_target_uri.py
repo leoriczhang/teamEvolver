@@ -21,6 +21,32 @@ def _service(tmp_path) -> MemoryAggregationService:
     )
 
 
+def test_default_merge_fan_in_limits_llm_payload_size(tmp_path) -> None:
+    config = ConfigStore(tmp_path / "config.yaml").to_config()
+
+    assert config.aggregation_merge_fan_in == 4
+    assert config.aggregation_merge_concurrency == 4
+    assert config.aggregation_account_user_limit == 50_000
+    assert config.aggregation_account_user_page_size == 1_000
+    assert config.aggregation_partition_threshold == 512
+    assert config.aggregation_partition_count == 256
+    assert MemoryAggregationService(config)._merge_fan_in() == 4
+
+
+def test_settings_expose_a_private_staging_template() -> None:
+    settings = aggregation_routes.AggregationMixin._aggregation_settings_payload(
+        {
+            "shared_knowledge_prefix": "shared-knowledge",
+            "staging_dir": "staging",
+        }
+    )
+
+    assert settings["work_root"] == (
+        "viking://user/{merge_user}/resources/teamEvolver/"
+        "staging/<target-hash>"
+    )
+
+
 def test_run_target_uri_is_normalized_and_isolates_work_and_state(tmp_path) -> None:
     service = _service(tmp_path)
 
@@ -39,13 +65,14 @@ def test_run_target_uri_is_normalized_and_isolates_work_and_state(tmp_path) -> N
     assert default_run.target_uri == "viking://resources/shared-knowledge"
     assert run.target_uri == "viking://resources/engineering/team-memory"
     assert run.to_public()["target_uri"] == run.target_uri
-    assert (
-        service._work_root(run.target_uri)
-        == "viking://resources/engineering/team-memory-staging"
+    work_root = service._work_root(run.target_uri)
+    assert work_root.startswith(
+        "viking://user/team/resources/teamEvolver/staging/"
     )
+    assert len(work_root.rsplit("/", 1)[-1]) == 20
     assert (
         service._staging_uri("alice", run.target_uri)
-        == "viking://resources/engineering/team-memory-staging/alice"
+        == f"{work_root}/users/alice/snapshots"
     )
     assert service._state_path("default") != service._state_path(
         "default",
@@ -73,6 +100,19 @@ def test_run_target_uri_rejects_unsafe_locations(tmp_path, target_uri: str) -> N
 
     with pytest.raises(ValueError, match="viking://resources/<path>"):
         service.new_run("default", target_uri=target_uri)
+
+
+def test_private_work_root_rejects_unsafe_staging_segment(tmp_path) -> None:
+    service = MemoryAggregationService(
+        TeamEvolverConfig(
+            aggregation_staging_dir="../shared",
+            aggregation_state_dir=str(tmp_path),
+            sharing_viking_endpoint="http://127.0.0.1:1933",
+        )
+    )
+
+    with pytest.raises(ValueError, match="staging_dir"):
+        service._work_root("viking://resources/team-memory")
 
 
 @pytest.mark.parametrize(

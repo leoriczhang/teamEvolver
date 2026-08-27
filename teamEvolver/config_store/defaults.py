@@ -166,7 +166,7 @@ _DEFAULTS: dict = {
         },
     },
     "aggregation": {
-        # ov compile-based cross-user memory aggregation (replaces DreamCycle).
+        # Deterministic staging + ov compile cross-user memory aggregation.
         "enabled": False,
         # Output lands under viking://resources/<prefix>/<kind>. resources is
         # account-shared and supports a full artifact tree, unlike a user's
@@ -177,23 +177,32 @@ _DEFAULTS: dict = {
         "insight_skill_uri": "",
         # Compatibility field; the current runtime does not derive user keys.
         "key_seed": "teamevolver-aggregation",
-        # Scratch dir suffix for per-user staging + tree-reduce intermediates.
-        # Lives in a SIBLING root (viking://resources/<prefix>-<staging_dir>),
-        # never inside the final knowledge root, so the team-memory view stays
-        # clean of _merge/staging artifacts.
+        # Scratch dir segment for deterministic per-user snapshots and
+        # tree-reduce intermediates. Runtime resolves it below the merge
+        # identity's private viking://user/<merge-user>/resources tree.
         "staging_dir": "staging",
         # Memory categories to aggregate (empty -> built-in default set).
         "kinds": [],
-        # Keep below the ov compile 16-source ceiling; large accounts split
-        # into multiple compile tasks per category.
+        # Compatibility field retained for existing configuration files.
         "max_users_per_batch": 12,
-        # Phase 1 per-user compiles run concurrently up to this many at once.
-        # Raise for faster large-account runs; lower to reduce server load.
+        # Large-account inventory is fetched in stable pages. The safety limit
+        # prevents an accidental unbounded Account-wide run.
+        "account_user_limit": 50_000,
+        "account_user_page_size": 1_000,
+        # Phase 1 deterministic snapshot copies run concurrently up to this
+        # many at once.
         "phase1_concurrency": 6,
         # Tree-reduce fan-in width for Phase 2 merges. Each merge compile takes
         # at most this many sources; groups of groups cascade until one root
         # remains. Kept < 16 to respect the ov compile source ceiling.
-        "merge_fan_in": 12,
+        "merge_fan_in": 4,
+        "merge_concurrency": 4,
+        # Above this user count, publish fixed hash partitions instead of
+        # collapsing all team memory into one 128-page compile output.
+        "partition_threshold": 512,
+        "partition_count": 256,
+        # Keep live/status payloads bounded while retaining aggregate counters.
+        "run_detail_limit": 2_000,
         "compile_runtime_timeout_seconds": 3000,
         "state_dir": "",
     },

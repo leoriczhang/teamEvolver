@@ -139,7 +139,7 @@ Agent session ingest
 [Parallel] DreamCycle maintains team memory → memory-changes/ (change ledger)
 [Isolation] peers/{account}/ holds per-user data (personal skills, etc.)
 [Aggregation] viking://user/<user>/memories/
-            → viking://resources/<shared_knowledge_prefix>-<staging_dir>/ (work data)
+            → viking://user/<merge-user>/resources/teamEvolver/<staging_dir>/<target-hash>/ (private work data)
             → viking://resources/<shared_knowledge_prefix>/ (team Memory)
 ```
 

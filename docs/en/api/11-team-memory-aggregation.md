@@ -4,24 +4,26 @@
 
 The Team Memory Aggregation API (Interface 1) aggregates the personal memories of multiple Users under one OpenViking Account into account-shared team memory via `ov compile`. Output defaults to `viking://resources/shared-knowledge/`, the actual target directory is configurable, and every user in the account can retrieve it.
 
-Aggregation uses a two-phase, tree-reduce model. It requires no OpenViking source changes:
+Aggregation uses an account-shared Skill with a two-phase, tree-reduce model:
 
-- **Phase 1 (per-user staging):** Trusted mode uses the Root Key with an asserted User identity. API-key mode uses the Admin Key to fetch existing user keys, then uses each User's own Key to read Memory, install the Skill, and run compile. Output goes to a sibling work root such as `viking://resources/shared-knowledge-staging/<uid>`.
-- **Phase 2 (tree-reduce merge):** as the team user, all staging roots are merged in bounded batches of `merge_fan_in` (default 12, ≤15) across cascading levels, down to the final `viking://resources/shared-knowledge/` root. Tree-reduce keeps every compile under the 16-source hard limit, supporting 100+ users.
+- **Shared Skill preparation:** the aggregation Skill is published once at `viking://agent/skills/team-memory-okf`. A run pins its content-addressed revision; the Skill is used only by Phase 2 compile tasks.
+- **Phase 1 (deterministic staging):** each User identity reads its visible Memory text and writes a stable JSONL snapshot containing source URIs and content hashes. This phase invokes neither a model nor a Skill. A snapshot is written to a temporary directory and atomically moved to an immutable source-fingerprint path.
+- **Phase 2 (tree-reduce merge):** as the team/admin identity and with the pinned Skill revision, staging snapshots are merged in bounded batches of `merge_fan_in` (default 4, ≤15). Above `partition_threshold`, output is published into stable hash partitions below the final root.
 
-Additional behavior: concurrent Phase 1 (`phase1_concurrency`), content-fingerprint incremental skipping (unchanged users reuse prior staging), and failure isolation with resumable reruns. Staging and `_merge` paths stay under the work root and never pollute the final team-Memory root or its L0/L1 summaries.
+Additional behavior: concurrent Phase 1 (`phase1_concurrency`), source-fingerprint incremental skipping, failure isolation, and resumable reruns. Staging and `_merge` live under the merge identity's private Resources tree; only final team Memory is written to account-shared `viking://resources/...`. Skill changes invalidate merge output without recopying user Memory.
 
 Implementation:
 - Routes: `teamEvolver/proxy/aggregation_routes.py` (`AggregationMixin`)
 - Orchestration: `teamEvolver/aggregation/service.py` (`MemoryAggregationService`)
+- Deterministic staging: `teamEvolver/aggregation/staging.py` (`DeterministicStagingClient`)
 - Compile invocation: `teamEvolver/aggregation/compile_client.py` (`CompileClient`)
 - User enumeration: `teamEvolver/aggregation/sources.py` (`AccountSourceBuilder`)
 - Incremental state: `teamEvolver/aggregation/state.py` (`AggregationState`)
 - Default OKF Skill: `teamEvolver/aggregation/okf_skill.py` (`DEFAULT_OKF_SKILL_BODY`)
 
-`CompileClient` calls OpenViking over HTTP. It installs the aggregation Skill
-as inline content through `POST /api/v1/skills`, then creates and polls compile
-tasks through `POST /bot/v1/compile` and `GET /bot/v1/compile/{task_id}`.
+`CompileClient` calls OpenViking over HTTP. It reads or publishes the account-shared
+Skill through `GET/POST/PUT /api/v1/skills`, then creates revision-pinned tasks
+through `POST /bot/v1/compile` and polls `GET /bot/v1/compile/{task_id}`.
 The teamEvolver host does not need the `ov` CLI, access to
 `/app/.venv/bin/ov`, or a shared temporary directory with the OpenViking container.
 
@@ -127,22 +129,32 @@ Query a task's live progress (group-level status).
 | `account_id` | string | Target account |
 | `auth_mode` | string | `trusted` or `api_key` |
 | `target_uri` | string | Normalized final output URI for this run |
+| `work_root` | string | Actual private staging/intermediate root owned by the merge identity |
+| `skill_uri` | string | Account-shared Skill URI used by the run |
+| `skill_revision` | string | Content revision pinned by the run |
 | `status` | string | `pending`, `running`, `completed`, `failed` |
 | `started_at` | number | Start timestamp |
 | `finished_at` | number\|null | Finish timestamp (null while running) |
 | `error` | string | Failure reason (when failed) |
+| `source_user_count` | integer | Number of selected source users |
+| `publish_mode` | string | `single` or `partitioned` |
+| `partition_count` | integer | Active publish partitions |
+| `estimated_merge_tasks` | integer | Planned merge compile count |
+| `group_total` | integer | Total processed groups |
+| `group_counts` | object | Group totals by `ok`, `skipped`, and `failed` |
+| `groups_truncated` | boolean | Whether detail rows were capped |
 | `groups` | array | Group results (Group objects, see below) |
 
 **Group object fields:**
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `group_key` | string | `stage:<uid>` (per-user staging), `merge:L<n>:g<i>` (intermediate merge), `merge` (final merge), `skill:<uid>` (skill install failure) |
+| `group_key` | string | `stage:<uid>` (per-user staging), `merge:L<n>:g<i>` (intermediate merge), or `merge` (final merge) |
 | `kind` | string | Category marker (currently unified as `(all)`) |
 | `target_uri` | string | Output URI of the group |
 | `source_count` | integer | Number of sources for the group |
 | `status` | string | `ok`, `skipped`, `failed` |
-| `detail` | string | Note (e.g. `unchanged (reused staging)`, error message) |
+| `detail` | string | Note (e.g. `unchanged (reused deterministic snapshot)`, error message) |
 
 Code entry: `teamEvolver/proxy/aggregation_routes.py` (`api_aggregation_status`)
 
@@ -159,6 +171,9 @@ Read the currently effective Team Memory Aggregation Skill (the user-edited cont
 | Field | Type | Description |
 |-------|------|-------------|
 | `skill_name` | string | Skill name (default `team-memory-okf`) |
+| `skill_uri` | string | Account-shared Skill URI |
+| `revision` | string | Current content revision |
+| `source` | string | `openviking` or `local_fallback` before first publication |
 | `body` | string | SKILL.md content |
 | `editable` | boolean | Always true |
 
@@ -168,7 +183,7 @@ Code entry: `teamEvolver/proxy/aggregation_routes.py` (`api_aggregation_okf_skil
 
 ### PUT /api/aggregation/okf-skill
 
-Save the user-edited Team Memory Aggregation Skill. The content is persisted to `<state_dir>/okf_skill.md` (default `~/.teamEvolver/aggregation/okf_skill.md`) and installed into each participating identity's skills space on **the next aggregation run**.
+Save the edited Team Memory Aggregation Skill. The content is immediately published to `viking://agent/skills/<name>` with a path-scoped version snapshot. `<state_dir>/okf_skill.md` remains only as the first-publish fallback. The next aggregation reads the shared Skill and pins its revision.
 
 **Auth:** Console Cookie (admin)
 
@@ -177,6 +192,7 @@ Save the user-edited Team Memory Aggregation Skill. The content is persisted to 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `body` | string | Yes | New SKILL.md content, must not be empty |
+| `version_message` | string | No | Version description |
 
 **Response fields:**
 
@@ -184,6 +200,8 @@ Save the user-edited Team Memory Aggregation Skill. The content is persisted to 
 |-------|------|-------------|
 | `ok` | boolean | Whether the save succeeded |
 | `body` | string | Saved content |
+| `skill_uri` | string | Shared Skill URI |
+| `revision` | string | Published content revision |
 
 Code entry: `teamEvolver/proxy/aggregation_routes.py` (`api_aggregation_okf_skill_save`)
 
@@ -200,8 +218,8 @@ Read aggregation settings and their computed paths.
 | `enabled` | boolean | Aggregation marker in configuration |
 | `shared_knowledge_prefix` | string | Default output prefix used when a run omits `target_uri` |
 | `target_root` | string | Computed final root, such as `viking://resources/shared-knowledge` |
-| `staging_dir` | string | Work-root suffix |
-| `work_root` | string | Computed sibling work root, such as `viking://resources/shared-knowledge-staging` |
+| `staging_dir` | string | Directory segment within the private work root |
+| `work_root` | string | Private work-root template, such as `viking://user/{merge_user}/resources/teamEvolver/staging/<target-hash>` |
 | `okf_skill_uri` | string | Aggregation Skill identifier |
 | `key_seed` | string | Compatibility field; the current runtime does not derive user keys from it |
 | `kinds` | array[string] | Explicit Memory categories; empty means the built-in set |
@@ -217,7 +235,7 @@ Persist editable aggregation settings through `ConfigStore`, then hot-reload Ope
 | Request Body field | Type | Required | Description |
 |--------------------|------|----------|-------------|
 | `shared_knowledge_prefix` | string | No | Default output prefix, used only when a run omits `target_uri` |
-| `staging_dir` | string | No | Sibling work-root suffix |
+| `staging_dir` | string | No | Directory segment within the private work root |
 | `okf_skill_uri` | string | No | Aggregation Skill identifier |
 | `kinds` | array[string] | No | Memory category list; empty items are removed |
 
@@ -263,6 +281,7 @@ Response (202):
   "account_id": "default",
   "auth_mode": "api_key",
   "target_uri": "viking://resources/engineering-memory",
+  "work_root": "viking://user/admin/resources/teamEvolver/staging/8f3a2d4c6b7e90123456",
   "status": "running",
   "started_at": 1756100000.0,
   "finished_at": null,
@@ -287,10 +306,11 @@ Response (completed):
   "account_id": "default",
   "auth_mode": "api_key",
   "target_uri": "viking://resources/engineering-memory",
+  "work_root": "viking://user/admin/resources/teamEvolver/staging/8f3a2d4c6b7e90123456",
   "status": "completed",
   "groups": [
-    {"group_key": "stage:chenghan", "kind": "(all)", "target_uri": "viking://resources/engineering-memory-staging/chenghan", "source_count": 1, "status": "ok", "detail": ""},
-    {"group_key": "stage:zhangpengkun", "kind": "(all)", "target_uri": "viking://resources/engineering-memory-staging/zhangpengkun", "source_count": 8, "status": "ok", "detail": ""},
+    {"group_key": "stage:chenghan", "kind": "(all)", "target_uri": "viking://user/admin/resources/teamEvolver/staging/8f3a2d4c6b7e90123456/users/chenghan/snapshots/12ab...", "source_count": 1, "status": "ok", "detail": "copied 1 source files into 1 JSONL chunks"},
+    {"group_key": "stage:zhangpengkun", "kind": "(all)", "target_uri": "viking://user/admin/resources/teamEvolver/staging/8f3a2d4c6b7e90123456/users/zhangpengkun/snapshots/34cd...", "source_count": 8, "status": "ok", "detail": "copied 8 source files into 1 JSONL chunks"},
     {"group_key": "merge", "kind": "(all)", "target_uri": "viking://resources/engineering-memory", "source_count": 2, "status": "ok", "detail": "merged"}
   ]
 }
@@ -376,7 +396,7 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 | 400 | `endpoint must be a valid HTTP(S) URL` | The endpoint scheme or URL structure is invalid |
 | 400 | `api_key mode requires plaintext per-user API keys...` | User records contain only Key prefixes or omit User Keys; no rotation was attempted |
 | 400 | `admin_key owner could not be identified...` | The Admin Key owner could not be identified from the user list |
-| 400 | `admin list-users reached safety limit...` | The user count reached the 10000 safety limit and may be truncated |
+| 400 | `admin list-users reached safety limit...` | The user count exceeded `account_user_limit` |
 | 400 | `target_uri must be a string` | `target_uri` is not a string |
 | 400 | `target_uri must be a valid path under viking://resources/<path>` | URI is invalid, targets the resources root, or leaves the shared resources namespace |
 | 400 | (upstream message) | OpenViking is unreachable or the Admin Key is unauthorized |
@@ -391,12 +411,18 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 | Config key (`aggregation.*`) | Default | Description |
 |------|---------|-------------|
 | `shared_knowledge_prefix` | `shared-knowledge` | Default team-memory output prefix when a run omits `target_uri` |
-| `staging_dir` | `staging` | Sibling work-root suffix; combined as `<prefix>-<staging_dir>` |
+| `staging_dir` | `staging` | Work-directory segment under the merge identity's private Resources |
 | `okf_skill_uri` | `viking://agent/skills/team-memory-okf` | Source of the aggregation Skill name (trailing segment used as the skill name); output format is defined by this Skill |
 | `kinds` | empty (built-in default set) | Memory categories to aggregate |
-| `max_users_per_batch` | 12 | Per-compile source cap in Phase 1 (< 16) |
-| `phase1_concurrency` | 6 | Service-wide compile concurrency limit shared by all aggregation Runs |
-| `merge_fan_in` | 12 | Phase 2 tree-reduce fan-in width (2–15) |
+| `max_users_per_batch` | 12 | Compatibility field; deterministic staging does not consume it |
+| `account_user_limit` | 50000 | Maximum users accepted for one Account-wide run |
+| `account_user_page_size` | 1000 | Stable Admin user-list page size |
+| `phase1_concurrency` | 6 | Maximum concurrent per-user snapshot copies |
+| `merge_fan_in` | 4 | Phase 2 tree-reduce fan-in width (2–15) |
+| `merge_concurrency` | 4 | Concurrent merge groups |
+| `partition_threshold` | 512 | User count that enables partitioned publication |
+| `partition_count` | 256 | Fixed hash partition count |
+| `run_detail_limit` | 2000 | Maximum retained status detail rows |
 | `compile_runtime_timeout_seconds` | 3000 | Per-compile runtime timeout |
 | `state_dir` | empty (default `~/.teamEvolver/aggregation`) | Storage dir for incremental state and Skill content; state is isolated by endpoint, Account, and target URI |
 
@@ -405,8 +431,9 @@ Config is registered in three places: `teamEvolver/config_store/defaults.py`, `t
 ### Limits and scale
 
 - `ov compile` has a hard limit of 16 sources per task and 128 output pages/files.
-- Phase 2 uses tree-reduce so every compile stays at or below `merge_fan_in` (≤15) sources regardless of user count; verified at 120-user scale without truncation or hitting the limit.
-- The first full aggregation scales roughly linearly with user count (each compile takes tens of seconds); prefer incremental mode for routine use so only changed/failed users are recompiled.
+- Phase 2 keeps every compile at or below `merge_fan_in` (≤15) sources. Runs above 512 users publish stable partitions so the 128-page per-compile output limit does not cap the complete team corpus.
+- Phase 1 makes no model calls. Incremental runs recopy only changed/failed users and recompile only affected merge branches.
+- A deterministic 10,000-user planning test verifies bounded worker count, all 256 stable partitions, and roughly 3,600 merge tasks for a full initial run. This is operationally resumable, not instantaneous.
 - Skill uploads and compile submissions retry connection-establishment failures up to three times with exponential backoff. Other POST failures are not replayed because the upstream may already have accepted the request. Compile-status polling is an idempotent GET and retries transient transport failures.
 
 ### Compile capacity diagnostics
@@ -439,10 +466,10 @@ covering four worst-case execution waves.
 - External calls provide exactly one credential: `root_key` selects `trusted`; `admin_key` selects `api_key`. Neither credential is persisted or returned.
 - The console remains backward compatible: an administrator session may omit credentials and use `sharing.viking_team_api_key` as the Trusted Root Key.
 - `endpoint` can be overridden per request and is not persisted. It must be an HTTP(S) URL without user information, query parameters, or fragments.
-- In API-key mode, teamEvolver reads existing plaintext Keys from the Admin user list. Each User's probe, Skill installation, and compile use only that User's own Key.
-- The final merge uses the Admin Key and the actual Admin User's Skill space instead of the fixed `team` identity.
+- In API-key mode, teamEvolver reads existing plaintext Keys from the Admin user list. Each User's inventory and content reads use only that User's own Key.
+- Snapshots are written to the merge identity's private Resources. API-key mode uses the actual Admin User; Trusted mode uses the configured team User.
 - User Keys exist only in background-worker memory. They never enter HTTP responses, Runs, logs, incremental state, or persisted configuration.
 - Deployments with API Key hashing enabled cannot use this compatibility path. The service fails closed and never regenerates or replaces User Keys automatically.
 - `task_id` is a high-entropy random value. Callers without a TeamEvolver identity use it to query one task; listing all tasks remains restricted to console administrators.
 - Expose execution endpoints only over HTTPS or a trusted network so the Admin Key is protected in transit.
-- Final output is written to the run's `target_uri`, or to `viking://resources/<shared_knowledge_prefix>/` when omitted; intermediate artifacts stay in that target's sibling work root.
+- Final output is written to the run's `target_uri`, or to `viking://resources/<shared_knowledge_prefix>/` when omitted; raw snapshots and intermediates remain under the merge identity's private work root.

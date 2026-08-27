@@ -1,17 +1,13 @@
-"""Account -> users -> per-category source URI expansion and batching.
+"""Account user discovery for cross-user Memory aggregation.
 
-The source builder is deliberately free of any LLM logic. It only:
+The source builder is deliberately free of model logic. It:
 
 1. Enumerates real users under an OpenViking account via the Admin API
    (request-scoped Root/Admin Key), mirroring the request shape already used by
    ``users_admin._openviking_sync`` (``GET /api/v1/admin/accounts/{account}/users``).
-2. Maps each user + memory category to a canonical source URI
-   (``viking://user/<uid>/memories/<category>``).
-3. Batches those sources under the ``ov compile`` 16-source ceiling so a single
-   compile task never exceeds the limit. Batching is per category first (all
-   users' ``experiences`` compile together into one target directory), then
-   split into sub-batches when a category has more than ``max_users_per_batch``
-   users.
+2. Retains the legacy per-category compile planner for compatibility. The
+   active aggregation pipeline stages deterministic per-user snapshots and
+   applies this batching limit only during merge tree reduction.
 """
 
 from __future__ import annotations
@@ -25,7 +21,8 @@ import httpx
 # roots do not push a batch over the ceiling.
 _COMPILE_SOURCE_CEILING = 16
 _DEFAULT_MAX_USERS_PER_BATCH = 12
-_DEFAULT_ACCOUNT_USER_LIMIT = 10_000
+_DEFAULT_ACCOUNT_USER_LIMIT = 50_000
+_DEFAULT_ACCOUNT_USER_PAGE_SIZE = 1_000
 
 # Built-in OpenViking memory categories worth aggregating. ``identity``/``soul``
 # are intentionally excluded: they are assistant-persona files, not team
@@ -87,6 +84,7 @@ class AccountSourceBuilder:
     shared_knowledge_prefix: str = "shared-knowledge"
     max_users_per_batch: int = _DEFAULT_MAX_USERS_PER_BATCH
     account_user_limit: int = _DEFAULT_ACCOUNT_USER_LIMIT
+    account_user_page_size: int = _DEFAULT_ACCOUNT_USER_PAGE_SIZE
     timeout_seconds: float = 15.0
     # Users that must never be treated as an aggregation source (the team user
     # that owns the shared output, system/service users, etc.).
@@ -121,12 +119,47 @@ class AccountSourceBuilder:
         if not self.api_key:
             raise SourceExpansionError("aggregation requires an OpenViking API key")
         limit = max(1, int(self.account_user_limit))
+        page_size = max(1, min(1_000, int(self.account_user_page_size), limit))
         url = f"{self.endpoint.rstrip('/')}/api/v1/admin/accounts/{self.account_id}/users"
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                records: list[AccountUserCredential] = []
+                seen_user_ids: set[str] = set()
+                offset = 0
+                while len(records) < limit:
+                    request_limit = min(page_size, limit - len(records))
+                    response = await client.get(
+                        url,
+                        params={"limit": request_limit, "offset": offset},
+                        headers=self._admin_headers(),
+                    )
+                    if response.status_code >= 400:
+                        raise SourceExpansionError(
+                            f"admin list-users failed (HTTP {response.status_code}): "
+                            f"{(response.text or '')[:300]}"
+                        )
+                    try:
+                        page = _extract_user_credentials(response.json())
+                    except ValueError as exc:
+                        raise SourceExpansionError(
+                            "admin list-users returned non-JSON"
+                        ) from exc
+                    if not page:
+                        return records
+                    if any(record.user_id in seen_user_ids for record in page):
+                        raise SourceExpansionError(
+                            "admin list-users pagination did not advance; "
+                            "upgrade OpenViking to a version with offset support"
+                        )
+                    records.extend(page)
+                    seen_user_ids.update(record.user_id for record in page)
+                    offset += len(page)
+                    if len(page) < request_limit:
+                        return records
+
                 response = await client.get(
                     url,
-                    params={"limit": limit},
+                    params={"limit": 1, "offset": offset},
                     headers=self._admin_headers(),
                 )
         except httpx.HTTPError as exc:
@@ -137,14 +170,13 @@ class AccountSourceBuilder:
                 f"{(response.text or '')[:300]}"
             )
         try:
-            payload = response.json()
+            overflow = _extract_user_credentials(response.json())
         except ValueError as exc:
             raise SourceExpansionError("admin list-users returned non-JSON") from exc
-        records = _extract_user_credentials(payload)
-        if len(records) >= limit:
+        if overflow:
             raise SourceExpansionError(
                 f"admin list-users reached safety limit ({limit}); "
-                "refine the Account or increase pagination support"
+                "raise aggregation.account_user_limit explicitly"
             )
         return records
 

@@ -497,11 +497,37 @@ class ConfigStore:
             aggregation_max_users_per_batch=max(
                 1, int(aggregation.get("max_users_per_batch", 12) or 12)
             ),
+            aggregation_account_user_limit=max(
+                1, int(aggregation.get("account_user_limit", 50_000) or 50_000)
+            ),
+            aggregation_account_user_page_size=max(
+                1,
+                min(
+                    1_000,
+                    int(aggregation.get("account_user_page_size", 1_000) or 1_000),
+                ),
+            ),
             aggregation_phase1_concurrency=max(
                 1, int(aggregation.get("phase1_concurrency", 6) or 6)
             ),
             aggregation_merge_fan_in=max(
-                2, min(15, int(aggregation.get("merge_fan_in", 12) or 12))
+                2, min(15, int(aggregation.get("merge_fan_in", 4) or 4))
+            ),
+            aggregation_merge_concurrency=max(
+                1, int(aggregation.get("merge_concurrency", 4) or 4)
+            ),
+            aggregation_partition_threshold=max(
+                16, int(aggregation.get("partition_threshold", 512) or 512)
+            ),
+            aggregation_partition_count=max(
+                16,
+                min(
+                    1_024,
+                    int(aggregation.get("partition_count", 256) or 256),
+                ),
+            ),
+            aggregation_run_detail_limit=max(
+                100, int(aggregation.get("run_detail_limit", 2_000) or 2_000)
             ),
             aggregation_compile_runtime_timeout_seconds=max(
                 60, int(aggregation.get("compile_runtime_timeout_seconds", 3000) or 3000)

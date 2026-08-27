@@ -26,7 +26,12 @@ DEFAULT_OKF_SKILL_NAME = "team-memory-okf"
 # OpenViking compatibility. Users may replace this wholesale.
 DEFAULT_OKF_SKILL_BODY = """---
 name: team-memory-okf
-description: Aggregate multiple users' OpenViking memories into an account-shared OKF knowledge tree under viking://resources. Merge same-subject items across users, de-duplicate, resolve conflicts by keeping the most complete/recent version, preserve concrete data, and record provenance. Produce OKF v0.2 Markdown pages with YAML frontmatter, a maintained index, and Markdown cross references.
+description: >-
+  Aggregate multiple users' OpenViking memories into an account-shared OKF
+  knowledge tree under viking://resources. Merge same-subject items across users,
+  de-duplicate, resolve conflicts by keeping the most complete/recent version,
+  preserve concrete data, and record provenance. Produce OKF v0.2 Markdown pages
+  with YAML frontmatter, a maintained index, and Markdown cross references.
 ---
 
 # Team Memory OKF Aggregation
@@ -34,6 +39,15 @@ description: Aggregate multiple users' OpenViking memories into an account-share
 Turn the supplied per-user memory sources into durable, connected team knowledge.
 Keep sources read-only. Do not invent facts; use only the supplied sources and
 the existing target tree.
+
+## Input format
+
+Phase 1 is a deterministic copy and does not execute this Skill. A direct
+per-user staging source contains `snapshot-*.jsonl`; each line records
+`source_uri`, `relative_path`, `kind`, `modified_at`, `content_sha256`, and the
+verbatim visible Memory text in `content`. Read the `content` field as source
+material and retain `source_uri` as provenance. Inputs from later tree-reduce
+levels are prior structured merge outputs.
 
 ## Output format (OKF v0.2)
 

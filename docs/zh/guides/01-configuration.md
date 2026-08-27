@@ -189,14 +189,20 @@ API-key 模式读取 Admin 用户列表中的现存用户明文 Key，不执行 
 |------|------|--------|------|
 | `enabled` | boolean | `false` | 聚合功能的配置标记。聚合仍由管理员在控制台显式触发。 |
 | `shared_knowledge_prefix` | string | `"shared-knowledge"` | 最终团队 Memory 根：`viking://resources/<prefix>/`。可在「进化链路 → 团队 Memory 自进化」热更新。 |
-| `okf_skill_uri` | string | `"viking://agent/skills/team-memory-okf"` | 聚合 Skill 标识；执行时取末段作为 Skill 名，并将当前可编辑内容安装到参与身份自己的 Skill 空间。 |
+| `okf_skill_uri` | string | `"viking://agent/skills/team-memory-okf"` | 账号级共享聚合 Skill；所有参与身份读取同一份内容和 revision。 |
 | `insight_skill_uri` | string | `""` | 预留的洞察 Skill 标识，当前聚合执行链路尚未使用。 |
 | `key_seed` | string | `"teamevolver-aggregation"` | 兼容保留字段；当前执行链路不使用它生成用户 Key。 |
-| `staging_dir` | string | `"staging"` | 工作根后缀。默认 staging 位于同级 `viking://resources/shared-knowledge-staging/`，不会污染最终目录的 L0/L1 摘要。 |
+| `staging_dir` | string | `"staging"` | merge 身份私有 Resources 下的工作目录段；原始快照不会写入 account 共享 Resources。 |
 | `kinds` | list | `[]` | 个人 Memory 类别；空列表使用内置集合 `profile/entities/preferences/events/cases/patterns/trajectories/experiences/tools/skills`。 |
-| `max_users_per_batch` | integer | `12` | 单个用户 Phase 1 compile 最多读取的类别数，运行时上限为 15。 |
-| `phase1_concurrency` | integer | `6` | Phase 1 用户级 compile 最大并发数。 |
-| `merge_fan_in` | integer | `12` | tree-reduce 每轮合并的最大源数，运行时限制为 2–15。 |
+| `max_users_per_batch` | integer | `12` | 兼容保留字段；确定性 staging 不使用该值。 |
+| `account_user_limit` | integer | `50000` | 单次 Account 全量聚合的用户安全上限。 |
+| `account_user_page_size` | integer | `1000` | 稳定读取用户清单的分页大小，最大 1000。 |
+| `phase1_concurrency` | integer | `6` | Phase 1 用户级确定性快照最大并发数。 |
+| `merge_fan_in` | integer | `4` | tree-reduce 每轮合并的最大源数，运行时限制为 2–15。 |
+| `merge_concurrency` | integer | `4` | merge 分组最大并发数。 |
+| `partition_threshold` | integer | `512` | staging 用户超过该值后启用固定哈希分区发布。 |
+| `partition_count` | integer | `256` | 固定发布分区数，范围 16–1024。 |
+| `run_detail_limit` | integer | `2000` | 实时状态中最多保留的分组明细数。 |
 | `compile_runtime_timeout_seconds` | integer | `3000` | 单个 compile 任务的运行超时秒数，最小 60。 |
 | `state_dir` | string | `""` | 聚合状态目录；留空使用 `~/.teamEvolver/aggregation/`。 |
 
@@ -397,8 +403,14 @@ aggregation:
   enabled: true
   shared_knowledge_prefix: "shared-knowledge"
   staging_dir: "staging"
+  account_user_limit: 50000
+  account_user_page_size: 1000
   phase1_concurrency: 6
-  merge_fan_in: 12
+  merge_fan_in: 4
+  merge_concurrency: 4
+  partition_threshold: 512
+  partition_count: 256
+  run_detail_limit: 2000
 
 validation:
   enabled: true

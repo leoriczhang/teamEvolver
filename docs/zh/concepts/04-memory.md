@@ -22,31 +22,34 @@ Memory 是可检索的长期事实、背景、偏好与团队共识。它为 Age
 1. 控制台管理员默认使用系统配置的 Endpoint、Account 和 Trusted Root Key；独立接口也支持 `admin_key` 的 API-key 模式。
 2. 服务端使用 Root/Admin Key 枚举用户；API-key 模式同时读取现存的用户明文 Key，排除 team 服务用户。
 3. 管理员全选、反选或逐个选择参与用户，并选择增量或全量模式。
-4. Phase 1 在 Trusted 模式使用 Root Key 模拟目标身份，在 API-key 模式使用每个用户自己的 Key，并发生成 per-user staging。
-5. Phase 2 以最多 15 个源为一组做 tree-reduce，最终写入团队 Memory 根。
+4. Phase 1 使用每个用户的身份并发读取可见 Memory 原文，确定性写入 merge 身份的私有 staging；不调用模型或 Skill。
+5. Phase 2 使用固定的 Skill revision，以最多 15 个源为一组做 tree-reduce；大账号按固定哈希分区发布，避免把全部内容压缩进单个 128 页 compile 结果。
 
 默认目录：
 
 ```text
 个人源     viking://user/<user>/memories/<kind>/
-工作根     viking://resources/shared-knowledge-staging/
+工作根     viking://user/<merge-user>/resources/teamEvolver/staging/<target-hash>/
 最终根     viking://resources/shared-knowledge/
 ```
 
-`shared_knowledge_prefix` 和 `staging_dir` 可配置。工作根始终是最终根的同级目录，中间 `_merge` 文件不会进入最终根，也不会污染最终目录的 L0/L1 摘要。
+`shared_knowledge_prefix` 和 `staging_dir` 可配置。工作根属于 merge 身份的私有 Resources，原始快照和 `_merge` 中间产物不会暴露到 account 共享 Resources；最终根只包含聚合后的团队 Memory。
 
 ### 聚合 Skill
 
-聚合输出结构由「团队记忆聚合 Skill」定义。管理员可在控制台直接编辑完整 `SKILL.md`，内容默认持久化到 `~/.teamEvolver/aggregation/okf_skill.md`。下一次聚合时，服务会把它安装到每个参与身份自己的 Skill 空间。
+聚合输出结构由「团队记忆聚合 Skill」定义。管理员可在控制台编辑完整 `SKILL.md`，内容会发布到账号级共享目录 `viking://agent/skills/team-memory-okf` 并生成版本快照。Skill 只在 Phase 2 merge 中执行。
 
-Skill 内容变化会使下一次增量运行重新编译全部选中用户。用户 Memory 内容未变化且上次 staging 成功时，增量模式会复用已有 staging。
+Skill 内容变化只会使下一次运行重新执行受影响的 merge；不会重新复制未变化用户的 staging。用户 Memory 内容未变化且快照仍存在时，增量模式直接复用该快照。
 
 ### 规模与失败恢复
 
-- Phase 1 默认最大并发为 6。
-- `merge_fan_in` 默认 12，运行时限制为 2–15，避免超过 compile 的 16 源上限。
+- Phase 1 快照复制默认最大并发为 6。
+- 用户清单按每页 1,000 个稳定分页读取，默认安全上限为 50,000。
+- `merge_fan_in` 默认 4，运行时限制为 2–15，避免超过 compile 的 16 源上限。
+- staging 用户超过 512 时，最多发布 256 个固定哈希分区；新增或变化用户只使所属分区失效。
+- 10,000 用户首次全量当前约需 3,600 次 merge compile；支持断点续跑，但耗时和模型成本仍取决于部署吞吐。
 - 单用户失败不会中止其他用户；下一次增量运行会重试失败或内容变化的用户。
-- 页面刷新后可恢复当前服务进程内的最近任务；服务重启会清空任务列表，但不会清除磁盘上的指纹状态。
+- 每组完成后立即追加检查点。服务重启会清空实时任务列表，但不会清除已完成快照或 merge 检查点。
 
 完整接口见 [团队记忆聚合 API](../api/11-team-memory-aggregation.md)。
 
@@ -97,8 +100,13 @@ aggregation:
   enabled: true
   shared_knowledge_prefix: shared-knowledge
   staging_dir: staging
+  account_user_limit: 50000
+  account_user_page_size: 1000
   phase1_concurrency: 6
-  merge_fan_in: 12
+  merge_fan_in: 4
+  merge_concurrency: 4
+  partition_threshold: 512
+  partition_count: 256
 
 dreamcycle:
   enabled: false

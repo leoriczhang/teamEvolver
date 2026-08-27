@@ -115,7 +115,7 @@ FastAPI 应用组装入口，负责：
 
 ### 团队 Memory 聚合（[aggregation/](file:///home/zhangpengkun/teamEvolver/teamEvolver/aggregation/)）
 
-管理员从控制台选择 OpenViking Account 用户后，聚合服务以受控并发执行 per-user compile，再通过有界 tree-reduce 写入 `viking://resources/<shared_knowledge_prefix>/`。中转目录位于最终目录同级，并使用指纹状态支持增量跳过。
+管理员从控制台选择 OpenViking Account 用户后，聚合服务以受控并发生成不执行 Skill 的 per-user 确定性快照，再通过有界 tree-reduce compile 写入 `viking://resources/<shared_knowledge_prefix>/`。原始快照与中间产物位于 merge 身份的私有 Resources，并使用指纹状态支持增量跳过。
 
 ### Validation Worker ([validation/worker.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/validation/worker.py))
 
