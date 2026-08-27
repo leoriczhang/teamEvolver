@@ -555,8 +555,13 @@ class DeterministicStagingClient:
                     json={
                         "root_uri": root_uri,
                         "operations": operations,
-                        "wait": True,
-                        "timeout": self.timeout_seconds,
+                        # Do not block on server-side vectorization. The staged
+                        # snapshot is deterministic scratch data: it is verified
+                        # by content fingerprint and read back as raw text by the
+                        # compile step, never via semantic search. Waiting for
+                        # inline indexing dominated publish time (~22s per batch)
+                        # and made large-memory staging look hung.
+                        "wait": False,
                     },
                     headers=self._target_headers,
                 )
