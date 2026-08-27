@@ -20,9 +20,9 @@ Memory 是可检索的长期事实、背景、偏好与团队共识。它为 Age
 当前控制台中的「进化链路 → 团队 Memory 自进化」使用 `MemoryAggregationService` 和 `ov compile`：
 
 1. 控制台管理员默认使用系统配置的 Endpoint、Account 和 Trusted Root Key；独立接口也支持 `admin_key` 的 API-key 模式。
-2. 服务端使用本次请求解析出的 Root/Admin Key 枚举用户，排除 team 服务用户；Key 不持久化。
+2. 服务端使用 Root/Admin Key 枚举用户；API-key 模式同时读取现存的用户明文 Key，排除 team 服务用户。
 3. 管理员全选、反选或逐个选择参与用户，并选择增量或全量模式。
-4. Phase 1 使用所选凭据和目标用户身份读取每个用户的 Memory，并并发生成 per-user staging。
+4. Phase 1 在 Trusted 模式使用 Root Key 模拟目标身份，在 API-key 模式使用每个用户自己的 Key，并发生成 per-user staging。
 5. Phase 2 以最多 15 个源为一组做 tree-reduce，最终写入团队 Memory 根。
 
 默认目录：

@@ -6,7 +6,7 @@ The Team Memory Aggregation API (Interface 1) aggregates the personal memories o
 
 Aggregation uses a two-phase, tree-reduce model. It requires no OpenViking source changes:
 
-- **Phase 1 (per-user staging):** for each selected User, compile uses the resolved OpenViking Root/Admin credential and reads that user's Memory. Output goes to a work root beside the final directory, for example `viking://resources/shared-knowledge-staging/<uid>`. The aggregation Skill is installed into that user's own Skill space first so the same identity can read it.
+- **Phase 1 (per-user staging):** Trusted mode uses the Root Key with an asserted User identity. API-key mode uses the Admin Key to fetch existing user keys, then uses each User's own Key to read Memory, install the Skill, and run compile. Output goes to a sibling work root such as `viking://resources/shared-knowledge-staging/<uid>`.
 - **Phase 2 (tree-reduce merge):** as the team user, all staging roots are merged in bounded batches of `merge_fan_in` (default 12, ≤15) across cascading levels, down to the final `viking://resources/shared-knowledge/` root. Tree-reduce keeps every compile under the 16-source hard limit, supporting 100+ users.
 
 Additional behavior: concurrent Phase 1 (`phase1_concurrency`), content-fingerprint incremental skipping (unchanged users reuse prior staging), and failure isolation with resumable reruns. Staging and `_merge` paths stay under the work root and never pollute the final team-Memory root or its L0/L1 summaries.
@@ -99,6 +99,8 @@ Start a background aggregation task; returns 202 with the initial Run object imm
 **Response (202):** initial Run object (`status` is `pending`/`running`).
 
 `target_uri` is scoped to this run and does not mutate persisted settings. Incremental state is isolated by endpoint, Account, authentication mode, and target URI. Neither credential appears in the 202 response, task list, or status response.
+
+API-key mode requires the OpenViking Admin user list to return complete `api_key` values. If the target deployment hashes API Keys and returns only `key_prefix`, the run fails before any compile starts. teamEvolver never regenerates User Keys automatically.
 
 Code entry: `teamEvolver/proxy/aggregation_routes.py` (`api_aggregation_run`)
 
@@ -372,6 +374,9 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 | 400 | `endpoint must be a string` | `endpoint` is not a string |
 | 400 | `endpoint is required` | The request omitted the endpoint and no default endpoint is configured |
 | 400 | `endpoint must be a valid HTTP(S) URL` | The endpoint scheme or URL structure is invalid |
+| 400 | `api_key mode requires plaintext per-user API keys...` | User records contain only Key prefixes or omit User Keys; no rotation was attempted |
+| 400 | `admin_key owner could not be identified...` | The Admin Key owner could not be identified from the user list |
+| 400 | `admin list-users reached safety limit...` | The user count reached the 10000 safety limit and may be truncated |
 | 400 | `target_uri must be a string` | `target_uri` is not a string |
 | 400 | `target_uri must be a valid path under viking://resources/<path>` | URI is invalid, targets the resources root, or leaves the shared resources namespace |
 | 400 | (upstream message) | OpenViking is unreachable or the Admin Key is unauthorized |
@@ -390,7 +395,7 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 | `okf_skill_uri` | `viking://agent/skills/team-memory-okf` | Source of the aggregation Skill name (trailing segment used as the skill name); output format is defined by this Skill |
 | `kinds` | empty (built-in default set) | Memory categories to aggregate |
 | `max_users_per_batch` | 12 | Per-compile source cap in Phase 1 (< 16) |
-| `phase1_concurrency` | 6 | Phase 1 concurrency |
+| `phase1_concurrency` | 6 | Service-wide compile concurrency limit shared by all aggregation Runs |
 | `merge_fan_in` | 12 | Phase 2 tree-reduce fan-in width (2–15) |
 | `compile_runtime_timeout_seconds` | 3000 | Per-compile runtime timeout |
 | `state_dir` | empty (default `~/.teamEvolver/aggregation`) | Storage dir for incremental state and Skill content; state is isolated by endpoint, Account, and target URI |
@@ -402,14 +407,42 @@ Config is registered in three places: `teamEvolver/config_store/defaults.py`, `t
 - `ov compile` has a hard limit of 16 sources per task and 128 output pages/files.
 - Phase 2 uses tree-reduce so every compile stays at or below `merge_fan_in` (≤15) sources regardless of user count; verified at 120-user scale without truncation or hitting the limit.
 - The first full aggregation scales roughly linearly with user count (each compile takes tens of seconds); prefer incremental mode for routine use so only changed/failed users are recompiled.
+- Skill uploads and compile submissions retry connection-establishment failures up to three times with exponential backoff. Other POST failures are not replayed because the upstream may already have accepted the request. Compile-status polling is an idempotent GET and retries transient transport failures.
+
+### Compile capacity diagnostics
+
+OpenViking deployments that expose capacity status can be queried with an
+authenticated request:
+
+```bash
+curl -H "X-API-Key: <openviking-key>" \
+  -H "X-OpenViking-Account: <account-id>" \
+  -H "X-OpenViking-User: <user-id>" \
+  "https://openviking.example.com/bot/v1/compile/status"
+```
+
+Key fields:
+
+- `worker_model=in_process_asyncio`: compile runs as in-process tasks inside the VikingBot gateway; there is no separate compile worker process.
+- `available_execution_slots`: currently free execution slots; a sustained zero means capacity is exhausted.
+- `running_tasks` / `queued_tasks`: tasks executing and waiting for a slot.
+- `queue_wait_seconds`: maximum time a task may wait for an execution slot.
+
+When many tasks fail in `queued` while `available_execution_slots=0`, reduce
+caller-wide concurrency or increase tested OpenViking capacity before
+investigating the VLM. The current local source deployment aligns 40 admitted
+tasks and 10 execution slots by raising queue wait from one hour to four hours,
+covering four worst-case execution waves.
 
 ### Identity and permissions
 
 - External calls provide exactly one credential: `root_key` selects `trusted`; `admin_key` selects `api_key`. Neither credential is persisted or returned.
 - The console remains backward compatible: an administrator session may omit credentials and use `sharing.viking_team_api_key` as the Trusted Root Key.
 - `endpoint` can be overridden per request and is not persisted. It must be an HTTP(S) URL without user information, query parameters, or fragments.
-- Phase 1 uses the selected credential with the target user identity to read each user's Memory.
-- Current OpenViking API-key mode ignores `X-OpenViking-User`, and a standard Admin role cannot read another user's private Memory. The `admin_key` branch therefore requires an OpenViking deployment that provides Admin cross-user delegation; otherwise the upstream returns a permission error.
+- In API-key mode, teamEvolver reads existing plaintext Keys from the Admin user list. Each User's probe, Skill installation, and compile use only that User's own Key.
+- The final merge uses the Admin Key and the actual Admin User's Skill space instead of the fixed `team` identity.
+- User Keys exist only in background-worker memory. They never enter HTTP responses, Runs, logs, incremental state, or persisted configuration.
+- Deployments with API Key hashing enabled cannot use this compatibility path. The service fails closed and never regenerates or replaces User Keys automatically.
 - `task_id` is a high-entropy random value. Callers without a TeamEvolver identity use it to query one task; listing all tasks remains restricted to console administrators.
 - Expose execution endpoints only over HTTPS or a trusted network so the Admin Key is protected in transit.
 - Final output is written to the run's `target_uri`, or to `viking://resources/<shared_knowledge_prefix>/` when omitted; intermediate artifacts stay in that target's sibling work root.

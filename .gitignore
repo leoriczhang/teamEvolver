@@ -46,3 +46,7 @@ docs/research/
 openviking/
 CLAUDE.local.md
 STATE.md
+
+# Debug artifacts
+.dbg/
+debug-*.md

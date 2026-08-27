@@ -6,7 +6,7 @@
 
 聚合采用「两阶段 + 分层归并」模型，全程不修改 OpenViking 源码：
 
-- **Phase 1（per-user staging）**：对每个选中的 User，使用解析后的 OpenViking Root/Admin 凭据运行 compile 并读取该用户的记忆。产物写入最终目录的同级工作根，例如 `viking://resources/shared-knowledge-staging/<uid>`。OKF Skill 先安装到该用户自己的 skills 空间，供同身份读取。
+- **Phase 1（per-user staging）**：Trusted 模式使用 Root Key + User 身份；API-key 模式先用 Admin Key 获取现存用户 Key，再使用每个 User 自己的 Key 读取 Memory、安装 Skill 和运行 compile。产物写入最终目录的同级工作根，例如 `viking://resources/shared-knowledge-staging/<uid>`。
 - **Phase 2（tree-reduce 合并）**：以 team 用户身份，将所有 staging 根按 `merge_fan_in`（默认 12，≤15）分批做多级归并，最终合并到 `viking://resources/shared-knowledge/`。分层归并保证每次 compile 源数不超过 16 的硬上限，支持 100+ 用户。
 
 其它特性：Phase 1 并发执行（`phase1_concurrency`）、内容指纹增量跳过（未变更用户复用上次 staging）、失败隔离与断点续跑（单用户失败不影响整体，下次仅重试失败/变更项）。中转和 `_merge` 目录始终位于工作根，不会进入最终团队 Memory 根或污染其 L0/L1 摘要。
@@ -98,6 +98,8 @@
 **响应（202）：** 初始 Run 对象（`status` 为 `pending`/`running`）。
 
 `target_uri` 是运行级参数，不修改持久化设置。服务会按 Endpoint、Account、认证模式和目标 URI 隔离增量状态。`root_key` 和 `admin_key` 都不会出现在 202 响应、任务列表或状态查询结果中。
+
+API-key 模式要求 OpenViking Admin 用户列表返回完整 `api_key`。如果目标部署启用了 API Key 哈希、只返回 `key_prefix`，任务会在任何 compile 启动前失败；teamEvolver 不会自动 regenerate 用户 Key。
 
 代码入口：`teamEvolver/proxy/aggregation_routes.py` (`api_aggregation_run`)
 
@@ -368,6 +370,9 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 | 400 | `endpoint must be a string` | `endpoint` 不是字符串 |
 | 400 | `endpoint is required` | 请求未传 Endpoint，且系统未配置默认 Endpoint |
 | 400 | `endpoint must be a valid HTTP(S) URL` | Endpoint 协议或 URL 结构非法 |
+| 400 | `api_key mode requires plaintext per-user API keys...` | 用户列表只返回 Key 前缀或缺少用户 Key；未执行 Key 轮换 |
+| 400 | `admin_key owner could not be identified...` | 无法从用户列表确认 Admin Key 对应的管理员身份 |
+| 400 | `admin list-users reached safety limit...` | 用户数达到 10000 安全上限，结果可能被截断 |
 | 400 | `target_uri must be a string` | `target_uri` 不是字符串 |
 | 400 | `target_uri must be a valid path under viking://resources/<path>` | URI 非法、指向资源根或不在共享资源命名空间 |
 | 400 | （上游错误信息） | OpenViking 不可达或 Admin Key 无权访问 |
@@ -386,7 +391,7 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 | `okf_skill_uri` | `viking://agent/skills/team-memory-okf` | 聚合 Skill 名称来源（取末段作为 skill 名）；输出格式由该 Skill 定义 |
 | `kinds` | 空（用内置默认集） | 参与聚合的记忆类别 |
 | `max_users_per_batch` | 12 | Phase 1 单次 compile 源数上限（< 16） |
-| `phase1_concurrency` | 6 | Phase 1 并发度 |
+| `phase1_concurrency` | 6 | TeamEvolver 服务实例级 compile 总并发上限，多个聚合 Run 共享 |
 | `merge_fan_in` | 12 | Phase 2 tree-reduce 扇入宽度（2–15） |
 | `compile_runtime_timeout_seconds` | 3000 | 单次 compile 运行超时 |
 | `state_dir` | 空（默认 `~/.teamEvolver/aggregation`） | 增量状态与 Skill 内容存储目录；状态按 Endpoint、Account 与目标 URI 隔离 |
@@ -398,14 +403,37 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 - `ov compile` 单任务源数硬上限为 16，产物数上限为 128。
 - Phase 2 采用 tree-reduce 分层归并，保证任意用户规模下每次 compile 源数 ≤ `merge_fan_in`（≤15），已在 120 用户规模下验证不截断、不超限。
 - 首次全量聚合耗时随用户数线性增长（每次 compile 约数十秒），日常使用建议用增量模式，仅重编译变更/失败用户。
+- Skill 上传和 compile 提交只对连接建立失败做最多 3 次指数退避重试，避免重复提交已被上游接受的 POST；compile 状态轮询是幂等 GET，可对瞬时传输错误重试。
+
+### Compile 容量诊断
+
+支持容量状态接口的 OpenViking 部署可通过鉴权请求查询：
+
+```bash
+curl -H "X-API-Key: <openviking-key>" \
+  -H "X-OpenViking-Account: <account-id>" \
+  -H "X-OpenViking-User: <user-id>" \
+  "https://openviking.example.com/bot/v1/compile/status"
+```
+
+重点字段：
+
+- `worker_model=in_process_asyncio`：compile 由 VikingBot gateway 进程内任务执行，不存在独立 compile worker 进程。
+- `available_execution_slots`：当前空闲执行槽；持续为 0 表示容量已耗尽。
+- `running_tasks` / `queued_tasks`：正在执行及等待执行的任务数。
+- `queue_wait_seconds`：任务获取执行槽前允许等待的最长时间。
+
+若大量任务在 `queued` 阶段失败且 `available_execution_slots=0`，应优先降低调用方总并发或扩充经过压测的 OV 容量，而不是排查 VLM。当前本地源码部署将 40 个接纳任务、10 个执行槽对应的 queue wait 从 1 小时调整为 4 小时，可覆盖四个最坏执行波次。
 
 ### 身份与权限
 
 - 外部调用必须二选一：`root_key` 对应 `trusted`，`admin_key` 对应 `api_key`；服务端不持久化，也不通过任何响应返回凭据。
 - 控制台保持兼容：管理员会话可不传凭据，使用 `sharing.viking_team_api_key` 作为 Trusted Root Key。
 - `endpoint` 可按请求覆盖且不持久化，只接受不含用户信息、查询参数或片段的 HTTP(S) URL。
-- Phase 1 使用所选凭据和目标用户身份读取各用户记忆。
-- 当前 OpenViking API-key 模式会忽略 `X-OpenViking-User`，标准 Admin 角色也不能读取其他用户的私有 Memory；`admin_key` 分支需要目标 OpenViking 部署提供 Admin 跨用户委托能力，否则会返回权限错误。
+- API-key 模式从 Admin 用户列表中读取现存明文 Key；每个用户的 probe、Skill 安装和 compile 只使用该用户自己的 Key。
+- 最终 merge 使用 Admin Key 及其实际管理员 User 的 Skill 空间，不使用固定 `team` 身份。
+- 用户 Key 只存在于后台 worker 内存，不进入 HTTP 响应、Run、日志、增量状态或持久化配置。
+- 开启 API Key 哈希的部署不支持该兼容路径；服务会失败关闭，绝不自动 regenerate 或替换用户 Key。
 - `task_id` 使用高熵随机值；无 TeamEvolver 身份的调用方凭该 ID 查询单个任务。任务列表仍只对控制台管理员开放。
 - 部署方应通过 HTTPS 或受信网络暴露执行接口，避免 Admin Key 在传输过程中泄露。
 - 最终产物写入运行请求的 `target_uri`，未传时回退到 `viking://resources/<shared_knowledge_prefix>/`；中间产物只写入该目标的同级工作根。

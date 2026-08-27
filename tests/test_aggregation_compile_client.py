@@ -108,6 +108,7 @@ def test_http_transport_uploads_inline_skill_and_runs_compile_without_host_cli(
             source_uris=["viking://user/alice/memories/events"],
             target_uri="viking://resources/team-memory",
             skill_uri="viking://user/alice/skills/team-memory-okf",
+            runtime_timeout_seconds=123,
         )
         return installed, compiled
 
@@ -123,6 +124,7 @@ def test_http_transport_uploads_inline_skill_and_runs_compile_without_host_cli(
     assert calls[1][2]["from"] == [
         "viking://user/alice/memories/events"
     ]
+    assert "runtime_timeout_seconds" not in calls[1][2]
     assert all(call[3]["X-API-Key"] == "admin-secret" for call in calls)
     assert all(
         call[3]["X-OpenViking-Actor-Peer"] == "team-skill-evolver"
@@ -176,3 +178,72 @@ def test_http_transport_returns_sanitized_upstream_error(monkeypatch) -> None:
     assert result["exit_code"] == 401
     assert result["stderr"] == "Admin Key rejected"
     assert "admin-secret" not in json.dumps(result)
+
+
+def test_compile_submit_retries_transient_connection_failure(monkeypatch) -> None:
+    attempts = 0
+
+    class FlakyClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, *, json, headers):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise httpx.ConnectError(
+                    "temporary connection failure",
+                    request=httpx.Request("POST", url),
+                )
+            return _FakeResponse(
+                202,
+                {
+                    "status": "ok",
+                    "result": {"task_id": "cmp_retry", "status": "accepted"},
+                },
+            )
+
+        async def get(self, url, *, headers):
+            return _FakeResponse(
+                200,
+                {
+                    "status": "ok",
+                    "result": {
+                        "task_id": "cmp_retry",
+                        "status": "completed",
+                        "stage": "completed",
+                        "result": {"page_count": 1},
+                    },
+                },
+            )
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(httpx, "AsyncClient", FlakyClient)
+    monkeypatch.setattr("asyncio.sleep", no_sleep)
+
+    client = CompileClient(
+        endpoint="http://openviking.example",
+        account_id="default",
+        user_id="alice",
+        api_key="admin-secret",
+        timeout_seconds=5,
+    )
+    result = asyncio.run(
+        client.run_batch(
+            source_uris=["viking://user/alice/memories/events"],
+            target_uri="viking://resources/team-memory",
+            skill_uri="viking://user/alice/skills/team-memory-okf",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["page_count"] == 1
+    assert attempts == 2

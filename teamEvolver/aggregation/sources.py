@@ -25,6 +25,7 @@ import httpx
 # roots do not push a batch over the ceiling.
 _COMPILE_SOURCE_CEILING = 16
 _DEFAULT_MAX_USERS_PER_BATCH = 12
+_DEFAULT_ACCOUNT_USER_LIMIT = 10_000
 
 # Built-in OpenViking memory categories worth aggregating. ``identity``/``soul``
 # are intentionally excluded: they are assistant-persona files, not team
@@ -66,6 +67,16 @@ class SourceExpansionError(RuntimeError):
     """Raised when account users cannot be resolved."""
 
 
+@dataclass(frozen=True, repr=False)
+class AccountUserCredential:
+    """One Account user and its optional request-scoped API credential."""
+
+    user_id: str
+    role: str = "user"
+    api_key: str = ""
+    key_prefix: str = ""
+
+
 @dataclass
 class AccountSourceBuilder:
     """Resolve an account's users and plan per-category compile batches."""
@@ -75,6 +86,7 @@ class AccountSourceBuilder:
     account_id: str
     shared_knowledge_prefix: str = "shared-knowledge"
     max_users_per_batch: int = _DEFAULT_MAX_USERS_PER_BATCH
+    account_user_limit: int = _DEFAULT_ACCOUNT_USER_LIMIT
     timeout_seconds: float = 15.0
     # Users that must never be treated as an aggregation source (the team user
     # that owns the shared output, system/service users, etc.).
@@ -95,16 +107,28 @@ class AccountSourceBuilder:
         Authorization failures surface as ``SourceExpansionError`` with the
         upstream message.
         """
+        records = await self.list_account_user_credentials()
+        return [
+            record.user_id
+            for record in records
+            if record.user_id and record.user_id not in self.excluded_user_ids
+        ]
+
+    async def list_account_user_credentials(self) -> list[AccountUserCredential]:
+        """Return Account user records without exposing them to HTTP callers."""
         if not self.endpoint:
             raise SourceExpansionError("OpenViking endpoint is not configured")
         if not self.api_key:
-            raise SourceExpansionError(
-                "aggregation requires an OpenViking API key"
-            )
+            raise SourceExpansionError("aggregation requires an OpenViking API key")
+        limit = max(1, int(self.account_user_limit))
         url = f"{self.endpoint.rstrip('/')}/api/v1/admin/accounts/{self.account_id}/users"
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                response = await client.get(url, headers=self._admin_headers())
+                response = await client.get(
+                    url,
+                    params={"limit": limit},
+                    headers=self._admin_headers(),
+                )
         except httpx.HTTPError as exc:
             raise SourceExpansionError(f"OpenViking is unreachable: {exc}") from exc
         if response.status_code >= 400:
@@ -116,8 +140,13 @@ class AccountSourceBuilder:
             payload = response.json()
         except ValueError as exc:
             raise SourceExpansionError("admin list-users returned non-JSON") from exc
-        users = _extract_user_ids(payload)
-        return [u for u in users if u and u not in self.excluded_user_ids]
+        records = _extract_user_credentials(payload)
+        if len(records) >= limit:
+            raise SourceExpansionError(
+                f"admin list-users reached safety limit ({limit}); "
+                "refine the Account or increase pagination support"
+            )
+        return records
 
     def plan_batches(
         self,
@@ -156,8 +185,8 @@ class AccountSourceBuilder:
         return f"viking://user/{user_id}/memories/{kind}"
 
 
-def _extract_user_ids(payload: Any) -> list[str]:
-    """Pull user_id strings from the various admin list-users shapes."""
+def _extract_user_credentials(payload: Any) -> list[AccountUserCredential]:
+    """Pull normalized user records from the admin list-users response."""
     items: Any = payload
     if isinstance(payload, dict):
         items = payload.get("result", payload)
@@ -165,12 +194,23 @@ def _extract_user_ids(payload: Any) -> list[str]:
             items = items.get("users", items.get("items", []))
     if not isinstance(items, (list, tuple)):
         return []
-    user_ids: list[str] = []
+    records: dict[str, AccountUserCredential] = {}
     for item in items:
         if isinstance(item, str):
-            user_ids.append(item.strip())
+            user_id = item.strip()
+            if user_id:
+                records.setdefault(user_id, AccountUserCredential(user_id=user_id))
         elif isinstance(item, dict):
             value = item.get("user_id") or item.get("id") or item.get("name")
             if isinstance(value, str) and value.strip():
-                user_ids.append(value.strip())
-    return list(dict.fromkeys(user_ids))
+                user_id = value.strip()
+                record = AccountUserCredential(
+                    user_id=user_id,
+                    role=str(item.get("role") or "user").strip().lower(),
+                    api_key=str(item.get("api_key") or "").strip(),
+                    key_prefix=str(item.get("key_prefix") or "").strip(),
+                )
+                existing = records.get(user_id)
+                if existing is None or (record.api_key and not existing.api_key):
+                    records[user_id] = record
+    return list(records.values())

@@ -15,13 +15,53 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
+import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 _MAX_HTTP_OUTPUT_CHARS = 512 * 1024
+_HTTP_RETRY_ATTEMPTS = 3
+_HTTP_RETRY_BASE_SECONDS = 0.25
+
+
+# #region debug-point instrumentation:aggregation-compile-stall
+async def _debug_event(
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict[str, Any],
+) -> None:
+    if os.environ.get("DEBUG_SESSION_ID") != "aggregation-compile-stall":
+        return
+    payload = json.dumps(
+        {
+            "sessionId": "aggregation-compile-stall",
+            "runId": os.environ.get("DEBUG_RUN_ID", "pre-fix"),
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "msg": f"[DEBUG] {message}",
+            "data": data,
+            "ts": int(time.time() * 1000),
+        }
+    ).encode()
+
+    def send() -> None:
+        request = urllib.request.Request(
+            os.environ.get("DEBUG_SERVER_URL", "http://127.0.0.1:7777/event"),
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(request, timeout=0.5).read()
+
+    try:
+        await asyncio.to_thread(send)
+    except Exception:
+        pass
+# #endregion
 
 
 @dataclass
@@ -112,6 +152,42 @@ class CompileClient:
             follow_redirects=False,
         )
 
+    async def _request_with_retry(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        url: str,
+        *,
+        retry_all_transport_errors: bool = False,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        retryable: tuple[type[httpx.TransportError], ...] = (
+            (httpx.TransportError,)
+            if retry_all_transport_errors
+            else (httpx.ConnectError, httpx.ConnectTimeout)
+        )
+        for attempt in range(1, _HTTP_RETRY_ATTEMPTS + 1):
+            try:
+                request = getattr(client, method.lower())
+                return await request(url, **kwargs)
+            except retryable as exc:
+                if attempt >= _HTTP_RETRY_ATTEMPTS:
+                    raise
+                # #region debug-point E:compile-transport-retry
+                await _debug_event(
+                    "E",
+                    "aggregation.compile_client:_request_with_retry",
+                    "retrying transient OpenViking transport failure",
+                    {
+                        "method": method.upper(),
+                        "attempt": attempt,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                # #endregion
+                await asyncio.sleep(_HTTP_RETRY_BASE_SECONDS * (2 ** (attempt - 1)))
+        raise RuntimeError("unreachable")
+
     async def install_skill(
         self,
         *,
@@ -129,7 +205,9 @@ class CompileClient:
         }
         try:
             async with self._client() as client:
-                response = await client.post(
+                response = await self._request_with_retry(
+                    client,
+                    "POST",
                     f"{self.endpoint.rstrip('/')}/api/v1/skills",
                     json=body,
                     headers=self._headers(),
@@ -169,12 +247,26 @@ class CompileClient:
         }
         if reason.strip():
             body["reason"] = reason.strip()
-        if runtime_timeout_seconds:
-            body["runtime_timeout_seconds"] = float(runtime_timeout_seconds)
 
+        # #region debug-point E:compile-submit
+        await _debug_event(
+            "E",
+            "aggregation.compile_client:run_batch:submit",
+            "compile submit starting",
+            {
+                "endpoint": self.endpoint,
+                "source_count": len(source_uris),
+                "timeout_seconds": self.timeout_seconds,
+            },
+        )
+        # #endregion
+        task_id = ""
+        request_phase = "submit"
         try:
             async with self._client() as client:
-                response = await client.post(
+                response = await self._request_with_retry(
+                    client,
+                    "POST",
                     f"{self.endpoint.rstrip('/')}/bot/v1/compile",
                     json=body,
                     headers=self._headers(),
@@ -197,9 +289,19 @@ class CompileClient:
                         "result": accepted,
                     }
 
+                # #region debug-point A:compile-accepted
+                await _debug_event(
+                    "A",
+                    "aggregation.compile_client:run_batch:accepted",
+                    "compile task accepted",
+                    {"task_id": task_id},
+                )
+                # #endregion
                 deadline = time.monotonic() + max(1.0, self.timeout_seconds)
                 polling = 0.5
                 status_operation = f"GET /bot/v1/compile/{task_id}"
+                last_status = ""
+                request_phase = "poll"
                 while True:
                     if time.monotonic() >= deadline:
                         return {
@@ -213,9 +315,12 @@ class CompileClient:
                             ),
                             "result": accepted,
                         }
-                    status_response = await client.get(
+                    status_response = await self._request_with_retry(
+                        client,
+                        "GET",
                         f"{self.endpoint.rstrip('/')}/bot/v1/compile/{task_id}",
                         headers=self._headers(),
+                        retry_all_transport_errors=True,
                     )
                     task = self._payload(status_response)
                     if not status_response.is_success:
@@ -229,6 +334,24 @@ class CompileClient:
                         if isinstance(task, dict)
                         else ""
                     )
+                    if status != last_status:
+                        # #region debug-point B:compile-status
+                        await _debug_event(
+                            "B",
+                            "aggregation.compile_client:run_batch:poll",
+                            "compile status changed",
+                            {
+                                "task_id": task_id,
+                                "status": status,
+                                "stage": (
+                                    str(task.get("stage") or "")
+                                    if isinstance(task, dict)
+                                    else ""
+                                ),
+                            },
+                        )
+                        # #endregion
+                        last_status = status
                     if status == "completed":
                         result = task.get("result")
                         return self._success(
@@ -254,11 +377,31 @@ class CompileClient:
                     await asyncio.sleep(polling)
                     polling = min(2.0, polling * 2)
         except httpx.HTTPError as exc:
+            # #region debug-point E:compile-transport-error
+            await _debug_event(
+                "E",
+                "aggregation.compile_client:run_batch:transport_error",
+                "compile transport failed",
+                {
+                    "phase": request_phase,
+                    "task_id": task_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            # #endregion
             return {
                 "ok": False,
                 "exit_code": -1,
-                "command": ["http", operation],
+                "command": [
+                    "http",
+                    f"GET /bot/v1/compile/{task_id}" if task_id else operation,
+                ],
                 "stdout": "",
-                "stderr": f"OpenViking compile request failed: {exc}",
+                "stderr": (
+                    "OpenViking compile status request failed"
+                    if task_id
+                    else "OpenViking compile request failed"
+                )
+                + f": {exc}",
                 "result": None,
             }

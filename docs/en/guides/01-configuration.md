@@ -183,6 +183,8 @@ DreamCycle memory maintenance engine configuration. DreamCycle is teamEvolver's 
 
 Cross-user team-Memory aggregation configuration. The console defaults to the Endpoint, Account, and Trusted Root Key configured under `sharing`. Independent callers may override the Endpoint and Account and provide exactly one of `root_key` (Trusted) or `admin_key` (API-key). Request credentials are not persisted.
 
+API-key mode reads existing plaintext User Keys from the Admin user list and never generates or rotates Keys. OpenViking deployments that hash API Keys and expose only `key_prefix` cannot use this compatibility path.
+
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `enabled` | boolean | `false` | Configuration marker for aggregation. An administrator still starts every run explicitly in the console. |

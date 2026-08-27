@@ -17,7 +17,9 @@ runs :meth:`run` inside a background thread and polls :attr:`status`.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import hmac
 import logging
 import re
 import secrets
@@ -33,6 +35,7 @@ from .okf_skill import DEFAULT_OKF_SKILL_BODY, skill_fingerprint
 from .sources import (
     DEFAULT_MEMORY_KINDS,
     AccountSourceBuilder,
+    AccountUserCredential,
     SourceExpansionError,
 )
 from .state import AggregationState
@@ -88,6 +91,14 @@ class AggregationRun:
         }
 
 
+@dataclass(repr=False)
+class _ExecutionCredentials:
+    users: list[str]
+    user_api_keys: dict[str, str]
+    merge_user_id: str
+    merge_api_key: str
+
+
 class MemoryAggregationService:
     """Coordinate account-wide memory aggregation via ov compile."""
 
@@ -95,6 +106,7 @@ class MemoryAggregationService:
         self.config = config
         self._runs: dict[str, AggregationRun] = {}
         self._lock = threading.Lock()
+        self._compile_slots = threading.BoundedSemaphore(self._phase1_concurrency())
 
     # ---- config accessors ------------------------------------------------ #
 
@@ -412,15 +424,14 @@ class MemoryAggregationService:
             max_users_per_batch=self._max_users_per_batch(),
             excluded_user_ids=frozenset({self._team_user()}),
         )
-        users = asyncio.run(builder.list_account_users())
-        # Restrict to an explicit selection when the console provided one.
-        if user_ids:
-            allow = {str(u).strip() for u in user_ids if str(u).strip()}
-            users = [u for u in users if u in allow]
-        if not users:
-            raise SourceExpansionError(
-                f"no aggregatable users under account '{run.account_id}'"
-            )
+        records = asyncio.run(builder.list_account_user_credentials())
+        credentials = self._resolve_execution_credentials(
+            run=run,
+            records=records,
+            requested_user_ids=user_ids,
+            bootstrap_api_key=api_key,
+        )
+        users = credentials.users
 
         skill_body = self.skill_body()
         skill_name = self._skill_name()
@@ -443,9 +454,9 @@ class MemoryAggregationService:
             self._run_pipeline(
                 run=run,
                 users=users,
+                user_api_keys=credentials.user_api_keys,
                 kinds=kinds,
                 endpoint=endpoint,
-                api_key=api_key,
                 agent_id=agent_id,
                 skill_name=skill_name,
                 skill_body=skill_body,
@@ -470,8 +481,8 @@ class MemoryAggregationService:
         team_client = CompileClient(
             endpoint=endpoint,
             account_id=run.account_id,
-            user_id=self._team_user(),
-            api_key=api_key,
+            user_id=credentials.merge_user_id,
+            api_key=credentials.merge_api_key,
             agent_id=agent_id,
             timeout_seconds=self._runtime_timeout(),
         )
@@ -479,7 +490,9 @@ class MemoryAggregationService:
             team_client.install_skill(
                 skill_name=skill_name,
                 skill_body=skill_body,
-                parent_uri=f"viking://user/{self._team_user()}/skills",
+                parent_uri=(
+                    f"viking://user/{credentials.merge_user_id}/skills"
+                ),
             )
         )
         if not team_install.get("ok"):
@@ -491,7 +504,7 @@ class MemoryAggregationService:
                 )
             )
             return
-        team_skill = self._own_skill_uri(self._team_user())
+        team_skill = self._own_skill_uri(credentials.merge_user_id)
         asyncio.run(
             self._tree_reduce_merge(
                 run=run,
@@ -501,14 +514,88 @@ class MemoryAggregationService:
             )
         )
 
+    def _resolve_execution_credentials(
+        self,
+        *,
+        run: "AggregationRun",
+        records: list[AccountUserCredential],
+        requested_user_ids,
+        bootstrap_api_key: str,
+    ) -> _ExecutionCredentials:
+        by_user = {record.user_id: record for record in records if record.user_id}
+        users = [
+            user_id
+            for user_id in by_user
+            if user_id != self._team_user()
+        ]
+        if requested_user_ids:
+            allow = {
+                str(user_id).strip()
+                for user_id in requested_user_ids
+                if str(user_id).strip()
+            }
+            users = [user_id for user_id in users if user_id in allow]
+        if not users:
+            raise SourceExpansionError(
+                f"no aggregatable users under account '{run.account_id}'"
+            )
+
+        if run.auth_mode == "trusted":
+            return _ExecutionCredentials(
+                users=users,
+                user_api_keys={user_id: bootstrap_api_key for user_id in users},
+                merge_user_id=self._team_user(),
+                merge_api_key=bootstrap_api_key,
+            )
+
+        missing = [
+            user_id
+            for user_id in users
+            if not by_user[user_id].api_key
+        ]
+        if missing:
+            preview = ", ".join(missing[:10])
+            suffix = f" (+{len(missing) - 10} more)" if len(missing) > 10 else ""
+            raise SourceExpansionError(
+                "api_key mode requires plaintext per-user API keys from "
+                f"admin list-users; unavailable for: {preview}{suffix}. "
+                "API key hashing may be enabled; key rotation was not attempted."
+            )
+
+        admin_record = next(
+            (
+                record
+                for record in records
+                if record.role == "admin"
+                and record.api_key
+                and hmac.compare_digest(record.api_key, bootstrap_api_key)
+            ),
+            None,
+        )
+        if admin_record is None:
+            raise SourceExpansionError(
+                "admin_key owner could not be identified from list-users; "
+                "plaintext API keys are required and key rotation was not attempted"
+            )
+
+        return _ExecutionCredentials(
+            users=users,
+            user_api_keys={
+                user_id: by_user[user_id].api_key
+                for user_id in users
+            },
+            merge_user_id=admin_record.user_id,
+            merge_api_key=bootstrap_api_key,
+        )
+
     async def _run_pipeline(
         self,
         *,
         run: "AggregationRun",
         users: list,
+        user_api_keys: dict[str, str],
         kinds: list,
         endpoint: str,
-        api_key: str,
         agent_id: str,
         skill_name: str,
         skill_body: str,
@@ -523,13 +610,21 @@ class MemoryAggregationService:
             *(
                 self._stage_one_user(
                     run=run, user_id=uid, kinds=kinds, endpoint=endpoint,
-                    api_key=api_key, agent_id=agent_id, skill_name=skill_name,
+                    api_key=user_api_keys[uid], agent_id=agent_id, skill_name=skill_name,
                     skill_body=skill_body, state=state, force_all=force_all, sem=sem,
                 )
                 for uid in users
             )
         )
         return [r for r in results if r]
+
+    async def _run_compile(self, client: "CompileClient", **kwargs: Any) -> dict[str, Any]:
+        while not self._compile_slots.acquire(blocking=False):
+            await asyncio.sleep(0.1)
+        try:
+            return await client.run_batch(**kwargs)
+        finally:
+            self._compile_slots.release()
 
     async def _stage_one_user(
         self,
@@ -595,7 +690,8 @@ class MemoryAggregationService:
             own_skill = self._own_skill_uri(user_id)
             cap = max(1, min(self._max_users_per_batch(), 15))
             sources = [f"viking://user/{user_id}/memories/{k}" for k in present[:cap]]
-            result = await client.run_batch(
+            result = await self._run_compile(
+                client,
                 source_uris=sources, target_uri=staging_uri, skill_uri=own_skill,
                 reason=f"Stage {user_id}'s memory ({len(sources)} categories) for team aggregation.",
                 runtime_timeout_seconds=self._runtime_timeout(),
@@ -701,7 +797,8 @@ class MemoryAggregationService:
             groups = [current[i : i + fan_in] for i in range(0, len(current), fan_in)]
             for gi, group in enumerate(groups):
                 inter_uri = f"{work_root}/_merge/L{level}/g{gi}"
-                res = await client.run_batch(
+                res = await self._run_compile(
+                    client,
                     source_uris=group, target_uri=inter_uri, skill_uri=skill_uri,
                     reason=f"Tree-reduce merge L{level} group {gi} ({len(group)} sources).",
                     runtime_timeout_seconds=self._runtime_timeout(),
@@ -728,7 +825,8 @@ class MemoryAggregationService:
             level += 1
 
         # Final round: <= fan_in sources into the team-memory root.
-        res = await client.run_batch(
+        res = await self._run_compile(
+            client,
             source_uris=current, target_uri=target_root, skill_uri=skill_uri,
             reason="Final merge of staged/intermediate memory into the team shared memory.",
             runtime_timeout_seconds=self._runtime_timeout(),

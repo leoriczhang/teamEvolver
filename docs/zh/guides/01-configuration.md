@@ -183,6 +183,8 @@ DreamCycle 记忆维护引擎配置。DreamCycle 是 teamEvolver 的自动化记
 
 跨 User 团队 Memory 聚合配置。控制台默认使用 `sharing` 中配置的 Endpoint、Account 和 Trusted Root Key；独立接口可覆盖 Endpoint、Account，并在 `root_key`（Trusted）与 `admin_key`（API-key）之间二选一。请求凭据不持久化。
 
+API-key 模式读取 Admin 用户列表中的现存用户明文 Key，不执行 Key 生成或轮换；启用 API Key 哈希、仅返回 `key_prefix` 的 OpenViking 部署不支持该兼容路径。
+
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `enabled` | boolean | `false` | 聚合功能的配置标记。聚合仍由管理员在控制台显式触发。 |

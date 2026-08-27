@@ -328,6 +328,8 @@ export default function OpenVikingWorkspaceShell({
   const [editing, setEditing] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, WorkspaceDraft>>({});
   const [reviewOpen, setReviewOpen] = useState(false);
+  const spaceLoadIdRef = useRef(0);
+  const configLoadIdRef = useRef(0);
 
   const activeSpace = spaces.find((item) => item.key === activeSpaceKey) || spaces[0];
   const spaceScopes = useMemo(
@@ -414,6 +416,7 @@ export default function OpenVikingWorkspaceShell({
         .map((member) => cfg.scopes?.[member.scope])
         .filter((scope): scope is ScopeConfig => !!scope);
       if (!members.length) return;
+      const loadId = ++spaceLoadIdRef.current;
       setLoading(true);
       try {
         const results = await Promise.all(
@@ -438,6 +441,7 @@ export default function OpenVikingWorkspaceShell({
             }
           }),
         );
+        if (loadId !== spaceLoadIdRef.current) return;
         const merged = results.flat();
         setEntries(merged);
         if (resetSelection) {
@@ -452,9 +456,13 @@ export default function OpenVikingWorkspaceShell({
         }
         setExpanded(new Set(members.map((scope) => groupUri(scope.name))));
       } catch (error: any) {
-        toastErr("加载 OpenViking 文件树失败", error.message);
+        if (loadId === spaceLoadIdRef.current) {
+          toastErr("加载 OpenViking 文件树失败", error.message);
+        }
       } finally {
-        setLoading(false);
+        if (loadId === spaceLoadIdRef.current) {
+          setLoading(false);
+        }
       }
     },
     [],
@@ -463,21 +471,26 @@ export default function OpenVikingWorkspaceShell({
   const loadConfig = useCallback(
     async (userId: string) => {
       if (!userId) return;
+      const loadId = ++configLoadIdRef.current;
       setLoading(true);
       try {
         const result = await api<WorkspaceConfig>(
           `/api/openviking/workspace/config?user_id=${encodeURIComponent(userId)}`,
         );
+        if (loadId !== configLoadIdRef.current) return;
         setConfig(result);
         const first = initialSpace(mode, result);
         setActiveSpaceKey(first.key);
         if (result.enabled) {
           await loadSpace(first, userId, result);
+        } else {
+          setLoading(false);
         }
       } catch (error: any) {
-        toastErr("读取 OpenViking 配置失败", error.message);
-      } finally {
-        setLoading(false);
+        if (loadId === configLoadIdRef.current) {
+          setLoading(false);
+          toastErr("读取 OpenViking 配置失败", error.message);
+        }
       }
     },
     [loadSpace, mode],
