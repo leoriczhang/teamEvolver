@@ -153,14 +153,22 @@ class CompileClient:
     ) -> dict[str, Any]:
         """Install inline Skill content without exposing a host-local path."""
         operation = "POST /api/v1/skills"
-        body = {
+        # Keep the body within OpenViking's accepted fields. A version note is
+        # carried inside source_metadata (an arbitrary dict) rather than as a
+        # top-level version_message, which OV's schema rejects.
+        body: dict[str, Any] = {
             "data": skill_body,
             "wait": True,
             "timeout": self.timeout_seconds,
             "target_uri": parent_uri,
         }
         if version_message.strip():
-            body["version_message"] = version_message.strip()
+            body["source_metadata"] = {
+                "type": "api",
+                "source": "inline_content",
+                "operation": "install",
+                "version_message": version_message.strip(),
+            }
         try:
             async with self._client() as client:
                 response = await self._request_with_retry(
@@ -246,13 +254,22 @@ class CompileClient:
             detail = current.get("result") or {}
             if str(detail.get("content") or "") != skill_body:
                 operation = f"PUT /api/v1/skills/{skill_name}"
+                # OpenViking's update endpoint forbids unknown body fields, so
+                # only send what UpdateSkillRequest accepts. version_message is
+                # carried inside source_metadata (an arbitrary dict OV accepts)
+                # rather than as a rejected top-level field; OV owns revisioning
+                # so no client-side expected_revision is sent.
                 body = {
                     "data": skill_body,
                     "wait": True,
                     "timeout": self.timeout_seconds,
                     "target_uri": "viking://agent/skills",
-                    "expected_revision": str(detail.get("revision") or ""),
-                    "version_message": version_message,
+                    "source_metadata": {
+                        "type": "api",
+                        "source": "inline_content",
+                        "operation": "update",
+                        "version_message": version_message,
+                    },
                 }
                 try:
                     async with self._client() as client:

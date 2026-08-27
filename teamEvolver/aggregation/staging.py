@@ -23,6 +23,11 @@ _STAGING_FORMAT = "teamevolver-memory-snapshot-v1"
 # whole memory tree. Total memory size is unbounded across directories.
 _SOURCE_NODE_LIMIT = 10_000
 _INSPECT_TIMEOUT_SECONDS = 60.0
+# Concurrent per-file content reads during publish. A large memory has
+# thousands of files; reading them one at a time is what makes staging look
+# hung. Reads are windowed so peak concurrency and memory stay bounded while
+# results are still consumed in the deterministic inventory order.
+_READ_CONCURRENCY = 16
 _CHUNK_TARGET_BYTES = 4 * 1024 * 1024
 _BATCH_TARGET_BYTES = 12 * 1024 * 1024
 _BATCH_MAX_OPERATIONS = 200
@@ -217,6 +222,31 @@ class DeterministicStagingClient:
             )
         return payload
 
+    async def _read_source_text(
+        self,
+        client: httpx.AsyncClient,
+        source: "StagingSource",
+    ) -> str:
+        """Read one Memory file's text content."""
+        response = await self._request_with_retry(
+            client,
+            "GET",
+            f"{self.endpoint.rstrip('/')}/api/v1/content/read",
+            params={"uri": source.uri},
+            headers=self._source_headers,
+        )
+        if not response.is_success:
+            raise StagingError(
+                f"OpenViking Memory read failed for {source.uri}: "
+                f"{self._error_message(response)}"
+            )
+        content = self._payload(response)
+        if not isinstance(content, str):
+            raise StagingError(
+                f"OpenViking Memory read returned non-text content: {source.uri}"
+            )
+        return content
+
     async def inspect(self, kinds: Iterable[str]) -> StagingInventory:
         """Enumerate selected Memory files and compute a stable inventory hash.
 
@@ -395,54 +425,47 @@ class DeterministicStagingClient:
 
         try:
             async with self._client() as client:
-                for source in inventory.files:
-                    response = await self._request_with_retry(
-                        client,
-                        "GET",
-                        f"{self.endpoint.rstrip('/')}/api/v1/content/read",
-                        params={"uri": source.uri},
-                        headers=self._source_headers,
+                # Read files in bounded-concurrency windows: thousands of
+                # serial reads is what made a large memory look hung. Each
+                # window is gathered concurrently, then consumed in inventory
+                # order so chunking and the content fingerprint stay stable.
+                sources = inventory.files
+                for start in range(0, len(sources), _READ_CONCURRENCY):
+                    window = sources[start : start + _READ_CONCURRENCY]
+                    contents = await asyncio.gather(
+                        *(self._read_source_text(client, source) for source in window)
                     )
-                    if not response.is_success:
-                        raise StagingError(
-                            f"OpenViking Memory read failed for {source.uri}: "
-                            f"{self._error_message(response)}"
-                        )
-                    content = self._payload(response)
-                    if not isinstance(content, str):
-                        raise StagingError(
-                            f"OpenViking Memory read returned non-text content: {source.uri}"
-                        )
-                    content_bytes = content.encode("utf-8")
-                    total_bytes += len(content_bytes)
-                    content_hash = hashlib.sha256(content_bytes).hexdigest()
-                    content_digest.update(source.uri.encode("utf-8"))
-                    content_digest.update(b"\0")
-                    content_digest.update(content_hash.encode("ascii"))
-                    content_digest.update(b"\0")
-                    record = {
-                        "source_uri": source.uri,
-                        "relative_path": source.relative_path,
-                        "kind": source.kind,
-                        "modified_at": source.modified_at,
-                        "content_sha256": content_hash,
-                        "content": content,
-                    }
-                    line = json.dumps(
-                        record,
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ) + "\n"
-                    line_bytes = len(line.encode("utf-8"))
-                    if line_bytes > _CHUNK_TARGET_BYTES:
-                        raise StagingError(
-                            "one Memory entry exceeds the deterministic staging "
-                            f"chunk limit ({_CHUNK_TARGET_BYTES} bytes): {source.uri}"
-                        )
-                    if chunk_lines and chunk_bytes + line_bytes > _CHUNK_TARGET_BYTES:
-                        await flush_chunk()
-                    chunk_lines.append(line)
-                    chunk_bytes += line_bytes
+                    for source, content in zip(window, contents):
+                        content_bytes = content.encode("utf-8")
+                        total_bytes += len(content_bytes)
+                        content_hash = hashlib.sha256(content_bytes).hexdigest()
+                        content_digest.update(source.uri.encode("utf-8"))
+                        content_digest.update(b"\0")
+                        content_digest.update(content_hash.encode("ascii"))
+                        content_digest.update(b"\0")
+                        record = {
+                            "source_uri": source.uri,
+                            "relative_path": source.relative_path,
+                            "kind": source.kind,
+                            "modified_at": source.modified_at,
+                            "content_sha256": content_hash,
+                            "content": content,
+                        }
+                        line = json.dumps(
+                            record,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ) + "\n"
+                        line_bytes = len(line.encode("utf-8"))
+                        if line_bytes > _CHUNK_TARGET_BYTES:
+                            raise StagingError(
+                                "one Memory entry exceeds the deterministic staging "
+                                f"chunk limit ({_CHUNK_TARGET_BYTES} bytes): {source.uri}"
+                            )
+                        if chunk_lines and chunk_bytes + line_bytes > _CHUNK_TARGET_BYTES:
+                            await flush_chunk()
+                        chunk_lines.append(line)
+                        chunk_bytes += line_bytes
 
             await flush_chunk()
             await flush_operations()

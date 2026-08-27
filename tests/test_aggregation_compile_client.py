@@ -239,8 +239,14 @@ def test_publish_shared_skill_updates_once_and_returns_revision(monkeypatch) -> 
     assert result["result"]["revision"] == "rev-new"
     update = next(call for call in calls if call[0] == "PUT")
     assert update[2]["target_uri"] == "viking://agent/skills"
-    assert update[2]["expected_revision"] == "rev-old"
-    assert update[2]["version_message"] == "Update aggregation rules"
+    # OpenViking's update endpoint forbids unknown body fields; the version
+    # note rides inside source_metadata, not as a rejected top-level field.
+    assert "version_message" not in update[2]
+    assert "expected_revision" not in update[2]
+    assert set(update[2]).issubset(
+        {"data", "temp_file_id", "wait", "timeout", "source_metadata", "telemetry", "target_uri"}
+    )
+    assert update[2]["source_metadata"]["version_message"] == "Update aggregation rules"
 
 
 def test_publish_shared_skill_does_not_accept_user_skill_fallback(monkeypatch) -> None:
@@ -315,6 +321,11 @@ def test_publish_shared_skill_does_not_accept_user_skill_fallback(monkeypatch) -
     assert result["result"]["root_uri"] == "viking://agent/skills/team-memory-okf"
     assert [call[0] for call in calls] == ["GET", "POST", "GET"]
     assert calls[1][2]["target_uri"] == "viking://agent/skills"
+    # The install body must not carry a top-level version_message either.
+    assert "version_message" not in calls[1][2]
+    assert calls[1][2]["source_metadata"]["version_message"] == (
+        "Publish shared aggregation Skill"
+    )
 
 
 def test_compile_submit_retries_transient_connection_failure(monkeypatch) -> None:
