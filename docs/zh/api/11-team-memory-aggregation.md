@@ -410,6 +410,7 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 | 400 | `shared_knowledge_prefix is required` | 输出前缀为空 |
 | 400 | `shared_knowledge_prefix must be at most 120 characters` | 输出前缀过长 |
 | 404 | `unknown aggregation task` | task_id 不存在 |
+| 409 | `an aggregation run is already active for this target...` | 同一 Endpoint+Account+目标 URI 已有任务在运行；等其结束后重试 |
 
 ### 相关配置
 
@@ -427,6 +428,9 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 | `merge_concurrency` | 4 | merge 分组并发数 |
 | `partition_threshold` | 512 | 启用私有分区归并的用户数阈值 |
 | `partition_count` | 256 | 固定私有哈希分区数 |
+| `preserve_manual_edits` | false | 为 true 时，最终归并把当前 team memory 目标作为权威基线源，保留人工修改并在其上去重合并，而非整体覆盖 |
+| `incremental_publish` | false | 为 true 时，Phase 2 改为按批把用户快照顺序 compile 到目标目录（依赖 ov compile 的 upsert + target-checkout 合并到既有页），而非一次整树重写。突破 128 页目录上限：128 仅约束单批产出 |
+| `publish_batch_users` | 8 | `incremental_publish` 下每批用户数；批过大导致单次产出超 128 时运行时自动二分拆批 |
 | `run_detail_limit` | 2000 | 实时状态保留的最大明细数 |
 | `compile_runtime_timeout_seconds` | 3000 | 单次 compile 运行超时 |
 | `state_dir` | 空（默认 `~/.teamEvolver/aggregation`） | 增量状态与 Skill 内容存储目录；状态按 Endpoint、Account 与目标 URI 隔离 |

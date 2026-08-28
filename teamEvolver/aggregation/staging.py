@@ -56,6 +56,7 @@ class StagingInventory:
     kinds: tuple[str, ...]
     files: tuple[StagingSource, ...]
     fingerprint: str
+    include_all_kinds: bool = False
 
 
 @dataclass(frozen=True)
@@ -247,7 +248,13 @@ class DeterministicStagingClient:
             )
         return content
 
-    async def inspect(self, kinds: Iterable[str]) -> StagingInventory:
+    async def inspect(
+        self,
+        kinds: Iterable[str],
+        *,
+        source_root: str | None = None,
+        include_all_kinds: bool = False,
+    ) -> StagingInventory:
         """Enumerate selected Memory files and compute a stable inventory hash.
 
         Enumeration walks the tree breadth-first with cheap **non-recursive**
@@ -257,12 +264,21 @@ class DeterministicStagingClient:
         memory forces a deep server-side traversal that times out (504). Per
         directory listings stay small and bounded no matter how large or deep
         the memory is, so arbitrarily large memory is copied in full.
+
+        When ``include_all_kinds`` is set the ``kinds`` gate is ignored and the
+        whole tree under ``source_root`` is captured. This is used to snapshot
+        the existing team-memory target as an authoritative baseline before the
+        final merge, so manual edits are preserved rather than overwritten.
         """
         selected = tuple(
             sorted({str(kind).strip() for kind in kinds if str(kind).strip()})
         )
         requested = set(selected)
-        source_root = f"viking://user/{self.source_user_id}/memories"
+        source_root = (
+            source_root.rstrip("/")
+            if source_root
+            else f"viking://user/{self.source_user_id}/memories"
+        )
 
         files: list[StagingSource] = []
         seen_uris: set[str] = set()
@@ -294,14 +310,18 @@ class DeterministicStagingClient:
                         kind = self._kind_for_path(relative_path)
                         # Below the root every node already sits inside a
                         # requested kind; at the root, gate on the kind name.
-                        if first_level and kind not in requested:
+                        if (
+                            first_level
+                            and not include_all_kinds
+                            and kind not in requested
+                        ):
                             continue
                         if bool(entry.get("isDir")):
                             pending.append(uri)
                             continue
                         if PurePosixPath(relative_path).name.startswith("."):
                             continue
-                        if kind not in requested:
+                        if not include_all_kinds and kind not in requested:
                             continue
                         size = entry.get("size")
                         files.append(
@@ -320,6 +340,10 @@ class DeterministicStagingClient:
 
         digest = hashlib.sha256()
         digest.update(f"{_STAGING_FORMAT}\0{self.source_user_id}".encode("utf-8"))
+        digest.update(b"\0root\0")
+        digest.update(source_root.encode("utf-8"))
+        if include_all_kinds:
+            digest.update(b"\0all-kinds\0")
         for kind in selected:
             digest.update(b"\0kind\0")
             digest.update(kind.encode("utf-8"))
@@ -338,6 +362,7 @@ class DeterministicStagingClient:
             kinds=selected,
             files=tuple(files),
             fingerprint="sha256:" + digest.hexdigest(),
+            include_all_kinds=include_all_kinds,
         )
 
     async def snapshot_exists(self, uri: str) -> bool:
@@ -469,10 +494,23 @@ class DeterministicStagingClient:
 
             await flush_chunk()
             await flush_operations()
-            confirmed = await self.inspect(inventory.kinds)
+            # Re-scan the same source to detect mid-copy changes. Keep the
+            # historical single-arg call for ordinary per-user snapshots; only
+            # pass the extra scoping when this is a baseline inventory (a
+            # different root / all-kinds scan).
+            if inventory.include_all_kinds or inventory.source_root != (
+                f"viking://user/{self.source_user_id}/memories"
+            ):
+                confirmed = await self.inspect(
+                    inventory.kinds,
+                    source_root=inventory.source_root,
+                    include_all_kinds=inventory.include_all_kinds,
+                )
+            else:
+                confirmed = await self.inspect(inventory.kinds)
             if confirmed.fingerprint != inventory.fingerprint:
                 raise StagingError(
-                    "user Memory changed while its deterministic snapshot was "
+                    "source content changed while its deterministic snapshot was "
                     "being copied; retry the aggregation"
                 )
             manifest = {

@@ -244,6 +244,9 @@ class TeamEvolverConfig:
     aggregation_merge_concurrency: int = 4
     aggregation_partition_threshold: int = 512
     aggregation_partition_count: int = 256
+    aggregation_preserve_manual_edits: bool = False
+    aggregation_incremental_publish: bool = False
+    aggregation_publish_batch_users: int = 8
     aggregation_run_detail_limit: int = 2_000
     aggregation_compile_runtime_timeout_seconds: int = 3000
     aggregation_state_dir: str = ""

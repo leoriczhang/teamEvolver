@@ -243,6 +243,20 @@ class AggregationMixin:
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+            # Refuse a second concurrent run against the same output target: two
+            # runs would interleave writes to the same tree and incremental
+            # state. Different endpoint/account/target combinations still run
+            # in parallel.
+            if service.target_is_active(run):
+                service.forget_run(run.task_id)
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "an aggregation run is already active for this target; "
+                        "retry after it finishes"
+                    ),
+                )
+
             def _worker() -> None:
                 service.run(
                     run,

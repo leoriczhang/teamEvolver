@@ -201,6 +201,19 @@ _DEFAULTS: dict = {
         # collapsing all team memory into one 128-page compile output.
         "partition_threshold": 512,
         "partition_count": 256,
+        # When true, the final merge treats the current team-memory target as an
+        # authoritative baseline source so manual edits are preserved and new
+        # material is de-duplicated/merged on top instead of overwritten.
+        "preserve_manual_edits": False,
+        # When true, Phase 2 publishes in sequential batches directly onto the
+        # target (relying on ov compile's upsert + target-checkout to merge onto
+        # existing pages) instead of one whole-tree final rewrite. This removes
+        # the 128-page directory ceiling: 128 only limits a single batch.
+        "incremental_publish": False,
+        # Users per publish batch when incremental_publish is on. Kept small so a
+        # batch's compile output stays under the 128-page ceiling; oversized
+        # batches are auto-bisected at runtime.
+        "publish_batch_users": 8,
         # Keep live/status payloads bounded while retaining aggregate counters.
         "run_detail_limit": 2_000,
         "compile_runtime_timeout_seconds": 3000,

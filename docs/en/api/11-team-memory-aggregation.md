@@ -405,6 +405,7 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 | 400 | `shared_knowledge_prefix is required` | Output prefix is empty |
 | 400 | `shared_knowledge_prefix must be at most 120 characters` | Output prefix is too long |
 | 404 | `unknown aggregation task` | task_id does not exist |
+| 409 | `an aggregation run is already active for this target...` | Another run already targets the same endpoint+account+target URI; retry after it finishes |
 
 ### Related configuration
 
@@ -422,6 +423,9 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 | `merge_concurrency` | 4 | Concurrent merge groups |
 | `partition_threshold` | 512 | User count that enables private partitioned reduction |
 | `partition_count` | 256 | Fixed private hash partition count |
+| `preserve_manual_edits` | false | When true, the final merge treats the current team-memory target as an authoritative baseline source: manual edits are preserved and new material is de-duplicated/merged on top instead of overwritten |
+| `incremental_publish` | false | When true, Phase 2 publishes staged snapshots onto the target in sequential batches (relying on ov compile's upsert + target-checkout to merge onto existing pages) instead of one whole-tree rewrite. Removes the 128-page directory ceiling: 128 only limits a single batch |
+| `publish_batch_users` | 8 | Users per batch under `incremental_publish`; a batch whose compile output would exceed 128 pages is auto-bisected at runtime |
 | `run_detail_limit` | 2000 | Maximum retained status detail rows |
 | `compile_runtime_timeout_seconds` | 3000 | Per-compile runtime timeout |
 | `state_dir` | empty (default `~/.teamEvolver/aggregation`) | Storage dir for incremental state and Skill content; state is isolated by endpoint, Account, and target URI |

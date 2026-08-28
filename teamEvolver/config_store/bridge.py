@@ -526,6 +526,15 @@ class ConfigStore:
                     int(aggregation.get("partition_count", 256) or 256),
                 ),
             ),
+            aggregation_preserve_manual_edits=bool(
+                aggregation.get("preserve_manual_edits", False)
+            ),
+            aggregation_incremental_publish=bool(
+                aggregation.get("incremental_publish", False)
+            ),
+            aggregation_publish_batch_users=max(
+                1, int(aggregation.get("publish_batch_users", 8) or 8)
+            ),
             aggregation_run_detail_limit=max(
                 100, int(aggregation.get("run_detail_limit", 2_000) or 2_000)
             ),

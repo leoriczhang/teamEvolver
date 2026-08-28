@@ -102,6 +102,12 @@ root `index.md` sits directly at the target root.
 - De-identify team knowledge: strip names and person-locating detail; present
   team-level, reusable statements.
 - Record provenance in `sources` (source user + original memory URI).
+- Baseline: one input may be a snapshot of the current team memory (its
+  `source_uri` values live under `viking://resources`). Treat it as the
+  authoritative existing knowledge base. Preserve human edits that appear only
+  in the baseline, keep pages that no new source touches, and merge/de-duplicate
+  new material onto it — never discard baseline content just because it is
+  absent from this run's user sources.
 
 ## Cross references
 

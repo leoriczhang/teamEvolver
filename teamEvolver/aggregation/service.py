@@ -44,12 +44,21 @@ from .state import AggregationState
 
 logger = logging.getLogger(__name__)
 
+
+class RunConflictError(RuntimeError):
+    """Raised when another aggregation run already targets the same output."""
+
+
 _SNAPSHOT_MERGE_INSTRUCTION = (
     "Inputs may include deterministic per-user snapshot JSONL files. Each JSON "
     "line contains source_uri, relative_path, kind, modified_at, content_sha256, "
     "and the verbatim Memory text in content. Treat content as source material "
     "and preserve source_uri provenance. Inputs from later levels are prior "
-    "structured merge outputs."
+    "structured merge outputs. One input may be a baseline snapshot of the "
+    "current team memory (its source_uri values live under viking://resources): "
+    "treat it as the authoritative existing knowledge, preserve human edits "
+    "found only there, and de-duplicate/merge new material on top of it instead "
+    "of discarding it."
 )
 
 
@@ -139,6 +148,10 @@ class MemoryAggregationService:
         self._runs: dict[str, AggregationRun] = {}
         self._lock = threading.Lock()
         self._compile_slots = threading.BoundedSemaphore(self._merge_concurrency())
+        # Active (endpoint, account, target) keys with a run in flight. A second
+        # run against the same target would interleave writes to the same output
+        # tree and incremental state, so it is refused rather than serialized.
+        self._active_targets: dict[str, str] = {}
 
     # ---- config accessors ------------------------------------------------ #
 
@@ -388,6 +401,15 @@ class MemoryAggregationService:
             or 3000
         )
 
+    def _preserve_manual_edits(self) -> bool:
+        return bool(getattr(self.config, "aggregation_preserve_manual_edits", False))
+
+    def _incremental_publish(self) -> bool:
+        return bool(getattr(self.config, "aggregation_incremental_publish", False))
+
+    def _publish_batch_users(self) -> int:
+        return max(1, int(getattr(self.config, "aggregation_publish_batch_users", 8) or 8))
+
     @staticmethod
     def _merge_input_fingerprint(
         sources: list[tuple[str, str]],
@@ -588,6 +610,11 @@ class MemoryAggregationService:
             self._runs[task_id] = run
         return run
 
+    def forget_run(self, task_id: str) -> None:
+        """Drop a run record (used to discard a rejected, never-started run)."""
+        with self._lock:
+            self._runs.pop(task_id, None)
+
     def list_runs(self, limit: int = 20) -> list[dict[str, Any]]:
         """Return recent runs (newest first) for refresh recovery."""
         with self._lock:
@@ -616,6 +643,35 @@ class MemoryAggregationService:
         )
         return await builder.list_account_users()
 
+    @staticmethod
+    def _target_lock_key(run: "AggregationRun") -> str:
+        return f"{run.endpoint}\0{run.account_id}\0{run.target_uri}"
+
+    def _acquire_target(self, run: "AggregationRun") -> None:
+        """Reserve this run's target, refusing a second concurrent run on it."""
+        key = self._target_lock_key(run)
+        with self._lock:
+            holder = self._active_targets.get(key)
+            if holder is not None:
+                raise RunConflictError(
+                    "an aggregation run is already active for "
+                    f"{run.target_uri} (task {holder})"
+                )
+            self._active_targets[key] = run.task_id
+
+    def _release_target(self, run: "AggregationRun") -> None:
+        key = self._target_lock_key(run)
+        with self._lock:
+            if self._active_targets.get(key) == run.task_id:
+                self._active_targets.pop(key, None)
+
+    def target_is_active(self, run: "AggregationRun") -> bool:
+        """Whether another run currently holds this run's target lock."""
+        key = self._target_lock_key(run)
+        with self._lock:
+            holder = self._active_targets.get(key)
+            return holder is not None and holder != run.task_id
+
     def run(
         self,
         run: AggregationRun,
@@ -631,14 +687,22 @@ class MemoryAggregationService:
             credential = str(api_key or "").strip()
             if not credential:
                 raise ValueError("OpenViking API key is required")
-            self._run_inner(
-                run,
-                kinds=kinds,
-                full=full,
-                user_ids=user_ids,
-                api_key=credential,
-            )
+            self._acquire_target(run)
+            try:
+                self._run_inner(
+                    run,
+                    kinds=kinds,
+                    full=full,
+                    user_ids=user_ids,
+                    api_key=credential,
+                )
+            finally:
+                self._release_target(run)
             run.status = "completed"
+        except RunConflictError as exc:
+            run.status = "failed"
+            run.error = str(exc)
+            logger.warning("[aggregation] run rejected: %s", exc)
         except SourceExpansionError as exc:
             run.status = "failed"
             run.error = str(exc)
@@ -778,6 +842,60 @@ class MemoryAggregationService:
             )
             return
 
+        # Incremental publish: write staged snapshots onto the target in bounded
+        # sequential batches, relying on ov compile's upsert + target-checkout to
+        # merge onto existing pages. This removes the whole-tree 128-page ceiling
+        # (128 then only limits a single batch) and preserves manual edits via the
+        # upstream checkout, so no explicit baseline source is needed.
+        if self._incremental_publish():
+            published = asyncio.run(
+                self._publish_incremental(
+                    run=run,
+                    staged_roots=staged_roots,
+                    client=team_client,
+                    skill_uri=run.skill_uri,
+                    skill_revision=run.skill_revision,
+                    state=state,
+                    force_all=full or skill_changed,
+                )
+            )
+            if not published:
+                raise SourceExpansionError(
+                    "incremental publish incomplete; rerun will reuse successful "
+                    "batches and retry failed batches"
+                )
+            return
+
+        # Optionally snapshot the current team memory so the final merge treats
+        # it as an authoritative baseline and preserves manual edits instead of
+        # overwriting them. Failure-isolated: on any error we fall back to the
+        # historical overwrite behavior for this run.
+        baseline_uri = ""
+        baseline_fingerprint = ""
+        if self._preserve_manual_edits():
+            baseline_client = DeterministicStagingClient(
+                endpoint=endpoint,
+                account_id=run.account_id,
+                source_user_id=credentials.merge_user_id,
+                source_api_key=credentials.merge_api_key,
+                target_user_id=credentials.merge_user_id,
+                target_api_key=credentials.merge_api_key,
+                agent_id=agent_id,
+                timeout_seconds=self._runtime_timeout(),
+            )
+            baseline_uri = asyncio.run(
+                self._stage_baseline(
+                    run=run,
+                    client=baseline_client,
+                    state=state,
+                    force_all=full,
+                )
+            ) or ""
+            if baseline_uri:
+                baseline_fingerprint = str(
+                    state.groups.get("baseline", {}).get("source_fingerprint") or ""
+                )
+
         # The pinned Skill is applied only while merging staged snapshots.
         merge_completed = asyncio.run(
             self._merge_staged_roots(
@@ -788,6 +906,8 @@ class MemoryAggregationService:
                 skill_revision=run.skill_revision,
                 state=state,
                 force_all=full or skill_changed,
+                baseline_uri=baseline_uri or None,
+                baseline_fingerprint=baseline_fingerprint,
             )
         )
         if not merge_completed:
@@ -1140,6 +1260,72 @@ class MemoryAggregationService:
                         run.groups[index] = group
                         break
 
+    async def _stage_baseline(
+        self,
+        *,
+        run: "AggregationRun",
+        client: "DeterministicStagingClient",
+        state: "AggregationState",
+        force_all: bool,
+    ) -> Optional[str]:
+        """Snapshot the current team-memory target as an authoritative baseline.
+
+        Returns the baseline staging URI (an ordinary snapshot root that can be
+        fed to the final compile) or None when the target does not exist yet or
+        has no content. Failure-isolated: a baseline error never aborts the run,
+        it just falls back to overwrite behavior for this run.
+        """
+        group_key = "baseline"
+        baseline_parent = f"{run.work_root}/_baseline"
+        try:
+            inventory = await client.inspect(
+                (),
+                source_root=run.target_uri,
+                include_all_kinds=True,
+            )
+        except StagingError as exc:
+            self._append_group(run, GroupResult(
+                group_key=group_key, kind="(all)", target_uri=run.target_uri,
+                source_count=0, status="failed",
+                detail=f"baseline inspect failed; overwriting instead: {exc}"[:500],
+            ))
+            return None
+        if not inventory.files:
+            # First run (or empty target): nothing to preserve.
+            return None
+
+        baseline_uri = f"{baseline_parent}/{inventory.fingerprint.removeprefix('sha256:')}"
+        try:
+            reusable = (
+                not force_all
+                and await client.snapshot_exists(baseline_uri)
+            )
+            if not reusable:
+                await client.publish(
+                    inventory,
+                    staging_uri=baseline_uri,
+                    run_id=run.task_id,
+                )
+        except StagingError as exc:
+            self._append_group(run, GroupResult(
+                group_key=group_key, kind="(all)", target_uri=run.target_uri,
+                source_count=len(inventory.files), status="failed",
+                detail=f"baseline snapshot failed; overwriting instead: {exc}"[:500],
+            ))
+            return None
+
+        state.groups[group_key] = {
+            "status": "ok",
+            "source_fingerprint": inventory.fingerprint,
+            "staging_uri": baseline_uri,
+        }
+        self._append_group(run, GroupResult(
+            group_key=group_key, kind="(all)", target_uri=baseline_uri,
+            source_count=len(inventory.files), status="ok",
+            detail="snapshot of current team memory kept as merge baseline",
+        ))
+        return baseline_uri
+
     async def _merge_staged_roots(
         self,
         *,
@@ -1150,6 +1336,8 @@ class MemoryAggregationService:
         skill_revision: str,
         state: "AggregationState",
         force_all: bool = False,
+        baseline_uri: Optional[str] = None,
+        baseline_fingerprint: str = "",
     ) -> bool:
         """Publish one root for small runs or stable partitions for large runs."""
         if len(staged_roots) <= self._partition_threshold():
@@ -1168,6 +1356,8 @@ class MemoryAggregationService:
                 force_all=force_all,
                 state=state,
                 compact_state=False,
+                baseline_uri=baseline_uri,
+                baseline_fingerprint=baseline_fingerprint,
             )
             if not completed:
                 state.save(skill_fingerprint=state.skill_fingerprint)
@@ -1286,6 +1476,8 @@ class MemoryAggregationService:
             group_prefix="merge",
             compact_state=False,
             source_fingerprints=partition_fingerprints,
+            baseline_uri=baseline_uri,
+            baseline_fingerprint=baseline_fingerprint,
         )
         if not completed:
             state.save(skill_fingerprint=state.skill_fingerprint)
@@ -1307,6 +1499,159 @@ class MemoryAggregationService:
         state.save(skill_fingerprint=state.skill_fingerprint)
         return True
 
+    @staticmethod
+    def _is_output_limit_error(res: dict[str, Any]) -> bool:
+        """Heuristic: did a compile fail because it produced too many pages?"""
+        text = f"{res.get('stderr') or ''}\n{res.get('stdout') or ''}".lower()
+        needles = (
+            "output_pages",
+            "output_files",
+            "page limit",
+            "page_count",
+            "exceeds the page",
+            "too many pages",
+            "output ceiling",
+            "128",
+        )
+        return any(needle in text for needle in needles)
+
+    async def _publish_incremental(
+        self,
+        *,
+        run: "AggregationRun",
+        staged_roots: list[str],
+        client: "CompileClient",
+        skill_uri: str,
+        skill_revision: str,
+        state: "AggregationState",
+        force_all: bool = False,
+    ) -> bool:
+        """Publish staged snapshots onto the target in sequential batches.
+
+        Each batch is one compile with ``to`` = the real knowledge base and
+        ``from`` = that batch's staged snapshots. ov compile reads the existing
+        target (target-checkout) and writes with upsert, so batches accumulate
+        onto the same tree and manual edits are preserved. Batches run strictly
+        in order so a later batch can see (and de-duplicate against) pages an
+        earlier batch just wrote. A batch whose inputs + Skill revision are
+        unchanged is skipped; a batch that trips the per-compile 128 ceiling is
+        auto-bisected and retried in halves.
+        """
+        run.publish_mode = "incremental"
+        ordered = sorted(staged_roots)
+        batch_size = self._publish_batch_users()
+        batches = [
+            ordered[i : i + batch_size]
+            for i in range(0, len(ordered), batch_size)
+        ]
+        run.partition_count = len(batches)
+        run.estimated_merge_tasks = len(batches)
+
+        staging_fingerprints = self._staging_source_fingerprints(
+            run=run,
+            state=state,
+            staged_roots=ordered,
+        )
+
+        for index, batch in enumerate(batches):
+            group_key = f"publish:b{index}"
+            fingerprinted = [
+                (uri, staging_fingerprints.get(uri, f"uncached:{secrets.token_hex(16)}"))
+                for uri in batch
+            ]
+            batch_fingerprint = self._merge_input_fingerprint(
+                fingerprinted,
+                skill_revision=skill_revision,
+            )
+            if not state.needs_recompile(
+                group_key,
+                batch_fingerprint,
+                current_skill_fingerprint=state.skill_fingerprint,
+                full=force_all,
+            ):
+                self._append_group(run, GroupResult(
+                    group_key=group_key, kind="(all)", target_uri=run.target_uri,
+                    source_count=len(batch), status="skipped",
+                    detail="unchanged (reused incremental batch)",
+                ))
+                continue
+
+            ok = await self._compile_batch_onto_target(
+                run=run,
+                batch=batch,
+                client=client,
+                skill_uri=skill_uri,
+                skill_revision=skill_revision,
+                group_key=group_key,
+            )
+            if not ok:
+                state.mark_failed(group_key)
+                state.checkpoint(group_key, skill_fingerprint=state.skill_fingerprint)
+                state.save(skill_fingerprint=state.skill_fingerprint)
+                return False
+            state.mark_ok(group_key, batch_fingerprint)
+            state.checkpoint(group_key, skill_fingerprint=state.skill_fingerprint)
+
+        state.save(skill_fingerprint=state.skill_fingerprint)
+        return True
+
+    async def _compile_batch_onto_target(
+        self,
+        *,
+        run: "AggregationRun",
+        batch: list[str],
+        client: "CompileClient",
+        skill_uri: str,
+        skill_revision: str,
+        group_key: str,
+    ) -> bool:
+        """Compile one batch onto the target, auto-bisecting on a 128 overflow."""
+        if not batch:
+            return True
+        res = await self._run_compile(
+            client,
+            source_uris=batch,
+            target_uri=run.target_uri,
+            skill_uri=skill_uri,
+            skill_revision=skill_revision,
+            reason=(
+                "Incremental merge of staged memory onto the existing team "
+                f"memory. {_SNAPSHOT_MERGE_INSTRUCTION}"
+            ),
+            runtime_timeout_seconds=self._runtime_timeout(),
+        )
+        if res.get("ok"):
+            self._append_group(run, GroupResult(
+                group_key=group_key, kind="(all)", target_uri=run.target_uri,
+                source_count=len(batch), status="ok",
+                detail=f"merged {len(batch)} sources onto target",
+            ))
+            return True
+
+        # Bisect on a page-limit overflow: a batch produced > 128 pages, so split
+        # it and retry each half sequentially (order preserved).
+        if len(batch) > 1 and self._is_output_limit_error(res):
+            mid = len(batch) // 2
+            left_ok = await self._compile_batch_onto_target(
+                run=run, batch=batch[:mid], client=client,
+                skill_uri=skill_uri, skill_revision=skill_revision,
+                group_key=f"{group_key}.l",
+            )
+            if not left_ok:
+                return False
+            return await self._compile_batch_onto_target(
+                run=run, batch=batch[mid:], client=client,
+                skill_uri=skill_uri, skill_revision=skill_revision,
+                group_key=f"{group_key}.r",
+            )
+
+        detail = (res.get("stderr") or res.get("stdout") or "")[:500]
+        self._append_group(run, GroupResult(
+            group_key=group_key, kind="(all)", target_uri=run.target_uri,
+            source_count=len(batch), status="failed", detail=detail,
+        ))
+        return False
+
     async def _tree_reduce_merge(
         self,
         *,
@@ -1322,6 +1667,8 @@ class MemoryAggregationService:
         group_prefix: str = "merge",
         compact_state: bool = True,
         source_fingerprints: Optional[dict[str, str]] = None,
+        baseline_uri: Optional[str] = None,
+        baseline_fingerprint: str = "",
     ) -> bool:
         """Merge staging roots into the final root via bounded-fan-in tree reduce.
 
@@ -1453,7 +1800,13 @@ class MemoryAggregationService:
             current = [next_by_index[index] for index in range(len(groups))]
             level += 1
 
-        # Final round: <= fan_in sources into the team-memory root.
+        # Final round: <= fan_in sources into the team-memory root. When a
+        # baseline snapshot of the existing target is supplied, prepend it as an
+        # authoritative source so the compile merges onto current team memory
+        # (preserving manual edits) instead of overwriting it. The baseline adds
+        # at most one source, keeping the final compile within the 16 ceiling.
+        if baseline_uri:
+            current = [(baseline_uri, baseline_fingerprint or "baseline"), *current]
         final_fingerprint = self._merge_input_fingerprint(
             current,
             skill_revision=skill_revision,
