@@ -903,6 +903,28 @@ export interface OpenVikingAccountsResp {
   error?: string;
 }
 
+export interface OpenVikingAccountUser {
+  user_id: string;
+  role: "user" | "admin";
+  openviking_role?: string;
+  imported?: boolean;
+}
+
+export interface OpenVikingAccountUsersResp {
+  account: string;
+  users: OpenVikingAccountUser[];
+  source?: "openviking" | "fallback";
+  endpoint?: string;
+  error?: string;
+}
+
+export interface ImportAccountUsersResp {
+  account: string;
+  imported: string[];
+  skipped_existing: string[];
+  missing: string[];
+}
+
 export interface UserProfile {
   id: string;
   display_name?: string;

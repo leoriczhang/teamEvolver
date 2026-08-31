@@ -42,14 +42,17 @@ if ! python_ready "$OPENVIKING_PYTHON"; then
 fi
 
 STUDIO_DIR="$OPENVIKING_REPO/web-studio/dist"
-if [[ "$BUILD_STUDIO" == "1" && ! -f "$STUDIO_DIR/index.html" ]]; then
+if [[ "$BUILD_STUDIO" == "1" ]]; then
   if ! command -v npm >/dev/null 2>&1; then
     echo "npm is required to build OpenViking Web Studio" >&2
     exit 1
   fi
   echo "[OpenViking] building Web Studio..."
   npm --prefix "$OPENVIKING_REPO/web-studio" ci
-  npm --prefix "$OPENVIKING_REPO/web-studio" run build
+  # The bundle is served under /studio, so it must be built with that base or
+  # index.html will reference /assets/* (404) and the SPA never boots. Always
+  # rebuild so studio source changes take effect on restart.
+  npm --prefix "$OPENVIKING_REPO/web-studio" run build -- --base=/studio/
 fi
 
 export OPENVIKING_WEB_STUDIO_DIR="$STUDIO_DIR"

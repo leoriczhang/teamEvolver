@@ -965,6 +965,142 @@ def list_openviking_accounts(config) -> dict[str, Any]:
     return result
 
 
+def _map_openviking_role(value: Any) -> str:
+    """Map an OpenViking account role onto teamEvolver's two-level role model.
+
+    OpenViking uses ROOT / ADMIN / USER; teamEvolver only distinguishes admin
+    from user. An OpenViking account ``admin`` (or ``root``) becomes the
+    teamEvolver admin for that tenant, which is exactly the "each account has
+    its own admin" ownership model — teamEvolver reflects OpenViking, it does
+    not invent a parallel identity source.
+    """
+    role = str(value or "user").strip().lower()
+    return "admin" if role in {"admin", "root"} else "user"
+
+
+def list_openviking_account_users(config, account: str) -> dict[str, Any]:
+    """List the users registered under one OpenViking account via the ROOT API.
+
+    Fail-open: any transport/auth error is swallowed and returned as ``error``
+    with an empty ``users`` list, so the console can still render the account
+    picker when OpenViking is unreachable. This never provisions or mutates
+    anything; it is a read-only reflection of OpenViking's own account users.
+    """
+    endpoint = _openviking_endpoint(config)
+    api_key = _openviking_root_key(config)
+    account_id = str(account or "").strip() or str(
+        getattr(config, "sharing_viking_account", "") or "default"
+    ).strip() or "default"
+    result: dict[str, Any] = {
+        "account": account_id,
+        "users": [],
+        "source": "fallback",
+        "endpoint": endpoint,
+    }
+    if not endpoint or not api_key:
+        result["error"] = "OpenViking endpoint or API key not configured"
+        return result
+    url = f"{endpoint}/api/v1/admin/accounts/{account_id}/users"
+    headers = {
+        "Accept": "application/json",
+        "X-API-Key": api_key,
+        "Authorization": f"Bearer {api_key}",
+    }
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            response = client.get(url, headers=headers)
+    except httpx.HTTPError as exc:
+        result["error"] = f"transport error: {exc}"
+        _LOG.warning("openviking list account users failed: %s", exc)
+        return result
+    if response.status_code != 200:
+        result["error"] = f"HTTP {response.status_code}: {(response.text or '')[:400]}"
+        _LOG.warning("openviking list account users failed: %s", result["error"])
+        return result
+    try:
+        payload = response.json()
+    except ValueError:
+        result["error"] = "invalid JSON from OpenViking"
+        return result
+    rows = payload.get("result") if isinstance(payload, dict) else None
+    users: list[dict[str, Any]] = []
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            user_id = str(row.get("user_id") or "").strip()
+            if not user_id:
+                continue
+            users.append(
+                {
+                    "user_id": user_id,
+                    "role": _map_openviking_role(row.get("role")),
+                    "openviking_role": str(row.get("role") or "user"),
+                }
+            )
+    users.sort(key=lambda item: item["user_id"])
+    result["users"] = users
+    result["source"] = "openviking"
+    return result
+
+
+def import_openviking_account_users(
+    config,
+    account: str,
+    user_ids: list[str],
+) -> dict[str, Any]:
+    """Materialize selected OpenViking account users into the local registry.
+
+    Import is additive and idempotent: users that already exist in the
+    teamEvolver registry are left untouched (so their roles, spaces and
+    passwords are never reset), and only genuinely new identities are created.
+    The imported role follows OpenViking's account role, keeping the account's
+    own admin as the teamEvolver admin for that tenant.
+    """
+    account_id = str(account or "").strip() or str(
+        getattr(config, "sharing_viking_account", "") or "default"
+    ).strip() or "default"
+    available = {
+        row["user_id"]: row
+        for row in list_openviking_account_users(config, account_id).get("users") or []
+    }
+    requested = [str(uid or "").strip() for uid in (user_ids or []) if str(uid or "").strip()]
+
+    path = _registry_path(config)
+    data = _load_registry(path)
+    existing_ids = {str(user.get("id") or "") for user in data.get("users") or []}
+
+    imported: list[str] = []
+    skipped_existing: list[str] = []
+    missing: list[str] = []
+    dirty = False
+    for raw_id in requested:
+        row = available.get(raw_id)
+        if row is None:
+            missing.append(raw_id)
+            continue
+        user_id = _slug(raw_id)
+        if user_id in existing_ids:
+            skipped_existing.append(user_id)
+            continue
+        _upsert_user(
+            data,
+            {"id": user_id, "role": row.get("role") or "user"},
+            config=config,
+        )
+        existing_ids.add(user_id)
+        imported.append(user_id)
+        dirty = True
+    if dirty:
+        _save_registry(path, data)
+    return {
+        "account": account_id,
+        "imported": sorted(imported),
+        "skipped_existing": sorted(skipped_existing),
+        "missing": sorted(missing),
+    }
+
+
 def sync_openviking_user(config, user_id: str) -> dict[str, Any]:
     """Ensure a same-name OpenViking user exists under the default account.
 
@@ -1086,6 +1222,44 @@ class UsersAdminMixin:
             """List OpenViking accounts for the team-workspace picker (admin)."""
             _require_admin_request(request)
             return JSONResponse(content=list_openviking_accounts(owner.config))
+
+        @app.get("/api/openviking-accounts/{account}/users")
+        async def api_list_openviking_account_users(account: str, request: Request):
+            """List existing OpenViking users under an account (admin).
+
+            Read-only reflection of OpenViking's own account users, used by the
+            console to preview who already exists before importing them into the
+            teamEvolver registry. Each row is annotated with whether it has
+            already been imported locally.
+            """
+            _require_admin_request(request)
+            payload = list_openviking_account_users(owner.config, account)
+            registry = _load_registry(_registry_path(owner.config))
+            local_ids = {str(user.get("id") or "") for user in registry.get("users") or []}
+            for row in payload.get("users") or []:
+                row["imported"] = _slug(row["user_id"]) in local_ids
+            return JSONResponse(content=payload)
+
+        @app.post("/api/openviking-accounts/{account}/import-users")
+        async def api_import_openviking_account_users(
+            account: str,
+            body: dict[str, Any],
+            request: Request,
+        ):
+            """Import selected OpenViking account users into the registry (admin).
+
+            Additive and idempotent: existing teamEvolver users are never
+            overwritten. Sync each newly imported id back to OpenViking so the
+            same-name user is guaranteed to exist for downstream space routing.
+            """
+            _require_admin_request(request)
+            raw_ids = body.get("user_ids") or body.get("users") or []
+            if not isinstance(raw_ids, list):
+                raise HTTPException(status_code=400, detail="user_ids must be a list")
+            report = import_openviking_account_users(owner.config, account, raw_ids)
+            for user_id in report.get("imported") or []:
+                sync_openviking_user(owner.config, user_id)
+            return JSONResponse(content=report)
 
         @app.get("/api/users/{user_id}")
         async def api_get_user(user_id: str, request: Request):
