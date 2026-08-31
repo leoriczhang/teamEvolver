@@ -16,6 +16,7 @@ import {
   api,
   type AgentIntegration,
   type AgentIntegrationsResp,
+  type OpenVikingAccountsResp,
   type SkillSpaceConfig,
   type TeamSettings,
   type UserProfile,
@@ -77,6 +78,7 @@ export default function UsersView({
   const [integrations, setIntegrations] = useState<AgentIntegration[]>([]);
   const [storageDeployment, setStorageDeployment] = useState("cloud");
   const [defaultTeamUser, setDefaultTeamUser] = useState("team");
+  const [accountOptions, setAccountOptions] = useState<string[]>([]);
   const [teamSettings, setTeamSettings] = useState<TeamSettings | null>(null);
   const [teamNameDraft, setTeamNameDraft] = useState("");
   const loaded = useRef(false);
@@ -86,6 +88,10 @@ export default function UsersView({
   const isLocalOpenViking = storageDeployment === "local";
   const userPager = usePagedItems(users);
   const selectedUser = useMemo(() => users.find((u) => u.id === selectedId) || null, [users, selectedId]);
+  // The team Workspace binding is fixed at registration. An already-bound user
+  // keeps its team space one-to-one, so the binding field becomes read-only
+  // (key rotation stays available).
+  const teamBound = !!selectedUser?.team_space?.bound;
   const hasCustomAgentSubject = integrations.some((integration) => {
     const subject = form.agent_subjects?.find(
       (item) => item.integration_id === integration.agent_id
@@ -111,6 +117,15 @@ export default function UsersView({
       setDefaultTeamUser(integrationData.default_team_user || "team");
       setTeamSettings(teamData);
       setTeamNameDraft(teamData.configured_display_name || teamData.display_name || "Team");
+      // The team-workspace picker lists OpenViking accounts; admin-only route.
+      if (isAdmin) {
+        try {
+          const accts = await api<OpenVikingAccountsResp>("/api/openviking-accounts");
+          setAccountOptions(accts.accounts || []);
+        } catch {
+          setAccountOptions([]);
+        }
+      }
       if (!selectedId && !isAdmin && data.users[0]) {
         setSelectedId(data.users[0].id);
         setForm(toForm(data.users[0]));
@@ -521,22 +536,31 @@ export default function UsersView({
                 />
                 <WorkspaceBinding
                   title="团队 Workspace"
+                  label="Account（团队名）"
                   value={form.team_space.viking_user || defaultTeamUser}
                   placeholder={`系统默认 · ${defaultTeamUser}`}
+                  options={isAdmin && !teamBound ? accountOptions : undefined}
                   status={
-                    form.team_space.viking_user
-                    && form.team_space.viking_user !== defaultTeamUser
-                      ? "自定义"
-                      : `默认 · ${defaultTeamUser}`
+                    teamBound
+                      ? "已绑定"
+                      : form.team_space.viking_user
+                        && form.team_space.viking_user !== defaultTeamUser
+                        ? "自定义"
+                        : `默认 · ${defaultTeamUser}`
                   }
-                  disabled={!isAdmin}
-                  onChange={(vikingUser) =>
+                  disabled={!isAdmin || teamBound}
+                  hint={
+                    teamBound
+                      ? "团队 Workspace 注册后与该 account 一对一绑定，不可更改。"
+                      : "注册时选择团队 account（团队名）；保存后即绑定，不可更改。"
+                  }
+                  onChange={(account) =>
                     setForm({
                       ...form,
                       team_space: {
                         ...form.team_space,
                         backend: "viking",
-                        viking_user: vikingUser,
+                        viking_user: account,
                       },
                     })
                   }
@@ -560,6 +584,14 @@ export default function UsersView({
                   onChange={(team_space) => setForm({ ...form, team_space })}
                   onReveal={revealSpaceKey}
                   disabled={!isAdmin}
+                  userDisabled={teamBound}
+                  userLabel="Account（团队名）"
+                  userOptions={isAdmin && !teamBound ? accountOptions : undefined}
+                  userHint={
+                    teamBound
+                      ? "团队 Workspace 注册后与该 account 一对一绑定，不可更改；如需轮换仅可更新 Key。"
+                      : "注册时选择团队 account（团队名）；保存后即绑定，不可更改。"
+                  }
                 />
               </div>
             )}
@@ -599,6 +631,9 @@ function WorkspaceBinding({
   placeholder,
   status,
   disabled = false,
+  hint,
+  label = "OpenViking User",
+  options,
   onChange,
 }: {
   title: string;
@@ -606,22 +641,43 @@ function WorkspaceBinding({
   placeholder: string;
   status: string;
   disabled?: boolean;
+  hint?: string;
+  label?: string;
+  options?: string[];
   onChange?: (value: string) => void;
 }) {
+  const useSelect = Array.isArray(options) && options.length > 0;
   return (
     <div className="border border-border bg-background/60 p-4">
       <div className="mb-3 flex items-center justify-between gap-2">
         <div className="text-sm font-bold">{title}</div>
         <Pill tone={status === "自定义" ? "amber" : "green"}>{status}</Pill>
       </div>
-      <Field label="OpenViking User">
-        <Input
-          value={value}
-          disabled={disabled}
-          placeholder={placeholder}
-          onChange={(event) => onChange?.(event.target.value)}
-        />
+      <Field label={label}>
+        {useSelect ? (
+          <select
+            value={value}
+            disabled={disabled}
+            onChange={(event) => onChange?.(event.target.value)}
+            className="h-8 w-full rounded-lg border border-border bg-background px-2 text-xs font-semibold outline-none disabled:opacity-60"
+          >
+            {options!.includes(value) ? null : <option value={value}>{value || placeholder}</option>}
+            {options!.map((opt) => (
+              <option key={opt} value={opt}>{opt}</option>
+            ))}
+          </select>
+        ) : (
+          <Input
+            value={value}
+            disabled={disabled}
+            placeholder={placeholder}
+            onChange={(event) => onChange?.(event.target.value)}
+          />
+        )}
       </Field>
+      {hint ? (
+        <div className="mt-1.5 text-[11px] text-muted-soft">{hint}</div>
+      ) : null}
     </div>
   );
 }
@@ -634,6 +690,10 @@ function KeyEditor({
   onChange,
   onReveal,
   disabled = false,
+  userDisabled = false,
+  userHint,
+  userLabel = "OpenViking 用户空间",
+  userOptions,
 }: {
   title: string;
   space: "personal" | "team";
@@ -642,6 +702,10 @@ function KeyEditor({
   onChange: (next: SkillSpaceConfig) => void;
   onReveal: (space: "personal" | "team") => Promise<string>;
   disabled?: boolean;
+  userDisabled?: boolean;
+  userHint?: string;
+  userLabel?: string;
+  userOptions?: string[];
 }) {
   const [visible, setVisible] = useState(false);
   const [revealing, setRevealing] = useState(false);
@@ -711,13 +775,32 @@ function KeyEditor({
           默认隐藏；点击“显示”才读取明文。继承管理员服务 Key 时不会回显明文；保存时留空会保留原 Key，清空后保存才删除。
         </div>
       </Field>
-      <Field label="OpenViking 用户空间">
-        <Input
-          value={value.viking_user || ""}
-          disabled={disabled}
-          placeholder={space === "personal" ? "例如 single_evolve3" : "例如 team_evolve1"}
-          onChange={(e) => onChange({ ...value, viking_user: e.target.value })}
-        />
+      <Field label={`${userLabel}${userDisabled ? "（已绑定）" : ""}`}>
+        {Array.isArray(userOptions) && userOptions.length > 0 ? (
+          <select
+            value={value.viking_user || ""}
+            disabled={disabled || userDisabled}
+            onChange={(e) => onChange({ ...value, viking_user: e.target.value })}
+            className="h-8 w-full rounded-lg border border-border bg-background px-2 text-xs font-semibold outline-none disabled:opacity-60"
+          >
+            {userOptions.includes(value.viking_user || "") ? null : (
+              <option value={value.viking_user || ""}>{value.viking_user || "请选择 account"}</option>
+            )}
+            {userOptions.map((opt) => (
+              <option key={opt} value={opt}>{opt}</option>
+            ))}
+          </select>
+        ) : (
+          <Input
+            value={value.viking_user || ""}
+            disabled={disabled || userDisabled}
+            placeholder={space === "personal" ? "例如 single_evolve3" : "例如 team_evolve1"}
+            onChange={(e) => onChange({ ...value, viking_user: e.target.value })}
+          />
+        )}
+        {userHint ? (
+          <div className="mt-1.5 text-[11px] text-muted-soft">{userHint}</div>
+        ) : null}
       </Field>
     </div>
   );

@@ -735,7 +735,7 @@ def test_local_user_registration_defaults_workspace_and_agent_subject(
         json={
             "id": "alice",
             "personal_space": {"viking_user": "still-not-used"},
-            "team_space": {"viking_user": "custom-team"},
+            "team_space": {"viking_user": "team"},
             "agent_subjects": [
                 {
                     "integration_id": "agentshub:tenant-demo",
@@ -749,8 +749,22 @@ def test_local_user_registration_defaults_workspace_and_agent_subject(
     assert customized.status_code == 200
     updated = customized.json()
     assert updated["personal_space"]["viking_user"] == "alice"
-    assert updated["team_space"]["viking_user"] == "custom-team"
+    # The team workspace binding is fixed at registration; keeping the same
+    # value is fine and other fields still update.
+    assert updated["team_space"]["viking_user"] == "team"
+    assert updated["team_space"]["bound"] is True
     assert updated["agent_subjects"][0]["external_subject"] == "agents-alice"
+
+    # Re-pointing the already-bound team workspace is rejected one-to-one.
+    rebind = client.post(
+        "/api/users",
+        json={
+            "id": "alice",
+            "team_space": {"viking_user": "custom-team"},
+        },
+    )
+    assert rebind.status_code == 409
+    assert "team workspace is already bound" in rebind.json()["detail"]
 
 
 def test_routes_full_crud_cycle_without_sharing(tmp_path: Path) -> None:

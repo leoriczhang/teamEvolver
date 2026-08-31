@@ -3820,6 +3820,13 @@ class RoutesMixin:
                     ),
                     "team_api_key_present": bool(sharing.get("viking_team_api_key") or sharing.get("viking_api_key")),
                     "personal_api_key_present": bool(sharing.get("viking_personal_api_key")),
+                    # A team space is one-to-one with its OpenViking account. Once
+                    # the service (root) key is configured the team space is bound
+                    # and the account can no longer be re-pointed.
+                    "account_bound": bool(
+                        sharing.get("viking_team_api_key")
+                        or sharing.get("viking_api_key")
+                    ),
                 }
             )
 
@@ -3837,6 +3844,26 @@ class RoutesMixin:
             store = ConfigStore()
             data = store.load()
             sharing = data.setdefault("sharing", {})
+            # Once a service (root) key is configured the team space is bound to
+            # its OpenViking account one-to-one. The binding is immutable: reject
+            # any attempt to re-point the account so existing team resources,
+            # shared skills, aggregated memory and ACLs never lose their owner.
+            account_bound = bool(
+                sharing.get("viking_team_api_key")
+                or sharing.get("viking_api_key")
+            )
+            if "account" in body and account_bound:
+                requested_account = str(body.get("account") or "default").strip()
+                current_account = str(sharing.get("viking_account") or "default").strip()
+                if requested_account != current_account:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "team space is already bound to account "
+                            f"'{current_account}'; the account cannot be changed "
+                            "once a service key is configured"
+                        ),
+                    )
             sharing["enabled"] = bool(body.get("enabled", sharing.get("enabled", True)))
             sharing["backend"] = "viking"
             sharing["viking_deployment"] = deployment
@@ -3850,14 +3877,10 @@ class RoutesMixin:
                 sharing["viking_personal_user"] = str(
                     body.get("personal_user") or ""
                 ).strip()
-            if "team_user" in body:
-                sharing["viking_user"] = str(
-                    body.get("team_user") or "default"
-                ).strip()
-            if "root_prefix" in body:
-                sharing["viking_root_prefix"] = str(
-                    body.get("root_prefix") or "team-skill-evolver"
-                ).strip().strip("/")
+            # team_user (viking_user) and root_prefix (viking_root_prefix) are no
+            # longer user-configurable: the account is the tenant boundary, so
+            # these keep their internal defaults and any incoming values from
+            # older clients are ignored.
             if "personal_api_key" in body:
                 sharing["viking_personal_api_key"] = str(
                     body.get("personal_api_key") or ""

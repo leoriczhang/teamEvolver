@@ -38,8 +38,8 @@ type SharingUpdate = {
   endpoint_override: string;
   account: string;
   personal_user: string;
-  team_user: string;
-  root_prefix: string;
+  team_user?: string;
+  root_prefix?: string;
   personal_api_key?: string;
   service_api_key?: string;
   team_api_key?: string;
@@ -332,8 +332,6 @@ function DeploymentPanel({
   const [override, setOverride] = useState("");
   const [account, setAccount] = useState("default");
   const [personalUser, setPersonalUser] = useState("");
-  const [teamUser, setTeamUser] = useState("default");
-  const [rootPrefix, setRootPrefix] = useState("team-skill-evolver");
   const [personalKey, setPersonalKey] = useState("");
   const [teamKey, setTeamKey] = useState("");
   const [personalKeyDirty, setPersonalKeyDirty] = useState(false);
@@ -349,8 +347,6 @@ function DeploymentPanel({
     setOverride(sharing.endpoint_override || "");
     setAccount(sharing.account || "default");
     setPersonalUser(sharing.personal_user || "");
-    setTeamUser(sharing.team_user || "default");
-    setRootPrefix(sharing.root_prefix || "team-skill-evolver");
     setPersonalKey("");
     setTeamKey("");
     setPersonalKeyDirty(false);
@@ -361,6 +357,12 @@ function DeploymentPanel({
   const localEndpoint = sharing?.local_endpoint || "http://localhost:1933";
   const effectiveEndpoint =
     override.trim() || (deployment === "local" ? localEndpoint : cloudEndpoint);
+  // Team space is one-to-one with its OpenViking account; the binding locks in
+  // once a service (root) key is configured, so the account becomes read-only.
+  const accountBound = Boolean(
+    sharing?.account_bound ??
+      (sharing?.service_api_key_present ?? sharing?.team_api_key_present)
+  );
 
   async function handleSave() {
     setSaving(true);
@@ -370,8 +372,8 @@ function DeploymentPanel({
         endpoint_override: override.trim(),
         account: account.trim() || "default",
         personal_user: personalUser.trim(),
-        team_user: teamUser.trim() || "default",
-        root_prefix: rootPrefix.trim() || "team-skill-evolver",
+        // team_user / root_prefix are no longer user-configurable: the account
+        // is the tenant boundary, so the backend keeps its internal defaults.
         ...(personalKeyDirty ? { personal_api_key: personalKey } : {}),
         ...(teamKeyDirty ? { service_api_key: teamKey, team_api_key: teamKey } : {}),
       });
@@ -451,19 +453,31 @@ function DeploymentPanel({
         </div>
 
         <div className="grid gap-3 md:grid-cols-2">
-          <ConfigInput label="OpenViking Account" value={account} disabled={!isAdmin} onChange={(value) => { setAccount(value); setDirty(true); }} />
-          <ConfigInput label="团队资源 Root Prefix" value={rootPrefix} disabled={!isAdmin} onChange={(value) => { setRootPrefix(value); setDirty(true); }} />
-          <ConfigInput label="默认个人 OpenViking 用户" value={personalUser} disabled={!isAdmin} placeholder="例如 single_evolve3" onChange={(value) => { setPersonalUser(value); setDirty(true); }} />
-          <ConfigInput label="团队 OpenViking 用户" value={teamUser} disabled={!isAdmin} placeholder="例如 team_evolve1" onChange={(value) => { setTeamUser(value); setDirty(true); }} />
+          <div>
+            <ConfigInput
+              label={`OpenViking Account${accountBound ? "（已绑定，不可更改）" : ""}`}
+              value={account}
+              disabled={!isAdmin || accountBound}
+              onChange={(value) => { setAccount(value); setDirty(true); }}
+            />
+            {accountBound ? (
+              <div className="mt-1 text-[11px] text-muted-soft">
+                团队空间已与该 account 一对一绑定；配置服务 API Key 后不可再更改。
+              </div>
+            ) : null}
+          </div>
+          <ConfigInput label="默认个人 OpenViking 用户" value={personalUser} disabled={!isAdmin || deployment === "local"} placeholder={deployment === "local" ? "自建模式按用户 ID 自动绑定" : "例如 single_evolve3"} onChange={(value) => { setPersonalUser(value); setDirty(true); }} />
+          {deployment === "local" ? null : (
+            <ConfigInput
+              label={`默认个人 API Key${sharing?.personal_api_key_present ? "（已配置，留空保留）" : ""}`}
+              value={personalKey}
+              type="password"
+              disabled={!isAdmin}
+              onChange={(value) => { setPersonalKey(value); setPersonalKeyDirty(true); setDirty(true); }}
+            />
+          )}
           <ConfigInput
-            label={`默认个人 API Key${sharing?.personal_api_key_present ? "（已配置，留空保留）" : ""}`}
-            value={personalKey}
-            type="password"
-            disabled={!isAdmin}
-            onChange={(value) => { setPersonalKey(value); setPersonalKeyDirty(true); setDirty(true); }}
-          />
-          <ConfigInput
-            label={`服务 API Key（复用管理员 Key）${(sharing?.service_api_key_present ?? sharing?.team_api_key_present) ? "（已配置，留空保留）" : ""}`}
+            label={`服务 API Key（root key）${(sharing?.service_api_key_present ?? sharing?.team_api_key_present) ? "（已配置，留空保留）" : ""}`}
             value={teamKey}
             type="password"
             disabled={!isAdmin}
@@ -472,7 +486,9 @@ function DeploymentPanel({
         </div>
 
         <div className="rounded-lg border border-border bg-background/60 p-3 text-xs leading-relaxed text-muted-foreground">
-          服务 API Key 复用管理员配置的 OpenViking Key，用于写入团队资源、技能同步和团队记忆聚合；普通用户无需单独配置或持有明文 Key。
+          {deployment === "local"
+            ? "自建（Trusted）模式下只需管理员配置一个服务 API Key（OpenViking root key），即可管理团队资源、技能同步与团队记忆聚合；个人用户空间按用户 ID 自动绑定，无需单独的个人 Key。团队空间与 OpenViking account 一对一绑定，配置服务 API Key 后 account 即锁定，不可再更改。"
+            : "服务 API Key（即 OpenViking 的 root key）仅管理员可配置，用于写入团队资源、技能同步和团队记忆聚合；普通用户无需也无法设置或持有明文 Key。团队空间与 OpenViking account 一对一绑定，配置服务 API Key 后 account 即锁定，不可再更改。"}
         </div>
 
         {isAdmin ? (
@@ -485,8 +501,6 @@ function DeploymentPanel({
                 setOverride(sharing?.endpoint_override || "");
                 setAccount(sharing?.account || "default");
                 setPersonalUser(sharing?.personal_user || "");
-                setTeamUser(sharing?.team_user || "default");
-                setRootPrefix(sharing?.root_prefix || "team-skill-evolver");
                 setPersonalKey("");
                 setTeamKey("");
                 setPersonalKeyDirty(false);

@@ -215,6 +215,9 @@ def _public_space(space: dict[str, Any]) -> dict[str, Any]:
         "backend": "viking",
         "api_key_present": bool(space.get("viking_api_key")),
         "viking_user": str(space.get("viking_user") or ""),
+        # A non-empty ``viking_user`` means the workspace binding is fixed and
+        # can no longer be re-pointed (key rotation is still allowed).
+        "bound": bool(str(space.get("viking_user") or "").strip()),
     }
 
 
@@ -670,6 +673,22 @@ def _upsert_user(
         user["team_space"]["viking_user"] = str(
             getattr(config, "sharing_viking_user", "") or _DEFAULT_USER
         )
+    # The team Workspace binding is fixed at registration. Once a user has a
+    # bound team ``viking_user`` it maps one-to-one to that shared space and can
+    # no longer be re-pointed, so aggregated team memory and skills never lose
+    # their owner. Key rotation is still allowed; only the binding is frozen.
+    existing_team_user = str(
+        ((existing or {}).get("team_space") or {}).get("viking_user") or ""
+    ).strip()
+    new_team_user = str(user["team_space"].get("viking_user") or "").strip()
+    if existing_team_user and new_team_user and existing_team_user != new_team_user:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"team workspace is already bound to '{existing_team_user}'; "
+                "the team workspace cannot be changed after registration"
+            ),
+        )
     _validate_unique_agent_identities(data, user)
     _validate_unique_agent_subjects(data, user)
     if idx is None:
@@ -890,6 +909,62 @@ def _openviking_root_key(config) -> str:
     )
 
 
+def list_openviking_accounts(config) -> dict[str, Any]:
+    """List OpenViking accounts (workspaces) via the ROOT admin API.
+
+    Fail-open: any transport/auth error is swallowed and the currently
+    configured account is returned as the single fallback, so user
+    registration never breaks when OpenViking is unreachable.
+    """
+    endpoint = _openviking_endpoint(config)
+    api_key = _openviking_root_key(config)
+    current = str(getattr(config, "sharing_viking_account", "") or "default").strip() or "default"
+    result: dict[str, Any] = {
+        "accounts": [current],
+        "current": current,
+        "source": "fallback",
+        "endpoint": endpoint,
+    }
+    if not endpoint or not api_key:
+        result["error"] = "OpenViking endpoint or API key not configured"
+        return result
+    url = f"{endpoint}/api/v1/admin/accounts"
+    headers = {
+        "Accept": "application/json",
+        "X-API-Key": api_key,
+        "Authorization": f"Bearer {api_key}",
+    }
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            response = client.get(url, headers=headers)
+    except httpx.HTTPError as exc:
+        result["error"] = f"transport error: {exc}"
+        _LOG.warning("openviking list accounts failed: %s", exc)
+        return result
+    if response.status_code != 200:
+        result["error"] = f"HTTP {response.status_code}: {(response.text or '')[:400]}"
+        _LOG.warning("openviking list accounts failed: %s", result["error"])
+        return result
+    try:
+        payload = response.json()
+    except ValueError:
+        result["error"] = "invalid JSON from OpenViking"
+        return result
+    rows = payload.get("result") if isinstance(payload, dict) else None
+    accounts: list[str] = []
+    if isinstance(rows, list):
+        for row in rows:
+            account_id = str((row or {}).get("account_id") or "").strip() if isinstance(row, dict) else ""
+            if account_id and account_id not in accounts:
+                accounts.append(account_id)
+    if current and current not in accounts:
+        accounts.append(current)
+    if accounts:
+        result["accounts"] = sorted(accounts)
+        result["source"] = "openviking"
+    return result
+
+
 def sync_openviking_user(config, user_id: str) -> dict[str, Any]:
     """Ensure a same-name OpenViking user exists under the default account.
 
@@ -1005,6 +1080,12 @@ class UsersAdminMixin:
                 current_id = str(_request_user(request).get("id") or "")
                 users = [user for user in users if str(user.get("id") or "") == current_id]
             return JSONResponse(content={"users": [_public_user(u, owner.config) for u in users]})
+
+        @app.get("/api/openviking-accounts")
+        async def api_list_openviking_accounts(request: Request):
+            """List OpenViking accounts for the team-workspace picker (admin)."""
+            _require_admin_request(request)
+            return JSONResponse(content=list_openviking_accounts(owner.config))
 
         @app.get("/api/users/{user_id}")
         async def api_get_user(user_id: str, request: Request):

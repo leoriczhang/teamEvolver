@@ -59,6 +59,7 @@ export interface SharingConfig {
   service_api_key_present?: boolean;
   team_api_key_present?: boolean;
   personal_api_key_present?: boolean;
+  account_bound?: boolean;
 }
 
 export interface TeamSettings {
@@ -891,6 +892,15 @@ export interface SkillSpaceConfig {
   clear_viking_api_key?: boolean;
   api_key_present?: boolean;
   inherited_from_admin?: boolean;
+  bound?: boolean;
+}
+
+export interface OpenVikingAccountsResp {
+  accounts: string[];
+  current: string;
+  source?: "openviking" | "fallback";
+  endpoint?: string;
+  error?: string;
 }
 
 export interface UserProfile {
