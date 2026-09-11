@@ -18,7 +18,7 @@
 
 6. 实现 Context Workspace 调用（resolve/read/skills）
 7. 实现 Context Session 生命周期管理（start/append/commit）
-8. 暴露 Replay HTTP 端点供 teamEvolver 回调
+8. 暴露 Replay Turn 端点供 teamEvolver 回调（或复用 `scripts/replay_turn_server.py`）
 9. 实现 Skill Sync（拉取或接收推送 webhook）
 10. 可选：实现个人 Memory 写入（remember/forget）
 
@@ -79,12 +79,8 @@ curl -X POST "http://<teamevolver-host>:52010/internal/agents/register" \
       },
       "replay.branch.v1": {
         "transport": "http",
+        "orchestration": "server_driven",
         "endpoint": "https://my-agent.example.com/api/teamevolver/replay",
-        "max_interactions": 10,
-        "supports_materials": true,
-        "supports_artifacts": false,
-        "supports_full_trace": true,
-        "idempotent": true,
         "auth_profile": "my_agent"
       },
       "skill.sync.v1": {
@@ -325,65 +321,79 @@ def commit_context_session(context_session_id: str, used_refs: list[str]):
     return resp.json()
 ```
 
-## 步骤 8（可选）：暴露 Replay 端点
+## 步骤 8（可选）：实现 Replay Turn 端点
 
-teamEvolver 在验证候选 Skill 时，会向 Agent 注册的 `replay_url` 发送 HTTP 请求，要求在隔离环境中执行 baseline 和 candidate 两个分支。
+teamEvolver 在验证候选 Skill 时，会调用 Agent 注册的 `replay_url` 执行 baseline 和 candidate 两个分支。推荐使用**服务端驱动的 Turn 协议**：Agent 注册 `orchestration: "server_driven"`，teamEvolver 每个交互轮次调用一次 turn 端点，多轮循环、Checklist 评审和指标聚合由服务端完成。
 
-Replay 端点需要：
+Turn 端点需要：
 
-1. 接收 POST 请求，包含 `request_id`、`branch`（baseline/candidate）、`case.query`（任务指令）、`frozen_context`（冻结上下文）、`limits`（超时和轮次限制）。
-2. 在隔离沙箱中执行任务，不得访问生产数据或产生外部副作用。
-3. 返回包含 `interaction_turns`、`tool_call_count`、`total_tokens` 指标的结果，以及 `context_input_hash`。
-4. 对于无法确定性重放的外部工具调用，返回 `REPLAY_EXTERNAL_TOOL_UNSUPPORTED`。
+1. 接收 POST 请求（`teamevolver.replay-turn-request.v1`），包含 `request_id`（Session 句柄，相同 `request_id` 的后续轮次必须续接同一回放会话而不是重置）、`turn_num`、`branch`（baseline/candidate）、`prompt`（本轮指令）、`history`（此前各轮记录 `[{turn_num, prompt, response}]`）、`limits.turn_timeout_seconds`（本轮超时）；第 1 轮还会附带 `context_snapshot`、`skill`、`materials`、`tool_policy`。
+2. 在隔离环境中执行本轮任务，不得访问生产数据或产生外部副作用。
+3. 返回本轮结果（`teamevolver.replay-turn-result.v1`）：`final_response`、`messages`（本轮完整消息轨迹，服务端 Checklist Judge 唯一可见的证据），以及 fail-closed 的 `metrics`——`tool_call_count` 和 `total_tokens` 必须是非负整数，缺失或非法时该轮校验失败。
+4. 对于无法确定性重放的外部工具调用，返回 `status: "unsupported"`（fail-closed，不得回退到实时调用）。
 
-### Replay 请求处理框架示例
+### 快速方式：复用现成的 Turn 服务
+
+仓库自带 `scripts/replay_turn_server.py`，无需自己实现 HTTP 和协议层：
+
+```bash
+python scripts/replay_turn_server.py --port 8010 --api-key <secret>
+```
+
+- 路由：`POST /turn/<runtime_type>`（teamEvolver 每轮调用一次）和 `GET /health`（探活）
+- 每个 `runtime_type` 对应 `AGENT_HANDLERS` 字典中的一个处理函数；脚本按 `request_id` 维护每会话历史并作为 `req["history"]` 传给处理函数，无状态 Agent 也能续接任务
+- 处理函数抛出 `ReplayUnsupportedError` 时，脚本返回 `status: "unsupported"`
+- teamEvolver 侧导出 `TEAMEVOLVER_AGENT_<AUTH_PROFILE>_REPLAY_API_KEY=<secret>`，与 `--api-key` 传入相同密钥
+
+### 自行实现 Turn 端点示例
 
 ```python
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-@app.post("/api/teamevolver/replay")
-def handle_replay():
+@app.post("/api/teamevolver/replay/turn")
+def handle_replay_turn():
     body = request.json
     request_id = body["request_id"]
+    turn_num = body["turn_num"]
     branch = body["branch"]
-    case = body["case"]
-    limits = body["limits"]
-    frozen_context = body.get("context_snapshot", {})
+    prompt = body["prompt"]
+    history = body.get("history", [])      # 此前各轮：[{turn_num, prompt, response}]
+    turn_timeout = body["limits"]["turn_timeout_seconds"]
+    # 第 1 轮额外携带：context_snapshot、skill、materials、tool_policy
 
     if branch not in ("baseline", "candidate"):
         return jsonify({"error": "invalid branch"}), 400
 
     try:
-        result = run_replay_branch(
-            branch=branch,
-            instruction=case["query"],
-            frozen_context=frozen_context,
-            timeout_seconds=limits["timeout_seconds"],
-            max_interactions=limits["max_interactions"]
+        result = run_replay_turn(
+            request_id=request_id,         # 作为会话句柄续接执行
+            turn_num=turn_num,
+            prompt=prompt,
+            history=history,
+            turn_timeout_seconds=turn_timeout
         )
         return jsonify({
-            "schema_version": "teamevolver.replay-branch-result.v1",
+            "schema_version": "teamevolver.replay-turn-result.v1",
             "protocol_version": "1.0",
             "request_id": request_id,
+            "turn_num": turn_num,
             "branch": branch,
             "status": "succeeded",
+            "final_response": result["response"],
+            "messages": result["messages"],
             "metrics": {
-                "interaction_turns": result["turns"],
                 "tool_call_count": result["tool_calls"],
                 "total_tokens": result["tokens"]
-            },
-            "output": {"final_response": result["response"]},
-            "trace": {"messages": result["messages"], "interactions": []},
-            "context_input_hash": result["context_hash"],
-            "elapsed_seconds": result["elapsed"]
+            }
         })
     except ReplayExternalToolError:
         return jsonify({
-            "schema_version": "teamevolver.replay-branch-result.v1",
+            "schema_version": "teamevolver.replay-turn-result.v1",
             "protocol_version": "1.0",
             "request_id": request_id,
+            "turn_num": turn_num,
             "branch": branch,
             "status": "unsupported",
             "error": {
@@ -391,12 +401,11 @@ def handle_replay():
                 "message": "external tool call cannot be deterministically replayed",
                 "retryable": False
             },
-            "metrics": {},
-            "elapsed_seconds": 0
+            "metrics": {}
         })
 ```
 
-Replay 适配器实现：`teamEvolver/integrations/replay_adapters.py`
+Replay 适配器实现：`teamEvolver/integrations/replay_adapters.py:TurnBasedReplayAdapter`
 
 ## 步骤 9（可选）：实现 Skill Sync
 
@@ -468,7 +477,7 @@ Skill Sync 实现：`teamEvolver/integrations/skill_sync_adapters.py`
 | 令牌管理 | 存储一个字符串 | 存储一个字符串 |
 | Session 上报 | ~40 行/会话 | ~40 行/会话（加上 context_usage） |
 | Context Workspace | 不需要 | ~100 行（resolve + read + session 生命周期） |
-| Replay 端点 | 不需要 | ~200+ 行（沙箱隔离 + 确定性重放） |
+| Replay Turn 处理函数 | 不需要 | 一个函数（填入 `scripts/replay_turn_server.py` 的 `AGENT_HANDLERS`，HTTP 与协议层由脚本提供） |
 | Skill Sync | 不需要 | ~50 行（拉取模式）或 ~80 行（推送 webhook） |
 | Memory 写入 | 不需要 | ~20 行（remember/forget） |
 

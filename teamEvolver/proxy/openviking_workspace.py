@@ -345,8 +345,13 @@ def _content_hash(content: str) -> str:
 class OpenVikingWorkspaceMixin:
     """Workspace, memory, and skill browsing backed by OpenViking APIs."""
 
+    def _workspace_config(self):
+        from ..tenants.registry import effective_config, get_current_tenant
+
+        return effective_config(None, get_current_tenant(), self.config)
+
     def _workspace_endpoint(self) -> str:
-        return str(getattr(self.config, "sharing_viking_endpoint", "") or "").strip().rstrip("/")
+        return str(getattr(self._workspace_config(), "sharing_viking_endpoint", "") or "").strip().rstrip("/")
 
     @staticmethod
     def _workspace_cli_binary() -> str:
@@ -373,7 +378,7 @@ class OpenVikingWorkspaceMixin:
         if not target_id:
             raise HTTPException(status_code=400, detail="user_id is required")
         _require_self_or_admin(request, target_id)
-        registry = _load_registry(_registry_path(self.config))
+        registry = _load_registry(_registry_path(self.config), self.config)
         _index, user = _find_user(registry, target_id)
         return user, str(current.get("role") or "user") == "admin"
 
@@ -389,7 +394,7 @@ class OpenVikingWorkspaceMixin:
             else {}
         )
         scopes = _scope_map(
-            self.config,
+            self._workspace_config(),
             str(user.get("id") or ""),
             is_admin=is_admin,
             personal_user=str(personal_space.get("viking_user") or ""),
@@ -399,7 +404,12 @@ class OpenVikingWorkspaceMixin:
     def _workspace_headers(
         self, user: dict[str, Any], scope: _WorkspaceScope
     ) -> dict[str, str]:
-        if scope.space == "team":
+        config = self._workspace_config()
+        if config.storage_pg_enabled:
+            # Stored user credentials may belong to a different account.
+            # PG tenancy always uses the service credential plus account ID.
+            api_key = _effective_team_key(config) or config.sharing_viking_api_key
+        elif scope.space == "team":
             api_key = _space_key(user.get("team_space") or {}) or _effective_team_key(self.config)
         else:
             api_key = _space_key(user.get("personal_space") or {}) or str(
@@ -416,9 +426,9 @@ class OpenVikingWorkspaceMixin:
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "X-OpenViking-Account": str(getattr(self.config, "sharing_viking_account", "") or "default"),
+            "X-OpenViking-Account": str(getattr(config, "sharing_viking_account", "") or "default"),
             "X-OpenViking-User": scope.openviking_user or "default",
-            "X-OpenViking-Agent": str(getattr(self.config, "sharing_viking_agent", "") or "team-skill-evolver"),
+            "X-OpenViking-Agent": str(getattr(config, "sharing_viking_agent", "") or "team-skill-evolver"),
         }
         if api_key:
             headers["X-API-Key"] = api_key
@@ -547,7 +557,7 @@ class OpenVikingWorkspaceMixin:
         async def workspace_config(request: Request, user_id: str = Query(default="")):
             user, is_admin = owner._workspace_actor(request, user_id)
             deployment = str(
-                getattr(owner.config, "sharing_viking_deployment", "") or "cloud"
+                getattr(owner._workspace_config(), "sharing_viking_deployment", "") or "cloud"
             ).lower()
             endpoint = owner._workspace_endpoint()
             personal_space = (
@@ -562,17 +572,17 @@ class OpenVikingWorkspaceMixin:
             # auto-grant personal access whenever a usable server key exists.
             has_personal_key = bool(
                 _space_key(personal_space)
-                or str(getattr(owner.config, "sharing_viking_personal_api_key", "") or "")
+                or str(getattr(owner._workspace_config(), "sharing_viking_personal_api_key", "") or "")
             )
             has_server_key = bool(
-                _effective_team_key(owner.config)
-                or str(getattr(owner.config, "sharing_viking_api_key", "") or "")
+                _effective_team_key(owner._workspace_config())
+                or str(getattr(owner._workspace_config(), "sharing_viking_api_key", "") or "")
             )
             personal_access_configured = has_personal_key or (
                 deployment == "local" and has_server_key
             )
             scopes = _scope_map(
-                owner.config,
+                owner._workspace_config(),
                 str(user.get("id") or ""),
                 is_admin=is_admin,
                 personal_user=str(personal_space.get("viking_user") or ""),
@@ -583,13 +593,13 @@ class OpenVikingWorkspaceMixin:
             except HTTPException:
                 cli_available = False
             return JSONResponse(content={
-                "enabled": bool(getattr(owner.config, "sharing_enabled", False) and endpoint),
+                "enabled": bool(getattr(owner._workspace_config(), "sharing_enabled", False) and endpoint),
                 "deployment": deployment,
                 "endpoint": endpoint,
                 "studio_url": f"{endpoint}/studio/" if deployment == "local" and endpoint else "",
                 "studio_user_url": (
                     f"{endpoint}/studio/home?account="
-                    f"{str(getattr(owner.config, 'sharing_viking_account', '') or 'default')}"
+                    f"{str(getattr(owner._workspace_config(), 'sharing_viking_account', '') or 'default')}"
                     f"&user={str(user.get('id') or '')}"
                     if deployment == "local" and endpoint and user.get("id")
                     else ""
@@ -1006,7 +1016,7 @@ class OpenVikingWorkspaceMixin:
                 else {}
             )
             scopes = _scope_map(
-                owner.config,
+                owner._workspace_config(),
                 str(user.get("id") or ""),
                 is_admin=is_admin,
                 personal_user=str(personal_space.get("viking_user") or ""),

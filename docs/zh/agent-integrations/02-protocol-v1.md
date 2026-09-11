@@ -7,7 +7,7 @@ Protocol V1 允许 Agent 将 teamEvolver 用作其上下文和进化控制面。
 - 上报带版本号的 Session 数据；
 - 解析和读取个人/团队 Memory 与 Skill 上下文；
 - 仅写入或遗忘已映射用户的个人 Memory；
-- 在 Agent 的真实运行时中执行一次 baseline 或 candidate replay 分支；
+- 在 Agent 的真实运行时中执行 baseline 或 candidate replay 分支（服务端驱动的逐轮 Turn 协议，或单次同步请求回退）；
 - 接收已发布的团队 Skill 更新。
 
 协议版本为 `1.0`。未知主版本号返回 `PROTOCOL_VERSION_UNSUPPORTED` 错误。不带版本号的 payload 通过单周期遗留适配器处理。
@@ -52,11 +52,8 @@ V1 注册必须指定 `schema_version` 为 `teamevolver.agent-registration.v1`�
     },
     "replay.branch.v1": {
       "transport": "http",
+      "orchestration": "server_driven",
       "endpoint": "https://agent.example/replay/v1",
-      "max_interactions": 20,
-      "supports_materials": true,
-      "supports_artifacts": true,
-      "supports_full_trace": true,
       "idempotent": false,
       "auth_profile": "example"
     }
@@ -74,7 +71,7 @@ V1 注册必须指定 `schema_version` 为 `teamevolver.agent-registration.v1`�
 |------|------|------|
 | `session.ingest.v1` | object | 支持 Session 上报 |
 | `context.workspace.v1` | object | 支持 Context Workspace，`scopes` 指定可访问范围 |
-| `replay.branch.v1` | object | 支持 True Replay，需提供 `endpoint`、`max_interactions`、`supports_*` 等参数 |
+| `replay.branch.v1` | object | 支持 True Replay。`endpoint` 指定回调端点，`orchestration: "server_driven"` 启用服务端驱动的 Turn 协议。`max_interactions`（默认 20）与 `idempotent`（默认 false）由服务端填充默认值；`supports_*` 字段在 Replay 代码中不被消费 |
 | `skill.sync.v1` | object | 支持 Skill 推送同步，需提供 `skill_sync_url` |
 
 ### 主体映射（Subject Mappings）
@@ -231,15 +228,15 @@ Authorization: Bearer <agent-access-token>
 
 ## Replay 分支
 
-HTTP Agent 暴露在 `replay.branch.v1` 中注册的确切端点。teamEvolver 为每个分支发送一个同步请求。baseline 和 candidate 调用并发执行，共享相同的 Context 和执行清单。
+HTTP Agent 暴露在 `replay.branch.v1` 中注册的确切端点。主模式为**服务端驱动的 Turn 协议**：Agent 注册时声明 `orchestration: "server_driven"`，teamEvolver 按交互轮次逐轮调用 Agent 的 turn 端点（`teamevolver.replay-turn-request.v1` / `teamevolver.replay-turn-result.v1`），多轮循环、Checklist 评审和指标聚合全部由服务端编排。未声明 `orchestration` 时回退为单次同步请求：teamEvolver 为每个分支发送一个同步请求（`teamevolver.replay-branch-request.v1`），baseline 和 candidate 调用并发执行，共享相同的 Context 和执行清单。
 
-代码实现：`teamEvolver/integrations/replay_adapters.py`
+代码实现：`teamEvolver/integrations/replay_adapters.py` (`TurnBasedReplayAdapter`、`MappedHttpAdapter`、`HttpReplayAdapter`)
 
 ### 超时与截止时间
 
-调用方拥有截止时间控制权。Agent 必须在 `limits.timeout_seconds` 之前停止；在 HTTP 调用方超时后不得继续消耗模型或工具资源。timeout_seconds 范围：30-3600 秒；max_interactions 范围：1-20。
+调用方拥有截止时间控制权。Agent 必须在 `limits.timeout_seconds` 之前停止；在 HTTP 调用方超时后不得继续消耗模型或工具资源。timeout_seconds 范围：30-3600 秒；max_interactions 范围：1-20。服务端驱动模式下每轮限制为 `limits.turn_timeout_seconds`（30-3600 秒，默认 600）。
 
-### 请求格式
+### 请求格式（单次调用回退模式）
 
 teamEvolver 发送给 Agent 的 replay 请求格式：
 
@@ -275,9 +272,9 @@ teamEvolver 发送给 Agent 的 replay 请求格式：
 | `tool_call_count` | 工具调用次数 |
 | `total_tokens` | 总 token 消耗 |
 
-缺少指标、`request_id`/`branch` 不匹配或 schema 无效将失败关闭为 `INVALID_RESPONSE`。
+缺少指标、`request_id`/`branch` 不匹配或 schema 无效将失败关闭为 `INVALID_RESPONSE`。服务端驱动模式下 Agent 逐轮返回 `teamevolver.replay-turn-result.v1`，每轮必须回报 `metrics.tool_call_count` 和 `metrics.total_tokens`（fail-closed），由服务端聚合。
 
-### 响应格式
+### 响应格式（单次调用回退模式）
 
 ```json
 {
@@ -405,3 +402,5 @@ teamEvolver 会验证版本号和哈希是否匹配，不匹配则标记为同�
 | Context 快照 | `docs/schemas/agent-context-snapshot-v1.schema.json` |
 | Replay 请求 | `docs/schemas/replay-branch-request-v1.schema.json` |
 | Replay 结果 | `docs/schemas/replay-branch-result-v1.schema.json` |
+| Replay Turn 请求 | 无独立 schema 文件；schema 常量 `teamevolver.replay-turn-request.v1` 定义于 `teamEvolver/integrations/agent_protocol.py:REPLAY_TURN_REQUEST_SCHEMA_V1` |
+| Replay Turn 结果 | 无独立 schema 文件；schema 常量 `teamevolver.replay-turn-result.v1` 定义于 `teamEvolver/integrations/agent_protocol.py:REPLAY_TURN_RESULT_SCHEMA_V1` |

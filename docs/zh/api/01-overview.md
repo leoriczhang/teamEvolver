@@ -25,9 +25,9 @@ teamEvolver API 使用三种认证机制，并保留少量无认证的健康与�
 
 ### 控制面密钥
 
-环境变量 `EVOLVE_INGEST_API_KEY` 配置的密钥，用于注册新 Agent。权限最高，必须妥善保管。未配置此变量时，V1 注册端点返回 503 错误。
+环境变量 `EVOLVE_INGEST_API_KEY` 配置的密钥，用于注册新 Agent。权限最高，必须妥善保管。未配置此变量时，V1 注册端点不做认证、注册请求直接放行（生产环境务必配置）；请求携带的密钥与配置不匹配时返回 401。
 
-代码入口：`teamEvolver/proxy/routes.py:768` (`_check_v1_control_plane_key`)
+代码入口：`teamEvolver/proxy/routes.py:_check_ingest_api_key`
 
 ### Agent 访问令牌
 
@@ -47,7 +47,7 @@ teamEvolver API 使用三种认证机制，并保留少量无认证的健康与�
 
 通过 `/api/auth/login` 登录后获得 HttpOnly Cookie，有效期 24 小时。`/api/*` 路径下的管理接口需要此认证，管理员用户额外执行权限检查。
 
-代码入口：`teamEvolver/proxy/routes.py:1699` (`require_console_auth` 中间件)
+代码入口：`teamEvolver/proxy/routes.py:require_console_auth` 中间件
 
 ## 版本控制
 
@@ -117,8 +117,14 @@ Agent 协议 API 使用 `protocol_version` 字段进行版本控制。当前版�
 | `/api/openviking/workspace/*` | Workspace 浏览、L0/L1、条件批量写、CLI | [存储空间与目录布局](../concepts/09-storage-layout.md) |
 | `/api/skill-lab/*`、`/api/openviking/memory/*` | Skill / Memory 实验与 True Replay | [Web 控制台](../guides/03-console.md) |
 | `/api/mining/*` | 知识源、挖掘任务、产物与 LIFT | [Skill Miner 指南](../guides/07-skill-miner.md) |
-| `/api/langfuse-config`、`/langfuse/*` | Langfuse 配置、拉取、映射和状态 | [可观测性指南](../guides/04-observability.md) |
+| `/api/langfuse-config`、`/api/langfuse-tracing-config`、`/langfuse/*` | 租户数据源、全局链路观测、拉取、映射和状态 | [可观测性指南](../guides/04-observability.md) |
 | `/api/docs/*` | 内置文档目录、页面读取和搜索 | [文档维护指南](./99-docs-maintenance.md) |
+| `/api/sharing-config`、`/api/evolve-model`、`/api/evolve-model/test`、`/api/evolve-settings` | 共享/本地回退存储配置、进化模型配置（含连通性测试）与进化设置 | [Web 控制台](../guides/03-console.md) |
+| `/api/session-filter/audit`、`/api/mined-skills`、`/api/mined-skills/{name}/submit` | Session 过滤审计查询、挖掘产物查询与提交 | [Skill Miner 指南](../guides/07-skill-miner.md) |
+| `/api/openviking-accounts`、`/api/openviking-accounts/{account}/users`、`/api/openviking-accounts/{account}/import-users` | OpenViking 账号列表、账号用户与用户导入 | [Web 控制台](../guides/03-console.md) |
+| `/sessions`、`/conversations`、`/conversations/export`、`/conversations/status`、`/conversations/{session_id}`、`/conversations/{session_id}/process`、`/history` | 控制台 Session/会话浏览、导出、处理状态与历史查询 | [Session 查询](./08-sessions-api.md) |
+| `/v1/models`、`/v1/chat/completions` | OpenAI 兼容模型代理（模型列表与对话补全） | — |
+| `/internal/agentshub/openviking-config`、`/internal/reload-skills` | AgentsHub 内部配置下发、Skill 运行时重载 | — |
 
 ### 文档维护
 

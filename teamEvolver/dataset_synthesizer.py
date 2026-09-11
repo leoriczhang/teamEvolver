@@ -27,41 +27,33 @@ _LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)、]|[（(]\d+[)）])\s*")
 _FENCE_RE = re.compile(r"```(?:json)?\s*|\s*```", re.IGNORECASE)
 
 _SYNTHESIZE_SYSTEM = """\
-You generate held-out test datasets for Skill evolution.
+你为 Skill 演化生成留存测试（held-out test）数据集。
 
-The same accumulated sessions and team SOP evidence were used to produce a
-candidate Skill. Build {case_count} realistic TEST cases that evaluate whether
-the candidate internalized those reusable procedures without leaking the full
-requirements in the initial query.
+同一批积累的会话和团队 SOP 证据已被用于产出一个候选 Skill。请构建 {case_count} 个\
+贴近真实的测试用例，评估该候选是否内化了那些可复用规程，同时初始提问不得泄露完整需求。
 
-For every test case:
-1. query: a self-contained initial user request. It MUST NOT enumerate or reveal
-   the checklist.
-2. requirements: {min_requirements}-{max_requirements} flat, independently
-   verifiable output/content requirements. No nested items. Every requirement
-   must be grounded in the supplied sessions or team SOP evidence.
-3. trajectory_requirements: flat checks for how the task is executed, including
-   material reads, tool operations, calculations, validation, and artifact
-   writes when supported by evidence.
-4. source_session_ids: the session ids that ground the case.
-5. evidence_window: "recent" or "historical".
-6. name: a concise human-readable test name.
+对每个测试用例：
+1. query：一个自包含的初始用户请求。绝不能枚举或透露 checklist。
+2. requirements：{min_requirements}-{max_requirements} 条扁平的、可独立验证的\
+输出/内容要求。不要嵌套条目。每条要求都必须有会话或团队 SOP 证据支撑。
+3. trajectory_requirements：对任务执行方式的扁平检查，包括资料读取、工具操作、\
+计算、校验和产物写入（以证据支持为限）。
+4. source_session_ids：支撑该用例的会话 ID。
+5. evidence_window："recent" 或 "historical"。
+6. name：简洁、人类可读的测试名称。
 
-Every generated case must be runnable from the dataset by itself. If the source
-task used files or directories but their bytes are not present in the supplied
-evidence, do not reference those paths. Instead, inline a compact realistic
-fixture under a `材料：` section in query. Never invent a filename, archive,
-input directory, or material that the replay environment cannot provide.
+每个生成的用例都必须能凭数据集本身独立运行。如果源任务使用了文件或目录，但其字节内容\
+未包含在所提供的证据中，不要引用这些路径。改为在 query 中以 `材料：` 小节内联一段\
+紧凑且贴近真实的夹具（fixture）。绝不要虚构回放环境无法提供的文件名、压缩包、\
+输入目录或材料。
 
-The replay protocol reveals only query on interaction 1. After each interaction
-an independent checklist judge identifies unmet requirements; only the next
-batch of unmet requirements is disclosed. Therefore requirements must be
-specific enough to judge from the response, tool trace, and artifacts.
+回放协议只在第 1 轮交互中展示 query。之后每轮交互由独立的 checklist 评审者指出未满足的\
+要求，且只披露下一批未满足的要求。因此每条要求必须具体到可以依据回复、工具轨迹和产物\
+来判定。
 
-Do not add generic formatting rules unsupported by evidence. Do not include
-train/test scoring, weights, or aggregate scores.
+不要添加证据不支持的通用格式规则。不要包含训练/测试打分、权重或汇总分。
 
-Return JSON only:
+只返回 JSON：
 {
   "test_datasets": [
     {

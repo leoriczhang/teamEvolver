@@ -75,6 +75,11 @@ def _healthz_ready(port: int, timeout: float = 0.5) -> bool:
 
 
 def _ensure_daemon_not_running():
+    if runtime_state._multi_replica_enabled():
+        # Multi-replica mode: multiple daemons may coexist on one host; the
+        # singleton check is skipped (cross-replica cycle isolation is enforced
+        # by pg_advisory_lock in the scheduler).
+        return
     pid = _read_pid()
     if pid is None:
         return

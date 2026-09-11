@@ -22,7 +22,7 @@ Related code at:
 | Execution | Scheduled/manual pull | Auto-captured per LLM call |
 | Impact on evolution | Provides raw material for evolution | No side effects, fail-open design |
 
-Both modes share same Langfuse credentials (`public_key`/`secret_key`) and `host` config, but can be toggled independently.
+The two modes use separate Langfuse connections. Inbound connections can be configured per tenant. Outbound tracing is service-wide: every tenant reports to one operator-managed Langfuse project, and tenant overrides are rejected.
 
 ## Configuration Reference
 
@@ -42,6 +42,9 @@ All Langfuse-related configuration in config.yaml `langfuse` section:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `tracing_enabled` | boolean | `false` | Whether to enable outbound LLM call tracing |
+| `tracing_host` | string | `""` | Global observability Langfuse URL, separate from inbound `host` |
+| `tracing_public_key` | string | `""` | Global observability project public key |
+| `tracing_secret_key` | string | `""` | Global observability project secret key |
 | `tracing_environment` | string | `"local"` | Environment tag, distinguishes deployment environments in Langfuse UI. Recommended values: `production`, `staging`, `local`. Only letters, numbers, `-`, `_` allowed |
 | `tracing_release` | string | `""` | Release tag, marks current deployment version (e.g., git commit hash, version number) |
 | `tracing_sample_rate` | float | `1.0` | Sample rate, range 0.0-1.0. Production recommend `0.1` (10% sampling) to reduce cost |
@@ -80,10 +83,10 @@ Note: Public Key starts with `pk-lf-`, Secret Key starts with `sk-lf-`.
 ```yaml
 langfuse:
   enabled: false
-  host: "https://cloud.langfuse.com"
-  public_key: "pk-lf-xxxxxxxx"
-  secret_key: "sk-lf-xxxxxxxx"
   tracing_enabled: true
+  tracing_host: "https://cloud.langfuse.com"
+  tracing_public_key: "pk-lf-observability"
+  tracing_secret_key: "sk-lf-observability"
   tracing_environment: "production"
   tracing_release: "v1.2.3"
   tracing_sample_rate: 0.1
@@ -95,10 +98,13 @@ langfuse:
 ```yaml
 langfuse:
   enabled: true
-  host: "https://cloud.langfuse.com"
-  public_key: "pk-lf-xxxxxxxx"
-  secret_key: "sk-lf-xxxxxxxx"
+  host: "https://tenant-source.example.com"
+  public_key: "pk-lf-source"
+  secret_key: "sk-lf-source"
   tracing_enabled: true
+  tracing_host: "https://global-observability.example.com"
+  tracing_public_key: "pk-lf-observability"
+  tracing_secret_key: "sk-lf-observability"
   tracing_environment: "production"
   tracing_sample_rate: 0.5
   default_environment:
@@ -114,14 +120,17 @@ langfuse:
 ```yaml
 langfuse:
   enabled: true
-  host: "http://langfuse.internal.example.com"
-  public_key: "pk-lf-xxxxxxxx"
-  secret_key: "sk-lf-xxxxxxxx"
+  host: "http://tenant-langfuse.internal.example.com"
+  public_key: "pk-lf-source"
+  secret_key: "sk-lf-source"
   tracing_enabled: true
+  tracing_host: "http://observability-langfuse.internal.example.com"
+  tracing_public_key: "pk-lf-observability"
+  tracing_secret_key: "sk-lf-observability"
   tracing_environment: "local"
 ```
 
-Also configurable via environment variables (higher priority than config.yaml):
+Environment variables can override the global outbound tracing connection (higher priority than config.yaml; they do not configure tenant session sources):
 
 ```bash
 export LANGFUSE_HOST="https://cloud.langfuse.com"
@@ -164,8 +173,8 @@ For each traced LLM call, following information recorded:
 - **Model Parameters**: temperature, max_tokens, etc.
 - **Usage Details**: prompt tokens, completion tokens, total tokens
 - **Metadata**: Structured metadata like component name, operation name, stage ID, source session ID
-- **Session ID**: Associated teamEvolver session ID (for grouping by session in Langfuse)
-- **Tags**: Automatically adds `teamEvolver` tag and stage-specific tags
+- **Session ID**: Carried only by skill-evolution Traces when `EVOBENCH_RUN_ID` is set (`team-skill-evolver:{run_id}:{operation}:{skill_name}`); source session IDs are recorded in Metadata
+- **Tags**: LLM calls automatically get the `llm` tag plus stage-specific tags (see table above)
 - **Environment**: Configured by `tracing_environment`
 - **Release**: Configured by `tracing_release`
 
@@ -339,8 +348,8 @@ Recommended to use both: teamEvolver console for operations and management, Lang
 ### Traces not appearing in Langfuse
 
 1. Check `tracing_enabled` is `true`
-2. Check `public_key` and `secret_key` are correct
-3. Check `host` is accessible from server (self-hosted instances verify network connectivity)
+2. Check `tracing_public_key` and `tracing_secret_key` are correct
+3. Check `tracing_host` is accessible from server (self-hosted instances verify network connectivity)
 4. Check teamEvolver logs for `[Langfuse] tracing unavailable` warnings
 5. Run `teamEvolver langfuse status` to verify `reachable: True`
 

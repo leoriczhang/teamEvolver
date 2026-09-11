@@ -31,7 +31,7 @@ dependencies = [
     "httpx>=0.25.0",
     "json-repair>=0.44.0",
     "langfuse>=4.14,<5.0",
-    "openai>=1.0",
+    "openai>=1.0,<3",
     "openpyxl>=3.1",
     "pypdf>=5.0",
     "pydantic-settings>=2.0",
@@ -43,22 +43,25 @@ dependencies = [
 sharing = [
     "boto3>=1.28",
 ]
+pg = [
+    "asyncpg>=0.29.0",
+]
 mining = [
     "hermes-agent==0.19.0",
 ]
 validation = [
-    "openai>=1.0",
+    "openai>=1.0,<3",
 ]
 truereplay = [
     "hermes-agent==0.19.0",
-    "openai>=1.0",
+    "openai>=1.0,<3",
 ]
 dev = [
     "pytest>=8.0",
     "anyio>=4.0",
 ]
 all = [
-    "teamEvolver[sharing,mining,validation,truereplay]",
+    "teamEvolver[sharing,mining,validation,truereplay,pg]",
 ]
 
 [project.urls]

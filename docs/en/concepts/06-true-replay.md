@@ -56,7 +56,10 @@ Local sandbox launched via `systemd-run`, enabling system-level isolation:
 
 ### Remote Agent Runtime
 
-For external Agents registering `replay.branch.v1` capability (like Pi Agent), True Replay sends Replay requests to Agent's replay endpoint via HTTP adapter, with Agent Runtime responsible for isolated execution. External Runtimes must implement isolation requirements specified by protocol.
+For external Agents registering `replay.branch.v1` capability (like Pi Agent), True Replay communicates with the Agent's replay endpoint via HTTP adapters, with Agent Runtime responsible for isolated execution. External Runtimes must implement isolation requirements specified by protocol. Remote execution has two modes:
+
+- **Server-driven mode (primary)**: the Agent declares `orchestration: "server_driven"` at registration, and teamEvolver calls the Agent's turn endpoint once per interaction turn via `teamEvolver/integrations/replay_adapters.py:TurnBasedReplayAdapter` (or `MappedHttpAdapter` when the capability defines `request_template`). The multi-turn loop is orchestrated server-side, and the checklist is never sent to the Agent; the server evaluates the checklist from the Agent's per-turn `messages` and `artifacts` and aggregates per-turn metrics.
+- **Single-request mode (fallback)**: registrations without `orchestration` use one synchronous request per branch via `teamEvolver/integrations/replay_adapters.py:HttpReplayAdapter`; the Agent performs the multi-turn execution itself and returns aggregated results.
 
 ## Frozen Context & Snapshot Hash
 
@@ -64,10 +67,10 @@ True Replay uses Context Snapshot to ensure both branches see identical context 
 
 1. **Snapshot loading**: Loads frozen Context projection from source Session's `context_usage.context_snapshot_id`
 2. **Treatment replacement**: For Skill Replay, removes existing version of validated Skill, injects respective Baseline/Candidate Skill content; for Memory Replay, removes changed Memory entry, injects before/after content
-3. **Hash verification**: Computes `shared_context_hash` and `context_input_hash` for each branch's context_snapshot, ensuring shared context consistent between branches, only treatment part differs
-4. **Runtime injection**: Frozen Snapshot passed to Agent Runtime via Replay request; Agent must use received Snapshot instead of live context pull
+3. **Hash verification**: For server-driven remote branches, the server computes `context_input_hash` over the branch-invariant shared context and `execution_manifest_hash` over the execution manifest, then checks cross-branch equality between baseline/candidate (a mismatch fails with `CONTEXT_PARITY_VIOLATION`/`EXECUTION_PARITY_VIOLATION`)
+4. **Runtime injection**: Frozen Snapshot passed to Agent Runtime via the Replay request (as the turn-1 `context_snapshot` field in server-driven mode); Agent must use received Snapshot instead of live context pull
 
-Protocol V1 requires Agent Runtime return `context_input_hash`; mismatch with server-computed hash results in fail-closed.
+In server-driven mode, both `context_input_hash` and `execution_manifest_hash` are computed by the server; the Agent does not return them. Memory Replay's `shared_context_hash` and before/after treatment hashes are likewise computed server-side.
 
 ## Progressive Disclosure Protocol
 
@@ -145,12 +148,12 @@ DreamCycle-produced team Memory Changes (merged, deduplicated, cleaned memory en
 
 ### Safety and Consistency Guarantees
 
-- **Hash verification**: Each branch returns `context_input_hash`; mismatch with server-computed `shared_context_hash + treatment_hash` fails closed
+- **Hash verification**: The server computes `shared_context_hash` and before/after treatment hashes, then checks cross-branch consistency; mismatch fails closed
 - **before/after non-empty check**: If before and after content are identical (same hash), reject meaningless Replay
 - **Checklist minimization**: Memory Replay requires at least 1 Checklist item (max 50), query length capped at 32000 characters
 - **Runtime selection**: Resolve available Replay endpoint from source Session's `runtime_type`; local Hermes uses sandbox execution, remote Agents (e.g., Pi Agent) use HTTP Replay adapter
 
-Code entry point: `MemoryTrueReplayRunner` in [dreamcycle/memory_replay.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/dreamcycle/memory_replay.py).
+Code entry point: `MemoryTrueReplayRunner` in [dreamcycle/memory_replay.py](../../../teamEvolver/dreamcycle/memory_replay.py).
 
 ## External Tool Replay (Fail-Closed Strategy)
 
@@ -239,13 +242,15 @@ Results aggregated and passed to `progressive_replay_decision` for final decisio
 
 | Module | Path |
 |--------|------|
-| True Replay core | [true_replay.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/true_replay.py) |
-| Progressive disclosure & Checklist decisions | [progressive_replay.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/progressive_replay.py) |
-| Replay Model Broker | [integrations/replay_model_broker.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/integrations/replay_model_broker.py) |
-| Replay HTTP adapters | [integrations/replay_adapters.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/integrations/replay_adapters.py) |
-| Efficiency metric comparison | [replay_metrics.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/replay_metrics.py) |
-| Memory True Replay | [dreamcycle/memory_replay.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/dreamcycle/memory_replay.py) |
-| Agent registration & runtime resolution | [integrations/agent_registry.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/integrations/agent_registry.py) |
+| True Replay core | [true_replay.py](../../../teamEvolver/true_replay.py) |
+| Progressive disclosure & Checklist decisions | [progressive_replay.py](../../../teamEvolver/progressive_replay.py) |
+| Replay Model Broker | [integrations/replay_model_broker.py](../../../teamEvolver/integrations/replay_model_broker.py) |
+| Replay HTTP adapters | [integrations/replay_adapters.py](../../../teamEvolver/integrations/replay_adapters.py) |
+| Efficiency metric comparison | [replay_metrics.py](../../../teamEvolver/replay_metrics.py) |
+| Memory True Replay | [dreamcycle/memory_replay.py](../../../teamEvolver/dreamcycle/memory_replay.py) |
+| Agent registration & runtime resolution | [integrations/agent_registry.py](../../../teamEvolver/integrations/agent_registry.py) |
+| Agent-side Replay Turn server | [scripts/replay_turn_server.py](../../../scripts/replay_turn_server.py) |
+| Replay Turn protocol schemas | `teamevolver.replay-turn-request.v1` / `teamevolver.replay-turn-result.v1` (defined in `teamEvolver/integrations/agent_protocol.py`) |
 | Protocol V1 Replay Branch specification | [Protocol V1 Specification](../agent-integrations/02-protocol-v1) |
 
 ## Related Documentation

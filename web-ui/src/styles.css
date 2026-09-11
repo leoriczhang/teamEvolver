@@ -317,6 +317,15 @@ select,
   color: var(--accent);
 }
 
+.skill-lab-view .ui-panel {
+  min-width: 0;
+}
+
+.skill-lab-view .ui-panel > div:first-child,
+.skill-lab-view .ui-panel h2 {
+  flex-wrap: wrap;
+}
+
 @media (max-width: 760px) {
   .app-sidebar {
     width: 64px;
@@ -327,6 +336,8 @@ select,
   .sidebar-item-label,
   .sidebar-user-copy,
   .sidebar-user-chevron,
+  .sidebar-tenant-copy,
+  .sidebar-tenant-chevron,
   .sidebar-version {
     display: none;
   }
@@ -349,12 +360,14 @@ select,
     padding-inline: 8px;
   }
 
-  .sidebar-user-button {
+  .sidebar-user-button,
+  .sidebar-tenant-button {
     justify-content: center;
     padding-inline: 0;
   }
 
-  .sidebar-user-popover {
+  .sidebar-user-popover,
+  .sidebar-tenant-popover {
     right: auto;
     width: 220px;
   }

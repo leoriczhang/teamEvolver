@@ -1,0 +1,3 @@
+# Install build tooling from the same hashed wheel set for offline builds.
+setuptools>=68,<85
+wheel>=0.41,<1

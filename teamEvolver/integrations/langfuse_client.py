@@ -11,12 +11,12 @@ Endpoints used (all under ``{host}/api/public``):
 - ``GET /traces``                 list traces with rich attribute filters
 - ``GET /traces/{id}``            one trace incl. observations + scores
 
-Session-attribute filtering is the headline capability: the ``/sessions`` list
-endpoint only filters by time + environment, but agent sessions are usually
-tagged at the *trace* level (userId, tags, release, version, name, metadata).
-:meth:`LangfuseClient.list_session_ids` therefore resolves the set of matching
-session ids through the far richer ``/traces`` endpoint whenever any
-trace-level filter is supplied, and falls back to ``/sessions`` otherwise.
+Session-attribute filtering: the ``/sessions`` list endpoint only filters by
+time + environment, so when session-scoping trace-level filters (user/tags/
+release/version/metadata) are supplied, session ids are resolved through the
+richer ``/traces`` endpoint. ``trace_name`` alone does NOT trigger the trace
+scan — the sessions list stays the default discovery path and ``trace_name``
+is applied when fetching session details.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -41,10 +42,12 @@ class LangfuseError(RuntimeError):
 class SessionFilters:
     """Filter set for selecting Langfuse sessions to pull.
 
-    Time + ``environment`` map to native ``/sessions`` query params. The
-    remaining fields are trace-level attributes; when any of them is set the
-    client resolves session ids via the ``/traces`` endpoint (which supports
-    them) instead of the limited ``/sessions`` list.
+    Time + ``environment`` map to native ``/sessions`` query params, and the
+    sessions list endpoint is the DEFAULT discovery path (one paginated list
+    beats per-trace scanning on the slow remote API). Only session-scoping
+    trace-level filters (user/tags/release/version/metadata) fall back to the
+    ``/traces`` endpoint. ``trace_name`` is applied client-side when fetching
+    session details instead of driving the discovery strategy.
     """
 
     from_timestamp: str = ""
@@ -59,12 +62,14 @@ class SessionFilters:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def has_trace_level_filter(self) -> bool:
+        # ``trace_name`` is deliberately excluded: it is the project-wide
+        # default label (e.g. "openclaw-turn") and must not force the slow
+        # per-trace discovery scan; it is applied client-side instead.
         return bool(
             self.user_id
             or self.tags
             or self.release
             or self.version
-            or self.trace_name
             or self.metadata
         )
 
@@ -117,6 +122,15 @@ class LangfuseClient:
         self._auth = (public_key, secret_key)
         self._timeout = float(timeout or 30.0)
         self._page_limit = max(1, min(100, int(page_limit or 50)))
+        # Pooled connection: reusing one client avoids re-paying DNS/TCP/TLS
+        # per request, which otherwise amplifies transient network stalls
+        # (same lesson as the OpenViking viking.py pooling fix).
+        self._http: Optional[httpx.Client] = None
+
+    def close(self):
+        if self._http is not None:
+            self._http.close()
+            self._http = None
 
     @classmethod
     def from_config(cls, config) -> "LangfuseClient":
@@ -134,8 +148,9 @@ class LangfuseClient:
     def _get(self, path: str, params: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         url = f"{self._base_url}{path}"
         try:
-            with httpx.Client(timeout=self._timeout) as client:
-                response = client.get(url, params=_clean_params(params or {}), auth=self._auth)
+            if self._http is None:
+                self._http = httpx.Client(timeout=self._timeout, auth=self._auth)
+            response = self._http.get(url, params=_clean_params(params or {}))
         except httpx.HTTPError as exc:
             raise LangfuseError(f"Langfuse request to {path} failed: {exc}") from exc
         if response.status_code == 401:
@@ -204,7 +219,7 @@ class LangfuseClient:
         session_id = str(session_id or "").strip()
         if not session_id:
             raise LangfuseError("session_id is required")
-        return self._get(f"/sessions/{session_id}")
+        return self._get(f"/sessions/{quote(session_id, safe='')}")
 
     # ------------------------------------------------------------------ #
     # Traces                                                              #
@@ -332,18 +347,28 @@ class LangfuseClient:
                 break
         return ordered
 
-    def fetch_session_with_traces(self, session_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    def fetch_session_with_traces(
+        self,
+        session_id: str,
+        *,
+        trace_name: str = "",
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Return (session, full_traces) with observations resolved per trace.
 
         The ``/sessions/{id}`` response lists traces but WITHOUT observations,
         so each trace is re-fetched via ``/traces/{id}`` to obtain the
-        observation-level token/tool metrics the converter needs.
+        observation-level token/tool metrics the converter needs. When
+        ``trace_name`` is set, only traces with that name are resolved —
+        skipping detail fetches (and conversion) for foreign trace types.
         """
         session = self.get_session(session_id)
         raw_traces = session.get("traces") if isinstance(session.get("traces"), list) else []
+        wanted_name = str(trace_name or "").strip()
         full_traces: list[dict[str, Any]] = []
         for trace in raw_traces:
             if not isinstance(trace, dict):
+                continue
+            if wanted_name and str(trace.get("name") or "").strip() != wanted_name:
                 continue
             trace_id = str(trace.get("id") or "").strip()
             if not trace_id:

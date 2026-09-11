@@ -6,6 +6,7 @@ Reads/writes ~/.teamEvolver/config.yaml and bridges to TeamEvolverConfig.
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from ..config import (
     TeamEvolverConfig,
     resolve_viking_endpoint,
 )
+from ..integrations.langfuse_mapper import normalize_mapper_entries
 from .defaults import (
     _DEFAULT_SKILLS_DIR,
     _DEFAULTS,
@@ -39,7 +41,8 @@ class ConfigStore:
     """Read/write ~/.teamEvolver/config.yaml."""
 
     def __init__(self, config_file: Path = CONFIG_FILE):
-        self.config_file = config_file
+        override = os.environ.get("TEAMEVOLVER_CONFIG_FILE")
+        self.config_file = Path(override).expanduser() if override and config_file == CONFIG_FILE else config_file
 
     def exists(self) -> bool:
         return self.config_file.exists()
@@ -65,8 +68,8 @@ class ConfigStore:
             if "service" not in data and isinstance(data.get("proxy"), dict):
                 merged["service"] = dict(merged.get("proxy") or {})
             return merged
-        except Exception:
-            return _deep_merge({}, _DEFAULTS)
+        except Exception as exc:
+            raise ValueError(f"invalid configuration file: {self.config_file}") from exc
 
     def save(self, data: dict):
         import yaml
@@ -75,9 +78,15 @@ class ConfigStore:
             _deep_merge({}, data)
         )
         self.config_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.config_file, "w", encoding="utf-8") as f:
-            yaml.dump(sanitized, f, default_flow_style=False, allow_unicode=True)
-        os.chmod(self.config_file, 0o600)
+        fd, name = tempfile.mkstemp(dir=self.config_file.parent, prefix=".config-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                yaml.dump(sanitized, f, default_flow_style=False, allow_unicode=True)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(name, self.config_file)
+        finally:
+            Path(name).unlink(missing_ok=True)
 
     def get(self, dotpath: str) -> Any:
         data = self.load()
@@ -102,6 +111,16 @@ class ConfigStore:
 
     def to_config(self) -> TeamEvolverConfig:
         data = self.load()
+        for env, section, key in (
+            ("TEAMEVOLVER_PG_DSN", "storage_pg", "dsn"),
+            ("TEAMEVOLVER_LLM_API_KEY", "llm", "api_key"),
+            ("TEAMEVOLVER_LLM_BASE_URL", "llm", "api_base"),
+            ("TEAMEVOLVER_LLM_MODEL", "llm", "model_id"),
+            ("TEAMEVOLVER_OV_ENDPOINT", "sharing", "viking_endpoint"),
+            ("TEAMEVOLVER_OV_ROOT_KEY", "sharing", "viking_team_api_key"),
+        ):
+            if os.environ.get(env):
+                data.setdefault(section, {})[key] = os.environ[env]
         team = data.get("team", {}) if isinstance(data.get("team"), dict) else {}
         team_display_name = str(
             os.environ.get("EVOLVE_TEAM_DISPLAY_NAME")
@@ -126,6 +145,7 @@ class ConfigStore:
         dreamcycle = data.get("dreamcycle", {})
         validation = data.get("validation", {})
         aggregation = data.get("aggregation", {}) if isinstance(data.get("aggregation"), dict) else {}
+        pg = data.get("storage_pg", {}) if isinstance(data.get("storage_pg"), dict) else {}
         dreamcycle_prompts = dreamcycle.get("prompts") if isinstance(dreamcycle.get("prompts"), dict) else {}
         dreamcycle_job_prompts = (
             dreamcycle.get("job_prompts")
@@ -138,10 +158,18 @@ class ConfigStore:
             else {}
         )
         langfuse = data.get("langfuse", {}) if isinstance(data.get("langfuse"), dict) else {}
+        datasource = data.get("datasource", {}) if isinstance(data.get("datasource"), dict) else {}
         sharing_backend = _infer_sharing_backend(sharing)
         sharing_endpoint = _first_non_empty(sharing, "endpoint")
         sharing_skill_backend = _first_non_empty(sharing, "skill_backend")
         sharing_session_backend = _first_non_empty(sharing, "session_backend")
+        if pg.get("enabled"):
+            sharing_skill_backend = "postgres"
+            sharing_session_backend = "postgres"
+        sharing_local_fallback_enabled = bool(sharing.get("local_fallback_enabled", True))
+        sharing_local_root = str(sharing.get("local_root", "") or "")
+        sharing_skill_mirror_enabled = bool(sharing.get("skill_mirror_enabled", True))
+        sharing_skill_mirror_spool_dir = str(sharing.get("skill_mirror_spool_dir", "") or "")
         sharing_viking_deployment = _normalize_viking_deployment(
             sharing.get("viking_deployment")
         )
@@ -154,7 +182,7 @@ class ConfigStore:
 
         skills_dir = resolve_skills_dir(skills.get("dir", str(_DEFAULT_SKILLS_DIR)))
 
-        return TeamEvolverConfig(
+        config = TeamEvolverConfig(
             _config_file=str(self.config_file),
             team_display_name=team_display_name,
             # LLM forwarding
@@ -188,6 +216,10 @@ class ConfigStore:
             sharing_endpoint=sharing_endpoint,
             sharing_skill_backend=sharing_skill_backend,
             sharing_session_backend=sharing_session_backend,
+            sharing_local_fallback_enabled=sharing_local_fallback_enabled,
+            sharing_local_root=sharing_local_root,
+            sharing_skill_mirror_enabled=sharing_skill_mirror_enabled,
+            sharing_skill_mirror_spool_dir=sharing_skill_mirror_spool_dir,
             sharing_viking_endpoint=sharing_viking_endpoint,
             sharing_viking_api_key=str(sharing.get("viking_api_key", "") or ""),
             sharing_viking_personal_api_key=str(
@@ -248,6 +280,14 @@ class ConfigStore:
             sharing_skill_reload_interval_seconds=_normalize_reload_interval(
                 sharing.get("skill_reload_interval_seconds", 30),
             ),
+            storage_pg_enabled=bool(pg.get("enabled", False)),
+            storage_pg_dsn=str(pg.get("dsn", "") or ""),
+            storage_pg_schema=str(pg.get("schema", "") or "teamevolver"),
+            storage_pg_pool_min=max(1, int(pg.get("pool_min", 2))),
+            storage_pg_pool_max=max(2, int(pg.get("pool_max", 20))),
+            storage_pg_command_timeout_seconds=max(
+                1.0, float(pg.get("command_timeout_seconds", 30.0))
+            ),
             evolve_server_url=str(
                 evolve.get("server_url", "") or "http://127.0.0.1:52010"
             ),
@@ -307,6 +347,28 @@ class ConfigStore:
             ),
             evolve_max_parallel_groups=max(
                 1, int(evolve.get("max_parallel_groups", 4) or 4)
+            ),
+            evolve_agent_max_rounds=max(
+                2, min(24, int(evolve.get("agent_max_rounds", 12) or 12))
+            ),
+            evolve_agent_max_tool_calls_per_round=max(
+                1,
+                min(16, int(evolve.get("agent_max_tool_calls_per_round", 8) or 8)),
+            ),
+            evolve_min_group_sessions=max(
+                0, int(evolve.get("min_group_sessions", 2) or 0)
+            ),
+            evolve_min_group_users=max(
+                0, int(evolve.get("min_group_users", 2) or 0)
+            ),
+            evolve_drain_max_per_cycle=max(
+                0, int(evolve.get("drain_max_per_cycle", 0) or 0)
+            ),
+            evolve_drain_batch_size=max(
+                1, int(evolve.get("drain_batch_size", 25) or 25)
+            ),
+            evolve_drain_batch_delay_seconds=max(
+                0.0, float(evolve.get("drain_batch_delay_seconds", 1.0) or 0.0)
             ),
             evolve_bundle_text_extensions=_normalize_extensions(
                 evolve.get("bundle_text_extensions", [".py", ".sh"])
@@ -567,6 +629,15 @@ class ConfigStore:
             langfuse_tracing_enabled=bool(
                 langfuse.get("tracing_enabled", False)
             ),
+            langfuse_tracing_host=str(
+                langfuse.get("tracing_host", "") or ""
+            ).rstrip("/"),
+            langfuse_tracing_public_key=str(
+                langfuse.get("tracing_public_key", "") or ""
+            ),
+            langfuse_tracing_secret_key=str(
+                langfuse.get("tracing_secret_key", "") or ""
+            ),
             langfuse_tracing_environment=str(
                 langfuse.get("tracing_environment", "") or "local"
             ),
@@ -614,9 +685,26 @@ class ConfigStore:
             langfuse_default_trace_name=str(
                 langfuse.get("default_trace_name", "") or ""
             ),
+            datasource_type=str(
+                datasource.get("type", "") or "langfuse"
+            ),
+            datasource_legacy_converter_code=str(datasource.get("legacy_converter_code", "") or ""),
+            datasource_legacy_project=str(datasource.get("legacy_project", "") or ""),
+            datasource_legacy_options=dict(datasource.get("legacy_options") or {}),
+            datasource_adapters_dir=str(
+                datasource.get("adapters_dir", "") or ""
+            ),
             langfuse_mapper_enabled=bool(langfuse.get("mapper_enabled", False)),
             langfuse_mapper_code=str(langfuse.get("mapper_code", "") or ""),
+            langfuse_mappers=normalize_mapper_entries(
+                langfuse.get("mappers"),
+                legacy_enabled=bool(langfuse.get("mapper_enabled", False)),
+                legacy_code=str(langfuse.get("mapper_code", "") or ""),
+            ),
         )
+        from ..tenants.registry import effective_config, get_current_tenant
+
+        return effective_config(None, get_current_tenant(), config)
 
     def describe(self) -> str:
         """Return a human-readable summary of the current config."""
@@ -743,4 +831,5 @@ class ConfigStore:
                 "langfuse.default_tags: "
                 f"{','.join(_normalize_string_list(langfuse.get('default_tags', []))) or '(any)'}",
             ]
+        lines.append(f"datasource.type: {str(data.get('datasource', {}).get('type', 'langfuse'))}")
         return "\n".join(lines)

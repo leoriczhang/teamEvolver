@@ -111,6 +111,15 @@ class UploadsMixin:
 
     def _schedule_evolve_trigger(self) -> bool:
         """Schedule one debounced evolve trigger. Returns True when scheduled."""
+        if bool(getattr(self.config, "storage_pg_enabled", False)):
+            from ..tenants.registry import current_tenant_id
+
+            # Wake this account's bounded scheduler; never loop back to the
+            # unauthenticated default tenant over HTTP.
+            tid = current_tenant_id()
+            due = asyncio.get_running_loop().time() + self._evolve_trigger_debounce_seconds()
+            self._evolve_next_due[tid] = min(self._evolve_next_due.get(tid, due), due)
+            return True
         task = getattr(self, "_evolve_trigger_task", None)
         if task is not None and not task.done():
             logger.info("[SkillHub] evolve trigger already scheduled; coalescing request")

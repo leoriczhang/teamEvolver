@@ -46,16 +46,21 @@ import tempfile
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from pathlib import Path
 from typing import Any, Optional
 
 from .integrations.agent_protocol import (
     REPLAY_REQUEST_SCHEMA_V1,
+    REPLAY_TURN_REQUEST_SCHEMA_V1,
     replay_request_id,
 )
+from .integrations.context_workspace import stable_hash
 from .integrations.replay_adapters import (
     HttpReplayAdapter,
     LegacyAgentsHubHttpAdapter,
+    MappedHttpAdapter,
+    TurnBasedReplayAdapter,
     legacy_branch_projection,
 )
 from .integrations.replay_model_broker import (
@@ -86,10 +91,9 @@ _EFFICIENCY_METRICS = (
     "total_tokens",
 )
 _CHECKLIST_JUDGE_SYSTEM = (
-    "Evaluate each checklist item using only the supplied responses, tool "
-    "trajectory, and real workspace artifacts. Output JSON "
-    "{items:[{id,satisfied,evidence}],all_satisfied}. Do not infer success "
-    "without concrete evidence."
+    "仅使用所提供的回复、工具轨迹和真实工作区产物来评估每个 checklist 条目。"
+    "输出 JSON {items:[{id,satisfied,evidence}],all_satisfied}。"
+    "没有具体证据时不得推断成功。"
 )
 _SYSTEMD_RUN = "/usr/bin/systemd-run"
 _SYSTEMCTL = "/usr/bin/systemctl"
@@ -427,6 +431,20 @@ def spawn_native_agent_branch(
             "ok": False,
             "error": f"replay capability resolution failed: {type(exc).__name__}: {exc}",
         }
+    if str(capability.get("orchestration") or "").strip().lower() == "server_driven":
+        return _spawn_server_driven_branch(
+            branch=branch,
+            instruction=instruction,
+            branch_skill=branch_skill,
+            job=job,
+            case=case,
+            source_session=source_session,
+            timeout=timeout,
+            max_interactions=max_interactions,
+            runtime_type=runtime_type,
+            capability=capability,
+            endpoint=endpoint,
+        )
     candidate_revision = str(
         job.get("candidate_revision")
         or (job.get("candidate_skill") or {}).get("tree_sha256")
@@ -520,6 +538,318 @@ def spawn_native_agent_branch(
         )
     )
     return legacy_branch_projection(adapter.execute_branch(request))
+
+
+def _spawn_server_driven_branch(
+    *,
+    branch: str,
+    instruction: str,
+    branch_skill: Optional[dict[str, Any]],
+    job: dict[str, Any],
+    case: dict[str, Any],
+    source_session: dict[str, Any],
+    timeout: int,
+    max_interactions: int,
+    runtime_type: str,
+    capability: dict[str, Any],
+    endpoint: str,
+) -> dict[str, Any]:
+    """Run one branch against a remote Agent with one HTTP call per turn.
+
+    Mirrors the local Hermes worker loop (``_run_branch_worker``) but every
+    ``agent.run_conversation`` becomes a ``replay-turn-request.v1`` HTTP call.
+    All orchestration stays server-side: the checklist judge, progressive
+    disclosure, turn counting, and metric aggregation never reach the Agent,
+    and the checklist itself is never sent to it."""
+    candidate_revision = str(
+        job.get("candidate_revision")
+        or (job.get("candidate_skill") or {}).get("tree_sha256")
+        or ""
+    )
+    job_identifier = str(
+        job.get("job_id")
+        or job.get("id")
+        or f"legacy-{candidate_revision or case.get('session_id') or 'replay'}"
+    )
+    request_id = replay_request_id(
+        job_id=job_identifier,
+        case_index=int(case.get("index") or 0),
+        branch=branch,
+        candidate_revision=candidate_revision,
+    )
+    snapshot_id = str(case.get("context_snapshot_id") or "")
+    context_snapshot = (
+        case.get("context_snapshot")
+        if isinstance(case.get("context_snapshot"), dict)
+        else None
+    )
+    if context_snapshot is None and snapshot_id:
+        context_snapshot = load_context_snapshot(
+            snapshot_id,
+            source_session,
+        )
+    shared_context = (
+        context_snapshot if isinstance(context_snapshot, dict) else {}
+    )
+    # Server-side parity hashes: cover ONLY branch-invariant inputs so the
+    # per-branch equality checks in _evaluate_native_agent_case hold.
+    context_input_hash = "sha256:" + stable_hash(shared_context)
+    execution_manifest_hash = "sha256:" + stable_hash(
+        case.get("execution_manifest") or {}
+    )
+    checklist = [
+        dict(item)
+        for item in case.get("checklist") or []
+        if isinstance(item, dict) and item.get("text")
+    ]
+    disclosure = (
+        case.get("progressive_disclosure")
+        if isinstance(case.get("progressive_disclosure"), dict)
+        else {}
+    )
+    batch_size = max(1, int(disclosure.get("batch_size") or 4))
+    max_interactions = max(1, int(max_interactions or 1))
+    try:
+        judge_harness = read_team_evolver_harness()
+    except Exception as exc:  # noqa: BLE001 - replay must fail closed.
+        return {
+            "branch": branch,
+            "runtime": runtime_type,
+            "ok": False,
+            "error_code": "REPLAY_JUDGE_UNAVAILABLE",
+            "error": f"checklist judge harness unavailable: {exc}",
+        }
+    judge_config = _checklist_judge_config()
+    request_template = capability.get("request_template")
+    if capability.get("transport") == "deap":
+        from .integrations.deap_replay import DeapReplayAdapter
+
+        adapter = DeapReplayAdapter(
+            endpoint,
+            employee_no=capability.get("employee_no", ""),
+            auth_profile=str(capability.get("auth_profile") or ""),
+        )
+    elif isinstance(request_template, dict) and request_template:
+        # Zero agent-side awareness: render turns into the customer's own
+        # request shape and extract metrics from their own response shape.
+        adapter = MappedHttpAdapter(
+            endpoint=endpoint,
+            runtime_type=runtime_type,
+            request_template=request_template,
+            response_mapping=(
+                capability.get("response_mapping")
+                if isinstance(capability.get("response_mapping"), dict)
+                else {}
+            ),
+            auth_profile=str(capability.get("auth_profile") or ""),
+        )
+    else:
+        adapter = TurnBasedReplayAdapter(
+            endpoint=endpoint,
+            runtime_type=runtime_type,
+            auth_profile=str(capability.get("auth_profile") or ""),
+        )
+    materials = (
+        case.get("materials") if isinstance(case.get("materials"), list) else []
+    )
+    tool_policy = (
+        case.get("tool_policy")
+        if isinstance(case.get("tool_policy"), dict)
+        else {}
+    )
+    interactions: list[dict[str, Any]] = []
+    messages: list[dict[str, Any]] = []
+    artifacts: list[Any] = []
+    totals = {
+        "api_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 0,
+        "tool_call_count": 0,
+    }
+    disclosed_ids: set[str] = set()
+    current_prompt = instruction
+    result: dict[str, Any] = {}
+    turn_results: list[dict[str, Any]] = []
+    checklist_report: dict[str, Any] = {}
+    started = time.monotonic()
+    deadline = started + max(30, int(timeout or 600))
+
+    def failed(error: str, *, error_code: str = "EXECUTION_FAILED") -> dict[str, Any]:
+        return {
+            "branch": branch,
+            "runtime": runtime_type,
+            "ok": False,
+            "error": error,
+            "error_code": error_code,
+            "interactions": interactions,
+            "messages": messages,
+            "elapsed_seconds": round(time.monotonic() - started, 1),
+        }
+
+    try:
+        for interaction_num in range(1, max_interactions + 1):
+            remaining = int(deadline - time.monotonic())
+            if remaining <= 5:
+                return failed(
+                    f"branch timeout after {interaction_num - 1} turn(s)",
+                    error_code="TIMEOUT",
+                )
+            turn_request: dict[str, Any] = {
+                "schema_version": REPLAY_TURN_REQUEST_SCHEMA_V1,
+                "protocol_version": "1.0",
+                "request_id": request_id,
+                "turn_num": interaction_num,
+                "branch": branch,
+                "prompt": current_prompt,
+                # Session continuity for stateless agent endpoints: prior
+                # turns (prompt+response) rendered into request templates.
+                "history": [
+                    {
+                        "turn_num": item.get("interaction_num"),
+                        "prompt": str(item.get("prompt") or ""),
+                        "response": str(item.get("response") or ""),
+                    }
+                    for item in interactions
+                ],
+                "limits": {
+                    "turn_timeout_seconds": max(
+                        30,
+                        min(int(timeout or 600), remaining),
+                    ),
+                },
+            }
+            if interaction_num == 1:
+                turn_request["context_snapshot"] = shared_context
+                if isinstance(branch_skill, dict) and branch_skill:
+                    turn_request["skill"] = branch_skill
+                if materials:
+                    turn_request["materials"] = materials
+                if tool_policy:
+                    turn_request["tool_policy"] = tool_policy
+            result = adapter.call_turn(turn_request)
+            turn_results.append(result)
+            status = str(result.get("status") or "")
+            if status == "unsupported":
+                error = (
+                    result.get("error")
+                    if isinstance(result.get("error"), dict)
+                    else {}
+                )
+                return failed(
+                    str(error.get("message") or "agent cannot replay this branch"),
+                    error_code="REPLAY_EXTERNAL_TOOL_UNSUPPORTED",
+                )
+            if status != "succeeded":
+                error = (
+                    result.get("error")
+                    if isinstance(result.get("error"), dict)
+                    else {}
+                )
+                return failed(
+                    "turn {num} failed: {code}: {message}".format(
+                        num=interaction_num,
+                        code=str(error.get("code") or "EXECUTION_FAILED"),
+                        message=str(error.get("message") or ""),
+                    )
+                )
+            metrics = (
+                result.get("metrics")
+                if isinstance(result.get("metrics"), dict)
+                else {}
+            )
+            round_messages = [
+                dict(item)
+                for item in result.get("messages") or []
+                if isinstance(item, dict)
+            ]
+            messages.extend(round_messages)
+            round_tools = int(metrics.get("tool_call_count") or 0) or (
+                count_tool_calls(round_messages)
+            )
+            totals["tool_call_count"] += round_tools
+            for key in (
+                "api_calls",
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+                "reasoning_tokens",
+                "total_tokens",
+            ):
+                totals[key] += int(metrics.get(key) or 0)
+            for item in result.get("artifacts") or []:
+                if isinstance(item, (str, dict)):
+                    artifacts.append(item)
+            interaction = {
+                "interaction_num": interaction_num,
+                "prompt": current_prompt,
+                "response": str(result.get("final_response") or ""),
+                "tool_call_count": round_tools,
+                "total_tokens": int(metrics.get("total_tokens") or 0),
+            }
+            interactions.append(interaction)
+            checklist_report = _evaluate_local_checklist(
+                harness=judge_harness,
+                checklist=checklist,
+                interactions=interactions,
+                messages=messages,
+                workspace="",
+                judge_config=judge_config,
+                artifacts=artifacts or None,
+            )
+            interaction["checklist_report"] = checklist_report
+            interaction["completed"] = bool(
+                checklist_report.get("all_satisfied")
+            )
+            if checklist_report.get("all_satisfied"):
+                break
+            current_prompt, disclosed = next_disclosure_prompt(
+                checklist=checklist,
+                report=checklist_report,
+                disclosed_ids=disclosed_ids,
+                round_number=interaction_num + 1,
+                batch_size=batch_size,
+            )
+            disclosed_ids.update(disclosed)
+            if not current_prompt:
+                break
+    except Exception as exc:  # noqa: BLE001 - surface any failure to the caller
+        return failed(f"{type(exc).__name__}: {exc}")
+    finally:
+        close = getattr(adapter, "close", None)
+        if close is not None:
+            try:
+                close()
+            except Exception as exc:
+                return failed(str(exc), error_code="REPLAY_CLEANUP_FAILED")
+    checklist_report["rounds"] = len(interactions)
+    return {
+        "branch": branch,
+        "runtime": runtime_type,
+        "ok": True,
+        "error": "",
+        "error_code": "",
+        "final_response": str(result.get("final_response") or ""),
+        "messages": messages,
+        "interactions": interactions,
+        "artifacts": artifacts,
+        "checklist_report": checklist_report,
+        "completed": bool(checklist_report.get("all_satisfied")),
+        "interaction_turns": len(interactions),
+        "metrics_incomplete": any(
+            bool(item.get("metrics_incomplete"))
+            for item in turn_results
+        ),
+        "context_input_hash": context_input_hash,
+        "execution_manifest_hash": execution_manifest_hash,
+        "request_id": request_id,
+        "elapsed_seconds": round(time.monotonic() - started, 1),
+        **totals,
+    }
 
 
 def _agentshub_endpoint(source_session: dict[str, Any]) -> str:
@@ -846,6 +1176,7 @@ def _evaluate_local_checklist(
     messages: list[dict[str, Any]],
     workspace: str,
     judge_config: dict[str, Any] | None = None,
+    artifacts: Optional[list[Any]] = None,
 ) -> dict[str, Any]:
     if not checklist:
         return normalize_checklist_report(
@@ -865,7 +1196,13 @@ def _evaluate_local_checklist(
             "checklist": checklist,
             "interactions": interactions,
             "tool_trajectory": render_trajectory(messages),
-            "workspace_artifacts": _workspace_evidence(workspace),
+            # Server-driven remote branches have no local workspace; the Agent
+            # may report per-turn artifacts instead (optional evidence).
+            "workspace_artifacts": (
+                artifacts
+                if artifacts is not None
+                else _workspace_evidence(workspace)
+            ),
         }
         completion = client.chat.completions.create(
             model=str(
@@ -1589,6 +1926,7 @@ def _evaluate_native_agent_case(
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = {
             pool.submit(
+                copy_context().run,
                 spawn_native_agent_branch,
                 branch,
                 case["instruction"],
@@ -1637,6 +1975,8 @@ def _evaluate_native_agent_case(
         for branch, result in results.items()
         if not result.get("ok")
     ] + parity_failures
+    if runtime_type == "deap" and any(result.get("metrics_incomplete") for result in results.values()):
+        failures.append("DEAP usage metrics unavailable; manual review required")
     efficiency = compare_efficiency(results["baseline"], results["candidate"])
     expected_checklist = list(case.get("checklist") or [])
     branch_checklists = {
@@ -1893,6 +2233,7 @@ def evaluate_job(
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = {
                 pool.submit(
+                    copy_context().run,
                     spawn_branch,
                     branch,
                     sandboxes[branch],

@@ -17,8 +17,8 @@ from ..llm import AsyncLLMClient
 from .dreamcycle import collect_personal_source_keys, collect_personal_source_users, parse_openviking_key
 
 logger = logging.getLogger(__name__)
-DEFAULT_EXTRACT_PROMPT = """You maintain team memory. Extract durable, reusable facts from personal memories. Remove secrets, transient details, duplicates, and person-specific content that should not be shared. Return concise Markdown bullets with source labels and confidence."""
-DEFAULT_CONSOLIDATE_PROMPT = """You curate team memory. Merge candidate memories into the existing team memory. Preserve useful established rules, resolve conflicts conservatively, remove duplicates, and return only the final Markdown team-memory document."""
+DEFAULT_EXTRACT_PROMPT = """你负责维护团队记忆。从个人记忆中提取持久、可复用的事实。剔除秘密信息、临时性细节、重复内容，以及不应共享的个人特定内容。返回带来源标注和置信度的简洁 Markdown 条目。"""
+DEFAULT_CONSOLIDATE_PROMPT = """你负责整理团队记忆。把候选记忆合并进既有团队记忆。保留有效的既有规则，以保守方式解决冲突，去除重复，只返回最终的 Markdown 团队记忆文档。"""
 
 
 def _result(response: httpx.Response) -> Any:

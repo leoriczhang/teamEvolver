@@ -39,6 +39,7 @@ teamEvolver langfuse pull --help
 | `console_sessions.json` | Web 控制台登录会话 |
 | `users.json` | 控制台用户注册表 |
 | `agent-protocol.env` | Agent 协议环境变量（可选，Daemon 启动时自动加载） |
+| `skill_mirror_spool/` | Skill 库异步镜像 spool（待投递到 OpenViking 的 push/delete 事件） |
 
 ## 服务管理命令
 
@@ -196,6 +197,8 @@ teamEvolver skills push [--no-filter]
 
 推送时会自动检查 `skills/skill_stats.json` 中的统计数据，不满足门槛的技能会被过滤掉以保证共享技能质量。
 
+推送通过 `teamEvolver/skills/mutations.py:SkillMutationService` 执行（`_push_via_mutations` 路径）：每个技能写入一条变更提交和同步发件箱事件，由后台 flusher 异步投递到 OpenViking。结果包含 `uploaded`、`skipped`、`filtered`、`submitted`（提交数量）以及事件 ID 列表（`event_ids`）。
+
 ### teamEvolver skills pull
 
 从云端拉取共享技能到本地。
@@ -204,7 +207,7 @@ teamEvolver skills push [--no-filter]
 teamEvolver skills pull
 ```
 
-拉取结果会显示：downloaded（新下载）、skipped（无变化）、failed（失败）、deleted（本地被云端删除的技能）。拉取失败时会自动尝试从备份恢复。
+拉取结果包含：`downloaded`（新下载）、`skipped`（无变化）、`deleted`（本地被云端删除的技能）、`total_remote`（云端技能总数）、`restored_from_backup`（拉取失败时是否自动从备份恢复）和 `backup_dir`（备份目录）。
 
 ### teamEvolver skills sync
 

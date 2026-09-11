@@ -18,7 +18,7 @@ Continuing implementation on top of minimum integration:
 
 6. Implement Context Workspace calls (resolve/read/skills)
 7. Implement Context Session lifecycle management (start/append/commit)
-8. Expose Replay HTTP endpoint for teamEvolver callback
+8. Expose Replay Turn endpoint for teamEvolver callback (or reuse `scripts/replay_turn_server.py`)
 9. Implement Skill Sync (pull or receive push webhook)
 10. Optional: Implement personal Memory write (remember/forget)
 
@@ -79,12 +79,8 @@ curl -X POST "http://<teamevolver-host>:52010/internal/agents/register" \
       },
       "replay.branch.v1": {
         "transport": "http",
+        "orchestration": "server_driven",
         "endpoint": "https://my-agent.example.com/api/teamevolver/replay",
-        "max_interactions": 10,
-        "supports_materials": true,
-        "supports_artifacts": false,
-        "supports_full_trace": true,
-        "idempotent": true,
         "auth_profile": "my_agent"
       },
       "skill.sync.v1": {
@@ -325,65 +321,79 @@ def commit_context_session(context_session_id: str, used_refs: list[str]):
     return resp.json()
 ```
 
-## Step 8 (Optional): Expose Replay Endpoint
+## Step 8 (Optional): Implement Replay Turn Endpoint
 
-When teamEvolver validates candidate Skills, sends HTTP requests to Agent's registered `replay_url`, requiring execution of baseline and candidate branches in isolated environments.
+When teamEvolver validates candidate Skills, it calls the Agent's registered `replay_url` to execute the baseline and candidate branches. The recommended mode is the **server-driven Turn protocol**: the Agent registers `orchestration: "server_driven"`, and teamEvolver calls the turn endpoint once per interaction turn, while the multi-turn loop, checklist judging, and metric aggregation stay on the server.
 
-Replay endpoint needs to:
+The turn endpoint needs to:
 
-1. Receive POST request containing `request_id`, `branch` (baseline/candidate), `case.query` (task instruction), `frozen_context` (frozen context), `limits` (timeout and turn limits).
-2. Execute task in isolated sandbox; must not access production data or produce external side effects.
-3. Return results containing `interaction_turns`, `tool_call_count`, `total_tokens` metrics, plus `context_input_hash`.
-4. For external tool calls that cannot be deterministically replayed, return `REPLAY_EXTERNAL_TOOL_UNSUPPORTED`.
+1. Receive a POST request (`teamevolver.replay-turn-request.v1`) containing `request_id` (session handle; consecutive turns with the same `request_id` must resume the same replay session instead of resetting it), `turn_num`, `branch` (baseline/candidate), `prompt` (turn instruction), `history` (prior turn records `[{turn_num, prompt, response}]`), and `limits.turn_timeout_seconds` (per-turn timeout); turn 1 additionally carries `context_snapshot`, `skill`, `materials`, and `tool_policy`.
+2. Execute this turn's task in an isolated environment; must not access production data or produce external side effects.
+3. Return this turn's result (`teamevolver.replay-turn-result.v1`): `final_response`, `messages` (full message trace of the turn; the only evidence the server-side Checklist Judge can see), plus fail-closed `metrics`—`tool_call_count` and `total_tokens` must be non-negative integers; missing or invalid counts invalidate the turn.
+4. For external tool calls that cannot be deterministically replayed, return `status: "unsupported"` (fail-closed; do not fall back to live calls).
 
-### Replay Request Handling Framework Example
+### Quick Path: Reuse the Ready-Made Turn Server
+
+The repository ships `scripts/replay_turn_server.py`, so you do not need to implement the HTTP and protocol layers yourself:
+
+```bash
+python scripts/replay_turn_server.py --port 8010 --api-key <secret>
+```
+
+- Routes: `POST /turn/<runtime_type>` (called by teamEvolver once per turn) and `GET /health` (liveness)
+- Each `runtime_type` maps to one handler function in the `AGENT_HANDLERS` dict; the script keeps per-session history keyed by `request_id` and passes it to the handler as `req["history"]`, so even stateless Agents can continue a task
+- When the handler raises `ReplayUnsupportedError`, the script returns `status: "unsupported"`
+- On the teamEvolver side export `TEAMEVOLVER_AGENT_<AUTH_PROFILE>_REPLAY_API_KEY=<secret>`, the same secret passed via `--api-key`
+
+### Implementing the Turn Endpoint Yourself
 
 ```python
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-@app.post("/api/teamevolver/replay")
-def handle_replay():
+@app.post("/api/teamevolver/replay/turn")
+def handle_replay_turn():
     body = request.json
     request_id = body["request_id"]
+    turn_num = body["turn_num"]
     branch = body["branch"]
-    case = body["case"]
-    limits = body["limits"]
-    frozen_context = body.get("context_snapshot", {})
+    prompt = body["prompt"]
+    history = body.get("history", [])      # prior turns: [{turn_num, prompt, response}]
+    turn_timeout = body["limits"]["turn_timeout_seconds"]
+    # Turn 1 additionally carries: context_snapshot, skill, materials, tool_policy
 
     if branch not in ("baseline", "candidate"):
         return jsonify({"error": "invalid branch"}), 400
 
     try:
-        result = run_replay_branch(
-            branch=branch,
-            instruction=case["query"],
-            frozen_context=frozen_context,
-            timeout_seconds=limits["timeout_seconds"],
-            max_interactions=limits["max_interactions"]
+        result = run_replay_turn(
+            request_id=request_id,         # session handle for continuation
+            turn_num=turn_num,
+            prompt=prompt,
+            history=history,
+            turn_timeout_seconds=turn_timeout
         )
         return jsonify({
-            "schema_version": "teamevolver.replay-branch-result.v1",
+            "schema_version": "teamevolver.replay-turn-result.v1",
             "protocol_version": "1.0",
             "request_id": request_id,
+            "turn_num": turn_num,
             "branch": branch,
             "status": "succeeded",
+            "final_response": result["response"],
+            "messages": result["messages"],
             "metrics": {
-                "interaction_turns": result["turns"],
                 "tool_call_count": result["tool_calls"],
                 "total_tokens": result["tokens"]
-            },
-            "output": {"final_response": result["response"]},
-            "trace": {"messages": result["messages"], "interactions": []},
-            "context_input_hash": result["context_hash"],
-            "elapsed_seconds": result["elapsed"]
+            }
         })
     except ReplayExternalToolError:
         return jsonify({
-            "schema_version": "teamevolver.replay-branch-result.v1",
+            "schema_version": "teamevolver.replay-turn-result.v1",
             "protocol_version": "1.0",
             "request_id": request_id,
+            "turn_num": turn_num,
             "branch": branch,
             "status": "unsupported",
             "error": {
@@ -391,12 +401,11 @@ def handle_replay():
                 "message": "external tool call cannot be deterministically replayed",
                 "retryable": False
             },
-            "metrics": {},
-            "elapsed_seconds": 0
+            "metrics": {}
         })
 ```
 
-Replay adapter implementation: `teamEvolver/integrations/replay_adapters.py`
+Replay adapter implementation: `teamEvolver/integrations/replay_adapters.py:TurnBasedReplayAdapter`
 
 ## Step 9 (Optional): Implement Skill Sync
 
@@ -468,7 +477,7 @@ Skill Sync implementation: `teamEvolver/integrations/skill_sync_adapters.py`
 | Token management | Store one string | Store one string |
 | Session ingestion | ~40 lines/session | ~40 lines/session (plus context_usage) |
 | Context Workspace | Not needed | ~100 lines (resolve + read + session lifecycle) |
-| Replay endpoint | Not needed | ~200+ lines (sandbox isolation + deterministic replay) |
+| Replay Turn handler | Not needed | One function (placed in `AGENT_HANDLERS` of `scripts/replay_turn_server.py`; HTTP and protocol layers are provided by the script) |
 | Skill Sync | Not needed | ~50 lines (pull mode) or ~80 lines (push webhook) |
 | Memory write | Not needed | ~20 lines (remember/forget) |
 

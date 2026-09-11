@@ -499,7 +499,7 @@ export default function SkillLabView({
   const inlineMaterial = inlineMaterialText(datasetDraft.query);
 
   return (
-    <div className={cn(embedded ? "px-1 py-1" : "mx-auto max-w-[1440px] px-[22px] py-[22px]")}>
+    <div className={cn("skill-lab-view min-w-0", embedded ? "px-1 py-1" : "mx-auto max-w-[1440px] px-[22px] py-[22px]")}>
       <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">
         <StatCard label="当前 Skill" value={skillName || "未选择"} mono />
         <StatCard label="可编辑数据集" value={manualCount} />
@@ -523,7 +523,7 @@ export default function SkillLabView({
               value={skillName}
               disabled={!!lockedSkillName}
               onChange={(event) => selectSkill(event.target.value)}
-              className="h-8 min-w-[260px] rounded-lg border border-border bg-background px-2 text-xs font-semibold outline-none disabled:opacity-70"
+              className="h-8 w-[260px] min-w-0 max-w-full rounded-lg border border-border bg-background px-2 text-xs font-semibold outline-none disabled:opacity-70"
             >
               {!skills.length && <option value="">暂无 Skill</option>}
               {skills.map((item) => (
@@ -535,7 +535,7 @@ export default function SkillLabView({
             <select
               value={selectedDatasetId}
               onChange={(event) => setSelectedDatasetId(event.target.value)}
-              className="h-8 min-w-[320px] max-w-[520px] rounded-lg border border-border bg-background px-2 text-xs outline-none"
+              className="h-8 w-[320px] min-w-0 max-w-full rounded-lg border border-border bg-background px-2 text-xs outline-none"
             >
               {!datasets.length && <option value="">请先创建数据集</option>}
               {datasets.map((item) => (
@@ -592,7 +592,7 @@ export default function SkillLabView({
         </div>
       </Panel>
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.05fr)_minmax(420px,0.95fr)]">
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.05fr)_minmax(420px,0.95fr)]">
         <Panel
           title={embedded ? "候选草稿（来自工作空间编辑器）" : "SKILL.md 实验草稿"}
           count={dirty ? "与已保存版本有差异 · 作为 Candidate" : "与技能库一致"}
@@ -602,7 +602,7 @@ export default function SkillLabView({
                 Baseline=已保存版本 · Candidate=当前编辑内容
               </span>
             ) : (
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 <Button
                   variant="outline"
                   size="sm"
@@ -654,7 +654,7 @@ export default function SkillLabView({
             title="Skill 数据集"
             count={`${datasets.length} 个`}
             extra={
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 <Button
                   variant="outline"
                   size="sm"
@@ -698,7 +698,7 @@ export default function SkillLabView({
                 value={synthesizeSessionIds}
                 onChange={(event) => setSynthesizeSessionIds(event.target.value)}
                 placeholder="填入 Langfuse / 历史 Session ID（逗号分隔），留空则用近期会话"
-                className="h-8 min-w-[280px] flex-1 text-xs"
+                className="h-8 min-w-0 basis-[280px] flex-1 text-xs"
               />
               <span className="text-[10px] text-muted-soft">
                 先在「Langfuse 接入」拉取会话，再填 Session ID → 生成数据集 → True Replay
@@ -1529,7 +1529,7 @@ function Field({
   children: ReactNode;
 }) {
   return (
-    <label className="block">
+    <label className="block min-w-0 max-w-full">
       <span className="mb-1.5 block text-xs font-semibold text-muted-foreground">{label}</span>
       {children}
       {hint && <span className="mt-1 block text-[11px] text-muted-soft">{hint}</span>}

@@ -1,6 +1,6 @@
 # Storage Spaces and Directory Layout
 
-teamEvolver keeps shared assets and evolution artifacts in OpenViking. Service configuration, console Sessions, and some runtime state remain under `~/.teamEvolver/`. This document explains how a teamEvolver **account maps to OpenViking spaces** and how Agent-referable assets are separated from platform-internal data.
+teamEvolver uses local-first storage: its own ledgers and evolution artifacts (Session queue/`session_index`, filter audit, evidence, Skill registry, manifest, version history, validation state, mutation commits/outbox) live by default in the built-in local object store `teamEvolver/storage/local.py:LocalObjectStore` (root `~/.teamEvolver/local_store`); OpenViking holds the mirrored `skills/` subtree plus team Memory/aggregation products. Service configuration and some runtime state remain under `~/.teamEvolver/`. This document explains how a teamEvolver **account maps to OpenViking spaces** and how Agent-referable assets are separated from platform-internal data.
 
 ## Account ↔ OpenViking Space Mapping
 
@@ -52,17 +52,17 @@ In Trusted self-hosted mode, a configured service key plus `X-OpenViking-User` a
 
 ## Platform Asset Directory Map
 
-`viking://resources/team-skill-evolver/` contains both team Skills and internal evolution data. The console's **Platform Assets** view only exposes allowlisted internal directories and does not mix `peers/` or other Agent assets into that view. Entries under this root fall into seven functional groups.
+`viking://resources/team-skill-evolver/` contains both team Skills and internal evolution data. The console's **Platform Assets** view only exposes allowlisted internal directories and does not mix `peers/` or other Agent assets into that view. Entries under this root fall into seven functional groups. Storage location per group: only the `skills/<name>/` subtree of group 1 is asynchronously mirrored to OpenViking (its local primary copy stays in the local object store); groups 2–6 are entirely local storage; group 7 is OpenViking's own remote structure.
 
-### 1. Skill library (finished artifacts)
+### 1. Skill library (finished artifacts) — local primary, only `skills/<name>/` mirrored to OpenViking
 
 | Entry | Type | Purpose | Code entry |
 |-------|------|---------|------------|
-| `skills/` | dir | Official team skill library; one subdirectory per skill (`skills/<name>/SKILL.md` + versions). Pi Agent / Hermes read team skills from here | `teamEvolver/skills/hub.py` |
+| `skills/` | dir | Official team skill library; one subdirectory per skill (`skills/<name>/SKILL.md` + versions). Pi Agent / Hermes read team skills from here. Publishing is local-first: `teamEvolver/skills/mirror.py:VikingSkillMirror` enqueues push/delete events into a durable spool, and a background flusher (`teamEvolver/proxy/server.py`, roughly every 30 seconds) delivers them to OpenViking | `teamEvolver/skills/hub.py`, `teamEvolver/skills/mirror.py` |
 | `manifest.json` | file | Skill manifest index: skill name → version/hash, used to diff local vs. remote | `teamEvolver/skills/hub.py` |
 | `evolve_skill_registry.json` | file | Skill ID registry keeping IDs stable across nodes | `teamEvolver/skills/registry.py` |
 
-### 2. Skill lab and evolution material
+### 2. Skill lab and evolution material — local storage
 
 This backs the "data-driven evolution" loop: mine datasets from historical sessions, generate matching test sets, and validate effectiveness.
 
@@ -74,7 +74,7 @@ This backs the "data-driven evolution" loop: mine datasets from historical sessi
 | `skill_evidence/` | dir | Skill effectiveness evidence (`<skill>.json`): injection counts, effectiveness, and other evolution-decision inputs | `teamEvolver/evolve/runtime/evidence.py` |
 | `skill_version_context/` | dir | Per-version skill context (`<skill>/v<N>.json`) used as a True Replay baseline | `teamEvolver/validation/store.py` |
 
-### 3. Session pipeline (evolution raw material)
+### 3. Session pipeline (evolution raw material) — local storage
 
 | Entry | Type | Purpose | Code entry |
 |-------|------|---------|------------|
@@ -84,7 +84,7 @@ This backs the "data-driven evolution" loop: mine datasets from historical sessi
 | `session_ledger/` | dir | Session ledger recording the queued→consumed lifecycle transitions | `teamEvolver/evolve/runtime/orchestrator.py` |
 | `session_index.json` | file | Session metadata index (title, turns, tokens, status) for fast console browsing | `teamEvolver/session_store.py` |
 
-### 4. Evolution validation (True Replay loop)
+### 4. Evolution validation (True Replay loop) — local storage
 
 Rules in `teamEvolver/validation/store.py`.
 
@@ -98,19 +98,19 @@ Rules in `teamEvolver/validation/store.py`.
 | `validation_decisions/` | dir | Final publish/reject decision (`<job_id>.json`) |
 | `validation_decision_index.json` | file | Decision index for fast lookup |
 
-### 5. Human review
+### 5. Human review — local storage
 
 | Entry | Type | Purpose | Code entry |
 |-------|------|---------|------------|
 | `human_review/` | dir | Human-review task queue (`<job_id>.json`): escalated when an automated decision is uncertain | `teamEvolver/validation/store.py` |
 
-### 6. DreamCycle team-memory maintenance
+### 6. DreamCycle team-memory maintenance — local storage
 
 | Entry | Type | Purpose | Code entry |
 |-------|------|---------|------------|
 | `memory-changes/` | dir | Memory-change ledger (`teamevolver.memory-change.v1`): recorded when DreamCycle dedups/cleans/consolidates memory, enabling True Replay of memory edits | `teamEvolver/dreamcycle/memory_changes.py` |
 
-### 7. Isolation and low-level structure
+### 7. Isolation and low-level structure — OpenViking (remote structure)
 
 | Entry | Type | Purpose | Code entry |
 |-------|------|---------|------------|
@@ -156,6 +156,8 @@ Agent session ingest
 | Scope mapping and workspace API | `teamEvolver/proxy/openviking_workspace.py` |
 | Account registry and key resolution | `teamEvolver/proxy/users_admin.py` |
 | OpenViking object store | `teamEvolver/storage/viking.py` |
+| Built-in local object store | `teamEvolver/storage/local.py:LocalObjectStore` |
+| Skill library async mirror (spool + flusher) | `teamEvolver/skills/mirror.py:VikingSkillMirror` |
 | Isolation prefix `peers/` | `teamEvolver/storage/base.py` |
 | Session storage | `teamEvolver/session_store.py` |
 | Validation storage | `teamEvolver/validation/store.py` |

@@ -84,7 +84,7 @@ Authorization: Bearer <agent-access-token>
 
 ### 推送模式（Push）
 
-Skill 发布后，`SkillMutationService` 通过 outbox 机制向支持推送的 Agent 发送更新通知。推送适配器在 [skill_sync_adapters.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/integrations/skill_sync_adapters.py) 中注册。
+Skill 发布后，`SkillMutationService` 通过 outbox 机制向支持推送的 Agent 发送更新通知。推送适配器在 [skill_sync_adapters.py](../../../teamEvolver/integrations/skill_sync_adapters.py) 中注册。
 
 ### Hermes 集成
 
@@ -95,7 +95,7 @@ Hermes 通过 `pre_llm_call` hook 实现自动拉取：
 拉取最新 Skill Bundle → 更新 external_dirs → Hermes 原生 skill discovery
 ```
 
-安装脚本见 [hermes_skill_sync/install.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/integrations/hermes_skill_sync/install.py)。
+安装脚本见 [hermes_skill_sync/install.py](../../../teamEvolver/integrations/hermes_skill_sync/install.py)。
 
 ## Skill 与 Memory 的边界
 
@@ -111,8 +111,8 @@ Hermes 通过 `pre_llm_call` hook 实现自动拉取：
 
 | 模块 | 路径 |
 |------|------|
-| Skill Bundle 模型 | [skills/bundle.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/skills/bundle.py) |
-| 变更服务 | [skills/mutations.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/skills/mutations.py) |
-| 渲染引擎 | [skills/render.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/skills/render.py) |
-| 注册表 | [skills/registry.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/skills/registry.py) |
-| Frontmatter 解析 | [skills/frontmatter.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/skills/frontmatter.py) |
+| Skill Bundle 模型 | [skills/bundle.py](../../../teamEvolver/skills/bundle.py) |
+| 变更服务 | [skills/mutations.py](../../../teamEvolver/skills/mutations.py) |
+| 渲染引擎 | [skills/render.py](../../../teamEvolver/skills/render.py) |
+| 注册表 | [skills/registry.py](../../../teamEvolver/skills/registry.py) |
+| Frontmatter 解析 | [skills/frontmatter.py](../../../teamEvolver/skills/frontmatter.py) |

@@ -44,7 +44,7 @@ Flattening logic handles: lists/tuples/dicts (extracts text/requirement fields),
 
 After each interaction turn, Checklist Judge uses LLM to evaluate current execution state:
 
-1. **Input**: Checklist item list, interaction history (interactions), tool trajectory (tool_trajectory), workspace artifact file list (workspace_artifacts with text preview, max 40 files)
+1. **Input**: Checklist item list, interaction history (interactions), tool trajectory (tool_trajectory), workspace artifact file list (workspace_artifacts with text preview, max 40 files). Local branches read artifacts from the branch workspace; server-driven remote branches have no local workspace, so the Judge instead receives the `artifacts` reported by the Agent per turn (mapped to `workspace_artifacts`, see `teamEvolver/true_replay.py:_evaluate_local_checklist`)
 2. **Output**: `{items: [{id, satisfied, evidence}], all_satisfied}`
 3. **Conservative fallback**: When Judge unavailable, all items marked `satisfied: false`, evidence "checklist judge unavailable", judge status marked "unavailable"
 
@@ -133,11 +133,11 @@ DreamCycle's Memory True Replay also uses Checklist gate, but at smaller scale:
 
 | Module | Path |
 |--------|------|
-| Progressive disclosure & Checklist decisions | [progressive_replay.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/progressive_replay.py) |
-| Checklist item generation | [dataset_synthesizer.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/dataset_synthesizer.py) |
-| Local Checklist Judge | [true_replay.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/true_replay.py) (`_evaluate_local_checklist`) |
-| Efficiency comparison decisions | [replay_metrics.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/replay_metrics.py) |
-| Memory Replay Checklist | [dreamcycle/memory_replay.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/dreamcycle/memory_replay.py) |
+| Progressive disclosure & Checklist decisions | [progressive_replay.py](../../../teamEvolver/progressive_replay.py) |
+| Checklist item generation | [dataset_synthesizer.py](../../../teamEvolver/dataset_synthesizer.py) |
+| Local Checklist Judge | [true_replay.py](../../../teamEvolver/true_replay.py) (`_evaluate_local_checklist`) |
+| Efficiency comparison decisions | [replay_metrics.py](../../../teamEvolver/replay_metrics.py) |
+| Memory Replay Checklist | [dreamcycle/memory_replay.py](../../../teamEvolver/dreamcycle/memory_replay.py) |
 
 ## Related Documentation
 

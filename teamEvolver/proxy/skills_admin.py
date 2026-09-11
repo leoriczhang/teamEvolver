@@ -29,6 +29,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from ..skills import editor
 from ..skills.bundle import candidate_skill_bundle, diff_skill_bundles
 from ..skills.editor import SkillEditorError
+from ..tenants.registry import DEFAULT_TENANT_ID, current_tenant_id
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +38,19 @@ _VERSION_CONTEXT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _VERSION_DETAIL_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
+def _version_cache_key(name: str, suffix: str) -> str:
+    """Version-cache key namespaced by the request's tenant (no-op default)."""
+    tenant = current_tenant_id()
+    prefix = "" if tenant == DEFAULT_TENANT_ID else f"t:{tenant}|"
+    return f"{prefix}{name}:{suffix}"
+
+
 def _clear_version_cache(name: str = "") -> None:
     for cache in (_VERSION_CONTEXT_CACHE, _VERSION_DETAIL_CACHE):
         for key in list(cache):
-            if not name or key.startswith(f"{name}:"):
+            # Keys may carry a "t:<tenant>|" prefix (multi-tenant scope);
+            # compare the unprefixed tail so a purge covers every tenant.
+            if not name or key.split("|")[-1].startswith(f"{name}:"):
                 cache.pop(key, None)
 
 
@@ -64,8 +74,9 @@ def _version_evolution_context(
     version: int,
     history: list[dict[str, Any]],
     store: Any = None,
+    effective_config: Any = None,
 ) -> dict[str, Any]:
-    cache_key = f"{name}:{version}"
+    cache_key = _version_cache_key(name, str(version))
     now = time.monotonic()
     cached = _VERSION_CONTEXT_CACHE.get(cache_key)
     if cached and cached[0] > now:
@@ -75,7 +86,12 @@ def _version_evolution_context(
         from .routes import _candidate_list_payloads, _evaluation_payload
 
         if store is None:
-            store = ValidationStore.from_config(config)
+            # Default-tenant/background callers pass the global config; console
+            # requests pass the request-scoped tenant effective config so the
+            # version context is read from the tenant's own validation store.
+            store = ValidationStore.from_config(
+                effective_config or config, tenant_id=current_tenant_id()
+            )
         indexed = store.load_skill_version_context(name, version)
         if indexed:
             selected = {
@@ -232,7 +248,11 @@ class SkillsAdminMixin:
     # ------------------------------------------------------------------ #
 
     def _skills_dir(self) -> str:
-        return str(getattr(self.config, "skills_dir", "") or "")
+        base = str(getattr(self.config, "skills_dir", "") or "")
+        tenant = current_tenant_id()
+        if tenant and tenant != DEFAULT_TENANT_ID:
+            return os.path.join(base, "tenants", tenant)
+        return base
 
     def _reload_skill_manager(self) -> int:
         """Reload the manager so edits show up in injection immediately."""
@@ -256,7 +276,9 @@ class SkillsAdminMixin:
                 SkillMutationService,
             )
 
-            commit = SkillMutationService.from_config(self.config).execute(
+            commit = SkillMutationService.from_config(
+                self.config, tenant_id=current_tenant_id()
+            ).execute(
                 SkillMutationCommand(
                     action="update",
                     name=name,
@@ -284,7 +306,9 @@ class SkillsAdminMixin:
                 SkillMutationService,
             )
 
-            commit = SkillMutationService.from_config(self.config).execute(
+            commit = SkillMutationService.from_config(
+                self.config, tenant_id=current_tenant_id()
+            ).execute(
                 SkillMutationCommand(
                     action="delete",
                     name=name,
@@ -312,7 +336,7 @@ class SkillsAdminMixin:
             try:
                 from ..skills.hub import SkillHub
 
-                hub = SkillHub.team_from_config(self.config)
+                hub = SkillHub.team_from_config(self.config, tenant_id=current_tenant_id())
                 bundles: list[dict[str, Any]] = []
                 for record in hub.list_remote():
                     name = str(record.get("name") or "")
@@ -385,6 +409,12 @@ class SkillsAdminMixin:
     def _register_skills_admin_routes(self, app: FastAPI) -> None:
         owner = self
 
+        def _eff_config():
+            """Request-scoped effective config (tenant overrides merged)."""
+            from .routes import _tenant_effective_config
+
+            return _tenant_effective_config(owner)
+
         @app.get("/skills-ui", response_class=HTMLResponse)
         async def skills_ui():
             """Serve the single-file skill management UI."""
@@ -415,12 +445,14 @@ class SkillsAdminMixin:
             try:
                 from ..skills.hub import SkillHub
 
-                cache_key = f"{name}:list"
+                cache_key = _version_cache_key(name, "list")
                 now = time.monotonic()
                 cached = _VERSION_DETAIL_CACHE.get(cache_key)
                 if cached and cached[0] > now:
                     return JSONResponse(content=cached[1])
-                payload = SkillHub.team_from_config(owner.config).list_versions(name)
+                payload = SkillHub.team_from_config(
+                    _eff_config(), tenant_id=current_tenant_id()
+                ).list_versions(name)
                 _VERSION_DETAIL_CACHE[cache_key] = (now + 15.0, payload)
                 return JSONResponse(content=payload)
             except Exception as e:  # noqa: BLE001
@@ -432,8 +464,9 @@ class SkillsAdminMixin:
             try:
                 from ..skills.hub import SkillHub
 
-                hub = SkillHub.team_from_config(owner.config)
-                cache_key = f"{name}:{int(version)}"
+                eff_cfg = _eff_config()
+                hub = SkillHub.team_from_config(eff_cfg, tenant_id=current_tenant_id())
+                cache_key = _version_cache_key(name, str(int(version)))
                 now = time.monotonic()
                 cached = _VERSION_DETAIL_CACHE.get(cache_key)
                 if cached and cached[0] > now:
@@ -445,6 +478,7 @@ class SkillsAdminMixin:
                     name=name,
                     version=int(version),
                     history=history,
+                    effective_config=eff_cfg,
                 )
                 _VERSION_DETAIL_CACHE[cache_key] = (now + 30.0, payload)
                 return JSONResponse(content=payload)
@@ -471,7 +505,7 @@ class SkillsAdminMixin:
                     SkillMutationService,
                 )
 
-                hub = SkillHub.team_from_config(owner.config)
+                hub = SkillHub.team_from_config(owner.config, tenant_id=current_tenant_id())
                 commit = SkillMutationService.from_hub(
                     hub,
                     config=owner.config,

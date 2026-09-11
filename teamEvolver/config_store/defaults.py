@@ -52,6 +52,19 @@ _DEFAULTS: dict = {
         "endpoint": "",
         "skill_backend": "",
         "session_backend": "",
+        # Async mirror of the team skill library to OpenViking: evolved/pushed
+        # skills land on the built-in local backend first, then mirror into
+        # viking://resources/{root_prefix}/skills/<name>/ so remote Agents can
+        # keep reading them. Only that subtree mirrors; registry/manifest stay
+        # local. Empty spool_dir means ~/.teamEvolver/skill_mirror_spool.
+        "skill_mirror_enabled": True,
+        "skill_mirror_spool_dir": "",
+        # Built-in local-storage fallback: when the configured OpenViking is
+        # unavailable (connection error / timeout / HTTP 5xx), object stores
+        # fall back to teamEvolver's own filesystem store. Empty ``local_root``
+        # means ~/.teamEvolver/local_store.
+        "local_fallback_enabled": True,
+        "local_root": "",
         # Empty means "derive from viking_deployment"; set a value only to
         # override the cloud/local default endpoint.
         "viking_endpoint": "",
@@ -80,6 +93,16 @@ _DEFAULTS: dict = {
         "skill_reload_mode": "poll",
         "skill_reload_interval_seconds": 30,
     },
+    # PostgreSQL local-state storage (multi-tenancy plan §2.4): shares the
+    # OpenViking PG instance; empty dsn derives from OV_PG_* env vars.
+    "storage_pg": {
+        "enabled": False,
+        "dsn": "",
+        "schema": "teamevolver",
+        "pool_min": 2,
+        "pool_max": 20,
+        "command_timeout_seconds": 30.0,
+    },
     "evolve": {
         "server_url": "http://127.0.0.1:52010",
         "use_session_judge": True,
@@ -101,6 +124,10 @@ _DEFAULTS: dict = {
         "dataset_disclosure_batch_size": 4,
         "candidate_coalesce_enabled": True,
         "max_parallel_groups": 4,
+        "agent_max_rounds": 12,
+        "agent_max_tool_calls_per_round": 8,
+        "min_group_sessions": 2,
+        "min_group_users": 2,
         "bundle_text_extensions": [".py", ".sh"],
         "bundle_max_file_bytes": 262144,
         "bundle_max_prompt_bytes": 786432,
@@ -231,13 +258,26 @@ _DEFAULTS: dict = {
         "agentshub_url": "",
         "agentshub_api_key": "",
     },
+    # Data source abstraction: controls which source adapter is used for
+    # session pulls and where per-agent hook files live. The ``type`` field
+    # selects the adapter (currently "langfuse"; future: "doris", "custom",
+    # ...). Per-agent hook files in ``adapters_dir`` override individual
+    # pipeline stages (filter, extract, dedup, convert) per agent.
+    "datasource": {
+        "type": "langfuse",
+        "adapters_dir": "",
+    },
     "langfuse": {
         "enabled": False,
         "host": "https://cloud.langfuse.com",
         "public_key": "",
         "secret_key": "",
         # Outbound observability is independent from inbound session pulls.
+        # Tracing target is separate from the pull host/keys above.
         "tracing_enabled": False,
+        "tracing_host": "",
+        "tracing_public_key": "",
+        "tracing_secret_key": "",
         "tracing_environment": "local",
         "tracing_release": "",
         "tracing_sample_rate": 1.0,
@@ -255,10 +295,11 @@ _DEFAULTS: dict = {
         "default_release": "",
         "default_version": "",
         "default_trace_name": "",
-        # Operator-authored trace mapper. When ``mapper_enabled`` is true and
-        # ``mapper_code`` defines ``map_trace(trace, observations)``, that
-        # function produces the evolution turn (deep-merged over the built-in
-        # mapping). Empty/disabled falls back to the built-in converter.
+        # Deprecated single trace mapper (migrated into ``mappers`` on first
+        # read; see integrations.langfuse_mapper.normalize_mapper_entries).
+        # NOTE: do NOT add a default ``mappers`` key here — defaults are
+        # deep-merged under the user's YAML, so a default would make the
+        # never-written-key check in the migration logic always see [].
         "mapper_enabled": False,
         "mapper_code": "",
     },

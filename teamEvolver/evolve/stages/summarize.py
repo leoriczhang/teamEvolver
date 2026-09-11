@@ -20,7 +20,9 @@ from ..kernel.llm import AsyncLLMClient
 
 logger = logging.getLogger(__name__)
 
-_SUMMARIZER_DEBUG_DIR = ""
+from contextvars import ContextVar
+
+_SUMMARIZER_DEBUG_DIR: ContextVar[str] = ContextVar("summarizer_debug_dir", default="")
 
 # ------------------------------------------------------------------ #
 #  Programmatic trajectory builder (zero information loss)             #
@@ -66,8 +68,10 @@ def _format_tool_calls(turn: dict) -> list[str]:
         if not isinstance(tc, dict):
             continue
         func = tc.get("function") if isinstance(tc.get("function"), dict) else {}
-        name = str(func.get("name") or "unknown")
-        args = _clip(func.get("arguments", ""), _TOOL_ARG_MAX)
+        # Canonical shape is {id, type, function:{name, arguments}}; accept the
+        # legacy mapper shape {name, input} so older sessions still render.
+        name = str(func.get("name") or tc.get("name") or "unknown")
+        args = _clip(str(func.get("arguments") or tc.get("input") or ""), _TOOL_ARG_MAX)
         call_id = str(tc.get("id") or "")
 
         outcome = ""
@@ -234,30 +238,20 @@ def _format_step(
 # ------------------------------------------------------------------ #
 
 _SUMMARIZE_SESSION_SYSTEM = """\
-You are a concise analyst for an AI coding assistant framework called teamEvolver.
+你是 teamEvolver（一个 AI 编程助手框架）的精炼分析师。
 
-Given a complete agent session, produce a trajectory-aware analytical summary \
-(8-15 sentences) that captures:
+给定一个完整的 agent 会话，请输出一份面向轨迹的分析式摘要（8-15 句），需涵盖：
 
-1. **Goal**: The overall task the user wanted to accomplish.
-2. **Key trajectory**: The step-by-step path the agent took — what it tried, \
-in what order, and why (e.g., "read skill X → attempted approach Y → hit \
-error Z → switched to W").
-3. **Skill effectiveness**: For each skill that was read, injected, or \
-modified, did it help or hurt? Was it relevant to the task? Was any guidance \
-missing or wrong?
-4. **Critical turning points**: Where things went right or wrong. What \
-caused failures? What enabled successes?
-5. **Tool usage patterns**: Which tools were used effectively, which caused \
-errors, and any recurring patterns.
-6. **Outcome**: Final result quality and what could have gone better.
+1. **目标**：用户想要完成的总体任务。
+2. **关键轨迹**：agent 采取的逐步路径——尝试了什么、按什么顺序、为什么（例如"读取技能 X → 尝试方案 Y → 遇到错误 Z → 改用 W"）。
+3. **技能有效性**：对于每个被读取、注入或修改的技能，它是有所帮助还是有所妨碍？与任务是否相关？是否缺少某些指引，或指引本身有误？
+4. **关键转折点**：哪些环节顺利、哪些环节出错。失败由什么导致？成功靠什么促成？
+5. **工具使用模式**：哪些工具使用得当，哪些引发了错误，以及反复出现的模式。
+6. **结果**：最终产出的质量，以及哪些地方本可以做得更好。
 
-Focus on preserving the SEQUENCE of events and CAUSAL RELATIONSHIPS. This \
-summary will be used to decide whether skills need improvement, so be \
-specific about what skill guidance helped, what was missing, and what was \
-misleading.
+重点保留事件的发生顺序和因果关系。这份摘要将用于判断技能是否需要改进，因此要具体说明哪些技能指引起了作用、哪些缺失、哪些产生了误导。
 
-Output ONLY the plain-text summary — no JSON, no markdown fences.
+只输出纯文本摘要——不要 JSON，不要 markdown 代码围栏。
 """
 
 _SUMMARY_PROMPT_MAX_CHARS = 8000
@@ -403,9 +397,9 @@ def _extract_session_metadata(session: dict) -> None:
     """Extract skill references and compute aggregate metrics for a session.
 
     Attaches the following keys directly to the session dict:
-    - ``_skills_referenced``: set of skill names explicitly read or modified
-      by any interaction. Prompt-time injected skill catalog entries are only
-      exposure metadata and do not count as actual skill references.
+    - ``_skills_referenced``: set of skill names explicitly read, used, or
+      modified by any interaction. Prompt-time injected skill catalog entries
+      are only exposure metadata and do not count as actual skill references.
     - ``_skills_injected``: set of skill names exposed in the prompt catalog.
     - ``_prm_scores``: list of all non-None PRM scores
     - ``_avg_prm``: mean PRM (or None if no scores)
@@ -423,6 +417,13 @@ def _extract_session_metadata(session: dict) -> None:
             if name:
                 skills.add(name)
         for item in turn.get("modified_skills") or []:
+            name = item.get("skill_name", "").strip() if isinstance(item, dict) else str(item or "").strip()
+            if name:
+                skills.add(name)
+        # Langfuse mapper output: skill names whose files the agent actually
+        # used via tool calls (e.g. exec touching skills/<name>/). This is an
+        # explicit use, equivalent to read/modify for aggregation purposes.
+        for item in turn.get("used_skills") or []:
             name = item.get("skill_name", "").strip() if isinstance(item, dict) else str(item or "").strip()
             if name:
                 skills.add(name)
@@ -504,8 +505,7 @@ async def summarize_session(llm: AsyncLLMClient, session: dict) -> str:
 
 def set_summarizer_debug_dir(path: str) -> None:
     """Set the debug dump directory used by summarization."""
-    global _SUMMARIZER_DEBUG_DIR
-    _SUMMARIZER_DEBUG_DIR = str(path or "").strip()
+    _SUMMARIZER_DEBUG_DIR.set(str(path or "").strip())
 
 
 async def summarize_sessions_parallel(
@@ -546,7 +546,7 @@ async def summarize_sessions_parallel(
         result.append(summary)
 
     # ---- debug dump -------------------------------------------------- #
-    debug_dir = _SUMMARIZER_DEBUG_DIR
+    debug_dir = _SUMMARIZER_DEBUG_DIR.get()
     if debug_dir:
         import pathlib
 

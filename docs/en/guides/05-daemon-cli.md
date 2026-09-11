@@ -39,6 +39,7 @@ All runtime state files stored under `~/.teamEvolver/` directory:
 | `console_sessions.json` | Web console login sessions |
 | `users.json` | Console user registry |
 | `agent-protocol.env` | Agent protocol environment variables (optional, auto-loaded on daemon start) |
+| `skill_mirror_spool/` | Skill library async mirror spool (pending push/delete events to deliver to OpenViking) |
 
 ## Service Management Commands
 
@@ -196,6 +197,8 @@ Options:
 
 Push automatically checks statistics in `skills/skill_stats.json`; skills not meeting thresholds filtered to ensure shared skill quality.
 
+Push goes through `teamEvolver/skills/mutations.py:SkillMutationService` (the `_push_via_mutations` path): each skill writes one mutation commit and one sync outbox event, delivered asynchronously to OpenViking by the background flusher. The result includes `uploaded`, `skipped`, `filtered`, `submitted` (submission count) and the list of event IDs (`event_ids`).
+
 ### teamEvolver skills pull
 
 Pulls shared skills from cloud to local.
@@ -204,7 +207,7 @@ Pulls shared skills from cloud to local.
 teamEvolver skills pull
 ```
 
-Pull results show: downloaded (new), skipped (no change), failed, deleted (locally deleted by cloud). On pull failure automatically attempts backup recovery.
+Pull results include: `downloaded` (new), `skipped` (no change), `deleted` (removed locally because deleted from cloud), `total_remote` (total remote skill count), `restored_from_backup` (whether backup recovery was used after a pull failure), and `backup_dir` (backup directory).
 
 ### teamEvolver skills sync
 

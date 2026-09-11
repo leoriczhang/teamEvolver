@@ -200,7 +200,7 @@ Keep core terminology consistent, avoid synonyms:
 
 Before committing documentation changes, verify each item:
 
-- [ ] All code reference paths actually exist under `/home/zhangpengkun/teamEvolver/`
+- [ ] All code reference paths actually exist under `/path/to/teamEvolver/`
 - [ ] `node docs/scripts/check-docs-refs.mjs` runs without errors
 - [ ] New document filenames follow numeric prefix conventions
 - [ ] Level 1 headings (`#`) accurately reflect document topics

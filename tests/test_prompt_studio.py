@@ -116,7 +116,7 @@ def test_effective_prompt_expands_shared_blocks_for_overrides():
     ps.set_override("create_skill", "HEAD __USER_OVERRIDE_RULE__ TAIL")
     eff = ps.effective_prompt("create_skill")
     assert "__USER_OVERRIDE_RULE__" not in eff
-    assert "user-precedence" in eff.lower()
+    assert "用户优先级声明" in eff
 
 
 def test_empty_override_rejected():

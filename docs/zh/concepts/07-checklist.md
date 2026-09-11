@@ -44,7 +44,7 @@ Checklist 项可通过两种方式设置：
 
 每轮交互后，Checklist Judge 使用 LLM 对当前执行状态进行评估：
 
-1. **输入**：Checklist 项列表、交互历史（interactions）、工具轨迹（tool_trajectory）、workspace 产物文件列表（workspace_artifacts，含文本预览，最多 40 个文件）
+1. **输入**：Checklist 项列表、交互历史（interactions）、工具轨迹（tool_trajectory）、workspace 产物文件列表（workspace_artifacts，含文本预览，最多 40 个文件）。本地分支的产物来自分支 workspace；服务端驱动的远程分支没有本地 workspace，Judge 收到的是 Agent 逐轮上报的 `artifacts`（映射为 `workspace_artifacts`，见 `teamEvolver/true_replay.py:_evaluate_local_checklist`）
 2. **输出**：`{items: [{id, satisfied, evidence}], all_satisfied}`
 3. **保守降级**：Judge 不可用时，所有项标记为 `satisfied: false`，evidence 为 "checklist judge unavailable"，judge 状态标记为 "unavailable"
 
@@ -133,11 +133,11 @@ DreamCycle 的 Memory True Replay 同样使用 Checklist 门禁，但规模更�
 
 | 模块 | 路径 |
 |------|------|
-| 渐进披露与 Checklist 决策 | [progressive_replay.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/progressive_replay.py) |
-| Checklist 项生成 | [dataset_synthesizer.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/dataset_synthesizer.py) |
-| 本地 Checklist Judge | [true_replay.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/true_replay.py)（`_evaluate_local_checklist`） |
-| 效率比较决策 | [replay_metrics.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/replay_metrics.py) |
-| Memory Replay Checklist | [dreamcycle/memory_replay.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/dreamcycle/memory_replay.py) |
+| 渐进披露与 Checklist 决策 | [progressive_replay.py](../../../teamEvolver/progressive_replay.py) |
+| Checklist 项生成 | [dataset_synthesizer.py](../../../teamEvolver/dataset_synthesizer.py) |
+| 本地 Checklist Judge | [true_replay.py](../../../teamEvolver/true_replay.py)（`_evaluate_local_checklist`） |
+| 效率比较决策 | [replay_metrics.py](../../../teamEvolver/replay_metrics.py) |
+| Memory Replay Checklist | [dreamcycle/memory_replay.py](../../../teamEvolver/dreamcycle/memory_replay.py) |
 
 ## 相关文档
 

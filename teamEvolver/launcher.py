@@ -11,10 +11,9 @@ from pathlib import Path
 from typing import Optional
 
 from .config_store import ConfigStore
+from . import runtime_state
 
 logger = logging.getLogger(__name__)
-
-_PID_FILE = Path.home() / ".teamEvolver" / "teamEvolver.pid"
 
 
 class Launcher:
@@ -37,7 +36,10 @@ class Launcher:
         logger.info("[Launcher] Starting teamEvolver …")
         self._write_pid()
         self._setup_signal_handlers()
-        await self._run(cfg)
+        try:
+            await self._run(cfg)
+        finally:
+            self.stop()
 
     def stop(self):
         self._stop_event.set()
@@ -51,7 +53,7 @@ class Launcher:
                 self._api_server.stop()
             except Exception:
                 pass
-        _PID_FILE.unlink(missing_ok=True)
+        runtime_state.clear_pid_if_matches(os.getpid())
 
     # ------------------------------------------------------------------ #
     # Core startup                                                         #
@@ -116,11 +118,8 @@ class Launcher:
         if callable(wait_until_ready) and wait_until_ready(timeout_s=30.0):
             logger.info("[Launcher] service ready at http://%s:%d", cfg.proxy_host, cfg.proxy_port)
         elif callable(wait_until_ready):
-            logger.warning(
-                "[Launcher] service did not report ready within timeout on http://%s:%d",
-                cfg.proxy_host,
-                cfg.proxy_port,
-            )
+            server.stop()
+            raise RuntimeError(f"service failed to become ready on {cfg.proxy_host}:{cfg.proxy_port}")
         else:
             logger.info("[Launcher] service does not expose wait_until_ready(); skipping readiness wait")
 
@@ -145,6 +144,9 @@ class Launcher:
 
         try:
             while not self._stop_event.is_set():
+                stopped = getattr(server, "_server_stopped_event", None)
+                if stopped is not None and stopped.is_set():
+                    raise RuntimeError("service HTTP thread stopped unexpectedly")
                 await asyncio.sleep(1.0)
         finally:
             if self._validation_worker is not None:
@@ -165,9 +167,18 @@ class Launcher:
         from .skills.mutations import SkillMutationService
 
         service = SkillMutationService.from_config(cfg)
+        # reconcile() walks the full commit/tombstone history via synchronous
+        # storage I/O — keep it off the event loop and away from the 5s drain
+        # cadence (per-process key caching makes repeat runs cheap).
+        reconcile_interval_s = 60.0
+        last_reconcile = float("-inf")
         while not self._stop_event.is_set():
             try:
-                repaired = service.reconcile()
+                loop_time = asyncio.get_running_loop().time()
+                repaired = 0
+                if loop_time - last_reconcile >= reconcile_interval_s:
+                    last_reconcile = loop_time
+                    repaired = await asyncio.to_thread(service.reconcile)
                 result = await service.drain()
                 if repaired or result["synced"] or result["failed"]:
                     logger.info(
@@ -186,8 +197,9 @@ class Launcher:
     # ------------------------------------------------------------------ #
 
     def _write_pid(self):
-        _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _PID_FILE.write_text(str(os.getpid()))
+        pid_path = runtime_state.pid_file_path()
+        pid_path.parent.mkdir(parents=True, exist_ok=True)
+        pid_path.write_text(str(os.getpid()))
 
     def _setup_signal_handlers(self):
         def _handler(signum, frame):

@@ -72,7 +72,7 @@ teamEvolver --> POST https://<agent-skill-sync-url>
 
 Skill Sync API Key is configured via environment variable: `TEAMEVOLVER_AGENT_<AUTH_PROFILE>_SKILL_SYNC_API_KEY` (auth_profile converted to UPPER_SNAKE_CASE). Earlier Pi Agent builds used the `validation_agentshub_api_key` configuration for compatibility.
 
-Code: `teamEvolver/integrations/skill_sync_adapters.py:18` (`_sync_api_key`)
+Code: `teamEvolver/integrations/skill_sync_adapters.py:_sync_api_key`
 
 **Request Body (`teamevolver.skill-changed.v1`):**
 
@@ -81,7 +81,7 @@ Code: `teamEvolver/integrations/skill_sync_adapters.py:18` (`_sync_api_key`)
 | `schema_version` | string | Yes | `teamevolver.skill-changed.v1` |
 | `protocol_version` | string | Yes | `1.0` |
 | `event_id` | string | Yes | Event unique ID (`skill_evt_<hash>`) |
-| `action` | string | Yes | Action type: `publish` (publish/update), `delete` (delete) |
+| `action` | string | Yes | Action type: `publish` (publish), `update` (update), `rollback` (rollback), `delete` (delete) |
 | `job_id` | string | Yes | Change task ID (mutation_id) |
 | `skills` | array | Yes | Changed Skill list |
 | `skills[].name` | string | Yes | Skill name |
@@ -94,7 +94,7 @@ Code: `teamEvolver/integrations/skill_sync_adapters.py:18` (`_sync_api_key`)
 
 **Multi-tenant Filtering:** If an Agent specifies a tenant ID in `metadata.tenant_id` during registration, teamEvolver only sends callbacks when that tenant's Skills change.
 
-Code: `teamEvolver/integrations/skill_sync_adapters.py:41` (`_target_tenant_ids`)
+Code: `teamEvolver/integrations/skill_sync_adapters.py:_target_tenant_ids`
 
 ### 2.4 Push Acknowledgment Response
 
@@ -123,16 +123,18 @@ teamEvolver verifies:
 
 Failed verification marks sync as failed and enters the retry queue.
 
-Code: `teamEvolver/integrations/skill_sync_adapters.py:63` (`_ack_matches`)
+Code: `teamEvolver/integrations/skill_sync_adapters.py:_ack_matches`
 
 ### 2.5 Retry Mechanism
 
 - Failed sync events enter the outbox queue and are retried periodically;
 - Retry eligibility is determined based on `next_retry_at` timestamp;
 - When an Agent is disabled or the `skill.sync.v1` capability is removed, pending delivery events are marked `cancelled`;
-- When an Agent is deregistered, related events are marked `cancelled`.
+- When an Agent is deregistered, related events are marked `cancelled`;
+- After retries are exhausted, events enter the terminal `dead_letter` state and can be repaired via `SkillMutationService.reconcile()` or the management interfaces;
+- Retry and discard support per-integration granularity (`integration_id`): discard writes `cancelled_at`/`cancelled_by`/`cancel_reason` on the delivery record and appends an entry to the event's `audit` list.
 
-Code: `teamEvolver/integrations/skill_sync_adapters.py:115` (`_delivery_due`)
+Code: `teamEvolver/integrations/skill_sync_adapters.py:_delivery_due`
 
 ## 3. Usage Examples
 
@@ -238,4 +240,4 @@ def handle_skill_sync():
 | POST | `/api/agent-integrations/skill-sync/{event_id}/retry` | Retry failed sync event (admin) |
 | POST | `/api/agent-integrations/skill-sync/{event_id}/discard` | Discard failed sync event (admin) |
 
-Code: `teamEvolver/proxy/routes.py:3405` (`/api/agent-integrations`)
+Code: `teamEvolver/proxy/routes.py:api_agent_integrations`

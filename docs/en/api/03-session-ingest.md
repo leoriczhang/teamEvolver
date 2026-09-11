@@ -64,7 +64,7 @@ Content-Type: application/json
 | `source_materials` | array | No | Source material list (code repositories, documents, etc.) |
 | `system_prompt` | string | No | System prompt |
 | `title` | string | No | Session title |
-| `force_reprocess` | boolean | No | Force reprocessing of already processed Sessions |
+| `force_reprocess` | boolean | No | Force reprocessing of already processed Sessions (bypasses content fingerprint dedup); the session then records a `reprocess_reason` (default `explicit dashboard reingest`, may be passed explicitly in the request body) |
 | `defer_evolution_trigger` | boolean | No | Defer evolution cycle trigger (used for batch ingest) |
 
 ### Request Body Size Limit

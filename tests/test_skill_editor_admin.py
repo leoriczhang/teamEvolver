@@ -830,6 +830,9 @@ def test_routes_full_crud_cycle_without_sharing(tmp_path: Path) -> None:
 
 def test_sync_skills_endpoint_uses_shared_store_when_configured(tmp_path: Path) -> None:
     server = _make_server(tmp_path, sharing=True)
+    # Pin the team skill library to the shared (memory) bucket: the per-purpose
+    # split otherwise defaults it to the local backend.
+    server.config.sharing_skill_backend = "viking"
     client = _authed_client(server)
 
     cloud_source = tmp_path / "cloud-source"

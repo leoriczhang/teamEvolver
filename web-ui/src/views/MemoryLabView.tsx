@@ -44,7 +44,7 @@ export default function MemoryLabView({
   const loadFiles = useCallback(
     async (uid: string, chosen: ScopeName, cfg: WorkspaceConfig) => {
       const root = cfg.scopes?.[chosen]?.root_uri;
-      if (!uid || !root) {
+      if (!cfg.enabled || !uid || !root) {
         setFiles([]);
         return;
       }

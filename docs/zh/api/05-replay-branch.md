@@ -4,11 +4,15 @@
 
 Replay 分支执行 API 是 teamEvolver 向已注册 Agent 发起的回调接口。与其他 Agent API 不同，Replay 请求由 **teamEvolver 主动调用 Agent 的 `replay_url`**，而非 Agent 调用 teamEvolver。当 teamEvolver 验证候选 Skill 时，会同时向 Agent 发送 baseline 和 candidate 两个分支的 replay 请求，对比两者的执行结果。
 
-Replay 请求包含冻结的上下文投影、任务指令、执行限制（超时、最大交互轮次），Agent 必须在隔离沙箱中执行，不得产生外部副作用。成功结果必须包含效率指标（interaction_turns、tool_call_count、total_tokens）和 `context_input_hash`（实际注入上下文的哈希）。
+主模式是**服务端驱动的 Turn 协议**：Agent 注册 `replay.branch.v1` 能力时声明 `orchestration: "server_driven"`，teamEvolver 通过 `teamEvolver/integrations/replay_adapters.py:TurnBasedReplayAdapter` 每个交互轮次调用一次 Agent 的 turn 端点（当 capability 定义了 `request_template` 时改用 `MappedHttpAdapter`，将每轮渲染为客户自己的请求格式）。多轮循环、Checklist 评审、渐进披露和指标聚合全部由服务端完成；Agent 每次只执行一轮，永远不会看到 Checklist。
+
+未声明 `orchestration` 的注册仍走单次调用回退路径：teamEvolver 通过 `teamEvolver/integrations/replay_adapters.py:HttpReplayAdapter` 为每个分支发送一个同步请求，由 Agent 自行完成多轮执行并返回聚合结果。
+
+Replay 请求包含冻结的上下文投影、任务指令、执行限制（超时、最大交互轮次），Agent 必须在隔离沙箱中执行，不得产生外部副作用。回退模式下成功结果必须包含效率指标（interaction_turns、tool_call_count、total_tokens）；服务端驱动模式下 Agent 每轮必须回报 `metrics.tool_call_count` 和 `metrics.total_tokens`（fail-closed，缺失即校验失败）。
 
 代码实现：`teamEvolver/integrations/replay_adapters.py`
-协议校验：`teamEvolver/integrations/agent_protocol.py:259` (`normalize_replay_request`、`normalize_replay_result`)
-True Replay 引擎：`teamEvolver/true_replay.py`
+协议校验：`teamEvolver/integrations/agent_protocol.py` (`normalize_replay_request`、`normalize_replay_result`、`normalize_replay_turn_request`、`normalize_replay_turn_result`)
+True Replay 引擎：`teamEvolver/true_replay.py` (`_spawn_server_driven_branch`)
 
 ## 2. 接口和参数说明
 
@@ -27,9 +31,9 @@ teamEvolver --> POST https://<agent-replay-url>
 
 Replay API Key 通过环境变量配置，命名规则为 `TEAMEVOLVER_AGENT_<AUTH_PROFILE>_REPLAY_API_KEY`（auth_profile 转为大写下划线格式）。例如 auth_profile 为 `my_agent` 时，环境变量为 `TEAMEVOLVER_AGENT_MY_AGENT_REPLAY_API_KEY`。
 
-代码：`teamEvolver/integrations/replay_adapters.py:27` (`resolve_replay_api_key`)
+代码：`teamEvolver/integrations/replay_adapters.py:resolve_replay_api_key`
 
-### 请求体（`teamevolver.replay-branch-request.v1`）
+### 请求体（`teamevolver.replay-branch-request.v1`，单次调用回退模式）
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -42,15 +46,21 @@ Replay API Key 通过环境变量配置，命名规则为 `TEAMEVOLVER_AGENT_<AU
 | `case.query` | string | 是 | 任务指令/用户查询 |
 | `case.instruction` | string | 否 | 同 query（兼容字段） |
 | `case.materials` | array | 否 | 源材料列表 |
+| `case_index` | integer | 否 | 用例在 Test Dataset 中的序号 |
+| `case_id` | string | 否 | 用例 ID（dataset_id 或序号） |
+| `baseline_ref` | object | 否 | 基线引用信息 |
 | `limits` | object | 是 | 执行限制 |
 | `limits.timeout_seconds` | integer | 是 | 超时时间（秒），30-3600，默认 600 |
 | `limits.max_interactions` | integer | 是 | 最大交互轮次，1-20 |
 | `context_snapshot` | object | 否 | 冻结的上下文投影（resolve 结果快照） |
-| `frozen_context` | object | 否 | 冻结上下文（同 context_snapshot） |
+| `execution_manifest` | object | 否 | 执行清单 |
+| `tool_policy` | object | 否 | 工具策略 |
+| `checklist_policy` | object | 否 | Checklist 策略 |
 | `skill` | object | 否 | 候选 Skill 内容（branch=candidate 时） |
 | `current_skill` | object | 否 | 当前 Skill 内容（branch=baseline 时） |
 | `target_skill_name` | string | 否 | 目标 Skill 名称 |
 | `source_session` | object | 否 | 源 Session 数据 |
+| `options.include_full_trace` | boolean | 否 | 是否要求返回完整 trace |
 
 ### 超时控制
 
@@ -58,7 +68,7 @@ Replay API Key 通过环境变量配置，命名规则为 `TEAMEVOLVER_AGENT_<AU
 - Agent **必须**在 `limits.timeout_seconds` 内停止执行，在 HTTP 调用方超时后不得继续消耗模型或工具资源。
 - baseline 和 candidate 请求并发发送，共享相同的截止时间。
 
-### 响应体（`teamevolver.replay-branch-result.v1`）
+### 响应体（`teamevolver.replay-branch-result.v1`，单次调用回退模式）
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -111,6 +121,54 @@ teamEvolver 侧的适配器错误码：
 | `TIMEOUT` | HTTP 请求超时 |
 | `HTTP_ERROR` | HTTP 连接错误或非 2xx 响应 |
 
+### Server-Driven Turn 协议（`orchestration: "server_driven"`）
+
+声明 `orchestration: "server_driven"` 后，teamEvolver 不再发送单个分支请求，而是按交互轮次逐轮调用 Agent 在 `replay_url` 注册的 turn 端点。每轮使用 `teamevolver.replay-turn-request.v1` / `teamevolver.replay-turn-result.v1` schema，由 `teamEvolver/integrations/agent_protocol.py:normalize_replay_turn_request` 和 `teamEvolver/integrations/agent_protocol.py:normalize_replay_turn_result` 校验。当 capability 定义了 `request_template`/`response_mapping` 时，teamEvolver 改用 `MappedHttpAdapter` 将每轮渲染为 Agent 自己的请求/响应格式，Agent 无需感知 teamEvolver 协议。
+
+#### Turn 请求体（`teamevolver.replay-turn-request.v1`）
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `schema_version` | string | 是 | `teamevolver.replay-turn-request.v1` |
+| `protocol_version` | string | 是 | `1.0` |
+| `request_id` | string | 是 | Session 句柄：相同 `request_id` 的后续轮次必须续接同一回放 Session，而不是重置 |
+| `turn_num` | integer | 是 | 轮次序号，从 1 开始 |
+| `branch` | string | 是 | `baseline` 或 `candidate` |
+| `prompt` | string | 是 | 本轮指令（第 1 轮为用户原始 query，后续轮为渐进披露追加提示） |
+| `history` | array | 是 | 此前各轮记录：`[{turn_num, prompt, response}]` |
+| `limits.turn_timeout_seconds` | integer | 是 | 本轮超时（秒），30-3600，默认 600 |
+| `context_snapshot` | object | 仅第 1 轮 | 冻结的上下文投影 |
+| `skill` | object | 仅第 1 轮 | 该分支加载的 Skill 内容 |
+| `materials` | array | 仅第 1 轮 | 源材料列表 |
+| `tool_policy` | object | 仅第 1 轮 | 工具策略 |
+
+#### Turn 响应体（`teamevolver.replay-turn-result.v1`）
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `schema_version` | string | 是 | `teamevolver.replay-turn-result.v1` |
+| `protocol_version` | string | 是 | `1.0` |
+| `request_id` | string | 是 | 必须与请求的 request_id 完全一致 |
+| `turn_num` | integer | 是 | 必须与请求的 turn_num 完全一致 |
+| `branch` | string | 是 | 必须与请求的 branch 完全一致 |
+| `status` | string | 是 | `succeeded`、`failed`、`unsupported` |
+| `final_response` | string | status=succeeded 时 | 本轮最终响应文本 |
+| `messages` | array | 推荐 | 本轮完整消息轨迹（assistant/tool 消息）；这是服务端 Checklist Judge 唯一可见的评估证据 |
+| `artifacts` | array | 否 | 本轮产物（可选证据，供服务端 Checklist 评估） |
+| `metrics` | object | status=succeeded 时必填 | 本轮用量 |
+| `metrics.tool_call_count` | integer | 是 | 非负整数；缺失或非法时该轮校验失败（fail-closed，不静默补零） |
+| `metrics.total_tokens` | integer | 是 | 非负整数；同上 fail-closed |
+| `metrics_incomplete` | boolean | 否 | 指标不完整时置 true（`MappedHttpAdapter` 对 plain 端点缺量补零时用于透明标记） |
+| `error` | object | status!=succeeded 时必填 | `code`、`message`、`retryable` |
+
+`status=unsupported` 用于本轮遇到无法确定性重放的外部副作用工具调用（fail-closed，不得回退到实时调用），整个分支随即以 `REPLAY_EXTERNAL_TOOL_UNSUPPORTED` 终止。
+
+服务端负责多轮循环与终止条件（Checklist 全部满足或无更多披露项）、Checklist Judge 评估、渐进披露和逐轮指标聚合；Agent 不聚合指标，也永远不会收到 Checklist。
+
+#### Agent 侧参考实现
+
+`scripts/replay_turn_server.py` 提供开箱即用的 Agent 侧 turn 服务：在 `AGENT_HANDLERS` 中为每个 `runtime_type` 注册一个处理函数即可，路由为 `POST /turn/<runtime_type>`（每轮一次）和 `GET /health`（探活）。详见[自定义 Agent 接入指南](../agent-integrations/05-custom-agent)。
+
 ## 3. 隔离要求
 
 Agent 的 Replay 运行时必须满足以下隔离要求：
@@ -144,6 +202,8 @@ Checklist 完成度是通过/否决的门禁条件，而非加权分数。每个
 候选分支在 checklist 全部通过的前提下，效率不低于基线（no_regression）才会被自动接受。
 
 ## 5. 使用示例
+
+以下示例为单次调用回退模式的请求/响应。
 
 ### teamEvolver 发送的 baseline 请求示例
 
@@ -234,4 +294,4 @@ Checklist 完成度是通过/否决的门禁条件，而非加权分数。每个
 
 ### 遗留兼容
 
-早期 Pi Agent 版本使用不同的请求/响应格式。`teamEvolver/integrations/replay_adapters.py:141` (`LegacyAgentsHubHttpAdapter`) 提供一个兼容性周期的适配器，将旧格式转换为 V1 标准格式。新接入的 Agent 应直接实现 V1 格式。
+早期 Pi Agent 版本使用不同的请求/响应格式。`teamEvolver/integrations/replay_adapters.py:LegacyAgentsHubHttpAdapter` 提供一个兼容性周期的适配器，将旧格式转换为 V1 标准格式。新接入的 Agent 应直接实现 V1 格式。

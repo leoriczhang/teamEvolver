@@ -77,27 +77,27 @@ ingest → session_filter → summarize → judge → group → ┬→ evolve_sk
 - **Injects shared blocks**: No
 - **Description**: Supplements scores for sessions lacking reliable scores, outputs JSON dimensional scores. Low temperature ensures scoring consistency.
 
-#### evolve_skill (Skill Improvement)
+#### evolve_skill (Skill Improvement, agent loop)
 
 - **Module**: `teamEvolver.evolve.stages.execute`
 - **Symbol**: `_EVOLVE_FROM_SESSIONS_SYSTEM`
 - **Default Temperature**: 0.4
 - **Default Max Tokens**: 16384
-- **Input variables**: `{skill_name}`, current skill block, cross-cycle evidence, evaluation cohort, session evidence, existing skill names
+- **Input variables**: `{skill_name}`, round-1 session index card (one line per session), current skill outline card, cross-cycle evidence, evaluation cohort, existing skill names
 - **Injects shared blocks**: Yes
-- **Description**: This is core evolution stage. Makes improvement decisions for existing skills based on session evidence. Note: Original Prompt template contains three sentinel placeholders (`__GENERALIZATION_RULES__`, `__USER_OVERRIDE_RULE__`, `__EVIDENCE_ROUTING_RULES__`); preserve these placeholders when saving overrides; shared rule blocks auto-injected at runtime.
+- **Description**: The core evolution stage, running as a multi-round agent loop (see [Agent Loop Protocol](#agent-loop-protocol)). Round 1 produces a plan (improve / optimize_description / create / skip) from the session index card; a plan with `action_candidate=skip` exits immediately. Later rounds load evidence on demand via tools and stage edits through `propose_edits` before the final submission. The raw prompt template (task card) carries sentinel placeholders (`__GENERALIZATION_RULES__`, `__USER_OVERRIDE_RULE__`, `__EVIDENCE_ROUTING_RULES__`, `__OUTPUT_LANGUAGE_RULE__`); preserve them when saving overrides — shared rule blocks are injected at runtime.
 
-#### create_skill (Skill Creation)
+#### create_skill (Skill Creation, agent loop)
 
 - **Module**: `teamEvolver.evolve.stages.execute`
 - **Symbol**: `_CREATE_FROM_SESSIONS_SYSTEM`
 - **Default Temperature**: 0.4
 - **Default Max Tokens**: 16384
-- **Input variables**: cross-cycle evidence, evaluation cohort, session evidence, existing skill names
+- **Input variables**: round-1 session index card, cross-cycle evidence, evaluation cohort, existing skill names
 - **Injects shared blocks**: Yes
-- **Description**: Identifies reusable patterns from no-skill-match session buckets and generates brand-new skills. Also contains shared block placeholders.
+- **Description**: Identifies reusable patterns from no-skill-match session buckets and generates brand-new skills, also as an agent loop. `read_library_skill` loads an existing skill's full text for differentiation; `check_name` validates the new name against collisions.
 
-#### merge (Conflict Merge)
+#### merge (Conflict Merge, agent loop)
 
 - **Module**: `teamEvolver.evolve.stages.execute`
 - **Symbol**: `_MERGE_SKILL_SYSTEM`
@@ -105,7 +105,7 @@ ingest → session_filter → summarize → judge → group → ┬→ evolve_sk
 - **Default Max Tokens**: 8192
 - **Input variables**: Version A (existing skill), Version B (new evolved version)
 - **Injects shared blocks**: No
-- **Description**: When same-named skill produces two conflicting evolved versions, merges them into one superior version.
+- **Description**: Merges two conflicting evolved versions of the same-named skill into one superior version. Both versions are inlined in the round-1 message; the model runs the pre-submit self-review against the merge principles and outputs the final merged skill object. A failed loop keeps the incoming version.
 
 #### dataset_synthesis (Test Set Generation)
 
@@ -126,6 +126,22 @@ ingest → session_filter → summarize → judge → group → ┬→ evolve_sk
 - **Input variables**: checklist, interactions, tool trajectory, workspace artifacts
 - **Injects shared blocks**: No
 - **Description**: After true replay completes, verifies Checklist items satisfied one by one. Judge only allows judgment based on observable evidence; temperature=0 ensures adjudication consistency.
+
+## Agent Loop Protocol
+
+The three skill-writing stages (`evolve_skill`, `create_skill`, `merge`) run as a controlled agent loop (implemented in `teamEvolver/evolve/agent/`) over a text-JSON protocol (no native tool calling):
+
+1. **Round 1 plan (mandatory)**: from a dense index card (one line per session + current skill outline) the model outputs `{"type": "plan", "action_candidate": ..., "evidence_classification": {...}, "plan": [...], "rationale": ...}`. The runtime gates deterministically: `action_candidate=skip` exits immediately; a non-skip plan with an empty `team_skill` bucket gets one correction round, then exits as skip.
+2. **Act rounds (tool calls)**: the model calls tools on demand; the runtime executes them and feeds observations back. Tools per stage:
+   - `read_session` (load one session's summary/trajectory/tail/full on demand), `search_sessions` (keyword search)
+   - evolve: `read_skill` (byte-exact current body — the anchor source), `read_bundle_file`, `propose_edits` (mechanical apply + staging, failures fed back), `check_generalization` (hardcoded-suspect scan)
+   - create: `read_library_skill` (differentiation against existing skills), `check_name` (name collision check)
+3. **final (submit)**: `{"type": "final", "decision": {...}}`. Submit-time contract validation (team_skill gate, file_changes pre-validation, content/staging backfill); failures come back as one correction round.
+4. **Round budget**: `evolve.agent_max_rounds` (default 12, clamped 2-24) and `evolve.agent_max_tool_calls_per_round` (default 8, clamped 1-16). The penultimate round carries a must-submit warning; at exhaustion the loop closes from staged state (best-effort, degrading to skip/None when nothing was staged).
+
+**Override semantics (important)**: Prompt Studio edits the *task card* (role, mission, editing principles, shared rule blocks). The loop protocol (turn formats, tool contracts, final decision schema) is a code-owned `TOOL_PROTOCOL_APPENDIX` force-appended at runtime and **not overridable** — overrides should describe the task, not the wire format.
+
+Progressive disclosure: round 1 carries only index cards; full content loads on demand. This keeps the context dense and makes `propose_edits` anchors always come from the byte-exact `read_skill` body, eliminating the "anchor rewritten from memory" failure mode at its root.
 
 ## Prompt Studio Web Interface
 
@@ -204,8 +220,7 @@ Prompt Studio tests are not "simulations"—they use identical message construct
 - `session_filter`: Uses `_session_summary()` to construct input identical to real classifier
 - `summarize`: Uses `_build_session_payload()` to construct real payload
 - `judge`: Ensures `_trajectory` and `_summary` metadata exist before calling `_build_judge_payload()`
-- `evolve_skill`/`create_skill`: Calls `_build_session_evidence()` to construct real evidence blocks
-- `merge`: Provides example A/B versions (since two conflicting versions needed)
+- `evolve_skill`/`create_skill`/`merge`: **runs the real agent loop** (rounds capped at 6) with the same index-card / dual-version construction and tool set as production; the result additionally returns a per-round `rounds` transcript rendered in the test panel
 - `dataset_synthesis`: Rendered using `render_synthesis_prompt()`
 - `replay_checklist`: Constructs example checklist and interaction records
 

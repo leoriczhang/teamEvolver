@@ -5,29 +5,29 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
-from .llm import AsyncLLMClient
+from .llm import AsyncLLMClient, LLMOverloadedError
 
 logger = logging.getLogger(__name__)
 _DEFAULT_CLASSIFIER_TIMEOUT_SECONDS = 60
 _SESSION_CLASSIFIER_SYSTEM = (
-    "You classify whether a completed agent session should enter a skill-evolution pipeline.\n"
-    "Do not classify by keyword matching, fixed phrase lists, or language-specific trigger words. "
-    "Judge the full interaction sequence, including user corrections and assistant outcomes.\n"
-    "Injected skills only mean skills were visible to the agent; they are not evidence by themselves. "
-    "Used skills, tool calls, concrete procedures, and task outcomes are stronger evidence.\n"
-    "Return decision='valuable' only when the session contains reusable team-Skill evidence: "
-    "an executed workflow, concrete outcome, causal skill gap, domain procedure, or user feedback "
-    "about a produced result. Return decision='memory_candidate' when the useful evidence is a "
-    "user-specific preference or habit rather than a team SOP. Return decision='task_only' for a "
-    "real task request that has no completed outcome or actionable evolution evidence yet. Return "
-    "decision='chitchat' only for social, empty, or non-task interaction.\n"
-    "Do not promote one deliverable's explicit requirements into user memory. A memory candidate "
-    "must plausibly remain useful for the same user across future tasks.\n"
+    "你负责判断一个已完成的 agent 会话是否应进入 Skill 演化流水线。\n"
+    "不要通过关键词匹配、固定短语列表或特定语言的触发词来分类。"
+    "请基于完整的交互序列进行判断，包括用户的纠正和 assistant 的最终结果。\n"
+    "技能被注入（injected）只说明该技能对 agent 可见，其本身并不构成使用证据。"
+    "已使用的技能、工具调用、具体操作过程和任务结果才是更强的证据。\n"
+    "仅当会话包含可复用的团队 Skill 证据时才返回 decision='valuable'："
+    "例如执行过的工作流、明确的产出、因果性的技能缺陷、领域操作规程，"
+    "或针对产出的用户反馈。当有用证据属于用户个人偏好或习惯而非团队 SOP 时，"
+    "返回 decision='memory_candidate'。对于真实的任务请求但尚无完成结果或可演化证据时，"
+    "返回 decision='task_only'。仅社交闲聊、空会话或非任务交互才返回 decision='chitchat'。\n"
+    "不要把某次交付物的明确要求提升为用户记忆。memory candidate 必须在同用户未来的任务中"
+    "仍然可能有用。\n"
     'Schema: {"decision":"valuable|memory_candidate|task_only|chitchat",'
-    '"confidence":0..1,"reason":"short reason","memory_candidates":'
+    '"confidence":0..1,"reason":"简短理由（用中文书写，专有名词可保留英文原文）","memory_candidates":'
     '[{"preference":"...","scope":"...","evidence":"..."}]}'
 )
 
@@ -66,6 +66,35 @@ def _extract_json_object(text: Any) -> dict[str, Any]:
     except Exception:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+_DECISION_RE = re.compile(r'"decision"\s*:\s*"(valuable|memory_candidate|task_only|chitchat)"')
+_CONFIDENCE_RE = re.compile(r'"confidence"\s*:\s*([0-9]+(?:\.[0-9]+)?)')
+_REASON_RE = re.compile(r'"reason"\s*:\s*"([^"]*)"')
+
+
+def _lenient_parse(text: Any) -> Optional[dict[str, Any]]:
+    """Recover the decision from a truncated/unparseable classifier reply.
+
+    Reasoning models may exhaust the token budget mid-JSON; strict parsing
+    then discards a usable decision. Extract the individual fields instead.
+    """
+    raw = str(text or "")
+    match = _DECISION_RE.search(raw)
+    if not match:
+        return None
+    parsed: dict[str, Any] = {"decision": match.group(1)}
+    confidence = _CONFIDENCE_RE.search(raw)
+    parsed["confidence"] = 0.5
+    if confidence:
+        try:
+            parsed["confidence"] = max(0.0, min(1.0, float(confidence.group(1))))
+        except ValueError:
+            pass
+    reason = _REASON_RE.search(raw)
+    if reason:
+        parsed["reason"] = reason.group(1)
+    return parsed
 
 
 def _session_user_texts(session: dict[str, Any], limit: int = 20) -> list[str]:
@@ -197,18 +226,21 @@ def heuristic_classify_session(session: dict[str, Any], *, reason: str = "") -> 
         decision = "chitchat"
         confidence = 0.85
         rationale = "session has no user task text"
-    elif tool_call_count > 0 or has_used_skill_signal or has_verified_skill_feedback:
+    elif has_verified_skill_feedback:
         decision = "valuable"
         confidence = 0.75
-        rationale = (
-            "session contains verified team-Skill feedback"
-            if has_verified_skill_feedback
-            else "session used tools or explicitly used skills"
-        )
+        rationale = "session contains verified team-Skill feedback"
     elif is_managed_eval_train and len(user_texts) >= 2:
         decision = "valuable"
         confidence = 0.8
         rationale = "controlled managed-agent training session contains explicit user feedback"
+    elif tool_call_count > 0 or has_used_skill_signal:
+        # Calibrated with the LLM classifier: tool/skill usage alone is not
+        # reusable team-Skill evidence (the model marks such sessions
+        # task_only). Only verified feedback or corrections stay valuable.
+        decision = "task_only"
+        confidence = 0.65
+        rationale = "session used tools or skills but has no user feedback or defect evidence"
     elif len(combined) >= 80 or len(user_texts) >= 2:
         decision = "task_only"
         confidence = 0.65
@@ -360,6 +392,8 @@ class SessionValueClassifier:
                 },
             )
         except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, LLMOverloadedError):
+                raise
             logger.warning("[SessionFilter] classifier failed: %s", exc)
             return heuristic_classify_session(
                 session,
@@ -367,7 +401,17 @@ class SessionValueClassifier:
             )
 
         parsed = _extract_json_object(raw)
+        mode = "model"
         decision = str(parsed.get("decision") or "").strip().lower()
+        if decision not in {
+            "valuable",
+            "memory_candidate",
+            "task_only",
+            "chitchat",
+        }:
+            parsed = _lenient_parse(raw) or {}
+            decision = str(parsed.get("decision") or "").strip().lower()
+            mode = "model_lenient"
         if decision not in {
             "valuable",
             "memory_candidate",
@@ -390,6 +434,6 @@ class SessionValueClassifier:
                 and isinstance(memory_candidates, list)
                 else []
             ),
-            "mode": "model",
+            "mode": mode,
             "model": self.client.model,
         }

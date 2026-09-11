@@ -211,11 +211,11 @@ Management operations:
 
 | Module | Path |
 |--------|------|
-| SkillMutationService | [skills/mutations.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/skills/mutations.py) |
-| SkillHub (underlying storage ops) | [skills/hub.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/skills/hub.py) |
-| Skill Bundle model | [skills/bundle.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/skills/bundle.py) |
-| Sync adapters | [integrations/skill_sync_adapters.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/integrations/skill_sync_adapters.py) |
-| Skill ID registry | [skills/registry.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/skills/registry.py) |
+| SkillMutationService | [skills/mutations.py](../../../teamEvolver/skills/mutations.py) |
+| SkillHub (underlying storage ops) | [skills/hub.py](../../../teamEvolver/skills/hub.py) |
+| Skill Bundle model | [skills/bundle.py](../../../teamEvolver/skills/bundle.py) |
+| Sync adapters | [integrations/skill_sync_adapters.py](../../../teamEvolver/integrations/skill_sync_adapters.py) |
+| Skill ID registry | [skills/registry.py](../../../teamEvolver/skills/registry.py) |
 
 ## Related Documentation
 

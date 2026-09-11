@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import {
   Panel,
   StatCard,
-  UserBadge,
   Pill,
   Dot,
   Empty,
@@ -11,20 +10,22 @@ import {
   usePagedItems,
 } from "@/components/common";
 import { Button } from "@/components/ui/button";
-import { fmtTime } from "@/lib/format";
 import { toastOk, toastErr } from "@/lib/toast";
 import {
   api,
+  hydrateCandidates,
+  tenantHeaders,
   type StatusResp,
   type StorageStatus,
-  type QueueSession,
-  type LedgerRow,
   type Candidate,
   type EvalResult,
   type PageResponse,
 } from "@/api/client";
+import { useSessionList, type SessionListFilters } from "@/hooks/useSessionList";
+import SessionTable from "@/components/session/SessionTable";
+import SessionFiltersBar from "@/components/session/SessionFilters";
 import SkillVersionModal from "./dashboard/SkillVersionModal";
-import SessionModal, { StatusBadge, type SessTab } from "./dashboard/SessionModal";
+import SessionModal, { type SessTab } from "./dashboard/SessionModal";
 import CandidateModal from "./dashboard/CandidateModal";
 
 const POLL_MS = 15_000;
@@ -55,23 +56,91 @@ function serverPager(page: number, total: number, itemCount: number) {
 export default function DashboardView({ active }: { active: boolean }) {
   const [status, setStatus] = useState<StatusResp | null>(null);
   const [storage, setStorage] = useState<StorageStatus | null>(null);
-  const [queue, setQueue] = useState<QueueSession[] | null>(null);
-  const [ledger, setLedger] = useState<LedgerRow[] | null>(null);
   const [cands, setCands] = useState<Candidate[]>([]);
-  const [queueTotal, setQueueTotal] = useState(0);
-  const [ledgerTotal, setLedgerTotal] = useState(0);
   const [candidateTotal, setCandidateTotal] = useState(0);
-  const [queuePage, setQueuePage] = useState(1);
-  const [ledgerPage, setLedgerPage] = useState(1);
   const [candidatePage, setCandidatePage] = useState(1);
   const [lastUpdate, setLastUpdate] = useState("—");
+  // Session filters start from the URL (shareable/bookmarkable views) and are
+  // written back on every change via history.replaceState.
+  const FILTER_URL_KEYS = [
+    "search",
+    "status",
+    "decision",
+    "case",
+    "skill",
+    "start",
+    "end",
+    "sort_by",
+    "order",
+  ] as const;
+  const readFiltersFromUrl = (): SessionListFilters => {
+    const p = new URLSearchParams(window.location.search);
+    const f: SessionListFilters = {};
+    for (const k of FILTER_URL_KEYS) {
+      const v = p.get(k);
+      if (v) (f as Record<string, string>)[k] = v;
+    }
+    return f;
+  };
+  const [sessFilters, setSessFilters] = useState<SessionListFilters>(readFiltersFromUrl);
+  const [selectedSessIds, setSelectedSessIds] = useState<string[]>([]);
+  const [exportFormat, setExportFormat] = useState<"csv" | "json">("csv");
 
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    for (const k of FILTER_URL_KEYS) p.delete(k);
+    for (const [k, v] of Object.entries(sessFilters)) {
+      if (v) p.set(k, String(v));
+    }
+    const qs = p.toString();
+    window.history.replaceState(null, "", qs ? `?${qs}` : window.location.pathname);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessFilters]);
+
+  const sessions = useSessionList({
+    filters: sessFilters,
+    pageSize: PAGE_SIZE,
+    pollMs: POLL_MS,
+    enabled: active,
+  });
   const [evalCache, setEvalCache] = useState<Record<string, EvalResult>>({});
   const [evaluating, setEvaluating] = useState<Record<string, boolean>>({});
+  const [backfilling, setBackfilling] = useState(false);
+
+  // Sweep archived sessions lacking a quality score into the server's async
+  // judge worker (fills historical task_only/chitchat sessions that never ran
+  // through an evolution cycle). Scores then appear via the normal 15s poll.
+  const backfillJudges = useCallback(async () => {
+    if (backfilling) return;
+    if (!window.confirm("将对本租户尚无评审分、且有正文的会话批量补评（后台异步、有速率上限）。继续？")) {
+      return;
+    }
+    setBackfilling(true);
+    try {
+      const r = await api<{ enqueued: number; backlog?: number }>(
+        "/conversations/judge-backfill",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ limit: 200 }),
+        }
+      );
+      toastOk(`已加入补评队列 ${r.enqueued} 个会话`, "评审在后台进行，稍后自动刷新出现分数");
+      sessions.reload();
+    } catch (e: any) {
+      toastErr("发起补评失败", e?.message || String(e));
+    } finally {
+      setBackfilling(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backfilling]);
 
   const inflight = useRef(false);
   const evaluatingRef = useRef<Record<string, boolean>>({});
   const evalCacheRef = useRef<Record<string, EvalResult>>({});
+  // job_id -> last loaded full candidate detail; polled compact list items
+  // are rehydrated from this so an open modal never loses its content.
+  const candDetailRef = useRef<Record<string, Candidate>>({});
   evaluatingRef.current = evaluating;
   evalCacheRef.current = evalCache;
 
@@ -85,6 +154,7 @@ export default function DashboardView({ active }: { active: boolean }) {
       const detail = await api<Candidate>(
         `/api/validation/candidates/${encodeURIComponent(jobId)}/detail`
       );
+      candDetailRef.current[jobId] = detail;
       setCands((items) => mergeCandidateDetail(items, detail));
       if (detail.evaluation) {
         setEvalCache((m) => ({ ...m, [jobId]: detail.evaluation as EvalResult }));
@@ -119,35 +189,60 @@ export default function DashboardView({ active }: { active: boolean }) {
     }
   }, []);
 
+  // Batch export via the standalone /conversations/export endpoint.
+  // "selected" exports checked sessions; "filtered" reuses the current
+  // server-side filters so the export matches exactly what the list shows.
+  const handleExport = useCallback(
+    async (mode: "selected" | "filtered") => {
+      const qs = new URLSearchParams();
+      qs.set("format", exportFormat);
+      if (mode === "selected") {
+        if (!selectedSessIds.length) return;
+        qs.set("ids", selectedSessIds.join(","));
+      } else {
+        for (const [k, v] of Object.entries(sessFilters)) {
+          if (v && k !== "sort_by" && k !== "order") qs.set(k, String(v));
+        }
+      }
+      const url = `/conversations/export?${qs.toString()}`;
+      try {
+        const res = await fetch(url, { headers: tenantHeaders(url) });
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        const blob = await res.blob();
+        const ext = exportFormat === "csv" ? "csv" : "json";
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `sessions_export.${ext}`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+        const count =
+          Number(res.headers.get("X-Export-Count")) ||
+          (mode === "selected" ? selectedSessIds.length : sessions.total);
+        toastOk(`已导出 ${count} 个会话（${ext.toUpperCase()}）`);
+      } catch (e: any) {
+        toastErr("导出失败", e?.message || String(e));
+      }
+    },
+    [exportFormat, selectedSessIds, sessFilters, sessions.total]
+  );
+
   const refresh = useCallback(
     async (force: boolean) => {
       if (inflight.current && !force) return;
       inflight.current = true;
       const refreshFlag = force ? "&refresh=true" : "";
-      const [statusResult, storageResult, queueResult, ledgerResult, candidateResult] =
-        await Promise.allSettled([
-          api<StatusResp>(`/status${force ? "?refresh=true" : ""}`),
-          api<StorageStatus>("/storage/status"),
-          api<PageResponse<QueueSession>>(
-            `/sessions?limit=${PAGE_SIZE}&offset=${(queuePage - 1) * PAGE_SIZE}${refreshFlag}`
-          ),
-          api<PageResponse<LedgerRow>>(
-            `/conversations?limit=${PAGE_SIZE}&offset=${(ledgerPage - 1) * PAGE_SIZE}${refreshFlag}`
-          ),
-          api<PageResponse<Candidate>>(
-            `/api/validation/candidates?compact=true&limit=${PAGE_SIZE}&offset=${(candidatePage - 1) * PAGE_SIZE}${refreshFlag}`
-          ),
-        ]);
+      const [statusResult, storageResult, candidateResult] = await Promise.allSettled([
+        api<StatusResp>(`/status${force ? "?refresh=true" : ""}`),
+        api<StorageStatus>("/storage/status"),
+        api<PageResponse<Candidate>>(
+          `/api/validation/candidates?compact=true&limit=${PAGE_SIZE}&offset=${(candidatePage - 1) * PAGE_SIZE}${refreshFlag}`
+        ),
+      ]);
       const st = statusResult.status === "fulfilled" ? statusResult.value : null;
       const sto = storageResult.status === "fulfilled" ? storageResult.value : null;
-      const queuePayload = queueResult.status === "fulfilled" ? queueResult.value : null;
-      const ledgerPayload = ledgerResult.status === "fulfilled" ? ledgerResult.value : null;
-      const candidatePayload =
-        candidateResult.status === "fulfilled" ? candidateResult.value : null;
-      const q = queuePayload?.sessions || null;
-      const led = ledgerPayload?.conversations || null;
+      const candidatePayload = candidateResult.status === "fulfilled" ? candidateResult.value : null;
       const cs = candidatePayload?.candidates || null;
-      const nextCands = cs || [];
+      const nextCands = hydrateCandidates(cs || [], candDetailRef.current);
       const serverEvaluations: Record<string, EvalResult> = {};
       for (const c of nextCands) {
         if (c.evaluation) serverEvaluations[c.job_id] = c.evaluation;
@@ -156,14 +251,22 @@ export default function DashboardView({ active }: { active: boolean }) {
       if (Object.keys(serverEvaluations).length) {
         setEvalCache((m) => ({ ...m, ...serverEvaluations }));
       }
-      setStatus(st);
-      setStorage(sto);
-      setQueue(q);
-      setLedger(led);
-      setCands(nextCands);
-      setQueueTotal(queuePayload?.total || 0);
-      setLedgerTotal(ledgerPayload?.total || 0);
-      setCandidateTotal(candidatePayload?.total || 0);
+      // Keep last good data on partial failure: a transient backend stall
+      // (single event loop shared with the evolution cycle) must never blank
+      // the page — only successful payloads update state. An EMPTY list is
+      // treated as suspicious too: under load the backend may briefly fail
+      // to read the candidate store and answer 200 with zero items; accept
+      // it only when we have nothing to lose (initial load).
+      if (st) setStatus(st);
+      if (sto) setStorage(sto);
+      if (cs === null) {
+        // request failed — keep previous list
+      } else if (cs.length === 0 && cands.length > 0) {
+        // suspicious empty response while a list is on screen — keep old data
+      } else {
+        setCands(nextCands);
+      }
+      setCandidateTotal(candidatePayload?.total ?? candidateTotal);
       setLastUpdate(
         "更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false })
       );
@@ -175,7 +278,7 @@ export default function DashboardView({ active }: { active: boolean }) {
         }
       }
     },
-    [candidatePage, evaluate, ledgerPage, queuePage]
+    [candidatePage, cands.length, evaluate]
   );
 
   // poll
@@ -237,9 +340,8 @@ export default function DashboardView({ active }: { active: boolean }) {
   const skillNames = Object.keys(skills);
   const openCand = candJobId ? cands.find((c) => c.job_id === candJobId) || null : null;
   const skillPager = usePagedItems(skillNames);
-  const queuePager = serverPager(queuePage, queueTotal, queue?.length || 0);
-  const ledgerPager = serverPager(ledgerPage, ledgerTotal, ledger?.length || 0);
   const candPager = serverPager(candidatePage, candidateTotal, cands.length);
+  const sessPager = serverPager(sessions.page, sessions.total, sessions.rows?.length || 0);
 
   return (
     <div className="mx-auto max-w-[1200px] px-[22px] py-[22px]">
@@ -252,7 +354,23 @@ export default function DashboardView({ active }: { active: boolean }) {
         <div className="flex flex-wrap items-center gap-2">
           <ConnBadge storage={storage} />
           <span className="text-xs text-muted-foreground">{lastUpdate}</span>
-          <Button variant="outline" size="sm" onClick={() => refresh(true)}>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={backfilling}
+            title="对本租户尚无评审分的历史会话在后台批量补评"
+            onClick={backfillJudges}
+          >
+            {backfilling ? "补评中…" : "补评历史会话"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              refresh(true);
+              sessions.reload();
+            }}
+          >
             刷新
           </Button>
         </div>
@@ -269,72 +387,114 @@ export default function DashboardView({ active }: { active: boolean }) {
         />
       </div>
 
-      {/* queue */}
-      <Panel title="会话队列" count={queue ? `${queueTotal} 个` : ""}>
-        {!queue?.length ? (
-          <Empty>队列为空，暂无待进化会话</Empty>
-        ) : (
-          <>
-            <ListViewport>
-              <Table headers={["提交人", "会话 ID", "轮数", "提交时间"]}>
-                {(queue || []).map((s, i) => (
-                  <tr key={`${s.session_id}-${i}`}>
-                    <Td>
-                      <UserBadge name={s.user_alias} />
-                    </Td>
-                    <Td className="mono">{s.session_id}</Td>
-                    <Td>{s.num_turns}</Td>
-                    <Td className="text-xs text-muted-foreground">{fmtTime(s.timestamp)}</Td>
-                  </tr>
-                ))}
-              </Table>
-            </ListViewport>
-            <PaginationControls {...queuePager} onPageChange={setQueuePage} />
-          </>
+      {/* sessions (unified list) */}
+      <Panel
+        title="会话"
+        count={
+          sessions.rows
+            ? `${sessions.total} 条`
+            : sessions.loading
+              ? "加载中…"
+              : sessions.error
+                ? ""
+                : "0 条"
+        }
+      >
+        <SessionFiltersBar
+          value={sessFilters}
+          onApply={setSessFilters}
+          skillOptions={sessions.skillCounts}
+          actions={
+            <div className="flex items-center gap-2">
+              <select
+                value={exportFormat}
+                onChange={(e) => setExportFormat(e.target.value as "csv" | "json")}
+                className="h-8 rounded-lg border border-border bg-background px-2 text-xs font-semibold outline-none"
+                title="导出文件格式"
+              >
+                <option value="csv">CSV (Excel)</option>
+                <option value="json">JSON</option>
+              </select>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={!selectedSessIds.length}
+                title={selectedSessIds.length ? "导出勾选的会话" : "先在列表中勾选会话"}
+                onClick={() => handleExport("selected")}
+              >
+                导出选中 ({selectedSessIds.length})
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                title={`按当前筛选条件批量导出，将导出 ${sessions.total} 条`}
+                onClick={() => handleExport("filtered")}
+              >
+                导出筛选结果 ({sessions.total})
+              </Button>
+              {selectedSessIds.length > 0 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  title="清空勾选"
+                  onClick={() => setSelectedSessIds([])}
+                >
+                  清空勾选
+                </Button>
+              )}
+            </div>
+          }
+        />
+        {sessions.stats && (
+          <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md border border-border bg-background/60 px-3 py-1.5 text-xs text-muted-foreground">
+            <span>
+              共 <span className="font-semibold text-foreground">{sessions.stats.total}</span> 条
+            </span>
+            <span>
+              Good <span className="font-semibold text-green-600">{sessions.stats.good}</span> ·
+              Bad <span className="font-semibold text-red-600">{sessions.stats.bad}</span>
+            </span>
+            <span>
+              有价值 <span className="font-semibold text-foreground">{sessions.stats.valuable}</span>{" "}
+              · 闲聊 <span className="font-semibold text-foreground">{sessions.stats.chitchat}</span>
+            </span>
+            <span>
+              平均分{" "}
+              <span className="font-mono font-semibold text-foreground">
+                {sessions.stats.avg_score != null ? sessions.stats.avg_score.toFixed(2) : "—"}
+              </span>
+            </span>
+          </div>
         )}
-      </Panel>
-
-      {/* history */}
-      <Panel title="会话历史" count={ledger ? `${ledgerTotal} 条` : ""}>
-        {!ledger?.length ? (
-          <Empty>尚无会话历史</Empty>
-        ) : (
-          <>
-            <ListViewport>
-              <Table headers={["会话标题", "提交人", "轮数", "消费状态", "时间"]}>
-                {(ledger || []).map((r, i) => {
-                  const sid = r.session_id || "";
-                  return (
-                    <tr key={`${sid}-${i}`}>
-                      <td
-                        className="link max-w-[360px] truncate border-b border-line px-4 py-2.5 align-top text-accent"
-                        title={"点击查看会话内容：" + (r.title || "")}
-                        onClick={() => setSessModal({ sid, tab: "detail" })}
-                      >
-                        {r.title || "(无标题会话)"}
-                      </td>
-                      <Td>
-                        <UserBadge name={r.user_alias} />
-                      </Td>
-                      <Td>{r.num_turns != null ? r.num_turns : "-"}</Td>
-                      <td
-                        className="link border-b border-line px-4 py-2.5 align-top"
-                        title="点击查看进化过程明细"
-                        onClick={() => setSessModal({ sid, tab: "process" })}
-                      >
-                        <StatusBadge status={r.status} />
-                      </td>
-                      <Td className="text-xs text-muted-foreground">
-                        {fmtTime(r.consumed_at || r.ingested_at || r.timestamp)}
-                      </Td>
-                    </tr>
-                  );
-                })}
-              </Table>
-            </ListViewport>
-            <PaginationControls {...ledgerPager} onPageChange={setLedgerPage} />
-          </>
-        )}
+        <SessionTable
+          rows={sessions.rows}
+          emptyText={
+            sessions.loading
+              ? "会话加载中…（新租户首次加载可能需要数秒）"
+              : sessions.error
+                ? "会话列表暂不可用（自动重试中）：" + sessions.error
+                : "暂无会话"
+          }
+          onOpen={(sid, tab) => setSessModal({ sid, tab })}
+          selectedIds={selectedSessIds}
+          onToggleSelect={(sid, checked) =>
+            setSelectedSessIds((prev) =>
+              checked ? [...new Set([...prev, sid])] : prev.filter((id) => id !== sid)
+            )
+          }
+          onSelectAll={(checked) =>
+            setSelectedSessIds((prev) => {
+              const pageIds = (sessions.rows || [])
+                .map((r) => r.session_id)
+                .filter(Boolean) as string[];
+              if (checked) {
+                return [...new Set([...prev, ...pageIds])];
+              }
+              return prev.filter((id) => !pageIds.includes(id));
+            })
+          }
+        />
+        <PaginationControls {...sessPager} onPageChange={sessions.setPage} />
       </Panel>
 
       {/* candidates */}
@@ -511,12 +671,13 @@ function ConnBadge({ storage }: { storage: StorageStatus | null }) {
   if (!storage) {
     return (
       <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-        <Dot state="off" /> OpenViking：不可达
+        <Dot state="off" /> 存储：检查中
       </span>
     );
   }
   const ok = storage.reachable;
-  const backend = (storage.backend || "?").toUpperCase();
+  const paused = !ok && storage.reason === "sharing_disabled";
+  const backend = storage.pg ? "PostgreSQL" : (storage.backend || "?").toUpperCase();
   const label = backend === "VIKING" ? "OpenViking" : backend;
   const title = [
     storage.endpoint ? "endpoint=" + storage.endpoint : "",
@@ -530,7 +691,8 @@ function ConnBadge({ storage }: { storage: StorageStatus | null }) {
       className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
       title={title}
     >
-      <Dot state={ok ? "on" : "err"} /> {label}：{ok ? "已连接" : "不可达"}
+      <Dot state={ok ? "on" : paused ? "off" : "err"} /> {label}：
+      {ok ? "已连接" : paused ? "同步已暂停" : "不可达"}
     </span>
   );
 }

@@ -8,11 +8,14 @@ background thread) and idle/validation accessors.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import tempfile
 import threading
 import time
-from typing import Optional
+from pathlib import Path
+from typing import Any, Optional
 
 import uvicorn
 from starlette.responses import Response
@@ -23,6 +26,13 @@ from ..integrations.dreamcycle_runtime import (
 )
 from ..observability import configure_langfuse, flush_langfuse
 from ..skills.manager import SkillManager
+from ..tenants.registry import (
+    DEFAULT_TENANT_ID,
+    QUOTA_MAX_EVOLVE_PER_DAY,
+    TenantRegistry,
+    current_tenant_id,
+    tenant_quotas,
+)
 from .agent_context import AgentContextMixin
 from .aggregation_routes import AggregationMixin
 from .docs import DocsMixin
@@ -32,6 +42,7 @@ from .routes import RoutesMixin
 from .skill_lab import SkillLabMixin
 from .skillminer_bridge import SkillMinerBridgeMixin
 from .skills_admin import SkillsAdminMixin
+from .tenant_routes import get_tenant_registry
 from .uploads import UploadsMixin
 from .users_admin import UsersAdminMixin, sync_openviking_user
 
@@ -84,16 +95,39 @@ class ProxyServer(
             5,
             int(getattr(config, "sharing_skill_reload_interval_seconds", 30) or 30),
         )
+        # Default-tenant engine slot — kept for hot-reload change detection and
+        # test doubles; the authoritative per-tenant engines live in the pool.
         self._embedded_evolve_server = None
-        self._embedded_evolve_app = None
+        # Per-tenant engines (multi-tenancy plan Phase 2): LRU pool + per-tenant
+        # HTTP apps + per-tenant cycle pacing for the global scheduler.
+        self._engine_pool = None
+        self._embedded_evolve_apps: dict[str, Any] = {}
         self._embedded_evolve_task: Optional[asyncio.Task] = None
-        self._embedded_evolve_init_failed = False
+        self._tenant_cycle_tasks: dict[str, asyncio.Task] = {}
+        self._evolve_next_due: dict[str, float] = {}
+        # Per-tenant daily cycle counters (local day) for the max_evolve_per_day
+        # quota; in-memory per replica, so the cap is approximate across
+        # replicas — sufficient to stop single-tenant starvation (plan Phase 3).
+        self._evolve_daily: dict[str, tuple[str, int]] = {}
         configure_langfuse(config)
         # Team-owned memories/resources use the canonical OpenViking ``team``
         # user. Ensure it exists on every deployment; the sync helper is
         # idempotent and fail-open when OpenViking is unavailable.
         sync_openviking_user(config, "team")
         self._dreamcycle = DreamCycleSupervisor(config)
+        # Durable skill-mirror outbox: delivers the local skill library subtree
+        # to OpenViking with retry/backoff so remote Agents keep reading team
+        # skills even while OpenViking is flaky. Never on the evolution path.
+        self._mirror_flusher = None
+        self._start_skill_mirror_flusher()
+
+        # Post-ingest async quality judge for value-filter-skipped sessions
+        # (task_only / chitchat never enter an evolution cycle, so without this
+        # they get no Good/Bad review). Started from the app lifespan because
+        # it needs a running event loop; all LLM work runs off the request path.
+        from .session_judge_queue import AsyncSessionJudgeQueue
+
+        self._session_judge_queue = AsyncSessionJudgeQueue(self)
 
         self.app = self._build_app()
 
@@ -102,6 +136,9 @@ class ProxyServer(
         self._thread: Optional[threading.Thread] = None
         self._ready_event = threading.Event()
         self._server_stopped_event = threading.Event()
+
+        # Persist daily evolve quotas across process restarts (plan Phase 3).
+        self._load_evolve_daily()
 
     # ------------------------------------------------------------------ #
     # Idle / validation accessors                                          #
@@ -132,12 +169,33 @@ class ProxyServer(
             return False
         return age >= max(0, int(idle_after_seconds))
 
+    def _start_skill_mirror_flusher(self) -> None:
+        try:
+            from ..skills.mirror import MirrorFlusher, VikingSkillMirror
+
+            mirror = VikingSkillMirror.from_config(self.config)
+            if mirror is None:
+                return
+            self._mirror_flusher = MirrorFlusher(mirror)
+            self._mirror_flusher.start()
+        except Exception:  # noqa: BLE001 - mirroring must never block startup
+            logger.debug("[SkillMirror] flusher start skipped", exc_info=True)
+
     async def _shutdown_cleanup(self) -> None:
         if self._skill_reload_task is not None:
             self._skill_reload_task.cancel()
             await asyncio.gather(self._skill_reload_task, return_exceptions=True)
             self._skill_reload_task = None
+        if self._mirror_flusher is not None:
+            self._mirror_flusher.stop()
+            self._mirror_flusher = None
         self._dreamcycle.stop()
+        judge_queue = getattr(self, "_session_judge_queue", None)
+        if judge_queue is not None:
+            try:
+                await asyncio.wait_for(judge_queue.stop(), timeout=5.0)
+            except Exception:  # noqa: BLE001 - shutdown must proceed
+                logger.debug("[SessionJudge] queue stop failed", exc_info=True)
         await self._stop_embedded_evolve()
         try:
             self._stop_skillminer()
@@ -166,8 +224,13 @@ class ProxyServer(
     def _dreamcycle_dry_run(self) -> dict:
         return self._dreamcycle.dry_run()
 
-    def _dreamcycle_memory_changes(self, *, limit: int = 100) -> dict:
-        return self._dreamcycle.memory_changes(limit=limit)
+    def _dreamcycle_memory_changes(
+        self,
+        *,
+        limit: int = 100,
+        config: Any = None,
+    ) -> dict:
+        return self._dreamcycle.memory_changes(limit=limit, config=config)
 
     def _run_dreamcycle_memory_replay(
         self,
@@ -178,6 +241,7 @@ class ProxyServer(
         source_session_id: str = "",
         max_interactions: int = 4,
         timeout_seconds: int = 600,
+        config: Any = None,
     ) -> dict:
         return self._dreamcycle.run_memory_replay(
             change_id=change_id,
@@ -186,6 +250,7 @@ class ProxyServer(
             source_session_id=source_session_id,
             max_interactions=max_interactions,
             timeout_seconds=timeout_seconds,
+            config=config,
         )
 
     def _run_dreamcycle_memory_replay_adhoc(
@@ -200,6 +265,7 @@ class ProxyServer(
         source_session_id: str = "",
         max_interactions: int = 4,
         timeout_seconds: int = 600,
+        config: Any = None,
     ) -> dict:
         return self._dreamcycle.run_memory_replay_adhoc(
             memory_path=memory_path,
@@ -211,6 +277,7 @@ class ProxyServer(
             source_session_id=source_session_id,
             max_interactions=max_interactions,
             timeout_seconds=timeout_seconds,
+            config=config,
         )
 
     def _dreamcycle_memory_replays(
@@ -218,10 +285,12 @@ class ProxyServer(
         *,
         change_id: str,
         limit: int = 100,
+        config: Any = None,
     ) -> dict:
         return self._dreamcycle.memory_replays(
             change_id=change_id,
             limit=limit,
+            config=config,
         )
 
     def _dreamcycle_reset(
@@ -237,11 +306,7 @@ class ProxyServer(
         config: TeamEvolverConfig,
     ) -> None:
         """Apply a credential update without restarting the service process."""
-        current_evolve_config = getattr(
-            self._embedded_evolve_server,
-            "config",
-            None,
-        )
+        current_evolve_config = self._embedded_evolve_config_snapshot()
         next_evolve_config = self._build_embedded_evolve_config(config)
         evolve_config_changed = current_evolve_config != next_evolve_config
 
@@ -249,12 +314,17 @@ class ProxyServer(
         self.config = config
         configure_langfuse(config)
         self._dreamcycle = DreamCycleSupervisor(config)
+        # Tenant registry binds to storage_pg settings — rebuild on reload so
+        # enabling/disabling PG or changing its DSN takes effect at once.
+        self._tenant_registry = TenantRegistry(config)
 
         if evolve_config_changed:
             await self._stop_embedded_evolve(graceful=True)
             self._embedded_evolve_server = None
-            self._embedded_evolve_app = None
-            self._embedded_evolve_init_failed = False
+            self._embedded_evolve_apps = {}
+            self._engine_pool = None
+            self._evolve_next_due = {}
+            self._load_evolve_daily()
             self._start_embedded_evolve()
         else:
             logger.info(
@@ -286,62 +356,326 @@ class ProxyServer(
         evolve_config.__post_init__()
         return evolve_config
 
-    def _get_embedded_evolve_server(self):
+    def _get_engine_pool(self):
+        """Per-tenant engine pool (multi-tenancy plan Phase 2)."""
         if not self._embedded_evolve_enabled():
             return None
-        if self._embedded_evolve_server is not None:
-            return self._embedded_evolve_server
-        if self._embedded_evolve_init_failed:
-            return None
-        try:
-            from ..evolve import EvolveServer
+        if self._engine_pool is None:
+            from .engine_pool import EnginePool
 
-            evolve_config = self._build_embedded_evolve_config(self.config)
-            self._embedded_evolve_server = EvolveServer(evolve_config)
-            logger.info(
-                "[EvolveServer] embedded in teamEvolver on port %s interval=%ss",
-                evolve_config.http_port,
-                evolve_config.interval_seconds,
+            self._engine_pool = EnginePool(
+                self.config,
+                self._build_embedded_evolve_config,
+                registry_provider=lambda: get_tenant_registry(self),
             )
-        except Exception:
-            self._embedded_evolve_init_failed = True
-            logger.warning("[EvolveServer] embedded startup disabled; import/config failed", exc_info=True)
-            return None
-        return self._embedded_evolve_server
+        return self._engine_pool
 
-    def _get_embedded_evolve_app(self):
-        if self._embedded_evolve_app is not None:
-            return self._embedded_evolve_app
-        server = self._get_embedded_evolve_server()
+    def _embedded_evolve_config_snapshot(self):
+        """Currently active evolve config for hot-reload change detection.
+
+        Reads the resident default-tenant engine (or a test-injected stand-in)
+        without constructing anything; falls back to a cheap config-only build
+        from the pool.
+        """
+        config = getattr(self._embedded_evolve_server, "config", None)
+        if config is not None:
+            return config
+        pool = self._engine_pool
+        if pool is not None:
+            return pool.peek_config(DEFAULT_TENANT_ID)
+        return None
+
+    def _get_embedded_evolve_server(self, tenant_id: Optional[str] = None):
+        """Engine for *tenant_id* (request tenant context by default)."""
+        pool = self._get_engine_pool()
+        if pool is None:
+            return None
+        tid = str(tenant_id or current_tenant_id() or DEFAULT_TENANT_ID)
+        engine = pool.get(tid)
+        if tid == DEFAULT_TENANT_ID:
+            # Keep the legacy slot in sync for reload detection and tests.
+            self._embedded_evolve_server = engine
+        return engine
+
+    def _get_embedded_evolve_app(self, tenant_id: Optional[str] = None):
+        server = self._get_embedded_evolve_server(tenant_id)
         if server is None:
             return None
-        app = server.create_http_app()
-        self._embedded_evolve_app = app
+        tid = str(getattr(server, "tenant_id", "") or DEFAULT_TENANT_ID)
+        resident_engines = getattr(self._get_engine_pool(), "engines", None)
+        if callable(resident_engines):
+            resident = {engine.tenant_id for engine in resident_engines()}
+            for cached_id in list(self._embedded_evolve_apps):
+                if cached_id not in resident:
+                    self._embedded_evolve_apps.pop(cached_id, None)
+        app = self._embedded_evolve_apps.get(tid)
+        if app is None or (hasattr(app, "state") and getattr(app.state, "engine", None) is not server):
+            app = server.create_http_app()
+            if hasattr(app, "state"):
+                app.state.engine = server
+            self._embedded_evolve_apps[tid] = app
         return app
 
     def _start_embedded_evolve(self) -> None:
-        server = self._get_embedded_evolve_server()
-        if server is None:
+        if self._get_engine_pool() is None:
             return
         if self._embedded_evolve_task is not None and not self._embedded_evolve_task.done():
             return
-        self._embedded_evolve_task = asyncio.create_task(server.run_periodic())
-        logger.info("[EvolveServer] embedded periodic loop started")
+        self._embedded_evolve_task = asyncio.create_task(self._run_multi_tenant_evolve())
+        logger.info("[EvolveServer] multi-tenant scheduler started")
+
+    async def _run_multi_tenant_evolve(self) -> None:
+        """Global evolution scheduler (plan §3 Phase 2.3).
+
+        One loop for all tenants: every pass iterates the registry's active
+        tenants and runs a cycle for those whose per-tenant interval elapsed
+        (or that drained a full batch / made progress last cycle). Tenants
+        whose cross-replica advisory cycle lock is held by another replica are
+        skipped. Global LLM/OpenViking concurrency limits still apply inside
+        each engine unchanged.
+        """
+        tick = self._evolve_tick_seconds()
+        limit = max(1, min(8, int(os.environ.get("TEAMEVOLVER_TENANT_CONCURRENCY", "4"))))
+        tasks = self._tenant_cycle_tasks
+        logger.info("[EvolveServer] multi-tenant scheduler: tick=%ss", tick)
+
+        async def run_tenant(pool, tid):
+            from ..tenants.registry import reset_current_tenant, set_current_tenant
+
+            context_token = None
+            try:
+                registry = pool.registry()
+                ctx = await asyncio.to_thread(registry.get, tid) if registry is not None else None
+                if ctx is not None:
+                    if ctx.status != "active":
+                        return
+                    context_token = set_current_tenant(ctx)
+                engine = await asyncio.to_thread(pool.get, tid)
+                if engine is None:
+                    self._evolve_next_due[tid] = time.monotonic() + 30
+                    return
+                drained = await self._run_tenant_cycle(pool, tid, engine)
+                if drained > 0:
+                    await asyncio.to_thread(self._evolve_note_cycle, tid)
+                cap = int(getattr(engine.config, "drain_max_per_cycle", 0) or 0)
+                backlog = drained >= cap if cap > 0 else drained > 0
+                self._evolve_next_due[tid] = time.monotonic() + (
+                    1 if backlog else max(1, int(engine.config.interval_seconds))
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._evolve_next_due[tid] = time.monotonic() + 30
+                logger.exception("[EvolveServer] tenant %s cycle failed", tid)
+            finally:
+                if context_token is not None:
+                    reset_current_tenant(context_token)
+
+        try:
+            while True:
+                for tid, task in list(tasks.items()):
+                    if task.done():
+                        tasks.pop(tid)
+                try:
+                    pool = self._get_engine_pool()
+                    if pool is not None:
+                        for tid in await asyncio.to_thread(self._quota_ordered_tenants, pool):
+                            if len(tasks) >= limit:
+                                break
+                            if tid not in tasks and time.monotonic() >= self._evolve_next_due.get(tid, 0):
+                                tasks[tid] = asyncio.create_task(run_tenant(pool, tid))
+                except Exception:
+                    logger.exception("[EvolveServer] scheduler pass failed")
+                await asyncio.sleep(tick)
+        finally:
+            for task in tasks.values():
+                task.cancel()
+            await asyncio.gather(*tasks.values(), return_exceptions=True)
+            tasks.clear()
+
+    @staticmethod
+    def _evolve_tick_seconds() -> float:
+        raw = os.environ.get("TEAMEVOLVER_EVOLVE_TICK_S", "2").strip()
+        try:
+            return max(0.5, float(raw))
+        except ValueError:
+            return 2.0
+
+    # -- per-tenant quota scheduling (plan Phase 3) --------------------------- #
+
+    @staticmethod
+    def _evolve_day_key() -> str:
+        return time.strftime("%Y-%m-%d")
+
+    def _evolve_daily_file(self) -> Path:
+        return Path.home() / ".teamEvolver" / "evolve_daily_quota.json"
+
+    def _load_evolve_daily(self) -> None:
+        """Populate ``self._evolve_daily`` from the on-disk quota file.
+
+        File format: ``{"day": "2024-01-01", "counts": {"tenant_id": 5}}``.
+        Stale data (stored day != today) is discarded so a fresh day starts
+        every tenant at zero.
+        """
+        self._evolve_daily = {}
+        path = self._evolve_daily_file()
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return
+        if data.get("day") != self._evolve_day_key():
+            return
+        counts = data.get("counts") or {}
+        self._evolve_daily = {
+            tid: (self._evolve_day_key(), int(count))
+            for tid, count in counts.items()
+        }
+
+    def _save_evolve_daily(self) -> None:
+        """Atomically persist ``self._evolve_daily`` to the quota file."""
+        path = self._evolve_daily_file()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            logger.warning(
+                "[EvolveServer] failed to create evolve quota dir %s",
+                path.parent,
+                exc_info=True,
+            )
+            return
+        payload = {
+            "day": self._evolve_day_key(),
+            "counts": {
+                tid: count for tid, (_day, count) in self._evolve_daily.items()
+            },
+        }
+        try:
+            fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".json")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(payload, fh)
+                os.replace(tmp, path)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+        except OSError:
+            logger.warning(
+                "[EvolveServer] failed to persist evolve quota file %s",
+                path,
+                exc_info=True,
+            )
+
+    def _evolve_cycle_count_today(self, tenant_id: str) -> int:
+        day, count = self._evolve_daily.get(tenant_id, ("", 0))
+        return count if day == self._evolve_day_key() else 0
+
+    def _evolve_note_cycle(self, tenant_id: str) -> None:
+        self._evolve_daily[tenant_id] = (
+            self._evolve_day_key(),
+            self._evolve_cycle_count_today(tenant_id) + 1,
+        )
+        self._save_evolve_daily()
+
+    @staticmethod
+    def _next_midnight_monotonic() -> float:
+        now = time.time()
+        lt = time.localtime(now)
+        midnight = time.mktime(
+            (lt.tm_year, lt.tm_mon, lt.tm_mday + 1, 0, 0, 0, 0, 0, -1)
+        )
+        return time.monotonic() + max(0.0, midnight - now)
+
+    def _quota_ordered_tenants(self, pool) -> list[str]:
+        """Due-order tenants by quota-weighted deficit (plan Phase 3 quotas).
+
+        Weighted round-robin: tenants are served in ascending
+        ``cycles_today / weight`` order (weight = max_evolve_per_day, or 1 when
+        unlimited), so a tenant with a larger quota earns proportionally more
+        cycles per pass. Tenants that exhausted their daily cap are deferred to
+        the next local midnight. Counters are per-replica in-memory — the cap
+        is approximate across replicas, which is enough to prevent one tenant
+        from starving the rest.
+        """
+        registry = pool.registry()
+        entries: list[tuple[float, str]] = []
+        for tid in pool.tenant_ids():
+            ctx = None
+            if registry is not None:
+                try:
+                    ctx = registry.get(tid)
+                except Exception:  # noqa: BLE001 - quota lookup must not stop cycles
+                    logger.warning(
+                        "[EvolveServer] quota lookup failed for tenant %s", tid,
+                        exc_info=True,
+                    )
+            daily_cap = tenant_quotas(ctx)[QUOTA_MAX_EVOLVE_PER_DAY]
+            count = self._evolve_cycle_count_today(tid)
+            if daily_cap > 0 and count >= daily_cap:
+                self._evolve_next_due[tid] = self._next_midnight_monotonic()
+                logger.info(
+                    "[EvolveServer] tenant %s reached max_evolve_per_day=%d; "
+                    "deferred to midnight",
+                    tid,
+                    daily_cap,
+                )
+                continue
+            weight = float(daily_cap if daily_cap > 0 else 1)
+            entries.append((count / weight, tid))
+        entries.sort()
+        return [tid for _, tid in entries]
+
+    async def _run_tenant_cycle(self, pool, tenant_id: str, engine) -> int:
+        """One evolution cycle for one tenant; returns the drained session count."""
+        registry = pool.registry()
+        runtime = getattr(registry, "runtime", None) if registry is not None else None
+        locked = False
+        if runtime is not None and not getattr(engine, "owns_cycle_lock", False):
+            # Cross-replica mutex (plan §2.3): skip when another replica is
+            # already running this tenant's cycle.
+            locked = await asyncio.to_thread(runtime.try_advisory_lock, tenant_id)
+            if not locked:
+                logger.debug(
+                    "[EvolveServer] tenant %s cycle lock held elsewhere; skipping",
+                    tenant_id,
+                )
+                return 0
+        try:
+            # Share the cycle lock with /trigger so a manual trigger and the
+            # scheduler never run overlapping read-modify-write cycles.
+            async with engine._get_run_lock():
+                logger.info("[EvolveServer] tenant %s cycle start", tenant_id)
+                result = await engine.run_once()
+            return int(result.get("sessions") or 0)
+        finally:
+            if locked:
+                await asyncio.to_thread(runtime.release_advisory_lock, tenant_id)
 
     async def _stop_embedded_evolve(self, *, graceful: bool = False) -> None:
-        server = self._embedded_evolve_server
-        if graceful and server is not None:
-            run_lock = getattr(server, "_run_lock", None)
-            if run_lock is not None and run_lock.locked():
-                timeout = max(
-                    1.0,
-                    float(
-                        os.environ.get(
-                            "TEAMEVOLVER_EVOLVE_RELOAD_GRACE_S",
-                            "900",
-                        )
-                    ),
-                )
+        engines = []
+        pool = self._engine_pool
+        if pool is not None:
+            engines.extend(pool.engines())
+        legacy = self._embedded_evolve_server
+        if legacy is not None and all(legacy is not engine for engine in engines):
+            engines.append(legacy)
+        if graceful:
+            timeout = max(
+                1.0,
+                float(
+                    os.environ.get(
+                        "TEAMEVOLVER_EVOLVE_RELOAD_GRACE_S",
+                        "900",
+                    )
+                ),
+            )
+            for engine in engines:
+                run_lock = getattr(engine, "_run_lock", None)
+                if run_lock is None or not run_lock.locked():
+                    continue
                 try:
                     await asyncio.wait_for(run_lock.acquire(), timeout=timeout)
                 except asyncio.TimeoutError:
@@ -352,9 +686,9 @@ class ProxyServer(
                     )
                 else:
                     run_lock.release()
-        if server is not None:
+        for engine in engines:
             try:
-                server.stop()
+                engine.stop()
             except Exception:
                 logger.debug("[EvolveServer] embedded stop failed", exc_info=True)
         task = self._embedded_evolve_task
@@ -364,7 +698,8 @@ class ProxyServer(
             self._embedded_evolve_task = None
 
     async def _dispatch_embedded_evolve_request(self, request) -> Optional[Response]:
-        app = self._get_embedded_evolve_app()
+        tenant_id = getattr(request.state, "tenant_id", None) or current_tenant_id()
+        app = await asyncio.to_thread(self._get_embedded_evolve_app, tenant_id)
         if app is None:
             return None
 
@@ -407,6 +742,7 @@ class ProxyServer(
             host=self.config.proxy_host,
             port=self.config.proxy_port,
             log_level="info",
+            limit_concurrency=max(16, int(os.environ.get("TEAMEVOLVER_HTTP_CONCURRENCY", "256"))),
         )
         self._server = uvicorn.Server(cfg)
         self._thread = threading.Thread(target=self._run_server, daemon=True)
@@ -442,7 +778,17 @@ class ProxyServer(
         self._server_stopped_event.set()
 
     def wait_until_ready(self, timeout_s: float = 30.0) -> bool:
-        return self._ready_event.wait(timeout=timeout_s)
+        deadline = time.monotonic() + timeout_s
+        while not self._server_stopped_event.is_set():
+            if self._ready_event.is_set():
+                server = getattr(self, "_server", None)
+                if server is None or server.started:
+                    return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self._server_stopped_event.wait(min(0.05, remaining))
+        return False
 
     # ------------------------------------------------------------------ #
     # Utility                                                              #

@@ -101,10 +101,10 @@ python teamEvolver/integrations/hermes_skill/install.py \
 ## 6. 手动触发进化
 
 ```bash
-curl -X POST http://localhost:52010/trigger
+curl -X POST http://localhost:52010/trigger-dreamcycle
 ```
 
-这会立即触发一次进化周期：从队列取出 Session → 提取 Evidence → 生成 Candidate。`validated` 模式下 Candidate 随后进入 True Replay 与发布门禁。
+这会触发一次 DreamCycle 内存维护任务：已触发返回 202，未配置 DreamCycle 时返回 503。队列中的 Session 也会按配置间隔自动进入进化周期。
 
 ## 7. 停止服务
 

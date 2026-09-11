@@ -4,11 +4,15 @@
 
 The Replay Branch Execution API is a callback interface that teamEvolver initiates to registered Agents. Unlike other Agent APIs, Replay requests are **actively sent by teamEvolver to the Agent's `replay_url`**, not the other way around. When teamEvolver validates candidate Skills, it concurrently sends replay requests for both baseline and candidate branches to the Agent, comparing their execution results.
 
-Replay requests include frozen context projections, task instructions, and execution limits (timeout, maximum interaction turns). Agents must execute in an isolated sandbox without producing external side effects. Successful results must include efficiency metrics (interaction_turns, tool_call_count, total_tokens) and `context_input_hash` (hash of actually injected context).
+The primary mode is the **server-driven turn protocol**: the Agent registers the `replay.branch.v1` capability with `orchestration: "server_driven"`, and teamEvolver calls the Agent's turn endpoint once per interaction turn via `teamEvolver/integrations/replay_adapters.py:TurnBasedReplayAdapter` (or `MappedHttpAdapter` when the capability defines `request_template`, rendering each turn into the customer's own request shape). The multi-turn loop, checklist judging, progressive disclosure, and metric aggregation are all owned by the server; the Agent executes exactly one turn per call and never sees the checklist.
+
+Registrations without `orchestration` still use the single-call fallback path: teamEvolver sends one synchronous request per branch via `teamEvolver/integrations/replay_adapters.py:HttpReplayAdapter`, and the Agent performs the multi-turn execution itself and returns aggregated results.
+
+Replay requests include frozen context projections, task instructions, and execution limits (timeout, maximum interaction turns). Agents must execute in an isolated sandbox without producing external side effects. In fallback mode, successful results must include efficiency metrics (interaction_turns, tool_call_count, total_tokens); in server-driven mode the Agent must report `metrics.tool_call_count` and `metrics.total_tokens` per turn (fail-closed: missing counts invalidate the turn).
 
 Code implementation: `teamEvolver/integrations/replay_adapters.py`
-Protocol validation: `teamEvolver/integrations/agent_protocol.py:259` (`normalize_replay_request`, `normalize_replay_result`)
-True Replay engine: `teamEvolver/true_replay.py`
+Protocol validation: `teamEvolver/integrations/agent_protocol.py` (`normalize_replay_request`, `normalize_replay_result`, `normalize_replay_turn_request`, `normalize_replay_turn_result`)
+True Replay engine: `teamEvolver/true_replay.py` (`_spawn_server_driven_branch`)
 
 ## 2. Interface and Parameter Specification
 
@@ -27,9 +31,9 @@ teamEvolver --> POST https://<agent-replay-url>
 
 Replay API Key is configured via environment variables, with naming convention `TEAMEVOLVER_AGENT_<AUTH_PROFILE>_REPLAY_API_KEY` (auth_profile converted to UPPER_SNAKE_CASE). For example, when auth_profile is `my_agent`, the environment variable is `TEAMEVOLVER_AGENT_MY_AGENT_REPLAY_API_KEY`.
 
-Code: `teamEvolver/integrations/replay_adapters.py:27` (`resolve_replay_api_key`)
+Code: `teamEvolver/integrations/replay_adapters.py:resolve_replay_api_key`
 
-### Request Body (`teamevolver.replay-branch-request.v1`)
+### Request Body (`teamevolver.replay-branch-request.v1`, single-call fallback mode)
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -42,15 +46,21 @@ Code: `teamEvolver/integrations/replay_adapters.py:27` (`resolve_replay_api_key`
 | `case.query` | string | Yes | Task instruction/user query |
 | `case.instruction` | string | No | Same as query (compatibility field) |
 | `case.materials` | array | No | Source material list |
+| `case_index` | integer | No | Case index in the Test Dataset |
+| `case_id` | string | No | Case ID (dataset_id or index) |
+| `baseline_ref` | object | No | Baseline reference information |
 | `limits` | object | Yes | Execution limits |
 | `limits.timeout_seconds` | integer | Yes | Timeout in seconds, 30-3600, default 600 |
 | `limits.max_interactions` | integer | Yes | Maximum interaction turns, 1-20 |
 | `context_snapshot` | object | No | Frozen context projection (resolve result snapshot) |
-| `frozen_context` | object | No | Frozen context (same as context_snapshot) |
+| `execution_manifest` | object | No | Execution manifest |
+| `tool_policy` | object | No | Tool policy |
+| `checklist_policy` | object | No | Checklist policy |
 | `skill` | object | No | Candidate Skill content (when branch=candidate) |
 | `current_skill` | object | No | Current Skill content (when branch=baseline) |
 | `target_skill_name` | string | No | Target Skill name |
 | `source_session` | object | No | Source Session data |
+| `options.include_full_trace` | boolean | No | Whether to request the full trace |
 
 ### Timeout Control
 
@@ -58,7 +68,7 @@ Code: `teamEvolver/integrations/replay_adapters.py:27` (`resolve_replay_api_key`
 - The Agent **must** stop execution within `limits.timeout_seconds`, and must not continue consuming model or tool resources after the HTTP caller times out.
 - Baseline and candidate requests are sent concurrently, sharing the same deadline.
 
-### Response Body (`teamevolver.replay-branch-result.v1`)
+### Response Body (`teamevolver.replay-branch-result.v1`, single-call fallback mode)
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -111,6 +121,54 @@ teamEvolver-side adapter error codes:
 | `TIMEOUT` | HTTP request timeout |
 | `HTTP_ERROR` | HTTP connection error or non-2xx response |
 
+### Server-Driven Turn Protocol (`orchestration: "server_driven"`)
+
+With `orchestration: "server_driven"` declared, teamEvolver no longer sends a single branch request; instead it calls the Agent's turn endpoint registered at `replay_url` once per interaction turn. Each turn uses the `teamevolver.replay-turn-request.v1` / `teamevolver.replay-turn-result.v1` schemas, validated by `teamEvolver/integrations/agent_protocol.py:normalize_replay_turn_request` and `teamEvolver/integrations/agent_protocol.py:normalize_replay_turn_result`. When the capability defines `request_template`/`response_mapping`, teamEvolver uses `MappedHttpAdapter` instead, rendering each turn into the Agent's own request/response shape so the Agent needs no awareness of the teamEvolver protocol.
+
+#### Turn Request Body (`teamevolver.replay-turn-request.v1`)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `schema_version` | string | Yes | `teamevolver.replay-turn-request.v1` |
+| `protocol_version` | string | Yes | `1.0` |
+| `request_id` | string | Yes | Session handle: consecutive turns with the same `request_id` must resume the same replay session instead of resetting it |
+| `turn_num` | integer | Yes | Turn number, starting at 1 |
+| `branch` | string | Yes | `baseline` or `candidate` |
+| `prompt` | string | Yes | Turn instruction (turn 1 carries the user's original query; later turns carry progressive-disclosure follow-up prompts) |
+| `history` | array | Yes | Prior turn records: `[{turn_num, prompt, response}]` |
+| `limits.turn_timeout_seconds` | integer | Yes | Per-turn timeout in seconds, 30-3600, default 600 |
+| `context_snapshot` | object | Turn 1 only | Frozen context projection |
+| `skill` | object | Turn 1 only | Skill content loaded for this branch |
+| `materials` | array | Turn 1 only | Source material list |
+| `tool_policy` | object | Turn 1 only | Tool policy |
+
+#### Turn Response Body (`teamevolver.replay-turn-result.v1`)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `schema_version` | string | Yes | `teamevolver.replay-turn-result.v1` |
+| `protocol_version` | string | Yes | `1.0` |
+| `request_id` | string | Yes | Must exactly match request's request_id |
+| `turn_num` | integer | Yes | Must exactly match request's turn_num |
+| `branch` | string | Yes | Must exactly match request's branch |
+| `status` | string | Yes | `succeeded`, `failed`, `unsupported` |
+| `final_response` | string | Required when status=succeeded | Final response text for this turn |
+| `messages` | array | Recommended | Full message trace for this turn (assistant/tool messages); the only evidence the server-side Checklist Judge can evaluate |
+| `artifacts` | array | No | Turn artifacts (optional evidence for server-side checklist evaluation) |
+| `metrics` | object | Required when status=succeeded | Turn usage |
+| `metrics.tool_call_count` | integer | Yes | Non-negative integer; missing or invalid counts invalidate the turn (fail-closed, never silently zero-filled) |
+| `metrics.total_tokens` | integer | Yes | Non-negative integer; same fail-closed rule |
+| `metrics_incomplete` | boolean | No | Set true when metrics are incomplete (transparency flag when `MappedHttpAdapter` zero-fills missing counts from plain endpoints) |
+| `error` | object | Required when status!=succeeded | `code`, `message`, `retryable` |
+
+`status=unsupported` is used when the turn hits an external side effect that cannot be deterministically replayed (fail-closed, never fall back to live calls); the whole branch then terminates with `REPLAY_EXTERNAL_TOOL_UNSUPPORTED`.
+
+The server owns the multi-turn loop and termination conditions (all checklist items satisfied or no more items to disclose), Checklist Judge evaluation, progressive disclosure, and per-turn metric aggregation; the Agent never aggregates metrics and never sees the checklist.
+
+#### Agent-Side Reference Implementation
+
+`scripts/replay_turn_server.py` provides a ready-made Agent-side turn server: register one handler per `runtime_type` in `AGENT_HANDLERS`; routes are `POST /turn/<runtime_type>` (once per turn) and `GET /health` (liveness). See the [Custom Agent Integration Guide](../agent-integrations/05-custom-agent).
+
 ## 3. Isolation Requirements
 
 The Agent's Replay runtime must meet the following isolation requirements:
@@ -144,6 +202,8 @@ Efficiency comparison is prioritized as follows (lower is better):
 With all checklist items passing, the candidate branch is automatically accepted only if it is no worse than baseline (no_regression).
 
 ## 5. Usage Examples
+
+The following examples show the single-call fallback mode request/response.
 
 ### Example baseline request sent by teamEvolver
 
@@ -234,4 +294,4 @@ With all checklist items passing, the candidate branch is automatically accepted
 
 ### Legacy Compatibility
 
-Earlier Pi Agent builds used different request/response formats. `teamEvolver/integrations/replay_adapters.py:141` (`LegacyAgentsHubHttpAdapter`) provides an adapter for a compatibility period, converting legacy formats to V1 standard format. Newly integrated Agents should implement the V1 format directly.
+Earlier Pi Agent builds used different request/response formats. `teamEvolver/integrations/replay_adapters.py:LegacyAgentsHubHttpAdapter` provides an adapter for a compatibility period, converting legacy formats to V1 standard format. Newly integrated Agents should implement the V1 format directly.

@@ -74,17 +74,17 @@ class LangfuseTracingSettings:
         host = str(
             os.environ.get("LANGFUSE_BASE_URL")
             or os.environ.get("LANGFUSE_HOST")
-            or get("langfuse_host", "")
+            or get("langfuse_tracing_host", "")
             or "http://127.0.0.1:3000"
         ).strip().rstrip("/")
         public_key = str(
             os.environ.get("LANGFUSE_PUBLIC_KEY")
-            or get("langfuse_public_key", "")
+            or get("langfuse_tracing_public_key", "")
             or ""
         ).strip()
         secret_key = str(
             os.environ.get("LANGFUSE_SECRET_KEY")
-            or get("langfuse_secret_key", "")
+            or get("langfuse_tracing_secret_key", "")
             or ""
         ).strip()
         environment = _normalize_environment(

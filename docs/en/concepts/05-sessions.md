@@ -12,7 +12,7 @@ A Session records the entire process of an Agent from receiving a task to comple
 - **Context usage (context_usage)**: Records actual context references used in that turn, including `context_snapshot_id`, `memory_refs`, `skill_refs`, `feedback`
 - **Source materials**: User-uploaded files, embedded as base64 or referenced via sandbox snapshot paths
 
-Formal Session Schema definition at [agent-session-v1.schema.json](file:///home/zhangpengkun/teamEvolver/docs/schemas/agent-session-v1.schema.json).
+Formal Session Schema definition at [agent-session-v1.schema.json](../../schemas/agent-session-v1.schema.json).
 
 ## Session Ingest Pipeline
 
@@ -21,23 +21,23 @@ After each session concludes, the Agent reports the Session trajectory via `POST
 1. **Identity validation**: Validates integration-scoped token, maps `integration_id + external_subject` to teamEvolver user
 2. **Schema validation**: Checks required fields (schema_version, protocol_version, session_id, runtime, runtime_context, turns)
 3. **Duplicate detection**: Determines duplicate submissions of processed Sessions via content fingerprint. Fingerprint computed from turn count and conversation text hash; same Session with no new turns not re-enqueued
-4. **Dual-write storage**: Writes simultaneously to queue (`sessions/`) and archive (`session_archive/`); queue consumed by evolution engine, archive for audit and historical lookup
-5. **Index update**: Maintains `session_index.json`, recording metadata for all Sessions (title, user, turn count, Token, tool call count, value judgment result)
-6. **Filter audit**: Writes to `session_filter_audit/`, recording filter decisions
+4. **Dual-write storage**: Writes simultaneously to queue (`sessions/`) and archive (`session_archive/`); queue consumed by evolution engine, archive for audit and historical lookup. Post-consumption archiving by the evolution engine preserves `value_judge` and `judge` as well (`teamEvolver/evolve/runtime/orchestrator.py:_archive_sessions`)
+5. **Index update**: Maintains `session_index.json`, recording metadata for all Sessions (title, user, turn count, Token, tool call count, value judgment result `value_judge`, plus session-level `judge` scores and per-dimension reasons — `teamEvolver/session_store.py:_session_meta`)
+6. **Filter audit**: Writes to `session_filter_audit/`; each record carries the metadata plus `value_judge` (including the decision `mode`) and `judge` scores (`teamEvolver/session_store.py:save_filter_audit`)
 
 Sessions removed from queue after consumption by evolution engine, but archive permanently retained.
 
 ## Session Filtering & Value Classification
 
-Before entering evolution queue, Sessions undergo value judgment by `SessionValueClassifier`, determining whether they enter Skill Evolution or Memory Evolution pipeline.
+Before entering evolution queue, Sessions undergo value judgment by `SessionValueClassifier`, determining whether they enter the Skill Evolution pipeline.
 
 ### Decision Categories
 
 | decision | Meaning | Destination |
 |----------|---------|-------------|
 | `valuable` | Contains reusable team-level Skill Evidence: executed workflows, concrete outputs, explicit Skill gaps, domain processes, or user feedback on outputs | Enters Skill Evolution queue |
-| `memory_candidate` | Useful Evidence is user-specific preferences or habits (not team SOP), and may remain useful for that user's future tasks | Routed to Memory Evolution (DreamCycle) |
-| `task_only` | Real task request but no completion outputs or actionable evolution Evidence yet | Archived, awaiting more Evidence accumulation |
+| `memory_candidate` | Useful Evidence is user-specific preferences or habits (not team SOP), and may remain useful for that user's future tasks | Skipped and archived. No Memory Evolution routing exists at ingest (DreamCycle superseded): any decision other than `valuable` is skipped, and `memory_candidates` is only recorded as part of the `value_judge` result (`teamEvolver/proxy/routes.py:_ingest_session_dict`) |
+| `task_only` | Real task request but no completion outputs or actionable evolution Evidence yet | Skipped and archived, awaiting more Evidence accumulation |
 | `chitchat` | Social, empty conversation, or non-task interaction | Skipped, does not enter evolution |
 
 ### Decision Modes
@@ -134,8 +134,9 @@ Archive retains complete Session content and status (queued/consumed/skipped). I
 
 Session storage uses content fingerprinting for idempotent writes:
 - Fingerprint computed from each turn's prompt_text, response_text, runtime type/integration_id, context_usage (snapshot_id, memory_refs, skill_refs, feedback)
-- Duplicate submissions for same session_id with unchanged fingerprint (no new turns) judged duplicate, not re-enqueued
+- Duplicate submissions for same session_id are fingerprint-compared against the archived copy (`teamEvolver/session_store.py:duplicate_of_processed`); an unchanged fingerprint (no new turns) is judged duplicate, the endpoint returns `duplicate`, and the session is not re-enqueued
 - If fingerprint changes (new turns), updates archive and queue, treated as session continuation
+- A request carrying `force_reprocess` bypasses this check and forces reprocessing
 
 This prevents Agents from re-entering same conversation into evolution pipeline due to retries or delayed reporting.
 
@@ -143,10 +144,10 @@ This prevents Agents from re-entering same conversation into evolution pipeline 
 
 | Module | Path |
 |--------|------|
-| Session storage & lifecycle | [session_store.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/session_store.py) |
-| Session value classifier | [session_filter.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/session_filter.py) |
-| Session materials collection | [session_materials.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/session_materials.py) |
-| Session Schema definition | [docs/schemas/agent-session-v1.schema.json](file:///home/zhangpengkun/teamEvolver/docs/schemas/agent-session-v1.schema.json) |
+| Session storage & lifecycle | [session_store.py](../../../teamEvolver/session_store.py) |
+| Session value classifier | [session_filter.py](../../../teamEvolver/session_filter.py) |
+| Session materials collection | [session_materials.py](../../../teamEvolver/session_materials.py) |
+| Session Schema definition | [docs/schemas/agent-session-v1.schema.json](../../schemas/agent-session-v1.schema.json) |
 | Agent integration protocol (Session Ingest) | [Protocol V1 Specification](../agent-integrations/02-protocol-v1) |
 
 ## Related Documentation
@@ -154,4 +155,4 @@ This prevents Agents from re-entering same conversation into evolution pipeline 
 - [Architecture Overview](./01-architecture): Session Ingest position in architecture
 - [Evolution Loop](./02-evolution-loop): How Sessions drive evolution loop
 - [True Replay](./06-true-replay): Sessions as True Replay Case source
-- [Memory System](./04-memory): Destination of memory_candidate Sessions
+- [Memory System](./04-memory): Memory system overview

@@ -66,7 +66,7 @@ List Candidates.
 
 **Caching:** Candidate list cached for 15 seconds.
 
-Code entry point: `teamEvolver/proxy/routes.py:4040` (`api_validation_candidates`)
+Code entry point: `teamEvolver/proxy/routes.py:api_validation_candidates`
 
 ---
 
@@ -84,7 +84,7 @@ Get complete details for a candidate, including Skill content, diff, and evoluti
 
 **Response:** Complete candidate object, including `current_skill_md`, `candidate_skill_md`, `skill_diff`, and `evaluation` details.
 
-Code entry point: `teamEvolver/proxy/routes.py:4077` (`api_validation_candidate_detail`)
+Code entry point: `teamEvolver/proxy/routes.py:api_validation_candidate_detail`
 
 ---
 
@@ -110,7 +110,7 @@ Execute True Replay evaluation on a candidate, generating baseline/candidate com
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `status` | string | `evaluated` |
+| `status` | string | Evaluation status: `evaluated` (evaluated), `failed` (branch failure or parity check violation), `skipped` (case not replayable), `not_found` (job does not exist) |
 | `skill_name` | string | Skill name |
 | `recommended_publish` | boolean | Whether publication is recommended |
 | `replay.verdict` | string | Verdict result |
@@ -118,15 +118,20 @@ Execute True Replay evaluation on a candidate, generating baseline/candidate com
 | `replay.cases` | array | Baseline/candidate comparison for each test case |
 | `replay.cases[].baseline` | object | Baseline branch result |
 | `replay.cases[].candidate` | object | Candidate branch result |
+| `replay.cases[].baseline.interactions` | array | Per-turn interaction records (prompt, response, tool_call_count, checklist_report, etc.) |
+| `replay.cases[].baseline.artifacts` | array | Branch artifact list |
+| `replay.cases[].baseline.artifact_gap_report` | object | Artifact gap report |
 | `replay.efficiency` | object | Efficiency comparison (dimensions include turns/tool_calls/tokens with baseline/candidate/delta/winner) |
 | `replay.checklist` | object | Checklist comparison |
 | `candidate_skill_md` | string | Candidate content |
 | `current_skill_md` | string | Current content |
 | `skill_diff` | string | diff |
 
+Server-driven mode branch results also include `metrics_incomplete` (true when any turn has incomplete metrics). For server-driven remote branches, `context_input_hash` (covering only branch-invariant inputs) and `execution_manifest_hash` are computed by the server and checked for cross-branch equality between baseline/candidate; a mismatch fails the evaluation with `CONTEXT_PARITY_VIOLATION` or `EXECUTION_PARITY_VIOLATION` (fail-closed).
+
 **Replay Execution Timeout:** Controlled by environment variable `TEAMEVOLVER_TRUE_REPLAY_TIMEOUT_S` (default 90 seconds); maximum interaction turns controlled by `TEAMEVOLVER_TRUE_REPLAY_MAX_INTERACTIONS` (default 4).
 
-Code entry point: `teamEvolver/proxy/routes.py:4082` (`api_validation_candidate_evaluate`)
+Code entry point: `teamEvolver/proxy/routes.py:api_validation_candidate_evaluate` (evaluation logic: `teamEvolver/true_replay.py:evaluate_job`)
 
 ---
 
@@ -170,7 +175,7 @@ Review a candidate and decide whether to publish. When `mode=force`, ignores aut
 | `accepted` | boolean | `false` |
 | `reason` | string | Rejection reason |
 
-Code entry point: `teamEvolver/proxy/routes.py:4096` (`api_validation_candidate_validate`)
+Code entry point: `teamEvolver/proxy/routes.py:api_validation_candidate_validate`
 
 ---
 
@@ -186,7 +191,7 @@ Delete a candidate record.
 |-----------|------|----------|-------------|
 | `job_id` | string | Yes | Job ID |
 
-Code entry point: `teamEvolver/proxy/routes.py:4168` (`api_validation_candidate_delete`)
+Code entry point: `teamEvolver/proxy/routes.py:api_validation_candidate_delete`
 
 ---
 

@@ -59,10 +59,17 @@ class SkillMutationService:
         self._bucket = hub._bucket
         self._config = config
         self._deliverer = deliverer
+        # Per-process caches: object history under commits/tombstones/outbox is
+        # append-only, so each key only needs to be downloaded once. Without
+        # these, every 5s drain cycle re-reads the entire history and blocks
+        # the event loop on synchronous storage I/O.
+        self._outbox_status: dict[str, dict[str, Any]] = {}
+        self._reconciled_keys: set[str] = set()
+        self._committed_fingerprints: set[str] = set()
 
     @classmethod
-    def from_config(cls, config: Any) -> "SkillMutationService":
-        return cls(hub=SkillHub.team_from_config(config), config=config)
+    def from_config(cls, config: Any, tenant_id: str = "default") -> "SkillMutationService":
+        return cls(hub=SkillHub.team_from_config(config, tenant_id=tenant_id), config=config)
 
     @classmethod
     def from_hub(
@@ -257,12 +264,14 @@ class SkillMutationService:
 
     def reconcile(self) -> int:
         repaired = 0
-        committed_fingerprints: set[str] = set()
         for item in self._bucket.iter_objects("skill_mutation_commits/"):
+            if item.key in self._reconciled_keys:
+                continue
             commit = self._read_json(item.key)
+            self._reconciled_keys.add(item.key)
             if not commit:
                 continue
-            committed_fingerprints.add(
+            self._committed_fingerprints.add(
                 _stable_id(
                     "expected",
                     dict(commit.get("expected") or {}),
@@ -280,7 +289,10 @@ class SkillMutationService:
                 )
                 repaired += 1
         for item in self._bucket.iter_objects("skill_tombstones/"):
+            if item.key in self._reconciled_keys:
+                continue
             tombstone = self._read_json(item.key)
+            self._reconciled_keys.add(item.key)
             if not tombstone:
                 continue
             expected = {
@@ -294,7 +306,7 @@ class SkillMutationService:
                 )
             }
             fingerprint = _stable_id("expected", expected)
-            if fingerprint in committed_fingerprints:
+            if fingerprint in self._committed_fingerprints:
                 continue
             mutation_id = str(tombstone.get("mutation_id") or "")
             if not mutation_id:
@@ -306,12 +318,12 @@ class SkillMutationService:
                 tenant_ids=[],
                 metadata={"reconciled_from": item.key},
             )
-            committed_fingerprints.add(fingerprint)
+            self._committed_fingerprints.add(fingerprint)
             repaired += 1
         for current in self._hub.list_remote():
             expected = dict(current)
             fingerprint = _stable_id("expected", expected)
-            if fingerprint in committed_fingerprints:
+            if fingerprint in self._committed_fingerprints:
                 continue
             name = str(expected.get("name") or "")
             version = int(expected.get("version") or 0)
@@ -332,17 +344,24 @@ class SkillMutationService:
                 tenant_ids=[],
                 metadata={"reconciled_from": "manifest.json"},
             )
-            committed_fingerprints.add(fingerprint)
+            self._committed_fingerprints.add(fingerprint)
             repaired += 1
         return repaired
 
     async def drain(self, *, limit: int = 100) -> dict[str, int]:
         summary = {"synced": 0, "failed": 0, "pending": 0}
-        for item in list(self._bucket.iter_objects("skill_sync_outbox/"))[:limit]:
+        candidates = [
+            item
+            for item in self._bucket.iter_objects("skill_sync_outbox/")
+            if not self._outbox_settled(item.key)
+        ]
+        for item in candidates[:limit]:
             event = self._read_json(item.key)
             if not event or event.get("status") in {"synced", "cancelled"}:
+                self._cache_outbox(item.key, event or {})
                 continue
             if not _due(event.get("next_retry_at")):
+                self._cache_outbox(item.key, event)
                 summary["pending"] += 1
                 continue
             try:
@@ -445,7 +464,24 @@ class SkillMutationService:
                 summary["failed"] += 1
             event["updated_at"] = _now()
             self._write_json(item.key, event)
+            self._cache_outbox(item.key, event)
         return summary
+
+    def _cache_outbox(self, key: str, event: dict[str, Any]) -> None:
+        self._outbox_status[key] = {
+            "status": str(event.get("status") or ""),
+            "next_retry_at": event.get("next_retry_at"),
+        }
+
+    def _outbox_settled(self, key: str) -> bool:
+        cached = self._outbox_status.get(key)
+        if cached is None:
+            return False
+        if cached["status"] in {"synced", "cancelled"}:
+            return True
+        # Pending retry times are mutable (admin retry / another process).
+        # Only terminal events can be excluded without consulting storage.
+        return False
 
     def health(self) -> dict[str, Any]:
         now = datetime.now(timezone.utc)

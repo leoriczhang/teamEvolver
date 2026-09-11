@@ -350,7 +350,7 @@ def evaluate_runtime_compatibility(
     policy: dict[str, Any] | None,
     results: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Require an independent accepted result for every runtime class."""
+    """Require acceptance without explicit rejection for every runtime class."""
     policy = dict(policy or {})
     required = sorted(
         {_runtime(item) for item in policy.get("required_runtimes") or [] if _runtime(item)}
@@ -392,17 +392,17 @@ def evaluate_runtime_compatibility(
             accepted = bool(raw_entry.get("accepted")) or decision == "accept"
             rejected = bool(raw_entry.get("rejected")) or decision == "reject"
             current = matrix[runtime]
-            if accepted:
-                matrix[runtime] = {
-                    "status": "accepted",
-                    "accepted": True,
-                    "decision": decision or "accept",
-                }
-            elif rejected and current.get("status") != "accepted":
+            if rejected:
                 matrix[runtime] = {
                     "status": "rejected",
                     "accepted": False,
                     "decision": "reject",
+                }
+            elif accepted and current.get("status") != "rejected":
+                matrix[runtime] = {
+                    "status": "accepted",
+                    "accepted": True,
+                    "decision": decision or "accept",
                 }
             elif current.get("status") == "missing":
                 matrix[runtime] = {

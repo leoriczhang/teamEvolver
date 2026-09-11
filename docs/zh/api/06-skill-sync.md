@@ -72,7 +72,7 @@ teamEvolver --> POST https://<agent-skill-sync-url>
 
 Skill Sync API Key 通过环境变量配置：`TEAMEVOLVER_AGENT_<AUTH_PROFILE>_SKILL_SYNC_API_KEY`（auth_profile 转为大写下划线格式）。早期 Pi Agent 版本兼容使用 `validation_agentshub_api_key` 配置。
 
-代码：`teamEvolver/integrations/skill_sync_adapters.py:18` (`_sync_api_key`)
+代码：`teamEvolver/integrations/skill_sync_adapters.py:_sync_api_key`
 
 **请求体（`teamevolver.skill-changed.v1`）：**
 
@@ -81,7 +81,7 @@ Skill Sync API Key 通过环境变量配置：`TEAMEVOLVER_AGENT_<AUTH_PROFILE>_
 | `schema_version` | string | 是 | `teamevolver.skill-changed.v1` |
 | `protocol_version` | string | 是 | `1.0` |
 | `event_id` | string | 是 | 事件唯一 ID（`skill_evt_<hash>`） |
-| `action` | string | 是 | 操作类型：`publish`（发布/更新）、`delete`（删除） |
+| `action` | string | 是 | 操作类型：`publish`（发布）、`update`（更新）、`rollback`（回滚）、`delete`（删除） |
 | `job_id` | string | 是 | 变更任务 ID（mutation_id） |
 | `skills` | array | 是 | 变更的 Skill 列表 |
 | `skills[].name` | string | 是 | Skill 名称 |
@@ -94,7 +94,7 @@ Skill Sync API Key 通过环境变量配置：`TEAMEVOLVER_AGENT_<AUTH_PROFILE>_
 
 **多租户过滤：** 如果 Agent 注册时在 `metadata.tenant_id` 中指定了租户 ID，teamEvolver 仅在该租户的 Skill 变更时向其发送回调。
 
-代码：`teamEvolver/integrations/skill_sync_adapters.py:41` (`_target_tenant_ids`)
+代码：`teamEvolver/integrations/skill_sync_adapters.py:_target_tenant_ids`
 
 ### 2.4 推送确认响应
 
@@ -123,16 +123,18 @@ teamEvolver 会验证：
 
 验证失败会标记为同步失败并进入重试队列。
 
-代码：`teamEvolver/integrations/skill_sync_adapters.py:63` (`_ack_matches`)
+代码：`teamEvolver/integrations/skill_sync_adapters.py:_ack_matches`
 
 ### 2.5 重试机制
 
 - 同步失败的事件会进入 outbox 队列，定期重试；
 - 基于 `next_retry_at` 时间戳判断是否到期重试；
 - Agent 被禁用或取消 `skill.sync.v1` capability 时，待投递事件标记为 `cancelled`；
-- Agent 注销时，相关事件标记为 `cancelled`。
+- Agent 注销时，相关事件标记为 `cancelled`；
+- 重试次数耗尽后，事件进入终态 `dead_letter`，可通过 `SkillMutationService.reconcile()` 或管理接口修复；
+- 重试与丢弃支持按 integration 粒度操作（`integration_id`）：丢弃会在投递记录上写入 `cancelled_at`/`cancelled_by`/`cancel_reason`，并在事件的 `audit` 列表追加流水。
 
-代码：`teamEvolver/integrations/skill_sync_adapters.py:115` (`_delivery_due`)
+代码：`teamEvolver/integrations/skill_sync_adapters.py:_delivery_due`
 
 ## 3. 使用示例
 
@@ -238,4 +240,4 @@ def handle_skill_sync():
 | POST | `/api/agent-integrations/skill-sync/{event_id}/retry` | 重试失败的同步事件（管理员） |
 | POST | `/api/agent-integrations/skill-sync/{event_id}/discard` | 丢弃失败的同步事件（管理员） |
 
-代码：`teamEvolver/proxy/routes.py:3405` (`/api/agent-integrations`)
+代码：`teamEvolver/proxy/routes.py:api_agent_integrations`

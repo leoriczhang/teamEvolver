@@ -12,7 +12,7 @@ Session 是一次 Agent 与用户围绕任务产生的完整交互记录。它�
 - **上下文使用（context_usage）**：记录该轮实际使用的上下文引用，包括 `context_snapshot_id`、`memory_refs`、`skill_refs`、`feedback`
 - **源材料（source_materials）**：用户上传的文件，以 base64 内嵌或通过沙箱快照路径引用
 
-Session Schema 的正式定义见 [agent-session-v1.schema.json](file:///home/zhangpengkun/teamEvolver/docs/schemas/agent-session-v1.schema.json)。
+Session Schema 的正式定义见 [agent-session-v1.schema.json](../../schemas/agent-session-v1.schema.json)。
 
 ## Session 采集管线（Ingest Pipeline）
 
@@ -21,23 +21,23 @@ Agent 在每次会话结束后通过 `POST /ingest_session` 接口上报 Session
 1. **身份校验**：验证 integration-scoped token，将 `integration_id + external_subject` 映射到 teamEvolver 用户
 2. **Schema 校验**：检查必需字段（schema_version、protocol_version、session_id、runtime、runtime_context、turns）
 3. **去重检测**：通过内容指纹（content_fingerprint）判断是否为已处理 Session 的重复提交。指纹结合轮次数和对话文本哈希计算，同一 Session 无新轮次时不重复入队
-4. **双写存储**：同时写入队列（`sessions/`）和归档（`session_archive/`），队列用于进化引擎消费，归档用于审计和历史回溯
-5. **索引更新**：维护 `session_index.json`，记录所有 Session 的元信息（标题、用户、轮次数、Token、工具调用数、价值判定结果）
-6. **过滤审计**：写入 `session_filter_audit/`，记录过滤决策
+4. **双写存储**：同时写入队列（`sessions/`）和归档（`session_archive/`），队列用于进化引擎消费，归档用于审计和历史回溯；进化引擎消费后排空归档同样保留 `value_judge` 与 `judge`（`teamEvolver/evolve/runtime/orchestrator.py:_archive_sessions`）
+5. **索引更新**：维护 `session_index.json`，记录所有 Session 的元信息（标题、用户、轮次数、Token、工具调用数、价值判定结果 `value_judge`，以及会话级评分 `judge` 的分数与各维度 reasons，`teamEvolver/session_store.py:_session_meta`）
+6. **过滤审计**：写入 `session_filter_audit/`，每条记录除元信息外还携带 `value_judge`（含判定模式 `mode`）与 `judge` 评分（`teamEvolver/session_store.py:save_filter_audit`）
 
 队列中的 Session 被进化引擎消费后，从队列中移除，但归档永久保留。
 
 ## Session 过滤与价值分类
 
-Session 进入进化队列前，由 `SessionValueClassifier` 进行价值判定，决定其是否进入 Skill Evolution 或 Memory Evolution 管线。
+Session 进入进化队列前，由 `SessionValueClassifier` 进行价值判定，决定其是否进入 Skill Evolution 管线。
 
 ### 判定类别
 
 | decision | 含义 | 去向 |
 |----------|------|------|
 | `valuable` | 包含可复用的团队级 Skill Evidence：执行过的工作流、具体成果、明确的 Skill 差距、领域流程、或用户对产出的反馈 | 进入 Skill Evolution 队列 |
-| `memory_candidate` | 有用的 Evidence 是用户特定偏好或习惯（而非团队 SOP），且对该用户未来任务可能持续有用 | 路由到 Memory Evolution（DreamCycle） |
-| `task_only` | 真实任务请求但尚无完成成果或可操作的进化 Evidence | 归档，等待更多 Evidence 累积 |
+| `memory_candidate` | 有用的 Evidence 是用户特定偏好或习惯（而非团队 SOP），且对该用户未来任务可能持续有用 | 跳过并归档。ingest 阶段不存在 Memory 进化路由（DreamCycle 已被取代）：凡 decision 不为 `valuable` 的会话一律跳过，`memory_candidates` 仅作为判定结果的一部分随 `value_judge` 记录（`teamEvolver/proxy/routes.py:_ingest_session_dict`） |
+| `task_only` | 真实任务请求但尚无完成成果或可操作的进化 Evidence | 跳过并归档，等待更多 Evidence 累积 |
 | `chitchat` | 社交、空对话或非任务交互 | 跳过，不进入进化 |
 
 ### 判定模式
@@ -134,8 +134,9 @@ Session 的 metrics 字段记录效率数据，是 True Replay 效率比较的�
 
 Session 存储使用内容指纹实现幂等写入：
 - 指纹由每轮的 prompt_text、response_text、runtime 类型/integration_id、context_usage（snapshot_id、memory_refs、skill_refs、feedback）共同计算
-- 同一 session_id 的重复上报，如果指纹不变（没有新轮次），则判定为重复，不重新入队
+- 同一 session_id 的重复上报会与归档中已有内容比对指纹（`teamEvolver/session_store.py:duplicate_of_processed`）：指纹不变（没有新轮次）则判定为重复，接口直接返回 `duplicate`，不重新入队
 - 如果指纹变化（新增轮次），则更新归档和队列，视为会话继续
+- 请求携带 `force_reprocess` 时绕过上述检查，强制重新处理
 
 这避免了 Agent 因重试或延迟上报导致同一对话重复进入进化管线。
 
@@ -143,10 +144,10 @@ Session 存储使用内容指纹实现幂等写入：
 
 | 模块 | 路径 |
 |------|------|
-| Session 存储与生命周期 | [session_store.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/session_store.py) |
-| Session 价值分类器 | [session_filter.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/session_filter.py) |
-| Session 材料收集 | [session_materials.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/session_materials.py) |
-| Session Schema 定义 | [docs/schemas/agent-session-v1.schema.json](file:///home/zhangpengkun/teamEvolver/docs/schemas/agent-session-v1.schema.json) |
+| Session 存储与生命周期 | [session_store.py](../../../teamEvolver/session_store.py) |
+| Session 价值分类器 | [session_filter.py](../../../teamEvolver/session_filter.py) |
+| Session 材料收集 | [session_materials.py](../../../teamEvolver/session_materials.py) |
+| Session Schema 定义 | [docs/schemas/agent-session-v1.schema.json](../../schemas/agent-session-v1.schema.json) |
 | Agent 接入协议（Session Ingest 部分） | [Protocol V1 规范](../agent-integrations/02-protocol-v1) |
 
 ## 相关文档
@@ -154,4 +155,4 @@ Session 存储使用内容指纹实现幂等写入：
 - [架构总览](./01-architecture)：Session Ingest 在架构中的位置
 - [进化闭环](./02-evolution-loop)：Session 如何驱动进化闭环
 - [True Replay](./06-true-replay)：Session 作为 True Replay 的 Case 来源
-- [Memory 体系](./04-memory)：memory_candidate 类 Session 的去向
+- [Memory 体系](./04-memory)：Memory 体系概览

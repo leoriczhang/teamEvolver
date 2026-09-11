@@ -25,9 +25,9 @@ teamEvolver API uses three authentication mechanisms, plus a small set of unauth
 
 ### Control Plane Key
 
-The key configured via the `EVOLVE_INGEST_API_KEY` environment variable, used for registering new Agents. This has the highest privilege level and must be kept secure. If this variable is not configured, the V1 registration endpoint returns a 503 error.
+The key configured via the `EVOLVE_INGEST_API_KEY` environment variable, used for registering new Agents. This has the highest privilege level and must be kept secure. When this variable is unset, the V1 registration endpoint performs no authentication and registration requests proceed unauthenticated (always configure it in production); when the provided key does not match the configured one, 401 is returned.
 
-Code entry point: `teamEvolver/proxy/routes.py:768` (`_check_v1_control_plane_key`)
+Code entry point: `teamEvolver/proxy/routes.py:_check_ingest_api_key`
 
 ### Agent Access Token
 
@@ -47,7 +47,7 @@ Code entry point: `teamEvolver/integrations/agent_registry.py:259` (`verify_agen
 
 An HttpOnly Cookie obtained after logging in via `/api/auth/login`, valid for 24 hours. Management interfaces under the `/api/*` path require this authentication, with additional permission checks for admin users.
 
-Code entry point: `teamEvolver/proxy/routes.py:1699` (`require_console_auth` middleware)
+Code entry point: `teamEvolver/proxy/routes.py:require_console_auth` middleware
 
 ## Versioning
 
@@ -117,8 +117,14 @@ The following `/api/*` endpoints serve the built-in console and require a consol
 | `/api/openviking/workspace/*` | Workspace browsing, L0/L1, conditional batch writes, and CLI | [Storage Layout](../concepts/09-storage-layout.md) |
 | `/api/skill-lab/*`, `/api/openviking/memory/*` | Skill/Memory experiments and True Replay | [Web Console](../guides/03-console.md) |
 | `/api/mining/*` | Knowledge sources, mining jobs, artifacts, and LIFT | [Skill Miner Guide](../guides/07-skill-miner.md) |
-| `/api/langfuse-config`, `/langfuse/*` | Langfuse configuration, pull, mapping, and status | [Observability Guide](../guides/04-observability.md) |
+| `/api/langfuse-config`, `/api/langfuse-tracing-config`, `/langfuse/*` | Tenant sources, global tracing, pull, mapping, and status | [Observability Guide](../guides/04-observability.md) |
 | `/api/docs/*` | Built-in document tree, page reads, and search | [Documentation Maintenance](./99-docs-maintenance.md) |
+| `/api/sharing-config`, `/api/evolve-model`, `/api/evolve-model/test`, `/api/evolve-settings` | Sharing/local-fallback storage config, evolution model config (with connectivity test), and evolution settings | [Web Console](../guides/03-console.md) |
+| `/api/session-filter/audit`, `/api/mined-skills`, `/api/mined-skills/{name}/submit` | Session filter audit queries, mining artifact queries and submission | [Skill Miner Guide](../guides/07-skill-miner.md) |
+| `/api/openviking-accounts`, `/api/openviking-accounts/{account}/users`, `/api/openviking-accounts/{account}/import-users` | OpenViking account list, account users, and user import | [Web Console](../guides/03-console.md) |
+| `/sessions`, `/conversations`, `/conversations/export`, `/conversations/status`, `/conversations/{session_id}`, `/conversations/{session_id}/process`, `/history` | Console Session/conversation browsing, export, processing status, and history queries | [Session Queries](./08-sessions-api.md) |
+| `/v1/models`, `/v1/chat/completions` | OpenAI-compatible model proxy (model listing and chat completions) | — |
+| `/internal/agentshub/openviking-config`, `/internal/reload-skills` | AgentsHub internal config delivery, Skill runtime reload | — |
 
 ### Documentation Maintenance
 

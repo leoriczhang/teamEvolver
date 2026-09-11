@@ -66,7 +66,7 @@ The Langfuse page manages two independent paths:
 - **Inbound Session pull** previews and imports Sessions filtered by environment, user, tags, release, version, or trace name.
 - **Outbound tracing** records teamEvolver's internal model and tool calls.
 
-Administrators can also edit `map_trace(trace, observations)`, dry-run it against a bundled sample or pasted Trace, and compare custom output with the built-in mapping. A mapper error falls back for that Session without aborting the whole import.
+Administrators can also manage per-agent entries in the "Mapper Registry" panel: each entry carries routing constraints (trace-name patterns, tags, sessionId patterns — first match in list order wins) and mapping code (optionally a `map_session` session hook). Per-entry template insertion and dry-run (including route-match feedback) plus a panel-level "Route Preview" (paste a sample Trace to see the whole registry's routing outcome) are supported. A mapper error falls back for that trace without aborting the whole import.
 
 ### Evolution Pipeline
 

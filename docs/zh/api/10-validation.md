@@ -66,7 +66,7 @@ True Replay 引擎：`teamEvolver/true_replay.py`
 
 **缓存：** 候选列表缓存 15 秒。
 
-代码入口：`teamEvolver/proxy/routes.py:4040` (`api_validation_candidates`)
+代码入口：`teamEvolver/proxy/routes.py:api_validation_candidates`
 
 ---
 
@@ -84,7 +84,7 @@ True Replay 引擎：`teamEvolver/true_replay.py`
 
 **响应：** 完整 candidate 对象，包含 `current_skill_md`、`candidate_skill_md`、`skill_diff` 和 `evaluation` 详情。
 
-代码入口：`teamEvolver/proxy/routes.py:4077` (`api_validation_candidate_detail`)
+代码入口：`teamEvolver/proxy/routes.py:api_validation_candidate_detail`
 
 ---
 
@@ -110,7 +110,7 @@ True Replay 引擎：`teamEvolver/true_replay.py`
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `status` | string | `evaluated` |
+| `status` | string | 评估状态：`evaluated`（已评估）、`failed`（分支失败或 parity 校验违规）、`skipped`（用例不可重放）、`not_found`（任务不存在） |
 | `skill_name` | string | Skill 名称 |
 | `recommended_publish` | boolean | 是否推荐发布 |
 | `replay.verdict` | string | 判定结果 |
@@ -118,15 +118,20 @@ True Replay 引擎：`teamEvolver/true_replay.py`
 | `replay.cases` | array | 各测试用例的 baseline/candidate 对比 |
 | `replay.cases[].baseline` | object | 基线分支结果 |
 | `replay.cases[].candidate` | object | 候选分支结果 |
+| `replay.cases[].baseline.interactions` | array | 逐轮交互记录（prompt、response、tool_call_count、checklist_report 等） |
+| `replay.cases[].baseline.artifacts` | array | 分支产物列表 |
+| `replay.cases[].baseline.artifact_gap_report` | object | 产物缺口报告 |
 | `replay.efficiency` | object | 效率对比（dimensions 包含 turns/tool_calls/tokens 的 baseline/candidate/delta/winner） |
 | `replay.checklist` | object | Checklist 对比 |
 | `candidate_skill_md` | string | 候选内容 |
 | `current_skill_md` | string | 当前内容 |
 | `skill_diff` | string | diff |
 
+服务端驱动模式的分支结果还包含 `metrics_incomplete`（任一轮指标不完整时为 true）。对于服务端驱动的远程分支，`context_input_hash`（仅覆盖分支不变输入）和 `execution_manifest_hash` 由服务端计算，并校验 baseline/candidate 跨分支一致；不一致时评估以 `CONTEXT_PARITY_VIOLATION` 或 `EXECUTION_PARITY_VIOLATION` 失败（fail-closed）。
+
 **Replay 执行超时：** 由环境变量 `TEAMEVOLVER_TRUE_REPLAY_TIMEOUT_S` 控制（默认 90 秒），最大交互轮次由 `TEAMEVOLVER_TRUE_REPLAY_MAX_INTERACTIONS` 控制（默认 4）。
 
-代码入口：`teamEvolver/proxy/routes.py:4082` (`api_validation_candidate_evaluate`)
+代码入口：`teamEvolver/proxy/routes.py:api_validation_candidate_evaluate`（评估逻辑：`teamEvolver/true_replay.py:evaluate_job`）
 
 ---
 
@@ -170,7 +175,7 @@ True Replay 引擎：`teamEvolver/true_replay.py`
 | `accepted` | boolean | `false` |
 | `reason` | string | 驳回原因 |
 
-代码入口：`teamEvolver/proxy/routes.py:4096` (`api_validation_candidate_validate`)
+代码入口：`teamEvolver/proxy/routes.py:api_validation_candidate_validate`
 
 ---
 
@@ -186,7 +191,7 @@ True Replay 引擎：`teamEvolver/true_replay.py`
 |------|------|------|------|
 | `job_id` | string | 是 | 任务 ID |
 
-代码入口：`teamEvolver/proxy/routes.py:4168` (`api_validation_candidate_delete`)
+代码入口：`teamEvolver/proxy/routes.py:api_validation_candidate_delete`
 
 ---
 

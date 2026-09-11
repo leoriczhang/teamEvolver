@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..storage.admin_kv import read_kv, write_kv
+
 _STATE_LOCK = threading.RLock()
 _DEFAULT_REF_TTL_SECONDS = 900
 
@@ -50,16 +52,24 @@ class ContextStateStore:
 
     def __init__(self, config: Any) -> None:
         root = _state_dir(config)
+        self._config = config
         self.path = root / "agent_context_state.json"
         self.audit_path = root / "agent_context_audit.jsonl"
 
     def _load(self) -> dict[str, Any]:
-        if not self.path.exists():
-            return {"schema_version": 1, "refs": {}, "sessions": {}}
+        # Primary: PG-backed kv (per-tenant RLS isolated).
+        data: dict[str, Any] = {}
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8") or "{}")
-        except (OSError, json.JSONDecodeError):
+            data = read_kv(self._config, "agent_context_state.json", self.path)
+        except Exception:
             data = {}
+        if not data:
+            if not self.path.exists():
+                return {"schema_version": 1, "refs": {}, "sessions": {}}
+            try:
+                data = json.loads(self.path.read_text(encoding="utf-8") or "{}")
+            except (OSError, json.JSONDecodeError):
+                data = {}
         if not isinstance(data, dict):
             data = {}
         if not isinstance(data.get("refs"), dict):
@@ -80,6 +90,12 @@ class ContextStateStore:
         return data
 
     def _save(self, data: dict[str, Any]) -> None:
+        # Primary: PG-backed kv (per-tenant RLS isolated); file is always written too.
+        try:
+            write_kv(self._config, "agent_context_state.json", self.path, data)
+            return
+        except Exception:
+            pass
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".json.tmp")
         temporary.write_text(

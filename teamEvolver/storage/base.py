@@ -15,6 +15,10 @@ prefixes (see :func:`peer_key_prefix`).
 An in-process :class:`~teamEvolver.storage.memory.InMemoryObjectStore` also
 implements this contract, but it is reserved for unit tests and the evolve
 engine's ``mock`` mode — it is never a user-selectable sharing backend.
+
+A filesystem-backed :class:`~teamEvolver.storage.local.LocalObjectStore`
+implements the same contract as teamEvolver's built-in storage: the automatic
+fallback when the configured OpenViking deployment is unavailable.
 """
 
 from __future__ import annotations
@@ -51,12 +55,17 @@ def read_bytes(data: bytes | str | io.IOBase) -> bytes:
 def normalize_backend(backend: str | None, *, endpoint: str = "", local_root: str = "") -> str:
     """Map user-facing aliases into the concrete backend names we support.
 
-    Only ``viking`` is supported (cloud or local OpenViking). ``local_root`` is
-    accepted for signature compatibility but no longer selects a filesystem
-    backend; when a viking alias or endpoint is present the result is
+    ``viking`` (cloud or local OpenViking) is the primary backend; ``local``
+    selects the built-in filesystem store (teamEvolver's own storage), which is
+    also the automatic fallback when OpenViking is unavailable. ``local_root``
+    is accepted for signature compatibility but does not by itself select the
+    local backend; when a viking alias or endpoint is present the result is
     ``"viking"``, otherwise the empty string.
     """
     value = str(backend or "").strip().lower().replace("_", "-")
+    local_aliases = {"local", "localfs", "local-fs", "filesystem", "fs", "builtin", "built-in"}
+    if value in local_aliases:
+        return "local"
     aliases = {
         "openviking": "viking",
         "open-viking": "viking",
@@ -65,10 +74,16 @@ def normalize_backend(backend: str | None, *, endpoint: str = "", local_root: st
         return "viking"
     if value == "viking":
         return "viking"
+    # PostgreSQL local-state backend (multi-tenancy plan §2.4).
+    if value in {"pg", "postgres", "postgresql"}:
+        return "postgres"
     if value:
-        # Unknown/legacy backend names collapse to the single supported backend.
+        # Unknown/legacy backend names collapse to the viking backend.
         return "viking"
-    if endpoint:
+    # No explicit backend: only a memory:// endpoint selects viking (test
+    # buckets); a plain endpoint with no backend means "not configured" —
+    # per-purpose callers default to the built-in local backend.
+    if str(endpoint or "").strip().lower().startswith("memory://"):
         return "viking"
     return ""
 

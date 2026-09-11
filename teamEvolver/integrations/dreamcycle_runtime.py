@@ -17,6 +17,7 @@ from ..dreamcycle.config import (
 from ..dreamcycle.jobs import ALL_JOBS
 from ..dreamcycle.logging_config import setup_embedded_logging
 from ..dreamcycle.memory_replay import MemoryTrueReplayRunner
+from ..dreamcycle.memory_changes import MemoryChangeLedger
 from ..dreamcycle.scheduler import Scheduler
 from .dreamcycle import (
     collect_personal_source_keys,
@@ -117,6 +118,56 @@ class FullDreamCycleSupervisor:
             if not str(value or "").strip()
         ]
 
+    @staticmethod
+    def _viking_config(config: Any) -> OpenVikingConfig:
+        """Build an ``OpenVikingConfig`` from a (possibly tenant-scoped) config."""
+        team_key = str(
+            getattr(config, "sharing_viking_team_api_key", "")
+            or getattr(config, "sharing_viking_api_key", "")
+            or ""
+        ).strip()
+        account, encoded_team_user = parse_openviking_key(team_key)
+        return OpenVikingConfig(
+            endpoint=str(
+                getattr(config, "sharing_viking_endpoint", "") or ""
+            ),
+            api_key=team_key,
+            account=(
+                account
+                or str(
+                    getattr(config, "sharing_viking_account", "")
+                    or "default"
+                )
+            ),
+            agent_id=(
+                encoded_team_user
+                or str(
+                    getattr(config, "sharing_viking_user", "")
+                    or "default"
+                )
+            ),
+            source_api_keys=collect_personal_source_keys(config),
+            source_users=collect_personal_source_users(config),
+            agent=str(
+                getattr(config, "dreamcycle_viking_agent", "")
+                or "teamEvolver-dreamcycle"
+            ),
+            customer_id=str(
+                getattr(config, "dreamcycle_customer_id", "") or ""
+            ),
+        )
+
+    def _tenant_ledger(self, config: Any) -> MemoryChangeLedger:
+        """Build a per-tenant ``MemoryChangeLedger`` from a tenant-scoped config.
+
+        The global supervisor's scheduler/ledger is built once from
+        ``self.config`` (the process-level default config).  When the console
+        admin switches tenants, the read-only ``memory_changes`` /
+        ``memory_replays`` endpoints must read from the target tenant's storage
+        namespace, so we build a fresh ledger from the tenant-effective config.
+        """
+        return MemoryChangeLedger.from_config(self._viking_config(config))
+
     def _selected_job_classes(self) -> list[type]:
         configured = getattr(self.config, "dreamcycle_enabled_jobs", None)
         if isinstance(configured, (list, tuple, set)):
@@ -136,54 +187,8 @@ class FullDreamCycleSupervisor:
                 or _STATE_DIR
             )
         ).expanduser()
-        team_key = str(
-            getattr(self.config, "sharing_viking_team_api_key", "")
-            or getattr(self.config, "sharing_viking_api_key", "")
-            or ""
-        ).strip()
-        account, encoded_team_user = parse_openviking_key(team_key)
         dreamcycle_config = DreamCycleConfig(
-            viking=OpenVikingConfig(
-                endpoint=str(
-                    getattr(self.config, "sharing_viking_endpoint", "") or ""
-                ),
-                api_key=team_key,
-                account=(
-                    account
-                    or str(
-                        getattr(
-                            self.config,
-                            "sharing_viking_account",
-                            "",
-                        )
-                        or "default"
-                    )
-                ),
-                agent_id=(
-                    encoded_team_user
-                    or str(
-                        getattr(
-                            self.config,
-                            "sharing_viking_user",
-                            "",
-                        )
-                        or "default"
-                    )
-                ),
-                source_api_keys=collect_personal_source_keys(self.config),
-                source_users=collect_personal_source_users(self.config),
-                agent=str(
-                    getattr(
-                        self.config,
-                        "dreamcycle_viking_agent",
-                        "",
-                    )
-                    or "teamEvolver-dreamcycle"
-                ),
-                customer_id=str(
-                    getattr(self.config, "dreamcycle_customer_id", "") or ""
-                ),
-            ),
+            viking=self._viking_config(self.config),
             llm=LLMConfig(
                 base_url=str(
                     getattr(self.config, "dreamcycle_llm_base_url", "")
@@ -491,12 +496,25 @@ class FullDreamCycleSupervisor:
             ],
         }
 
-    def memory_changes(self, *, limit: int = 100) -> dict[str, Any]:
-        changes = self._scheduler._change_ledger.list_changes(
-            limit=max(1, min(500, int(limit))),
-        )
+    def memory_changes(
+        self,
+        *,
+        limit: int = 100,
+        config: Any = None,
+    ) -> dict[str, Any]:
+        # When a tenant-scoped config is provided (admin tenant switch),
+        # read from a per-tenant ledger instead of the global default one.
+        if config is not None:
+            ledger = self._tenant_ledger(config)
+            changes = ledger.list_changes(limit=max(1, min(500, int(limit))))
+            replays = ledger.list_replays(limit=10000)
+        else:
+            changes = self._scheduler._change_ledger.list_changes(
+                limit=max(1, min(500, int(limit))),
+            )
+            replays = self._memory_replay.list_replays(limit=10000)
         latest_by_change: dict[str, dict[str, Any]] = {}
-        for replay in self._memory_replay.list_replays(limit=10000):
+        for replay in replays:
             change_id = str(replay.get("change_id") or "")
             if change_id and change_id not in latest_by_change:
                 latest_by_change[change_id] = replay
@@ -519,7 +537,22 @@ class FullDreamCycleSupervisor:
         source_session_id: str = "",
         max_interactions: int = 4,
         timeout_seconds: int = 600,
+        config: Any = None,
     ) -> dict[str, Any]:
+        if config is not None:
+            ledger = self._tenant_ledger(config)
+            runner = MemoryTrueReplayRunner(
+                ledger=ledger,
+                app_config=config,
+            )
+            return runner.run(
+                change_id=change_id,
+                query=query,
+                checklist=checklist,
+                source_session_id=source_session_id,
+                max_interactions=max_interactions,
+                timeout_seconds=timeout_seconds,
+            )
         return self._memory_replay.run(
             change_id=change_id,
             query=query,
@@ -541,7 +574,26 @@ class FullDreamCycleSupervisor:
         source_session_id: str = "",
         max_interactions: int = 4,
         timeout_seconds: int = 600,
+        config: Any = None,
     ) -> dict[str, Any]:
+        if config is not None:
+            from ..dreamcycle.memory_replay import MemoryTrueReplayRunner
+            ledger = self._tenant_ledger(config)
+            runner = MemoryTrueReplayRunner(
+                ledger=ledger,
+                app_config=config,
+            )
+            return runner.run_adhoc(
+                memory_path=memory_path,
+                before_content=before_content,
+                after_content=after_content,
+                query=query,
+                checklist=checklist,
+                scope=scope,
+                source_session_id=source_session_id,
+                max_interactions=max_interactions,
+                timeout_seconds=timeout_seconds,
+            )
         return self._memory_replay.run_adhoc(
             memory_path=memory_path,
             before_content=before_content,
@@ -559,11 +611,19 @@ class FullDreamCycleSupervisor:
         *,
         change_id: str,
         limit: int = 100,
+        config: Any = None,
     ) -> dict[str, Any]:
-        items = self._memory_replay.list_replays(
-            change_id=change_id,
-            limit=max(1, min(500, int(limit))),
-        )
+        if config is not None:
+            ledger = self._tenant_ledger(config)
+            items = ledger.list_replays(
+                change_id=change_id,
+                limit=max(1, min(500, int(limit))),
+            )
+        else:
+            items = self._memory_replay.list_replays(
+                change_id=change_id,
+                limit=max(1, min(500, int(limit))),
+            )
         return {
             "schema_version": "teamevolver.memory-true-replay-list.v1",
             "change_id": change_id,

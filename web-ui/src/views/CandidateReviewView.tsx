@@ -9,7 +9,7 @@ import {
   usePagedItems,
 } from "@/components/common";
 import { Button } from "@/components/ui/button";
-import { api, type Candidate, type EvalResult } from "@/api/client";
+import { api, hydrateCandidates, type Candidate, type EvalResult } from "@/api/client";
 import { toastErr, toastOk } from "@/lib/toast";
 import CandidateModal from "./dashboard/CandidateModal";
 
@@ -69,6 +69,9 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
   const [loading, setLoading] = useState(false);
   const evaluatingRef = useRef<Record<string, boolean>>({});
   const evalCacheRef = useRef<Record<string, EvalResult>>({});
+  // job_id -> last loaded full candidate detail; polled list items are
+  // rehydrated from this so an open modal never loses its content.
+  const candDetailRef = useRef<Record<string, Candidate>>({});
   evaluatingRef.current = evaluating;
   evalCacheRef.current = evalCache;
 
@@ -77,6 +80,7 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
       const detail = await api<Candidate>(
         `/api/validation/candidates/${encodeURIComponent(jobId)}/detail`
       );
+      candDetailRef.current[jobId] = detail;
       setCands((items) => mergeCandidateDetail(items, detail));
       if (detail.evaluation) {
         setEvalCache((m) => ({ ...m, [jobId]: detail.evaluation as EvalResult }));
@@ -92,6 +96,18 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
     setOpenJobId(jobId);
     void loadCandidateDetail(jobId);
   }, [loadCandidateDetail]);
+
+  // After an in-modal edit the backend bumps the candidate revision and drops
+  // the cached evaluation, so clear the local cache and adopt the fresh detail.
+  const handleCandidateUpdated = useCallback(async (detail: Candidate) => {
+    candDetailRef.current[detail.job_id] = detail;
+    setCands((items) => mergeCandidateDetail(items, detail));
+    setEvalCache((m) => {
+      const n = { ...m };
+      delete n[detail.job_id];
+      return n;
+    });
+  }, []);
 
   const evaluate = useCallback(async (jobId: string, force: boolean) => {
     if (evaluatingRef.current[jobId]) return;
@@ -128,7 +144,13 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
     try {
       const query = scope === "processed" ? "?scope=processed" : "";
       const data = await api<{ candidates: Candidate[] }>(`/api/validation/candidates${query}`);
-      const next = data.candidates || [];
+      // Under load the backend may briefly fail to read the candidate store
+      // and answer 200 with zero items; keep the on-screen list in that case.
+      const raw = data.candidates || [];
+      if (raw.length === 0 && cands.length > 0) {
+        return;
+      }
+      const next = hydrateCandidates(raw, candDetailRef.current);
       const serverEvaluations: Record<string, EvalResult> = {};
       for (const c of next) {
         if (c.evaluation) serverEvaluations[c.job_id] = c.evaluation;
@@ -150,7 +172,7 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
     } finally {
       setLoading(false);
     }
-  }, [evaluate, scope]);
+  }, [cands.length, evaluate, scope]);
 
   useEffect(() => {
     if (active) {
@@ -355,6 +377,7 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
           if (!openJobId || isProcessedCandidate(openCand)) return;
           evaluate(openJobId, force);
         }}
+        onUpdated={handleCandidateUpdated}
       />
     </div>
   );

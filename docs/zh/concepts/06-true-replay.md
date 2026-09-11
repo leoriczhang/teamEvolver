@@ -56,7 +56,10 @@ True Replay 不在主服务进程中执行 Agent，而是为每个分支创建�
 
 ### 远程 Agent Runtime
 
-对于注册了 `replay.branch.v1` 能力的外部 Agent（如 Pi Agent），True Replay 通过 HTTP 适配器发送 Replay 请求到 Agent 的 replay endpoint，由 Agent Runtime 负责隔离执行。外部 Runtime 必须实现协议规定的隔离要求。
+对于注册了 `replay.branch.v1` 能力的外部 Agent（如 Pi Agent），True Replay 通过 HTTP 适配器与 Agent 的 replay endpoint 通信，由 Agent Runtime 负责隔离执行。外部 Runtime 必须实现协议规定的隔离要求。远程执行有两种模式：
+
+- **服务端驱动模式（主模式）**：Agent 注册时声明 `orchestration: "server_driven"`，teamEvolver 通过 `teamEvolver/integrations/replay_adapters.py:TurnBasedReplayAdapter` 每个交互轮次调用一次 Agent 的 turn 端点（capability 定义了 `request_template` 时改用 `MappedHttpAdapter`）。多轮循环由服务端编排，Checklist 从不发送给 Agent；服务端基于 Agent 每轮返回的 `messages` 和 `artifacts` 评估 Checklist，并聚合逐轮指标。
+- **单次请求模式（回退）**：未声明 `orchestration` 的注册走 `teamEvolver/integrations/replay_adapters.py:HttpReplayAdapter` 单次同步请求，Agent 自行完成多轮执行并返回聚合结果。
 
 ## 冻结 Context 与 Snapshot Hash
 
@@ -64,10 +67,10 @@ True Replay 使用 Context Snapshot 确保两个分支看到完全一致的上�
 
 1. **Snapshot 加载**：从源 Session 的 `context_usage.context_snapshot_id` 加载冻结的 Context 投影
 2. **Treatment 替换**：对于 Skill Replay，移除被验证 Skill 的现有版本，注入 Baseline/Candidate 各自的 Skill 内容；对于 Memory Replay，移除被变更的 Memory 条目，注入 before/after 内容
-3. **Hash 校验**：每个分支的 context_snapshot 计算 `shared_context_hash` 和 `context_input_hash`，确保分支间共享上下文一致，仅 treatment 部分不同
-4. **运行时注入**：冻结的 Snapshot 通过 Replay 请求传递给 Agent Runtime，Agent 必须使用收到的 Snapshot 而非实时拉取上下文
+3. **Hash 校验**：对于服务端驱动的远程分支，服务端对分支不变的共享上下文计算 `context_input_hash`，对 `execution_manifest` 计算 `execution_manifest_hash`，并校验 baseline/candidate 跨分支一致（不一致时以 `CONTEXT_PARITY_VIOLATION`/`EXECUTION_PARITY_VIOLATION` 失败）
+4. **运行时注入**：冻结的 Snapshot 通过 Replay 请求（服务端驱动模式下作为第 1 轮的 `context_snapshot` 字段）传递给 Agent Runtime，Agent 必须使用收到的 Snapshot 而非实时拉取上下文
 
-Protocol V1 要求 Agent Runtime 返回 `context_input_hash`，与服务端计算的 hash 不匹配时结果 fail-closed。
+服务端驱动模式下 `context_input_hash` 与 `execution_manifest_hash` 均由服务端计算，Agent 无需返回；Memory Replay 的 `shared_context_hash` 和 before/after treatment hash 同样在服务端计算。
 
 ## 渐进披露协议（Progressive Disclosure）
 
@@ -145,12 +148,12 @@ DreamCycle 产出的团队 Memory Change（合并、去重、清理后的 Memory
 
 ### 安全与一致性保障
 
-- **Hash 校验**：每个分支返回 `context_input_hash`，与服务端计算的 `shared_context_hash + treatment_hash` 不匹配时 fail-closed
+- **Hash 校验**：服务端计算 `shared_context_hash` 和 before/after treatment hash，并校验分支间一致性，不一致时 fail-closed
 - **before/after 非空校验**：若 before 与 after 内容完全相同（hash 相等），拒绝执行无意义的 Replay
 - **Checklist 最小化**：Memory Replay 要求至少 1 个 Checklist 项，最多 50 项，query 长度上限 32000 字符
 - **运行时选择**：从源 Session 的 `runtime_type` 解析可用的 Replay 端点，本地 Hermes 走沙箱执行，远程 Agent（如 Pi Agent）走 HTTP Replay 适配器
 
-代码入口：[dreamcycle/memory_replay.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/dreamcycle/memory_replay.py) 中的 `MemoryTrueReplayRunner`。
+代码入口：[dreamcycle/memory_replay.py](../../../teamEvolver/dreamcycle/memory_replay.py) 中的 `MemoryTrueReplayRunner`。
 
 ## 外部工具重放（Fail-Closed 策略）
 
@@ -239,13 +242,15 @@ Broker 的 worker_base_url 返回 `http://127.0.0.1:{port}/upstream`，Sidecar �
 
 | 模块 | 路径 |
 |------|------|
-| True Replay 核心 | [true_replay.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/true_replay.py) |
-| 渐进披露与 Checklist 决策 | [progressive_replay.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/progressive_replay.py) |
-| Replay Model Broker | [integrations/replay_model_broker.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/integrations/replay_model_broker.py) |
-| Replay HTTP 适配器 | [integrations/replay_adapters.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/integrations/replay_adapters.py) |
-| 效率指标比较 | [replay_metrics.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/replay_metrics.py) |
-| Memory True Replay | [dreamcycle/memory_replay.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/dreamcycle/memory_replay.py) |
-| Agent 注册与运行时解析 | [integrations/agent_registry.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/integrations/agent_registry.py) |
+| True Replay 核心 | [true_replay.py](../../../teamEvolver/true_replay.py) |
+| 渐进披露与 Checklist 决策 | [progressive_replay.py](../../../teamEvolver/progressive_replay.py) |
+| Replay Model Broker | [integrations/replay_model_broker.py](../../../teamEvolver/integrations/replay_model_broker.py) |
+| Replay HTTP 适配器 | [integrations/replay_adapters.py](../../../teamEvolver/integrations/replay_adapters.py) |
+| 效率指标比较 | [replay_metrics.py](../../../teamEvolver/replay_metrics.py) |
+| Memory True Replay | [dreamcycle/memory_replay.py](../../../teamEvolver/dreamcycle/memory_replay.py) |
+| Agent 注册与运行时解析 | [integrations/agent_registry.py](../../../teamEvolver/integrations/agent_registry.py) |
+| Agent 侧 Replay Turn 服务 | [scripts/replay_turn_server.py](../../../scripts/replay_turn_server.py) |
+| Replay Turn 协议 schema | `teamevolver.replay-turn-request.v1` / `teamevolver.replay-turn-result.v1`（定义于 `teamEvolver/integrations/agent_protocol.py`） |
 | Protocol V1 Replay Branch 规范 | [Protocol V1 规范](../agent-integrations/02-protocol-v1) |
 
 ## 相关文档

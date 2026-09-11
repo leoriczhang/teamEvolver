@@ -13,6 +13,7 @@ from typing import Any, Iterable, Mapping
 
 from ..storage import (
     InMemoryObjectStore,
+    LocalObjectStore,
     OpenVikingSnapshotClient,
     SnapshotError,
     SnapshotNotFoundError,
@@ -86,13 +87,17 @@ class MemoryChangeLedger:
                 viking_agent=config.agent or "teamEvolver-dreamcycle",
                 viking_api_key=config.api_key,
                 viking_root_prefix="team-skill-evolver",
+                allow_fallback=True,
             )
             if endpoint
             else InMemoryObjectStore("unconfigured-dreamcycle-ledger")
         )
         snapshot = (
             None
-            if not endpoint or is_memory_endpoint(endpoint)
+            # When the object store fell back to the built-in local backend,
+            # the OpenViking endpoint is down — the snapshot client would only
+            # hammer a dead server, so snapshot capture is disabled too.
+            if not endpoint or is_memory_endpoint(endpoint) or isinstance(store, LocalObjectStore)
             else OpenVikingSnapshotClient(
                 endpoint=endpoint,
                 api_key=config.api_key,

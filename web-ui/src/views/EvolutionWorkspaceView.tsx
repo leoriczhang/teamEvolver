@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Brain, Sparkles } from "lucide-react";
 
 import type { UserProfile } from "@/api/client";
@@ -16,17 +16,28 @@ const TABS = [
 export default function EvolutionWorkspaceView({
   active,
   user,
+  openVikingConfigured,
 }: {
   active: boolean;
   user?: UserProfile | null;
+  openVikingConfigured: boolean;
 }) {
   const [tab, setTab] = useState<EvolutionTab>("skills");
+  const visibleTabs = openVikingConfigured
+    ? TABS
+    : TABS.filter(({ key }) => key !== "memory");
+
+  useEffect(() => {
+    if (!openVikingConfigured && tab === "memory") {
+      setTab("skills");
+    }
+  }, [openVikingConfigured, tab]);
 
   return (
     <div>
       <div className="section-tabs pt-2.5">
         <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="进化链路">
-          {TABS.map(({ key, label, icon: Icon }) => (
+          {visibleTabs.map(({ key, label, icon: Icon }) => (
             <button
               key={key}
               type="button"
@@ -50,9 +61,11 @@ export default function EvolutionWorkspaceView({
       <div className={cn(tab !== "skills" && "hidden")}>
         <PromptStudioView active={active && tab === "skills"} user={user} />
       </div>
-      <div className={cn(tab !== "memory" && "hidden")}>
-        <TeamMemoryAggregationView active={active && tab === "memory"} user={user} />
-      </div>
+      {openVikingConfigured && (
+        <div className={cn(tab !== "memory" && "hidden")}>
+          <TeamMemoryAggregationView active={active && tab === "memory"} user={user} />
+        </div>
+      )}
     </div>
   );
 }

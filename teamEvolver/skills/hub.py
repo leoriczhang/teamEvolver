@@ -22,10 +22,15 @@ import logging
 import os
 import shutil
 from datetime import datetime, timezone
-from typing import Any, Collection, Optional
+from typing import TYPE_CHECKING, Any, Collection, Optional
+
+if TYPE_CHECKING:
+    from .mirror import VikingSkillMirror
 
 from ..storage import (
     _VIKING_ROOT_PREFIX,
+    LocalObjectStore,
+    PgObjectStore,
     build_object_store,
     is_not_found_error,
     normalize_backend,
@@ -69,14 +74,27 @@ class SkillHub:
         viking_root_prefix: str = "",
         viking_group_id: str = "",
         viking_namespace: str = "resources",
+        allow_fallback: bool = False,
+        fallback_root: str = "",
+        mirror_spool_dir: str = "",
+        # PostgreSQL local-state backend (used when backend == "postgres").
+        # Empty pg_dsn derives from the OV_PG_* environment variables.
+        pg_dsn: str = "",
+        pg_schema: str = "teamevolver",
+        pg_pool_min: int = 2,
+        pg_pool_max: int = 20,
+        pg_command_timeout: float = 30.0,
+        tenant_id: str = "default",
     ):
-        # ``local_root`` is accepted for backward-compatible call sites but no
-        # longer used: the only backend is OpenViking (cloud or local
-        # self-hosted), selected purely by endpoint.
+        # ``local_root`` selects the root of the built-in local backend and
+        # doubles as an alias for ``fallback_root``: when ``allow_fallback``
+        # is set and the configured OpenViking endpoint is unavailable, the
+        # bucket becomes teamEvolver's own filesystem store.
         effective_endpoint = endpoint or viking_endpoint
         self._bucket = build_object_store(
             backend=backend,
             endpoint=effective_endpoint,
+            local_root=local_root,
             viking_account=viking_account,
             viking_user=viking_user,
             viking_agent=viking_agent,
@@ -85,10 +103,84 @@ class SkillHub:
             viking_root_prefix=viking_root_prefix,
             viking_group_id=viking_group_id,
             viking_namespace=viking_namespace,
+            allow_fallback=allow_fallback,
+            fallback_root=fallback_root,
+            pg_dsn=pg_dsn,
+            pg_schema=pg_schema,
+            pg_pool_min=pg_pool_min,
+            pg_pool_max=pg_pool_max,
+            pg_command_timeout=pg_command_timeout,
+            tenant_id=tenant_id,
         )
         # Per-customer (peer) scope for isolated artifacts. Empty = agent level.
         self._customer_id = str(customer_id or "").strip("/")
         self._user_alias = user_alias or os.environ.get("USER", "anonymous")
+        # Tenant scope: non-default tenants get a key prefix so their skills,
+        # manifest and registry are isolated from other tenants in the same
+        # object store.  PgObjectStore also uses tenant_id for row-level
+        # isolation, but the key prefix is still needed for local/viking
+        # backends and for the in-memory SkillIDRegistry.
+        self._tenant_id = str(tenant_id or "default").strip()
+        # Optional mirror target attached by _build when the primary bucket is
+        # local: the hub used by the mirror outbox to push the skills subtree
+        # to OpenViking for remote Agents. None when mirroring is disabled or
+        # the primary bucket is already viking.
+        self._mirror_viking_hub: Optional["SkillHub"] = None
+        # Spool directory for mirror deliveries (empty = default
+        # ~/.teamEvolver/skill_mirror_spool). Kept on the hub so every enqueue
+        # writes to the same spool the flusher/status read from.
+        self._mirror_spool_dir = str(mirror_spool_dir or "")
+
+    @property
+    def mirror_viking_hub(self) -> Optional["SkillHub"]:
+        """Viking hub used by the skill mirror outbox (None when not mirroring)."""
+        return self._mirror_viking_hub
+
+    @property
+    def _is_pg_backend(self) -> bool:
+        """True when the primary bucket is the PostgreSQL object store.
+
+        PG enforces tenant isolation via Row-Level Security, so skill keys
+        stay bare (no ``tenants/<id>/`` directory prefix).
+        """
+        return isinstance(self._bucket, PgObjectStore)
+
+    def _build_mirror(self) -> Optional["VikingSkillMirror"]:
+        """Build the mirror outbox for this hub (None when not mirroring)."""
+        if self._mirror_viking_hub is None:
+            return None
+        from .mirror import VikingSkillMirror
+
+        return VikingSkillMirror(
+            spool_dir=self._mirror_spool_dir or None,
+            viking_hub=self._mirror_viking_hub,
+            sequence_bucket=self._bucket,
+        )
+
+    def mirror_enqueue_push(self, skill_name: str, bundle_files: dict[str, bytes]) -> None:
+        """Enqueue an OpenViking mirror for one freshly-published skill.
+
+        No-op unless this hub is local-backed with a mirror attached. Never
+        raises — mirroring must not break the publish path; failures are
+        retried by the background flusher.
+        """
+        mirror = self._build_mirror()
+        if mirror is None:
+            return
+        try:
+            mirror.enqueue_skill(skill_name, bundle_files)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[SkillHub] mirror enqueue failed for %s: %s", skill_name, exc)
+
+    def mirror_enqueue_delete(self, skill_name: str) -> None:
+        """Enqueue removal of one skill's mirrored subtree (best-effort)."""
+        mirror = self._build_mirror()
+        if mirror is None:
+            return
+        try:
+            mirror.enqueue_delete(skill_name)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[SkillHub] mirror delete enqueue failed for %s: %s", skill_name, exc)
 
     @classmethod
     def from_bucket(
@@ -107,6 +199,9 @@ class SkillHub:
         hub._bucket = bucket
         hub._customer_id = str(customer_id or "").strip("/")
         hub._user_alias = user_alias or os.environ.get("USER", "anonymous")
+        hub._tenant_id = "default"
+        hub._mirror_viking_hub = None
+        hub._mirror_spool_dir = ""
         return hub
 
     # ------------------------------------------------------------------ #
@@ -123,17 +218,40 @@ class SkillHub:
         namespace: str,
         key_scope: str = "team",
         allow_none: bool = False,
+        tenant_id: str = "default",
     ) -> Optional["SkillHub"]:
         """Shared builder for the three config-driven constructors.
 
         *backend_field* selects the per-purpose backend key; *allow_none*
         returns ``None`` (rather than an empty-backend hub) when nothing is
         configured, matching the object-storage variant.
+
+        Per-purpose split: ``sharing_session_backend`` / ``sharing_skill_backend``
+        default to the built-in local backend (empty → "local"); OpenViking is
+        kept only as the cross-machine mirror target for the team skill
+        subtree. teamEvolver's own ledgers (registry / manifest / indexes /
+        validation / session queue) therefore stay on the local store while
+        remote Agents still read skills from ``viking://resources/...``.
         """
         sharing_backend = str(getattr(config, "sharing_backend", "") or "").strip().lower()
-        backend = str(getattr(config, backend_field, "") or "").strip().lower() or sharing_backend
-        endpoint = str(getattr(config, "sharing_endpoint", "") or "")
+        purpose_backend = str(getattr(config, backend_field, "") or "").strip().lower()
         viking_endpoint = str(getattr(config, "sharing_viking_endpoint", "") or "")
+        # Per-purpose split. An explicit per-purpose backend always wins.
+        # Otherwise the default depends on which side of the split this config
+        # describes: teamEvolver's own service (identified by a configured
+        # local root — set by the split) keeps its ledgers on the built-in
+        # local backend and mirrors skills out; a remote Agent's pull config
+        # (endpoint + sharing_backend=viking, no local root) reads the mirrored
+        # library straight from OpenViking.
+        if purpose_backend:
+            backend = purpose_backend
+        elif str(getattr(config, "sharing_local_root", "") or "").strip():
+            backend = "local"
+        elif sharing_backend == "viking" and viking_endpoint:
+            backend = "viking"
+        else:
+            backend = "local"
+        endpoint = str(getattr(config, "sharing_endpoint", "") or "")
         legacy_viking_api_key = str(getattr(config, "sharing_viking_api_key", "") or "")
         personal_viking_api_key = str(getattr(config, "sharing_viking_personal_api_key", "") or "")
         team_viking_api_key = str(getattr(config, "sharing_viking_team_api_key", "") or "")
@@ -144,22 +262,25 @@ class SkillHub:
         has_viking_key = bool(viking_api_key)
         sharing_enabled = bool(getattr(config, "sharing_enabled", False))
 
-        # Only the OpenViking backend is supported (cloud or local self-hosted).
         if allow_none:
             resolved = normalize_backend(backend, endpoint=viking_endpoint)
-            if not resolved and viking_endpoint and (sharing_enabled or has_viking_key):
-                resolved = "viking"
+            if not resolved:
+                # No per-purpose backend and no explicit request for local: fall
+                # back to viking when an endpoint exists (legacy configs that
+                # predate the local backend), otherwise bail out.
+                if viking_endpoint and (sharing_enabled or has_viking_key):
+                    resolved = "viking"
+                elif sharing_enabled:
+                    resolved = "local"
             if not resolved:
                 return None
             backend = resolved
         else:
-            backend = "viking"
+            backend = normalize_backend(backend) or "local"
 
-        return cls(
-            backend=backend,
-            endpoint=endpoint,
-            customer_id=customer_id,
-            user_alias=getattr(config, "sharing_user_alias", ""),
+        allow_fallback = bool(getattr(config, "sharing_local_fallback_enabled", True))
+        fallback_root = str(getattr(config, "sharing_local_root", "") or "")
+        viking_kwargs = dict(
             viking_endpoint=viking_endpoint,
             viking_api_key=viking_api_key,
             viking_account=str(getattr(config, "sharing_viking_account", "") or "default"),
@@ -168,11 +289,59 @@ class SkillHub:
             viking_agent_id=str(getattr(config, "sharing_viking_agent_id", "") or ""),
             viking_root_prefix=str(getattr(config, "sharing_viking_root_prefix", "") or _VIKING_ROOT_PREFIX),
             viking_group_id=str(getattr(config, "sharing_viking_group_id", "") or ""),
-            viking_namespace=namespace,
+        )
+        # PostgreSQL local-state backend options (used when the resolved backend
+        # is "postgres"); ignored by the other backends.
+        pg_kwargs = dict(
+            pg_dsn=str(getattr(config, "storage_pg_dsn", "") or ""),
+            pg_schema=str(getattr(config, "storage_pg_schema", "") or "teamevolver"),
+            pg_pool_min=int(getattr(config, "storage_pg_pool_min", 2) or 2),
+            pg_pool_max=int(getattr(config, "storage_pg_pool_max", 20) or 20),
+            pg_command_timeout=float(
+                getattr(config, "storage_pg_command_timeout_seconds", 30.0) or 30.0
+            ),
         )
 
+        hub = cls(
+            backend=backend,
+            endpoint=endpoint,
+            customer_id=customer_id,
+            user_alias=getattr(config, "sharing_user_alias", ""),
+            allow_fallback=allow_fallback,
+            fallback_root=fallback_root,
+            mirror_spool_dir=str(getattr(config, "sharing_skill_mirror_spool_dir", "") or ""),
+            viking_namespace=namespace,
+            tenant_id=tenant_id,
+            **viking_kwargs,
+            **pg_kwargs,
+        )
+
+        # When the primary bucket is local and the mirror is enabled, attach a
+        # viking hub used by the mirror outbox to push the skills subtree. The
+        # mirror target bypasses the local fallback (an unavailable OpenViking
+        # must surface as a failed delivery, not silently write elsewhere).
+        mirror_enabled = bool(getattr(config, "sharing_skill_mirror_enabled", True))
+        if (
+            isinstance(hub._bucket, LocalObjectStore)
+            and mirror_enabled
+            and viking_endpoint
+            and sharing_enabled
+            and key_scope == "team"
+        ):
+            hub._mirror_viking_hub = cls(
+                backend="viking",
+                endpoint=viking_endpoint,
+                customer_id=customer_id,
+                user_alias=getattr(config, "sharing_user_alias", ""),
+                allow_fallback=False,
+                mirror_spool_dir=str(getattr(config, "sharing_skill_mirror_spool_dir", "") or ""),
+                viking_namespace=namespace,
+                **viking_kwargs,
+            )
+        return hub
+
     @classmethod
-    def from_config(cls, config) -> "SkillHub":
+    def from_config(cls, config, tenant_id: str = "default") -> "SkillHub":
         """Build a hub for the caller's personal skills under ``resources``."""
         return cls._build(
             config,
@@ -180,10 +349,11 @@ class SkillHub:
             customer_id=getattr(config, "sharing_viking_customer_id", ""),
             namespace="resources",
             key_scope="personal",
+            tenant_id=tenant_id,
         )
 
     @classmethod
-    def team_from_config(cls, config) -> "SkillHub":
+    def team_from_config(cls, config, tenant_id: str = "default") -> "SkillHub":
         """Build a hub for team-shared (``resources`` namespace) skills."""
         return cls._build(
             config,
@@ -191,10 +361,13 @@ class SkillHub:
             customer_id="",
             namespace="resources",
             key_scope="team",
+            tenant_id=tenant_id,
         )
 
     @classmethod
-    def object_storage_from_config(cls, config) -> Optional["SkillHub"]:
+    def object_storage_from_config(
+        cls, config, tenant_id: str = "default"
+    ) -> Optional["SkillHub"]:
         """Build the object-store hub for skills and non-skill artifacts.
 
         Returns ``None`` when no OpenViking object storage is configured.
@@ -206,6 +379,7 @@ class SkillHub:
             namespace="resources",
             key_scope="team",
             allow_none=True,
+            tenant_id=tenant_id,
         )
 
     # ------------------------------------------------------------------ #
@@ -216,9 +390,21 @@ class SkillHub:
         """Key prefix for skill artifacts.
 
         In by-peer mode skills are scoped under ``peers/<customer_id>/``.
-        Without a customer id the prefix is empty.
+        Without a customer id the prefix is empty.  Non-default tenants get
+        an additional ``tenants/<tenant_id>/`` scope so their skills,
+        manifest and registry are isolated from other tenants in the same
+        object store — but ONLY for backends that share a physical key
+        namespace across tenants (local filesystem, Viking). The PostgreSQL
+        backend isolates rows with Row-Level Security (every connection is
+        pinned to one tenant via ``app.tenant_id``), so a key prefix would
+        both be redundant and break alignment with the engine, which writes
+        bare ``skills/...`` keys into its per-tenant RLS scope.
         """
-        return peer_key_prefix(self._customer_id)
+        parts: list[str] = []
+        if self._tenant_id and self._tenant_id != "default" and not self._is_pg_backend:
+            parts.append(f"tenants/{self._tenant_id}/")
+        parts.append(peer_key_prefix(self._customer_id))
+        return "".join(parts)
 
     def session_prefix(self) -> str:
         """Key prefix for the session queue consumed by skill evolution.
@@ -475,6 +661,8 @@ class SkillHub:
             manifest[skill_name].setdefault("category", layout.category_from_skill_path(skills_dir, path))
             uploaded += 1
             logger.info("[SkillHub] pushed skill: %s", skill_name)
+            # Mirror the agent-facing subtree to OpenViking (async, best-effort).
+            self.mirror_enqueue_push(skill_name, bundle_files)
 
         if uploaded > 0:
             self._save_remote_manifest(manifest)
@@ -887,6 +1075,7 @@ class SkillHub:
             registry.save_to_oss(self._bucket, self._prefix())
 
         logger.info("[SkillHub] deleted remote skill: %s (existed=%s)", name, existed)
+        self.mirror_enqueue_delete(name)
         return {"deleted": existed, "name": name}
 
     # ------------------------------------------------------------------ #

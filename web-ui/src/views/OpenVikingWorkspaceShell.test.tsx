@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 
 import "@testing-library/jest-dom/vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api } from "@/api/client";
 import OpenVikingWorkspaceShell, {
@@ -102,6 +102,30 @@ describe("OpenVikingWorkspaceShell", () => {
     window.localStorage.clear();
     Element.prototype.scrollTo = vi.fn();
   });
+  afterEach(cleanup);
+
+  it("keeps both labs reachable without an OpenViking connection", async () => {
+    mockedApi.mockImplementation(async (path: string) => path === "/api/users"
+      ? { users: [{ id: "alice", display_name: "Alice", role: "admin" }] }
+      : { ...config, enabled: false });
+
+    render(
+      <OpenVikingWorkspaceShell
+        active
+        mode="workspace"
+        user={{ id: "alice", display_name: "Alice", role: "admin" }}
+        labs={{ skill: <div>skill-lab-content</div>, memory: <div>memory-lab-content</div> }}
+      />,
+    );
+    const skillTab = await screen.findByRole("tab", { name: "Skill Lab" });
+    fireEvent.click(skillTab);
+    expect(screen.getByText("skill-lab-content")).toBeVisible();
+    fireEvent.click(screen.getByRole("tab", { name: "Memory Lab" }));
+    expect(screen.getByText("memory-lab-content")).toBeVisible();
+    fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
+    expect(screen.getByText(/OpenViking.*endpoint/)).toBeVisible();
+  });
+
 
   it("keeps team memory visible when the initial personal-space request finishes late", async () => {
     let releasePersonalRequests!: () => void;

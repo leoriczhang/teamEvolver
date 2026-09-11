@@ -266,6 +266,31 @@ WatchdogSec=60
 
 If using Prometheus, monitor `/healthz` endpoint via blackbox-exporter.
 
+## Storage and Local Fallback
+
+teamEvolver uses local-first storage by default: high-frequency write paths (Session queue/index, filter audit, evidence, validation state, Skill registry/manifest/version history, mutation commits/outbox, etc.) always write to the built-in local object store; OpenViking only carries the asynchronously mirrored Skill library subtree plus team Memory/aggregation products. The relevant settings live in the `sharing` section (defaults in `teamEvolver/config_store/defaults.py`):
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `sharing.local_fallback_enabled` | `true` | Automatically fall back to local storage when OpenViking is unavailable (connection error/timeout/HTTP 5xx) |
+| `sharing.local_root` | empty → `~/.teamEvolver/local_store` | Local object store root directory |
+| `sharing.session_backend` | empty → `local` | Session storage backend |
+| `sharing.skill_backend` | empty → `local` | Skill library storage backend |
+| `sharing.skill_mirror_enabled` | `true` | Asynchronously mirror the Skill library to OpenViking |
+| `sharing.skill_mirror_spool_dir` | empty → `~/.teamEvolver/skill_mirror_spool` | Mirror spool directory (durable pending push/delete events) |
+
+Writes made during fallback stay local and are not automatically synced back to OpenViking; Skill library mirror events persist in the spool and are redelivered by the background flusher (roughly every 30 seconds) once OpenViking recovers. Runtime state is observable via `GET /storage/status` (`fallback_active`, `effective_backend`, `mirror`).
+
+## Local Run Scripts
+
+`scripts/` provides three operations scripts that do not require the shared cloud backend:
+
+| Script | Purpose | Main flags |
+|--------|---------|------------|
+| `scripts/run_local_evolution.py` | Fully local evolution run: ingest → evolve → export, artifacts written to a dedicated run directory | `--max-cycles` (default 30), `--drain-max-per-cycle` (default 40), `--export-only` |
+| `scripts/pull_sessions_local.py` | Bulk-pull Langfuse sessions into the local raw/converted stores | `--reconvert` (re-convert every file in the raw dir, skipping pull), `--workers` (default 4), `--timeout` (override client timeout seconds) |
+| `scripts/replay_turn_server.py` | Agent-side server-driven Replay turn server: `POST /turn/<runtime_type>`, `GET /health` | `--host`, `--port` |
+
 ## Backup Strategy
 
 teamEvolver persistent data stored at following locations:

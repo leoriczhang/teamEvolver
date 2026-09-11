@@ -8,6 +8,8 @@ from teamEvolver.integrations.agent_protocol import (
     CAP_REPLAY_BRANCH,
     CAP_SESSION_INGEST,
     normalize_registration,
+    normalize_replay_turn_request,
+    normalize_replay_turn_result,
     normalize_session_envelope,
     validate_endpoint_url,
 )
@@ -136,3 +138,110 @@ def test_v1_session_normalizes_runtime_protocol() -> None:
     assert result["protocol_compatibility"] == "compatible"
     assert result["runtime"]["type"] == "demo"
     assert result["runtime"]["protocol_version"] == "1.0"
+
+
+def _turn_request(**overrides) -> dict:
+    request = {
+        "schema_version": "teamevolver.replay-turn-request.v1",
+        "protocol_version": "1.0",
+        "request_id": "replay_abc",
+        "turn_num": 1,
+        "branch": "candidate",
+        "prompt": "do the task",
+        "limits": {"turn_timeout_seconds": 120},
+    }
+    request.update(overrides)
+    return request
+
+
+def test_replay_turn_request_normalizes_and_enforces_required_fields() -> None:
+    result = normalize_replay_turn_request(
+        _turn_request(
+            context_snapshot={"snapshot_id": "s1"},
+            skill={"name": "demo", "content": "# demo"},
+        )
+    )
+
+    assert result["turn_num"] == 1
+    assert result["limits"]["turn_timeout_seconds"] == 120
+    assert result["skill"]["name"] == "demo"
+
+    with pytest.raises(AgentProtocolError):
+        normalize_replay_turn_request(_turn_request(prompt="  "))
+    with pytest.raises(AgentProtocolError):
+        normalize_replay_turn_request(_turn_request(turn_num=0))
+    with pytest.raises(AgentProtocolError):
+        normalize_replay_turn_request(_turn_request(branch="eval"))
+    with pytest.raises(AgentProtocolError):
+        normalize_replay_turn_request(
+            _turn_request(limits={"turn_timeout_seconds": 10})
+        )
+
+
+def test_replay_turn_result_requires_metrics_on_success() -> None:
+    result = normalize_replay_turn_result(
+        {
+            "schema_version": "teamevolver.replay-turn-result.v1",
+            "protocol_version": "1.0",
+            "request_id": "replay_abc",
+            "turn_num": 2,
+            "status": "succeeded",
+            "final_response": "done",
+            "messages": [{"role": "assistant", "content": "step"}],
+            "metrics": {"tool_call_count": 2, "total_tokens": 90},
+            "artifacts": [{"path": "out.txt", "size": 10}],
+        },
+        expected_request_id="replay_abc",
+        expected_turn_num=2,
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["metrics"]["total_tokens"] == 90
+
+    # Fail-closed: a succeeded turn without counts is invalid.
+    with pytest.raises(AgentProtocolError) as excinfo:
+        normalize_replay_turn_result(
+            {
+                "schema_version": "teamevolver.replay-turn-result.v1",
+                "protocol_version": "1.0",
+                "request_id": "replay_abc",
+                "turn_num": 1,
+                "status": "succeeded",
+                "metrics": {"tool_call_count": 1},
+            },
+            expected_request_id="replay_abc",
+            expected_turn_num=1,
+        )
+    assert "total_tokens" in str(excinfo.value)
+
+    with pytest.raises(AgentProtocolError):
+        normalize_replay_turn_result(
+            {
+                "schema_version": "teamevolver.replay-turn-result.v1",
+                "protocol_version": "1.0",
+                "request_id": "other",
+                "turn_num": 1,
+                "status": "succeeded",
+                "metrics": {"tool_call_count": 1, "total_tokens": 1},
+            },
+            expected_request_id="replay_abc",
+            expected_turn_num=1,
+        )
+
+
+def test_replay_turn_result_defaults_error_for_failures() -> None:
+    result = normalize_replay_turn_result(
+        {
+            "schema_version": "teamevolver.replay-turn-result.v1",
+            "protocol_version": "1.0",
+            "request_id": "replay_abc",
+            "turn_num": 1,
+            "status": "unsupported",
+        },
+        expected_request_id="replay_abc",
+        expected_turn_num=1,
+    )
+
+    assert result["status"] == "unsupported"
+    assert result["error"]["code"] == "EXECUTION_FAILED"
+    assert result["error"]["retryable"] is False

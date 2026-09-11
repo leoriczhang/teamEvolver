@@ -81,7 +81,7 @@ HTTP 服务监听配置。
 
 ### sharing 节
 
-技能共享与 OpenViking 云端同步配置。
+技能共享与 OpenViking 云端同步配置。存储采用本地优先策略：Session 队列、session_index、filter audit、证据、Skill 注册表等高频写路径始终落在本地对象存储，Skill 库再异步镜像到 OpenViking；OpenViking 不可用时自动回退到本地存储（见 `local_fallback_enabled`）。
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -109,8 +109,12 @@ HTTP 服务监听配置。
 | `skill_reload_mode` | string | `"poll"` | 技能重载模式：`"off"`（关闭）、`"poll"`（轮询）、`"callback"`（回调）。 |
 | `skill_reload_interval_seconds` | integer | `30` | 轮询模式下的技能检查间隔（秒），最小值为 5。 |
 | `endpoint` | string | `""` | 通用端点（留空时使用 viking_endpoint）。 |
-| `skill_backend` | string | `""` | 技能专用后端（留空时使用 backend）。 |
-| `session_backend` | string | `""` | 会话专用后端（留空时使用 backend）。 |
+| `skill_backend` | string | `""` | 技能专用后端。留空时使用 `"local"`（本地存储 + 异步镜像到 OpenViking），不直接继承 `backend`。 |
+| `session_backend` | string | `""` | 会话专用后端。留空时使用 `"local"`（本地存储），不直接继承 `backend`。 |
+| `local_fallback_enabled` | boolean | `true` | OpenViking 不可用（连接错误/超时/5xx）时自动回退到本地存储；4xx 不触发回退。 |
+| `local_root` | string | `""` | 本地对象存储根目录，留空时使用 `~/.teamEvolver/local_store`；回退目录按实例隔离命名。 |
+| `skill_mirror_enabled` | boolean | `true` | 是否将本地 Skill 库异步镜像到 OpenViking（通过持久化 spool 外发队列）。 |
+| `skill_mirror_spool_dir` | string | `""` | Skill 镜像 spool 目录，留空时使用 `~/.teamEvolver/skill_mirror_spool`。 |
 
 ### evolve 节
 
@@ -134,9 +138,14 @@ HTTP 服务监听配置。
 | `dataset_max_requirements` | integer | `24` | 测试用例最多检查项数量。 |
 | `dataset_disclosure_batch_size` | integer | `4` | 渐进披露批量大小。 |
 | `validation_max_rejections` | integer | `1` | 连续拒绝多少次后暂停该技能的进化。 |
-| `use_session_judge` | boolean | `true` | 是否使用会话价值分类器。 |
+| `use_session_judge` | boolean | `true` | 是否启用进化阶段的 Session 评分 Judge（按任务完成度/响应质量/效率/工具使用四维打分并给出中文理由）；ingest 阶段的价值分类器独立运行，不受此项控制。 |
 | `candidate_coalesce_enabled` | boolean | `true` | 是否启用候选合并。 |
 | `max_parallel_groups` | integer | `4` | 单个进化周期并行处理的 Skill 分组上限。 |
+| `drain_batch_size` | integer | `25` | 持续拉取模式下每批读取并处理的 Session 数量。 |
+| `drain_batch_delay_seconds` | float | `1.0` | 相邻两批 drain 之间的间隔（秒），防止压垮存储层。 |
+| `drain_max_per_cycle` | integer | `0` | 单个进化周期最多 drain 的 Session 数，0 表示不设上限；仍有积压时下一周期约 1 秒后自动启动。 |
+| `min_group_sessions` | integer | `2` | 组建团队证据分组所需的最少 Session 数，不足则跳过该分组本轮进化。 |
+| `min_group_users` | integer | `2` | 组建团队证据分组所需的最少用户数，不足则跳过该分组本轮进化。 |
 | `bundle_text_extensions` | list | `[".py", ".sh"]` | 技能包中视为文本文件的扩展名列表。 |
 | `bundle_max_file_bytes` | integer | `262144` | 技能包单个文件最大字节数（256KB）。 |
 | `bundle_max_prompt_bytes` | integer | `786432` | 技能包最大 Prompt 字节数（768KB）。 |
@@ -225,7 +234,7 @@ API-key 模式读取 Admin 用户列表中的现存用户明文 Key，不执行 
 
 ### langfuse 节
 
-Langfuse 可观测性与会话拉取配置。Langfuse 集成分为两种独立模式：入站会话拉取（从 Langfuse 拉取会话进入进化流水线）和出站追踪（将进化过程中的 LLM 调用发送到 Langfuse）。
+Langfuse 集成分为两种独立模式：入站会话拉取使用租户级数据源连接；出站追踪使用服务级连接，所有租户统一上报且不能通过租户配置覆盖。
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -234,6 +243,9 @@ Langfuse 可观测性与会话拉取配置。Langfuse 集成分为两种独立�
 | `public_key` | string | `""` | Langfuse Public Key，用于 API 访问。 |
 | `secret_key` | string | `""` | Langfuse Secret Key。 |
 | `tracing_enabled` | boolean | `false` | 是否启用出站 LLM 调用追踪。 |
+| `tracing_host` | string | `""` | 全局观测 Langfuse 地址，独立于租户数据源 `host`。 |
+| `tracing_public_key` | string | `""` | 全局观测 Project Public Key。 |
+| `tracing_secret_key` | string | `""` | 全局观测 Project Secret Key。 |
 | `tracing_environment` | string | `"local"` | 追踪环境标签，用于在 Langfuse UI 中区分不同部署环境（如 production、staging、local）。 |
 | `tracing_release` | string | `""` | 追踪版本标签。 |
 | `tracing_sample_rate` | float | `1.0` | 追踪采样率（0.0-1.0），1.0 表示全量采样。 |
@@ -249,8 +261,36 @@ Langfuse 可观测性与会话拉取配置。Langfuse 集成分为两种独立�
 | `default_release` | string | `""` | 默认拉取过滤的版本。 |
 | `default_version` | string | `""` | 默认拉取过滤的版本号。 |
 | `default_trace_name` | string | `""` | 默认拉取过滤的 Trace 名称。 |
-| `mapper_enabled` | boolean | `false` | 是否启用自定义 Trace 映射。启用后拉取时对每个 trace 调用用户编写的 `map_trace`。 |
-| `mapper_code` | string | `""` | 用户编写的 `map_trace(trace, observations)` 函数源码，返回（可部分的）进化标准 turn。 |
+| `mapper_enabled` | boolean | `false` | 已弃用：旧版单 mapper 开关，首次读取时自动迁移进 `mappers`（名为 `default` 的兜底条目），控制台首次保存后删除。 |
+| `mapper_code` | string | `""` | 已弃用：旧版单 mapper 源码，迁移行为同上。 |
+| `mappers` | list | 无 | **Per-Agent 映射注册表**。有序列表，每条为 `{name, enabled, note?, code, match}`；拉取时按列表顺序匹配，首个命中的启用条目负责该 trace 的映射。 |
+
+#### 映射注册表（按 Agent 路由）
+
+不同 Agent 的 Langfuse 数据形态各异，`mappers` 允许为每个 Agent 配置独立的映射逻辑与路由规则：
+
+```yaml
+langfuse:
+  mappers:
+    - name: openclaw-zhang
+      enabled: true
+      note: "openclaw agent，用户 zhang"
+      match:
+        trace_names: ["openclaw-turn"]        # fnmatch 通配，区分大小写
+        tags: ["openclaw"]                     # 任一命中即可（ANY-of）
+        session_id_patterns: ["agent:main:openresponses-user:42749155_*"]
+      code: |
+        def map_trace(trace, observations): ...
+        def map_session(converted, session, traces):
+            return {"user_alias": "zhang"}     # 可选会话钩子
+    - name: default
+      enabled: true
+      match: {}                                # 空匹配 = 兜底，务必放最后
+      code: |
+        def map_trace(trace, observations): ...
+```
+
+**匹配语义**：`match` 中三类条件（trace 名称通配、tags、sessionId 模式）按 AND 组合，留空的组不设限，全空即兜底；列表顺序即优先级，首个命中的启用条目生效。条目也可以只定义 `map_session`（会话钩子条目），它不参与 trace 映射，但会对命中的会话生效。
 
 #### 自定义 Trace 映射（进化标准格式）
 
@@ -270,10 +310,11 @@ def map_trace(trace, observations):
     }
 ```
 
-- 函数在受限环境中执行：内置 `json / re / math / datetime`，禁用 `import` 与文件访问。仅管理员可编辑（属于可执行配置）。
+- 函数在受限环境中执行：内置 `json / re / math / datetime / collections / itertools / functools`，禁用 `import` 与文件访问。仅管理员可编辑（属于可执行配置）。
 - 返回值会**深合并**到内置映射结果之上——只需覆盖关心的字段，其余自动回退到内置逻辑。
-- 在控制台 Langfuse 页的「自定义 Trace 映射」面板可编辑、插入参考模板，并对内置样例或粘贴的 trace 试运行，直接对比映射结果与内置映射。面板右上角的「标准格式说明」按钮会弹出进化标准格式（各字段含义 + 完整示例）的说明。
-- 若代码在拉取时抛错，该会话会自动回退到内置映射，不会中断整批拉取。
+- 条目代码还可定义会话级钩子 `map_session(converted, session, traces)`：在整场会话转换完成后调用，返回部分会话字典（如 `user_alias`、`title`、`system_prompt`）深合并到会话上；同一会话命中多个带钩子的条目时按列表顺序依次生效，钩子优先于拉取时的 `user_alias` 默认值。
+- 在控制台 Langfuse 页的「映射注册表」面板可增删条目、调整顺序、逐条插入参考模板与试运行（显示路由是否命中），面板级「路由预览」可粘贴样例 trace 查看整张注册表的路由结果。面板右上角的「标准格式说明」按钮会弹出进化标准格式（各字段含义 + 完整示例）的说明。
+- 单条代码在拉取时抛错只影响该 trace（自动回退内置映射），不会中断整批拉取；编译失败的条目启动时跳过并在控制台路由预览中标红。
 
 ### mining 节
 
@@ -327,13 +368,23 @@ OpenRouter 备用路由配置（可选）。
 | `EVOLVE_HUMAN_REVIEW_ENABLED` | `evolve.human_review_enabled` |
 | `EVOLVE_HUMAN_REVIEW_TIMEOUT_SECONDS` | `evolve.human_review_timeout_seconds` |
 | `EVOLVE_INTERVAL` | `evolve.interval_seconds` |
+| `EVOLVE_MAX_PARALLEL_GROUPS` | `evolve.max_parallel_groups` |
+| `EVOLVE_DRAIN_MAX_PER_CYCLE` | `evolve.drain_max_per_cycle` |
+| `EVOLVE_MIN_GROUP_SESSIONS` | `evolve.min_group_sessions` |
+| `EVOLVE_MIN_GROUP_USERS` | `evolve.min_group_users` |
+| `EVOLVE_LLM_MAX_CONCURRENCY` | 全局 LLM 调用并发上限（默认 8，不得超过） |
+| `EVOLVE_STORAGE_BACKEND` | `sharing.backend` |
+| `EVOLVE_STORAGE_FALLBACK` | `sharing.local_fallback_enabled` |
+| `EVOLVE_STORAGE_LOCAL_ROOT` | `sharing.local_root` |
+| `EVOLVE_SKILL_MIRROR` | `sharing.skill_mirror_enabled` |
+| `EVOLVE_SKILL_MIRROR_SPOOL_DIR` | `sharing.skill_mirror_spool_dir` |
 | `EVOLVE_EVIDENCE_ENABLED` | `evolve.evidence_enabled` |
 | `EVOLVE_EVIDENCE_MAX_ENTRIES` | `evolve.evidence_max_entries` |
 | `EVOLVE_INGEST_API_KEY` | 全局 ingest 端点 API Key |
 | `TEAMEVOLVER_PROXY_API_KEY` | 模型代理 API Key |
-| `LANGFUSE_BASE_URL` / `LANGFUSE_HOST` | `langfuse.host` |
-| `LANGFUSE_PUBLIC_KEY` | `langfuse.public_key` |
-| `LANGFUSE_SECRET_KEY` | `langfuse.secret_key` |
+| `LANGFUSE_BASE_URL` / `LANGFUSE_HOST` | `langfuse.tracing_host` |
+| `LANGFUSE_PUBLIC_KEY` | `langfuse.tracing_public_key` |
+| `LANGFUSE_SECRET_KEY` | `langfuse.tracing_secret_key` |
 | `LANGFUSE_TRACING_ENABLED` | `langfuse.tracing_enabled` |
 | `LANGFUSE_TRACING_ENVIRONMENT` | `langfuse.tracing_environment` |
 | `LANGFUSE_SAMPLE_RATE` | `langfuse.tracing_sample_rate` |
@@ -425,6 +476,9 @@ langfuse:
   public_key: "pk-lf-xxxxxxxx"
   secret_key: "sk-lf-xxxxxxxx"
   tracing_enabled: true
+  tracing_host: "https://observability-langfuse.example.com"
+  tracing_public_key: "pk-lf-observability"
+  tracing_secret_key: "sk-lf-observability"
   tracing_environment: "production"
   tracing_sample_rate: 0.1
 ```

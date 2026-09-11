@@ -56,7 +56,12 @@ from ...skills.bundle import (
     bundle_tree_sha256,
     candidate_skill_bundle,
 )
-from ...storage import InMemoryObjectStore, build_object_store, is_not_found_error
+from ...storage import (
+    InMemoryObjectStore,
+    LocalObjectStore,
+    build_object_store,
+    is_not_found_error,
+)
 from ...validation import ValidationStore
 from ...validation.bundle_checks import validate_candidate_bundle
 from ...validation.runtime_compatibility import (
@@ -79,10 +84,18 @@ from ..stages.execute import (
     create_skill_from_sessions,
     evolve_skill_from_sessions,
     execute_merge,
+    set_evolve_agent_limits,
+    set_evolve_bundle_contract,
     set_evolve_debug_dir,
 )
-from ..stages.judge import judge_sessions_parallel
-from ..stages.summarize import set_summarizer_debug_dir, summarize_sessions_parallel
+from ..stages.judge import _should_skip_judging, judge_session, judge_sessions_parallel
+from ..stages.summarize import (
+    _extract_session_metadata,
+    build_session_trajectory,
+    set_summarizer_debug_dir,
+    summarize_session,
+    summarize_sessions_parallel,
+)
 from ..store.object_store import (
     build_bundle_record,
     delete_session_keys,
@@ -91,6 +104,7 @@ from ..store.object_store import (
     fetch_version_bundle,
     list_session_keys,
     list_skill_versions,
+    load_history_records,
     load_manifest,
     load_manifest_snapshot,
     publish_skill_bundle_batch,
@@ -110,6 +124,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 class EvolveServer(EvolveEngineMixin):
     """Session-level evolve server backed by shared object storage."""
+
+    owns_cycle_lock = True
 
     # Per-branch wall-clock budget for a true replay (each of baseline/candidate
     # runs a full real tool loop). The subprocess is given ~2x + slack overall.
@@ -170,9 +186,17 @@ class EvolveServer(EvolveEngineMixin):
         self._eval_jobs: dict[str, asyncio.Task[Any]] = {}
         self._eval_refresh_pending: set[str] = set()
 
-        set_evolve_debug_dir(config.debug_dump_dir)
-        set_summarizer_debug_dir(config.debug_dump_dir)
         self._id_registry.load_from_oss(self._skill_bucket, self._skill_prefix)
+
+    @property
+    def tenant_id(self) -> str:
+        """Engine tenant scope (PostgreSQL RLS key; tenant ≡ OV account).
+
+        The proxy's :class:`~teamEvolver.proxy.engine_pool.EnginePool` builds
+        one engine per tenant with this key set; standalone/CLI usage stays on
+        the implicit ``default`` tenant.
+        """
+        return str(getattr(self.config, "pg_tenant_id", "") or "default")
 
     @staticmethod
     def _skill_prefix_for_config(_config: EvolveServerConfig) -> str:
@@ -193,6 +217,18 @@ class EvolveServer(EvolveEngineMixin):
                 raise ValueError("mock mode requires mock_root")
             return InMemoryObjectStore(mock_root)
         backend_normalized = str(config.storage_backend or "").strip().lower()
+        if backend_normalized == "postgres":
+            return build_object_store(
+                backend="postgres",
+                pg_dsn=str(getattr(config, "pg_dsn", "") or ""),
+                pg_schema=str(getattr(config, "pg_schema", "") or "teamevolver"),
+                pg_pool_min=int(getattr(config, "pg_pool_min", 2) or 2),
+                pg_pool_max=int(getattr(config, "pg_pool_max", 20) or 20),
+                pg_command_timeout=float(
+                    getattr(config, "pg_command_timeout_seconds", 30.0) or 30.0
+                ),
+                tenant_id=str(getattr(config, "pg_tenant_id", "") or "default"),
+            )
         if backend_normalized == "viking":
             return build_object_store(
                 backend="viking",
@@ -205,6 +241,8 @@ class EvolveServer(EvolveEngineMixin):
                 viking_root_prefix=getattr(config, "viking_root_prefix", "") or "team-skill-evolver",
                 viking_group_id=getattr(config, "viking_group_id", "") or "",
                 viking_namespace="resources",
+                allow_fallback=bool(getattr(config, "storage_fallback_enabled", True)),
+                fallback_root=str(getattr(config, "storage_local_root", "") or ""),
             )
         return EvolveEngineMixin._build_bucket(config, mock=mock, mock_root=mock_root)
 
@@ -685,6 +723,38 @@ class EvolveServer(EvolveEngineMixin):
 
         skill_id = self._id_registry.get_or_create(name)
         bundle = candidate_skill_bundle(skill)
+        runtime_policy = (
+            skill.get("runtime_policy")
+            if isinstance(skill.get("runtime_policy"), dict)
+            else {}
+        )
+        committed = manifest.get(name) or {}
+        if (
+            committed.get("format") == "bundle_v1"
+            and committed.get("tree_sha256") == bundle_tree_sha256(bundle)
+            and committed.get("description", "") == skill.get("description", "")
+            and committed.get("category", "general") == skill.get("category", "general")
+            and (committed.get("runtime_policy") or {}) == runtime_policy
+            and int(committed.get("version") or 0) > 0
+            and int(committed["version"]) == self._id_registry.get_version(name)
+        ):
+            try:
+                active_bundle = fetch_skill_bundle(
+                    self._skill_bucket, self._skill_prefix, name, committed
+                )
+            except Exception as exc:
+                if not is_not_found_error(exc):
+                    raise
+                active_bundle = {}
+            if active_bundle == bundle:
+                # Retry post-commit delivery without creating another Skill version.
+                self._record_committed_skill_mutation(
+                    action="publish" if int(committed["version"]) == 1 else "update",
+                    expected=committed,
+                    metadata={"source": "evolve", "proposed_action": action},
+                )
+                self._mirror_enqueue_skill(name, bundle)
+                return "uploaded_idempotent"
         bundle_record = (
             build_bundle_record(bundle)
             if native_batch
@@ -718,11 +788,6 @@ class EvolveServer(EvolveEngineMixin):
             "description": skill.get("description", ""),
             "category": skill.get("category", "general"),
         }
-        runtime_policy = (
-            skill.get("runtime_policy")
-            if isinstance(skill.get("runtime_policy"), dict)
-            else {}
-        )
         if runtime_policy:
             manifest[name]["runtime_policy"] = dict(runtime_policy)
         try:
@@ -768,7 +833,69 @@ class EvolveServer(EvolveEngineMixin):
                 "proposed_action": action,
             },
         )
+        self._mirror_enqueue_skill(name, bundle)
         return "uploaded"
+
+    def _mirror_enqueue_skill(self, name: str, bundle: dict[str, bytes]) -> None:
+        """Enqueue an OpenViking mirror for a just-published skill.
+
+        No-op unless the skill library lives on the built-in local backend
+        with mirroring enabled. Best-effort: the local publish already
+        succeeded, so a mirror enqueue failure is logged and retried by the
+        background flusher rather than failing the evolution branch.
+        """
+        if not isinstance(self._skill_bucket, LocalObjectStore):
+            return
+        if not bool(getattr(self.config, "skill_mirror_enabled", True)):
+            return
+        try:
+            from ...skills.mirror import VikingSkillMirror
+
+            VikingSkillMirror(
+                spool_dir=str(getattr(self.config, "skill_mirror_spool_dir", "") or "") or None,
+                viking_hub=self._mirror_viking_hub(),
+                sequence_bucket=self._skill_bucket,
+            ).enqueue_skill(name, bundle)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[EvolveServer] skill mirror enqueue failed for %s: %s", name, exc)
+
+    def _mirror_viking_hub(self):
+        """Lazily build the viking hub used solely as the mirror target.
+
+        Constructed with ``allow_fallback=False``: an unavailable OpenViking
+        must surface as a failed (retryable) mirror delivery, never silently
+        redirect into another local directory.
+        """
+        cached = self.__dict__.get("_mirror_hub")
+        if cached is not None:
+            return cached
+        endpoint = str(
+            getattr(self.config, "viking_endpoint", "") or self.config.storage_endpoint or ""
+        )
+        if not endpoint:
+            return None
+        from ...storage import build_object_store
+        from ...skills.hub import SkillHub
+
+        bucket = build_object_store(
+            backend="viking",
+            endpoint=endpoint,
+            viking_account=str(getattr(self.config, "viking_account", "") or "default"),
+            viking_user=str(getattr(self.config, "viking_user", "") or "team"),
+            viking_agent=str(getattr(self.config, "viking_agent", "") or "team-skill-evolver"),
+            viking_api_key=str(getattr(self.config, "viking_api_key", "") or ""),
+            viking_agent_id=str(getattr(self.config, "viking_agent_id", "") or ""),
+            viking_root_prefix=str(getattr(self.config, "viking_root_prefix", "") or "team-skill-evolver"),
+            viking_group_id=str(getattr(self.config, "viking_group_id", "") or ""),
+            viking_namespace="resources",
+            allow_fallback=False,
+        )
+        hub = SkillHub.from_bucket(
+            bucket,
+            customer_id=str(getattr(self.config, "viking_customer_id", "") or ""),
+        )
+        self.__dict__["_mirror_hub"] = hub
+        return hub
 
     def _list_skill_versions(self, name: str) -> dict[str, Any]:
         """Return archived versions + current pointer for a skill (object store)."""
@@ -1080,7 +1207,7 @@ class EvolveServer(EvolveEngineMixin):
 
     @staticmethod
     def _upload_status_to_action(action_type: str, upload_status: str) -> tuple[str, bool]:
-        if upload_status == "uploaded":
+        if upload_status in {"uploaded", "uploaded_idempotent"}:
             return action_type, True
         if upload_status == "uploaded_pending_review":
             return f"{action_type}_pending_review", False
@@ -1099,6 +1226,71 @@ class EvolveServer(EvolveEngineMixin):
             "min_score": None,
             "max_score": None,
         }
+
+    async def _prepare_sessions(self, sessions: list[dict]) -> int:
+        """Summarize + judge as one per-session pipeline with bounded LLM fan-out.
+
+        Previously summarize and judge ran as two sequential unbounded
+        ``asyncio.gather`` phases: the slowest summarize held up every judge,
+        and 100+ concurrent LLM calls could pile onto the shared thread pool /
+        LLM proxy. Now each session flows summarize → judge independently
+        (a session's judge starts as soon as its own summary lands), while a
+        semaphore caps total in-flight LLM calls at
+        ``EVOLVE_LLM_MAX_CONCURRENCY`` (default 8).
+
+        Returns the number of sessions judged (for the cycle summary).
+        """
+        judged = 0
+        if not sessions:
+            return judged
+
+        for session in sessions:
+            _extract_session_metadata(session)
+            session["_trajectory"] = build_session_trajectory(session)
+
+        limit = max(1, int(getattr(self.config, "llm_max_concurrency", 8) or 8))
+        semaphore = asyncio.Semaphore(limit)
+        judge_enabled = bool(self.config.use_session_judge)
+
+        async def _one(session: dict) -> int:
+            async with semaphore:
+                try:
+                    session["_summary"] = await summarize_session(self._llm, session)
+                except Exception as exc:  # noqa: BLE001 - keep the cycle alive
+                    logger.warning(
+                        "[Summarizer] exception for session %s: %s",
+                        session.get("session_id"),
+                        exc,
+                    )
+                    session["_summary"] = ""
+                if not judge_enabled or _should_skip_judging(session):
+                    return 0
+                scores = await judge_session(self._llm, session)
+                return 1 if scores is not None else 0
+
+        results = await asyncio.gather(*(_one(s) for s in sessions), return_exceptions=True)
+        judged = sum(r for r in results if isinstance(r, int))
+        if judged:
+            logger.info("[EvolveServer] judged %d sessions without benchmark scores", judged)
+        return judged
+
+    def _judge_summary(self, sessions: list[dict], judged: int) -> dict[str, Any]:
+        summary = self._empty_judge_summary()
+        if not self.config.use_session_judge or not sessions:
+            return summary
+        scores = [
+            float(judge_scores["overall_score"])
+            for session in sessions
+            for judge_scores in [session.get("_judge_scores")]
+            if isinstance(judge_scores, dict) and isinstance(judge_scores.get("overall_score"), (int, float))
+        ]
+        summary["judged_sessions"] = judged
+        summary["scored_sessions"] = len(scores)
+        if scores:
+            summary["mean_score"] = round(sum(scores) / len(scores), 3)
+            summary["min_score"] = round(min(scores), 3)
+            summary["max_score"] = round(max(scores), 3)
+        return summary
 
     async def _run_session_judge(self, sessions: list[dict]) -> dict[str, Any]:
         summary = self._empty_judge_summary()
@@ -1127,8 +1319,9 @@ class EvolveServer(EvolveEngineMixin):
 
         The aggregate ``session_judge`` block only carries mean/min/max, which
         cannot answer "how was *this* session judged?". We surface each
-        session's dimension scores + overall + rationale so a per-session
-        consumption view can be reconstructed even for skip/no-op cycles.
+        session's dimension scores + overall + per-dimension reasons +
+        rationale so a per-session consumption view can be reconstructed even
+        for skip/no-op cycles.
         """
         details: list[dict[str, Any]] = []
         for session in sessions:
@@ -1144,6 +1337,7 @@ class EvolveServer(EvolveEngineMixin):
                     "response_quality",
                     "efficiency",
                     "tool_usage",
+                    "reasons",
                     "rationale",
                 ):
                     if scores.get(key) is not None:
@@ -1734,10 +1928,10 @@ class EvolveServer(EvolveEngineMixin):
             inconclusive = 0
             for result in results:
                 result_decision = str(result.get("decision") or "").lower()
-                if result.get("accepted") is True or result_decision == "accept":
-                    accepted += 1
-                elif result_decision == "reject" or result.get("rejected") is True:
+                if result_decision == "reject" or result.get("rejected") is True:
                     rejected += 1
+                elif result.get("accepted") is True or result_decision == "accept":
+                    accepted += 1
                 else:
                     inconclusive += 1
 
@@ -1759,7 +1953,7 @@ class EvolveServer(EvolveEngineMixin):
                 or runtime_gate["status"] == "rejected"
             )
 
-            if publish_ready:
+            if publish_ready and not reject_ready:
                 candidate_skill = job.get("candidate_skill")
                 if not isinstance(candidate_skill, dict) or not candidate_skill.get("name"):
                     self._validation_store.save_decision(
@@ -2797,13 +2991,23 @@ class EvolveServer(EvolveEngineMixin):
         else:
             namespace = ""
         reachable = await self._call_storage(self._probe_storage_reachable)
-        return {
+        payload = {
             "backend": backend,
             "endpoint": endpoint,
             "namespace": namespace,
             "api_key_present": bool(getattr(self.config, "viking_api_key", "")),
             "reachable": bool(reachable),
+            "fallback_enabled": bool(getattr(self.config, "storage_fallback_enabled", True)),
+            "effective_backend": backend,
+            "fallback_active": False,
         }
+        # The engine build may have silently fallen back to the built-in local
+        # store when the configured OpenViking endpoint is unavailable.
+        if isinstance(self._skill_bucket, LocalObjectStore) and backend == "viking":
+            payload["effective_backend"] = "local"
+            payload["fallback_active"] = True
+            payload["local_root"] = getattr(self._skill_bucket, "root", "")
+        return payload
 
     def _inherit_current_skill(
         self,
@@ -3035,6 +3239,63 @@ class EvolveServer(EvolveEngineMixin):
             "uploaded": uploaded,
         }
 
+    @staticmethod
+    def _is_candidate_audit_session(session: dict[str, Any]) -> bool:
+        runtime_context = (
+            session.get("runtime_context")
+            if isinstance(session.get("runtime_context"), dict)
+            else {}
+        )
+        return bool(
+            str(runtime_context.get("candidate_job_id") or "").strip()
+            and str(runtime_context.get("candidate_sha256") or "").strip()
+        )
+
+    def _team_evidence_gap(
+        self,
+        planning_sessions: list[dict[str, Any]],
+    ) -> Optional[str]:
+        """Return a rationale when a branch lacks team-level evidence.
+
+        Shared skills must generalize beyond a single user, so evolution is
+        blocked until the planning evidence spans the configured minima of
+        distinct sessions and distinct users (0 disables a check). Evidence
+        from the cross-cycle ledger counts toward both minima. Controlled
+        candidate-audit sessions are exempt: they are anchored to a candidate
+        job and are not personal-preference observations.
+        """
+        min_sessions = int(getattr(self.config, "min_group_sessions", 0) or 0)
+        min_users = int(getattr(self.config, "min_group_users", 0) or 0)
+        if min_sessions <= 0 and min_users <= 0:
+            return None
+        valid = [
+            session
+            for session in planning_sessions or []
+            if isinstance(session, dict)
+        ]
+        if any(self._is_candidate_audit_session(session) for session in valid):
+            return None
+        session_ids = {
+            str(session.get("session_id") or "").strip()
+            for session in valid
+            if str(session.get("session_id") or "").strip()
+        }
+        users = {
+            str(session.get("user_alias") or "").strip() or "(unknown)"
+            for session in valid
+        }
+        if min_sessions > 0 and len(session_ids) < min_sessions:
+            return (
+                f"insufficient team evidence: {len(session_ids)} session(s) "
+                f"below minimum {min_sessions}"
+            )
+        if min_users > 0 and len(users) < min_users:
+            return (
+                f"insufficient team evidence: {len(users)} distinct user(s) "
+                f"below minimum {min_users}"
+            )
+        return None
+
     async def _evolve_skill_group(
         self,
         skill_name: str,
@@ -3044,6 +3305,35 @@ class EvolveServer(EvolveEngineMixin):
         planning_sessions, evolution_context, replay_windows = (
             await self._prepare_evolution_evidence(skill_name, sessions)
         )
+        gap = self._team_evidence_gap(planning_sessions)
+        if gap:
+            logger.info(
+                "[EvolveServer] skill '%s': %s; skipping evolution", skill_name, gap
+            )
+            evidence_state = await self._record_evolution_skip(
+                skill_name,
+                sessions,
+                gap,
+            )
+            debt = (
+                evidence_state.get("change_debt")
+                if isinstance(evidence_state.get("change_debt"), dict)
+                else {}
+            )
+            return {
+                "action": "skip",
+                "skill_name": skill_name,
+                "session_ids": [
+                    str(session.get("session_id") or "")
+                    for session in sessions
+                    if str(session.get("session_id") or "").strip()
+                ],
+                "rationale": gap,
+                "evidence_classification": {},
+                "source": "skill_group",
+                "uploaded": False,
+                "change_debt": debt,
+            }
         current_bundle = await self._call_storage(
             self._fetch_skill_bundle,
             skill_name,
@@ -3182,11 +3472,55 @@ class EvolveServer(EvolveEngineMixin):
         planning_sessions, evolution_context, replay_windows = (
             await self._prepare_evolution_evidence(NO_SKILL_KEY, sessions)
         )
+        gap = self._team_evidence_gap(planning_sessions)
+        if gap:
+            logger.info(
+                "[EvolveServer] no-skill sessions: %s; skipping create", gap
+            )
+            evidence_state = await self._record_evolution_skip(
+                NO_SKILL_KEY,
+                sessions,
+                gap,
+            )
+            debt = (
+                evidence_state.get("change_debt")
+                if isinstance(evidence_state.get("change_debt"), dict)
+                else {}
+            )
+            return [
+                {
+                    "action": "skip",
+                    "skill_name": "",
+                    "session_ids": [
+                        str(session.get("session_id") or "")
+                        for session in sessions
+                        if str(session.get("session_id") or "").strip()
+                    ],
+                    "rationale": gap,
+                    "evidence_classification": {},
+                    "source": "no_skill",
+                    "uploaded": False,
+                    "change_debt": debt,
+                }
+            ]
+
+        async def _library_reader(name: str) -> str:
+            # On-demand access to an existing skill's SKILL.md for the agent
+            # loop's read_library_skill tool (differentiation during create).
+            content = await self._call_storage(
+                fetch_skill_content,
+                self._skill_bucket,
+                self._skill_prefix,
+                str(name or "").strip(),
+            )
+            return str(content or "")
+
         result = await create_skill_from_sessions(
             self._llm,
             planning_sessions,
             existing_skill_names,
             evolution_context=evolution_context,
+            library_reader=_library_reader,
         )
         if not result or result.get("action") == DecisionAction.SKIP:
             rationale = (
@@ -3564,7 +3898,7 @@ class EvolveServer(EvolveEngineMixin):
     def _archive_key(self, session_id: str) -> str:
         return f"{self._session_prefix}session_archive/{session_id}.json"
 
-    def _archive_sessions(self, sessions: list[dict[str, Any]]) -> None:
+    def _archive_sessions(self, sessions: list[dict[str, Any]]) -> list[dict]:
         """Persist a durable copy of each session's turns before the live queue
         object is deleted on consumption.
 
@@ -3575,6 +3909,7 @@ class EvolveServer(EvolveEngineMixin):
         reconstruct uploaded inputs. Archiving is best-effort: a failure here
         must never block the drain.
         """
+        consumed = []
         for session in sessions:
             if not isinstance(session, dict):
                 continue
@@ -3586,6 +3921,7 @@ class EvolveServer(EvolveEngineMixin):
                 if not isinstance(turn, dict):
                     continue
                 turns.append({
+                    **{key: value for key, value in turn.items() if not key.startswith("_")},
                     "turn_num": turn.get("turn_num"),
                     "prompt_text": turn.get("prompt_text") or "",
                     "response_text": turn.get("response_text") or "",
@@ -3606,6 +3942,7 @@ class EvolveServer(EvolveEngineMixin):
                     ),
                 })
             archived = {
+                **{key: value for key, value in session.items() if not key.startswith("_")},
                 "schema_version": session.get("schema_version") or "",
                 "protocol_version": session.get("protocol_version") or "",
                 "session_id": sid,
@@ -3636,14 +3973,41 @@ class EvolveServer(EvolveEngineMixin):
                     for item in session.get("source_materials") or []
                     if isinstance(item, dict) and item.get("path")
                 ],
+                # Preserve the ingest-time review conclusions. The session
+                # index keeps its own copy, but the archived payload is what
+                # the conversation-detail endpoint reads after consumption —
+                # dropping these left consumed sessions without a visible
+                # judge conclusion in the console.
+                "value_judge": (
+                    dict(session["value_judge"])
+                    if isinstance(session.get("value_judge"), dict)
+                    else {}
+                ),
+                "judge": (
+                    dict(session["judge"])
+                    if isinstance(session.get("judge"), dict)
+                    else {}
+                ),
             }
             try:
-                self._bucket.put_object(
-                    self._archive_key(sid),
-                    json.dumps(archived, ensure_ascii=False).encode("utf-8"),
-                )
+                if hasattr(self._bucket, "consume_session"):
+                    if not self._bucket.consume_session(
+                        f"{self._session_prefix}sessions/{sid}.json",
+                        session.get("_queue_sha256", ""),
+                        self._archive_key(sid), {**archived, "status": "consumed"},
+                    ):
+                        continue
+                else:
+                    self._bucket.put_object(
+                        self._archive_key(sid),
+                        json.dumps(archived, ensure_ascii=False).encode("utf-8"),
+                    )
+                consumed.append(session)
             except Exception as exc:  # noqa: BLE001 - archival must not block drain
+                if self.config.storage_backend == "postgres":
+                    raise
                 logger.warning("[EvolveServer] archive session %s failed: %s", sid, exc)
+        return consumed
 
     def _read_session_content(self, session_id: str) -> tuple[dict[str, Any] | None, str]:
         """Return ``(session_dict, source)`` with turns, live queue first then
@@ -3720,17 +4084,69 @@ class EvolveServer(EvolveEngineMixin):
     def _get_session_process(self, session_id: str) -> dict[str, Any]:
         """Reconstruct "what happened to this session" from evolution history.
 
-        A session isn't processed in isolation — it's aggregated into per-skill
-        groups. So we scan ``evolve_history.jsonl`` for every cycle that
+        Reads from the bucket first (per-tenant isolated), falling back to
+        the file-based ``evolve_history.jsonl`` for legacy / local-backend
+        deployments.  A session isn't processed in isolation — it's
+        aggregated into per-skill groups. So we scan every cycle that
         referenced this ``session_id`` (top-level or via any evolution record)
         and surface, per cycle: this session's judge scores, which skills its
         content contributed to evolving, and the resulting action/candidate.
-        Read-only; a missing/corrupt history file yields an empty timeline.
         """
         sid = str(session_id or "").strip()
         if not sid:
             return {"status": "not_found"}
+        # Merge bucket records (per-tenant isolated) with legacy file records
+        # so historical data isn't lost after upgrading to the bucket path.
+        records = load_history_records(self._bucket, session_id=sid)
+        file_records = self._read_history_file(session_id=sid)
+        if file_records:
+            seen = {str(r.get("timestamp") or "") + str(r.get("cycle_id") or "") for r in records}
+            for fr in file_records:
+                key = str(fr.get("timestamp") or "") + str(fr.get("cycle_id") or "")
+                if key not in seen:
+                    records.append(fr)
+                    seen.add(key)
+            records.sort(key=lambda r: str(r.get("timestamp") or ""), reverse=True)
         cycles: list[dict[str, Any]] = []
+        for record in records:
+            judge = None
+            for detail in record.get("session_judge_details") or []:
+                if isinstance(detail, dict) and str(detail.get("session_id")) == sid:
+                    judge = detail
+                    break
+            evolutions: list[dict[str, Any]] = []
+            for evo in record.get("evolutions") or []:
+                if isinstance(evo, dict) and sid in set(evo.get("session_ids") or []):
+                    evolutions.append({
+                        "skill_name": evo.get("skill_name"),
+                        "action": evo.get("action"),
+                        "reason": evo.get("reason"),
+                        "rationale": evo.get("rationale"),
+                        "evidence_classification": evo.get("evidence_classification") or {},
+                        "uploaded": evo.get("uploaded"),
+                        "version": evo.get("version"),
+                        "job_id": evo.get("job_id"),
+                    })
+            cycles.append({
+                "timestamp": record.get("timestamp"),
+                "elapsed_seconds": record.get("elapsed_seconds"),
+                "sessions": record.get("sessions"),
+                "skill_groups": record.get("skill_groups"),
+                "uploaded_skills": record.get("uploaded_skills"),
+                "candidates_queued": record.get("candidates_queued"),
+                "judge": judge,
+                "evolutions": evolutions,
+            })
+        # load_history_records returns newest first; reverse for chronological.
+        cycles.reverse()
+        return {"status": "ok", "session_id": sid, "cycles": cycles}
+
+    def _read_history_file(self, *, session_id: str = "") -> list[dict[str, Any]]:
+        """Read history records from the legacy ``evolve_history.jsonl`` file."""
+        if self.config.storage_backend == "postgres":
+            return []
+        wanted = str(session_id or "").strip()
+        records: list[dict[str, Any]] = []
         try:
             with open(self.config.history_path, "r", encoding="utf-8") as handle:
                 for line in handle:
@@ -3743,53 +4159,48 @@ class EvolveServer(EvolveEngineMixin):
                         continue
                     if not isinstance(record, dict):
                         continue
-                    ids = set(record.get("session_ids") or [])
-                    for evo in record.get("evolutions") or []:
-                        if isinstance(evo, dict):
-                            ids.update(evo.get("session_ids") or [])
-                    if sid not in ids:
-                        continue
-                    judge = None
-                    for detail in record.get("session_judge_details") or []:
-                        if isinstance(detail, dict) and str(detail.get("session_id")) == sid:
-                            judge = detail
-                            break
-                    evolutions: list[dict[str, Any]] = []
-                    for evo in record.get("evolutions") or []:
-                        if isinstance(evo, dict) and sid in set(evo.get("session_ids") or []):
-                            evolutions.append({
-                                "skill_name": evo.get("skill_name"),
-                                "action": evo.get("action"),
-                                "reason": evo.get("reason"),
-                                "rationale": evo.get("rationale"),
-                                "evidence_classification": evo.get("evidence_classification") or {},
-                                "uploaded": evo.get("uploaded"),
-                                "version": evo.get("version"),
-                                "job_id": evo.get("job_id"),
-                            })
-                    cycles.append({
-                        "timestamp": record.get("timestamp"),
-                        "elapsed_seconds": record.get("elapsed_seconds"),
-                        "sessions": record.get("sessions"),
-                        "skill_groups": record.get("skill_groups"),
-                        "uploaded_skills": record.get("uploaded_skills"),
-                        "candidates_queued": record.get("candidates_queued"),
-                        "judge": judge,
-                        "evolutions": evolutions,
-                    })
+                    if wanted:
+                        ids = set(record.get("session_ids") or [])
+                        for evo in record.get("evolutions") or []:
+                            if isinstance(evo, dict):
+                                ids.update(evo.get("session_ids") or [])
+                        if wanted not in ids:
+                            continue
+                    records.append(record)
         except FileNotFoundError:
-            cycles = []
-        except Exception as exc:  # noqa: BLE001 - process view is best-effort
-            logger.warning("[EvolveServer] session process read failed: %s", exc)
-            cycles = []
-        cycles.reverse()
-        return {"status": "ok", "session_id": sid, "cycles": cycles}
+            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[EvolveServer] history file read failed: %s", exc)
+        records.sort(key=lambda r: str(r.get("timestamp") or ""), reverse=True)
+        return records
 
     async def get_session_process(self, session_id: str) -> dict[str, Any]:
         """Async wrapper around :meth:`_get_session_process`."""
         return await self._call_storage(self._get_session_process, session_id)
 
     async def run_once(self) -> dict:
+        runtime = getattr(self._bucket, "_runtime", None)
+        locked = False
+        if runtime is not None and hasattr(runtime, "try_advisory_lock"):
+            locked = await asyncio.to_thread(runtime.try_advisory_lock, self.tenant_id)
+            if not locked:
+                return {"sessions": 0, "status": "busy"}
+        try:
+            return await self._run_observed_cycle()
+        finally:
+            if locked:
+                await asyncio.to_thread(runtime.release_advisory_lock, self.tenant_id)
+
+    async def _run_observed_cycle(self) -> dict:
+        debug_dir = self.config.debug_dump_dir
+        if debug_dir and self.config.storage_backend == "postgres":
+            debug_dir = str(Path(debug_dir) / self.tenant_id)
+        set_evolve_debug_dir(debug_dir)
+        set_summarizer_debug_dir(debug_dir)
+        set_evolve_agent_limits(self.config.agent_max_rounds, self.config.agent_max_tool_calls_per_round)
+        set_evolve_bundle_contract(
+            self.config.bundle_text_extensions, self.config.bundle_max_file_bytes, self.config.bundle_allow_delete
+        )
         cycle_id = f"eb-{uuid.uuid4().hex[:12]}"
         with langfuse_observation(
             name="teamEvolver.evolve.cycle",
@@ -3838,11 +4249,15 @@ class EvolveServer(EvolveEngineMixin):
         no_skill_sessions: list[dict] = []
         evolution_records: list[dict] = []
         had_processing_error = False
+        # Session ids tied to a failed branch: they stay queued for retry
+        # while sessions from successful branches are consumed (partial
+        # commit), so one permanently-failing group can't starve the queue.
+        failed_session_ids: set[str] = set()
 
         if sessions:
-            logger.info("[EvolveServer] summarizing %d sessions", len(sessions))
-            await summarize_sessions_parallel(self._llm, sessions)
-            judge_summary = await self._run_session_judge(sessions)
+            logger.info("[EvolveServer] preparing %d sessions (summarize+judge pipeline)", len(sessions))
+            judged = await self._prepare_sessions(sessions)
+            judge_summary = self._judge_summary(sessions, judged)
 
             grouped_sessions = aggregate_sessions_by_skill(sessions)
             no_skill_sessions = grouped_sessions.pop(NO_SKILL_KEY, [])
@@ -3874,7 +4289,12 @@ class EvolveServer(EvolveEngineMixin):
                             name, group, existing_skill_names
                         )
                     except Exception as exc:
-                        logger.error("[EvolveServer] skill '%s' evolve failed: %s", name, exc)
+                        logger.error(
+                            "[EvolveServer] skill '%s' evolve failed: %s",
+                            name,
+                            exc,
+                            exc_info=True,
+                        )
                         raise
                     return [record] if record else []
 
@@ -3905,6 +4325,15 @@ class EvolveServer(EvolveEngineMixin):
                             logger.error(
                                 "[EvolveServer] no-skill evolve failed: %s", result
                             )
+                        failed_group = (
+                            no_skill_sessions
+                            if branch_name == NO_SKILL_KEY
+                            else grouped_sessions.get(branch_name, [])
+                        )
+                        for failed_session in failed_group:
+                            failed_sid = failed_session.get("session_id")
+                            if failed_sid:
+                                failed_session_ids.add(failed_sid)
                         had_processing_error = True
                         continue
                     evolution_records.extend(result)
@@ -3919,21 +4348,44 @@ class EvolveServer(EvolveEngineMixin):
         # write-back preserves them instead of clobbering with our in-memory map.
         await self._call_storage(self._id_registry.merge_from_oss, self._skill_bucket, self._skill_prefix)
         await self._call_storage(self._id_registry.save_to_oss, self._skill_bucket, self._skill_prefix)
-        if session_keys and not had_processing_error:
-            # Snapshot conversation content to the durable archive BEFORE the
-            # queue objects are deleted, so 会话历史 can still show the turns of
-            # a consumed session (the ledger alone only keeps metadata).
-            await self._call_storage(self._archive_sessions, sessions)
-            await self._call_storage(delete_session_keys, self._bucket, session_keys)
-            # Mark the drained conversations consumed in the durable ledger so
-            # the dashboard's 会话历史 reflects that they've been processed even
-            # though they're gone from the live queue.
-            await self._call_storage(self._mark_sessions_consumed, sessions)
-        elif session_keys and had_processing_error:
-            logger.warning(
-                "[EvolveServer] retaining %d session(s) in queue because this cycle had processing errors",
-                len(session_keys),
-            )
+        if session_keys:
+            # session_keys (consumed keys) align 1:1 with the drained
+            # sessions list, so zip() maps each session to its queue key.
+            if had_processing_error:
+                # Partial commit: consume sessions whose branches all
+                # succeeded; retain sessions touched by a failed branch
+                # (a session referencing multiple skills survives if ANY
+                # of its groups failed).
+                doomed_sessions = [
+                    s for s in sessions
+                    if s.get("session_id") not in failed_session_ids
+                ]
+                doomed_keys = [
+                    k for s, k in zip(sessions, session_keys)
+                    if s.get("session_id") not in failed_session_ids
+                ]
+                logger.warning(
+                    "[EvolveServer] partial commit: consuming %d session(s), "
+                    "retaining %d session(s) tied to failed branch(es)",
+                    len(doomed_keys),
+                    len(session_keys) - len(doomed_keys),
+                )
+            else:
+                doomed_sessions = sessions
+                doomed_keys = session_keys
+            if doomed_keys:
+                # Snapshot conversation content to the durable archive BEFORE the
+                # queue objects are deleted, so 会话历史 can still show the turns of
+                # a consumed session (the ledger alone only keeps metadata).
+                consumed = await self._call_storage(self._archive_sessions, doomed_sessions)
+                if hasattr(self._bucket, "consume_session"):
+                    doomed_sessions = consumed
+                else:
+                    await self._call_storage(delete_session_keys, self._bucket, doomed_keys)
+                # Mark the drained conversations consumed in the durable ledger so
+                # the dashboard's 会话历史 reflects that they've been processed even
+                # though they're gone from the live queue.
+                await self._call_storage(self._mark_sessions_consumed, doomed_sessions)
 
         elapsed = round(time.monotonic() - started_at, 1)
         uploaded_skills = sum(1 for record in all_records if record.get("uploaded"))
@@ -4004,14 +4456,39 @@ class EvolveServer(EvolveEngineMixin):
         self._running = True
         logger.info("[EvolveServer] periodic mode: interval=%ds", self.config.interval_seconds)
         while self._running:
+            drained = 0
             try:
                 # Share the cycle lock with /trigger so a manual trigger and the
                 # periodic loop never run overlapping read-modify-write cycles.
                 async with self._get_run_lock():
-                    await self.run_once()
+                    result = await self.run_once()
+                drained = int(result.get("sessions") or 0)
             except Exception as exc:
                 logger.error("[EvolveServer] cycle error: %s", exc, exc_info=True)
-            await asyncio.sleep(self.config.interval_seconds)
+            # Continuous drain: while the queue still holds sessions (a capped
+            # drain left a backlog, or more sessions arrived mid-cycle), start
+            # the next cycle after a short pause instead of idling for a full
+            # interval. With an empty queue the normal interval applies, so
+            # LLM cost at rest is unchanged.
+            has_backlog = False
+            cap = int(getattr(self.config, "drain_max_per_cycle", 0) or 0)
+            if cap > 0:
+                has_backlog = drained >= cap
+            else:
+                try:
+                    remaining = await self._call_storage(
+                        list_session_keys, self._bucket, self._session_prefix
+                    )
+                    has_backlog = bool(remaining)
+                except Exception:
+                    has_backlog = False
+            if has_backlog:
+                logger.info(
+                    "[EvolveServer] session backlog detected — starting next cycle immediately"
+                )
+                await asyncio.sleep(1.0)
+            else:
+                await asyncio.sleep(self.config.interval_seconds)
 
     def stop(self) -> None:
         self._running = False
@@ -4080,6 +4557,11 @@ class EvolveServer(EvolveEngineMixin):
             # can read sessions written by a different account/user/peer namespace.
             if not isinstance(body, dict):
                 body = {}
+            if self.config.storage_backend == "postgres" and body:
+                return JSONResponse(
+                    status_code=400,
+                    content={"detail": "tenant identity and runtime overrides are not allowed"},
+                )
             # Serialize the whole cycle: the override branch swaps shared instance
             # state in place and run_once does a non-atomic manifest read-modify-
             # write. Without this, two concurrent /trigger calls interleave and
@@ -4191,45 +4673,28 @@ class EvolveServer(EvolveEngineMixin):
 
         @app.get("/history")
         async def history(session_id: str = "", limit: int = 20):
-            """Read back recent evolution cycles from ``evolve_history.jsonl``.
+            """Read back recent evolution cycles from the object store.
 
-            Read-only. Optionally filter to cycles that consumed ``session_id``
-            (matched against the cycle's top-level ``session_ids`` or any
-            ``evolutions[].session_ids``). ``limit`` caps how many matching
-            cycles are returned, newest first. Best-effort: a missing/corrupt
-            history file yields an empty list rather than an error.
+            Merges bucket records (per-tenant isolated) with legacy file
+            records so historical data isn't lost after upgrading.  Optionally
+            filter to cycles that consumed ``session_id``.  ``limit`` caps how
+            many matching cycles are returned, newest first.
             """
             wanted = str(session_id or "").strip()
             capped = max(1, min(int(limit or 20), 200))
-            path = self.config.history_path
-            cycles: list[dict[str, Any]] = []
-            try:
-                with open(path, "r", encoding="utf-8") as handle:
-                    for line in handle:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            record = json.loads(line)
-                        except Exception:
-                            continue
-                        if not isinstance(record, dict):
-                            continue
-                        if wanted:
-                            ids = set(record.get("session_ids") or [])
-                            for evo in record.get("evolutions") or []:
-                                if isinstance(evo, dict):
-                                    ids.update(evo.get("session_ids") or [])
-                            if wanted not in ids:
-                                continue
-                        cycles.append(record)
-            except FileNotFoundError:
-                cycles = []
-            except Exception as exc:
-                logger.warning("[EvolveServer] history read failed: %s", exc)
-                cycles = []
-            cycles.reverse()
-            return JSONResponse(content={"reachable": True, "cycles": cycles[:capped]})
+            # Merge bucket + file, dedup by timestamp+cycle_id.
+            records = load_history_records(self._bucket, session_id=wanted)
+            file_records = self._read_history_file(session_id=wanted)
+            if file_records:
+                seen = {str(r.get("timestamp") or "") + str(r.get("cycle_id") or "") for r in records}
+                for fr in file_records:
+                    key = str(fr.get("timestamp") or "") + str(fr.get("cycle_id") or "")
+                    if key not in seen:
+                        records.append(fr)
+                        seen.add(key)
+                records.sort(key=lambda r: str(r.get("timestamp") or ""), reverse=True)
+            records = records[:capped]
+            return JSONResponse(content={"reachable": True, "cycles": records})
 
         @app.get("/sessions")
         async def sessions():

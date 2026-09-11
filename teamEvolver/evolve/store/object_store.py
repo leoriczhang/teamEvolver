@@ -407,3 +407,80 @@ def fetch_version_bundle(
     except Exception:
         return {}
     return bundle
+
+
+# --------------------------------------------------------------------------- #
+# Evolution history (replaces evolve_history.jsonl; goes through the bucket  #
+# so PG RLS / per-tenant Viking credentials enforce isolation automatically)  #
+# --------------------------------------------------------------------------- #
+
+_HISTORY_PREFIX = "evolve_history/"
+
+
+def _history_key(timestamp: str, cycle_id: str) -> str:
+    """Build a sortable, unique key for one history record."""
+    ts = str(timestamp or "").replace(":", "").replace(".", "_")
+    cid = str(cycle_id or "").replace("/", "_")
+    return f"{_HISTORY_PREFIX}{ts}_{cid}.json"
+
+
+def append_history_record(bucket, record: dict[str, Any]) -> None:
+    """Write one evolution-cycle history record through the object store.
+
+    Each cycle gets its own object key under ``evolve_history/`` so the
+    existing per-tenant RLS / Viking account scoping applies without any
+    new DDL.  The file-based ``evolve_history.jsonl`` remains as a fallback
+    for single-tenant / local-backend deployments.
+    """
+    ts = str(record.get("timestamp") or "")
+    cid = str(record.get("cycle_id") or "")
+    if not ts and not cid:
+        import uuid
+
+        cid = uuid.uuid4().hex[:12]
+    key = _history_key(ts, cid)
+    payload = json.dumps(record, ensure_ascii=False).encode("utf-8")
+    try:
+        bucket.put_object(key, payload)
+    except Exception as exc:  # noqa: BLE001 - history must not break the cycle
+        logger.warning("[History] bucket write failed for %s: %s", key, exc)
+
+
+def load_history_records(
+    bucket,
+    *,
+    limit: int = 0,
+    session_id: str = "",
+) -> list[dict[str, Any]]:
+    """Read evolution-cycle records from the bucket, newest first.
+
+    When *session_id* is set, only cycles referencing that session (in
+    ``session_ids`` or any ``evolutions[].session_ids``) are returned.
+    *limit* caps the result count (0 = all).
+    """
+    wanted = str(session_id or "").strip()
+    records: list[dict[str, Any]] = []
+    try:
+        keys = list_object_keys(bucket, _HISTORY_PREFIX)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[History] bucket list failed: %s", exc)
+        return []
+    for key in keys:
+        if not key.endswith(".json"):
+            continue
+        record = read_json_object(bucket, key)
+        if not isinstance(record, dict):
+            continue
+        if wanted:
+            ids = set(record.get("session_ids") or [])
+            for evo in record.get("evolutions") or []:
+                if isinstance(evo, dict):
+                    ids.update(evo.get("session_ids") or [])
+            if wanted not in ids:
+                continue
+        records.append(record)
+    # Sort by timestamp descending (newest first).
+    records.sort(key=lambda r: str(r.get("timestamp") or ""), reverse=True)
+    if limit and limit > 0:
+        records = records[:limit]
+    return records

@@ -14,6 +14,8 @@ SESSION_SCHEMA_V1 = "teamevolver.agent-session.v1"
 CONTEXT_RESULT_SCHEMA_V1 = "teamevolver.context-result.v1"
 REPLAY_REQUEST_SCHEMA_V1 = "teamevolver.replay-branch-request.v1"
 REPLAY_RESULT_SCHEMA_V1 = "teamevolver.replay-branch-result.v1"
+REPLAY_TURN_REQUEST_SCHEMA_V1 = "teamevolver.replay-turn-request.v1"
+REPLAY_TURN_RESULT_SCHEMA_V1 = "teamevolver.replay-turn-result.v1"
 
 CAP_SESSION_INGEST = "session.ingest.v1"
 CAP_REPLAY_BRANCH = "replay.branch.v1"
@@ -348,6 +350,120 @@ def normalize_replay_result(
         "protocol_version": AGENT_PROTOCOL_VERSION,
         "request_id": request_id,
         "branch": branch,
+        "status": status,
+        "metrics": dict(metrics),
+        "error": error,
+    }
+
+
+def normalize_replay_turn_request(payload: dict[str, Any]) -> dict[str, Any]:
+    """Validate one server-driven replay turn request.
+
+    The server owns the multi-turn loop, checklist judging, and metric
+    aggregation; the Agent executes exactly one turn per call. ``request_id``
+    is a session handle: consecutive turns with the same value must resume
+    the same sandbox session/workspace instead of resetting it."""
+    if not isinstance(payload, dict):
+        raise AgentProtocolError("replay turn request must be an object")
+    _require_supported_version(payload.get("protocol_version") or "1.0")
+    schema = str(payload.get("schema_version") or "").strip().lower()
+    if schema != REPLAY_TURN_REQUEST_SCHEMA_V1:
+        raise AgentProtocolError(
+            f"unsupported replay turn request schema: {schema}"
+        )
+    request_id = str(payload.get("request_id") or "").strip()
+    branch = str(payload.get("branch") or "").strip().lower()
+    turn_num = payload.get("turn_num")
+    prompt = str(payload.get("prompt") or "").strip()
+    if not request_id:
+        raise AgentProtocolError("replay turn request_id is required")
+    if branch not in {"baseline", "candidate"}:
+        raise AgentProtocolError("replay turn branch must be baseline or candidate")
+    if isinstance(turn_num, bool) or not isinstance(turn_num, int) or turn_num < 1:
+        raise AgentProtocolError("replay turn_num must be a positive integer")
+    if not prompt:
+        raise AgentProtocolError("replay turn prompt is required")
+    limits = payload.get("limits") if isinstance(payload.get("limits"), dict) else {}
+    try:
+        turn_timeout = int(limits.get("turn_timeout_seconds") or 600)
+    except (TypeError, ValueError) as exc:
+        raise AgentProtocolError("replay turn limits must be integers") from exc
+    if not 30 <= turn_timeout <= 3600:
+        raise AgentProtocolError(
+            "replay turn_timeout_seconds must be between 30 and 3600"
+        )
+    return {
+        **payload,
+        "schema_version": REPLAY_TURN_REQUEST_SCHEMA_V1,
+        "protocol_version": AGENT_PROTOCOL_VERSION,
+        "request_id": request_id,
+        "branch": branch,
+        "turn_num": turn_num,
+        "prompt": prompt,
+        "limits": {
+            **limits,
+            "turn_timeout_seconds": turn_timeout,
+        },
+    }
+
+
+def normalize_replay_turn_result(
+    payload: dict[str, Any],
+    *,
+    expected_request_id: str,
+    expected_turn_num: int,
+) -> dict[str, Any]:
+    """Validate one server-driven replay turn result.
+
+    Fail-closed: a ``succeeded`` turn MUST report per-turn ``tool_call_count``
+    and ``total_tokens``; missing or invalid counts invalidate the turn so
+    server-side efficiency comparison never runs on fabricated metrics."""
+    if not isinstance(payload, dict):
+        raise AgentProtocolError(
+            "INVALID_RESPONSE: replay turn result must be an object"
+        )
+    _require_supported_version(payload.get("protocol_version") or "1.0")
+    schema = str(payload.get("schema_version") or "").strip().lower()
+    if schema != REPLAY_TURN_RESULT_SCHEMA_V1:
+        raise AgentProtocolError(
+            f"INVALID_RESPONSE: unsupported replay turn result schema: {schema}"
+        )
+    request_id = str(payload.get("request_id") or "")
+    turn_num = payload.get("turn_num")
+    if request_id != expected_request_id:
+        raise AgentProtocolError(
+            "INVALID_RESPONSE: replay turn request_id mismatch"
+        )
+    if (
+        isinstance(turn_num, bool)
+        or not isinstance(turn_num, int)
+        or turn_num != expected_turn_num
+    ):
+        raise AgentProtocolError("INVALID_RESPONSE: replay turn_num mismatch")
+    status = str(payload.get("status") or "").lower()
+    if status not in {"succeeded", "failed", "unsupported"}:
+        raise AgentProtocolError("INVALID_RESPONSE: invalid replay turn status")
+    metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+    if status == "succeeded":
+        for key in ("tool_call_count", "total_tokens"):
+            value = metrics.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise AgentProtocolError(
+                    f"INVALID_RESPONSE: metrics.{key} must be a non-negative integer"
+                )
+    error = payload.get("error")
+    if status != "succeeded" and not isinstance(error, dict):
+        error = {
+            "code": "EXECUTION_FAILED",
+            "message": str(error or "replay turn failed"),
+            "retryable": False,
+        }
+    return {
+        **payload,
+        "schema_version": REPLAY_TURN_RESULT_SCHEMA_V1,
+        "protocol_version": AGENT_PROTOCOL_VERSION,
+        "request_id": request_id,
+        "turn_num": turn_num,
         "status": status,
         "metrics": dict(metrics),
         "error": error,

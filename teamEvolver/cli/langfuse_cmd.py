@@ -153,9 +153,12 @@ def langfuse_status():
     click.echo(f"host: {cfg.langfuse_host}")
     click.echo(f"session_pull_enabled: {cfg.langfuse_enabled}")
     click.echo(f"tracing_enabled: {cfg.langfuse_tracing_enabled}")
+    click.echo(f"tracing_host: {cfg.langfuse_tracing_host or '(unset)'}")
     click.echo(f"tracing_environment: {cfg.langfuse_tracing_environment}")
     click.echo(f"public_key: {'present' if cfg.langfuse_public_key else 'missing'}")
     click.echo(f"secret_key: {'present' if cfg.langfuse_secret_key else 'missing'}")
+    click.echo(f"tracing_public_key: {'present' if cfg.langfuse_tracing_public_key else 'missing'}")
+    click.echo(f"tracing_secret_key: {'present' if cfg.langfuse_tracing_secret_key else 'missing'}")
     click.echo(f"max_sessions: {cfg.langfuse_max_sessions}")
     click.echo(f"default.environment: {','.join(cfg.langfuse_default_environment) or '(any)'}")
     click.echo(f"default.user_id: {cfg.langfuse_default_user_id or '(any)'}")
@@ -400,7 +403,11 @@ def _pull_via_service(
     if api_key:
         req.add_header("Authorization", f"Bearer {api_key}")
     try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
+        # The service ingests every pulled session synchronously (LLM-backed
+        # value classification per session), so a large window takes well
+        # over 5 minutes; the CLI must wait it out rather than report a
+        # false failure while server-side ingest keeps running.
+        with urllib.request.urlopen(req, timeout=3600) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:300]

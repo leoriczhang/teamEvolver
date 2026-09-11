@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional, Protocol
 
 from ..progressive_replay import (
@@ -72,6 +75,7 @@ class ValidationWorker:
         self._jobs_completed_today = 0
         self._jobs_completed_date = datetime.now(timezone.utc).date().isoformat()
         self._user_alias = str(config.sharing_user_alias or os.environ.get("USER", "anonymous"))
+        self._load_quota()
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -84,6 +88,55 @@ class ValidationWorker:
         if today != self._jobs_completed_date:
             self._jobs_completed_date = today
             self._jobs_completed_today = 0
+        self._save_quota()
+
+    def _quota_file(self) -> Path:
+        """Per-tenant quota file so multi-tenant deployments don't share a counter."""
+        tenant = str(getattr(self.config, "pg_tenant_id", "") or "default")
+        if tenant == "default":
+            return Path.home() / ".teamEvolver" / "validation_quota.json"
+        return Path.home() / ".teamEvolver" / f"validation_quota.{tenant}.json"
+
+    def _save_quota(self) -> None:
+        path = self._quota_file()
+        tmp_path: Path | None = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                delete=False,
+            ) as handle:
+                tmp_path = Path(handle.name)
+                json.dump(
+                    {
+                        "date": self._jobs_completed_date,
+                        "count": self._jobs_completed_today,
+                    },
+                    handle,
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, path)
+        except OSError:
+            logger.warning("[ValidationWorker] failed to persist validation quota", exc_info=True)
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+
+    def _load_quota(self) -> None:
+        path = self._quota_file()
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return
+        stored_date = str(data.get("date") or "")
+        if stored_date == datetime.now(timezone.utc).date().isoformat():
+            self._jobs_completed_date = stored_date
+            self._jobs_completed_today = int(data.get("count") or 0)
 
     def _quota_available(self) -> bool:
         self._reset_daily_quota_if_needed()
@@ -473,6 +526,7 @@ class ValidationWorker:
                 claim_token,
             )
             self._jobs_completed_today += 1
+            self._save_quota()
             summary.validated_jobs += 1
             logger.info(
                 "[ValidationWorker] submitted result for job %s as %s "

@@ -2,7 +2,7 @@
 
 ## 1. API 实现介绍
 
-Skill 管理 API 提供团队 Skill 的 CRUD、版本回滚和云端同步，也提供个人 Skill 编辑、个人与团队空间复制以及发布申请。这些接口供 Web 控制台使用并要求登录；团队 Skill 写操作和发布申请裁决要求管理员。团队 Skill 变更会同步到 OpenViking，并通过 Skill Sync outbox 通知已注册的 Agent。
+Skill 管理 API 提供团队 Skill 的 CRUD、版本回滚和云端同步，也提供个人 Skill 编辑、个人与团队空间复制以及发布申请。这些接口供 Web 控制台使用并要求登录；团队 Skill 写操作和发布申请裁决要求管理员。团队 Skill 变更保存在本地 Skill 库，并异步镜像到 OpenViking，同时通过 Skill Sync outbox 通知已注册的 Agent。
 
 代码实现：`teamEvolver/proxy/skills_admin.py`（`SkillsAdminMixin`）
 Skill 编辑器：`teamEvolver/skills/editor.py`
@@ -173,11 +173,16 @@ Skill 编辑器：`teamEvolver/skills/editor.py`
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `name` | string | Skill 名称 |
+| `skill_id` | string | 技能 ID（登记表分配，跨节点稳定） |
 | `current_version` | integer | 当前版本 |
+| `versions` | array[integer] | 可查看/可回退的版本号（降序，每个版本都有 `versions/v{n}/` bundle） |
 | `history` | array | 版本历史列表 |
 | `history[].version` | integer | 版本号 |
-| `history[].created_at` | string | 创建时间 |
-| `history[].message` | string | 版本说明 |
+| `history[].timestamp` | string | 创建时间（UTC ISO-8601） |
+| `history[].action` | string | 变更动作（如 `publish`、`update`、`rollback:v<N>`） |
+| `history[].content_sha` | string | SKILL.md 内容 SHA-256 |
+| `history[].tree_sha256` | string | Bundle 树哈希（可选） |
+| `history[].files` | array | Bundle 文件记录（可选） |
 
 **缓存：** 版本列表缓存 15 秒。
 
@@ -237,6 +242,7 @@ Skill 编辑器：`teamEvolver/skills/editor.py`
 |------|------|------|
 | `name` | string | Skill 名称 |
 | `new_version` | integer | 新版本号（回滚后的版本） |
+| `restored_from` | integer | 被回滚的目标版本号 |
 | `loaded_skills` | integer | 重新加载后的 Skill 总数 |
 | `event_id` | string | 同步事件 ID |
 
@@ -366,3 +372,15 @@ curl -X POST -b "teamEvolver_console_session=<token>" \
 - 写操作（create/update/delete/rollback）自动触发云端同步；
 - 同步失败不影响本地写入，响应中 `cloud.synced: false` 并包含失败原因；
 - 成功的云端同步会触发 Skill Sync webhook，通知已注册的 Agent 更新本地缓存。
+
+### Skill 变更服务（写路径）
+
+所有团队 Skill 写操作统一经过 `teamEvolver/skills/mutations.py:SkillMutationService`（动作 `publish|update|rollback|delete`）。每次变更产生三类持久化记录：
+
+- 提交存档 `skill_mutation_commits/`（完整变更审计）；
+- 同步发件箱事件 `skill_sync_outbox/`（投递给各 Agent 运行时）；
+- 删除墓碑 `skill_tombstones/`（delete 动作）。
+
+发件箱事件在重试耗尽后进入终态 `dead_letter`，可通过 `SkillMutationService.reconcile()` 修复重投。
+
+注意：Skill 库本地优先存储，通过持久化 spool（`sharing.skill_mirror_spool_dir`）异步镜像到 OpenViking；镜像状态可在 `GET /storage/status` 的 `mirror_enabled` 与 `mirror` 字段查看。

@@ -132,6 +132,8 @@ for (const mdFile of mdFiles) {
   for (const match of content.matchAll(codeFileRegex)) {
     refsChecked++
     let refPath = '/' + match[1]  // restore leading slash after file://
+    // Legacy absolute prefix from the original author's machine — normalize to this repo root
+    refPath = refPath.replace(/^\/home\/zhangpengkun\/teamEvolver(?=\/|$)/, repoRoot)
     // Skip fragment/query
     refPath = refPath.split('#')[0].split('?')[0]
     // Handle directory references (ending with /)
@@ -162,7 +164,9 @@ for (const mdFile of mdFiles) {
       // Check for def/class/function/async def of symbol
       const symName = symbol.split('.').pop()
       const symbolRegex = new RegExp(
-        `(?:def|class|async\\s+def)\\s+${symName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`
+        `(?:def|class|async\\s+def)\\s+${symName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}\\b` +
+        `|^${symName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}\\s*=:?`,
+        'm'
       )
       if (!symbolRegex.test(fileContent)) {
         warnings.push(`[${rel}] Symbol "${symName}" not found in ${codeRelPath}`)

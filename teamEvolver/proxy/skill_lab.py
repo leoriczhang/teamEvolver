@@ -20,6 +20,7 @@ from ..skill_lab import (
     resolve_dataset,
 )
 from ..dataset_synthesizer import synthesize_evolution_datasets
+from ..tenants.registry import current_tenant_id
 from .skills_admin import _clear_version_cache, _require_admin_request
 
 logger = logging.getLogger(__name__)
@@ -71,8 +72,15 @@ class SkillLabMixin:
     def _register_skill_lab_routes(self, app: FastAPI) -> None:
         owner = self
 
+        def _eff_config():
+            """Request-scoped effective config (tenant overrides merged)."""
+            from .routes import _tenant_effective_config
+            return _tenant_effective_config(owner)
+
         def lab_store() -> SkillLabStore:
-            return SkillLabStore.from_config(owner.config)
+            return SkillLabStore.from_config(
+                _eff_config(), tenant_id=current_tenant_id()
+            )
 
         def merged_datasets(skill_name: str) -> list[dict[str, Any]]:
             store = lab_store()
@@ -85,7 +93,7 @@ class SkillLabMixin:
             legacy_evolution = [
                 item
                 for item in evolution_datasets(
-                    owner.config,
+                    _eff_config(),
                     skill_name=skill_name,
                 )
                 if str(item.get("dataset_id") or "") not in seen
@@ -96,7 +104,7 @@ class SkillLabMixin:
             try:
                 from ..session_store import SessionStore
 
-                store = SessionStore.from_config(owner.config)
+                store = SessionStore.from_config(_eff_config(), tenant_id=current_tenant_id())
                 for row in store.list_conversations(limit=500):
                     session_id = str(row.get("session_id") or "")
                     session = store.load_session(session_id)
@@ -172,7 +180,7 @@ class SkillLabMixin:
                 skill_name = str(payload.get("skill_name") or "").strip()
                 if dataset_id and skill_name:
                     source_dataset = resolve_dataset(
-                        owner.config,
+                        _eff_config(),
                         store,
                         skill_name=skill_name,
                         dataset_id=dataset_id,
@@ -213,7 +221,7 @@ class SkillLabMixin:
                 from ..skills import editor
                 from ..validation.store import ValidationStore
 
-                session_store = SessionStore.from_config(owner.config)
+                session_store = SessionStore.from_config(_eff_config(), tenant_id=current_tenant_id())
                 rows = session_store.list_conversations(limit=500)
                 sessions: list[dict[str, Any]] = []
                 for row in rows:
@@ -256,7 +264,9 @@ class SkillLabMixin:
                         detail="没有找到该 Skill 关联的历史 Session",
                     )
 
-                validation_store = ValidationStore.from_config(owner.config)
+                validation_store = ValidationStore.from_config(
+                    _eff_config(), tenant_id=current_tenant_id()
+                )
                 jobs = [
                     job
                     for job in validation_store.list_jobs()
@@ -280,7 +290,7 @@ class SkillLabMixin:
                         window if window in replay_windows else "recent"
                     ].append(case)
 
-                detail = editor.get_skill(str(owner.config.skills_dir), skill_name)
+                detail = editor.get_skill(str(_eff_config().skills_dir), skill_name)
                 candidate_skill = parse_skill_markdown(
                     str(detail.get("skill_md") or "")
                 )
@@ -289,16 +299,17 @@ class SkillLabMixin:
                     if isinstance(latest.get("evidence_classification"), dict)
                     else {}
                 )
+                _cfg = _eff_config()
                 llm = AsyncLLMClient(
-                    api_key=str(owner.config.llm_api_key or ""),
-                    base_url=str(owner.config.llm_api_base or ""),
+                    api_key=str(_cfg.llm_api_key or ""),
+                    base_url=str(_cfg.llm_api_base or ""),
                     model=str(
-                        owner.config.llm_model_id
-                        or owner.config.model_name
+                        _cfg.llm_model_id
+                        or _cfg.model_name
                         or ""
                     ),
-                    max_tokens=int(owner.config.llm_max_tokens or 100_000),
-                    temperature=float(owner.config.llm_temperature),
+                    max_tokens=int(_cfg.llm_max_tokens or 100_000),
+                    temperature=float(_cfg.llm_temperature),
                 )
                 generated = await synthesize_evolution_datasets(
                     llm,
@@ -317,7 +328,7 @@ class SkillLabMixin:
                             6,
                             int(
                                 body.get("case_count")
-                                or owner.config.evolve_dataset_test_cases
+                                or _cfg.evolve_dataset_test_cases
                                 or 2
                             ),
                         ),
@@ -326,7 +337,7 @@ class SkillLabMixin:
                         1,
                         int(
                             body.get("min_requirements")
-                            or owner.config.evolve_dataset_min_requirements
+                            or _cfg.evolve_dataset_min_requirements
                             or 12
                         ),
                     ),
@@ -334,7 +345,7 @@ class SkillLabMixin:
                         1,
                         int(
                             body.get("max_requirements")
-                            or owner.config.evolve_dataset_max_requirements
+                            or _cfg.evolve_dataset_max_requirements
                             or 24
                         ),
                     ),
@@ -342,7 +353,7 @@ class SkillLabMixin:
                         1,
                         int(
                             body.get("disclosure_batch_size")
-                            or owner.config.evolve_dataset_disclosure_batch_size
+                            or _cfg.evolve_dataset_disclosure_batch_size
                             or 4
                         ),
                     ),
@@ -406,7 +417,7 @@ class SkillLabMixin:
             store = lab_store()
             try:
                 source = resolve_dataset(
-                    owner.config,
+                    _eff_config(),
                     store,
                     skill_name=skill_name,
                     dataset_id=dataset_id,
@@ -503,7 +514,7 @@ class SkillLabMixin:
             store = lab_store()
             try:
                 dataset = resolve_dataset(
-                    owner.config,
+                    _eff_config(),
                     store,
                     skill_name=skill_name,
                     dataset_id=dataset_id,
@@ -594,7 +605,7 @@ class SkillLabMixin:
                 )
                 run_id = store.make_run_id()
                 job = prepare_experiment_job(
-                    skills_dir=str(owner.config.skills_dir),
+                    skills_dir=str(_eff_config().skills_dir),
                     skill_name=skill_name,
                     candidate_skill_md=candidate_skill_md,
                     dataset=dataset,

@@ -266,6 +266,31 @@ WatchdogSec=60
 
 如果使用 Prometheus，可通过 blackbox-exporter 监控 `/healthz` 端点。
 
+## 存储与本地回退
+
+teamEvolver 默认本地优先存储：高频写入路径（Session 队列/索引、过滤审计、证据、验证状态、Skill 登记表/manifest/版本历史、变更提交/发件箱等）始终写入内置本地对象存储；OpenViking 仅承载异步镜像的 Skill 库子树与团队 Memory/聚合产物。相关配置位于 `sharing` 节（默认值见 `teamEvolver/config_store/defaults.py`）：
+
+| 配置 | 默认 | 说明 |
+|------|------|------|
+| `sharing.local_fallback_enabled` | `true` | OpenViking 不可用（连接错误/超时/HTTP 5xx）时自动回退到本地存储 |
+| `sharing.local_root` | 空 → `~/.teamEvolver/local_store` | 本地对象存储根目录 |
+| `sharing.session_backend` | 空 → `local` | Session 存储后端 |
+| `sharing.skill_backend` | 空 → `local` | Skill 库存储后端 |
+| `sharing.skill_mirror_enabled` | `true` | Skill 库异步镜像到 OpenViking |
+| `sharing.skill_mirror_spool_dir` | 空 → `~/.teamEvolver/skill_mirror_spool` | 镜像 spool 目录（持久化待投递的 push/delete 事件） |
+
+回退期间的写入仅保存在本地，不会自动同步回 OpenViking；Skill 库的镜像事件在 spool 中持久化，OpenViking 恢复后由后台 flusher（约 30 秒一轮）补投。运行状态可通过 `GET /storage/status` 观察（`fallback_active`、`effective_backend`、`mirror`）。
+
+## 本地运行脚本
+
+`scripts/` 提供三个不依赖共享云端的运维脚本：
+
+| 脚本 | 用途 | 主要参数 |
+|------|------|---------|
+| `scripts/run_local_evolution.py` | 全本地进化运行：ingest → evolve → export，产物写入独立 run 目录 | `--max-cycles`（默认 30）、`--drain-max-per-cycle`（默认 40）、`--export-only` |
+| `scripts/pull_sessions_local.py` | 批量拉取 Langfuse 会话到本地 raw/converted 存储 | `--reconvert`（重新转换 raw 目录中的全部文件，跳过拉取）、`--workers`（默认 4）、`--timeout`（覆盖客户端超时秒数） |
+| `scripts/replay_turn_server.py` | Agent 侧 server-driven Replay turn server：`POST /turn/<runtime_type>`、`GET /health` | `--host`、`--port` |
+
 ## 备份策略
 
 teamEvolver 的持久化数据存储在以下位置：

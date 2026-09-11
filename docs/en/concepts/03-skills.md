@@ -84,7 +84,7 @@ Returns currently published team Skill Bundle manifest and content.
 
 ### Push Mode
 
-After Skill publication, `SkillMutationService` sends update notifications to push-capable Agents via outbox mechanism. Push adapters are registered in [skill_sync_adapters.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/integrations/skill_sync_adapters.py).
+After Skill publication, `SkillMutationService` sends update notifications to push-capable Agents via outbox mechanism. Push adapters are registered in [skill_sync_adapters.py](../../../teamEvolver/integrations/skill_sync_adapters.py).
 
 ### Hermes Integration
 
@@ -95,7 +95,7 @@ User initiates task → Hermes pre_llm_call hook → teamEvolver-sync →
 Pull latest Skill Bundle → Update external_dirs → Hermes native skill discovery
 ```
 
-Installation script at [hermes_skill_sync/install.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/integrations/hermes_skill_sync/install.py).
+Installation script at [hermes_skill_sync/install.py](../../../teamEvolver/integrations/hermes_skill_sync/install.py).
 
 ## Boundary Between Skill and Memory
 
@@ -111,8 +111,8 @@ Installation script at [hermes_skill_sync/install.py](file:///home/zhangpengkun/
 
 | Module | Path |
 |--------|------|
-| Skill Bundle model | [skills/bundle.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/skills/bundle.py) |
-| Mutation service | [skills/mutations.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/skills/mutations.py) |
-| Render engine | [skills/render.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/skills/render.py) |
-| Registry | [skills/registry.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/skills/registry.py) |
-| Frontmatter parser | [skills/frontmatter.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/skills/frontmatter.py) |
+| Skill Bundle model | [skills/bundle.py](../../../teamEvolver/skills/bundle.py) |
+| Mutation service | [skills/mutations.py](../../../teamEvolver/skills/mutations.py) |
+| Render engine | [skills/render.py](../../../teamEvolver/skills/render.py) |
+| Registry | [skills/registry.py](../../../teamEvolver/skills/registry.py) |
+| Frontmatter parser | [skills/frontmatter.py](../../../teamEvolver/skills/frontmatter.py) |

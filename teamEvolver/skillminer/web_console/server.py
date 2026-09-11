@@ -34,6 +34,7 @@ import re
 import shutil
 import signal
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -1251,12 +1252,36 @@ class EventBus:
 
     MAX_HISTORY = 2000  # 历史上限：防止长跑后新连接重放巨量事件
 
+    @staticmethod
+    def _state_file():
+        return Path(PROJECT_ROOT) / "data" / "event_bus_state.json"
+
     def __init__(self):
         self._subscribers = []
         self._lock = threading.Lock()
         self._history = []  # 便于新连接补发已发生的事件
-        self._seq = 0
-        self._stream_id = f"{time.time_ns():x}"
+        try:
+            with open(self._state_file(), "r", encoding="utf-8") as f:
+                state = json.load(f)
+            self._seq = int(state.get("seq", 0))
+            self._stream_id = str(state.get("stream_id") or f"{time.time_ns():x}")
+        except (FileNotFoundError, ValueError, OSError):
+            self._seq = 0
+            self._stream_id = f"{time.time_ns():x}"
+
+    def _save_state(self):
+        state_file = self._state_file()
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=str(state_file.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({"seq": self._seq, "stream_id": self._stream_id}, f)
+            os.replace(tmp_path, state_file)
+        except OSError:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
     def subscribe(self, after_seq=0):
         """订阅事件流；只补发 seq > after_seq 的历史（after_seq=0 即全部）。"""
@@ -1295,6 +1320,7 @@ class EventBus:
                     except queue.Empty:
                         pass
                     q.put_nowait(event)
+        self._save_state()
 
     def reset(self):
         with self._lock:

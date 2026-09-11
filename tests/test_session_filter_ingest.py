@@ -10,6 +10,7 @@ from teamEvolver.config import TeamEvolverConfig
 from teamEvolver.proxy import ProxyServer
 from teamEvolver.session_filter import (
     SessionValueClassifier,
+    _lenient_parse,
     heuristic_classify_session,
 )
 from teamEvolver.session_store import SessionStore
@@ -43,6 +44,20 @@ def _queued_exists(store: SessionStore, session_id: str) -> bool:
         if is_not_found_error(exc):
             return False
         raise
+
+
+def _verified_feedback_usage() -> dict:
+    """Verified team-skill feedback signal (strongest heuristic evidence)."""
+    return {
+        "verified": True,
+        "skill_refs": [
+            {"scope": "team_skills", "context_ref": "skill://demo", "qualified_skill_id": "demo"}
+        ],
+        "feedback": {
+            "outcome": "failure",
+            "correction": "应按团队 SOP 流程重试",
+        },
+    }
 
 
 def test_ingest_skips_chitchat_sessions(tmp_path: Path) -> None:
@@ -108,6 +123,55 @@ def test_controlled_managed_eval_feedback_is_valuable() -> None:
     assert result["decision"] == "valuable"
 
 
+def test_tool_usage_without_feedback_is_task_only() -> None:
+    """Tool/skill usage alone must not upgrade a session to valuable.
+
+    Calibrated with the LLM classifier: the model marks ordinary tool-using
+    lookups task_only, so the heuristic fallback must not queue them either
+    (run evolution_local_20260908_v3 queued 83 fallback sessions the model
+    would have skipped).
+    """
+    result = heuristic_classify_session(
+        {
+            "turns": [
+                {
+                    "prompt_text": "武汉到多地的顺丰时效是多少",
+                    "response_text": "已为您查询到时效信息",
+                    "tool_calls": [{"id": "t1", "function": {"name": "read"}}],
+                }
+            ],
+            "used_skills": ["get-freight-time"],
+            "metrics": {"tool_call_count": 3},
+        }
+    )
+
+    assert result["decision"] == "task_only"
+
+
+def test_lenient_parse_recovers_truncated_decision() -> None:
+    raw = (
+        '{"decision": "task_only", "confidence": 0.8, "reason": "用户查询时效", "memory_candidates":'
+    )
+    parsed = _lenient_parse(raw)
+
+    assert parsed is not None
+    assert parsed["decision"] == "task_only"
+    assert parsed["confidence"] == 0.8
+    assert "时效" in parsed["reason"]
+
+
+def test_lenient_parse_defaults_confidence() -> None:
+    parsed = _lenient_parse('truncated output {"decision": "chitchat"')
+
+    assert parsed is not None
+    assert parsed["decision"] == "chitchat"
+    assert parsed["confidence"] == 0.5
+
+
+def test_lenient_parse_returns_none_without_decision() -> None:
+    assert _lenient_parse('{"confidence": 0.9, "reason": "no decision field"') is None
+
+
 @pytest.mark.anyio
 async def test_verified_candidate_audit_bypasses_subjective_classifier() -> None:
     class FailingClient:
@@ -162,6 +226,7 @@ async def test_classifier_empty_response_falls_back_to_heuristic() -> None:
                             }
                         }
                     ],
+                    "context_usage": _verified_feedback_usage(),
                 }
             ],
             "metrics": {"tool_call_count": 1},
@@ -186,6 +251,7 @@ def test_ingest_queues_valuable_sessions(tmp_path: Path) -> None:
                     {
                         "prompt_text": "帮我整理这个接口调用流程并生成可复用步骤",
                         "tool_calls": [{"function": {"name": "terminal", "arguments": "{}"}}],
+                        "context_usage": _verified_feedback_usage(),
                     }
                 ],
                 "metrics": {"tool_call_count": 1},
@@ -234,7 +300,8 @@ def test_managed_eval_train_session_queues_without_auto_trigger(
                                 }
                             }
                         ],
-                    }
+                    },
+                    {"prompt_text": "请沉淀生成后校验产物的共性流程"},
                 ],
                 "metrics": {"tool_call_count": 1},
             },
@@ -257,6 +324,7 @@ def test_reingesting_unchanged_processed_session_is_skipped(tmp_path: Path) -> N
             {
                 "prompt_text": "帮我整理这个接口调用流程并生成可复用步骤",
                 "tool_calls": [{"function": {"name": "terminal", "arguments": "{}"}}],
+                "context_usage": _verified_feedback_usage(),
             }
         ],
         "metrics": {"tool_call_count": 1},
@@ -288,6 +356,7 @@ def test_reingesting_continued_session_with_new_turn_requeues(tmp_path: Path) ->
     base_turn = {
         "prompt_text": "帮我整理这个接口调用流程并生成可复用步骤",
         "tool_calls": [{"function": {"name": "terminal", "arguments": "{}"}}],
+        "context_usage": _verified_feedback_usage(),
     }
 
     with TestClient(app) as client:

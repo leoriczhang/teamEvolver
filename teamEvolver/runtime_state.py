@@ -12,7 +12,22 @@ def _state_dir() -> Path:
     return Path.home() / ".teamEvolver"
 
 
+def _multi_replica_enabled() -> bool:
+    """Multi-replica mode (multi-tenancy plan Phase 3).
+
+    When enabled each replica records its own ``teamEvolver.{pid}.pid`` file
+    and skips the singleton ``daemon_start.lock`` so multiple replicas can run
+    side-by-side on one host (cross-replica evolution-cycle isolation is
+    enforced by ``pg_advisory_lock`` instead). Disabled by default to preserve
+    the single-instance behavior existing deployments rely on.
+    """
+    raw = str(os.environ.get("TEAMEVOLVER_MULTI_REPLICA", "")).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def pid_file_path() -> Path:
+    if _multi_replica_enabled():
+        return _state_dir() / f"teamEvolver.{os.getpid()}.pid"
     return _state_dir() / "teamEvolver.pid"
 
 
@@ -63,7 +78,21 @@ def _coerce_pid(value: Any) -> int | None:
     return pid if pid > 0 else None
 
 
+def _replica_pid_files() -> list[Path]:
+    """All ``teamEvolver.{pid}.pid`` files in multi-replica mode."""
+    return sorted(_state_dir().glob("teamEvolver.*.pid"))
+
+
 def read_pid() -> int | None:
+    if _multi_replica_enabled():
+        # Return the first live replica's pid (for status probes). Stale
+        # per-pid files are pruned opportunistically.
+        for path in _replica_pid_files():
+            pid = _coerce_pid(path.name.rsplit(".", 2)[-2])
+            if pid is not None and process_alive(pid):
+                return pid
+            path.unlink(missing_ok=True)
+        return None
     try:
         pid = _coerce_pid(pid_file_path().read_text(encoding="utf-8").strip())
     except FileNotFoundError:
@@ -79,6 +108,10 @@ def clear_pid():
 
 
 def clear_pid_if_matches(pid: int):
+    if _multi_replica_enabled():
+        path = _state_dir() / f"teamEvolver.{pid}.pid"
+        path.unlink(missing_ok=True)
+        return
     if read_pid() == pid:
         clear_pid()
 
@@ -105,6 +138,12 @@ def _write_text_atomic(path: Path, text: str):
 
 @contextmanager
 def daemon_start_lock():
+    if _multi_replica_enabled():
+        # Multi-replica mode: no singleton lock; each replica writes its own
+        # per-pid file and cross-replica cycle isolation is enforced by
+        # pg_advisory_lock in the scheduler.
+        yield
+        return
     path = daemon_start_lock_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     owner_pid = os.getpid()

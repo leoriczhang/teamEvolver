@@ -30,11 +30,17 @@ want the configured mapper use :func:`build_trace_mapper_from_config`.
 from __future__ import annotations
 
 import builtins
+import collections
 import datetime as _datetime
+import fnmatch
+import functools
+import inspect
+import itertools
 import json
 import logging
 import math
 import re
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -99,23 +105,25 @@ def _mapper_globals() -> dict[str, Any]:
         "re": re,
         "math": math,
         "datetime": _datetime,
+        "collections": collections,
+        "itertools": itertools,
+        "functools": functools,
     }
 
 
-def compile_mapper(code: str) -> Callable[..., Any]:
-    """Compile operator ``code`` and return its ``map_trace``/``map_turn`` callable.
+def _exec_mapper_code(code: str, *, max_chars: int) -> dict[str, Any]:
+    """Compile+exec operator ``code`` in the restricted namespace.
 
-    Raises :class:`MapperError` on syntax errors, a missing entry point, or a
-    non-callable entry point. Execution of the module body happens here (so
-    top-level helpers/constants are available to the entry point), but the
-    trace-mapping call itself is deferred to :class:`TraceMapper`.
+    Raises :class:`MapperError` on empty/oversized code, syntax errors, or any
+    load-time failure of the module body (top-level helpers/constants run here
+    so the entry points can reference them).
     """
     text = str(code or "").strip()
     if not text:
         raise MapperError("mapper code is empty")
-    if len(text) > _MAX_MAPPER_CODE_CHARS:
+    if len(text) > max_chars:
         raise MapperError(
-            f"mapper code exceeds {_MAX_MAPPER_CODE_CHARS} characters"
+            f"mapper code exceeds {max_chars} characters"
         )
     try:
         compiled = compile(text, "<langfuse_mapper>", "exec")
@@ -127,15 +135,53 @@ def compile_mapper(code: str) -> Callable[..., Any]:
         exec(compiled, namespace)  # noqa: S102 - trusted admin config, restricted builtins
     except Exception as exc:  # noqa: BLE001 - surface any load-time failure
         raise MapperError(f"failed to load mapper: {type(exc).__name__}: {exc}") from exc
+    return namespace
 
+
+def compile_mapper_entry(
+    code: str, *, max_chars: int = _MAX_MAPPER_CODE_CHARS
+) -> tuple[Optional[Callable[..., Any]], Optional[Callable[..., Any]]]:
+    """Compile one registry entry's code into ``(trace_fn, session_fn)``.
+
+    The code block may define ``map_trace``/``map_turn`` (per-trace mapping)
+    and/or ``map_session`` (post-conversion session hook). Either entry point
+    may be omitted, but at least one must be present and callable. A present
+    but non-callable ``map_session`` is an error.
+    """
+    namespace = _exec_mapper_code(code, max_chars=max_chars)
+
+    trace_fn: Optional[Callable[..., Any]] = None
     for name in _ENTRY_NAMES:
         candidate = namespace.get(name)
         if callable(candidate):
-            return candidate
-    raise MapperError(
-        "mapper code must define a top-level function named "
-        f"{' or '.join(_ENTRY_NAMES)}"
-    )
+            trace_fn = candidate
+            break
+
+    session_fn = namespace.get("map_session")
+    if session_fn is not None and not callable(session_fn):
+        raise MapperError("map_session must be a callable function")
+
+    if trace_fn is None and session_fn is None:
+        raise MapperError(
+            "mapper code must define a top-level function named "
+            f"{' or '.join(_ENTRY_NAMES)} and/or map_session"
+        )
+    return trace_fn, session_fn
+
+
+def compile_mapper(code: str, *, max_chars: int = _MAX_MAPPER_CODE_CHARS) -> Callable[..., Any]:
+    """Compile operator ``code`` and return its ``map_trace``/``map_turn`` callable.
+
+    Raises :class:`MapperError` on syntax errors, a missing entry point, or a
+    non-callable entry point.
+    """
+    trace_fn, _ = compile_mapper_entry(code, max_chars=max_chars)
+    if trace_fn is None:
+        raise MapperError(
+            "mapper code must define a top-level function named "
+            f"{' or '.join(_ENTRY_NAMES)}"
+        )
+    return trace_fn
 
 
 def _deep_merge_turn(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -289,23 +335,410 @@ class TraceMapper:
         return merged
 
 
-def build_trace_mapper_from_config(config: Any) -> Optional[TraceMapper]:
-    """Return a :class:`TraceMapper` when the operator enabled a custom mapper.
+# --------------------------------------------------------------------------- #
+# Per-agent mapper registry                                                    #
+# --------------------------------------------------------------------------- #
 
-    Returns ``None`` when the feature is disabled or the code is empty. Compile
-    errors are logged and swallowed (returns ``None``) so a broken mapper never
-    blocks a pull — the caller falls back to the built-in converter.
+_MATCH_KEYS = ("trace_names", "tags", "session_id_patterns")
+
+
+def _as_pattern_list(raw: Any) -> list[str]:
+    """Coerce a match value (list or comma-separated string) into a clean list."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        parts = raw.split(",")
+    elif isinstance(raw, (list, tuple, set)):
+        parts = list(raw)
+    else:
+        parts = [raw]
+    out: list[str] = []
+    for part in parts:
+        text = str(part or "").strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
+def normalize_match(raw: Any) -> dict[str, list[str]]:
+    """Normalize one entry's ``match`` block into the three canonical lists.
+
+    Accepts list/tuple/set or comma-separated strings per key; empty values are
+    dropped and duplicates removed. An empty result means catch-all.
     """
-    if not bool(getattr(config, "langfuse_mapper_enabled", False)):
-        return None
-    code = str(getattr(config, "langfuse_mapper_code", "") or "").strip()
-    if not code:
-        return None
+    match = raw if isinstance(raw, dict) else {}
+    return {key: _as_pattern_list(match.get(key)) for key in _MATCH_KEYS}
+
+
+def normalize_mapper_entries(
+    raw: Any, *, legacy_enabled: bool = False, legacy_code: str = ""
+) -> list[dict[str, Any]]:
+    """Normalize the ``langfuse.mappers`` registry into canonical entry dicts.
+
+    Each entry becomes ``{name, enabled, note, code, match}`` with ``match``
+    normalized by :func:`normalize_match`.
+
+    Migration (idempotent): when ``raw is None`` — i.e. the key was never
+    written — and ``legacy_code`` is non-empty, a single catch-all entry named
+    ``default`` is synthesized from the legacy single-mapper fields. An
+    explicit empty list or a list never triggers migration, so a deliberate
+    ``mappers: []`` disables the legacy mapper permanently.
+    """
+    if raw is None:
+        code = str(legacy_code or "").strip()
+        if not code:
+            return []
+        return [
+            {
+                "name": "default",
+                "enabled": bool(legacy_enabled),
+                "note": "由旧版单 mapper 配置迁移而来",
+                "code": str(legacy_code),
+                "match": normalize_match(None),
+            }
+        ]
+    if not isinstance(raw, list):
+        logger.warning(
+            "[Langfuse] ignoring non-list mappers config: %s", type(raw).__name__
+        )
+        return []
+    entries: list[dict[str, Any]] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            logger.warning(
+                "[Langfuse] dropping non-dict mapper entry at index %d", index
+            )
+            continue
+        name = str(item.get("name") or "").strip() or f"entry-{index + 1}"
+        entries.append(
+            {
+                "name": name,
+                "enabled": bool(item.get("enabled", True)),
+                "note": str(item.get("note") or ""),
+                "code": str(item.get("code") or ""),
+                "match": normalize_match(item.get("match")),
+            }
+        )
+    return entries
+
+
+@dataclass(frozen=True)
+class MapperMatch:
+    """Routing constraints for one registry entry (AND of non-empty groups).
+
+    - ``trace_names``: fnmatch patterns (case-sensitive) against ``trace.name``.
+    - ``tags``: ANY-of — the trace carries at least one of these tags.
+    - ``session_id_patterns``: fnmatch patterns against the trace's sessionId
+      (prefix patterns are expressed as ``prefix*``).
+
+    All groups empty = catch-all.
+    """
+
+    trace_names: tuple[str, ...] = ()
+    tags: frozenset = frozenset()
+    session_id_patterns: tuple[str, ...] = ()
+
+    @classmethod
+    def from_raw(cls, raw: Any) -> "MapperMatch":
+        normalized = normalize_match(raw)
+        return cls(
+            trace_names=tuple(normalized["trace_names"]),
+            tags=frozenset(normalized["tags"]),
+            session_id_patterns=tuple(normalized["session_id_patterns"]),
+        )
+
+    @staticmethod
+    def _session_id(trace: dict[str, Any]) -> str:
+        return str(trace.get("sessionId") or trace.get("session_id") or "")
+
+    def matches(self, trace: dict[str, Any]) -> bool:
+        if not isinstance(trace, dict):
+            return False
+        if self.trace_names:
+            name = str(trace.get("name") or "")
+            if not any(fnmatch.fnmatchcase(name, p) for p in self.trace_names):
+                return False
+        if self.tags:
+            trace_tags = {str(t) for t in trace.get("tags") or []}
+            if not (self.tags & trace_tags):
+                return False
+        if self.session_id_patterns:
+            sid = self._session_id(trace)
+            if not any(fnmatch.fnmatchcase(sid, p) for p in self.session_id_patterns):
+                return False
+        return True
+
+    def unmet_reasons(self, trace: dict[str, Any]) -> list[str]:
+        """Human-readable reasons each constraint group failed (for previews)."""
+        if not isinstance(trace, dict):
+            return ["trace 不是对象"]
+        reasons: list[str] = []
+        if self.trace_names:
+            name = str(trace.get("name") or "")
+            if not any(fnmatch.fnmatchcase(name, p) for p in self.trace_names):
+                reasons.append(
+                    f"trace name {name!r} 未命中 {list(self.trace_names)}"
+                )
+        if self.tags:
+            trace_tags = {str(t) for t in trace.get("tags") or []}
+            if not (self.tags & trace_tags):
+                reasons.append(
+                    f"trace tags {sorted(trace_tags)} 未包含 "
+                    f"{sorted(self.tags)} 中任一标签"
+                )
+        if self.session_id_patterns:
+            sid = self._session_id(trace)
+            if not any(fnmatch.fnmatchcase(sid, p) for p in self.session_id_patterns):
+                reasons.append(
+                    f"sessionId {sid!r} 未命中 {list(self.session_id_patterns)}"
+                )
+        return reasons
+
+    def describe(self) -> str:
+        parts: list[str] = []
+        if self.trace_names:
+            parts.append("name~" + "|".join(self.trace_names))
+        if self.tags:
+            parts.append("tag:" + "|".join(sorted(self.tags)))
+        if self.session_id_patterns:
+            parts.append("sid~" + "|".join(self.session_id_patterns))
+        return " · ".join(parts) if parts else "全部匹配"
+
+
+@dataclass
+class CompiledMapperEntry:
+    """One registry entry with its compiled entry points.
+
+    ``trace_mapper`` is None for hook-only entries (code defines only
+    ``map_session``) and for entries whose code failed to compile (they never
+    match; see :attr:`MapperRegistry.broken`).
+    """
+
+    name: str
+    index: int
+    enabled: bool
+    note: str
+    match: MapperMatch
+    trace_mapper: Optional[TraceMapper] = None
+    session_fn: Optional[Callable[..., Any]] = None
+
+
+def _invoke_session_hook(
+    fn: Callable[..., Any],
+    converted: dict[str, Any],
+    session: dict[str, Any],
+    traces: list[dict[str, Any]],
+) -> Any:
+    """Call ``map_session(converted, session, traces)`` adapting to its arity.
+
+    ``*args`` gets all three positionally; otherwise positional params are
+    filled from the left. Keyword-only params fall back to caller error
+    handling (the hook is skipped with a warning).
+    """
     try:
-        return TraceMapper.from_code(code)
-    except MapperError as exc:
-        logger.warning("[Langfuse] custom trace mapper disabled (compile failed): %s", exc)
+        parameters = list(inspect.signature(fn).parameters.values())
+    except (TypeError, ValueError):
+        return fn(converted, session, traces)
+    if any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in parameters):
+        return fn(converted, session, traces)
+    count = sum(
+        1
+        for p in parameters
+        if p.kind
+        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.POSITIONAL_ONLY)
+    )
+    args = (converted, session, traces)
+    return fn(*args[:count])
+
+
+class MapperRegistry:
+    """Ordered per-agent mapper registry; the first matching entry wins.
+
+    Callable with the mapper protocol of ``convert_trace_to_turn``
+    (``registry(trace, observations, turn_num, defaults)``), so it can be
+    passed directly as the ``mapper`` argument.
+    """
+
+    def __init__(
+        self,
+        entries: list[CompiledMapperEntry],
+        broken: Optional[list[tuple[str, str]]] = None,
+    ) -> None:
+        self.entries = entries
+        self.broken = list(broken or [])
+
+    @classmethod
+    def from_entries(cls, raw: Any) -> "MapperRegistry":
+        """Build a registry from raw config entries (normalized internally).
+
+        Enabled entries whose code fails to compile are recorded in
+        ``self.broken`` with a warning and can never match — routing falls to
+        later entries or the built-in mapping (fail-open, consistent with the
+        single-mapper behavior).
+        """
+        normalized = normalize_mapper_entries(raw)
+        entries: list[CompiledMapperEntry] = []
+        broken: list[tuple[str, str]] = []
+        for index, entry in enumerate(normalized):
+            name = entry["name"]
+            trace_mapper: Optional[TraceMapper] = None
+            session_fn: Optional[Callable[..., Any]] = None
+            if entry["enabled"]:
+                try:
+                    trace_fn, hook_fn = compile_mapper_entry(entry["code"])
+                    if trace_fn is not None:
+                        trace_mapper = TraceMapper(trace_fn, source=str(entry["code"]))
+                    session_fn = hook_fn
+                except MapperError as exc:
+                    broken.append((name, str(exc)))
+                    logger.warning(
+                        "[Langfuse] mapper entry %r disabled (compile failed): %s",
+                        name,
+                        exc,
+                    )
+            entries.append(
+                CompiledMapperEntry(
+                    name=name,
+                    index=index,
+                    enabled=bool(entry["enabled"]),
+                    note=entry["note"],
+                    match=MapperMatch.from_raw(entry["match"]),
+                    trace_mapper=trace_mapper,
+                    session_fn=session_fn,
+                )
+            )
+        return cls(entries, broken)
+
+    def for_trace(self, trace: dict[str, Any]) -> Optional[CompiledMapperEntry]:
+        """First matching enabled entry that carries a trace mapper.
+
+        Hook-only entries are transparent for trace mapping (they still apply
+        their session hooks); no match → None (built-in mapping).
+        """
+        for entry in self.entries:
+            if (
+                entry.enabled
+                and entry.trace_mapper is not None
+                and entry.match.matches(trace)
+            ):
+                return entry
         return None
+
+    def map_trace(
+        self,
+        trace: dict[str, Any],
+        observations: list[dict[str, Any]],
+        turn_num: int,
+        defaults: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Per-trace mapping with fail-open: errors fall back to ``defaults``."""
+        entry = self.for_trace(trace)
+        if entry is None or entry.trace_mapper is None:
+            return defaults
+        try:
+            return entry.trace_mapper(trace, observations, turn_num, defaults)
+        except Exception as exc:  # noqa: BLE001 - operator code can raise anything
+            logger.warning(
+                "[Langfuse] mapper entry %r failed on trace %s; using built-in mapping: %s",
+                entry.name,
+                trace.get("id") if isinstance(trace, dict) else "?",
+                exc,
+            )
+            return defaults
+
+    __call__ = map_trace
+
+    def apply_session_hooks(
+        self,
+        converted: dict[str, Any],
+        session: dict[str, Any],
+        traces: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Run matched entries' ``map_session`` hooks, deep-merging in order.
+
+        A hook runs iff its entry is enabled, defines ``map_session``, and
+        matches at least one trace of the session. Errors and non-dict returns
+        are skipped with a warning; the converted session is preserved.
+        """
+        result = converted if isinstance(converted, dict) else {}
+        trace_dicts = [t for t in traces or [] if isinstance(t, dict)]
+        for entry in self.entries:
+            if not entry.enabled or entry.session_fn is None:
+                continue
+            if not any(entry.match.matches(t) for t in trace_dicts):
+                continue
+            try:
+                raw = _invoke_session_hook(entry.session_fn, result, session, traces)
+            except Exception as exc:  # noqa: BLE001 - operator code can raise anything
+                logger.warning(
+                    "[Langfuse] mapper entry %r map_session failed; hook skipped: %s",
+                    entry.name,
+                    exc,
+                )
+                continue
+            if raw is None:
+                continue
+            if not isinstance(raw, dict):
+                logger.warning(
+                    "[Langfuse] mapper entry %r map_session must return a dict "
+                    "or None, got %s; hook skipped",
+                    entry.name,
+                    type(raw).__name__,
+                )
+                continue
+            result = _deep_merge_turn(result, _jsonable(raw))
+        return result
+
+    def route_report(self, trace: dict[str, Any]) -> dict[str, Any]:
+        """Explain routing for one trace (used by the console route preview)."""
+        per_entry: list[dict[str, Any]] = []
+        matched: Optional[dict[str, Any]] = None
+        for entry in self.entries:
+            did_match = bool(entry.enabled and entry.match.matches(trace))
+            per_entry.append(
+                {
+                    "index": entry.index,
+                    "name": entry.name,
+                    "enabled": entry.enabled,
+                    "matched": did_match,
+                }
+            )
+            if matched is None and did_match and entry.trace_mapper is not None:
+                matched = {"index": entry.index, "name": entry.name}
+        return {
+            "order": [entry.name for entry in self.entries],
+            "matched": matched,
+            "per_entry": per_entry,
+        }
+
+
+def build_mapper_registry(config: Any) -> Optional[MapperRegistry]:
+    """Build the per-agent mapper registry from config (None → built-in only).
+
+    Reads ``config.langfuse_mappers`` (list). When empty, falls back to the
+    legacy single-mapper fields as one catch-all entry — this covers config
+    objects not built by :mod:`teamEvolver.config_store.bridge` (e.g. the
+    local pull script's SimpleNamespace) and keeps old tests/configs working.
+    """
+    entries = getattr(config, "langfuse_mappers", None)
+    if entries:
+        return MapperRegistry.from_entries(entries)
+    if bool(getattr(config, "langfuse_mapper_enabled", False)):
+        code = str(getattr(config, "langfuse_mapper_code", "") or "")
+        if code.strip():
+            return MapperRegistry.from_entries(
+                [{"name": "default", "enabled": True, "code": code, "match": {}}]
+            )
+    return None
+
+
+def build_trace_mapper_from_config(config: Any) -> Optional[MapperRegistry]:
+    """Deprecated alias for :func:`build_mapper_registry`.
+
+    The returned registry is callable with the mapper protocol used by
+    ``convert_trace_to_turn``, so existing call sites keep working unchanged.
+    """
+    return build_mapper_registry(config)
 
 
 # --------------------------------------------------------------------------- #
@@ -587,12 +1020,17 @@ def run_mapper_preview(
     payload: Any,
     *,
     turn_num: int = 1,
+    match: Any = None,
 ) -> dict[str, Any]:
     """Dry-run ``code`` against a pasted trace and return a structured result.
 
     Returns ``{"ok": True, "turn": <mapped turn>, "builtin": <built-in turn>}``
     on success or ``{"ok": False, "error": "..."}`` on any failure. Never
     raises, so the console tester can render either branch directly.
+
+    When ``match`` is provided (an entry's ``match`` block), the result also
+    carries ``{"match": {"matched": bool, "unmet": [str, ...]}}`` so the
+    console can show whether this trace would route to the entry.
     """
     # Imported lazily to avoid a circular import (convert imports nothing here,
     # but preview needs the built-in baseline turn to show the merge result).
@@ -609,10 +1047,21 @@ def run_mapper_preview(
         return {"ok": False, "error": f"built-in conversion failed: {exc}"}
 
     try:
-        mapper = TraceMapper.from_code(code)
+        trace_fn, _ = compile_mapper_entry(code)
     except MapperError as exc:
         return {"ok": False, "error": str(exc)}
 
+    if trace_fn is None:
+        # Hook-only entry (map_session without map_trace): no per-turn mapping.
+        return {
+            "ok": True,
+            "turn": _jsonable(builtin_turn),
+            "builtin": _jsonable(builtin_turn),
+            "observation_count": len(observations),
+            "note": "该条目仅定义 map_session（会话钩子），无轮级映射",
+        }
+
+    mapper = TraceMapper(trace_fn, source=str(code))
     try:
         turn = convert_trace_to_turn(trace, turn_num, mapper=mapper)
     except MapperError as exc:
@@ -620,9 +1069,16 @@ def run_mapper_preview(
     except Exception as exc:  # noqa: BLE001 - operator code can raise anything
         return {"ok": False, "error": f"mapper raised {type(exc).__name__}: {exc}"}
 
-    return {
+    result = {
         "ok": True,
         "turn": _jsonable(turn),
         "builtin": _jsonable(builtin_turn),
         "observation_count": len(observations),
     }
+    if match is not None:
+        matcher = MapperMatch.from_raw(match)
+        result["match"] = {
+            "matched": matcher.matches(trace),
+            "unmet": matcher.unmet_reasons(trace),
+        }
+    return result

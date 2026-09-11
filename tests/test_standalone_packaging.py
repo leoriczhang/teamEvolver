@@ -39,7 +39,10 @@ def test_builtin_evolve_engine_instantiates_from_primary_config(tmp_path: Path) 
     server = EvolveServer(evolve_config)
 
     assert type(server).__module__.startswith("teamEvolver.evolve.")
-    assert evolve_config.storage_backend == "viking"
+    # Per-purpose split: engine ledgers default to the built-in local backend;
+    # OpenViking is only the skill mirror target unless a purpose backend is
+    # explicitly set to viking.
+    assert evolve_config.storage_backend == "local"
 
 
 def test_agent_protocol_install_resources_are_present() -> None:

@@ -16,8 +16,10 @@ model via the injected instructions.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import tempfile
 from collections import Counter
 from typing import Any
 
@@ -47,6 +49,7 @@ class SkillManager:
         # Monotonically-increasing counter, bumped whenever the local skill
         # library changes so callers can drop stale snapshots.
         self.generation: int = 0
+        self.generation = self._load_generation()
 
         self.skills = self._load_skills()
         self._skills_fingerprint = self._compute_skills_fingerprint()
@@ -65,6 +68,35 @@ class SkillManager:
 
     def _stats_path(self) -> str:
         return os.path.join(self._skills_dir, _STATS_FILENAME)
+
+    # ------------------------------------------------------------------ #
+    # Generation persistence                                               #
+    # ------------------------------------------------------------------ #
+
+    def _generation_file(self) -> str:
+        return os.path.join(self._skills_dir, "skill_generation.json")
+
+    def _load_generation(self) -> int:
+        """Load the persisted generation counter; return 0 on any error."""
+        try:
+            with open(self._generation_file(), "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return int(data.get("generation", 0))
+        except Exception:
+            return 0
+
+    def _save_generation(self) -> None:
+        """Persist the generation counter to disk atomically."""
+        path = self._generation_file()
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=parent, delete=False
+        ) as tmp:
+            json.dump({"generation": self.generation}, tmp)
+            tmp_path = tmp.name
+        os.replace(tmp_path, path)
 
     def record_injection(self, skill_names: list[str]) -> None:
         """Record that these skills were injected into a request."""
@@ -126,6 +158,7 @@ class SkillManager:
             return False
         self.reload()
         self.generation += 1
+        self._save_generation()
         logger.info("[SkillManager] detected local skill changes; refreshed library")
         return True
 

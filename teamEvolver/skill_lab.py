@@ -133,7 +133,8 @@ class SkillLabStore:
 
     def __init__(self, bucket) -> None:
         self._bucket = bucket
-        self._datasets = SkillDatasetStore(bucket)
+        self._tenant_id: str = "default"
+        self._datasets = SkillDatasetStore(bucket, prefix=self._dataset_store_prefix())
 
     # Process-lifetime fallback store shared across from_config() calls, used
     # only when no OpenViking backend is configured. Data is ephemeral (in
@@ -141,30 +142,50 @@ class SkillLabStore:
     _fallback_bucket: "InMemoryObjectStore | None" = None
 
     @classmethod
-    def from_config(cls, config) -> "SkillLabStore":
+    def from_config(cls, config, tenant_id: str = "default") -> "SkillLabStore":
         from .skills.hub import SkillHub
 
-        hub = SkillHub.object_storage_from_config(config)
-        if hub is not None:
-            return cls(hub._bucket)
-        logger.warning(
-            "[SkillLabStore] no OpenViking backend configured; using an "
-            "in-memory fallback store. Skill-lab data will not persist across "
-            "restarts. Configure cloud or local OpenViking to persist."
-        )
+        hub = SkillHub.object_storage_from_config(config, tenant_id=tenant_id)
+        bucket = hub._bucket if hub is not None else cls._get_fallback_bucket()
+        store = cls.__new__(cls)
+        store._bucket = bucket
+        store._tenant_id = str(tenant_id or "default")
+        store._datasets = SkillDatasetStore(bucket, prefix=store._dataset_store_prefix())
+        if hub is None:
+            logger.warning(
+                "[SkillLabStore] no OpenViking backend configured; using an "
+                "in-memory fallback store. Skill-lab data will not persist across "
+                "restarts. Configure cloud or local OpenViking to persist."
+            )
+        return store
+
+    @classmethod
+    def _get_fallback_bucket(cls):
         if cls._fallback_bucket is None:
             cls._fallback_bucket = InMemoryObjectStore("skill_lab")
-        return cls(cls._fallback_bucket)
+        return cls._fallback_bucket
 
     @staticmethod
     def make_run_id() -> str:
         return _run_id()
 
+    def _dataset_store_prefix(self) -> str:
+        """Prefix for SkillDatasetStore (tenant-scoped)."""
+        if self._tenant_id and self._tenant_id != "default":
+            return f"tenants/{self._tenant_id}/"
+        return ""
+
+    def _tenant_prefix(self) -> str:
+        """Key prefix for tenant-scoped skill-lab data."""
+        if self._tenant_id and self._tenant_id != "default":
+            return f"tenants/{self._tenant_id}/skill_lab/"
+        return "skill_lab/"
+
     def _legacy_dataset_key(self, dataset_id: str) -> str:
-        return f"skill_lab/datasets/{_normalize_dataset_id(dataset_id)}/metadata.json"
+        return f"{self._tenant_prefix()}datasets/{_normalize_dataset_id(dataset_id)}/metadata.json"
 
     def _legacy_dataset_prefix(self, dataset_id: str) -> str:
-        return f"skill_lab/datasets/{_normalize_dataset_id(dataset_id)}/"
+        return f"{self._tenant_prefix()}datasets/{_normalize_dataset_id(dataset_id)}/"
 
     def _legacy_material_key(self, dataset_id: str, rel_path: str) -> str:
         return (
@@ -173,10 +194,10 @@ class SkillLabStore:
         )
 
     def _run_key(self, run_id: str) -> str:
-        return f"skill_lab/runs/{_normalize_dataset_id(run_id)}/metadata.json"
+        return f"{self._tenant_prefix()}runs/{_normalize_dataset_id(run_id)}/metadata.json"
 
     def _run_result_key(self, run_id: str) -> str:
-        return f"skill_lab/runs/{_normalize_dataset_id(run_id)}/result.json"
+        return f"{self._tenant_prefix()}runs/{_normalize_dataset_id(run_id)}/result.json"
 
     def _read_json(self, key: str) -> Optional[dict[str, Any]]:
         try:
@@ -430,7 +451,7 @@ class SkillLabStore:
             )
             for item in rows
         }
-        for obj in self._bucket.iter_objects(prefix="skill_lab/datasets/"):
+        for obj in self._bucket.iter_objects(prefix=f"{self._tenant_prefix()}datasets/"):
             if not obj.key.endswith("/metadata.json"):
                 continue
             item = self._read_json(obj.key)
@@ -557,7 +578,7 @@ class SkillLabStore:
     def list_runs(self, *, skill_name: str = "", limit: int = 100) -> list[dict[str, Any]]:
         wanted = str(skill_name or "").strip()
         rows: list[dict[str, Any]] = []
-        for obj in self._bucket.iter_objects(prefix="skill_lab/runs/"):
+        for obj in self._bucket.iter_objects(prefix=f"{self._tenant_prefix()}runs/"):
             if not obj.key.endswith("/metadata.json"):
                 continue
             item = self._read_json(obj.key)

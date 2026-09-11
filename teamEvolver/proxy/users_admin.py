@@ -23,6 +23,8 @@ from ..config_store import ConfigStore
 from ..skills import editor
 from ..skills.bundle import write_skill_bundle
 from ..skills.hub import SkillHub
+from ..storage.admin_kv import read_kv, write_kv
+from ..tenants.registry import current_tenant_id
 
 _LOG = logging.getLogger(__name__)
 
@@ -81,7 +83,21 @@ def _registry_path(config) -> Path:
     return Path(path).expanduser() if path else _DEFAULT_USERS_PATH
 
 
-def _load_registry(path: Path) -> dict[str, Any]:
+def _load_registry(path: Path, config: Any = None) -> dict[str, Any]:
+    """Load the users registry from PG (primary) or file (fallback)."""
+    if config is not None and getattr(config, "storage_pg_enabled", False):
+        data = read_kv(config, "users.json", path, tenant_id="default")
+        data.setdefault("users", [])
+        return data
+    if config is not None:
+        try:
+            data = read_kv(config, "users.json", path)
+            if data:
+                if not isinstance(data.get("users"), list):
+                    data["users"] = []
+                return data
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning("[users_admin] PG read failed, falling back to file: %s", exc)
     if not path.exists():
         return {"users": []}
     try:
@@ -95,7 +111,17 @@ def _load_registry(path: Path) -> dict[str, Any]:
     return data
 
 
-def _save_registry(path: Path, data: dict[str, Any]) -> None:
+def _save_registry(path: Path, data: dict[str, Any], config: Any = None) -> None:
+    """Save the users registry to PG (primary) and file (always)."""
+    if config is not None and getattr(config, "storage_pg_enabled", False):
+        write_kv(config, "users.json", path, data, tenant_id="default")
+        return
+    if config is not None:
+        try:
+            write_kv(config, "users.json", path, data)
+            return
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning("[users_admin] PG write failed, falling back to file: %s", exc)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -229,7 +255,7 @@ def _effective_team_key(config, data: dict[str, Any] | None = None) -> str:
     be copied into every user profile or exposed through the normal secret
     endpoint.
     """
-    registry = data if isinstance(data, dict) else _load_registry(_registry_path(config))
+    registry = data if isinstance(data, dict) else _load_registry(_registry_path(config), config)
     users = registry.get("users") or []
     admins = sorted(
         [user for user in users if str(user.get("role") or "user") == "admin"],
@@ -365,7 +391,7 @@ def resolve_registered_user_id(
     preferred_user_id: str = "",
 ) -> str:
     """Resolve an Agent-side username to a teamEvolver user id."""
-    data = _load_registry(_registry_path(config))
+    data = _load_registry(_registry_path(config), config)
     users = [item for item in data.get("users") or [] if isinstance(item, dict)]
     runtime = str(runtime_type or "").strip().lower()
     external = str(external_username or "").strip()
@@ -404,7 +430,7 @@ def resolve_agent_subject_user_id(
     subject = str(external_subject or "").strip()
     if not integration or not runtime or not subject:
         return ""
-    data = _load_registry(_registry_path(config))
+    data = _load_registry(_registry_path(config), config)
     users = [item for item in data.get("users") or [] if isinstance(item, dict)]
     for user in users:
         subjects = (
@@ -483,7 +509,7 @@ def sync_agent_subject_mappings(
         desired[external_subject] = user_id
 
     path = _registry_path(config)
-    data = _load_registry(path)
+    data = _load_registry(path, config)
     users = [
         item
         for item in data.get("users") or []
@@ -588,7 +614,7 @@ def sync_agent_subject_mappings(
             users,
             key=lambda item: str(item.get("id") or ""),
         )
-        _save_registry(path, data)
+        _save_registry(path, data, config)
 
     return {
         "mapped_count": len(mapped_subjects),
@@ -846,7 +872,7 @@ def _publish_skill_to_hub(
 
 def _publish_request_bucket(config):
     """Return the shared object-store bucket for publish requests, or None."""
-    hub = SkillHub.object_storage_from_config(config)
+    hub = SkillHub.object_storage_from_config(config, tenant_id=current_tenant_id())
     return hub._bucket if hub is not None else None
 
 
@@ -1067,7 +1093,7 @@ def import_openviking_account_users(
     requested = [str(uid or "").strip() for uid in (user_ids or []) if str(uid or "").strip()]
 
     path = _registry_path(config)
-    data = _load_registry(path)
+    data = _load_registry(path, config)
     existing_ids = {str(user.get("id") or "") for user in data.get("users") or []}
 
     imported: list[str] = []
@@ -1092,7 +1118,7 @@ def import_openviking_account_users(
         imported.append(user_id)
         dirty = True
     if dirty:
-        _save_registry(path, data)
+        _save_registry(path, data, config)
     return {
         "account": account_id,
         "imported": sorted(imported),
@@ -1210,7 +1236,7 @@ class UsersAdminMixin:
 
         @app.get("/api/users")
         async def api_list_users(request: Request):
-            data = _load_registry(_registry_path(owner.config))
+            data = _load_registry(_registry_path(owner.config), owner.config)
             users = data.get("users") or []
             if not _is_admin_request(request):
                 current_id = str(_request_user(request).get("id") or "")
@@ -1234,7 +1260,7 @@ class UsersAdminMixin:
             """
             _require_admin_request(request)
             payload = list_openviking_account_users(owner.config, account)
-            registry = _load_registry(_registry_path(owner.config))
+            registry = _load_registry(_registry_path(owner.config), owner.config)
             local_ids = {str(user.get("id") or "") for user in registry.get("users") or []}
             for row in payload.get("users") or []:
                 row["imported"] = _slug(row["user_id"]) in local_ids
@@ -1264,7 +1290,7 @@ class UsersAdminMixin:
         @app.get("/api/users/{user_id}")
         async def api_get_user(user_id: str, request: Request):
             _require_self_or_admin(request, user_id)
-            data = _load_registry(_registry_path(owner.config))
+            data = _load_registry(_registry_path(owner.config), owner.config)
             _idx, user = _find_user(data, user_id)
             return JSONResponse(content=_public_user(user, owner.config))
 
@@ -1273,7 +1299,7 @@ class UsersAdminMixin:
             _require_self_or_admin(request, user_id)
             if space not in _SPACES:
                 raise HTTPException(status_code=400, detail=f"unsupported skill space: {space}")
-            data = _load_registry(_registry_path(owner.config))
+            data = _load_registry(_registry_path(owner.config), owner.config)
             _idx, user = _find_user(data, user_id)
             key = "team_space" if space == "team" else "personal_space"
             inherited = (
@@ -1287,9 +1313,9 @@ class UsersAdminMixin:
         async def api_upsert_user(body: dict[str, Any], request: Request):
             _require_admin_request(request)
             path = _registry_path(owner.config)
-            data = _load_registry(path)
+            data = _load_registry(path, owner.config)
             user = _upsert_user(data, body, config=owner.config)
-            _save_registry(path, data)
+            _save_registry(path, data, owner.config)
             owner.config = _sync_user_space_keys_to_config(owner.config, user)
             sync_report = sync_openviking_user(owner.config, str(user.get("id") or ""))
             payload = _public_user(user, owner.config)
@@ -1304,7 +1330,7 @@ class UsersAdminMixin:
         ):
             _require_self_or_admin(request, user_id)
             path = _registry_path(owner.config)
-            data = _load_registry(path)
+            data = _load_registry(path, owner.config)
             _idx, existing = _find_user(data, user_id)
             payload = {
                 "id": user_id,
@@ -1324,17 +1350,17 @@ class UsersAdminMixin:
                 "agent_subjects": existing.get("agent_subjects", []),
             }
             user = _upsert_user(data, payload, config=owner.config)
-            _save_registry(path, data)
+            _save_registry(path, data, owner.config)
             return JSONResponse(content=_public_user(user, owner.config))
 
         @app.delete("/api/users/{user_id}")
         async def api_delete_user(user_id: str, request: Request):
             _require_admin_request(request)
             path = _registry_path(owner.config)
-            data = _load_registry(path)
+            data = _load_registry(path, owner.config)
             idx, user = _find_user(data, user_id)
             data["users"].pop(idx)
-            _save_registry(path, data)
+            _save_registry(path, data, owner.config)
             return JSONResponse(content={"deleted": True, "id": user.get("id")})
 
         @app.get("/api/users/{user_id}/skills")
@@ -1344,7 +1370,7 @@ class UsersAdminMixin:
             space: str = Query(default="personal"),
         ):
             _require_self_or_admin(request, user_id)
-            data = _load_registry(_registry_path(owner.config))
+            data = _load_registry(_registry_path(owner.config), owner.config)
             _idx, user = _find_user(data, user_id)
             hub = _hub_from_user(owner.config, user, space=space)
             return JSONResponse(content={"space": space, "skills": hub.list_remote()})
@@ -1361,7 +1387,7 @@ class UsersAdminMixin:
                 for name in (payload.get("skill_names") or payload.get("skills") or [])
                 if str(name or "").strip()
             }
-            data = _load_registry(_registry_path(owner.config))
+            data = _load_registry(_registry_path(owner.config), owner.config)
             _idx, user = _find_user(data, user_id)
             if direction == "personal_to_team" and str(user.get("role") or "user") != "admin":
                 raise HTTPException(
@@ -1389,7 +1415,7 @@ class UsersAdminMixin:
             _require_self_or_admin(request, user_id)
             if space not in _SPACES:
                 raise HTTPException(status_code=400, detail=f"unsupported skill space: {space}")
-            data = _load_registry(_registry_path(owner.config))
+            data = _load_registry(_registry_path(owner.config), owner.config)
             _idx, user = _find_user(data, user_id)
             hub = _hub_from_user(owner.config, user, space=space)
             detail = _read_hub_skill(hub, str(name or "").strip())
@@ -1429,7 +1455,7 @@ class UsersAdminMixin:
                     category=str(body.get("category") or "general"),
                     body=str(body.get("body") or ""),
                 )
-            data = _load_registry(_registry_path(owner.config))
+            data = _load_registry(_registry_path(owner.config), owner.config)
             _idx, user = _find_user(data, user_id)
             hub = _hub_from_user(owner.config, user, space=space)
             commit = _publish_skill_to_hub(
@@ -1455,7 +1481,7 @@ class UsersAdminMixin:
                     status_code=403,
                     detail="only admin users can delete team skills",
                 )
-            data = _load_registry(_registry_path(owner.config))
+            data = _load_registry(_registry_path(owner.config), owner.config)
             _idx, user = _find_user(data, user_id)
             hub = _hub_from_user(owner.config, user, space=space)
             result = hub.delete_skill(str(name or "").strip())
@@ -1492,7 +1518,7 @@ class UsersAdminMixin:
             )
             if not requested:
                 raise HTTPException(status_code=400, detail="skill_names must not be empty")
-            data = _load_registry(_registry_path(owner.config))
+            data = _load_registry(_registry_path(owner.config), owner.config)
             _idx, user = _find_user(data, user_id)
             request_id = f"pubreq-{uuid.uuid4().hex[:16]}"
             record = {
@@ -1533,7 +1559,7 @@ class UsersAdminMixin:
                     status_code=409,
                     detail=f"request already {record.get('status')}",
                 )
-            data = _load_registry(_registry_path(owner.config))
+            data = _load_registry(_registry_path(owner.config), owner.config)
             _idx, requester = _find_user(data, str(record.get("requester_id") or ""))
             result = _copy_skills(
                 source_hub=_hub_from_user(owner.config, requester, space="personal"),

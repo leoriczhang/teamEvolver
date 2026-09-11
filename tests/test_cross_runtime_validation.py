@@ -146,6 +146,43 @@ def test_ingestion_only_runtime_blocks_publish_without_replay_capability() -> No
     assert gate["status"] == "blocked"
 
 
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_runtime_rejection_cannot_be_overridden_by_acceptance(nested, reverse) -> None:
+    results = [
+        {"accepted": True, "decision": "accept"},
+        {"accepted": False, "decision": "reject"},
+    ]
+    if reverse:
+        results.reverse()
+    results = [
+        {"runtime_validation": {"hermes": result}}
+        if nested else {"runtime_type": "hermes", **result}
+        for result in results
+    ]
+
+    gate = evaluate_runtime_compatibility({"required_runtimes": ["hermes"]}, results)
+
+    assert gate["status"] == "rejected"
+    assert gate["matrix"]["hermes"]["accepted"] is False
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"accepted": True, "decision": "reject"},
+        {"accepted": True, "verdict": "reject"},
+        {"accepted": True, "decision": "accept", "rejected": True},
+    ],
+)
+def test_runtime_rejection_wins_over_conflicting_accept_fields(result) -> None:
+    gate = evaluate_runtime_compatibility(
+        {"required_runtimes": ["hermes"]}, [{"runtime_type": "hermes", **result}]
+    )
+
+    assert gate["status"] == "rejected"
+
+
 def test_runtime_specific_skill_is_only_distributed_to_supported_runtime() -> None:
     skill = {
         "name": "agentshub-only",

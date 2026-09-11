@@ -20,6 +20,7 @@ from .agent_protocol import (
     CAP_SESSION_INGEST,
     normalize_registration,
 )
+from ..storage.admin_kv import read_kv, write_kv
 
 _DEFAULT_REGISTRY_PATH = Path.home() / ".teamEvolver" / "agents.json"
 _SECRET_TOKENS = ("key", "token", "secret", "password", "credential")
@@ -83,7 +84,18 @@ def _safe_mapping(value: Any) -> dict[str, Any]:
     return result if isinstance(result, dict) else {}
 
 
-def _load(path: Path) -> dict[str, Any]:
+def _load(path: Path, config: Any = None) -> dict[str, Any]:
+    """Load the agents registry from PG (primary) or file (fallback)."""
+    if config is not None and getattr(config, "storage_pg_enabled", False):
+        data = read_kv(config, "agents.json", path)
+        return data if isinstance(data.get("agents"), list) else {"agents": []}
+    if config is not None:
+        try:
+            data = read_kv(config, "agents.json", path)
+            if data and isinstance(data.get("agents"), list):
+                return data
+        except Exception:
+            pass
     if not path.exists():
         return {"agents": []}
     try:
@@ -95,7 +107,17 @@ def _load(path: Path) -> dict[str, Any]:
     return data
 
 
-def _save(path: Path, data: dict[str, Any]) -> None:
+def _save(path: Path, data: dict[str, Any], config: Any = None) -> None:
+    """Save the agents registry to PG (primary) and file (always)."""
+    if config is not None and getattr(config, "storage_pg_enabled", False):
+        write_kv(config, "agents.json", path, data)
+        return
+    if config is not None:
+        try:
+            write_kv(config, "agents.json", path, data)
+            return
+        except Exception:
+            pass
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -130,7 +152,7 @@ def register_agent(config, payload: dict[str, Any]) -> dict[str, Any]:
     }
     path = _registry_path(config)
     with _REGISTRY_LOCK:
-        data = _load(path)
+        data = _load(path, config)
         existing = next(
             (
                 item
@@ -179,7 +201,7 @@ def register_agent(config, payload: dict[str, Any]) -> dict[str, Any]:
         ]
         data["agents"].append(record)
         data["agents"].sort(key=lambda item: str(item.get("agent_id") or ""))
-        _save(path, data)
+        _save(path, data, config)
     return record
 
 
@@ -187,7 +209,7 @@ def list_agents(config) -> list[dict[str, Any]]:
     with _REGISTRY_LOCK:
         return [
             item
-            for item in _load(_registry_path(config)).get("agents") or []
+            for item in _load(_registry_path(config), config).get("agents") or []
             if isinstance(item, dict)
         ]
 
@@ -229,7 +251,7 @@ def issue_agent_access_token(
 ) -> tuple[dict[str, Any], str]:
     path = _registry_path(config)
     with _REGISTRY_LOCK:
-        data = _load(path)
+        data = _load(path, config)
         record = next(
             (
                 item
@@ -255,7 +277,7 @@ def issue_agent_access_token(
             "rotated_at": _now(),
         }
         record["updated_at"] = _now()
-        _save(path, data)
+        _save(path, data, config)
         return record, token
 
 

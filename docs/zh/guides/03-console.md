@@ -66,7 +66,7 @@ Langfuse 页面把两条相互独立的链路放在一起管理：
 - **入站 Session 拉取**：按 environment、user、tags、release、version、trace name 等条件预览和导入 Session
 - **出站链路追踪**：记录 teamEvolver 内部模型与工具调用
 
-管理员还可以编辑 `map_trace(trace, observations)`，用内置样例或粘贴的 Trace 试运行，并对比自定义映射与内置映射结果。映射失败时单条 Session 回退到内置转换，不中断整批导入。
+管理员还可以在「映射注册表」面板为不同 Agent 配置各自的映射条目：每条可设置路由条件（trace 名称通配、tags、sessionId 模式，按列表顺序首个命中生效）与映射代码（可含 `map_session` 会话钩子）。支持逐条插入参考模板、试运行（显示路由是否命中）与面板级「路由预览」（粘贴样例 Trace 查看整张注册表的路由结果）。映射失败时该 trace 回退到内置转换，不中断整批导入。
 
 ### 进化链路
 

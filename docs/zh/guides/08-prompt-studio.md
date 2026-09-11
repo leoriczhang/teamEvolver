@@ -37,9 +37,9 @@ ingest → session_filter → summarize → judge → group → ┬→ evolve_sk
 | `summarize` | LLM | 是 | 会话总结，构建无损轨迹并生成轨迹感知摘要 |
 | `judge` | LLM | 是 | 会话评分，对缺少可靠分数的会话补打多维度分 |
 | `group` | 逻辑 | 否 | 按技能分组，无 LLM 调用 |
-| `evolve_skill` | LLM | 是 | 改进技能，对已有技能决定 improve/optimize_description/create/skip |
-| `create_skill` | LLM | 是 | 新建技能，从 no-skill 桶识别可复用模式并生成新技能 |
-| `merge` | LLM | 是 | 冲突合并，合并同名技能的两个进化版本 |
+| `evolve_skill` | LLM | 是 | 改进技能，多轮 agent 循环（plan → act → submit），对已有技能决定 improve/optimize_description/create/skip |
+| `create_skill` | LLM | 是 | 新建技能，多轮 agent 循环，从 no-skill 桶识别可复用模式并生成新技能 |
+| `merge` | LLM | 是 | 冲突合并，按合并原则自检后输出同名技能两个进化版本的合并结果 |
 | `dataset_synthesis` | LLM | 是 | 测试集生成，生成带 Checklist 的渐进式测试数据集 |
 | `validate` | 门禁 | 否 | 真回放校验，非 LLM 逻辑 |
 | `replay_checklist` | LLM | 是 | Checklist 裁判，逐条核验回放结果是否满足 Checklist |
@@ -77,27 +77,27 @@ ingest → session_filter → summarize → judge → group → ┬→ evolve_sk
 - **注入共享块**：否
 - **说明**：对缺少可靠分数的会话补打分，输出 JSON 维度分。低 temperature 保证评分一致性。
 
-#### evolve_skill（改进技能）
+#### evolve_skill（改进技能，agent 循环）
 
 - **模块**：`teamEvolver.evolve.stages.execute`
 - **符号**：`_EVOLVE_FROM_SESSIONS_SYSTEM`
 - **默认 Temperature**：0.4
 - **默认 Max Tokens**：16384
-- **输入变量**：`{skill_name}`、current skill block、cross-cycle evidence、evaluation cohort、session evidence、existing skill names
+- **输入变量**：`{skill_name}`、round-1 会话索引卡（每会话一行）、current skill 大纲卡、cross-cycle evidence、evaluation cohort、existing skill names
 - **注入共享块**：是
-- **说明**：这是核心进化阶段。基于会话证据对已有技能做出改进决策。注意：原始 Prompt 模板中包含三个 sentinel 占位符（`__GENERALIZATION_RULES__`、`__USER_OVERRIDE_RULE__`、`__EVIDENCE_ROUTING_RULES__`），保存覆盖时保留这些占位符即可，运行时会自动注入共享规则块。
+- **说明**：这是核心进化阶段，以多轮 agent 循环运行（见 [Agent 循环工作协议](#agent-循环工作协议)）。第 1 轮基于会话索引卡输出 plan（improve / optimize_description / create / skip），plan 的 action_candidate=skip 时立即终局；随后按需用工具加载证据、经 `propose_edits` 暂存编辑，final 提交。原始 Prompt 模板（任务卡）中包含 sentinel 占位符（`__GENERALIZATION_RULES__`、`__USER_OVERRIDE_RULE__`、`__EVIDENCE_ROUTING_RULES__`、`__OUTPUT_LANGUAGE_RULE__`），保存覆盖时保留这些占位符即可，运行时会自动注入共享规则块。
 
-#### create_skill（新建技能）
+#### create_skill（新建技能，agent 循环）
 
 - **模块**：`teamEvolver.evolve.stages.execute`
 - **符号**：`_CREATE_FROM_SESSIONS_SYSTEM`
 - **默认 Temperature**：0.4
 - **默认 Max Tokens**：16384
-- **输入变量**：cross-cycle evidence、evaluation cohort、session evidence、existing skill names
+- **输入变量**：round-1 会话索引卡、cross-cycle evidence、evaluation cohort、existing skill names
 - **注入共享块**：是
-- **说明**：从无技能匹配的会话桶中识别可复用模式并生成全新技能。同样包含共享块占位符。
+- **说明**：从无技能匹配的会话桶中识别可复用模式并生成全新技能，同样以 agent 循环运行。可用 `read_library_skill` 读取既有技能全文做差异化定位，用 `check_name` 校验新名称是否冲突。同样包含共享块占位符。
 
-#### merge（冲突合并）
+#### merge（冲突合并，agent 循环）
 
 - **模块**：`teamEvolver.evolve.stages.execute`
 - **符号**：`_MERGE_SKILL_SYSTEM`
@@ -105,7 +105,7 @@ ingest → session_filter → summarize → judge → group → ┬→ evolve_sk
 - **默认 Max Tokens**：8192
 - **输入变量**：Version A（现有技能）、Version B（新进化版本）
 - **注入共享块**：否
-- **说明**：当同名技能产生两个冲突的进化版本时，将它们合并为一个更优版本。
+- **说明**：当同名技能产生两个冲突的进化版本时合并为一个更优版本。两个版本的全文内联在第 1 轮消息中；模型对照合并原则完成"提交前自检"后输出 final（合并后的 skill 对象）。循环失败时保留新进版本（incoming）。
 
 #### dataset_synthesis（测试集生成）
 
@@ -126,6 +126,22 @@ ingest → session_filter → summarize → judge → group → ┬→ evolve_sk
 - **输入变量**：checklist、interactions、tool trajectory、workspace artifacts
 - **注入共享块**：否
 - **说明**：在真回放完成后，逐条核验 Checklist 项是否满足。裁判只允许依据可观察证据判定，temperature=0 保证裁决一致性。
+
+## Agent 循环工作协议
+
+`evolve_skill`、`create_skill`、`merge` 三个技能编写阶段以受控 agent 循环运行（实现位于 `teamEvolver/evolve/agent/`）。循环采用文本 JSON 协议（不依赖原生 tool calling）：
+
+1. **第 1 轮 plan（强制）**：模型基于高密度索引卡（每会话一行 + 当前 Skill 大纲）输出 `{"type": "plan", "action_candidate": ..., "evidence_classification": {...}, "plan": [...], "rationale": ...}`。运行时做确定性门控：`action_candidate=skip` 直接终局；非 skip 但 `team_skill` 证据为空先给一轮纠错，仍为空则终局 skip。
+2. **act 轮（工具调用）**：模型按需调用工具，运行时执行后以观测（Observations）反馈。工具集按阶段启用：
+   - `read_session`（按需读单会话 summary/trajectory/tail/full）、`search_sessions`（关键词检索）
+   - evolve：`read_skill`（byte-exact 当前正文，编辑锚点来源）、`read_bundle_file`、`propose_edits`（编辑机械应用与暂存，失败明细回喂）、`check_generalization`（硬编码嫌疑扫描）
+   - create：`read_library_skill`（读既有技能做差异化）、`check_name`（名称冲突校验）
+3. **final（提交）**：`{"type": "final", "decision": {...}}`。提交时做契约校验（team_skill 门、file_changes 预校验、content/暂存回填），失败则作为纠错观测回喂。
+4. **轮数预算**：`evolve.agent_max_rounds`（默认 12，clamp 2-24）与 `evolve.agent_max_tool_calls_per_round`（默认 8，clamp 1-16）。倒数第二轮注入"必须提交"提醒；到顶未提交时按已暂存状态做 best-effort 收尾（无暂存则降级 skip / None）。
+
+**覆盖语义（重要）**：Prompt Studio 编辑的是"任务卡"（角色、使命、编辑原则、共享规则块）。循环协议（回合格式、工具契约、final 决策 schema）由代码所有的 `TOOL_PROTOCOL_APPENDIX` 在运行时强制追加，**不可被覆盖**——旧的一次性输出格式说明不再需要，覆盖文本不应描述输出格式，只描述任务本身。
+
+渐进式披露：第 1 轮只给索引卡，全文按需加载。这既让上下文保持高信息密度，也让 `propose_edits` 的锚点始终来自 `read_skill` 的 byte-exact 正文，从根源上消除"凭记忆重写锚点"的失败模式。
 
 ## Prompt Studio Web 界面
 
@@ -204,8 +220,7 @@ Prompt Studio 的测试不是"模拟"——它使用与真实进化流水线完�
 - `session_filter`：使用 `_session_summary()` 构建与真实分类器完全一致的输入
 - `summarize`：使用 `_build_session_payload()` 构建真实载荷
 - `judge`：确保 `_trajectory` 和 `_summary` 元数据存在后调用 `_build_judge_payload()`
-- `evolve_skill`/`create_skill`：调用 `_build_session_evidence()` 构建真实证据块
-- `merge`：提供示例 A/B 版本（因为需要两个冲突版本）
+- `evolve_skill`/`create_skill`/`merge`：**运行真实的 agent 循环**（轮数上限 6），使用与生产一致的索引卡/双版本卡构造与工具集；结果额外返回 `rounds` 逐轮记录，测试面板会渲染每轮的类型（plan / 工具 / final）
 - `dataset_synthesis`：使用 `render_synthesis_prompt()` 渲染
 - `replay_checklist`：构建示例 checklist 和交互记录
 

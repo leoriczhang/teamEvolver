@@ -2,12 +2,12 @@
 
 ## 1. API 实现介绍
 
-Agent 注册接口用于将新的 Agent 运行时注册到 teamEvolver，并获取限定作用域的访问令牌。V1 注册使用控制面密钥认证，注册时声明 Agent 支持的能力（capabilities）、回调端点和元数据。
+Agent 注册接口用于将新的 Agent 运行时注册到 teamEvolver，并按需获取限定作用域的访问令牌。V1 注册使用控制面密钥认证，注册时声明 Agent 支持的能力（capabilities）、回调端点和元数据。
 
-首次注册成功时，响应中包含 `credentials.agent_access_token`，该令牌仅返回一次，服务端仅存储其 SHA-256 哈希。重复注册已存在的 agent_id 不会重新签发令牌，除非请求中指定 `rotate_access_token: true`。
+访问令牌仅在注册声明的 capability 集合与 `session.ingest.v1` 或 `context.workspace.v1` 有交集时签发（且要求 V1 compatible 注册），此时响应中包含 `credentials.agent_access_token`，该令牌仅返回一次，服务端仅存储其 SHA-256 哈希。仅声明 `replay.branch.v1` 等 Replay 能力的注册不会获得令牌。重复注册已存在的 agent_id 不会重新签发令牌，除非请求中指定 `rotate_access_token: true`。
 
 代码实现：`teamEvolver/integrations/agent_registry.py:107` (`register_agent`)
-路由入口：`teamEvolver/proxy/routes.py:3366` (`register_agent_runtime`)
+路由入口：`teamEvolver/proxy/routes.py:register_agent_runtime`
 
 ## 2. 接口和参数说明
 
@@ -48,8 +48,10 @@ Content-Type: application/json
 |-----------|---------|------|
 | `session.ingest.v1` | 无 | 支持 Session 上报 |
 | `context.workspace.v1` | `scopes` | 可访问的 Context 范围数组，可选值：`personal_memory`、`team_memory`、`personal_skills`、`team_skills` |
-| `replay.branch.v1` | `transport`、`endpoint`、`max_interactions`、`supports_materials`、`supports_artifacts`、`supports_full_trace`、`idempotent`、`auth_profile` | True Replay 回调配置 |
+| `replay.branch.v1` | `transport`、`endpoint`、`orchestration`、`request_template`、`response_mapping`、`max_interactions`、`idempotent`、`auth_profile` | True Replay 回调配置。`orchestration: "server_driven"` 启用逐轮 Turn 协议；`request_template`/`response_mapping` 用于 plain HTTP 端点的逐轮请求渲染与响应字段映射。未提供的字段使用服务端默认值 |
 | `skill.sync.v1` | `transport`、`endpoint`、`auth_profile` | Skill Sync 推送配置 |
+
+服务端默认值由 `teamEvolver/integrations/agent_registry.py:resolve_replay_capability` 填充：`transport`（有 `endpoints.replay_url` 时为 `http`，否则 `local`）、`max_interactions`（默认 20）、`idempotent`（默认 `false`）。
 
 ### 响应
 
@@ -65,7 +67,7 @@ Content-Type: application/json
 | `status` | string | 状态（`active`） |
 | `created_at` | string(ISO8601) | 创建时间 |
 | `updated_at` | string(ISO8601) | 更新时间 |
-| `credentials` | object | 凭证信息（仅首次注册或轮换时返回） |
+| `credentials` | object | 凭证信息（仅 V1 compatible 注册且 capability 集合含 `session.ingest.v1` 或 `context.workspace.v1` 时，在首次注册或轮换时返回） |
 | `credentials.agent_access_token` | string | Agent 访问令牌，格式 `tev1_<random>` |
 | `subject_sync` | object | 主体同步结果 |
 | `subject_sync.missing_user_ids` | array[string] | 映射中未找到的用户 ID |
@@ -129,6 +131,35 @@ curl -X POST "http://localhost:52010/internal/agents/register" \
     }
   }'
 ```
+
+### Server-Driven Replay 注册示例
+
+运行 `scripts/replay_turn_server.py` 的 Agent 以 `orchestration: "server_driven"` 注册，teamEvolver 将逐轮调用其 turn 端点：
+
+```bash
+curl -X POST "http://localhost:52010/internal/agents/register" \
+  -H "Authorization: Bearer my-control-plane-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "schema_version": "teamevolver.agent-registration.v1",
+    "protocol_version": "1.0",
+    "agent_id": "my-agent:prod",
+    "runtime_type": "my-agent",
+    "capabilities": {
+      "replay.branch.v1": {
+        "transport": "http",
+        "orchestration": "server_driven",
+        "endpoint": "http://<turn-server-host>:8010/turn/my-agent",
+        "auth_profile": "my_agent"
+      }
+    },
+    "endpoints": {
+      "replay_url": "http://<turn-server-host>:8010/turn/my-agent"
+    }
+  }'
+```
+
+teamEvolver 侧需导出 `TEAMEVOLVER_AGENT_MY_AGENT_REPLAY_API_KEY=<secret>`，turn 服务端通过 `--api-key` 传入同一密钥。此注册不声明 `session.ingest.v1`/`context.workspace.v1`，因此响应中不包含访问令牌。
 
 ## 4. 响应契约与错误处理
 

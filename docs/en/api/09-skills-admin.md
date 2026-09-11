@@ -2,7 +2,7 @@
 
 ## 1. API Implementation Overview
 
-The Skill Management API provides team-Skill CRUD, version rollback, and cloud sync, plus personal-Skill editing, personal/team copying, and publish requests. These endpoints require a console login; team-Skill writes and publish-request decisions require administrator access. Team-Skill changes sync to OpenViking and notify registered Agents through the Skill Sync outbox.
+The Skill Management API provides team-Skill CRUD, version rollback, and cloud sync, plus personal-Skill editing, personal/team copying, and publish requests. These endpoints require a console login; team-Skill writes and publish-request decisions require administrator access. Team-Skill changes are stored in the local Skill library, asynchronously mirrored to OpenViking, and notify registered Agents through the Skill Sync outbox.
 
 Code implementation: `teamEvolver/proxy/skills_admin.py` (`SkillsAdminMixin`)
 Skill editor: `teamEvolver/skills/editor.py`
@@ -171,11 +171,16 @@ List cloud version history for a Skill.
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | Skill name |
+| `skill_id` | string | Skill ID (assigned by the registry, stable across nodes) |
 | `current_version` | integer | Current version |
+| `versions` | array[integer] | Viewable/rollback-capable version numbers (descending; each has a `versions/v{n}/` bundle) |
 | `history` | array | Version history list |
 | `history[].version` | integer | Version number |
-| `history[].created_at` | string | Creation time |
-| `history[].message` | string | Version description |
+| `history[].timestamp` | string | Creation time (UTC ISO-8601) |
+| `history[].action` | string | Change action (e.g. `publish`, `update`, `rollback:v<N>`) |
+| `history[].content_sha` | string | SHA-256 of SKILL.md content |
+| `history[].tree_sha256` | string | Bundle tree hash (optional) |
+| `history[].files` | array | Bundle file records (optional) |
 
 **Caching:** Version list cached for 15 seconds.
 
@@ -235,6 +240,7 @@ Roll back a Skill to a specified version. This re-publishes the target version c
 |-------|------|-------------|
 | `name` | string | Skill name |
 | `new_version` | integer | New version number (after rollback) |
+| `restored_from` | integer | Target version that was rolled back to |
 | `loaded_skills` | integer | Total Skill count after reload |
 | `event_id` | string | Sync event ID |
 
@@ -364,3 +370,15 @@ Any write operation (POST/PUT/DELETE/rollback) clears related caches and trigger
 - Write operations (create/update/delete/rollback) automatically trigger cloud sync;
 - Sync failure does not affect local writes; response contains `cloud.synced: false` with failure reason;
 - Successful cloud sync triggers Skill Sync webhook, notifying registered Agents to update local caches.
+
+### Skill Mutation Service (write path)
+
+All team-Skill writes go through `teamEvolver/skills/mutations.py:SkillMutationService` (actions `publish|update|rollback|delete`). Each change produces three kinds of persistent records:
+
+- Commit records in `skill_mutation_commits/` (full change audit);
+- Sync outbox events in `skill_sync_outbox/` (delivered to Agent runtimes);
+- Delete tombstones in `skill_tombstones/` (for the delete action).
+
+Outbox events enter the terminal `dead_letter` state after retries are exhausted; `SkillMutationService.reconcile()` repairs and redelivers them.
+
+Note: the Skill library is stored local-first and asynchronously mirrored to OpenViking via a durable spool (`sharing.skill_mirror_spool_dir`); mirror status is available in `GET /storage/status` (`mirror_enabled`, `mirror`).

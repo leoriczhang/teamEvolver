@@ -211,11 +211,11 @@ teamEvolver 中的 Skill 版本号始终单调递增，永不复用旧版本号�
 
 | 模块 | 路径 |
 |------|------|
-| SkillMutationService | [skills/mutations.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/skills/mutations.py) |
-| SkillHub（底层存储操作） | [skills/hub.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/skills/hub.py) |
-| Skill Bundle 模型 | [skills/bundle.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/skills/bundle.py) |
-| 同步适配器 | [integrations/skill_sync_adapters.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/integrations/skill_sync_adapters.py) |
-| Skill ID 注册表 | [skills/registry.py](file:///home/zhangpengkun/teamEvolver/teamEvolver/skills/registry.py) |
+| SkillMutationService | [skills/mutations.py](../../../teamEvolver/skills/mutations.py) |
+| SkillHub（底层存储操作） | [skills/hub.py](../../../teamEvolver/skills/hub.py) |
+| Skill Bundle 模型 | [skills/bundle.py](../../../teamEvolver/skills/bundle.py) |
+| 同步适配器 | [integrations/skill_sync_adapters.py](../../../teamEvolver/integrations/skill_sync_adapters.py) |
+| Skill ID 注册表 | [skills/registry.py](../../../teamEvolver/skills/registry.py) |
 
 ## 相关文档
 

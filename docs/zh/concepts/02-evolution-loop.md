@@ -32,21 +32,40 @@ Agent 在每次会话结束后通过 `/ingest_session` 上报完整轨迹：
 
 ### 2. Evidence Extraction（证据提取）
 
-进化引擎的 Judge 阶段对 Session 进行分析，判断哪些内容可以上升为团队资产：
+证据提取分两层，分别发生在不同阶段：
 
-| Evidence 类型 | 去向 |
-|--------------|------|
-| 可复用的任务方法 | Skill Candidate |
-| 长期事实/偏好/共识 | Memory Change（通过 DreamCycle） |
-| 特定任务要求 | 丢弃（不属于团队资产） |
-| Agent 运行时问题 | 标记为 runtime-issue，不进化 |
-| 证据不足 | 归档，等待更多 Evidence 累积 |
+**会话级评分（Judge 阶段）**：摘要完成后，会话级评估器（`teamEvolver/evolve/stages/judge.py:judge_session`，系统提示词为模块常量 `_JUDGE_SYSTEM`）对每个 Session 按四个维度打分（0.0-1.0）：
+
+| 维度 | 权重 | 含义 |
+|------|------|------|
+| `task_completion` | 0.55 | 用户目标是否完成 |
+| `response_quality` | 0.30 | 最终结果的正确性、完整性与清晰度 |
+| `efficiency` | 0.05 | 执行路径是否避免了不必要的重试/绕路 |
+| `tool_usage` | 0.10 | 工具使用是否恰当且有效 |
+
+加权得到 `overall_score`，输出还包含每个维度的评分要点（`reasons`，中文要点列表）和整体 `rationale`。已有可靠会话级分数（benchmark/aggregate）的 Session 会被跳过。
+
+**证据路由（进化 Prompt 内）**：不存在独立的"证据分类"阶段。候选生成时，进化 Prompt（`teamEvolver/evolve/stages/execute.py:evolve_skill_from_sessions`，路由规则为模块常量 `_EVIDENCE_ROUTING_RULES`）要求把每条候选经验归入且只归入一个桶：
+
+| 桶 | 含义 |
+|----|------|
+| `team_skill` | 可复用的 SOP、稳定环境事实、工具/领域操作规程 |
+| `user_memory` | 可归因于某个用户的偏好或习惯 |
+| `task_requirement` | 仅针对当前交付物的明确要求或纠正 |
+| `agent_runtime` | 中断、上下文丢失、工具故障、编排失败等运行时问题 |
+| `insufficient_evidence` | 与 Skill 没有可论证因果联系的观察 |
+
+只有 `team_skill` 证据才能修改共享 Skill；若全部观察落在其余桶中，进化选择 `skip`，Session 归档。曾经的 DreamCycle Memory 路由已被取代：ingest 阶段分类结果不为 `valuable` 的会话直接跳过并归档（见 [Sessions](./05-sessions)）。
 
 ### 3. Candidate Generation（候选生成）
 
-当同一类 Evidence 积累到阈值（`evidence_change_debt_threshold=3`）时：
-- **Skill Candidate**：基于多轮 Session 中的成功模式，合并为一个 Skill 修订或新建版本
-- **Memory Change**：通过 DreamCycle 的 React 引擎聚合、去重后生成提案
+每个进化周期，引擎把消费的 Session 按关联 Skill 分组，每个分组是一个独立分支，各自运行一次进化（`teamEvolver/evolve/runtime/orchestrator.py:_evolve_skill_group`）：基于该 Skill 关联的 Session 与跨周期 Evidence 账本，产出修订、新建或 `skip` 决策。不存在"证据积累到阈值才生成候选"的机制；`evidence_change_debt_threshold` 只影响 Evidence 账本的跨周期引导，不是候选生成阈值。
+
+分支级约束：
+
+- **团队证据最低要求**：每个分支的规划证据必须覆盖至少 `evolve.min_group_sessions`（默认 2）个不同 Session 且 `evolve.min_group_users`（默认 2）个不同 User（`teamEvolver/evolve/kernel/settings.py:EvolveServerConfig`），不满足则本轮跳过该分支；设为 0 表示关闭对应检查。
+- **并行度上限**：分组分支与无 Skill 新建分支的并行数量由 `evolve.max_parallel_groups` 限制。
+- **部分提交**：某分支失败时，其 Session 保留在队列中等待下轮重试；成功分支的 Session 正常消费并归档，避免持续失败的分组阻塞整个队列（`teamEvolver/evolve/runtime/orchestrator.py:_run_once`）。
 
 Candidate 创建时不影响已发布的团队资产，仅存在于验证队列。
 
@@ -95,6 +114,7 @@ Candidate 创建时不影响已发布的团队资产，仅存在于验证队列�
 | 自动周期 | `evolve.interval_seconds=600`（10分钟）扫描队列 |
 | 手动触发 | `POST /trigger` 立即执行一次进化周期 |
 | Session 驱动 | 积累足够 Evidence 时自动唤醒 |
+| 连续排空 | 配置 `evolve.drain_max_per_cycle`（默认 0 = 不设上限）后，若单周期排空达到上限仍有积压，或周期内又有新会话入队，下一周期约 1 秒后自动启动，而不是等待完整间隔（`teamEvolver/evolve/runtime/orchestrator.py:run_periodic`）；排空本身按批读取会话（`teamEvolver/evolve/runtime/mixins.py:_drain_sessions`），队列空闲时仍按完整间隔休眠 |
 
 ## 发布模式
 

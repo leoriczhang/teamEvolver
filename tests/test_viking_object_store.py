@@ -153,27 +153,25 @@ def test_put_object_writes_utf8_content_and_uri() -> None:
     assert headers["Authorization"] == "Bearer secret"
 
 
-def test_put_object_falls_back_to_base64_for_binary_payload() -> None:
+def test_put_object_binary_raises_clear_error_without_batch_write(monkeypatch) -> None:
+    """Binary payloads cannot use content/write (text-only); batch-write is
+    unavailable, so put_object must fail fast with a clear error and never
+    hit the batch-write endpoint."""
+    import teamEvolver.storage.viking as viking_mod
+
+    monkeypatch.setattr(viking_mod.time, "sleep", lambda *_: None)
+
     def handler(call: dict) -> _FakeResponse:
-        if call["url"].endswith("/api/v1/content/download"):
-            return _FakeResponse(
-                404,
-                {"error": {"code": "NOT_FOUND", "message": "missing"}},
-            )
+        assert not call["url"].endswith("/api/v1/content/batch-write")
         if call["url"].endswith("/api/v1/fs/mkdir"):
             return _FakeResponse(200, {"status": "ok", "result": {}})
-        return _FakeResponse(
-            200,
-            {"status": "ok", "result": {"created": [], "updated": []}},
-        )
+        return _FakeResponse(200, {"status": "ok", "result": {}})
 
     store, fake = _make_store(handler=handler)
     binary = b"\xff\xfe\x80\x81\x82\x83"
-    store.put_object("blobs/x.bin", binary)
-
-    body = fake.calls[-1]["json"]
-    assert fake.calls[-1]["url"].endswith("/api/v1/content/batch-write")
-    assert base64.b64decode(body["operations"][0]["content_base64"]) == binary
+    with pytest.raises(RuntimeError, match="binary object"):
+        store.batch_write({"blobs/x.bin": binary})
+    assert not any(c["url"].endswith("/content/batch-write") for c in fake.calls)
 
 
 def test_put_object_falls_back_to_create_when_replace_misses() -> None:
@@ -195,14 +193,12 @@ def test_put_object_falls_back_to_create_when_replace_misses() -> None:
 
 
 def test_put_object_falls_back_to_append_for_restricted_extension() -> None:
-    state = {"calls": 0}
-
     def handler(call: dict) -> _FakeResponse:
-        del call
-        state["calls"] += 1
-        if state["calls"] == 1:
+        if call["url"].endswith("/api/v1/fs/mkdir"):
+            return _FakeResponse(200, {"status": "ok", "result": {}})
+        if call["json"].get("mode") == "replace":
             return _FakeResponse(404, {"error": {"code": "NOT_FOUND", "message": "x"}})
-        if state["calls"] == 2:
+        if call["json"].get("mode") == "create":
             return _FakeResponse(
                 400, {"error": {"code": "INVALID_ARGUMENT", "message": "extension not allowed"}}
             )
@@ -211,86 +207,71 @@ def test_put_object_falls_back_to_append_for_restricted_extension() -> None:
     store, fake = _make_store(handler=handler)
     store.put_object("peers/cust-a/sessions/foo.jsonl", b"line")
 
-    assert state["calls"] == 3
-    assert [c["json"]["mode"] for c in fake.calls] == ["replace", "create", "append"]
+    write_modes = [
+        c["json"]["mode"]
+        for c in fake.calls
+        if c["url"].endswith("/api/v1/content/write")
+    ]
+    # Initial replace->create misses, then the INVALID_ARGUMENT retry walks
+    # replace/create/append until append succeeds for the restricted type.
+    assert write_modes == ["replace", "create", "replace", "create", "append"]
+    assert write_modes[-1] == "append"
 
 
-def test_batch_write_sends_conditional_text_and_binary_operations() -> None:
+def test_batch_write_writes_text_sequentially_and_rejects_binary() -> None:
+    """With /content/batch-write unavailable, batch_write emulates the batch
+    via sequential content/write calls for text and rejects binary keys."""
     def handler(call: dict) -> _FakeResponse:
         if call["url"].endswith("/api/v1/fs/mkdir"):
             return _FakeResponse(200, {"status": "ok", "result": {}})
-        assert call["url"].endswith("/api/v1/content/batch-write")
-        return _FakeResponse(
-            200,
-            {
-                "status": "ok",
-                "result": {
-                    "created": ["viking://resources/teamEvolver/skills/demo/SKILL.md"],
-                    "updated": [],
-                    "unchanged": [],
-                    "queue_status": {"Semantic": {"error_count": 0}},
-                },
-                "telemetry": {"id": "telemetry-1"},
-            },
-        )
+        assert call["url"].endswith("/api/v1/content/write")
+        return _FakeResponse(200, {"status": "ok", "result": {}})
 
     store, fake = _make_store(handler=handler)
-    result = store.batch_write(
-        {
-            "skills/demo/SKILL.md": b"# Demo\n",
-            "skills/demo/files/icon.bin": b"\xff\x00",
-        },
-        preconditions={
-            "skills/demo/SKILL.md": {"kind": "create_if_absent"},
-            "skills/demo/files/icon.bin": {
-                "kind": "replace_if_hash",
-                "base_hash": "sha256:" + "a" * 64,
+    with pytest.raises(RuntimeError, match="binary object"):
+        store.batch_write(
+            {
+                "skills/demo/SKILL.md": b"# Demo\n",
+                "skills/demo/files/icon.bin": b"\xff\x00",
             },
-        },
-    )
-
-    assert result["queue_status"]["Semantic"]["error_count"] == 0
-    assert result["telemetry"] == {"id": "telemetry-1"}
-    assert len(fake.calls) == 2
-    payload = fake.calls[1]["json"]
-    assert payload["root_uri"] == "viking://resources/teamEvolver"
-    assert payload["wait"] is True
-    assert payload["telemetry"] is True
-    operations = {item["uri"]: item for item in payload["operations"]}
-    text_op = operations["viking://resources/teamEvolver/skills/demo/SKILL.md"]
-    binary_op = operations["viking://resources/teamEvolver/skills/demo/files/icon.bin"]
-    assert text_op["content"] == "# Demo\n"
-    assert text_op["precondition"] == {"kind": "create_if_absent"}
-    assert base64.b64decode(binary_op["content_base64"]) == b"\xff\x00"
-    assert binary_op["precondition"]["kind"] == "replace_if_hash"
+            preconditions={
+                "skills/demo/SKILL.md": {"kind": "create_if_absent"},
+                "skills/demo/files/icon.bin": {
+                    "kind": "replace_if_hash",
+                    "base_hash": "sha256:" + "a" * 64,
+                },
+            },
+        )
+    # Sorted keys put SKILL.md first; its single-file write succeeded before
+    # the binary key was rejected.
+    write_calls = [c for c in fake.calls if c["url"].endswith("/api/v1/content/write")]
+    assert len(write_calls) == 1
+    assert write_calls[0]["json"]["content"] == "# Demo\n"
+    assert not any(c["url"].endswith("/content/batch-write") for c in fake.calls)
 
 
-def test_batch_write_captures_existing_object_hash() -> None:
-    import hashlib
-
-    old = b"old content"
-
+def test_batch_write_text_uses_content_write_replace_mode() -> None:
     def handler(call: dict) -> _FakeResponse:
-        if call["url"].endswith("/api/v1/content/download"):
-            return _FakeResponse(200, content=old)
         if call["url"].endswith("/api/v1/fs/mkdir"):
             return _FakeResponse(200, {"status": "ok", "result": {}})
-        return _FakeResponse(
-            200,
-            {"status": "ok", "result": {"created": [], "updated": [], "unchanged": []}},
-        )
+        return _FakeResponse(200, {"status": "ok", "result": {}})
 
     store, fake = _make_store(handler=handler)
     store.batch_write({"manifest.json": b"new content"})
 
-    operation = fake.calls[-1]["json"]["operations"][0]
-    assert operation["precondition"] == {
-        "kind": "replace_if_hash",
-        "base_hash": "sha256:" + hashlib.sha256(old).hexdigest(),
-    }
+    write_calls = [c for c in fake.calls if c["url"].endswith("/api/v1/content/write")]
+    assert len(write_calls) == 1
+    call = write_calls[0]
+    assert call["json"]["content"] == "new content"
+    assert call["json"]["mode"] in ("replace", "create", "append")
+    assert not any(c["url"].endswith("/content/batch-write") for c in fake.calls)
 
 
-def test_batch_write_propagates_conflict_without_fallback() -> None:
+def test_batch_write_propagates_conflict_without_fallback(monkeypatch) -> None:
+    import teamEvolver.storage.viking as viking_mod
+
+    monkeypatch.setattr(viking_mod.time, "sleep", lambda *_: None)
+
     def handler(call: dict) -> _FakeResponse:
         if call["url"].endswith("/api/v1/fs/mkdir"):
             return _FakeResponse(200, {"status": "ok", "result": {}})
@@ -306,7 +287,10 @@ def test_batch_write_propagates_conflict_without_fallback() -> None:
             preconditions={"manifest.json": {"kind": "create_if_absent"}},
         )
 
-    assert len(fake.calls) == 2
+    # put_object retries CONFLICT with patient backoff before propagating.
+    write_calls = [c for c in fake.calls if c["url"].endswith("/api/v1/content/write")]
+    assert len(write_calls) > 1
+    assert not any(c["url"].endswith("/content/batch-write") for c in fake.calls)
 
 
 def test_get_object_downloads_raw_text() -> None:
@@ -468,6 +452,12 @@ def test_skill_hub_object_storage_from_config_builds_viking_bucket() -> None:
         sharing_viking_customer_id="cust-a",
         sharing_viking_root_prefix="teamEvolver",
         sharing_viking_group_id="team-a",
+        # Keep the test hermetic: with the fallback enabled the hub build would
+        # probe http://viking.test and fall back to the local store.
+        sharing_local_fallback_enabled=False,
+        # The per-purpose split defaults session/ledger storage to local; this
+        # test pins the legacy viking object-storage path explicitly.
+        sharing_session_backend="viking",
     )
 
     hub = SkillHub.object_storage_from_config(cfg)
@@ -476,3 +466,194 @@ def test_skill_hub_object_storage_from_config_builds_viking_bucket() -> None:
     assert hub._bucket._user == "liuyue"
     assert hub._bucket._root_prefix == "teamEvolver"
     assert hub._bucket._group_id == "team-a"
+
+
+# --------------------------------------------------------------------- #
+# Built-in local-storage fallback                                        #
+# --------------------------------------------------------------------- #
+
+
+@pytest.fixture(autouse=True)
+def _clear_probe_cache():
+    from teamEvolver.storage.viking import reset_probe_cache
+
+    reset_probe_cache()
+    yield
+    reset_probe_cache()
+
+
+def test_normalize_backend_local_aliases() -> None:
+    assert normalize_backend("local") == "local"
+    assert normalize_backend("localfs") == "local"
+    assert normalize_backend("local-fs") == "local"
+    assert normalize_backend("filesystem") == "local"
+    assert normalize_backend("builtin") == "local"
+
+
+def test_build_object_store_routes_local_backend(tmp_path) -> None:
+    from teamEvolver.storage import LocalObjectStore
+
+    store = build_object_store(backend="local", local_root=str(tmp_path))
+    assert isinstance(store, LocalObjectStore)
+    store.put_object("k", b"v")
+    assert store.get_object("k").read() == b"v"
+
+
+def test_probe_classifies_transport_error_unavailable() -> None:
+    import httpx
+
+    from teamEvolver.storage.viking import probe_viking_availability
+
+    def handler(call: dict) -> _FakeResponse:
+        raise httpx.ConnectError("connection refused")
+
+    store, _ = _make_store(handler=handler)
+    available, reason = probe_viking_availability(store)
+    assert available is False
+    assert "ConnectError" in reason
+
+
+def test_probe_classifies_timeout_unavailable() -> None:
+    import httpx
+
+    from teamEvolver.storage.viking import probe_viking_availability
+
+    def handler(call: dict) -> _FakeResponse:
+        raise httpx.ReadTimeout("slow")
+
+    store, _ = _make_store(handler=handler)
+    available, _ = probe_viking_availability(store)
+    assert available is False
+
+
+def test_probe_classifies_5xx_unavailable() -> None:
+    from teamEvolver.storage.viking import probe_viking_availability
+
+    store, _ = _make_store(
+        handler=lambda call: _FakeResponse(504, text="Gateway Time-out")
+    )
+    available, reason = probe_viking_availability(store)
+    assert available is False
+    assert "504" in reason
+
+
+def test_probe_classifies_4xx_and_not_found_available() -> None:
+    from teamEvolver.storage.viking import probe_viking_availability
+
+    # Auth/config errors mean the server answered — never mask them by falling
+    # back to local storage.
+    store, _ = _make_store(
+        handler=lambda call: _FakeResponse(
+            401, {"error": {"code": "UNAUTHENTICATED", "message": "bad key"}}
+        )
+    )
+    available, _ = probe_viking_availability(store)
+    assert available is True
+
+    store, _ = _make_store(
+        handler=lambda call: _FakeResponse(
+            404, {"error": {"code": "NOT_FOUND", "message": "no root yet"}}
+        )
+    )
+    available, _ = probe_viking_availability(store)
+    assert available is True
+
+
+def test_probe_verdicts_are_ttl_cached() -> None:
+    import httpx
+
+    from teamEvolver.storage.viking import probe_viking_availability
+
+    calls = {"count": 0}
+
+    def handler(call: dict) -> _FakeResponse:
+        calls["count"] += 1
+        raise httpx.ConnectError("down")
+
+    store, _ = _make_store(handler=handler)
+    first = probe_viking_availability(store)
+    second = probe_viking_availability(store)
+    assert first == second == (False, first[1])
+    assert calls["count"] == 1
+
+
+def test_build_object_store_falls_back_when_viking_unavailable(tmp_path, monkeypatch) -> None:
+    from teamEvolver.storage import LocalObjectStore
+
+    monkeypatch.setattr(
+        "teamEvolver.storage.probe_viking_availability",
+        lambda store, *, timeout=3.0: (False, "ConnectError: down"),
+    )
+    store = build_object_store(
+        backend="viking",
+        endpoint="http://viking.test",
+        allow_fallback=True,
+        fallback_root=str(tmp_path),
+    )
+    assert isinstance(store, LocalObjectStore)
+    assert store.fallback_active is True
+    assert "ConnectError" in store.fallback_reason
+    assert store.fallback_endpoint == "http://viking.test"
+    # The fallback root is namespaced per viking identity.
+    assert store.root.startswith(str(tmp_path))
+
+
+def test_build_object_store_keeps_viking_when_probe_succeeds(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "teamEvolver.storage.probe_viking_availability",
+        lambda store, *, timeout=3.0: (True, ""),
+    )
+    store = build_object_store(
+        backend="viking",
+        endpoint="http://viking.test",
+        allow_fallback=True,
+    )
+    assert isinstance(store, OpenVikingObjectStore)
+
+
+def test_build_object_store_no_fallback_by_default(monkeypatch) -> None:
+    def fail_probe(store, *, timeout=3.0):
+        raise AssertionError("probe must not run when allow_fallback=False")
+
+    monkeypatch.setattr("teamEvolver.storage.probe_viking_availability", fail_probe)
+    store = build_object_store(backend="viking", endpoint="http://viking.test")
+    assert isinstance(store, OpenVikingObjectStore)
+
+
+def test_effective_fallback_root_is_deterministic_and_isolated(tmp_path) -> None:
+    from teamEvolver.storage import _effective_fallback_root
+
+    kwargs = dict(
+        account="default",
+        user="team",
+        root_prefix="team-skill-evolver",
+        group_id="",
+        namespace="resources",
+    )
+    a = _effective_fallback_root(str(tmp_path), endpoint="http://a", **kwargs)
+    a_again = _effective_fallback_root(str(tmp_path), endpoint="http://a", **kwargs)
+    b = _effective_fallback_root(str(tmp_path), endpoint="http://b", **kwargs)
+    assert a == a_again
+    assert a != b
+    assert a.startswith(str(tmp_path))
+
+
+def test_skill_hub_falls_back_to_local_store(tmp_path, monkeypatch) -> None:
+    from teamEvolver.storage import LocalObjectStore
+
+    monkeypatch.setattr(
+        "teamEvolver.storage.probe_viking_availability",
+        lambda store, *, timeout=3.0: (False, "ConnectError: down"),
+    )
+    cfg = TeamEvolverConfig(
+        sharing_backend="viking",
+        sharing_viking_endpoint="http://viking.test",
+        sharing_local_fallback_enabled=True,
+        sharing_local_root=str(tmp_path),
+    )
+    hub = SkillHub.object_storage_from_config(cfg)
+    assert hub is not None
+    assert isinstance(hub._bucket, LocalObjectStore)
+    # The hub remains fully functional on the fallback store.
+    hub._bucket.put_object("manifest.json", b"{}")
+    assert hub._bucket.get_object("manifest.json").read() == b"{}"

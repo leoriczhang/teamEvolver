@@ -81,7 +81,7 @@ Local skill library configuration.
 
 ### sharing Section
 
-Skill sharing and OpenViking cloud sync configuration.
+Skill sharing and OpenViking cloud sync configuration. Storage is local-first: high-frequency write paths (Session queue, session_index, filter audit, evidence, Skill registry, etc.) always land in the local object store, and the Skill library is asynchronously mirrored to OpenViking; when OpenViking is unavailable, storage automatically falls back to local (see `local_fallback_enabled`).
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -109,8 +109,12 @@ Skill sharing and OpenViking cloud sync configuration.
 | `skill_reload_mode` | string | `"poll"` | Skill reload mode: `"off"` (disabled), `"poll"` (polling), `"callback"` (webhook). |
 | `skill_reload_interval_seconds` | integer | `30` | Skill check interval in polling mode; minimum 5. |
 | `endpoint` | string | `""` | Generic endpoint (uses viking_endpoint when empty). |
-| `skill_backend` | string | `""` | Skill-dedicated backend (uses backend when empty). |
-| `session_backend` | string | `""` | Session-dedicated backend (uses backend when empty). |
+| `skill_backend` | string | `""` | Skill-dedicated backend. Empty uses `"local"` (local storage + async mirror to OpenViking); it does not inherit `backend`. |
+| `session_backend` | string | `""` | Session-dedicated backend. Empty uses `"local"` (local storage); it does not inherit `backend`. |
+| `local_fallback_enabled` | boolean | `true` | Fall back to local storage when OpenViking is unavailable (connection errors/timeouts/5xx); 4xx never triggers fallback. |
+| `local_root` | string | `""` | Local object store root directory; empty uses `~/.teamEvolver/local_store`. Fallback directories are namespaced per instance. |
+| `skill_mirror_enabled` | boolean | `true` | Whether to asynchronously mirror the local Skill library to OpenViking (via a durable spool). |
+| `skill_mirror_spool_dir` | string | `""` | Skill mirror spool directory; empty uses `~/.teamEvolver/skill_mirror_spool`. |
 
 ### evolve Section
 
@@ -134,9 +138,14 @@ Evolution pipeline core parameter configuration.
 | `dataset_max_requirements` | integer | `24` | Maximum checklist items per test case. |
 | `dataset_disclosure_batch_size` | integer | `4` | Progressive disclosure batch size. |
 | `validation_max_rejections` | integer | `1` | Pause evolution for skill after consecutive rejections count. |
-| `use_session_judge` | boolean | `true` | Whether to use session value classifier. |
+| `use_session_judge` | boolean | `true` | Whether to enable the evolution-stage Session score Judge (four dimensions: task completion / response quality / efficiency / tool usage, each with Chinese-language reasons); the ingest-stage value classifier runs independently and is not affected by this switch. |
 | `candidate_coalesce_enabled` | boolean | `true` | Whether to enable candidate coalescing. |
 | `max_parallel_groups` | integer | `4` | Maximum Skill groups processed concurrently in one evolution cycle. |
+| `drain_batch_size` | integer | `25` | Sessions read and processed per batch in continuous-drain mode. |
+| `drain_batch_delay_seconds` | float | `1.0` | Delay between consecutive drain batches in seconds, protecting the storage layer. |
+| `drain_max_per_cycle` | integer | `0` | Maximum Sessions drained per evolution cycle, 0 means unlimited; when backlog remains, the next cycle starts after about 1 second. |
+| `min_group_sessions` | integer | `2` | Minimum Sessions required to form a team-evidence group; below this the group skips the cycle. |
+| `min_group_users` | integer | `2` | Minimum users required to form a team-evidence group; below this the group skips the cycle. |
 | `bundle_text_extensions` | list | `[".py", ".sh"]` | Extensions treated as text files in skill bundles. |
 | `bundle_max_file_bytes` | integer | `262144` | Maximum single file bytes in skill bundles (256KB). |
 | `bundle_max_prompt_bytes` | integer | `786432` | Maximum prompt bytes in skill bundles (768KB). |
@@ -225,7 +234,7 @@ Candidate skill validation configuration.
 
 ### langfuse Section
 
-Langfuse observability and session pull configuration. Langfuse integration has two independent modes: inbound session pull (pulling sessions from Langfuse into evolution pipeline) and outbound tracing (sending LLM calls during evolution to Langfuse).
+Langfuse has two independent modes: inbound session pull uses tenant-scoped source connections; outbound tracing uses one service-wide connection shared by every tenant and cannot be overridden per tenant.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -234,6 +243,9 @@ Langfuse observability and session pull configuration. Langfuse integration has 
 | `public_key` | string | `""` | Langfuse Public Key for API access. |
 | `secret_key` | string | `""` | Langfuse Secret Key. |
 | `tracing_enabled` | boolean | `false` | Whether to enable outbound LLM call tracing. |
+| `tracing_host` | string | `""` | Global observability Langfuse URL, separate from tenant source `host`. |
+| `tracing_public_key` | string | `""` | Global observability project public key. |
+| `tracing_secret_key` | string | `""` | Global observability project secret key. |
 | `tracing_environment` | string | `"local"` | Tracing environment tag; distinguishes deployment environments in Langfuse UI (e.g., production, staging, local). |
 | `tracing_release` | string | `""` | Tracing release tag. |
 | `tracing_sample_rate` | float | `1.0` | Tracing sample rate (0.0-1.0); 1.0 means full sampling. |
@@ -249,8 +261,36 @@ Langfuse observability and session pull configuration. Langfuse integration has 
 | `default_release` | string | `""` | Default release filter. |
 | `default_version` | string | `""` | Default version filter. |
 | `default_trace_name` | string | `""` | Default trace name filter. |
-| `mapper_enabled` | boolean | `false` | Enable the custom trace mapper. When on, a user-authored `map_trace` runs for every trace during a pull. |
-| `mapper_code` | string | `""` | Source of the user-authored `map_trace(trace, observations)` function returning a (possibly partial) standard evolution turn. |
+| `mapper_enabled` | boolean | `false` | Deprecated: legacy single-mapper switch, auto-migrated into `mappers` (a catch-all entry named `default`) on first read and deleted on the first console save. |
+| `mapper_code` | string | `""` | Deprecated: legacy single-mapper source, migrated the same way. |
+| `mappers` | list | — | **Per-agent mapper registry**. Ordered list; each entry is `{name, enabled, note?, code, match}`. At pull time entries are matched in list order and the first matching enabled entry maps the trace. |
+
+#### Mapper Registry (per-agent routing)
+
+Langfuse payloads differ per agent, so `mappers` lets each agent own its mapping logic and routing rule:
+
+```yaml
+langfuse:
+  mappers:
+    - name: openclaw-zhang
+      enabled: true
+      note: "openclaw agent, user zhang"
+      match:
+        trace_names: ["openclaw-turn"]        # fnmatch patterns, case-sensitive
+        tags: ["openclaw"]                     # ANY-of semantics
+        session_id_patterns: ["agent:main:openresponses-user:42749155_*"]
+      code: |
+        def map_trace(trace, observations): ...
+        def map_session(converted, session, traces):
+            return {"user_alias": "zhang"}     # optional session hook
+    - name: default
+      enabled: true
+      match: {}                                # empty match = catch-all, keep last
+      code: |
+        def map_trace(trace, observations): ...
+```
+
+**Match semantics**: the three constraint groups (trace-name patterns, tags, sessionId patterns) combine with AND; an empty group is unconstrained; all empty = catch-all. List order is priority — the first matching enabled entry wins. An entry may also define only `map_session` (a hook-only entry): it never maps traces but its hook applies to sessions it matches.
 
 #### Custom Trace Mapping (Standard Evolution Format)
 
@@ -271,10 +311,11 @@ def map_trace(trace, observations):
     }
 ```
 
-- The function runs in a restricted namespace: `json / re / math / datetime` are available, while `import` and filesystem access are disabled. Only admins may edit it (it is executable configuration).
+- The function runs in a restricted namespace: `json / re / math / datetime / collections / itertools / functools` are available, while `import` and filesystem access are disabled. Only admins may edit it (it is executable configuration).
 - The return value is **deep-merged** over the built-in mapping — override only the fields you care about; the rest fall back to the built-in logic.
-- The console's Langfuse page has a "Custom Trace Mapping" panel to edit the code, insert the reference template, and dry-run it against a bundled sample or a pasted trace, comparing the mapped turn to the built-in mapping side by side. A "Standard Format" button in the panel header opens a dialog documenting the evolution turn format (every field's meaning plus a worked example).
-- If the code raises during a pull, that session falls back to the built-in mapping so one bad trace never fails the whole batch.
+- Entry code may also define a session-level hook `map_session(converted, session, traces)`: invoked after the whole session is converted, returning a partial session dict (e.g. `user_alias`, `title`, `system_prompt`) deep-merged onto the session. When a session matches several hook-bearing entries they apply in list order; hooks win over the pull-time `user_alias` default.
+- The console's Langfuse page has a "Mapper Registry" panel to add/remove entries, reorder them, insert the reference template per entry, and dry-run each one (including whether it would route-match). A panel-level "Route Preview" pastes a sample trace and shows the routing outcome of the whole registry. A "Standard Format" button in the panel header opens a dialog documenting the evolution turn format (every field's meaning plus a worked example).
+- If one entry's code raises during a pull, only that trace falls back to the built-in mapping — the batch continues. Entries that fail to compile are skipped at registry build time and flagged in the console route preview.
 
 ### mining Section
 
@@ -328,13 +369,23 @@ Besides YAML configuration file, following environment variables can override co
 | `EVOLVE_HUMAN_REVIEW_ENABLED` | `evolve.human_review_enabled` |
 | `EVOLVE_HUMAN_REVIEW_TIMEOUT_SECONDS` | `evolve.human_review_timeout_seconds` |
 | `EVOLVE_INTERVAL` | `evolve.interval_seconds` |
+| `EVOLVE_MAX_PARALLEL_GROUPS` | `evolve.max_parallel_groups` |
+| `EVOLVE_DRAIN_MAX_PER_CYCLE` | `evolve.drain_max_per_cycle` |
+| `EVOLVE_MIN_GROUP_SESSIONS` | `evolve.min_group_sessions` |
+| `EVOLVE_MIN_GROUP_USERS` | `evolve.min_group_users` |
+| `EVOLVE_LLM_MAX_CONCURRENCY` | Global LLM call concurrency cap (default 8, must not exceed) |
+| `EVOLVE_STORAGE_BACKEND` | `sharing.backend` |
+| `EVOLVE_STORAGE_FALLBACK` | `sharing.local_fallback_enabled` |
+| `EVOLVE_STORAGE_LOCAL_ROOT` | `sharing.local_root` |
+| `EVOLVE_SKILL_MIRROR` | `sharing.skill_mirror_enabled` |
+| `EVOLVE_SKILL_MIRROR_SPOOL_DIR` | `sharing.skill_mirror_spool_dir` |
 | `EVOLVE_EVIDENCE_ENABLED` | `evolve.evidence_enabled` |
 | `EVOLVE_EVIDENCE_MAX_ENTRIES` | `evolve.evidence_max_entries` |
 | `EVOLVE_INGEST_API_KEY` | Global ingest endpoint API Key |
 | `TEAMEVOLVER_PROXY_API_KEY` | Model proxy API Key |
-| `LANGFUSE_BASE_URL` / `LANGFUSE_HOST` | `langfuse.host` |
-| `LANGFUSE_PUBLIC_KEY` | `langfuse.public_key` |
-| `LANGFUSE_SECRET_KEY` | `langfuse.secret_key` |
+| `LANGFUSE_BASE_URL` / `LANGFUSE_HOST` | `langfuse.tracing_host` |
+| `LANGFUSE_PUBLIC_KEY` | `langfuse.tracing_public_key` |
+| `LANGFUSE_SECRET_KEY` | `langfuse.tracing_secret_key` |
 | `LANGFUSE_TRACING_ENABLED` | `langfuse.tracing_enabled` |
 | `LANGFUSE_TRACING_ENVIRONMENT` | `langfuse.tracing_environment` |
 | `LANGFUSE_SAMPLE_RATE` | `langfuse.tracing_sample_rate` |
@@ -427,6 +478,9 @@ langfuse:
   public_key: "pk-lf-xxxxxxxx"
   secret_key: "sk-lf-xxxxxxxx"
   tracing_enabled: true
+  tracing_host: "https://observability-langfuse.example.com"
+  tracing_public_key: "pk-lf-observability"
+  tracing_secret_key: "sk-lf-observability"
   tracing_environment: "production"
   tracing_sample_rate: 0.1
 ```

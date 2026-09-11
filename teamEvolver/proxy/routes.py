@@ -8,6 +8,8 @@ health, skill/user admin, model settings, and internal skill reload). Route bodi
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
 import logging
 import os
@@ -16,9 +18,9 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -28,9 +30,19 @@ from fastapi.staticfiles import StaticFiles
 from ..config import (
     LOCAL_OPENVIKING_ENDPOINT,
     VOLCENGINE_OPENVIKING_ENDPOINT,
-    resolve_viking_endpoint,
 )
 from ..config_store import ConfigStore
+from ..evolve.runtime.mixins import EvolveEngineMixin
+from ..tenants.registry import (
+    AGENT_TOKEN_PREFIX,
+    DEFAULT_TENANT_ID,
+    current_tenant_id,
+    effective_config,
+    get_current_tenant,
+    reset_current_tenant,
+    set_current_tenant,
+)
+from .tenant_routes import get_tenant_registry, register_tenant_routes
 from ..integrations.agent_protocol import (
     AgentProtocolError,
     is_v1_payload,
@@ -44,6 +56,7 @@ from ..integrations.agent_registry import (
     verify_agent_access_token,
 )
 from ..integrations.context_workspace import verify_context_usage
+from ..integrations.langfuse_mapper import normalize_mapper_entries
 from ..mining_lifecycle import (
     MiningLifecycleError,
     list_mined_skill_statuses,
@@ -57,11 +70,10 @@ from ..progressive_replay import (
 )
 from ..session_filter import SessionValueClassifier
 from ..session_store import SessionStore
-from ..skills import frontmatter
 from ..skills.hub import SkillHub
 from ..skills.mutations import SkillMutationService
 from ..skills.render import build_skill_md
-from ..storage import is_not_found_error
+from ..storage import LocalObjectStore, PgObjectStore, build_object_store, is_not_found_error
 from ..validation.store import ValidationStore
 from ..validation.worker import ValidationWorker
 from .users_admin import (
@@ -84,7 +96,35 @@ _SESSION_TTL_SECONDS = 24 * 60 * 60
 _DASHBOARD_CACHE: dict[str, tuple[float, Any]] = {}
 
 
+def _scoped_cache_key(key: str) -> str:
+    """Namespace a dashboard cache key by the request's tenant.
+
+    Keeps tenant A's cached conversation/queue rows from ever being served to
+    tenant B. No-op in default-tenant/background contexts, so single-tenant
+    behavior (and cache keys) is unchanged.
+    """
+    tenant = current_tenant_id()
+    return key if tenant == DEFAULT_TENANT_ID else f"t:{tenant}|{key}"
+
+
+def _tenant_effective_config(owner, config=None):
+    """Request-scoped effective config (multi-tenancy plan §1.3).
+
+    Merges the current tenant's config overrides over the passed config
+    (default: the server's global config) so request-context stores
+    (SessionStore / SkillHub) honor per-tenant backend selection. Returns the
+    input unchanged for the default tenant or when no registry is available.
+    """
+    base = config if config is not None else owner.config
+    try:
+        ctx = get_current_tenant()
+    except Exception:  # noqa: BLE001 - contextvar not set (background job)
+        return base
+    return effective_config(None, ctx, base)
+
+
 def _cached_dashboard_value(key: str, ttl_seconds: float, loader):
+    key = _scoped_cache_key(key)
     now = time.monotonic()
     cached = _DASHBOARD_CACHE.get(key)
     if cached and cached[0] > now:
@@ -98,6 +138,7 @@ def _invalidate_dashboard_cache(*prefixes: str) -> None:
     if not prefixes:
         _DASHBOARD_CACHE.clear()
         return
+    prefixes = [_scoped_cache_key(prefix) for prefix in prefixes]
     for key in list(_DASHBOARD_CACHE):
         if any(key.startswith(prefix) for prefix in prefixes):
             _DASHBOARD_CACHE.pop(key, None)
@@ -701,12 +742,178 @@ def _langfuse_settings_payload(config, store_data: dict[str, Any]) -> dict[str, 
             if langfuse.get("mapper_code") is not None
             else getattr(config, "langfuse_mapper_code", "") or ""
         ),
+        # Per-agent mapper registry. Legacy single-mapper fields migrate into
+        # this list on read (see normalize_mapper_entries); the legacy fields
+        # above are still echoed for one release so a stale frontend build can
+        # render.
+        "mappers": normalize_mapper_entries(
+            langfuse.get("mappers"),
+            legacy_enabled=bool(
+                langfuse.get("mapper_enabled", getattr(config, "langfuse_mapper_enabled", False))
+            ),
+            legacy_code=str(
+                langfuse.get("mapper_code")
+                if langfuse.get("mapper_code") is not None
+                else getattr(config, "langfuse_mapper_code", "") or ""
+            ),
+        ),
+    }
+
+
+def _langfuse_tracing_settings_payload(
+    config,
+    store_data: dict[str, Any],
+) -> dict[str, Any]:
+    """Service-wide outbound tracing settings, separate from tenant sources."""
+    langfuse = (
+        store_data.get("langfuse")
+        if isinstance(store_data.get("langfuse"), dict)
+        else {}
+    )
+    from ..observability import langfuse_status
+
+    public_key = str(
+        langfuse.get("tracing_public_key")
+        or getattr(config, "langfuse_tracing_public_key", "")
+        or ""
+    )
+    secret_key = str(
+        langfuse.get("tracing_secret_key")
+        or getattr(config, "langfuse_tracing_secret_key", "")
+        or ""
+    )
+    return {
+        "enabled": bool(
+            langfuse.get(
+                "tracing_enabled",
+                getattr(config, "langfuse_tracing_enabled", False),
+            )
+        ),
+        "host": str(
+            langfuse.get("tracing_host")
+            or getattr(config, "langfuse_tracing_host", "")
+            or ""
+        ),
+        "public_key_present": bool(public_key),
+        "secret_key_present": bool(secret_key),
+        "environment": str(
+            langfuse.get("tracing_environment")
+            or getattr(config, "langfuse_tracing_environment", "")
+            or "local"
+        ),
+        "release": str(
+            langfuse.get("tracing_release")
+            or getattr(config, "langfuse_tracing_release", "")
+            or ""
+        ),
+        "sample_rate": float(
+            langfuse.get(
+                "tracing_sample_rate",
+                getattr(config, "langfuse_tracing_sample_rate", 1.0),
+            )
+        ),
+        "capture_content": bool(
+            langfuse.get(
+                "tracing_capture_content",
+                getattr(config, "langfuse_tracing_capture_content", True),
+            )
+        ),
+        "flush_at": int(
+            langfuse.get(
+                "tracing_flush_at",
+                getattr(config, "langfuse_tracing_flush_at", 1),
+            )
+        ),
+        "flush_interval_seconds": float(
+            langfuse.get(
+                "tracing_flush_interval_seconds",
+                getattr(
+                    config,
+                    "langfuse_tracing_flush_interval_seconds",
+                    1.0,
+                ),
+            )
+        ),
+        "status": langfuse_status(),
+    }
+
+
+def _datasource_settings_payload(config, store_data: dict[str, Any]) -> dict[str, Any]:
+    """Snapshot of the data-source settings for the console form."""
+    ds = store_data.get("datasource") if isinstance(store_data.get("datasource"), dict) else {}
+    from ..integrations.source_adapter import _adapters_dir
+
+    source_type = str(ds.get("type") or getattr(config, "datasource_type", "langfuse") or "langfuse")
+    legacy_converter_code = str(
+        ds.get("legacy_converter_code")
+        if ds.get("legacy_converter_code") is not None
+        else getattr(config, "datasource_legacy_converter_code", "") or ""
+    )
+    adapters_directory = _adapters_dir(config)
+    # List existing adapter files so the console can show them.
+    adapter_files: list[dict[str, Any]] = []
+    if adapters_directory.exists():
+        for p in sorted(adapters_directory.glob("*.py")):
+            if p.name.startswith("__"):
+                continue
+            stat = p.stat()
+            adapter_files.append({
+                "agent_id": p.stem,
+                "size": stat.st_size,
+                "mtime": stat.st_mtime,
+            })
+
+    return {
+        "type": source_type,
+        "source": "langfuse",
+        "conversion_mode": "legacy_skillopt" if source_type == "skillopt" else "native",
+        "legacy_converter_code": legacy_converter_code,
+        "adapters_dir": str(ds.get("adapters_dir") or getattr(config, "datasource_adapters_dir", "") or ""),
+        "adapters_dir_resolved": str(adapters_directory),
+        "adapter_files": adapter_files,
+        "available_types": ["langfuse"],
     }
 
 
 def _require_admin_user(user: dict | None) -> None:
     if not user or str(user.get("role") or "user") != "admin":
         raise HTTPException(status_code=403, detail="only admin users can perform this operation")
+
+
+def _validate_mapper_registry_entries(raw: Any) -> list[dict[str, Any]]:
+    """Validate + normalize a mapper registry payload from the console.
+
+    Raises ``ValueError`` with an operator-facing message on the first problem:
+    entry names must be non-empty and unique, and enabled entries need code
+    that compiles (``map_trace``/``map_turn`` and/or ``map_session``).
+    """
+    from ..integrations.langfuse_mapper import (
+        MapperError,
+        compile_mapper_entry,
+    )
+
+    if not isinstance(raw, list):
+        raise ValueError("mappers 必须是列表")
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"mappers[{index}] 必须是对象")
+        if not str(item.get("name") or "").strip():
+            raise ValueError(f"mappers[{index}] 缺少 name")
+    entries = normalize_mapper_entries(raw)
+    seen: set[str] = set()
+    for entry in entries:
+        name = entry["name"]
+        if name in seen:
+            raise ValueError(f"mapper 名称重复: {name!r}")
+        seen.add(name)
+        if entry["enabled"]:
+            if not entry["code"].strip():
+                raise ValueError(f"mapper {name!r} 无法启用：代码为空")
+            try:
+                compile_mapper_entry(entry["code"])
+            except MapperError as exc:
+                raise ValueError(f"mapper {name!r} 无法启用：{exc}") from exc
+    return entries
 
 
 def _console_sessions_path(config) -> Path:
@@ -717,6 +924,10 @@ def _console_sessions_path(config) -> Path:
 
 def _load_console_sessions(config) -> dict[str, dict]:
     path = _console_sessions_path(config)
+    if getattr(config, "storage_pg_enabled", False):
+        from ..storage.admin_kv import read_kv
+
+        return read_kv(config, "console_sessions.json", path, tenant_id="default")
     if not path.exists():
         return {}
     try:
@@ -738,6 +949,11 @@ def _load_console_sessions(config) -> dict[str, dict]:
 
 def _save_console_sessions(config, sessions: dict[str, dict]) -> None:
     path = _console_sessions_path(config)
+    if getattr(config, "storage_pg_enabled", False):
+        from ..storage.admin_kv import write_kv
+
+        write_kv(config, "console_sessions.json", path, sessions, tenant_id="default")
+        return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -871,10 +1087,12 @@ def _max_session_body_bytes() -> int:
 
 
 async def _read_limited_json_body(request: Request) -> dict[str, Any]:
-    raw = await request.body()
     limit = _max_session_body_bytes()
-    if len(raw) > limit:
-        raise HTTPException(status_code=413, detail=f"session body exceeds {limit} bytes")
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > limit:
+            raise HTTPException(status_code=413, detail=f"session body exceeds {limit} bytes")
+        raw.extend(chunk)
     try:
         parsed = json.loads(raw.decode("utf-8")) if raw else {}
     except (UnicodeDecodeError, ValueError) as exc:
@@ -886,7 +1104,7 @@ async def _read_limited_json_body(request: Request) -> dict[str, Any]:
 
 def _session_queue_snapshot(config, *, limit: int = 100) -> dict[str, Any]:
     try:
-        store = SessionStore.from_config(config)
+        store = SessionStore.from_config(config, tenant_id=current_tenant_id())
         rows = store.list_queue(limit=limit if limit > 0 else 100000)
         return {
             "reachable": True,
@@ -897,10 +1115,27 @@ def _session_queue_snapshot(config, *, limit: int = 100) -> dict[str, Any]:
         return {"reachable": False, "sessions": [], "pending": 0, "reason": str(exc)}
 
 
+def _turn_skill_union(session: dict[str, Any], key: str) -> list[str]:
+    """Union of a string-list skill field across turns (first-seen order)."""
+    skills: list[str] = []
+    for turn in session.get("turns") or []:
+        if not isinstance(turn, dict):
+            continue
+        for skill in turn.get(key) or []:
+            skill = str(skill).strip()
+            if skill and skill not in skills:
+                skills.append(skill)
+    return skills
+
+
 def _session_detail_payload(session: dict[str, Any]) -> dict[str, Any]:
     status = str(session.get("status") or "queued")
     turns = session.get("turns") if isinstance(session.get("turns"), list) else []
     metrics = session.get("metrics") if isinstance(session.get("metrics"), dict) else {}
+    # Older Langfuse archives carry skills only on turns (the converter used to
+    # leave the top-level unions empty) — fall back to the turn-level union.
+    injected = session.get("injected_skills") or _turn_skill_union(session, "injected_skills")
+    used = session.get("used_skills") or _turn_skill_union(session, "used_skills")
     return {
         "meta": {
             "title": session.get("title") or "",
@@ -911,17 +1146,20 @@ def _session_detail_payload(session: dict[str, Any]) -> dict[str, Any]:
         "turns_available": bool(turns),
         "turns_source": "archive",
         "system_prompt": session.get("system_prompt") or "",
-        "injected_skills": session.get("injected_skills") or [],
-        "used_skills": session.get("used_skills") or [],
+        "injected_skills": injected,
+        "used_skills": used,
         "metrics": metrics,
         "turns": turns,
         "value_judge": session.get("value_judge") if isinstance(session.get("value_judge"), dict) else {},
+        # Session-level judge scores (dimensions + per-dimension reasons) so
+        # the detail modal can render the full review breakdown on click.
+        "judge": session.get("judge") if isinstance(session.get("judge"), dict) else {},
     }
 
 
 def _history_from_archived_sessions(config, *, limit: int = 50, session_id: str = "") -> list[dict[str, Any]]:
     try:
-        store = SessionStore.from_config(config)
+        store = SessionStore.from_config(config, tenant_id=current_tenant_id())
         rows = store.list_conversations(limit=100000)
     except Exception:
         return []
@@ -950,6 +1188,26 @@ def _history_from_archived_sessions(config, *, limit: int = 50, session_id: str 
             }
         )
     return cycles
+
+
+def _build_history_bucket(config) -> Any | None:
+    """Build a per-tenant object store for reading evolve history.
+
+    Returns None when the backend would be local (the file-based fallback
+    is faster and sufficient for single-tenant / local-backend deployments).
+    For postgres and viking backends, the bucket enforces per-tenant RLS /
+    account scoping so history records are isolated.
+    """
+    from ..evolve.kernel.settings import EvolveServerConfig
+
+    engine_config = EvolveServerConfig.from_teamEvolver_config(config)
+    backend = str(engine_config.storage_backend or "").strip().lower()
+    if backend not in ("postgres", "viking"):
+        return None
+    try:
+        return EvolveEngineMixin._build_bucket(engine_config)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _evolve_history_path_candidates(config) -> list[str]:
@@ -998,10 +1256,266 @@ def _filter_cycle_for_session(record: dict[str, Any], session_id: str) -> dict[s
     return filtered
 
 
-def _history_from_evolve_file(config, *, limit: int = 50, session_id: str = "") -> list[dict[str, Any]]:
-    capped = max(1, int(limit or 50))
+_GOOD_CASE_SCORE = 0.6
+
+
+def _coerce_dt(value: str, *, assume_local: bool) -> Optional[datetime]:
+    """Parse an ISO timestamp/date; naive values are interpreted as UTC for
+    stored row timestamps and as the server's local timezone for filter
+    bounds (users pick dates in their local calendar)."""
+    v = str(value or "").strip()
+    if not v:
+        return None
+    v = v.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(v)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.astimezone() if assume_local else dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _row_time(row: dict[str, Any]) -> Optional[datetime]:
+    return _coerce_dt(
+        str(row.get("ingested_at") or row.get("timestamp") or ""),
+        assume_local=False,
+    )
+
+
+def _filter_conversation_rows(
+    rows: list[dict[str, Any]],
+    *,
+    search: str = "",
+    status: str = "",
+    decision: str = "",
+    case: str = "",
+    skill: str = "",
+    start: str = "",
+    end: str = "",
+) -> list[dict[str, Any]]:
+    """Server-side filters for the unified conversation list.
+
+    ``search`` matches session_id / title / user_alias substrings; ``status``
+    and ``decision`` are exact matches; ``skill`` requires the skill to be in
+    the row's ``used_skills``; ``case`` filters by latest judge score
+    (good >= 0.6, bad < 0.6, rows without a score are excluded); ``start`` /
+    ``end`` bound the ingest time (inclusive, date-only strings mean the whole
+    local day).
+    """
+    wanted_search = str(search or "").strip().lower()
+    wanted_status = str(status or "").strip().lower()
+    wanted_decision = str(decision or "").strip().lower()
+    wanted_case = str(case or "").strip().lower()
+    wanted_skill = str(skill or "").strip().lower()
+    raw_start = str(start or "").strip()
+    raw_end = str(end or "").strip()
+    start_dt = _coerce_dt(raw_start, assume_local=True)
+    # A date-only end bound covers the entire local day.
+    end_dt = None
+    end_exclusive = None
+    if raw_end:
+        if len(raw_end) == 10:
+            parsed = _coerce_dt(raw_end, assume_local=True)
+            if parsed is not None:
+                end_exclusive = parsed + timedelta(days=1)
+        else:
+            end_dt = _coerce_dt(raw_end, assume_local=True)
+    if not (
+        wanted_search
+        or wanted_status
+        or wanted_decision
+        or wanted_case
+        or wanted_skill
+        or start_dt
+        or end_dt
+        or end_exclusive
+    ):
+        return rows
+
+    def _match(row: dict[str, Any]) -> bool:
+        if wanted_search:
+            haystack = " ".join(
+                str(row.get(key) or "")
+                for key in ("session_id", "title", "user_alias")
+            ).lower()
+            if wanted_search not in haystack:
+                return False
+        if wanted_status and str(row.get("status") or "").lower() != wanted_status:
+            return False
+        if wanted_decision:
+            value_judge = row.get("value_judge") if isinstance(row.get("value_judge"), dict) else {}
+            if str(value_judge.get("decision") or "").lower() != wanted_decision:
+                return False
+        if wanted_skill:
+            used = row.get("used_skills") if isinstance(row.get("used_skills"), list) else []
+            if wanted_skill not in {str(s).strip().lower() for s in used}:
+                return False
+        if start_dt or end_dt or end_exclusive:
+            ts = _row_time(row)
+            if ts is None:
+                return False
+            if start_dt and ts < start_dt:
+                return False
+            if end_dt and ts > end_dt:
+                return False
+            if end_exclusive and ts >= end_exclusive:
+                return False
+        if wanted_case:
+            score = (row.get("judge") or {}).get("overall_score") if isinstance(row.get("judge"), dict) else None
+            if not isinstance(score, (int, float)) or isinstance(score, bool):
+                return False
+            if wanted_case == "good" and float(score) < _GOOD_CASE_SCORE:
+                return False
+            if wanted_case == "bad" and float(score) >= _GOOD_CASE_SCORE:
+                return False
+        return True
+
+    return [row for row in rows if _match(row)]
+
+
+def _sort_conversation_rows(
+    rows: list[dict[str, Any]], sort_by: str = "", order: str = ""
+) -> list[dict[str, Any]]:
+    """Sort the filtered set; default stays ingest-time descending.
+
+    Supported keys: ``time`` (ingested_at), ``score`` (judge overall_score,
+    unscored rows always last), ``turns`` (num_turns).
+    """
+    key = str(sort_by or "").strip().lower()
+    if key not in ("time", "score", "turns"):
+        return rows
+    reverse = str(order or "desc").strip().lower() != "asc"
+    if key == "score":
+        # Stable two-pass sort keeps unscored rows last in both directions.
+        def _score(row: dict[str, Any]) -> Optional[float]:
+            raw = (row.get("judge") or {}).get("overall_score") if isinstance(row.get("judge"), dict) else None
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                return float(raw)
+            return None
+
+        rows = sorted(rows, key=lambda r: _score(r) is None)
+        rows = sorted(rows, key=lambda r: _score(r) or 0.0, reverse=reverse)
+        return rows
+    if key == "turns":
+        return sorted(rows, key=lambda r: int(r.get("num_turns") or 0), reverse=reverse)
+    return sorted(
+        rows,
+        key=lambda r: _row_time(r) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=reverse,
+    )
+
+
+def _conversation_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Quality summary over a (filtered) conversation set."""
+    good = bad = valuable = chitchat = 0
+    scores: list[float] = []
+    for row in rows:
+        raw = (row.get("judge") or {}).get("overall_score") if isinstance(row.get("judge"), dict) else None
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            score = float(raw)
+            scores.append(score)
+            if score >= _GOOD_CASE_SCORE:
+                good += 1
+            else:
+                bad += 1
+        value_judge = row.get("value_judge") if isinstance(row.get("value_judge"), dict) else {}
+        decision = str(value_judge.get("decision") or "").lower()
+        if decision == "valuable":
+            valuable += 1
+        elif decision == "chitchat":
+            chitchat += 1
+    return {
+        "total": len(rows),
+        "good": good,
+        "bad": bad,
+        "valuable": valuable,
+        "chitchat": chitchat,
+        "avg_score": round(sum(scores) / len(scores), 4) if scores else None,
+    }
+
+
+_JUDGE_REASON_DIMENSIONS = (
+    "task_completion",
+    "response_quality",
+    "efficiency",
+    "tool_usage",
+)
+
+
+def _clean_judge_reasons(raw: Any) -> dict[str, list[str]]:
+    """Normalize a judge ``reasons`` payload to ``{dimension: [bullets]}``.
+
+    Best-effort: anything that is not a dict, or whose bullet entries are
+    blank, is dropped so downstream exports stay clean.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    cleaned: dict[str, list[str]] = {}
+    for dim in _JUDGE_REASON_DIMENSIONS:
+        items = [
+            str(item).strip()
+            for item in (raw.get(dim) or [])
+            if str(item or "").strip()
+        ]
+        if items:
+            cleaned[dim] = items
+    return cleaned
+
+
+def _session_judge_score_index(config) -> dict[str, dict[str, Any]]:
+    """Latest per-session judge scores from evolve history ``session_judge_details``.
+
+    Reads from the per-tenant object store first (RLS-isolated), falling back
+    to the file-based ``evolve_history.jsonl`` for local-backend deployments.
+    History records are chronological (oldest first), so the last occurrence of
+    a session wins. Read-only and best-effort.
+    """
+    index: dict[str, dict[str, Any]] = {}
+
+    def _process_record(record: dict[str, Any]) -> None:
+        for detail in record.get("session_judge_details") or []:
+            if not isinstance(detail, dict):
+                continue
+            sid = str(detail.get("session_id") or "").strip()
+            if not sid:
+                continue
+            score = detail.get("overall_score")
+            judged_at = str(record.get("timestamp") or "")
+            prev = index.get(sid)
+            if prev and prev.get("judged_at") and judged_at and prev["judged_at"] > judged_at:
+                continue
+            raw_reasons = detail.get("reasons")
+            reasons = _clean_judge_reasons(raw_reasons)
+            index[sid] = {
+                "overall_score": (
+                    float(score)
+                    if isinstance(score, (int, float)) and not isinstance(score, bool)
+                    else None
+                ),
+                "rationale": str(detail.get("rationale") or ""),
+                "reasons": reasons,
+                "judged_at": judged_at,
+            }
+            for dim in _JUDGE_REASON_DIMENSIONS:
+                raw_dim = detail.get(dim)
+                if isinstance(raw_dim, (int, float)) and not isinstance(raw_dim, bool):
+                    index[sid][dim] = float(raw_dim)
+
+    # Primary: read from the per-tenant bucket (RLS / account-scoped).
+    bucket = _build_history_bucket(config)
+    if bucket is not None:
+        try:
+            from ..evolve.store.object_store import load_history_records
+
+            for record in load_history_records(bucket):
+                _process_record(record)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[History] bucket judge score read failed: %s", exc)
+
+    # Also read from the legacy JSONL file(s) to merge historical records
+    # that predate the bucket-based write path.
     for path in _evolve_history_path_candidates(config):
-        rows: list[dict[str, Any]] = []
         try:
             with open(path, "r", encoding="utf-8") as handle:
                 for line in handle:
@@ -1012,17 +1526,71 @@ def _history_from_evolve_file(config, *, limit: int = 50, session_id: str = "") 
                         record = json.loads(line)
                     except Exception:
                         continue
-                    if not isinstance(record, dict) or not _cycle_matches_session(record, session_id):
+                    if not isinstance(record, dict):
                         continue
-                    rows.append(_filter_cycle_for_session(record, session_id))
+                    _process_record(record)
         except FileNotFoundError:
             continue
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[History] failed to read evolve history %s: %s", path, exc)
+        except Exception as exc:  # noqa: BLE001 - ledger enrichment is best-effort
+            logger.warning("[History] failed to read judge scores from %s: %s", path, exc)
             continue
-        rows.reverse()
-        return rows[:capped]
-    return []
+    return index
+
+
+def _history_from_evolve_file(config, *, limit: int = 50, session_id: str = "") -> list[dict[str, Any]]:
+    capped = max(1, int(limit or 50))
+
+    # Merge bucket records (per-tenant isolated) with legacy file records
+    # so historical data isn't lost after upgrading to the bucket path.
+    bucket_records: list[dict[str, Any]] = []
+    bucket = _build_history_bucket(config)
+    if bucket is not None:
+        try:
+            from ..evolve.store.object_store import load_history_records
+
+            bucket_records = load_history_records(bucket, session_id=session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[History] bucket history read failed: %s", exc)
+
+    file_records: list[dict[str, Any]] = []
+    # The legacy evolve_history.jsonl is a process-global single-tenant file
+    # (CWD-relative) belonging to the default tenant. A switched tenant is
+    # isolated by its bucket (PG RLS / per-tenant Viking account), so never
+    # merge the global file into its evolution audit view.
+    if current_tenant_id() == DEFAULT_TENANT_ID:
+        for path in _evolve_history_path_candidates(config):
+            rows: list[dict[str, Any]] = []
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            record = json.loads(line)
+                        except Exception:
+                            continue
+                        if not isinstance(record, dict) or not _cycle_matches_session(record, session_id):
+                            continue
+                        rows.append(record)
+            except FileNotFoundError:
+                continue
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[History] failed to read evolve history %s: %s", path, exc)
+                continue
+            file_records.extend(rows)
+
+    # Dedup by timestamp + cycle_id, bucket wins on conflict.
+    seen: set[str] = set()
+    merged: list[dict[str, Any]] = []
+    for record in bucket_records + file_records:
+        key = str(record.get("timestamp") or "") + str(record.get("cycle_id") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(record)
+    merged.sort(key=lambda r: str(r.get("timestamp") or ""), reverse=True)
+    return [_filter_cycle_for_session(r, session_id) for r in merged[:capped]]
 
 
 def _history_cycles(config, *, limit: int = 50, session_id: str = "") -> list[dict[str, Any]]:
@@ -1468,36 +2036,19 @@ async def _evaluate_candidate_job(config, owner, job: dict[str, Any]) -> dict[st
 
 
 def _load_current_skill_md_for_display(config, skill_name: str) -> str:
+    """Fetch the published baseline SKILL.md for candidate diff display.
+
+    Always reads from the shared team store (OpenViking
+    ``viking://resources/{root_prefix}/skills/<name>/``) — the same store the
+    evolve server publishes to. Local skill dirs are deliberately NOT consulted:
+    they can drift from the published baseline, and the A/B diff must show the
+    version the candidate would actually replace.
+    """
     name = str(skill_name or "").strip()
     if not name:
         return ""
-    for raw_root in [getattr(config, "skills_dir", ""), os.path.abspath("skills")]:
-        root = str(raw_root or "").strip()
-        if not root:
-            continue
-        direct = os.path.join(root, name, "SKILL.md")
-        if os.path.isfile(direct):
-            try:
-                with open(direct, "r", encoding="utf-8") as handle:
-                    return handle.read()
-            except Exception:
-                pass
-        try:
-            for current_root, _, files in os.walk(root):
-                if "SKILL.md" not in files:
-                    continue
-                path = os.path.join(current_root, "SKILL.md")
-                try:
-                    parsed = frontmatter.parse_skill_md(path)
-                except Exception:
-                    parsed = None
-                if isinstance(parsed, dict) and str(parsed.get("name") or os.path.basename(current_root)) == name:
-                    with open(path, "r", encoding="utf-8") as handle:
-                        return handle.read()
-        except Exception:
-            pass
     try:
-        hub = SkillHub.team_from_config(config)
+        hub = SkillHub.team_from_config(config, tenant_id=current_tenant_id())
         for record in hub.list_remote():
             if str(record.get("name") or "") != name:
                 continue
@@ -1550,13 +2101,14 @@ def _storage_status(config) -> dict[str, Any]:
         "endpoint": endpoint,
         "namespace": namespace,
         "api_key_present": api_key_present,
+        "sharing_enabled": bool(getattr(config, "sharing_enabled", False)),
+        "fallback_enabled": bool(getattr(config, "sharing_local_fallback_enabled", True)),
+        "effective_backend": backend or "none",
+        "fallback_active": False,
         "reachable": False,
     }
-    if not getattr(config, "sharing_enabled", False):
-        payload["reason"] = "sharing_disabled"
-        return payload
     try:
-        hub = SkillHub.team_from_config(config)
+        hub = SkillHub.team_from_config(config, tenant_id=current_tenant_id())
         # Probe the configured store. Missing manifest is still a successful
         # connectivity check: it means the bucket/key is reachable but empty.
         try:
@@ -1565,6 +2117,41 @@ def _storage_status(config) -> dict[str, Any]:
             if not is_not_found_error(exc):
                 raise
         payload["reachable"] = True
+        # PG local-state backend: surface health + connection-pool metrics
+        # (multi-tenancy plan Phase 3 deployment shape).
+        if isinstance(hub._bucket, PgObjectStore):
+            payload["pg"] = hub._bucket.pool_status()
+        # The hub build may have silently fallen back to the built-in local
+        # store when the configured OpenViking endpoint is unavailable.
+        if isinstance(hub._bucket, LocalObjectStore) and backend == "viking":
+            payload["effective_backend"] = "local"
+            payload["fallback_active"] = True
+            payload["local_root"] = getattr(hub._bucket, "root", "")
+            reason = str(getattr(hub._bucket, "fallback_reason", "") or "")
+            payload["reason"] = f"viking_unavailable: {reason}" if reason else "viking_unavailable"
+        elif isinstance(hub._bucket, LocalObjectStore):
+            payload["effective_backend"] = "local"
+            payload["local_root"] = getattr(hub._bucket, "root", "")
+        elif not payload["sharing_enabled"]:
+            payload["reason"] = "sharing_disabled"
+        # Per-purpose split status + mirror outbox backlog (when the team
+        # skill library is local-backed with mirroring enabled).
+        payload["session_backend"] = str(getattr(config, "sharing_session_backend", "") or "local")
+        payload["skill_backend"] = str(getattr(config, "sharing_skill_backend", "") or "local")
+        mirror_hub = getattr(hub, "mirror_viking_hub", None)
+        payload["mirror_enabled"] = mirror_hub is not None
+        if mirror_hub is not None:
+            try:
+                from ..skills.mirror import VikingSkillMirror
+
+                spool_dir = str(getattr(config, "sharing_skill_mirror_spool_dir", "") or "") or None
+                payload["mirror"] = VikingSkillMirror(
+                    spool_dir=spool_dir,
+                    viking_hub=mirror_hub,
+                    sequence_bucket=getattr(hub, "_bucket", None),
+                ).status()
+            except Exception as exc:  # noqa: BLE001 - status must never raise
+                payload["mirror"] = {"enabled": True, "error": str(exc)}
         return payload
     except Exception as exc:  # noqa: BLE001
         payload["reason"] = str(exc)
@@ -1583,7 +2170,10 @@ async def _ingest_session_dict(owner, session: dict[str, Any]) -> dict[str, Any]
     """
     session_id = str(session.get("session_id") or "")
     try:
-        session_store = SessionStore.from_config(owner.config)
+        session_store = await asyncio.to_thread(
+            SessionStore.from_config,
+            _tenant_effective_config(owner), current_tenant_id()
+        )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail="session storage is not configured") from exc
 
@@ -1591,7 +2181,7 @@ async def _ingest_session_dict(owner, session: dict[str, Any]) -> dict[str, Any]
     # changed. A continued conversation (new turns) has a different fingerprint
     # and is ingested normally.
     force_reprocess = bool(session.pop("force_reprocess", False))
-    if not force_reprocess and session_store.duplicate_of_processed(session):
+    if not force_reprocess and await asyncio.to_thread(session_store.duplicate_of_processed, session):
         logger.info(
             "[SessionFilter] skipped duplicate session=%s (already processed, no new content)",
             session_id,
@@ -1602,14 +2192,24 @@ async def _ingest_session_dict(owner, session: dict[str, Any]) -> dict[str, Any]
             session.get("reprocess_reason") or "explicit dashboard reingest"
         )
 
-    classifier = SessionValueClassifier.from_config(owner.config)
+    classifier = SessionValueClassifier.from_config(_tenant_effective_config(owner))
     value_judge = await classifier.classify(session)
     session["value_judge"] = value_judge
     session["ingested_at"] = _utc_now_iso()
 
     if value_judge.get("decision") != "valuable":
-        session_store.save_skipped(session)
+        await asyncio.to_thread(session_store.save_skipped, session)
         _invalidate_dashboard_cache(f"conversations:{id(owner.config)}")
+        # Skipped sessions never enter an evolution cycle (the only place the
+        # quality judge used to run), so schedule the off-request review that
+        # gives them a Good/Bad score + reasons in the console. Best-effort:
+        # a full/unavailable queue simply leaves them unscored.
+        judge_queue = getattr(owner, "_session_judge_queue", None)
+        if judge_queue is not None:
+            try:
+                judge_queue.enqueue(current_tenant_id(), session_id)
+            except Exception:  # noqa: BLE001 - ingest must never fail on this
+                logger.debug("[SessionJudge] enqueue failed for %s", session_id, exc_info=True)
         logger.info(
             "[SessionFilter] skipped session=%s decision=%s reason=%s",
             session_id,
@@ -1623,7 +2223,7 @@ async def _ingest_session_dict(owner, session: dict[str, Any]) -> dict[str, Any]
             "value_judge": value_judge,
         }
 
-    key = session_store.save_queued(session)
+    key = await asyncio.to_thread(session_store.save_queued, session)
     _invalidate_dashboard_cache(
         f"queue:{id(owner.config)}",
         f"conversations:{id(owner.config)}",
@@ -1653,16 +2253,28 @@ class RoutesMixin:
 
         @asynccontextmanager
         async def lifespan(_app: FastAPI):
-            owner._ready_event.set()
+            if bool(getattr(owner.config, "storage_pg_enabled", False)):
+                registry = get_tenant_registry(owner)
+                status = await asyncio.to_thread(registry.runtime.pool_status)
+                if not status.get("reachable"):
+                    raise RuntimeError(f"PostgreSQL startup check failed: {status.get('reason')}")
             owner._start_skill_reload_polling()
             owner._start_embedded_evolve()
+            judge_queue = getattr(owner, "_session_judge_queue", None)
+            if judge_queue is not None:
+                try:
+                    judge_queue.start()
+                except Exception:  # noqa: BLE001 - post-ingest judging is best-effort
+                    logger.warning("[SessionJudge] queue start failed", exc_info=True)
             # DreamCycle is superseded by the ov compile-based cross-user memory
             # aggregation (see teamEvolver/aggregation/). It no longer auto-starts;
             # team memory is now maintained under viking://resources/shared-knowledge/.
-            try:
-                owner._start_skillminer()
-            except Exception:
-                logger.debug("[SkillMiner] eager start failed", exc_info=True)
+            if os.environ.get("TEAMEVOLVER_SKILLMINER_ENABLED", "1") == "1":
+                try:
+                    await asyncio.to_thread(owner._start_skillminer)
+                except Exception:
+                    logger.debug("[SkillMiner] eager start failed", exc_info=True)
+            owner._ready_event.set()
             try:
                 yield
             finally:
@@ -1697,7 +2309,7 @@ class RoutesMixin:
             user_id = str(session.get("user_id") or "")
             if not user_id:
                 return None
-            data = _load_registry(_registry_path(owner.config))
+            data = _load_registry(_registry_path(owner.config), owner.config)
             try:
                 _idx, user = _find_user(data, user_id)
             except HTTPException:
@@ -1708,7 +2320,7 @@ class RoutesMixin:
             return _public_user(user, owner.config)
 
         def _users_empty() -> bool:
-            data = _load_registry(_registry_path(owner.config))
+            data = _load_registry(_registry_path(owner.config), owner.config)
             return not bool(data.get("users"))
 
         @app.middleware("http")
@@ -1720,8 +2332,135 @@ class RoutesMixin:
             return await call_next(request)
 
         @app.middleware("http")
+        async def tenant_context(request: Request, call_next):
+            """Resolve the request's tenant (multi-tenancy plan Phase 1).
+
+            ``tevt_`` agent tokens map to tenants server-side; console admins
+            may switch via ``X-Tenant-Id``; everything else stays on the
+            implicit default tenant (single-tenant compatibility — when
+            storage_pg is disabled the registry only knows ``default``).
+            Registered between the embedded-dispatch and console-auth
+            middlewares, so ``request.state.console_user`` is already set here.
+            """
+            registry = get_tenant_registry(owner)
+            path = request.url.path
+            ctx = None
+            source = "default"
+            try:
+                if not path.startswith("/v1/"):
+                    token = _bearer_token(request)
+                    claimed = str(request.headers.get("x-tenant-id") or "").strip()
+                    if token.startswith(AGENT_TOKEN_PREFIX) and registry.mode == "postgres":
+                        ctx = await asyncio.to_thread(registry.resolve_by_agent_token, token)
+                        if ctx is None or ctx.status != "active":
+                            return JSONResponse(status_code=401, content={"detail": "invalid tenant token"})
+                        machine_paths = (
+                            "/ingest_session", "/langfuse/pull", "/trigger", "/status",
+                            "/history", "/sessions", "/conversations", "/storage/status",
+                        )
+                        if not any(path == prefix or path.startswith(prefix + "/") for prefix in machine_paths):
+                            return JSONResponse(status_code=403, content={"detail": "console admin required"})
+                        if ctx is not None:
+                            source = "token"
+                            if claimed and claimed != ctx.tenant_id:
+                                # The tenant is derived from the token; a
+                                # client-supplied override never wins.
+                                return JSONResponse(
+                                    status_code=403, content={"detail": "tenant mismatch"}
+                                )
+                    elif (
+                        claimed
+                        and registry.mode == "postgres"
+                        and not path.startswith("/v1/")
+                    ):
+                        # Accept the console-admin tenant selector on every
+                        # non-/v1/ endpoint (dashboard endpoints such as
+                        # /status, /conversations, /storage/status live
+                        # outside /api/ and must be tenant-scoped too).
+                        user = getattr(request.state, "console_user", None)
+                        if user is None:
+                            return JSONResponse(
+                                status_code=401, content={"detail": "login required"}
+                            )
+                        if str(user.get("role") or "user") != "admin":
+                            return JSONResponse(
+                                status_code=403,
+                                content={"detail": "admin required for tenant switch"},
+                            )
+                        target = await asyncio.to_thread(registry.get, claimed)
+                        if target is None or target.status != "active":
+                            return JSONResponse(
+                                status_code=403,
+                                content={"detail": f"unknown tenant: {claimed}"},
+                            )
+                        ctx = target
+                        source = "console"
+                if ctx is None:
+                    ctx = registry.default_context()
+                if not ctx.is_default() and path.startswith("/api/"):
+                    tenant_apis = (
+                        "/api/tenants",
+                        "/api/skills",
+                        "/api/validation",
+                        "/api/auth",
+                        "/api/prompt-studio",
+                        "/api/docs",
+                        "/api/openviking/workspace",
+                        "/api/openviking/memory",
+                        "/api/skill-lab",
+                        "/api/langfuse-tracing-config",
+                    )
+                    directory_read = request.method == "GET" and path == "/api/users"
+                    sharing_config_read = (
+                        request.method == "GET" and path == "/api/sharing-config"
+                    )
+                    if not directory_read and not sharing_config_read and not any(
+                        path == prefix or path.startswith(prefix + "/") for prefix in tenant_apis
+                    ):
+                        return JSONResponse(
+                            status_code=409,
+                            content={"detail": "service-wide settings require the default account; use tenant config"},
+                        )
+                request.state.tenant = ctx
+                request.state.tenant_id = ctx.tenant_id
+                request.state.tenant_source = source
+                tenant_token = set_current_tenant(ctx)
+                try:
+                    return await call_next(request)
+                finally:
+                    reset_current_tenant(tenant_token)
+            except HTTPException:
+                raise
+            except Exception:
+                logger.exception("[Tenants] tenant resolution failed")
+                raise
+
+        @app.middleware("http")
         async def require_console_auth(request: Request, call_next):
             path = request.url.path
+            import hmac
+
+            root_key = os.environ.get("TEAMEVOLVER_ROOT_API_KEY", "")
+            bearer = _bearer_token(request)
+            if root_key and bearer and hmac.compare_digest(bearer, root_key):
+                request.state.service_root_authenticated = True
+                request.state.console_user = {"id": "service-root", "role": "admin"}
+                return await call_next(request)
+            if bool(getattr(owner.config, "storage_pg_enabled", False)):
+                if path.startswith("/v1/"):
+                    return JSONResponse(status_code=401, content={"detail": "service root key required"})
+                public = path in {"/", "/console", "/health", "/healthz", "/readyz", "/favicon.ico"} or path.startswith(
+                    ("/assets/", "/docs-assets/", "/api/auth/")
+                )
+                if not public and not path.startswith("/v1/"):
+                    user = await asyncio.to_thread(_session_user, request)
+                    if user is not None:
+                        request.state.console_user = user
+                    elif not bearer.startswith(AGENT_TOKEN_PREFIX):
+                        return JSONResponse(status_code=401, content={"detail": "login or tenant token required"})
+                    # Tenant tokens are authenticated by the inner middleware;
+                    # admin-only handlers still require an admin console user.
+                    return await call_next(request)
             reusable_aggregation = _is_reusable_aggregation_path(path)
             requires_auth = (
                 path.startswith("/api/")
@@ -1739,7 +2478,40 @@ class RoutesMixin:
                 if user is None:
                     return JSONResponse(status_code=401, content={"detail": "login required"})
                 request.state.console_user = user
+            elif not path.startswith("/v1/"):
+                # Non-/v1/ dashboard endpoints (e.g. /conversations, /status,
+                # /storage/status) are not auth-gated, but the tenant_context
+                # middleware still needs console_user to validate an admin's
+                # X-Tenant-Id selector. Set it opportunistically when a valid
+                # session cookie is present; absent a session the request
+                # proceeds as an anonymous (default-tenant) view.
+                user = _session_user(request)
+                if user is not None:
+                    request.state.console_user = user
             return await call_next(request)
+
+        @app.middleware("http")
+        async def admission_control(request: Request, call_next):
+            from ..llm import LLMOverloadedError
+
+            active = getattr(owner, "_active_http_requests", 0)
+            limit = max(1, int(os.environ.get("TEAMEVOLVER_HTTP_CONCURRENCY", "256")))
+            if active >= limit and request.url.path not in {"/health", "/healthz"}:
+                return JSONResponse(status_code=429, content={"detail": "service busy"}, headers={"Retry-After": "2"})
+            owner._active_http_requests = active + 1
+            try:
+                return await call_next(request)
+            except LLMOverloadedError:
+                return JSONResponse(status_code=429, content={"detail": "model queue full"}, headers={"Retry-After": "2"})
+            finally:
+                owner._active_http_requests -= 1
+
+        @app.get("/readyz")
+        async def readiness():
+            if bool(getattr(owner.config, "storage_pg_enabled", False)):
+                status = await asyncio.to_thread(get_tenant_registry(owner).runtime.pool_status)
+                return JSONResponse(status_code=200 if status.get("reachable") else 503, content=status)
+            return {"ready": True}
 
         # Skill and user management REST APIs used by the unified console.
         self._register_skills_admin_routes(app)
@@ -1751,6 +2523,7 @@ class RoutesMixin:
         self._register_skillminer_routes(app)
         self._register_docs_routes(app)
         self._register_aggregation_routes(app)
+        register_tenant_routes(self, app)
 
         @app.get("/")
         @app.get("/console")
@@ -1826,8 +2599,9 @@ class RoutesMixin:
 
         @app.get("/api/auth/status")
         async def auth_status(request: Request):
-            user = _session_user(request)
+            user = getattr(request.state, "console_user", None) or _session_user(request)
             return {
+                "customer_mode": os.environ.get("TEAMEVOLVER_CUSTOMER_MODE") == "1",
                 "authenticated": bool(user),
                 "needs_setup": _users_empty(),
                 "user": user,
@@ -1835,12 +2609,16 @@ class RoutesMixin:
 
         @app.post("/api/auth/bootstrap")
         async def auth_bootstrap(request: Request):
+            if getattr(owner.config, "storage_pg_enabled", False):
+                _require_admin_user(getattr(request.state, "console_user", None))
             if not _users_empty():
                 raise HTTPException(status_code=409, detail="users already exist")
             body = await request.json()
             if not isinstance(body, dict):
                 raise HTTPException(status_code=400, detail="bootstrap body must be an object")
             password = str(body.get("password") or "admin")
+            if getattr(owner.config, "storage_pg_enabled", False) and len(password) < 12:
+                raise HTTPException(status_code=400, detail="password must contain at least 12 characters")
             payload = {
                 "id": body.get("username") or body.get("id") or "admin",
                 "display_name": body.get("display_name") or body.get("username") or "admin",
@@ -1849,9 +2627,9 @@ class RoutesMixin:
                 "password": password,
             }
             path = _registry_path(owner.config)
-            data = _load_registry(path)
+            data = _load_registry(path, owner.config)
             user = _upsert_user(data, payload, config=owner.config)
-            _save_registry(path, data)
+            _save_registry(path, data, owner.config)
             sync_openviking_user(owner.config, str(user.get("id") or ""))
             token = secrets.token_urlsafe(32)
             owner._console_sessions[token] = {
@@ -1886,7 +2664,7 @@ class RoutesMixin:
             password = str(body.get("password") or "")
             if not username or not password:
                 raise HTTPException(status_code=400, detail="username and password are required")
-            data = _load_registry(_registry_path(owner.config))
+            data = _load_registry(_registry_path(owner.config), owner.config)
             try:
                 _idx, user = _find_user(data, username)
             except HTTPException as exc:
@@ -1929,7 +2707,7 @@ class RoutesMixin:
             if not username or not password:
                 raise HTTPException(status_code=400, detail="username and password are required")
             path = _registry_path(owner.config)
-            data = _load_registry(path)
+            data = _load_registry(path, owner.config)
             if any(str(user.get("id") or "") == username for user in data.get("users") or []):
                 raise HTTPException(status_code=409, detail="user already exists")
             payload = {
@@ -1940,7 +2718,7 @@ class RoutesMixin:
                 "password": password,
             }
             user = _upsert_user(data, payload, config=owner.config)
-            _save_registry(path, data)
+            _save_registry(path, data, owner.config)
             sync_openviking_user(owner.config, str(user.get("id") or ""))
             token = secrets.token_urlsafe(32)
             owner._console_sessions[token] = {
@@ -1992,7 +2770,7 @@ class RoutesMixin:
 
         @app.post("/api/team-settings")
         async def api_save_team_settings(request: Request):
-            _require_admin_user(_session_user(request))
+            _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
             body = await request.json()
             if not isinstance(body, dict):
                 raise HTTPException(
@@ -2050,7 +2828,7 @@ class RoutesMixin:
 
         @app.post("/api/evolve-model")
         async def api_save_evolve_model(request: Request):
-            _require_admin_user(_session_user(request))
+            _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
             body = await request.json()
             if not isinstance(body, dict):
                 raise HTTPException(status_code=400, detail="model settings body must be an object")
@@ -2120,7 +2898,7 @@ class RoutesMixin:
 
         @app.post("/api/evolve-settings")
         async def api_save_evolve_settings(request: Request):
-            _require_admin_user(_session_user(request))
+            _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
             body = await request.json()
             if not isinstance(body, dict):
                 raise HTTPException(
@@ -2662,13 +3440,12 @@ class RoutesMixin:
 
         @app.post("/api/langfuse-config")
         async def api_save_langfuse_config(request: Request):
-            _require_admin_user(_session_user(request))
+            _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
             body = await request.json()
             if not isinstance(body, dict):
                 raise HTTPException(status_code=400, detail="langfuse settings body must be an object")
 
             enabled = bool(body.get("enabled", False))
-            tracing_enabled = bool(body.get("tracing_enabled", False))
             host = str(body.get("host") or "").strip().rstrip("/") or "https://cloud.langfuse.com"
 
             def _norm_list(value: Any) -> list[str]:
@@ -2691,30 +3468,10 @@ class RoutesMixin:
                 timeout_seconds = max(
                     1, int(body.get("timeout_seconds") or owner.config.langfuse_timeout_seconds or 30)
                 )
-                tracing_sample_rate = max(
-                    0.0,
-                    min(
-                        1.0,
-                        float(body.get("tracing_sample_rate", 1.0)),
-                    ),
-                )
-                tracing_flush_at = max(
-                    1, int(body.get("tracing_flush_at") or 1)
-                )
-                tracing_flush_interval_seconds = max(
-                    0.1,
-                    float(
-                        body.get("tracing_flush_interval_seconds")
-                        or 1.0
-                    ),
-                )
             except (TypeError, ValueError) as exc:
                 raise HTTPException(
                     status_code=400,
-                    detail=(
-                        "invalid Langfuse paging, timeout, sampling, or flush "
-                        "settings"
-                    ),
+                    detail="invalid Langfuse paging or timeout settings",
                 ) from exc
 
             # Enabling requires usable credentials so the UI never claims "enabled"
@@ -2736,13 +3493,10 @@ class RoutesMixin:
             if raw_secret is not None and str(raw_secret).strip():
                 secret_key = str(raw_secret).strip()
 
-            if (enabled or tracing_enabled) and (not public_key or not secret_key):
+            if enabled and (not public_key or not secret_key):
                 raise HTTPException(
                     status_code=400,
-                    detail=(
-                        "public_key 和 secret_key 均为必填项才能启用 "
-                        "Langfuse 会话拉取或链路观测"
-                    ),
+                    detail="public_key 和 secret_key 均为必填项才能启用 Langfuse 会话拉取",
                 )
 
             # Operator-authored trace mapper. Persist the code even while
@@ -2770,27 +3524,27 @@ class RoutesMixin:
                     detail="启用自定义 trace mapper 前必须填写 map_trace 代码",
                 )
 
+            # Per-agent mapper registry. When the body carries ``mappers`` we
+            # validate + persist the whole registry and drop the legacy
+            # single-mapper fields (migration completes on first save). When
+            # absent, any existing registry is preserved untouched so partial
+            # saves (e.g. toggling a filter) never wipe it.
+            if "mappers" in body:
+                if not isinstance(body.get("mappers"), list):
+                    raise HTTPException(status_code=400, detail="mappers 必须是列表")
+                try:
+                    langfuse["mappers"] = _validate_mapper_registry_entries(
+                        body["mappers"]
+                    )
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+
             langfuse.update(
                 {
                     "enabled": enabled,
                     "host": host,
                     "public_key": public_key,
                     "secret_key": secret_key,
-                    "tracing_enabled": tracing_enabled,
-                    "tracing_environment": str(
-                        body.get("tracing_environment") or "local"
-                    ).strip(),
-                    "tracing_release": str(
-                        body.get("tracing_release") or ""
-                    ).strip(),
-                    "tracing_sample_rate": tracing_sample_rate,
-                    "tracing_capture_content": bool(
-                        body.get("tracing_capture_content", True)
-                    ),
-                    "tracing_flush_at": tracing_flush_at,
-                    "tracing_flush_interval_seconds": (
-                        tracing_flush_interval_seconds
-                    ),
                     "max_sessions": max_sessions,
                     "page_limit": page_limit,
                     "timeout_seconds": timeout_seconds,
@@ -2804,15 +3558,303 @@ class RoutesMixin:
                     "mapper_code": mapper_code,
                 }
             )
+            if "mappers" in body:
+                # Migration completes: the registry replaces the legacy fields.
+                langfuse.pop("mapper_enabled", None)
+                langfuse.pop("mapper_code", None)
             store.save(data)
             # Hot-reload the in-memory config so /langfuse/* endpoints pick up the
             # new host/keys/filters immediately, without a service restart.
             owner._configure_langfuse(store.to_config())
             return JSONResponse(content=_langfuse_settings_payload(owner.config, data))
 
+        @app.get("/api/langfuse-tracing-config")
+        async def api_get_langfuse_tracing_config():
+            config_file = str(
+                getattr(owner.config, "_config_file", "") or ""
+            ).strip()
+            store = (
+                ConfigStore(config_file=Path(config_file))
+                if config_file
+                else ConfigStore()
+            )
+            return JSONResponse(
+                content=_langfuse_tracing_settings_payload(
+                    owner.config,
+                    store.load(),
+                )
+            )
+
+        @app.post("/api/langfuse-tracing-config")
+        async def api_save_langfuse_tracing_config(request: Request):
+            _require_admin_user(
+                getattr(request.state, "console_user", None)
+                or _session_user(request)
+            )
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Langfuse tracing settings body must be an object",
+                )
+
+            config_file = str(
+                getattr(owner.config, "_config_file", "") or ""
+            ).strip()
+            store = (
+                ConfigStore(config_file=Path(config_file))
+                if config_file
+                else ConfigStore()
+            )
+            data = store.load()
+            langfuse = data.setdefault("langfuse", {})
+
+            enabled = bool(body.get("enabled", False))
+            host = str(
+                body.get("host")
+                if "host" in body
+                else langfuse.get("tracing_host")
+                or getattr(owner.config, "langfuse_tracing_host", "")
+                or ""
+            ).strip().rstrip("/")
+
+            existing_public = str(
+                langfuse.get("tracing_public_key")
+                or getattr(owner.config, "langfuse_tracing_public_key", "")
+                or ""
+            )
+            existing_secret = str(
+                langfuse.get("tracing_secret_key")
+                or getattr(owner.config, "langfuse_tracing_secret_key", "")
+                or ""
+            )
+            public_key = (
+                ""
+                if bool(body.get("clear_public_key", False))
+                else existing_public
+            )
+            secret_key = (
+                ""
+                if bool(body.get("clear_secret_key", False))
+                else existing_secret
+            )
+            if str(body.get("public_key") or "").strip():
+                public_key = str(body["public_key"]).strip()
+            if str(body.get("secret_key") or "").strip():
+                secret_key = str(body["secret_key"]).strip()
+
+            try:
+                sample_rate = float(
+                    body.get(
+                        "sample_rate",
+                        langfuse.get("tracing_sample_rate", 1.0),
+                    )
+                )
+                if not 0.0 <= sample_rate <= 1.0:
+                    raise ValueError("sample_rate out of range")
+                flush_at = max(
+                    1,
+                    int(
+                        body.get(
+                            "flush_at",
+                            langfuse.get("tracing_flush_at", 1),
+                        )
+                    ),
+                )
+                flush_interval_seconds = max(
+                    0.1,
+                    float(
+                        body.get(
+                            "flush_interval_seconds",
+                            langfuse.get(
+                                "tracing_flush_interval_seconds",
+                                1.0,
+                            ),
+                        )
+                    ),
+                )
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail="invalid Langfuse tracing sampling or flush settings",
+                ) from exc
+
+            if enabled and (not host or not public_key or not secret_key):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "host、public_key 和 secret_key 均为必填项，"
+                        "才能启用全局 Langfuse 链路观测"
+                    ),
+                )
+
+            langfuse.update(
+                {
+                    "tracing_enabled": enabled,
+                    "tracing_host": host,
+                    "tracing_public_key": public_key,
+                    "tracing_secret_key": secret_key,
+                    "tracing_environment": str(
+                        body.get(
+                            "environment",
+                            langfuse.get("tracing_environment", "local"),
+                        )
+                        or "local"
+                    ).strip(),
+                    "tracing_release": str(
+                        body.get(
+                            "release",
+                            langfuse.get("tracing_release", ""),
+                        )
+                        or ""
+                    ).strip(),
+                    "tracing_sample_rate": sample_rate,
+                    "tracing_capture_content": bool(
+                        body.get(
+                            "capture_content",
+                            langfuse.get("tracing_capture_content", True),
+                        )
+                    ),
+                    "tracing_flush_at": flush_at,
+                    "tracing_flush_interval_seconds": flush_interval_seconds,
+                }
+            )
+            store.save(data)
+            owner._configure_langfuse(store.to_config())
+            return JSONResponse(
+                content=_langfuse_tracing_settings_payload(
+                    owner.config,
+                    data,
+                )
+            )
+
+        @app.post("/api/langfuse-tracing-config/test")
+        async def api_test_langfuse_tracing_config(request: Request):
+            _require_admin_user(
+                getattr(request.state, "console_user", None)
+                or _session_user(request)
+            )
+            from ..integrations.langfuse_client import (
+                LangfuseClient,
+                LangfuseError,
+            )
+
+            body = await request.json() if await request.body() else {}
+            if not isinstance(body, dict):
+                body = {}
+            host = str(
+                body.get("host")
+                or getattr(owner.config, "langfuse_tracing_host", "")
+                or ""
+            ).strip().rstrip("/")
+            public_key = str(
+                body.get("public_key")
+                or getattr(owner.config, "langfuse_tracing_public_key", "")
+                or ""
+            ).strip()
+            secret_key = str(
+                body.get("secret_key")
+                or getattr(owner.config, "langfuse_tracing_secret_key", "")
+                or ""
+            ).strip()
+            if not host or not public_key or not secret_key:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "host / public_key / secret_key "
+                        "均为测试全局链路观测的必填项"
+                    ),
+                )
+            client = LangfuseClient(
+                host=host,
+                public_key=public_key,
+                secret_key=secret_key,
+                timeout=float(owner.config.langfuse_timeout_seconds or 30),
+            )
+            try:
+                health = await asyncio.to_thread(client.health)
+            except LangfuseError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+            finally:
+                await asyncio.to_thread(client.close)
+            return JSONResponse(content=health)
+
+        @app.get("/api/datasource-config")
+        async def api_get_datasource_config():
+            config_file = str(getattr(owner.config, "_config_file", "") or "").strip()
+            store = ConfigStore(config_file=Path(config_file)) if config_file else ConfigStore()
+            return JSONResponse(content=_datasource_settings_payload(owner.config, store.load()))
+
+        @app.post("/api/datasource-config")
+        async def api_save_datasource_config(request: Request):
+            _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise HTTPException(status_code=400, detail="datasource settings body must be an object")
+            ds_type = str(body.get("type") or "langfuse").strip().lower()
+            if ds_type not in {"langfuse", "skillopt"}:
+                raise HTTPException(status_code=400, detail="unsupported conversion mode")
+            store = ConfigStore()
+            data = store.load()
+            datasource = data.setdefault("datasource", {})
+            legacy_converter_code = str(
+                body.get("legacy_converter_code")
+                if "legacy_converter_code" in body
+                else datasource.get("legacy_converter_code") or ""
+            )
+            if ds_type == "skillopt":
+                from ..integrations.legacy_converter import inspect_converter
+
+                validation = inspect_converter(legacy_converter_code)
+                if validation["issues"]:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="invalid legacy converter: " + "; ".join(validation["issues"]),
+                    )
+            datasource["type"] = ds_type
+            datasource["legacy_converter_code"] = legacy_converter_code
+            if "adapters_dir" in body:
+                datasource["adapters_dir"] = str(body.get("adapters_dir") or "").strip()
+            store.save(data)
+            # Hot-reload
+            owner._configure_langfuse(store.to_config())
+            return JSONResponse(content=_datasource_settings_payload(owner.config, data))
+
+        @app.get("/api/datasource-config/adapter-template")
+        async def api_datasource_adapter_template(request: Request):
+            """Return a starter adapter file for the given agent_id."""
+            from ..integrations.source_adapter import default_adapter_template
+
+            agent_id = str(request.query_params.get("agent_id") or "").strip()
+            return JSONResponse(content={
+                "agent_id": agent_id,
+                "code": default_adapter_template(agent_id),
+            })
+
+        @app.get("/api/datasource-config/adapter-files")
+        async def api_datasource_adapter_files():
+            """List existing per-agent adapter files."""
+            from ..integrations.source_adapter import _adapters_dir
+
+            adapters_directory = _adapters_dir(owner.config)
+            files: list[dict[str, Any]] = []
+            if adapters_directory.exists():
+                for p in sorted(adapters_directory.glob("*.py")):
+                    if p.name.startswith("__"):
+                        continue
+                    stat = p.stat()
+                    files.append({
+                        "agent_id": p.stem,
+                        "size": stat.st_size,
+                        "mtime": stat.st_mtime,
+                    })
+            return JSONResponse(content={"adapters_dir": str(adapters_directory), "files": files})
+
         @app.post("/api/langfuse-config/test")
         async def api_test_langfuse_config(request: Request):
-            _require_admin_user(_session_user(request))
+            _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
             from ..integrations.langfuse_client import LangfuseClient, LangfuseError
 
             body = await request.json() if await request.body() else {}
@@ -2850,7 +3892,9 @@ class RoutesMixin:
 
         def _load_studio_session(session_id: str) -> dict[str, Any]:
             """Load a full session dict (turns) to use as test input."""
-            store = SessionStore.from_config(owner.config)
+            store = SessionStore.from_config(
+                _tenant_effective_config(owner), tenant_id=current_tenant_id()
+            )
             session = store.load_session(_safe_session_id(session_id))
             if not session:
                 raise HTTPException(status_code=404, detail="session not found")
@@ -2859,9 +3903,10 @@ class RoutesMixin:
         def _studio_llm_factory():
             from ..llm import AsyncLLMClient
 
-            api_key = str(getattr(owner.config, "llm_api_key", "") or "")
-            base_url = str(getattr(owner.config, "llm_api_base", "") or "")
-            model = str(getattr(owner.config, "llm_model_id", "") or getattr(owner.config, "model_name", "") or "")
+            config = _tenant_effective_config(owner)
+            api_key = str(getattr(config, "llm_api_key", "") or "")
+            base_url = str(getattr(config, "llm_api_base", "") or "")
+            model = str(getattr(config, "llm_model_id", "") or getattr(config, "model_name", "") or "")
             if not api_key or not base_url or not model:
                 raise HTTPException(
                     status_code=503,
@@ -2871,8 +3916,8 @@ class RoutesMixin:
                 api_key=api_key,
                 base_url=base_url,
                 model=model,
-                max_tokens=int(getattr(owner.config, "llm_max_tokens", 100000) or 100000),
-                temperature=float(getattr(owner.config, "llm_temperature", 0.4) or 0.4),
+                max_tokens=int(getattr(config, "llm_max_tokens", 100000) or 100000),
+                temperature=float(getattr(config, "llm_temperature", 0.4) or 0.4),
             )
 
         @app.get("/api/prompt-studio/pipeline")
@@ -2881,27 +3926,27 @@ class RoutesMixin:
 
         @app.get("/api/prompt-studio/prompts")
         async def api_prompt_studio_prompts():
-            return JSONResponse(content={"prompts": _prompt_studio().list_prompts()})
+            return JSONResponse(content={"prompts": await asyncio.to_thread(_prompt_studio().list_prompts)})
 
         @app.get("/api/prompt-studio/prompts/{stage_id}")
         async def api_prompt_studio_prompt_detail(stage_id: str):
             try:
-                return JSONResponse(content=_prompt_studio().get_prompt(stage_id))
+                return JSONResponse(content=await asyncio.to_thread(_prompt_studio().get_prompt, stage_id))
             except KeyError as exc:
                 raise HTTPException(status_code=404, detail=f"unknown prompt stage: {stage_id}") from exc
 
         @app.post("/api/prompt-studio/prompts/{stage_id}")
         async def api_prompt_studio_save(stage_id: str, request: Request):
-            _require_admin_user(_session_user(request))
+            _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
             body = await request.json()
             if not isinstance(body, dict):
                 raise HTTPException(status_code=400, detail="body must be an object")
             ps = _prompt_studio()
             try:
                 if "prompt" in body:
-                    ps.set_override(stage_id, str(body.get("prompt") or ""))
+                    ps.set_override(stage_id, str(body.get("prompt") or ""), config=owner.config)
                 if "settings" in body:
-                    ps.set_stage_settings(stage_id, body.get("settings"))
+                    ps.set_stage_settings(stage_id, body.get("settings"), config=owner.config)
             except KeyError as exc:
                 raise HTTPException(status_code=404, detail=f"unknown prompt stage: {stage_id}") from exc
             except ValueError as exc:
@@ -2910,11 +3955,11 @@ class RoutesMixin:
 
         @app.post("/api/prompt-studio/prompts/{stage_id}/reset")
         async def api_prompt_studio_reset(stage_id: str, request: Request):
-            _require_admin_user(_session_user(request))
+            _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
             ps = _prompt_studio()
             try:
-                ps.reset_override(stage_id)
-                ps.reset_stage_settings(stage_id)
+                ps.reset_override(stage_id, config=owner.config)
+                ps.reset_stage_settings(stage_id, config=owner.config)
             except KeyError as exc:
                 raise HTTPException(status_code=404, detail=f"unknown prompt stage: {stage_id}") from exc
             return JSONResponse(content=ps.get_prompt(stage_id))
@@ -2923,7 +3968,9 @@ class RoutesMixin:
         async def api_prompt_studio_sessions(limit: int = 20):
             """Recent sessions the operator can use as test input."""
             try:
-                store = SessionStore.from_config(owner.config)
+                store = SessionStore.from_config(
+                    _tenant_effective_config(owner), tenant_id=current_tenant_id()
+                )
                 rows = store.list_conversations(limit=max(1, min(200, int(limit or 20))))
             except Exception as exc:  # noqa: BLE001
                 return JSONResponse(content={"sessions": [], "reason": str(exc)})
@@ -2942,7 +3989,7 @@ class RoutesMixin:
 
         @app.post("/api/prompt-studio/prompts/{stage_id}/test")
         async def api_prompt_studio_test(stage_id: str, request: Request):
-            _require_admin_user(_session_user(request))
+            _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
             body = await request.json()
             if not isinstance(body, dict):
                 raise HTTPException(status_code=400, detail="body must be an object")
@@ -2973,7 +4020,7 @@ class RoutesMixin:
 
         @app.post("/api/evolve-model/test")
         async def api_test_evolve_model(request: Request):
-            _require_admin_user(_session_user(request))
+            _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
             body = await request.json()
             if not isinstance(body, dict):
                 body = {}
@@ -3036,7 +4083,8 @@ class RoutesMixin:
         async def ingest_session(request: Request):
             body = await _read_limited_json_body(request)
             agent_record: dict[str, Any] | None = None
-            if is_v1_payload(body):
+            root_ingest = bool(getattr(request.state, "service_root_authenticated", False))
+            if is_v1_payload(body) and not root_ingest:
                 agent_record = verify_agent_access_token(
                     owner.config,
                     _bearer_token(request),
@@ -3048,7 +4096,21 @@ class RoutesMixin:
                         detail="invalid or insufficient Agent access token",
                     )
             else:
-                _check_ingest_api_key(request)
+                if not root_ingest and getattr(request.state, "tenant_source", "") != "token":
+                    _check_ingest_api_key(request)
+                registry = get_tenant_registry(owner)
+                if (
+                    registry.mode == "postgres"
+                    and not str(os.environ.get("EVOLVE_INGEST_API_KEY") or "").strip()
+                ):
+                    # Multi-tenant fail-closed: with tenants configured and no
+                    # master key, only a per-tenant token (tevt_, resolved by
+                    # the tenant middleware) may ingest legacy envelopes.
+                    if not root_ingest and getattr(request.state, "tenant_source", "") != "token":
+                        raise HTTPException(
+                            status_code=401,
+                            detail="valid tenant agent token required",
+                        )
             try:
                 body = normalize_session_envelope(body)
             except AgentProtocolError as exc:
@@ -3153,26 +4215,39 @@ class RoutesMixin:
                     overrides[key] = source.get(key)
             return overrides
 
+        def _tenant_langfuse_config():
+            """Langfuse config with the current tenant's overrides applied.
+
+            Multi-tenancy plan §1.3: each tenant can point at its own Langfuse
+            deployment (host/keys/mappers/default filters) via ``tenants.config``
+            flat field overrides; the default tenant keeps the global config.
+            """
+            from ..tenants.registry import effective_config, get_current_tenant
+
+            registry = get_tenant_registry(owner)
+            return effective_config(registry, get_current_tenant(), owner.config)
+
         @app.get("/langfuse/status")
         async def langfuse_status():
             from ..integrations.langfuse_client import LangfuseClient, LangfuseError
             from ..observability import langfuse_status as tracing_status
 
-            enabled = bool(getattr(owner.config, "langfuse_enabled", False))
+            config = _tenant_langfuse_config()
+            enabled = bool(getattr(config, "langfuse_enabled", False))
             payload: dict[str, Any] = {
                 "enabled": enabled,
                 "tracing": tracing_status(),
-                "host": str(getattr(owner.config, "langfuse_host", "") or ""),
-                "public_key_present": bool(getattr(owner.config, "langfuse_public_key", "")),
-                "secret_key_present": bool(getattr(owner.config, "langfuse_secret_key", "")),
-                "max_sessions": int(getattr(owner.config, "langfuse_max_sessions", 100) or 100),
+                "host": str(getattr(config, "langfuse_host", "") or ""),
+                "public_key_present": bool(getattr(config, "langfuse_public_key", "")),
+                "secret_key_present": bool(getattr(config, "langfuse_secret_key", "")),
+                "max_sessions": int(getattr(config, "langfuse_max_sessions", 100) or 100),
                 "default_filters": {
-                    "environment": list(getattr(owner.config, "langfuse_default_environment", []) or []),
-                    "user_id": str(getattr(owner.config, "langfuse_default_user_id", "") or ""),
-                    "tags": list(getattr(owner.config, "langfuse_default_tags", []) or []),
-                    "release": str(getattr(owner.config, "langfuse_default_release", "") or ""),
-                    "version": str(getattr(owner.config, "langfuse_default_version", "") or ""),
-                    "trace_name": str(getattr(owner.config, "langfuse_default_trace_name", "") or ""),
+                    "environment": list(getattr(config, "langfuse_default_environment", []) or []),
+                    "user_id": str(getattr(config, "langfuse_default_user_id", "") or ""),
+                    "tags": list(getattr(config, "langfuse_default_tags", []) or []),
+                    "release": str(getattr(config, "langfuse_default_release", "") or ""),
+                    "version": str(getattr(config, "langfuse_default_version", "") or ""),
+                    "trace_name": str(getattr(config, "langfuse_default_trace_name", "") or ""),
                 },
                 "reachable": False,
             }
@@ -3181,7 +4256,7 @@ class RoutesMixin:
                 return JSONResponse(content=payload)
             try:
                 health = await asyncio.to_thread(
-                    lambda: LangfuseClient.from_config(owner.config).health()
+                    lambda: LangfuseClient.from_config(config).health()
                 )
                 payload["reachable"] = True
                 payload["total_sessions"] = health.get("total_sessions")
@@ -3206,7 +4281,7 @@ class RoutesMixin:
             try:
                 result = await asyncio.to_thread(
                     preview_sessions,
-                    owner.config,
+                    _tenant_langfuse_config(),
                     overrides,
                     max_sessions=max_sessions,
                 )
@@ -3223,19 +4298,26 @@ class RoutesMixin:
             if not isinstance(body, dict):
                 body = {}
             overrides = _langfuse_filter_overrides(body)
+            require_used_skills = [
+                str(item).strip()
+                for item in (body.get("require_used_skills") or [])
+                if str(item or "").strip()
+            ] if isinstance(body.get("require_used_skills"), (list, tuple)) else []
             try:
                 max_sessions = int(body.get("max_sessions") or 0)
             except (TypeError, ValueError):
                 max_sessions = 0
             try:
                 result = await pull_sessions(
-                    owner.config,
+                    _tenant_langfuse_config(),
                     _ingest_langfuse_session,
                     overrides,
                     max_sessions=max_sessions,
                     user_alias=str(body.get("user_alias") or ""),
                     force_reprocess=bool(body.get("force_reprocess", False)),
                     defer_evolution_trigger=bool(body.get("defer_evolution_trigger", False)),
+                    require_used_skills=require_used_skills,
+                    agent_id=str(body.get("agent_id") or ""),
                 )
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(status_code=502, detail=f"langfuse pull failed: {exc}") from exc
@@ -3269,7 +4351,7 @@ class RoutesMixin:
             when ``trace`` is omitted a small bundled sample is used so the
             operator can iterate before wiring up a live Langfuse pull.
             """
-            _require_admin_user(_session_user(request))
+            _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
             from ..integrations.langfuse_mapper import (
                 run_mapper_preview,
                 sample_trace_payload,
@@ -3290,10 +4372,52 @@ class RoutesMixin:
             except (TypeError, ValueError):
                 turn_num = 1
             result = await asyncio.to_thread(
-                run_mapper_preview, code, payload, turn_num=turn_num
+                run_mapper_preview,
+                code,
+                payload,
+                turn_num=turn_num,
+                match=body.get("match"),
             )
             result["used_sample"] = used_sample
             return JSONResponse(content=result)
+
+        @app.post("/langfuse/mapper/route-preview")
+        async def langfuse_mapper_route_preview(request: Request):
+            """Dry-run registry routing for one trace (console route preview).
+
+            Body: ``{"trace"?: {trace, observations} | trace, "mappers"?: [...]}``.
+            Omitting ``mappers`` tests the live configured registry; providing it
+            lets the console test-drive unsaved edits. Never persists anything.
+            """
+            _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
+            from ..integrations.langfuse_mapper import (
+                MapperRegistry,
+                sample_trace_payload,
+            )
+
+            body = await request.json() if await request.body() else {}
+            if not isinstance(body, dict):
+                body = {}
+            payload = body.get("trace")
+            used_sample = payload in (None, "", {}, [])
+            if used_sample:
+                payload = sample_trace_payload()
+            raw_entries = body.get("mappers")
+            if raw_entries is None:
+                from ..config_store.bridge import ConfigStore
+
+                store_data = ConfigStore(owner.config._config_file).load()
+                lf = store_data.get("langfuse") if isinstance(store_data.get("langfuse"), dict) else {}
+                raw_entries = normalize_mapper_entries(
+                    lf.get("mappers"),
+                    legacy_enabled=bool(lf.get("mapper_enabled", False)),
+                    legacy_code=str(lf.get("mapper_code") or ""),
+                )
+            registry = await asyncio.to_thread(MapperRegistry.from_entries, raw_entries)
+            report = await asyncio.to_thread(registry.route_report, payload)
+            report["used_sample"] = used_sample
+            report["broken"] = [[name, error] for name, error in registry.broken]
+            return JSONResponse(content=report)
 
         async def _register_agent_runtime(body: dict[str, Any]) -> dict[str, Any]:
             """Register an Agent and optionally merge cloud OpenViking sources.
@@ -3549,6 +4673,64 @@ class RoutesMixin:
                 ),
             }
 
+        @app.post("/api/agent-integrations")
+        async def api_register_agent_integration(request: Request):
+            """Console-side Agent registration (admin session auth).
+
+            Builds a V1 registration payload from simple form fields and
+            reuses the same registration path as the control-plane endpoint.
+            ``auth_profile`` left empty means the replay endpoint is called
+            without a Bearer key (trusted-network deployments)."""
+            _require_admin_user(getattr(request.state, "console_user", None))
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise HTTPException(status_code=400, detail="body must be an object")
+            agent_id = str(body.get("agent_id") or "").strip()
+            runtime_type = str(body.get("runtime_type") or "").strip()
+            replay_url = str(body.get("replay_url") or "").strip()
+            if not agent_id or not runtime_type or not replay_url:
+                raise HTTPException(
+                    status_code=400,
+                    detail="agent_id, runtime_type and replay_url are required",
+                )
+            try:
+                max_interactions = max(1, min(20, int(body.get("max_interactions") or 10)))
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=400, detail="max_interactions must be an integer"
+                ) from exc
+            capability: dict[str, Any] = {
+                "transport": "http",
+                "orchestration": str(body.get("orchestration") or "server_driven"),
+                "endpoint": replay_url,
+                "max_interactions": max_interactions,
+            }
+            auth_profile = str(body.get("auth_profile") or "").strip()
+            if auth_profile:
+                capability["auth_profile"] = auth_profile
+            # Zero agent-side awareness mode: render turns into the agent's
+            # own request shape and extract results via dotted-path mapping.
+            request_template = body.get("request_template")
+            if isinstance(request_template, dict) and request_template:
+                capability["request_template"] = request_template
+            response_mapping = body.get("response_mapping")
+            if isinstance(response_mapping, dict) and response_mapping:
+                capability["response_mapping"] = response_mapping
+            capabilities: dict[str, Any] = {"replay.branch.v1": capability}
+            if bool(body.get("session_ingest", False)):
+                capabilities["session.ingest.v1"] = {}
+            payload = {
+                "schema_version": "teamevolver.agent-registration.v1",
+                "protocol_version": "1.0",
+                "agent_id": agent_id,
+                "runtime_type": runtime_type,
+                "runtime_version": str(body.get("runtime_version") or "1.0.0"),
+                "display_name": str(body.get("display_name") or agent_id),
+                "capabilities": capabilities,
+                "endpoints": {"replay_url": replay_url},
+            }
+            return await _register_agent_runtime(payload)
+
         @app.post("/api/agent-integrations/skill-sync/{event_id}/retry")
         async def api_retry_skill_sync(
             event_id: str,
@@ -3616,7 +4798,7 @@ class RoutesMixin:
 
         @app.get("/trigger-dreamcycle/dry-run")
         async def dreamcycle_dry_run(request: Request):
-            _require_admin_user(_session_user(request))
+            _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
             return owner._dreamcycle_dry_run()
 
         @app.get("/trigger-dreamcycle/memory-changes")
@@ -3624,13 +4806,16 @@ class RoutesMixin:
             request: Request,
             limit: int = 100,
         ):
-            _require_admin_user(_session_user(request))
+            _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
             if not 1 <= limit <= 500:
                 raise HTTPException(
                     status_code=400,
                     detail="limit must be between 1 and 500",
                 )
-            return owner._dreamcycle_memory_changes(limit=limit)
+            return owner._dreamcycle_memory_changes(
+                limit=limit,
+                config=_tenant_effective_config(owner),
+            )
 
         @app.post(
             "/trigger-dreamcycle/memory-changes/{change_id}/true-replay"
@@ -3639,7 +4824,7 @@ class RoutesMixin:
             change_id: str,
             request: Request,
         ):
-            _require_admin_user(_session_user(request))
+            _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
             body = await request.json()
             if not isinstance(body, dict):
                 raise HTTPException(
@@ -3672,6 +4857,7 @@ class RoutesMixin:
                     timeout_seconds=int(
                         body.get("timeout_seconds") or 600
                     ),
+                    config=_tenant_effective_config(owner),
                 )
             except KeyError as exc:
                 raise HTTPException(
@@ -3692,7 +4878,7 @@ class RoutesMixin:
             request: Request,
             limit: int = 100,
         ):
-            _require_admin_user(_session_user(request))
+            _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
             if not 1 <= limit <= 500:
                 raise HTTPException(
                     status_code=400,
@@ -3701,6 +4887,7 @@ class RoutesMixin:
             return owner._dreamcycle_memory_replays(
                 change_id=change_id,
                 limit=limit,
+                config=_tenant_effective_config(owner),
             )
 
         @app.post("/api/openviking/memory/true-replay")
@@ -3747,6 +4934,7 @@ class RoutesMixin:
                     timeout_seconds=int(
                         body.get("timeout_seconds") or 600
                     ),
+                    config=_tenant_effective_config(owner),
                 )
             except ValueError as exc:
                 raise HTTPException(
@@ -3756,7 +4944,7 @@ class RoutesMixin:
 
         @app.post("/trigger-dreamcycle/reset")
         async def dreamcycle_reset(request: Request):
-            _require_admin_user(_session_user(request))
+            _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
             body = await request.json()
             if not isinstance(body, dict):
                 raise HTTPException(
@@ -3786,53 +4974,62 @@ class RoutesMixin:
 
         @app.get("/storage/status")
         async def storage_status():
-            return JSONResponse(content=_storage_status(owner.config))
+            return JSONResponse(content=_storage_status(_tenant_effective_config(owner)))
 
         @app.get("/api/sharing-config")
         async def api_get_sharing_config():
-            data = ConfigStore().load()
+            store = ConfigStore()
+            data = store.load()
+            effective = store.to_config()
             sharing = data.get("sharing", {}) if isinstance(data.get("sharing"), dict) else {}
-            deployment = str(sharing.get("viking_deployment") or "cloud").strip().lower()
+            deployment = str(
+                getattr(effective, "sharing_viking_deployment", "") or "cloud"
+            ).strip().lower()
             if deployment not in {"cloud", "local"}:
                 deployment = "cloud"
+            service_api_key_present = bool(
+                getattr(effective, "sharing_viking_team_api_key", "")
+                or getattr(effective, "sharing_viking_api_key", "")
+            )
             return JSONResponse(
                 content={
-                    "enabled": bool(sharing.get("enabled", True)),
+                    "enabled": bool(getattr(effective, "sharing_enabled", True)),
                     "backend": "viking",
                     "deployment": deployment,
-                    "endpoint": resolve_viking_endpoint(
-                        deployment, str(sharing.get("viking_endpoint", "") or "")
+                    "endpoint": str(
+                        getattr(effective, "sharing_viking_endpoint", "") or ""
                     ),
                     "endpoint_override": str(sharing.get("viking_endpoint", "") or ""),
                     "cloud_endpoint": VOLCENGINE_OPENVIKING_ENDPOINT,
                     "local_endpoint": LOCAL_OPENVIKING_ENDPOINT,
-                    "account": str(sharing.get("viking_account") or "default"),
+                    "account": str(
+                        getattr(effective, "sharing_viking_account", "") or "default"
+                    ),
                     "personal_user": str(
-                        sharing.get("viking_personal_user") or ""
+                        getattr(effective, "sharing_viking_personal_user", "") or ""
                     ),
-                    "team_user": str(sharing.get("viking_user") or "team"),
+                    "team_user": str(
+                        getattr(effective, "sharing_viking_user", "") or "team"
+                    ),
                     "root_prefix": str(
-                        sharing.get("viking_root_prefix") or "team-skill-evolver"
+                        getattr(effective, "sharing_viking_root_prefix", "")
+                        or "team-skill-evolver"
                     ),
-                    "service_api_key_present": bool(
-                        sharing.get("viking_team_api_key")
-                        or sharing.get("viking_api_key")
+                    "service_api_key_present": service_api_key_present,
+                    "team_api_key_present": service_api_key_present,
+                    "personal_api_key_present": bool(
+                        getattr(effective, "sharing_viking_personal_api_key", "")
                     ),
-                    "team_api_key_present": bool(sharing.get("viking_team_api_key") or sharing.get("viking_api_key")),
-                    "personal_api_key_present": bool(sharing.get("viking_personal_api_key")),
                     # A team space is one-to-one with its OpenViking account. Once
                     # the service (root) key is configured the team space is bound
                     # and the account can no longer be re-pointed.
-                    "account_bound": bool(
-                        sharing.get("viking_team_api_key")
-                        or sharing.get("viking_api_key")
-                    ),
+                    "account_bound": service_api_key_present,
                 }
             )
 
         @app.post("/api/sharing-config")
         async def api_save_sharing_config(request: Request):
-            _require_admin_user(_session_user(request))
+            _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
             body = await request.json()
             if not isinstance(body, dict):
                 raise HTTPException(status_code=400, detail="sharing settings body must be an object")
@@ -3902,9 +5099,10 @@ class RoutesMixin:
 
             def build_status():
                 skills: dict[str, dict[str, Any]] = {}
-                session_queue = _session_queue_snapshot(owner.config, limit=0)
+                effective_cfg = _tenant_effective_config(owner)
+                session_queue = _session_queue_snapshot(effective_cfg, limit=0)
                 try:
-                    hub = SkillHub.team_from_config(owner.config)
+                    hub = SkillHub.team_from_config(effective_cfg, tenant_id=current_tenant_id())
                     for item in hub.list_remote():
                         name = str(item.get("name") or "")
                         if not name:
@@ -3915,7 +5113,15 @@ class RoutesMixin:
                         }
                 except Exception:
                     pass
-                if not skills and owner.skill_manager is not None:
+                # Local-process fallback reflects the global (default-tenant)
+                # skill manager only — never surface it for a switched tenant,
+                # otherwise the status card leaks the default tenant's skill
+                # count when the tenant's own hub is empty or unreachable.
+                if (
+                    not skills
+                    and current_tenant_id() == DEFAULT_TENANT_ID
+                    and owner.skill_manager is not None
+                ):
                     for skill in owner.skill_manager.get_all_skills():
                         name = str(skill.get("name") or "")
                         if name:
@@ -3927,7 +5133,11 @@ class RoutesMixin:
                     "skills": skills,
                 }
 
-            return _cached_dashboard_value(cache_key, 5.0, build_status)
+            # Sync viking I/O must not run on the event loop: one slow call
+            # would stall every concurrent request.
+            return await asyncio.to_thread(
+                _cached_dashboard_value, cache_key, 5.0, build_status
+            )
 
         @app.get("/sessions")
         async def dashboard_sessions(
@@ -3940,10 +5150,13 @@ class RoutesMixin:
             cache_key = f"queue:{id(owner.config)}"
             if refresh:
                 _invalidate_dashboard_cache(cache_key, f"status:{id(owner.config)}")
-            rows = _cached_dashboard_value(
+            rows = await asyncio.to_thread(
+                _cached_dashboard_value,
                 cache_key,
                 5.0,
-                lambda: SessionStore.from_config(owner.config).list_queue(limit=100000),
+                lambda: SessionStore.from_config(
+                    _tenant_effective_config(owner), tenant_id=current_tenant_id()
+                ).list_queue(limit=100000),
             )
             page = rows[safe_offset : safe_offset + safe_limit]
             return {
@@ -3961,6 +5174,15 @@ class RoutesMixin:
             limit: int = 20,
             offset: int = 0,
             refresh: bool = False,
+            search: str = "",
+            status: str = "",
+            decision: str = "",
+            case: str = "",
+            skill: str = "",
+            start: str = "",
+            end: str = "",
+            sort_by: str = "",
+            order: str = "",
         ):
             try:
                 safe_limit = min(200, max(1, int(limit or 20)))
@@ -3968,21 +5190,61 @@ class RoutesMixin:
                 cache_key = f"conversations:{id(owner.config)}"
                 if refresh:
                     _invalidate_dashboard_cache(cache_key)
-                conversations = _cached_dashboard_value(
+                conversations = await asyncio.to_thread(
+                    _cached_dashboard_value,
                     cache_key,
                     15.0,
-                    lambda: SessionStore.from_config(owner.config).list_conversations(
+                    lambda: SessionStore.from_config(
+                        _tenant_effective_config(owner), tenant_id=current_tenant_id()
+                    ).list_conversations(
                         limit=100000
                     ),
                 )
-                page = conversations[safe_offset : safe_offset + safe_limit]
+                # Enrich BEFORE filtering so the ``case`` filter can match on
+                # judge scores; index build + lookups are cache-backed/cheap.
+                try:
+                    score_index = await asyncio.to_thread(
+                        _cached_dashboard_value,
+                        f"session-judge-scores:{id(owner.config)}",
+                        30.0,
+                        lambda: _session_judge_score_index(_tenant_effective_config(owner)),
+                    )
+                    for row in conversations:
+                        judge = score_index.get(str(row.get("session_id") or ""))
+                        if judge:
+                            row["judge"] = judge
+                except Exception as exc:  # noqa: BLE001 - enrichment is best-effort
+                    logger.warning("[Conversations] judge score enrichment failed: %s", exc)
+                filtered = _filter_conversation_rows(
+                    conversations,
+                    search=search,
+                    status=status,
+                    decision=decision,
+                    case=case,
+                    skill=skill,
+                    start=start,
+                    end=end,
+                )
+                filtered = _sort_conversation_rows(filtered, sort_by=sort_by, order=order)
+                page = filtered[safe_offset : safe_offset + safe_limit]
+                skill_counts: dict[str, int] = {}
+                for row in filtered:
+                    used = row.get("used_skills") if isinstance(row.get("used_skills"), list) else []
+                    for name in used:
+                        name = str(name).strip()
+                        if name:
+                            skill_counts[name] = skill_counts.get(name, 0) + 1
                 return {
                     "reachable": True,
                     "conversations": page,
-                    "total": len(conversations),
+                    "total": len(filtered),
+                    "stats": _conversation_stats(filtered),
+                    "skill_counts": dict(
+                        sorted(skill_counts.items(), key=lambda kv: kv[1], reverse=True)[:100]
+                    ),
                     "limit": safe_limit,
                     "offset": safe_offset,
-                    "has_more": safe_offset + len(page) < len(conversations),
+                    "has_more": safe_offset + len(page) < len(filtered),
                 }
             except Exception as exc:  # noqa: BLE001
                 return {
@@ -3991,6 +5253,210 @@ class RoutesMixin:
                     "total": 0,
                     "reason": str(exc),
                 }
+
+        @app.get("/conversations/export")
+        async def dashboard_conversations_export(
+            ids: str = "",
+            search: str = "",
+            status: str = "",
+            decision: str = "",
+            case: str = "",
+            skill: str = "",
+            start: str = "",
+            end: str = "",
+            sort_by: str = "",
+            order: str = "",
+            format: str = "json",
+            limit: int = 5000,
+        ):
+            """Standalone batch export with quality details.
+
+            Explicit ``ids`` (comma separated, checkbox selection) take
+            precedence; otherwise the same server-side filters as the list
+            endpoint are applied. Supports ``format=json`` (default) and
+            ``format=csv`` (UTF-8 BOM so Excel opens Chinese correctly).
+            """
+            try:
+                safe_limit = min(20000, max(1, int(limit or 5000)))
+                conversations = await asyncio.to_thread(
+                    _cached_dashboard_value,
+                    f"conversations:{id(owner.config)}",
+                    15.0,
+                    lambda: SessionStore.from_config(
+                        _tenant_effective_config(owner), tenant_id=current_tenant_id()
+                    ).list_conversations(
+                        limit=100000
+                    ),
+                )
+                try:
+                    score_index = await asyncio.to_thread(
+                        _cached_dashboard_value,
+                        f"session-judge-scores:{id(owner.config)}",
+                        30.0,
+                        lambda: _session_judge_score_index(_tenant_effective_config(owner)),
+                    )
+                    for row in conversations:
+                        judge = score_index.get(str(row.get("session_id") or ""))
+                        if judge:
+                            row["judge"] = judge
+                except Exception as exc:  # noqa: BLE001 - enrichment is best-effort
+                    logger.warning("[Export] judge score enrichment failed: %s", exc)
+
+                wanted_ids = [
+                    _safe_session_id(value.strip())
+                    for value in str(ids or "").split(",")
+                    if value.strip()
+                ]
+                wanted_ids = [value for value in wanted_ids if value]
+                if wanted_ids:
+                    by_id = {str(row.get("session_id") or ""): row for row in conversations}
+                    selected = [by_id[value] for value in wanted_ids if value in by_id]
+                    skipped_ids = [value for value in wanted_ids if value not in by_id]
+                else:
+                    selected = _filter_conversation_rows(
+                        conversations,
+                        search=search,
+                        status=status,
+                        decision=decision,
+                        case=case,
+                        skill=skill,
+                        start=start,
+                        end=end,
+                    )
+                    selected = _sort_conversation_rows(selected, sort_by=sort_by, order=order)
+                    skipped_ids = []
+                selected = selected[:safe_limit]
+
+                def _quality(row: dict[str, Any]) -> dict[str, Any]:
+                    value_judge = (
+                        row.get("value_judge") if isinstance(row.get("value_judge"), dict) else {}
+                    )
+                    judge = row.get("judge") if isinstance(row.get("judge"), dict) else {}
+                    score = judge.get("overall_score")
+                    return {
+                        "value_judge": {
+                            "decision": value_judge.get("decision"),
+                            "confidence": value_judge.get("confidence"),
+                            "reason": value_judge.get("reason"),
+                        },
+                        "judge": {
+                            "overall_score": score,
+                            "case_type": (
+                                "good"
+                                if isinstance(score, (int, float))
+                                and not isinstance(score, bool)
+                                and float(score) >= _GOOD_CASE_SCORE
+                                else "bad"
+                                if isinstance(score, (int, float))
+                                and not isinstance(score, bool)
+                                else None
+                            ),
+                            "judged_at": judge.get("judged_at"),
+                            "rationale": judge.get("rationale"),
+                            "reasons": _clean_judge_reasons(judge.get("reasons")),
+                        },
+                    }
+
+                export_format = str(format or "json").strip().lower()
+                if export_format == "csv":
+                    buffer = io.StringIO()
+                    writer = csv.writer(buffer)
+                    writer.writerow(
+                        [
+                            "session_id",
+                            "title",
+                            "user_alias",
+                            "status",
+                            "num_turns",
+                            "used_skills",
+                            "timestamp",
+                            "ingested_at",
+                            "value_judge_decision",
+                            "value_judge_confidence",
+                            "value_judge_reason",
+                            "judge_overall_score",
+                            "judge_case_type",
+                            "judge_judged_at",
+                            "judge_rationale",
+                            "judge_task_completion_reasons",
+                            "judge_response_quality_reasons",
+                            "judge_efficiency_reasons",
+                            "judge_tool_usage_reasons",
+                        ]
+                    )
+                    for row in selected:
+                        quality = _quality(row)
+                        value_judge = quality["value_judge"]
+                        judge = quality["judge"]
+                        reasons = judge.get("reasons") or {}
+                        writer.writerow(
+                            [
+                                row.get("session_id") or "",
+                                row.get("title") or "",
+                                row.get("user_alias") or "",
+                                row.get("status") or "",
+                                row.get("num_turns") if row.get("num_turns") is not None else "",
+                                ";".join(
+                                    str(s) for s in (row.get("used_skills") or []) if s
+                                ),
+                                row.get("timestamp") or "",
+                                row.get("ingested_at") or "",
+                                value_judge.get("decision") or "",
+                                value_judge.get("confidence")
+                                if value_judge.get("confidence") is not None
+                                else "",
+                                value_judge.get("reason") or "",
+                                judge.get("overall_score")
+                                if judge.get("overall_score") is not None
+                                else "",
+                                judge.get("case_type") or "",
+                                judge.get("judged_at") or "",
+                                judge.get("rationale") or "",
+                                "; ".join(reasons.get("task_completion") or []),
+                                "; ".join(reasons.get("response_quality") or []),
+                                "; ".join(reasons.get("efficiency") or []),
+                                "; ".join(reasons.get("tool_usage") or []),
+                            ]
+                        )
+                    payload = "\ufeff" + buffer.getvalue()
+                    return Response(
+                        content=payload,
+                        media_type="text/csv; charset=utf-8",
+                        headers={
+                            "Content-Disposition": 'attachment; filename="sessions_export.csv"',
+                            "X-Export-Count": str(len(selected)),
+                        },
+                    )
+
+                return {
+                    "reachable": True,
+                    "total": len(selected),
+                    "capped": len(selected) >= safe_limit,
+                    "skipped_ids": skipped_ids,
+                    "sessions": [
+                        {
+                            "session_id": row.get("session_id") or "",
+                            "title": row.get("title") or "",
+                            "user_alias": row.get("user_alias") or "",
+                            "status": row.get("status") or "",
+                            "num_turns": row.get("num_turns"),
+                            "used_skills": row.get("used_skills") or [],
+                            "timestamp": row.get("timestamp") or "",
+                            "ingested_at": row.get("ingested_at") or "",
+                            **_quality(row),
+                        }
+                        for row in selected
+                    ],
+                }
+            except Exception as exc:  # noqa: BLE001
+                logger.error("[Export] conversations export failed: %s", exc)
+                if str(format or "").strip().lower() == "csv":
+                    return Response(
+                        content="\ufefferror\n" + str(exc).replace(",", " "),
+                        media_type="text/csv; charset=utf-8",
+                        status_code=500,
+                    )
+                return JSONResponse(status_code=500, content={"reachable": False, "reason": str(exc)})
 
         @app.post("/conversations/status")
         async def dashboard_conversation_statuses(request: Request):
@@ -4001,19 +5467,77 @@ class RoutesMixin:
                 for value in (raw_ids if isinstance(raw_ids, list) else [])[:500]
             ]
             try:
-                store = SessionStore.from_config(owner.config)
+                store = SessionStore.from_config(
+                    _tenant_effective_config(owner), tenant_id=current_tenant_id()
+                )
+                statuses = await asyncio.to_thread(
+                    store.conversation_statuses, session_ids
+                )
                 return {
                     "reachable": True,
-                    "statuses": store.conversation_statuses(session_ids),
+                    "statuses": statuses,
                 }
             except Exception as exc:  # noqa: BLE001
                 return {"reachable": False, "statuses": {}, "reason": str(exc)}
 
+        @app.post("/conversations/judge-backfill")
+        async def dashboard_conversation_judge_backfill(request: Request):
+            """Sweep archived sessions without a quality score into the async
+            judge queue (admin only). Fills the historical gap for sessions the
+            value filter skipped before post-ingest judging existed."""
+            user = _session_user(request)
+            if user is None or str(user.get("role") or "user") != "admin":
+                raise HTTPException(status_code=403, detail="admin required")
+            judge_queue = getattr(owner, "_session_judge_queue", None)
+            if judge_queue is None or not getattr(judge_queue, "_started", False):
+                raise HTTPException(status_code=503, detail="judge worker unavailable")
+            try:
+                body = await request.json()
+            except Exception:  # noqa: BLE001
+                body = {}
+            body = body if isinstance(body, dict) else {}
+            want_status = str(body.get("status") or "").strip().lower()
+            try:
+                limit = max(1, min(500, int(body.get("limit") or 200)))
+            except (TypeError, ValueError):
+                limit = 200
+            store = SessionStore.from_config(
+                _tenant_effective_config(owner), tenant_id=current_tenant_id()
+            )
+            rows = await asyncio.to_thread(store.list_conversations, limit=100000)
+            tenant_id = current_tenant_id()
+            enqueued: list[str] = []
+            for row in rows:
+                sid = str(row.get("session_id") or "").strip()
+                if not sid:
+                    continue
+                if want_status and str(row.get("status") or "") != want_status:
+                    continue
+                judge = row.get("judge") if isinstance(row.get("judge"), dict) else {}
+                if isinstance(judge.get("overall_score"), (int, float)):
+                    continue
+                if judge_queue.pending(tenant_id, sid):
+                    continue
+                if judge_queue.enqueue(tenant_id, sid):
+                    enqueued.append(sid)
+                if len(enqueued) >= limit:
+                    break
+            return {
+                "reachable": True,
+                "enqueued": len(enqueued),
+                "backlog": judge_queue.backlog(),
+                "session_ids": enqueued[:limit],
+            }
+
         @app.get("/conversations/{session_id}")
         async def dashboard_conversation_detail(session_id: str):
             try:
-                store = SessionStore.from_config(owner.config)
-                session = store.load_session(_safe_session_id(session_id))
+                store = SessionStore.from_config(
+                    _tenant_effective_config(owner), tenant_id=current_tenant_id()
+                )
+                session = await asyncio.to_thread(
+                    store.load_session, _safe_session_id(session_id)
+                )
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
             if not session:
@@ -4023,7 +5547,7 @@ class RoutesMixin:
         @app.get("/conversations/{session_id}/process")
         async def dashboard_conversation_process(session_id: str):
             cycles = _history_cycles(
-                owner.config,
+                _tenant_effective_config(owner),
                 limit=50,
                 session_id=_safe_session_id(session_id),
             )
@@ -4033,7 +5557,7 @@ class RoutesMixin:
         async def dashboard_history(limit: int = 50, session_id: str = ""):
             return {
                 "cycles": _history_cycles(
-                    owner.config,
+                    _tenant_effective_config(owner),
                     limit=max(1, int(limit or 50)),
                     session_id=_safe_session_id(session_id) if session_id else "",
                 )
@@ -4046,7 +5570,9 @@ class RoutesMixin:
             cache_key = f"session-filter-audit:{id(owner.config)}:{safe_limit}:{wanted}"
 
             def load_audit() -> dict[str, Any]:
-                store = SessionStore.from_config(owner.config)
+                store = SessionStore.from_config(
+                    _tenant_effective_config(owner), tenant_id=current_tenant_id()
+                )
                 return {
                     "stats": store.filter_stats(),
                     "items": store.list_filter_audit(
@@ -4078,7 +5604,9 @@ class RoutesMixin:
         @app.get("/api/mined-skills")
         async def api_mined_skills():
             try:
-                store = ValidationStore.from_config(owner.config)
+                store = ValidationStore.from_config(
+                    _tenant_effective_config(owner), tenant_id=current_tenant_id()
+                )
                 registered = {
                     str(skill.get("name") or "")
                     for skill in (
@@ -4115,7 +5643,9 @@ class RoutesMixin:
                     None,
                 )
             try:
-                store = ValidationStore.from_config(owner.config)
+                store = ValidationStore.from_config(
+                    _tenant_effective_config(owner), tenant_id=current_tenant_id()
+                )
                 submitted = submit_mined_skill(
                     store,
                     skill_name,
@@ -4185,7 +5715,9 @@ class RoutesMixin:
                     skill_name,
                     artifact_path=str(payload.get("artifact_path") or ""),
                 )
-                store = ValidationStore.from_config(owner.config)
+                store = ValidationStore.from_config(
+                    _tenant_effective_config(owner), tenant_id=current_tenant_id()
+                )
                 submitted = submit_mined_skill(
                     store,
                     skill_name,
@@ -4228,7 +5760,9 @@ class RoutesMixin:
             }
 
         def _validation_store() -> ValidationStore:
-            return ValidationStore.from_config(owner.config)
+            return ValidationStore.from_config(
+                _tenant_effective_config(owner), tenant_id=current_tenant_id()
+            )
 
         def _validation_candidate_detail_payload(store: ValidationStore, job_id: str) -> dict[str, Any]:
             job = store.load_job(job_id)
@@ -4250,10 +5784,11 @@ class RoutesMixin:
                 store = _validation_store()
                 safe_limit = min(200, max(1, int(limit or 20)))
                 safe_offset = max(0, int(offset or 0))
-                cache_key = f"candidates:{id(owner.config)}:{scope}"
+                cache_key = f"candidates:{id(owner.config)}:{current_tenant_id()}:{scope}"
                 if refresh:
                     _invalidate_dashboard_cache(cache_key)
-                candidates = _cached_dashboard_value(
+                candidates = await asyncio.to_thread(
+                    _cached_dashboard_value,
                     cache_key,
                     15.0,
                     lambda: _candidate_list_payloads(
@@ -4296,7 +5831,7 @@ class RoutesMixin:
 
         @app.post("/api/validation/candidates/{job_id}/validate")
         async def api_validation_candidate_validate(job_id: str, request: Request):
-            _require_admin_user(_session_user(request))
+            _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
             body = await request.json()
             if not isinstance(body, dict):
                 body = {}
@@ -4366,9 +5901,49 @@ class RoutesMixin:
             )
             return decision
 
+        @app.put("/api/validation/candidates/{job_id}/content")
+        async def api_validation_candidate_update_content(job_id: str, request: Request):
+            """Human review edit: revise the candidate skill before publishing.
+
+            Bumps ``candidate_revision`` so the cached True Replay evaluation
+            computed against the previous content is treated as stale and the
+            candidate must be re-evaluated before it can be published again.
+            """
+            _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise HTTPException(status_code=400, detail="invalid request body")
+            store = _validation_store()
+            job = store.load_job(job_id)
+            if not job:
+                raise HTTPException(status_code=404, detail="candidate not found")
+            candidate_skill = (
+                job.get("candidate_skill")
+                if isinstance(job.get("candidate_skill"), dict)
+                else {}
+            )
+            for key in ("name", "description", "category", "content"):
+                if key in body and body[key] is not None:
+                    candidate_skill[key] = str(body[key])
+            if not str(candidate_skill.get("name") or "").strip():
+                raise HTTPException(status_code=400, detail="candidate skill name is required")
+            job["candidate_skill"] = candidate_skill
+            job["candidate_revision"] = max(1, int(job.get("candidate_revision") or 1)) + 1
+            job["updated_at"] = _utc_now_iso()
+            # Drop artifacts bound to the previous revision (cached evaluation,
+            # per-user results, rendered candidate bundle); save_job rewrites
+            # the bundle from the edited candidate_skill.
+            store.reset_job_artifacts(job_id)
+            store.save_job(job)
+            _invalidate_dashboard_cache(
+                f"candidates:{id(owner.config)}",
+                f"status:{id(owner.config)}",
+            )
+            return _validation_candidate_detail_payload(store, job_id)
+
         @app.delete("/api/validation/candidates/{job_id}")
         async def api_validation_candidate_delete(job_id: str, request: Request):
-            _require_admin_user(_session_user(request))
+            _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
             store = _validation_store()
             result = store.delete_job(job_id)
             _invalidate_dashboard_cache(f"candidates:{id(owner.config)}")

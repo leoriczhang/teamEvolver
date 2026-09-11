@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import io
+import threading
+import time
 from typing import Any, Iterator, Mapping
 
 from .base import ObjectInfo, _BytesObject, read_bytes
@@ -12,6 +15,48 @@ from .base import ObjectInfo, _BytesObject, read_bytes
 # Wire constant, do not rename. This string is a shared data contract: Hermes'
 # AgentsHub and the evolve server read team skills from this shared contract.
 _VIKING_ROOT_PREFIX = "team-skill-evolver"
+
+
+@functools.lru_cache(maxsize=8)
+def _shared_client(endpoint: str, timeout: float):
+    """Return a process-wide pooled HTTP client for one OpenViking endpoint.
+
+    Store instances are rebuilt per ingest/operation, but the keep-alive
+    connection pool must outlive them — otherwise every request pays a fresh
+    TCP connect + DNS lookup (seconds for slow resolvers, e.g. ``.local``
+    hostnames on macOS). Sharing one client per (endpoint, timeout) keeps
+    connections warm across instances. ``httpx.Client`` is thread-safe and
+    ``functools.lru_cache`` locks construction, so concurrent ``to_thread``
+    callers share the pool safely.
+    """
+    import httpx
+
+    return httpx.Client(
+        timeout=timeout,
+        limits=httpx.Limits(keepalive_expiry=60.0),
+        transport=httpx.HTTPTransport(retries=1),
+    )
+
+
+# Per-key in-process write locks. OpenViking holds a short per-file lock on
+# every write and returns CONFLICT ("lock acquire timed out after 2ms") when
+# another write to the *same* key is in flight. Evidence records are
+# read-modify-write, so concurrent writers to one key both thrash the server
+# lock and lose updates. Serializing same-key writers per process removes the
+# self-inflicted contention; cross-process writers (rare) fall back to the
+# retry loop below. Keys are unbounded in principle but bounded in practice
+# (skills x evidence windows), so a plain dict is fine.
+_WRITE_LOCKS: dict[str, threading.Lock] = {}
+_WRITE_LOCKS_GUARD = threading.Lock()
+
+
+def _write_lock(uri: str) -> threading.Lock:
+    with _WRITE_LOCKS_GUARD:
+        lock = _WRITE_LOCKS.get(uri)
+        if lock is None:
+            lock = threading.Lock()
+            _WRITE_LOCKS[uri] = lock
+        return lock
 
 
 class OpenVikingObjectStore:
@@ -95,7 +140,9 @@ class OpenVikingObjectStore:
         self._group_id = (group_id or "").strip("/")
         self._namespace = (namespace or "resources").strip().lower()
         self._timeout = timeout
-        self._httpx = httpx
+        # Defaults to the shared pooled client; tests may inject a fake
+        # module-like object exposing ``request()``.
+        self._httpx = _shared_client(self._endpoint, self._timeout)
 
     # ------------------------------------------------------------------ #
     # URI helpers                                                         #
@@ -236,6 +283,7 @@ class OpenVikingObjectStore:
         wait: bool = True,
         timeout: float | None = None,
         telemetry: bool = True,
+        default_mode: str = "upsert",
     ) -> dict[str, Any]:
         """Write one conditional batch below this store's configured root.
 
@@ -264,10 +312,6 @@ class OpenVikingObjectStore:
         if total_bytes > self._BATCH_MAX_TOTAL_BYTES:
             raise ValueError("batch_write total content exceeds 16 MiB")
 
-        captured = {
-            key: dict((preconditions or {}).get(key) or self.object_precondition(key))
-            for key in prepared
-        }
         root_uri = self._base_uri().rstrip("/")
         try:
             self._request(
@@ -278,36 +322,37 @@ class OpenVikingObjectStore:
         except RuntimeError as exc:
             if not any(token in str(exc) for token in ("ALREADY_EXISTS", "CONFLICT")):
                 raise
-        operations: list[dict[str, Any]] = []
-        for key, value in sorted(prepared.items()):
-            operation: dict[str, Any] = {
-                "uri": self._uri(key),
-                "precondition": captured[key],
-            }
-            try:
-                operation["content"] = value.decode("utf-8")
-            except UnicodeDecodeError:
-                operation["content_base64"] = base64.b64encode(value).decode("ascii")
-            operations.append(operation)
-
-        payload: dict[str, Any] = {
-            "root_uri": root_uri,
-            "operations": operations,
-            "wait": bool(wait),
-            "telemetry": bool(telemetry),
+        # The OpenViking /content/batch-write endpoint deadlocked on 2026-09-04
+        # (any batch-write hung until the gateway returned 504, on every
+        # resource and user, while /content/write, mkdir, delete and reads all
+        # worked). Emulate the batch with sequential single-file writes.
+        # Text keys go through put_object (content/write path, replace ->
+        # create -> append strategy). Binary keys cannot go through
+        # content/write (text-only, no content_base64 support) and must not
+        # recurse into put_object's binary->batch_write fallback, so they
+        # raise until the server-side batch-write endpoint is restored.
+        succeeded: list[str] = []
+        failed: list[dict[str, Any]] = []
+        try:
+            for key, value in sorted(prepared.items()):
+                try:
+                    value.decode("utf-8")
+                except UnicodeDecodeError:
+                    raise RuntimeError(
+                        f"OpenViking content/write is text-only and the "
+                        f"batch-write endpoint is unavailable; cannot write "
+                        f"binary object {key}"
+                    )
+                self.put_object(key, value)
+                succeeded.append(key)
+        except Exception as exc:
+            failed.append({"error": str(exc)})
+            raise RuntimeError(f"OpenViking sequential batch write failed: {exc}") from exc
+        result: dict[str, Any] = {
+            "succeeded": succeeded,
+            "failed": failed,
+            "mode": "sequential_fallback",
         }
-        if timeout is not None:
-            payload["timeout"] = float(timeout)
-        response = self._request(
-            "POST",
-            "/api/v1/content/batch-write",
-            json=payload,
-        )
-        result = response.get("result") if isinstance(response, dict) else None
-        if not isinstance(result, dict):
-            raise RuntimeError("OpenViking batch-write returned no result")
-        if response.get("telemetry") is not None:
-            result = {**result, "telemetry": response["telemetry"]}
         return result
 
     def ensure_parent(self, key: str) -> None:
@@ -331,6 +376,11 @@ class OpenVikingObjectStore:
 
     def put_object(self, key: str, data: bytes | str | io.IOBase) -> None:
         uri = self._uri(key)
+        # Serialize same-key writers within this process (see _WRITE_LOCKS).
+        with _write_lock(uri):
+            self._put_object_locked(key, uri, data)
+
+    def _put_object_locked(self, key: str, uri: str, data: bytes | str | io.IOBase) -> None:
         body = read_bytes(data)
         # OpenViking content/write expects text content; binary keys are
         # stored base64-encoded.  We probe by trying utf-8 first.
@@ -338,7 +388,8 @@ class OpenVikingObjectStore:
             content = body.decode("utf-8")
             payload = {"uri": uri, "content": content}
         except UnicodeDecodeError:
-            self.batch_write({key: body})
+            self.ensure_parent(key)
+            self.batch_write({key: body}, default_mode="upsert", wait=False)
             return
         # Strategy: replace (handles existing files of any extension) ->
         # create (new files with allowed extensions) -> append (new files
@@ -354,18 +405,70 @@ class OpenVikingObjectStore:
         try:
             self._request("POST", "/api/v1/content/write", json=payload)
             return
+        except FileNotFoundError:
+            # Nested path whose parent directories do not exist yet. The
+            # remote can transiently report NOT_FOUND right after the parent
+            # directories are created (eventual consistency), so retry once.
+            for attempt in range(2):
+                try:
+                    self.ensure_parent(key)
+                    self._request("POST", "/api/v1/content/write", json=payload)
+                    return
+                except (RuntimeError, FileNotFoundError):
+                    if attempt:
+                        raise
+                    time.sleep(0.5)
         except RuntimeError as exc:
             err_msg = str(exc)
             if "INVALID_ARGUMENT" in err_msg or "does not allow" in err_msg:
-                # Extension restricted in create mode; append creates the file
-                payload["mode"] = "append"
-                self._request("POST", "/api/v1/content/write", json=payload)
-                return
+                # Extension restricted in create mode (e.g. .html). The old
+                # escape hatch was batch-write upsert, but /content/write does
+                # not support upsert mode, and batch_write now routes through
+                # put_object (recursion), so retry the allowed modes directly.
+                self.ensure_parent(key)
+                for retry_mode in ("replace", "create", "append"):
+                    payload["mode"] = retry_mode
+                    try:
+                        self._request("POST", "/api/v1/content/write", json=payload)
+                        return
+                    except (RuntimeError, FileNotFoundError):
+                        continue
+                raise
             if "ALREADY_EXISTS" in err_msg or "CONFLICT" in err_msg:
-                # Race: file appeared between our replace and create attempts
+                # Race: file appeared between our replace and create attempts.
+                # Concurrent writers hold a short per-file server lock, so the
+                # immediate replace can hit CONFLICT (lock acquire timeout).
+                # Contention bursts last a few seconds (parallel groups doing
+                # read-modify-write on the same key), so retry with patient
+                # backoff instead of failing the caller.
                 payload["mode"] = "replace"
-                self._request("POST", "/api/v1/content/write", json=payload)
-                return
+                backoffs = (0.3, 0.6, 1.2, 2.0, 3.0, 5.0, 5.0, 5.0)
+                last_conflict: RuntimeError | None = None
+                for delay in backoffs:
+                    time.sleep(delay)
+                    try:
+                        self._request("POST", "/api/v1/content/write", json=payload)
+                        return
+                    except RuntimeError as retry_exc:
+                        if "CONFLICT" not in str(retry_exc):
+                            raise
+                        last_conflict = retry_exc
+                assert last_conflict is not None
+                raise last_conflict
+            if "NOT_FOUND" in err_msg:
+                # The remote can transiently report NOT_FOUND on create while
+                # parent-directory state is still propagating (observed as
+                # intermittent 404s on the same directory where concurrent
+                # writes succeed). Ensure parents exist and retry.
+                for attempt in range(3):
+                    try:
+                        self.ensure_parent(key)
+                        self._request("POST", "/api/v1/content/write", json=payload)
+                        return
+                    except (RuntimeError, FileNotFoundError):
+                        if attempt == 2:
+                            raise
+                        time.sleep(0.5 * (attempt + 1))
             raise
 
     def delete_object(self, key: str) -> None:
@@ -408,3 +511,97 @@ class OpenVikingObjectStore:
             if isinstance(child_uri, str) and child_uri:
                 leaves.append(child_uri)
         return iter(ObjectInfo(self._strip_uri(uri)) for uri in leaves)
+
+
+# --------------------------------------------------------------------- #
+# Availability probing (local-storage fallback support)                  #
+# --------------------------------------------------------------------- #
+
+# TTL-cached probe verdicts keyed by the store identity tuple. Store
+# instances are rebuilt per ingest/operation, so without a cache every
+# construction would pay a probe request; 30s bounds both the extra traffic
+# and the worst-case time to notice a recovered OpenViking.
+_PROBE_TTL_SECONDS = 30.0
+_PROBE_CACHE: dict[tuple, tuple[float, bool, str]] = {}
+_PROBE_CACHE_GUARD = threading.Lock()
+
+
+def _probe_cache_key(store: "OpenVikingObjectStore", timeout: float) -> tuple:
+    return (
+        store._endpoint,
+        store._account,
+        store._user,
+        store._api_key,
+        store._root_prefix,
+        store._group_id,
+        store._namespace,
+        float(timeout),
+    )
+
+
+def probe_viking_availability(
+    store: "OpenVikingObjectStore",
+    *,
+    timeout: float = 3.0,
+) -> tuple[bool, str]:
+    """Probe whether the OpenViking deployment behind ``store`` is usable.
+
+    Issues a single short-timeout bare ``fs/ls`` (no ``uri`` parameter) through
+    the store's own pooled client, so the probe sees exactly the same
+    auth/headers as production calls. Deliberately NOT a real listing: with a
+    ``uri`` this endpoint can take 9-15s+ server-side on large namespaces (and a
+    cold connection pays ~5s of macOS mDNS DNS tax on ``*.local`` hostnames),
+    which would make any practical timeout misclassify a healthy deployment.
+    A bare call is rejected fast (HTTP 4xx) while still exercising DNS, TCP,
+    TLS-less connect and the server's request loop.
+
+    Classification:
+    - unavailable -> connection/transport errors, timeouts, HTTP 5xx
+      (the server cannot serve storage; callers may fall back to local)
+    - available   -> any answered HTTP response below 500, including 4xx
+      (e.g. auth misconfiguration — the server answered, so falling back
+      would only mask a config error)
+
+    The probe inspects the raw HTTP status rather than ``_request``'s
+    reformatted error strings, so gateway 5xx pages with empty/odd bodies are
+    classified correctly. Verdicts (both directions) are cached for
+    ``_PROBE_TTL_SECONDS`` so per-operation store rebuilds stay cheap.
+    Returns ``(available, reason)``; ``reason`` is empty on success.
+    """
+    import httpx
+
+    key = _probe_cache_key(store, timeout)
+    now = time.monotonic()
+    with _PROBE_CACHE_GUARD:
+        cached = _PROBE_CACHE.get(key)
+        if cached is not None and now - cached[0] < _PROBE_TTL_SECONDS:
+            return cached[1], cached[2]
+
+    available: bool
+    reason: str
+    try:
+        resp = store._httpx.request(
+            "GET",
+            f"{store._endpoint}/api/v1/fs/ls",
+            headers=store._headers(),
+            timeout=timeout,
+        )
+    except (httpx.TimeoutException, httpx.TransportError) as exc:
+        available, reason = False, f"{type(exc).__name__}: {exc}"
+    except Exception as exc:  # noqa: BLE001 - probe must never raise
+        available, reason = False, f"{type(exc).__name__}: {exc}"
+    else:
+        if resp.status_code >= 500:
+            available, reason = False, f"HTTP {resp.status_code}"
+        else:
+            available, reason = True, ""
+
+    with _PROBE_CACHE_GUARD:
+        _PROBE_CACHE[key] = (time.monotonic(), available, reason)
+    return available, reason
+
+
+def reset_probe_cache() -> None:
+    """Drop all cached probe verdicts (tests only)."""
+    with _PROBE_CACHE_GUARD:
+        _PROBE_CACHE.clear()

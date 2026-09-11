@@ -201,7 +201,7 @@ node docs/scripts/check-docs-refs.mjs
 
 提交文档变更前，请逐项确认：
 
-- [ ] 所有代码引用路径真实存在于 `/home/zhangpengkun/teamEvolver/` 下
+- [ ] 所有代码引用路径真实存在于 `/path/to/teamEvolver/` 下
 - [ ] 运行 `node docs/scripts/check-docs-refs.mjs` 无报错
 - [ ] 新文档文件命名符合数字前缀约定
 - [ ] 一级标题（`#`）准确反映文档主题

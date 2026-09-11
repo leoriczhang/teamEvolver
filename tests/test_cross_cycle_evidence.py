@@ -444,6 +444,10 @@ async def test_repeated_skip_debt_is_visible_to_next_planner_cycle(
         EvolveServerConfig(
             llm_api_key="test-key",
             evidence_change_debt_threshold=2,
+            # This test targets change-debt mechanics, not team-evidence
+            # minima; disable the gate so the fake planner is reached.
+            min_group_sessions=0,
+            min_group_users=0,
         ),
         mock=True,
         mock_root=str(tmp_path),
@@ -469,6 +473,110 @@ async def test_repeated_skip_debt_is_visible_to_next_planner_cycle(
     assert second["change_debt"]["reconsideration_ready"] is True
     assert contexts[2]["change_debt"]["reconsideration_ready"] is True
     assert contexts[2]["total_evidence_sessions"] == 3
+
+
+@pytest.mark.anyio
+async def test_team_evidence_gate_blocks_single_user_group(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Evolution below the team minima is skipped before any LLM call, while
+    a group spanning enough sessions/users still reaches the planner."""
+    called: list[str] = []
+
+    async def fake_evolve(
+        _llm,
+        skill_name,
+        _sessions,
+        _current_skill,
+        _existing_skill_names,
+        *,
+        evolution_context=None,
+    ):
+        called.append(skill_name)
+        return {"action": DecisionAction.SKIP, "rationale": "planner skip"}
+
+    monkeypatch.setattr(
+        orchestrator_module,
+        "evolve_skill_from_sessions",
+        fake_evolve,
+    )
+    server = EvolveServer(
+        EvolveServerConfig(llm_api_key="test-key"),
+        mock=True,
+        mock_root=str(tmp_path),
+    )
+
+    def _user_session(session_id: str, user: str) -> dict:
+        session = _session(session_id)
+        session["user_alias"] = user
+        return session
+
+    blocked = await server._evolve_skill_group(
+        "ppt-generation",
+        [_user_session("s-1", "alice"), _user_session("s-2", "alice")],
+        [],
+    )
+    assert blocked["action"] == "skip"
+    assert "insufficient team evidence" in blocked["rationale"]
+    assert called == []
+
+    allowed = await server._evolve_skill_group(
+        "ppt-generation",
+        [_user_session("s-3", "alice"), _user_session("s-4", "bob")],
+        [],
+    )
+    assert called == ["ppt-generation"]
+    assert allowed["rationale"] == "planner skip"
+
+
+@pytest.mark.anyio
+async def test_team_evidence_gate_skip_accumulates_change_debt(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def fake_evolve(
+        _llm,
+        _skill_name,
+        _sessions,
+        _current_skill,
+        _existing_skill_names,
+        *,
+        evolution_context=None,
+    ):
+        raise AssertionError("planner must not run below team minima")
+
+    monkeypatch.setattr(
+        orchestrator_module,
+        "evolve_skill_from_sessions",
+        fake_evolve,
+    )
+    server = EvolveServer(
+        EvolveServerConfig(
+            llm_api_key="test-key",
+            evidence_change_debt_threshold=2,
+        ),
+        mock=True,
+        mock_root=str(tmp_path),
+    )
+
+    def _user_session(session_id: str) -> dict:
+        session = _session(session_id)
+        session["user_alias"] = "alice"
+        return session
+
+    first = await server._evolve_skill_group(
+        "ppt-generation",
+        [_user_session("s-1")],
+        [],
+    )
+    second = await server._evolve_skill_group(
+        "ppt-generation",
+        [_user_session("s-2")],
+        [],
+    )
+    assert first["change_debt"]["reconsideration_ready"] is False
+    assert second["change_debt"]["reconsideration_ready"] is True
 
 
 @pytest.mark.anyio
@@ -532,6 +640,7 @@ async def test_run_once_evolves_skill_groups_concurrently(
         _existing_skill_names,
         *,
         evolution_context=None,
+        library_reader=None,
     ):
         await _observe_concurrency()
         return {
@@ -561,6 +670,11 @@ async def test_run_once_evolves_skill_groups_concurrently(
     monkeypatch.setattr(orchestrator_module, "evolve_skill_from_sessions", fake_evolve)
     monkeypatch.setattr(orchestrator_module, "create_skill_from_sessions", fake_create)
 
+    async def summarize_one(_llm, _session):
+        return ""
+
+    monkeypatch.setattr(orchestrator_module, "summarize_session", summarize_one)
+
     server = EvolveServer(
         EvolveServerConfig(
             llm_api_key="test-key",
@@ -573,19 +687,25 @@ async def test_run_once_evolves_skill_groups_concurrently(
         mock=True,
         mock_root=str(tmp_path),
     )
-    # Two skill groups (explicit references) + one no-skill session. Sessions
-    # live under the ``sessions/`` prefix the drain step scans.
+    # Two skill groups (explicit references, each spanning the team-evidence
+    # minima of 2 sessions / 2 users) + two no-skill sessions from two users.
+    # Sessions live under the ``sessions/`` prefix the drain step scans.
     for idx, skill in enumerate(("alpha-skill", "beta-skill")):
-        session = _session(f"has-skill-{idx}")
-        session["turns"][0]["read_skills"] = [{"skill_name": skill}]
+        for user_idx, user in enumerate(("alice", "bob")):
+            session = _session(f"has-skill-{idx}-{user_idx}")
+            session["user_alias"] = user
+            session["turns"][0]["read_skills"] = [{"skill_name": skill}]
+            server._bucket.put_object(
+                f"sessions/sess-{idx}-{user_idx}.json",
+                json.dumps(session).encode("utf-8"),
+            )
+    for user_idx, user in enumerate(("carol", "dave")):
+        session = _session(f"no-skill-{user_idx}")
+        session["user_alias"] = user
         server._bucket.put_object(
-            f"sessions/sess-{idx}.json",
+            f"sessions/sess-noskill-{user_idx}.json",
             json.dumps(session).encode("utf-8"),
         )
-    server._bucket.put_object(
-        "sessions/sess-noskill.json",
-        json.dumps(_session("no-skill-1")).encode("utf-8"),
-    )
 
     summary = await server._run_once()
 

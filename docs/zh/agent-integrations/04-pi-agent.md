@@ -15,9 +15,9 @@ Pi Agent 通过子进程方式运行 Agent 循环（`pi_rpc_worker.py` 中使用
 集成参考代码位于（宿主侧）：
 
 ```
-/home/zhangpengkun/AgentsHub/backend/app/integrations/team_evolver.py
-/home/zhangpengkun/AgentsHub/backend/app/integrations/team_evolver_replay.py
-/home/zhangpengkun/AgentsHub/backend/app/core/pi_agent.py
+/path/to/AgentsHub/backend/app/integrations/team_evolver.py
+/path/to/AgentsHub/backend/app/integrations/team_evolver_replay.py
+/path/to/AgentsHub/backend/app/core/pi_agent.py
 ```
 
 ## 声明的能力

@@ -4,7 +4,7 @@
 
 Health and status interfaces are used to monitor the running status of the teamEvolver service, check component connectivity, and manually trigger evolution cycles. These interfaces do not require authentication (designed for internal network deployment; access should be controlled at the network boundary).
 
-Code implementation: `teamEvolver/proxy/routes.py` (`/health`, `/healthz`, `/status`, `/trigger`, `/storage/status`)
+Code implementation: `teamEvolver/proxy/routes.py` (`/health`, `/healthz`, `/status`, `/trigger-dreamcycle`, `/storage/status`)
 
 ## 2. Interface and Parameter Specification
 
@@ -224,4 +224,4 @@ Response:
 1. **Load Balancer Health Checks:** Use `/healthz` as the L7 health check path, `/health` as the readiness probe.
 2. **Network Isolation:** `/trigger` and `/trigger-dreamcycle` have no authentication; production environments should restrict access to internal networks via firewalls.
 3. **Monitoring Metrics:** Periodically scrape the `pending_sessions` value from `/status`; continuous growth indicates insufficient evolution processing capacity or queue blockage.
-4. **Storage Alerts:** Trigger an alert when `/storage/status` returns `reachable: false`, indicating shared storage is unavailable and Skill sync and Memory functionality will be degraded.
+4. **Storage Alerts:** Note that a "healthy but in fallback" state exists: `fallback_active: true`, `effective_backend: local`, while `reachable` remains `true`; writes are kept locally and are not automatically synced back to OpenViking. Alert on `fallback_active` being `true` or `effective_backend` not matching the expected backend, rather than relying solely on `reachable: false`; also watch for sustained growth of `mirror.backlog`/`mirror.oldest_age_seconds` and `mirror.dead_letter > 0`.

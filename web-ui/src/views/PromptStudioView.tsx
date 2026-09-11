@@ -59,6 +59,8 @@ export default function PromptStudioView({
   const [testSession, setTestSession] = useState<string>("");
   const [testResult, setTestResult] = useState<PromptTestResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [graphError, setGraphError] = useState("");
+  const [processSettingsUnavailable, setProcessSettingsUnavailable] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [showDefault, setShowDefault] = useState(false);
@@ -82,28 +84,69 @@ export default function PromptStudioView({
 
   const refresh = useCallback(async () => {
     setLoading(true);
+    setGraphError("");
     try {
-      const [g, p, s, process] = await Promise.all([
+      const [graphResult, promptsResult, sessionsResult, processResult] = await Promise.allSettled([
         api<PipelineGraph>("/api/prompt-studio/pipeline"),
         api<{ prompts: PromptSummary[] }>("/api/prompt-studio/prompts"),
         api<{ sessions: PromptStudioSession[] }>("/api/prompt-studio/sessions?limit=50"),
         api<EvolveProcessSettings>("/api/evolve-settings"),
       ]);
-      setGraph(g);
-      setPrompts(p.prompts || []);
-      setProcessSettings(process);
-      setSavedProcessSettings(JSON.stringify(process));
-      setSessions(s.sessions || []);
-      if (!selectedId && p.prompts?.length) {
-        const first = p.prompts[0].id;
+
+      if (graphResult.status === "fulfilled") {
+        setGraph(graphResult.value);
+      } else {
+        const message = graphResult.reason?.message || String(graphResult.reason);
+        setGraph(null);
+        setGraphError(message);
+        toastErr("加载自进化链路失败", message);
+      }
+
+      const nextPrompts = promptsResult.status === "fulfilled"
+        ? promptsResult.value.prompts || []
+        : [];
+      setPrompts(nextPrompts);
+      if (promptsResult.status === "rejected") {
+        toastErr(
+          "加载 Prompt 列表失败",
+          promptsResult.reason?.message || String(promptsResult.reason),
+        );
+      }
+
+      if (sessionsResult.status === "fulfilled") {
+        setSessions(sessionsResult.value.sessions || []);
+        if (!testSession && sessionsResult.value.sessions?.length) {
+          setTestSession(sessionsResult.value.sessions[0].session_id);
+        }
+      } else {
+        setSessions([]);
+        toastErr(
+          "加载测试 Session 失败",
+          sessionsResult.reason?.message || String(sessionsResult.reason),
+        );
+      }
+
+      if (processResult.status === "fulfilled") {
+        setProcessSettings(processResult.value);
+        setSavedProcessSettings(JSON.stringify(processResult.value));
+        setProcessSettingsUnavailable(false);
+      } else {
+        setProcessSettings(null);
+        setSavedProcessSettings("");
+        setProcessSettingsUnavailable(true);
+        if (processResult.reason?.status !== 409) {
+          toastErr(
+            "加载进化过程参数失败",
+            processResult.reason?.message || String(processResult.reason),
+          );
+        }
+      }
+
+      if (!selectedId && nextPrompts.length) {
+        const first = nextPrompts[0].id;
         setSelectedId(first);
         await loadDetail(first);
       }
-      if (!testSession && s.sessions?.length) {
-        setTestSession(s.sessions[0].session_id);
-      }
-    } catch (e: any) {
-      toastErr("加载 Prompt Studio 失败", e.message);
     } finally {
       setLoading(false);
     }
@@ -228,7 +271,13 @@ export default function PromptStudioView({
         }
       >
         <div className="p-4">
-          <PipelineChain graph={graph} selectedPrompt={selectedId} onPick={selectPrompt} />
+          <PipelineChain
+            graph={graph}
+            selectedPrompt={selectedId}
+            onPick={selectPrompt}
+            loading={loading}
+            error={graphError}
+          />
           <div className="mt-3 flex flex-wrap gap-3 text-[11px] text-muted-foreground">
             {(["llm", "logic", "gate", "io"] as const).map((k) => (
               <span key={k} className="flex items-center gap-1.5">
@@ -399,6 +448,11 @@ export default function PromptStudioView({
                       onChange={setProcessSettings}
                     />
                   )}
+                  {processSettingsUnavailable && (
+                    <div className="rounded-lg border border-border bg-background/60 p-3 text-xs text-muted-foreground">
+                      当前租户未开放服务级进化过程参数；阶段 Prompt 与模型参数仍可编辑。
+                    </div>
+                  )}
 
 
                   <div className={cn("grid gap-3", showDefault && "lg:grid-cols-2")}>
@@ -455,10 +509,26 @@ export default function PromptStudioView({
                   </div>
 
                   {testResult ? (
-                    <div className="grid gap-3 lg:grid-cols-3">
-                      <IoBlock title="① System Prompt（实际下发）" body={testResult.system_prompt} />
-                      <IoBlock title="② User 消息（由会话构造）" body={testResult.user_message} />
-                      <IoBlock title="③ 模型输出" body={testResult.output} highlight />
+                    <div className="grid gap-3">
+                      <div className="grid gap-3 lg:grid-cols-3">
+                        <IoBlock title="① System Prompt（实际下发）" body={testResult.system_prompt} />
+                        <IoBlock title="② User 消息（由会话构造）" body={testResult.user_message} />
+                        <IoBlock title="③ 模型输出" body={testResult.output} highlight />
+                      </div>
+                      {testResult.rounds && testResult.rounds.length > 0 ? (
+                        <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+                          <span>循环轮次：</span>
+                          {testResult.rounds.map((r) => (
+                            <span
+                              key={r.round}
+                              className="rounded bg-muted px-1.5 py-0.5 font-mono"
+                              title={r.error || (r.errors || []).join("；") || ""}
+                            >
+                              R{r.round}·{r.action || (r.tools && r.tools.length ? r.tools.join("+") : r.type)}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
                   ) : (
                     <Empty>选择会话后点击「测试」，即可看到该阶段实际的 system prompt、user 输入和模型输出。</Empty>
@@ -477,13 +547,23 @@ function PipelineChain({
   graph,
   selectedPrompt,
   onPick,
+  loading,
+  error,
 }: {
   graph: PipelineGraph | null;
   selectedPrompt: string;
   onPick: (stageId: string) => void;
+  loading: boolean;
+  error: string;
 }) {
-  if (!graph?.nodes?.length) {
+  if (loading && !graph) {
     return <Empty>链路加载中…</Empty>;
+  }
+  if (error && !graph) {
+    return <Empty>链路加载失败：{error}</Empty>;
+  }
+  if (!graph?.nodes?.length) {
+    return <Empty>暂无链路节点。</Empty>;
   }
   // Derive layered columns from the real edges (longest-path levelling) so
   // parallel branches — e.g. Evolve 与 Create 同时从 Group 分叉 — render as

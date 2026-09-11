@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any, Optional
@@ -21,70 +22,95 @@ from ..kernel.llm import AsyncLLMClient
 logger = logging.getLogger(__name__)
 
 _JUDGE_SYSTEM = """\
-You are a session-level evaluator for teamEvolver trajectories.
+你是 teamEvolver 轨迹的会话级评估者。
 
-You will receive one session with:
-- a lossless trajectory
-- an LLM-generated analysis summary
-- extracted source artifacts that the agent read
-- lightweight metadata such as prior PRM scores and tool-error flags
-- extracted final output artifacts when the agent wrote files
+你会收到一个会话，其中包含：
+- 无损轨迹（lossless trajectory）
+- 一份 LLM 生成的分析摘要
+- agent 读取过的源工件（source artifacts）
+- 轻量元数据，例如历史 PRM 分数和工具错误标记
+- 当 agent 写过文件时，其最终输出工件的提取内容
 
-Score the session on a 0.0-1.0 scale for:
-- task_completion: whether the user's goal was completed
-- response_quality: correctness, completeness, and clarity of the final outcome
-- efficiency: whether the path avoided unnecessary retries / detours
-- tool_usage: whether tool usage was appropriate and effective
+请按 0.0-1.0 为以下维度打分：
+- task_completion：用户目标是否完成
+- response_quality：最终结果的正确性、完整性与清晰度
+- efficiency：执行路径是否避免了不必要的重试/绕路
+- tool_usage：工具使用是否恰当且有效
 
-Use this weighting for the overall score:
+总评使用以下权重：
 - task_completion: 0.55
 - response_quality: 0.30
 - efficiency: 0.05
 - tool_usage: 0.10
 
-Guidelines:
-- 1.0 means clearly excellent on that dimension.
-- 0.5 means mixed / uncertain / partially successful.
-- 0.0 means clearly failed on that dimension.
-- Prefer the trajectory as ground truth; use the summary as supporting analysis.
-- Distinguish "missing evidence" from "clear failure". If evidence is weak, be conservative rather than extreme.
-- Do not assume benchmark labels exist.
-- Prioritize factual correctness and goal completion over polish.
-- Do not heavily penalize framework/runtime startup noise (for example benign prologue reads,
-  environment initialization, or short non-blocking detours) unless it materially interferes
-  with solving the task.
-- Use low efficiency scores only for severe wasted effort: repeated failed retries, long
-  thrashing loops, or large amounts of irrelevant work.
-- Judge tool_usage mainly by whether the core tools chosen were appropriate for reaching a
-  correct result; do not over-penalize incidental startup/tooling noise.
-- If the session includes concrete output artifacts (for example file contents written by the
-  agent), treat those artifacts as strong evidence for task_completion and response_quality.
-- If the session includes concrete source artifacts that the agent read from the task workspace,
-  use those source artifacts as the primary factual basis for judging whether the final outputs
-  are accurate.
-- When written outputs match the requested schema/format and are consistent with the available
-  evidence, score completion/quality based primarily on correctness of those outputs even if
-  earlier exploration was noisy.
-- Only lower completion/quality sharply when the final outputs are missing, malformed, clearly
-  contradicted by evidence, or unsupported by the available facts.
-- Treat broad labels such as "PPT", "slides", or "presentation" as the presentation goal,
-  not automatically as a native `.pptx` file requirement. An HTML slide deck can satisfy the
-  request unless the user explicitly requires PowerPoint/PPTX, native editable slide objects,
-  or later rejects HTML delivery.
-- Do not penalize the agent merely because another available Skill could also have completed
-  the task. Judge the Skill and tools actually used by their observed results.
+评分准则：
+- 1.0 表示该维度明显优秀。
+- 0.5 表示好坏参半 / 不确定 / 部分成功。
+- 0.0 表示该维度明显失败。
+- 以轨迹为事实依据（ground truth）；摘要仅作为辅助分析。
+- 区分"缺少证据"与"明确失败"。证据不足时宁可保守，不要走极端。
+- 不要假设存在基准（benchmark）标签。
+- 把事实正确性和目标完成度置于表面润色之上。
 
-Return EXACTLY one JSON object with:
+通用评判原则（适用于任何具体场景）：
+- 按用户目标与可交付结果判断交付形式。除非用户明确要求特定载体（文件格式/可编辑对象）
+  或事后拒绝了该交付，否则能够等效达成目标的替代形式不扣分。
+- 区分与任务求解无关的环境/框架/启动噪音（无害的开场读取、初始化、短暂非阻塞绕路）
+  与实质性无效劳动（反复失败的重试、长时间打转、大量无关工作）。只对后者扣效率分。
+- 基于实际观测到的路径与结果评判，不因存在其他同样可行的路径或 Skill 而扣分。
+- 不得基于"某技能/工具可能适用"的推测扣 tool_usage 分；只有轨迹中存在明确证据
+  （读取过该技能/工具的文档，或其说明明确覆盖该请求）时，才能作为未用对工具的依据。
+- 当请求超出 agent 能力或知识范围，且 agent 诚实说明、做出了合理的路由或澄清尝试时，
+  按过程质量（沟通与路由正确性）评分，不要因客观不可答而给 task_completion 极低分；
+  这类会话应标记为 defect 演化证据（知识缺口），而非劣质执行。
+- 如果会话包含具体的输出工件（例如 agent 写入的文件内容），将这些工件作为 task_completion
+  和 response_quality 的强证据。
+- 如果会话包含 agent 从任务工作区读取的具体源工件，将这些源工件作为判断最终输出是否准确的
+  主要事实依据。
+- 当写入的产出符合要求的 schema/格式，且与现有证据一致时，即使前期探索比较混乱，也应主要
+  基于产出的正确性来打完成度/质量分。
+- 只有当最终产出缺失、格式错误、与证据明显矛盾或缺乏事实支撑时，才大幅降低完成度/质量分。
+
+演化证据标记：
+除打分外，请判断该会话对团队技能演化的沉淀价值，输出 evolution_evidence：
+- "defect"：会话暴露了可复用的技能/流程缺陷——错误的技能或工具路由、违反技能规范、
+  被用户纠正、反复重试同一错误，或诚实暴露的知识/能力缺口（含无产出但源于知识缺失的失败）。
+- "exemplary"：会话是特别优秀的执行范例——技能/工具路由正确且理由清晰，产出高质量且
+  经得起源工件核对，值得作为范例沉淀供团队复用。
+- "none"：常规成功或失败，无上述沉淀价值。
+当 evolution_evidence 不是 "none" 时，用 evidence_reason 用中文简述依据（1-3 句）。
+宁可标记 "none"，不要为了标记而标记。
+
+只返回一个 JSON 对象，格式如下：
 {
-  "task_completion": <float 0..1>,
-  "response_quality": <float 0..1>,
-  "efficiency": <float 0..1>,
-  "tool_usage": <float 0..1>,
-  "overall_score": <float 0..1>,
-  "rationale": "<brief explanation>"
+  "task_completion": <浮点数 0..1>,
+  "response_quality": <浮点数 0..1>,
+  "efficiency": <浮点数 0..1>,
+  "tool_usage": <浮点数 0..1>,
+  "overall_score": <浮点数 0..1>,
+  "evolution_evidence": "defect|exemplary|none",
+  "evidence_reason": "<中文说明，evolution_evidence 为 none 时可省略>",
+  "reasons": {
+    "task_completion": ["<要点>", "<要点>"],
+    "response_quality": ["<要点>"],
+    "efficiency": ["<要点>"],
+    "tool_usage": ["<要点>"]
+  },
+  "rationale": "<简要说明>"
 }
 
-No markdown fences. No extra text.
+`reasons` 中必须为四个维度各写 1-4 个评分要点，要求：
+- 每个要点单独成条（字符串数组的一项），一句话说明一个事实或判断。
+- 要点必须引用轨迹中的具体依据（工具调用及其结果、最终产出内容、错误信息、轮次数等），
+  不要泛泛而谈。
+- 要点必须与该维度的分数一致：高分要点应说明做得好的具体表现，低分要点应指出具体的
+  问题或缺失的证据。
+- 每个维度的要点合在一起应能独立解释该维度的分数，不依赖其他维度的上下文。
+
+`rationale` 必须用中文书写。`reasons` 中每个要点也必须用中文书写。工具名、命令、路径、\
+报错信息等专有名词可保留英文原文，但叙述语言必须是中文——不要在同一段落中英文混杂。
+
+不要 markdown 围栏。不要多余文本。
 """
 
 _JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -157,6 +183,45 @@ def _normalize_score(value: Any) -> Optional[float]:
         return None
     score = max(0.0, min(1.0, float(value)))
     return round(score, 3)
+
+
+def _normalize_reason_list(value: Any) -> list[str]:
+    """Coerce one dimension's reason payload into a list of bullet strings.
+
+    Tolerates models that emit a single string, a multi-line string, or a
+    list with empty/None entries instead of the required string array.
+    """
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.splitlines()]
+        return [part for part in parts if part]
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if text:
+            items.append(text)
+    return items
+
+
+def _parse_reasons(payload: dict[str, Any]) -> dict[str, list[str]]:
+    """Extract per-dimension scoring reasons from the judge payload.
+
+    Accepts the canonical nested ``reasons`` object plus flat fallbacks
+    (``<dim>_reasons`` / ``<dim>_reason``) so slightly-off-schema outputs
+    still surface their reasons.
+    """
+    nested = payload.get("reasons") if isinstance(payload.get("reasons"), dict) else {}
+    reasons: dict[str, list[str]] = {}
+    for key in _DIMENSION_KEYS:
+        items = _normalize_reason_list(nested.get(key))
+        if not items:
+            items = _normalize_reason_list(payload.get(f"{key}_reasons"))
+        if not items:
+            items = _normalize_reason_list(payload.get(f"{key}_reason"))
+        if items:
+            reasons[key] = items
+    return reasons
 
 
 def _clip_text(value: Any, max_chars: int = 8000) -> str:
@@ -418,10 +483,68 @@ def _parse_scores(raw: str) -> Optional[dict[str, Any]]:
         "overall_score": overall,
         "rationale": str(payload.get("rationale") or "").strip(),
     }
+    reasons = _parse_reasons(payload)
+    if reasons:
+        result["reasons"] = reasons
     raw_overall = _normalize_score(payload.get("overall_score"))
     if raw_overall is not None:
         result["model_overall_score"] = raw_overall
+    evidence = str(payload.get("evolution_evidence") or "").strip().lower()
+    result["evolution_evidence"] = evidence if evidence in {"defect", "exemplary", "none"} else "none"
+    if result["evolution_evidence"] != "none":
+        evidence_reason = str(payload.get("evidence_reason") or "").strip()
+        if evidence_reason:
+            result["evidence_reason"] = evidence_reason
     return result
+
+
+_DEFECT_SCORE_THRESHOLD_DEFAULT = 0.5
+
+
+def _defect_threshold() -> float:
+    try:
+        return max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    os.environ.get(
+                        "EVOLVE_REQUEUE_DEFECT_THRESHOLD",
+                        str(_DEFECT_SCORE_THRESHOLD_DEFAULT),
+                    )
+                ),
+            ),
+        )
+    except ValueError:
+        return _DEFECT_SCORE_THRESHOLD_DEFAULT
+
+
+def judge_has_defect_evidence(scores: Any, threshold: Optional[float] = None) -> bool:
+    """True when a judge result carries reusable defect evidence.
+
+    Either the overall score falls below the requeue threshold (a failing
+    session likely exposing a skill/process gap) or the judge explicitly
+    flagged ``evolution_evidence == "defect"``.
+    """
+    if not isinstance(scores, dict):
+        return False
+    if threshold is None:
+        threshold = _defect_threshold()
+    overall = scores.get("overall_score")
+    if (
+        isinstance(overall, (int, float))
+        and not isinstance(overall, bool)
+        and float(overall) < threshold
+    ):
+        return True
+    return str(scores.get("evolution_evidence") or "").strip().lower() == "defect"
+
+
+def judge_is_exemplary(scores: Any) -> bool:
+    """True when the judge flagged the session as an exemplary goodcase."""
+    if not isinstance(scores, dict):
+        return False
+    return str(scores.get("evolution_evidence") or "").strip().lower() == "exemplary"
 
 
 async def judge_session(

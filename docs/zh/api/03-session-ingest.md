@@ -78,9 +78,9 @@ Content-Type: application/json
 | `status` | string | 处理状态：`queued`（已入队）、`duplicate`（重复跳过）、`skipped`（无价值跳过） |
 | `session_id` | string | Session ID |
 | `queued` | boolean | 是否已进入进化队列 |
-| `key` | string | 队列键（仅 queued 时返回） |
+| `key` | string | 队列对象键，格式为 `<存储前缀>sessions/{session_id}.json`（`teamEvolver/session_store.py:queue_key`，仅 queued 时返回） |
 | `trigger_scheduled` | boolean | 是否已调度进化触发（仅 queued 时返回） |
-| `value_judge` | object | 价值分类结果（skipped/queued 时返回） |
+| `value_judge` | object | 价值分类结果（skipped/queued 时返回）：`decision`（`valuable|memory_candidate|task_only|chitchat`）、`confidence`、`reason`、`memory_candidates`、`mode`（`deterministic|model|heuristic`） |
 
 ## 3. 使用示例
 
@@ -140,12 +140,14 @@ curl -X POST "http://localhost:52010/ingest_session" \
   "status": "queued",
   "session_id": "sess-20240115-001",
   "queued": true,
-  "key": "sess-20240115-001",
+  "key": ".../sessions/sess-20240115-001.json",
   "trigger_scheduled": true,
   "value_judge": {
     "decision": "valuable",
     "confidence": 0.92,
-    "reason": "包含具体技术问题和有效解决方案"
+    "reason": "包含具体技术问题和有效解决方案",
+    "memory_candidates": [],
+    "mode": "model"
   }
 }
 ```
@@ -168,9 +170,11 @@ curl -X POST "http://localhost:52010/ingest_session" \
   "session_id": "sess-20240115-001",
   "queued": false,
   "value_judge": {
-    "decision": "frivolous",
+    "decision": "task_only",
     "confidence": 0.85,
-    "reason": "闲聊内容，无技术价值"
+    "reason": "真实任务请求，但尚无完成成果或可演化证据",
+    "memory_candidates": [],
+    "mode": "model"
   }
 }
 ```

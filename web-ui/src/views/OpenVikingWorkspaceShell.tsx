@@ -366,7 +366,7 @@ export default function OpenVikingWorkspaceShell({
     selectedScope?.can_write &&
     (selectedScope.kind === "memory" || selectedScope.kind === "skills")
   );
-  const hasEditableScopes = spaceScopes.some(
+  const hasEditableScopes = !!config?.enabled && spaceScopes.some(
     (scope) => scope.can_write && (scope.kind === "memory" || scope.kind === "skills"),
   );
     const currentScope = scopeForUri(currentUri);
@@ -532,11 +532,11 @@ export default function OpenVikingWorkspaceShell({
   async function chooseSpace(next: SpaceConfig) {
     setSurface("workspace");
     setActiveSpaceKey(next.key);
-    if (config) await loadSpace(next, activeUserId, config);
+    if (config?.enabled) await loadSpace(next, activeUserId, config);
   }
 
   async function refreshTree(resetSelection = false) {
-    if (config) await loadSpace(activeSpace, activeUserId, config, resetSelection);
+    if (config?.enabled) await loadSpace(activeSpace, activeUserId, config, resetSelection);
   }
 
   async function openEntry(entry: WorkspaceEntry) {
@@ -712,18 +712,6 @@ export default function OpenVikingWorkspaceShell({
     }
   }
 
-  if (!config?.enabled) {
-    return (
-      <div className="px-5 pb-5">
-        <div className="rounded-xl border border-border bg-surface p-8">
-          <Empty>
-            请先在“运行状态”中启用 OpenViking，并配置本地部署或云端 endpoint。
-          </Empty>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="w-full px-4 pb-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-surface px-3 py-2">
@@ -731,7 +719,7 @@ export default function OpenVikingWorkspaceShell({
             {spaces.map((space) => {
             const unavailable =
               mode === "workspace" &&
-              config.personal_access_configured === false && isPersonalSpace(space.key);
+              config?.personal_access_configured === false && isPersonalSpace(space.key);
             return (
               <button
                   key={space.key}
@@ -765,10 +753,10 @@ export default function OpenVikingWorkspaceShell({
             {selected?.uri || currentUri || activeSpace.label}
           </span>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1.5">
           {mode === "workspace" && labs && (
             <div
-              className="mr-1 flex rounded-lg border border-border bg-muted p-0.5"
+              className="mr-1 flex max-w-full flex-wrap rounded-lg border border-border bg-muted p-0.5"
               role="tablist"
               aria-label="Agent 工作空间视图"
             >
@@ -848,7 +836,7 @@ export default function OpenVikingWorkspaceShell({
               </Button>
             )
           )}
-          {config.studio_url && (
+          {config?.studio_url && (
             <Button asChild variant="outline" size="sm">
               <a href={config.studio_url} target="_blank" rel="noreferrer">
                 OpenViking Studio <ExternalLink />
@@ -871,6 +859,12 @@ export default function OpenVikingWorkspaceShell({
         <div className="min-h-0">{labs.skill}</div>
       ) : surface === "memory-lab" && labs ? (
         <div className="min-h-0">{labs.memory}</div>
+      ) : !config?.enabled ? (
+        <div className="p-8">
+          <Empty>
+            请先在“运行状态”中启用 OpenViking，并配置本地部署或云端 endpoint。
+          </Empty>
+        </div>
       ) : (
         <div
           className="grid min-h-[560px] overflow-hidden rounded-xl border border-border bg-surface shadow-sm xl:grid-cols-[minmax(270px,0.78fr)_minmax(420px,1.35fr)_minmax(330px,0.9fr)]"

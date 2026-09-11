@@ -52,17 +52,17 @@ Trusted 自建模式下，只要服务端已有可用服务 Key，个人空间�
 
 ## 平台资产目录全景
 
-`viking://resources/team-skill-evolver/` 同时承载团队 Skill 与进化闭环内部数据。控制台「平台资产」只展示 allowlist 中的平台目录，不会把 `peers/` 等 Agent 资产混入内部视图。根目录下的条目按 7 个功能组划分。
+`viking://resources/team-skill-evolver/` 同时承载团队 Skill 与进化闭环内部数据。控制台「平台资产」只展示 allowlist 中的平台目录，不会把 `peers/` 等 Agent 资产混入内部视图。根目录下的条目按 7 个功能组划分。各组存储位置：仅第 1 组中的 `skills/<name>/` 子树异步镜像到 OpenViking（本地主存仍在本地对象存储）；第 2–6 组全部为本地存储；第 7 组为 OpenViking 远端固有结构。
 
-### 1. 技能库（成品）
+### 1. 技能库（成品）— 本地主存，仅 `skills/<name>/` 异步镜像到 OpenViking
 
 | 条目 | 类型 | 用途 | 代码入口 |
 |------|------|------|----------|
-| `skills/` | 目录 | 团队正式技能库，每个技能一个子目录（`skills/<name>/SKILL.md` + 版本）。Pi Agent / Hermes 从此读取团队技能 | `teamEvolver/skills/hub.py` |
+| `skills/` | 目录 | 团队正式技能库，每个技能一个子目录（`skills/<name>/SKILL.md` + 版本）。Pi Agent / Hermes 从此读取团队技能。本地优先发布；`teamEvolver/skills/mirror.py:VikingSkillMirror` 将 push/delete 事件写入持久化 spool，由后台 flusher（`teamEvolver/proxy/server.py`，约 30 秒一轮）异步投递到 OpenViking | `teamEvolver/skills/hub.py`、`teamEvolver/skills/mirror.py` |
 | `manifest.json` | 文件 | 技能清单索引：技能名 → 版本/哈希，用于判断本地与远端差异 | `teamEvolver/skills/hub.py` |
 | `evolve_skill_registry.json` | 文件 | 技能 ID 登记表，保证技能 ID 跨节点稳定 | `teamEvolver/skills/registry.py` |
 
-### 2. 技能实验室与进化素材
+### 2. 技能实验室与进化素材 — 本地存储
 
 对应「数据驱动进化」闭环：从历史会话挖掘数据集，配套生成测试集并验证效果。
 
@@ -156,6 +156,8 @@ Agent 会话采集
 | 作用域映射与工作区 API | `teamEvolver/proxy/openviking_workspace.py` |
 | 账号注册表与 Key 解析 | `teamEvolver/proxy/users_admin.py` |
 | OpenViking 对象存储 | `teamEvolver/storage/viking.py` |
+| 内置本地对象存储 | `teamEvolver/storage/local.py:LocalObjectStore` |
+| Skill 库异步镜像（spool + flusher） | `teamEvolver/skills/mirror.py:VikingSkillMirror` |
 | 隔离前缀 `peers/` | `teamEvolver/storage/base.py` |
 | 会话存储 | `teamEvolver/session_store.py` |
 | 验证存储 | `teamEvolver/validation/store.py` |

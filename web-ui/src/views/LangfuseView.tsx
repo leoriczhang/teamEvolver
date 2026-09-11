@@ -7,32 +7,27 @@ import {
   StatCard,
   type PillTone,
 } from "@/components/common";
+import LegacyConverterPanel from "@/components/LegacyConverterPanel";
+import { MapperRegistryPanel } from "@/components/MapperRegistryPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import {
-  Dialog,
-  DialogClose,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import {
   api,
+  getActiveTenantId,
+  updateTenantConfig,
+  type DatasourceConfig,
   type LangfuseConfig,
   type LangfuseFilters,
-  type LangfuseMapperFormatSpec,
-  type LangfuseMapperTemplateResp,
-  type LangfuseMapperTestResp,
+  type LangfuseMapperEntry,
   type LangfusePullResp,
   type LangfuseSessionsResp,
   type LangfuseSessionPreview,
   type LangfuseStatus,
   type LangfuseTestResp,
+  type LangfuseTracingConfig,
   type UserProfile,
 } from "@/api/client";
+import SessionModal from "@/views/dashboard/SessionModal";
 import { fmtTime } from "@/lib/format";
 import { toastErr, toastOk } from "@/lib/toast";
 
@@ -66,10 +61,9 @@ const EMPTY_FORM: FilterForm = {
   max_sessions: "",
 };
 
-// Editable connection + default-filter settings (persisted server-side).
-interface ConfigForm {
+// Tenant-scoped inbound connection + default filters.
+interface SourceConfigForm {
   enabled: boolean;
-  tracing_enabled: boolean;
   host: string;
   public_key: string;
   secret_key: string;
@@ -77,17 +71,12 @@ interface ConfigForm {
   default_environment: string;
   default_user_id: string;
   default_tags: string;
-  tracing_environment: string;
-  tracing_release: string;
-  tracing_sample_rate: string;
-  tracing_capture_content: boolean;
-  mapper_enabled: boolean;
-  mapper_code: string;
+  default_trace_name: string;
+  mappers: LangfuseMapperEntry[];
 }
 
-const EMPTY_CONFIG: ConfigForm = {
+const EMPTY_SOURCE_CONFIG: SourceConfigForm = {
   enabled: false,
-  tracing_enabled: false,
   host: "https://cloud.langfuse.com",
   public_key: "",
   secret_key: "",
@@ -95,12 +84,30 @@ const EMPTY_CONFIG: ConfigForm = {
   default_environment: "",
   default_user_id: "",
   default_tags: "",
-  tracing_environment: "local",
-  tracing_release: "",
-  tracing_sample_rate: "1",
-  tracing_capture_content: true,
-  mapper_enabled: false,
-  mapper_code: "",
+  default_trace_name: "",
+  mappers: [],
+};
+
+interface TracingConfigForm {
+  enabled: boolean;
+  host: string;
+  public_key: string;
+  secret_key: string;
+  environment: string;
+  release: string;
+  sample_rate: string;
+  capture_content: boolean;
+}
+
+const EMPTY_TRACING_CONFIG: TracingConfigForm = {
+  enabled: false,
+  host: "",
+  public_key: "",
+  secret_key: "",
+  environment: "local",
+  release: "",
+  sample_rate: "1",
+  capture_content: true,
 };
 
 function splitList(value: string): string[] {
@@ -160,24 +167,36 @@ export default function LangfuseView({
   user?: UserProfile | null;
 }) {
   const isAdmin = user?.role === "admin";
+  const projectId = isAdmin ? getActiveTenantId() : "";
+  const configPrefix = projectId && projectId !== "default" ? `/api/tenants/${encodeURIComponent(projectId)}` : "/api";
+  const configPath = `${configPrefix}/langfuse-config`;
   const [status, setStatus] = useState<LangfuseStatus | null>(null);
   const [config, setConfig] = useState<LangfuseConfig | null>(null);
-  const [cfgForm, setCfgForm] = useState<ConfigForm>(EMPTY_CONFIG);
+  const [cfgForm, setCfgForm] = useState<SourceConfigForm>(EMPTY_SOURCE_CONFIG);
+  const [tracingConfig, setTracingConfig] = useState<LangfuseTracingConfig | null>(null);
+  const [tracingForm, setTracingForm] = useState<TracingConfigForm>(EMPTY_TRACING_CONFIG);
   const [showConfig, setShowConfig] = useState(false);
+  const [showTracingConfig, setShowTracingConfig] = useState(false);
   const [form, setForm] = useState<FilterForm>(EMPTY_FORM);
   const [sessions, setSessions] = useState<LangfuseSessionPreview[] | null>(null);
   const [pull, setPull] = useState<LangfusePullResp | null>(null);
+  const [ingestedSid, setIngestedSid] = useState<string | null>(null);
   const [loadingStatus, setLoadingStatus] = useState(false);
   const [savingCfg, setSavingCfg] = useState(false);
   const [testingCfg, setTestingCfg] = useState(false);
+  const [savingTracing, setSavingTracing] = useState(false);
+  const [testingTracing, setTestingTracing] = useState(false);
   const [listing, setListing] = useState(false);
   const [pulling, setPulling] = useState(false);
   const loaded = useRef(false);
+  const [dsConfig, setDsConfig] = useState<DatasourceConfig | null>(null);
+  const [sourceType, setSourceType] = useState("langfuse");
+  const [converterCode, setConverterCode] = useState("");
+  const [savingSource, setSavingSource] = useState(false);
 
   const applyConfigToForms = useCallback((cfg: LangfuseConfig) => {
     setCfgForm({
       enabled: !!cfg.enabled,
-      tracing_enabled: !!cfg.tracing_enabled,
       host: cfg.host || "https://cloud.langfuse.com",
       public_key: cfg.public_key || "",
       secret_key: "",
@@ -185,32 +204,57 @@ export default function LangfuseView({
       default_environment: (cfg.default_environment || []).join(", "),
       default_user_id: cfg.default_user_id || "",
       default_tags: (cfg.default_tags || []).join(", "),
-      tracing_environment: cfg.tracing_environment || "local",
-      tracing_release: cfg.tracing_release || "",
-      tracing_sample_rate: String(cfg.tracing_sample_rate ?? 1),
-      tracing_capture_content: cfg.tracing_capture_content !== false,
-      mapper_enabled: !!cfg.mapper_enabled,
-      mapper_code: cfg.mapper_code || "",
+      default_trace_name: cfg.default_trace_name || "",
+      mappers: cfg.mappers || [],
+    });
+  }, []);
+
+  const applyTracingConfigToForm = useCallback((cfg: LangfuseTracingConfig) => {
+    setTracingForm({
+      enabled: !!cfg.enabled,
+      host: cfg.host || "",
+      public_key: "",
+      secret_key: "",
+      environment: cfg.environment || "local",
+      release: cfg.release || "",
+      sample_rate: String(cfg.sample_rate ?? 1),
+      capture_content: cfg.capture_content !== false,
     });
   }, []);
 
   const refresh = useCallback(
     async (prefillFilters: boolean) => {
       setLoadingStatus(true);
-      try {
-        const [statusData, cfgData] = await Promise.all([
-          api<LangfuseStatus>("/langfuse/status"),
-          api<LangfuseConfig>("/api/langfuse-config"),
-        ]);
-        setStatus(statusData);
+      const statusPromise = api<LangfuseStatus>("/langfuse/status").catch((e: any) => {
+        toastErr("加载 Langfuse 状态失败", e.message);
+        return null;
+      });
+      const cfgPromise = api<LangfuseConfig>(configPath).catch((e: any) => {
+        // 401 means the session expired — the app-level auth gate will
+        // redirect to login; don't double-report with a scary toast.
+        if (e?.status !== 401) {
+          toastErr("加载 Langfuse 配置失败", e.message);
+        }
+        return null;
+      });
+      const tracingPromise = api<LangfuseTracingConfig>("/api/langfuse-tracing-config").catch((e: any) => {
+        if (e?.status !== 401) {
+          toastErr("加载全局链路观测配置失败", e.message);
+        }
+        return null;
+      });
+      const dsPromise = api<DatasourceConfig>(`${configPrefix}/datasource-config`).catch(() => null);
+      const [statusData, cfgData, tracingData, dsData] = await Promise.all([
+        statusPromise,
+        cfgPromise,
+        tracingPromise,
+        dsPromise,
+      ]);
+      if (statusData) setStatus(statusData);
+      if (cfgData) {
         setConfig(cfgData);
         applyConfigToForms(cfgData);
-        // Auto-open the settings panel when the integration is not yet usable.
-        if (
-          (!cfgData.enabled && !cfgData.tracing_enabled)
-          || !cfgData.public_key_present
-          || !cfgData.secret_key_present
-        ) {
+        if (!cfgData.enabled || !cfgData.public_key_present || !cfgData.secret_key_present) {
           setShowConfig(true);
         }
         // Prefill filter form with configured defaults on first load only.
@@ -225,13 +269,27 @@ export default function LangfuseView({
             trace_name: cfgData.default_trace_name || "",
           }));
         }
-      } catch (e: any) {
-        toastErr("加载 Langfuse 状态失败", e.message);
-      } finally {
-        setLoadingStatus(false);
       }
+      if (tracingData) {
+        setTracingConfig(tracingData);
+        applyTracingConfigToForm(tracingData);
+        if (
+          !tracingData.enabled
+          || !tracingData.host
+          || !tracingData.public_key_present
+          || !tracingData.secret_key_present
+        ) {
+          setShowTracingConfig(true);
+        }
+      }
+      if (dsData) {
+        setDsConfig(dsData);
+        setSourceType(dsData.type || "langfuse");
+        setConverterCode(dsData.legacy_converter_code || "");
+      }
+      setLoadingStatus(false);
     },
-    [applyConfigToForms]
+    [applyConfigToForms, applyTracingConfigToForm]
   );
 
   useEffect(() => {
@@ -247,23 +305,18 @@ export default function LangfuseView({
     try {
       const payload: LangfuseConfig = {
         enabled: cfgForm.enabled,
-        tracing_enabled: cfgForm.tracing_enabled,
         host: cfgForm.host.trim(),
         max_sessions: Number(cfgForm.max_sessions) || undefined,
         default_environment: splitList(cfgForm.default_environment),
         default_user_id: cfgForm.default_user_id.trim(),
         default_tags: splitList(cfgForm.default_tags),
-        tracing_environment: cfgForm.tracing_environment.trim() || "local",
-        tracing_release: cfgForm.tracing_release.trim(),
-        tracing_sample_rate: Number(cfgForm.tracing_sample_rate),
-        tracing_capture_content: cfgForm.tracing_capture_content,
-        mapper_enabled: cfgForm.mapper_enabled,
-        mapper_code: cfgForm.mapper_code,
+        default_trace_name: cfgForm.default_trace_name.trim(),
+        mappers: cfgForm.mappers,
       };
       // Only send secrets when the operator typed a new value.
       if (cfgForm.public_key.trim()) payload.public_key = cfgForm.public_key.trim();
       if (cfgForm.secret_key.trim()) payload.secret_key = cfgForm.secret_key.trim();
-      const saved = await api<LangfuseConfig>("/api/langfuse-config", {
+      const saved = await api<LangfuseConfig>(configPath, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -271,8 +324,8 @@ export default function LangfuseView({
       setConfig(saved);
       applyConfigToForms(saved);
       toastOk(
-        "Langfuse 配置已保存",
-        saved.enabled || saved.tracing_enabled ? "集成已启用" : "集成已停用"
+        "数据源 Langfuse 配置已保存",
+        saved.enabled ? "会话拉取已启用" : "会话拉取已停用"
       );
       // Re-probe connectivity so the status cards reflect the new credentials.
       await refresh(false);
@@ -283,6 +336,59 @@ export default function LangfuseView({
     }
   }
 
+  async function saveTracingConfig() {
+    if (!isAdmin) return;
+    setSavingTracing(true);
+    try {
+      const payload: LangfuseTracingConfig = {
+        enabled: tracingForm.enabled,
+        host: tracingForm.host.trim(),
+        environment: tracingForm.environment.trim() || "local",
+        release: tracingForm.release.trim(),
+        sample_rate: Number(tracingForm.sample_rate),
+        capture_content: tracingForm.capture_content,
+      };
+      if (tracingForm.public_key.trim()) payload.public_key = tracingForm.public_key.trim();
+      if (tracingForm.secret_key.trim()) payload.secret_key = tracingForm.secret_key.trim();
+      const saved = await api<LangfuseTracingConfig>("/api/langfuse-tracing-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      setTracingConfig(saved);
+      applyTracingConfigToForm(saved);
+      toastOk(
+        "全局链路观测配置已保存",
+        saved.enabled ? "所有租户的进化链路将统一上报" : "链路观测已停用"
+      );
+      await refresh(false);
+    } catch (e: any) {
+      toastErr("保存全局链路观测配置失败", e.message);
+    } finally {
+      setSavingTracing(false);
+    }
+  }
+
+  async function testTracingConfig() {
+    if (!isAdmin) return;
+    setTestingTracing(true);
+    try {
+      const payload: Record<string, string> = { host: tracingForm.host.trim() };
+      if (tracingForm.public_key.trim()) payload.public_key = tracingForm.public_key.trim();
+      if (tracingForm.secret_key.trim()) payload.secret_key = tracingForm.secret_key.trim();
+      await api<LangfuseTestResp>("/api/langfuse-tracing-config/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      toastOk("全局链路观测 Langfuse 连通正常");
+    } catch (e: any) {
+      toastErr("全局链路观测连通性测试失败", e.message);
+    } finally {
+      setTestingTracing(false);
+    }
+  }
+
   async function testConfig() {
     if (!isAdmin) return;
     setTestingCfg(true);
@@ -290,7 +396,7 @@ export default function LangfuseView({
       const payload: Record<string, string> = { host: cfgForm.host.trim() };
       if (cfgForm.public_key.trim()) payload.public_key = cfgForm.public_key.trim();
       if (cfgForm.secret_key.trim()) payload.secret_key = cfgForm.secret_key.trim();
-      const result = await api<LangfuseTestResp>("/api/langfuse-config/test", {
+      const result = await api<LangfuseTestResp>(`${configPath}/test`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -300,6 +406,37 @@ export default function LangfuseView({
       toastErr("Langfuse 连通性测试失败", e.message);
     } finally {
       setTestingCfg(false);
+    }
+  }
+
+  async function saveSourceConfig() {
+    if (!isAdmin) return;
+    setSavingSource(true);
+    try {
+      if (projectId && projectId !== "default") {
+        await updateTenantConfig(projectId, {
+          datasource_type: sourceType,
+          datasource_legacy_converter_code: converterCode.trim() || null,
+        });
+      } else {
+        await api<DatasourceConfig>("/api/datasource-config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            type: sourceType,
+            legacy_converter_code: converterCode,
+          }),
+        });
+      }
+      toastOk(
+        "转换配置已保存",
+        sourceType === "skillopt" ? "使用兼容模式（导入旧版 converter.py）" : "使用原生 Langfuse 映射"
+      );
+      await refresh(false);
+    } catch (e: any) {
+      toastErr("保存转换配置失败", e.message);
+    } finally {
+      setSavingSource(false);
     }
   }
 
@@ -345,10 +482,69 @@ export default function LangfuseView({
   const enabled = !!status?.enabled;
   const reachable = !!status?.reachable;
   const usable = enabled && reachable;
-  const tracingEnabled = !!status?.tracing?.enabled;
+  const tracingStatus = tracingConfig?.status || status?.tracing;
+  const tracingEnabled = !!tracingStatus?.enabled;
+  const tracingInitialized = !!tracingStatus?.initialized;
 
   return (
     <div className="mx-auto max-w-[1200px] px-[22px] py-[22px]">
+      {/* ---- Data source and conversion configuration ---- */}
+      <Panel
+        title="数据来源与转换"
+        extra={
+          <Pill tone={dsConfig?.source ? "green" : "gray"}>
+            {dsConfig?.source || "langfuse"}
+          </Pill>
+        }
+      >
+        <div className="space-y-3 px-4 py-3">
+          <div className="text-sm">
+            <span className="text-muted-foreground">Session 来源：</span>
+            <span className="font-semibold">Langfuse</span>
+            <span className="ml-4 text-muted-foreground">转换模式：</span>
+            <span className="font-semibold">
+              {sourceType === "skillopt" ? "兼容模式（导入旧版 converter.py）" : "原生 Langfuse 映射"}
+            </span>
+          </div>
+          {(!projectId || projectId === "default") && <><div className="text-sm">
+            <span className="text-muted-foreground">适配器目录：</span>
+            <span className="mono text-xs break-all">{dsConfig?.adapters_dir_resolved || "—"}</span>
+          </div>
+          {dsConfig?.adapter_files && dsConfig.adapter_files.length > 0 && (
+            <div className="text-sm">
+              <span className="text-muted-foreground">已配置适配器：</span>
+              <span>{dsConfig.adapter_files.length} 个</span>
+              {dsConfig.adapter_files.slice(0, 5).map((f) => (
+                <Pill key={f.agent_id} tone="blue">{f.agent_id}</Pill>
+              ))}
+              {dsConfig.adapter_files.length > 5 && (
+                <span className="text-xs text-muted-soft"> 等 {dsConfig.adapter_files.length} 个</span>
+              )}
+            </div>
+          )}
+          <div className="pt-1 text-xs text-muted-foreground">
+            每个智能体可在适配器目录中放置 <code className="mono">{"<agent_id>.py"}</code> 文件，定义项目级的过滤、去重、字段抽取和转换逻辑。文件保存后自动热重载，无需重启服务。
+          </div></>}
+          <LegacyConverterPanel
+            previewPath={
+              projectId && projectId !== "default"
+                ? `/api/tenants/${encodeURIComponent(projectId)}/converter`
+                : undefined
+            }
+            sourceType={sourceType}
+            code={converterCode}
+            disabled={!isAdmin}
+            onSourceType={setSourceType}
+            onChange={setConverterCode}
+          />
+          <div className="flex items-center justify-end">
+            <Button size="sm" onClick={saveSourceConfig} disabled={!isAdmin || savingSource}>
+              {savingSource ? "保存中…" : "保存转换配置"}
+            </Button>
+          </div>
+        </div>
+      </Panel>
+
       {/* ---- Connection status ---- */}
       <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">
         <StatCard
@@ -360,16 +556,20 @@ export default function LangfuseView({
           }
         />
         <StatCard
-          label="链路观测"
+          label="全局链路观测"
           value={
-            <Pill tone={tracingEnabled ? "green" : "gray"}>
-              {tracingEnabled ? "已启用" : "未启用"}
+            <Pill tone={tracingEnabled ? (tracingInitialized ? "green" : "amber") : "gray"}>
+              {tracingEnabled ? (tracingInitialized ? "已连接" : "待初始化") : "未启用"}
             </Pill>
           }
         />
-        <StatCard label="Host" value={<span className="mono text-xs break-all">{status?.host || "—"}</span>} />
+        <StatCard label="数据源 Host" value={<span className="mono text-xs break-all">{status?.host || "—"}</span>} />
         <StatCard
-          label="凭据"
+          label="观测 Host"
+          value={<span className="mono text-xs break-all">{tracingStatus?.host || tracingConfig?.host || "—"}</span>}
+        />
+        <StatCard
+          label="数据源凭据"
           value={
             <span className="text-sm">
               {status?.public_key_present ? "public ✓" : "public ✗"} ·{" "}
@@ -386,13 +586,13 @@ export default function LangfuseView({
         </div>
       )}
 
-      {/* ---- Editable connection settings (in-console, hot-reload) ---- */}
+      {/* ---- Tenant-scoped inbound Langfuse settings ---- */}
       <Panel
-        title="连接配置"
+        title="数据源 Langfuse"
         extra={
           <div className="flex items-center gap-2">
-            <Pill tone={config?.enabled || config?.tracing_enabled ? "green" : "gray"}>
-              {config?.enabled || config?.tracing_enabled ? "已启用" : "已停用"}
+            <Pill tone={config?.enabled ? "green" : "gray"}>
+              {config?.enabled ? "已启用" : "已停用"}
             </Pill>
             <Button variant="ghost" size="sm" onClick={() => setShowConfig((v) => !v)}>
               {showConfig ? "收起" : "编辑"}
@@ -416,17 +616,8 @@ export default function LangfuseView({
               />
               从 Langfuse 拉取会话
             </label>
-            <label className="flex items-center gap-2 text-sm font-semibold">
-              <input
-                type="checkbox"
-                disabled={!isAdmin}
-                checked={cfgForm.tracing_enabled}
-                onChange={(e) => setCfgForm({ ...cfgForm, tracing_enabled: e.target.checked })}
-              />
-              上报进化与团队 Memory 链路
-            </label>
             <div className="grid gap-3.5 md:grid-cols-2">
-              <FormField label="Host *" hint="Langfuse 部署地址，自部署填自己的">
+              <FormField label="数据源 Host *" hint="当前租户的会话来源">
                 <Input
                   disabled={!isAdmin}
                   value={cfgForm.host}
@@ -443,9 +634,7 @@ export default function LangfuseView({
                   onChange={(e) => setCfgForm({ ...cfgForm, max_sessions: e.target.value })}
                 />
               </FormField>
-              <FormField
-                label={`Public Key *${config?.public_key_present ? "（已配置，可覆盖）" : ""}`}
-              >
+              <FormField label={`数据源 Public Key *${config?.public_key_present ? "（已配置，可覆盖）" : ""}`}>
                 <Input
                   disabled={!isAdmin}
                   value={cfgForm.public_key}
@@ -453,9 +642,7 @@ export default function LangfuseView({
                   onChange={(e) => setCfgForm({ ...cfgForm, public_key: e.target.value })}
                 />
               </FormField>
-              <FormField
-                label={`Secret Key *${config?.secret_key_present ? "（已配置，留空保留）" : ""}`}
-              >
+              <FormField label={`数据源 Secret Key *${config?.secret_key_present ? "（已配置，留空保留）" : ""}`}>
                 <Input
                   disabled={!isAdmin}
                   type="password"
@@ -480,6 +667,14 @@ export default function LangfuseView({
                   onChange={(e) => setCfgForm({ ...cfgForm, default_tags: e.target.value })}
                 />
               </FormField>
+              <FormField label="默认 Trace 名称" hint="拉取会话时按 trace.name 过滤">
+                <Input
+                  disabled={!isAdmin}
+                  value={cfgForm.default_trace_name}
+                  placeholder="openclaw-turn"
+                  onChange={(e) => setCfgForm({ ...cfgForm, default_trace_name: e.target.value })}
+                />
+              </FormField>
               <FormField label="默认 User ID">
                 <Input
                   disabled={!isAdmin}
@@ -488,42 +683,6 @@ export default function LangfuseView({
                   onChange={(e) => setCfgForm({ ...cfgForm, default_user_id: e.target.value })}
                 />
               </FormField>
-              <FormField label="观测 Environment" hint="例如 local、staging、production">
-                <Input
-                  disabled={!isAdmin}
-                  value={cfgForm.tracing_environment}
-                  placeholder="local"
-                  onChange={(e) => setCfgForm({ ...cfgForm, tracing_environment: e.target.value })}
-                />
-              </FormField>
-              <FormField label="观测 Release" hint="可填写版本号或 Git SHA">
-                <Input
-                  disabled={!isAdmin}
-                  value={cfgForm.tracing_release}
-                  placeholder="（可选）"
-                  onChange={(e) => setCfgForm({ ...cfgForm, tracing_release: e.target.value })}
-                />
-              </FormField>
-              <FormField label="采样率" hint="0 到 1；本地调试建议 1">
-                <Input
-                  disabled={!isAdmin}
-                  type="number"
-                  min="0"
-                  max="1"
-                  step="0.05"
-                  value={cfgForm.tracing_sample_rate}
-                  onChange={(e) => setCfgForm({ ...cfgForm, tracing_sample_rate: e.target.value })}
-                />
-              </FormField>
-              <label className="flex items-center gap-2 self-end pb-2 text-sm">
-                <input
-                  type="checkbox"
-                  disabled={!isAdmin}
-                  checked={cfgForm.tracing_capture_content}
-                  onChange={(e) => setCfgForm({ ...cfgForm, tracing_capture_content: e.target.checked })}
-                />
-                采集模型输入与输出
-              </label>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <Button size="sm" onClick={saveConfig} disabled={!isAdmin || savingCfg}>
@@ -540,20 +699,133 @@ export default function LangfuseView({
         )}
         {!showConfig && (
           <div className="px-4 py-3 text-xs text-muted-foreground">
-            {config?.enabled || config?.tracing_enabled
-              ? `已启用 · ${config.host} · 拉取 ${config.enabled ? "开" : "关"} · 观测 ${config.tracing_enabled ? "开" : "关"}`
-              : "尚未启用。点击右上角「编辑」填写 Host 与 public/secret key 后保存即可使用。"}
+            {config?.enabled
+              ? `会话拉取已启用 · ${config.host}`
+              : "尚未启用当前租户的数据源连接。"}
           </div>
         )}
       </Panel>
 
-      {/* ---- White-box: user-authored trace mapper ---- */}
-      <TraceMapperPanel
+      {/* ---- Service-wide outbound tracing settings ---- */}
+      <Panel
+        title="全局链路观测 Langfuse"
+        count="服务级配置 · 所有租户共用"
+        extra={
+          <div className="flex items-center gap-2">
+            <Pill tone={tracingConfig?.enabled ? "green" : "gray"}>
+              {tracingConfig?.enabled ? "已启用" : "已停用"}
+            </Pill>
+            <Button variant="ghost" size="sm" onClick={() => setShowTracingConfig((v) => !v)}>
+              {showTracingConfig ? "收起" : "编辑"}
+            </Button>
+          </div>
+        }
+      >
+        {showTracingConfig ? (
+          <div className="space-y-4 p-4">
+            <label className="flex items-center gap-2 text-sm font-semibold">
+              <input
+                type="checkbox"
+                disabled={!isAdmin}
+                checked={tracingForm.enabled}
+                onChange={(e) => setTracingForm({ ...tracingForm, enabled: e.target.checked })}
+              />
+              上报进化与团队 Memory 链路
+            </label>
+            <div className="grid gap-3.5 md:grid-cols-2">
+              <FormField label="观测 Host *" hint="独立于各租户的数据源 Langfuse">
+                <Input
+                  disabled={!isAdmin}
+                  value={tracingForm.host}
+                  placeholder="https://cloud.langfuse.com"
+                  onChange={(e) => setTracingForm({ ...tracingForm, host: e.target.value })}
+                />
+              </FormField>
+              <FormField label="观测 Environment" hint="例如 local、staging、production">
+                <Input
+                  disabled={!isAdmin}
+                  value={tracingForm.environment}
+                  placeholder="local"
+                  onChange={(e) => setTracingForm({ ...tracingForm, environment: e.target.value })}
+                />
+              </FormField>
+              <FormField label={`观测 Public Key *${tracingConfig?.public_key_present ? "（已配置，可覆盖）" : ""}`}>
+                <Input
+                  disabled={!isAdmin}
+                  value={tracingForm.public_key}
+                  placeholder="pk-lf-..."
+                  onChange={(e) => setTracingForm({ ...tracingForm, public_key: e.target.value })}
+                />
+              </FormField>
+              <FormField label={`观测 Secret Key *${tracingConfig?.secret_key_present ? "（已配置，留空保留）" : ""}`}>
+                <Input
+                  disabled={!isAdmin}
+                  type="password"
+                  value={tracingForm.secret_key}
+                  placeholder={tracingConfig?.secret_key_present ? "输入新值可替换" : "sk-lf-..."}
+                  onChange={(e) => setTracingForm({ ...tracingForm, secret_key: e.target.value })}
+                />
+              </FormField>
+              <FormField label="观测 Release" hint="可填写版本号或 Git SHA">
+                <Input
+                  disabled={!isAdmin}
+                  value={tracingForm.release}
+                  placeholder="（可选）"
+                  onChange={(e) => setTracingForm({ ...tracingForm, release: e.target.value })}
+                />
+              </FormField>
+              <FormField label="采样率" hint="0 到 1；本地调试建议 1">
+                <Input
+                  disabled={!isAdmin}
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={tracingForm.sample_rate}
+                  onChange={(e) => setTracingForm({ ...tracingForm, sample_rate: e.target.value })}
+                />
+              </FormField>
+              <label className="flex items-center gap-2 self-end pb-2 text-sm">
+                <input
+                  type="checkbox"
+                  disabled={!isAdmin}
+                  checked={tracingForm.capture_content}
+                  onChange={(e) => setTracingForm({ ...tracingForm, capture_content: e.target.checked })}
+                />
+                采集模型输入与输出
+              </label>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" onClick={saveTracingConfig} disabled={!isAdmin || savingTracing}>
+                {savingTracing ? "保存中…" : "保存全局观测配置"}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={testTracingConfig}
+                disabled={!isAdmin || testingTracing}
+              >
+                {testingTracing ? "测试中…" : "测试观测连接"}
+              </Button>
+              <span className="ml-auto text-xs text-muted-foreground">
+                该连接不参与会话拉取，保存后立即对所有租户生效。
+              </span>
+            </div>
+          </div>
+        ) : (
+          <div className="px-4 py-3 text-xs text-muted-foreground">
+            {tracingConfig?.enabled
+              ? `全租户统一上报 · ${tracingConfig.host} · Environment ${tracingConfig.environment || "local"}`
+              : "全局链路观测未启用。"}
+          </div>
+        )}
+      </Panel>
+
+      {/* ---- White-box: per-agent mapper registry ---- */}
+      <MapperRegistryPanel
         isAdmin={isAdmin}
-        enabled={cfgForm.mapper_enabled}
-        code={cfgForm.mapper_code}
-        onToggle={(v) => setCfgForm((f) => ({ ...f, mapper_enabled: v }))}
-        onCodeChange={(v) => setCfgForm((f) => ({ ...f, mapper_code: v }))}
+        mappers={cfgForm.mappers}
+        onChange={(m) => setCfgForm((f) => ({ ...f, mappers: m }))}
         onSave={saveConfig}
         saving={savingCfg}
       />
@@ -699,7 +971,17 @@ export default function LangfuseView({
                   {pull.results.map((r) => (
                     <tr key={r.session_id}>
                       <Td>
-                        <span className="mono text-xs">{r.session_id}</span>
+                        {r.status === "queued" ? (
+                          <span
+                            className="link mono text-xs"
+                            title="点击查看已入库的会话详情"
+                            onClick={() => setIngestedSid(r.session_id)}
+                          >
+                            {r.session_id}
+                          </span>
+                        ) : (
+                          <span className="mono text-xs">{r.session_id}</span>
+                        )}
                       </Td>
                       <Td>
                         <Pill tone={STATUS_TONE[r.status] || "gray"}>{r.status}</Pill>
@@ -772,6 +1054,12 @@ export default function LangfuseView({
           )}
         </Panel>
       )}
+      <SessionModal
+        sid={ingestedSid}
+        initialTab="detail"
+        open={!!ingestedSid}
+        onClose={() => setIngestedSid(null)}
+      />
     </div>
   );
 }
@@ -797,343 +1085,5 @@ function FormField({
 function Td({ children, className = "" }: { children: ReactNode; className?: string }) {
   return (
     <td className={`border-b border-line px-4 py-2.5 align-top text-sm ${className}`}>{children}</td>
-  );
-}
-
-// White-box editor + dry-run tester for the operator-authored trace mapper.
-// The mapper is a Python function `map_trace(trace, observations)` that returns
-// a partial teamEvolver evolution turn; the server deep-merges it over the
-// built-in mapping. Editing/testing is admin-only (it is executable config).
-function TraceMapperPanel({
-  isAdmin,
-  enabled,
-  code,
-  onToggle,
-  onCodeChange,
-  onSave,
-  saving,
-}: {
-  isAdmin: boolean;
-  enabled: boolean;
-  code: string;
-  onToggle: (value: boolean) => void;
-  onCodeChange: (value: string) => void;
-  onSave: () => void | Promise<void>;
-  saving: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  const [traceJson, setTraceJson] = useState("");
-  const [testing, setTesting] = useState(false);
-  const [loadingTpl, setLoadingTpl] = useState(false);
-  const [result, setResult] = useState<LangfuseMapperTestResp | null>(null);
-  const [spec, setSpec] = useState<LangfuseMapperFormatSpec | null>(null);
-  const [specOpen, setSpecOpen] = useState(false);
-  const [loadingSpec, setLoadingSpec] = useState(false);
-
-  // The mapper endpoints were added to the evolve service; when the console
-  // talks to an older running service the routes 404. Surface a clear hint to
-  // restart rather than a bare "加载失败".
-  function describeMapperError(e: any): string {
-    const msg = String(e?.message || e || "");
-    if (/404|not found|Method Not Allowed|405/i.test(msg)) {
-      return "该接口不存在，通常是服务未重启。请重启 teamEvolver 服务后重试。";
-    }
-    return msg;
-  }
-
-  async function fetchTemplate(): Promise<LangfuseMapperTemplateResp> {
-    const tpl = await api<LangfuseMapperTemplateResp>("/langfuse/mapper/template");
-    if (tpl.spec) setSpec(tpl.spec);
-    return tpl;
-  }
-
-  async function insertTemplate() {
-    setLoadingTpl(true);
-    try {
-      const tpl = await fetchTemplate();
-      if (!code.trim() || window.confirm("用参考模板覆盖当前代码？")) {
-        onCodeChange(tpl.template);
-      }
-      if (!traceJson.trim()) {
-        setTraceJson(JSON.stringify(tpl.sample, null, 2));
-      }
-    } catch (e: any) {
-      toastErr("加载模板失败", describeMapperError(e));
-    } finally {
-      setLoadingTpl(false);
-    }
-  }
-
-  async function showSpec() {
-    setSpecOpen(true);
-    if (spec) return;
-    setLoadingSpec(true);
-    try {
-      const tpl = await fetchTemplate();
-      if (!tpl.spec) {
-        toastErr("加载标准格式说明失败", "服务未返回格式说明，请重启服务后重试。");
-      }
-    } catch (e: any) {
-      toastErr("加载标准格式说明失败", describeMapperError(e));
-    } finally {
-      setLoadingSpec(false);
-    }
-  }
-
-  async function runTest() {
-    if (!code.trim()) {
-      toastErr("无法测试", "请先填写 map_trace 代码");
-      return;
-    }
-    let traceArg: unknown = undefined;
-    const raw = traceJson.trim();
-    if (raw) {
-      try {
-        traceArg = JSON.parse(raw);
-      } catch (e: any) {
-        toastErr("样例 JSON 无法解析", e.message);
-        return;
-      }
-    }
-    setTesting(true);
-    setResult(null);
-    try {
-      const data = await api<LangfuseMapperTestResp>("/langfuse/mapper/test", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code, trace: traceArg }),
-      });
-      setResult(data);
-      if (data.ok) {
-        toastOk("映射成功", data.used_sample ? "使用内置样例 trace" : "使用自定义 trace");
-      } else {
-        toastErr("映射失败", data.error || "未知错误");
-      }
-    } catch (e: any) {
-      toastErr("测试请求失败", e.message);
-    } finally {
-      setTesting(false);
-    }
-  }
-
-  return (
-    <>
-    <Panel
-      title="自定义 Trace 映射（进化标准格式）"
-      extra={
-        <div className="flex items-center gap-2">
-          <Pill tone={enabled ? "green" : "gray"}>{enabled ? "已启用" : "未启用"}</Pill>
-          <Button variant="outline" size="sm" onClick={showSpec} disabled={loadingSpec}>
-            {loadingSpec ? "加载中…" : "标准格式说明"}
-          </Button>
-          <Button variant="ghost" size="sm" onClick={() => setOpen((v) => !v)}>
-            {open ? "收起" : "编辑"}
-          </Button>
-        </div>
-      }
-    >
-      {!open && (
-        <div className="px-4 py-3 text-xs text-muted-foreground">
-          {enabled
-            ? "已启用自定义映射：拉取时对每个 trace 调用 map_trace(trace, observations)，结果深合并到内置映射之上。"
-            : "未启用。拉取会话时使用内置的 Langfuse → 进化格式映射。点击「编辑」可自定义。"}
-        </div>
-      )}
-      {open && (
-        <div className="space-y-4 p-4">
-          {!isAdmin && (
-            <div className="rounded-lg border border-border bg-background/60 p-3 text-xs text-muted-foreground">
-              当前账号不是管理员，只能查看映射代码，无法保存或测试。
-            </div>
-          )}
-          <div className="rounded-lg border border-border bg-background/60 p-3 text-xs text-muted-foreground">
-            编写 <code className="mono">map_trace(trace, observations)</code>，返回一个（可以是部分的）进化标准
-            turn 字典；未返回的字段会回退到内置映射，返回 <code className="mono">None</code> 表示完全使用内置映射。
-            可用 <code className="mono">json / re / math / datetime</code>，出于安全考虑禁用了{" "}
-            <code className="mono">import</code> 与文件访问。
-          </div>
-          <label className="flex items-center gap-2 text-sm font-semibold">
-            <input
-              type="checkbox"
-              disabled={!isAdmin}
-              checked={enabled}
-              onChange={(e) => onToggle(e.target.checked)}
-            />
-            拉取时启用自定义 trace 映射
-          </label>
-          <FormField label="map_trace 代码（Python）">
-            <Textarea
-              disabled={!isAdmin}
-              value={code}
-              spellCheck={false}
-              onChange={(e) => onCodeChange(e.target.value)}
-              placeholder={"def map_trace(trace, observations):\n    return {\"prompt_text\": str(trace.get(\"input\") or \"\")}"}
-              className="mono h-64 text-xs"
-            />
-          </FormField>
-          <FormField
-            label="测试用 trace（JSON，可留空使用内置样例）"
-            hint="支持 {trace, observations} 或直接是内嵌 observations 的 trace 对象。"
-          >
-            <Textarea
-              disabled={!isAdmin}
-              value={traceJson}
-              spellCheck={false}
-              onChange={(e) => setTraceJson(e.target.value)}
-              placeholder='{"trace": {...}, "observations": [...]}'
-              className="mono h-40 text-xs"
-            />
-          </FormField>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button size="sm" onClick={onSave} disabled={!isAdmin || saving}>
-              {saving ? "保存中…" : "保存映射"}
-            </Button>
-            <Button variant="outline" size="sm" onClick={runTest} disabled={!isAdmin || testing}>
-              {testing ? "映射中…" : "试运行映射"}
-            </Button>
-            <Button variant="ghost" size="sm" onClick={insertTemplate} disabled={!isAdmin || loadingTpl}>
-              {loadingTpl ? "加载中…" : "插入参考模板"}
-            </Button>
-            <span className="ml-auto text-xs text-muted-foreground">
-              保存后立即生效，无需重启服务。启用前会校验代码可编译。
-            </span>
-          </div>
-          {result && (
-            <div className="space-y-2">
-              {result.ok ? (
-                <>
-                  <div className="text-xs text-muted-foreground">
-                    映射成功 · {result.used_sample ? "内置样例" : "自定义 trace"} · observations:{" "}
-                    {result.observation_count ?? "—"}
-                  </div>
-                  <div className="grid gap-3 lg:grid-cols-2">
-                    <MapperResultBlock title="映射结果（标准格式 turn）" value={result.turn} />
-                    <MapperResultBlock title="内置映射（对照）" value={result.builtin} />
-                  </div>
-                </>
-              ) : (
-                <div className="rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700 whitespace-pre-wrap">
-                  {result.error || "映射失败"}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-    </Panel>
-    <StandardFormatDialog open={specOpen} onOpenChange={setSpecOpen} spec={spec} loading={loadingSpec} />
-    </>
-  );
-}
-
-// Read-only dialog documenting the standard evolution turn format that a mapper
-// must produce. Content comes from GET /langfuse/mapper/template's `spec`, so it
-// stays in lockstep with the server-side ingest contract.
-function StandardFormatDialog({
-  open,
-  onOpenChange,
-  spec,
-  loading,
-}: {
-  open: boolean;
-  onOpenChange: (v: boolean) => void;
-  spec: LangfuseMapperFormatSpec | null;
-  loading: boolean;
-}) {
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-[860px]">
-        <DialogHeader>
-          <DialogTitle>{spec?.title || "进化标准格式（Evolution Turn）"}</DialogTitle>
-          {spec?.summary && <DialogDescription>{spec.summary}</DialogDescription>}
-        </DialogHeader>
-        {loading && <div className="py-6 text-center text-sm text-muted-foreground">加载中…</div>}
-        {!loading && !spec && (
-          <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-            无法加载格式说明。若服务为旧版本，请重启 teamEvolver 服务后重试。
-          </div>
-        )}
-        {!loading && spec && (
-          <div className="space-y-4">
-            <ListViewport maxHeight="340px">
-              <table className="w-full border-collapse">
-                <thead>
-                  <tr>
-                    {["字段", "类型", "必填", "说明"].map((h) => (
-                      <th
-                        key={h}
-                        className="sticky top-0 border-b border-line bg-surface-subtle px-3 py-2 text-left text-xs font-semibold text-muted-foreground"
-                      >
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {spec.fields.map((f) => (
-                    <tr key={f.key}>
-                      <td className="border-b border-line px-3 py-2 align-top">
-                        <code className="mono text-xs">{f.key}</code>
-                      </td>
-                      <td className="border-b border-line px-3 py-2 align-top text-xs text-muted-foreground">
-                        {f.type}
-                      </td>
-                      <td className="border-b border-line px-3 py-2 align-top text-xs">
-                        {f.required === true ? (
-                          <Pill tone="red">必填</Pill>
-                        ) : f.required ? (
-                          <Pill tone="amber">{String(f.required)}</Pill>
-                        ) : (
-                          <span className="text-muted-soft">可选</span>
-                        )}
-                      </td>
-                      <td className="border-b border-line px-3 py-2 align-top text-xs text-muted-foreground">
-                        {f.desc}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </ListViewport>
-            <div>
-              <div className="mb-1.5 text-xs font-semibold text-muted-foreground">示例（一个 turn）</div>
-              <ListViewport maxHeight="280px">
-                <pre className="mono whitespace-pre-wrap break-all p-3 text-[11px] leading-relaxed">
-                  {JSON.stringify(spec.example, null, 2)}
-                </pre>
-              </ListViewport>
-            </div>
-          </div>
-        )}
-        <DialogFooter>
-          <DialogClose asChild>
-            <Button variant="outline" size="sm">
-              关闭
-            </Button>
-          </DialogClose>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function MapperResultBlock({
-  title,
-  value,
-}: {
-  title: string;
-  value?: Record<string, unknown>;
-}) {
-  return (
-    <div className="rounded-lg border border-line bg-surface-subtle">
-      <div className="border-b border-line px-3 py-2 text-xs font-semibold text-muted-foreground">
-        {title}
-      </div>
-      <ListViewport maxHeight="320px">
-        <pre className="mono whitespace-pre-wrap break-all p-3 text-[11px] leading-relaxed">
-          {JSON.stringify(value ?? {}, null, 2)}
-        </pre>
-      </ListViewport>
-    </div>
   );
 }

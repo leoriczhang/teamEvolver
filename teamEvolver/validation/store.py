@@ -35,10 +35,14 @@ class ValidationStore:
         backend: str,
         endpoint: str,
         customer_id: str = "",
+        allow_fallback: bool = False,
+        fallback_root: str = "",
     ) -> None:
         self._bucket = build_object_store(
             backend=backend,
             endpoint=endpoint,
+            allow_fallback=allow_fallback,
+            fallback_root=fallback_root,
         )
         self._customer_id = str(customer_id or "").strip("/")
 
@@ -51,10 +55,10 @@ class ValidationStore:
         return store
 
     @classmethod
-    def from_config(cls, config) -> "ValidationStore":
+    def from_config(cls, config, tenant_id: str = "default") -> "ValidationStore":
         from ..skills.hub import SkillHub
 
-        hub = SkillHub.object_storage_from_config(config)
+        hub = SkillHub.object_storage_from_config(config, tenant_id=tenant_id)
         if hub is None:
             raise ValueError("validation storage requires OpenViking object storage")
         store = cls.__new__(cls)

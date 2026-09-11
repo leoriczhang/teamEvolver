@@ -7,7 +7,7 @@ Protocol V1 allows Agents to use teamEvolver as their context and evolution cont
 - Report versioned Session data;
 - Resolve and read personal/team Memory and Skill context;
 - Only write or forget mapped users' personal Memory;
-- Execute one baseline or candidate replay branch in Agent's real runtime;
+- Execute baseline or candidate replay branches in the Agent's real runtime (server-driven per-turn Turn protocol, or single synchronous request fallback);
 - Receive published team Skill updates.
 
 Protocol version is `1.0`. Unknown major versions return `PROTOCOL_VERSION_UNSUPPORTED` error. Payloads without version numbers processed via single-cycle legacy adapter.
@@ -52,11 +52,8 @@ Minimum registration payload example:
     },
     "replay.branch.v1": {
       "transport": "http",
+      "orchestration": "server_driven",
       "endpoint": "https://agent.example/replay/v1",
-      "max_interactions": 20,
-      "supports_materials": true,
-      "supports_artifacts": true,
-      "supports_full_trace": true,
       "idempotent": false,
       "auth_profile": "example"
     }
@@ -74,7 +71,7 @@ Minimum registration payload example:
 |-------|------|-------------|
 | `session.ingest.v1` | object | Supports Session ingestion |
 | `context.workspace.v1` | object | Supports Context Workspace; `scopes` specifies accessible ranges |
-| `replay.branch.v1` | object | Supports True Replay; must provide `endpoint`, `max_interactions`, `supports_*` parameters |
+| `replay.branch.v1` | object | Supports True Replay. `endpoint` specifies the callback endpoint; `orchestration: "server_driven"` enables the server-driven Turn protocol. `max_interactions` (default 20) and `idempotent` (default false) have server-filled defaults; `supports_*` fields are not consumed by the Replay code |
 | `skill.sync.v1` | object | Supports Skill push sync; must provide `skill_sync_url` |
 
 ### Subject Mappings
@@ -231,15 +228,15 @@ Code entry point: `teamEvolver/proxy/routes.py:2971` (`ingest_session`)
 
 ## Replay Branch
 
-HTTP Agent exposes exact endpoint registered in `replay.branch.v1`. teamEvolver sends one synchronous request per branch. Baseline and candidate calls execute concurrently, sharing same Context and execution checklist.
+HTTP Agent exposes exact endpoint registered in `replay.branch.v1`. The primary mode is the **server-driven Turn protocol**: the Agent declares `orchestration: "server_driven"` at registration, and teamEvolver calls the Agent's turn endpoint once per interaction turn (`teamevolver.replay-turn-request.v1` / `teamevolver.replay-turn-result.v1`), with the multi-turn loop, checklist judging, and metric aggregation all orchestrated server-side. Registrations without `orchestration` fall back to a single synchronous request: teamEvolver sends one synchronous request per branch (`teamevolver.replay-branch-request.v1`), and baseline/candidate calls execute concurrently, sharing the same Context and execution manifest.
 
-Code implementation: `teamEvolver/integrations/replay_adapters.py`
+Code implementation: `teamEvolver/integrations/replay_adapters.py` (`TurnBasedReplayAdapter`, `MappedHttpAdapter`, `HttpReplayAdapter`)
 
 ### Timeouts and Deadlines
 
-Caller controls deadline. Agent must stop before `limits.timeout_seconds`; must not continue consuming model or tool resources after HTTP caller timeout. timeout_seconds range: 30-3600 seconds; max_interactions range: 1-20.
+Caller controls deadline. Agent must stop before `limits.timeout_seconds`; must not continue consuming model or tool resources after HTTP caller timeout. timeout_seconds range: 30-3600 seconds; max_interactions range: 1-20. In server-driven mode the per-turn limit is `limits.turn_timeout_seconds` (30-3600 seconds, default 600).
 
-### Request Format
+### Request Format (single-call fallback mode)
 
 Replay request format teamEvolver sends to Agent:
 
@@ -275,9 +272,9 @@ Success results must contain non-negative integer metrics:
 | `tool_call_count` | Tool calls |
 | `total_tokens` | Total token consumption |
 
-Missing metrics, `request_id`/`branch` mismatch, or invalid schema fail-closed as `INVALID_RESPONSE`.
+Missing metrics, `request_id`/`branch` mismatch, or invalid schema fail-closed as `INVALID_RESPONSE`. In server-driven mode the Agent returns `teamevolver.replay-turn-result.v1` per turn, and each turn must report `metrics.tool_call_count` and `metrics.total_tokens` (fail-closed); the server aggregates them.
 
-### Response Format
+### Response Format (single-call fallback mode)
 
 ```json
 {
@@ -405,3 +402,5 @@ Never lower replay security, baseline CAS, or central Checklist adjudication dur
 | Context Snapshot | `docs/schemas/agent-context-snapshot-v1.schema.json` |
 | Replay Request | `docs/schemas/replay-branch-request-v1.schema.json` |
 | Replay Result | `docs/schemas/replay-branch-result-v1.schema.json` |
+| Replay Turn Request | No standalone schema file; schema constant `teamevolver.replay-turn-request.v1` defined in `teamEvolver/integrations/agent_protocol.py:REPLAY_TURN_REQUEST_SCHEMA_V1` |
+| Replay Turn Result | No standalone schema file; schema constant `teamevolver.replay-turn-result.v1` defined in `teamEvolver/integrations/agent_protocol.py:REPLAY_TURN_RESULT_SCHEMA_V1` |

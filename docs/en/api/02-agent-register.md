@@ -2,12 +2,12 @@
 
 ## 1. API Implementation Overview
 
-The Agent registration interface is used to register new Agent runtimes with teamEvolver and obtain scoped access tokens. V1 registration uses control plane key authentication, where the Agent declares supported capabilities, callback endpoints, and metadata.
+The Agent registration interface is used to register new Agent runtimes with teamEvolver and obtain scoped access tokens on demand. V1 registration uses control plane key authentication, where the Agent declares supported capabilities, callback endpoints, and metadata.
 
-Upon first successful registration, the response includes `credentials.agent_access_token`. This token is returned only once; the server stores only its SHA-256 hash. Re-registering an existing agent_id will not re-issue a token unless `rotate_access_token: true` is specified in the request.
+The access token is issued only when the registered capability set intersects `session.ingest.v1` or `context.workspace.v1` (and the registration is V1 compatible); the response then includes `credentials.agent_access_token`. This token is returned only once; the server stores only its SHA-256 hash. Registrations declaring only Replay capabilities such as `replay.branch.v1` receive no token. Re-registering an existing agent_id will not re-issue a token unless `rotate_access_token: true` is specified in the request.
 
 Code implementation: `teamEvolver/integrations/agent_registry.py:107` (`register_agent`)
-Route entry point: `teamEvolver/proxy/routes.py:3366` (`register_agent_runtime`)
+Route entry point: `teamEvolver/proxy/routes.py:register_agent_runtime`
 
 ## 2. Interface and Parameter Specification
 
@@ -48,8 +48,10 @@ Content-Type: application/json
 |-----------|--------------|-------------|
 | `session.ingest.v1` | None | Supports Session ingest |
 | `context.workspace.v1` | `scopes` | Array of accessible Context scopes, options: `personal_memory`, `team_memory`, `personal_skills`, `team_skills` |
-| `replay.branch.v1` | `transport`, `endpoint`, `max_interactions`, `supports_materials`, `supports_artifacts`, `supports_full_trace`, `idempotent`, `auth_profile` | True Replay callback configuration |
+| `replay.branch.v1` | `transport`, `endpoint`, `orchestration`, `request_template`, `response_mapping`, `max_interactions`, `idempotent`, `auth_profile` | True Replay callback configuration. `orchestration: "server_driven"` enables the per-turn Turn protocol; `request_template`/`response_mapping` render per-turn requests and map response fields for plain HTTP endpoints. Fields not provided fall back to server defaults |
 | `skill.sync.v1` | `transport`, `endpoint`, `auth_profile` | Skill Sync push configuration |
+
+Server defaults are filled in by `teamEvolver/integrations/agent_registry.py:resolve_replay_capability`: `transport` (`http` when `endpoints.replay_url` exists, otherwise `local`), `max_interactions` (default 20), `idempotent` (default `false`).
 
 ### Response
 
@@ -65,7 +67,7 @@ Content-Type: application/json
 | `status` | string | Status (`active`) |
 | `created_at` | string(ISO8601) | Creation time |
 | `updated_at` | string(ISO8601) | Update time |
-| `credentials` | object | Credential information (returned only on first registration or rotation) |
+| `credentials` | object | Credential information (returned only on first registration or rotation, and only for V1 compatible registrations whose capability set includes `session.ingest.v1` or `context.workspace.v1`) |
 | `credentials.agent_access_token` | string | Agent access token, format `tev1_<random>` |
 | `subject_sync` | object | Subject sync result |
 | `subject_sync.missing_user_ids` | array[string] | User IDs not found in mappings |
@@ -129,6 +131,35 @@ curl -X POST "http://localhost:52010/internal/agents/register" \
     }
   }'
 ```
+
+### Server-Driven Replay Registration Example
+
+An Agent running `scripts/replay_turn_server.py` registers with `orchestration: "server_driven"`; teamEvolver then calls its turn endpoint once per turn:
+
+```bash
+curl -X POST "http://localhost:52010/internal/agents/register" \
+  -H "Authorization: Bearer my-control-plane-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "schema_version": "teamevolver.agent-registration.v1",
+    "protocol_version": "1.0",
+    "agent_id": "my-agent:prod",
+    "runtime_type": "my-agent",
+    "capabilities": {
+      "replay.branch.v1": {
+        "transport": "http",
+        "orchestration": "server_driven",
+        "endpoint": "http://<turn-server-host>:8010/turn/my-agent",
+        "auth_profile": "my_agent"
+      }
+    },
+    "endpoints": {
+      "replay_url": "http://<turn-server-host>:8010/turn/my-agent"
+    }
+  }'
+```
+
+On the teamEvolver side export `TEAMEVOLVER_AGENT_MY_AGENT_REPLAY_API_KEY=<secret>`; the turn server receives the same secret via `--api-key`. This registration does not declare `session.ingest.v1`/`context.workspace.v1`, so the response contains no access token.
 
 ## 4. Response Contract and Error Handling
 

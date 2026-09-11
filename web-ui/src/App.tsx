@@ -3,8 +3,18 @@ import { Toaster } from "@/components/ui/sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { Activity, ClipboardCheck, Filter, FolderTree, History, LayoutDashboard, BookOpen, Users, SlidersHorizontal, LogOut, RefreshCw, Sparkles, Clock, Repeat2, ShieldCheck, TrendingUp, Zap, Database, ListChecks, ChevronsUpDown, DownloadCloud, TerminalSquare, HardDrive } from "lucide-react";
-import { api, type AuthStatus, type UserProfile } from "@/api/client";
+import { Activity, Building2, ClipboardCheck, Filter, FolderTree, History, LayoutDashboard, BookOpen, Users, SlidersHorizontal, LogOut, RefreshCw, Sparkles, Clock, Repeat2, ShieldCheck, TrendingUp, Zap, Database, ListChecks, ChevronsUpDown, DownloadCloud, TerminalSquare, HardDrive } from "lucide-react";
+import {
+  api,
+  getActiveTenantId,
+  setActiveTenantId,
+  setTenantHeaderAllowed,
+  listTenants,
+  type AuthStatus,
+  type SharingConfig,
+  type UserProfile,
+  type TenantsResp,
+} from "@/api/client";
 import { PageHeader } from "@/components/common";
 import { toastErr, toastOk } from "@/lib/toast";
 import DashboardView from "@/views/DashboardView";
@@ -21,6 +31,7 @@ import OpenVikingWorkspaceView from "@/views/OpenVikingWorkspaceShell";
 import SkillLabView from "@/views/SkillLabView";
 import MemoryLabView from "@/views/MemoryLabView";
 import DocsView from "@/views/DocsView";
+import TenantsView from "@/views/TenantsView";
 
 type ViewKey =
   | "mine-overview"
@@ -32,6 +43,7 @@ type ViewKey =
   | "health"
   | "workspace"
   | "platform"
+  | "tenants"
   | "users"
   | "model"
   | "docs";
@@ -48,7 +60,13 @@ const MINE_PAGES: { key: MiningViewKey; page: MinePage }[] = [
 const NAV_SECTIONS: {
   id: string;
   label: string;
-  items: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[];
+  items: {
+    key: ViewKey;
+    label: string;
+    icon: typeof LayoutDashboard;
+    adminOnly?: boolean;
+    requiresOpenViking?: boolean;
+  }[];
 }[] = [
   {
     id: "mining",
@@ -64,7 +82,7 @@ const NAV_SECTIONS: {
     label: "进化闭环",
     items: [
       { key: "dashboard", label: "运行总览", icon: LayoutDashboard },
-      { key: "langfuse", label: "Langfuse 接入", icon: DownloadCloud },
+      { key: "langfuse", label: "数据源接入", icon: DownloadCloud },
       { key: "prompt-studio", label: "进化链路", icon: TerminalSquare },
     ],
   },
@@ -72,8 +90,8 @@ const NAV_SECTIONS: {
     id: "assets",
     label: "资产中心",
     items: [
-      { key: "workspace", label: "Agent 工作空间", icon: FolderTree },
-      { key: "platform", label: "平台资产", icon: HardDrive },
+      { key: "workspace", label: "Agent 工作空间", icon: FolderTree, requiresOpenViking: true },
+      { key: "platform", label: "平台资产", icon: HardDrive, requiresOpenViking: true },
     ],
   },
   {
@@ -82,6 +100,7 @@ const NAV_SECTIONS: {
     items: [
       { key: "model", label: "全局模型", icon: SlidersHorizontal },
       { key: "users", label: "用户与权限", icon: Users },
+      { key: "tenants", label: "租户管理", icon: Building2, adminOnly: true },
       { key: "health", label: "运行状态", icon: Activity },
     ],
   },
@@ -116,14 +135,28 @@ type StandalonePageConfig = {
   title: string;
   description: string;
   badge: string;
-  render: (props: { active: boolean; user?: UserProfile | null }) => ReactNode;
+  requiresOpenViking?: boolean;
+  render: (props: {
+    active: boolean;
+    user?: UserProfile | null;
+    openVikingConfigured: boolean;
+    onSharingConfigChange: (config: SharingConfig) => void;
+  }) => ReactNode;
 };
+
+export function hasOpenVikingConfiguration(config?: SharingConfig | null): boolean {
+  return Boolean(
+    config?.enabled
+    && config.endpoint?.trim()
+    && (config.service_api_key_present || config.team_api_key_present),
+  );
+}
 
 const STANDALONE_PAGES: StandalonePageConfig[] = [
   {
     key: "langfuse",
-    title: "Langfuse 接入",
-    description: "统一配置会话证据拉取，以及 Skills 进化、团队 Memory 和内部模型调用的链路观测。",
+    title: "数据源接入",
+    description: "统一配置当前租户的 Langfuse 接入、会话转换与拉取；同时管理 Skills 进化、团队 Memory 和内部模型调用的链路观测。",
     badge: "数据与观测",
     render: ({ active, user }) => <LangfuseView active={active} user={user} />,
   },
@@ -132,13 +165,20 @@ const STANDALONE_PAGES: StandalonePageConfig[] = [
     title: "进化链路",
     description: "统一管理 Skills 自进化与团队 Memory 自进化（DreamCycle）的 Prompt、模型、参数和运行状态。",
     badge: "白盒配置",
-    render: ({ active, user }) => <EvolutionWorkspaceView active={active} user={user} />,
+    render: ({ active, user, openVikingConfigured }) => (
+      <EvolutionWorkspaceView
+        active={active}
+        user={user}
+        openVikingConfigured={openVikingConfigured}
+      />
+    ),
   },
   {
     key: "workspace",
     title: "Agent 工作空间",
     description: "Agent 能引用的个人与团队资产：Skills、Memory 和资源，统一在 OpenViking 文件管理界面中呈现。",
     badge: "Agent 可引用",
+    requiresOpenViking: true,
     render: ({ active, user }) => (
       <OpenVikingWorkspaceView
         active={active}
@@ -156,6 +196,7 @@ const STANDALONE_PAGES: StandalonePageConfig[] = [
     title: "平台资产",
     description: "自进化平台自己的存储：会话队列、候选技能、验证任务、记忆变更与 Skill Lab 等中间产物，Agent 无法引用，仅供平台运行与排查。",
     badge: "平台内部",
+    requiresOpenViking: true,
     render: ({ active, user }) => <OpenVikingWorkspaceView active={active} mode="platform" user={user} />,
   },
   {
@@ -173,11 +214,24 @@ const STANDALONE_PAGES: StandalonePageConfig[] = [
     render: ({ active, user }) => <UsersView active={active} user={user} />,
   },
   {
+    key: "tenants",
+    title: "租户管理",
+    description: "多租户模式下创建/禁用租户、轮换 agent 接入 token；单租户部署保持 default 一个租户。",
+    badge: "平台治理",
+    render: ({ active, user }) => <TenantsView active={active} user={user} />,
+  },
+  {
     key: "health",
     title: "运行状态",
     description: "汇总服务、存储、模型、Agent、用户和技能状态，定位平台运行问题。",
     badge: "平台治理",
-    render: ({ active, user }) => <HealthView active={active} user={user} />,
+    render: ({ active, user, onSharingConfigChange }) => (
+      <HealthView
+        active={active}
+        user={user}
+        onSharingConfigChange={onSharingConfigChange}
+      />
+    ),
   },
   {
     key: "docs",
@@ -209,22 +263,39 @@ const DASH_PAGE_META: Record<DashTab, { title: string; description: string }> = 
 
 export default function App() {
   const [view, setView] = useState<ViewKey>(initialView);
-  const [dashTab, setDashTab] = useState<DashTab>("overview");
+  const [dashTab, setDashTab] = useState<DashTab>(() => {
+    const tab = new URLSearchParams(window.location.search).get("tab");
+    return DASH_TABS.some(item => item.key === tab) ? tab as DashTab : "overview";
+  });
   const [mineInputDir, setMineInputDir] = useState("");
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [refreshingLogin, setRefreshingLogin] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [openVikingConfigured, setOpenVikingConfigured] = useState(false);
+  const [openVikingConfigChecked, setOpenVikingConfigChecked] = useState(false);
+  // ---- Tenant context (multi-tenancy plan §4.1) ----
+  const [tenantsResp, setTenantsResp] = useState<TenantsResp | null>(null);
+  // Tenant switches reload the app (see switchTenant), so plain state read at
+  // mount is enough; there is no in-place mutation to track.
+  const [activeTenantId] = useState(() => getActiveTenantId());
 
-  const refreshAuth = useCallback(async () => {
+  const refreshAuth = useCallback(async (silent = false) => {
     setCheckingAuth(true);
     try {
       const status = await api<AuthStatus>("/api/auth/status");
       setAuth(status);
       return status;
     } catch (e: any) {
-      toastErr("登录状态检查失败", e.message);
+      // The backend shares one event loop with the evolution cycle; under
+      // load a quick auth-status check can time out.  Don't scare the user
+      // with a toast on the initial page load — only surface the error when
+      // they explicitly click "刷新登录信息".
+      if (!silent) {
+        const isTimeout = e?.status === undefined && /超时|Timeout|Abort/i.test(e?.message || "");
+        toastErr(isTimeout ? "登录状态检查超时，服务可能繁忙" : "登录状态检查失败", e.message);
+      }
       return null;
     } finally {
       setCheckingAuth(false);
@@ -232,8 +303,91 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    refreshAuth();
+    refreshAuth(true);
   }, [refreshAuth]);
+
+  const applySharingConfig = useCallback((config: SharingConfig) => {
+    setOpenVikingConfigured(hasOpenVikingConfiguration(config));
+    setOpenVikingConfigChecked(true);
+  }, []);
+
+  useEffect(() => {
+    if (!auth?.authenticated) {
+      setOpenVikingConfigured(false);
+      setOpenVikingConfigChecked(false);
+      return;
+    }
+    let cancelled = false;
+    api<SharingConfig>("/api/sharing-config")
+      .then((config) => {
+        if (!cancelled) applySharingConfig(config);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setOpenVikingConfigured(false);
+          setOpenVikingConfigChecked(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [auth?.authenticated, applySharingConfig]);
+
+  useEffect(() => {
+    if (
+      openVikingConfigChecked
+      && !openVikingConfigured
+      && (view === "workspace" || view === "platform")
+    ) {
+      setView("dashboard");
+      const url = new URL(window.location.href);
+      url.searchParams.set("view", "dashboard");
+      window.history.replaceState(null, "", url.toString());
+    }
+  }, [openVikingConfigChecked, openVikingConfigured, view]);
+
+  // Tenant header injection is only valid for admin console sessions; keep
+  // the client-side gate in sync with the authenticated identity.
+  const isAdmin = auth?.user?.role === "admin";
+  // Set the gate DURING RENDER (not in an effect): child view effects fire
+  // before parent effects, so an effect-based flip happened only AFTER the
+  // dashboard's first fetch — briefly sending it without X-Tenant-Id and
+  // flashing the default tenant's data right after a tenant switch/reload.
+  // While auth is still unknown we render the full-screen gate and no view
+  // is mounted, so setting it here is both timely and safe.
+  setTenantHeaderAllowed(!!auth?.authenticated && isAdmin);
+  useEffect(() => {
+    if (!auth?.authenticated || !isAdmin) {
+      setTenantsResp(null);
+      return;
+    }
+    let cancelled = false;
+    listTenants()
+      .then((resp) => {
+        if (!cancelled) setTenantsResp(resp);
+      })
+      .catch(() => {
+        // 403 (non-admin) or PG down — stay in single-tenant view.
+        if (!cancelled) setTenantsResp(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [auth?.authenticated, isAdmin]);
+
+  const tenantSwitcherVisible =
+    !!tenantsResp && tenantsResp.mode === "postgres" && tenantsResp.tenants.length > 0;
+
+  // Switching tenants remounts the whole app: every view caches per-tenant
+  // state fetched before the switch, so a reload is the only sound reset.
+  function switchTenant(tenantId: string) {
+    if (tenantId === activeTenantId) return;
+    setActiveTenantId(tenantId);
+    const url = new URL(window.location.href);
+    url.searchParams.set("view", view);
+    url.searchParams.set("tab", dashTab);
+    window.location.assign(url.toString());
+  }
 
   async function refreshLoginInfo() {
     setUserMenuOpen(false);
@@ -257,7 +411,11 @@ export default function App() {
       setAuth({ authenticated: false, needs_setup: false });
       toastOk("已退出登录");
     } catch (e: any) {
-      toastErr("退出失败", e.message);
+      // Even if the logout request times out, clear the local session so
+      // the user is not stuck on a wedged button.
+      setAuth({ authenticated: false, needs_setup: false });
+      const isTimeout = e?.status === undefined && /超时|Timeout|Abort/i.test(e?.message || "");
+      toastErr(isTimeout ? "退出超时，已本地清除登录态" : "退出失败", e.message);
     } finally {
       setLoggingOut(false);
     }
@@ -277,7 +435,7 @@ export default function App() {
       <>
         <LoginGate
           needsSetup={!!auth?.needs_setup}
-          onAuthed={(next) => setAuth(next)}
+          onAuthed={(next) => setAuth({ ...next, customer_mode: auth?.customer_mode })}
         />
         <Toaster position="bottom-right" />
       </>
@@ -300,38 +458,53 @@ export default function App() {
             <div className="mt-0.5 text-[9.5px] font-[600] text-muted-soft">团队记忆与技能进化平台</div>
           </div>
         </div>
+        {tenantSwitcherVisible && (
+          <TenantSwitcher
+            tenants={tenantsResp!.tenants}
+            activeTenantId={activeTenantId}
+            onSelect={switchTenant}
+          />
+        )}
         <nav className="sidebar-nav flex flex-1 flex-col gap-0.5 overflow-auto px-2.5 py-3" aria-label="主导航">
-          {NAV_SECTIONS.map(({ id, label, items }) => (
-            <section key={id} className="sidebar-nav-section mb-1.5" aria-labelledby={`nav-section-${id}`}>
-              <div
-                id={`nav-section-${id}`}
-                className="sidebar-group-label px-3 pb-1 pt-2.5 text-[10px] font-[800] uppercase tracking-[0.08em] text-muted-soft"
-              >
-                {label}
-              </div>
-              {items.map(({ key, label, icon: Icon }) => (
-                <button
-                  key={key}
-                  type="button"
-                  aria-current={view === key ? "page" : undefined}
-                  onClick={() => {
-                    setView(key);
-                    setUserMenuOpen(false);
-                  }}
-                  title={label}
-                  className={cn(
-                    "sidebar-nav-item flex w-full items-center gap-2.5 rounded-[10px] px-3 py-2.5 text-[13px] font-[700] transition-[background-color,color,transform,box-shadow]",
-                    view === key
-                      ? "bg-sidebar-primary text-sidebar-primary-foreground shadow-[0_7px_18px_rgba(24,24,26,0.12)]"
-                      : "text-sidebar-foreground hover:translate-x-[3px] hover:bg-sidebar-accent hover:text-foreground"
-                  )}
+          {NAV_SECTIONS.map(({ id, label, items }) => {
+            const visibleItems = items.filter(
+              ({ adminOnly, requiresOpenViking }) =>
+                (!adminOnly || isAdmin)
+                && (!requiresOpenViking || openVikingConfigured),
+            );
+            if (!visibleItems.length) return null;
+            return (
+              <section key={id} className="sidebar-nav-section mb-1.5" aria-labelledby={`nav-section-${id}`}>
+                <div
+                  id={`nav-section-${id}`}
+                  className="sidebar-group-label px-3 pb-1 pt-2.5 text-[10px] font-[800] uppercase tracking-[0.08em] text-muted-soft"
                 >
-                  <Icon className="size-4 shrink-0 opacity-85" />
-                  <span className="sidebar-item-label">{label}</span>
-                </button>
-              ))}
-            </section>
-          ))}
+                  {label}
+                </div>
+                {visibleItems.map(({ key, label: itemLabel, icon: Icon }) => (
+                  <button
+                    key={key}
+                    type="button"
+                    aria-current={view === key ? "page" : undefined}
+                    onClick={() => {
+                      setView(key);
+                      setUserMenuOpen(false);
+                    }}
+                    title={itemLabel}
+                    className={cn(
+                      "sidebar-nav-item flex w-full items-center gap-2.5 rounded-[10px] px-3 py-2.5 text-[13px] font-[700] transition-[background-color,color,transform,box-shadow]",
+                      view === key
+                        ? "bg-sidebar-primary text-sidebar-primary-foreground shadow-[0_7px_18px_rgba(24,24,26,0.12)]"
+                        : "text-sidebar-foreground hover:translate-x-[3px] hover:bg-sidebar-accent hover:text-foreground"
+                    )}
+                  >
+                    <Icon className="size-4 shrink-0 opacity-85" />
+                    <span className="sidebar-item-label">{itemLabel}</span>
+                  </button>
+                ))}
+              </section>
+            );
+          })}
         </nav>
         <UserMenu
           user={auth.user}
@@ -345,7 +518,7 @@ export default function App() {
       </aside>
 
       {/* ---- Content ---- */}
-      <main className="app-main h-screen flex-1 overflow-auto">
+      <main className="app-main h-screen min-w-0 flex-1 overflow-auto">
         {MINE_PAGES.map(({ key, page }) => (
           <div key={key} className={cn(view !== key && "hidden")}>
             <MiningView
@@ -361,7 +534,7 @@ export default function App() {
                   return;
                 }
                 if (destination === "skills") {
-                  setView("workspace");
+                  setView(openVikingConfigured ? "workspace" : "health");
                   return;
                 }
                 setView(`mine-${destination}` as ViewKey);
@@ -411,12 +584,19 @@ export default function App() {
             <SessionFilterView active={view === "dashboard" && dashTab === "filter"} />
           </div>
         </div>
-        {STANDALONE_PAGES.map(({ key, title, description, badge, render }) => {
+        {STANDALONE_PAGES
+          .filter(({ requiresOpenViking }) => !requiresOpenViking || openVikingConfigured)
+          .map(({ key, title, description, badge, render }) => {
           const active = view === key;
           return (
             <div key={key} className={cn(!active && "hidden")}>
               <PageHeader title={title} description={description} badge={badge} />
-              {render({ active, user: auth.user })}
+              {render({
+                active,
+                user: auth.user,
+                openVikingConfigured,
+                onSharingConfigChange: applySharingConfig,
+              })}
             </div>
           );
         })}
@@ -713,6 +893,90 @@ function LoginHero() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+export function TenantSwitcher({
+  tenants,
+  activeTenantId,
+  onSelect,
+  projectMode = false,
+}: {
+  tenants: TenantsResp["tenants"];
+  activeTenantId: string;
+  onSelect: (tenantId: string) => void;
+  projectMode?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  // The default tenant always exists as the single-tenant fallback, even
+  // when it was never explicitly registered in the tenants table.
+  const entries = [
+    ...tenants.filter((t) => t.tenant_id !== "default"),
+    ...(tenants.some((t) => t.tenant_id === "default")
+      ? tenants.filter((t) => t.tenant_id === "default")
+      : [{ tenant_id: "default", display_name: "default", status: "active" }]),
+  ];
+  const activeTenant =
+    entries.find((t) => t.tenant_id === activeTenantId) ||
+    entries.find((t) => t.tenant_id === "default") ||
+    entries[0];
+  return (
+    <div className={cn("relative", projectMode ? "w-full" : "border-b border-sidebar-border p-2.5")}>
+      <button
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={`${projectMode ? "项目" : "租户"}切换：当前 ${activeTenant.display_name}`}
+        onClick={() => setOpen((v) => !v)}
+        className={cn(
+          "flex w-full items-center gap-2.5 rounded-[12px] border px-2.5 py-2 text-left transition-colors",
+          !projectMode && "sidebar-tenant-button",
+          open ? "border-accent/30 bg-accent-soft" : "border-transparent hover:border-border hover:bg-muted"
+        )}
+      >
+        <span className="grid size-8 shrink-0 place-items-center rounded-[10px] bg-accent-soft text-accent">
+          <Building2 className="size-4" />
+        </span>
+        <span className={cn("min-w-0 flex-1", !projectMode && "sidebar-tenant-copy")}>
+          <span className="block text-[10px] font-[600] uppercase tracking-wide text-muted-soft">{projectMode ? "当前项目" : "当前租户"}</span>
+          <span className="block truncate text-[13px] font-semibold">
+            {activeTenant.display_name || activeTenant.tenant_id}
+          </span>
+        </span>
+        <ChevronsUpDown className={cn("size-3.5 shrink-0 text-muted-soft", !projectMode && "sidebar-tenant-chevron")} />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="sidebar-tenant-popover absolute left-0 right-0 top-[calc(100%+8px)] z-50 max-h-80 overflow-y-auto rounded-md border border-border bg-surface shadow-[var(--shadow-float)]"
+        >
+          <div className="p-2"><Input aria-label="搜索项目" placeholder="搜索项目" value={search} onChange={e => setSearch(e.target.value)} /></div>
+          {!entries.some(t => t.status === "active" && `${t.display_name} ${t.tenant_id}`.toLowerCase().includes(search.trim().toLowerCase())) && <div role="status" className="p-3 text-xs text-muted-foreground">无匹配项目</div>}
+          {entries.filter(t => t.status === "active" && `${t.display_name} ${t.tenant_id}`.toLowerCase().includes(search.trim().toLowerCase())).map((t) => (
+            <button
+              key={t.tenant_id}
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                onSelect(t.tenant_id);
+              }}
+              className={cn(
+                "flex w-full items-center justify-between gap-2 px-4 py-2.5 text-left text-sm hover:bg-muted",
+                t.tenant_id === activeTenant.tenant_id && "bg-accent-soft font-semibold"
+              )}
+            >
+              <span className="min-w-0 flex-1 truncate">
+                {t.display_name || t.tenant_id}
+                <span className="ml-1.5 text-[11px] text-muted-foreground">{t.tenant_id}</span>
+              </span>
+              {t.status !== "active" && <span className="text-[10px] text-muted-soft">已禁用</span>}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

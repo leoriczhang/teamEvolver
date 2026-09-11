@@ -1,0 +1,51 @@
+service:
+  host: 0.0.0.0
+  port: 52010
+storage_pg:
+  enabled: true
+  # Inject TEAMEVOLVER_PG_DSN or OV_PG_* environment variables.
+  dsn: ""
+  schema: teamevolver
+  pool_min: 2
+  pool_max: 20
+  command_timeout_seconds: 15
+llm:
+  provider: custom
+  api_base: ""
+  api_key: ""
+  model_id: ""
+  max_tokens: 8192
+  temperature: 0.2
+skills:
+  enabled: false
+sharing:
+  enabled: true
+  session_backend: postgres
+  skill_backend: postgres
+  local_fallback_enabled: false
+  skill_mirror_enabled: false
+  auto_pull_on_start: false
+  skill_reload_mode: off
+  viking_deployment: local
+  viking_endpoint: ""
+evolve:
+  interval_seconds: 600
+  drain_max_per_cycle: 100
+  drain_batch_size: 25
+  drain_batch_delay_seconds: 0
+  max_parallel_groups: 4
+  publish_mode: validated
+  human_review_enabled: true
+validation:
+  enabled: false
+dreamcycle:
+  enabled: false
+langfuse:
+  enabled: false
+  host: https://cloud.langfuse.com
+  public_key: ""
+  secret_key: ""
+  tracing_enabled: false
+  tracing_host: ""
+  tracing_public_key: ""
+  tracing_secret_key: ""

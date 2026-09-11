@@ -63,8 +63,9 @@ def compact_tool_calls(tool_calls: Any, max_items: int = _TOOL_SNIPPET_MAX_ITEMS
         out.append(
             {
                 "id": str(tc.get("id") or ""),
-                "name": str(func.get("name") or "unknown"),
-                "arguments": _clip_text(func.get("arguments") or ""),
+                # Accept the legacy mapper shape {name, input} as well.
+                "name": str(func.get("name") or tc.get("name") or "unknown"),
+                "arguments": _clip_text(func.get("arguments") or tc.get("input") or ""),
             }
         )
     return out

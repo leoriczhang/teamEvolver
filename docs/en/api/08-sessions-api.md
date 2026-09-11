@@ -69,6 +69,8 @@ List processed conversation history (archived conversations).
 
 **Caching:** Conversation list cached for 15 seconds.
 
+Each conversation row carries full metadata including `value_judge` (value classification result); when the session appears in evolution history, the row is additionally enriched with a `judge` field (`overall_score`, the four dimension scores, per-dimension `reasons`, and `rationale`, from the most recent cycle record covering that session — `teamEvolver/proxy/routes.py:_session_judge_score_index`).
+
 ---
 
 ### GET /conversations/{session_id}
@@ -163,6 +165,37 @@ Get evolution cycle history records (read from `evolve_history.jsonl` or archive
 |-------|------|-------------|
 | `cycles` | array | Evolution cycle list |
 
+Each cycle record contains a `session_judge` aggregate (`enabled`, `judged_sessions`, `scored_sessions`, `mean_score`, `min_score`, `max_score`) plus `session_judge_details` (per consumed Session: `session_id`, `overall_score`, the four dimension scores, per-dimension `reasons`, and `rationale` — `teamEvolver/evolve/runtime/orchestrator.py:_collect_session_judge_details`).
+
+---
+
+### GET /api/session-filter/audit
+
+Query session filter audit records (`session_filter_audit/`) and their aggregate statistics.
+
+**Authentication:** Console Session Cookie (`/api/*` paths)
+
+**Query Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `limit` | integer | No | Number of records to return, minimum 1, default 100 |
+| `decision` | string | No | Filter by `value_judge.decision` (`valuable|memory_candidate|task_only|chitchat`) |
+
+**Response Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `stats` | object | Aggregate statistics: `total` (record count), `decisions` (count per decision), `statuses` (count per status), `modes` (count per decision mode) |
+| `items` | array | Audit record list (sorted by recording time descending); each item includes metadata, `value_judge`, `judge`, and `key` |
+| `reason` | string | Failure reason when reading fails (returned only on error) |
+
+**Code entry:** `teamEvolver/proxy/routes.py:api_session_filter_audit` (`teamEvolver/session_store.py:list_filter_audit`, `teamEvolver/session_store.py:filter_stats`)
+
+**Caching:** Results cached for 30 seconds.
+
+---
+
 ## 3. Usage Examples
 
 ### View Pending Queue
@@ -220,11 +253,28 @@ Example response:
       "timestamp": "2024-01-15T10:35:00Z",
       "session_ids": ["sess-20240115-001"],
       "sessions": 1,
-      "judge": {
-        "overall_score": 0.85,
-        "decision": "accept",
-        "rationale": "Skill optimization improves efficiency"
+      "session_judge": {
+        "enabled": true,
+        "judged_sessions": 1,
+        "scored_sessions": 1,
+        "mean_score": 0.85,
+        "min_score": 0.85,
+        "max_score": 0.85
       },
+      "session_judge_details": [
+        {
+          "session_id": "sess-20240115-001",
+          "overall_score": 0.85,
+          "task_completion": 0.9,
+          "response_quality": 0.85,
+          "efficiency": 0.7,
+          "tool_usage": 0.8,
+          "reasons": {
+            "task_completion": ["The final output matches the required format"]
+          },
+          "rationale": "Task completed with good output quality; minor detours"
+        }
+      ],
       "evolutions": [
         {
           "skill_name": "database-debugging",
@@ -233,6 +283,34 @@ Example response:
         }
       ],
       "status": "published"
+    }
+  ]
+}
+```
+
+### Query Filter Audit
+
+```bash
+curl "http://localhost:52010/api/session-filter/audit?limit=20&decision=task_only"
+```
+
+Example response:
+
+```json
+{
+  "stats": {
+    "total": 142,
+    "decisions": {"valuable": 90, "task_only": 38, "chitchat": 12, "memory_candidate": 2},
+    "statuses": {"queued": 90, "skipped": 52},
+    "modes": {"model": 130, "heuristic": 10, "deterministic": 2}
+  },
+  "items": [
+    {
+      "session_id": "sess-20240115-002",
+      "status": "skipped",
+      "recorded_at": "2024-01-15T10:31:00Z",
+      "value_judge": {"decision": "task_only", "confidence": 0.8, "mode": "model"},
+      "key": ".../session_filter_audit/sess-20240115-002.json"
     }
   ]
 }

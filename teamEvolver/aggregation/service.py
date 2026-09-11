@@ -21,9 +21,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
+import os
 import re
 import secrets
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -152,6 +155,106 @@ class MemoryAggregationService:
         # run against the same target would interleave writes to the same output
         # tree and incremental state, so it is refused rather than serialized.
         self._active_targets: dict[str, str] = {}
+        # Recover persisted run state so a process restart doesn't lose
+        # in-flight runs or the concurrent-target guard.
+        self._recover_runs()
+
+    # ---- run persistence ------------------------------------------------ #
+
+    def _runs_file(self) -> Path:
+        base = str(getattr(self.config, "aggregation_state_dir", "") or "").strip()
+        root = Path(base).expanduser() if base else Path.home() / ".teamEvolver" / "aggregation"
+        return root / "runs.json"
+
+    @staticmethod
+    def _write_json_atomic(path: Path, data: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=path.parent,
+                prefix=f".{path.name}.", delete=False,
+            ) as handle:
+                tmp = Path(handle.name)
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+        finally:
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)
+
+    def _save_runs(self) -> None:
+        """Persist run records and active target locks to disk."""
+        path = self._runs_file()
+        data = {
+            "runs": [r.to_public() for r in self._runs.values()],
+            "active_targets": dict(self._active_targets),
+        }
+        try:
+            self._write_json_atomic(path, json.dumps(data, ensure_ascii=False, indent=2))
+        except OSError:
+            logger.debug("[aggregation] failed to persist runs", exc_info=True)
+
+    def _recover_runs(self) -> None:
+        """Load persisted runs; mark any unfinished ones as failed."""
+        path = self._runs_file()
+        try:
+            raw = json.loads(path.read_text("utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(raw, dict):
+            return
+        # Restore active targets so a crashed run blocks duplicates until
+        # explicitly released.
+        for key, task_id in (raw.get("active_targets") or {}).items():
+            if isinstance(key, str) and isinstance(task_id, str):
+                self._active_targets[key] = task_id
+        # Restore run records; mark in-flight ones as failed so callers see
+        # the crash rather than a perpetually "running" ghost.
+        for entry in raw.get("runs") or []:
+            if not isinstance(entry, dict):
+                continue
+            status = str(entry.get("status") or "")
+            if status in ("pending", "running"):
+                entry["status"] = "failed"
+                entry["error"] = entry.get("error") or "process restarted"
+                entry["finished_at"] = entry.get("finished_at") or time.time()
+                # Release the target lock for crashed runs.
+                task_id = str(entry.get("task_id") or "")
+                for key, holder in list(self._active_targets.items()):
+                    if holder == task_id:
+                        self._active_targets.pop(key, None)
+            task_id = str(entry.get("task_id") or "")
+            if not task_id:
+                continue
+            run = AggregationRun(
+                task_id=task_id,
+                account_id=str(entry.get("account_id") or ""),
+                endpoint=str(entry.get("endpoint") or ""),
+                auth_mode=str(entry.get("auth_mode") or "trusted"),
+                target_uri=str(entry.get("target_uri") or ""),
+                work_root=str(entry.get("work_root") or ""),
+                skill_uri=str(entry.get("skill_uri") or ""),
+                skill_revision=str(entry.get("skill_revision") or ""),
+                status=str(entry.get("status") or "failed"),
+                started_at=float(entry.get("started_at") or time.time()),
+                finished_at=entry.get("finished_at"),
+                group_counts=entry.get("group_counts") or {"ok": 0, "skipped": 0, "failed": 0},
+                group_total=int(entry.get("group_total") or 0),
+                groups_truncated=bool(entry.get("groups_truncated")),
+                source_user_count=int(entry.get("source_user_count") or 0),
+                publish_mode=str(entry.get("publish_mode") or "single"),
+                partition_count=int(entry.get("partition_count") or 0),
+                estimated_merge_tasks=int(entry.get("estimated_merge_tasks") or 0),
+                error=str(entry.get("error") or ""),
+            )
+            self._runs[task_id] = run
+        if self._runs:
+            logger.info(
+                "[aggregation] recovered %d run(s) from disk (%d active targets)",
+                len(self._runs), len(self._active_targets),
+            )
 
     # ---- config accessors ------------------------------------------------ #
 
@@ -608,12 +711,14 @@ class MemoryAggregationService:
         )
         with self._lock:
             self._runs[task_id] = run
+        self._save_runs()
         return run
 
     def forget_run(self, task_id: str) -> None:
         """Drop a run record (used to discard a rejected, never-started run)."""
         with self._lock:
             self._runs.pop(task_id, None)
+        self._save_runs()
 
     def list_runs(self, limit: int = 20) -> list[dict[str, Any]]:
         """Return recent runs (newest first) for refresh recovery."""
@@ -658,12 +763,14 @@ class MemoryAggregationService:
                     f"{run.target_uri} (task {holder})"
                 )
             self._active_targets[key] = run.task_id
+        self._save_runs()
 
     def _release_target(self, run: "AggregationRun") -> None:
         key = self._target_lock_key(run)
         with self._lock:
             if self._active_targets.get(key) == run.task_id:
                 self._active_targets.pop(key, None)
+        self._save_runs()
 
     def target_is_active(self, run: "AggregationRun") -> bool:
         """Whether another run currently holds this run's target lock."""
@@ -713,6 +820,7 @@ class MemoryAggregationService:
             logger.exception("[aggregation] run failed")
         finally:
             run.finished_at = time.time()
+            self._save_runs()
 
     # ---- internals ------------------------------------------------------- #
 

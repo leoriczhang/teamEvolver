@@ -101,10 +101,10 @@ After installation, restart Hermes; new sessions will automatically be reported 
 ## 6. Manually Trigger Evolution
 
 ```bash
-curl -X POST http://localhost:52010/trigger
+curl -X POST http://localhost:52010/trigger-dreamcycle
 ```
 
-This immediately runs one evolution cycle: dequeue Sessions → extract Evidence → generate Candidates. In `validated` mode, Candidates then enter True Replay and release gates.
+This triggers a DreamCycle memory maintenance task: 202 when started, 503 when DreamCycle is not configured. Queued Sessions also enter the evolution cycle automatically at the configured interval.
 
 ## 7. Stop the Service
 

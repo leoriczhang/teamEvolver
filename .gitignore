@@ -1,4 +1,6 @@
 .venv/
+.test-home/
+runtime/
 __pycache__/
 *.py[cod]
 *.tsbuildinfo
@@ -41,6 +43,11 @@ docs/.vitepress/dist/
 docs/design/
 docs/prd/
 docs/research/
+docs/multi-tenancy-plan.md
+客户上下文/
+adapters/
+DELIVERY_REPORT.md
+进化阶段LLM消耗统计_*.md
 
 # Local runtime
 openviking/

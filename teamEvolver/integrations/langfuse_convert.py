@@ -22,15 +22,57 @@ import json
 from typing import Any, Callable, Optional
 
 # Cap any single text body so ingested payloads stay reasonable, mirroring the
-# Hermes push hook (push_session.MAX_CHARS). Keep this generous for 256k+
-# context models so downstream summarization preserves enough raw evidence.
-MAX_CHARS = 64_000
+# Hermes push hook (push_session.MAX_CHARS). Set to None to disable truncation.
+MAX_CHARS = None  # no truncation: preserve full original IO ([:None] keeps everything)
 MAX_SYSTEM_CHARS = 200_000
 
 # Langfuse core observation types (see commons.yml ObservationType).
 _GENERATION_TYPES = {"GENERATION"}
 _EVENT_TYPES = {"EVENT"}
 _TOOL_ROLES = {"tool", "function"}
+
+# Trace names that are generic pipeline labels rather than session titles.
+_GENERIC_TRACE_NAMES = {"openclaw-turn", "turn", "trace", "session"}
+
+# JSON keys holding the actual user question in common agent payloads.
+_TITLE_QUERY_KEYS = ("query", "question", "text", "message", "content")
+
+
+def _title_from_prompt(prompt_text: str) -> str:
+    """Extract a human-readable session title candidate from a turn prompt.
+
+    Agent payloads often wrap the user message in JSON envelopes (e.g.
+    openclaw's ``{"sender": ..., "msg": {"content": {"query": ...}}}``);
+    unwrap the most common shapes and fall back to the first meaningful
+    plain-text line.
+    """
+    text = (prompt_text or "").strip()
+    if not text:
+        return ""
+    if text.startswith("{"):
+        try:
+            payload = json.loads(text)
+        except (ValueError, TypeError):
+            payload = None
+        if isinstance(payload, dict):
+            msg = payload.get("msg")
+            if isinstance(msg, dict):
+                content = msg.get("content")
+                candidates = [content] if not isinstance(content, dict) else [content]
+            else:
+                candidates = [payload]
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                for key in _TITLE_QUERY_KEYS:
+                    value = candidate.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip().splitlines()[0]
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith(("{", "【", "[\"")):
+            return line
+    return ""
 
 
 def _extract_text(value: Any) -> str:
@@ -326,6 +368,20 @@ def _dominant(values: list[str]) -> str:
     return max(counts, key=counts.get)
 
 
+def _user_from_session_id(session_id: str) -> str:
+    """Derive the owning user from an agent session id.
+
+    Agent session ids embed the user before the conversation id, e.g.
+    ``agent:main:openresponses-user:42749155_<conversation>``. Langfuse traces
+    frequently omit ``userId``, so this is the reliable fallback for
+    attribution. Returns "" when the id has no ``<user>_<rest>`` tail.
+    """
+    tail = str(session_id or "").split(":")[-1]
+    if "_" not in tail:
+        return ""
+    return tail.split("_", 1)[0].strip()
+
+
 def _metric_int(turn: dict[str, Any], key: str) -> int:
     """Read one integer metric from a turn, tolerating custom-mapper output.
 
@@ -404,15 +460,19 @@ def convert_langfuse_session(
             if tag and tag not in tags:
                 tags.append(tag)
 
-    # Session title: first trace name, else first user prompt.
+    # Session title: first meaningful user prompt, else first non-generic
+    # trace name. Langfuse trace names are often generic labels
+    # (e.g. "openclaw-turn"), so user content wins.
     title = ""
-    if ordered_traces:
-        title = str(ordered_traces[0].get("name") or "").strip()
-    if not title:
-        for turn in turns:
-            if turn.get("prompt_text"):
-                title = turn["prompt_text"].splitlines()[0][:120]
-                break
+    for turn in turns:
+        candidate = _title_from_prompt(turn.get("prompt_text") or "")
+        if candidate:
+            title = candidate[:120]
+            break
+    if not title and ordered_traces:
+        name = str(ordered_traces[0].get("name") or "").strip()
+        if name and name.lower() not in _GENERIC_TRACE_NAMES:
+            title = name
 
     timestamp = str(
         session.get("createdAt")
@@ -421,13 +481,28 @@ def convert_langfuse_session(
         or ""
     )
 
+    # Session-level skill unions: the ingest contract and the console detail
+    # view read the top-level fields, so aggregate them from turns (a custom
+    # mapper fills them per-turn).
+    injected_skills: list[str] = []
+    used_skills: list[str] = []
+    for turn in turns:
+        for key, bucket in (
+            ("injected_skills", injected_skills),
+            ("used_skills", used_skills),
+        ):
+            for skill in turn.get(key) or []:
+                skill = str(skill).strip()
+                if skill and skill not in bucket:
+                    bucket.append(skill)
+
     converted: dict[str, Any] = {
         "session_id": session_id,
         "turns": turns,
         "messages": messages,
         "system_prompt": "",
-        "injected_skills": [],
-        "used_skills": [],
+        "injected_skills": injected_skills,
+        "used_skills": used_skills,
         "source": "langfuse",
         "model": _dominant([m for turn in turns for m in _turn_models(turn)]),
         "metrics": {
@@ -457,7 +532,7 @@ def convert_langfuse_session(
         converted["title"] = title
     if timestamp:
         converted["timestamp"] = timestamp
-    dominant_user = _dominant(user_ids)
+    dominant_user = _dominant(user_ids) or _user_from_session_id(session_id)
     if dominant_user:
         converted["user_alias"] = dominant_user
     return converted

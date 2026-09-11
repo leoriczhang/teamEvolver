@@ -4,6 +4,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from teamEvolver.evolve import EvolveServer, EvolveServerConfig
 from teamEvolver.evolve.store.object_store import (
     fetch_skill_bundle,
@@ -152,16 +154,20 @@ def test_publish_versions_and_rollback_preserve_complete_bundle(
     assert restored_manifest["tree_sha256"] == bundle_tree_sha256(restored)
 
 
+@pytest.mark.parametrize("native_batch", [False, True])
 def test_identical_publish_reuses_committed_version(
-    tmp_path: Path,
+    tmp_path: Path, native_batch: bool,
 ) -> None:
     server = _server(tmp_path)
+    if native_batch:
+        server._skill_bucket = _NativeBatchStore()
     skill = _skill(
         "# Stable",
         {"scripts/run.py": b"print('stable')\n"},
     )
 
     assert server._upload_skill(skill, "create_skill") == "uploaded"
+    original_manifest = load_manifest(server._skill_bucket, server._skill_prefix)
     assert (
         server._upload_skill(skill, "create_skill")
         == "uploaded_idempotent"
@@ -173,6 +179,75 @@ def test_identical_publish_reuses_committed_version(
     )
     assert manifest["bundle-demo"]["version"] == 1
     assert server._id_registry.get_version("bundle-demo") == 1
+    assert manifest == original_manifest
+    assert len(list(server._skill_bucket.iter_objects("skill_mutation_commits/"))) == 1
+    assert len(list(server._skill_bucket.iter_objects("skill_sync_outbox/"))) == 1
+    if native_batch:
+        assert len(server._skill_bucket.batch_calls) == 1
+
+
+@pytest.mark.parametrize("native_batch", [False, True])
+@pytest.mark.parametrize("change", ["script", "runtime_policy"])
+def test_same_entrypoint_with_changed_bundle_or_policy_is_not_idempotent(
+    tmp_path: Path, native_batch: bool, change: str,
+) -> None:
+    server = _server(tmp_path)
+    if native_batch:
+        server._skill_bucket = _NativeBatchStore()
+    first = _skill("# Stable", {"scripts/run.py": b"print('v1')\n"})
+    second = (
+        _skill("# Stable", {"scripts/run.py": b"print('v2')\n"})
+        if change == "script"
+        else {**first, "runtime_policy": {"supported_runtimes": ["hermes"]}}
+    )
+
+    assert server._upload_skill(first, "create_skill") == "uploaded"
+    assert server._upload_skill(second, "improve_skill") == "uploaded"
+    assert server._id_registry.get_version("bundle-demo") == 2
+    assert server._upload_skill(second, "improve_skill") == "uploaded_idempotent"
+    assert server._id_registry.get_version("bundle-demo") == 2
+
+
+def test_identical_publish_retries_interrupted_mutation_record(tmp_path, monkeypatch) -> None:
+    server = _server(tmp_path)
+    skill = _skill("# Stable", {"scripts/run.py": b"print('stable')\n"})
+    record_committed = server._record_committed_skill_mutation
+
+    def fail_record(**kwargs):
+        raise RuntimeError("mutation storage unavailable")
+
+    monkeypatch.setattr(server, "_record_committed_skill_mutation", fail_record)
+    with pytest.raises(RuntimeError, match="mutation storage unavailable"):
+        server._upload_skill(skill, "create_skill")
+    monkeypatch.setattr(server, "_record_committed_skill_mutation", record_committed)
+
+    assert server._upload_skill(skill, "create_skill") == "uploaded_idempotent"
+    assert server._id_registry.get_version("bundle-demo") == 1
+    assert len(list(server._skill_bucket.iter_objects("skill_sync_outbox/"))) == 1
+
+
+def test_idempotent_upload_is_a_successful_publish() -> None:
+    assert EvolveServer._upload_status_to_action("improve_skill", "uploaded_idempotent") == (
+        "improve_skill", True,
+    )
+
+
+@pytest.mark.parametrize("native_batch", [False, True])
+@pytest.mark.parametrize("damage", ["missing", "changed"])
+def test_matching_manifest_does_not_hide_damaged_active_bundle(tmp_path, native_batch, damage) -> None:
+    server = _server(tmp_path)
+    if native_batch:
+        server._skill_bucket = _NativeBatchStore()
+    skill = _skill("# Stable", {"scripts/run.py": b"print('stable')\n"})
+    server._upload_skill(skill, "create_skill")
+    key = f"{server._skill_prefix}skills/bundle-demo/files/scripts/run.py"
+    if damage == "missing":
+        server._skill_bucket.delete_object(key)
+    else:
+        server._skill_bucket.put_object(key, b"damaged\n")
+
+    assert server._upload_skill(skill, "create_skill") == "uploaded"
+    assert server._skill_bucket.get_object(key).read() == b"print('stable')\n"
 
 
 def test_native_openviking_publish_batches_bundle_manifest_and_registry(

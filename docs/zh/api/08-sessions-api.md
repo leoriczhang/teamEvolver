@@ -69,6 +69,8 @@ Session 查询接口用于查看队中的待处理 Session 和已处理的会话
 
 **缓存：** 会话列表缓存 15 秒。
 
+每行会话记录携带完整元信息，包括 `value_judge`（价值分类结果）；当该会话出现在进化历史中时，还会用 `judge` 字段富化（`overall_score`、四个维度分数、各维度 `reasons` 与 `rationale`，取自最近一次覆盖该会话的周期记录，`teamEvolver/proxy/routes.py:_session_judge_score_index`）。
+
 ---
 
 ### GET /conversations/{session_id}
@@ -163,6 +165,37 @@ Session 查询接口用于查看队中的待处理 Session 和已处理的会话
 |------|------|------|
 | `cycles` | array | 进化周期列表 |
 
+每个周期记录包含 `session_judge` 汇总（`enabled`、`judged_sessions`、`scored_sessions`、`mean_score`、`min_score`、`max_score`）与 `session_judge_details`（每个被消费 Session 的 `session_id`、`overall_score`、四个维度分数、各维度 `reasons` 与 `rationale`，`teamEvolver/evolve/runtime/orchestrator.py:_collect_session_judge_details`）。
+
+---
+
+### GET /api/session-filter/audit
+
+查询会话过滤审计记录（`session_filter_audit/`）及其统计汇总。
+
+**认证：** 控制台 Session Cookie（`/api/*` 路径）
+
+**Query 参数：**
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `limit` | integer | 否 | 返回条数，最小 1，默认 100 |
+| `decision` | string | 否 | 按 `value_judge.decision` 过滤（`valuable|memory_candidate|task_only|chitchat`） |
+
+**响应字段：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `stats` | object | 统计汇总：`total`（记录总数）、`decisions`（各 decision 计数）、`statuses`（各状态计数）、`modes`（各判定模式计数） |
+| `items` | array | 审计记录列表（按记录时间倒序），每条包含元信息、`value_judge`、`judge` 与 `key` |
+| `reason` | string | 读取失败时的原因（仅错误时返回） |
+
+**代码入口：** `teamEvolver/proxy/routes.py:api_session_filter_audit`（`teamEvolver/session_store.py:list_filter_audit`、`teamEvolver/session_store.py:filter_stats`）
+
+**缓存：** 结果缓存 30 秒。
+
+---
+
 ## 3. 使用示例
 
 ### 查看待处理队列
@@ -220,11 +253,28 @@ curl "http://localhost:52010/conversations/sess-20240115-001/process"
       "timestamp": "2024-01-15T10:35:00Z",
       "session_ids": ["sess-20240115-001"],
       "sessions": 1,
-      "judge": {
-        "overall_score": 0.85,
-        "decision": "accept",
-        "rationale": "Skill optimization improves efficiency"
+      "session_judge": {
+        "enabled": true,
+        "judged_sessions": 1,
+        "scored_sessions": 1,
+        "mean_score": 0.85,
+        "min_score": 0.85,
+        "max_score": 0.85
       },
+      "session_judge_details": [
+        {
+          "session_id": "sess-20240115-001",
+          "overall_score": 0.85,
+          "task_completion": 0.9,
+          "response_quality": 0.85,
+          "efficiency": 0.7,
+          "tool_usage": 0.8,
+          "reasons": {
+            "task_completion": ["最终产出符合要求格式"]
+          },
+          "rationale": "任务完成且产出质量良好，存在少量绕路"
+        }
+      ],
       "evolutions": [
         {
           "skill_name": "database-debugging",
@@ -233,6 +283,34 @@ curl "http://localhost:52010/conversations/sess-20240115-001/process"
         }
       ],
       "status": "published"
+    }
+  ]
+}
+```
+
+### 查询过滤审计
+
+```bash
+curl "http://localhost:52010/api/session-filter/audit?limit=20&decision=task_only"
+```
+
+响应示例：
+
+```json
+{
+  "stats": {
+    "total": 142,
+    "decisions": {"valuable": 90, "task_only": 38, "chitchat": 12, "memory_candidate": 2},
+    "statuses": {"queued": 90, "skipped": 52},
+    "modes": {"model": 130, "heuristic": 10, "deterministic": 2}
+  },
+  "items": [
+    {
+      "session_id": "sess-20240115-002",
+      "status": "skipped",
+      "recorded_at": "2024-01-15T10:31:00Z",
+      "value_judge": {"decision": "task_only", "confidence": 0.8, "mode": "model"},
+      "key": ".../session_filter_audit/sess-20240115-002.json"
     }
   ]
 }

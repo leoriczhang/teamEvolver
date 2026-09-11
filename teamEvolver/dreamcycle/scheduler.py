@@ -81,6 +81,8 @@ class ExecutionState:
         self._data["last_run_time"] = datetime.now(timezone.utc).isoformat()
         self._data["rounds_today"] = self._data.get("rounds_today", 0) + 1
         self._data["total_cycles"] = self._data.get("total_cycles", 0) + 1
+        # Clear any partial-round checkpoint now that the round is complete.
+        self._data.pop("partial_round", None)
 
         # Keep last 30 days of history
         history = self._data.setdefault("history", [])
@@ -97,6 +99,33 @@ class ExecutionState:
             self._data["history"] = history[-90:]
 
         self.save()
+
+    def checkpoint_partial_round(self, run_id: str, results: List[JobResult]) -> None:
+        """Save a partial round checkpoint after each job completes.
+
+        If the process crashes mid-round, the next startup can detect the
+        incomplete round via :attr:`partial_round` and log a warning.  The
+        memory changes from completed jobs are already persisted by the
+        ``MemoryChangeLedger``; this checkpoint prevents a blind full re-run.
+        """
+        self._data["partial_round"] = {
+            "run_id": run_id,
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "time": datetime.now(timezone.utc).isoformat(),
+            "completed_jobs": [r.to_dict() for r in results],
+        }
+        self.save()
+
+    @property
+    def partial_round(self) -> Optional[Dict[str, Any]]:
+        """Return a partial round checkpoint if one exists from a crash."""
+        pr = self._data.get("partial_round")
+        return dict(pr) if pr else None
+
+    def clear_partial_round(self) -> None:
+        """Remove a stale partial-round checkpoint."""
+        if self._data.pop("partial_round", None) is not None:
+            self.save()
 
     def should_run_round(self, max_rounds: int) -> bool:
         """Check if another round should run today."""
@@ -128,6 +157,18 @@ class Scheduler:
         )
         self._shutdown = False
         self._signal_count = 0
+
+        # Warn if the previous round was interrupted mid-execution.
+        partial = self._state.partial_round
+        if partial:
+            logger.warning(
+                "[Scheduler] previous round was interrupted (run_id=%s, "
+                "completed_jobs=%d). Memory changes from completed jobs are "
+                "already persisted; the round will re-run from the beginning.",
+                partial.get("run_id"),
+                len(partial.get("completed_jobs") or []),
+            )
+            self._state.clear_partial_round()
 
         if register_signals:
             signal.signal(signal.SIGTERM, self._handle_shutdown)
@@ -373,6 +414,8 @@ class Scheduler:
                     result.duration_seconds,
                     result.tasks_completed,
                 )
+                # Checkpoint after each job so a crash mid-round is detectable.
+                self._state.checkpoint_partial_round(run_id, results)
             except Exception as e:
                 logger.error("[Scheduler] Job %s crashed: %s", job.name, e, exc_info=True)
                 failed_result = JobResult(
@@ -384,6 +427,7 @@ class Scheduler:
                 )
                 failed_result.memory_changes = self._change_ledger.summaries_since(change_cursor)
                 results.append(failed_result)
+                self._state.checkpoint_partial_round(run_id, results)
 
         # Record state
         self._state.record_round(results)

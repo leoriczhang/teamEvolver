@@ -14,8 +14,11 @@ talk to a single origin.
 from __future__ import annotations
 
 import logging
+import asyncio
+import shutil
 import os
 import socket
+import tempfile
 import subprocess
 import sys
 import threading
@@ -70,6 +73,7 @@ class SkillMinerBridgeMixin:
 
     _skillminer_proc: Optional[subprocess.Popen] = None
     _skillminer_port: Optional[int] = None
+    _skillminer_ready: bool = False
     _skillminer_lock = threading.Lock()
 
     # ------------------------------------------------------------------ #
@@ -82,12 +86,29 @@ class SkillMinerBridgeMixin:
             return False
         return _CONSOLE_SERVER.is_file()
 
+    def _skillminer_runtime_root(self) -> Path:
+        if os.environ.get("TEAMEVOLVER_CUSTOMER_MODE") != "1" or not getattr(self.config, "storage_pg_enabled", False):
+            return _SKILLMINER_ROOT
+        # Refresh implementation files while retaining uploaded inputs/jobs on
+        # the persistent volume. Never copy one deployment's generated data.
+        root = Path.home() / ".teamEvolver" / "skillminer"
+        shutil.copytree(_SKILLMINER_ROOT, root, dirs_exist_ok=True, ignore=shutil.ignore_patterns(
+            "__pycache__", "*.pyc", ".hermes_home", ".env", "data",
+            ".knowledge_originals", ".knowledge_locks", "mining_jobs",
+            "sample_packages", "semantic_reports", "compiled_skill", "benchmark_results",
+            "benchmark_sessions", "trajectory_benchmarks", "coverage_reports",
+            "reflection_rounds", "run_history", "lift_datasets", "skill_test_results",
+        ))
+        (root / "data" / "input").mkdir(parents=True, exist_ok=True)
+        return root
+
     def _start_skillminer(self) -> None:
         if not self._skillminer_enabled():
             return
         with self._skillminer_lock:
             if self._skillminer_proc is not None and self._skillminer_proc.poll() is None:
                 return
+            self._skillminer_ready = False
             port = _pick_free_port(int(os.environ.get("TEAMEVOLVER_SKILLMINER_PORT", "8765") or 8765))
             env = dict(os.environ)
             env["PORT"] = str(port)
@@ -157,15 +178,19 @@ class SkillMinerBridgeMixin:
                 effective_pipeline["benchmark_max_turns"]
             )
             try:
+                runtime_root = self._skillminer_runtime_root()
                 self._skillminer_proc = subprocess.Popen(
-                    [sys.executable, str(_CONSOLE_SERVER)],
-                    cwd=str(_SKILLMINER_ROOT),
+                    [sys.executable, str(runtime_root / "web_console" / "server.py")],
+                    cwd=str(runtime_root),
                     env=env,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     stdin=subprocess.DEVNULL,
                 )
                 self._skillminer_port = port
+                pid = getattr(self._skillminer_proc, "pid", None)
+                if pid:
+                    (Path(tempfile.gettempdir()) / f"te_skillminer_{pid}.pid").write_text(str(pid))
                 logger.info("[SkillMiner] console subprocess started on 127.0.0.1:%s", port)
             except Exception:
                 self._skillminer_proc = None
@@ -187,6 +212,10 @@ class SkillMinerBridgeMixin:
             except Exception:
                 logger.debug("[SkillMiner] stop failed", exc_info=True)
             finally:
+                self._skillminer_ready = False
+                pid = getattr(proc, "pid", None)
+                if pid:
+                    (Path(tempfile.gettempdir()) / f"te_skillminer_{pid}.pid").unlink(missing_ok=True)
                 self._skillminer_proc = None
                 self._skillminer_port = None
                 logger.info("[SkillMiner] console subprocess stopped")
@@ -249,13 +278,15 @@ class SkillMinerBridgeMixin:
         """
         # Lazily (re)start the subprocess on first use.
         if self._skillminer_proc is None or self._skillminer_proc.poll() is not None:
-            self._start_skillminer()
+            await asyncio.to_thread(self._start_skillminer)
+        if not self._skillminer_ready:
             if not await self._await_skillminer_ready():
                 logger.warning("[SkillMiner] console did not become ready within the startup timeout")
                 return JSONResponse(
                     status_code=503,
                     content={"detail": "SkillMiner console failed to start or did not become ready"},
                 )
+            self._skillminer_ready = True
 
         base = self._skillminer_base_url()
         if base is None:

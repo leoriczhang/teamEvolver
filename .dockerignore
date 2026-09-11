@@ -1,4 +1,10 @@
 .git/
+.test-home/
+runtime/
+.env
+.env.*
+客户上下文/
+**/*.orig
 .venv/
 .pytest_cache/
 .ruff_cache/

@@ -155,6 +155,9 @@ def _entry_from_session(session: dict[str, Any]) -> dict[str, Any]:
     overall = judge_scores.get("overall_score")
     if not isinstance(overall, (int, float)) or isinstance(overall, bool):
         overall = None
+    evidence_kind = str(judge_scores.get("evolution_evidence") or "").strip().lower()
+    if evidence_kind not in {"defect", "exemplary", "none"}:
+        evidence_kind = ""
     avg_prm = session.get("_avg_prm")
     if not isinstance(avg_prm, (int, float)) or isinstance(avg_prm, bool):
         avg_prm = None
@@ -167,11 +170,14 @@ def _entry_from_session(session: dict[str, Any]) -> dict[str, Any]:
     runtime, projected_context = _runtime_projection(session)
     return {
         "session_id": str(session.get("session_id") or "").strip(),
+        "user_alias": str(session.get("user_alias") or "").strip(),
         "observed_at": observed_at,
         "captured_at": _utc_now_iso(),
         "summary": _clip(session.get("_summary"), _SUMMARY_LIMIT),
         "trajectory": _clip(session.get("_trajectory"), _TRAJECTORY_LIMIT),
         "judge_overall_score": overall,
+        "evolution_evidence": evidence_kind,
+        "evidence_reason": str(judge_scores.get("evidence_reason") or ""),
         "avg_prm": avg_prm,
         "has_tool_errors": bool(session.get("_has_tool_errors")),
         "verified_skill_feedback": [
@@ -198,6 +204,16 @@ def _stratified_history(entries: list[dict[str, Any]], limit: int) -> list[dict[
 
     selected: list[dict[str, Any]] = []
     selected_ids: set[str] = set()
+
+    def _take(items: list[dict[str, Any]]) -> None:
+        for item in items:
+            session_id = str(item.get("session_id") or "")
+            if session_id not in selected_ids:
+                selected.append(item)
+                selected_ids.add(session_id)
+            if len(selected) >= limit:
+                return
+
     failures = [
         item
         for item in entries
@@ -207,13 +223,21 @@ def _stratified_history(entries: list[dict[str, Any]], limit: int) -> list[dict[
             and float(item["judge_overall_score"]) < 0.6
         )
     ]
-    for item in failures[-max(1, limit // 2) :]:
-        session_id = str(item.get("session_id") or "")
-        if session_id not in selected_ids:
-            selected.append(item)
-            selected_ids.add(session_id)
-        if len(selected) >= limit:
-            return sorted(selected, key=lambda row: str(row.get("observed_at") or ""))
+    _take(failures[-max(1, limit // 2) :])
+    if len(selected) >= limit:
+        return sorted(selected, key=lambda row: str(row.get("observed_at") or ""))
+
+    # Exemplary goodcases get their own reserved quota so positive evidence
+    # (correct skill routing, high-quality output) reaches the evolution
+    # prompt alongside the failure evidence.
+    exemplaries = [
+        item
+        for item in entries
+        if str(item.get("evolution_evidence") or "") == "exemplary"
+    ]
+    _take(exemplaries[-max(1, limit // 4) :])
+    if len(selected) >= limit:
+        return sorted(selected, key=lambda row: str(row.get("observed_at") or ""))
 
     remaining = [item for item in entries if str(item.get("session_id") or "") not in selected_ids]
     slots = limit - len(selected)
@@ -452,6 +476,7 @@ class SkillEvidenceStore:
     ) -> dict[str, Any]:
         result: dict[str, Any] = {
             "session_id": str(entry.get("session_id") or ""),
+            "user_alias": str(entry.get("user_alias") or ""),
             "_summary": str(entry.get("summary") or ""),
             "_trajectory": str(entry.get("trajectory") or ""),
             "_avg_prm": entry.get("avg_prm"),
@@ -491,7 +516,14 @@ class SkillEvidenceStore:
             ] = evaluation_profile
         overall = entry.get("judge_overall_score")
         if isinstance(overall, (int, float)) and not isinstance(overall, bool):
-            result["_judge_scores"] = {"overall_score": float(overall)}
+            judge_scores: dict[str, Any] = {"overall_score": float(overall)}
+            evidence_kind = str(entry.get("evolution_evidence") or "")
+            if evidence_kind:
+                judge_scores["evolution_evidence"] = evidence_kind
+            evidence_reason = str(entry.get("evidence_reason") or "")
+            if evidence_reason:
+                judge_scores["evidence_reason"] = evidence_reason
+            result["_judge_scores"] = judge_scores
         return result
 
     def build_context(
@@ -537,6 +569,12 @@ class SkillEvidenceStore:
             ],
             "tool_error_sessions": sum(
                 1 for item in all_entries if item.get("has_tool_errors")
+            ),
+            "defect_evidence_sessions": sum(
+                1 for item in all_entries if item.get("evolution_evidence") == "defect"
+            ),
+            "exemplary_evidence_sessions": sum(
+                1 for item in all_entries if item.get("evolution_evidence") == "exemplary"
             ),
             "mean_judge_score": (
                 round(sum(scores) / len(scores), 3) if scores else None

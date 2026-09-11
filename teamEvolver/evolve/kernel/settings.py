@@ -17,15 +17,19 @@ def _first_env(*names: str, default: str = "") -> str:
 def _infer_storage_backend(endpoint: str, local_root: str = "") -> str:
     """Resolve the evolve engine's storage backend.
 
-    Only ``viking`` (OpenViking) is supported. ``local_root`` is accepted for
-    signature compatibility but no longer selects a filesystem backend.
+    Default is the built-in local backend: the engine's ledgers (sessions /
+    registry / manifest / evidence / validation) are its own hot read/write
+    data and belong on local storage. ``EVOLVE_STORAGE_BACKEND=viking`` (or a
+    viking endpoint with an explicit backend request) opts back into OpenViking.
     """
     backend = _first_env("EVOLVE_STORAGE_BACKEND", default="").strip().lower()
+    if backend in {"local", "localfs", "local-fs", "builtin"}:
+        return "local"
     if backend:
         return "viking"
-    if os.environ.get("EVOLVE_VIKING_ENDPOINT") or endpoint:
-        return "viking"
-    return ""
+    # No explicit choice: local by default — viking is only the skill mirror
+    # target and the mining/memory surface, not the engine ledger backend.
+    return "local"
 
 
 @dataclass
@@ -54,6 +58,33 @@ class EvolveServerConfig:
     # group_id (default) means the team library has no group segment.
     viking_root_prefix: str = "team-skill-evolver"
     viking_group_id: str = ""
+
+    # Built-in local-storage fallback: when the configured OpenViking
+    # deployment is unavailable (connection error / timeout / HTTP 5xx), the
+    # engine's object stores fall back to teamEvolver's own filesystem store
+    # rooted at ``storage_local_root`` (empty = ~/.teamEvolver/local_store).
+    storage_fallback_enabled: bool = True
+    storage_local_root: str = ""
+
+    # PostgreSQL local-state backend. Used when storage_backend == "postgres"
+    # (multi-tenancy plan §2.4); empty pg_dsn derives from OV_PG_* env vars.
+    pg_dsn: str = ""
+    pg_schema: str = "teamevolver"
+    pg_pool_min: int = 2
+    pg_pool_max: int = 20
+    pg_command_timeout_seconds: float = 30.0
+    # Engine tenant scope (PostgreSQL RLS key). Standalone/CLI runs stay on the
+    # implicit "default"; the proxy's per-tenant EnginePool overrides this field
+    # per tenant when building each engine (multi-tenancy plan Phase 2).
+    pg_tenant_id: str = "default"
+
+    # Skill mirror to OpenViking: when the skill library lives on the local
+    # backend, published skills are mirrored asynchronously into
+    # ``viking://resources/{viking_root_prefix}/skills/<name>/`` so remote
+    # Agents keep reading them. Only that subtree mirrors; registry/manifest
+    # stay local. Empty spool dir = ~/.teamEvolver/skill_mirror_spool.
+    skill_mirror_enabled: bool = True
+    skill_mirror_spool_dir: str = ""
 
     # LLM
     llm_api_key: str = ""
@@ -86,7 +117,25 @@ class EvolveServerConfig:
     # Max skill groups (plus the no-skill create) evolved concurrently per cycle.
     # Groups are independent branches; the only shared write (immediate-publish
     # upload) is serialized separately, so this only bounds LLM/dataset fan-out.
-    max_parallel_groups: int = 4
+    max_parallel_groups: int = 8
+    # Agent-loop budgets for the three skill-writing stages (plan → act →
+    # submit). Rounds clamp to [2, 24]; tool calls per round to [1, 16].
+    agent_max_rounds: int = 12
+    agent_max_tool_calls_per_round: int = 8
+    # Global cap on in-flight LLM calls from the session preparation pipeline
+    # (summarize + judge). Keeps large drains from piling hundreds of
+    # concurrent calls onto the shared thread pool / LLM proxy.
+    llm_max_concurrency: int = 8
+    # Max sessions consumed per evolution cycle (0 = unlimited). A large
+    # backlog is churned down over multiple cycles with bounded blast radius.
+    drain_max_per_cycle: int = 0
+    # Team-evidence minima per evolution branch (skill group / no-skill create).
+    # Evolution only runs when the planning evidence spans at least N distinct
+    # sessions and M distinct users, so shared skills reflect team patterns
+    # rather than a single user's preference or personal SOP. 0 disables a
+    # check. Historical evidence-ledger sessions count toward both minima.
+    min_group_sessions: int = 2
+    min_group_users: int = 2
     bundle_text_extensions: list[str] = field(
         default_factory=lambda: [".py", ".sh"]
     )
@@ -143,6 +192,12 @@ class EvolveServerConfig:
             1, int(self.dataset_disclosure_batch_size or 1)
         )
         self.max_parallel_groups = max(1, int(self.max_parallel_groups or 1))
+        self.agent_max_rounds = max(2, min(24, int(self.agent_max_rounds or 12)))
+        self.agent_max_tool_calls_per_round = max(
+            1, min(16, int(self.agent_max_tool_calls_per_round or 8))
+        )
+        self.min_group_sessions = max(0, int(self.min_group_sessions or 0))
+        self.min_group_users = max(0, int(self.min_group_users or 0))
         normalized_extensions: list[str] = []
         raw_extensions = self.bundle_text_extensions
         if isinstance(raw_extensions, str):
@@ -191,6 +246,20 @@ class EvolveServerConfig:
             viking_customer_id=_first_env("EVOLVE_VIKING_CUSTOMER_ID", "EVOLVE_VIKING_PEER_ID"),
             viking_root_prefix=os.environ.get("EVOLVE_VIKING_ROOT_PREFIX", "team-skill-evolver"),
             viking_group_id=_first_env("EVOLVE_VIKING_GROUP_ID", "EVOLVE_VIKING_GROUP", default=""),
+            storage_fallback_enabled=os.environ.get(
+                "EVOLVE_STORAGE_FALLBACK", "1"
+            ).lower() not in {"0", "false", "no"},
+            storage_local_root=os.environ.get("EVOLVE_STORAGE_LOCAL_ROOT", ""),
+            pg_dsn=os.environ.get("EVOLVE_PG_DSN", ""),
+            pg_schema=os.environ.get("EVOLVE_PG_SCHEMA", "teamevolver"),
+            pg_pool_min=int(os.environ.get("EVOLVE_PG_POOL_MIN", "2")),
+            pg_pool_max=int(os.environ.get("EVOLVE_PG_POOL_MAX", "20")),
+            pg_command_timeout_seconds=float(os.environ.get("EVOLVE_PG_COMMAND_TIMEOUT", "30")),
+            pg_tenant_id=os.environ.get("EVOLVE_PG_TENANT", "default"),
+            skill_mirror_enabled=os.environ.get(
+                "EVOLVE_SKILL_MIRROR", "1"
+            ).lower() not in {"0", "false", "no"},
+            skill_mirror_spool_dir=os.environ.get("EVOLVE_SKILL_MIRROR_SPOOL_DIR", ""),
             llm_api_key=llm_api_key,
             llm_base_url=llm_base_url,
             llm_model=llm_model,
@@ -233,8 +302,21 @@ class EvolveServerConfig:
             ).lower()
             not in {"0", "false", "no"},
             max_parallel_groups=int(
-                os.environ.get("EVOLVE_MAX_PARALLEL_GROUPS", "4")
+                os.environ.get("EVOLVE_MAX_PARALLEL_GROUPS", "8")
             ),
+            agent_max_rounds=int(
+                os.environ.get("EVOLVE_AGENT_MAX_ROUNDS", "12")
+            ),
+            agent_max_tool_calls_per_round=int(
+                os.environ.get("EVOLVE_AGENT_MAX_TOOL_CALLS_PER_ROUND", "8")
+            ),
+            llm_max_concurrency=int(
+                os.environ.get("EVOLVE_LLM_MAX_CONCURRENCY", "8")
+            ),
+            min_group_sessions=int(
+                os.environ.get("EVOLVE_MIN_GROUP_SESSIONS", "2")
+            ),
+            min_group_users=int(os.environ.get("EVOLVE_MIN_GROUP_USERS", "2")),
             bundle_text_extensions=os.environ.get(
                 "EVOLVE_BUNDLE_TEXT_EXTENSIONS", ".py,.sh"
             ).split(","),
@@ -297,10 +379,22 @@ class EvolveServerConfig:
 
         storage_backend = _first_env("EVOLVE_STORAGE_BACKEND", default="")
         if not storage_backend:
-            if viking_endpoint:
+            # Per-purpose split: session/evolution ledgers default to the
+            # built-in local backend unless an explicit backend was requested.
+            # ``sharing_session_backend``/``sharing_skill_backend`` empty means
+            # local; an explicit "viking" opts the engine back into OpenViking.
+            session_backend = str(
+                getattr(config, "sharing_session_backend", "") or ""
+            ).strip().lower()
+            skill_backend = str(
+                getattr(config, "sharing_skill_backend", "") or ""
+            ).strip().lower()
+            if "viking" in {session_backend, skill_backend}:
                 storage_backend = "viking"
-            elif sharing_backend:
-                storage_backend = "viking"
+            elif "postgres" in {session_backend, skill_backend}:
+                storage_backend = "postgres"
+            else:
+                storage_backend = "local"
 
         return cls(
             engine=engine,
@@ -319,6 +413,30 @@ class EvolveServerConfig:
             viking_customer_id=str(getattr(config, "sharing_viking_customer_id", "") or ""),
             viking_root_prefix=str(getattr(config, "sharing_viking_root_prefix", "") or "team-skill-evolver"),
             viking_group_id=str(getattr(config, "sharing_viking_group_id", "") or ""),
+            storage_fallback_enabled=os.environ.get(
+                "EVOLVE_STORAGE_FALLBACK",
+                "1" if getattr(config, "sharing_local_fallback_enabled", True) else "0",
+            ).lower() not in {"0", "false", "no"},
+            storage_local_root=os.environ.get(
+                "EVOLVE_STORAGE_LOCAL_ROOT",
+                str(getattr(config, "sharing_local_root", "") or ""),
+            ),
+            pg_dsn=str(getattr(config, "storage_pg_dsn", "") or ""),
+            pg_schema=str(getattr(config, "storage_pg_schema", "") or "teamevolver"),
+            pg_pool_min=max(1, int(getattr(config, "storage_pg_pool_min", 2) or 2)),
+            pg_pool_max=max(2, int(getattr(config, "storage_pg_pool_max", 20) or 20)),
+            pg_command_timeout_seconds=max(
+                1.0, float(getattr(config, "storage_pg_command_timeout_seconds", 30.0) or 30.0)
+            ),
+            pg_tenant_id="default",  # overridden per tenant by the proxy EnginePool
+            skill_mirror_enabled=os.environ.get(
+                "EVOLVE_SKILL_MIRROR",
+                "1" if getattr(config, "sharing_skill_mirror_enabled", True) else "0",
+            ).lower() not in {"0", "false", "no"},
+            skill_mirror_spool_dir=os.environ.get(
+                "EVOLVE_SKILL_MIRROR_SPOOL_DIR",
+                str(getattr(config, "sharing_skill_mirror_spool_dir", "") or ""),
+            ),
             llm_api_key=llm_api_key,
             llm_base_url=llm_base_url,
             llm_model=llm_model,
@@ -439,7 +557,47 @@ class EvolveServerConfig:
             max_parallel_groups=int(
                 os.environ.get(
                     "EVOLVE_MAX_PARALLEL_GROUPS",
-                    str(getattr(config, "evolve_max_parallel_groups", 4) or 4),
+                    str(getattr(config, "evolve_max_parallel_groups", 8) or 8),
+                )
+            ),
+            agent_max_rounds=int(
+                os.environ.get(
+                    "EVOLVE_AGENT_MAX_ROUNDS",
+                    str(getattr(config, "evolve_agent_max_rounds", 12) or 12),
+                )
+            ),
+            agent_max_tool_calls_per_round=int(
+                os.environ.get(
+                    "EVOLVE_AGENT_MAX_TOOL_CALLS_PER_ROUND",
+                    str(
+                        getattr(
+                            config,
+                            "evolve_agent_max_tool_calls_per_round",
+                            8,
+                        )
+                        or 8
+                    ),
+                )
+            ),
+            llm_max_concurrency=int(
+                os.environ.get("EVOLVE_LLM_MAX_CONCURRENCY", "8")
+            ),
+            min_group_sessions=int(
+                os.environ.get(
+                    "EVOLVE_MIN_GROUP_SESSIONS",
+                    str(getattr(config, "evolve_min_group_sessions", 2) or 0),
+                )
+            ),
+            min_group_users=int(
+                os.environ.get(
+                    "EVOLVE_MIN_GROUP_USERS",
+                    str(getattr(config, "evolve_min_group_users", 2) or 0),
+                )
+            ),
+            drain_max_per_cycle=int(
+                os.environ.get(
+                    "EVOLVE_DRAIN_MAX_PER_CYCLE",
+                    str(getattr(config, "evolve_drain_max_per_cycle", 0) or 0),
                 )
             ),
             bundle_text_extensions=list(

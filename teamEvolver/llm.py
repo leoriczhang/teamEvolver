@@ -5,7 +5,12 @@ Async LLM client — thin wrapper around the ``openai`` SDK.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import os
+import threading
+import weakref
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import Any
 
 from .observability import (
@@ -14,6 +19,43 @@ from .observability import (
 )
 
 _CCR_MODEL_OVERRIDE = "deepseek-v4-flash-ga-260731"
+_LLM_CONCURRENCY = max(1, min(8, int(os.environ.get("TEAMEVOLVER_LLM_CONCURRENCY", "8"))))
+_LLM_EXECUTOR = ThreadPoolExecutor(max_workers=_LLM_CONCURRENCY, thread_name_prefix="te-llm")
+_LLM_PENDING = threading.BoundedSemaphore(64)
+_LOOP_SLOTS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_SLOTS_LOCK = threading.Lock()
+
+
+class LLMOverloadedError(RuntimeError):
+    pass
+
+
+async def _call_in_pool(func, **kwargs):
+    if not _LLM_PENDING.acquire(blocking=False):
+        raise LLMOverloadedError("LLM queue full; retry later")
+    loop = asyncio.get_running_loop()
+    with _SLOTS_LOCK:
+        slots = _LOOP_SLOTS.setdefault(loop, asyncio.Semaphore(_LLM_CONCURRENCY))
+    try:
+        await slots.acquire()
+    except BaseException:
+        _LLM_PENDING.release()
+        raise
+    try:
+        context = contextvars.copy_context()
+        future = loop.run_in_executor(_LLM_EXECUTOR, context.run, partial(func, **kwargs))
+    except BaseException:
+        slots.release()
+        _LLM_PENDING.release()
+        raise
+
+    def finished(_):
+        slots.release()
+        _LLM_PENDING.release()
+
+    future.add_done_callback(finished)
+    # Cancellation cannot free a slot while the synchronous HTTP call is alive.
+    return await asyncio.shield(future)
 
 
 def _resolve_alias_model(model: str) -> str:
@@ -68,13 +110,19 @@ class AsyncLLMClient:
         import httpx
         from openai import OpenAI
 
-        resolved_api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        resolved_api_key = (api_key or os.environ.get("OPENAI_API_KEY", "")).strip()
+        if resolved_api_key.lower().startswith("bearer "):
+            resolved_api_key = resolved_api_key[7:].strip()
+        resolved_base = (base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")).rstrip("/")
+        if resolved_base.endswith("/chat/completions"):
+            resolved_base = resolved_base[:-len("/chat/completions")]
         self._client = OpenAI(
             # Newer OpenAI SDKs require a non-empty value at construction time.
             # Keep startup/config inspection available and let the real request
             # report missing credentials when no key has been configured.
             api_key=resolved_api_key or "not-configured",
-            base_url=base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            base_url=resolved_base,
+            max_retries=0,
             timeout=httpx.Timeout(
                 max(1.0, float(timeout_seconds)),
                 connect=max(1.0, float(connect_timeout_seconds)),
@@ -88,6 +136,8 @@ class AsyncLLMClient:
 
     async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
         """Send a chat completion request and return the assistant content."""
+        if getattr(self._client, "api_key", "") == "not-configured":
+            raise RuntimeError("LLM API key is not configured")
         trace_name = str(kwargs.pop("trace_name", "") or "").strip()
         trace_tags = [
             str(tag).strip()
@@ -118,8 +168,14 @@ class AsyncLLMClient:
         # and retrying lets the model finish reasoning and emit the JSON verdict.
         budget_bumps_left = 3
         budget_ceiling = 131072
+        output_cap = max(0, int(os.environ.get("TEAMEVOLVER_LLM_MAX_OUTPUT_TOKENS", "0")))
+        if output_cap:
+            merged["max_completion_tokens"] = min(int(merged["max_completion_tokens"]), output_cap)
+            budget_ceiling = min(budget_ceiling, output_cap)
 
-        for attempt in range(self.max_retries):
+        # Parameter negotiation has its own small allowance; transport retries
+        # still obey max_retries below (including max_retries=1 classifiers).
+        for attempt in range(self.max_retries + 2):
             generation_input: dict[str, Any] = {"messages": messages}
             if merged.get("tools"):
                 generation_input["tools"] = merged["tools"]
@@ -149,7 +205,7 @@ class AsyncLLMClient:
                 tags=["llm", *trace_tags],
             ) as observation:
                 try:
-                    resp = await asyncio.to_thread(
+                    resp = await _call_in_pool(
                         self._client.chat.completions.create,
                         **merged,
                     )
@@ -183,6 +239,8 @@ class AsyncLLMClient:
                             continue
                     return content
                 except Exception as exc:
+                    if isinstance(exc, LLMOverloadedError):
+                        raise
                     body_text = (
                         getattr(getattr(exc, "response", None), "text", "")
                         or ""
@@ -192,6 +250,9 @@ class AsyncLLMClient:
                         "status_code",
                         None,
                     )
+                    if status_code == 400 and "max_completion_tokens" in body_text and "max_completion_tokens" in merged:
+                        merged["max_tokens"] = merged.pop("max_completion_tokens")
+                        continue
                     if (
                         status_code == 400
                         and "'temperature' is not supported" in body_text
@@ -217,6 +278,8 @@ class AsyncLLMClient:
                             metadata={"transport": "stream-fallback"},
                         )
                         return content
+                    if status_code is not None and status_code not in {408, 409, 429} and status_code < 500:
+                        raise
                     if attempt < self.max_retries - 1:
                         import random
 
@@ -232,43 +295,20 @@ class AsyncLLMClient:
                         await asyncio.sleep(wait)
                         continue
                     raise
+        raise RuntimeError("LLM response remained invalid after retry budget")
 
     async def _chat_via_stream(self, body: dict[str, Any]) -> str:
-        import json
-
-        import httpx
-
-        headers: dict[str, str] = {}
-        api_key = getattr(self._client, "api_key", None) or os.environ.get("OPENAI_API_KEY", "")
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-
         request_body = dict(body)
         request_body["stream"] = True
-        base_url = str(getattr(self._client, "base_url", "")).rstrip("/")
 
-        content_parts: list[str] = []
-        async with httpx.AsyncClient(timeout=600.0) as client:
-            async with client.stream(
-                "POST",
-                f"{base_url}/chat/completions",
-                json=request_body,
-                headers=headers,
-            ) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    payload = line[5:].strip()
-                    if not payload or payload == "[DONE]":
-                        continue
-                    try:
-                        event = json.loads(payload)
-                    except json.JSONDecodeError:
-                        continue
-                    for choice in event.get("choices", []) or []:
-                        delta = choice.get("delta") or {}
-                        text = delta.get("content")
-                        if isinstance(text, str) and text:
-                            content_parts.append(text)
-        return "".join(content_parts)
+        def stream():
+            parts = []
+            with self._client.chat.completions.create(**request_body) as response:
+                for event in response:
+                    for choice in event.choices:
+                        text = choice.delta.content
+                        if text:
+                            parts.append(text)
+            return "".join(parts)
+
+        return await _call_in_pool(stream)

@@ -22,7 +22,7 @@ teamEvolver 深度集成 Langfuse 提供 LLM 应用可观测能力。Langfuse �
 | 运行方式 | 定时/手动拉取 | 每次 LLM 调用自动捕获 |
 | 对进化的影响 | 为进化提供原材料 | 无副作用，fail-open 设计 |
 
-两种模式共享同一套 Langfuse 凭证（`public_key`/`secret_key`）和 `host` 配置，但可以独立开关。
+两种模式使用独立的 Langfuse 连接。入站连接可以按租户配置；出站追踪连接是服务级配置，所有租户统一上报到同一个 Langfuse Project，不接受租户覆盖。
 
 ## 配置说明
 
@@ -42,6 +42,9 @@ teamEvolver 深度集成 Langfuse 提供 LLM 应用可观测能力。Langfuse �
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `tracing_enabled` | boolean | `false` | 是否启用出站 LLM 调用追踪 |
+| `tracing_host` | string | `""` | 全局观测 Langfuse 地址，独立于入站 `host` |
+| `tracing_public_key` | string | `""` | 全局观测 Project Public Key |
+| `tracing_secret_key` | string | `""` | 全局观测 Project Secret Key |
 | `tracing_environment` | string | `"local"` | 环境标签，用于在 Langfuse UI 中区分不同部署环境。建议值：`production`、`staging`、`local`。只允许字母、数字、`-`、`_` |
 | `tracing_release` | string | `""` | 版本标签，标记当前部署版本（如 git commit hash、版本号） |
 | `tracing_sample_rate` | float | `1.0` | 采样率，范围 0.0-1.0。生产环境建议设为 `0.1`（10% 采样）以降低成本 |
@@ -80,10 +83,10 @@ teamEvolver 深度集成 Langfuse 提供 LLM 应用可观测能力。Langfuse �
 ```yaml
 langfuse:
   enabled: false
-  host: "https://cloud.langfuse.com"
-  public_key: "pk-lf-xxxxxxxx"
-  secret_key: "sk-lf-xxxxxxxx"
   tracing_enabled: true
+  tracing_host: "https://cloud.langfuse.com"
+  tracing_public_key: "pk-lf-observability"
+  tracing_secret_key: "sk-lf-observability"
   tracing_environment: "production"
   tracing_release: "v1.2.3"
   tracing_sample_rate: 0.1
@@ -95,10 +98,13 @@ langfuse:
 ```yaml
 langfuse:
   enabled: true
-  host: "https://cloud.langfuse.com"
-  public_key: "pk-lf-xxxxxxxx"
-  secret_key: "sk-lf-xxxxxxxx"
+  host: "https://tenant-source.example.com"
+  public_key: "pk-lf-source"
+  secret_key: "sk-lf-source"
   tracing_enabled: true
+  tracing_host: "https://global-observability.example.com"
+  tracing_public_key: "pk-lf-observability"
+  tracing_secret_key: "sk-lf-observability"
   tracing_environment: "production"
   tracing_sample_rate: 0.5
   default_environment:
@@ -114,14 +120,17 @@ langfuse:
 ```yaml
 langfuse:
   enabled: true
-  host: "http://langfuse.internal.example.com"
-  public_key: "pk-lf-xxxxxxxx"
-  secret_key: "sk-lf-xxxxxxxx"
+  host: "http://tenant-langfuse.internal.example.com"
+  public_key: "pk-lf-source"
+  secret_key: "sk-lf-source"
   tracing_enabled: true
+  tracing_host: "http://observability-langfuse.internal.example.com"
+  tracing_public_key: "pk-lf-observability"
+  tracing_secret_key: "sk-lf-observability"
   tracing_environment: "local"
 ```
 
-也可以通过环境变量配置（优先级高于 config.yaml）：
+也可以通过环境变量覆盖全局出站追踪配置（优先级高于 config.yaml，不用于租户数据源拉取）：
 
 ```bash
 export LANGFUSE_HOST="https://cloud.langfuse.com"
@@ -142,17 +151,23 @@ export LANGFUSE_SAMPLE_RATE="0.1"
 
 | 阶段 | Trace Name | 标签 |
 |------|-----------|------|
-| 价值分类（Session Filter） | `teamEvolver.evolve.session_filter` | `["teamEvolver", "evolve", "session_filter"]` |
-| 会话总结（Summarize） | `teamEvolver.evolve.summarize` | `["teamEvolver", "evolve", "summarize"]` |
-| 会话评分（Judge） | `teamEvolver.evolve.judge` | `["teamEvolver", "evolve", "judge"]` |
-| 技能改进（Evolve Skill） | `teamEvolver.evolve.evolve_skill` | `["teamEvolver", "evolve", "evolve_skill"]` |
-| 新技能创建（Create Skill） | `teamEvolver.evolve.create_skill` | `["teamEvolver", "evolve", "create_skill"]` |
-| 冲突合并（Merge） | `teamEvolver.evolve.merge` | `["teamEvolver", "evolve", "merge"]` |
-| 测试集生成（Dataset Synthesis） | `teamEvolver.evolve.dataset_synthesis` | `["teamEvolver", "evolve", "dataset_synthesis"]` |
-| Checklist 裁判（Replay Checklist） | `teamEvolver.evolve.replay_checklist` | `["teamEvolver", "evolve", "replay_checklist"]` |
-| Prompt Studio 测试 | `teamEvolver.evolve.prompt_test.<stage_id>` | `["teamEvolver", "evolve", "prompt-studio", <stage_id>]` |
+| 进化周期（Cycle，周期级 Trace，非 LLM 调用） | `teamEvolver.evolve.cycle` | `["evolve", "cycle"]` |
+| 价值分类（Session Filter） | `teamEvolver.evolve.session_filter` | `["llm", "evolve", "session-filter"]` |
+| 会话总结（Summarize） | `teamEvolver.evolve.summarize` | `["llm", "evolve", "summarize"]` |
+| 会话评分（Judge） | `teamEvolver.evolve.judge` | `["llm", "evolve", "judge"]` |
+| 技能改进（Evolve Skill） | `team-skill-evolver:evolve_skill:{skill_name}` | `["llm", "team-skill-evolver", "teamEvolver.evolve", "evolve_skill", "skill:{skill_name}", ...源会话 ID]` |
+| 新技能创建（Create Skill） | `team-skill-evolver:create_skill` | `["llm", "team-skill-evolver", "teamEvolver.evolve", "create_skill", ...源会话 ID]` |
+| 冲突合并（Merge Skill） | `team-skill-evolver:merge_skill:{skill_name}` | `["llm", "team-skill-evolver", "teamEvolver.evolve", "merge_skill", "skill:{skill_name}"]` |
+| 测试集生成（Dataset Synthesis） | `team-skill-evolver:dataset_synthesis:{skill_name}` | `["llm", "team-skill-evolver", "dataset-synthesis", "skill:{skill_name}"]` |
+| Prompt Studio 测试 | `teamEvolver.evolve.prompt_test.{stage_id}` | `["llm", "evolve", "prompt-studio", {stage_id}]` |
 
-DreamCycle 启用后，其 Job 的 LLM 调用也会被追踪。
+说明：
+
+- 标签中的 `llm` 由 LLM 客户端对所有被追踪调用统一附加；技能改进/新建/合并的名称与标签由 `teamEvolver/evolve/stages/execute.py:_llm_trace_kwargs` 生成，测试集生成的见 `teamEvolver/dataset_synthesizer.py`。
+- 设置环境变量 `EVOBENCH_RUN_ID` 时，技能进化类 Trace 会追加 run id 标签，并携带 `trace_session_id`（`team-skill-evolver:{run_id}:{operation}:{skill_name}`）与 `trace_user_id`。
+- 源会话 ID 最多 20 个作为标签追加，Metadata 中最多保留 50 个；设置 `EVOBENCH_RUN_ID` 时，被合并/改进的 Skill 名称不存在于库中时 Trace Name 省略 `:{skill_name}` 后缀。
+
+DreamCycle 启用后，其 Job 的 LLM 调用也会被追踪（Trace Name 形如 `teamEvolver.dreamcycle.round`、`teamEvolver.dreamcycle.{job_name}`）。
 
 ### 每条 Trace 包含的数据
 
@@ -294,7 +309,7 @@ teamEvolver langfuse pull --in-process
 2. 进入 Tracing 页面
 3. 在左侧过滤栏中：
    - 选择 Environment（如 `production`）
-   - 添加 Tag 过滤：`teamEvolver`
+   - 添加 Tag 过滤：`evolve`（进化流水线各阶段）或 `team-skill-evolver`（技能进化分支）
 4. 可以看到所有 teamEvolver 发出的 Trace
 
 ### 按阶段筛选
@@ -339,8 +354,8 @@ teamEvolver langfuse pull --in-process
 ### Trace 没有出现在 Langfuse 中
 
 1. 检查 `tracing_enabled` 是否为 `true`
-2. 检查 `public_key` 和 `secret_key` 是否正确
-3. 检查 `host` 是否能从服务器访问（自托管实例注意网络连通性）
+2. 检查 `tracing_public_key` 和 `tracing_secret_key` 是否正确
+3. 检查 `tracing_host` 是否能从服务器访问（自托管实例注意网络连通性）
 4. 查看 teamEvolver 日志中是否有 `[Langfuse] tracing unavailable` 警告
 5. 运行 `teamEvolver langfuse status` 检查 `reachable: True`
 

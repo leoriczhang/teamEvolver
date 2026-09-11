@@ -1,6 +1,7 @@
 """Unified configuration for teamEvolver."""
 
 from dataclasses import dataclass, field
+from typing import Any
 
 VOLCENGINE_OPENVIKING_ENDPOINT = "https://api.vikingdb.cn-beijing.volces.com/openviking"
 # Default endpoint for a locally self-hosted ``openviking-server`` (see
@@ -99,6 +100,36 @@ class TeamEvolverConfig:
     # backend is reserved for the Skill registry.
     sharing_session_backend: str = ""
 
+    # Per-purpose backend split. teamEvolver's own hot read/write data (session
+    # queue / indexes / evidence / validation / engine ledgers) and the skill
+    # library internals (registry / manifest / version history) belong on the
+    # built-in local backend; OpenViking is kept only for the cross-machine
+    # Agent read surface (mirrored skills + mining/memory aggregation outputs).
+    # Empty means "local" for each. (Field names unchanged for backward
+    # compatibility with existing config files; only the default changed.)
+
+    # When the team skill library is on the local backend, evolved/pushed
+    # skills are mirrored asynchronously to OpenViking so remote Agents can keep
+    # reading them from ``viking://resources/{root_prefix}/skills/<name>/``.
+    # Only that subtree is mirrored — registry/manifest stay local.
+    sharing_skill_mirror_enabled: bool = True
+    # Local spool directory for pending mirror deliveries; empty means
+    # ~/.teamEvolver/skill_mirror_spool. The spool makes mirroring durable:
+    # OpenViking outages never block evolution, deliveries retry with backoff.
+    sharing_skill_mirror_spool_dir: str = ""
+
+    # Built-in local-storage fallback. When enabled (default), any object store
+    # built for an OpenViking deployment that is currently unavailable
+    # (connection error / timeout / HTTP 5xx) falls back to teamEvolver's own
+    # filesystem store rooted at ``sharing_local_root`` so ingest / evolution /
+    # validation keep working through an outage. 4xx responses (e.g. auth
+    # misconfiguration) never trigger the fallback — the server answered, so
+    # the error must surface instead of being masked by local writes. Data
+    # written locally during an outage stays local (no automatic sync-back).
+    sharing_local_fallback_enabled: bool = True
+    # Empty means ~/.teamEvolver/local_store.
+    sharing_local_root: str = ""
+
     # OpenViking backend (sharing.backend = "viking"). When empty the endpoint
     # is derived from ``sharing_viking_deployment`` (cloud vs local); a
     # non-empty value is an explicit advanced override.
@@ -147,6 +178,20 @@ class TeamEvolverConfig:
     users_registry_path: str = ""
 
     # ------------------------------------------------------------------ #
+    # PostgreSQL local-state storage (multi-tenancy plan §2.4)             #
+    # ------------------------------------------------------------------ #
+    # Backends created with backend="postgres" land here. Shares the
+    # OpenViking PG instance; all TeamEvolver tables live in the dedicated
+    # schema below. Empty DSN derives from the OV_PG_* environment variables
+    # (percent-encoding the password automatically).
+    storage_pg_enabled: bool = False
+    storage_pg_dsn: str = ""
+    storage_pg_schema: str = "teamevolver"
+    storage_pg_pool_min: int = 2
+    storage_pg_pool_max: int = 20
+    storage_pg_command_timeout_seconds: float = 30.0
+
+    # ------------------------------------------------------------------ #
     # Evolve server integration                                           #
     # ------------------------------------------------------------------ #
     evolve_server_url: str = "http://127.0.0.1:52010"
@@ -156,6 +201,15 @@ class TeamEvolverConfig:
     evolve_human_review_enabled: bool = True
     evolve_human_review_timeout_seconds: int = 86400
     evolve_interval_seconds: int = 600
+    # Drain throttling: queued sessions are read in batches so a large backlog
+    # does not saturate the (self-hosted) OpenViking storage. Raise batch size
+    # or lower the delay to drain faster on a beefier storage instance.
+    evolve_drain_batch_size: int = 25
+    evolve_drain_batch_delay_seconds: float = 1.0
+    # Max sessions consumed per evolution cycle (0 = unlimited). Lets a large
+    # backlog be fed once and churned down over multiple cycles with bounded
+    # blast radius per cycle.
+    evolve_drain_max_per_cycle: int = 0
     evolve_evidence_enabled: bool = True
     evolve_evidence_max_entries: int = 400
     evolve_evidence_recent_limit: int = 20
@@ -169,6 +223,11 @@ class TeamEvolverConfig:
     evolve_dataset_disclosure_batch_size: int = 4
     evolve_candidate_coalesce_enabled: bool = True
     evolve_max_parallel_groups: int = 4
+    evolve_agent_max_rounds: int = 12
+    evolve_agent_max_tool_calls_per_round: int = 8
+    # Team-evidence minima per evolution branch (see EvolveServerConfig).
+    evolve_min_group_sessions: int = 2
+    evolve_min_group_users: int = 2
     evolve_bundle_text_extensions: list[str] = field(
         default_factory=lambda: [".py", ".sh"]
     )
@@ -284,6 +343,13 @@ class TeamEvolverConfig:
     # This is intentionally independent from ``langfuse_enabled``, which
     # controls pulling external sessions into the evolution queue.
     langfuse_tracing_enabled: bool = False
+    # Tracing (self-reporting) target. Intentionally separate from the pull
+    # source (``langfuse_host``/``langfuse_public_key``/``langfuse_secret_key``)
+    # so evolution ingestion and self-tracing can point at different Langfuse
+    # deployments. Empty means tracing has no dedicated target and stays off.
+    langfuse_tracing_host: str = ""
+    langfuse_tracing_public_key: str = ""
+    langfuse_tracing_secret_key: str = ""
     langfuse_tracing_environment: str = "local"
     langfuse_tracing_release: str = ""
     langfuse_tracing_sample_rate: float = 1.0
@@ -305,5 +371,25 @@ class TeamEvolverConfig:
     # Operator-authored trace mapper: when enabled, ``langfuse_mapper_code``
     # defines ``map_trace(trace, observations)`` and produces the evolution turn
     # (deep-merged over the built-in mapping). Disabled/empty uses the built-in.
+    # Deprecated: migrated into ``langfuse_mappers`` (kept only for migration).
     langfuse_mapper_enabled: bool = False
     langfuse_mapper_code: str = ""
+    # Per-agent mapper registry (multi-mapper routing). Ordered list; each entry
+    # is {name, enabled, note?, code, match: {trace_names, tags,
+    # session_id_patterns}}. First matching enabled entry wins; empty match =
+    # catch-all. Legacy mapper_enabled/mapper_code migrate into this list (see
+    # integrations.langfuse_mapper.normalize_mapper_entries).
+    langfuse_mappers: list[dict[str, Any]] = field(default_factory=list)
+
+    # ------------------------------------------------------------------ #
+    # Data source abstraction                                             #
+    # ------------------------------------------------------------------ #
+    # Selects the source adapter for session pulls. Currently "langfuse";
+    # future types can be registered via source_adapter.register_source_adapter.
+    datasource_type: str = "langfuse"
+    datasource_legacy_converter_code: str = ""
+    datasource_legacy_project: str = ""
+    datasource_legacy_options: dict[str, Any] = field(default_factory=dict)
+    # Directory for per-agent hook files (adapters/<agent_id>.py). Empty
+    # defaults to ~/.teamEvolver/adapters/.
+    datasource_adapters_dir: str = ""

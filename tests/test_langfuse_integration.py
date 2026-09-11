@@ -19,6 +19,7 @@ import pytest
 
 from teamEvolver.config import TeamEvolverConfig
 from teamEvolver.integrations import langfuse_pull
+from teamEvolver.integrations import source_adapter
 from teamEvolver.integrations.langfuse_client import (
     LangfuseClient,
     LangfuseError,
@@ -353,7 +354,7 @@ async def test_pull_sessions_converts_and_ingests(monkeypatch) -> None:
         def list_session_ids(self, filters, *, max_sessions=0):
             return ["s1", "s2"]
 
-        def fetch_session_with_traces(self, session_id):
+        def fetch_session_with_traces(self, session_id, trace_name=""):
             session = session_payloads[session_id]
             traces = [
                 trace_payloads[t["id"]] for t in session.get("traces", [])
@@ -361,6 +362,7 @@ async def test_pull_sessions_converts_and_ingests(monkeypatch) -> None:
             return session, traces
 
     monkeypatch.setattr(langfuse_pull, "LangfuseClient", _PullFakeClient)
+    monkeypatch.setattr(source_adapter, "LangfuseClient", _PullFakeClient)
 
     ingested: list[dict[str, Any]] = []
 
@@ -390,11 +392,102 @@ async def test_pull_sessions_requires_enabled() -> None:
         await langfuse_pull.pull_sessions(config, _ingest, {})
 
 
+@pytest.mark.anyio
+async def test_pull_sessions_filters_by_required_used_skills(monkeypatch) -> None:
+    """require_used_skills drops sessions whose adapter-declared skills miss."""
+    from teamEvolver.integrations.source_adapter import AgentHooks
+
+    config = TeamEvolverConfig(
+        langfuse_enabled=True,
+        langfuse_max_sessions=10,
+    )
+
+    trace_payloads = {
+        "t1": _trace(
+            "t1",
+            "s1",
+            input="wiki question",
+            observations=[_generation()],
+            metadata={"skill": "llm-wiki"},
+        ),
+        "t2": _trace(
+            "t2",
+            "s2",
+            input="report work",
+            observations=[_generation()],
+            metadata={"skill": "generate-report"},
+        ),
+        "t3": _trace(
+            "t3",
+            "s3",
+            input="other work",
+            observations=[_generation()],
+            metadata={"skill": "chatbi-query"},
+        ),
+    }
+
+    class _SkillTagFakeClient(_FakeClient):
+        @classmethod
+        def from_config(cls, _config):
+            return cls({})
+
+        def list_session_ids(self, filters, *, max_sessions=0):
+            return ["s1", "s2", "s3"]
+
+        def fetch_session_with_traces(self, session_id, trace_name=""):
+            session = {"id": session_id, "traces": [{"id": f"t{session_id[-1]}"}]}
+            traces = [trace_payloads[f"t{session_id[-1]}"]]
+            return session, traces
+
+    monkeypatch.setattr(langfuse_pull, "LangfuseClient", _SkillTagFakeClient)
+    monkeypatch.setattr(source_adapter, "LangfuseClient", _SkillTagFakeClient)
+
+    # Inject an adapter hook that tags used_skills from trace metadata.
+    def _skill_tag_map_trace(trace, observations, turn_num=0, defaults=None):
+        meta = trace.get("metadata") if isinstance(trace, dict) else {}
+        return {"used_skills": [str(meta.get("skill") or "")]}
+
+    monkeypatch.setattr(
+        source_adapter,
+        "resolve_hooks",
+        lambda agent_id, config=None: AgentHooks(
+            map_trace=_skill_tag_map_trace,
+            defined={"map_trace"},
+        ),
+    )
+
+    ingested: list[dict[str, Any]] = []
+
+    async def _ingest(session: dict[str, Any]) -> dict[str, Any]:
+        ingested.append(session)
+        return {"status": "queued", "queued": True}
+
+    result = await langfuse_pull.pull_sessions(
+        config,
+        _ingest,
+        {},
+        max_sessions=10,
+        require_used_skills=["llm-wiki", "chatbi-query"],
+        agent_id="test-agent",
+    )
+
+    assert result["total"] == 3
+    assert result["counts"]["queued"] == 2
+    assert result["counts"]["filtered"] == 1
+    assert [s["session_id"] for s in ingested] == ["s1", "s3"]
+    filtered = [r for r in result["results"] if r["status"] == "filtered"]
+    assert filtered[0]["session_id"] == "s2"
+    assert filtered[0]["used_skills"] == ["generate-report"]
+
+
 def test_config_store_maps_langfuse_tracing_settings(tmp_path) -> None:
     from teamEvolver.config_store import ConfigStore
 
     store = ConfigStore(config_file=tmp_path / "config.yaml")
     store.set("langfuse.tracing_enabled", True)
+    store.set("langfuse.tracing_host", "https://observability.example.com")
+    store.set("langfuse.tracing_public_key", "pk-observability")
+    store.set("langfuse.tracing_secret_key", "sk-observability")
     store.set("langfuse.tracing_environment", "local-dev")
     store.set("langfuse.tracing_release", "abc123")
     store.set("langfuse.tracing_sample_rate", 0.25)
@@ -403,6 +496,9 @@ def test_config_store_maps_langfuse_tracing_settings(tmp_path) -> None:
     config = store.to_config()
 
     assert config.langfuse_tracing_enabled is True
+    assert config.langfuse_tracing_host == "https://observability.example.com"
+    assert config.langfuse_tracing_public_key == "pk-observability"
+    assert config.langfuse_tracing_secret_key == "sk-observability"
     assert config.langfuse_tracing_environment == "local-dev"
     assert config.langfuse_tracing_release == "abc123"
     assert config.langfuse_tracing_sample_rate == 0.25

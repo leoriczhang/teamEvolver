@@ -1,0 +1,38 @@
+services:
+  teamevolver:
+    image: ${TEAMEVOLVER_IMAGE:-teamevolver:customer}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.customer
+      args:
+        PYTHON_IMAGE: "${PYTHON_IMAGE:-python:3.11-slim-bookworm}"
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}"
+    restart: unless-stopped
+    init: true
+    user: "${TEAMEVOLVER_UID:-10001}:${TEAMEVOLVER_GID:-10001}"
+    ports:
+      - "${PORT:-52010}:52010"
+    environment:
+      TEAMEVOLVER_PG_DSN: "${TEAMEVOLVER_PG_DSN:?Set the PostgreSQL DSN}"
+      TEAMEVOLVER_ROOT_API_KEY: "${TEAMEVOLVER_ROOT_API_KEY:?Set a random root key}"
+      TEAMEVOLVER_LLM_API_KEY: "${TEAMEVOLVER_LLM_API_KEY:-}"
+      TEAMEVOLVER_LLM_BASE_URL: "${TEAMEVOLVER_LLM_BASE_URL:-}"
+      TEAMEVOLVER_LLM_MODEL: "${TEAMEVOLVER_LLM_MODEL:-}"
+      TEAMEVOLVER_OV_ENDPOINT: "${TEAMEVOLVER_OV_ENDPOINT:-}"
+      TEAMEVOLVER_OV_ROOT_KEY: "${TEAMEVOLVER_OV_ROOT_KEY:-}"
+      TEAMEVOLVER_LLM_CONCURRENCY: "${TEAMEVOLVER_LLM_CONCURRENCY:-8}"
+      TEAMEVOLVER_LLM_MAX_OUTPUT_TOKENS: "${TEAMEVOLVER_LLM_MAX_OUTPUT_TOKENS:-8192}"
+      TEAMEVOLVER_TENANT_CONCURRENCY: "${TEAMEVOLVER_TENANT_CONCURRENCY:-4}"
+      TEAMEVOLVER_HTTP_CONCURRENCY: "${TEAMEVOLVER_HTTP_CONCURRENCY:-256}"
+      TEAMEVOLVER_SKILLMINER_ENABLED: "${TEAMEVOLVER_SKILLMINER_ENABLED:-1}"
+    volumes:
+      - "${DATA_ROOT:-customer_state}:/data"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:52010/readyz', timeout=5)"]
+      interval: 20s
+      timeout: 8s
+      retries: 3
+      start_period: 30s
+    stop_grace_period: 45s
+volumes:
+  customer_state:

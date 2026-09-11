@@ -32,21 +32,40 @@ Reports carry integration-scoped tokens and `external_subject`; the server valid
 
 ### 2. Evidence Extraction
 
-The evolution engine's Judge stage analyzes Sessions to determine which content can be elevated to team assets:
+Evidence extraction happens in two layers at different stages:
 
-| Evidence Type | Destination |
-|---------------|-------------|
-| Reusable task methods | Skill Candidate |
-| Long-term facts/preferences/consensus | Memory Change (via DreamCycle) |
-| Task-specific requirements | Discarded (not team assets) |
-| Agent runtime issues | Marked as runtime-issue, no evolution |
-| Insufficient evidence | Archived, awaiting more Evidence accumulation |
+**Session-level scoring (Judge stage)**: After summarization, a session-level scorer (`teamEvolver/evolve/stages/judge.py:judge_session`, system prompt in the module constant `_JUDGE_SYSTEM`) scores each Session on four dimensions (0.0-1.0):
+
+| Dimension | Weight | Meaning |
+|-----------|--------|---------|
+| `task_completion` | 0.55 | Whether the user's goal was accomplished |
+| `response_quality` | 0.30 | Correctness, completeness, and clarity of the final result |
+| `efficiency` | 0.05 | Whether the execution path avoided unnecessary retries/detours |
+| `tool_usage` | 0.10 | Whether tool usage was appropriate and effective |
+
+The weighted result is `overall_score`; the output also carries per-dimension scoring bullets (`reasons`, a Chinese bullet list) and an overall `rationale`. Sessions that already have a reliable session-level score (benchmark/aggregate) are skipped.
+
+**Evidence routing (inside evolution prompts)**: There is no standalone "evidence classification" stage. During candidate generation, the evolution prompt (`teamEvolver/evolve/stages/execute.py:evolve_skill_from_sessions`, routing rules in the module constant `_EVIDENCE_ROUTING_RULES`) requires every candidate observation to be assigned to exactly one bucket:
+
+| Bucket | Meaning |
+|--------|---------|
+| `team_skill` | Reusable SOPs, stable environment facts, tool/domain operating procedures |
+| `user_memory` | Preferences or habits attributable to an individual user |
+| `task_requirement` | Explicit requirements or corrections for the current deliverable only |
+| `agent_runtime` | Runtime issues such as interruptions, context loss, tool failures, orchestration failures |
+| `insufficient_evidence` | Observations with no demonstrable causal link to a Skill |
+
+Only `team_skill` evidence can modify shared Skills; if all observations fall into the other buckets, evolution chooses `skip` and the Session is archived. The former DreamCycle Memory routing has been superseded: sessions whose ingest classification is not `valuable` are skipped and archived directly (see [Sessions](./05-sessions)).
 
 ### 3. Candidate Generation
 
-When Evidence of the same type accumulates to threshold (`evidence_change_debt_threshold=3`):
-- **Skill Candidate**: Based on successful patterns across multiple Sessions, merged into a Skill revision or new version
-- **Memory Change**: Generated after DreamCycle's React engine aggregates and deduplicates
+In each evolution cycle, the engine groups consumed Sessions by their associated Skill; each group is an independent branch that runs its own evolution pass (`teamEvolver/evolve/runtime/orchestrator.py:_evolve_skill_group`), producing a revision, a new Skill, or a `skip` decision based on the group's Sessions plus the cross-cycle Evidence ledger. There is no "accumulate evidence to a threshold to trigger candidates" mechanism; `evidence_change_debt_threshold` only feeds cross-cycle guidance in the Evidence ledger and is not a candidate-generation threshold.
+
+Branch-level constraints:
+
+- **Team-evidence minima**: Each branch's planning evidence must span at least `evolve.min_group_sessions` (default 2) distinct Sessions and `evolve.min_group_users` (default 2) distinct Users (`teamEvolver/evolve/kernel/settings.py:EvolveServerConfig`); otherwise the branch is skipped this cycle. Setting 0 disables a check.
+- **Parallelism cap**: The number of concurrently evolving group branches plus the no-skill create branch is bounded by `evolve.max_parallel_groups`.
+- **Partial commit**: When a branch fails, its Sessions stay queued for retry on a later cycle; Sessions from successful branches are consumed and archived normally, so one permanently failing group cannot block the whole queue (`teamEvolver/evolve/runtime/orchestrator.py:_run_once`).
 
 Candidate creation does not affect published team assets; they exist only in the validation queue.
 
@@ -95,6 +114,7 @@ Can rollback to historical versions at any time:
 | Automatic periodic | `evolve.interval_seconds=600` (10 minutes) scans queue |
 | Manual trigger | `POST /trigger` executes one evolution cycle immediately |
 | Session-driven | Automatically wakes when sufficient Evidence accumulates |
+| Continuous drain | With `evolve.drain_max_per_cycle` set (default 0 = unlimited), when a capped drain leaves a backlog or new sessions arrive mid-cycle, the next cycle starts after roughly 1 second instead of waiting a full interval (`teamEvolver/evolve/runtime/orchestrator.py:run_periodic`); the drain itself reads sessions in batches (`teamEvolver/evolve/runtime/mixins.py:_drain_sessions`), and an empty queue still idles for the full interval |
 
 ## Publish Modes
 
