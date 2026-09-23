@@ -1,0 +1,257 @@
+{
+  "scope": "real TE/OV/system tests not executed",
+  "cases": [
+    {
+      "id": "O01",
+      "scenario": "原生Compile能力协商",
+      "expected": "from/to/skill、输出制品、args和取消语义与固定部署匹配",
+      "owner": "OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O02",
+      "scenario": "Runtime凭证越界读取",
+      "expected": "Manifest外来源在工具侧实际被拒，非仅Prompt劝阻",
+      "owner": "OV／Runtime",
+      "status": "not_run"
+    },
+    {
+      "id": "O03",
+      "scenario": "staging候选普通检索",
+      "expected": "list/read/find/search/导出均不向无权主体暴露候选",
+      "owner": "OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O04",
+      "scenario": "同submission键并发请求",
+      "expected": "同请求同任务关联；异请求409；受理崩溃可恢复",
+      "owner": "OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O05",
+      "scenario": "受理成功但响应丢失",
+      "expected": "TE按键对账，不盲目启动重复业务步骤",
+      "owner": "TE／OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O06",
+      "scenario": "模型臆造类型或扩大Schema",
+      "expected": "候选隔离，Schema变更独立审批",
+      "owner": "TE",
+      "status": "not_run"
+    },
+    {
+      "id": "O07",
+      "scenario": "同名不同地区网点／不同类型",
+      "expected": "不错误合并，别名查询显示歧义",
+      "owner": "TE／OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O08",
+      "scenario": "缺产品／地区／时点等必需限定",
+      "expected": "验证拒绝或输出缺口，不发布宽泛结论",
+      "owner": "OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O09",
+      "scenario": "Wiki摘要没有原始证据",
+      "expected": "不认定已证实事实，无伪造片段或页码",
+      "owner": "TE／Runtime",
+      "status": "not_run"
+    },
+    {
+      "id": "O10",
+      "scenario": "循环生成来源互相证明",
+      "expected": "证明图拒绝无原始叶子的自支持环",
+      "owner": "OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O11",
+      "scenario": "UserClaim伪装SystemFact",
+      "expected": "缺可信观察证明不能晋升为系统事实",
+      "owner": "OV／网关",
+      "status": "not_run"
+    },
+    {
+      "id": "O12",
+      "scenario": "工具结果过期／跨主体句柄",
+      "expected": "UNKNOWN或拒绝，不沿用旧肯定结论",
+      "owner": "OV／网关",
+      "status": "not_run"
+    },
+    {
+      "id": "O13",
+      "scenario": "业务有效期与记录时点交叉查询",
+      "expected": "bitemporal结果和修订轨迹正确",
+      "owner": "OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O14",
+      "scenario": "多必要源中一项无权或撤回",
+      "expected": "该证明不再可用，不以证据数组取并集放权",
+      "owner": "OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O15",
+      "scenario": "多个独立证明",
+      "expected": "仅完整且受权的证明可用于返回，明确独立性",
+      "owner": "OV／TE",
+      "status": "not_run"
+    },
+    {
+      "id": "O16",
+      "scenario": "候选摘要批准后被替换",
+      "expected": "grant失效，正式head不变",
+      "owner": "OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O17",
+      "scenario": "两个候选同base并发commit",
+      "expected": "只有匹配基线者生效，另一方重基准",
+      "owner": "OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O18",
+      "scenario": "commit成功但回执丢失",
+      "expected": "查到同一receipt，无重复激活／通知副作用",
+      "owner": "OV／TE",
+      "status": "not_run"
+    },
+    {
+      "id": "O19",
+      "scenario": "撤权与commit／读取竞态",
+      "expected": "新水位阻断过期批准、缓存、候选和正式返回",
+      "owner": "OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O20",
+      "scenario": "取消后迟到Runtime结果",
+      "expected": "私有产物不成为正式知识，fence有效",
+      "owner": "OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O21",
+      "scenario": "老版本回滚／备份恢复",
+      "expected": "当前源权限与撤回先检查，不复活已撤回内容",
+      "owner": "OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O22",
+      "scenario": "隐藏节点与证明",
+      "expected": "不从边、标题、计数、解释或错误泄漏存在性",
+      "owner": "OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O23",
+      "scenario": "高出度节点／恶意QueryPlan",
+      "expected": "扫描、输出和deadline均有上限",
+      "owner": "OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O24",
+      "scenario": "上下文预算不足",
+      "expected": "完整省略事实包；不截断否定、例外或证明",
+      "owner": "OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O25",
+      "scenario": "原文提示注入／恶意工具URL",
+      "expected": "当数据处理，不能改指令或注册执行端点",
+      "owner": "Runtime／Agent",
+      "status": "not_run"
+    },
+    {
+      "id": "O26",
+      "scenario": "TE停机、授权服务正常",
+      "expected": "已发布合法读取可用，新审核暂停",
+      "owner": "OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O27",
+      "scenario": "权限服务不可用",
+      "expected": "fail closed，不以缓存继续返回敏感内容",
+      "owner": "OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O28",
+      "scenario": "Source503／同步暂时失败",
+      "expected": "UNKNOWN，不自动执行破坏性删除",
+      "owner": "OV／TE",
+      "status": "not_run"
+    },
+    {
+      "id": "O29",
+      "scenario": "Wiki新版本、本体旧generation",
+      "expected": "明确as-of与lag，不混拼不兼容事实",
+      "owner": "OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O30",
+      "scenario": "批量编译与在线查询并发",
+      "expected": "读延迟、模型配额、公平队列和积压可量化",
+      "owner": "平台",
+      "status": "not_run"
+    },
+    {
+      "id": "O31",
+      "scenario": "人工改、AutoFix、回滚工具",
+      "expected": "均产生候选与真实receipt，无正式写旁路",
+      "owner": "TE／OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O32",
+      "scenario": "真实业务写动作绕过Skill",
+      "expected": "网关仍检查当前身份、版本、确认和幂等",
+      "owner": "业务系统",
+      "status": "not_run"
+    },
+    {
+      "id": "O33",
+      "scenario": "工具Schema升级与旧Rule",
+      "expected": "旧字段解释被阻断，重校验后恢复",
+      "owner": "TE／OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O34",
+      "scenario": "不同用户同问句缓存",
+      "expected": "结果按当前授权隔离且撤回立即可见",
+      "owner": "OV",
+      "status": "not_run"
+    },
+    {
+      "id": "O35",
+      "scenario": "同源工单改写进入评测两侧",
+      "expected": "检出数据泄漏，按来源家族／时间重切分",
+      "owner": "评测",
+      "status": "not_run"
+    },
+    {
+      "id": "O36",
+      "scenario": "文档首导／日更放大",
+      "expected": "记录Token、成功事实、重试、写放大与人审成本",
+      "owner": "平台／TE",
+      "status": "not_run"
+    }
+  ]
+}

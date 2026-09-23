@@ -1,0 +1,30 @@
+{
+  "checks": [
+    {
+      "method": "GET",
+      "path": "/api/v1/enterprise/ontology/capabilities",
+      "status": 200,
+      "body": {
+        "response_received": true
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/enterprise/context/compose",
+      "status": 200,
+      "body": {
+        "response_received": true
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/tasks?task_type=ontology_compile",
+      "status": 200,
+      "body": {
+        "response_received": true
+      }
+    }
+  ],
+  "mode": "native OV process with localhost dev auth",
+  "limitation": "existing Rust binding lacks invalidate_cache; native metadata worker repeatedly fails on test invalidation events"
+}

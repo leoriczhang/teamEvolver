@@ -1,0 +1,12 @@
+SET
+PREPARE
+Limit  (cost=0.56..3071.42 rows=8 width=562)
+  ->  Index Scan using facts_pkey on facts  (cost=0.56..30709.23 rows=80 width=562)
+        Index Cond: ((tenant = $1) AND (generation = $2))
+        Filter: (((cardinality($3) = 0) OR (subject = ANY ($3))) AND ((cardinality($4) = 0) OR (predicate = ANY ($4))))
+PREPARE
+Limit  (cost=49.72..49.73 rows=1 width=562)
+  ->  Sort  (cost=49.72..49.73 rows=1 width=562)
+        Sort Key: id
+        ->  Index Scan using ontology_fact_subject on facts  (cost=0.56..49.71 rows=1 width=562)
+              Index Cond: ((tenant = $1) AND (generation = $2) AND (subject = ANY ($3)))

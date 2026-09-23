@@ -1,0 +1,75 @@
+{
+  "recorded_at": "2026-09-18T18:31:10.057127+00:00",
+  "note": "Uncommitted worktree source snapshot; base HEAD alone does not include implementation",
+  "repositories": {
+    "teamEvolver": {
+      "base_head": "fe7f8246fe229fecccbb37fd713aded0c654d682",
+      "sha256": {
+        "Dockerfile": "3a854a8600ede418a29753e6214a09530a1367b0a50cdeaec78399873b706f35",
+        "cicd_scripts/build.sh": "8723264afeb0407e69997eecad250c09d7f631c051c505e16b2698cea86246a5",
+        "docker/Dockerfile.customer": "7d9d6ef1f7ed42b75ef9a237372ef6e6e77c2a61daa4865ab5f5ab26dbcf0ca6",
+        "docs/scripts/check-docs-refs.mjs": "c5be8c929d264b05f3b61f834c546d9cb2c26be4d65d45fd38e1525e4454024d",
+        "pyproject.toml": "dc7327a739f0656de400a9f0a82b09bf5cc495cdf6e3fe7197c97fa3af7c0703",
+        "scripts/ontology_lab.py": "fcb2aaf0ed59d5c8312871700a1b60dc5253aff00f32b831a19713df16d21585",
+        "scripts/ontology_load.py": "cbb130857ce24d1d82fae9bf3d0f020e203dedac776c33b2cc3f699bfc5087e7",
+        "scripts/ontology_scale.py": "95d38749282c7009f28b56b9d3aef528e88eb2abd37db4ec338fd3d1f30211b7",
+        "scripts/ontology_smoke.py": "b7921d71d926cf98c35d380e8a6788141f5bc71b233b6ed67279c5b780011c9a",
+        "teamEvolver/proxy/routes.py": "6013389940385b1934e63344a97cb10eb8b5adbc4c85023a93efe3df8a6dae73",
+        "team_ontology/README.md": "5efd676909eb2f8498cf078f8f5a5108cfd6c32afaf0cf1077b4285d0acd37b0",
+        "team_ontology/__init__.py": "6976ddb6d2d91f2ee512022ca02738c1c1ab2c5cfed0603056d0db8b62b30110",
+        "team_ontology/api.py": "8acef782f1b6afc8614f17d8d6f9a404646ff7d9568a2208cd11421fb7ae9cec",
+        "team_ontology/standalone.py": "3031cf046f2b20b7859d0c0f310fe10ff6ef5b387f3a307cdf665b1fa56b8f92",
+        "tests/test_ontology_integration.py": "a8ded112ae878bcbf8ed480b1a6028a98e5fbe26b9275ac8b9b4a91cff538efb",
+        "web-ui/package-lock.json": "3a6f9c43d6d0d7e35eef0b6e756e2916d5eec63e03b17c6b459d2f40996613ab",
+        "web-ui/src/App.tsx": "bb46c74805175705a4fa4509567fde3ede74f1156fab848f12be6d89db6257dd",
+        "web-ui/src/views/OntologyView.tsx": "bad2543b6bef9b28e389be7f8c4185974ea36d3cc7a0f36648eafd236d1e4a4e",
+        "scripts/ontology_agent_example.py": "c2210d2fd3738fa31d71a9b6f4aa2b4f01b7f4ecde2358df222d7297849b1604"
+      }
+    },
+    "OpenViking": {
+      "base_head": "029faeff0b204c1522b6d3bf95df61c984ebb2c6",
+      "sha256": {
+        "openviking/ontology/README.md": "6d8df25fe92aa73ce2920619383b2b65c73305f750a4dd4541893d1da539c170",
+        "openviking/ontology/__init__.py": "e0c7246f4299ab830bbffc0063370a1fea9da32ae3a4f02471215fa70b901581",
+        "openviking/ontology/api.py": "d926fd37360e6c99696c028d4fb61996780b0b99aa360016f1f2d14d75fb8d20",
+        "openviking/ontology/contracts/candidate_bundle.schema.json": "2255a45be668973d92f8774e326bc2a70056d356eb67f9b5c4b281271c2ba86e",
+        "openviking/ontology/contracts/context_packet.schema.json": "33b1f1813286d3a0ee6ae04a322fdc13db6c8a8777c101b952b9a30296372807",
+        "openviking/ontology/contracts/context_request.schema.json": "746cc106596661dcd56c3c59dc01f211d1ded2c98533ab43801ec73ac73a3273",
+        "openviking/ontology/contracts/error_response.schema.json": "5712891679d5e03b5c1b4b7b02774d8de95b1e172dad2aaef8b200b4e1469d7d",
+        "openviking/ontology/contracts/manifest.json": "ff247802d2de4f8e3666160cf92c375b64df6c267515d09a336c0cf7efb5bc20",
+        "openviking/ontology/contracts/manifest.schema.json": "2de70111c954d1429048ef8f946c05aba10722077a3f223c15cd7debe5d364fd",
+        "openviking/ontology/contracts/observation.schema.json": "94fcde063207f1238aaa132545b5e4bf3041ca4662942e8c60b686804bd2111f",
+        "openviking/ontology/contracts/openapi.json": "f58d1b7db07f53c9d1cc4b38210731b54f57444fedc1d6e26e8094e2b8fffded",
+        "openviking/ontology/contracts/publication_grant.schema.json": "e7cc69e8aea570449146e5c1bc9870cadf0b7f7c49eea5389f18be9770a32019",
+        "openviking/ontology/contracts/schema.schema.json": "726f82886b1e5ba4e4d81b0040072ac83653041ad03626622f56765c88a941ea",
+        "openviking/ontology/contracts/typed_query.schema.json": "649cebdb5bf571d070e7d483c23b8551ead4ee4ad67528159b5a870f9db6dd70",
+        "openviking/ontology/contracts.py": "1d18c719995b895937d88aa1af43919a1941ffd1b68110955be080fd35f1fcd8",
+        "openviking/ontology/errors.py": "a3703d6cabc7fa12723dbb867910ccd64c65c029dad3f0d122c8622eb14c39f5",
+        "openviking/ontology/export_contracts.py": "c41b9c6ecc4b36ec66256fdb4ca7a537f7f88c34d157002c6adf475b30bf1080",
+        "openviking/ontology/limits.py": "13e258c28b846b6feb1f614df551721a010913b8b78efc91413d6b47b663a6c7",
+        "openviking/ontology/rules.py": "bb1faa6fc5570ca1cc47552f6d4067099885633867469d63f6e1578b1cfb6de0",
+        "openviking/ontology/schema.sql": "17430e82c37bf888bb81b5b5127919a4c775979170d672f1bb7a8a6c53335e86",
+        "openviking/ontology/service.py": "6cdd020ca536012f75d019239fe0b7c4a30cb9310f272ec453bc48c699312c99",
+        "openviking/ontology/standalone.py": "1de0c66aee4f0def3adcf8b49931d0b49490b98972efaaa76173e8cfabc1674f",
+        "openviking/ontology/store.py": "defdf08da42f880b0d7941f4867a8ed0679392684b687f081ade48041acbfd64",
+        "openviking/ontology/validation.py": "6651ab647522c6a2ea4cfa9d01aa95de68a13db11be2a4e5a344406682bda252",
+        "openviking/ontology/worker.py": "4f26ad3a1839525fbd633e2f58454ccbca9b5038a1d55a6819970d5c15d5714e",
+        "openviking/server/app.py": "0ce473c6857c5d32d9b2dd72d5db2a57b869c084179dd842c15ef235495d976b",
+        "openviking/storage/metadata/tasks.py": "27475af5d9977d1ad40cd403f855a46c026412e1bdb19caeee8830f4abfdc7c4",
+        "pyproject.toml": "598c9f0dd28cdc50b2a8dfe24bb6ad52db4b40fe8fffa082fca0962ec01c6e48"
+      }
+    },
+    "ontology-enhancer": {
+      "base_head": "b8de0d1a033ba8584af87a51b32fe3988a456c1c",
+      "sha256": {
+        "pyproject.toml": "d2fdfe8108ab19e5ad6d71afdb6a5e7108fb07e7a5fa9f337436960c5c901547",
+        "src/ontology_enhancer/ov_runtime/README.md": "5d2d269b44be7397bd3c7f14c76d40da65af23154e6f43430c9ee79cdc8704e1",
+        "src/ontology_enhancer/ov_runtime/__init__.py": "322d54a14194203873210d697d920e2d19bbd77b9f70c85196c832baa71e596f",
+        "src/ontology_enhancer/ov_runtime/app.py": "f83b564a3927987514f8983a829e8a0b9309cbb528540b3c4ac748c61d3a83dd",
+        "src/ontology_enhancer/ov_runtime/contracts/candidate_bundle.schema.json": "2255a45be668973d92f8774e326bc2a70056d356eb67f9b5c4b281271c2ba86e",
+        "src/ontology_enhancer/ov_runtime/extractor.py": "9853dea1ee7f0bc84289dc006b008640e56b8dd0263072e6b11217a2ab46a40d",
+        "tests/test_ov_runtime.py": "66090a528abafc57ebea9b5e4a11e41d12f094716a0a7e305ccfe8d2d9f347ad"
+      }
+    }
+  }
+}

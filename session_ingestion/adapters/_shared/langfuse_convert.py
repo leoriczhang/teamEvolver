@@ -1,0 +1,633 @@
+"""Convert Langfuse sessions/traces into the teamEvolver session format.
+
+These functions are intentionally pure (no network, no config) so the mapping
+logic can be unit-tested with fixture payloads. They translate the Langfuse v3
+public-API shapes into the same session dict that ``/ingest_session`` and
+``SessionStore`` already consume from Hermes/AgentsHub:
+
+    Langfuse session            -> teamEvolver session
+    Langfuse trace (chronological) -> one interaction turn
+    Langfuse GENERATION obs      -> model/api call + token usage
+    OpenAI-style tool_calls / role="tool" messages -> tool_calls / tool_results
+
+The Langfuse data model is generic, so message extraction copes with the common
+encodings we see in practice: a bare string, a single ``{role, content}`` map, a
+``{"messages": [...]}`` wrapper, a list of message maps, and list-style content
+parts (``[{"type": "text", "text": "..."}]``).
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any, Callable, Optional
+
+# Cap any single text body so ingested payloads stay reasonable, mirroring the
+# Hermes push hook (push_session.MAX_CHARS). Set to None to disable truncation.
+MAX_CHARS = None  # no truncation: preserve full original IO ([:None] keeps everything)
+MAX_SYSTEM_CHARS = 200_000
+
+# Langfuse core observation types (see commons.yml ObservationType).
+_GENERATION_TYPES = {"GENERATION"}
+_EVENT_TYPES = {"EVENT"}
+_TOOL_ROLES = {"tool", "function"}
+
+# Trace names that are generic pipeline labels rather than session titles.
+_GENERIC_TRACE_NAMES = {"openclaw-turn", "turn", "trace", "session"}
+
+# JSON keys holding the actual user question in common agent payloads.
+_TITLE_QUERY_KEYS = ("query", "question", "text", "message", "content")
+
+
+def _title_from_payload(payload: Any) -> str:
+    """First user question found in a JSON envelope.
+
+    openclaw/openapi agents wrap the current turn as
+    ``{"sender": ..., "msg": {"content": {"query": "..."}}}``.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    msg = payload.get("msg")
+    candidates = [msg.get("content")] if isinstance(msg, dict) else [payload]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        for key in _TITLE_QUERY_KEYS:
+            value = candidate.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip().splitlines()[0]
+    return ""
+
+
+def _iter_json_objects(text: str):
+    """Yield JSON objects embedded in mixed text (fenced or appended)."""
+    depth = 0
+    start = None
+    in_str = False
+    escape = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start is not None:
+                try:
+                    obj = json.loads(text[start:i + 1])
+                except (ValueError, TypeError):
+                    obj = None
+                if isinstance(obj, dict):
+                    yield obj
+                start = None
+
+
+def _is_metadata_line(line: str) -> bool:
+    """Metadata scaffolding that must never surface as a session title."""
+    lowered = line.lower()
+    return (
+        lowered.startswith("conversation info")
+        or lowered.endswith("(untrusted metadata):")
+        or line.startswith("```")
+    )
+
+
+def _first_plain_line(text: str) -> str:
+    """First natural-language line outside JSON objects and metadata fences."""
+    depth = 0
+    in_str = False
+    escape = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        starts_inside_json = depth > 0
+        for ch in raw_line:
+            if in_str:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}" and depth > 0:
+                depth -= 1
+        if starts_inside_json or depth > 0 or not line or _is_metadata_line(line):
+            continue
+        if not line.startswith(("{", "【", "[\"")):
+            return line
+    return ""
+
+
+def _title_from_prompt(prompt_text: str) -> str:
+    """Extract a human-readable session title candidate from a turn prompt.
+
+    Agent payloads often wrap the user message in JSON envelopes (e.g.
+    openclaw's ``{"sender": ..., "msg": {"content": {"query": ...}}}``);
+    unwrap the most common shapes and fall back to the first meaningful
+    plain-text line. Prompts carrying the question only inside an embedded
+    envelope (after the ``Conversation info`` header) are unwrapped last so
+    natural-language lines keep winning.
+    """
+    text = (prompt_text or "").strip()
+    if not text:
+        return ""
+    if text.startswith("{"):
+        try:
+            payload = json.loads(text)
+        except (ValueError, TypeError):
+            payload = None
+        title = _title_from_payload(payload)
+        if title:
+            return title
+    line = _first_plain_line(text)
+    if line:
+        return line
+    for payload in _iter_json_objects(text):
+        title = _title_from_payload(payload)
+        if title:
+            return title
+    return ""
+
+
+def _extract_text(value: Any) -> str:
+    """Flatten arbitrary Langfuse content into a single text string."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                # OpenAI-style content parts: {"type": "text", "text": "..."}.
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+                elif "content" in item:
+                    parts.append(_extract_text(item.get("content")))
+                else:
+                    parts.append(json.dumps(item, ensure_ascii=False))
+            else:
+                parts.append(str(item))
+        return "\n".join(part for part in parts if part)
+    if isinstance(value, dict):
+        if isinstance(value.get("text"), str):
+            return value["text"]
+        if "content" in value:
+            return _extract_text(value.get("content"))
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _normalize_tool_calls(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    calls: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function") if isinstance(item.get("function"), dict) else {}
+        name = str(function.get("name") or item.get("name") or "").strip()
+        arguments = function.get("arguments")
+        if arguments is None:
+            arguments = item.get("arguments")
+        if isinstance(arguments, (dict, list)):
+            arguments = json.dumps(arguments, ensure_ascii=False)
+        calls.append(
+            {
+                "id": str(item.get("id") or item.get("tool_call_id") or ""),
+                "type": str(item.get("type") or "function"),
+                "function": {"name": name, "arguments": str(arguments or "{}")},
+            }
+        )
+    return calls
+
+
+def _normalize_messages(value: Any, *, default_role: str) -> list[dict[str, Any]]:
+    """Return a list of normalized message dicts from arbitrary Langfuse IO."""
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        inner = value.get("messages")
+        if isinstance(inner, list):
+            return _normalize_messages(inner, default_role=default_role)
+        if any(key in value for key in ("role", "content", "tool_calls")):
+            value = [value]
+        else:
+            return [{"role": default_role, "content": _extract_text(value)[:MAX_CHARS]}]
+    if isinstance(value, (str, int, float, bool)):
+        text = _extract_text(value)[:MAX_CHARS]
+        return [{"role": default_role, "content": text}] if text else []
+    if not isinstance(value, list):
+        return []
+    messages: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            text = _extract_text(item)[:MAX_CHARS]
+            if text:
+                messages.append({"role": default_role, "content": text})
+            continue
+        role = str(item.get("role") or default_role)
+        content_source = item.get("content") if "content" in item else item
+        message: dict[str, Any] = {
+            "role": role,
+            "content": _extract_text(content_source)[:MAX_CHARS],
+        }
+        tool_calls = _normalize_tool_calls(item.get("tool_calls"))
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        if role in _TOOL_ROLES:
+            message["tool_call_id"] = str(item.get("tool_call_id") or "")
+            message["tool_name"] = str(item.get("name") or item.get("tool_name") or "")
+        messages.append(message)
+    return messages
+
+
+def _observation_tokens(obs: dict[str, Any]) -> tuple[int, int, int]:
+    """Return (input, output, total) token counts for one observation."""
+
+    def _as_int(value: Any) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+
+    usage_details = obs.get("usageDetails") if isinstance(obs.get("usageDetails"), dict) else {}
+    usage = obs.get("usage") if isinstance(obs.get("usage"), dict) else {}
+    input_tokens = _as_int(
+        usage_details.get("input")
+        or usage_details.get("prompt_tokens")
+        or usage_details.get("input_tokens")
+        or usage.get("input")
+    )
+    output_tokens = _as_int(
+        usage_details.get("output")
+        or usage_details.get("completion_tokens")
+        or usage_details.get("output_tokens")
+        or usage.get("output")
+    )
+    total_tokens = _as_int(
+        usage_details.get("total")
+        or usage_details.get("total_tokens")
+        or usage.get("total")
+    )
+    if not total_tokens:
+        total_tokens = input_tokens + output_tokens
+    return input_tokens, output_tokens, total_tokens
+
+
+def _has_error(obs: dict[str, Any]) -> bool:
+    if str(obs.get("level") or "").upper() == "ERROR":
+        return True
+    status = str(obs.get("statusMessage") or "").lower()
+    return any(token in status for token in ("error", "exception", "failed", "traceback"))
+
+
+def _tool_calls_from_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    for message in messages:
+        for call in message.get("tool_calls") or []:
+            calls.append(call)
+    return calls
+
+
+def _tool_results_from_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for message in messages:
+        if str(message.get("role") or "") not in _TOOL_ROLES:
+            continue
+        content = str(message.get("content") or "")
+        results.append(
+            {
+                "tool_call_id": message.get("tool_call_id") or "",
+                "tool_name": message.get("tool_name") or "",
+                "content": content,
+                "has_error": any(
+                    token in content.lower()
+                    for token in ("error", "exception", "traceback", "failed")
+                ),
+            }
+        )
+    return results
+
+
+def convert_trace_to_turn(
+    trace: dict[str, Any],
+    turn_num: int,
+    *,
+    mapper: Optional[Callable[..., dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    """Convert one Langfuse trace (with full observations) into a turn dict.
+
+    When ``mapper`` is provided it is called as
+    ``mapper(trace, observations, turn_num, builtin_turn)`` and its result
+    replaces the returned turn. The built-in turn is always computed first and
+    passed as ``builtin_turn`` so an operator's :class:`TraceMapper` can
+    deep-merge a partial override over it. A mapper that raises is the caller's
+    responsibility to handle (the pull pipeline logs and falls back).
+    """
+    observations = trace.get("observations") if isinstance(trace.get("observations"), list) else []
+
+    input_messages = _normalize_messages(trace.get("input"), default_role="user")
+    output_messages = _normalize_messages(trace.get("output"), default_role="assistant")
+
+    # Observations carry the finer-grained conversation (per-generation IO and
+    # tool spans). Fold generation IO into the message stream so tool_calls /
+    # tool results surface even when the trace-level output omits them.
+    observation_messages: list[dict[str, Any]] = []
+    input_tokens = output_tokens = total_tokens = 0
+    generation_count = 0
+    non_generation_spans = 0
+    models: list[str] = []
+    for obs in sorted(
+        (o for o in observations if isinstance(o, dict)),
+        key=lambda o: str(o.get("startTime") or ""),
+    ):
+        obs_type = str(obs.get("type") or "").upper()
+        if obs_type in _GENERATION_TYPES:
+            generation_count += 1
+            model = str(obs.get("model") or "").strip()
+            if model:
+                models.append(model)
+            in_tok, out_tok, tot_tok = _observation_tokens(obs)
+            input_tokens += in_tok
+            output_tokens += out_tok
+            total_tokens += tot_tok
+            observation_messages.extend(
+                _normalize_messages(obs.get("input"), default_role="user")
+            )
+            observation_messages.extend(
+                _normalize_messages(obs.get("output"), default_role="assistant")
+            )
+        elif obs_type not in _EVENT_TYPES:
+            # SPAN / TOOL / AGENT / CHAIN style observations represent
+            # intermediate steps; treat named ones as tool activity.
+            non_generation_spans += 1
+
+    combined_messages = input_messages + observation_messages + output_messages
+    tool_calls = _tool_calls_from_messages(combined_messages)
+    tool_results = _tool_results_from_messages(combined_messages)
+
+    prompts = [m["content"] for m in input_messages if m["role"] == "user" and m["content"]]
+    if not prompts:
+        prompts = [
+            m["content"]
+            for m in combined_messages
+            if m["role"] == "user" and m["content"]
+        ]
+    responses = [
+        m["content"] for m in output_messages if m["role"] == "assistant" and m["content"]
+    ]
+    if not responses:
+        responses = [
+            m["content"]
+            for m in combined_messages
+            if m["role"] == "assistant" and m["content"]
+        ]
+
+    # Prefer explicit tool_calls; otherwise fall back to counting non-generation
+    # observation spans as tool activity so metrics are non-zero for agents that
+    # log tool executions as spans rather than message tool_calls.
+    tool_call_count = len(tool_calls) or non_generation_spans
+
+    turn = {
+        "turn_num": turn_num,
+        "trace_id": str(trace.get("id") or ""),
+        "prompt_text": "\n".join(prompts).strip()[:MAX_CHARS],
+        "response_text": "\n".join(responses).strip()[:MAX_CHARS],
+        "messages": combined_messages,
+        "tool_calls": tool_calls,
+        "tool_results": tool_results,
+        "injected_skills": [],
+        "used_skills": [],
+        "read_skills": [],
+        "modified_skills": [],
+        "metrics": {
+            "tool_call_count": tool_call_count,
+            "api_call_count": generation_count,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens or (input_tokens + output_tokens),
+            "message_tokens": total_tokens or (input_tokens + output_tokens),
+        },
+        "_langfuse": {
+            "trace_name": str(trace.get("name") or ""),
+            "user_id": str(trace.get("userId") or ""),
+            "tags": list(trace.get("tags") or []),
+            "release": str(trace.get("release") or ""),
+            "version": str(trace.get("version") or ""),
+            "environment": str(trace.get("environment") or ""),
+            "timestamp": str(trace.get("timestamp") or ""),
+            "models": models,
+        },
+    }
+
+    if mapper is None:
+        return turn
+    # The operator-authored mapper owns the final shape; it receives the flat
+    # observation list plus the built-in turn as a deep-merge baseline.
+    return mapper(trace, list(observations), turn_num, turn)
+
+
+def _dominant(values: list[str]) -> str:
+    if not values:
+        return ""
+    counts: dict[str, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    return max(counts, key=counts.get)
+
+
+def _user_from_session_id(session_id: str) -> str:
+    """Derive the owning user from an agent session id.
+
+    Agent session ids embed the user before the conversation id, e.g.
+    ``agent:main:openresponses-user:42749155_<conversation>``. Langfuse traces
+    frequently omit ``userId``, so this is the reliable fallback for
+    attribution. Returns "" when the id has no ``<user>_<rest>`` tail, or
+    when the extracted value looks like a system-generated prefix (contains
+    ``-`` or ``.``) rather than a real user identifier.
+    """
+    tail = str(session_id or "").split(":")[-1]
+    if "_" not in tail:
+        return ""
+    candidate = tail.split("_", 1)[0].strip()
+    # Filter out system-generated prefixes like "openapi-http-openapi-default-direct-sess"
+    # Real user identifiers (e.g. "user_0b9494575", "42749155") do not contain hyphens or dots.
+    if "-" in candidate or "." in candidate:
+        return ""
+    return candidate
+
+
+def _metric_int(turn: dict[str, Any], key: str) -> int:
+    """Read one integer metric from a turn, tolerating custom-mapper output.
+
+    A user mapper may omit ``metrics`` entirely or set a non-numeric value; in
+    those cases we contribute 0 to the session-level aggregate rather than
+    raising, so one odd turn never fails a whole pull.
+    """
+    if not isinstance(turn, dict):
+        return 0
+    metrics = turn.get("metrics")
+    if not isinstance(metrics, dict):
+        return 0
+    try:
+        return int(metrics.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def convert_langfuse_session(
+    session: dict[str, Any],
+    traces: list[dict[str, Any]],
+    *,
+    mapper: Optional[Callable[..., dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    """Convert a Langfuse session plus its full traces into a teamEvolver session.
+
+    ``session`` is the object returned by ``GET /api/public/sessions/513386726504_AWS_us-west-1`` (or a
+    minimal ``{"id": ...}`` when only the id is known). ``traces`` is a list of
+    ``TraceWithFullDetails`` (each including its ``observations``), which the
+    caller has already fetched and may pre-filter/sort.
+
+    ``mapper`` is an optional operator-authored per-trace mapper (see
+    :mod:`~teamEvolver.integrations.langfuse_mapper`). It is applied to every
+    trace; the resulting turns still feed the same session-level aggregation so
+    metrics/titles stay consistent regardless of who produced the turn.
+    """
+    session_id = str(session.get("id") or session.get("session_id") or "").strip()
+
+    ordered_traces = sorted(
+        (t for t in traces if isinstance(t, dict)),
+        key=lambda t: str(t.get("timestamp") or ""),
+    )
+
+    turns: list[dict[str, Any]] = []
+    for index, trace in enumerate(ordered_traces, start=1):
+        turns.append(convert_trace_to_turn(trace, index, mapper=mapper))
+
+    # A custom mapper may drop/rename metric keys, so read them defensively.
+    total_input = sum(_metric_int(turn, "input_tokens") for turn in turns)
+    total_output = sum(_metric_int(turn, "output_tokens") for turn in turns)
+    total_tokens = sum(_metric_int(turn, "total_tokens") for turn in turns)
+    tool_call_count = sum(_metric_int(turn, "tool_call_count") for turn in turns)
+    api_call_count = sum(_metric_int(turn, "api_call_count") for turn in turns)
+
+    messages: list[dict[str, Any]] = []
+    for turn in turns:
+        turn_messages = turn.get("messages")
+        if isinstance(turn_messages, list):
+            messages.extend(turn_messages)
+
+    user_ids = [str(t.get("userId") or "").strip() for t in ordered_traces if t.get("userId")]
+    environments = [
+        str(t.get("environment") or "").strip() for t in ordered_traces if t.get("environment")
+    ]
+    releases = [str(t.get("release") or "").strip() for t in ordered_traces if t.get("release")]
+    versions = [str(t.get("version") or "").strip() for t in ordered_traces if t.get("version")]
+    tags: list[str] = []
+    for trace in ordered_traces:
+        for tag in trace.get("tags") or []:
+            tag = str(tag).strip()
+            if tag and tag not in tags:
+                tags.append(tag)
+
+    # Session title: first meaningful user prompt, else first non-generic
+    # trace name. Langfuse trace names are often generic labels
+    # (e.g. "openclaw-turn"), so user content wins.
+    title = ""
+    for turn in turns:
+        candidate = _title_from_prompt(turn.get("prompt_text") or "")
+        if candidate:
+            title = candidate[:120]
+            break
+    if not title and ordered_traces:
+        name = str(ordered_traces[0].get("name") or "").strip()
+        if name and name.lower() not in _GENERIC_TRACE_NAMES:
+            title = name
+
+    timestamp = str(
+        session.get("createdAt")
+        or session.get("timestamp")
+        or (ordered_traces[0].get("timestamp") if ordered_traces else "")
+        or ""
+    )
+
+    # Session-level skill unions: the ingest contract and the console detail
+    # view read the top-level fields, so aggregate them from turns (a custom
+    # mapper fills them per-turn).
+    injected_skills: list[str] = []
+    used_skills: list[str] = []
+    for turn in turns:
+        for key, bucket in (
+            ("injected_skills", injected_skills),
+            ("used_skills", used_skills),
+        ):
+            for skill in turn.get(key) or []:
+                skill = str(skill).strip()
+                if skill and skill not in bucket:
+                    bucket.append(skill)
+
+    converted: dict[str, Any] = {
+        "session_id": session_id,
+        "turns": turns,
+        "messages": messages,
+        "system_prompt": "",
+        "injected_skills": injected_skills,
+        "used_skills": used_skills,
+        "source": "langfuse",
+        "model": _dominant([m for turn in turns for m in _turn_models(turn)]),
+        "metrics": {
+            "interaction_turns": len(turns),
+            "message_count": len(messages),
+            "tool_call_count": tool_call_count,
+            "api_call_count": api_call_count,
+            "input_tokens": total_input,
+            "output_tokens": total_output,
+            "total_tokens": total_tokens or (total_input + total_output),
+        },
+        "langfuse": {
+            "session_id": session_id,
+            "project_id": str(session.get("projectId") or ""),
+            "environment": _dominant(environments),
+            "environments": sorted(set(environments)),
+            "user_id": _dominant(user_ids),
+            "user_ids": sorted(set(user_ids)),
+            "tags": tags,
+            "release": _dominant(releases),
+            "version": _dominant(versions),
+            "trace_count": len(ordered_traces),
+            "trace_ids": [str(t.get("id") or "") for t in ordered_traces],
+        },
+    }
+    if title:
+        converted["title"] = title
+    if timestamp:
+        converted["timestamp"] = timestamp
+    dominant_user = _dominant(user_ids) or _user_from_session_id(session_id)
+    if dominant_user:
+        converted["user_alias"] = dominant_user
+    return converted
+
+
+def _turn_models(turn: dict[str, Any]) -> list[str]:
+    langfuse = turn.get("_langfuse") if isinstance(turn.get("_langfuse"), dict) else {}
+    models = langfuse.get("models")
+    return [str(m) for m in models] if isinstance(models, list) else []

@@ -1,0 +1,8 @@
+{
+  "from": [
+    "viking://resources/enterprise-private/compile-inputs/job-demo-001"
+  ],
+  "to": "viking://resources/enterprise-private/compile-staging/job-demo-001",
+  "skill": "viking://resources/enterprise-skills/sf-ontology-build-v1/SKILL.md",
+  "instruction": "按冻结manifest生成受限候选；不改正式资产；证据不足报告缺口。"
+}

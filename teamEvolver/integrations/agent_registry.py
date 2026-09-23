@@ -1,0 +1,305 @@
+"""Persistent registry for Agent runtimes connected to teamEvolver."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from .agent_protocol import (
+    CAP_REPLAY_BRANCH,
+    normalize_registration,
+)
+from ..storage.admin_kv import read_kv, write_kv
+
+_DEFAULT_REGISTRY_PATH = Path.home() / ".teamEvolver" / "agents.json"
+_SECRET_TOKENS = ("key", "token", "secret", "password", "credential")
+_ENDPOINT_FIELDS = {
+    "health_url",
+    "replay_url",
+    "skill_sync_url",
+    "session_ingest_url",
+}
+_REGISTRY_LOCK = threading.RLock()
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _registry_path(config) -> Path:
+    users_path = str(getattr(config, "users_registry_path", "") or "").strip()
+    if users_path:
+        return Path(users_path).expanduser().parent / "agents.json"
+    config_file = str(getattr(config, "_config_file", "") or "").strip()
+    if config_file:
+        return Path(config_file).expanduser().parent / "agents.json"
+    return _DEFAULT_REGISTRY_PATH
+
+
+def _safe_id(value: Any) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_.:-]+", "-", str(value or "").strip())
+    normalized = normalized.strip(".:-")
+    if not normalized:
+        raise ValueError("agent_id is required")
+    return normalized[:160]
+
+
+def _safe_value(value: Any, *, depth: int = 0) -> Any:
+    if depth > 4:
+        return None
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for raw_key, raw_value in value.items():
+            key = str(raw_key or "").strip()
+            if not key or any(token in key.lower() for token in _SECRET_TOKENS):
+                continue
+            safe = _safe_value(raw_value, depth=depth + 1)
+            if safe is not None:
+                result[key] = safe
+        return result
+    if isinstance(value, list):
+        return [
+            safe
+            for item in value[:100]
+            if (safe := _safe_value(item, depth=depth + 1)) is not None
+        ]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return None
+
+
+def _safe_mapping(value: Any) -> dict[str, Any]:
+    result = _safe_value(value)
+    return result if isinstance(result, dict) else {}
+
+
+def _load(path: Path, config: Any = None) -> dict[str, Any]:
+    """Load the agents registry from PG (primary) or file (fallback)."""
+    if config is not None and getattr(config, "storage_pg_enabled", False):
+        data = read_kv(config, "agents.json", path)
+        return data if isinstance(data.get("agents"), list) else {"agents": []}
+    if config is not None:
+        try:
+            data = read_kv(config, "agents.json", path)
+            if data and isinstance(data.get("agents"), list):
+                return data
+        except Exception:
+            pass
+    if not path.exists():
+        return {"agents": []}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8") or "{}")
+    except Exception:
+        return {"agents": []}
+    if not isinstance(data, dict) or not isinstance(data.get("agents"), list):
+        return {"agents": []}
+    return data
+
+
+def _save(path: Path, data: dict[str, Any], config: Any = None) -> None:
+    """Save the agents registry to PG (primary) and file (always)."""
+    if config is not None and getattr(config, "storage_pg_enabled", False):
+        write_kv(config, "agents.json", path, data)
+        return
+    if config is not None:
+        try:
+            write_kv(config, "agents.json", path, data)
+            return
+        except Exception:
+            pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    tmp.replace(path)
+    os.chmod(path, 0o600)
+
+
+def register_agent(config, payload: dict[str, Any]) -> dict[str, Any]:
+    """Register one runtime without persisting credentials."""
+    normalized = normalize_registration(payload)
+    agent_id = _safe_id(normalized.get("agent_id"))
+    runtime_type = _safe_id(
+        normalized.get("runtime_type") or agent_id.split(":", 1)[0]
+    )
+    capabilities = sorted(
+        {
+            str(item or "").strip()
+            for item in normalized.get("capabilities") or []
+            if str(item or "").strip()
+        }
+    )
+    raw_endpoints = (
+        normalized.get("endpoints")
+        if isinstance(normalized.get("endpoints"), dict)
+        else {}
+    )
+    endpoints = {
+        key: str(raw_endpoints.get(key) or "").strip().rstrip("/")
+        for key in _ENDPOINT_FIELDS
+        if str(raw_endpoints.get(key) or "").strip()
+    }
+    path = _registry_path(config)
+    with _REGISTRY_LOCK:
+        data = _load(path, config)
+        existing = next(
+            (
+                item
+                for item in data["agents"]
+                if isinstance(item, dict)
+                and str(item.get("agent_id") or "") == agent_id
+            ),
+            {},
+        )
+        record = {
+            "schema_version": str(normalized.get("schema_version") or ""),
+            "protocol_version": str(normalized.get("protocol_version") or ""),
+            "runtime_version": str(normalized.get("runtime_version") or ""),
+            "agent_id": agent_id,
+            "runtime_type": runtime_type,
+            "runtime_class": str(
+                normalized.get("runtime_class") or runtime_type
+            ),
+            "display_name": str(
+                normalized.get("display_name")
+                or existing.get("display_name")
+                or agent_id
+            ),
+            "capabilities": capabilities,
+            "capability_ids": list(normalized.get("capability_ids") or []),
+            "capability_details": _safe_mapping(
+                normalized.get("capability_details")
+            ),
+            "endpoints": endpoints,
+            "auth": _safe_mapping(normalized.get("auth")),
+            "metadata": _safe_mapping(normalized.get("metadata")),
+            "compatibility": str(
+                normalized.get("compatibility") or "legacy"
+            ),
+            "status": "active",
+            "created_at": str(existing.get("created_at") or _now()),
+            "updated_at": _now(),
+        }
+        data["agents"] = [
+            item
+            for item in data["agents"]
+            if not isinstance(item, dict)
+            or str(item.get("agent_id") or "") != agent_id
+        ]
+        data["agents"].append(record)
+        data["agents"].sort(key=lambda item: str(item.get("agent_id") or ""))
+        _save(path, data, config)
+    return record
+
+
+def list_agents(config) -> list[dict[str, Any]]:
+    with _REGISTRY_LOCK:
+        return [
+            item
+            for item in _load(_registry_path(config), config).get("agents") or []
+            if isinstance(item, dict)
+        ]
+
+
+def public_agent_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Strip retired credential material before a record leaves the server.
+
+    Registries written before the credential convergence may still carry
+    ``access_auth`` (a token hash); it must never be exposed again.
+    """
+    return {key: value for key, value in record.items() if key != "access_auth"}
+
+
+def resolve_runtime_agent(
+    config,
+    *,
+    runtime_type: str,
+    agent_id: str = "",
+    allow_runtime_fallback: bool = True,
+) -> dict[str, Any] | None:
+    """Resolve an exact Agent id, optionally falling back to runtime type."""
+    records = list_agents(config)
+    cleaned_id = str(agent_id or "").strip()
+    if cleaned_id:
+        exact = next(
+            (item for item in records if str(item.get("agent_id") or "") == cleaned_id),
+            None,
+        )
+        if exact or not allow_runtime_fallback:
+            return exact
+    cleaned_type = str(runtime_type or "").strip()
+    matches = [
+        item
+        for item in records
+        if str(item.get("runtime_type") or "") == cleaned_type
+    ]
+    return max(matches, key=lambda item: str(item.get("updated_at") or "")) if matches else None
+
+
+def resolve_active_agent(
+    config,
+    *,
+    agent_id: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Resolve an exact, registered, active Agent for a declared identity.
+
+    Used by the tenant machine credential (``tevt_``) paths, where the caller
+    declares ``integration_id`` instead of holding a per-Agent token. Returns
+    ``(record, "")`` on success and ``(None, code)`` otherwise, with code in
+    ``{"UNKNOWN_INTEGRATION_ID", "INTEGRATION_DISABLED"}``.
+    """
+    cleaned = str(agent_id or "").strip()
+    record = resolve_runtime_agent(
+        config,
+        runtime_type="",
+        agent_id=cleaned,
+        allow_runtime_fallback=False,
+    )
+    if record is None:
+        return None, "UNKNOWN_INTEGRATION_ID"
+    if str(record.get("status") or "active") != "active":
+        return None, "INTEGRATION_DISABLED"
+    return record, ""
+
+
+def resolve_replay_capability(
+    config,
+    *,
+    runtime_type: str,
+    agent_id: str = "",
+    allow_runtime_fallback: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    record = resolve_runtime_agent(
+        config,
+        runtime_type=runtime_type,
+        agent_id=agent_id,
+        allow_runtime_fallback=allow_runtime_fallback,
+    )
+    if record is None or str(record.get("status") or "active") != "active":
+        return None
+    capabilities = set(record.get("capability_ids") or [])
+    legacy = set(record.get("capabilities") or [])
+    if CAP_REPLAY_BRANCH not in capabilities and "true_replay" not in legacy:
+        return None
+    details = (
+        record.get("capability_details", {}).get(CAP_REPLAY_BRANCH)
+        if isinstance(record.get("capability_details"), dict)
+        else {}
+    )
+    detail = dict(details) if isinstance(details, dict) else {}
+    endpoints = (
+        record.get("endpoints")
+        if isinstance(record.get("endpoints"), dict)
+        else {}
+    )
+    detail.setdefault("transport", "http" if endpoints.get("replay_url") else "local")
+    if endpoints.get("replay_url"):
+        detail.setdefault("endpoint", str(endpoints["replay_url"]))
+    detail.setdefault("max_interactions", 20)
+    detail.setdefault("idempotent", False)
+    return record, detail

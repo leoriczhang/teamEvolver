@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-python -m compileall skillgene tests
+python -m compileall teamEvolver team_skills team_memory team_miner team_replay session_ingestion tests
 
 if python - <<'PY' >/dev/null 2>&1
 import pytest  # noqa: F401
@@ -17,7 +17,10 @@ PY
     python -m pytest
   else
     echo "[verify] Python sqlite3 module is unavailable; skipped sqlite-dependent Hermes capture test"
-    mapfile -t TEST_FILES < <(find tests -name 'test_*.py' ! -name 'test_hermes_session_capture.py' | sort)
+    mapfile -t TEST_FILES < <(
+      find tests team_memory/tests team_miner/tests team_replay/tests \
+        -name 'test_*.py' ! -name 'test_hermes_session_capture.py' | sort
+    )
     python -m pytest "${TEST_FILES[@]}"
   fi
 else

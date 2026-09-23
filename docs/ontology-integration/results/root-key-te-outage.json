@@ -1,0 +1,9 @@
+{
+  "status": "passed",
+  "te_stopped": true,
+  "ov_http_status": 200,
+  "generation": 23,
+  "facts_equal": true,
+  "fact_count": 1,
+  "scope": "published non-empty facts remain queryable with TE stopped"
+}

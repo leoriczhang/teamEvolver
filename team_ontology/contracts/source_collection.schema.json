@@ -1,0 +1,74 @@
+{
+  "$defs": {
+    "SourceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        },
+        "revision": {
+          "title": "Revision",
+          "type": "string"
+        },
+        "digest": {
+          "title": "Digest",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "revision",
+        "digest"
+      ],
+      "title": "SourceRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "contract": {
+      "const": "sf.te.ontology.sources.v1",
+      "default": "sf.te.ontology.sources.v1",
+      "title": "Contract",
+      "type": "string"
+    },
+    "submission_key": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Submission Key",
+      "type": "string"
+    },
+    "roots": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 20,
+      "title": "Roots",
+      "type": "array"
+    },
+    "references": {
+      "items": {
+        "$ref": "#/$defs/SourceRef"
+      },
+      "maxItems": 1000,
+      "title": "References",
+      "type": "array"
+    },
+    "readers": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 1000,
+      "minItems": 1,
+      "title": "Readers",
+      "type": "array"
+    }
+  },
+  "required": [
+    "submission_key",
+    "readers"
+  ],
+  "title": "SourceCollectionRequest",
+  "type": "object"
+}

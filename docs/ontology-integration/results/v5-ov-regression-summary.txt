@@ -1,0 +1,17 @@
+FAILED ../OpenViking/tests/server/test_auth.py::test_user_key_access - assert...
+FAILED ../OpenViking/tests/server/test_auth.py::test_auth_on_multiple_endpoints
+FAILED ../OpenViking/tests/server/test_auth.py::test_admin_key_cannot_switch_effective_user_within_account
+FAILED ../OpenViking/tests/server/test_auth.py::test_admin_key_cannot_switch_account_via_header
+FAILED ../OpenViking/tests/server/test_auth.py::test_user_key_resolves_to_key_user_and_cannot_switch_user
+FAILED ../OpenViking/tests/server/test_auth.py::test_trusted_mode_looks_up_role_from_api_key_manager
+FAILED ../OpenViking/tests/server/test_mcp_endpoint.py::test_search_no_results
+FAILED ../OpenViking/tests/server/test_mcp_endpoint.py::test_list_root - Type...
+FAILED ../OpenViking/tests/server/test_mcp_endpoint.py::test_list_empty_dir
+FAILED ../OpenViking/tests/server/test_mcp_endpoint.py::test_forget_directory_without_recursive_fails
+FAILED ../OpenViking/tests/server/test_mcp_endpoint.py::test_write_append_missing_file_fails
+FAILED ../OpenViking/tests/server/test_mcp_endpoint.py::test_write_home_alias_uri[user]
+FAILED ../OpenViking/tests/server/test_mcp_endpoint.py::test_write_home_alias_uri[admin]
+FAILED ../OpenViking/tests/server/test_mcp_endpoint.py::test_write_home_alias_uri[root]
+FAILED ../OpenViking/tests/server/test_mcp_endpoint.py::test_grep_single_pattern
+FAILED ../OpenViking/tests/server/test_mcp_endpoint.py::test_glob_match_all_md
+16 failed, 255 passed, 4 warnings in 355.85s (0:05:55)

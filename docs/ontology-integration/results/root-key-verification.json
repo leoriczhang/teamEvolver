@@ -1,0 +1,120 @@
+{
+  "date": "2026-09-21",
+  "python": "3.12.9",
+  "scope": "local isolated; no SIT/PRD deployment",
+  "publication_contract": "sf.ontology.commit.v2",
+  "publication_auth": "trusted + actual Root Key; no TE signing key files",
+  "repositories": {
+    "/Users/01435552/Project/inc-aiagent-core-team-evolver": "d1bad60c044dddb11ef4feb8a048d0c5d73ca218",
+    "/Users/01435552/Project/OpenViking": "ebc81b750553721257a3d1395d749fac1442c43e"
+  },
+  "working_tree_changes": "uncommitted; base HEADs above do not include this change",
+  "tests": {
+    "ontology_config_and_engine": {
+      "passed": 73
+    },
+    "te_full": {
+      "passed": 574,
+      "failed": 1,
+      "skipped": 40,
+      "failure": "existing candidate_feedback"
+    },
+    "ov_host_auth_identity_mcp_bounds": {
+      "passed": 106,
+      "failed": 6,
+      "failure_ids_match_previous_baseline": true
+    },
+    "legacy_pg": {
+      "passed": 19
+    }
+  },
+  "frontend_build": "passed; bundle size warning only",
+  "compileall": "passed",
+  "docs_refs": "passed",
+  "contract_parity": "OV and TE JSON schemas and Python wire definitions identical",
+  "http": {
+    "publication_auth": "trusted_root",
+    "publication_contract": "sf.ontology.commit.v2",
+    "services": 2,
+    "separate_runtime": false,
+    "extractor": "fixture",
+    "model_calls": 0,
+    "checks": [
+      {
+        "domain": "Shipment",
+        "status": "passed",
+        "generation": 20,
+        "receipt": {
+          "generation": 20,
+          "projection": "postgres_ready",
+          "receipt_id": "427370d5a8075c9bce2b8ab03b0a4b31",
+          "prepared_id": "e1b14211025e0c36f2de578acbffe65a543ce5dad5335d69bdbbbd704ca5ac43",
+          "committed_at": "2026-09-21T03:11:06.607215+00:00",
+          "candidate_digest": "12e8ffefb102928c16f30f0477d72d2364f5568b66826f023fbf5dde5aa44277"
+        }
+      },
+      {
+        "domain": "Procurement",
+        "status": "passed",
+        "generation": 21,
+        "receipt": {
+          "generation": 21,
+          "projection": "postgres_ready",
+          "receipt_id": "7241b9540cfb8cb1f87ade3fb9ec2909",
+          "prepared_id": "b6e6055b158408363ba0199756ce23ff09617067ed91b4bf0d582a6d07a5b6cd",
+          "committed_at": "2026-09-21T03:11:07.394474+00:00",
+          "candidate_digest": "b83496494177c60dbacb87b00889bcfe84655824d9ec91462159cf9091ad587d"
+        }
+      },
+      {
+        "name": "rollback-new-generation",
+        "status": "passed",
+        "receipt": {
+          "generation": 22,
+          "projection": "postgres_ready",
+          "receipt_id": "2dce6ce9da39dfd02ca57f215c9b6c77",
+          "prepared_id": "15c34422393d75fac2f5e6f4a48d23c5cd1155ee4d21dbf34d0495afe471eb78",
+          "committed_at": "2026-09-21T03:11:07.921569+00:00",
+          "candidate_digest": "bf05eca086b9430af866e56d4e4ab19f8b5396f3b7f70281b46ba54540e50502"
+        }
+      },
+      {
+        "name": "withdrawal-blocks-access",
+        "status": "passed"
+      }
+    ],
+    "real_model": "not covered"
+  },
+  "te_outage": {
+    "status": "passed",
+    "te_stopped": true,
+    "ov_http_status": 200,
+    "generation": 23,
+    "facts_equal": true,
+    "fact_count": 1,
+    "scope": "published non-empty facts remain queryable with TE stopped"
+  },
+  "not_executed": [
+    "SIT/PRD deployment and frank acceptance",
+    "full native services E2E deployment",
+    "real model extraction rerun (extraction unchanged)",
+    "scale and cross-service restore"
+  ],
+  "source_sha256": {
+    "team_ontology/service.py": "05326923fdfc627ae8556171086e2b991350d467a695ed92d6b61e0eeb2c0ac0",
+    "team_ontology/control.py": "e5a99f996e7c69dfbb30c566cb73dc049f4e57bb9a5e49b10ba8ef49f0586848",
+    "team_ontology/api.py": "73f571b559be7e11cbac1f975a6fe29816d5f35bee88faf66c2df1f0de2868a0",
+    "team_ontology/wire.py": "5f488930c87ab80aff4948cb6de423d455f863ace6d7fc903d3cc3e0851db6d1"
+  },
+  "personal_kb": {
+    "create_operations_saved": 2,
+    "revision_proposals_pending": 7,
+    "publication_confirmed": false
+  },
+  "ov_source_sha256": {
+    "openviking/ontology/assets.py": "388e822092a118fc96b40a49cc128bb14d44a7eea8648fb818f5ee95c754ef23",
+    "openviking/ontology/host.py": "f878c53014f2d2126df231093a35ad0946e4f3f25b9bacd89f1de36273f9a805",
+    "openviking/ontology/contracts.py": "5f488930c87ab80aff4948cb6de423d455f863ace6d7fc903d3cc3e0851db6d1",
+    "openviking/ontology/service.py": "450fe198f711c1e52c58d50a09ea6766319d4d817da1cbf01f6294bc1d5e3750"
+  }
+}

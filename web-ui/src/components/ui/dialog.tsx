@@ -42,7 +42,7 @@ const DialogOverlay = React.forwardRef<
       ref={ref}
       data-slot="dialog-overlay"
       className={cn(
-        "fixed inset-0 isolate z-50 bg-black/10 duration-100 supports-backdrop-filter:backdrop-blur-xs data-open:animate-in data-open:fade-in-0",
+        "fixed inset-0 isolate z-50 bg-[#18181a]/18 duration-150 supports-backdrop-filter:backdrop-blur-[2px] data-open:animate-in data-open:fade-in-0",
         className
       )}
       {...props}
@@ -70,7 +70,7 @@ const DialogContent = React.forwardRef<
           onEscapeKeyDown?.(event)
         }}
         className={cn(
-          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95",
+          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-[14px] border-0 bg-popover p-5 text-sm text-popover-foreground shadow-[var(--shadow-float)] duration-150 outline-none sm:max-w-[440px] data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95",
           className
         )}
         {...props}
@@ -116,7 +116,7 @@ function DialogFooter({
     <div
       data-slot="dialog-footer"
       className={cn(
-        "flex flex-col-reverse gap-2 bg-white px-[24px] py-[12px] sm:flex-row sm:justify-end",
+        "-mx-5 -mb-5 mt-1 flex flex-col-reverse gap-2 border-t border-line bg-white px-[20px] py-[12px] sm:flex-row sm:justify-end",
         className
       )}
       {...props}
@@ -140,7 +140,7 @@ const DialogTitle = React.forwardRef<
       ref={ref}
       data-slot="dialog-title"
       className={cn(
-        "font-heading text-base leading-none font-medium",
+        "font-heading text-[16px] leading-tight font-[780]",
         className
       )}
       {...props}

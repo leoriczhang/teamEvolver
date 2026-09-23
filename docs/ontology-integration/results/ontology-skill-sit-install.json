@@ -1,0 +1,36 @@
+{
+  "date": "2026-09-22T06:08:20.589989+00:00",
+  "endpoint": "http://openviking.intsit.sfcloud.local:1080",
+  "account": "product_agent",
+  "uri": "viking://agent/skills/ontology-extraction-v1",
+  "upload_response": "timeout; reconciled through content/read",
+  "index_processing": "not_confirmed",
+  "expected_content_digest": "c959f606e0b4b001efa0a22be27c1433c22dbb612d71adcc3b1e8bc51e34fee9",
+  "reads": [
+    {
+      "user": "team",
+      "status": 200,
+      "matches_bundled_content": true,
+      "raw_sha256": "2338e5fcf2e45bdf255cee5bd829fce527de1cd5c8024c82552fd7bac213298f"
+    },
+    {
+      "user": "te-ontology-compiler",
+      "status": 200,
+      "matches_bundled_content": true,
+      "raw_sha256": "2338e5fcf2e45bdf255cee5bd829fce527de1cd5c8024c82552fd7bac213298f"
+    }
+  ],
+  "TE_changes": {
+    "status": "implemented_locally_not_deployed",
+    "optional_field": "skill_uri",
+    "default": "viking://agent/skills/ontology-extraction-v1",
+    "verification": {
+      "targeted_backend": "41 passed",
+      "frontend": "66 passed",
+      "full_python": "737 passed, 53 skipped, 3 existing failures",
+      "compileall": "passed",
+      "frontend_build": "passed",
+      "docs_references": "119 files, 308 references, 0 errors"
+    }
+  }
+}

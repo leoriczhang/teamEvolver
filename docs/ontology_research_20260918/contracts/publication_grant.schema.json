@@ -1,0 +1,86 @@
+{
+  "type": "object",
+  "properties": {
+    "contract": {
+      "const": "sf.ontology.publication-grant.v1"
+    },
+    "tenant": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9_:@./-]+$"
+    },
+    "scope_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9_:@./-]+$"
+    },
+    "prepared_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9_:@./-]+$"
+    },
+    "candidate_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "evidence_manifest_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "schema_revision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9_:@./-]+$"
+    },
+    "expected_generation": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9_:@./-]+$"
+    },
+    "approval_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9_:@./-]+$"
+    },
+    "nonce": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9_:@./-]+$"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "signature_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9_:@./-]+$"
+    }
+  },
+  "required": [
+    "contract",
+    "tenant",
+    "scope_ref",
+    "prepared_id",
+    "candidate_digest",
+    "evidence_manifest_digest",
+    "schema_revision",
+    "expected_generation",
+    "approval_ref",
+    "nonce",
+    "expires_at",
+    "signature_ref"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Draft publication binding shape",
+  "description": "Shape only; no signature verification, authorization or replay protection."
+}

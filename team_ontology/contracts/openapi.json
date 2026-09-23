@@ -1,0 +1,2305 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "OV enterprise ontology",
+    "version": "sf.ontology.v1"
+  },
+  "paths": {
+    "/api/v1/enterprise/sources": {
+      "post": {
+        "tags": [
+          "ontology"
+        ],
+        "summary": "Source",
+        "operationId": "source_api_v1_enterprise_sources_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Source"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/schemas": {
+      "post": {
+        "tags": [
+          "ontology"
+        ],
+        "summary": "Schema",
+        "operationId": "schema_api_v1_enterprise_schemas_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Schema"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/manifests": {
+      "post": {
+        "tags": [
+          "ontology"
+        ],
+        "summary": "Manifest",
+        "operationId": "manifest_api_v1_enterprise_manifests_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Manifest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/assets/prepare": {
+      "post": {
+        "tags": [
+          "ontology"
+        ],
+        "summary": "Prepare",
+        "operationId": "prepare_api_v1_enterprise_assets_prepare_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Prepare"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/assets/commits": {
+      "post": {
+        "tags": [
+          "ontology"
+        ],
+        "summary": "Commit",
+        "operationId": "commit_api_v1_enterprise_assets_commits_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommitV2"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/assets/commits/by-key": {
+      "get": {
+        "tags": [
+          "ontology"
+        ],
+        "summary": "Receipt",
+        "operationId": "receipt_api_v1_enterprise_assets_commits_by_key_get",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/ontology/capabilities": {
+      "get": {
+        "tags": [
+          "ontology"
+        ],
+        "summary": "Capabilities",
+        "operationId": "capabilities_api_v1_enterprise_ontology_capabilities_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/ontology/resolve": {
+      "post": {
+        "tags": [
+          "ontology"
+        ],
+        "summary": "Resolve",
+        "operationId": "resolve_api_v1_enterprise_ontology_resolve_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/ontology/query": {
+      "post": {
+        "tags": [
+          "ontology"
+        ],
+        "summary": "Query",
+        "operationId": "query_api_v1_enterprise_ontology_query_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TypedQuery"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/ontology/evaluate": {
+      "post": {
+        "tags": [
+          "ontology"
+        ],
+        "summary": "Compose",
+        "operationId": "compose_api_v1_enterprise_ontology_evaluate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContextRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/context/compose": {
+      "post": {
+        "tags": [
+          "ontology"
+        ],
+        "summary": "Compose",
+        "operationId": "compose_api_v1_enterprise_context_compose_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContextRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/ontology/explain": {
+      "post": {
+        "tags": [
+          "ontology"
+        ],
+        "summary": "Explain",
+        "operationId": "explain_api_v1_enterprise_ontology_explain_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TypedQuery"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/ontology/feedback": {
+      "get": {
+        "tags": [
+          "ontology-assets-v2"
+        ],
+        "summary": "Feedback",
+        "operationId": "feedback_api_v1_enterprise_ontology_feedback_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ontology"
+        ],
+        "summary": "Feedback",
+        "operationId": "feedback_api_v1_enterprise_ontology_feedback_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Feedback"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/observations": {
+      "post": {
+        "tags": [
+          "ontology"
+        ],
+        "summary": "Observations",
+        "operationId": "observations_api_v1_enterprise_observations_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Observation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/source-events": {
+      "post": {
+        "tags": [
+          "ontology"
+        ],
+        "summary": "Event",
+        "operationId": "event_api_v1_enterprise_source_events_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceEvent"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/principals/{subject}/revoke": {
+      "post": {
+        "tags": [
+          "ontology"
+        ],
+        "summary": "Revoke",
+        "operationId": "revoke_api_v1_enterprise_principals__subject__revoke_post",
+        "parameters": [
+          {
+            "name": "subject",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Subject"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/artifacts/sessions": {
+      "post": {
+        "tags": [
+          "ontology-assets-v2"
+        ],
+        "summary": "Session",
+        "operationId": "session_api_v1_enterprise_artifacts_sessions_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/artifacts/cancel": {
+      "post": {
+        "tags": [
+          "ontology-assets-v2"
+        ],
+        "summary": "Cancel",
+        "operationId": "cancel_api_v1_enterprise_artifacts_cancel_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/snapshots/freeze": {
+      "post": {
+        "tags": [
+          "ontology-assets-v2"
+        ],
+        "summary": "Freeze",
+        "operationId": "freeze_api_v1_enterprise_snapshots_freeze_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FreezeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/snapshots/read": {
+      "post": {
+        "tags": [
+          "ontology-assets-v2"
+        ],
+        "summary": "Frozen",
+        "operationId": "frozen_api_v1_enterprise_snapshots_read_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Manifest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/artifacts": {
+      "post": {
+        "tags": [
+          "ontology-assets-v2"
+        ],
+        "summary": "Artifact",
+        "operationId": "artifact_api_v1_enterprise_artifacts_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArtifactRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/assets/rollback-material/{generation}": {
+      "get": {
+        "tags": [
+          "ontology-assets-v2"
+        ],
+        "summary": "Rollback Material",
+        "operationId": "rollback_material_api_v1_enterprise_assets_rollback_material__generation__get",
+        "parameters": [
+          {
+            "name": "generation",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Generation"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/assets/versions": {
+      "get": {
+        "tags": [
+          "ontology-assets-v2"
+        ],
+        "summary": "Versions",
+        "operationId": "versions_api_v1_enterprise_assets_versions_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/ontology/access": {
+      "put": {
+        "tags": [
+          "ontology-assets-v2"
+        ],
+        "summary": "Access",
+        "operationId": "access_api_v1_enterprise_ontology_access_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccessRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/ontology/search": {
+      "post": {
+        "tags": [
+          "ontology-agent"
+        ],
+        "summary": "Enhanced",
+        "operationId": "enhanced_api_v1_enterprise_ontology_search_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enterprise/ontology/evidence": {
+      "get": {
+        "tags": [
+          "ontology-agent"
+        ],
+        "summary": "Evidence",
+        "operationId": "evidence_api_v1_enterprise_ontology_evidence_get",
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Source Id"
+            }
+          },
+          {
+            "name": "revision",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Revision"
+            }
+          },
+          {
+            "name": "digest",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Digest"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AccessRequest": {
+        "properties": {
+          "subject": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Subject"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": true
+          },
+          "active": {
+            "type": "boolean",
+            "title": "Active",
+            "default": true
+          },
+          "permissions": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "read",
+                "build",
+                "approve",
+                "publish",
+                "observe",
+                "feedback"
+              ]
+            },
+            "type": "array",
+            "maxItems": 6,
+            "title": "Permissions"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "subject",
+          "permissions"
+        ],
+        "title": "AccessRequest"
+      },
+      "ArtifactRequest": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "pattern": "^ont_[a-f0-9]{24}$",
+            "title": "Job Id"
+          },
+          "attempt": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Attempt"
+          },
+          "manifest": {
+            "$ref": "#/components/schemas/Manifest"
+          },
+          "candidate": {
+            "$ref": "#/components/schemas/CandidateBundle"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "job_id",
+          "attempt",
+          "manifest",
+          "candidate"
+        ],
+        "title": "ArtifactRequest"
+      },
+      "Assertion": {
+        "properties": {
+          "assertion_id": {
+            "type": "string",
+            "title": "Assertion Id"
+          },
+          "subject": {
+            "type": "string",
+            "title": "Subject"
+          },
+          "predicate": {
+            "type": "string",
+            "title": "Predicate"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              }
+            ],
+            "title": "Value"
+          },
+          "polarity": {
+            "type": "string",
+            "enum": [
+              "positive",
+              "negative"
+            ],
+            "title": "Polarity",
+            "default": "positive"
+          },
+          "qualifiers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Qualifiers",
+            "default": {}
+          },
+          "epistemic_kind": {
+            "type": "string",
+            "enum": [
+              "document_fact",
+              "user_claim",
+              "system_fact",
+              "derived"
+            ],
+            "title": "Epistemic Kind",
+            "default": "document_fact"
+          },
+          "valid_from": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Valid From"
+          },
+          "valid_to": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid To"
+          },
+          "support_sets": {
+            "items": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Support Sets"
+          },
+          "premises": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "title": "Premises"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "assertion_id",
+          "subject",
+          "predicate",
+          "value",
+          "valid_from",
+          "support_sets"
+        ],
+        "title": "Assertion"
+      },
+      "CandidateBundle": {
+        "properties": {
+          "contract": {
+            "type": "string",
+            "const": "sf.ontology.v1",
+            "title": "Contract",
+            "default": "sf.ontology.v1"
+          },
+          "manifest_digest": {
+            "type": "string",
+            "title": "Manifest Digest"
+          },
+          "entities": {
+            "items": {
+              "$ref": "#/components/schemas/Entity"
+            },
+            "type": "array",
+            "maxItems": 10000,
+            "title": "Entities"
+          },
+          "assertions": {
+            "items": {
+              "$ref": "#/components/schemas/Assertion"
+            },
+            "type": "array",
+            "maxItems": 10000,
+            "title": "Assertions"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/Evidence"
+            },
+            "type": "array",
+            "maxItems": 20000,
+            "title": "Evidence"
+          },
+          "tombstones": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 10000,
+            "title": "Tombstones"
+          },
+          "schema_proposals": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "title": "Schema Proposals"
+          },
+          "extraction": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Extraction",
+            "default": {}
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "manifest_digest",
+          "entities",
+          "assertions",
+          "evidence"
+        ],
+        "title": "CandidateBundle"
+      },
+      "CommitV2": {
+        "properties": {
+          "contract": {
+            "type": "string",
+            "const": "sf.ontology.commit.v2",
+            "title": "Contract"
+          },
+          "prepared_id": {
+            "type": "string",
+            "title": "Prepared Id"
+          },
+          "commit_key": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Commit Key"
+          },
+          "approval": {
+            "$ref": "#/components/schemas/PublicationApproval"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "contract",
+          "prepared_id",
+          "commit_key",
+          "approval"
+        ],
+        "title": "CommitV2"
+      },
+      "ContextRequest": {
+        "properties": {
+          "entity_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 50,
+            "title": "Entity Ids"
+          },
+          "predicates": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "title": "Predicates"
+          },
+          "valid_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid At"
+          },
+          "known_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Known At"
+          },
+          "max_hops": {
+            "type": "integer",
+            "maximum": 2.0,
+            "minimum": 1.0,
+            "title": "Max Hops",
+            "default": 1
+          },
+          "max_nodes": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Max Nodes",
+            "default": 100
+          },
+          "max_assertions": {
+            "type": "integer",
+            "maximum": 200.0,
+            "minimum": 1.0,
+            "title": "Max Assertions",
+            "default": 200
+          },
+          "max_examined_edges": {
+            "type": "integer",
+            "maximum": 5000.0,
+            "minimum": 1.0,
+            "title": "Max Examined Edges",
+            "default": 5000
+          },
+          "task_ref": {
+            "type": "string",
+            "maxLength": 200,
+            "title": "Task Ref",
+            "default": ""
+          },
+          "token_budget": {
+            "type": "integer",
+            "maximum": 16000.0,
+            "minimum": 64.0,
+            "title": "Token Budget",
+            "default": 4000
+          },
+          "claim": {
+            "type": "string",
+            "maxLength": 4000,
+            "title": "Claim",
+            "default": ""
+          },
+          "observation_handles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "title": "Observation Handles"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ContextRequest"
+      },
+      "Entity": {
+        "properties": {
+          "entity_id": {
+            "type": "string",
+            "title": "Entity Id"
+          },
+          "authority_namespace": {
+            "type": "string",
+            "title": "Authority Namespace"
+          },
+          "entity_type": {
+            "type": "string",
+            "title": "Entity Type"
+          },
+          "external_id": {
+            "type": "string",
+            "title": "External Id"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "aliases": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "title": "Aliases"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "entity_id",
+          "authority_namespace",
+          "entity_type",
+          "external_id",
+          "label"
+        ],
+        "title": "Entity"
+      },
+      "Evidence": {
+        "properties": {
+          "evidence_id": {
+            "type": "string",
+            "title": "Evidence Id"
+          },
+          "source_id": {
+            "type": "string",
+            "title": "Source Id"
+          },
+          "revision": {
+            "type": "string",
+            "title": "Revision"
+          },
+          "digest": {
+            "type": "string",
+            "title": "Digest"
+          },
+          "start": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Start"
+          },
+          "end": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "End"
+          },
+          "quote": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Quote"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "evidence_id",
+          "source_id",
+          "revision",
+          "digest",
+          "start",
+          "end",
+          "quote"
+        ],
+        "title": "Evidence"
+      },
+      "Feedback": {
+        "properties": {
+          "result_ref": {
+            "type": "string",
+            "title": "Result Ref"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "result_ref",
+          "note"
+        ],
+        "title": "Feedback"
+      },
+      "FreezeRequest": {
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Source Id"
+          },
+          "uri": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Uri"
+          },
+          "readers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Readers"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_id",
+          "uri",
+          "readers"
+        ],
+        "title": "FreezeRequest"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "Manifest": {
+        "properties": {
+          "contract": {
+            "type": "string",
+            "const": "sf.ontology.v1",
+            "title": "Contract",
+            "default": "sf.ontology.v1"
+          },
+          "profile": {
+            "type": "string",
+            "const": "sf-ontology-build.v1",
+            "title": "Profile",
+            "default": "sf-ontology-build.v1"
+          },
+          "schema_revision": {
+            "type": "string",
+            "title": "Schema Revision"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRef"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Sources"
+          },
+          "expected_generation": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Expected Generation"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "delta",
+              "replace"
+            ],
+            "title": "Mode",
+            "default": "delta"
+          },
+          "extractor": {
+            "type": "string",
+            "enum": [
+              "fixture",
+              "llm"
+            ],
+            "title": "Extractor",
+            "default": "llm"
+          },
+          "deadline_seconds": {
+            "type": "integer",
+            "maximum": 600.0,
+            "minimum": 10.0,
+            "title": "Deadline Seconds",
+            "default": 120
+          },
+          "max_assertions": {
+            "type": "integer",
+            "maximum": 10000.0,
+            "minimum": 1.0,
+            "title": "Max Assertions",
+            "default": 200
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "schema_revision",
+          "sources",
+          "expected_generation"
+        ],
+        "title": "Manifest"
+      },
+      "Observation": {
+        "properties": {
+          "task_ref": {
+            "type": "string",
+            "title": "Task Ref"
+          },
+          "subject": {
+            "type": "string",
+            "title": "Subject"
+          },
+          "predicate": {
+            "type": "string",
+            "title": "Predicate"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              }
+            ],
+            "title": "Value"
+          },
+          "source_id": {
+            "type": "string",
+            "title": "Source Id"
+          },
+          "revision": {
+            "type": "string",
+            "title": "Revision"
+          },
+          "ttl_seconds": {
+            "type": "integer",
+            "maximum": 300.0,
+            "minimum": 1.0,
+            "title": "Ttl Seconds",
+            "default": 60
+          },
+          "audience": {
+            "type": "string",
+            "title": "Audience"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "task_ref",
+          "subject",
+          "predicate",
+          "value",
+          "source_id",
+          "revision",
+          "audience"
+        ],
+        "title": "Observation"
+      },
+      "Predicate": {
+        "properties": {
+          "subject_type": {
+            "type": "string",
+            "title": "Subject Type"
+          },
+          "value_type": {
+            "type": "string",
+            "enum": [
+              "string",
+              "number",
+              "boolean",
+              "entity"
+            ],
+            "title": "Value Type",
+            "default": "string"
+          },
+          "object_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Object Type"
+          },
+          "required_qualifiers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Required Qualifiers",
+            "default": []
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "subject_type"
+        ],
+        "title": "Predicate"
+      },
+      "Prepare": {
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "title": "Task Id"
+          },
+          "candidate_digest": {
+            "type": "string",
+            "title": "Candidate Digest"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "task_id",
+          "candidate_digest"
+        ],
+        "title": "Prepare"
+      },
+      "PublicationApproval": {
+        "properties": {
+          "prepared_id": {
+            "type": "string",
+            "title": "Prepared Id"
+          },
+          "tenant": {
+            "type": "string",
+            "title": "Tenant"
+          },
+          "reviewer": {
+            "type": "string",
+            "title": "Reviewer"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Note"
+          },
+          "candidate_digest": {
+            "type": "string",
+            "title": "Candidate Digest"
+          },
+          "manifest_digest": {
+            "type": "string",
+            "title": "Manifest Digest"
+          },
+          "expected_generation": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Expected Generation"
+          },
+          "epoch": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Epoch"
+          },
+          "expires_at": {
+            "type": "integer",
+            "title": "Expires At"
+          },
+          "approval_id": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Approval Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "prepared_id",
+          "tenant",
+          "reviewer",
+          "note",
+          "candidate_digest",
+          "manifest_digest",
+          "expected_generation",
+          "epoch",
+          "expires_at",
+          "approval_id"
+        ],
+        "title": "PublicationApproval"
+      },
+      "ResolveRequest": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Text"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "title": "ResolveRequest"
+      },
+      "Rule": {
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "title": "Rule Id"
+          },
+          "predicate": {
+            "type": "string",
+            "title": "Predicate",
+            "default": ""
+          },
+          "equals": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              }
+            ],
+            "title": "Equals",
+            "default": ""
+          },
+          "required_qualifiers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Required Qualifiers",
+            "default": {}
+          },
+          "expression": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expression"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "rule_id"
+        ],
+        "title": "Rule"
+      },
+      "Schema": {
+        "properties": {
+          "revision": {
+            "type": "string",
+            "title": "Revision"
+          },
+          "entity_types": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Entity Types"
+          },
+          "predicates": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Predicate"
+            },
+            "type": "object",
+            "title": "Predicates"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/Rule"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "title": "Rules"
+          },
+          "issue_pack_revision": {
+            "type": "string",
+            "title": "Issue Pack Revision"
+          },
+          "evidence_slots": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "title": "Evidence Slots"
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/ToolContract"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "title": "Tools"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "revision",
+          "entity_types",
+          "predicates",
+          "issue_pack_revision"
+        ],
+        "title": "Schema"
+      },
+      "SearchRequest": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Query"
+          },
+          "target_uri": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Target Uri",
+            "default": ""
+          },
+          "limit": {
+            "type": "integer",
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "default": 10
+          },
+          "token_budget": {
+            "type": "integer",
+            "maximum": 16000.0,
+            "minimum": 64.0,
+            "title": "Token Budget",
+            "default": 4000
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "title": "SearchRequest"
+      },
+      "SessionRequest": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "pattern": "^ont_[a-f0-9]{24}$",
+            "title": "Job Id"
+          },
+          "attempt": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Attempt"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "job_id",
+          "attempt"
+        ],
+        "title": "SessionRequest"
+      },
+      "Source": {
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Source Id"
+          },
+          "revision": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Revision"
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 2000000,
+            "title": "Text"
+          },
+          "readers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Readers"
+          },
+          "provenance": {
+            "type": "string",
+            "enum": [
+              "document",
+              "trusted_connector"
+            ],
+            "title": "Provenance",
+            "default": "document"
+          },
+          "origin_uri": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Origin Uri",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_id",
+          "revision",
+          "text",
+          "readers"
+        ],
+        "title": "Source"
+      },
+      "SourceEvent": {
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Event Id"
+          },
+          "source_id": {
+            "type": "string",
+            "title": "Source Id"
+          },
+          "revision": {
+            "type": "string",
+            "title": "Revision"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "partition": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Partition",
+            "default": "manual"
+          },
+          "sequence": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sequence"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "event_id",
+          "source_id",
+          "revision",
+          "status"
+        ],
+        "title": "SourceEvent"
+      },
+      "SourceRef": {
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "title": "Source Id"
+          },
+          "revision": {
+            "type": "string",
+            "title": "Revision"
+          },
+          "digest": {
+            "type": "string",
+            "title": "Digest"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_id",
+          "revision",
+          "digest"
+        ],
+        "title": "SourceRef"
+      },
+      "ToolContract": {
+        "properties": {
+          "tool_id": {
+            "type": "string",
+            "title": "Tool Id"
+          },
+          "revision": {
+            "type": "string",
+            "title": "Revision"
+          },
+          "evidence_slots": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Evidence Slots"
+          },
+          "input_schema": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Input Schema"
+          },
+          "read_only": {
+            "type": "boolean",
+            "const": true,
+            "title": "Read Only",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "tool_id",
+          "revision",
+          "evidence_slots",
+          "input_schema"
+        ],
+        "title": "ToolContract"
+      },
+      "TypedQuery": {
+        "properties": {
+          "entity_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 50,
+            "title": "Entity Ids"
+          },
+          "predicates": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "title": "Predicates"
+          },
+          "valid_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid At"
+          },
+          "known_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Known At"
+          },
+          "max_hops": {
+            "type": "integer",
+            "maximum": 2.0,
+            "minimum": 1.0,
+            "title": "Max Hops",
+            "default": 1
+          },
+          "max_nodes": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Max Nodes",
+            "default": 100
+          },
+          "max_assertions": {
+            "type": "integer",
+            "maximum": 200.0,
+            "minimum": 1.0,
+            "title": "Max Assertions",
+            "default": 200
+          },
+          "max_examined_edges": {
+            "type": "integer",
+            "maximum": 5000.0,
+            "minimum": 1.0,
+            "title": "Max Examined Edges",
+            "default": 5000
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "TypedQuery"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}

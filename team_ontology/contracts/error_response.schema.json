@@ -1,0 +1,39 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "contract": {
+      "const": "sf.ontology.error.v1",
+      "default": "sf.ontology.error.v1",
+      "title": "Contract",
+      "type": "string"
+    },
+    "detail": {
+      "title": "Detail",
+      "type": "string"
+    },
+    "request_id": {
+      "title": "Request Id",
+      "type": "string"
+    },
+    "retryable": {
+      "title": "Retryable",
+      "type": "boolean"
+    },
+    "details": {
+      "default": [],
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Details",
+      "type": "array"
+    }
+  },
+  "required": [
+    "detail",
+    "request_id",
+    "retryable"
+  ],
+  "title": "ErrorResponse",
+  "type": "object"
+}

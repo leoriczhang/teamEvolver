@@ -1,0 +1,205 @@
+{
+  "$defs": {
+    "Predicate": {
+      "additionalProperties": false,
+      "properties": {
+        "subject_type": {
+          "title": "Subject Type",
+          "type": "string"
+        },
+        "value_type": {
+          "default": "string",
+          "enum": [
+            "string",
+            "number",
+            "boolean",
+            "entity"
+          ],
+          "title": "Value Type",
+          "type": "string"
+        },
+        "object_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Object Type"
+        },
+        "required_qualifiers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Qualifiers",
+          "type": "array"
+        }
+      },
+      "required": [
+        "subject_type"
+      ],
+      "title": "Predicate",
+      "type": "object"
+    },
+    "Rule": {
+      "additionalProperties": false,
+      "properties": {
+        "rule_id": {
+          "title": "Rule Id",
+          "type": "string"
+        },
+        "predicate": {
+          "default": "",
+          "title": "Predicate",
+          "type": "string"
+        },
+        "equals": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "default": "",
+          "title": "Equals"
+        },
+        "required_qualifiers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Required Qualifiers",
+          "type": "object"
+        },
+        "expression": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expression"
+        }
+      },
+      "required": [
+        "rule_id"
+      ],
+      "title": "Rule",
+      "type": "object"
+    },
+    "ToolContract": {
+      "additionalProperties": false,
+      "properties": {
+        "tool_id": {
+          "title": "Tool Id",
+          "type": "string"
+        },
+        "revision": {
+          "title": "Revision",
+          "type": "string"
+        },
+        "evidence_slots": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Slots",
+          "type": "array"
+        },
+        "input_schema": {
+          "additionalProperties": true,
+          "title": "Input Schema",
+          "type": "object"
+        },
+        "read_only": {
+          "const": true,
+          "default": true,
+          "title": "Read Only",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "tool_id",
+        "revision",
+        "evidence_slots",
+        "input_schema"
+      ],
+      "title": "ToolContract",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "revision": {
+      "title": "Revision",
+      "type": "string"
+    },
+    "entity_types": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 100,
+      "minItems": 1,
+      "title": "Entity Types",
+      "type": "array"
+    },
+    "predicates": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Predicate"
+      },
+      "title": "Predicates",
+      "type": "object"
+    },
+    "rules": {
+      "items": {
+        "$ref": "#/$defs/Rule"
+      },
+      "maxItems": 100,
+      "title": "Rules",
+      "type": "array"
+    },
+    "issue_pack_revision": {
+      "title": "Issue Pack Revision",
+      "type": "string"
+    },
+    "evidence_slots": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 100,
+      "title": "Evidence Slots",
+      "type": "array"
+    },
+    "tools": {
+      "items": {
+        "$ref": "#/$defs/ToolContract"
+      },
+      "maxItems": 100,
+      "title": "Tools",
+      "type": "array"
+    }
+  },
+  "required": [
+    "revision",
+    "entity_types",
+    "predicates",
+    "issue_pack_revision"
+  ],
+  "title": "Schema",
+  "type": "object"
+}

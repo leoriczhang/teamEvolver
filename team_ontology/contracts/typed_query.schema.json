@@ -1,0 +1,77 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "entity_ids": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 50,
+      "title": "Entity Ids",
+      "type": "array"
+    },
+    "predicates": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 100,
+      "title": "Predicates",
+      "type": "array"
+    },
+    "valid_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Valid At"
+    },
+    "known_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Known At"
+    },
+    "max_hops": {
+      "default": 1,
+      "maximum": 2,
+      "minimum": 1,
+      "title": "Max Hops",
+      "type": "integer"
+    },
+    "max_nodes": {
+      "default": 100,
+      "maximum": 100,
+      "minimum": 1,
+      "title": "Max Nodes",
+      "type": "integer"
+    },
+    "max_assertions": {
+      "default": 200,
+      "maximum": 200,
+      "minimum": 1,
+      "title": "Max Assertions",
+      "type": "integer"
+    },
+    "max_examined_edges": {
+      "default": 5000,
+      "maximum": 5000,
+      "minimum": 1,
+      "title": "Max Examined Edges",
+      "type": "integer"
+    }
+  },
+  "title": "TypedQuery",
+  "type": "object"
+}

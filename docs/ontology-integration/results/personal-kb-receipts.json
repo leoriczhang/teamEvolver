@@ -1,0 +1,272 @@
+{
+  "scope": "5 documents created; 6 hash-bound revision proposals pending owner review; not long-term memory publication",
+  "operations": [
+    {
+      "name": "27_Ontology三项目集成_V4源码实施版_20260919.md",
+      "operation": "create",
+      "receipt": {
+        "operation_id": "9cf1348c8e7f8f1c3f42248856bdba81099649e1f5a7a0b7525ab6e2f763c505",
+        "actor": "chatgpt",
+        "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/27_Ontology三项目集成_V4源码实施版_20260919.md",
+        "sha256": "525b2f84add7af5504244a48418271e95aef3e701140b440232cde8ed35f036e",
+        "expected_sha256": null,
+        "kind": "create",
+        "state": "created",
+        "attempt": 1,
+        "created_at": "2026-09-18T18:16:04.221983+00:00",
+        "updated_at": "2026-09-18T18:16:49.972634+00:00",
+        "next_attempt_at": 0,
+        "applied_at": "2026-09-18T18:16:49.648619+00:00",
+        "error": null,
+        "semantic_status": "queued",
+        "vector_status": "queued"
+      },
+      "verified_document": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\n  \"size\": 4181,\n  \"isDir\": false,\n  \"uri\": \"viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/27_Ontology三项目集成_V4源码实施版_20260919.md\",\n  \"checked_at\": \"2026-09-18T18:19:35.673482+00:00\",\n  \"sha256\": \"525b2f84add7af5504244a48418271e95aef3e701140b440232cde8ed35f036e\"\n}"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "name": "28_Ontology契约与迁移_20260919.md",
+      "operation": "create",
+      "receipt": {
+        "operation_id": "99feab0a1d744b4625dce2926550026c73d14b7cd39e1fea2bf53f2672adc261",
+        "actor": "chatgpt",
+        "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/28_Ontology契约与迁移_20260919.md",
+        "sha256": "e6e9a26d70c7ff90be280b6b0cdd60653d42d9b1c1036b5198696fdd6a33725b",
+        "expected_sha256": null,
+        "kind": "create",
+        "state": "created",
+        "attempt": 1,
+        "created_at": "2026-09-18T18:16:15.547724+00:00",
+        "updated_at": "2026-09-18T18:16:58.533415+00:00",
+        "next_attempt_at": 0,
+        "applied_at": "2026-09-18T18:16:58.108800+00:00",
+        "error": null,
+        "semantic_status": "queued",
+        "vector_status": "queued"
+      },
+      "verified_document": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\n  \"size\": 4820,\n  \"isDir\": false,\n  \"uri\": \"viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/28_Ontology契约与迁移_20260919.md\",\n  \"checked_at\": \"2026-09-18T18:19:35.671735+00:00\",\n  \"sha256\": \"e6e9a26d70c7ff90be280b6b0cdd60653d42d9b1c1036b5198696fdd6a33725b\"\n}"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "name": "30_Ontology源码核验与架构决策_20260919.md",
+      "operation": "create",
+      "receipt": {
+        "operation_id": "6f2eb1f515d937569bb8549e850decd40a6bb5d44e44a84cba7559cb6d04ee1f",
+        "actor": "chatgpt",
+        "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/30_Ontology源码核验与架构决策_20260919.md",
+        "sha256": "1398b7d31cc89afae5d79c9478f70bba97e65c73101e47ad050116b899cb95df",
+        "expected_sha256": null,
+        "kind": "create",
+        "state": "created",
+        "attempt": 2,
+        "created_at": "2026-09-18T18:16:17.467551+00:00",
+        "updated_at": "2026-09-18T18:24:57.418953+00:00",
+        "next_attempt_at": 1789755425.320612,
+        "error": null,
+        "applied_at": "2026-09-18T18:24:57.061829+00:00",
+        "semantic_status": "queued",
+        "vector_status": "queued"
+      },
+      "verified_document": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\n  \"size\": 2845,\n  \"isDir\": false,\n  \"uri\": \"viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/30_Ontology源码核验与架构决策_20260919.md\",\n  \"checked_at\": \"2026-09-18T18:19:36.022214+00:00\",\n  \"sha256\": \"1398b7d31cc89afae5d79c9478f70bba97e65c73101e47ad050116b899cb95df\"\n}"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "name": "00_项目总览与资料索引.md",
+      "operation": "propose_update",
+      "base_sha256": "7b243f09def0824bef68e48c91dd6b94fa8869da8992242f4eb94a35c35953e6",
+      "receipt": {
+        "operation_id": "ad29705ab3775d3f6ae87d08533d2b33b7c1e4d945a78350ece1addc34042a2f",
+        "actor": "chatgpt",
+        "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/00_项目总览与资料索引.md",
+        "sha256": "86a33245994bae1c3bbb138ef9eb1c2b4129c9eb392819080f256d43fcb8004b",
+        "expected_sha256": "7b243f09def0824bef68e48c91dd6b94fa8869da8992242f4eb94a35c35953e6",
+        "kind": "update",
+        "state": "pending_review",
+        "attempt": 0,
+        "created_at": "2026-09-18T18:17:33.989223+00:00",
+        "updated_at": "2026-09-18T18:17:33.989244+00:00",
+        "next_attempt_at": 0
+      }
+    },
+    {
+      "name": "02_架构演进与技术决策.md",
+      "operation": "propose_update",
+      "base_sha256": "36e6d7c0bdd242fb1aaf5b46ca80288d06c33851ee5c06d03461867c7ceda222",
+      "receipt": {
+        "operation_id": "2b3b8e68b6da4387589714e1c15e75c8504b76109fa002fd5cce275df11f25bf",
+        "actor": "chatgpt",
+        "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/02_架构演进与技术决策.md",
+        "sha256": "45d712c08d886376c6982058a7a05964079789079de8b7546c60fedf27233665",
+        "expected_sha256": "36e6d7c0bdd242fb1aaf5b46ca80288d06c33851ee5c06d03461867c7ceda222",
+        "kind": "update",
+        "state": "pending_review",
+        "attempt": 0,
+        "created_at": "2026-09-18T18:17:36.890659+00:00",
+        "updated_at": "2026-09-18T18:17:36.890678+00:00",
+        "next_attempt_at": 0
+      }
+    },
+    {
+      "name": "07_证据边界与待验证事项.md",
+      "operation": "propose_update",
+      "base_sha256": "fd8eacff56c9cdd1b6e5c094b54674c7cd99ce0e543d75c3358f6aa0dcd9f276",
+      "receipt": {
+        "operation_id": "b41de5985dc7b31fd9bf8266c2ee6591766365033a16890c7c4ecfb42459274b",
+        "actor": "chatgpt",
+        "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/07_证据边界与待验证事项.md",
+        "sha256": "4bf15dcca7008fbb1d69d36e18d7534b27e2e15f4243594a82bb5348f74f56bb",
+        "expected_sha256": "fd8eacff56c9cdd1b6e5c094b54674c7cd99ce0e543d75c3358f6aa0dcd9f276",
+        "kind": "update",
+        "state": "pending_review",
+        "attempt": 0,
+        "created_at": "2026-09-18T18:17:39.522865+00:00",
+        "updated_at": "2026-09-18T18:17:39.522884+00:00",
+        "next_attempt_at": 0
+      }
+    },
+    {
+      "name": "25_顺丰Ontology完整实施方案_TE入口_OV编译存储服务_V3_20260918.md",
+      "operation": "propose_update",
+      "base_sha256": "17ce637a79b403472365fd9a783c0993f7847440f98ee68a9fac821154e9e4f1",
+      "receipt": {
+        "operation_id": "94ed3b6cd26ab89389ff71a0caada05857e179a1db80601e9543a550d7bde31e",
+        "actor": "chatgpt",
+        "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/25_顺丰Ontology完整实施方案_TE入口_OV编译存储服务_V3_20260918.md",
+        "sha256": "cb946eb4dc6cfff33c033e1726b20e9d93293b5ead04ffc530dcc74e474aa8bd",
+        "expected_sha256": "17ce637a79b403472365fd9a783c0993f7847440f98ee68a9fac821154e9e4f1",
+        "kind": "update",
+        "state": "pending_review",
+        "attempt": 0,
+        "created_at": "2026-09-18T18:17:41.838021+00:00",
+        "updated_at": "2026-09-18T18:17:41.838039+00:00",
+        "next_attempt_at": 0
+      }
+    },
+    {
+      "name": "26_Ontology接口契约_增量发布与验收_20260918.md",
+      "operation": "propose_update",
+      "base_sha256": "d7d9ea4fcb176e6549c9c3ce8ab6ca783ef9d0db2b9a299affbf087337f1bed7",
+      "receipt": {
+        "operation_id": "8908c99d08fafe3a368df0f9a48c498c3d099573df97c2aeb282145922aaa2c4",
+        "actor": "chatgpt",
+        "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/26_Ontology接口契约_增量发布与验收_20260918.md",
+        "sha256": "6415bf60a33479dd382be418d95f6830eefb2ef85a27623057a993f4ad987615",
+        "expected_sha256": "d7d9ea4fcb176e6549c9c3ce8ab6ca783ef9d0db2b9a299affbf087337f1bed7",
+        "kind": "update",
+        "state": "pending_review",
+        "attempt": 0,
+        "created_at": "2026-09-18T18:17:44.619949+00:00",
+        "updated_at": "2026-09-18T18:17:44.619967+00:00",
+        "next_attempt_at": 0
+      }
+    },
+    {
+      "name": "29_Ontology分阶段验收与状态_20260919.md",
+      "operation": "create",
+      "receipt": {
+        "operation_id": "258d9e52b746e2c40dc406ac7102d04479134c0fccd8027e4b7cfa9ef2540c8c",
+        "actor": "chatgpt",
+        "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/29_Ontology分阶段验收与状态_20260919.md",
+        "sha256": "50421abf84954f281824aeba9c350a9b9f413ba8cb9c9e3dbb65922287ac684e",
+        "expected_sha256": null,
+        "kind": "create",
+        "state": "created",
+        "attempt": 1,
+        "created_at": "2026-09-18T18:18:41.041658+00:00",
+        "updated_at": "2026-09-18T18:25:07.518037+00:00",
+        "next_attempt_at": 0,
+        "applied_at": "2026-09-18T18:25:07.137825+00:00",
+        "error": null,
+        "semantic_status": "queued",
+        "vector_status": "queued"
+      },
+      "initial_stat": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error executing tool documents_stat: File not found: viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/29_Ontology分阶段验收与状态_20260919.md"
+          }
+        ],
+        "structuredContent": {
+          "error_code": "INVALID_ARGUMENT"
+        },
+        "isError": true
+      },
+      "verified_document": {
+        "sha256": "50421abf84954f281824aeba9c350a9b9f413ba8cb9c9e3dbb65922287ac684e",
+        "size": 9102,
+        "checked_at": "2026-09-18T18:31:22.228808+00:00",
+        "source": "documents_stat"
+      }
+    },
+    {
+      "name": "31_Ontology部署运维与结果_20260919.md",
+      "operation": "create",
+      "receipt": {
+        "operation_id": "b0df9612457811dc1ffa8250d680ff036b460a8a10b0568957ce34a3ac80fbaa",
+        "actor": "chatgpt",
+        "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/31_Ontology部署运维与结果_20260919.md",
+        "sha256": "bdb18e943b174f33d3245b461c04e43b7d47c0bca73fa03bf1500b3084d59c7a",
+        "expected_sha256": null,
+        "kind": "create",
+        "state": "created",
+        "attempt": 1,
+        "created_at": "2026-09-18T18:27:38.541434+00:00",
+        "updated_at": "2026-09-18T18:32:49.982439+00:00",
+        "next_attempt_at": 0,
+        "applied_at": "2026-09-18T18:32:49.642544+00:00",
+        "error": null,
+        "semantic_status": "queued",
+        "vector_status": "queued"
+      },
+      "verified_document": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\n  \"size\": 16256,\n  \"isDir\": false,\n  \"uri\": \"viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/31_Ontology部署运维与结果_20260919.md\",\n  \"checked_at\": \"2026-09-18T18:33:43.536416+00:00\",\n  \"sha256\": \"bdb18e943b174f33d3245b461c04e43b7d47c0bca73fa03bf1500b3084d59c7a\"\n}"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "name": "31_Ontology部署运维与结果_20260919.md",
+      "operation": "propose_update",
+      "base_sha256": "bdb18e943b174f33d3245b461c04e43b7d47c0bca73fa03bf1500b3084d59c7a",
+      "receipt": {
+        "operation_id": "242a8c0c3c4bba96339187db01e0c7495abd2f798767962421db604b0768addc",
+        "actor": "chatgpt",
+        "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/31_Ontology部署运维与结果_20260919.md",
+        "sha256": "75a8829a04182a8b58f0bf23f9f321e8b4484586df0766bb3d10929647b5a582",
+        "expected_sha256": "bdb18e943b174f33d3245b461c04e43b7d47c0bca73fa03bf1500b3084d59c7a",
+        "kind": "update",
+        "state": "pending_review",
+        "attempt": 0,
+        "created_at": "2026-09-18T18:33:49.091969+00:00",
+        "updated_at": "2026-09-18T18:33:49.091989+00:00",
+        "next_attempt_at": 0
+      }
+    }
+  ]
+}

@@ -1,0 +1,162 @@
+[
+  {
+    "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/38_Ontology_trusted_RootKey发布调整_20260921.md",
+    "operation": "create",
+    "result": {
+      "operation_id": "63ee54ff9ca06037eb361d01640b23287ffd99df4fa31a3f461170e5cc10db70",
+      "actor": "chatgpt",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/38_Ontology_trusted_RootKey发布调整_20260921.md",
+      "sha256": "923b7fac62887b76f16358c9c9ef95d8328e2ce5c5c66711a96a63bdb51c06a8",
+      "expected_sha256": null,
+      "kind": "create",
+      "state": "saved",
+      "attempt": 0,
+      "created_at": "2026-09-21T03:15:30.885352+00:00",
+      "updated_at": "2026-09-21T03:15:30.885370+00:00",
+      "next_attempt_at": 0
+    }
+  },
+  {
+    "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/00_项目总览与资料索引.md",
+    "operation": "propose_update",
+    "expected_sha256": "7b243f09def0824bef68e48c91dd6b94fa8869da8992242f4eb94a35c35953e6",
+    "result": {
+      "operation_id": "46c36de42061737177346cc4fe170e5c8ac4a10d422f0f027fee0e79f7629556",
+      "actor": "chatgpt",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/00_项目总览与资料索引.md",
+      "sha256": "f53f3d42cbdd76240735f366e9cc6f4780e060544e879e4282a91cceec34a8a4",
+      "expected_sha256": "7b243f09def0824bef68e48c91dd6b94fa8869da8992242f4eb94a35c35953e6",
+      "kind": "update",
+      "state": "pending_review",
+      "attempt": 0,
+      "created_at": "2026-09-21T03:16:02.800792+00:00",
+      "updated_at": "2026-09-21T03:16:02.800810+00:00",
+      "next_attempt_at": 0
+    }
+  },
+  {
+    "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/02_架构演进与技术决策.md",
+    "operation": "propose_update",
+    "expected_sha256": "36e6d7c0bdd242fb1aaf5b46ca80288d06c33851ee5c06d03461867c7ceda222",
+    "result": {
+      "operation_id": "0847f3c4e73a0f847f2d121b9a17cc6f9d05c2813115addb4436f15ecba587cb",
+      "actor": "chatgpt",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/02_架构演进与技术决策.md",
+      "sha256": "6b73948ac0fe22aa8275f786a8093c14674ba984b68016c27bbd0c4d51a24081",
+      "expected_sha256": "36e6d7c0bdd242fb1aaf5b46ca80288d06c33851ee5c06d03461867c7ceda222",
+      "kind": "update",
+      "state": "pending_review",
+      "attempt": 0,
+      "created_at": "2026-09-21T03:16:05.788400+00:00",
+      "updated_at": "2026-09-21T03:16:05.788419+00:00",
+      "next_attempt_at": 0
+    }
+  },
+  {
+    "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/07_证据边界与待验证事项.md",
+    "operation": "propose_update",
+    "expected_sha256": "fd8eacff56c9cdd1b6e5c094b54674c7cd99ce0e543d75c3358f6aa0dcd9f276",
+    "result": {
+      "operation_id": "c0a0cae8c549a4748f69125a6123cb186f504ca8cd07034ae7d117d69c8db01a",
+      "actor": "chatgpt",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/07_证据边界与待验证事项.md",
+      "sha256": "4f87cb891acde9e705ec87ec12ee9358f792fbcfb9cd393ffdc66f1d390be9ab",
+      "expected_sha256": "fd8eacff56c9cdd1b6e5c094b54674c7cd99ce0e543d75c3358f6aa0dcd9f276",
+      "kind": "update",
+      "state": "pending_review",
+      "attempt": 0,
+      "created_at": "2026-09-21T03:16:11.266558+00:00",
+      "updated_at": "2026-09-21T03:16:11.266576+00:00",
+      "next_attempt_at": 0
+    }
+  },
+  {
+    "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/32_TE统一知识运营_OV本体接入_V5源码实施_20260920.md",
+    "operation": "propose_update",
+    "expected_sha256": "97cc520bfc2b6329974b4246cb17ce20a3d30cdf4e70bd8ffbe79b4ad4e69bf9",
+    "result": {
+      "operation_id": "8857b366e4a815306eebe8614b84a574a77f1e643aaba0ed22344081103f7ca5",
+      "actor": "chatgpt",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/32_TE统一知识运营_OV本体接入_V5源码实施_20260920.md",
+      "sha256": "a4a165e48a41c33cc62b633b9b150b4484394fdccae3d52cd2b3f4063d814296",
+      "expected_sha256": "97cc520bfc2b6329974b4246cb17ce20a3d30cdf4e70bd8ffbe79b4ad4e69bf9",
+      "kind": "update",
+      "state": "pending_review",
+      "attempt": 0,
+      "created_at": "2026-09-21T03:16:13.963777+00:00",
+      "updated_at": "2026-09-21T03:16:13.963796+00:00",
+      "next_attempt_at": 0
+    }
+  },
+  {
+    "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/33_Ontology_V5契约迁移与部署运维_20260920.md",
+    "operation": "propose_update",
+    "expected_sha256": "addeb516440852f7a3720a9585904c2c2259c05dd29a21380458e5e00fc8e63d",
+    "result": {
+      "operation_id": "f128d7ea97764953823a2eb36de669dbe6c41748613f4b145dbfecc45efc1a4e",
+      "actor": "chatgpt",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/33_Ontology_V5契约迁移与部署运维_20260920.md",
+      "sha256": "ec4ac63a5e53da0dcb17488ff94bee0fc63fe95d2abb79aa711dbf6e74e497b3",
+      "expected_sha256": "addeb516440852f7a3720a9585904c2c2259c05dd29a21380458e5e00fc8e63d",
+      "kind": "update",
+      "state": "pending_review",
+      "attempt": 0,
+      "created_at": "2026-09-21T03:16:17.434809+00:00",
+      "updated_at": "2026-09-21T03:16:17.434830+00:00",
+      "next_attempt_at": 0
+    }
+  },
+  {
+    "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/36_Ontology_V5源码证据与架构决策_20260920.md",
+    "operation": "propose_update",
+    "expected_sha256": "b6131e5210409fcf080b818225b5448c316c22220af441636c3706c1de6c3d86",
+    "result": {
+      "operation_id": "abf10996637ed8ccd5b508c8a873bddcfd5a25a3bd620bd95ae5fcfd4f241c4b",
+      "actor": "chatgpt",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/36_Ontology_V5源码证据与架构决策_20260920.md",
+      "sha256": "9781aa9040685fc74f9b626dbd8cc8f6ba9517a49eaa7452dc822d66f67d3926",
+      "expected_sha256": "b6131e5210409fcf080b818225b5448c316c22220af441636c3706c1de6c3d86",
+      "kind": "update",
+      "state": "pending_review",
+      "attempt": 0,
+      "created_at": "2026-09-21T03:16:20.659453+00:00",
+      "updated_at": "2026-09-21T03:16:20.659469+00:00",
+      "next_attempt_at": 0
+    }
+  },
+  {
+    "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/37_Ontology_V5最终验收补充_20260920.md",
+    "operation": "propose_update",
+    "expected_sha256": "03d9c69d79dcdba2f97a563ff9e146a86cd8f62640247289b0b5540fd8cf3da7",
+    "result": {
+      "operation_id": "50334e739f2b74f73faa114f653c146504c133154fe944787e58596a1e2647de",
+      "actor": "chatgpt",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/37_Ontology_V5最终验收补充_20260920.md",
+      "sha256": "a2f42f088478f7a453ca4868c9a5d82a0571288178939852cc5e887c2018cd41",
+      "expected_sha256": "03d9c69d79dcdba2f97a563ff9e146a86cd8f62640247289b0b5540fd8cf3da7",
+      "kind": "update",
+      "state": "pending_review",
+      "attempt": 0,
+      "created_at": "2026-09-21T03:16:23.773309+00:00",
+      "updated_at": "2026-09-21T03:16:23.773326+00:00",
+      "next_attempt_at": 0
+    }
+  },
+  {
+    "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/39_Ontology_RootKey源码版本与验收_20260921.md",
+    "operation": "create",
+    "result": {
+      "operation_id": "db9bf6355066bf350df151266c19adbdf5b2dde2524d6d3373f1a91b08f3d34c",
+      "actor": "chatgpt",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/39_Ontology_RootKey源码版本与验收_20260921.md",
+      "sha256": "2a05bfa39c8311a56d4f7b15e8aa173c4e470d92347c47408d0559443f692c4e",
+      "expected_sha256": null,
+      "kind": "create",
+      "state": "saved",
+      "attempt": 0,
+      "created_at": "2026-09-21T03:17:40.545241+00:00",
+      "updated_at": "2026-09-21T03:17:40.545259+00:00",
+      "next_attempt_at": 0
+    }
+  }
+]

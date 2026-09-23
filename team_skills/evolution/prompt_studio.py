@@ -1,0 +1,1054 @@
+"""Prompt Studio: make the skill-evolution pipeline transparent and editable.
+
+The skill-optimization pipeline runs a fixed chain of stages; its model-backed stages call
+an LLM with a system prompt that fully determines behavior. Historically those
+prompts were module-level constants — a black box from the console. This module
+turns them into first-class, inspectable, editable, and testable objects:
+
+    ingest → session_filter → summarize → judge → group-by-skill
+           → (evolve_skill | create_skill) → dataset_synthesis
+           → true-replay/checklist validate → publish
+
+Responsibilities:
+  * ``PIPELINE_STAGES`` — the chain graph for visualization (nodes + edges,
+    which nodes call the LLM, and the prompt id each LLM node uses).
+  * ``list_prompts`` / ``get_prompt`` — resolve a stage's DEFAULT system prompt
+    from the owning stage module, plus any persisted override, plus the shared
+    blocks that get injected and the ``{...}`` variables it expects.
+  * ``set_override`` / ``reset_override`` — file-backed prompt overrides at
+    ``~/.teamEvolver/prompt_overrides.json``.
+  * ``effective_prompt(stage_id, default)`` — the single accessor the live call
+    sites consult so an edited prompt actually drives the pipeline.
+  * ``run_stage_test`` — build the REAL user message a stage would send for a
+    given session and call the LLM, returning system + user + output so the
+    operator can see inputs and outputs, not a black box.
+
+Overrides are intentionally the raw system-prompt text. For the two skill-writing
+stages the raw template still contains ``__GENERALIZATION_RULES__`` /
+``__USER_OVERRIDE_RULE__`` / ``__EVIDENCE_ROUTING_RULES__`` /
+``__OUTPUT_LANGUAGE_RULE__`` sentinels; the shared
+blocks are injected at resolve time exactly as the live pipeline does, so what
+you edit is what runs.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+from teamEvolver.storage.admin_kv import read_kv, write_kv
+
+logger = logging.getLogger(__name__)
+
+_OVERRIDES_ENV = "TEAMEVOLVER_PROMPT_OVERRIDES_PATH"
+_STAGE_SETTINGS_ENV = "TEAMEVOLVER_STAGE_SETTINGS_PATH"
+
+
+def _overrides_path() -> Path:
+    override = str(os.environ.get(_OVERRIDES_ENV, "") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".teamEvolver" / "prompt_overrides.json"
+
+
+def _stage_settings_path() -> Path:
+    override = str(os.environ.get(_STAGE_SETTINGS_ENV, "") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".teamEvolver" / "stage_settings.json"
+
+
+# ------------------------------------------------------------------ #
+# Pipeline chain (for visualization)                                  #
+# ------------------------------------------------------------------ #
+# Each node: id, label, kind ("io"|"llm"|"logic"|"gate"), optional prompt_id,
+# and a short description. Edges are (from, to). This mirrors the real flow in
+# EvolveServer.run_once → summarize → judge → group → evolve/create → validate.
+PIPELINE_STAGES: dict[str, Any] = {
+    "nodes": [
+        {
+            "id": "ingest",
+            "label": "会话入队 Ingest",
+            "kind": "io",
+            "description": "会话经 /ingest_session 或 Langfuse 拉取后进入合并分析。",
+        },
+        {
+            "id": "analyze_session",
+            "label": "会话分析 Analyze（分类+摘要+评分合一）",
+            "kind": "llm",
+            "prompt_id": "analyze_session",
+            "description": "每个 Session 入库前必须完成一次价值分类、轨迹摘要与会话评分。",
+        },
+        {
+            "id": "analyze_trace_badcase",
+            "label": "Trace 级全量分析",
+            "kind": "llm",
+            "prompt_id": "analyze_trace_badcase",
+            "description": "对每个会话的全部 Trace 输出分析结果，并按结果触发上报钩子。",
+        },
+        {
+            "id": "group",
+            "label": "按技能分组 Group",
+            "kind": "logic",
+            "description": "按被引用/注入的技能把会话分组；无技能的会话归入 no-skill 桶。",
+        },
+        {
+            "id": "evolve_skill",
+            "label": "改进技能 Evolve",
+            "kind": "llm",
+            "prompt_id": "evolve_skill",
+            "description": "对已有技能：基于会话证据决定 improve/optimize_description/create/skip。",
+        },
+        {
+            "id": "create_skill",
+            "label": "新建技能 Create",
+            "kind": "llm",
+            "prompt_id": "create_skill",
+            "description": "对 no-skill 会话桶：判断是否存在可复用模式并生成新技能。",
+        },
+        {
+            "id": "merge",
+            "label": "冲突合并 Merge",
+            "kind": "llm",
+            "prompt_id": "merge",
+            "description": "同名技能的两个进化版本冲突时，合并为一个更优版本。",
+        },
+        {
+            "id": "dataset_synthesis",
+            "label": "测试集生成 Dataset Synthesis",
+            "kind": "llm",
+            "prompt_id": "dataset_synthesis",
+            "description": "使用同一批 Session、跨周期 SOP evidence 和候选 Skill，同步生成渐进披露的 test datasets。",
+        },
+        {
+            "id": "validate",
+            "label": "真回放校验 Validate",
+            "kind": "gate",
+            "description": "基于初始 Query 逐轮披露未满足 Checklist；完成后对比基线的轮次/工具调用/Token。",
+        },
+        {
+            "id": "replay_checklist",
+            "label": "Checklist 裁判",
+            "kind": "llm",
+            "prompt_id": "replay_checklist",
+            "description": "依据回复、工具轨迹和真实工作区产物逐条判断 Checklist 是否满足。",
+        },
+        {
+            "id": "publish",
+            "label": "发布 Publish",
+            "kind": "io",
+            "description": "通过校验的候选写入技能库并同步云端；不通过则进入人工复核。",
+        },
+    ],
+    "edges": [
+        {"from": "ingest", "to": "analyze_session"},
+        {"from": "analyze_session", "to": "group"},
+        {"from": "analyze_session", "to": "analyze_trace_badcase"},
+        {"from": "group", "to": "evolve_skill"},
+        {"from": "group", "to": "create_skill"},
+        {"from": "evolve_skill", "to": "merge"},
+        {"from": "create_skill", "to": "merge"},
+        {"from": "evolve_skill", "to": "dataset_synthesis"},
+        {"from": "create_skill", "to": "dataset_synthesis"},
+        {"from": "merge", "to": "dataset_synthesis"},
+        {"from": "dataset_synthesis", "to": "validate"},
+        {"from": "validate", "to": "replay_checklist"},
+        {"from": "replay_checklist", "to": "publish"},
+    ],
+}
+
+
+# ------------------------------------------------------------------ #
+# Stage catalog                                                       #
+# ------------------------------------------------------------------ #
+# Each entry declares how to resolve its DEFAULT system prompt from the owning
+# module. ``injects_shared_blocks`` marks the two skill-writing prompts whose
+# raw template still carries the sentinels expanded by execute._inject_shared_blocks.
+
+
+def _evolve_default_raw() -> str:
+    # Raw template BEFORE shared-block injection (kept as-is in the module after
+    # injection is applied at import). We reconstruct the editable raw form so
+    # operators edit the template, not the fully-expanded text.
+    from team_skills.evolution.stages import execute
+
+    return execute._EVOLVE_FROM_SESSIONS_SYSTEM
+
+
+def _create_default_raw() -> str:
+    from team_skills.evolution.stages import execute
+
+    return execute._CREATE_FROM_SESSIONS_SYSTEM
+
+
+def _merge_default() -> str:
+    from team_skills.evolution.stages import execute
+
+    return execute._MERGE_SKILL_SYSTEM
+
+
+def _dataset_synthesis_default() -> str:
+    from team_replay.datasets import synthesis as dataset_synthesizer
+
+    return dataset_synthesizer._SYNTHESIZE_SYSTEM
+
+
+def _analyze_session_default() -> str:
+    from team_skills.evolution.stages import analyze
+
+    return analyze._ANALYZE_SYSTEM
+
+
+def _analyze_trace_badcase_default() -> str:
+    from team_skills.evolution.stages import trace_analyze
+
+    return trace_analyze._TRACE_ANALYZE_SYSTEM
+
+
+def _replay_checklist_default() -> str:
+    from team_replay import engine as true_replay
+
+    return true_replay._CHECKLIST_JUDGE_SYSTEM
+
+
+_STAGE_CATALOG: dict[str, dict[str, Any]] = {
+    "analyze_session": {
+        "id": "analyze_session",
+        "label": "会话分析 Analyze（分类+摘要+评分合一）",
+        "module": "team_skills.evolution.stages.analyze",
+        "symbol": "_ANALYZE_SYSTEM",
+        "resolver": _analyze_session_default,
+        "injects_shared_blocks": False,
+        "temperature": 0.1,
+        # One merged call carries classification + summary + full judge JSON;
+        # keep the budget high so reasoning models do not truncate the combined
+        # tagged output.
+        "max_tokens": 32768,
+        "variables": [
+            "full session trajectory",
+            "interactions, tool calls, artifacts",
+            "used_skills split (existing-skill critique vs new-SOP discovery)",
+        ],
+        "description": (
+            "每个 Session 入库前必须通过一次 LLM 调用完成价值分类、轨迹摘要与会话评分；"
+            "三段结果缺一则入库失败。prompt 中段按是否使用团队 Skill 分支：用了则关注该 "
+            "Skill 本身的表现与缺陷，没用则关注是否有可进化为新 Skill 的团队 SOP。"
+        ),
+    },
+    "analyze_trace_badcase": {
+        "id": "analyze_trace_badcase",
+        "label": "Trace 级全量分析",
+        "module": "team_skills.evolution.stages.trace_analyze",
+        "symbol": "_TRACE_ANALYZE_SYSTEM",
+        "resolver": _analyze_trace_badcase_default,
+        "injects_shared_blocks": False,
+        "temperature": 0.1,
+        # Each bounded batch returns one JSON object covering every supplied
+        # trace; the payload carries per-trace signals, not full artifacts.
+        "max_tokens": 8192,
+        "variables": [
+            "per-trace prompt/response/score",
+            "tool errors per trace",
+            "session summary",
+        ],
+        "description": (
+            "对每个会话逐 Trace 分析：每个 Trace 都产出结果，存在问题时给出受控 "
+            "problem_type 与中文 problem_description，供 Trace 级结果上报（如上传 Doris）。"
+        ),
+    },
+    "evolve_skill": {
+        "id": "evolve_skill",
+        "label": "改进技能 Evolve",
+        "module": "team_skills.evolution.stages.execute",
+        "symbol": "_EVOLVE_FROM_SESSIONS_SYSTEM",
+        "resolver": _evolve_default_raw,
+        "injects_shared_blocks": True,
+        "temperature": 0.4,
+        "max_tokens": 16384,
+        "variables": [
+            "{skill_name}",
+            "round-1 session index card (one line per session)",
+            "current skill outline card",
+            "cross-cycle evidence",
+            "evaluation cohort",
+            "existing skill names",
+        ],
+        "description": (
+            "对已有技能的多轮 agent 循环：第 1 轮基于会话索引卡输出 plan"
+            "（improve / optimize_description / create / skip），再按需用工具加载证据"
+            "并经 propose_edits 暂存编辑，final 提交。未涉及正文逐字节保留。"
+        ),
+    },
+    "create_skill": {
+        "id": "create_skill",
+        "label": "新建技能 Create",
+        "module": "team_skills.evolution.stages.execute",
+        "symbol": "_CREATE_FROM_SESSIONS_SYSTEM",
+        "resolver": _create_default_raw,
+        "injects_shared_blocks": True,
+        "temperature": 0.4,
+        "max_tokens": 16384,
+        "variables": [
+            "round-1 session index card (one line per session)",
+            "cross-cycle evidence",
+            "evaluation cohort",
+            "existing skill names",
+        ],
+        "description": (
+            "对 no-skill 会话桶的多轮 agent 循环：基于会话索引卡判断是否存在可复用模式，"
+            "可读取既有技能做差异化（read_library_skill）并校验新名（check_name）后创建新技能。"
+        ),
+    },
+    "merge": {
+        "id": "merge",
+        "label": "冲突合并 Merge",
+        "module": "team_skills.evolution.stages.execute",
+        "symbol": "_MERGE_SKILL_SYSTEM",
+        "resolver": _merge_default,
+        "injects_shared_blocks": False,
+        "temperature": 0.3,
+        "max_tokens": 8192,
+        "variables": ["Version A (existing skill)", "Version B (incoming skill)"],
+        "description": "同名技能两个进化版本冲突时，按合并原则自检后输出合并版本。",
+    },
+    "dataset_synthesis": {
+        "id": "dataset_synthesis",
+        "label": "测试集生成 Dataset Synthesis",
+        "module": "team_replay.datasets.synthesis",
+        "symbol": "_SYNTHESIZE_SYSTEM",
+        "resolver": _dataset_synthesis_default,
+        "injects_shared_blocks": False,
+        "temperature": 0.3,
+        "max_tokens": 16384,
+        "variables": [
+            "{case_count}",
+            "{min_requirements}",
+            "{max_requirements}",
+            "candidate Skill",
+            "Session trajectories",
+            "team SOP evidence",
+            "replay seeds",
+        ],
+        "description": "从 Session 与跨周期 SOP evidence 同步生成带 Checklist 的渐进式 test datasets。",
+    },
+    "replay_checklist": {
+        "id": "replay_checklist",
+        "label": "真回放 Checklist 裁判",
+        "module": "team_replay.engine",
+        "symbol": "_CHECKLIST_JUDGE_SYSTEM",
+        "resolver": _replay_checklist_default,
+        "injects_shared_blocks": False,
+        "temperature": 0.0,
+        "max_tokens": 8192,
+        "variables": ["checklist", "interactions", "tool trajectory", "workspace artifacts"],
+        "description": "逐条核验真回放结果是否满足 Checklist；只允许依据可观察证据判定。",
+    },
+}
+
+STAGE_IDS = tuple(_STAGE_CATALOG.keys())
+
+
+def _default_prompt(stage_id: str) -> str:
+    entry = _STAGE_CATALOG.get(stage_id)
+    if not entry:
+        raise KeyError(f"unknown prompt stage: {stage_id}")
+    try:
+        return str(entry["resolver"]() or "")
+    except Exception as exc:  # noqa: BLE001 - resolver must never crash the API
+        logger.warning("[PromptStudio] failed to resolve default for %s: %s", stage_id, exc)
+        return ""
+
+
+# ------------------------------------------------------------------ #
+# Overrides persistence                                               #
+# ------------------------------------------------------------------ #
+def _load_overrides(config: Any = None) -> dict[str, str]:
+    path = _overrides_path()
+    config = _request_config(config)
+    if config is not None and getattr(config, "storage_pg_enabled", False):
+        data = read_kv(config, "prompt_overrides.json", path)
+        return {str(k): v for k, v in data.items() if isinstance(v, str) and k in _STAGE_CATALOG}
+    if config is not None:
+        try:
+            data = read_kv(config, "prompt_overrides.json", path)
+            if data:
+                return {str(k): str(v) for k, v in data.items() if isinstance(v, str) and str(k) in _STAGE_CATALOG}
+        except Exception:
+            pass
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8") or "{}")
+    except (ValueError, OSError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in data.items() if isinstance(v, str) and str(k) in _STAGE_CATALOG}
+
+
+def _save_overrides(overrides: dict[str, str], config: Any = None) -> None:
+    path = _overrides_path()
+    config = _request_config(config)
+    if config is not None and getattr(config, "storage_pg_enabled", False):
+        write_kv(config, "prompt_overrides.json", path, overrides)
+        return
+    if config is not None:
+        try:
+            write_kv(config, "prompt_overrides.json", path, overrides)
+            return
+        except Exception:
+            pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(overrides, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _load_stage_settings(config: Any = None) -> dict[str, dict[str, Any]]:
+    path = _stage_settings_path()
+    config = _request_config(config)
+    if config is not None and getattr(config, "storage_pg_enabled", False):
+        data = read_kv(config, "stage_settings.json", path)
+        return {str(k): v for k, v in data.items() if isinstance(v, dict) and k in _STAGE_CATALOG}
+    if config is not None:
+        try:
+            data = read_kv(config, "stage_settings.json", path)
+            if data:
+                return {
+                    str(stage_id): dict(value)
+                    for stage_id, value in data.items()
+                    if stage_id in _STAGE_CATALOG and isinstance(value, dict)
+                }
+        except Exception:
+            pass
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8") or "{}")
+    except (ValueError, OSError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        str(stage_id): dict(value)
+        for stage_id, value in data.items()
+        if stage_id in _STAGE_CATALOG and isinstance(value, dict)
+    }
+
+
+def _save_stage_settings(settings: dict[str, dict[str, Any]], config: Any = None) -> None:
+    path = _stage_settings_path()
+    config = _request_config(config)
+    if config is not None and getattr(config, "storage_pg_enabled", False):
+        write_kv(config, "stage_settings.json", path, settings)
+        return
+    if config is not None:
+        try:
+            write_kv(config, "stage_settings.json", path, settings)
+            return
+        except Exception:
+            pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(settings, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+
+
+def _request_config(config):
+    if config is None:
+        from teamEvolver.tenants.registry import get_current_tenant
+
+        if get_current_tenant() is not None:
+            from teamEvolver.config_store import ConfigStore
+
+            return ConfigStore().to_config()
+    return config
+
+
+def set_stage_settings(stage_id: str, settings: dict[str, Any], config: Any = None) -> None:
+    """Persist per-stage model sampling overrides."""
+    entry = _STAGE_CATALOG.get(stage_id)
+    if not entry:
+        raise KeyError(f"unknown prompt stage: {stage_id}")
+    if not isinstance(settings, dict):
+        raise ValueError("stage settings must be an object")
+    try:
+        temperature = float(
+            settings.get("temperature", entry["temperature"])
+        )
+        max_tokens = int(settings.get("max_tokens", entry["max_tokens"]))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("temperature and max_tokens must be numeric") from exc
+    if not 0 <= temperature <= 2:
+        raise ValueError("temperature must be between 0 and 2")
+    if max_tokens < 1:
+        raise ValueError("max_tokens must be at least 1")
+    provider = str(settings.get("provider") or "").strip()
+    base_url = str(settings.get("base_url") or "").strip().rstrip("/")
+    if base_url and not base_url.startswith(("http://", "https://")):
+        raise ValueError("base_url must start with http:// or https://")
+    model = str(settings.get("model") or "").strip()
+    overrides = _load_stage_settings(config)
+    existing = overrides.get(stage_id, {})
+    raw_api_key = settings.get("api_key")
+    if bool(settings.get("clear_api_key", False)):
+        api_key = ""
+    elif raw_api_key is not None and str(raw_api_key).strip():
+        api_key = str(raw_api_key).strip()
+    else:
+        api_key = str(existing.get("api_key") or "").strip()
+    normalized = {
+        "provider": provider,
+        "base_url": base_url,
+        "model": model,
+        "api_key": api_key,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    defaults = {
+        "provider": "",
+        "base_url": "",
+        "model": "",
+        "api_key": "",
+        "temperature": float(entry["temperature"]),
+        "max_tokens": int(entry["max_tokens"]),
+    }
+    if normalized == defaults:
+        overrides.pop(stage_id, None)
+    else:
+        overrides[stage_id] = normalized
+    _save_stage_settings(overrides, config)
+
+
+def reset_stage_settings(stage_id: str, config: Any = None) -> None:
+    if stage_id not in _STAGE_CATALOG:
+        raise KeyError(f"unknown prompt stage: {stage_id}")
+    overrides = _load_stage_settings(config)
+    if stage_id in overrides:
+        overrides.pop(stage_id, None)
+        _save_stage_settings(overrides, config)
+
+
+def stage_call_options(stage_id: str, config: Any = None) -> dict[str, Any]:
+    """Return live model and sampling kwargs for one stage.
+
+    Connection fields are omitted when empty so the shared client inherits the
+    current tenant's default model endpoint and credential.
+    """
+    entry = _STAGE_CATALOG.get(stage_id)
+    if not entry:
+        raise KeyError(f"unknown prompt stage: {stage_id}")
+    override = _load_stage_settings(config).get(stage_id, {})
+    options: dict[str, Any] = {
+        "temperature": float(
+            override.get("temperature", entry["temperature"])
+        ),
+        "max_tokens": int(override.get("max_tokens", entry["max_tokens"])),
+    }
+    model = str(override.get("model") or "").strip()
+    if model:
+        options["model"] = model
+    base_url = str(override.get("base_url") or "").strip()
+    if base_url:
+        options["base_url"] = base_url
+    api_key = str(override.get("api_key") or "").strip()
+    if api_key:
+        options["api_key"] = api_key
+    provider = str(override.get("provider") or "").strip()
+    if provider:
+        options["provider"] = provider
+    return options
+
+
+def set_override(stage_id: str, prompt: str, config: Any = None) -> None:
+    """Persist a system-prompt override for a stage."""
+    if stage_id not in _STAGE_CATALOG:
+        raise KeyError(f"unknown prompt stage: {stage_id}")
+    text = str(prompt or "")
+    if not text.strip():
+        raise ValueError("prompt override must not be empty")
+    overrides = _load_overrides(config)
+    overrides[stage_id] = text
+    _save_overrides(overrides, config)
+
+
+def reset_override(stage_id: str, config: Any = None) -> None:
+    """Remove any override so the stage reverts to its module default."""
+    if stage_id not in _STAGE_CATALOG:
+        raise KeyError(f"unknown prompt stage: {stage_id}")
+    overrides = _load_overrides(config)
+    if stage_id in overrides:
+        overrides.pop(stage_id, None)
+        _save_overrides(overrides, config)
+
+
+def _raw_effective(stage_id: str, config: Any = None) -> tuple[str, bool]:
+    """Return (raw_prompt_text, overridden) BEFORE shared-block expansion."""
+    overrides = _load_overrides(config)
+    if stage_id in overrides and overrides[stage_id].strip():
+        return overrides[stage_id], True
+    return _default_prompt(stage_id), False
+
+
+def _expand_shared_blocks(stage_id: str, text: str) -> str:
+    entry = _STAGE_CATALOG.get(stage_id) or {}
+    if not entry.get("injects_shared_blocks"):
+        return text
+    from team_skills.evolution.stages.execute import _inject_shared_blocks
+
+    return _inject_shared_blocks(text)
+
+
+def effective_prompt(
+    stage_id: str,
+    fallback: Optional[str] = None,
+    config: Any = None,
+) -> str:
+    """The system prompt the live pipeline should use for ``stage_id``.
+
+    Call sites pass their in-module default as ``fallback``; if no override is
+    stored we return that fallback verbatim so behavior is byte-identical to the
+    original code path. When an override exists we return it, expanding shared
+    blocks for the skill-writing stages exactly like the default path does.
+    """
+    overrides = _load_overrides(config)
+    if stage_id in overrides and overrides[stage_id].strip():
+        return _expand_shared_blocks(stage_id, overrides[stage_id])
+    if fallback is not None:
+        return fallback
+    return _expand_shared_blocks(stage_id, _default_prompt(stage_id))
+
+
+# ------------------------------------------------------------------ #
+# Read APIs for the console                                           #
+# ------------------------------------------------------------------ #
+def _shared_blocks() -> dict[str, str]:
+    from team_skills.evolution.stages import execute
+
+    return {
+        "__GENERALIZATION_RULES__": execute._GENERALIZATION_RULES,
+        "__USER_OVERRIDE_RULE__": execute._USER_OVERRIDE_RULE,
+        "__EVIDENCE_ROUTING_RULES__": execute._EVIDENCE_ROUTING_RULES,
+        "__OUTPUT_LANGUAGE_RULE__": execute._OUTPUT_LANGUAGE_RULE,
+    }
+
+
+def list_prompts(config: Any = None) -> list[dict[str, Any]]:
+    """Summary of every editable stage prompt (no full bodies)."""
+    overrides = _load_overrides(config)
+    stage_settings = _load_stage_settings(config)
+    items: list[dict[str, Any]] = []
+    for stage_id, entry in _STAGE_CATALOG.items():
+        default = _default_prompt(stage_id)
+        overridden = stage_id in overrides and overrides[stage_id].strip() != ""
+        raw = overrides[stage_id] if overridden else default
+        runtime = stage_call_options(stage_id, config)
+        items.append(
+            {
+                "id": stage_id,
+                "label": entry["label"],
+                "description": entry["description"],
+                "module": entry["module"],
+                "symbol": entry["symbol"],
+                "temperature": runtime["temperature"],
+                "max_tokens": runtime["max_tokens"],
+                "model": runtime.get("model", ""),
+                "provider": runtime.get("provider", ""),
+                "base_url": runtime.get("base_url", ""),
+                "api_key_present": bool(runtime.get("api_key")),
+                "settings_overridden": stage_id in stage_settings,
+                "injects_shared_blocks": entry["injects_shared_blocks"],
+                "overridden": overridden,
+                "char_count": len(raw),
+                "default_char_count": len(default),
+            }
+        )
+    return items
+
+
+def get_prompt(stage_id: str, config: Any = None) -> dict[str, Any]:
+    """Full detail for one stage: default, effective raw, expanded, variables."""
+    entry = _STAGE_CATALOG.get(stage_id)
+    if not entry:
+        raise KeyError(f"unknown prompt stage: {stage_id}")
+    default = _default_prompt(stage_id)
+    raw, overridden = _raw_effective(stage_id, config)
+    expanded = _expand_shared_blocks(stage_id, raw)
+    runtime = stage_call_options(stage_id, config)
+    stage_settings = _load_stage_settings(config)
+    payload: dict[str, Any] = {
+        "id": stage_id,
+        "label": entry["label"],
+        "description": entry["description"],
+        "module": entry["module"],
+        "symbol": entry["symbol"],
+        "temperature": runtime["temperature"],
+        "max_tokens": runtime["max_tokens"],
+        "model": runtime.get("model", ""),
+        "provider": runtime.get("provider", ""),
+        "base_url": runtime.get("base_url", ""),
+        "api_key_present": bool(runtime.get("api_key")),
+        "default_temperature": float(entry["temperature"]),
+        "default_max_tokens": int(entry["max_tokens"]),
+        "settings_overridden": stage_id in stage_settings,
+        "injects_shared_blocks": entry["injects_shared_blocks"],
+        "variables": list(entry["variables"]),
+        "overridden": overridden,
+        "default_prompt": default,
+        "effective_prompt": raw,
+        "expanded_prompt": expanded,
+    }
+    if entry["injects_shared_blocks"]:
+        payload["shared_blocks"] = _shared_blocks()
+    return payload
+
+
+def pipeline_graph(config: Any = None) -> dict[str, Any]:
+    """Chain graph annotated with which nodes have editable prompts + override flags."""
+    overrides = _load_overrides(config)
+    settings = _load_stage_settings(config)
+    nodes = []
+    for node in PIPELINE_STAGES["nodes"]:
+        item = dict(node)
+        prompt_id = item.get("prompt_id")
+        if prompt_id and prompt_id in _STAGE_CATALOG:
+            item["overridden"] = prompt_id in overrides and overrides[prompt_id].strip() != ""
+            item["settings_overridden"] = prompt_id in settings
+        nodes.append(item)
+    return {"nodes": nodes, "edges": list(PIPELINE_STAGES["edges"])}
+
+
+# ------------------------------------------------------------------ #
+# Test runner                                                         #
+# ------------------------------------------------------------------ #
+def build_stage_messages(stage_id: str, session: dict[str, Any], *, system_prompt: str) -> list[dict[str, str]]:
+    """Build the exact [system, user] messages a stage would send for a session.
+
+    ``system_prompt`` is used verbatim (already the edited/effective text). The
+    user message is reconstructed with the SAME helpers the live pipeline uses,
+    so the test reflects reality. For skill-writing stages we synthesize a
+    minimal-but-real evidence block from the given session.
+    """
+    if stage_id not in _STAGE_CATALOG:
+        raise KeyError(f"unknown prompt stage: {stage_id}")
+
+    if stage_id == "analyze_session":
+        from team_skills.evolution.stages.analyze import build_analysis_payload
+        from team_skills.evolution.stages.summarize import (
+            _extract_session_metadata,
+            build_session_trajectory,
+        )
+
+        # Reproduce the live analyze payload: metadata + trajectory then the
+        # merged full-trajectory payload the stage sends.
+        _extract_session_metadata(session)
+        if not session.get("_trajectory"):
+            session["_trajectory"] = build_session_trajectory(session)
+        payload = build_analysis_payload(session)
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ]
+
+    if stage_id == "analyze_trace_badcase":
+        from team_skills.evolution.stages.summarize import _extract_session_metadata
+        from team_skills.evolution.stages.trace_analyze import build_trace_payload
+
+        # Same per-trace payload the live localization call sends.
+        _extract_session_metadata(session)
+        payload = build_trace_payload(session)
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ]
+
+    if stage_id in {"evolve_skill", "create_skill"}:
+        from team_skills.evolution.agent.cards import build_round1_user_msg
+        from team_skills.evolution.stages.summarize import _extract_session_metadata, build_session_trajectory
+
+        _extract_session_metadata(session)
+        if not session.get("_trajectory"):
+            session["_trajectory"] = build_session_trajectory(session)
+        session.setdefault("_summary", session.get("_summary") or "")
+        if stage_id == "evolve_skill":
+            skill_name = str(session.get("_probe_skill_name") or "example-skill")
+            system_prompt = system_prompt.replace("{skill_name}", skill_name)
+            user_msg = build_round1_user_msg(
+                stage="evolve_skill",
+                skill_name=skill_name,
+                sessions=[session],
+                current_skill=None,
+                existing_skill_names=[skill_name],
+                evolution_context=None,
+            )
+        else:
+            user_msg = build_round1_user_msg(
+                stage="create_skill",
+                skill_name="",
+                sessions=[session],
+                current_skill=None,
+                existing_skill_names=[],
+                evolution_context=None,
+            )
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_msg},
+        ]
+
+    if stage_id == "merge":
+        from team_skills.evolution.agent.cards import build_merge_card
+
+        existing = {"name": "example-skill", "description": "existing", "content": "Existing body.", "_version": 1}
+        incoming = {"name": "example-skill", "description": "incoming", "content": "Incoming body."}
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": build_merge_card(existing, incoming)},
+        ]
+
+    if stage_id == "dataset_synthesis":
+        from team_replay.datasets.synthesis import render_synthesis_prompt
+        from team_skills.evolution.stages.summarize import (
+            _extract_session_metadata,
+            build_session_trajectory,
+        )
+
+        _extract_session_metadata(session)
+        if not session.get("_trajectory"):
+            session["_trajectory"] = build_session_trajectory(session)
+        payload = {
+            "skill_name": str(
+                session.get("_probe_skill_name") or "example-skill"
+            ),
+            "candidate_skill": {
+                "description": "Example candidate",
+                "content": "Example evolved procedure.",
+            },
+            "team_sop_evidence": {"context": {}, "claims": []},
+            "sessions": [
+                {
+                    "session_id": str(session.get("session_id") or ""),
+                    "initial_query": str(
+                        ((session.get("turns") or [{}])[0] or {}).get(
+                            "prompt_text"
+                        )
+                        or ""
+                    ),
+                    "summary": str(session.get("_summary") or ""),
+                    "trajectory": str(session.get("_trajectory") or ""),
+                }
+            ],
+            "replay_seeds": [],
+        }
+        resolved = render_synthesis_prompt(
+            system_prompt,
+            case_count=2,
+            min_requirements=12,
+            max_requirements=24,
+        )
+        return [
+            {"role": "system", "content": resolved},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ]
+
+    if stage_id == "replay_checklist":
+        checklist = [
+            {"id": "C01", "text": "完成用户要求并给出可验证结果", "kind": "output"}
+        ]
+        payload = {
+            "checklist": checklist,
+            "interactions": [
+                {
+                    "interaction_num": 1,
+                    "prompt": str(
+                        ((session.get("turns") or [{}])[0] or {}).get(
+                            "prompt_text"
+                        )
+                        or ""
+                    ),
+                    "response": str(
+                        ((session.get("turns") or [{}])[0] or {}).get(
+                            "response_text"
+                        )
+                        or ""
+                    ),
+                }
+            ],
+            "tool_trajectory": "(test runner reconstructs this in live replay)",
+            "workspace_artifacts": [],
+        }
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ]
+
+    raise KeyError(f"unsupported stage for test: {stage_id}")
+
+
+async def run_stage_test(
+    stage_id: str,
+    session: dict[str, Any],
+    *,
+    system_prompt: Optional[str],
+    llm_factory: Callable[[], Any],
+    config: Any = None,
+) -> dict[str, Any]:
+    """Run one stage against a session and return system + user + model output.
+
+    ``system_prompt`` overrides the effective prompt for this test only (so the
+    operator can try edits before saving). ``llm_factory`` returns an
+    ``AsyncLLMClient`` — injected so this module stays free of config coupling.
+
+    The three skill-writing stages run the REAL agent loop (plan → act →
+    submit, rounds capped for the test) and additionally return a per-round
+    transcript under ``rounds``.
+    """
+    if stage_id not in _STAGE_CATALOG:
+        raise KeyError(f"unknown prompt stage: {stage_id}")
+    # Resolve the system prompt to use: explicit test text, else effective.
+    if system_prompt and system_prompt.strip():
+        resolved_system = _expand_shared_blocks(stage_id, system_prompt)
+    else:
+        resolved_system = effective_prompt(stage_id, config=config)
+
+    if stage_id in {"evolve_skill", "create_skill", "merge"}:
+        return await _run_agent_stage_test(
+            stage_id,
+            session,
+            resolved_system=resolved_system,
+            llm_factory=llm_factory,
+            config=config,
+        )
+
+    messages = build_stage_messages(stage_id, session, system_prompt=resolved_system)
+    llm = llm_factory()
+    output = await llm.chat(
+        messages,
+        **stage_call_options(stage_id, config),
+        trace_name=f"team_skills.evolution.prompt_test.{stage_id}",
+        trace_tags=["evolve", "prompt-studio", stage_id],
+        trace_metadata={
+            "component": "team_skills.evolution",
+            "operation": "prompt_test",
+            "stage_id": stage_id,
+            "source_session_id": str(session.get("session_id") or ""),
+        },
+    )
+    return {
+        "stage_id": stage_id,
+        "system_prompt": messages[0]["content"],
+        "user_message": messages[1]["content"],
+        "output": output,
+    }
+
+
+async def _run_agent_stage_test(
+    stage_id: str,
+    session: dict[str, Any],
+    *,
+    resolved_system: str,
+    llm_factory: Callable[[], Any],
+    config: Any = None,
+) -> dict[str, Any]:
+    """Run the real agent loop for a skill-writing stage in the test panel."""
+    import json as _json
+
+    from team_skills.evolution.agent.cards import build_merge_card, build_round1_user_msg
+    from team_skills.evolution.agent.runner import run_skill_agent
+    from team_skills.evolution.agent.tools import build_protocol_appendix
+    from team_skills.evolution.stages.summarize import _extract_session_metadata, build_session_trajectory
+
+    _extract_session_metadata(session)
+    if not session.get("_trajectory"):
+        session["_trajectory"] = build_session_trajectory(session)
+    session.setdefault("_summary", session.get("_summary") or "")
+
+    llm = llm_factory()
+    rounds: list[dict[str, Any]] = []
+    call_options = stage_call_options(stage_id, config)
+    trace_metadata = {
+        "component": "team_skills.evolution",
+        "operation": "prompt_test",
+        "stage_id": stage_id,
+        "source_session_id": str(session.get("session_id") or ""),
+    }
+
+    if stage_id == "merge":
+        existing = {
+            "name": "example-skill",
+            "description": "existing",
+            "content": "Existing body.",
+            "_version": 1,
+        }
+        incoming = {"name": "example-skill", "description": "incoming", "content": "Incoming body."}
+        result = await run_skill_agent(
+            llm,
+            stage="merge",
+            system_prompt=resolved_system,
+            merge_versions=(existing, incoming),
+            max_rounds=6,
+            call_options=call_options,
+            trace_kwargs={
+                "trace_name": f"team_skills.evolution.prompt_test.{stage_id}",
+                "trace_tags": ["evolve", "prompt-studio", stage_id],
+                "trace_metadata": dict(trace_metadata),
+            },
+            round_log=rounds,
+        )
+        user_message = build_merge_card(existing, incoming)
+        appendix = build_protocol_appendix("merge")
+        system_message = f"{resolved_system}\n\n{appendix}" if resolved_system else appendix
+    else:
+        skill_name = (
+            str(session.get("_probe_skill_name") or "example-skill")
+            if stage_id == "evolve_skill"
+            else ""
+        )
+        existing_names = [skill_name] if stage_id == "evolve_skill" else []
+        result = await run_skill_agent(
+            llm,
+            stage=stage_id,
+            system_prompt=resolved_system,
+            skill_name=skill_name,
+            sessions=[session],
+            current_skill=None,
+            existing_skill_names=existing_names,
+            max_rounds=6,
+            call_options=call_options,
+            trace_kwargs={
+                "trace_name": f"team_skills.evolution.prompt_test.{stage_id}",
+                "trace_tags": ["evolve", "prompt-studio", stage_id],
+                "trace_metadata": dict(trace_metadata),
+            },
+            round_log=rounds,
+        )
+        user_message = build_round1_user_msg(
+            stage=stage_id,
+            skill_name=skill_name,
+            sessions=[session],
+            current_skill=None,
+            existing_skill_names=existing_names,
+            evolution_context=None,
+        )
+        appendix = build_protocol_appendix(stage_id)
+        system_message = (
+            resolved_system.replace("{skill_name}", skill_name) + f"\n\n{appendix}"
+        )
+
+    output = (
+        _json.dumps(result, ensure_ascii=False, indent=2)
+        if isinstance(result, dict)
+        else str(result)
+    )
+    return {
+        "stage_id": stage_id,
+        "system_prompt": system_message,
+        "user_message": user_message,
+        "output": output,
+        "rounds": rounds,
+    }

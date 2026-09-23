@@ -1,0 +1,305 @@
+{
+  "type": "object",
+  "properties": {
+    "contract": {
+      "const": "sf.ontology.candidate.v1"
+    },
+    "tenant": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9_:@./-]+$"
+    },
+    "schema_revision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9_:@./-]+$"
+    },
+    "base_generation": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9_:@./-]+$"
+    },
+    "source_manifest_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "owner_epoch": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "entities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "entity_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9_:@./-]+$"
+          },
+          "entity_type": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9_:@./-]+$"
+          },
+          "aliases": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            "minItems": 0,
+            "maxItems": 10000
+          },
+          "external_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "entity_id",
+          "entity_type",
+          "aliases",
+          "external_id"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "maxItems": 10000
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "evidence_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9_:@./-]+$"
+          },
+          "source_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9_:@./-]+$"
+          },
+          "source_revision": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9_:@./-]+$"
+          },
+          "segment_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9_:@./-]+$"
+          },
+          "source_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "source_uri": {
+            "type": "string",
+            "pattern": "^viking://"
+          },
+          "source_kind": {
+            "enum": [
+              "document",
+              "system_record",
+              "user_claim",
+              "synthetic"
+            ]
+          },
+          "status": {
+            "enum": [
+              "active",
+              "revoked"
+            ]
+          }
+        },
+        "required": [
+          "evidence_id",
+          "source_id",
+          "source_revision",
+          "segment_id",
+          "source_sha256",
+          "source_uri",
+          "source_kind",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "maxItems": 10000
+    },
+    "support_sets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "support_set_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9_:@./-]+$"
+          },
+          "evidence_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "^[A-Za-z0-9_:@./-]+$"
+            },
+            "minItems": 1,
+            "maxItems": 100
+          },
+          "mode": {
+            "const": "all_required"
+          }
+        },
+        "required": [
+          "support_set_id",
+          "evidence_ids",
+          "mode"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "maxItems": 10000
+    },
+    "assertions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "assertion_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9_:@./-]+$"
+          },
+          "subject": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9_:@./-]+$"
+          },
+          "predicate": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9_:@./-]+$"
+          },
+          "object": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9_:@./-]+$"
+          },
+          "qualifiers": {
+            "type": "object",
+            "properties": {
+              "product": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "region": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              }
+            },
+            "required": [
+              "product",
+              "region"
+            ],
+            "additionalProperties": false
+          },
+          "epistemic_kind": {
+            "enum": [
+              "document_fact",
+              "system_fact",
+              "user_claim",
+              "hypothesis"
+            ]
+          },
+          "polarity": {
+            "enum": [
+              "positive",
+              "negative"
+            ]
+          },
+          "valid_from": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "valid_to": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "support_set_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "^[A-Za-z0-9_:@./-]+$"
+            },
+            "minItems": 1,
+            "maxItems": 1
+          }
+        },
+        "required": [
+          "assertion_id",
+          "subject",
+          "predicate",
+          "object",
+          "qualifiers",
+          "epistemic_kind",
+          "polarity",
+          "valid_from",
+          "valid_to",
+          "support_set_ids"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "maxItems": 10000
+    }
+  },
+  "required": [
+    "contract",
+    "tenant",
+    "schema_revision",
+    "base_generation",
+    "source_manifest_digest",
+    "owner_epoch",
+    "entities",
+    "evidence",
+    "support_sets",
+    "assertions"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Draft synthetic candidate subset",
+  "description": "Contract demonstration only. Does not authenticate source_kind or grant production publication."
+}

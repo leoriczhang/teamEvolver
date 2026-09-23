@@ -1,0 +1,42 @@
+services:
+  teamevolver:
+    # Set TEAMEVOLVER_IMAGE when deploying a versioned image; local compose
+    # builds keep a stable default tag without pinning an obsolete commit.
+    image: "${TEAMEVOLVER_IMAGE:-teamevolver:latest}"
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: teamevolver
+    restart: unless-stopped
+    ports:
+      - "${TEAMEVOLVER_PORT:-52010}:52010"
+    environment:
+      TZ: Asia/Shanghai
+      TEAMEVOLVER_PORT: "52010"
+      # Prefer the source copied to /app over the wheel installed by pip.
+      # This keeps the main service and its embedded SkillMiner subprocess on
+      # the same release, and makes the mounted runtime directories effective.
+      PYTHONPATH: /app
+      # The image contains the pinned OpenViking CLI.  This remains
+      # overridable for diagnostics without depending on a host installation.
+      OPENVIKING_CLI_BIN: "${OPENVIKING_CLI_BIN:-/usr/local/bin/ov}"
+    volumes:
+      # Console account, model configuration, and service state.
+      - ./runtime/config:/var/lib/teamEvolver/.teamEvolver
+      # User-uploaded knowledge sources and all mining outputs.
+      - ./runtime/skillminer/data:/app/team_miner/data
+      - ./runtime/skillminer/originals:/app/team_miner/.knowledge_originals
+      - ./runtime/skillminer/jobs:/app/team_miner/mining_jobs
+      - ./runtime/skillminer/sample-packages:/app/team_miner/sample_packages
+      - ./runtime/skillminer/semantic-reports:/app/team_miner/semantic_reports
+      - ./runtime/skillminer/compiled-skills:/app/team_miner/compiled_skill
+      - ./runtime/skillminer/benchmarks:/app/team_miner/benchmark_results
+      - ./runtime/skillminer/reflection-rounds:/app/team_miner/reflection_rounds
+      - ./runtime/skillminer/run-history:/app/team_miner/run_history
+      - ./runtime/skillminer/lift-datasets:/app/team_miner/lift_datasets
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:52010/health', timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s

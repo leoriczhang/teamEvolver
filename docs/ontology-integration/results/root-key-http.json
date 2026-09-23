@@ -1,0 +1,53 @@
+{
+  "publication_auth": "trusted_root",
+  "publication_contract": "sf.ontology.commit.v2",
+  "services": 2,
+  "separate_runtime": false,
+  "extractor": "fixture",
+  "model_calls": 0,
+  "checks": [
+    {
+      "domain": "Shipment",
+      "status": "passed",
+      "generation": 20,
+      "receipt": {
+        "generation": 20,
+        "projection": "postgres_ready",
+        "receipt_id": "427370d5a8075c9bce2b8ab03b0a4b31",
+        "prepared_id": "e1b14211025e0c36f2de578acbffe65a543ce5dad5335d69bdbbbd704ca5ac43",
+        "committed_at": "2026-09-21T03:11:06.607215+00:00",
+        "candidate_digest": "12e8ffefb102928c16f30f0477d72d2364f5568b66826f023fbf5dde5aa44277"
+      }
+    },
+    {
+      "domain": "Procurement",
+      "status": "passed",
+      "generation": 21,
+      "receipt": {
+        "generation": 21,
+        "projection": "postgres_ready",
+        "receipt_id": "7241b9540cfb8cb1f87ade3fb9ec2909",
+        "prepared_id": "b6e6055b158408363ba0199756ce23ff09617067ed91b4bf0d582a6d07a5b6cd",
+        "committed_at": "2026-09-21T03:11:07.394474+00:00",
+        "candidate_digest": "b83496494177c60dbacb87b00889bcfe84655824d9ec91462159cf9091ad587d"
+      }
+    },
+    {
+      "name": "rollback-new-generation",
+      "status": "passed",
+      "receipt": {
+        "generation": 22,
+        "projection": "postgres_ready",
+        "receipt_id": "2dce6ce9da39dfd02ca57f215c9b6c77",
+        "prepared_id": "15c34422393d75fac2f5e6f4a48d23c5cd1155ee4d21dbf34d0495afe471eb78",
+        "committed_at": "2026-09-21T03:11:07.921569+00:00",
+        "candidate_digest": "bf05eca086b9430af866e56d4e4ab19f8b5396f3b7f70281b46ba54540e50502"
+      }
+    },
+    {
+      "name": "withdrawal-blocks-access",
+      "status": "passed"
+    }
+  ],
+  "real_model": "not covered"
+}

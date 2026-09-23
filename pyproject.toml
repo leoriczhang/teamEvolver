@@ -3,14 +3,14 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "skillgene"
+name = "teamEvolver"
 version = "0.1.0"
-description = "SkillGene: shared SKILL.md library management, sync, console, and optional validation."
+description = "teamEvolver: standalone multi-file team skill evolution, validation, and synchronization."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [
-    { name = "SkillGene Contributors" },
+    { name = "teamEvolver Contributors" },
 ]
 keywords = ["skills", "agents", "skill-library", "validation"]
 classifiers = [
@@ -29,60 +29,96 @@ dependencies = [
     "fastapi>=0.100",
     "uvicorn[standard]>=0.23",
     "httpx>=0.25.0",
+    "json-repair>=0.44.0",
+    "langfuse>=4.14,<5.0",
+    "openai>=1.0,<3",
+    "openpyxl>=3.1",
+    "pypdf>=5.0",
+    "pydantic-settings>=2.0",
+    "python-docx>=1.1",
     "tiktoken>=0.5",
+    "cryptography>=42",
+    "jsonschema[format]>=4.18",
+    "jieba>=0.42",
+    "beautifulsoup4>=4.12",
+    "markdown>=3.6",
+    "rank-bm25>=0.2",
+    "tomli-w>=1.0",
+    "tomli>=2; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
 sharing = [
     "boto3>=1.28",
 ]
+pg = [
+    "asyncpg>=0.29.0",
+]
+mining = [
+    "hermes-agent==0.19.0",
+]
 validation = [
-    "openai>=1.0",
+    "openai>=1.0,<3",
 ]
 truereplay = [
-    "hermes-agent @ git+https://github.com/nousresearch/hermes-agent.git",
-    "openai>=1.0",
+    "hermes-agent==0.19.0",
+    "openai>=1.0,<3",
 ]
 dev = [
     "pytest>=8.0",
+    "pytest-asyncio>=0.24",
     "anyio>=4.0",
 ]
 all = [
-    "skillgene[sharing,validation,truereplay]",
+    "teamEvolver[sharing,mining,validation,truereplay,pg]",
 ]
 
 [project.urls]
-Homepage = "https://github.com/leoriczhang/skillgene"
-Repository = "https://github.com/leoriczhang/skillgene"
-Issues = "https://github.com/leoriczhang/skillgene/issues"
+Homepage = "https://github.com/leoriczhang/teamEvolver"
+Repository = "https://github.com/leoriczhang/teamEvolver"
+Issues = "https://github.com/leoriczhang/teamEvolver/issues"
 
 [project.scripts]
-skillgene = "skillgene.cli:main"
+teamEvolver = "teamEvolver.cli:main"
+teamEvolver-dreamcycle = "team_memory.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["skillgene*"]
+include = ["teamEvolver*", "team_skills*", "team_miner*", "session_ingestion*", "team_memory*", "team_replay*", "team_ontology*"]
+exclude = ["team_memory.tests*", "team_memory.frontend*", "team_replay.tests*", "team_skills.tests*", "team_skills.frontend*", "team_miner.tests*", "team_miner.frontend*"]
 
 [tool.setuptools.package-data]
-skillgene = [
+team_ontology = ["skills/*/SKILL.md", "contracts/*.json", "engine/LICENSE", "engine/SOURCE.json"]
+team_memory = ["README.md"]
+team_replay = ["README.md"]
+"session_ingestion" = ["README.md"]
+"session_ingestion.adapters" = ["*.py", "README.md"]
+"session_ingestion.adapters._shared" = ["*.md"]
+"session_ingestion.push.hermes" = ["SKILL.md"]
+teamEvolver = [
     "web/*.html",
     "web/dist/*.html",
     "web/dist/assets/*",
-    "integrations/hermes_skill/*",
     "integrations/hermes_skill_sync/*",
-    "skillminer/*.md",
-    "skillminer/.env.example",
-    "skillminer/*.sh",
-    "skillminer/data/input/.gitkeep",
-    "skillminer/web_console/static/*",
-    "skillminer/*-agent-skill/*.md",
-    "skillminer/*-agent-skill/assets/*",
-    "skillminer/*-agent-skill/references/*",
-    "skillminer/*-agent-skill/scripts/*",
+    "integrations/hermes_context_provider/*",
+]
+team_miner = [
+    "*.md",
+    ".env.example",
+    "*.sh",
+    "hermes/*",
+    "data/input/.gitkeep",
+    "data/中文金融客服测试/*.md",
+    "web_console/*.py",
+    "web_console/static/*",
+    "*-agent-skill/*.md",
+    "*-agent-skill/assets/*",
+    "*-agent-skill/references/*",
+    "*-agent-skill/scripts/*",
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "team_memory/tests", "team_miner/tests", "team_replay/tests"]
 
 [tool.ruff]
 line-length = 120
@@ -90,3 +126,6 @@ line-length = 120
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 ignore = ["E731", "F403", "F405"]
+
+[tool.ruff.lint.per-file-ignores]
+"team_miner/*_prompt.py" = ["E501"]

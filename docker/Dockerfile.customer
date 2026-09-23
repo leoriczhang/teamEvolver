@@ -1,0 +1,25 @@
+ARG PYTHON_IMAGE=python:3.11-slim-bookworm
+FROM ${PYTHON_IMAGE}
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app \
+    HOME=/data TEAMEVOLVER_CONFIG_FILE=/data/config.yaml \
+    TEAMEVOLVER_SKILLMINER_ENABLED=1 TEAMEVOLVER_CONFIG_BOOTSTRAP=1
+WORKDIR /app
+COPY docker/requirements.customer.lock ./docker/requirements.customer.lock
+RUN pip install --no-cache-dir --require-hashes -r docker/requirements.customer.lock
+COPY pyproject.toml README.md LICENSE ./
+COPY teamEvolver ./teamEvolver
+COPY team_skills ./team_skills
+COPY team_memory ./team_memory
+COPY team_replay ./team_replay
+COPY team_ontology ./team_ontology
+COPY docs ./docs
+COPY session_ingestion ./session_ingestion
+COPY docker/customer.yaml ./docker/customer.yaml
+COPY scripts/import_skillopt.py scripts/prepare_customer.py ./scripts/
+RUN pip install --no-cache-dir --no-build-isolation --no-deps . \
+    && useradd --uid 10001 --home-dir /data --create-home app \
+    && chown -R app:app /data
+USER 10001
+EXPOSE 52010
+CMD ["python", "-m", "uvicorn", "teamEvolver.customer:create_app", "--factory", "--host", "0.0.0.0", "--port", "52010", "--workers", "1", "--limit-concurrency", "256"]

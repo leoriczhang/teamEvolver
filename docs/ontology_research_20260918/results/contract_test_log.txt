@@ -1,0 +1,45 @@
+test_01_positive_candidate (test_contracts.ContractTests.test_01_positive_candidate) ... ok
+test_02_unknown_root_field (test_contracts.ContractTests.test_02_unknown_root_field) ... ok
+test_03_duplicate_entity (test_contracts.ContractTests.test_03_duplicate_entity) ... ok
+test_04_dangling_endpoint (test_contracts.ContractTests.test_04_dangling_endpoint) ... ok
+test_05_wrong_relation_direction (test_contracts.ContractTests.test_05_wrong_relation_direction) ... ok
+test_06_unknown_type (test_contracts.ContractTests.test_06_unknown_type) ... ok
+test_07_unknown_predicate (test_contracts.ContractTests.test_07_unknown_predicate) ... ok
+test_08_missing_qualifier (test_contracts.ContractTests.test_08_missing_qualifier) ... ok
+test_09_empty_proof (test_contracts.ContractTests.test_09_empty_proof) ... ok
+test_10_unresolvable_proof (test_contracts.ContractTests.test_10_unresolvable_proof) ... ok
+test_11_unknown_support (test_contracts.ContractTests.test_11_unknown_support) ... ok
+test_12_duplicate_proof_member (test_contracts.ContractTests.test_12_duplicate_proof_member) ... ok
+test_13_tenant_mismatch (test_contracts.ContractTests.test_13_tenant_mismatch) ... ok
+test_14_schema_not_approved (test_contracts.ContractTests.test_14_schema_not_approved) ... ok
+test_15_source_digest_changed (test_contracts.ContractTests.test_15_source_digest_changed) ... ok
+test_16_source_version_changed (test_contracts.ContractTests.test_16_source_version_changed) ... ok
+test_17_source_revoked_after_extraction (test_contracts.ContractTests.test_17_source_revoked_after_extraction) ... ok
+test_18_fake_system_fact (test_contracts.ContractTests.test_18_fake_system_fact) ... ok
+test_19_forged_authority_label (test_contracts.ContractTests.test_19_forged_authority_label) ... ok
+test_20_reversed_time (test_contracts.ContractTests.test_20_reversed_time) ... ok
+test_21_missing_timezone (test_contracts.ContractTests.test_21_missing_timezone) ... ok
+test_22_unknown_observation_not_true (test_contracts.ContractTests.test_22_unknown_observation_not_true) ... ok
+test_23_unverified_observation_not_true (test_contracts.ContractTests.test_23_unverified_observation_not_true) ... ok
+test_24_stale_observation_not_true (test_contracts.ContractTests.test_24_stale_observation_not_true) ... ok
+test_25_conflict_not_true (test_contracts.ContractTests.test_25_conflict_not_true) ... ok
+test_26_verified_fresh_comparison (test_contracts.ContractTests.test_26_verified_fresh_comparison) ... ok
+test_27_bool_not_integer (test_contracts.ContractTests.test_27_bool_not_integer) ... ok
+test_28_three_valued_conjunction (test_contracts.ContractTests.test_28_three_valued_conjunction) ... ok
+test_29_atomic_budget_truncation (test_contracts.ContractTests.test_29_atomic_budget_truncation) ... ok
+test_30_budget_invalid_cost (test_contracts.ContractTests.test_30_budget_invalid_cost) ... ok
+test_31_visibility_positive (test_contracts.ContractTests.test_31_visibility_positive) ... ok
+test_32_no_permission_to_proof (test_contracts.ContractTests.test_32_no_permission_to_proof) ... ok
+test_33_hidden_endpoint (test_contracts.ContractTests.test_33_hidden_endpoint) ... ok
+test_34_fail_closed_authority_unavailable (test_contracts.ContractTests.test_34_fail_closed_authority_unavailable) ... ok
+test_35_revoked_source_not_visible (test_contracts.ContractTests.test_35_revoked_source_not_visible) ... ok
+test_36_other_tenant_not_visible (test_contracts.ContractTests.test_36_other_tenant_not_visible) ... ok
+test_37_other_example_shapes (test_contracts.ContractTests.test_37_other_example_shapes) ... ok
+test_38_query_cannot_increase_hops (test_contracts.ContractTests.test_38_query_cannot_increase_hops) ... ok
+test_39_query_cannot_include_sql (test_contracts.ContractTests.test_39_query_cannot_include_sql) ... ok
+test_40_all_required_proof_members (test_contracts.ContractTests.test_40_all_required_proof_members) ... ok
+
+----------------------------------------------------------------------
+Ran 40 tests in 0.334s
+
+OK

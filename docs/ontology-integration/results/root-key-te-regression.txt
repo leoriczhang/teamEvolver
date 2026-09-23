@@ -1,0 +1,2 @@
+FAILED tests/test_candidate_feedback.py::test_api_refresh_and_history_keep_feedback
+============ 1 failed, 574 passed, 40 skipped, 2 warnings in 15.87s ============

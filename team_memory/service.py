@@ -1,0 +1,2284 @@
+"""Orchestration for cross-user memory aggregation.
+
+Pipeline (all steps below use the OpenViking Root/Admin credential resolved
+for the current request):
+
+1. Resolve account users via the Admin API.
+2. Resolve or bootstrap one account-shared aggregation Skill and pin its
+   content-addressed revision for the whole run.
+3. Copy changed users into deterministic private snapshots without invoking a
+   model or Skill.
+4. Apply the pinned Skill while tree-reducing snapshots into the shared
+   team-memory target.
+5. Persist per-user status for the next incremental run.
+
+The service is transport-agnostic about how it is triggered: the proxy route
+runs :meth:`run` inside a background thread and polls :attr:`status`.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import hmac
+import json
+import logging
+import os
+import re
+import secrets
+import tempfile
+import threading
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Optional
+from urllib.parse import unquote, urlsplit
+
+import yaml
+
+from team_memory.compile_client import CompileClient, normalize_last_compile_time
+from team_memory.maintenance.maintenance_skill import DEFAULT_MAINTENANCE_SKILL_BODY, DEFAULT_MAINTENANCE_SKILL_NAME
+from team_memory.aggregation.okf_skill import DEFAULT_OKF_SKILL_BODY, skill_fingerprint
+from team_memory.aggregation.sources import (
+    DEFAULT_MEMORY_KINDS,
+    AccountSourceBuilder,
+    AccountUserCredential,
+    SourceExpansionError,
+)
+from team_memory.aggregation.staging import DeterministicStagingClient, StagingError
+from team_memory.aggregation.state import AggregationState
+
+logger = logging.getLogger(__name__)
+
+
+class RunConflictError(RuntimeError):
+    """Raised when another aggregation run already targets the same output."""
+
+
+_SNAPSHOT_MERGE_INSTRUCTION = (
+    "Inputs may include deterministic per-user snapshot JSONL files. Each JSON "
+    "line contains source_uri, relative_path, kind, modified_at, content_sha256, "
+    "and the verbatim Memory text in content. Treat content as source material "
+    "and preserve source_uri provenance. Inputs from later levels are prior "
+    "structured merge outputs. One input may be a baseline snapshot of the "
+    "current team memory (its source_uri values live under viking://resources): "
+    "treat it as the authoritative existing knowledge, preserve human edits "
+    "found only there, and de-duplicate/merge new material on top of it instead "
+    "of discarding it."
+)
+
+
+@dataclass
+class GroupResult:
+    group_key: str
+    kind: str
+    target_uri: str
+    source_count: int
+    status: str  # "ok" | "skipped" | "failed"
+    detail: str = ""
+
+
+@dataclass
+class AggregationRun:
+    task_id: str
+    account_id: str
+    endpoint: str
+    auth_mode: str
+    target_uri: str
+    work_root: str = ""
+    skill_uri: str = ""
+    skill_revision: str = ""
+    status: str = "pending"  # pending | running | completed | failed
+    started_at: float = field(default_factory=time.time)
+    finished_at: Optional[float] = None
+    groups: list[GroupResult] = field(default_factory=list)
+    group_counts: dict[str, int] = field(
+        default_factory=lambda: {"ok": 0, "skipped": 0, "failed": 0}
+    )
+    group_total: int = 0
+    groups_truncated: bool = False
+    source_user_count: int = 0
+    publish_mode: str = "single"
+    partition_count: int = 0
+    estimated_merge_tasks: int = 0
+    error: str = ""
+    pipeline: str = "both"
+    stage: str = "pending"
+    maintenance_skill_uri: str = ""
+    maintenance_skill_revision: str = ""
+    snapshot_uri: str = ""
+    merge_user_id: str = ""
+    last_compile_time: str = ""
+    upstream_tasks: dict[str, str] = field(default_factory=dict)
+
+    def to_public(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "account_id": self.account_id,
+            "endpoint": self.endpoint,
+            "auth_mode": self.auth_mode,
+            "target_uri": self.target_uri,
+            "work_root": self.work_root,
+            "skill_uri": self.skill_uri,
+            "skill_revision": self.skill_revision,
+            "status": self.status,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "error": self.error,
+            "pipeline": self.pipeline,
+            "stage": self.stage,
+            "maintenance_skill_uri": self.maintenance_skill_uri,
+            "maintenance_skill_revision": self.maintenance_skill_revision,
+            "snapshot_uri": self.snapshot_uri,
+            "merge_user_id": self.merge_user_id,
+            "last_compile_time": self.last_compile_time,
+            "upstream_tasks": dict(self.upstream_tasks),
+            "group_counts": dict(self.group_counts),
+            "group_total": self.group_total,
+            "groups_truncated": self.groups_truncated,
+            "source_user_count": self.source_user_count,
+            "publish_mode": self.publish_mode,
+            "partition_count": self.partition_count,
+            "estimated_merge_tasks": self.estimated_merge_tasks,
+            "groups": [
+                {
+                    "group_key": g.group_key,
+                    "kind": g.kind,
+                    "target_uri": g.target_uri,
+                    "source_count": g.source_count,
+                    "status": g.status,
+                    "detail": g.detail,
+                }
+                for g in self.groups
+            ],
+        }
+
+
+@dataclass(repr=False)
+class _ExecutionCredentials:
+    users: list[str]
+    user_api_keys: dict[str, str]
+    merge_user_id: str
+    merge_api_key: str
+
+
+class MemoryAggregationService:
+    """Coordinate account-wide memory aggregation via ov compile."""
+
+    def __init__(self, config: Any):
+        self.config = config
+        self._runs: dict[str, AggregationRun] = {}
+        self._lock = threading.Lock()
+        self._persistence_lock = threading.Lock()
+        self._run_slots = threading.BoundedSemaphore(4)
+        self._compile_slots = threading.BoundedSemaphore(self._merge_concurrency())
+        # Active (endpoint, account, target) keys with a run in flight. A second
+        # run against the same target would interleave writes to the same output
+        # tree and incremental state, so it is refused rather than serialized.
+        self._active_targets: dict[str, str] = {}
+        # Recover persisted run state so a process restart doesn't lose
+        # in-flight runs or the concurrent-target guard.
+        self._recover_runs()
+
+    # ---- run persistence ------------------------------------------------ #
+
+    def _runs_file(self) -> Path:
+        base = str(getattr(self.config, "aggregation_state_dir", "") or "").strip()
+        root = Path(base).expanduser() if base else Path.home() / ".teamEvolver" / "aggregation"
+        return root / "runs.json"
+
+    @staticmethod
+    def _write_json_atomic(path: Path, data: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=path.parent,
+                prefix=f".{path.name}.", delete=False,
+            ) as handle:
+                tmp = Path(handle.name)
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+        finally:
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)
+
+    def _save_runs(self) -> None:
+        """Persist run records and active target locks to disk."""
+        path = self._runs_file()
+        with self._persistence_lock:
+            with self._lock:
+                data = {
+                    "runs": [r.to_public() for r in self._runs.values()],
+                    "active_targets": dict(self._active_targets),
+                }
+            self._write_json_atomic(path, json.dumps(data, ensure_ascii=False, indent=2))
+
+    def _recover_runs(self) -> None:
+        """Load persisted runs; mark any unfinished ones as failed."""
+        path = self._runs_file()
+        try:
+            raw = json.loads(path.read_text("utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(raw, dict):
+            return
+        # Restore active targets so a crashed run blocks duplicates until
+        # explicitly released.
+        for key, task_id in (raw.get("active_targets") or {}).items():
+            if isinstance(key, str) and isinstance(task_id, str):
+                self._active_targets[key] = task_id
+        # Restore run records; mark in-flight ones as failed so callers see
+        # the crash rather than a perpetually "running" ghost.
+        for entry in raw.get("runs") or []:
+            if not isinstance(entry, dict):
+                continue
+            status = str(entry.get("status") or "")
+            if status in ("pending", "running"):
+                entry["status"] = "failed"
+                entry["error"] = entry.get("error") or "process restarted"
+                entry["finished_at"] = entry.get("finished_at") or time.time()
+                # Release the target lock for crashed runs.
+                task_id = str(entry.get("task_id") or "")
+                for key, holder in list(self._active_targets.items()):
+                    if holder == task_id and not entry.get("upstream_tasks"):
+                        self._active_targets.pop(key, None)
+            task_id = str(entry.get("task_id") or "")
+            if not task_id:
+                continue
+            run = AggregationRun(
+                task_id=task_id,
+                account_id=str(entry.get("account_id") or ""),
+                endpoint=str(entry.get("endpoint") or ""),
+                auth_mode=str(entry.get("auth_mode") or "trusted"),
+                target_uri=str(entry.get("target_uri") or ""),
+                work_root=str(entry.get("work_root") or ""),
+                skill_uri=str(entry.get("skill_uri") or ""),
+                skill_revision=str(entry.get("skill_revision") or ""),
+                status=str(entry.get("status") or "failed"),
+                started_at=float(entry.get("started_at") or time.time()),
+                finished_at=entry.get("finished_at"),
+                group_counts=entry.get("group_counts") or {"ok": 0, "skipped": 0, "failed": 0},
+                group_total=int(entry.get("group_total") or 0),
+                groups_truncated=bool(entry.get("groups_truncated")),
+                source_user_count=int(entry.get("source_user_count") or 0),
+                publish_mode=str(entry.get("publish_mode") or "single"),
+                partition_count=int(entry.get("partition_count") or 0),
+                estimated_merge_tasks=int(entry.get("estimated_merge_tasks") or 0),
+                error=str(entry.get("error") or ""),
+                pipeline=str(entry.get("pipeline") or "aggregate"),
+                stage=str(entry.get("stage") or "interrupted"),
+                maintenance_skill_uri=str(entry.get("maintenance_skill_uri") or ""),
+                maintenance_skill_revision=str(entry.get("maintenance_skill_revision") or ""),
+                snapshot_uri=str(entry.get("snapshot_uri") or ""),
+                merge_user_id=str(entry.get("merge_user_id") or ""),
+                last_compile_time=str(entry.get("last_compile_time") or ""),
+                upstream_tasks=dict(entry.get("upstream_tasks") or {}),
+            )
+            self._runs[task_id] = run
+        if self._runs:
+            logger.info(
+                "[aggregation] recovered %d run(s) from disk (%d active targets)",
+                len(self._runs), len(self._active_targets),
+            )
+
+    # ---- config accessors ------------------------------------------------ #
+
+    def _endpoint(self) -> str:
+        return str(getattr(self.config, "sharing_viking_endpoint", "") or "").rstrip("/")
+
+    @staticmethod
+    def normalize_endpoint(endpoint: str) -> str:
+        """Validate and normalize an OpenViking HTTP endpoint."""
+        value = str(endpoint or "").strip().rstrip("/")
+        parsed = urlsplit(value)
+        try:
+            parsed.port
+        except ValueError as exc:
+            raise ValueError("endpoint must be a valid HTTP(S) URL") from exc
+        decoded_path = unquote(parsed.path)
+        if (
+            len(value) > 2048
+            or parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or any(char.isspace() or ord(char) < 32 for char in value)
+            or "\\" in decoded_path
+            or any(
+                segment in {".", ".."}
+                or any(char.isspace() or ord(char) < 32 for char in segment)
+                for segment in decoded_path.split("/")
+            )
+        ):
+            raise ValueError("endpoint must be a valid HTTP(S) URL")
+        return value
+
+    def resolve_endpoint(self, endpoint: Optional[str] = None) -> str:
+        """Resolve a run endpoint, falling back to the configured deployment."""
+        requested = str(endpoint or "").strip()
+        if not requested:
+            requested = self._endpoint()
+        if not requested:
+            raise ValueError("endpoint is required")
+        return self.normalize_endpoint(requested)
+
+    def _team_user(self) -> str:
+        return str(getattr(self.config, "sharing_viking_user", "") or "team")
+
+    def _prefix(self) -> str:
+        return str(
+            getattr(self.config, "aggregation_shared_knowledge_prefix", "")
+            or "shared-knowledge"
+        )
+
+    def _skill_name(self, stage: str = "aggregation") -> str:
+        # The OKF Skill is published once under the account-shared agent scope.
+        from team_memory.aggregation.okf_skill import DEFAULT_OKF_SKILL_NAME
+
+        if stage not in {"aggregation", "maintenance"}:
+            raise ValueError("stage must be aggregation or maintenance")
+        field = "aggregation_okf_skill_uri" if stage == "aggregation" else "aggregation_maintenance_skill_uri"
+        configured = str(getattr(self.config, field, "") or "")
+        # Accept either a bare name or a full URI; derive the trailing name.
+        leaf = configured.rstrip("/").rsplit("/", 1)[-1] if configured else ""
+        return self._safe_path_segment(
+            leaf or (DEFAULT_OKF_SKILL_NAME if stage == "aggregation" else DEFAULT_MAINTENANCE_SKILL_NAME),
+            field_name="Skill name",
+        )
+
+    def _shared_skill_uri(self, stage: str = "aggregation") -> str:
+        return f"viking://agent/skills/{self._skill_name(stage)}"
+
+    def _staging_dir(self) -> str:
+        return str(getattr(self.config, "aggregation_staging_dir", "") or "_staging")
+
+    @staticmethod
+    def normalize_target_uri(target_uri: str) -> str:
+        """Validate and normalize a final aggregation target URI."""
+        value = str(target_uri or "").strip().rstrip("/")
+        parsed = urlsplit(value)
+        segments = parsed.path.lstrip("/").split("/") if parsed.path else []
+        decoded_segments = [unquote(segment) for segment in segments]
+        if (
+            len(value) > 512
+            or parsed.scheme != "viking"
+            or parsed.netloc != "resources"
+            or parsed.query
+            or parsed.fragment
+            or not segments
+            or any(
+                not segment
+                or segment in {".", ".."}
+                or "/" in segment
+                or "\\" in segment
+                or any(char.isspace() or ord(char) < 32 for char in segment)
+                for segment in decoded_segments
+            )
+        ):
+            raise ValueError(
+                "target_uri must be a valid path under "
+                "viking://resources/<path>"
+            )
+        return f"viking://resources/{'/'.join(segments)}"
+
+    def resolve_target_uri(self, target_uri: Optional[str] = None) -> str:
+        """Resolve a run target, falling back to the configured default."""
+        requested = str(target_uri or "").strip()
+        return self.normalize_target_uri(requested or self._target_root())
+
+    @staticmethod
+    def _safe_path_segment(value: str, *, field_name: str) -> str:
+        segment = str(value or "").strip().strip("/")
+        if segment in {".", ".."} or not re.fullmatch(r"[A-Za-z0-9_.@-]+", segment):
+            raise ValueError(f"{field_name} must be a safe OpenViking path segment")
+        return segment
+
+    def _work_root(
+        self,
+        target_uri: Optional[str] = None,
+        owner_user_id: Optional[str] = None,
+    ) -> str:
+        """Return private scratch space owned by the merge identity."""
+        owner = self._safe_path_segment(
+            owner_user_id or self._team_user(),
+            field_name="merge user_id",
+        )
+        staging = self._safe_path_segment(
+            self._staging_dir(),
+            field_name="aggregation staging_dir",
+        )
+        target = self.resolve_target_uri(target_uri)
+        target_digest = hashlib.sha256(target.encode("utf-8")).hexdigest()[:20]
+        return (
+            f"viking://user/{owner}/resources/teamEvolver/"
+            f"{staging}/{target_digest}"
+        )
+
+    def _staging_uri(
+        self,
+        user_id: str,
+        target_uri: Optional[str] = None,
+        *,
+        source_fingerprint: str = "",
+        work_root: str = "",
+    ) -> str:
+        source_user = self._safe_path_segment(user_id, field_name="source user_id")
+        root = work_root.rstrip("/") or self._work_root(target_uri)
+        base = f"{root}/users/{source_user}/snapshots"
+        if not source_fingerprint:
+            return base
+        fingerprint = source_fingerprint.removeprefix("sha256:")
+        if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+            raise ValueError("source fingerprint must be a SHA-256 digest")
+        return f"{base}/{fingerprint}"
+
+    def _target_root(self) -> str:
+        prefix = self._prefix().strip("/")
+        return f"viking://resources/{prefix}"
+
+    def _kinds(self, requested: Optional[list[str]]) -> list[str]:
+        if requested:
+            return [k.strip() for k in requested if k and k.strip()]
+        configured = getattr(self.config, "aggregation_kinds", None)
+        if isinstance(configured, (list, tuple)) and configured:
+            return [str(k).strip() for k in configured if str(k).strip()]
+        return list(DEFAULT_MEMORY_KINDS)
+
+    def _state_path(
+        self,
+        account_id: str,
+        target_uri: Optional[str] = None,
+        endpoint: Optional[str] = None,
+        auth_mode: str = "trusted",
+    ) -> Path:
+        base = str(getattr(self.config, "aggregation_state_dir", "") or "").strip()
+        root = Path(base).expanduser() if base else Path.home() / ".teamEvolver" / "aggregation"
+        configured_account = str(
+            getattr(self.config, "sharing_viking_account", "") or "default"
+        )
+        resolved_target = self.resolve_target_uri(target_uri)
+        resolved_endpoint = self.resolve_endpoint(endpoint)
+        configured_endpoint = (
+            self.normalize_endpoint(self._endpoint()) if self._endpoint() else ""
+        )
+        legacy_target = "viking://resources/shared-knowledge"
+        safe_account = re.sub(r"[^A-Za-z0-9._-]+", "-", account_id).strip("-")
+        if (
+            account_id == configured_account
+            and resolved_target == legacy_target
+            and resolved_endpoint == configured_endpoint
+            and auth_mode == "trusted"
+        ):
+            return root / f"state-{safe_account or 'default'}.json"
+        identity = (
+            f"{resolved_endpoint}\0{account_id}\0{resolved_target}\0{auth_mode}"
+        )
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:10]
+        return root / f"state-{safe_account or 'account'}-{digest}.json"
+
+    def _max_users_per_batch(self) -> int:
+        return int(getattr(self.config, "aggregation_max_users_per_batch", 12) or 12)
+
+    def _account_user_limit(self) -> int:
+        return max(
+            1,
+            int(getattr(self.config, "aggregation_account_user_limit", 50_000) or 50_000),
+        )
+
+    def _account_user_page_size(self) -> int:
+        return max(
+            1,
+            min(
+                1_000,
+                int(
+                    getattr(self.config, "aggregation_account_user_page_size", 1_000)
+                    or 1_000
+                ),
+            ),
+        )
+
+    def _phase1_concurrency(self) -> int:
+        return max(1, int(getattr(self.config, "aggregation_phase1_concurrency", 6) or 6))
+
+    def _merge_fan_in(self) -> int:
+        return max(2, min(15, int(getattr(self.config, "aggregation_merge_fan_in", 4) or 4)))
+
+    def _merge_concurrency(self) -> int:
+        return max(1, int(getattr(self.config, "aggregation_merge_concurrency", 4) or 4))
+
+    def _partition_threshold(self) -> int:
+        return max(
+            16,
+            int(getattr(self.config, "aggregation_partition_threshold", 512) or 512),
+        )
+
+    def _partition_count(self) -> int:
+        return max(
+            16,
+            min(
+                1_024,
+                int(getattr(self.config, "aggregation_partition_count", 256) or 256),
+            ),
+        )
+
+    def _run_detail_limit(self) -> int:
+        return max(
+            100,
+            int(getattr(self.config, "aggregation_run_detail_limit", 2_000) or 2_000),
+        )
+
+    def _runtime_timeout(self) -> float:
+        return float(
+            getattr(self.config, "aggregation_compile_runtime_timeout_seconds", 3000)
+            or 3000
+        )
+
+    def _merge_group_max_attempts(self) -> int:
+        # Total compile/staging attempts per group before it is abandoned so
+        # a permanently failing (e.g. always timing out) group cannot retry
+        # forever across runs.
+        return max(
+            1,
+            int(
+                getattr(self.config, "aggregation_merge_group_max_attempts", 2) or 2
+            ),
+        )
+
+    def _preserve_manual_edits(self) -> bool:
+        return bool(getattr(self.config, "aggregation_preserve_manual_edits", False))
+
+    def _incremental_publish(self) -> bool:
+        return bool(getattr(self.config, "aggregation_incremental_publish", False))
+
+    def _publish_batch_users(self) -> int:
+        return max(1, int(getattr(self.config, "aggregation_publish_batch_users", 8) or 8))
+
+    @staticmethod
+    def _merge_input_fingerprint(
+        sources: list[tuple[str, str]],
+        *,
+        skill_revision: str,
+    ) -> str:
+        digest = hashlib.sha256()
+        digest.update(b"team-memory-merge-v1\0")
+        digest.update(skill_revision.encode("utf-8"))
+        for uri, fingerprint in sources:
+            digest.update(b"\0")
+            digest.update(uri.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(fingerprint.encode("utf-8"))
+        return "sha256:" + digest.hexdigest()
+
+    def _partition_staged_roots(
+        self,
+        staged_roots: list[str],
+    ) -> dict[int, list[str]]:
+        """Assign staging roots to stable hash partitions."""
+        partition_count = self._partition_count()
+        partitions: dict[int, list[str]] = {}
+        for uri in staged_roots:
+            match = re.search(r"/users/([^/]+)/snapshots/", uri)
+            partition_key = match.group(1) if match else uri
+            digest = hashlib.sha256(partition_key.encode("utf-8")).digest()
+            partition = int.from_bytes(digest[:8], "big") % partition_count
+            partitions.setdefault(partition, []).append(uri)
+        return {
+            partition: sorted(uris)
+            for partition, uris in sorted(partitions.items())
+        }
+
+    def _tree_compile_task_count(self, source_count: int) -> int:
+        """Return compile task count for one bounded-fan-in reduction."""
+        if source_count <= 0:
+            return 0
+        fan_in = self._merge_fan_in()
+        tasks = 0
+        remaining = source_count
+        while remaining > fan_in:
+            remaining = (remaining + fan_in - 1) // fan_in
+            tasks += remaining
+        return tasks + 1
+
+    def _staging_source_fingerprints(
+        self,
+        *,
+        run: "AggregationRun",
+        state: "AggregationState",
+        staged_roots: list[str],
+    ) -> dict[str, str]:
+        requested = set(staged_roots)
+        fingerprints: dict[str, str] = {}
+        for group_key, entry in state.groups.items():
+            if not group_key.startswith("stage:") or not isinstance(entry, dict):
+                continue
+            staging_uri = str(entry.get("staging_uri") or "")
+            if staging_uri in requested:
+                fingerprints[staging_uri] = str(
+                    entry.get("source_fingerprint") or ""
+                )
+        return fingerprints
+
+    # ---- public API ------------------------------------------------------ #
+    def _skill_body_path(self, stage: str = "aggregation") -> Path:
+        base = str(getattr(self.config, "aggregation_state_dir", "") or "").strip()
+        root = Path(base).expanduser() if base else Path.home() / ".teamEvolver" / "aggregation"
+        return root / ("okf_skill.md" if stage == "aggregation" else "maintenance_skill.md")
+
+    def skill_body(self, stage: str = "aggregation") -> str:
+        """Return the effective OKF skill body (user override on disk, or default)."""
+        try:
+            text = self._skill_body_path(stage).read_text(encoding="utf-8")
+            if text.strip():
+                return text
+        except OSError:
+            pass
+        return DEFAULT_OKF_SKILL_BODY if stage == "aggregation" else DEFAULT_MAINTENANCE_SKILL_BODY
+
+    def save_skill_body(self, body: str, stage: str = "aggregation") -> None:
+        """Persist a user-edited OKF skill body for subsequent runs."""
+        if not body.strip():
+            raise ValueError("skill body must not be empty")
+        path = self._skill_body_path(stage)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+
+    async def _ensure_shared_skill(self, client: CompileClient, stage: str = "aggregation") -> dict[str, Any]:
+        """Return the published shared Skill, creating it from the fallback once."""
+        current = await client.get_skill(skill_name=self._skill_name(stage))
+        if not current.get("ok") and int(current.get("exit_code") or 0) == 404:
+            fallback = self.skill_body(stage)
+            parts = fallback.split("---", 2)
+            if len(parts) != 3:
+                raise SourceExpansionError("Skill fallback requires YAML frontmatter")
+            metadata = yaml.safe_load(parts[1])
+            if not isinstance(metadata, dict):
+                raise SourceExpansionError("Invalid Skill frontmatter")
+            metadata["name"] = self._skill_name(stage)
+            fallback = "---\n" + yaml.safe_dump(metadata, allow_unicode=True, sort_keys=False) + "---" + parts[2]
+            current = await client.publish_shared_skill(
+                skill_name=self._skill_name(stage),
+                skill_body=fallback,
+                version_message=f"Publish TeamEvolver {stage} Skill",
+            )
+        if not current.get("ok"):
+            detail = current.get("stderr") or current.get("stdout") or "unknown error"
+            raise SourceExpansionError(f"shared aggregation Skill is unavailable: {detail}")
+        skill = current.get("result") or {}
+        body = str(skill.get("content") or "")
+        revision = str(skill.get("revision") or skill_fingerprint(body))
+        if not body or not revision:
+            raise SourceExpansionError(
+                "shared aggregation Skill response is missing content or revision"
+            )
+        return {**skill, "revision": revision}
+
+    async def publish_shared_skill(
+        self,
+        *,
+        body: str,
+        endpoint: str,
+        account_id: str,
+        api_key: str,
+        user_id: str,
+        version_message: str,
+        stage: str = "aggregation",
+    ) -> dict[str, Any]:
+        """Publish one shared aggregation Skill revision and persist its fallback."""
+        if not body.strip():
+            raise ValueError("skill body must not be empty")
+        parts = body.strip().split("---", 2)
+        try:
+            metadata = yaml.safe_load(parts[1]) if len(parts) == 3 and not parts[0] else None
+        except yaml.YAMLError as exc:
+            raise ValueError("Invalid Skill YAML frontmatter") from exc
+        if not isinstance(metadata, dict) or metadata.get("name") != self._skill_name(stage):
+            raise ValueError(f"Skill frontmatter name must equal {self._skill_name(stage)}")
+        if not isinstance(metadata.get("description"), str) or not metadata["description"].strip():
+            raise ValueError("Skill description is required")
+        client = CompileClient(
+            endpoint=self.resolve_endpoint(endpoint),
+            account_id=account_id,
+            user_id=user_id,
+            api_key=api_key,
+            agent_id=str(
+                getattr(self.config, "sharing_viking_agent", "")
+                or "team-skill-evolver"
+            ),
+            timeout_seconds=self._runtime_timeout(),
+        )
+        published = await client.publish_shared_skill(
+            skill_name=self._skill_name(stage),
+            skill_body=body,
+            version_message=version_message,
+        )
+        if not published.get("ok"):
+            detail = published.get("stderr") or published.get("stdout") or "unknown error"
+            raise ValueError(f"failed to publish shared aggregation Skill: {detail}")
+        self.save_skill_body(body, stage)
+        return published.get("result") or {}
+
+    async def get_shared_skill(
+        self,
+        *,
+        endpoint: str,
+        account_id: str,
+        api_key: str,
+        user_id: str,
+        stage: str = "aggregation",
+    ) -> Optional[dict[str, Any]]:
+        client = CompileClient(
+            endpoint=self.resolve_endpoint(endpoint),
+            account_id=account_id,
+            user_id=user_id,
+            api_key=api_key,
+            agent_id=str(
+                getattr(self.config, "sharing_viking_agent", "")
+                or "team-skill-evolver"
+            ),
+            timeout_seconds=self._runtime_timeout(),
+        )
+        result = await client.get_skill(skill_name=self._skill_name(stage))
+        if result.get("ok"):
+            return result.get("result") or {}
+        if int(result.get("exit_code") or 0) == 404:
+            return None
+        detail = result.get("stderr") or result.get("stdout") or "unknown error"
+        raise ValueError(f"failed to read shared aggregation Skill: {detail}")
+
+
+    def status(self, task_id: str) -> Optional[dict[str, Any]]:
+        with self._lock:
+            run = self._runs.get(task_id)
+            return run.to_public() if run else None
+
+    def new_run(
+        self,
+        account_id: str,
+        *,
+        target_uri: Optional[str] = None,
+        endpoint: Optional[str] = None,
+        auth_mode: str = "trusted",
+        pipeline: str = "both",
+        last_compile_time: str = "",
+    ) -> AggregationRun:
+        if auth_mode not in {"trusted", "api_key"}:
+            raise ValueError("auth_mode must be trusted or api_key")
+        if pipeline not in {"both", "aggregate", "maintain"}:
+            raise ValueError("pipeline must be both, aggregate, or maintain")
+        normalized_lct = ""
+        if str(last_compile_time or "").strip():
+            # Validate/canonicalize eagerly so a bad value fails the request
+            # before a run record is created, not mid-compile.
+            normalized_lct = normalize_last_compile_time(last_compile_time)
+        task_id = f"agg_{secrets.token_urlsafe(24)}"
+        run = AggregationRun(
+            task_id=task_id,
+            account_id=account_id,
+            endpoint=self.resolve_endpoint(endpoint),
+            auth_mode=auth_mode,
+            target_uri=self.resolve_target_uri(target_uri),
+            pipeline=pipeline,
+            last_compile_time=normalized_lct,
+        )
+        with self._lock:
+            self._runs[task_id] = run
+        self._save_runs()
+        return run
+
+    def forget_run(self, task_id: str) -> None:
+        """Drop a run record (used to discard a rejected, never-started run)."""
+        with self._lock:
+            self._runs.pop(task_id, None)
+        self._save_runs()
+
+    def list_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Return recent runs (newest first) for refresh recovery."""
+        with self._lock:
+            runs = sorted(
+                self._runs.values(), key=lambda r: r.started_at, reverse=True
+            )[: max(1, limit)]
+            return [r.to_public() for r in runs]
+
+    async def list_account_users(
+        self,
+        account_id: str,
+        *,
+        api_key: str,
+        endpoint: Optional[str] = None,
+    ) -> list[str]:
+        """List aggregatable users under an account with a request credential."""
+        builder = AccountSourceBuilder(
+            endpoint=self.resolve_endpoint(endpoint),
+            api_key=str(api_key or "").strip(),
+            account_id=account_id,
+            shared_knowledge_prefix=self._prefix(),
+            max_users_per_batch=self._max_users_per_batch(),
+            account_user_limit=self._account_user_limit(),
+            account_user_page_size=self._account_user_page_size(),
+            excluded_user_ids=frozenset({self._team_user()}),
+        )
+        return await builder.list_account_users()
+
+    @staticmethod
+    def _target_lock_key(run: "AggregationRun") -> str:
+        return f"{run.endpoint}\0{run.account_id}\0{run.target_uri}"
+
+    def _acquire_target(self, run: "AggregationRun") -> None:
+        """Reserve this run's target, refusing a second concurrent run on it."""
+        key = self._target_lock_key(run)
+        with self._lock:
+            for active, owner in self._active_targets.items():
+                if owner == run.task_id:
+                    continue
+                endpoint, account, target = active.split("\0")
+                if (endpoint == run.endpoint and account == run.account_id
+                        and (run.target_uri.startswith(target + "/") or target.startswith(run.target_uri + "/"))):
+                    raise RunConflictError("An overlapping Team Memory target is active")
+            holder = self._active_targets.get(key)
+            if holder is not None and holder != run.task_id:
+                raise RunConflictError(
+                    "an aggregation run is already active for "
+                    f"{run.target_uri} (task {holder})"
+                )
+            self._active_targets[key] = run.task_id
+        self._save_runs()
+
+    def _release_target(self, run: "AggregationRun") -> None:
+        key = self._target_lock_key(run)
+        with self._lock:
+            if self._active_targets.get(key) == run.task_id and not run.upstream_tasks:
+                self._active_targets.pop(key, None)
+        self._save_runs()
+
+    def target_is_active(self, run: "AggregationRun") -> bool:
+        """Whether another run currently holds this run's target lock."""
+        key = self._target_lock_key(run)
+        with self._lock:
+            holder = self._active_targets.get(key)
+            return holder is not None and holder != run.task_id
+
+    def _track_task(self, run: AggregationRun, task_id: str, status: str) -> None:
+        with self._lock:
+            if status in {"completed", "failed", "cancelled"}:
+                run.upstream_tasks.pop(task_id, None)
+            else:
+                run.upstream_tasks[task_id] = status
+        self._save_runs()
+
+    async def reconcile(self, run: AggregationRun, api_key: str) -> None:
+        """Release a crashed/uncertain run only after OV confirms every task ended."""
+        with self._lock:
+            holder = self._active_targets.get(self._target_lock_key(run))
+            prior = self._runs.get(holder or "")
+            if not prior or prior.status in {"pending", "running"}:
+                return
+            tasks = dict(prior.upstream_tasks)
+        client = CompileClient(endpoint=prior.endpoint, account_id=prior.account_id,
+                               user_id=prior.merge_user_id, api_key=api_key)
+        for task_id in tasks:
+            if task_id == "submission_unknown":
+                raise RunConflictError("Compile submission outcome is unknown; verify OpenViking tasks before releasing the reservation")
+            status = await client.task_status(task_id)
+            self._track_task(prior, task_id, str(status.get("status") or "unknown"))
+        self._release_target(prior)
+
+    def submit(self, run: AggregationRun, *, api_key: str, **kwargs: Any) -> None:
+        if not self._run_slots.acquire(blocking=False):
+            raise RunConflictError("Team Memory worker limit reached; retry later")
+        try:
+            self._acquire_target(run)
+            def worker() -> None:
+                try:
+                    self.run(run, api_key=api_key, **kwargs)
+                finally:
+                    self._run_slots.release()
+            threading.Thread(target=worker, name=f"team-memory-{run.task_id}", daemon=True).start()
+        except BaseException:
+            self._run_slots.release()
+            self._release_target(run)
+            raise
+
+    def run(
+        self,
+        run: AggregationRun,
+        *,
+        kinds: Optional[list[str]] = None,
+        full: bool = False,
+        user_ids: Optional[list[str]] = None,
+        api_key: str,
+    ) -> None:
+        """Execute the aggregation synchronously (call inside a worker thread)."""
+        run.status = "running"
+        try:
+            credential = str(api_key or "").strip()
+            if not credential:
+                raise ValueError("OpenViking API key is required")
+            self._acquire_target(run)
+            try:
+                self._run_inner(
+                    run,
+                    kinds=kinds,
+                    full=full,
+                    user_ids=user_ids,
+                    api_key=credential,
+                )
+            finally:
+                self._release_target(run)
+            run.status = "completed"
+            run.stage = "completed"
+        except RunConflictError as exc:
+            run.status = "failed"
+            run.error = str(exc)
+            logger.warning("[aggregation] run rejected: %s", exc)
+        except SourceExpansionError as exc:
+            run.status = "failed"
+            run.error = str(exc)
+            logger.warning("[aggregation] source expansion failed: %s", exc)
+        except Exception as exc:  # noqa: BLE001 - surface failure into run state
+            run.status = "failed"
+            run.error = str(exc)
+            logger.exception("[aggregation] run failed")
+        finally:
+            run.finished_at = time.time()
+            self._save_runs()
+
+    # ---- internals ------------------------------------------------------- #
+
+    def _run_inner(
+        self,
+        run: "AggregationRun",
+        *,
+        kinds,
+        full: bool,
+        user_ids=None,
+        api_key: str,
+    ) -> None:
+        import asyncio
+
+        from team_memory.maintenance.workflow import freeze_skill, maintain
+
+        endpoint = run.endpoint
+        agent_id = str(getattr(self.config, "sharing_viking_agent", "") or "team-skill-evolver")
+        builder = AccountSourceBuilder(
+            endpoint=endpoint,
+            api_key=api_key,
+            account_id=run.account_id,
+            shared_knowledge_prefix=run.target_uri.removeprefix(
+                "viking://resources/"
+            ),
+            max_users_per_batch=self._max_users_per_batch(),
+            account_user_limit=self._account_user_limit(),
+            account_user_page_size=self._account_user_page_size(),
+            excluded_user_ids=frozenset({self._team_user()}),
+        )
+        records = ([] if run.pipeline == "maintain" and run.auth_mode == "trusted"
+                   else asyncio.run(builder.list_account_user_credentials()))
+        credentials = self._resolve_execution_credentials(
+            run=run,
+            records=records,
+            requested_user_ids=user_ids,
+            bootstrap_api_key=api_key,
+        )
+        users = credentials.users
+        run.merge_user_id = credentials.merge_user_id
+        run.stage = "preparing"
+        run.source_user_count = len(users)
+        run.work_root = self._work_root(
+            run.target_uri,
+            credentials.merge_user_id,
+        )
+
+        # Publish at most once, then pin every compile in this run to the same
+        # account-shared Skill package revision.
+        if self._skill_name() == self._skill_name("maintenance"):
+            raise ValueError("Aggregation and maintenance require distinct Skills")
+        team_client = CompileClient(
+            endpoint=endpoint,
+            account_id=run.account_id,
+            user_id=credentials.merge_user_id,
+            api_key=credentials.merge_api_key,
+            agent_id=agent_id,
+            timeout_seconds=self._runtime_timeout(),
+        )
+        team_client.task_callback = lambda task_id, status: self._track_task(run, task_id, status)
+        if run.pipeline != "maintain":
+            run.skill_uri, run.skill_revision = asyncio.run(freeze_skill(self, run, team_client, "aggregation"))
+        if run.pipeline != "aggregate":
+            run.maintenance_skill_uri, run.maintenance_skill_revision = asyncio.run(
+                freeze_skill(self, run, team_client, "maintenance")
+            )
+        skill_fp = run.skill_revision
+        kinds = self._kinds(kinds)
+        state = AggregationState.load(
+            self._state_path(
+                run.account_id,
+                run.target_uri,
+                run.endpoint,
+                run.auth_mode,
+            ),
+            run.account_id,
+        )
+        skill_changed = state.skill_fingerprint != skill_fp
+
+        def finish_maintenance() -> None:
+            if run.pipeline != "aggregate":
+                asyncio.run(maintain(self, run, team_client, state, full=full))
+
+        if run.pipeline == "maintain":
+            finish_maintenance()
+            return
+        run.stage = "staging"
+        self._save_runs()
+
+        # Phase 1 is a deterministic snapshot. It never loads or executes the
+        # aggregation Skill, so Skill changes do not invalidate user staging.
+        staged_roots = asyncio.run(
+            self._run_pipeline(
+                run=run,
+                users=users,
+                user_api_keys=credentials.user_api_keys,
+                target_user_id=credentials.merge_user_id,
+                target_api_key=credentials.merge_api_key,
+                kinds=kinds,
+                endpoint=endpoint,
+                agent_id=agent_id,
+                state=state,
+                force_all=full,
+            )
+        )
+
+        # Persist state (fingerprints + per-user status) for incremental reruns.
+        state.save(skill_fingerprint=skill_fp)
+
+        failed_staging = []
+        for user_id in users:
+            group_key = f"stage:{user_id}"
+            entry = state.groups.get(group_key)
+            if not isinstance(entry, dict) or entry.get("status") != "failed":
+                continue
+            if self._group_attempts_exhausted(
+                state,
+                group_key,
+                None,
+                force_all=full,
+            ):
+                # Staging retried enough times for this user; exclude the
+                # user instead of blocking the merge phase forever.
+                self._append_abandoned_group(
+                    run,
+                    state=state,
+                    group_key=group_key,
+                    target_uri=self._staging_uri(
+                        user_id,
+                        run.target_uri,
+                        work_root=run.work_root,
+                    ),
+                    source_count=int(entry.get("source_count") or 0),
+                    outcome="user excluded from aggregation",
+                )
+                continue
+            failed_staging.append(group_key)
+        if failed_staging:
+            self._append_group(
+                run,
+                GroupResult(
+                    group_key="merge",
+                    kind="(all)",
+                    target_uri=run.target_uri,
+                    source_count=0,
+                    status="failed",
+                    detail=(
+                        "merge not started because staging failed for: "
+                        + ", ".join(failed_staging[:10])
+                    ),
+                ),
+            )
+            raise SourceExpansionError(
+                "staging phase incomplete; rerun will retry failed users"
+            )
+
+        if not staged_roots:
+            self._append_group(
+                run,
+                GroupResult(
+                    group_key="merge", kind="(all)", target_uri=run.target_uri,
+                    source_count=0, status="skipped", detail="no staged sources",
+                ),
+            )
+            finish_maintenance()
+            return
+
+        run.stage = "aggregation"
+        self._save_runs()
+        # Both publication strategies respect OV's full-checkout output limits.
+        if self._incremental_publish():
+            published = asyncio.run(
+                self._publish_incremental(
+                    run=run,
+                    staged_roots=staged_roots,
+                    client=team_client,
+                    skill_uri=run.skill_uri,
+                    skill_revision=run.skill_revision,
+                    state=state,
+                    force_all=full or skill_changed,
+                )
+            )
+            if not published:
+                raise SourceExpansionError(
+                    "incremental publish incomplete; rerun will reuse successful "
+                    "batches and retry failed batches"
+                )
+            finish_maintenance()
+            return
+
+        # Optionally snapshot the current team memory so the final merge treats
+        # it as an authoritative baseline and preserves manual edits instead of
+        # overwriting them. Failure-isolated: on any error we fall back to the
+        # historical overwrite behavior for this run.
+        baseline_uri = ""
+        baseline_fingerprint = ""
+        if self._preserve_manual_edits():
+            baseline_client = DeterministicStagingClient(
+                endpoint=endpoint,
+                account_id=run.account_id,
+                source_user_id=credentials.merge_user_id,
+                source_api_key=credentials.merge_api_key,
+                target_user_id=credentials.merge_user_id,
+                target_api_key=credentials.merge_api_key,
+                agent_id=agent_id,
+                timeout_seconds=self._runtime_timeout(),
+            )
+            baseline_uri = asyncio.run(
+                self._stage_baseline(
+                    run=run,
+                    client=baseline_client,
+                    state=state,
+                    force_all=full,
+                )
+            ) or ""
+            if baseline_uri:
+                baseline_fingerprint = str(
+                    state.groups.get("baseline", {}).get("source_fingerprint") or ""
+                )
+
+        # The pinned Skill is applied only while merging staged snapshots.
+        merge_completed = asyncio.run(
+            self._merge_staged_roots(
+                run=run,
+                staged_roots=staged_roots,
+                client=team_client,
+                skill_uri=run.skill_uri,
+                skill_revision=run.skill_revision,
+                state=state,
+                force_all=full or skill_changed,
+                baseline_uri=baseline_uri or None,
+                baseline_fingerprint=baseline_fingerprint,
+            )
+        )
+        if not merge_completed:
+            raise SourceExpansionError(
+                "merge phase incomplete; rerun will reuse successful groups "
+                "and retry failed groups"
+            )
+        finish_maintenance()
+
+    def _resolve_execution_credentials(
+        self,
+        *,
+        run: "AggregationRun",
+        records: list[AccountUserCredential],
+        requested_user_ids,
+        bootstrap_api_key: str,
+    ) -> _ExecutionCredentials:
+        by_user = {record.user_id: record for record in records if record.user_id}
+        if run.pipeline == "maintain" and run.auth_mode == "trusted":
+            return _ExecutionCredentials([], {}, self._team_user(), bootstrap_api_key)
+        users = sorted(
+            user_id
+            for user_id in by_user
+            if user_id != self._team_user()
+        )
+        if requested_user_ids is not None:
+            allow = {
+                str(user_id).strip()
+                for user_id in requested_user_ids
+                if str(user_id).strip()
+            }
+            users = [user_id for user_id in users if user_id in allow]
+        if run.pipeline == "maintain":
+            users = []
+        if not users and run.pipeline != "maintain":
+            raise SourceExpansionError(
+                f"no aggregatable users under account '{run.account_id}'"
+            )
+
+        if run.auth_mode == "trusted":
+            return _ExecutionCredentials(
+                users=users,
+                user_api_keys={user_id: bootstrap_api_key for user_id in users},
+                merge_user_id=self._team_user(),
+                merge_api_key=bootstrap_api_key,
+            )
+
+        missing = [
+            user_id
+            for user_id in users
+            if not by_user[user_id].api_key
+        ]
+        if missing:
+            preview = ", ".join(missing[:10])
+            suffix = f" (+{len(missing) - 10} more)" if len(missing) > 10 else ""
+            raise SourceExpansionError(
+                "api_key mode requires plaintext per-user API keys from "
+                f"admin list-users; unavailable for: {preview}{suffix}. "
+                "API key hashing may be enabled; key rotation was not attempted."
+            )
+
+        admin_record = next(
+            (
+                record
+                for record in records
+                if record.role == "admin"
+                and record.api_key
+                and hmac.compare_digest(record.api_key, bootstrap_api_key)
+            ),
+            None,
+        )
+        if admin_record is None:
+            raise SourceExpansionError(
+                "admin_key owner could not be identified from list-users; "
+                "plaintext API keys are required and key rotation was not attempted"
+            )
+
+        return _ExecutionCredentials(
+            users=users,
+            user_api_keys={
+                user_id: by_user[user_id].api_key
+                for user_id in users
+            },
+            merge_user_id=admin_record.user_id,
+            merge_api_key=bootstrap_api_key,
+        )
+
+    async def _run_pipeline(
+        self,
+        *,
+        run: "AggregationRun",
+        users: list,
+        user_api_keys: dict[str, str],
+        target_user_id: str,
+        target_api_key: str,
+        kinds: list,
+        endpoint: str,
+        agent_id: str,
+        state: "AggregationState",
+        force_all: bool,
+    ) -> list:
+        """Phase 1: stage users with a fixed-size worker pool."""
+
+        async def stage(user_id: str) -> Optional[str]:
+            return await self._stage_one_user(
+                run=run,
+                user_id=user_id,
+                kinds=kinds,
+                endpoint=endpoint,
+                api_key=user_api_keys[user_id],
+                target_user_id=target_user_id,
+                target_api_key=target_api_key,
+                agent_id=agent_id,
+                state=state,
+                force_all=force_all,
+            )
+
+        results = await self._bounded_map(
+            users,
+            concurrency=self._phase1_concurrency(),
+            operation=stage,
+        )
+        return [r for r in results if r]
+
+    @staticmethod
+    async def _bounded_map(
+        items: list[Any],
+        *,
+        concurrency: int,
+        operation,
+    ) -> list[Any]:
+        """Map an async operation without creating one Task per input item."""
+        if not items:
+            return []
+        worker_count = min(max(1, concurrency), len(items))
+        queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=worker_count * 2)
+        sentinel = object()
+        results: list[Any] = [None] * len(items)
+        errors: list[Exception] = []
+
+        async def worker() -> None:
+            while True:
+                item = await queue.get()
+                try:
+                    if item is sentinel:
+                        return
+                    index, value = item
+                    try:
+                        results[index] = await operation(value)
+                    except Exception as exc:  # noqa: BLE001 - re-raised after draining
+                        errors.append(exc)
+                finally:
+                    queue.task_done()
+
+        workers = [
+            asyncio.create_task(worker(), name=f"aggregation-worker-{index}")
+            for index in range(worker_count)
+        ]
+        try:
+            for index, item in enumerate(items):
+                await queue.put((index, item))
+            for _worker in workers:
+                await queue.put(sentinel)
+            await queue.join()
+            await asyncio.gather(*workers)
+        finally:
+            for worker_task in workers:
+                if not worker_task.done():
+                    worker_task.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+        if errors:
+            raise errors[0]
+        return results
+
+    async def _run_compile(self, client: "CompileClient", **kwargs: Any) -> dict[str, Any]:
+        while not self._compile_slots.acquire(blocking=False):
+            await asyncio.sleep(0.1)
+        try:
+            return await client.run_batch(**kwargs)
+        finally:
+            self._compile_slots.release()
+
+    async def _stage_one_user(
+        self,
+        *,
+        run: "AggregationRun",
+        user_id: str,
+        kinds: list,
+        endpoint: str,
+        api_key: str,
+        target_user_id: str,
+        target_api_key: str,
+        agent_id: str,
+        state: "AggregationState",
+        force_all: bool,
+    ) -> Optional[str]:
+        """Stage a single user's memory into its staging root. Failure-isolated.
+
+        Returns the staging URI when output exists (fresh or reused), else None.
+        """
+        group_key = f"stage:{user_id}"
+        staging_parent = self._staging_uri(
+            user_id,
+            run.target_uri,
+            work_root=run.work_root,
+        )
+        client = DeterministicStagingClient(
+            endpoint=endpoint,
+            account_id=run.account_id,
+            source_user_id=user_id,
+            source_api_key=api_key,
+            target_user_id=target_user_id,
+            target_api_key=target_api_key,
+            agent_id=agent_id,
+            timeout_seconds=self._runtime_timeout(),
+        )
+        try:
+            inventory = await client.inspect(kinds)
+        except StagingError as exc:
+            state.mark_failed(group_key)
+            state.checkpoint(
+                group_key,
+                skill_fingerprint=state.skill_fingerprint,
+            )
+            self._append_group(run, GroupResult(
+                group_key=group_key,
+                kind="(all)",
+                target_uri=staging_parent,
+                source_count=0,
+                status="failed",
+                detail=str(exc)[:500],
+            ))
+            return None
+
+        if not inventory.files:
+            state.mark_stage_ok(
+                group_key,
+                inventory.fingerprint,
+                staging_uri="",
+                source_count=0,
+                total_bytes=0,
+            )
+            state.checkpoint(
+                group_key,
+                skill_fingerprint=state.skill_fingerprint,
+            )
+            self._append_group(run, GroupResult(
+                group_key=group_key, kind="(all)", target_uri=staging_parent,
+                source_count=0, status="skipped",
+                detail="user has no memory in requested kinds",
+            ))
+            return None
+
+        staging_uri = self._staging_uri(
+            user_id,
+            run.target_uri,
+            source_fingerprint=inventory.fingerprint,
+            work_root=run.work_root,
+        )
+        try:
+            reusable = (
+                not state.needs_restage(
+                    group_key,
+                    inventory.fingerprint,
+                    staging_uri=staging_uri,
+                    full=force_all,
+                )
+                and await client.snapshot_exists(staging_uri)
+            )
+        except StagingError as exc:
+            state.mark_failed(group_key)
+            state.checkpoint(
+                group_key,
+                skill_fingerprint=state.skill_fingerprint,
+            )
+            self._append_group(run, GroupResult(
+                group_key=group_key,
+                kind="(all)",
+                target_uri=staging_uri,
+                source_count=len(inventory.files),
+                status="failed",
+                detail=str(exc)[:500],
+            ))
+            return None
+        if reusable:
+            prior = state.groups.get(group_key) or {}
+            source_count = int(prior.get("source_count") or len(inventory.files))
+            self._append_group(run, GroupResult(
+                group_key=group_key, kind="(all)", target_uri=staging_uri,
+                source_count=source_count,
+                status="skipped",
+                detail="unchanged (reused deterministic snapshot)",
+            ))
+            return staging_uri
+
+        try:
+            snapshot = await client.publish(
+                inventory,
+                staging_uri=staging_uri,
+                run_id=run.task_id,
+            )
+        except StagingError as exc:
+            state.mark_failed(group_key)
+            state.checkpoint(
+                group_key,
+                skill_fingerprint=state.skill_fingerprint,
+            )
+            self._append_group(run, GroupResult(
+                group_key=group_key, kind="(all)", target_uri=staging_uri,
+                source_count=len(inventory.files),
+                status="failed",
+                detail=str(exc)[:500],
+            ))
+            return None
+
+        state.mark_stage_ok(
+            group_key,
+            inventory.fingerprint,
+            staging_uri=staging_uri,
+            source_count=snapshot.source_count,
+            total_bytes=snapshot.total_bytes,
+        )
+        state.checkpoint(
+            group_key,
+            skill_fingerprint=state.skill_fingerprint,
+        )
+        status = "skipped" if snapshot.reused else "ok"
+        detail = (
+            "deterministic snapshot already exists"
+            if snapshot.reused
+            else (
+                f"copied {snapshot.source_count} source files into "
+                f"{snapshot.chunk_count} JSONL chunks"
+            )
+        )
+        self._append_group(run, GroupResult(
+            group_key=group_key, kind="(all)", target_uri=staging_uri,
+            source_count=snapshot.source_count,
+            status=status,
+            detail=detail,
+        ))
+        return staging_uri
+
+    def _append_group(self, run: "AggregationRun", group: "GroupResult") -> None:
+        with self._lock:
+            run.group_total += 1
+            run.group_counts[group.status] = run.group_counts.get(group.status, 0) + 1
+            if len(run.groups) < self._run_detail_limit():
+                run.groups.append(group)
+                return
+            run.groups_truncated = True
+            if group.status == "failed":
+                for index, existing in enumerate(run.groups):
+                    if existing.status != "failed":
+                        run.groups[index] = group
+                        break
+
+    def _append_abandoned_group(
+        self,
+        run: "AggregationRun",
+        *,
+        state: "AggregationState",
+        group_key: str,
+        target_uri: str,
+        source_count: int,
+        outcome: str,
+    ) -> None:
+        """Record a group whose retry budget is exhausted.
+
+        Abandoned groups are excluded from the merge tree so the run can
+        still complete; the entry keeps them visible in the status API.
+        """
+        self._append_group(run, GroupResult(
+            group_key=group_key, kind="(all)", target_uri=target_uri,
+            source_count=source_count, status="failed",
+            detail=(
+                f"abandoned after {state.attempt_count(group_key)} failed "
+                f"attempts; {outcome}"
+            ),
+        ))
+
+    def _group_attempts_exhausted(
+        self,
+        state: "AggregationState",
+        group_key: str,
+        source_fingerprint: "str | None",
+        *,
+        force_all: bool,
+    ) -> bool:
+        if force_all:
+            # A full rerun explicitly asks to retry everything once more.
+            return False
+        return state.attempts_exhausted(
+            group_key,
+            source_fingerprint,
+            max_attempts=self._merge_group_max_attempts(),
+        )
+
+    async def _stage_baseline(
+        self,
+        *,
+        run: "AggregationRun",
+        client: "DeterministicStagingClient",
+        state: "AggregationState",
+        force_all: bool,
+    ) -> Optional[str]:
+        """Snapshot the current team-memory target as an authoritative baseline.
+
+        Returns the baseline staging URI (an ordinary snapshot root that can be
+        fed to the final compile) or None when the target does not exist yet or
+        has no content. Failure-isolated: a baseline error never aborts the run,
+        it just falls back to overwrite behavior for this run.
+        """
+        group_key = "baseline"
+        baseline_parent = f"{run.work_root}/_baseline"
+        try:
+            inventory = await client.inspect(
+                (),
+                source_root=run.target_uri,
+                include_all_kinds=True,
+            )
+        except StagingError as exc:
+            self._append_group(run, GroupResult(
+                group_key=group_key, kind="(all)", target_uri=run.target_uri,
+                source_count=0, status="failed",
+                detail=f"baseline inspect failed; overwriting instead: {exc}"[:500],
+            ))
+            return None
+        if not inventory.files:
+            # First run (or empty target): nothing to preserve.
+            return None
+
+        baseline_uri = f"{baseline_parent}/{inventory.fingerprint.removeprefix('sha256:')}"
+        try:
+            reusable = (
+                not force_all
+                and await client.snapshot_exists(baseline_uri)
+            )
+            if not reusable:
+                await client.publish(
+                    inventory,
+                    staging_uri=baseline_uri,
+                    run_id=run.task_id,
+                )
+        except StagingError as exc:
+            self._append_group(run, GroupResult(
+                group_key=group_key, kind="(all)", target_uri=run.target_uri,
+                source_count=len(inventory.files), status="failed",
+                detail=f"baseline snapshot failed; overwriting instead: {exc}"[:500],
+            ))
+            return None
+
+        state.groups[group_key] = {
+            "status": "ok",
+            "source_fingerprint": inventory.fingerprint,
+            "staging_uri": baseline_uri,
+        }
+        self._append_group(run, GroupResult(
+            group_key=group_key, kind="(all)", target_uri=baseline_uri,
+            source_count=len(inventory.files), status="ok",
+            detail="snapshot of current team memory kept as merge baseline",
+        ))
+        return baseline_uri
+
+    async def _merge_staged_roots(
+        self,
+        *,
+        run: "AggregationRun",
+        staged_roots: list[str],
+        client: "CompileClient",
+        skill_uri: str,
+        skill_revision: str,
+        state: "AggregationState",
+        force_all: bool = False,
+        baseline_uri: Optional[str] = None,
+        baseline_fingerprint: str = "",
+    ) -> bool:
+        """Publish one root for small runs or stable partitions for large runs."""
+        if len(staged_roots) <= self._partition_threshold():
+            previous_mode = str(state.metadata.get("publish_mode") or "")
+            run.publish_mode = "single"
+            run.partition_count = 1
+            run.estimated_merge_tasks = self._tree_compile_task_count(
+                len(staged_roots)
+            )
+            completed = await self._tree_reduce_merge(
+                run=run,
+                staged_roots=staged_roots,
+                client=client,
+                skill_uri=skill_uri,
+                skill_revision=skill_revision,
+                force_all=force_all,
+                state=state,
+                compact_state=False,
+                baseline_uri=baseline_uri,
+                baseline_fingerprint=baseline_fingerprint,
+            )
+            if not completed:
+                state.save(skill_fingerprint=state.skill_fingerprint)
+                return False
+            if previous_mode in {"partitioned", "semantic_partition_reduce"}:
+                deleted = await client.delete_uri(
+                    uri=(
+                        f"{run.work_root or self._work_root(run.target_uri)}"
+                        "/_merge/partitions"
+                    )
+                )
+                if not deleted.get("ok"):
+                    return False
+            if previous_mode == "partitioned":
+                deleted = await client.delete_uri(
+                    uri=f"{run.target_uri}/partitions"
+                )
+                if not deleted.get("ok"):
+                    return False
+            state.metadata["publish_mode"] = "single"
+            state.metadata.pop("active_partitions", None)
+            state.metadata.pop("partition_manifest_fingerprint", None)
+            state.save(skill_fingerprint=state.skill_fingerprint)
+            return True
+
+        partitions = self._partition_staged_roots(staged_roots)
+        run.publish_mode = "semantic"
+        run.partition_count = len(partitions)
+        run.estimated_merge_tasks = sum(
+            self._tree_compile_task_count(len(roots))
+            for roots in partitions.values()
+        ) + self._tree_compile_task_count(len(partitions))
+        width = max(2, len(f"{self._partition_count() - 1:x}"))
+        partition_plans = [
+            (f"{partition:0{width}x}", roots)
+            for partition, roots in partitions.items()
+        ]
+
+        async def publish_partition(
+            plan: tuple[str, list[str]],
+        ) -> tuple[str, bool]:
+            label, roots = plan
+            completed = await self._tree_reduce_merge(
+                run=run,
+                staged_roots=roots,
+                client=client,
+                skill_uri=skill_uri,
+                skill_revision=skill_revision,
+                force_all=force_all,
+                state=state,
+                target_root=(
+                    f"{run.work_root or self._work_root(run.target_uri)}"
+                    f"/_merge/partitions/{label}/semantic"
+                ),
+                merge_work_root=(
+                    f"{run.work_root or self._work_root(run.target_uri)}"
+                    f"/_merge/partitions/{label}/tree"
+                ),
+                group_prefix=f"merge:partition:{label}",
+                compact_state=False,
+            )
+            return label, completed
+
+        outcomes = await self._bounded_map(
+            partition_plans,
+            concurrency=self._merge_concurrency(),
+            operation=publish_partition,
+        )
+        if not all(completed for _label, completed in outcomes):
+            state.save(skill_fingerprint=state.skill_fingerprint)
+            return False
+
+        active_labels = [label for label, _completed in outcomes]
+        previous_labels = {
+            str(label)
+            for label in state.metadata.get("active_partitions", [])
+        }
+        for label in sorted(previous_labels - set(active_labels)):
+            deleted = await client.delete_uri(
+                uri=(
+                    f"{run.work_root or self._work_root(run.target_uri)}"
+                    f"/_merge/partitions/{label}"
+                )
+            )
+            if not deleted.get("ok"):
+                return False
+        partition_roots = [
+            (
+                f"{run.work_root or self._work_root(run.target_uri)}"
+                f"/_merge/partitions/{label}/semantic"
+            )
+            for label in active_labels
+        ]
+        partition_fingerprints = {
+            root: str(
+                state.groups.get(
+                    f"merge:partition:{label}",
+                    {},
+                ).get("source_fingerprint") or ""
+            )
+            for label, root in zip(active_labels, partition_roots)
+        }
+        completed = await self._tree_reduce_merge(
+            run=run,
+            staged_roots=partition_roots,
+            client=client,
+            skill_uri=skill_uri,
+            skill_revision=skill_revision,
+            force_all=force_all,
+            state=state,
+            target_root=run.target_uri,
+            merge_work_root=(
+                f"{run.work_root or self._work_root(run.target_uri)}"
+                "/_merge/final"
+            ),
+            group_prefix="merge",
+            compact_state=False,
+            source_fingerprints=partition_fingerprints,
+            baseline_uri=baseline_uri,
+            baseline_fingerprint=baseline_fingerprint,
+        )
+        if not completed:
+            state.save(skill_fingerprint=state.skill_fingerprint)
+            return False
+
+        if state.metadata.get("publish_mode") == "partitioned":
+            deleted = await client.delete_uri(
+                uri=f"{run.target_uri}/partitions"
+            )
+            if not deleted.get("ok"):
+                return False
+        state.metadata.update(
+            {
+                "publish_mode": "semantic_partition_reduce",
+                "active_partitions": active_labels,
+            }
+        )
+        state.metadata.pop("partition_manifest_fingerprint", None)
+        state.save(skill_fingerprint=state.skill_fingerprint)
+        return True
+
+    @staticmethod
+    def _is_output_limit_error(res: dict[str, Any]) -> bool:
+        """Heuristic: did a compile fail because it produced too many pages?"""
+        text = f"{res.get('stderr') or ''}\n{res.get('stdout') or ''}".lower()
+        needles = (
+            "output_pages",
+            "output_files",
+            "page limit",
+            "page_count",
+            "exceeds the page",
+            "too many pages",
+            "output ceiling",
+            "128",
+        )
+        return any(needle in text for needle in needles)
+
+    async def _publish_incremental(
+        self,
+        *,
+        run: "AggregationRun",
+        staged_roots: list[str],
+        client: "CompileClient",
+        skill_uri: str,
+        skill_revision: str,
+        state: "AggregationState",
+        force_all: bool = False,
+    ) -> bool:
+        """Publish staged snapshots onto the target in sequential batches.
+
+        Each batch is one compile with ``to`` = the real knowledge base and
+        ``from`` = that batch's staged snapshots. ov compile reads the existing
+        target (target-checkout) and writes with upsert, so batches accumulate
+        onto the same tree and manual edits are preserved. Batches run strictly
+        in order so a later batch can see (and de-duplicate against) pages an
+        earlier batch just wrote. A batch whose inputs + Skill revision are
+        unchanged is skipped; a batch that trips the per-compile 128 ceiling is
+        auto-bisected and retried in halves.
+        """
+        run.publish_mode = "incremental"
+        ordered = sorted(staged_roots)
+        batch_size = self._publish_batch_users()
+        batches = [
+            ordered[i : i + batch_size]
+            for i in range(0, len(ordered), batch_size)
+        ]
+        run.partition_count = len(batches)
+        run.estimated_merge_tasks = len(batches)
+
+        staging_fingerprints = self._staging_source_fingerprints(
+            run=run,
+            state=state,
+            staged_roots=ordered,
+        )
+
+        for index, batch in enumerate(batches):
+            group_key = f"publish:b{index}"
+            fingerprinted = [
+                (uri, staging_fingerprints.get(uri, f"uncached:{secrets.token_hex(16)}"))
+                for uri in batch
+            ]
+            batch_fingerprint = self._merge_input_fingerprint(
+                fingerprinted,
+                skill_revision=skill_revision,
+            )
+            if self._group_attempts_exhausted(
+                state,
+                group_key,
+                batch_fingerprint,
+                force_all=force_all,
+            ):
+                # Retry budget exhausted in earlier runs: skip this batch so
+                # the remaining batches can still be published.
+                self._append_abandoned_group(
+                    run,
+                    state=state,
+                    group_key=group_key,
+                    target_uri=run.target_uri,
+                    source_count=len(batch),
+                    outcome="batch excluded from publish",
+                )
+                continue
+            if not state.needs_recompile(
+                group_key,
+                batch_fingerprint,
+                current_skill_fingerprint=state.skill_fingerprint,
+                full=force_all,
+            ):
+                self._append_group(run, GroupResult(
+                    group_key=group_key, kind="(all)", target_uri=run.target_uri,
+                    source_count=len(batch), status="skipped",
+                    detail="unchanged (reused incremental batch)",
+                ))
+                continue
+
+            ok = await self._compile_batch_onto_target(
+                run=run,
+                batch=batch,
+                client=client,
+                skill_uri=skill_uri,
+                skill_revision=skill_revision,
+                group_key=group_key,
+            )
+            if not ok:
+                state.mark_failed(group_key, batch_fingerprint)
+                state.checkpoint(group_key, skill_fingerprint=state.skill_fingerprint)
+                state.save(skill_fingerprint=state.skill_fingerprint)
+                if self._group_attempts_exhausted(
+                    state,
+                    group_key,
+                    batch_fingerprint,
+                    force_all=force_all,
+                ):
+                    # This failure consumed the last retry budget of the
+                    # batch; skip it and keep publishing the remaining ones.
+                    self._append_abandoned_group(
+                        run,
+                        state=state,
+                        group_key=group_key,
+                        target_uri=run.target_uri,
+                        source_count=len(batch),
+                        outcome="batch excluded from publish",
+                    )
+                    continue
+                return False
+            state.mark_ok(group_key, batch_fingerprint)
+            state.checkpoint(group_key, skill_fingerprint=state.skill_fingerprint)
+
+        state.save(skill_fingerprint=state.skill_fingerprint)
+        return True
+
+    async def _compile_batch_onto_target(
+        self,
+        *,
+        run: "AggregationRun",
+        batch: list[str],
+        client: "CompileClient",
+        skill_uri: str,
+        skill_revision: str,
+        group_key: str,
+    ) -> bool:
+        """Compile one batch onto the target, auto-bisecting on a 128 overflow."""
+        if not batch:
+            return True
+        res = await self._run_compile(
+            client,
+            source_uris=batch,
+            target_uri=run.target_uri,
+            skill_uri=skill_uri,
+            skill_revision=skill_revision,
+            reason=(
+                "Incremental merge of staged memory onto the existing team "
+                f"memory. {_SNAPSHOT_MERGE_INSTRUCTION}"
+            ),
+            runtime_timeout_seconds=self._runtime_timeout(),
+            last_compile_time=run.last_compile_time or None,
+        )
+        if res.get("ok"):
+            self._append_group(run, GroupResult(
+                group_key=group_key, kind="(all)", target_uri=run.target_uri,
+                source_count=len(batch), status="ok",
+                detail=f"merged {len(batch)} sources onto target",
+            ))
+            return True
+
+        # Bisect on a page-limit overflow: a batch produced > 128 pages, so split
+        # it and retry each half sequentially (order preserved).
+        if len(batch) > 1 and self._is_output_limit_error(res):
+            mid = len(batch) // 2
+            left_ok = await self._compile_batch_onto_target(
+                run=run, batch=batch[:mid], client=client,
+                skill_uri=skill_uri, skill_revision=skill_revision,
+                group_key=f"{group_key}.l",
+            )
+            if not left_ok:
+                return False
+            return await self._compile_batch_onto_target(
+                run=run, batch=batch[mid:], client=client,
+                skill_uri=skill_uri, skill_revision=skill_revision,
+                group_key=f"{group_key}.r",
+            )
+
+        detail = (res.get("stderr") or res.get("stdout") or "")[:500]
+        self._append_group(run, GroupResult(
+            group_key=group_key, kind="(all)", target_uri=run.target_uri,
+            source_count=len(batch), status="failed", detail=detail,
+        ))
+        return False
+
+    async def _tree_reduce_merge(
+        self,
+        *,
+        run: "AggregationRun",
+        staged_roots: list,
+        client: "CompileClient",
+        skill_uri: str,
+        skill_revision: str,
+        force_all: bool = False,
+        state: Optional["AggregationState"] = None,
+        target_root: Optional[str] = None,
+        merge_work_root: Optional[str] = None,
+        group_prefix: str = "merge",
+        compact_state: bool = True,
+        source_fingerprints: Optional[dict[str, str]] = None,
+        baseline_uri: Optional[str] = None,
+        baseline_fingerprint: str = "",
+    ) -> bool:
+        """Merge staging roots into the final root via bounded-fan-in tree reduce.
+
+        Level 0: staging roots. Each round groups <= fan_in sources into one
+        intermediate product. The final round writes the single shared-knowledge
+        root. This keeps every compile <= 15 sources (16-source ceiling) no
+        matter how many users participate. Successful intermediate products are
+        checkpointed and reused when their inputs and Skill revision are unchanged.
+        """
+        fan_in = self._merge_fan_in()
+        target_root = target_root or run.target_uri
+        merge_work_root = (
+            merge_work_root
+            or f"{run.work_root or self._work_root(run.target_uri)}/_merge"
+        )
+        state = state or AggregationState.load(
+            self._state_path(
+                run.account_id,
+                run.target_uri,
+                run.endpoint,
+                run.auth_mode,
+            ),
+            run.account_id,
+        )
+        staging_fingerprints = source_fingerprints or (
+            self._staging_source_fingerprints(
+                run=run,
+                state=state,
+                staged_roots=staged_roots,
+            )
+        )
+        current = [
+            (
+                uri,
+                staging_fingerprints.get(
+                    uri,
+                    f"uncached:{secrets.token_hex(16)}",
+                ),
+            )
+            for uri in staged_roots
+        ]
+        level = 0
+        # Reduce until a single round can produce the final root.
+        while len(current) > fan_in:
+            groups = [current[i : i + fan_in] for i in range(0, len(current), fan_in)]
+            next_by_index: dict[int, tuple[str, str]] = {}
+            pending: list[tuple[int, list[tuple[str, str]], str, str, str]] = []
+            abandoned: set[int] = set()
+            for gi, group in enumerate(groups):
+                inter_uri = f"{merge_work_root}/L{level}/g{gi}"
+                group_key = f"{group_prefix}:L{level}:g{gi}"
+                source_fingerprint = self._merge_input_fingerprint(
+                    group,
+                    skill_revision=skill_revision,
+                )
+                if self._group_attempts_exhausted(
+                    state,
+                    group_key,
+                    source_fingerprint,
+                    force_all=force_all,
+                ):
+                    # Retry budget exhausted in earlier runs: exclude this
+                    # group from the tree so the run can still complete.
+                    abandoned.add(gi)
+                    self._append_abandoned_group(
+                        run,
+                        state=state,
+                        group_key=group_key,
+                        target_uri=inter_uri,
+                        source_count=len(group),
+                        outcome="excluded from merge tree",
+                    )
+                    continue
+                if not state.needs_recompile(
+                    group_key,
+                    source_fingerprint,
+                    current_skill_fingerprint=state.skill_fingerprint,
+                    full=force_all,
+                ):
+                    next_by_index[gi] = (inter_uri, source_fingerprint)
+                    self._append_group(run, GroupResult(
+                        group_key=group_key, kind="(all)", target_uri=inter_uri,
+                        source_count=len(group), status="skipped",
+                        detail="unchanged (reused intermediate merge)",
+                    ))
+                    continue
+                pending.append(
+                    (gi, group, inter_uri, group_key, source_fingerprint)
+                )
+
+            async def merge_group(
+                plan: tuple[int, list[tuple[str, str]], str, str, str],
+            ) -> tuple[int, Optional[tuple[str, str]]]:
+                gi, group, inter_uri, group_key, source_fingerprint = plan
+                res = await self._run_compile(
+                    client,
+                    source_uris=[uri for uri, _fingerprint in group],
+                    target_uri=inter_uri,
+                    skill_uri=skill_uri,
+                    skill_revision=skill_revision,
+                    reason=(
+                        f"Tree-reduce merge L{level} group {gi} "
+                        f"({len(group)} sources). {_SNAPSHOT_MERGE_INSTRUCTION}"
+                    ),
+                    runtime_timeout_seconds=self._runtime_timeout(),
+                    last_compile_time=run.last_compile_time or None,
+                )
+                if res.get("ok"):
+                    state.mark_ok(group_key, source_fingerprint)
+                    state.checkpoint(
+                        group_key,
+                        skill_fingerprint=state.skill_fingerprint,
+                    )
+                    self._append_group(run, GroupResult(
+                        group_key=group_key, kind="(all)", target_uri=inter_uri,
+                        source_count=len(group), status="ok", detail="intermediate merge",
+                    ))
+                    return gi, (inter_uri, source_fingerprint)
+                else:
+                    state.mark_failed(group_key, source_fingerprint)
+                    state.checkpoint(
+                        group_key,
+                        skill_fingerprint=state.skill_fingerprint,
+                    )
+                    detail = (res.get("stderr") or res.get("stdout") or "")[:400]
+                    self._append_group(run, GroupResult(
+                        group_key=group_key, kind="(all)", target_uri=inter_uri,
+                        source_count=len(group), status="failed", detail=detail,
+                    ))
+                    return gi, None
+
+            outcomes = await self._bounded_map(
+                pending,
+                concurrency=self._merge_concurrency(),
+                operation=merge_group,
+            )
+            plan_by_index = {plan[0]: plan for plan in pending}
+            for gi, outcome in outcomes:
+                if outcome is not None:
+                    next_by_index[gi] = outcome
+                    continue
+                plan = plan_by_index[gi]
+                if self._group_attempts_exhausted(
+                    state,
+                    plan[3],
+                    plan[4],
+                    force_all=force_all,
+                ):
+                    # This failure consumed the last retry budget of the
+                    # group; abandon it now instead of failing the run so
+                    # the remaining groups can still produce output.
+                    abandoned.add(gi)
+                    self._append_abandoned_group(
+                        run,
+                        state=state,
+                        group_key=plan[3],
+                        target_uri=plan[2],
+                        source_count=len(plan[1]),
+                        outcome="excluded from merge tree",
+                    )
+            if len(next_by_index) + len(abandoned) != len(groups):
+                self._append_group(run, GroupResult(
+                    group_key=f"{group_prefix}:L{level}",
+                    kind="(all)", target_uri=target_root,
+                    source_count=0,
+                    status="failed",
+                    detail="intermediate merge incomplete; final merge not started",
+                ))
+                return False
+            current = [
+                next_by_index[index]
+                for index in range(len(groups))
+                if index not in abandoned
+            ]
+            level += 1
+
+        # Final round: <= fan_in sources into the team-memory root. When a
+        # baseline snapshot of the existing target is supplied, prepend it as an
+        # authoritative source so the compile merges onto current team memory
+        # (preserving manual edits) instead of overwriting it. The baseline adds
+        # at most one source, keeping the final compile within the 16 ceiling.
+        if not current:
+            # Every input of this tree was abandoned; there is nothing left
+            # to publish, so fail with an explicit reason instead of running
+            # an empty final compile.
+            self._append_group(run, GroupResult(
+                group_key=group_prefix, kind="(all)", target_uri=target_root,
+                source_count=0, status="failed",
+                detail="all merge inputs were abandoned; nothing to publish",
+            ))
+            return False
+        if baseline_uri:
+            current = [(baseline_uri, baseline_fingerprint or "baseline"), *current]
+        final_fingerprint = self._merge_input_fingerprint(
+            current,
+            skill_revision=skill_revision,
+        )
+        if self._group_attempts_exhausted(
+            state,
+            group_prefix,
+            final_fingerprint,
+            force_all=force_all,
+        ):
+            # The final merge itself exhausted its retry budget in earlier
+            # runs. Fail fast (without another timeout-length compile) with
+            # an explicit reason; manual intervention is required.
+            self._append_abandoned_group(
+                run,
+                state=state,
+                group_key=group_prefix,
+                target_uri=target_root,
+                source_count=len(current),
+                outcome="no output written; manual intervention required",
+            )
+            return False
+        if not state.needs_recompile(
+            group_prefix,
+            final_fingerprint,
+            current_skill_fingerprint=state.skill_fingerprint,
+            full=force_all,
+        ):
+            self._append_group(run, GroupResult(
+                group_key=group_prefix, kind="(all)", target_uri=target_root,
+                source_count=len(current), status="skipped",
+                detail="unchanged (reused final merge)",
+            ))
+            return True
+        res = await self._run_compile(
+            client,
+            source_uris=[uri for uri, _fingerprint in current],
+            target_uri=target_root,
+            skill_uri=skill_uri,
+            skill_revision=skill_revision,
+            reason=(
+                "Final merge of staged/intermediate memory into the team shared "
+                f"memory. {_SNAPSHOT_MERGE_INSTRUCTION}"
+            ),
+            runtime_timeout_seconds=self._runtime_timeout(),
+            last_compile_time=run.last_compile_time or None,
+        )
+        if res.get("ok"):
+            state.mark_ok(group_prefix, final_fingerprint)
+            state.checkpoint(group_prefix, skill_fingerprint=state.skill_fingerprint)
+            if compact_state:
+                state.save(skill_fingerprint=state.skill_fingerprint)
+            self._append_group(run, GroupResult(
+                group_key=group_prefix, kind="(all)", target_uri=target_root,
+                source_count=len(current), status="ok",
+                detail=f"merged (levels={level + 1})" if level else "merged",
+            ))
+            return True
+        else:
+            state.mark_failed(group_prefix, final_fingerprint)
+            state.checkpoint(group_prefix, skill_fingerprint=state.skill_fingerprint)
+            if compact_state:
+                state.save(skill_fingerprint=state.skill_fingerprint)
+            detail = (res.get("stderr") or res.get("stdout") or "")[:500]
+            self._append_group(run, GroupResult(
+                group_key=group_prefix, kind="(all)", target_uri=target_root,
+                source_count=len(current), status="failed", detail=detail,
+            ))
+            return False

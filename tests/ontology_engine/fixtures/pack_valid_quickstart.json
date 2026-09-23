@@ -1,0 +1,92 @@
+{
+  "schema_version": "1.0",
+  "pack_id": "procurement_risk",
+  "name": "采购风险领域包",
+  "version": "1.0.0",
+  "domain": "procurement-risk",
+  "description": "约束采购申请中的供应商风险识别与摘要交付。",
+  "config": {
+    "injection_enabled": true,
+    "max_concepts": 8,
+    "token_budget": 1600,
+    "committee_size": 3,
+    "repeated_denial_threshold": 2,
+    "circuit_breaker_threshold": 5,
+    "allow_unresolved_tools": false
+  },
+  "concepts": [
+    {
+      "id": "ProcurementRequest",
+      "name": "采购申请",
+      "aliases": ["采购单"],
+      "definition": "包含采购标的、预算、申请部门和候选供应商的业务申请。",
+      "tags": ["采购"],
+      "risk": "low"
+    },
+    {
+      "id": "SupplierRisk",
+      "name": "供应商风险",
+      "aliases": ["供应风险"],
+      "definition": "可能影响供应商履约、合规或持续经营能力的风险。",
+      "closed_values": ["低", "中", "高", "待核验"],
+      "tags": ["风险"],
+      "risk": "medium"
+    }
+  ],
+  "relations": [
+    {
+      "id": "request_has_supplier_risk",
+      "subject": "ProcurementRequest",
+      "predicate": "包含",
+      "object": "SupplierRisk",
+      "description": "采购申请可以关联一个或多个供应商风险。",
+      "min_cardinality": 0,
+      "forbidden": false
+    }
+  ],
+  "constraints": [
+    {
+      "id": "procurement_summary_complete",
+      "name": "采购风险摘要必须完整",
+      "target": {
+        "kind": "output",
+        "output_tag": "procurement_risk_summary"
+      },
+      "schema": {
+        "type": "string",
+        "minLength": 120
+      },
+      "concept_id": "SupplierRisk",
+      "requires_citations": false,
+      "prerequisite_tools": [],
+      "mode": "enforce",
+      "risk": "medium",
+      "message": "采购风险摘要过短，无法支持业务复核。",
+      "suggestion": "补充风险事实、影响、未知项和建议的核验动作。",
+      "enabled": true
+    }
+  ],
+  "workflows": [
+    {
+      "id": "procurement_risk_review",
+      "name": "采购风险评审",
+      "triggers": [
+        "采购风险",
+        "供应商风险",
+        "procurement risk",
+        "supplier risk"
+      ],
+      "asset_triggers": [
+        {
+          "kind": "skill",
+          "tags_any": ["ontology:SupplierRisk"]
+        }
+      ],
+      "required_tools": [],
+      "forbidden_tools": [],
+      "output_tags": ["procurement_risk_summary"],
+      "review_level": "checkpoint",
+      "risk": "medium"
+    }
+  ]
+}

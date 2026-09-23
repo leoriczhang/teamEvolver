@@ -1,0 +1,3 @@
+# Versions used for this offline reference validation, not a production dependency lock.
+jsonschema[format]==4.26.0
+PyYAML==6.0.3

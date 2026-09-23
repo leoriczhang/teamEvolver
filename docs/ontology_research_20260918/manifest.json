@@ -1,0 +1,135 @@
+{
+  "created_at": "2026-09-18T07:49:42.293401+00:00",
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 2728,
+      "sha256": "8d1998399b3b34ff76529048b9f04e29490ede96ba652cb16b386c98303f0cd5"
+    },
+    {
+      "path": "contracts/candidate_bundle.schema.json",
+      "bytes": 7450,
+      "sha256": "0e8bb118c44e0ed7d5f09b774ac19df07c56739338434dcade0e7097d854b928"
+    },
+    {
+      "path": "contracts/context_packet.schema.json",
+      "bytes": 3595,
+      "sha256": "0342308a94ac39617190767ad4f582645ab7999461e5d138fb28f65dae101da5"
+    },
+    {
+      "path": "contracts/openapi-proposed.yaml",
+      "bytes": 6887,
+      "sha256": "141970e1dd71b40e3621dfca2d841b4ee695b605e44780807b7bef0e37759760"
+    },
+    {
+      "path": "contracts/publication_grant.schema.json",
+      "bytes": 1994,
+      "sha256": "0d4969fb6a666603c6c221dbdd0477adfd17126a5ec519797b071a18f007accf"
+    },
+    {
+      "path": "contracts/typed_query.schema.json",
+      "bytes": 2018,
+      "sha256": "e63e3a1feb276f5989b4baf1f9353e3815d7a49a7c66097708e65dd6de70d0b2"
+    },
+    {
+      "path": "docs/23_Ontology论文开源生态与选型_20260918.md",
+      "bytes": 13188,
+      "sha256": "72e7b6b13ec42f25d9d070d599cfbef4f2fa062eaded6e3c9cfcc6cec636ea2c"
+    },
+    {
+      "path": "docs/24_飞虎材料精读与顺丰领域本体蓝图_20260918.md",
+      "bytes": 14369,
+      "sha256": "80b3b02b6860ffc6ba46f755424b8dc8186e2ebe1253057f5f7c227aa6240d2e"
+    },
+    {
+      "path": "docs/25_顺丰Ontology完整实施方案_TE入口_OV编译存储服务_V3_20260918.md",
+      "bytes": 33749,
+      "sha256": "17ce637a79b403472365fd9a783c0993f7847440f98ee68a9fac821154e9e4f1"
+    },
+    {
+      "path": "docs/26_Ontology接口契约_增量发布与验收_20260918.md",
+      "bytes": 16720,
+      "sha256": "d7d9ea4fcb176e6549c9c3ce8ab6ca783ef9d0db2b9a299affbf087337f1bed7"
+    },
+    {
+      "path": "examples/candidate_bundle.json",
+      "bytes": 1704,
+      "sha256": "d3ca009015cee60ca5484cf9efd71e69e82ac4176f14ef8f0cf29a2e2a6ecb3d"
+    },
+    {
+      "path": "examples/context_packet.json",
+      "bytes": 502,
+      "sha256": "edac50690d4d145edebce151350e6f2c3f788907f0f563bacd6acaf08b294161"
+    },
+    {
+      "path": "examples/native_compile_request.json",
+      "bytes": 358,
+      "sha256": "654ce82650fd69a9d5417b41c6a6ac4bcaa2741021442f1ead50ba757830fd69"
+    },
+    {
+      "path": "examples/publication_grant.json",
+      "bytes": 553,
+      "sha256": "a338b1217e3383e4c494faa5ca145c54f2b18ebad81136da00b5b2c5af9a2868"
+    },
+    {
+      "path": "examples/typed_query.json",
+      "bytes": 405,
+      "sha256": "bcd79a9bc267e90b37cd51025308e8c00bec0ac5b7c1c63e5e18964557649947"
+    },
+    {
+      "path": "reference/build_contracts.py",
+      "bytes": 11610,
+      "sha256": "01b3757d7c67c41f7f7614a06c13f3404ce1722996e7dd4ca2771876102cf6af"
+    },
+    {
+      "path": "reference/run_tests.py",
+      "bytes": 1926,
+      "sha256": "6c29f17cf9004499c69c981adea121ba6eecff1a99fe8470473f59512e4ca578"
+    },
+    {
+      "path": "reference/test_contracts.py",
+      "bytes": 7240,
+      "sha256": "e3303429694d78e6236f9c825c76447de373630eecdd3c09f793c1a9167f960e"
+    },
+    {
+      "path": "reference/validator.py",
+      "bytes": 7834,
+      "sha256": "e194618ffe3b3c38daa87dccfb9dc51044665979a96ff7317baf7a9b11dd838d"
+    },
+    {
+      "path": "requirements.txt",
+      "bytes": 122,
+      "sha256": "8c8820a06eb37c6ee014c2900e2f9d555205c22cc023ebaead044be190c33d44"
+    },
+    {
+      "path": "results/contract_test_log.txt",
+      "bytes": 3989,
+      "sha256": "668af5c280538c973a49dc814cff24b7baea5a6c5b4d6396ec8418d982c63bba"
+    },
+    {
+      "path": "results/contract_test_results.json",
+      "bytes": 5064,
+      "sha256": "7f573a84020eee43a89b51f8824bf503252fde32fa5b8d56ac3dcc5abb9804af"
+    },
+    {
+      "path": "results/personal_kb_receipts.json",
+      "bytes": 2425,
+      "sha256": "7f7c19154df45de97c776e41a27d7ee9e9b6460db9d10b7d9f68f9731672b0bf"
+    },
+    {
+      "path": "results/source_index.json",
+      "bytes": 1970,
+      "sha256": "7853763e571578000b3e10b5b22e38e55649d8adf330f232c40d3bc0c7fad7b0"
+    },
+    {
+      "path": "results/static_validation.json",
+      "bytes": 1657,
+      "sha256": "499051b0d9d5e6db3d0a0a2699b2dd78ca0fc853ea2c0694e40b52de3dd83da0"
+    },
+    {
+      "path": "results/system_acceptance_matrix.json",
+      "bytes": 7530,
+      "sha256": "6afab5c5ad1b4b4639abec2964fa40564757335b27da085fd487008168f30121"
+    }
+  ]
+}

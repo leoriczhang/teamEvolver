@@ -1,0 +1,14 @@
+................................................................         [100%]
+=============================== warnings summary ===============================
+tests/test_ontology_v5.py::test_mcp_tools_use_same_read_service_and_do_not_expose_publication
+  /Users/01435552/Project/OpenViking/openviking/resource/watch_manager.py:56: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class WatchTask(BaseModel):
+
+tests/test_ontology_v5.py::test_mcp_tools_use_same_read_service_and_do_not_expose_publication
+tests/test_ontology_v5.py::test_mcp_tools_use_same_read_service_and_do_not_expose_publication
+tests/test_ontology_v5.py::test_mcp_tools_use_same_read_service_and_do_not_expose_publication
+  /tmp/te-ontology-venv/lib/python3.12/site-packages/pydantic/_internal/_generate_schema.py:325: PydanticDeprecatedSince20: `json_encoders` is deprecated. See https://docs.pydantic.dev/2.13/concepts/serialization/#custom-serializers for alternatives. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+64 passed, 4 warnings in 4.49s

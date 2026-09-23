@@ -1,0 +1,342 @@
+# Session Query API
+
+## 1. API Implementation Overview
+
+Session query interfaces are used to view pending Sessions in the queue and processed conversation history. These interfaces are primarily used by the web console and require console Session Cookie authentication (obtained after login). The `/sessions` and `/conversations` endpoints can also be accessed without authentication (designed for internal network deployment), but response data may be restricted.
+
+Code implementation: `teamEvolver/proxy/routes.py` (`dashboard_sessions`, `dashboard_conversations`, `dashboard_conversation_detail`)
+Session storage: `teamEvolver/session_store.py`
+
+## 2. Interface and Parameter Specification
+
+---
+
+### GET /sessions
+
+List Sessions waiting in the queue for evolution processing.
+
+**Authentication:** Console Cookie (recommended), also accessible without authentication on internal networks
+
+**Query Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `limit` | integer | No | Items per page, 1-200, default 20 |
+| `offset` | integer | No | Pagination offset, default 0 |
+| `refresh` | boolean | No | Whether to force refresh cache, default false |
+
+**Response Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `reachable` | boolean | Whether Session storage is reachable |
+| `sessions` | array | Current page Session list |
+| `pending` | integer | Total pending count |
+| `total` | integer | Total queue count |
+| `limit` | integer | Current page size |
+| `offset` | integer | Current offset |
+| `has_more` | boolean | Whether more data exists |
+
+**Caching:** Queue list cached for 5 seconds.
+
+---
+
+### GET /conversations
+
+List processed conversation history (archived conversations).
+
+**Authentication:** Console Cookie (recommended), also accessible without authentication on internal networks
+
+**Query Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `limit` | integer | No | Items per page, 1-200, default 20 |
+| `offset` | integer | No | Pagination offset, default 0 |
+| `refresh` | boolean | No | Whether to force refresh cache, default false |
+
+**Response Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `reachable` | boolean | Whether storage is reachable |
+| `conversations` | array | Current page conversation list |
+| `total` | integer | Total conversation count |
+| `limit` | integer | Current page size |
+| `offset` | integer | Current offset |
+| `has_more` | boolean | Whether more data exists |
+| `reason` | string | Unreachability reason |
+
+**Caching:** Conversation list cached for 15 seconds.
+
+Each conversation row carries full metadata including `value_judge` (value classification result); when the session appears in evolution history, the row is additionally enriched with a `judge` field (`overall_score`, the four dimension scores, per-dimension `reasons`, and `rationale`, from the most recent cycle record covering that session — `teamEvolver/proxy/routes.py:_session_judge_score_index`).
+
+---
+
+### GET /conversations/{session_id}
+
+Get detailed information about a single conversation.
+
+**Authentication:** Console Cookie (recommended)
+
+**Path Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_id` | string | Yes | Session ID |
+
+**Response Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `summary.title` | string | Conversation title |
+| `summary.user_alias` | string | User alias |
+| `summary.status` | string | Processing status |
+| `summary.num_turns` | integer | Number of turns |
+| `meta` | object | Adapter/push-extracted business meta (`user_id`, `session_id`, `trace_id`), same shape as `/conversations` list rows |
+| `turns_available` | boolean | Whether turn details are available |
+| `turns_source` | string | Turns source (`archive`) |
+| `system_prompt` | string | System prompt |
+| `injected_skills` | array | Injected Skill list |
+| `used_skills` | array | Used Skill list |
+| `metrics` | object | Conversation metrics |
+| `turns` | array | Turn details |
+| `value_judge` | object | Value classification result |
+
+---
+
+### GET /conversations/{session_id}/process
+
+Get evolution processing history (cycle records) for a specified conversation.
+
+**Authentication:** Console Cookie (recommended)
+
+**Path Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_id` | string | Yes | Session ID |
+
+**Response Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `cycles` | array | Evolution cycle record list |
+
+---
+
+### POST /conversations/status
+
+Batch query processing status of multiple Sessions.
+
+**Authentication:** Console Cookie
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `session_ids` | array[string] | Yes | Session ID list, maximum 500 entries |
+
+**Response Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `reachable` | boolean | Whether storage is reachable |
+| `statuses` | object | Session ID -> status mapping |
+| `reason` | string | Unreachability reason |
+
+---
+
+### GET /history
+
+Get evolution cycle history records (read from `evolve_history.jsonl` or archived Sessions).
+
+**Authentication:** None (internal interface)
+
+**Query Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `limit` | integer | No | Return count, default 50 |
+| `session_id` | string | No | Filter records for specified Session |
+
+**Response Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `cycles` | array | Evolution cycle list |
+
+Each cycle record contains a `session_judge` aggregate (`enabled`, `judged_sessions`, `scored_sessions`, `mean_score`, `min_score`, `max_score`) plus `session_judge_details` (per consumed Session: `session_id`, `overall_score`, the four dimension scores, per-dimension `reasons`, and `rationale` — `team_skills/evolution/runtime/orchestrator.py:_collect_session_judge_details`).
+
+---
+
+### GET /api/skill-evolution/session-analysis/audit
+
+Query session filter audit records (`session_filter_audit/`) and their aggregate statistics.
+
+**Authentication:** Console Session Cookie (`/api/*` paths)
+
+**Query Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `limit` | integer | No | Number of records to return, minimum 1, default 100 |
+| `decision` | string | No | Filter by `value_judge.decision` (`valuable|memory_candidate|task_only|chitchat`) |
+
+**Response Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `stats` | object | Aggregate statistics: `total` (record count), `decisions` (count per decision), `statuses` (count per status), `modes` (count per decision mode) |
+| `items` | array | Audit record list (sorted by recording time descending); each item includes metadata, `value_judge`, `judge`, and `key` |
+| `reason` | string | Failure reason when reading fails (returned only on error) |
+
+**Code entry:** `teamEvolver/proxy/routes.py:api_session_filter_audit` (`teamEvolver/session_store.py:list_filter_audit`, `teamEvolver/session_store.py:filter_stats`)
+
+**Caching:** Results cached for 30 seconds.
+
+---
+
+## 3. Usage Examples
+
+### View Pending Queue
+
+```bash
+curl "http://localhost:52010/sessions?limit=5"
+```
+
+Example response:
+
+```json
+{
+  "reachable": true,
+  "sessions": [
+    {
+      "session_id": "sess-20240115-001",
+      "user_alias": "alice",
+      "status": "queued",
+      "ingested_at": "2024-01-15T10:30:00Z",
+      "value_judge": {"decision": "valuable", "confidence": 0.92}
+    }
+  ],
+  "pending": 3,
+  "total": 3,
+  "limit": 5,
+  "offset": 0,
+  "has_more": false
+}
+```
+
+### View Conversation History
+
+```bash
+curl "http://localhost:52010/conversations?limit=10&offset=0"
+```
+
+### View Conversation Details
+
+```bash
+curl "http://localhost:52010/conversations/sess-20240115-001"
+```
+
+### View Evolution Processing History
+
+```bash
+curl "http://localhost:52010/conversations/sess-20240115-001/process"
+```
+
+Example response:
+
+```json
+{
+  "cycles": [
+    {
+      "timestamp": "2024-01-15T10:35:00Z",
+      "session_ids": ["sess-20240115-001"],
+      "sessions": 1,
+      "session_judge": {
+        "enabled": true,
+        "judged_sessions": 1,
+        "scored_sessions": 1,
+        "mean_score": 0.85,
+        "min_score": 0.85,
+        "max_score": 0.85
+      },
+      "session_judge_details": [
+        {
+          "session_id": "sess-20240115-001",
+          "overall_score": 0.85,
+          "task_completion": 0.9,
+          "response_quality": 0.85,
+          "efficiency": 0.7,
+          "tool_usage": 0.8,
+          "reasons": {
+            "task_completion": ["The final output matches the required format"]
+          },
+          "rationale": "Task completed with good output quality; minor detours"
+        }
+      ],
+      "evolutions": [
+        {
+          "skill_name": "database-debugging",
+          "action": "update",
+          "version": 4
+        }
+      ],
+      "status": "published"
+    }
+  ]
+}
+```
+
+### Query Filter Audit
+
+```bash
+curl "http://localhost:52010/api/skill-evolution/session-analysis/audit?limit=20&decision=task_only"
+```
+
+Example response:
+
+```json
+{
+  "stats": {
+    "total": 142,
+    "decisions": {"valuable": 90, "task_only": 38, "chitchat": 12, "memory_candidate": 2},
+    "statuses": {"queued": 90, "skipped": 52},
+    "modes": {"merged": 142}
+  },
+  "items": [
+    {
+      "session_id": "sess-20240115-002",
+      "status": "skipped",
+      "recorded_at": "2024-01-15T10:31:00Z",
+      "value_judge": {"decision": "task_only", "confidence": 0.8, "mode": "model"},
+      "key": ".../session_filter_audit/sess-20240115-002.json"
+    }
+  ]
+}
+```
+
+## 4. Response Contract and Error Handling
+
+### Error Codes
+
+| HTTP Status | Error Message | Cause |
+|------------|--------------|-------|
+| 400 | `session_id is required` | session_id parameter empty or invalid characters |
+| 401 | `login required` | Accessing interfaces requiring console authentication without login (`/api/*` paths) |
+| 404 | `session not found` | Specified session_id does not exist |
+| 503 | Storage error message | Session storage unavailable |
+
+### Pagination Conventions
+
+- `limit` range 1-200, values outside range are automatically truncated;
+- `offset` starts from 0;
+- `has_more: true` indicates more pages available;
+- `total` is the total count of matching records, usable for calculating total pages.
+
+### Important Notes
+
+1. Conversation detail interfaces require console login first (to obtain Cookie). `/sessions` and `/conversations` are under non-`/api/` paths and allow unauthenticated access to simplify internal network deployment, but adding an authentication layer via reverse proxy is recommended in production.
+2. Session IDs only allow letters, numbers, underscores, dots, and hyphens; other characters are replaced with `-`.
+3. Processing history is read preferentially from `evolve_history.jsonl`; if the file does not exist, falls back to archived Session data.

@@ -1,0 +1,36 @@
+# teamEvolver 离线部署依赖清单（cicd_scripts/build.sh 构建离线 wheelhouse 使用）
+# 内容与 pyproject.toml 保持同步：base dependencies + [sharing, mining, validation, truereplay, pg] extras
+# 修改 pyproject.toml 依赖时需同步更新本文件。
+
+click>=8.0
+pyyaml>=6.0
+fastapi>=0.100
+uvicorn[standard]>=0.23
+httpx>=0.25.0
+json-repair>=0.44.0
+langfuse>=4.14,<5.0
+openai>=1.0
+openpyxl>=3.1
+pypdf>=5.0
+pydantic-settings>=2.0
+python-docx>=1.1
+tiktoken>=0.5
+
+# extras: sharing
+boto3>=1.28
+
+# extras: mining / truereplay（SkillMiner 文档挖掘）
+hermes-agent==0.19.0
+
+# extras: pg（storage_pg 启用时 pg_pool 懒加载 asyncpg，离线环境无法补装）
+asyncpg>=0.29
+
+# Embedded Ontology document/pipeline support
+cryptography>=42
+jsonschema[format]>=4.18
+jieba>=0.42
+beautifulsoup4>=4.12
+markdown>=3.6
+rank-bm25>=0.2
+tomli-w>=1.0
+tomli>=2; python_version < "3.11"

@@ -1,0 +1,23 @@
+{
+  "contract": "sf.ontology.v1",
+  "sha256": {
+    "access.schema.json": "26a8b265a865bc67502fb645474556666afff6ccbc3d8b46a999a332e94f3d7b",
+    "artifact.schema.json": "87700435bb39e4876bd997fc0e1132bdf71e673dba05f58627c1fd65ddfa2cc9",
+    "artifact_session.schema.json": "93e48dd9271c506a6182db1560a71b39e145633f9ea026d6126e90a893dc86db",
+    "candidate_bundle.schema.json": "00d2ed37b0cf029d85c7dc0fdf1291a90068523b7b76704d2af2af7e927384e6",
+    "commit_v2.schema.json": "8e4bfdaa0380c28c743f6806af8114546ca80c5eed71c67682fdb1148917d02b",
+    "context_packet.schema.json": "33b1f1813286d3a0ee6ae04a322fdc13db6c8a8777c101b952b9a30296372807",
+    "context_request.schema.json": "746cc106596661dcd56c3c59dc01f211d1ded2c98533ab43801ec73ac73a3273",
+    "error_response.schema.json": "5712891679d5e03b5c1b4b7b02774d8de95b1e172dad2aaef8b200b4e1469d7d",
+    "freeze.schema.json": "f3a1d770a056a288331094d30ef2a530019557d87158a14a9dbcb4bf770c0c8f",
+    "manifest.schema.json": "2de70111c954d1429048ef8f946c05aba10722077a3f223c15cd7debe5d364fd",
+    "observation.schema.json": "94fcde063207f1238aaa132545b5e4bf3041ca4662942e8c60b686804bd2111f",
+    "ontology_search.schema.json": "d27b1ffe702533cddbe08cf109d6a413d4d91b2730736977e852d2d1e06ef686",
+    "openapi.json": "d57ddc9d33978ba2fc64c1555b6e3f6200f9c859978c1a9c577afac3875f7df8",
+    "publication_approval.schema.json": "e4c2a199df7241f1bf828746320659f4bff8b7ef50a5fc2967f6f88d735dcc5f",
+    "publication_grant.schema.json": "e7cc69e8aea570449146e5c1bc9870cadf0b7f7c49eea5389f18be9770a32019",
+    "schema.schema.json": "726f82886b1e5ba4e4d81b0040072ac83653041ad03626622f56765c88a941ea",
+    "source.schema.json": "aed933354a3f01788697ae07e629f0f1f1c4326ac719ff1a74b2a335f41e23d7",
+    "typed_query.schema.json": "649cebdb5bf571d070e7d483c23b8551ead4ee4ad67528159b5a870f9db6dd70"
+  }
+}

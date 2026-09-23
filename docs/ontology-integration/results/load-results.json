@@ -1,0 +1,19 @@
+{
+  "scope": "real OV HTTP + PostgreSQL + separate Runtime; synthetic fixture extraction",
+  "run": "load-8118b2b3ba",
+  "documents": 10000,
+  "assertions": 10000,
+  "batches": 100,
+  "duration_seconds": 102.34,
+  "context_concurrency": 10,
+  "context_p95_ms": 22.398,
+  "batch_median_seconds": 1.048,
+  "model_calls": 0,
+  "model_tokens": 0,
+  "human_review_seconds": null,
+  "limitations": [
+    "automated fixture approval is not human review",
+    "no real LLM quality or cost measured",
+    "no hybrid vector query measured"
+  ]
+}

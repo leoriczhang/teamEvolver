@@ -1,0 +1,142 @@
+{
+  "date": "2026-09-22T11:34:56",
+  "scope": "本地实现与隔离验证；未部署、未 commit、未 push；OV 源码未修改，已有 .env_sit 修改保留。",
+  "repositories": {
+    "TE": "3ad66f1bbd61f72c518ed308921ec135af6cf237",
+    "OV": "25766a617a867d7aafdc0ee78454e3f5b546e232",
+    "working_tree": "implementation is uncommitted"
+  },
+  "environment": {
+    "python": "3.12.9",
+    "OV_python": "3.13",
+    "postgres": "17.11",
+    "node": "24.11.0",
+    "PG": "localhost:55493; random schemas and disposable restricted test databases; no SIT/PRD access"
+  },
+  "source_sha256": {
+    "team_ontology/compile_flow.py": "a1e3f426f7a1c3cd17af31baaa547dec9f242917c9b7e62f72d72a4f49126cdf",
+    "team_ontology/compile_contract.py": "94adb2ca8b8485e3d4826d9f555de802827705ac114f5b6dd2202776b5d9b8f9",
+    "team_ontology/api.py": "4c8af8f8b3f53ec5cbadaf6350dd33c331c48ec43f7c104a65e53adfb036a607",
+    "team_ontology/control.py": "b8a891ae367c7ece4033d11f457c76f04955c9f9cc6c306451aa6630b85e14d4",
+    "team_ontology/service.py": "b063ce3237db31b3fdaf42a8ce36704480fc0fc2c78e8ddd0f5b71cecbe08469",
+    "team_ontology/skills/ontology-extraction-v1/SKILL.md": "156ca682b0b3b7fdb1535d56a379b8e16fa5922f1a6a3678753e7424e4d2bb69",
+    "web-ui/src/views/OntologyView.tsx": "b710b0a047a61051ca979fa425b4bd215b889a51d3be52d47fb7072b22a3df65",
+    "tests/test_ontology_compile.py": "14e733987de8ef6c0b55a0a7d4ae07d216d8484db0bfeb16b01973857901f81a",
+    "tests/test_ontology_compile_pg.py": "9111493b08c60e4fdaa71acafb070f0a3074b76daaa5d8788af9d4af97648d38"
+  },
+  "checks": [
+    {
+      "name": "Python compileall",
+      "status": "pass",
+      "command": "python -m compileall -q teamEvolver team_skills team_memory team_miner team_replay session_ingestion team_ontology tests"
+    },
+    {
+      "name": "Changed Python files ruff",
+      "status": "pass",
+      "note": "Full team_ontology lint also has existing standalone.py:29 E501; unchanged."
+    },
+    {
+      "name": "TE full regression with isolated PG",
+      "status": "failed_existing_tests",
+      "summary": "3 failed, 733 passed, 46 skipped, 2 warnings in 18.00s",
+      "command": "ONTOLOGY_COMPILE_TEST_DSN=<isolated PG> ONTOLOGY_SCHEMA_TEST_ADMIN_DSN=<isolated PG admin> python -m pytest -q",
+      "log": "/tmp/te-compile-final-tests.log",
+      "failures": [
+        "tests/test_dataset_collections.py::test_routes_accept_batch_and_preserve_historical_source_after_removal",
+        "tests/test_sf_agent_adapter.py::test_envelope_only_prompt_title_comes_from_nested_query",
+        "team_memory/tests/test_dreamcycle_integration.py::test_agentshub_config_sync_merges_personal_sources"
+      ]
+    },
+    {
+      "name": "New Compile and PG tests",
+      "status": "pass",
+      "tests": 31,
+      "model": "deterministic mock; HTTPX mock OV endpoints, ASGI real TE routes; real PG persistence tests",
+      "coverage": [
+        "folder pagination/Chinese paths/dedup/hidden/private-workspace exclusions",
+        "120 KB source and source budgets",
+        "single file and upload snapshot references",
+        "Schema unchanged/rename: exactly one Compile submission",
+        "partial and full supplementary Compile; round-local ID collision prevention",
+        "quote offsets, empty/missing proof, coverage validation, conflicts",
+        "response loss: single submission then exact native task reconciliation",
+        "ACL denial probe gates input writes",
+        "PG restart/idempotency/concurrent claim/cancellation fencing/queue backpressure",
+        "cancel race uses latest checkpoint from atomic fence"
+      ]
+    },
+    {
+      "name": "Frontend tests",
+      "status": "pass",
+      "files": 17,
+      "tests": 64,
+      "command": "npm --prefix web-ui test",
+      "log": "/tmp/te-compile-frontend-tests.log"
+    },
+    {
+      "name": "Frontend production build",
+      "status": "pass",
+      "command": "npm --prefix web-ui run build",
+      "warning": "existing large bundle warning",
+      "log": "/tmp/te-compile-frontend-build.log"
+    },
+    {
+      "name": "OV existing Compile regression",
+      "status": "pass",
+      "tests": 26,
+      "command": "python -m pytest -q -o addopts= bot/tests/test_compile_dispatch.py bot/tests/test_compile_incremental.py bot/tests/test_compile_finalization.py bot/tests/test_compile_workspace_config.py",
+      "log": "/tmp/te-ov-compile-regression.log"
+    },
+    {
+      "name": "TE process restart smoke",
+      "status": "pass",
+      "scope": "real CLI foreground and daemon start/stop; Ontology disabled, not native Compile end-to-end",
+      "port": 52318,
+      "log": "/tmp/te-compile-startup.log"
+    },
+    {
+      "name": "Offline HTML browser check",
+      "status": "pass",
+      "scope": "in-app browser architecture screenshot inspected and Schema step interaction verified"
+    },
+    {
+      "name": "Native Compile with real model",
+      "status": "not_executed",
+      "reason": "No running local isolated OV native Compile service with installed extraction Skill was available; no SIT/PRD or shared running service was modified. Native Runtime/model/Skill/ACL end-to-end still requires deployment validation."
+    },
+    {
+      "name": "Real OV ACL search denial, native restart, full review/publication",
+      "status": "not_executed",
+      "reason": "Covered by mock contracts and existing publication unit regressions only; not an actual native-service acceptance run."
+    },
+    {
+      "name": "Scale, true token cost and reviewer cost",
+      "status": "not_executed",
+      "reason": "No real-model performance claim. Runtime-provided usage is recorded when available; absent usage stays unknown."
+    },
+    {
+      "name": "Docs references",
+      "status": "pass",
+      "files": 119,
+      "references": 308,
+      "errors": 0,
+      "warnings": 0,
+      "command": "node docs/scripts/check-docs-refs.mjs"
+    }
+  ],
+  "efficiency": {
+    "unchanged_schema_extra_compile_requests": 0,
+    "rename_mapping_extra_compile_requests": 0,
+    "first_compile_model_calls": null,
+    "supplemental_compile_model_calls": null,
+    "real_model_tokens": null,
+    "note": "Only deterministic paths verified. Compile request count is not model-call count."
+  },
+  "limitations": [
+    "Existing assertion contract requires valid_from; undated facts cannot be assigned invented business validity dates.",
+    "Source dependency scope for semantic changes is explicitly provided by reviewer; otherwise full recompilation.",
+    "Native task listing has finite history; unknown acceptance requires manual reconciliation if a unique request cannot be found.",
+    "Cross-job reuse requires operator-managed compile_model_revision; empty disables it.",
+    "Workspace cleanup is manual; current Compile execution runtime remains trusted."
+  ]
+}

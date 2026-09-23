@@ -1,0 +1,52 @@
+{
+  "run": "5f502b65d954",
+  "scope": "isolated HTTP routers + real PostgreSQL + deterministic Runtime fixtures",
+  "status": "passed",
+  "checks": [
+    {
+      "name": "second_domain_no_hardcoded_shipment_logic",
+      "status": "passed",
+      "seconds": 0.577
+    },
+    {
+      "name": "TE_OV_Runtime_build_review_commit_read",
+      "status": "passed",
+      "seconds": 1.036
+    },
+    {
+      "name": "source_ACL_hides_assertions",
+      "status": "passed",
+      "seconds": 0.003
+    },
+    {
+      "name": "read_only_principal_cannot_publish",
+      "status": "passed",
+      "seconds": 0.004
+    },
+    {
+      "name": "write_actions_absent",
+      "status": "passed",
+      "seconds": 0.001
+    },
+    {
+      "name": "raw_query_rejected",
+      "status": "passed",
+      "seconds": 0.001
+    },
+    {
+      "name": "revoke",
+      "status": "passed",
+      "seconds": 0.007
+    },
+    {
+      "name": "revoke_immediately_blocks_read",
+      "status": "passed"
+    }
+  ],
+  "not_tested": [
+    "production IAM",
+    "native full OV startup",
+    "live model extraction",
+    "10k document throughput"
+  ]
+}

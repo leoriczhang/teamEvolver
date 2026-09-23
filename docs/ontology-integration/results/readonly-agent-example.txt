@@ -1,0 +1,2 @@
+{"conflicts":[],"evaluations":[{"conflict":false,"entity_id":"demo:Shipment:001","rule_id":"status-recorded","truth":"unknown"}],"facts":[],"missing_evidence":["status","receipt_method"],"next_queries":[],"observations":[],"user_claim":"客户陈述尚未收到；此陈述不作为系统事实"}
+{"generation": 4, "degraded": false, "truncated": false}

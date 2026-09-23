@@ -1,0 +1,33 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "source_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Source Id",
+      "type": "string"
+    },
+    "uri": {
+      "maxLength": 2000,
+      "minLength": 1,
+      "title": "Uri",
+      "type": "string"
+    },
+    "readers": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 1000,
+      "minItems": 1,
+      "title": "Readers",
+      "type": "array"
+    }
+  },
+  "required": [
+    "source_id",
+    "uri",
+    "readers"
+  ],
+  "title": "FreezeRequest",
+  "type": "object"
+}

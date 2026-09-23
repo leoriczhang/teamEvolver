@@ -1,0 +1,19 @@
+{
+  "contract": "sf.ontology.query.v1",
+  "scope_ref": "scope-demo",
+  "schema_revision": "sf-core@1.0.0",
+  "entity_ids": [
+    "demo:issue:receipt-dispute"
+  ],
+  "predicates": [
+    "requires_evidence"
+  ],
+  "valid_at": "2026-09-18T00:00:00Z",
+  "known_at": "2026-09-18T00:00:00Z",
+  "limits": {
+    "max_hops": 2,
+    "max_nodes": 100,
+    "max_assertions": 200,
+    "max_examined_edges": 5000
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "contract": "sf.ontology.context.v1",
+  "schema_revision": "sf-core@1.0.0",
+  "semantic_generation": "gen-demo-001",
+  "valid_at": "2026-09-18T00:00:00Z",
+  "known_at": "2026-09-18T00:00:00Z",
+  "authorization_epoch": 1,
+  "renderer_version": "deterministic-demo@1",
+  "facts": [],
+  "missing_evidence": [
+    "receipt_method"
+  ],
+  "conflicts": [],
+  "truncated": false,
+  "degraded": false,
+  "prompt_fragment": "缺少必要证据，不能确认本人收件。此例仅演示只读诊断。"
+}

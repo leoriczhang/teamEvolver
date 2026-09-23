@@ -1,0 +1,398 @@
+{
+  "$defs": {
+    "Assertion": {
+      "additionalProperties": false,
+      "properties": {
+        "assertion_id": {
+          "title": "Assertion Id",
+          "type": "string"
+        },
+        "subject": {
+          "title": "Subject",
+          "type": "string"
+        },
+        "predicate": {
+          "title": "Predicate",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Value"
+        },
+        "polarity": {
+          "default": "positive",
+          "enum": [
+            "positive",
+            "negative"
+          ],
+          "title": "Polarity",
+          "type": "string"
+        },
+        "qualifiers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Qualifiers",
+          "type": "object"
+        },
+        "epistemic_kind": {
+          "default": "document_fact",
+          "enum": [
+            "document_fact",
+            "user_claim",
+            "system_fact",
+            "derived"
+          ],
+          "title": "Epistemic Kind",
+          "type": "string"
+        },
+        "valid_from": {
+          "format": "date-time",
+          "title": "Valid From",
+          "type": "string"
+        },
+        "valid_to": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid To"
+        },
+        "support_sets": {
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Support Sets",
+          "type": "array"
+        },
+        "premises": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Premises",
+          "type": "array"
+        }
+      },
+      "required": [
+        "assertion_id",
+        "subject",
+        "predicate",
+        "value",
+        "valid_from",
+        "support_sets"
+      ],
+      "title": "Assertion",
+      "type": "object"
+    },
+    "CandidateBundle": {
+      "additionalProperties": false,
+      "properties": {
+        "contract": {
+          "const": "sf.ontology.v1",
+          "default": "sf.ontology.v1",
+          "title": "Contract",
+          "type": "string"
+        },
+        "manifest_digest": {
+          "title": "Manifest Digest",
+          "type": "string"
+        },
+        "entities": {
+          "items": {
+            "$ref": "#/$defs/Entity"
+          },
+          "maxItems": 10000,
+          "title": "Entities",
+          "type": "array"
+        },
+        "assertions": {
+          "items": {
+            "$ref": "#/$defs/Assertion"
+          },
+          "maxItems": 10000,
+          "title": "Assertions",
+          "type": "array"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "maxItems": 20000,
+          "title": "Evidence",
+          "type": "array"
+        },
+        "tombstones": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10000,
+          "title": "Tombstones",
+          "type": "array"
+        },
+        "schema_proposals": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "maxItems": 100,
+          "title": "Schema Proposals",
+          "type": "array"
+        },
+        "extraction": {
+          "additionalProperties": true,
+          "default": {},
+          "title": "Extraction",
+          "type": "object"
+        }
+      },
+      "required": [
+        "manifest_digest",
+        "entities",
+        "assertions",
+        "evidence"
+      ],
+      "title": "CandidateBundle",
+      "type": "object"
+    },
+    "Entity": {
+      "additionalProperties": false,
+      "properties": {
+        "entity_id": {
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "authority_namespace": {
+          "title": "Authority Namespace",
+          "type": "string"
+        },
+        "entity_type": {
+          "title": "Entity Type",
+          "type": "string"
+        },
+        "external_id": {
+          "title": "External Id",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "aliases": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20,
+          "title": "Aliases",
+          "type": "array"
+        }
+      },
+      "required": [
+        "entity_id",
+        "authority_namespace",
+        "entity_type",
+        "external_id",
+        "label"
+      ],
+      "title": "Entity",
+      "type": "object"
+    },
+    "Evidence": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_id": {
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        },
+        "revision": {
+          "title": "Revision",
+          "type": "string"
+        },
+        "digest": {
+          "title": "Digest",
+          "type": "string"
+        },
+        "start": {
+          "minimum": 0,
+          "title": "Start",
+          "type": "integer"
+        },
+        "end": {
+          "exclusiveMinimum": 0,
+          "title": "End",
+          "type": "integer"
+        },
+        "quote": {
+          "minLength": 1,
+          "title": "Quote",
+          "type": "string"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "source_id",
+        "revision",
+        "digest",
+        "start",
+        "end",
+        "quote"
+      ],
+      "title": "Evidence",
+      "type": "object"
+    },
+    "Manifest": {
+      "additionalProperties": false,
+      "properties": {
+        "contract": {
+          "const": "sf.ontology.v1",
+          "default": "sf.ontology.v1",
+          "title": "Contract",
+          "type": "string"
+        },
+        "profile": {
+          "const": "sf-ontology-build.v1",
+          "default": "sf-ontology-build.v1",
+          "title": "Profile",
+          "type": "string"
+        },
+        "schema_revision": {
+          "title": "Schema Revision",
+          "type": "string"
+        },
+        "sources": {
+          "items": {
+            "$ref": "#/$defs/SourceRef"
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "title": "Sources",
+          "type": "array"
+        },
+        "expected_generation": {
+          "minimum": 0,
+          "title": "Expected Generation",
+          "type": "integer"
+        },
+        "mode": {
+          "default": "delta",
+          "enum": [
+            "delta",
+            "replace"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "extractor": {
+          "default": "llm",
+          "enum": [
+            "fixture",
+            "llm"
+          ],
+          "title": "Extractor",
+          "type": "string"
+        },
+        "deadline_seconds": {
+          "default": 120,
+          "maximum": 600,
+          "minimum": 10,
+          "title": "Deadline Seconds",
+          "type": "integer"
+        },
+        "max_assertions": {
+          "default": 200,
+          "maximum": 10000,
+          "minimum": 1,
+          "title": "Max Assertions",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "sources",
+        "expected_generation"
+      ],
+      "title": "Manifest",
+      "type": "object"
+    },
+    "SourceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        },
+        "revision": {
+          "title": "Revision",
+          "type": "string"
+        },
+        "digest": {
+          "title": "Digest",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "revision",
+        "digest"
+      ],
+      "title": "SourceRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "job_id": {
+      "pattern": "^ont_[a-f0-9]{24}$",
+      "title": "Job Id",
+      "type": "string"
+    },
+    "attempt": {
+      "minimum": 1,
+      "title": "Attempt",
+      "type": "integer"
+    },
+    "manifest": {
+      "$ref": "#/$defs/Manifest"
+    },
+    "candidate": {
+      "$ref": "#/$defs/CandidateBundle"
+    }
+  },
+  "required": [
+    "job_id",
+    "attempt",
+    "manifest",
+    "candidate"
+  ],
+  "title": "ArtifactRequest",
+  "type": "object"
+}

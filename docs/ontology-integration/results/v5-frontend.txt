@@ -1,0 +1,19 @@
+
+> teamEvolver-web-ui@0.1.0 build
+> tsc -b && vite build
+
+vite v6.4.3 building for production...
+transforming...
+✓ 2244 modules transformed.
+rendering chunks...
+computing gzip size...
+../teamEvolver/web/dist/index.html                       0.41 kB │ gzip:   0.29 kB
+../teamEvolver/web/dist/assets/index-Dps3UaEV.css      111.54 kB │ gzip:  21.53 kB
+../teamEvolver/web/dist/assets/CodeEditor-BX5TlW6l.js  680.83 kB │ gzip: 238.78 kB
+../teamEvolver/web/dist/assets/index-ugGKilIN.js       997.03 kB │ gzip: 293.90 kB
+
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 1.83s

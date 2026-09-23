@@ -1,0 +1,102 @@
+# teamEvolver 本地开发配置
+# 用途：run_local.sh 使用，首次启动播种到 runtime/config/config.yaml，
+#       之后以 runtime/config 为准，控制台修改写回该文件。
+# 环境分工：本地=本文件；SIT 云平台=config_sit.yaml（平台挂载）；生产=config_prd.yaml（规划中）。
+# 本文件为稀疏覆盖：未列出的配置项使用代码内置默认值。
+# 控制台可管理的调优项（进化参数、挖掘参数、DreamCycle、聚合等）不在此列。
+# 密钥可直接填写在本文件中；留空的项也可启动后在控制台补填。
+
+team:
+  # 控制台各页面显示的团队名
+  display_name: "inc-aiagent"
+
+# ---------------------------------------------------------------------------
+# 全局模型（进化链路 / SkillMiner / True Replay 共用），OpenAI-compatible
+# ---------------------------------------------------------------------------
+llm:
+  model_id: "volcengine/glm-5.2-aicc"                    # 【必填】模型名
+  api_base: "http://llm-model-hub-proxy.sit.sf-express.com/v1"   # 【必填】Base URL（OpenAI 客户端拼接 /chat/completions，网关需带 /v1）
+  api_key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3NLZXkiOiJhcGkyXzhiMjc5YmRmLTE2OTUtNGUxOS04ZmVlLTk4OGJmNjkxYzVkNiIsImVudiI6InNpdCIsImp0aSI6MzI3MzUsInByb2plY3RfaWQiOjI0MjQ5LCJzeXN0ZW1LZXkiOiI4MzIxOTU1Zi1jZDQ3LTQyZjItYjlmZS05OWM0MGVlMzliZmMifQ.sIS9KuWd4rKkaswCCO5b566Mp-nsfDXJpTwDlgoGc5U"                     # 【必填】模型 API Key
+  max_tokens: 100000              # 单次生成上限，按所选模型调整
+  temperature: 0.4
+
+# ---------------------------------------------------------------------------
+# 服务监听
+# ---------------------------------------------------------------------------
+service:
+  host: 0.0.0.0
+  port: 52010                     # 实际端口以平台注入的 APP_PORT 为准，启动时自动改写
+
+# ---------------------------------------------------------------------------
+# OpenViking 上下文存储（远程服务：Session/Evidence/Skill/Memory 的存储层）
+# ---------------------------------------------------------------------------
+sharing:
+  enabled: true
+  backend: viking
+  viking_deployment: local        # local=自建 openviking-server；cloud=火山云托管
+  viking_endpoint: "http://openviking.intsit.sfcloud.local:1080"  # SIT 自建服务地址
+  viking_api_key: "26c0c0cc10a3c333bdea4059aa74eb2b564410563e2c2f6f5d9085ee9c4bb6a1"  # 账号 ROOT Key：仅管理 API（用户同步/账号列表）使用，不能访问数据 API
+  viking_team_api_key: "ZGVmYXVsdA.dGVhbQ.MWY5NmNlYjk0NzFmZDA1NjQ1OTMwMjk3OGNjZGQwZjJkYzYwZWEzMmNiMzNhNmVlYjk4M2RlNDliMTliZGNjZQ"  # default 账号 team 用户的服务 Key（数据操作优先用它）
+  viking_account: "default"       # OpenViking 账户名，需与 OpenViking 服务侧约定一致
+  viking_user: "team"             # 团队资源所在的 OpenViking 用户（default 会自动归一为 team）
+
+# ---------------------------------------------------------------------------
+# PostgreSQL 本地状态存储（多租户 session/skill 存储；启用后强制 postgres
+# 后端并关闭 viking 本地回退）。dsn 留空：由 run_local.sh 加载的 .env
+# （TEAMEVOLVER_PG_*）派生，模板见 .env.example。
+# ---------------------------------------------------------------------------
+storage_pg:
+  enabled: true
+  schema: teamevolver
+
+# 独立 evolve CLI 回连本服务的地址（内嵌进化不依赖此项）
+evolve:
+  server_url: "http://127.0.0.1:52010"
+
+# ---------------------------------------------------------------------------
+# 可选：Langfuse（Session 拉取 + 出站链路观测），默认关闭
+# 启用时填写 host 与密钥，或留空在控制台「Langfuse」页配置
+# ---------------------------------------------------------------------------
+langfuse:
+  enabled: false
+  host: ""                        # 如内部 Langfuse 服务地址
+  public_key: ""
+  secret_key: ""
+
+# Ontology 由 TE 运营与后处理，实际抽取调用 OV 原生 Compile。
+# 显式安装版本化 Skill；模型使用 OV Compile 配置，不再继承 TE llm。
+ontology:
+  enabled: true
+  state_dir: ""
+  queue_limit: 32
+  allow_fixture: false
+  model: {}  # 旧配置兼容；新构建使用 OV Compile 模型
+  compile_skill_uri: "viking://agent/skills/ontology-extraction-v1"
+  compile_workspace_uri: "viking://resources/te_ontology_compile"
+  compile_user: "te-ontology-compiler"
+  compile_timeout_seconds: 1800
+  compile_model_revision: ""  # OV 模型配置修订号；留空禁用跨任务缓存
+  source_max_files: 1000
+  source_max_depth: 20
+  source_max_entries: 10000
+  source_max_bytes: 20971520
+  source_max_file_bytes: 2097152
+
+# 服务级日志：目录自动创建；配置更改需重启。
+logging:
+  level: INFO
+  console_enabled: true
+  file_enabled: true
+  directory: ~/.teamEvolver
+  max_file_mb: 100
+  retention_days: 14
+  max_total_mb: 2048
+
+# 成功经验异步同步：仅处理按 Skill 聚合的经验 JSON，不接入 Session 索引。
+experience_sync:
+  enabled: false
+  target_directory: viking://resources/agent_knowledge_workspace/input/proven_experiences
+  interval_seconds: 30
+  batch_size: 100
+  full_scan_interval_seconds: 86400
+  import_max_source_mb: 64

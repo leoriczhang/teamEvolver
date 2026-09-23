@@ -1,0 +1,54 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "source_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Source Id",
+      "type": "string"
+    },
+    "revision": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Revision",
+      "type": "string"
+    },
+    "text": {
+      "maxLength": 2000000,
+      "title": "Text",
+      "type": "string"
+    },
+    "readers": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 1000,
+      "minItems": 1,
+      "title": "Readers",
+      "type": "array"
+    },
+    "provenance": {
+      "default": "document",
+      "enum": [
+        "document",
+        "trusted_connector"
+      ],
+      "title": "Provenance",
+      "type": "string"
+    },
+    "origin_uri": {
+      "default": "",
+      "maxLength": 2000,
+      "title": "Origin Uri",
+      "type": "string"
+    }
+  },
+  "required": [
+    "source_id",
+    "revision",
+    "text",
+    "readers"
+  ],
+  "title": "Source",
+  "type": "object"
+}

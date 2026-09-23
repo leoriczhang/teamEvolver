@@ -1,0 +1,48 @@
+{
+  "receipts": [
+    {
+      "document": "23_Ontology论文开源生态与选型_20260918.md",
+      "kb_relative_path": "顺丰工作/企业知识库_OpenViking_2026-07_2026-09/23_Ontology论文开源生态与选型_20260918.md",
+      "operation_id": "e92b6be7fe9ea50c6938e8e6f9df6c28f22cc65542aa646edcd1d1e9bce002b7",
+      "state": "created",
+      "sha256": "72e7b6b13ec42f25d9d070d599cfbef4f2fa062eaded6e3c9cfcc6cec636ea2c",
+      "readback_verified": true,
+      "checked_at": "2026-09-18T07:48:12.512694+00:00",
+      "semantic_status": "queued",
+      "vector_status": "queued"
+    },
+    {
+      "document": "24_飞虎材料精读与顺丰领域本体蓝图_20260918.md",
+      "kb_relative_path": "顺丰工作/企业知识库_OpenViking_2026-07_2026-09/24_飞虎材料精读与顺丰领域本体蓝图_20260918.md",
+      "operation_id": "7c0b2447795621ba42b04bb8336c9988b24edb799b9d791d2bdeac779276a661",
+      "state": "created",
+      "sha256": "80b3b02b6860ffc6ba46f755424b8dc8186e2ebe1253057f5f7c227aa6240d2e",
+      "readback_verified": true,
+      "checked_at": "2026-09-18T07:48:21.538361+00:00",
+      "semantic_status": "queued",
+      "vector_status": "queued"
+    },
+    {
+      "document": "25_顺丰Ontology完整实施方案_TE入口_OV编译存储服务_V3_20260918.md",
+      "kb_relative_path": "顺丰工作/企业知识库_OpenViking_2026-07_2026-09/25_顺丰Ontology完整实施方案_TE入口_OV编译存储服务_V3_20260918.md",
+      "operation_id": "a50a956f49003b8ee48793e57ca3e64f7f512468f96a65c91b35926503b1f01f",
+      "state": "created",
+      "sha256": "17ce637a79b403472365fd9a783c0993f7847440f98ee68a9fac821154e9e4f1",
+      "readback_verified": true,
+      "checked_at": "2026-09-18T07:48:32.472816+00:00",
+      "semantic_status": "queued",
+      "vector_status": "queued"
+    },
+    {
+      "document": "26_Ontology接口契约_增量发布与验收_20260918.md",
+      "kb_relative_path": "顺丰工作/企业知识库_OpenViking_2026-07_2026-09/26_Ontology接口契约_增量发布与验收_20260918.md",
+      "operation_id": "b36572565f341597a5f55c358f652541ebfa7c018bf1aa45c61268e9efbbb06a",
+      "state": "created",
+      "sha256": "d7d9ea4fcb176e6549c9c3ce8ab6ca783ef9d0db2b9a299affbf087337f1bed7",
+      "readback_verified": true,
+      "checked_at": "2026-09-18T07:48:53.349555+00:00",
+      "semantic_status": "queued",
+      "vector_status": "queued"
+    }
+  ]
+}

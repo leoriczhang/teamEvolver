@@ -1,0 +1,24 @@
+{
+  "status": "passed",
+  "mode": "pg_dump custom + pg_restore into separate local database",
+  "checks": [
+    {
+      "tenant": "ontology-demo",
+      "generation": 1,
+      "receipts": 1
+    },
+    {
+      "tenant": "ontology-other",
+      "generation": 101,
+      "receipts": 101
+    }
+  ],
+  "revoked_revisions": 1,
+  "withdrawn_fact_still_hidden": true,
+  "authorized_other_domain_readable": true,
+  "limitations": [
+    "Local registry only; external IAM watermark recovery not exercised",
+    "Snapshot restore, not point-in-time WAL recovery"
+  ],
+  "test_correction": "First attempt used agent principal for reviewer-only load corpus; corrected to reviewer, ACL denial was expected"
+}

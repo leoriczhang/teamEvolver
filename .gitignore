@@ -1,4 +1,6 @@
 .venv/
+.test-home/
+/runtime/
 __pycache__/
 *.py[cod]
 *.tsbuildinfo
@@ -10,12 +12,78 @@ __pycache__/
 .verify-home/
 build/
 dist/
-!skillgene/web/dist/
-!skillgene/web/dist/**
+!teamEvolver/web/dist/
+!teamEvolver/web/dist/**
 .DS_Store
 .env
 .env.*
 !.env.example
 *.log
+*.orig
+evolve_history.jsonl
 records/
 external/LIFT/
+.trae/
+
+# Local runtime state and generated presentation artifacts
+.skillgene-sync.lock
+.skillgene-sync.stamp
+teamEvolver/skillminer/.knowledge_originals/
+teamEvolver/skillminer/.knowledge_locks/
+artifacts/
+ppt/
+skillgene/
+
+# Docs site
+docs/node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
+
+# Confidential internal documents
+docs/design/
+docs/prd/
+docs/research/
+docs/multi-tenancy-plan.md
+客户上下文/
+/adapters/
+DELIVERY_REPORT.md
+进化阶段LLM消耗统计_*.md
+
+# Local runtime
+openviking/
+CLAUDE.local.md
+STATE.md
+
+# Debug artifacts
+.dbg/
+debug-*.md
+
+# CI/CD packaging outputs (cicd_scripts/build.sh)
+release/
+site-packages/
+app.tar
+
+# Docker compose runtime data (compose.yaml mounts ./runtime)
+/runtime/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# SF platform default ignores (repo init)
+.settings/
+.myeclipse/
+.gradle/
+target/
+*/.settings
+*/.classpath
+*/.project
+.classpath
+.project
+.idea/
+.svn/
+.externalToolBuilders/
+gradle/
+.recommenders/
+.metadata/
+*/node_modules
+node_modules

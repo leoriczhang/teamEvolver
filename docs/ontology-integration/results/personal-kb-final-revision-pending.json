@@ -1,0 +1,10 @@
+{
+  "state": "pending_owner_review",
+  "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/企业知识库_OpenViking_2026-07_2026-09/31_Ontology部署运维与结果_20260919.md",
+  "create_operation_id": "b0df9612457811dc1ffa8250d680ff036b460a8a10b0568957ce34a3ac80fbaa",
+  "queued_content_sha256": "bdb18e943b174f33d3245b461c04e43b7d47c0bca73fa03bf1500b3084d59c7a",
+  "final_local_content_path": "/Users/01435552/Project/inc-aiagent-core-team-evolver/docs/ontology-integration/31-operations-and-results.md",
+  "final_local_sha256": "75a8829a04182a8b58f0bf23f9f321e8b4484586df0766bb3d10929647b5a582",
+  "pending_delta": "Final source-manifest update and readonly Agent example submitted as hash-bound revision; see personal-kb-receipts.json",
+  "revision_operation_id": "242a8c0c3c4bba96339187db01e0c7495abd2f798767962421db604b0768addc"
+}

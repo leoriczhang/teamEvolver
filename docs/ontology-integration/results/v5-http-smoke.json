@@ -1,0 +1,51 @@
+{
+  "services": 2,
+  "separate_runtime": false,
+  "extractor": "fixture",
+  "model_calls": 0,
+  "checks": [
+    {
+      "domain": "Shipment",
+      "status": "passed",
+      "generation": 13,
+      "receipt": {
+        "generation": 13,
+        "projection": "postgres_ready",
+        "receipt_id": "ee42092b9fa62343e4283895fa816705",
+        "prepared_id": "4d80b3cc1de335d963aee3f561e151831c1e14ddfd793e8d3fd3c89a57e279ba",
+        "committed_at": "2026-09-20T11:32:23.142093+00:00",
+        "candidate_digest": "56d49883dff055339712c6760c29559061eabfd90a2e580300e5cdeff4d2115d"
+      }
+    },
+    {
+      "domain": "Procurement",
+      "status": "passed",
+      "generation": 14,
+      "receipt": {
+        "generation": 14,
+        "projection": "postgres_ready",
+        "receipt_id": "5ab27fab4d67f56118babfd513a9c59d",
+        "prepared_id": "70eb9f56ba822de139ce12420fc42458a8bb53d640579226616d567cb9a44685",
+        "committed_at": "2026-09-20T11:32:23.706850+00:00",
+        "candidate_digest": "1a4ea0f811fcf3d40dc98ae9e7f443b095c16bcc41b545e68db4763d03e72a07"
+      }
+    },
+    {
+      "name": "rollback-new-generation",
+      "status": "passed",
+      "receipt": {
+        "generation": 15,
+        "projection": "postgres_ready",
+        "receipt_id": "cba9e6536e4d0d5467dc20606544aa9c",
+        "prepared_id": "c7db38f7fc1481c26367736187acf584e222dfcf179165a26966b5aee1a0806e",
+        "committed_at": "2026-09-20T11:32:24.200355+00:00",
+        "candidate_digest": "d9397d4f398096c9d658cb56935dc253fa1410538ce29fe69874830f0064f6ad"
+      }
+    },
+    {
+      "name": "withdrawal-blocks-access",
+      "status": "passed"
+    }
+  ],
+  "real_model": "not covered"
+}

@@ -1,0 +1,235 @@
+dreamcycle:
+  enabled: false
+evolve:
+  drain_batch_delay_seconds: 0
+  drain_batch_size: 25
+  drain_max_per_cycle: 100
+  human_review_enabled: true
+  interval_seconds: 600
+  max_parallel_groups: 4
+  publish_mode: validated
+langfuse:
+  enabled: false
+  host: https://cloud.langfuse.com
+  mappers:
+  - code: "def _obs_text(value):\n    if value is None:\n        return \"\"\n   \
+      \ if isinstance(value, str):\n        return value\n    if isinstance(value,\
+      \ dict):\n        content = value.get(\"content\")\n        if isinstance(content,\
+      \ list):\n            parts = []\n            for item in content:\n       \
+      \         if isinstance(item, dict) and isinstance(item.get(\"text\"), str):\n\
+      \                    parts.append(item[\"text\"])\n                else:\n \
+      \                   parts.append(json.dumps(item, ensure_ascii=False))\n   \
+      \         return \"\\n\".join(p for p in parts if p)\n        if isinstance(content,\
+      \ str):\n            return content\n        return json.dumps(value, ensure_ascii=False)\n\
+      \    if isinstance(value, (list, int, float, bool)):\n        return json.dumps(value,\
+      \ ensure_ascii=False)\n    return str(value)\n\n\n_HEARTBEAT_MARK = \"An async\
+      \ command you ran earlier has completed\"\n\n\ndef _is_heartbeat(trace):\n \
+      \   sid = str(trace.get(\"sessionId\") or \"\").lower()\n    if \"heartbeat\"\
+      \ in sid:\n        return True\n    text = trace.get(\"input\")\n    if isinstance(text,\
+      \ (dict, list)):\n        text = json.dumps(text, ensure_ascii=False)\n    return\
+      \ _HEARTBEAT_MARK in str(text or \"\")\n\n\ndef map_trace(trace, observations,\
+      \ turn_num=0, defaults=None):\n    # openclaw-turn mapping:\n    #   - heartbeat\
+      \ traces -> zeroed turn (fully-heartbeat sessions then fail\n    #     _has_meaningful_content\
+      \ and are skipped as \"empty\")\n    #   - SPAN \"tool: <name>\" observations\
+      \ -> tool_calls (canonical shape) +\n    #     tool_results from the same observation's\
+      \ output\n    #   - exec commands touching skills/<name>/ -> used_skills\n \
+      \   #   - skill names exposed in metadata.systemPrompt -> injected_skills\n\
+      \    if _is_heartbeat(trace):\n        return {\n            \"prompt_text\"\
+      : \"\",\n            \"response_text\": \"\",\n            \"messages\": [],\n\
+      \            \"tool_calls\": [],\n            \"tool_results\": [],\n      \
+      \      \"used_skills\": [],\n            \"injected_skills\": [],\n        \
+      \    \"metrics\": {\n                \"tool_call_count\": 0,\n             \
+      \   \"api_call_count\": 0,\n                \"input_tokens\": 0,\n         \
+      \       \"output_tokens\": 0,\n                \"total_tokens\": 0,\n      \
+      \          \"message_tokens\": 0,\n            },\n        }\n    tool_calls\
+      \ = []\n    tool_results = []\n    used_skills = []\n    for obs in observations\
+      \ or []:\n        if not isinstance(obs, dict):\n            continue\n    \
+      \    name = str(obs.get(\"name\") or \"\")\n        if not name.startswith(\"\
+      tool:\"):\n            continue\n        tool = name.split(\":\", 1)[1].strip()\n\
+      \        obs_id = str(obs.get(\"id\") or \"\")\n        raw_in = obs.get(\"\
+      input\")\n        if isinstance(raw_in, (dict, list)):\n            cmd_src\
+      \ = json.dumps(raw_in, ensure_ascii=False)\n        else:\n            cmd_src\
+      \ = str(raw_in or \"\")\n        tool_calls.append({\n            \"id\": obs_id,\n\
+      \            \"type\": \"function\",\n            \"function\": {\"name\": tool,\
+      \ \"arguments\": cmd_src},\n        })\n        text = _obs_text(obs.get(\"\
+      output\"))\n        level = str(obs.get(\"level\") or \"\").upper()\n      \
+      \  lowered = text.lower()\n        has_error = (\n            level == \"ERROR\"\
+      \n            or \"error\" in lowered\n            or \"exception\" in lowered\n\
+      \            or \"traceback\" in lowered\n        )\n        tool_results.append({\n\
+      \            \"tool_call_id\": obs_id,\n            \"tool_name\": tool,\n \
+      \           \"content\": text,\n            \"has_error\": has_error,\n    \
+      \    })\n        for m in re.findall(r\"skills/([A-Za-z0-9_.-]+)\", cmd_src):\n\
+      \            if m not in used_skills:\n                used_skills.append(m)\n\
+      \    injected_skills = []\n    meta = trace.get(\"metadata\") if isinstance(trace.get(\"\
+      metadata\"), dict) else {}\n    sysprompt = str(meta.get(\"systemPrompt\") or\
+      \ \"\")\n    for m in re.findall(r\"skills/([A-Za-z0-9_.-]+)/\", sysprompt):\n\
+      \        if m not in injected_skills:\n            injected_skills.append(m)\n\
+      \    for group in re.findall(r\"skill（如 ([^）]+)）\", sysprompt):\n        for\
+      \ part in group.split(\"、\"):\n            p = part.strip()\n            if\
+      \ p.endswith(\"等\"):\n                p = p[:-1].strip()\n            if p and\
+      \ p not in injected_skills:\n                injected_skills.append(p)\n   \
+      \ return {\n        \"tool_calls\": tool_calls,\n        \"tool_results\": tool_results,\n\
+      \        \"used_skills\": used_skills,\n        \"injected_skills\": injected_skills,\n\
+      \    }\n"
+    enabled: true
+    match:
+      session_id_patterns: []
+      tags: []
+      trace_names: []
+    name: 生产-产品智能体
+    note: 线上产品智能体 openclaw-turn trace 映射
+  - code: "# Mapper for upclaw standalone agent traces (\"agent-call\") on the\n#\
+      \ new_product_agent tenant's Langfuse deployment.\n#\n# Trace shape (verified\
+      \ against ai-langfuse.sit.sf-express.com 2026-09-09):\n# - trace.input:  str\
+      \ — \"Conversation info (untrusted metadata): ```json {...}```\"\n#        \
+      \         + plain question OR an openapi JSON envelope\n#                 {\"\
+      sender\":..., \"msg\": {\"content\": {\"query\": \"...\"}}}\n# - trace.output:\
+      \ str — final assistant reply\n# - observations: flat list, nested via parentObservationId\n\
+      #   * SPAN \"tool: {name}\"      input {toolCallId, arguments{...}}\n#     \
+      \                        output {content, isError} — execute_skill carries\n\
+      #                             arguments.skill_id (e.g. \"llm-wiki\")\n#   *\
+      \ SPAN \"agent-loop-N\"     container spans\n#   * SPAN \"memory: ...\"    \
+      \ memory reads\n#   * GENERATION \"llm\"        input {messages: [...], tools},\n\
+      #                             output {content, role}, usageDetails {input,\n\
+      #                             output, total}\n#\n# Mapping strategy: extract\
+      \ tool activity and skill usage from the \"tool: \"\n# spans (message-level\
+      \ tool_calls are absent in this deployment), take the\n# user question from\
+      \ the unwrapped input envelope, and use the LAST\n# generation's messages as\
+      \ the turn's conversation (earlier generations carry\n# truncated prefixes of\
+      \ the same conversation — folding them all in, as the\n# built-in does, would\
+      \ duplicate every intermediate history).\n\ndef _flatten_text(value):\n    if\
+      \ value is None:\n        return \"\"\n    if isinstance(value, str):\n    \
+      \    return value\n    if isinstance(value, (int, float, bool)):\n        return\
+      \ str(value)\n    if isinstance(value, dict):\n        if isinstance(value.get(\"\
+      content\"), (str, int, float)):\n            return str(value[\"content\"])\n\
+      \        if isinstance(value.get(\"text\"), str):\n            return value[\"\
+      text\"]\n        return json.dumps(value, ensure_ascii=False)\n    if isinstance(value,\
+      \ (list, tuple)):\n        parts = []\n        for item in value:\n        \
+      \    if isinstance(item, str):\n                parts.append(item)\n       \
+      \     elif isinstance(item, dict):\n                text = item.get(\"text\"\
+      )\n                if isinstance(text, str):\n                    parts.append(text)\n\
+      \                else:\n                    parts.append(_flatten_text(item))\n\
+      \            else:\n                parts.append(str(item))\n        return\
+      \ \"\\n\".join(p for p in parts if p)\n    return str(value)\n\n\ndef _query_from_envelope(text):\n\
+      \    \"\"\"Extract the current question from a trailing openapi JSON envelope.\n\
+      \n    Multi-turn openapi requests carry the conversation history as plain text\n\
+      \    followed by one JSON envelope (``{\"sender\":..., \"msg\": {\"content\"\
+      : {\"query\":\n    ...}}}``) holding the CURRENT turn's message. The envelope\
+      \ is the last\n    top-level JSON object in the input; history without an envelope\
+      \ (single-shot\n    openclaw prompts) returns None so the caller keeps the plain\
+      \ text.\n    \"\"\"\n    idx = text.rfind('{\"sender\"')\n    if idx == -1:\n\
+      \        return None\n    try:\n        payload = json.loads(text[idx:])\n \
+      \   except Exception:\n        return None\n    if not isinstance(payload, dict):\n\
+      \        return None\n    containers = []\n    msg = payload.get(\"msg\")\n\
+      \    if isinstance(msg, dict):\n        containers.append(msg.get(\"content\"\
+      ))\n    containers.append(payload.get(\"content\"))\n    containers.append(payload)\n\
+      \    for container in containers:\n        if not isinstance(container, dict):\n\
+      \            continue\n        for key in (\"query\", \"question\", \"text\"\
+      , \"message\", \"content\"):\n            value = container.get(key)\n     \
+      \       if isinstance(value, str) and value.strip():\n                return\
+      \ value.strip()\n    return None\n\n\ndef _query_from_input(raw):\n    text\
+      \ = _flatten_text(raw).strip()\n    if not text:\n        return \"\"\n    #\
+      \ Drop the leading \"Conversation info (untrusted metadata): ```json ... ```\"\
+      \n    # block: the real question is whatever follows the closing fence.\n  \
+      \  if text.startswith(\"Conversation info\") and \"```\" in text:\n        first_fence\
+      \ = text.find(\"```\")\n        closing = text.find(\"```\", first_fence + 3)\n\
+      \        if closing != -1:\n            text = text[closing + 3:].strip()\n\
+      \    # Trailing openapi envelope -> its query is the current turn's question.\n\
+      \    from_envelope = _query_from_envelope(text)\n    if from_envelope is not\
+      \ None:\n        return from_envelope\n    if text.startswith(\"{\"):\n    \
+      \    try:\n            payload = json.loads(text)\n        except Exception:\n\
+      \            return text\n        if isinstance(payload, dict):\n          \
+      \  containers = []\n            msg = payload.get(\"msg\")\n            if isinstance(msg,\
+      \ dict):\n                containers.append(msg.get(\"content\"))\n        \
+      \    containers.append(payload.get(\"content\"))\n            containers.append(payload)\n\
+      \            for container in containers:\n                if not isinstance(container,\
+      \ dict):\n                    continue\n                for key in (\"query\"\
+      , \"question\", \"text\", \"message\", \"content\"):\n                    value\
+      \ = container.get(key)\n                    if isinstance(value, str) and value.strip():\n\
+      \                        return value.strip()\n    return text\n\n\ndef map_trace(trace,\
+      \ observations, turn_num, defaults):\n    obs_list = sorted(\n        [o for\
+      \ o in observations or [] if isinstance(o, dict)],\n        key=lambda o: str(o.get(\"\
+      startTime\") or \"\"),\n    )\n\n    tool_calls = []\n    tool_results = []\n\
+      \    used_skills = []\n    read_skills = []\n    for obs in obs_list:\n    \
+      \    name = str(obs.get(\"name\") or \"\")\n        if not name.startswith(\"\
+      tool: \"):\n            continue\n        tool_name = name[len(\"tool: \"):].strip()\n\
+      \        raw_input = obs.get(\"input\")\n        inp = raw_input if isinstance(raw_input,\
+      \ dict) else {}\n        args = inp.get(\"arguments\") if isinstance(inp.get(\"\
+      arguments\"), dict) else {}\n        call_id = str(inp.get(\"toolCallId\") or\
+      \ \"\")\n        tool_calls.append({\n            \"id\": call_id,\n       \
+      \     \"type\": \"function\",\n            \"function\": {\n               \
+      \ \"name\": tool_name,\n                \"arguments\": json.dumps(args, ensure_ascii=False)\
+      \ if args else \"{}\",\n            },\n        })\n        raw_out = obs.get(\"\
+      output\")\n        out = raw_out if isinstance(raw_out, dict) else {}\n    \
+      \    has_error = bool(out.get(\"isError\")) if isinstance(raw_out, dict) else\
+      \ False\n        tool_results.append({\n            \"tool_call_id\": call_id,\n\
+      \            \"tool_name\": tool_name,\n            \"content\": _flatten_text(out.get(\"\
+      content\") if isinstance(raw_out, dict) else raw_out),\n            \"has_error\"\
+      : has_error,\n        })\n        if tool_name == \"execute_skill\":\n     \
+      \       skill_id = str(args.get(\"skill_id\") or \"\").strip()\n           \
+      \ if skill_id and skill_id not in used_skills:\n                used_skills.append(skill_id)\n\
+      \        elif tool_name == \"read_skill\":\n            skill_id = str(args.get(\"\
+      skill_id\") or args.get(\"name\") or \"\").strip()\n            if skill_id:\n\
+      \                read_skills.append({\"skill_name\": skill_id})\n\n    # The\
+      \ last generation's input carries the complete final conversation;\n    # its\
+      \ per-message content is already the flattened text we want.\n    messages =\
+      \ []\n    generations = [o for o in obs_list if str(o.get(\"type\") or \"\"\
+      ).upper() == \"GENERATION\"]\n    if generations:\n        last_gen = generations[-1]\n\
+      \        gen_input = last_gen.get(\"input\") if isinstance(last_gen.get(\"input\"\
+      ), dict) else {}\n        raw_messages = gen_input.get(\"messages\") if isinstance(gen_input.get(\"\
+      messages\"), list) else []\n        for message in raw_messages:\n         \
+      \   if isinstance(message, dict):\n                messages.append({\n     \
+      \               \"role\": str(message.get(\"role\") or \"user\"),\n        \
+      \            \"content\": _flatten_text(message.get(\"content\")),\n       \
+      \         })\n\n    return {\n        \"prompt_text\": _query_from_input(trace.get(\"\
+      input\")),\n        \"response_text\": _flatten_text(trace.get(\"output\")),\n\
+      \        \"messages\": messages,\n        \"tool_calls\": tool_calls,\n    \
+      \    \"tool_results\": tool_results,\n        \"used_skills\": used_skills,\n\
+      \        \"read_skills\": read_skills,\n        \"metrics\": {\"tool_call_count\"\
+      : len(tool_calls)},\n    }\n"
+    enabled: true
+    match:
+      session_id_patterns: []
+      tags: []
+      trace_names:
+      - agent-call
+    name: 测试-产品智能体
+    note: 测试环境 upclaw http-openapi agent-call trace 映射
+  public_key: ''
+  secret_key: ''
+  tracing_enabled: false
+  tracing_host: ''
+  tracing_public_key: ''
+  tracing_secret_key: ''
+llm:
+  api_base: ''
+  api_key: ''
+  max_tokens: 8192
+  model_id: ''
+  provider: custom
+  temperature: 0.2
+service:
+  host: 0.0.0.0
+  port: 52010
+sharing:
+  auto_pull_on_start: false
+  enabled: true
+  local_fallback_enabled: false
+  session_backend: postgres
+  skill_backend: local
+  skill_local_root: /var/lib/teamevolver/skill-storage
+  skill_mirror_enabled: false
+  skill_reload_mode: false
+  viking_deployment: local
+  viking_endpoint: ''
+skills:
+  enabled: false
+storage_pg:
+  command_timeout_seconds: 15
+  dsn: ''
+  enabled: true
+  pool_max: 20
+  pool_min: 2
+  schema: teamevolver
+validation:
+  enabled: false

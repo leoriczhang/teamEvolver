@@ -1,0 +1,65 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "prepared_id": {
+      "title": "Prepared Id",
+      "type": "string"
+    },
+    "tenant": {
+      "title": "Tenant",
+      "type": "string"
+    },
+    "reviewer": {
+      "title": "Reviewer",
+      "type": "string"
+    },
+    "note": {
+      "maxLength": 2000,
+      "minLength": 1,
+      "title": "Note",
+      "type": "string"
+    },
+    "candidate_digest": {
+      "title": "Candidate Digest",
+      "type": "string"
+    },
+    "manifest_digest": {
+      "title": "Manifest Digest",
+      "type": "string"
+    },
+    "expected_generation": {
+      "minimum": 0,
+      "title": "Expected Generation",
+      "type": "integer"
+    },
+    "epoch": {
+      "minimum": 0,
+      "title": "Epoch",
+      "type": "integer"
+    },
+    "expires_at": {
+      "title": "Expires At",
+      "type": "integer"
+    },
+    "approval_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Approval Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "prepared_id",
+    "tenant",
+    "reviewer",
+    "note",
+    "candidate_digest",
+    "manifest_digest",
+    "expected_generation",
+    "epoch",
+    "expires_at",
+    "approval_id"
+  ],
+  "title": "PublicationApproval",
+  "type": "object"
+}

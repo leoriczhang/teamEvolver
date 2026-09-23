@@ -1,0 +1,66 @@
+{
+  "contract": "sf.ontology.candidate.v1",
+  "tenant": "demo-tenant",
+  "schema_revision": "sf-core@1.0.0",
+  "base_generation": "gen-demo-000",
+  "source_manifest_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "owner_epoch": 1,
+  "entities": [
+    {
+      "entity_id": "demo:issue:receipt-dispute",
+      "entity_type": "IssueDefinition",
+      "aliases": [
+        "合成签收争议"
+      ],
+      "external_id": null
+    },
+    {
+      "entity_id": "demo:slot:receipt-method",
+      "entity_type": "EvidenceSlot",
+      "aliases": [
+        "合成签收方式证据"
+      ],
+      "external_id": null
+    }
+  ],
+  "evidence": [
+    {
+      "evidence_id": "demo:evidence:1",
+      "source_id": "demo:source:1",
+      "source_revision": "r1",
+      "segment_id": "segment-1",
+      "source_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "source_uri": "viking://resources/demo/source-r1.md",
+      "source_kind": "synthetic",
+      "status": "active"
+    }
+  ],
+  "support_sets": [
+    {
+      "support_set_id": "demo:support:1",
+      "evidence_ids": [
+        "demo:evidence:1"
+      ],
+      "mode": "all_required"
+    }
+  ],
+  "assertions": [
+    {
+      "assertion_id": "demo:assertion:1",
+      "subject": "demo:issue:receipt-dispute",
+      "predicate": "requires_evidence",
+      "object": "demo:slot:receipt-method",
+      "qualifiers": {
+        "product": "DEMO_ONLY",
+        "region": "DEMO_ONLY"
+      },
+      "epistemic_kind": "document_fact",
+      "polarity": "positive",
+      "valid_from": "2026-09-18T00:00:00Z",
+      "valid_to": null,
+      "support_set_ids": [
+        "demo:support:1"
+      ]
+    }
+  ]
+}

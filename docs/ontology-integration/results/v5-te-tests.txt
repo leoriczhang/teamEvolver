@@ -1,0 +1,125 @@
+........................................................................ [ 12%]
+.....F.................................................................. [ 25%]
+.......ssssssssssssssssssssssssssssssssss.....................F.......F. [ 38%]
+F.........................................F............................. [ 50%]
+........................................................................ [ 63%]
+........................................................................ [ 76%]
+........................................................................ [ 88%]
+................................................................         [100%]
+=================================== FAILURES ===================================
+__________________ test_api_refresh_and_history_keep_feedback __________________
+
+candidate_api = (<starlette.testclient.TestClient object at 0x16539fd70>, <team_skills.candidates.store.ValidationStore object at 0x16... datasource_adapters_dir='', session_split_enabled=True), <teamEvolver.proxy.server.ProxyServer object at 0x164f283e0>)
+
+    def test_api_refresh_and_history_keep_feedback(candidate_api):
+        client, store, config, _ = candidate_api
+        base = "/api/skill-candidates"
+        # Warm the cached candidate list before marking.
+        assert client.get(base).json()["candidates"][0]["feedback"]["reviewed"] is False
+        saved = client.patch(base + "/job/feedback", json={"reviewed": True})
+        assert saved.status_code == 200, saved.text
+        feedback = saved.json()["feedback"]
+>       assert feedback["history"][0]["actor_id"] == "service-root"
+E       AssertionError: assert 'admin' == 'service-root'
+E
+E         - service-root
+E         + admin
+
+tests/test_candidate_feedback.py:129: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  teamEvolver.proxy.users_admin:users_admin.py:1306 openviking sync skipped for team: OpenViking endpoint or API key not configured
+______________ test_evolution_backfills_missing_session_analysis _______________
+
+    def test_evolution_backfills_missing_session_analysis():
+        client = _FakeClient(_analysis_reply())
+        owner = SimpleNamespace(
+            config=SimpleNamespace(use_session_judge=True),
+            _llm=client,
+        )
+        session = _session()
+
+        judged = asyncio.run(EvolveServer._prepare_sessions(owner, [session]))
+
+>       assert judged == 1
+E       assert 0 == 1
+
+tests/test_session_analyze_mandatory.py:209: AssertionError
+________________ test_legacy_score_cannot_bypass_model_analysis ________________
+
+    def test_legacy_score_cannot_bypass_model_analysis():
+        session = _session()
+        session["_summary"] = "legacy summary"
+        session["_judge_scores"] = {"overall_score": 0.9}
+        assert not session_has_merged_outputs(session)
+        client = _FakeClient(_analysis_reply())
+        owner = SimpleNamespace(config=SimpleNamespace(use_session_judge=True), _llm=client)
+        asyncio.run(EvolveServer._prepare_sessions(owner, [session]))
+>       assert len(client.calls) == 1
+E       assert 0 == 1
+E        +  where 0 = len([])
+E        +    where [] = <test_session_analyze_mandatory._FakeClient object at 0x1666eb830>.calls
+
+tests/test_session_analyze_mandatory.py:245: AssertionError
+_______ test_legacy_heuristic_archive_is_not_treated_as_already_analyzed _______
+
+tmp_path = PosixPath('/private/var/folders/x2/29_633m531z_g_jt14l581v9m8958r/T/pytest-of-01435552/pytest-93/test_legacy_heuristic_archive_0')
+
+    def test_legacy_heuristic_archive_is_not_treated_as_already_analyzed(tmp_path):
+        store = SessionStore(LocalObjectStore(str(tmp_path)))
+        session = _session()
+        store.save_skipped({**session, "value_judge": {"mode": "heuristic", "decision": "valuable"}})
+        assert store.duplicate_of_processed(session) is False
+        asyncio.run(_classify_session(session, SessionValueClassifier(client=_FakeClient(_analysis_reply()))))
+        store.save_skipped(session)
+        assert store.duplicate_of_processed(session) is True
+        engine = SimpleNamespace(
+            _bucket=store._bucket,
+            _archive_key=store.archive_key,
+            config=SimpleNamespace(storage_backend="local"),
+        )
+        EvolveServer._archive_sessions(engine, [session])
+>       assert store.duplicate_of_processed(session) is True
+E       AssertionError: assert False is True
+E        +  where False = duplicate_of_processed({'session_id': 'sess-mandatory', 'defer_evolution_trigger': True, 'turns': [{'prompt_text': '请执行候选技能', 'response_text'..._text': '结果符合预期', 'response_text': '收到', 'tool_calls': [], 'tool_results': [], ...}], '_skills_referenced': set(), ...})
+E        +    where duplicate_of_processed = <teamEvolver.session_store.SessionStore object at 0x1666b4fe0>.duplicate_of_processed
+
+tests/test_session_analyze_mandatory.py:303: AssertionError
+________ test_evolution_upload_uses_local_skill_store_and_tenant_prefix ________
+
+tmp_path = PosixPath('/private/var/folders/x2/29_633m531z_g_jt14l581v9m8958r/T/pytest-of-01435552/pytest-93/test_evolution_upload_uses_loc0')
+
+    def test_evolution_upload_uses_local_skill_store_and_tenant_prefix(tmp_path):
+        config = EvolveServerConfig(
+            storage_backend="local",
+            storage_local_root=str(tmp_path / "session-state"),
+            skill_storage_backend="local",
+            skill_storage_local_root=str(tmp_path / "nas"),
+            pg_tenant_id="tenant-a",
+            skill_mirror_enabled=False,
+        )
+        server = EvolveServer(config)
+
+        assert isinstance(server._skill_bucket, LocalObjectStore)
+>       assert server._skill_prefix == "tenants/tenant-a/"
+E       AssertionError: assert '' == 'tenants/tenant-a/'
+E
+E         - tenants/tenant-a/
+
+tests/test_skill_storage_backends.py:215: AssertionError
+=============================== warnings summary ===============================
+../../../../tmp/te-ontology-venv/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /tmp/te-ontology-venv/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+../../../../tmp/te-ontology-venv/lib/python3.12/site-packages/starlette/testclient.py:53
+  /tmp/te-ontology-venv/lib/python3.12/site-packages/starlette/testclient.py:53: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_candidate_feedback.py::test_api_refresh_and_history_keep_feedback
+FAILED tests/test_session_analyze_mandatory.py::test_evolution_backfills_missing_session_analysis
+FAILED tests/test_session_analyze_mandatory.py::test_legacy_score_cannot_bypass_model_analysis
+FAILED tests/test_session_analyze_mandatory.py::test_legacy_heuristic_archive_is_not_treated_as_already_analyzed
+FAILED tests/test_skill_storage_backends.py::test_evolution_upload_uses_local_skill_store_and_tenant_prefix
+5 failed, 529 passed, 34 skipped, 2 warnings in 13.53s

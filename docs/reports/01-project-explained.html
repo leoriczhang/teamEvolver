@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<meta name="description" content="基于 teamEvolver 当前源码的中文工程解读：架构、数据流、Skill Evolution、True Replay、Memory Evolution、SkillMiner、创新与局限。">
+<title>teamEvolver · 从个人经验到团队能力｜工程解读</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23115e59'/%3E%3Cpath d='M8 10h16M16 10v14M9 17h14' stroke='%23ffffff' stroke-width='3' fill='none'/%3E%3C/svg%3E">
+<style>
+:root{--ink:#182f33;--muted:#54686b;--teal:#115e59;--mint:#e3efea;--paper:#faf9f5;--white:#fff;--line:#d8e0da;--amber:#805016;--amber-bg:#fff3dc;--red:#903d35;--red-bg:#fae9e5;--blue:#265c86;--blue-bg:#eaf1f8;--rail:244px}
+*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:32px}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.85 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}a{color:var(--teal);text-underline-offset:4px}a:hover{color:#073c38}button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,a:focus-visible,input:focus-visible,summary:focus-visible{outline:3px solid #c78334;outline-offset:4px}button{border:1px solid var(--line);border-radius:8px;padding:7px 13px;background:#fff;color:var(--ink)}button:hover{background:var(--mint)}button.primary{background:var(--teal);color:white;border-color:var(--teal)}.skip{position:fixed;top:-70px;left:20px;background:#fff;padding:10px;z-index:20}.skip:focus{top:10px}.rail{position:fixed;inset:0 auto 0 0;width:var(--rail);background:#f1f2ec;border-right:1px solid var(--line);padding:34px 23px 20px;display:flex;flex-direction:column;z-index:5}.brand{display:flex;gap:10px;align-items:center;font-weight:750;font-size:20px;letter-spacing:-.7px}.brand-icon{display:grid;place-items:center;background:var(--teal);color:white;width:33px;height:33px;border-radius:9px;font:700 22px/1 Georgia,serif}.rail-sub{font-size:11px;letter-spacing:2px;color:var(--muted);margin:11px 0 25px}.rail nav{overflow:auto;flex:1}.rail nav a{display:flex;align-items:baseline;gap:10px;text-decoration:none;color:var(--muted);font-size:13px;padding:8px 9px;border-radius:6px;line-height:1.55;margin-bottom:3px}.rail nav a span{font:11px/1.5 ui-monospace,monospace;opacity:.7}.rail nav a.active{background:var(--teal);color:white}.rail-footer{font-size:11px;color:var(--muted);border-top:1px solid var(--line);padding-top:15px;margin-top:20px}.rail-footer button{font-size:12px;margin-bottom:10px;width:100%}.progress{height:3px;background:#d4ded7;margin-top:12px}.progress i{display:block;height:100%;background:var(--teal);width:0}.main{margin-left:var(--rail);max-width:1450px;padding:0 62px 80px}.hero{padding:60px 0 43px;border-bottom:1px solid var(--line)}.eyebrow{font:600 11px/1.5 ui-monospace,SFMono-Regular,monospace;letter-spacing:2.3px;color:var(--teal);text-transform:uppercase}.hero h1{font-size:clamp(36px,4.4vw,64px);line-height:1.2;letter-spacing:-2px;font-weight:720;margin:23px 0}.hero h1 em{font-style:normal;color:var(--teal)}.lead{font-size:19px;line-height:1.8;max-width:820px;color:var(--muted)}.meta{display:flex;gap:8px;flex-wrap:wrap;margin:25px 0}.pill{font-size:11px;line-height:1.5;padding:5px 9px;background:#e9ede6;border-radius:4px;color:#425b58}.hero-bottom{display:flex;justify-content:space-between;gap:20px;align-items:end;font-size:13px;margin-top:30px}.hero-bottom p{margin:0;color:var(--muted);max-width:670px}.hero-bottom a{white-space:nowrap;font-weight:650}.section{padding:48px 0 30px;border-bottom:1px solid var(--line);scroll-margin-top:24px}.section-head{display:flex;gap:18px;align-items:baseline}.num{font:500 15px/1.5 ui-monospace,monospace;color:var(--teal)}h2{font-size:30px;line-height:1.4;letter-spacing:-.7px;margin:0 0 18px;font-weight:700}h3{font-size:20px;line-height:1.6;margin:26px 0 11px}h4{font-size:16px;line-height:1.6;margin:18px 0 8px}p{margin:10px 0 16px}p.intro{color:var(--muted);font-size:17px;max-width:900px}strong{font-weight:680}small,.small{font-size:12px;color:var(--muted)}code{font: .86em/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;background:#eaf0eb;border-radius:4px;padding:2px 5px;overflow-wrap:anywhere}pre{padding:19px 22px;background:#193c3b;color:#e6f2eb;border-radius:10px;overflow:auto;font:12px/1.8 ui-monospace,monospace}pre code{background:none;padding:0;color:inherit;font:inherit}.grid{display:grid;gap:16px;margin:20px 0}.g2{grid-template-columns:repeat(2,minmax(0,1fr))}.g3{grid-template-columns:repeat(3,minmax(0,1fr))}.g4{grid-template-columns:repeat(4,minmax(0,1fr))}.card{padding:23px;background:var(--white);border:1px solid var(--line);border-radius:10px;min-width:0}.card h3{margin:7px 0 10px;font-size:19px}.card p:last-child{margin-bottom:0}.card p{font-size:14px;line-height:1.8}.card .mini-label{font:600 10px/1.6 ui-monospace,monospace;letter-spacing:1.4px;color:var(--teal)}.callout{padding:19px 23px;border-left:3px solid var(--teal);background:var(--mint);border-radius:0 8px 8px 0;margin:22px 0;font-size:14px}.callout p:last-child{margin-bottom:0}.callout.warn{border-color:var(--amber);background:var(--amber-bg);color:#573e22}.callout.note{border-color:var(--blue);background:var(--blue-bg)}.callout strong{display:block;margin-bottom:4px}.sources{font-size:11px;color:var(--muted);margin:18px 0 4px}.sources a{margin-right:9px}.table-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:9px;margin:20px 0;background:#fff}table{border-collapse:collapse;width:100%;font-size:13px;line-height:1.85}th{font-weight:650;text-align:left;padding:12px 15px;background:#edf2ed;white-space:nowrap}td{padding:14px 15px;vertical-align:top;border-top:1px solid var(--line)}td:first-child{font-weight:600}td p{margin:0 0 6px}td:last-child{min-width:170px}ul,ol{padding-left:21px;margin:10px 0 16px}li{margin:6px 0}.badge{display:inline-block;font-size:10px;line-height:1.6;padding:3px 7px;border-radius:4px;vertical-align:middle;font-weight:550}.fact{background:var(--mint);color:var(--teal)}.inference{background:var(--blue-bg);color:var(--blue)}.limit{background:var(--amber-bg);color:var(--amber)}.danger{background:var(--red-bg);color:var(--red)}figure{margin:23px 0}.architecture{padding:16px;background:#fff;border:1px solid var(--line);border-radius:12px}.architecture svg{width:100%;height:auto;display:block}.architecture figcaption{font-size:11px;color:var(--muted);padding:10px 10px 0}.flow{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:20px;margin:22px 0}.flow-item{position:relative;background:#fff;border:1px solid var(--line);border-radius:8px;padding:15px 13px;font-size:12px;line-height:1.7}.flow-item:not(:last-child):after{content:'→';position:absolute;right:-17px;top:35%;font-size:17px;color:var(--teal)}.flow-item b{display:block;color:var(--teal);font-size:14px;margin-bottom:6px}.flow-item span{color:var(--muted)}.story{counter-reset:steps;padding-left:0;list-style:none}.story li{position:relative;padding:0 0 22px 48px;margin:0;border-left:1px solid var(--line);margin-left:15px}.story li:before{counter-increment:steps;content:counter(steps,decimal-leading-zero);position:absolute;left:-15px;top:0;display:grid;place-items:center;width:30px;height:30px;border-radius:50%;background:var(--teal);color:white;font:11px ui-monospace,monospace;border:4px solid var(--paper)}.story li:last-child{border-left:0;padding-bottom:0}.story h4{margin-top:0}.story p{font-size:14px;margin-bottom:8px}.story .out{font-size:12px;color:var(--teal);background:var(--mint);display:inline-block;padding:3px 9px;border-radius:4px}.module{background:#fff;border:1px solid var(--line);border-radius:9px;margin:12px 0;overflow:hidden}.module summary{padding:18px 21px;cursor:pointer;font-size:16px;font-weight:650;list-style:none;display:flex;justify-content:space-between;gap:10px;align-items:center}.module summary::-webkit-details-marker{display:none}.module summary:after{content:'＋';font-weight:400;color:var(--teal);font-size:20px}.module[open] summary:after{content:'−'}.module summary small{display:block;font-size:12px;font-weight:400;line-height:1.6;padding-top:4px}.module-body{padding:0 23px 20px;font-size:14px;border-top:1px solid var(--line)}.module-body .grid{margin-bottom:10px}.module-body ul{margin-bottom:0}.module-body h4{color:var(--teal)}.section-tools{display:flex;justify-content:flex-end;gap:7px;margin:12px 0}.section-tools button{font-size:12px}.lab{background:#fff;border:1px solid var(--line);border-radius:12px;padding:24px;margin:24px 0}.lab-head{display:flex;align-items:center;justify-content:space-between;gap:15px}.lab-head h3{margin:0}.presets{display:flex;gap:7px;flex-wrap:wrap;margin:19px 0}.presets button{font-size:11px}.lab-inputs{display:grid;grid-template-columns:1fr 1fr;gap:20px}.branch{border:1px solid var(--line);border-radius:8px;padding:17px}.branch.candidate{background:#f2f7f2}.branch h4{margin:0 0 13px}.field{display:grid;grid-template-columns:1fr 100px;gap:10px;align-items:center;margin:9px 0;font-size:12px}.field input[type=number]{width:100%;padding:5px 8px;border:1px solid #b8c8bd;background:#fff;border-radius:5px;color:var(--ink)}.check-field{display:flex;align-items:center;gap:8px;margin:15px 0 0;font-size:12px}.check-field input{accent-color:var(--teal);width:16px;height:16px}.result{margin-top:19px;padding:18px 20px;background:var(--mint);border-radius:7px}.result strong{display:block;font-size:18px}.result p{font-size:13px;margin:5px 0 0}.result.reject{background:var(--red-bg);color:var(--red)}.result.inconclusive{background:var(--amber-bg);color:var(--amber)}.split-line{display:grid;grid-template-columns:150px 1fr;gap:20px;border-top:1px solid var(--line);padding:20px 0}.split-line h4{margin:0;color:var(--teal)}.split-line p{margin:0;font-size:14px}.ref-list{list-style:none;padding:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.ref-list li{border:1px solid var(--line);border-radius:7px;padding:14px 16px;background:#fff;margin:0;scroll-margin-top:30px;min-width:0}.ref-list li:target{outline:2px solid var(--teal)}.ref-list b{font-size:12px;display:block;margin-bottom:6px}.ref-list a{display:block;font:11px/1.8 ui-monospace,monospace;overflow-wrap:anywhere}.ref-list small{display:block;margin-top:7px}.glossary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 26px}.glossary div{padding:15px 0;border-bottom:1px solid var(--line)}.glossary dt{font-weight:650;color:var(--teal);font-size:14px}.glossary dd{margin:4px 0 0;font-size:13px;color:var(--muted)}.ending{padding:35px 0 0;color:var(--muted);font-size:12px}.ending strong{color:var(--teal)}.mobile-brand{display:none}
+@media(min-width:1600px){.main{padding-left:90px;padding-right:90px}}
+@media(max-width:1100px){:root{--rail:211px}.rail{padding-left:16px;padding-right:16px}.main{padding-left:30px;padding-right:30px}.g3,.g4{grid-template-columns:repeat(2,minmax(0,1fr))}.flow{gap:16px}.flow-item{padding:12px 9px}.flow-item:not(:last-child):after{right:-15px}h2{font-size:26px}}
+@media(max-width:760px){.rail{position:relative;width:auto;padding:17px 20px}.rail-sub,.rail-footer{display:none}.rail nav{display:flex;gap:5px;overflow:auto;padding-top:13px;white-space:nowrap}.rail nav a{flex-shrink:0;padding:6px 9px;font-size:12px}.rail nav a span{display:none}.main{margin:0;padding:0 20px 40px}.hero{padding:32px 0}.hero h1{font-size:clamp(30px,8.5vw,36px);letter-spacing:-1px}.lead{font-size:16px}.hero-bottom{display:block}.hero-bottom a{display:inline-block;margin-top:14px}.section{padding-top:32px}.section-head{gap:11px}h2{font-size:25px}.g2,.g3,.g4,.lab-inputs,.ref-list,.glossary{grid-template-columns:1fr}.card{padding:19px}.flow{grid-template-columns:1fr;gap:18px}.flow-item:not(:last-child):after{content:'↓';left:50%;right:auto;top:auto;bottom:-22px}.flow-item{padding:12px 15px}.architecture{padding:7px;overflow:auto}.architecture svg{min-width:690px}.architecture figcaption{min-width:0}.split-line{grid-template-columns:1fr;gap:7px}.table-wrap table{min-width:610px}.lab{padding:17px}.lab-head{display:block}.lab-head .badge{margin-top:8px}.story li{padding-left:28px}.section-tools{justify-content:flex-start}.module summary{padding:16px}.module-body{padding:0 16px 17px}.field{grid-template-columns:1fr 96px}.hero-bottom p{font-size:12px}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+@media print{@page{size:A4;margin:16mm 13mm}body{background:#fff;font-size:10pt;line-height:1.65;color:#132d30}.rail,.skip,.section-tools,.presets,.lab,.hero-bottom a{display:none!important}.main{margin:0;max-width:none;padding:0}.hero{padding:0 0 20px}.hero h1{font-size:32pt}.hero .lead{font-size:12pt}.section{padding:23px 0 15px;break-inside:auto}.section-head{break-after:avoid}h2{font-size:20pt}h3{font-size:14pt;break-after:avoid}h4{break-after:avoid}.card,.callout,.module,.split-line,.ref-list li,.glossary div,figure{break-inside:avoid}.g2,.g3,.g4{grid-template-columns:1fr 1fr}.card{padding:13px}.table-wrap{overflow:visible}table{font-size:9pt}th,td{padding:9px}tr{break-inside:avoid}thead{display:table-header-group}.architecture svg{min-width:0}.module summary{padding:12px 15px}.module-body{display:block!important;padding:0 15px 15px}.ref-list{grid-template-columns:1fr}.ref-list a{font-size:8pt}.sources{font-size:8pt}a{color:inherit;text-decoration:none}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:8pt}.flow{gap:16px}.flow-item{padding:9px}.pill,.badge,.card,.callout,th,.architecture{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+</style>
+</head>
+<body><div id="ontology-v4-update" style="position:relative;z-index:20;background:#fff2d7;padding:12px;text-align:center;color:#5c4423">本页为早期项目说明；2026-09-19 的 Ontology 架构与实测结果见 <a href="02-ontology-integration-explained.html">新版三项目集成说明</a>。</div>
+<a class="skip" href="#main">跳转到正文</a>
+<aside class="rail" aria-label="文档目录">
+  <div class="brand"><span class="brand-icon" aria-hidden="true">t</span>teamEvolver</div>
+  <div class="rail-sub">ENGINEERING FIELD GUIDE</div>
+  <nav aria-label="章节">
+    <a href="#overview" class="active"><span>01</span>先理解它解决什么</a>
+    <a href="#architecture"><span>02</span>工程架构与边界</a>
+    <a href="#flow"><span>03</span>Session 如何变成 Skill</a>
+    <a href="#replay"><span>04</span>True Replay 如何判定</a>
+    <a href="#memory"><span>05</span>团队 Memory 如何进化</a>
+    <a href="#miner"><span>06</span>SkillMiner 文档挖掘</a>
+    <a href="#modules"><span>07</span>核心模块实现索引</a>
+    <a href="#storage"><span>08</span>存储、发布与一致性</a>
+    <a href="#innovation"><span>09</span>创新点与工程长处</a>
+    <a href="#scenarios"><span>10</span>适用场景与落地方法</a>
+    <a href="#limits"><span>11</span>不足与改进优先级</a>
+    <a href="#glossary"><span>12</span>术语速查</a>
+    <a href="#sources"><span>13</span>源码依据与验证范围</a>
+  </nav>
+  <div class="rail-footer"><button type="button" id="print">打印 / 另存为 PDF</button>源码快照 · <code>f18d0d7</code><br>编写日期 · 2026-09-11<div class="progress" aria-hidden="true"><i id="progress"></i></div></div>
+</aside>
+<main class="main" id="main">
+<header class="hero">
+  <div class="eyebrow">PROJECT ANATOMY / 工程解读</div>
+  <h1>从个人经验，<br>到可验证的<em>团队能力。</em></h1>
+  <p class="lead">teamEvolver 把真实工作中的经验，转化为团队能持续复用的 Skill 与 Memory。理解这个项目，要同时看清：经验从哪里来、变化如何被验证、资产怎样可靠地交付给 Agent。</p>
+  <div class="meta"><span class="pill">FastAPI + React</span><span class="pill">本地对象存储 + OpenViking</span><span class="pill">Skill Evolution / Memory Evolution</span><span class="pill">源码解读 · 非效果测评</span></div>
+  <div class="hero-bottom"><p>阅读建议：先读 01–06 建立整体认识，再按需展开模块实现。09–11 面向技术选型与架构评审。全文可离线阅读，含可操作的 Replay 判定示例。</p><a href="#overview">开始阅读 ↓</a></div>
+</header>
+
+<section class="section" id="overview">
+  <div class="section-head"><span class="num">01</span><h2>先理解它解决什么</h2></div>
+  <p class="intro">一个 Agent 把任务完成了，不等于整个团队都学会了这套方法。teamEvolver 要补上的，是从“一次做对”到“以后能稳定复用”的工程链路。</p>
+  <div class="grid g3">
+    <article class="card"><div class="mini-label">EXPERIENCE</div><h3>经验可以追溯</h3><p>保留 Session、工具使用、用户纠正与产物线索；把支持某项变化的事实提取为 Evidence，说明“为什么值得改”。</p></article>
+    <article class="card"><div class="mini-label">VALIDATION</div><h3>改进可以验证</h3><p>先生成 Skill Candidate，在真实 Agent 运行时执行同一任务的 Baseline 与 Candidate，再检查任务完成性和效率。</p></article>
+    <article class="card"><div class="mini-label">GOVERNANCE</div><h3>能力可以治理</h3><p>团队资产有版本、变更记录、分发状态与 Rollback 路径。个人资产与团队资产之间有共享边界。</p></article>
+  </div>
+  <h3>一个贯穿全文的例子</h3>
+  <p>假设团队经常让 Agent 生成月度经营报告。多次 Session 显示：Agent 总要等用户提醒，才补齐指标口径、异常解释和来源说明。这些重复纠正可以成为 Evidence，支持修订一项报告 Skill。系统再构造同类任务，验证加载 Candidate 后，Agent 是否能更少往返地交付完整报告。</p>
+  <div class="grid g2">
+    <article class="card"><div class="mini-label">TEAM SKILL / 怎么做</div><h3>任务方法</h3><p>例如：生成报告前先核对指标口径，按固定步骤定位异常，最后检查来源与解释是否齐全。Skill 包含适用场景、步骤、约束及配套资源。</p></article>
+    <article class="card"><div class="mini-label">TEAM MEMORY / 需要知道什么</div><h3>长期上下文</h3><p>例如：团队使用哪套指标定义，某业务线的统计口径为何调整。Memory 保存长期事实、背景或共识，供 Agent 检索使用。</p></article>
+  </div>
+  <div class="callout"><strong>项目定位：Agent 团队能力进化控制面</strong>业务任务仍由外部 Agent 运行时执行；teamEvolver 管理 Evidence、Evolution、验证、版本和分发。它内部也会调用 LLM、运行维护循环和验证分支，但不接管外部 Agent 的日常执行循环。</div>
+  <p class="small">上面的经营报告场景为解释机制而构造，不代表仓库已经提供对应业务 Skill，也不代表已测得收益。</p>
+  <p class="sources">依据：<a href="#s01">[01] 定位与术语</a><a href="#s02">[02] 服务组装</a></p>
+</section>
+
+<section class="section" id="architecture">
+  <div class="section-head"><span class="num">02</span><h2>工程架构：一个服务，三条进化链路</h2></div>
+  <p class="intro">当前是模块化单体：一个 FastAPI 服务对外提供 API 和控制台，内部组合多个 Python 模块、后台循环与执行适配器。图中的模块不是独立部署的微服务。</p>
+  <figure class="architecture">
+    <svg viewBox="0 0 1040 596" role="img" aria-labelledby="arch-title arch-desc">
+      <title id="arch-title">teamEvolver 工程架构与存储边界</title>
+      <desc id="arch-desc">外部 Agent、Langfuse 和领域文档进入 FastAPI 控制面。控制面运行 Skill Evolution、True Replay、DreamCycle、跨用户聚合与 SkillMiner。高频账本和团队 Skill 主存储位于本地，Skill 子树异步镜像到 OpenViking。真实 Agent 分支在独立运行时执行。</desc>
+      <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0L6 3L0 6" fill="none" stroke="#5d8178" stroke-width="1.3"/></marker></defs>
+      <g font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif">
+      <g fill="#f2f5ef" stroke="#d3ddd5"><rect x="20" y="18" width="299" height="65" rx="8"/><rect x="338" y="18" width="214" height="65" rx="8"/><rect x="571" y="18" width="199" height="65" rx="8"/><rect x="789" y="18" width="230" height="65" rx="8"/></g>
+      <g fill="#203c3d" font-size="15" font-weight="600" text-anchor="middle"><text x="170" y="45">外部 Agent 运行时</text><text x="445" y="45">Langfuse</text><text x="670" y="45">领域文档</text><text x="904" y="45">React 控制台</text></g>
+      <g fill="#5a706c" font-size="11" text-anchor="middle"><text x="170" y="65">身份映射 · Session · Context · 分发</text><text x="445" y="65">入站 Session / 出站追踪</text><text x="670" y="65">文档挖掘的输入</text><text x="904" y="65">评审 · 资产 · 配置 · 观测</text></g>
+      <g stroke="#5d8178" fill="none" marker-end="url(#arrow)"><path d="M170 83V120"/><path d="M445 83V120"/><path d="M670 83V120"/><path d="M904 83V120"/></g>
+      <rect x="20" y="120" width="1000" height="301" rx="12" fill="#edf4ee" stroke="#aac5b7"/>
+      <rect x="39" y="141" width="962" height="51" rx="7" fill="#115e59"/>
+      <text x="59" y="173" fill="#fff" font-size="16" font-weight="600">FastAPI :52010</text><text x="254" y="173" fill="#d4e8df" font-size="13">鉴权 / 协议校验 / 路由 Mixin / 内嵌 EvolveServer / 生命周期管理</text>
+      <g stroke="#5d8178" fill="none" marker-end="url(#arrow)"><path d="M209 192V218"/><path d="M523 192V218"/><path d="M838 192V218"/></g>
+      <g fill="#fff" stroke="#c9d9cd"><rect x="40" y="219" width="306" height="97" rx="8"/><rect x="366" y="219" width="308" height="97" rx="8"/><rect x="694" y="219" width="307" height="97" rx="8"/></g>
+      <g fill="#153d37" font-size="16" font-weight="600"><text x="58" y="247">Skill Evolution</text><text x="383" y="247">Memory Evolution</text><text x="712" y="247">SkillMiner</text></g>
+      <g fill="#526b63" font-size="12"><text x="58" y="271">过滤 → 摘要 / Judge → 分组 → Candidate</text><text x="58" y="294">同源 Test Dataset · 近期 / 历史 Evidence</text><text x="383" y="271">DreamCycle：持续维护与变更账本</text><text x="383" y="294">Aggregation：确定性快照 + 分层编译</text><text x="712" y="271">样本包 → 语义发现 → Skill 与评测编译</text><text x="712" y="294">补证反思 · 产物检查 · Candidate 提交</text></g>
+      <rect x="40" y="337" width="461" height="63" rx="8" fill="#fff" stroke="#c9d9cd"/><rect x="520" y="337" width="481" height="63" rx="8" fill="#fff" stroke="#c9d9cd"/>
+      <text x="57" y="361" fill="#153d37" font-size="14" font-weight="600">True Replay / 验证结果 / Candidate Review</text><text x="57" y="383" fill="#526b63" font-size="12">服务端评估 + 可选空闲验证 Worker；Memory 前后验证</text><text x="536" y="361" fill="#153d37" font-size="14" font-weight="600">SkillMutationService / Commit / Outbox</text><text x="536" y="383" fill="#526b63" font-size="12">统一记录变更 · 版本 / 删除标记 · Agent 分发重试</text>
+      <g stroke="#5d8178" fill="none" marker-end="url(#arrow)"><path d="M209 316V337"/><path d="M672 316V337"/><path d="M501 368H520"/><path d="M168 421V462"/><path d="M517 421V462"/><path d="M839 421V462"/></g>
+      <g fill="#fff" stroke="#c9d9cd"><rect x="20" y="463" width="319" height="109" rx="8"/><rect x="359" y="463" width="335" height="109" rx="8"/><rect x="714" y="463" width="305" height="109" rx="8"/></g>
+      <g fill="#153d37" font-size="15" font-weight="600"><text x="38" y="492">本地持久化</text><text x="377" y="492">OpenViking</text><text x="732" y="492">隔离的真实 Agent 分支</text></g>
+      <g fill="#526b63" font-size="12"><text x="38" y="517">Session / Evidence / Candidate / 版本账本</text><text x="38" y="539">团队 Skill 主存储 / Outbox / YAML 配置</text><text x="377" y="517">Memory / Resources / Snapshot</text><text x="377" y="539">团队 Skill 子树的异步镜像</text><text x="732" y="517">Baseline 与 Candidate 并行执行</text><text x="732" y="539">HTTP Runtime Adapter / 本地 Hermes</text></g>
+      <path d="M339 550H359" stroke="#5d8178" fill="none" marker-end="url(#arrow)"/>
+      </g>
+    </svg>
+    <figcaption>实线表示依赖或主要调用关系；本地 → OpenViking 的箭头只表示 Skill 镜像，不表示所有本地账本都会复制到远端。下方执行分支由运行时适配器承载，隔离条件取决于运行路径。</figcaption>
+  </figure>
+  <div class="table-wrap"><table><thead><tr><th>边界</th><th>负责什么</th><th>理解这个边界的意义</th></tr></thead><tbody>
+    <tr><td>外部 Agent ↔ 控制面</td><td>Agent 上报 Session、读取 Context、执行 Replay Branch、接收 Skill Bundle。</td><td>接入不是简单上传文本；能否验证，取决于运行时是否提供对应能力与材料。</td></tr>
+    <tr><td>React ↔ FastAPI</td><td>React + TypeScript + Vite 构建；FastAPI 挂载静态产物并提供管理 API。</td><td>控制台是同一套后端能力的操作入口，不是另一个后台系统。</td></tr>
+    <tr><td>控制面 ↔ LLM</td><td>摘要、Judge、候选规划、Dataset 合成、Checklist 判定、Memory 维护与文档挖掘。</td><td>LLM 是多个阶段的依赖；一次 Evolution 的耗时和成本不等于一次模型调用。</td></tr>
+    <tr><td>本地存储 ↔ OpenViking</td><td>默认本地承载服务账本与团队 Skill；OpenViking 承载 Context、Memory、快照和 Skill 镜像。</td><td>OpenViking 不可用时，部分控制面路径仍能继续，但远端 Context 能力不会自动变成完整离线能力。</td></tr>
+  </tbody></table></div>
+  <p><code>ProxyServer</code> 通过多个 Mixin 组装路由；内嵌 <code>EvolveServer</code> 拥有自己的应用与周期循环，部分请求通过 <code>httpx.ASGITransport</code> 在进程内转发。因此，单端口背后仍存在多套状态与生命周期。</p>
+  <p class="sources">依据：<a href="#s02">[02] 服务组装</a><a href="#s03">[03] 前端与配置</a><a href="#s14">[14] 存储分层</a><a href="#s10">[10] Replay 运行边界</a></p>
+</section>
+
+<section class="section" id="flow">
+  <div class="section-head"><span class="num">03</span><h2>一份 Session，如何变成团队 Skill</h2></div>
+  <p class="intro">这条链路的核心不是不断生成新内容，而是有依据地提出变化、验证变化，再把版本交付出去。不同阶段有分支、跳过和重试，不是每份 Session 都会走完全程。</p>
+  <div class="flow" aria-label="Skill Evolution 主数据流"><div class="flow-item"><b>接收与过滤</b><span>真实 Session<br>身份 / 去重 / 价值判断</span></div><div class="flow-item"><b>组织 Evidence</b><span>摘要 / Judge / Skill 分组<br>结合跨周期事实</span></div><div class="flow-item"><b>提出变化</b><span>Skill Candidate<br>Bundle + Test Dataset</span></div><div class="flow-item"><b>验证与决策</b><span>静态检查 / True Replay<br>验证门禁 / 人工决策</span></div><div class="flow-item"><b>发布与分发</b><span>新版本 / Outbox<br>Agent 使用后产生新 Session</span></div></div>
+  <ol class="story">
+    <li><h4>接入：先确定是谁、使用过什么</h4><p>V1 Token 标识 Agent Integration；<code>integration_id + external_subject</code> 映射到 teamEvolver 用户。Session 可以携带完整交互、工具调用与结果、效率计数、Skill 使用和 Context 引用。受验证的 Context 使用信息比“某个 Skill 曾被注入”更有说服力。</p><span class="out">产出：规范化 Session 与可归属身份</span></li>
+    <li><h4>过滤：决定是否进入 Skill Evolution</h4><p>主服务与 Langfuse 拉取复用 <code>_ingest_session_dict</code>。已处理且内容未变的 Session 可去重；增加新轮次则可重新处理。价值分类器输出 <code>valuable</code>、<code>memory_candidate</code>、<code>task_only</code> 或 <code>chitchat</code>。当前主路径只有 <code>valuable</code> 入队，其余归档并记录过滤审计。</p><span class="out">产出：持久化队列、归档、过滤审计、Session 索引</span></li>
+    <li><h4>准备：先提取任务过程，再判断结果</h4><p>进化周期消费队列，生成 Session 摘要与执行轨迹，提取真实 Skill 引用，并按配置执行 Session Judge。Judge 会评价任务完成、响应质量、效率与工具使用。这是对来源 Session 的辅助评价，不是最终 Replay 发布分数。</p><span class="out">产出：摘要、轨迹、Skill 引用、Session Judge 结果</span></li>
+    <li><h4>分组：按真实使用关联 Skill</h4><p>引用了 A 与 B 的 Session 会进入两个 Skill 分支；没有明确引用的 Session 进入无 Skill 分支，尝试提议新建。Skill 仅出现在注入目录中，不应被当作已使用。分支结合近期与历史 Evidence；默认要求至少 2 个不同 Session 和 2 个不同用户，受控候选审计 Session 有专门例外。</p><span class="out">产出：Skill 分组、规划用 Evidence、近期与历史验证窗口</span></li>
+    <li><h4>规划：只让团队级任务经验改变团队 Skill</h4><p>LLM 规划修订、新建、描述优化、合并或 <code>skip</code>。Evidence Classification 位于候选规划规则中，区分 <code>team_skill</code>、<code>user_memory</code>、<code>task_requirement</code>、<code>agent_runtime</code>、<code>insufficient_evidence</code>。例如，一次报告要求“改成蓝色”不能直接升级为全团队方法。</p><span class="out">产出：变化理由、Evidence Classification、Skill 变化提议</span></li>
+    <li><h4>物化：形成完整 Bundle，而不只改入口文字</h4><p>把允许的文件变更应用到原有 Bundle，计算多文件 Diff；保留未改文件，检查路径、类型和大小约束。候选通常包含 <code>SKILL.md</code>、引用资料与配套执行资源。新增或修改的 Python / Shell 资源进入静态语法检查；该检查不能证明业务正确或执行无副作用。</p><span class="out">产出：Skill Candidate、Bundle Tree Hash、静态检查结果</span></li>
+    <li><h4>合成验证任务：用同源事实构建 Test Dataset</h4><p>Dataset Synthesizer 从支持变化的 Session / Evidence 构造任务和扁平 Checklist；近期窗口检验当前问题，历史窗口检验原有能力。默认合成参数包含 2 个测试任务、12–24 条要求、每批披露 4 条要求；这些是可配置默认值，不是每次运行一定满足的效果保证。</p><span class="out">产出：Replay Cases、Checklist、来源关联与验证窗口</span></li>
+    <li><h4>验证：把 Candidate 放进真实执行过程</h4><p>服务端可调度候选评估，Validation Worker 也可在满足配置与空闲条件时收集结果。Baseline 与 Candidate 使用对应运行时执行任务，保存回复、工具轨迹、产物与效率。候选修改后会变化的 revision 和 Bundle Hash，用来防止旧结果为新内容背书。</p><span class="out">产出：版本匹配的验证结果、完成门禁与运行时兼容性结论</span></li>
+    <li><h4>发布：根据实际配置选择门禁路径</h4><p>默认 <code>publish_mode=validated</code>，后台路径按验证结果数量、接受数量和运行时兼容性决定能否发布；管理员也可触发基于 Replay 的 Candidate Review。代码保留 <code>direct</code> 模式与管理员 <code>force</code> 路径，因此不能把“每次发布都必须人工点击、且指标更好”写成不可绕过的系统保证。</p><span class="out">产出：发布决策、新团队 Skill 版本、变更记录</span></li>
+    <li><h4>交付与收尾：可重试，也要避免失败拖累整个周期</h4><p>发布进入统一 mutation 记录和持久化分发流程。成功处理的 Session 先归档再移出队列；失败分支涉及的 Session 留待重试。一份 Session 涉及多个 Skill 时，只要其中一个分支失败，它仍保留。之后 Agent 使用已交付版本产生新的 Session，才形成反馈闭环。</p><span class="out">产出：Agent 分发状态、Skill 镜像状态、可追溯历史</span></li>
+  </ol>
+  <div class="callout note"><strong>“11 阶段”适合展示概念，不能理解为 11 个必定顺序调用的函数。</strong>实际执行包括分组并发、无 Skill 分支、合并、候选合并更新、跳过、部分成功和异步验证。最可靠的入口是 <code>EvolveServer._run_once</code> → <code>_evolve_skill_group</code> / <code>_handle_no_skill_sessions</code> → <code>_materialize_skill</code>。</div>
+  <p class="sources">依据：<a href="#s04">[04] Session ingest</a><a href="#s05">[05] 进化编排</a><a href="#s06">[06] Evidence 与规划</a><a href="#s07">[07] Dataset</a><a href="#s08">[08] Candidate 治理</a></p>
+</section>
+
+<section class="section" id="replay">
+  <div class="section-head"><span class="num">04</span><h2>True Replay：先做完，再比较代价</h2></div>
+  <p class="intro">一项 Skill 写得更像专家，并不能证明 Agent 用它做得更好。True Replay 让真实运行时执行任务，把判断落在行为与产物上。</p>
+  <div class="grid g2">
+    <article class="card"><div class="mini-label">BASELINE</div><h3>不加载 Skill Candidate</h3><p>同一 Replay Case 的对照分支。已有 Skill 的修订验证中可以加载当前已发布 Skill；新建 Skill 的场景可能没有对应 Skill。因此 Baseline 不能一概理解为“完全没有任何 Skill”。</p></article>
+    <article class="card"><div class="mini-label">CANDIDATE</div><h3>加载待验证版本</h3><p>对照相同任务，加载待验证 Bundle，并使用可复现的 Context 投影和必要材料。隔离执行目录与生产运行状态，收集分支实际交互、工具调用和输出。</p></article>
+  </div>
+  <h3>渐进披露，检验能否主动完成</h3>
+  <p>服务端持有 Checklist，每轮根据回复、工具轨迹和真实工作区产物判断完成情况。未满足的要求按批次继续披露，直到完成或耗尽轮次预算。更好的 Skill 有机会提前覆盖这些要求，减少用户补充和来回纠正。</p>
+  <p>例如，第一轮只提出“生成月报”，Checklist 检查报告是否解释异常、声明口径并列出来源。Candidate 主动完成这些内容，Baseline 经多次提醒才补齐，就会在交互轮次上拉开差异。这个差异来自任务执行，而不是给 Skill 文本打印象分。</p>
+  <h3>当前源码中的精确决策规则</h3>
+  <div class="table-wrap"><table><thead><tr><th>比较条件</th><th>策略结论</th><th>含义</th></tr></thead><tbody>
+    <tr><td>Candidate 的非空 Checklist 未全部满足</td><td><span class="badge danger">reject</span></td><td>即使轮次和 Token 更少，也没有完成任务。</td></tr>
+    <tr><td>两边都有 Checklist，仅 Candidate 全部满足</td><td><span class="badge fact">accept</span></td><td>完成性优先于资源节省。</td></tr>
+    <tr><td>两边均完成；Candidate 轮次更少 / 更多</td><td><span class="badge fact">accept</span> / <span class="badge danger">reject</span></td><td>轮次优先，次级指标不能推翻这一步。</td></tr>
+    <tr><td>轮次相同；工具调用、Token 至少一项减少，且无一增加</td><td><span class="badge fact">accept</span></td><td>两个次级指标一起考虑，不是先工具数再 Token 的严格逐项排序。</td></tr>
+    <tr><td>轮次相同；工具调用或 Token 任一增加</td><td><span class="badge danger">reject</span></td><td>即便另一项减少，也不接受这种次级指标交换。</td></tr>
+    <tr><td>完成性相同，三项效率指标均未变化</td><td><span class="badge limit">inconclusive</span></td><td>没有证据证明改善，不等于自动接受。</td></tr>
+  </tbody></table></div>
+  <div class="lab" aria-labelledby="lab-title">
+    <div class="lab-head"><h3 id="lab-title">动手试一遍判定逻辑</h3><span class="badge inference">说明用示例 · 非实测结果</span></div>
+    <p class="small">假设两边都有非空 Checklist、运行有效、使用同一任务。这里只复现完成性与效率策略；实际发布还要检查静态检查、结果新鲜度、验证窗口及运行时兼容性。</p>
+    <div class="presets"><button type="button" data-preset="turns">少一轮但 Token 更多</button><button type="button" data-preset="tradeoff">同轮次，工具少但 Token 多</button><button type="button" data-preset="complete">仅 Candidate 完成</button><button type="button" data-preset="tie">全部持平</button></div>
+    <div class="lab-inputs">
+      <div class="branch"><h4>Baseline</h4><label class="field">交互轮次<input id="b-turns" type="number" min="1" max="999" step="1" value="4"></label><label class="field">工具调用次数<input id="b-tools" type="number" min="0" max="9999999" step="1" value="10"></label><label class="field">总 Token 用量<input id="b-tokens" type="number" min="0" max="999999999" step="1" value="8000"></label><label class="check-field"><input id="b-done" type="checkbox" checked>Checklist 全部满足</label></div>
+      <div class="branch candidate"><h4>Candidate</h4><label class="field">交互轮次<input id="c-turns" type="number" min="1" max="999" step="1" value="3"></label><label class="field">工具调用次数<input id="c-tools" type="number" min="0" max="9999999" step="1" value="12"></label><label class="field">总 Token 用量<input id="c-tokens" type="number" min="0" max="999999999" step="1" value="10000"></label><label class="check-field"><input id="c-done" type="checkbox" checked>Checklist 全部满足</label></div>
+    </div>
+    <div class="result" id="lab-result" role="status" aria-live="polite"><strong>accept · Candidate 交互轮次更少</strong><p>4 → 3 轮。当前策略优先减少交互轮次，即使工具调用和 Token 用量增加，也接受这一效率策略结果。</p></div>
+    <noscript><p>交互演示需要 JavaScript。上表已经完整列出判断规则；正文阅读不受影响。</p></noscript>
+  </div>
+  <div class="callout warn"><strong>验证能力有三条重要边界</strong><p>① Checklist 的满足情况仍可由 LLM 判定，具有误判可能；真实执行不等于评估完全客观。② 空 Checklist 在底层策略中可能退化为效率比较，不能当成完整完成性证明。③ 同源 Test Dataset 与候选来自相近 Evidence，有相关性偏差；还需要独立保留的任务、重复运行和人工抽查。</p></div>
+  <p>本地 Hermes 分支使用 Linux <code>systemd-run</code>、私有网络、只读路径和最小环境等约束，并通过模型 Broker 保留服务端密钥。外部 Agent 的 HTTP Replay 依赖其适配器和运行环境履约。当前代码不能支撑“在任何操作系统、任何 Agent 上都无需适配即可安全 True Replay”的结论。</p>
+  <p class="sources">依据：<a href="#s09">[09] 完成性与效率策略</a><a href="#s10">[10] 运行隔离</a><a href="#s08">[08] 验证新鲜度</a><a href="#s20">[20] 对应测试</a></p>
+</section>
+
+<section class="section" id="memory">
+  <div class="section-head"><span class="num">05</span><h2>团队 Memory：聚合与持续维护分工</h2></div>
+  <p class="intro">Skill Evolution 关心可复用的方法；Memory Evolution 关心长期事实与背景能否保持准确、精简、可发现。当前代码提供两套互补机制。</p>
+  <div class="grid g2">
+    <article class="card"><div class="mini-label">DREAMCYCLE</div><h3>维护已经积累的 Memory</h3><p>通过计划、工具调用与持续检查，完成团队概况维护、去重、过期清理、个人经验团队化与新人可发现性检查。</p><p>主要入口：<code>FullDreamCycleSupervisor</code> → <code>Scheduler</code> → 各类 Job → <code>ReActEngine</code>。</p></article>
+    <article class="card"><div class="mini-label">CROSS-USER AGGREGATION</div><h3>把多用户来源编译成团队资产</h3><p>管理员选择用户与 Memory 类别，服务先制作确定性私有快照，再按固定版本的聚合 Skill 分层合并成团队 Memory。</p><p>主要入口：<code>MemoryAggregationService</code>，通过 OpenViking compile 完成语义编译。</p></article>
+  </div>
+  <h3>DreamCycle 的真实执行过程</h3>
+  <p>Supervisor 管理后台线程和轮次互斥；Scheduler 按配置的时间窗口和任务优先级执行。每个 Job 生成任务计划，ReActEngine 在“查看状态 → 调用模型 → 执行工具 → 更新计划”的循环中工作，受轮次预算与连续错误上限约束。</p>
+  <p>工具侧提供搜索、读取、浏览、写入、归档与合并；写入前强调先查重、优先更新已有权威条目，临时诊断报告保存为报告而非长期 Memory。部分完成判断锚定成功的写操作，减少“模型说已维护，实际上没改动”的问题。</p>
+  <div class="flow"><div class="flow-item"><b>选择维护 Job</b><span>概况 / 去重 / 清理<br>团队化 / 可发现性</span></div><div class="flow-item"><b>构造任务计划</b><span>目标与工具边界<br>任务优先级</span></div><div class="flow-item"><b>ReAct 执行</b><span>读取 → 推理 → 操作<br>成功操作与预算约束</span></div><div class="flow-item"><b>Memory Change</b><span>before / after 快照<br>路径、Hash、变更账本</span></div><div class="flow-item"><b>按需 True Replay</b><span>相同任务、不同 Memory<br>比较前后使用效果</span></div></div>
+  <div class="callout warn"><strong>这里的 Memory True Replay，不能直接等同于 Skill 发布门禁。</strong>已实现的 <code>MemoryChangeLedger</code> 记录变更前后 Snapshot；<code>MemoryTrueReplayRunner.run</code> 可验证已应用的变化，<code>run_adhoc</code> 可验证未保存的前后内容。账本中仍有 <code>risk_level="unclassified"</code>，没有证据表明所有 Memory 写入都经过统一风险分级、管理员处理与写前 Replay。当前更准确的说法是：已有维护约束、变更追踪和按需验证能力。</div>
+  <h3>跨用户聚合：先准确复制，再分层处理</h3>
+  <div class="table-wrap"><table><thead><tr><th>步骤</th><th>具体实现</th><th>为什么这样做</th></tr></thead><tbody>
+    <tr><td>固定聚合规则</td><td>读取可修改的聚合 Skill，计算内容指纹并固定本次运行 revision。</td><td>一次聚合中不应因中途修改规则而产生前后不一致。</td></tr>
+    <tr><td>生成确定性快照</td><td>逐用户制作 JSONL，保留来源 URI、相对路径、内容、修改时间和 SHA-256；这一阶段不调用模型。</td><td>将来源采集与语义变换分离，便于追溯，也能按指纹复用。</td></tr>
+    <tr><td>有界 tree-reduce</td><td>先分组合并，再逐层合并中间结果；限制 fan-in 和 compile 并发。</td><td>避免一次把全部用户 Memory 塞进上下文；但分层压缩仍可能损失细节。</td></tr>
+    <tr><td>保留团队已有内容</td><td>按配置把当前目标树做成 baseline 输入，要求保留只存在于团队树中的人工修订。</td><td>避免重新聚合把团队既有结论覆盖掉；仍需关注编译结果是否遵守约束。</td></tr>
+    <tr><td>增量与恢复</td><td>保存用户来源、Skill 指纹与合并状态；来源不变时复用快照；规则变化触发重新编译。还提供可选的增量发布路径。</td><td>减少重复模型成本，失败重跑可复用成功工作。不是全账户多文件事务。</td></tr>
+  </tbody></table></div>
+  <p>默认聚合 Skill 要求去个人化、合并同主题内容、记录来源、维护 Markdown 索引与交叉引用。输出含 entity、concept、synthesis、index 等类型。注意：正文去个人化与来源元数据保留是两件事；包含用户标识的 provenance 仍需访问控制。</p>
+  <p class="sources">依据：<a href="#s11">[11] DreamCycle 执行</a><a href="#s12">[12] Memory Change 与 Replay</a><a href="#s13">[13] 聚合与增量</a></p>
+</section>
+
+<section class="section" id="miner">
+  <div class="section-head"><span class="num">06</span><h2>SkillMiner：没有足够 Session 时，从文档开始</h2></div>
+  <p class="intro">团队已有成熟领域资料、但 Agent 使用历史还少时，可以先从文档提取可执行方法，建立初始 Skill，再用真实 Session 持续修订。</p>
+  <div class="flow"><div class="flow-item"><b>领域资料</b><span>输入与知识补证<br>保留来源关系</span></div><div class="flow-item"><b>样本包构建</b><span>组织主题与切片<br>检查覆盖 / 重复</span></div><div class="flow-item"><b>语义发现</b><span>提取决策单元<br>流程、边界与 GAP</span></div><div class="flow-item"><b>Skill 与评测编译</b><span>SKILL.md<br>EVALUATION.md / 评测产物</span></div><div class="flow-item"><b>检查与接入治理</b><span>产物质量 / 人工检查<br>再提交 Skill Candidate</span></div></div>
+  <p>前三个核心步骤由对应的内置 Agent Skill 与 Prompt 驱动；<code>run_pipeline.py</code> 组织实际运行、重试、反思与产物处理。发现知识缺口后，可携带 GAP 和补充资料继续下一轮，默认最多 3 轮。挖掘任务有独立状态、停止 / 恢复及白盒配置入口。</p>
+  <div class="grid g2">
+    <article class="card"><h3>“挖掘成功”与“可发布”不同</h3><p>生成唯一可识别的 <code>SKILL.md</code> 后，挖掘任务可能带 warning 完成；提交 Skill Candidate 前仍要补齐所需评测材料。文档产出的内部 Benchmark 也不能直接充当已完成 True Replay 的证明。</p></article>
+    <article class="card"><h3>还提供两条评测旁路</h3><p>轨迹 Benchmark 挖掘可直接从交互轨迹构造独立评测产物；LIFT 桥接把评测材料转成可检查、批准和发布的外部格式。这些路径有独立用途，不能混同于主 Skill Evolution 发布链路。</p></article>
+  </div>
+  <div class="callout"><strong>适合补齐冷启动，不能替代领域专家。</strong>文档本身可能过期、冲突或缺少执行细节。语义发现与反思环能把缺口显式化，但不会自动证明提取的方法有效；生成的 Skill 和评测定义仍需要领域校验与真实任务验证。</div>
+  <p class="sources">依据：<a href="#s17">[17] SkillMiner 流水线与生命周期</a><a href="#s20">[20] SkillMiner 契约测试</a></p>
+</section>
+
+<section class="section" id="modules">
+  <div class="section-head"><span class="num">07</span><h2>核心模块实现索引</h2></div>
+  <p class="intro">从“是什么”深入到“代码如何工作”。每个模块都按输入、关键机制和输出解释；点击展开可以沿源码入口继续阅读。</p>
+  <div class="section-tools"><button type="button" id="expand">展开所有实现</button><button type="button" id="collapse">收起所有实现</button></div>
+  <details class="module" open><summary><span>01 · 服务、协议与 Context<small>proxy/ · integrations/ · admin/ · config_store/</small></span></summary><div class="module-body"><div class="grid g2"><div><h4>输入与入口</h4><p>控制台请求、Agent 注册、Session ingest、Context 访问与配置变化。<code>ProxyServer</code> 组合路由模块；<code>agent_protocol.py</code> 定义版本化契约；<code>agent_registry.py</code> 管理 Integration。</p></div><div><h4>关键机制与输出</h4><p>短期不透明 <code>context_ref</code> 在服务端绑定身份、Session 与有效期；使用引用可记录到 Context Snapshot。通过用户映射约束个人 Memory 写入与团队资产读取，向 Agent 返回受控 Context。</p></div></div><p>YAML 经 ConfigStore 与 bridge 映射成运行配置；部分模块支持重载，生命周期入口负责停止或重建对应组件。维护时应核实具体配置是否即时生效。</p><p class="sources"><a href="#s02">[02] 服务入口</a><a href="#s16">[16] 身份与 Context</a><a href="#s03">[03] 配置</a></p></div></details>
+  <details class="module"><summary><span>02 · Session 生命周期与来源适配<small>session_store.py · session_filter.py · Langfuse integration</small></span></summary><div class="module-body"><div class="grid g2"><div><h4>输入与入口</h4><p>规范化的 Session，包含完整交互与工具信息。HTTP ingest 与 Langfuse 通过共享处理路径去重和分类。</p></div><div><h4>关键机制与输出</h4><p>内容指纹区分重复上报与继续发生的 Session；分别维护队列、归档、过滤审计与索引。索引当前采用进程内按存储身份加锁的整体合并写入。</p></div></div><p>这与工程指引要求的“合并队列 + 周期 flush 单写者”并不完全相同，详见不足章节。不能仅从规范文字断言当前代码已满足全部并发约束。</p><p class="sources"><a href="#s04">[04] Session</a><a href="#s18">[18] Langfuse</a><a href="#s19">[19] 工程约束差距</a></p></div></details>
+  <details class="module"><summary><span>03 · Evidence 与 Skill Evolution 编排<small>evolve/runtime/ · evolve/stages/ · evolve/kernel/</small></span></summary><div class="module-body"><div class="grid g2"><div><h4>输入与入口</h4><p>待消费 Session、已发布 Skill Bundle、历史 Evidence 和未决 Candidate。<code>EvolveServer</code> 组织摘要、Judge、分组与变化物化。</p></div><div><h4>关键机制与输出</h4><p>SkillEvidenceStore 把同一 Skill 的事实跨周期保留，组合近期与历史窗口；变更债务提示长期反复出现的问题。组级 Semaphore 限制并行，run lock / upload lock 保护周期和共享写入。</p></div></div><p>change debt 是规划引导，不是“达到一个分数就自动创建 Candidate”的硬阈值。默认团队 Evidence 门槛另由 <code>min_group_sessions</code> 与 <code>min_group_users</code> 控制。失败分支保留相关 Session，成功分支可独立收尾。</p><p class="sources"><a href="#s05">[05] 编排</a><a href="#s06">[06] Evidence 与阶段</a></p></div></details>
+  <details class="module"><summary><span>04 · Candidate、Dataset 与 True Replay<small>dataset_synthesizer.py · validation/ · true_replay.py</small></span></summary><div class="module-body"><div class="grid g2"><div><h4>输入与入口</h4><p>Candidate Bundle、来源 Evidence、Replay Cases、Context 材料、运行时信息。Dataset Synthesizer 负责产生结构化任务；ValidationStore 管理验证工单、结果与决策。</p></div><div><h4>关键机制与输出</h4><p>候选更新递增 revision，验证绑定 Bundle Tree Hash。静态检查先过滤明显资源语法问题；Baseline / Candidate 并行执行，完成门禁与效率策略合成结论。</p></div></div><p>近期与历史窗口需要完整可评估；缺窗口不能假定通过。运行时兼容性策略约束验证覆盖的执行环境。ValidationWorker 还受每日任务配额和空闲条件约束；是否运行以配置和启动路径为准。</p><p class="sources"><a href="#s07">[07] Dataset</a><a href="#s08">[08] 验证治理</a><a href="#s09">[09] 策略</a></p></div></details>
+  <details class="module"><summary><span>05 · Skill Bundle、版本与交付<small>skills/bundle.py · hub.py · mutations.py · mirror.py</small></span></summary><div class="module-body"><div class="grid g2"><div><h4>输入与入口</h4><p>经过决策的团队 Skill 变化，包括 Publish、Update、Rollback 和 Delete。Bundle 表示完整文件集合，文件清单与树 Hash 用于一致性校验。</p></div><div><h4>关键机制与输出</h4><p>SkillMutationService 的 <code>execute</code> 或 <code>record_committed</code> 统一生成 commit 与 outbox；删除用 tombstone 表达；drain 负责分发，reconcile 补齐部分缺失事件。</p></div></div><p>部分进化路径先完成底层上传，再调用 <code>record_committed</code>。这是统一治理记录与最终交付恢复机制，不能描述成单一数据库 ACID 事务。OpenViking Skill 镜像有独立 spool 与 flusher。</p><p class="sources"><a href="#s15">[15] 变更与交付</a><a href="#s14">[14] 存储与镜像</a></p></div></details>
+  <details class="module"><summary><span>06 · DreamCycle 与跨用户聚合<small>dreamcycle/ · aggregation/</small></span></summary><div class="module-body"><div class="grid g2"><div><h4>输入与入口</h4><p>个人 / 团队 Memory、任务配置、共享规则及管理员选择的来源。DreamCycle 通过工具循环维护，Aggregation 通过快照与 compile 生成团队输出。</p></div><div><h4>关键机制与输出</h4><p>前者保留变更前后快照与账本；后者用来源和规则指纹增量复用，限制 compile 并发，保存中间树合并状态。同目标并发聚合有冲突保护。</p></div></div><p>两者都涉及长期事实治理，但并未统一成和 Skill Candidate 完全相同的发布状态机。Snapshot 缺失或不完整，会限制 Memory True Replay 能提供的证据。</p><p class="sources"><a href="#s11">[11] 维护循环</a><a href="#s12">[12] 变更账本</a><a href="#s13">[13] 增量编译</a></p></div></details>
+  <details class="module"><summary><span>07 · SkillMiner、控制台与可观测性<small>skillminer/ · mining_lifecycle.py · web-ui/src/ · observability/</small></span></summary><div class="module-body"><div class="grid g2"><div><h4>输入与入口</h4><p>领域文档、补充材料、模型与 Prompt 配置。控制台组织挖掘、进化、资产、治理和文档入口，支持多文件 Diff 与 Skill / Memory Lab。</p></div><div><h4>关键机制与输出</h4><p>挖掘任务包装真实流水线，保存步骤产物和状态。Langfuse 入站负责拉取与映射 Session；出站追踪模型调用及进化 / DreamCycle 过程，异常时尽量不阻塞业务。</p></div></div><p>白盒配置使规划、合成和判定逻辑可调整，也意味着一次 Prompt 或模型变化可能影响后续验证结果。排查问题时，应把配置版本与候选版本一起看。</p><p class="sources"><a href="#s17">[17] 挖掘</a><a href="#s18">[18] 观测</a><a href="#s03">[03] 前端</a></p></div></details>
+</section>
+
+<section class="section" id="storage">
+  <div class="section-head"><span class="num">08</span><h2>存储与一致性：发布成功，不等于所有 Agent 已更新</h2></div>
+  <p class="intro">存储设计决定系统在故障、重启和并发时能否继续工作。当前默认将高频服务账本留在本地，并把远端 Context 能力与异步交付分开。</p>
+  <div class="table-wrap"><table><thead><tr><th>对象</th><th>默认主位置 / 机制</th><th>作用与恢复边界</th></tr></thead><tbody>
+    <tr><td>Session 队列、归档、索引、过滤审计</td><td>本地对象存储；<code>sessions/</code>、<code>session_archive/</code>、<code>session_index.json</code> 等。</td><td>队列可继续消费，归档支撑追溯。队列删除不应先于归档完成。</td></tr>
+    <tr><td>Evidence、Candidate、验证结果与 registry / manifest</td><td>默认本地账本 / 对象存储，经对应 Store 管理。</td><td>帮助解释候选来源、识别版本、保存决策；不是远端向量检索的高频写路径。</td></tr>
+    <tr><td>团队 Skill 与历史 Bundle</td><td>本地先提交，Skill 子树通过 spool 异步镜像到 OpenViking。</td><td>正文、资源、版本与 Hash 需要一致；manifest / registry 不属于该 Skill 子树镜像。</td></tr>
+    <tr><td>Agent 分发</td><td><code>skill_sync_outbox/</code>、commit 与 tombstone；适配器送达。</td><td>有 pending / 重试 / delivery 状态。中心版本成功不意味着远端立即全部收到。</td></tr>
+    <tr><td>Memory、Resources、Snapshot</td><td>OpenViking Context 接口与快照能力。</td><td>依赖外部服务、身份与相应 API 支持；本地 fallback 无法替代全部远端能力。</td></tr>
+    <tr><td>配置、认证及运行状态</td><td>主要位于 <code>~/.teamEvolver/</code>；部分目录可配置。</td><td>正式部署需持久卷与备份；不能只备份 OpenViking 就认为状态完整。</td></tr>
+  </tbody></table></div>
+  <h3>一次 Publish 的三条状态线</h3>
+  <div class="split-line"><h4>1. 中心版本</h4><p>写入 Bundle 与版本信息，形成 mutation commit；这回答“团队当前决定使用哪个版本”。</p></div>
+  <div class="split-line"><h4>2. Agent 分发</h4><p>durable outbox 通过适配器发送版本与 Hash，并记录各目标结果；失败后可重试。这回答“哪些 Agent 已拿到该版本”。</p></div>
+  <div class="split-line"><h4>3. Context 镜像</h4><p>独立 Skill mirror spool 将需要的 Skill 子树写入 OpenViking；镜像失败不应阻塞本地进化。这回答“通过远端 Context 读取时能看到哪个版本”。</p></div>
+  <h3>Rollback 是“用历史内容生成新版本”</h3>
+  <p>若 v8 有问题，要恢复 v5 的完整 Bundle，Rollback 应产生一个新的 v9，内容对应 v5；旧版本与审计链保留。Delete 则产生带版本信息的 tombstone，让分发端知道应删除，避免历史内容因重试再次出现。</p>
+  <div class="callout warn"><strong>两种“本地”不要混为一谈。</strong>默认本地为主的 Skill 库有明确异步镜像；OpenViking 不可用时临时启用的通用 LocalObjectStore fallback，代码明确说明<strong style="display:inline">没有通用自动回写远端</strong>。恢复远端服务不会自动合并所有回退期间的写入，也不代表现有 Store 实例会立即重新绑定远端。</div>
+  <p>LocalObjectStore 用锁、临时文件与 <code>os.replace</code> 降低单文件写入撕裂风险，回退目录按存储身份区分。但单文件原子替换不等于跨 Bundle、manifest、commit、outbox 的多对象原子事务，也不等于多进程分布式锁。</p>
+  <p class="sources">依据：<a href="#s14">[14] 本地 / 远端存储</a><a href="#s15">[15] mutation 与镜像</a><a href="#s04">[04] Session 账本</a></p>
+</section>
+
+<section class="section" id="innovation">
+  <div class="section-head"><span class="num">09</span><h2>创新点与工程长处</h2></div>
+  <p class="intro">这里的“创新”指项目在能力进化流程上的组合设计与工程特点。仅凭仓库分析，不能证明其学术首创、行业领先或效果优于其他产品。</p>
+  <div class="grid g2">
+    <article class="card"><div class="mini-label">01 / EVIDENCE-DRIVEN CHANGE</div><h3>把“值得改”与“可以共享”分开判断</h3><p>结合真实 Skill 使用、用户纠正、Evidence Classification 与跨用户最低要求，尽量避免把个人偏好、一次性任务要求或 Runtime 故障固化为团队方法。</p><p><strong>价值：</strong>减少无依据的团队资产变化。<br><strong>边界：</strong>分类仍受模型判断和来源完整性影响。</p></article>
+    <article class="card"><div class="mini-label">02 / EXECUTION-BASED VALIDATION</div><h3>通过渐进披露验证主动完成能力</h3><p>让 Baseline / Candidate 在真实工具循环中执行任务，Checklist 控制完成性，轮次体现用户需要补充多少要求。</p><p><strong>价值：</strong>比单纯评阅 Skill 文本更接近实际使用。<br><strong>边界：</strong>任务与 Checklist 的质量直接影响可信度。</p></article>
+    <article class="card"><div class="mini-label">03 / HISTORICAL EVIDENCE</div><h3>让变化记住之前的事实与失败</h3><p>Evidence 跨周期保留，近期与历史窗口同时参与规划和验证；Candidate revision / Bundle Hash 约束结果适用范围。</p><p><strong>价值：</strong>减少只修当前问题、忘掉历史能力，以及用旧结果发布新内容。<br><strong>边界：</strong>有限窗口仍无法覆盖全部历史场景。</p></article>
+    <article class="card"><div class="mini-label">04 / FULL-BUNDLE GOVERNANCE</div><h3>把可执行资产作为完整 Bundle 治理</h3><p>变化不仅覆盖入口内容，还涉及引用资源、多文件 Diff、静态检查、完整版本恢复、删除传播与交付追踪。</p><p><strong>价值：</strong>更适合包含执行资源的 Skill。<br><strong>边界：</strong>最终一致性与修复机制仍需故障验证。</p></article>
+    <article class="card"><div class="mini-label">05 / INCREMENTAL MEMORY</div><h3>确定性采集与语义聚合分层</h3><p>先按指纹复制来源，再固定聚合规则做有界 tree-reduce；中间状态可复用，目标已有内容可以作为合并输入。</p><p><strong>价值：</strong>为多用户 Memory 聚合提供成本与追溯控制。<br><strong>边界：</strong>分层摘要、去个人化与保留人工修订仍存在语义误差。</p></article>
+    <article class="card"><div class="mini-label">06 / WHITE-BOX OPERATIONS</div><h3>把进化过程变成可检查的工程过程</h3><p>控制台暴露过程参数、Prompt、Evidence、Diff、验证轨迹、分发状态与 Lab；Langfuse 提供跨阶段观测入口。</p><p><strong>价值：</strong>管理员能定位“为什么生成、为什么通过、为什么没送达”。<br><strong>边界：</strong>配置自由度也会增加复现与治理难度。</p></article>
+  </div>
+  <p class="sources">依据：<a href="#s05">[05] 编排</a><a href="#s06">[06] Evidence</a><a href="#s09">[09] 判定</a><a href="#s13">[13] 聚合</a><a href="#s15">[15] 版本交付</a><a href="#s18">[18] 观测</a></p>
+</section>
+
+<section class="section" id="scenarios">
+  <div class="section-head"><span class="num">10</span><h2>适用场景：重复任务多、反馈可观察、改进可验证</h2></div>
+  <p class="intro">以下是基于架构的适配性判断，而非客户案例或已验证收益。判断是否值得接入，先看是否存在可持续积累的团队任务经验。</p>
+  <div class="table-wrap"><table><thead><tr><th>场景</th><th>最有价值的能力</th><th>适配判断与前提</th></tr></thead><tbody>
+    <tr><td>研发、报告、分析等重复交付</td><td>Session → Skill Evolution → True Replay</td><td><span class="badge fact">较适合</span>任务可重做、产物可检查，重复纠正能反映方法缺陷。需要稳定执行环境和测试材料。</td></tr>
+    <tr><td>客服、运营等领域流程沉淀</td><td>SkillMiner + 后续真实 Session 反馈</td><td><span class="badge fact">较适合</span>已有可靠领域资料，且能把边界条件转为可验证任务。需要专家核查规则与结果。</td></tr>
+    <tr><td>多用户长期协作与新人上手</td><td>跨用户聚合 + DreamCycle + Context Workspace</td><td><span class="badge fact">较适合</span>团队事实分散、重复、过时，且有明确共享范围与负责人。</td></tr>
+    <tr><td>多种 Agent 统一管理团队能力</td><td>Agent Protocol V1 + Bundle 分发 + 运行时兼容性</td><td><span class="badge limit">有条件适合</span>各 Runtime 需要提供真实的 ingest、Context、Replay 与 Sync 能力；声明兼容不能替代运行验证。</td></tr>
+    <tr><td>只有一次性任务，或来源极少</td><td>可用 Lab / 文档挖掘做探索</td><td><span class="badge limit">完整平台收益有限</span>重复任务和多用户 Evidence 不足，难形成持续 Evolution 闭环。</td></tr>
+    <tr><td>必须访问生产外部系统的不可重现任务</td><td>需额外执行环境与副作用控制</td><td><span class="badge danger">接入成本高</span>例如真实交易或不可逆外部操作；若缺少可隔离环境，就不能获得可信的对照执行。</td></tr>
+    <tr><td>强一致、多副本高可用或大规模多租户平台</td><td>当前可作控制面原型基础</td><td><span class="badge danger">需要补强</span>本地账本、进程内锁、对象级提交和 Runtime 依赖都需要进一步系统化治理。</td></tr>
+  </tbody></table></div>
+  <h3>一条可落地的试点路线</h3>
+  <ol>
+    <li><strong>选一个有重复纠正的真实任务。</strong>先接入一个 Runtime，确认 Session、工具结果、产物与身份映射可靠。</li>
+    <li><strong>先建立可验证的输入。</strong>确定团队允许共享的 Evidence，整理可重现的任务和独立保留的评估任务。</li>
+    <li><strong>观察少量 Candidate 的完整生命周期。</strong>逐项看变化理由、Bundle Diff、Checklist 和真实轨迹，再检查 Agent 实际收到的版本。</li>
+    <li><strong>验证收益和成本，再扩大范围。</strong>对相同任务做重复运行，记录完成率、往返次数、工具调用、Token、实际耗时、验证成本与人工时间。</li>
+    <li><strong>补齐恢复路径后，再启用持续维护。</strong>试验队列重启恢复、分发重试、Rollback、镜像故障；随后逐步加入团队 Memory 聚合与 DreamCycle。</li>
+  </ol>
+  <div class="callout note"><strong>如何判断试点有收益</strong>不要只看生成了多少 Skill。可以估算：重复任务次数 × 每次节省的人工 / 执行成本 − Evolution、Replay 与维护成本。最终还要确认任务完成质量没有变差。仓库未提供本次环境的实测收益，本文不填入任何虚构百分比。</div>
+</section>
+
+<section class="section" id="limits">
+  <div class="section-head"><span class="num">11</span><h2>不足：把设计约束与现状区分开</h2></div>
+  <p class="intro">项目的能力面已经较完整，但“代码有这项机制”不等于“任何配置都能保证成立”。以下区分直接读到的实现事实、由架构推导的风险，以及后续改进建议。</p>
+  <h3>先说明代码与总览叙述的差异</h3>
+  <div class="table-wrap"><table><thead><tr><th>常见理解</th><th>当前源码支持的更精确说法</th></tr></thead><tbody>
+    <tr><td>Session 分类后会自动路由到 Skill 或 Memory</td><td>主 ingest 路径只把 <code>valuable</code> 入队；<code>memory_candidate</code> 等直接归档。Memory 聚合有独立来源与入口。</td></tr>
+    <tr><td>效率按轮次、工具调用、Token 严格依次排序</td><td>轮次优先；轮次相同时，工具与 Token 至少一项变好，且两者都不能变差。</td></tr>
+    <tr><td>每个团队 Skill 版本必经人工门禁</td><td>存在自动验证发布、管理员 Replay 发布，以及 <code>direct</code> / <code>force</code> 分支。治理效果受配置与路径影响。</td></tr>
+    <tr><td>Memory Change 必先 Replay 再应用</td><td>目前包括已应用变化的前后验证与未保存内容验证，不是统一写前强制流程。</td></tr>
+    <tr><td>所有变化都由一个事务原子完成</td><td>Bundle、索引、commit、outbox 等是分开的存储操作，以记录、重试和 reconcile 提升可恢复性。</td></tr>
+    <tr><td>OpenViking 回退期间写入会自动回到远端</td><td>通用本地 fallback 没有自动 sync-back；有单独镜像能力的是团队 Skill 子树。</td></tr>
+  </tbody></table></div>
+  <h3>影响工程成熟度的主要问题</h3>
+  <div class="table-wrap"><table><thead><tr><th>问题与证据类型</th><th>具体事实 / 风险</th><th>改进方向</th></tr></thead><tbody>
+    <tr><td>全局 LLM 并发边界<br><span class="badge fact">代码事实</span></td><td><code>AsyncLLMClient.chat</code> 使用 <code>asyncio.to_thread</code>；进化分组有局部 Semaphore，但该客户端没有工程指引要求的专用执行池 + 全局 ≤8 Semaphore。DreamCycle 等还存在独立模型调用路径。</td><td>统一模型调用预算与限流域，把摘要、规划、Replay 判定、Memory 维护纳入总体资源上限。</td></tr>
+    <tr><td>Session 索引写入<br><span class="badge fact">代码事实</span></td><td><code>_merge_session_index</code> 在进程内锁下整体读取、合并、写回，保留最多 10,000 条索引项；尚非指引所说的合并队列 + 周期 flush 单写者实现。归档并非因此只保留 10,000 份。</td><td>落实单写者 / 事务型索引，给高频 ingest 提供明确背压；设计多进程访问和更长历史的查询策略。</td></tr>
+    <tr><td>异步路由与同步存储<br><span class="badge fact">代码事实</span></td><td>主 <code>_ingest_session_dict</code> 直接调用 SessionStore 同步方法；默认本地写入仍占用事件循环，显式切换远端后影响更明显。高频本地存储也是可配置默认，非所有 override 都被硬禁止。</td><td>按调用边界隔离同步 I/O；对违反高频存储分层的配置给出明确校验。</td></tr>
+    <tr><td>多对象一致性与扩展<br><span class="badge inference">架构推断</span></td><td>多处进程内锁和 JSON 账本适合单实例运行，但不能直接推导多副本安全。中心提交、分发和镜像之间存在短暂差异。</td><td>扩大部署前定义唯一写入者、幂等键、事务边界和失败恢复协议，并做故障注入验证。</td></tr>
+    <tr><td>验证成本与统计可信度<br><span class="badge inference">架构推断</span></td><td>每个 Case 至少执行两条分支，再加 Dataset 合成和多轮判定。默认少量同源任务可能对特定 Evidence 过拟合，单次效率差异也可能来自模型随机性。</td><td>保留独立任务，重复运行，报告分布与不确定性；把真实耗时与经济成本作为补充观察。</td></tr>
+    <tr><td>Memory 治理闭环<br><span class="badge fact">代码事实</span></td><td>Memory Change 的风险字段仍可为 unclassified，Memory Replay 可发生在应用后；快照失败会减少可验证性。去个人化主要由聚合规则指导。</td><td>定义风险分级、需要人工处理的变化、快照缺失策略与可验证的共享检查。</td></tr>
+    <tr><td>运行时与平台依赖<br><span class="badge fact">代码事实</span></td><td>本地 Hermes Replay 需要 Linux systemd 隔离设施；外部 Replay 需要适配器提供真实执行、Context 与指标。安装 FastAPI 成功并不能证明 Replay 可用。</td><td>给不同 Runtime 建立能力矩阵、隔离自检和端到端接入用例。</td></tr>
+    <tr><td>大型编排模块与文档漂移<br><span class="badge fact">代码事实</span></td><td>当前 <code>orchestrator.py</code> 4,806 行，<code>routes.py</code> 5,158 行；多个模块和文档同时描述发布、验证与状态，容易产生不一致。</td><td>按生命周期拆分编排职责；从策略与契约生成说明，持续校验文档和默认配置。</td></tr>
+  </tbody></table></div>
+  <h3>建议优先级</h3>
+  <div class="grid g3"><article class="card"><div class="mini-label">P0 / 先确保边界可控</div><h3>资源与治理</h3><p>落实全局模型并发预算、Session 写入策略和同步 I/O 隔离；明确 direct / force 与 Memory 变更的使用门禁。</p></article><article class="card"><div class="mini-label">P1 / 再证明可靠性</div><h3>恢复与验证</h3><p>验证中断恢复、outbox 与镜像故障、候选更新后的旧结果失效；扩大独立任务和多次运行的评估。</p></article><article class="card"><div class="mini-label">P2 / 再扩大规模</div><h3>模块与部署</h3><p>拆分大型编排模块，补充多实例存储与队列设计，维护 Runtime 能力矩阵及可重复部署环境。</p></article></div>
+  <p class="sources">依据：<a href="#s19">[19] 规范与代码差距</a><a href="#s04">[04] ingest / 索引</a><a href="#s08">[08] 发布路径</a><a href="#s12">[12] Memory 账本</a><a href="#s14">[14] fallback</a><a href="#s10">[10] 执行环境</a></p>
+</section>
+
+<section class="section" id="glossary">
+  <div class="section-head"><span class="num">12</span><h2>术语速查</h2></div>
+  <p class="intro">以下解释遵循项目 <code>CONTEXT.md</code>；这些概念分别对应不同阶段，不能互相替换。</p>
+  <dl class="glossary">
+    <div><dt>Session</dt><dd>一次围绕任务产生的完整交互记录，包括工具调用、产物、Context 使用与效率。</dd></div>
+    <div><dt>Evidence</dt><dd>从 Session、领域资料或历史资产中提取，能支持某项资产变化的可追溯事实。</dd></div>
+    <div><dt>Evidence Classification</dt><dd>判断事实应该影响团队 Skill、个人 Memory，还是只属于当前任务、Runtime 问题或不足以支持变化。</dd></div>
+    <div><dt>Skill</dt><dd>可执行、可复用的任务方法，明确适用场景、步骤、约束和配套资源。</dd></div>
+    <div><dt>Memory</dt><dd>可检索的长期事实、背景、偏好或团队共识，不直接规定完整任务流程。</dd></div>
+    <div><dt>Skill Candidate</dt><dd>基于 Evidence 提议的新建或修订版本，验证与发布前不改变已发布团队 Skill。</dd></div>
+    <div><dt>Memory Change</dt><dd>对团队 Memory 的新增、合并、修订、去重或归档提议；当前代码也用它记录已执行变化。</dd></div>
+    <div><dt>Test Dataset</dt><dd>与 Skill Candidate 同源生成的任务集合，用于对比真实执行。本文将其与 SkillMiner 的内部评测产物分开描述。</dd></div>
+    <div><dt>Checklist</dt><dd>单个 Replay Case 必须满足的扁平完成条件集合；是完成门禁，不参与加权效果评分。</dd></div>
+    <div><dt>Baseline</dt><dd>不加载 Skill Candidate 时执行同一 Replay Case 的对照分支，可能保留当前已发布 Skill。</dd></div>
+    <div><dt>True Replay</dt><dd>在隔离的真实运行时中执行 Baseline 与 Candidate，按渐进披露协议检验完成性与效率。</dd></div>
+    <div><dt>Candidate Review</dt><dd>管理员基于 Evidence、静态检查和 True Replay 结果决定是否 Publish 的门禁。</dd></div>
+    <div><dt>Publish / Rollback</dt><dd>前者固化新的团队 Skill 版本并分发；后者以新版本恢复历史完整内容，保留版本与审计链。</dd></div>
+    <div><dt>Agent Integration</dt><dd>一个外部 Agent 运行时在 teamEvolver 注册的身份、能力声明与受控访问边界。</dd></div>
+    <div><dt>个人资产 / 团队资产</dt><dd>个人资产归属单个用户；团队资产经过共享性判断与团队治理，授权成员和 Agent 才能使用。</dd></div>
+    <div><dt>DreamCycle</dt><dd>持续执行团队 Memory 聚合、去重、清理、概况与可发现性维护的进化过程。</dd></div>
+  </dl>
+  <p class="sources">依据：<a href="#s01">[01] 项目统一术语</a></p>
+</section>
+
+<section class="section" id="sources">
+  <div class="section-head"><span class="num">13</span><h2>源码依据与验证范围</h2></div>
+  <p class="intro">本文基于本地仓库提交 <code>f18d0d7</code>，按 README / CONTEXT → 关键实现 → 配置默认值 → 对应测试交叉梳理。项目包版本为 0.1.0，包元数据标记 Alpha；这不代表本文完成了生产就绪认证。</p>
+  <div class="callout note"><strong>阅读这些来源链接</strong>链接相对于仓库内本文件位置解析，保留仓库结构即可打开源码；单独转发 HTML 时正文、图表与交互仍可离线使用，源码链接则需要仓库副本。函数名用于定位实现，不依赖易变化的行号。</div>
+  <ul class="ref-list">
+    <li id="s01"><b>[01] 项目定位与统一术语</b><a href="../../README.md">README.md</a><a href="../../CONTEXT.md">CONTEXT.md</a><a href="../../pyproject.toml">pyproject.toml</a><small>产品边界、术语定义、Python 版本要求与包成熟度声明。</small></li>
+    <li id="s02"><b>[02] 单服务组装与生命周期</b><a href="../../teamEvolver/proxy/server.py">teamEvolver/proxy/server.py:ProxyServer</a><a href="../../teamEvolver/launcher.py">teamEvolver/launcher.py</a><small>Mixin 组合、内嵌 EvolveServer、进程内 ASGI 转发、DreamCycle 与镜像 flusher。</small></li>
+    <li id="s03"><b>[03] 前端与配置默认值</b><a href="../../web-ui/src/App.tsx">web-ui/src/App.tsx</a><a href="../../web-ui/package.json">web-ui/package.json</a><a href="../../teamEvolver/config_store/defaults.py">teamEvolver/config_store/defaults.py</a><a href="../../teamEvolver/config_store/bridge.py">teamEvolver/config_store/bridge.py</a><small>控制台导航、构建技术、默认门禁与配置映射；生效值可能被配置覆盖。</small></li>
+    <li id="s04"><b>[04] Session ingest、分类与生命周期</b><a href="../../teamEvolver/proxy/routes.py">teamEvolver/proxy/routes.py:_ingest_session_dict</a><a href="../../teamEvolver/session_store.py">teamEvolver/session_store.py:SessionStore</a><a href="../../teamEvolver/session_filter.py">teamEvolver/session_filter.py:SessionValueClassifier</a><small>valuable 入队、其他分类归档、去重、索引整体合并写入。</small></li>
+    <li id="s05"><b>[05] Skill Evolution 主编排</b><a href="../../teamEvolver/evolve/runtime/orchestrator.py">teamEvolver/evolve/runtime/orchestrator.py:EvolveServer</a><a href="../../teamEvolver/evolve/runtime/mixins.py">teamEvolver/evolve/runtime/mixins.py:EvolveEngineMixin</a><a href="../../teamEvolver/evolve/kernel/settings.py">teamEvolver/evolve/kernel/settings.py:EvolveServerConfig</a><small>_run_once、_evolve_skill_group、_materialize_skill、_team_evidence_gap 与失败分支重试。</small></li>
+    <li id="s06"><b>[06] Evidence、摘要、Judge 与规划</b><a href="../../teamEvolver/evolve/runtime/evidence.py">teamEvolver/evolve/runtime/evidence.py:SkillEvidenceStore</a><a href="../../teamEvolver/evolve/stages/summarize.py">teamEvolver/evolve/stages/summarize.py</a><a href="../../teamEvolver/evolve/stages/judge.py">teamEvolver/evolve/stages/judge.py:judge_session</a><a href="../../teamEvolver/evolve/stages/aggregate.py">teamEvolver/evolve/stages/aggregate.py:aggregate_sessions_by_skill</a><a href="../../teamEvolver/evolve/stages/execute.py">teamEvolver/evolve/stages/execute.py:evolve_skill_from_sessions</a><small>Evidence 窗口与 change debt；实际使用关联；规划内部的 Evidence Classification。</small></li>
+    <li id="s07"><b>[07] 同源任务合成与 Bundle 检查</b><a href="../../teamEvolver/dataset_synthesizer.py">teamEvolver/dataset_synthesizer.py</a><a href="../../teamEvolver/evolve/kernel/bundle_changes.py">teamEvolver/evolve/kernel/bundle_changes.py</a><a href="../../teamEvolver/validation/bundle_checks.py">teamEvolver/validation/bundle_checks.py:validate_candidate_bundle</a><small>结构化任务、要求数量与披露策略；文件变化物化；Python / Shell 静态检查。</small></li>
+    <li id="s08"><b>[08] Candidate 验证与发布路径</b><a href="../../teamEvolver/validation/store.py">teamEvolver/validation/store.py:ValidationStore</a><a href="../../teamEvolver/validation/worker.py">teamEvolver/validation/worker.py:ValidationWorker</a><a href="../../teamEvolver/validation/runtime_compatibility.py">teamEvolver/validation/runtime_compatibility.py</a><a href="../../teamEvolver/evolve/runtime/orchestrator.py">teamEvolver/evolve/runtime/orchestrator.py:EvolveServer</a><small>候选 revision / Bundle Hash；_finalize_validation_jobs、review_validate_candidate、运行时兼容性与强制路径。</small></li>
+    <li id="s09"><b>[09] 完成门禁与效率判定</b><a href="../../teamEvolver/progressive_replay.py">teamEvolver/progressive_replay.py:progressive_replay_decision</a><a href="../../teamEvolver/replay_metrics.py">teamEvolver/replay_metrics.py:objective_replay_decision</a><a href="../../teamEvolver/true_replay.py">teamEvolver/true_replay.py:compare_efficiency</a><small>轮次优先，轮次持平时次级指标共同约束；空 Checklist 边界；渐进披露。</small></li>
+    <li id="s10"><b>[10] Replay 运行时、隔离与模型 Broker</b><a href="../../teamEvolver/true_replay.py">teamEvolver/true_replay.py</a><a href="../../teamEvolver/integrations/replay_adapters.py">teamEvolver/integrations/replay_adapters.py</a><a href="../../teamEvolver/integrations/replay_model_broker.py">teamEvolver/integrations/replay_model_broker.py</a><small>_systemd_sandbox_command、spawn_branch、_spawn_server_driven_branch、本地与外部 Runtime 路径。</small></li>
+    <li id="s11"><b>[11] DreamCycle 执行与工具边界</b><a href="../../teamEvolver/integrations/dreamcycle_runtime.py">teamEvolver/integrations/dreamcycle_runtime.py:FullDreamCycleSupervisor</a><a href="../../teamEvolver/dreamcycle/scheduler.py">teamEvolver/dreamcycle/scheduler.py:Scheduler</a><a href="../../teamEvolver/dreamcycle/react/engine.py">teamEvolver/dreamcycle/react/engine.py:ReActEngine</a><a href="../../teamEvolver/dreamcycle/tools/viking.py">teamEvolver/dreamcycle/tools/viking.py</a><a href="../../teamEvolver/dreamcycle/policy.py">teamEvolver/dreamcycle/policy.py</a><small>维护任务循环、轮次预算、写入约束与完成锚定。</small></li>
+    <li id="s12"><b>[12] Memory Change 与内容前后验证</b><a href="../../teamEvolver/dreamcycle/memory_changes.py">teamEvolver/dreamcycle/memory_changes.py:MemoryChangeLedger</a><a href="../../teamEvolver/dreamcycle/memory_replay.py">teamEvolver/dreamcycle/memory_replay.py:MemoryTrueReplayRunner</a><small>before / after Snapshot；risk_level 初始 unclassified；run 与 run_adhoc 的区别。</small></li>
+    <li id="s13"><b>[13] 多用户聚合、确定性快照与增量编译</b><a href="../../teamEvolver/aggregation/service.py">teamEvolver/aggregation/service.py:MemoryAggregationService</a><a href="../../teamEvolver/aggregation/staging.py">teamEvolver/aggregation/staging.py</a><a href="../../teamEvolver/aggregation/state.py">teamEvolver/aggregation/state.py</a><a href="../../teamEvolver/aggregation/okf_skill.py">teamEvolver/aggregation/okf_skill.py</a><small>来源 / Skill 指纹、受控并发、tree-reduce、已有团队内容保留与 provenance。</small></li>
+    <li id="s14"><b>[14] 存储选择、本地回退与 Skill 镜像</b><a href="../../teamEvolver/storage/__init__.py">teamEvolver/storage/__init__.py:build_object_store</a><a href="../../teamEvolver/storage/local.py">teamEvolver/storage/local.py:LocalObjectStore</a><a href="../../teamEvolver/skills/hub.py">teamEvolver/skills/hub.py:SkillHub</a><a href="../../teamEvolver/skills/mirror.py">teamEvolver/skills/mirror.py:VikingSkillMirror</a><small>默认本地账本、按身份区分回退目录、单文件原子替换、通用 fallback 无自动回写。</small></li>
+    <li id="s15"><b>[15] Bundle、mutation 与可靠分发</b><a href="../../teamEvolver/skills/bundle.py">teamEvolver/skills/bundle.py</a><a href="../../teamEvolver/skills/mutations.py">teamEvolver/skills/mutations.py:SkillMutationService</a><a href="../../teamEvolver/integrations/skill_sync_adapters.py">teamEvolver/integrations/skill_sync_adapters.py</a><small>execute / record_committed / reconcile / drain；commit、tombstone、outbox 与交付状态。</small></li>
+    <li id="s16"><b>[16] Agent Protocol 与受控 Context</b><a href="../../teamEvolver/integrations/agent_protocol.py">teamEvolver/integrations/agent_protocol.py</a><a href="../../teamEvolver/integrations/agent_registry.py">teamEvolver/integrations/agent_registry.py</a><a href="../../teamEvolver/integrations/context_workspace.py">teamEvolver/integrations/context_workspace.py:ContextStateStore</a><a href="../../teamEvolver/proxy/agent_context.py">teamEvolver/proxy/agent_context.py</a><small>Integration 能力、主体映射、引用约束、Context 使用归属与 Snapshot。</small></li>
+    <li id="s17"><b>[17] SkillMiner 流水线、任务与评测桥接</b><a href="../../teamEvolver/skillminer/run_pipeline.py">teamEvolver/skillminer/run_pipeline.py</a><a href="../../teamEvolver/skillminer/mining_jobs.py">teamEvolver/skillminer/mining_jobs.py</a><a href="../../teamEvolver/mining_lifecycle.py">teamEvolver/mining_lifecycle.py</a><a href="../../teamEvolver/skillminer/human_checkpoints.py">teamEvolver/skillminer/human_checkpoints.py</a><a href="../../teamEvolver/skillminer/lift_integration.py">teamEvolver/skillminer/lift_integration.py</a><a href="../zh/guides/07-skill-miner.md">docs/zh/guides/07-skill-miner.md</a><small>文档 → 样本包 → 语义发现 → Skill / 评测编译；产物完整性与治理入口。</small></li>
+    <li id="s18"><b>[18] Langfuse 与白盒操作</b><a href="../../teamEvolver/integrations/langfuse_pull.py">teamEvolver/integrations/langfuse_pull.py</a><a href="../../teamEvolver/integrations/langfuse_mapper.py">teamEvolver/integrations/langfuse_mapper.py</a><a href="../../teamEvolver/observability/langfuse.py">teamEvolver/observability/langfuse.py</a><a href="../../teamEvolver/evolve/prompt_studio.py">teamEvolver/evolve/prompt_studio.py</a><small>入站拉取 / 映射，出站追踪；模型与过程参数可观测、可配置。</small></li>
+    <li id="s19"><b>[19] 工程硬约束与当前实现差距</b><a href="../../AGENTS.md">AGENTS.md</a><a href="../../teamEvolver/llm.py">teamEvolver/llm.py:AsyncLLMClient</a><a href="../../teamEvolver/session_store.py">teamEvolver/session_store.py:SessionStore</a><a href="../../teamEvolver/proxy/routes.py">teamEvolver/proxy/routes.py:_ingest_session_dict</a><small>专用池 / 全局 Semaphore 要求；索引单写者要求；同步 I/O 调用路径。</small></li>
+    <li id="s20"><b>[20] 对应测试入口</b><a href="../../tests/test_true_replay_efficiency.py">tests/test_true_replay_efficiency.py</a><a href="../../tests/test_validation_store_freshness.py">tests/test_validation_store_freshness.py</a><a href="../../tests/test_skill_sync_outbox.py">tests/test_skill_sync_outbox.py</a><a href="../../tests/test_memory_true_replay.py">tests/test_memory_true_replay.py</a><a href="../../tests/test_aggregation_merge_resume.py">tests/test_aggregation_merge_resume.py</a><a href="../../tests/test_skillminer_pipeline_artifacts.py">tests/test_skillminer_pipeline_artifacts.py</a><a href="../../tests/test_bundle_static_checks.py">tests/test_bundle_static_checks.py</a><small>测试文件表达了预期契约；存在测试文件，不代表本次环境已经通过整个测试集。</small></li>
+  </ul>
+  <h3>本次分析与验证范围</h3>
+  <p>本次进行源码与文档交叉阅读、关键配置核对及 HTML 内容 / 链接 / 交互检查。13 个章节、76 个相对来源链接及内部锚点已检查；桌面与 390px 手机视口无页面级横向溢出，Replay 示例、输入校验和模块展开 / 收起通过浏览器检查。没有连接生产 Agent、OpenViking 或模型执行真实 Evolution，因此不报告真实任务成功率、性能提升或生产隔离验证结果。</p>
+  <p>Python compileall 已通过（现有 runtime_state.py 在 Python 3.14 下产生两处 SyntaxWarning）。仓库标准文档引用检查在当前副本中因缺少 <code>docs/design/</code> 而无法完成；当前系统 Python 未安装 pytest，也没有项目 <code>.venv</code>，完整 Python 测试集未运行。该 HTML 另行检查内部锚点和相对源码链接。</p>
+  <p class="small">本文只新增独立 HTML 文档，未调整运行代码、配置、依赖或前端构建产物。图与交互均嵌入本文件，不依赖 CDN。</p>
+</section>
+<footer class="ending"><strong>teamEvolver / 工程解读</strong><br>基于源码快照 f18d0d7 · 2026-09-11 · 本文结论应随架构、策略与运行时能力的变化重新核实。</footer>
+</main>
+<script>
+(()=>{'use strict';
+ const $=id=>document.getElementById(id);
+ const modules=[...document.querySelectorAll('.module')];
+ $('expand').addEventListener('click',()=>modules.forEach(x=>x.open=true));
+ $('collapse').addEventListener('click',()=>modules.forEach(x=>x.open=false));
+ let printState=[];
+ window.addEventListener('beforeprint',()=>{printState=modules.map(x=>x.open);modules.forEach(x=>x.open=true)});
+ window.addEventListener('afterprint',()=>modules.forEach((x,i)=>x.open=printState[i]??false));
+ $('print').addEventListener('click',()=>window.print());
+ const nav=[...document.querySelectorAll('.rail nav a')];
+ const sections=[...document.querySelectorAll('section[id]')];
+ let ticking=false;
+ const updateNav=()=>{const target=sections.filter(s=>s.getBoundingClientRect().top<150).at(-1)||sections[0];nav.forEach(a=>{const active=a.hash==='#'+target.id;a.classList.toggle('active',active);if(active)a.setAttribute('aria-current','location');else a.removeAttribute('aria-current')});const available=document.documentElement.scrollHeight-window.innerHeight;$('progress').style.width=(available>0?Math.min(100,window.scrollY/available*100):0)+'%';ticking=false};
+ window.addEventListener('scroll',()=>{if(!ticking){requestAnimationFrame(updateNav);ticking=true}},{passive:true});updateNav();
+ const ids=['b-turns','b-tools','b-tokens','c-turns','c-tools','c-tokens'];
+ function evaluate(){const out=$('lab-result');if(ids.some(id=>!$(id).validity.valid||$(id).value==='')){out.className='result inconclusive';out.replaceChildren();const title=document.createElement('strong');title.textContent='请填写范围内的整数';const p=document.createElement('p');p.textContent='交互轮次至少为 1；工具调用和 Token 用量至少为 0。';out.append(title,p);return}
+ const [bt,bc,bn,ct,cc,cn]=ids.map(id=>Number($(id).value));let verdict,title,reason;
+ if(!$('c-done').checked){verdict='reject';title='Candidate 未完成 Checklist';reason='完成性是门禁。即使资源消耗更低，也不能接受未完成任务的 Candidate。'}
+ else if(!$('b-done').checked){verdict='accept';title='仅 Candidate 完成 Checklist';reason='两边都有非空 Checklist，Candidate 完成、Baseline 未完成。完成性优先于效率。'}
+ else if(ct<bt){verdict='accept';title='Candidate 交互轮次更少';reason=bt+' → '+ct+' 轮。当前策略优先减少交互轮次，即使工具调用和 Token 用量增加，也接受这一效率策略结果。'}
+ else if(ct>bt){verdict='reject';title='Candidate 交互轮次更多';reason=bt+' → '+ct+' 轮。轮次优先，工具调用或 Token 的节省不能推翻这一结论。'}
+ else if(cc>bc||cn>bn){verdict='reject';title='轮次持平，存在次级指标退步';reason='工具调用与 Token 在这一层共同受约束。任意一项增加，即使另一项减少，也会拒绝。'}
+ else if(cc<bc||cn<bn){verdict='accept';title='轮次持平，次级指标改善且无退步';reason='工具调用与 Token 至少一项减少，且没有一项增加，符合当前效率策略。'}
+ else{verdict='inconclusive';title='完成性与效率均持平';reason='三项指标均未变化，没有证据证明改善。inconclusive 不等于自动接受。'}
+ out.className='result '+verdict;const strong=document.createElement('strong');strong.textContent=verdict+' · '+title;const p=document.createElement('p');p.textContent=reason;out.replaceChildren(strong,p)}
+ [...ids,'b-done','c-done'].forEach(id=>$(id).addEventListener('input',evaluate));
+ const presets={turns:[4,10,8000,3,12,10000,true,true],tradeoff:[3,10,8000,3,7,10000,true,true],complete:[2,6,5000,4,10,9000,false,true],tie:[3,8,8000,3,8,8000,true,true]};
+ document.querySelectorAll('[data-preset]').forEach(button=>button.addEventListener('click',()=>{const values=presets[button.dataset.preset];ids.forEach((id,i)=>$(id).value=values[i]);$('b-done').checked=values[6];$('c-done').checked=values[7];evaluate()}));
+ evaluate();
+})();
+</script>
+</body>
+</html>

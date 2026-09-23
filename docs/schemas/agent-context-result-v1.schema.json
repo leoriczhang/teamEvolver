@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://teamevolver.local/schemas/agent-context-result-v1.schema.json",
+  "title": "teamEvolver Context Result V1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "subject",
+    "snapshot_id",
+    "items",
+    "receipts",
+    "budget",
+    "skills_etag"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "teamevolver.context-result.v1"
+    },
+    "subject": {
+      "type": "object",
+      "required": [
+        "user_id",
+        "integration_id"
+      ]
+    },
+    "snapshot_id": {
+      "type": "string"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "scope",
+          "kind",
+          "context_ref",
+          "title"
+        ],
+        "properties": {
+          "scope": {
+            "enum": [
+              "personal_memory",
+              "team_memory",
+              "personal_skills",
+              "team_skills"
+            ]
+          },
+          "kind": {
+            "enum": [
+              "memory",
+              "skill"
+            ]
+          },
+          "context_ref": {
+            "type": "string",
+            "pattern": "^ctx_"
+          },
+          "title": {
+            "type": "string"
+          },
+          "l0": {
+            "type": "string"
+          },
+          "l1": {
+            "type": "string"
+          },
+          "content_hash": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "receipts": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "budget": {
+      "type": "object"
+    },
+    "skills_etag": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}

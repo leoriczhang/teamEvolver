@@ -1,0 +1,7 @@
+{
+  "status": "passed",
+  "te_port_closed": true,
+  "direct_ov_http_status": 200,
+  "authorized_facts_available": true,
+  "scope": "isolated TE process stopped; OV and Runtime remained running"
+}

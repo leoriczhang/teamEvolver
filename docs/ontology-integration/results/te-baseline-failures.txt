@@ -1,0 +1,50 @@
+.....F............F.......F.F.......F.........                           [100%]
+=================================== FAILURES ===================================
+__________________ test_api_refresh_and_history_keep_feedback __________________
+/tmp/te-ontology-baseline/tests/test_candidate_feedback.py:129: in test_api_refresh_and_history_keep_feedback
+    assert feedback["history"][0]["actor_id"] == "service-root"
+E   AssertionError: assert 'admin' == 'service-root'
+E
+E     - service-root
+E     + admin
+------------------------------ Captured log setup ------------------------------
+WARNING  teamEvolver.proxy.users_admin:users_admin.py:1306 openviking sync skipped for team: OpenViking endpoint or API key not configured
+______________ test_evolution_backfills_missing_session_analysis _______________
+/tmp/te-ontology-baseline/tests/test_session_analyze_mandatory.py:209: in test_evolution_backfills_missing_session_analysis
+    assert judged == 1
+E   assert 0 == 1
+________________ test_legacy_score_cannot_bypass_model_analysis ________________
+/tmp/te-ontology-baseline/tests/test_session_analyze_mandatory.py:245: in test_legacy_score_cannot_bypass_model_analysis
+    assert len(client.calls) == 1
+E   assert 0 == 1
+E    +  where 0 = len([])
+E    +    where [] = <test_session_analyze_mandatory._FakeClient object at 0x109cbb650>.calls
+_______ test_legacy_heuristic_archive_is_not_treated_as_already_analyzed _______
+/tmp/te-ontology-baseline/tests/test_session_analyze_mandatory.py:303: in test_legacy_heuristic_archive_is_not_treated_as_already_analyzed
+    assert store.duplicate_of_processed(session) is True
+E   AssertionError: assert False is True
+E    +  where False = duplicate_of_processed({'session_id': 'sess-mandatory', 'defer_evolution_trigger': True, 'turns': [{'prompt_text': '请执行候选技能', 'response_text'..._text': '结果符合预期', 'response_text': '收到', 'tool_calls': [], 'tool_results': [], ...}], '_skills_referenced': set(), ...})
+E    +    where duplicate_of_processed = <teamEvolver.session_store.SessionStore object at 0x109cbbe90>.duplicate_of_processed
+________ test_evolution_upload_uses_local_skill_store_and_tenant_prefix ________
+/tmp/te-ontology-baseline/tests/test_skill_storage_backends.py:215: in test_evolution_upload_uses_local_skill_store_and_tenant_prefix
+    assert server._skill_prefix == "tenants/tenant-a/"
+E   AssertionError: assert '' == 'tenants/tenant-a/'
+E
+E     - tenants/tenant-a/
+=============================== warnings summary ===============================
+../../../tmp/te-ontology-venv/lib/python3.12/site-packages/fastapi/testclient.py:1
+  /tmp/te-ontology-venv/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+../../../tmp/te-ontology-venv/lib/python3.12/site-packages/starlette/testclient.py:53
+  /tmp/te-ontology-venv/lib/python3.12/site-packages/starlette/testclient.py:53: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_candidate_feedback.py::test_api_refresh_and_history_keep_feedback
+FAILED tests/test_session_analyze_mandatory.py::test_evolution_backfills_missing_session_analysis
+FAILED tests/test_session_analyze_mandatory.py::test_legacy_score_cannot_bypass_model_analysis
+FAILED tests/test_session_analyze_mandatory.py::test_legacy_heuristic_archive_is_not_treated_as_already_analyzed
+FAILED tests/test_skill_storage_backends.py::test_evolution_upload_uses_local_skill_store_and_tenant_prefix
+5 failed, 41 passed, 2 warnings in 2.25s

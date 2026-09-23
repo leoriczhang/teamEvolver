@@ -1,0 +1,152 @@
+{
+  "date": "2026-09-21",
+  "scope": "TE configurable PostgreSQL schema; local isolated verification only",
+  "repositories": {
+    "TE": "045b7cb0285e7ffa7c6cf0557beea86cc60484d1",
+    "OV": "25766a617a867d7aafdc0ee78454e3f5b546e232"
+  },
+  "working_tree": "Uncommitted changes on top of recorded TE HEAD",
+  "tests": {
+    "ontology_schema_publication_v5_engine": {
+      "status": "passed",
+      "passed": 85,
+      "warnings": 4,
+      "command": "ONTOLOGY_SCHEMA_TEST_ADMIN_DSN=<isolated-admin> ONTOLOGY_V5_TE_DSN=<isolated-te> ONTOLOGY_V5_OV_DSN=<isolated-ov> /tmp/te-ontology-venv/bin/python -m pytest tests/test_ontology_schema.py tests/test_ontology_publication_config.py tests/test_ontology_v5.py tests/ontology_engine -q"
+    },
+    "full_pytest": {
+      "status": "blocked",
+      "reason": "Collection ImportError: SKILLOPT_ROLLOUT_CONSUMER missing from skill_sync_adapters in HEAD"
+    },
+    "excluding_collection_blocker": {
+      "status": "failed_existing_baseline",
+      "command": "python -m pytest --ignore=tests/test_skillopt_rollout.py -q",
+      "passed": 589,
+      "failed": 23,
+      "skipped": 47,
+      "baseline_passed": 583,
+      "baseline_failed": 23,
+      "baseline_skipped": 2,
+      "identical_failed_test_ids": [
+        "FAILED team_memory/tests/test_dreamcycle_integration.py::test_agentshub_config_sync_merges_personal_sources",
+        "FAILED tests/test_dataset_collections.py::test_routes_accept_batch_and_preserve_historical_source_after_removal",
+        "FAILED tests/test_evolution_validation_queue.py::test_engine_candidate_is_visible_to_tenant_validation_worker",
+        "FAILED tests/test_evolution_validation_queue.py::test_queue_candidate_uses_configured_validation_runtimes[runtimes0-missing0]",
+        "FAILED tests/test_evolution_validation_queue.py::test_queue_candidate_uses_configured_validation_runtimes[runtimes1-missing1]",
+        "FAILED tests/test_langfuse_source.py::test_convert_session_marks_source_and_applies_hooks",
+        "FAILED tests/test_langfuse_source.py::test_convert_session_session_mapper_receives_envelope",
+        "FAILED tests/test_langfuse_source.py::test_convert_session_tolerates_meta_failure",
+        "FAILED tests/test_langfuse_source.py::test_convert_session_without_hooks",
+        "FAILED tests/test_langfuse_source.py::test_env_fallback_when_options_empty",
+        "FAILED tests/test_langfuse_source.py::test_fetch_session_applies_trace_name_filter",
+        "FAILED tests/test_langfuse_source.py::test_fetch_session_returns_doris_envelope",
+        "FAILED tests/test_langfuse_source.py::test_health_passes_through",
+        "FAILED tests/test_langfuse_source.py::test_health_wraps_exceptions",
+        "FAILED tests/test_langfuse_source.py::test_options_override_env",
+        "FAILED tests/test_langfuse_source.py::test_pilot_file_health_mode",
+        "FAILED tests/test_langfuse_source.py::test_pilot_file_session_mode_produces_turns",
+        "FAILED tests/test_langfuse_source.py::test_pilot_file_validate_mode",
+        "FAILED tests/test_langfuse_source.py::test_preview_sessions_caps_and_filters",
+        "FAILED tests/test_langfuse_source.py::test_preview_sessions_rich_rows_sorted_desc",
+        "FAILED tests/test_langfuse_source.py::test_preview_sessions_session_id_short_circuits",
+        "FAILED tests/test_langfuse_source.py::test_unconfigured_client_raises",
+        "FAILED tests/test_langfuse_source.py::test_unconfigured_health_reports_error"
+      ],
+      "baseline_method": "git archive HEAD into isolated temporary directory; same Python environment; sibling OV integration module absent in archive and skipped"
+    },
+    "compileall": {
+      "status": "passed"
+    },
+    "ruff_changed_core_files": {
+      "status": "passed"
+    },
+    "standard_docs_check": {
+      "status": "blocked",
+      "reason": "Pre-existing missing docs/design; check-docs-refs.mjs exits ENOENT"
+    },
+    "changed_markdown_link_targets": {
+      "status": "passed",
+      "checked": 22
+    },
+    "frontend_build": {
+      "status": "not_applicable",
+      "reason": "No frontend changes"
+    }
+  },
+  "local_service_restart": {
+    "before_table": "te_ontology.jobs",
+    "after_table": "teamevolver.ontology_jobs",
+    "preserved_jobs": 23,
+    "port": 52210,
+    "pid": 82216,
+    "started": true,
+    "jobs_http_status": 200
+  },
+  "deployment": {
+    "SIT": "not_deployed",
+    "PRD": "not_deployed",
+    "OV_database_migration": "not_performed",
+    "git_commit": "not_created"
+  },
+  "logs": [
+    {
+      "path": "/tmp/ontology-schema-current-integration.log",
+      "sha256": "d7791758162dd4244c239e00909f20be1ac01e869b299bae24d3864227911fca"
+    },
+    {
+      "path": "/tmp/te-schema-full.log",
+      "sha256": "572cf842a111b511507ce23d1c637719d97ffe429f45e2fafc4b528452ff8cd3"
+    },
+    {
+      "path": "/tmp/te-schema-filtered-full.log",
+      "sha256": "79308740375bb90e58e5be3cea8e07408f14eac475a644c1ed16789eed5ee925"
+    },
+    {
+      "path": "/tmp/te-schema-baseline-full.log",
+      "sha256": "1923c124cb573b8b880ce7a83e3de974e8582f2580922e3309d2fb2ea4abaa83"
+    },
+    {
+      "path": "/tmp/te-schema-docs.log",
+      "sha256": "ce8ebe3ef148be269eb1cba692dccfa22dca032538b07f73735bc288979b1041"
+    }
+  ],
+  "limitations": [
+    "Local Python 3.12 versus reported deployment Python 3.13",
+    "SIT role permissions must be verified in deployment; no remote database accessed",
+    "Old TE workers must be stopped before legacy table migration"
+  ],
+  "post_rebase_verification": {
+    "remote_base": "eefc4ba",
+    "rebase_conflicts": false,
+    "ontology_tests": {
+      "passed": 85,
+      "warnings": 4
+    },
+    "full_pytest": {
+      "passed": 625,
+      "skipped": 47,
+      "failed": 2,
+      "failed_tests": [
+        "tests/test_dataset_collections.py::test_routes_accept_batch_and_preserve_historical_source_after_removal",
+        "team_memory/tests/test_dreamcycle_integration.py::test_agentshub_config_sync_merges_personal_sources"
+      ],
+      "note": "Both failures also occurred on the previously verified unmodified 045b7cb baseline."
+    },
+    "compileall": "passed",
+    "documentation_references": {
+      "checked": 287,
+      "errors": 0,
+      "warnings": 0
+    },
+    "note": "Historical pre-rebase results above are retained; remote updates resolved the collection and documentation blockers.",
+    "logs": [
+      {
+        "path": "/tmp/te-schema-post-rebase-full.log",
+        "sha256": "5f8c0a119d02810c71d436f584bbda8cdd091b768b5011442a1dc3c955f28b77"
+      },
+      {
+        "path": "/tmp/te-schema-post-rebase-docs.log",
+        "sha256": "355b63050cc67d102c19a87906f7b0e0c2ced4837a23e6d24512e2e245df9a15"
+      }
+    ]
+  }
+}

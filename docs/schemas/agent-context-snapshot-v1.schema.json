@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://teamevolver.local/schemas/agent-context-snapshot-v1.schema.json",
+  "title": "teamEvolver Context Snapshot V1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "snapshot_id",
+    "integration_id",
+    "subject_hash",
+    "items",
+    "manifest_hash"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "teamevolver.context-snapshot.v1"
+    },
+    "snapshot_id": {
+      "type": "string"
+    },
+    "integration_id": {
+      "type": "string"
+    },
+    "subject_hash": {
+      "type": "string"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "scope",
+          "uri_hash",
+          "content_hash"
+        ]
+      }
+    },
+    "target_skill_excluded": {
+      "type": "boolean"
+    },
+    "manifest_hash": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "additionalProperties": true
+}

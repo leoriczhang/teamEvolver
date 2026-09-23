@@ -1,0 +1,7 @@
+FAILED tests/server/test_auth.py::test_user_key_access - assert 500 == 200
+FAILED tests/server/test_auth.py::test_auth_on_multiple_endpoints - Assertion...
+FAILED tests/server/test_auth.py::test_admin_key_cannot_switch_effective_user_within_account
+FAILED tests/server/test_auth.py::test_admin_key_cannot_switch_account_via_header
+FAILED tests/server/test_auth.py::test_user_key_resolves_to_key_user_and_cannot_switch_user
+FAILED tests/server/test_auth.py::test_trusted_mode_looks_up_role_from_api_key_manager
+6 failed, 106 passed, 4 warnings in 182.89s (0:03:02)

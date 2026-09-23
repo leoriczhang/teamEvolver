@@ -1,0 +1,59 @@
+{
+  "date": "2026-09-19",
+  "scope": "Local isolated synthetic integration; NOT full V3 acceptance",
+  "legacy_contract_tests": {
+    "passed": 40
+  },
+  "new_pg_integration": {
+    "passed": 19
+  },
+  "enhancer": {
+    "passed": 75
+  },
+  "ov_related": {
+    "passed": 149,
+    "deselected": 1,
+    "excluded": "pgvector binary query"
+  },
+  "te_full": {
+    "passed": 480,
+    "failed": 5,
+    "skipped": 19,
+    "failure_classification": "All five reproduced on untouched baseline HEAD"
+  },
+  "frontend": "passed",
+  "compileall": "passed",
+  "ruff_new_code": "passed",
+  "native": "partial; existing Rust invalidate_cache missing",
+  "model_smoke": "blocked: explicit model configuration not provided",
+  "business_write": "not_applicable; route absent",
+  "remaining": [
+    "Independent OR proofs",
+    "Complete CQ01-CQ12 business goldens",
+    "Native Compile interoperability acceptance",
+    "Automatic Wiki/source repair and lag reconciliation",
+    "Fine-grained owner/IAM recovery integration",
+    "Complete semantic diff editor and signed pagination"
+  ],
+  "references": [
+    "http-smoke.json",
+    "load-results.json",
+    "scale-results.json",
+    "recovery-results.json",
+    "te-outage-results.json",
+    "acceptance-matrix.json"
+  ],
+  "personal_kb": {
+    "documents_created": 5,
+    "revision_proposals_pending_owner_review": 6,
+    "receipt_file": "personal-kb-receipts.json",
+    "not_claimed": "Long-term memory publication or completed vector indexing"
+  },
+  "html": "offline links and browser diagram/interactions verified",
+  "docs_refs": {
+    "files": 98,
+    "references": 256,
+    "errors": 0,
+    "warnings": 0
+  }
+}

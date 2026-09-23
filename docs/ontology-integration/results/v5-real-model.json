@@ -1,0 +1,17 @@
+{
+  "mode": "real_model",
+  "model": "volcengine/glm-5.2-aicc",
+  "synthetic_only": true,
+  "status": "passed",
+  "extraction": {
+    "mode": "llm",
+    "model": "volcengine/glm-5.2-aicc",
+    "model_calls": 4,
+    "input_bytes": 19762,
+    "reported_tokens": 4438,
+    "domain_pack_valid": true
+  },
+  "assertions": 1,
+  "scope": "extraction, JSON Schema and OV deterministic evidence validation; not publication approval",
+  "elapsed_seconds": 76.27
+}

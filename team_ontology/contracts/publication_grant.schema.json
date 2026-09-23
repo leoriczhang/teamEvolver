@@ -1,0 +1,54 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "prepared_id": {
+      "title": "Prepared Id",
+      "type": "string"
+    },
+    "tenant": {
+      "title": "Tenant",
+      "type": "string"
+    },
+    "reviewer": {
+      "title": "Reviewer",
+      "type": "string"
+    },
+    "candidate_digest": {
+      "title": "Candidate Digest",
+      "type": "string"
+    },
+    "manifest_digest": {
+      "title": "Manifest Digest",
+      "type": "string"
+    },
+    "expected_generation": {
+      "title": "Expected Generation",
+      "type": "integer"
+    },
+    "epoch": {
+      "title": "Epoch",
+      "type": "integer"
+    },
+    "expires_at": {
+      "title": "Expires At",
+      "type": "integer"
+    },
+    "nonce": {
+      "title": "Nonce",
+      "type": "string"
+    }
+  },
+  "required": [
+    "prepared_id",
+    "tenant",
+    "reviewer",
+    "candidate_digest",
+    "manifest_digest",
+    "expected_generation",
+    "epoch",
+    "expires_at",
+    "nonce"
+  ],
+  "title": "PublicationGrant",
+  "type": "object"
+}

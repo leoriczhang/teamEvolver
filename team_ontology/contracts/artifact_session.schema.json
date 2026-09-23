@@ -1,0 +1,21 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "job_id": {
+      "pattern": "^ont_[a-f0-9]{24}$",
+      "title": "Job Id",
+      "type": "string"
+    },
+    "attempt": {
+      "minimum": 1,
+      "title": "Attempt",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "job_id",
+    "attempt"
+  ],
+  "title": "SessionRequest",
+  "type": "object"
+}

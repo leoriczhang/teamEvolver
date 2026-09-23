@@ -1,0 +1,127 @@
+{
+  "date": "2026-09-20",
+  "python": "3.14.7",
+  "scope": "local isolated V5; not complete acceptance",
+  "new_and_migrated_tests": {
+    "passed": 64
+  },
+  "legacy_integration": {
+    "passed": 19
+  },
+  "te_full": {
+    "passed": 529,
+    "failed": 5,
+    "skipped": 34
+  },
+  "ov_related": {
+    "passed": 255,
+    "failed": 16,
+    "baseline_reproduction": {
+      "head": "f1b5a07eceba425a179257abf248ad3b982bca4a",
+      "same_failures": 16,
+      "native_binaries": "same as current checkout"
+    }
+  },
+  "frontend": "passed",
+  "compileall": "passed",
+  "lint": "passed",
+  "real_model": {
+    "mode": "real_model",
+    "model": "volcengine/glm-5.2-aicc",
+    "synthetic_only": true,
+    "status": "passed",
+    "extraction": {
+      "mode": "llm",
+      "model": "volcengine/glm-5.2-aicc",
+      "model_calls": 4,
+      "input_bytes": 19762,
+      "reported_tokens": 4438,
+      "domain_pack_valid": true
+    },
+    "assertions": 1,
+    "scope": "extraction, JSON Schema and OV deterministic evidence validation; not publication approval",
+    "elapsed_seconds": 76.27
+  },
+  "http": {
+    "services": 2,
+    "separate_runtime": false,
+    "extractor": "fixture",
+    "model_calls": 0,
+    "checks": [
+      {
+        "domain": "Shipment",
+        "status": "passed",
+        "generation": 13,
+        "receipt": {
+          "generation": 13,
+          "projection": "postgres_ready",
+          "receipt_id": "ee42092b9fa62343e4283895fa816705",
+          "prepared_id": "4d80b3cc1de335d963aee3f561e151831c1e14ddfd793e8d3fd3c89a57e279ba",
+          "committed_at": "2026-09-20T11:32:23.142093+00:00",
+          "candidate_digest": "56d49883dff055339712c6760c29559061eabfd90a2e580300e5cdeff4d2115d"
+        }
+      },
+      {
+        "domain": "Procurement",
+        "status": "passed",
+        "generation": 14,
+        "receipt": {
+          "generation": 14,
+          "projection": "postgres_ready",
+          "receipt_id": "5ab27fab4d67f56118babfd513a9c59d",
+          "prepared_id": "70eb9f56ba822de139ce12420fc42458a8bb53d640579226616d567cb9a44685",
+          "committed_at": "2026-09-20T11:32:23.706850+00:00",
+          "candidate_digest": "1a4ea0f811fcf3d40dc98ae9e7f443b095c16bcc41b545e68db4763d03e72a07"
+        }
+      },
+      {
+        "name": "rollback-new-generation",
+        "status": "passed",
+        "receipt": {
+          "generation": 15,
+          "projection": "postgres_ready",
+          "receipt_id": "cba9e6536e4d0d5467dc20606544aa9c",
+          "prepared_id": "c7db38f7fc1481c26367736187acf584e222dfcf179165a26966b5aee1a0806e",
+          "committed_at": "2026-09-20T11:32:24.200355+00:00",
+          "candidate_digest": "d9397d4f398096c9d658cb56935dc253fa1410538ce29fe69874830f0064f6ad"
+        }
+      },
+      {
+        "name": "withdrawal-blocks-access",
+        "status": "passed"
+      }
+    ],
+    "real_model": "not covered"
+  },
+  "te_outage": {
+    "status": "passed",
+    "te_stopped": true,
+    "ov_http_status": 200,
+    "generation": 16,
+    "facts_equal": true,
+    "fact_count": 1,
+    "scope": "published non-empty facts remain queryable with TE stopped"
+  },
+  "sit_prd": "not deployed",
+  "not_completed": [
+    "native end-to-end deployment",
+    "automatic source dependency repair",
+    "legacy OV audit reference migration",
+    "concept hierarchy expansion",
+    "feedback assignment closure",
+    "scale and cross-service restore"
+  ],
+  "wheel": "built; engine/license/contracts verified",
+  "docs_refs": "passed",
+  "html": "browser layout and interactions verified",
+  "host_tests": "passed",
+  "enhancer_regression": {
+    "passed": 78
+  },
+  "contract_parity": "passed",
+  "personal_kb": {
+    "create_operations_saved": 6,
+    "revision_proposals_pending": 7,
+    "publication_confirmed": false
+  }
+}

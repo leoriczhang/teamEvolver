@@ -3,72 +3,153 @@ import { Toaster } from "@/components/ui/sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { Activity, ClipboardCheck, Filter, History, LayoutDashboard, BookOpenText, Users, SlidersHorizontal, LogOut, RefreshCw, Sparkles, Clock, Repeat2, ShieldCheck, TrendingUp, Zap, Database, Workflow, ListChecks, ChevronsUpDown } from "lucide-react";
-import { api, type AuthStatus, type UserProfile } from "@/api/client";
-import { PageHeader } from "@/components/common";
+import { Activity, Building2, ClipboardCheck, Filter, FolderTree, History, LayoutDashboard, BookOpen, BookMarked, BookOpenText, Users, SlidersHorizontal, LogOut, RefreshCw, Sparkles, Clock, Repeat2, ShieldCheck, TrendingUp, Zap, Database, ListChecks, ChevronsUpDown, DownloadCloud, TerminalSquare, HardDrive } from "lucide-react";
+import {
+  api,
+  getActiveTenantId,
+  setActiveTenantId,
+  setTenantHeaderAllowed,
+  listTenants,
+  type AuthStatus,
+  type SharingConfig,
+  type UserProfile,
+  type TenantsResp,
+} from "@/api/client";
+import { PageHeader, Term } from "@/components/common";
 import { toastErr, toastOk } from "@/lib/toast";
+import { hasOpenVikingConfiguration } from "@/lib/sharing";
 import DashboardView from "@/views/DashboardView";
-import SkillsView from "@/views/SkillsView";
 import UsersView from "@/views/UsersView";
 import ModelSettingsView from "@/views/ModelSettingsView";
 import CandidateReviewView from "@/views/CandidateReviewView";
 import HealthView from "@/views/HealthView";
 import AuditView from "@/views/AuditView";
+import ExperienceLibraryView from "@/views/ExperienceLibraryView";
 import SessionFilterView from "@/views/SessionFilterView";
-import MiningView, { type MinePage } from "@/views/MiningView";
+import DataSourcesView from "@/views/DataSourcesView";
+import ObservabilityView from "@/views/ObservabilityView";
+import EvolutionWorkspaceView from "@/views/EvolutionWorkspaceView";
+import MiningView, { type MinePage } from "@miner/MiningView";
+import KnowledgeBaseMiningView from "@miner/KnowledgeBaseMiningView";
+import OpenVikingWorkspaceView from "@/views/OpenVikingWorkspaceShell";
+import PlatformAssetsView from "@/views/PlatformAssetsView";
+import SkillWorkbenchView from "@/views/SkillWorkbenchView";
+import DocsView from "@/views/DocsView";
+import TenantsView from "@/views/TenantsView";
+import DatasetsView from "@/views/DatasetsView";
+import OntologyView from "@/views/OntologyView";
 
 type ViewKey =
+  | "ontology"
   | "mine-overview"
   | "mine-sources"
-  | "mine-pipeline"
   | "mine-jobs"
-  | "mine-model"
+  | "mine-knowledge-base"
   | "dashboard"
+  | "experiences"
+  | "datasource"
+  | "datasets"
+  | "observability"
+  | "prompt-studio"
   | "health"
-  | "skills"
+  | "workspace"
+  | "agent-assets"
+  | "platform"
+  | "tenants"
   | "users"
-  | "model";
+  | "model"
+  | "docs";
 type DashTab = "overview" | "candidates" | "audit" | "filter";
+type MiningViewKey = "mine-overview" | "mine-sources" | "mine-jobs";
+type StandaloneViewKey = Exclude<ViewKey, MiningViewKey | "dashboard">;
 
-// The 挖掘 group is a flat list of menu items (like the 进化 group), each
-// pointing at a single MiningView page.
-const MINE_PAGES: { key: ViewKey; page: MinePage }[] = [
+const MINE_PAGES: { key: MiningViewKey; page: MinePage }[] = [
   { key: "mine-overview", page: "overview" },
   { key: "mine-sources", page: "sources" },
-  { key: "mine-pipeline", page: "pipeline" },
   { key: "mine-jobs", page: "jobs" },
-  { key: "mine-model", page: "model" },
 ];
 
-// Sidebar is organised around the two active lifecycle stages.  Benchmark is
-// an internal candidate dataset; no external evaluation runtime is required.
-const NAV_GROUPS: {
-  group: string;
-  items: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[];
+const NAV_SECTIONS: {
+  id: string;
+  label: string;
+  items: {
+    key: ViewKey;
+    label: string;
+    icon: typeof LayoutDashboard;
+    adminOnly?: boolean;
+    requiresOpenViking?: boolean;
+  }[];
 }[] = [
   {
-    group: "挖掘 · SkillMiner",
+    id: "mining",
+    label: "技能挖掘",
     items: [
       { key: "mine-overview", label: "挖掘总览", icon: LayoutDashboard },
       { key: "mine-sources", label: "知识源", icon: Database },
-      { key: "mine-pipeline", label: "挖掘流水线", icon: Workflow },
       { key: "mine-jobs", label: "挖掘任务", icon: ListChecks },
-      { key: "mine-model", label: "挖掘模型", icon: SlidersHorizontal },
+      { key: "mine-knowledge-base", label: "知识库挖掘", icon: BookOpenText, adminOnly: true, requiresOpenViking: true },
     ],
   },
   {
-    group: "进化 · SkillGene",
+    id: "evolution",
+    label: "进化闭环",
     items: [
-      { key: "dashboard", label: "进化看板", icon: LayoutDashboard },
-      { key: "health", label: "系统健康", icon: Activity },
-      { key: "skills", label: "技能管理", icon: BookOpenText },
-      { key: "users", label: "用户管理", icon: Users },
-      { key: "model", label: "进化模型", icon: SlidersHorizontal },
+      { key: "dashboard", label: "运行总览", icon: LayoutDashboard },
+      { key: "experiences", label: "经验库", icon: BookMarked },
+      { key: "datasets", label: "数据集", icon: FolderTree },
+    ],
+  },
+  {
+    id: "assets",
+    label: "资产中心",
+    items: [
+      { key: "ontology", label: "Ontology 工作台", icon: Database, adminOnly: true },
+      { key: "workspace", label: "实验工作台", icon: FolderTree },
+      { key: "agent-assets", label: "个人与团队资产", icon: BookMarked },
+      { key: "platform", label: "平台资产", icon: HardDrive },
+    ],
+  },
+  {
+    id: "global-config",
+    label: "全局配置",
+    items: [
+      { key: "observability", label: "链路观测", icon: Activity, adminOnly: true },
+      { key: "users", label: "用户与权限", icon: Users, adminOnly: true },
+      { key: "tenants", label: "租户管理", icon: Building2, adminOnly: true },
+    ],
+  },
+  {
+    id: "project-config",
+    label: "项目配置",
+    items: [
+      { key: "model", label: "模型配置", icon: SlidersHorizontal, adminOnly: true },
+      { key: "prompt-studio", label: "进化链路", icon: TerminalSquare, adminOnly: true },
+      { key: "datasource", label: "数据源接入", icon: DownloadCloud, adminOnly: true },
+      { key: "health", label: "运行状态", icon: Activity, adminOnly: true },
+    ],
+  },
+  {
+    id: "docs",
+    label: "文档",
+    items: [
+      { key: "docs", label: "使用文档", icon: BookOpen },
     ],
   },
 ];
 
-// Sub-pages hosted inside the 进化看板 group.
+const VIEW_KEYS = new Set<ViewKey>(
+  NAV_SECTIONS.flatMap(({ items }) => items.map(({ key }) => key))
+);
+
+function initialView(): ViewKey {
+  const params = new URLSearchParams(window.location.search);
+  const requested = params.get("view") as ViewKey | null;
+  if (String(requested) === "langfuse") return "datasource";
+  if (requested === "dashboard" && params.get("tab") === "experiences") return "experiences";
+  return requested && VIEW_KEYS.has(requested) ? requested : "dashboard";
+}
+
+// Operational views stay together under the evolution overview.
 const DASH_TABS: { key: DashTab; label: string; icon: typeof LayoutDashboard }[] = [
   { key: "overview", label: "总览", icon: LayoutDashboard },
   { key: "candidates", label: "候选评审", icon: ClipboardCheck },
@@ -76,33 +157,175 @@ const DASH_TABS: { key: DashTab; label: string; icon: typeof LayoutDashboard }[]
   { key: "filter", label: "过滤审计", icon: Filter },
 ];
 
-const EVOLVE_PAGE_META: Record<"health" | "skills" | "users" | "model", { title: string; description: string }> = {
-  health: {
-    title: "系统健康",
-    description: "聚合服务、存储、模型、用户和技能状态，用于快速定位运行问题。",
-  },
-  skills: {
-    title: "技能管理",
-    description: "管理个人技能与团队技能，并在对应空间完成编辑、分享和发布。",
-  },
-  users: {
-    title: "用户管理",
-    description: "注册用户、分配角色，并配置个人与团队 OpenViking 空间凭据。",
-  },
-  model: {
-    title: "进化模型",
-    description: "配置 SkillGene 在总结、判断、合并和生成技能时使用的模型。",
-  },
+type StandalonePageConfig = {
+  key: StandaloneViewKey;
+  title: string;
+  description: ReactNode;
+  badge: string;
+  scope?: "global" | "tenant";
+  requiresOpenViking?: boolean;
+  render: (props: {
+    active: boolean;
+    user?: UserProfile | null;
+    openVikingConfigured: boolean;
+    openVikingConfigChecked: boolean;
+    onSharingConfigChange: (config: SharingConfig) => void;
+    onNavigate: (view: ViewKey) => void;
+    activeTenantId?: string;
+  }) => ReactNode;
 };
+
+const STANDALONE_PAGES: StandalonePageConfig[] = [
+  {
+    key: "mine-knowledge-base",
+    title: "知识库挖掘",
+    description: null,
+    badge: "OpenViking Compile",
+    scope: "tenant",
+    requiresOpenViking: true,
+    render: ({ active, openVikingConfigured, openVikingConfigChecked, onNavigate }) =>
+      openVikingConfigChecked && !openVikingConfigured ? (
+        <OpenVikingRequiredNotice onConfigure={() => onNavigate("health")} />
+      ) : openVikingConfigured ? (
+        <KnowledgeBaseMiningView active={active} />
+      ) : null,
+  },
+  {
+    key: "ontology", title: "Ontology 工作台", description: "构建、审核和发布有证据支持的领域本体。",
+    badge: "只读诊断", scope: "tenant", render: ({ active, activeTenantId, user }) => <OntologyView key={`${activeTenantId}:${user?.id}`} active={active} scope={`${activeTenantId}:${user?.id}`} />,
+  },
+  {
+    key: "experiences",
+    title: "经验库",
+    description: "查看 Session 已生成的 Skill 错误经验和优秀实践，不依赖 Skill 是否已上传。",
+    badge: "进化闭环",
+    scope: "tenant",
+    render: ({ active, activeTenantId, user }) => <ExperienceLibraryView key={`${activeTenantId}:${user?.id}`}
+      active={active} canManageSync={user?.role === "admin"} />,
+  },
+  {
+    key: "datasets",
+    title: "数据集",
+    description: "从 Session 保存数据集，管理、导出并批量重回放验证。",
+    badge: "重回放验证",
+    scope: "tenant",
+    render: ({ active }) => <DatasetsView active={active} />,
+  },
+  {
+    key: "datasource",
+    title: "数据源接入",
+    description: "",
+    badge: "上游接入",
+    scope: "tenant",
+    render: ({ active, user }) => <DataSourcesView active={active} user={user} />,
+  },
+  {
+    key: "observability",
+    title: "链路观测",
+    description: "",
+    badge: "全局",
+    scope: "global",
+    render: ({ active, user }) => <ObservabilityView active={active} user={user} />,
+  },
+  {
+    key: "prompt-studio",
+    title: "进化链路",
+    description: (
+      <>
+        统一管理 Skills 自进化与团队 Memory 自进化（<Term term="dreamcycle" />
+        ）的 Prompt、模型、参数和运行状态。
+      </>
+    ),
+    badge: "白盒配置",
+    scope: "tenant",
+    render: ({ active, user, openVikingConfigured }) => (
+      <EvolutionWorkspaceView
+        active={active}
+        user={user}
+        openVikingConfigured={openVikingConfigured}
+      />
+    ),
+  },
+  {
+    key: "workspace",
+    title: "实验工作台",
+    description: "在代码文件夹中编辑 Skill，通过 True Replay 在线调试并查看执行结果。",
+    badge: "Workspace",
+    scope: "tenant",
+    render: ({ active, user }) => <SkillWorkbenchView active={active} user={user} />,
+  },
+  {
+    key: "agent-assets",
+    title: "个人与团队资产",
+    description: "浏览和维护 OpenViking 中的个人记忆与团队资源。",
+    badge: "OpenViking",
+    scope: "tenant",
+    render: ({ active, user }) => <OpenVikingWorkspaceView active={active} user={user} />,
+  },
+  {
+    key: "platform",
+    title: "平台资产",
+    description: "自进化平台自己的存储：会话队列、候选技能、验证任务、记忆变更与 Skill Lab 等中间产物，Agent 无法引用，仅供平台运行与排查。",
+    badge: "平台内部",
+    scope: "tenant",
+    render: ({ active }) => <PlatformAssetsView active={active} />,
+  },
+  {
+    key: "model",
+    title: "模型配置",
+    description: "配置当前租户的默认模型、Base URL 和 API Key；阶段可在进化链路中使用独立模型连接。",
+    badge: "租户配置",
+    scope: "tenant",
+    render: ({ active, user }) => <ModelSettingsView active={active} user={user} />,
+  },
+  {
+    key: "users",
+    title: "用户与权限",
+    description: "管理用户、角色、Agent 身份映射，以及个人和团队 OpenViking 空间凭据。",
+    badge: "平台治理",
+    scope: "global",
+    render: ({ active, user }) => <UsersView active={active} user={user} />,
+  },
+  {
+    key: "tenants",
+    title: "租户管理",
+    description: "多租户模式下创建/禁用租户、轮换 agent 接入 token；单租户部署保持 default 一个租户。",
+    badge: "平台治理",
+    scope: "global",
+    render: ({ active, user }) => <TenantsView active={active} user={user} />,
+  },
+  {
+    key: "health",
+    title: "运行状态",
+    description: "汇总服务、存储、模型、Agent、用户和技能状态，定位平台运行问题。",
+    badge: "平台治理",
+    scope: "tenant",
+    render: ({ active, user, onSharingConfigChange, activeTenantId }) => (
+      <HealthView
+        active={active}
+        user={user}
+        onSharingConfigChange={onSharingConfigChange}
+        activeTenantId={activeTenantId}
+      />
+    ),
+  },
+  {
+    key: "docs",
+    title: "使用文档",
+    description: "查阅 teamEvolver 的快速入门、核心概念、Agent 接入、API 参考、设计文档与常见问题。",
+    badge: "文档",
+    render: ({ active }) => <DocsView active={active} />,
+  },
+];
 
 const DASH_PAGE_META: Record<DashTab, { title: string; description: string }> = {
   overview: {
-    title: "进化看板",
-    description: "监控会话进化流水线、待发布候选和技能版本的整体状态。",
+    title: "运行总览",
+    description: "监控会话进入、技能进化、候选评审和版本发布的完整闭环。",
   },
   candidates: {
     title: "候选评审",
-    description: "集中处理待发布技能候选，核对 Verify 与 True Replay 证据后再发布。",
+    description: "集中处理待发布技能候选，核对 True Replay 证据后再发布。",
   },
   audit: {
     title: "进化审计",
@@ -115,45 +338,178 @@ const DASH_PAGE_META: Record<DashTab, { title: string; description: string }> = 
 };
 
 export default function App() {
-  const [view, setView] = useState<ViewKey>("dashboard");
-  const [dashTab, setDashTab] = useState<DashTab>("overview");
+  const [view, setView] = useState<ViewKey>(initialView);
+  const [dashTab, setDashTab] = useState<DashTab>(() => {
+    const tab = new URLSearchParams(window.location.search).get("tab");
+    return DASH_TABS.some(item => item.key === tab) ? tab as DashTab : "overview";
+  });
   const [mineInputDir, setMineInputDir] = useState("");
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [checkingAuth, setCheckingAuth] = useState(true);
+  const [authCheckFailed, setAuthCheckFailed] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [refreshingLogin, setRefreshingLogin] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [openVikingConfigured, setOpenVikingConfigured] = useState(false);
+  // False until /api/sharing-config answers: gates the "未配置" badge and the
+  // placeholder page so neither flashes before the config is actually known.
+  const [openVikingConfigChecked, setOpenVikingConfigChecked] = useState(false);
+  // ---- Tenant context (multi-tenancy plan §4.1) ----
+  const [tenantsResp, setTenantsResp] = useState<TenantsResp | null>(null);
+  // Tenant switches reload the app (see switchTenant), so plain state read at
+  // mount is enough; there is no in-place mutation to track.
+  const [activeTenantId] = useState(() => getActiveTenantId());
 
-  const refreshAuth = useCallback(async () => {
+  const refreshAuth = useCallback(async (silent = false) => {
     setCheckingAuth(true);
+    setAuthCheckFailed(false);
     try {
       const status = await api<AuthStatus>("/api/auth/status");
       setAuth(status);
+      return status;
     } catch (e: any) {
-      setAuth({ authenticated: false, needs_setup: false });
-      toastErr("登录状态检查失败", e.message);
+      setAuthCheckFailed(true);
+      // The backend shares one event loop with the evolution cycle; under
+      // load a quick auth-status check can time out.  Don't scare the user
+      // with a toast on the initial page load — only surface the error when
+      // they explicitly click "刷新登录信息".
+      if (!silent) {
+        const isTimeout = e?.status === undefined && /超时|Timeout|Abort/i.test(e?.message || "");
+        toastErr(isTimeout ? "登录状态检查超时，服务可能繁忙" : "登录状态检查失败", e.message);
+      }
+      return null;
     } finally {
       setCheckingAuth(false);
     }
   }, []);
 
   useEffect(() => {
-    refreshAuth();
+    refreshAuth(true);
   }, [refreshAuth]);
 
-  async function logout() {
-    try {
-      await api("/api/auth/logout", { method: "POST" });
-      setAuth({ authenticated: false, needs_setup: false });
-      setUserMenuOpen(false);
-      toastOk("已退出登录");
-    } catch (e: any) {
-      toastErr("退出失败", e.message);
+  useEffect(() => {
+    // A failed request says nothing about the session. Keep the restoration
+    // gate open and retry; only a successful status response can show login.
+    if (auth || checkingAuth || !authCheckFailed) return;
+    const timer = window.setTimeout(() => void refreshAuth(true), 5000);
+    return () => window.clearTimeout(timer);
+  }, [auth, checkingAuth, authCheckFailed, refreshAuth]);
+
+  const applySharingConfig = useCallback((config: SharingConfig) => {
+    setOpenVikingConfigured(hasOpenVikingConfiguration(config));
+  }, []);
+
+  useEffect(() => {
+    if (!auth?.authenticated) {
+      setOpenVikingConfigured(false);
+      setOpenVikingConfigChecked(false);
+      return;
+    }
+    let cancelled = false;
+    api<SharingConfig>("/api/sharing-config")
+      .then((config) => {
+        if (!cancelled) {
+          applySharingConfig(config);
+          setOpenVikingConfigChecked(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setOpenVikingConfigured(false);
+          setOpenVikingConfigChecked(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [auth?.authenticated, applySharingConfig]);
+
+  // Tenant header injection is only valid for admin console sessions; keep
+  // the client-side gate in sync with the authenticated identity.
+  const isAdmin = auth?.user?.role === "admin";
+  // Set the gate DURING RENDER (not in an effect): child view effects fire
+  // before parent effects, so an effect-based flip happened only AFTER the
+  // dashboard's first fetch — briefly sending it without X-Tenant-Id and
+  // flashing the default tenant's data right after a tenant switch/reload.
+  // While auth is still unknown we render the full-screen gate and no view
+  // is mounted, so setting it here is both timely and safe.
+  setTenantHeaderAllowed(!!auth?.authenticated && isAdmin);
+  useEffect(() => {
+    if (!auth?.authenticated || !isAdmin) {
+      setTenantsResp(null);
+      return;
+    }
+    let cancelled = false;
+    listTenants()
+      .then((resp) => {
+        if (!cancelled) setTenantsResp(resp);
+      })
+      .catch(() => {
+        // 403 (non-admin) or PG down — stay in single-tenant view.
+        if (!cancelled) setTenantsResp(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [auth?.authenticated, isAdmin]);
+
+  const tenantSwitcherVisible =
+    !!tenantsResp && tenantsResp.mode === "postgres" && tenantsResp.tenants.length > 0;
+
+  // Switching tenants remounts the whole app: every view caches per-tenant
+  // state fetched before the switch, so a reload is the only sound reset.
+  function switchTenant(tenantId: string) {
+    if (tenantId === activeTenantId) return;
+    setActiveTenantId(tenantId);
+    const url = new URL(window.location.href);
+    url.searchParams.set("view", view);
+    url.searchParams.set("tab", dashTab);
+    window.location.assign(url.toString());
+  }
+
+  async function refreshLoginInfo() {
+    setUserMenuOpen(false);
+    setRefreshingLogin(true);
+    const status = await refreshAuth();
+    setRefreshingLogin(false);
+    if (status?.authenticated) {
+      toastOk(
+        "登录信息已刷新",
+        status.user?.display_name || status.user?.id || ""
+      );
     }
   }
 
-  if (checkingAuth && !auth) {
+  async function logout() {
+    setUserMenuOpen(false);
+    setLoggingOut(true);
+    toastOk("正在退出登录…");
+    try {
+      await api("/api/auth/logout", { method: "POST" });
+      setAuth({ authenticated: false, needs_setup: false });
+      toastOk("已退出登录");
+    } catch (e: any) {
+      // Even if the logout request times out, clear the local session so
+      // the user is not stuck on a wedged button.
+      setAuth({ authenticated: false, needs_setup: false });
+      const isTimeout = e?.status === undefined && /超时|Timeout|Abort/i.test(e?.message || "");
+      toastErr(isTimeout ? "退出超时，已本地清除登录态" : "退出失败", e.message);
+    } finally {
+      setLoggingOut(false);
+    }
+  }
+
+  if (!auth) {
     return (
       <div className="grid min-h-screen place-items-center bg-background text-sm text-muted-foreground">
-        正在检查登录状态…
+        <div className="flex flex-col items-center gap-4" role="status">
+          {checkingAuth ? "正在检查登录状态…" : (
+            <>
+              <p>暂时无法确认登录状态，正在自动重试…</p>
+              <Button variant="outline" onClick={() => void refreshAuth(true)}>重试</Button>
+            </>
+          )}
+        </div>
         <Toaster position="bottom-right" />
       </div>
     );
@@ -164,7 +520,7 @@ export default function App() {
       <>
         <LoginGate
           needsSetup={!!auth?.needs_setup}
-          onAuthed={(next) => setAuth(next)}
+          onAuthed={(next) => setAuth({ ...next, customer_mode: auth?.customer_mode })}
         />
         <Toaster position="bottom-right" />
       </>
@@ -172,60 +528,100 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-screen overflow-hidden">
-      {/* ---- Sidebar (StaffDeck SD1 layout) ---- */}
-      <aside className="flex h-screen w-54 shrink-0 flex-col border-r border-line bg-surface">
-        <div className="flex h-[58px] items-center gap-2.5 border-b border-line px-[18px]">
-          <div className="grid size-[30px] place-items-center rounded-lg bg-sidebar-primary text-[13px] font-extrabold tracking-tighter text-white">
-            SG
+    <div className="app-shell flex h-screen overflow-hidden">
+      <aside className="app-sidebar flex h-screen shrink-0 flex-col border-r">
+        <div className="sidebar-brand flex h-[60px] items-center gap-2.5 border-b border-sidebar-border px-[18px]">
+          <div
+            className="grid size-[31px] shrink-0 place-items-center rounded-[10px] bg-accent text-[12px] font-extrabold tracking-tighter text-white shadow-[0_7px_16px_rgba(15,118,110,0.18)]"
+            aria-label="TeamEvolver"
+            title="TeamEvolver"
+          >
+            TE
           </div>
-          <div className="text-[15px] font-bold tracking-tight">SkillGene</div>
+          <div className="sidebar-brand-copy">
+            <div className="text-[14px] font-[800] leading-tight">teamEvolver</div>
+            <div className="mt-0.5 text-[9.5px] font-[600] text-muted-soft">团队记忆与技能进化平台</div>
+          </div>
         </div>
-        <nav className="flex flex-1 flex-col gap-0.5 overflow-auto px-2.5 py-3">
-          {NAV_GROUPS.map(({ group, items }) => (
-            <div key={group} className="mb-1.5">
-              <div className="px-3 pb-1 pt-2.5 text-[10.5px] font-bold uppercase tracking-[0.08em] text-muted-soft">
-                {group}
-              </div>
-              {items.map(({ key, label, icon: Icon }) => (
-                <button
-                  key={key}
-                  type="button"
-                  aria-current={view === key ? "page" : undefined}
-                  onClick={() => {
-                    setView(key);
-                    setUserMenuOpen(false);
-                  }}
-                  className={cn(
-                    "flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-[13.5px] font-semibold transition-colors",
-                    view === key
-                      ? "bg-sidebar-accent text-foreground"
-                      : "text-sidebar-foreground hover:bg-sidebar-accent hover:text-foreground"
-                  )}
+        {tenantSwitcherVisible && (
+          <TenantSwitcher
+            tenants={tenantsResp!.tenants}
+            activeTenantId={activeTenantId}
+            onSelect={switchTenant}
+          />
+        )}
+        <nav className="sidebar-nav flex flex-1 flex-col gap-0.5 overflow-auto px-2.5 py-3" aria-label="主导航">
+          {NAV_SECTIONS.map(({ id, label, items }) => {
+            const visibleItems = items.filter(({ adminOnly }) => !adminOnly || isAdmin);
+            if (!visibleItems.length) return null;
+            return (
+              <section key={id} className="sidebar-nav-section mb-1.5" aria-labelledby={`nav-section-${id}`}>
+                <div
+                  id={`nav-section-${id}`}
+                  className="sidebar-group-label px-3 pb-1 pt-2.5 text-[10px] font-[800] uppercase tracking-[0.08em] text-muted-soft"
                 >
-                  <Icon className="size-4 opacity-80" />
                   {label}
-                </button>
-              ))}
-            </div>
-          ))}
+                </div>
+                {visibleItems.map(({ key, label: itemLabel, icon: Icon, requiresOpenViking }) => {
+                  // OpenViking-backed entries stay visible when it is not
+                  // configured: they carry a badge and their page explains how
+                  // to enable it, instead of silently disappearing.
+                  const notConfigured =
+                    !!requiresOpenViking && openVikingConfigChecked && !openVikingConfigured;
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      aria-current={view === key ? "page" : undefined}
+                      aria-label={notConfigured ? `${itemLabel}（未配置 OpenViking）` : undefined}
+                      onClick={() => {
+                        setView(key);
+                        setUserMenuOpen(false);
+                      }}
+                      title={notConfigured ? `${itemLabel}：需先在运行状态中配置 OpenViking` : itemLabel}
+                      className={cn(
+                        "sidebar-nav-item flex w-full items-center gap-2.5 rounded-[10px] px-3 py-2.5 text-[13px] font-[700] transition-[background-color,color,transform,box-shadow]",
+                        view === key
+                          ? "bg-sidebar-primary text-sidebar-primary-foreground shadow-[0_7px_18px_rgba(24,24,26,0.12)]"
+                          : "text-sidebar-foreground hover:translate-x-[3px] hover:bg-sidebar-accent hover:text-foreground"
+                      )}
+                    >
+                      <Icon className="size-4 shrink-0 opacity-85" />
+                      <span className="sidebar-item-label">{itemLabel}</span>
+                      {notConfigured && (
+                        <span
+                          aria-hidden="true"
+                          className="ml-auto shrink-0 rounded-full bg-amber-400/25 px-1.5 py-0.5 text-[9.5px] font-bold text-amber-700"
+                        >
+                          未配置
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </section>
+            );
+          })}
         </nav>
         <UserMenu
           user={auth.user}
           open={userMenuOpen}
           onToggle={() => setUserMenuOpen((v) => !v)}
-          onRefresh={refreshAuth}
+          refreshing={refreshingLogin}
+          loggingOut={loggingOut}
+          onRefresh={refreshLoginInfo}
           onLogout={logout}
         />
       </aside>
 
       {/* ---- Content ---- */}
-      <main className="h-screen flex-1 overflow-auto bg-background">
+      <main className="app-main h-screen min-w-0 flex-1 overflow-auto">
         {MINE_PAGES.map(({ key, page }) => (
           <div key={key} className={cn(view !== key && "hidden")}>
             <MiningView
               active={view === key}
               page={page}
+              user={auth.user}
               preferredInputDir={mineInputDir}
               onInputDirChange={setMineInputDir}
               onNavigate={(destination) => {
@@ -235,7 +631,7 @@ export default function App() {
                   return;
                 }
                 if (destination === "skills") {
-                  setView("skills");
+                  setView("workspace");
                   return;
                 }
                 setView(`mine-${destination}` as ViewKey);
@@ -247,11 +643,11 @@ export default function App() {
           <PageHeader
             title={DASH_PAGE_META[dashTab].title}
             description={DASH_PAGE_META[dashTab].description}
-            badge="SkillGene"
+            badge="进化闭环"
           />
-          {/* Sub-tab bar for the 进化看板 group */}
-          <div className="border-b border-line bg-surface px-7 pt-3">
-            <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="进化看板页面">
+          {/* Operational detail views for the evolution loop. */}
+          <div className="section-tabs pt-2.5">
+            <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="进化运行页面">
               {DASH_TABS.map(({ key, label, icon: Icon }) => (
                 <button
                   key={key}
@@ -260,9 +656,9 @@ export default function App() {
                   aria-selected={dashTab === key}
                   onClick={() => setDashTab(key)}
                   className={cn(
-                    "flex items-center gap-1.5 rounded-t-lg border-b-2 px-3.5 py-2 text-[13px] font-semibold transition-colors",
+                    "flex items-center gap-1.5 border-b-2 px-3 py-2 text-[12px] font-[700] transition-colors",
                     dashTab === key
-                      ? "border-sidebar-primary text-foreground"
+                      ? "border-accent text-foreground"
                       : "border-transparent text-muted-foreground hover:text-foreground"
                   )}
                 >
@@ -273,7 +669,10 @@ export default function App() {
             </div>
           </div>
           <div className={cn(dashTab !== "overview" && "hidden")}>
-            <DashboardView active={view === "dashboard" && dashTab === "overview"} />
+            <DashboardView
+              active={view === "dashboard" && dashTab === "overview"}
+              onNavigate={(next) => setView(next as ViewKey)}
+            />
           </div>
           <div className={cn(dashTab !== "candidates" && "hidden")}>
             <CandidateReviewView active={view === "dashboard" && dashTab === "candidates"} />
@@ -285,25 +684,48 @@ export default function App() {
             <SessionFilterView active={view === "dashboard" && dashTab === "filter"} />
           </div>
         </div>
-        <div className={cn(view !== "health" && "hidden")}>
-          <PageHeader title={EVOLVE_PAGE_META.health.title} description={EVOLVE_PAGE_META.health.description} badge="SkillGene" />
-          <HealthView active={view === "health"} user={auth.user} />
-        </div>
-        <div className={cn(view !== "skills" && "hidden")}>
-          <PageHeader title={EVOLVE_PAGE_META.skills.title} description={EVOLVE_PAGE_META.skills.description} badge="SkillGene" />
-          <SkillsView active={view === "skills"} user={auth.user} />
-        </div>
-        <div className={cn(view !== "users" && "hidden")}>
-          <PageHeader title={EVOLVE_PAGE_META.users.title} description={EVOLVE_PAGE_META.users.description} badge="SkillGene" />
-          <UsersView active={view === "users"} />
-        </div>
-        <div className={cn(view !== "model" && "hidden")}>
-          <PageHeader title={EVOLVE_PAGE_META.model.title} description={EVOLVE_PAGE_META.model.description} badge="SkillGene" />
-          <ModelSettingsView active={view === "model"} user={auth.user} />
-        </div>
+        {STANDALONE_PAGES.map(({ key, title, description, badge, scope, render }) => {
+          const active = view === key;
+          return (
+            <div key={key} className={cn(!active && "hidden")}>
+              <PageHeader title={title} description={description} badge={badge} scope={scope} />
+              {render({
+                active,
+                user: auth.user,
+                openVikingConfigured,
+                openVikingConfigChecked,
+                onSharingConfigChange: applySharingConfig,
+                onNavigate: setView,
+                activeTenantId,
+              })}
+            </div>
+          );
+        })}
       </main>
 
       <Toaster position="bottom-right" />
+    </div>
+  );
+}
+
+function OpenVikingRequiredNotice({ onConfigure }: { onConfigure: () => void }) {
+  return (
+    <div className="mx-auto max-w-[760px] px-[22px] py-10">
+      <div className="rounded-[14px] border border-amber-300 bg-amber-50 p-5">
+        <div className="text-[15px] font-bold text-amber-900">该功能需要先连接 OpenViking</div>
+        <p className="mt-2 text-[13px] leading-relaxed text-amber-800">
+          Agent 工作空间与平台资产读取 OpenViking 中的团队 Skills、Memory 和资源。
+          当前尚未配置 OpenViking 服务凭据，或连接暂不可用。
+        </p>
+        <ol className="mt-3 list-decimal space-y-1 pl-5 text-[12.5px] leading-relaxed text-amber-800">
+          <li>前往「项目配置 → 运行状态」的 OpenViking 部署区域；</li>
+          <li>选择部署方式（火山云 / 自建）并填写 Endpoint、Service Key；</li>
+          <li>保存后返回本页，即可浏览与编辑资产。</li>
+        </ol>
+        <Button className="mt-4" size="sm" onClick={onConfigure}>
+          前往运行状态配置
+        </Button>
+      </div>
     </div>
   );
 }
@@ -352,31 +774,35 @@ function LoginGate({
   }
 
   return (
-    <div className="grid min-h-screen lg:grid-cols-[1.15fr_1fr]">
+    <div className="grid min-h-screen bg-background lg:grid-cols-[1.15fr_1fr]">
       {/* ---- Left: animated carousel showcase ---- */}
       <LoginHero />
 
       {/* ---- Right: auth form ---- */}
-      <div className="grid place-items-center bg-background px-6 py-10">
+      <div className="grid place-items-center bg-transparent px-6 py-10">
         <div className="w-full max-w-[420px]">
           <div className="mb-5 lg:hidden">
             <span className="inline-flex items-center gap-2 rounded-full bg-accent-soft px-3 py-1 text-xs font-semibold text-accent">
-              <Sparkles className="size-3.5" /> SkillGene · 团队技能进化平台
+              <Sparkles className="size-3.5" /> teamEvolver · 团队技能进化平台
             </span>
           </div>
-          <div className="rounded-4xl border border-border bg-surface p-6 shadow-[var(--shadow-float)]">
+          <div className="rounded-[18px] border border-border bg-surface p-6 shadow-[var(--shadow-float)]">
             <div className="mb-5">
-              <div className="mb-2 grid size-10 place-items-center rounded-xl bg-sidebar-primary text-sm font-extrabold text-white">
-                SG
+              <div
+                className="mb-2 grid size-10 place-items-center rounded-xl bg-accent text-sm font-extrabold text-white shadow-[0_8px_18px_rgba(15,118,110,0.18)]"
+                aria-label="TeamEvolver"
+                title="TeamEvolver"
+              >
+                TE
               </div>
               <h1 className="text-[22px] font-bold tracking-tight">
-                {needsSetup ? "初始化管理员账号" : isRegister ? "注册 SkillGene 账号" : "登录 SkillGene 控制台"}
+                {needsSetup ? "初始化管理员账号" : isRegister ? "注册 teamEvolver 账号" : "登录 teamEvolver 控制台"}
               </h1>
               <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
                 {needsSetup
                   ? "当前还没有用户。默认管理员账号和密码均为 admin，可直接创建后登录。"
                   : isRegister
-                    ? "注册后将创建普通用户账号，管理员权限需由管理员在用户管理中分配。"
+                    ? "注册后将创建普通用户账号，管理员权限需由管理员在“用户与权限”中分配。"
                     : "请输入账号密码后继续访问团队技能进化控制台。"}
               </p>
             </div>
@@ -465,7 +891,7 @@ const LOGIN_SLIDES: {
     icon: Clock,
     tag: "把重复劳动交给技能",
     title: "别再一遍遍写同样的流程",
-    desc: "请假审批、周报汇总、小红书选题、翻译润色……这些反复出现的活儿，SkillGene 把它们沉淀成可复用的“技能”，下次一键调用。",
+    desc: "请假审批、周报汇总、小红书选题、翻译润色……这些反复出现的活儿，teamEvolver 把它们沉淀成可复用的“技能”，下次一键调用。",
     points: ["高频事务自动成型", "团队共享同一套最佳做法", "新人开箱即用"],
   },
   {
@@ -514,16 +940,20 @@ function LoginHero() {
     <div className="login-hero relative hidden flex-col justify-between p-10 lg:flex xl:p-14">
       {/* animated backdrop */}
       <div className="login-blob" style={{ width: 320, height: 320, top: -60, right: -40, background: "rgba(126, 231, 213, 0.55)" }} />
-      <div className="login-blob" style={{ width: 260, height: 260, bottom: -40, left: -30, background: "rgba(198, 120, 70, 0.5)", animationDelay: "-6s" }} />
+      <div className="login-blob" style={{ width: 260, height: 260, bottom: -40, left: -30, background: "rgba(132, 115, 194, 0.48)", animationDelay: "-6s" }} />
       <div className="login-grid" />
 
       {/* brand */}
       <div className="relative z-10 flex items-center gap-3">
-        <div className="grid size-11 place-items-center rounded-2xl bg-white/15 text-base font-extrabold tracking-tighter ring-1 ring-white/25 backdrop-blur">
-          SG
+        <div
+          className="grid size-11 place-items-center rounded-2xl bg-white/15 text-base font-extrabold tracking-tighter ring-1 ring-white/25 backdrop-blur"
+          aria-label="TeamEvolver"
+          title="TeamEvolver"
+        >
+          TE
         </div>
         <div>
-          <div className="text-[17px] font-bold tracking-tight">SkillGene</div>
+          <div className="text-[17px] font-bold tracking-tight">teamEvolver</div>
           <div className="text-xs text-white/60">团队技能进化平台</div>
         </div>
       </div>
@@ -590,15 +1020,103 @@ function LoginHero() {
   );
 }
 
+export function TenantSwitcher({
+  tenants,
+  activeTenantId,
+  onSelect,
+  projectMode = false,
+}: {
+  tenants: TenantsResp["tenants"];
+  activeTenantId: string;
+  onSelect: (tenantId: string) => void;
+  projectMode?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  // The default tenant always exists as the single-tenant fallback, even
+  // when it was never explicitly registered in the tenants table.
+  const entries = [
+    ...tenants.filter((t) => t.tenant_id !== "default"),
+    ...(tenants.some((t) => t.tenant_id === "default")
+      ? tenants.filter((t) => t.tenant_id === "default")
+      : [{ tenant_id: "default", display_name: "default", status: "active" }]),
+  ];
+  const activeTenant =
+    entries.find((t) => t.tenant_id === activeTenantId) ||
+    entries.find((t) => t.tenant_id === "default") ||
+    entries[0];
+  return (
+    <div className={cn("relative", projectMode ? "w-full" : "border-b border-sidebar-border p-2.5")}>
+      <button
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={`${projectMode ? "项目" : "租户"}切换：当前 ${activeTenant.display_name}`}
+        onClick={() => setOpen((v) => !v)}
+        className={cn(
+          "flex w-full items-center gap-2.5 rounded-[12px] border px-2.5 py-2 text-left transition-colors",
+          !projectMode && "sidebar-tenant-button",
+          open ? "border-accent/30 bg-accent-soft" : "border-transparent hover:border-border hover:bg-muted"
+        )}
+      >
+        <span className="grid size-8 shrink-0 place-items-center rounded-[10px] bg-accent-soft text-accent">
+          <Building2 className="size-4" />
+        </span>
+        <span className={cn("min-w-0 flex-1", !projectMode && "sidebar-tenant-copy")}>
+          <span className="block text-[10px] font-[600] uppercase tracking-wide text-muted-soft">{projectMode ? "当前项目" : "当前租户"}</span>
+          <span className="block truncate text-[13px] font-semibold">
+            {activeTenant.display_name || activeTenant.tenant_id}
+          </span>
+        </span>
+        <ChevronsUpDown className={cn("size-3.5 shrink-0 text-muted-soft", !projectMode && "sidebar-tenant-chevron")} />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="sidebar-tenant-popover absolute left-0 right-0 top-[calc(100%+8px)] z-50 max-h-80 overflow-y-auto rounded-md border border-border bg-surface shadow-[var(--shadow-float)]"
+        >
+          <div className="p-2"><Input aria-label="搜索项目" placeholder="搜索项目" value={search} onChange={e => setSearch(e.target.value)} /></div>
+          {!entries.some(t => t.status === "active" && `${t.display_name} ${t.tenant_id}`.toLowerCase().includes(search.trim().toLowerCase())) && <div role="status" className="p-3 text-xs text-muted-foreground">无匹配项目</div>}
+          {entries.filter(t => t.status === "active" && `${t.display_name} ${t.tenant_id}`.toLowerCase().includes(search.trim().toLowerCase())).map((t) => (
+            <button
+              key={t.tenant_id}
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                onSelect(t.tenant_id);
+              }}
+              className={cn(
+                "flex w-full items-center justify-between gap-2 px-4 py-2.5 text-left text-sm hover:bg-muted",
+                t.tenant_id === activeTenant.tenant_id && "bg-accent-soft font-semibold"
+              )}
+            >
+              <span className="min-w-0 flex-1 truncate">
+                {t.display_name || t.tenant_id}
+                <span className="ml-1.5 text-[11px] text-muted-foreground">{t.tenant_id}</span>
+              </span>
+              {t.status !== "active" && <span className="text-[10px] text-muted-soft">已禁用</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function UserMenu({
   user,
   open,
+  refreshing,
+  loggingOut,
   onToggle,
   onRefresh,
   onLogout,
 }: {
   user?: UserProfile | null;
   open: boolean;
+  refreshing: boolean;
+  loggingOut: boolean;
   onToggle: () => void;
   onRefresh: () => void;
   onLogout: () => void;
@@ -606,8 +1124,8 @@ function UserMenu({
   const name = user?.display_name || user?.id || "unknown";
   const initials = name.slice(0, 1).toUpperCase();
   return (
-    <div className="relative border-t border-line p-2.5">
-      <div className="px-2 pb-2 text-[10.5px] font-medium text-muted-soft">统一控制台 · v1</div>
+    <div className="sidebar-user-footer relative border-t border-sidebar-border p-2.5">
+      <div className="sidebar-version px-2 pb-2 text-[10px] font-[600] text-muted-soft">统一控制台 · v1</div>
       <button
         type="button"
         aria-haspopup="menu"
@@ -615,32 +1133,44 @@ function UserMenu({
         aria-label={`账户菜单：${name}`}
         onClick={onToggle}
         className={cn(
-          "flex w-full items-center gap-2.5 rounded-xl border px-2.5 py-2 text-left transition-colors",
+          "sidebar-user-button flex w-full items-center gap-2.5 rounded-[12px] border px-2.5 py-2 text-left transition-colors",
           open ? "border-accent/30 bg-accent-soft" : "border-transparent hover:border-border hover:bg-muted"
         )}
       >
-        <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-sidebar-primary text-xs font-bold text-white shadow-sm">
+        <span className="grid size-8 shrink-0 place-items-center rounded-[10px] bg-accent text-xs font-bold text-white shadow-sm">
           {initials}
         </span>
-        <span className="min-w-0 flex-1">
+        <span className="sidebar-user-copy min-w-0 flex-1">
           <span className="block truncate text-[13px] font-semibold">{name}</span>
           <span className="block text-[10.5px] text-muted-foreground">{user?.role === "admin" ? "管理员" : "普通用户"}</span>
         </span>
-        <ChevronsUpDown className="size-3.5 shrink-0 text-muted-soft" />
+        <ChevronsUpDown className="sidebar-user-chevron size-3.5 shrink-0 text-muted-soft" />
       </button>
       {open && (
-        <div role="menu" className="absolute bottom-[calc(100%+8px)] left-2.5 right-2.5 z-50 overflow-hidden rounded-xl border border-border bg-surface shadow-[var(--shadow-float)]">
+        <div role="menu" className="sidebar-user-popover absolute bottom-[calc(100%+8px)] left-2.5 right-2.5 z-50 overflow-hidden rounded-[14px] border border-border bg-surface shadow-[var(--shadow-float)]">
           <div className="border-b border-line px-4 py-3">
             <div className="text-sm font-bold">{name}</div>
             <div className="mt-1 text-xs text-muted-foreground">{user?.email || user?.id || ""}</div>
           </div>
-          <button type="button" role="menuitem" onClick={onRefresh} className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm hover:bg-muted">
-            <RefreshCw className="size-4" />
-            刷新登录信息
+          <button
+            type="button"
+            role="menuitem"
+            disabled={refreshing || loggingOut}
+            onClick={onRefresh}
+            className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm hover:bg-muted disabled:opacity-50"
+          >
+            <RefreshCw className={refreshing ? "size-4 animate-spin" : "size-4"} />
+            {refreshing ? "刷新中…" : "刷新登录信息"}
           </button>
-          <button type="button" role="menuitem" onClick={onLogout} className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm text-destructive hover:bg-muted">
+          <button
+            type="button"
+            role="menuitem"
+            disabled={refreshing || loggingOut}
+            onClick={onLogout}
+            className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm text-destructive hover:bg-muted disabled:opacity-50"
+          >
             <LogOut className="size-4" />
-            退出登录
+            {loggingOut ? "退出中…" : "退出登录"}
           </button>
         </div>
       )}

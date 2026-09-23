@@ -1,403 +1,257 @@
-# SkillGene
+# teamEvolver
 
 <div align="center">
 
-## A Skill Library, Sync Console, and Validation Workbench for Agent Teams
+### The Capability Evolution Control Plane for Agent Teams
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-Service-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![React](https://img.shields.io/badge/Console-React%20%2B%20TypeScript-61DAFB.svg?logo=react&logoColor=111)](https://react.dev/)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![中文](https://img.shields.io/badge/README-中文-111827.svg)](./README.md)
+[![FastAPI](https://img.shields.io/badge/FastAPI-Control%20Plane-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![React](https://img.shields.io/badge/Console-React%20%2B%20TypeScript-149ECA.svg?logo=react&logoColor=white)](https://react.dev/)
+[![OpenViking](https://img.shields.io/badge/Context-OpenViking-0F766E.svg)](https://github.com/volcengine/OpenViking)
+[![License](https://img.shields.io/badge/License-MIT-18181B.svg)](./LICENSE)
+[![中文](https://img.shields.io/badge/README-中文-2563EB.svg)](./README.md)
 
-**Turn real agent experience into reusable, synced, validated `SKILL.md` assets for your team.**
+**Turn real Agent Sessions into reusable, validated, and governed team Skills and team Memory.**
 
 </div>
 
 ---
 
-## Why SkillGene?
+## Product
 
-Agents can already complete complex tasks, but team skills often remain a loose set of files on one machine:
+teamEvolver runs outside the Agent runtime and owns continuous capability evolution and governance. It receives real Sessions and domain material, extracts traceable Evidence, proposes Skill Candidates or Memory Changes, and closes the loop through static checks, True Replay, optional human gates, versioned publication, and controlled distribution.
 
-- **Hard to share**: the same experience gets copied across members, machines, and agents.
-- **Hard to separate**: personal preferences, customer facts, and team SOPs can mix, creating privacy and contamination risk.
-- **Hard to version**: skill origin, publisher, version state, and live team content are difficult to keep aligned.
-- **Hard to trust**: a skill may look polished, but there is little evidence that it improves task outcomes.
+It is neither another Agent runtime nor a file synchronization script:
 
-**SkillGene is not about making agents remember more; it is a safe pipeline from real sessions to team capability.**
-It turns scattered sessions into comparable evidence, separates personal and team assets, and publishes team skills through replay validation and version governance.
+- Agents keep their own models, tools, workspaces, and execution loops.
+- teamEvolver owns Evidence, evolution, validation, versions, audit, and release.
+- OpenViking stores team Skills, Memory, Sessions, and replay snapshots.
+- Langfuse can independently provide Session ingestion and evolution observability.
 
----
+## Evolution Loop
 
-## Design Principles
+```mermaid
+flowchart LR
+    A["Real Sessions / Domain Material"] --> B["Evidence Classification"]
+    B --> C["Skill Candidate"]
+    B --> D["Memory Change"]
+    C --> E["Test Dataset"]
+    E --> F["True Replay<br/>Baseline vs Candidate"]
+    F --> G["Candidate Review"]
+    G --> H["Versioned Release"]
+    H --> I["Agent Skill Sync"]
+    D --> J["DreamCycle"]
+    J --> K["Memory True Replay"]
+    K --> L["Team Memory"]
+```
 
-- **Central evidence**: retain sessions, tool calls, success strategies, and failure reasons so cross-user patterns become visible.
-- **Layered assets**: decide whether knowledge is shareable before deciding whether it should become `skill` or `memory`; personal assets stay isolated, team assets are published deliberately.
-- **Validated release**: team `SKILL.md` assets pass aggregation, redaction, deduplication, replay validation, versioning, and rollback gates.
-
-Hermes and other agents keep their native runtime model. SkillGene delivers team skills through synced directories and hooks, so the agent's native skill system remains in control.
-
----
+A Checklist is a completion gate, not a weighted score. Once the gate passes, True Replay compares efficiency by interaction turns, tool calls, and total tokens, in that order.
 
 ## Core Capabilities
 
-<table>
-  <tr>
-    <td width="25%" valign="top">
-      <h3>Skill Library</h3>
-      <p>Read, create, edit, delete, package, and import standard <code>SKILL.md</code> bundles while preserving frontmatter and attachments.</p>
-    </td>
-    <td width="25%" valign="top">
-      <h3>Team Sync</h3>
-      <p>Use local object storage or OpenViking-compatible object storage with separate personal and team spaces.</p>
-    </td>
-    <td width="25%" valign="top">
-      <h3>Web Console</h3>
-      <p>A built-in React + TypeScript console for skills, users, candidate review, health checks, and model settings.</p>
-    </td>
-    <td width="25%" valign="top">
-      <h3>True Replay</h3>
-      <p>Run baseline and candidate branches in isolated sandboxes and validate skill changes with real tool trajectories.</p>
-    </td>
-  </tr>
-</table>
+| Module | Current capability |
+| --- | --- |
+| Sessions and Evidence | V1 Session ingest, Langfuse pull, value classification, recent/historical Evidence windows, filter audit |
+| Skill Evolution | Summarize, judge, group, improve/create/merge, and same-source Test Dataset synthesis |
+| True Replay | Run Baseline and Candidate in the real Agent Runtime; inspect Checklist completion, traces, artifacts, and efficiency |
+| Candidate Governance | Review, replay-gated or forced publish, version detail, full Bundle diff, rollback, and audit |
+| Memory Evolution | DreamCycle maintenance, cross-user team-memory aggregation, editable aggregation Skill, incremental compilation, and Memory Replay |
+| Experiment Workbench | Edit Skill bundles and run True Replay against unsaved multi-file Candidates |
+| Personal and Team Assets | Browse and edit OpenViking assets from `viking://user` and `viking://resources` |
+| SkillMiner | Compile domain documents into Skills, semantic reports, `EVALUATION.md`, and internal Benchmarks |
+| Agent Protocol v2 | Tenant principals, Context, Session ingest, ReplayAdapterFactory, and Skill pull |
+| Observability | Langfuse Session import plus model, tool, Skill Evolution, and DreamCycle tracing |
 
----
+Every team Skill mutation goes through `SkillMutationService`, which owns commit records, tombstones, a durable outbox, and per-Agent delivery state.
+
+## Console
+
+### Operations Overview
+
+The complete Session queue and history, pending candidates, replay decisions, and Skill versions.
+
+<a href="./docs/assets/teamEvolver-console-dashboard.png">
+  <img src="./docs/assets/teamEvolver-console-dashboard.png" alt="Complete teamEvolver operations overview" width="100%">
+</a>
+
+### White-box Evolution Pipeline
+
+The complete Skill Evolution pipeline, eight editable prompts, model and process settings, and real input/output testing.
+
+<a href="./docs/assets/teamEvolver-evolution-pipeline.png">
+  <img src="./docs/assets/teamEvolver-evolution-pipeline.png" alt="Complete teamEvolver evolution pipeline" width="100%">
+</a>
 
 ## Architecture
 
 ```mermaid
-flowchart LR
-    subgraph Team["SkillGene Team Service"]
-        Console["Web Console"]
-        API["FastAPI Service"]
-        Registry["Skill Registry"]
-        Validation["Validation Queue"]
+flowchart TB
+    subgraph Sources["Evidence Sources"]
+        Pi["Pi Agent"]
+        Hermes["Hermes"]
+        Generic["Agent Protocol v2"]
+        LFIn["Langfuse Sessions"]
+        Docs["Domain Documents"]
     end
 
-    subgraph Storage["Shared Storage"]
-        Local["Local Object Store"]
-        Viking["OpenViking-compatible Store"]
+    subgraph Control["teamEvolver Control Plane :52010"]
+        Console["React Console"]
+        API["FastAPI"]
+        Evolution["Skill Evolution"]
+        Replay["Validation Worker / True Replay"]
+        Memory["DreamCycle / Team Memory Aggregation"]
+        Mutation["SkillMutationService / Outbox"]
     end
 
-    subgraph Agent["Agent Machines"]
-        Sync["skillgene-sync Hook"]
-        Dir["Synced SKILL.md Directory"]
-        Hermes["Hermes Native Skills"]
+    subgraph Context["OpenViking"]
+        Sessions["Sessions / Evidence"]
+        Skills["Team Skills / Versions"]
+        Memories["Personal + Team Memory"]
+        Snapshots["Replay Snapshots"]
     end
 
+    Sources --> API
     Console --> API
-    API --> Registry
-    API --> Validation
-    API <--> Local
-    API <--> Viking
-    Sync --> Viking
-    Sync --> Dir
-    Dir --> Hermes
+    API --> Evolution
+    API --> Replay
+    API --> Memory
+    Evolution --> Mutation
+    Mutation <--> Skills
+    API <--> Sessions
+    API <--> Memories
+    Replay <--> Snapshots
+    Mutation --> Pi
+    Mutation --> Hermes
+    Mutation --> Generic
 ```
 
-The recommended path is shared storage, local sync, and native agent loading. Commands such as `skills_list`, `skill_view`, and `/skills` continue to come from the agent itself; SkillGene only makes sure the team skill library reaches the machine reliably.
-
----
+The console, evolution engine, validation queue, DreamCycle, SkillMiner, and Agent integrations share one FastAPI service and one configuration source.
 
 ## Quick Start
 
-### 1. Install
+Requires Python 3.10+. The full install provisions Hermes inside the project virtual environment for document mining and True Replay.
 
 ```bash
-git clone https://github.com/leoriczhang/skillgene.git
-cd skillgene
-python -m venv .venv
+git clone https://github.com/leoriczhang/teamEvolver.git
+cd teamEvolver
+
+python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
 python -m pip install -e ".[all]"
+
+teamEvolver config service.port 52010
+teamEvolver start --daemon
+teamEvolver status
 ```
 
-Core package only:
+Open `http://127.0.0.1:52010/`. The first visit opens the administrator bootstrap screen. The form defaults to `admin`; use a strong password in production. After signing in, configure:
+
+1. **Global Model**: OpenAI-compatible Base URL, model, and API key.
+2. **Runtime Status → OpenViking Deployment**: choose Volcengine Cloud or self-hosted. For a remote self-hosted server, set the endpoint override, for example `http://10.0.0.8:1933`.
+3. **Users & Permissions**: configure console users, roles, and Account + Name bindings for Personal Memory and Team Resources. Trusted mode uses one server-side Root Key.
+4. **Agent Integration**: configure the tenant Key and user_id; bind a runtime adapter when using True Replay.
+5. **Langfuse Integration**: optionally enable Session pull, outbound tracing, or a custom Trace mapper.
+
+The console is organized into five areas:
+
+| Area | Main entries |
+| --- | --- |
+| Skill Mining | Overview, knowledge sources, mining jobs |
+| Evolution Loop | Operations, candidate review, evolution/filter audit, Langfuse, Skill/team-Memory evolution |
+| Asset Center | Experiment Workbench, personal and team assets, platform assets |
+| Governance | Global model, users and permissions, runtime status |
+| Documentation | Built-in bilingual reader and search |
+
+Common commands:
 
 ```bash
-python -m pip install -e .
+teamEvolver status
+teamEvolver doctor
+teamEvolver config show
+teamEvolver stop
 ```
 
-Installer script:
+The repository includes the production console build. Run the frontend build only when changing `web-ui/`.
+
+Docker Compose is also supported. The image builds the console, installs the full Python dependency set, bundles the OpenViking CLI, and stores runtime data under the repository's `runtime/` directory:
 
 ```bash
-bash scripts/install_skillgene.sh
+docker compose up -d --build
+docker compose ps
 ```
 
-### 2. Configure a Local Skill Library
+## Agent Integration
 
-```bash
-skillgene config skills.enabled true
-skillgene config skills.dir ./skills
-skillgene config sharing.enabled true
-skillgene config sharing.backend local
-skillgene config sharing.local_root ./skillgene-store
-```
+Use [v2](./docs/en/agent-integrations/06-protocol-v2.md) with a service URL, tenant Key and user_id.
+Context and Sessions belong to tenant/user; the tenant configuration determines the Account.
+Skills use authenticated pull; True Replay uses a tenant-bound ReplayAdapterFactory with independent sessions.
+OpenViking Root and model keys stay on the server.
+Existing deployments follow [staged migration](./docs/en/guides/11-agent-deregistration.md), with separate data migration and cleanup releases.
 
-### 3. Create a Skill
+## Safety and Consistency
 
-```bash
-mkdir -p skills/example-skill
-cat > skills/example-skill/SKILL.md <<'EOF'
----
-name: example-skill
-description: Use when you need a minimal SkillGene example.
-category: general
----
+- Replay materializes only the required runtime configuration, never a complete production database.
+- Candidate processes do not receive upstream model credentials; model access uses an ephemeral broker.
+- External side effects fail closed unless they can be replayed deterministically.
+- Context references are server-issued and bound to Tenant, User, Session, and expiry.
+- Team Memory and team Skills are read-only to regular Agents; personal-Memory writes validate tenant/user ownership.
+- Skill publish, rollback, delete, and sync use one mutation path, retaining versions and tombstones in pull mode.
+- Langfuse tracing is fail-open and never blocks evolution or Memory maintenance.
 
-# Example Skill
-
-Follow the project conventions and keep the answer concise.
-EOF
-```
-
-### 4. Sync Skills
-
-```bash
-skillgene skills push
-skillgene skills list-remote
-skillgene skills pull
-```
-
-### 5. Start the Console
-
-```bash
-skillgene config service.port 30000
-skillgene start --daemon
-skillgene status
-```
-
-Open:
+## Repository Layout
 
 ```text
-http://127.0.0.1:30000/console
+teamEvolver/
+├── teamEvolver/
+│   ├── evolve/          # Evidence, Skill Evolution, Dataset, release
+│   ├── replay.py        # virtual compatibility entry point for team_replay
+│   ├── validation/      # Candidate queue, result storage, and Validation Worker
+│   ├── aggregation/     # Cross-user team-Memory aggregation and incremental state
+│   ├── integrations/    # Tenant principals, Context, protocol, and Skill pull
+│   ├── proxy/           # FastAPI, console, and Workspace interfaces
+│   ├── config_store/    # YAML defaults, persistence, and runtime bridge
+│   ├── skills/          # Bundles, versions, and SkillMutationService
+│   └── storage/         # OpenViking storage adapters
+├── session_ingestion/   # Session push, pull, shared ingestion, and source Adapters
+├── team_miner/          # Skill mining, Benchmarks, job orchestration, and host bridge
+├── team_memory/         # Memory aggregation, maintenance, ledger, and routes
+├── team_replay/         # True Replay Interface, engine, policy, and Runtime Adapters
+├── web-ui/              # React + TypeScript console source
+├── tests/               # Unit, integration, protocol, and replay tests
+└── docs/                # Markdown documentation sources (bilingual zh/en, browsable in-console)
 ```
 
-On first launch, initialize the admin account. The default username and password are both `admin`; change them after deployment.
+## Documentation
 
----
+Documentation is maintained as Markdown source files in `docs/`, available in both English and Chinese. After logging into the console, the built-in reader under "Docs → Documentation" in the left sidebar supports sidebar tree navigation, full-text search, language switching, and Markdown/GFM/code block/table rendering:
 
-## Console Map
+| Section | Content |
+| --- | --- |
+| Getting Started | [Introduction](./docs/en/getting-started/01-introduction.md), [Quick Start](./docs/en/getting-started/02-quickstart.md), [Installation](./docs/en/getting-started/03-installation.md) |
+| Concepts | [Architecture](./docs/en/concepts/01-architecture.md), [Evolution Loop](./docs/en/concepts/02-evolution-loop.md), [Skills](./docs/en/concepts/03-skills.md), [Memory & DreamCycle](./docs/en/concepts/04-memory.md), [True Replay](./docs/en/concepts/06-true-replay.md) |
+| Guides | [Configuration](./docs/en/guides/01-configuration.md), [Deployment](./docs/en/guides/02-deployment.md), [Web Console](./docs/en/guides/03-console.md), [Observability](./docs/en/guides/04-observability.md), [Troubleshooting](./docs/en/guides/06-troubleshooting.md) |
+| Agent Integrations | [Overview](./docs/en/agent-integrations/01-overview.md), [Protocol v2 Spec](./docs/en/agent-integrations/06-protocol-v2.md), [Hermes Integration](./docs/en/agent-integrations/03-hermes.md), [Custom Agent](./docs/en/agent-integrations/05-custom-agent.md) |
+| API Reference | [Overview](./docs/en/api/01-overview.md), [Agent Register](./docs/en/api/02-agent-register.md), [Session Ingest](./docs/en/api/03-session-ingest.md), [Context Workspace](./docs/en/api/04-context-workspace.md), [Skills Admin](./docs/en/api/09-skills-admin.md), [Team Memory Aggregation](./docs/en/api/11-team-memory-aggregation.md) |
+| Design Notes | [Master PRD](./docs/design/01-master-prd.md), [DreamCycle Evaluation](./docs/design/02-dreamcycle-snapshot-evaluation.md), [OpenViking Research](./docs/design/03-openviking-capabilities.md) |
 
-<div align="center">
-  <img src="docs/assets/skillgene-console-dashboard.png" width="900" alt="SkillGene console evolution dashboard screenshot">
-  <br>
-  <sub>SkillGene Console: evolution dashboard, team skill status, storage connectivity, and management entry points.</sub>
-</div>
+### Documentation sync convention
 
-```mermaid
-flowchart TB
-    Home["Evolution Dashboard"]
-    Candidates["Candidate Review"]
-    Audit["Evolution Audit"]
-    Health["System Health"]
-    Skills["Skill Management"]
-    Users["User Management"]
-    Model["Model Settings"]
+When modifying code, update the corresponding docs following the [Docs Maintenance Guide](./docs/en/api/99-docs-maintenance.md). Run `node docs/scripts/check-docs-refs.mjs` before committing to verify all code references and links are valid.
 
-    Home --> Candidates
-    Home --> Audit
-    Home --> Health
-    Skills --> Users
-    Candidates --> Model
-```
+- [Protocol JSON Schemas](./docs/schemas/)
+- [中文文档](./docs/zh/getting-started/01-introduction.md)
 
-The console includes:
-
-- **Evolution Dashboard**: storage connectivity, skill count, candidate queue, and service status.
-- **Candidate Review**: inspect candidate skills before publication, with optional True Replay validation.
-- **Evolution Audit**: review skill-evolution records.
-- **System Health**: check service, storage, and key API availability.
-- **Skill Management**: manage personal and team skills, including zip upload.
-- **User Management**: manage users, roles, and personal/team storage credentials.
-- **Model Settings**: configure an optional validation model and test connectivity.
-
----
-
-## Team Skill Sync
-
-Install `skillgene-sync` on agent machines. It pulls team skills before each task run and adds the synced directory to the agent's external skill directories.
-
-```mermaid
-sequenceDiagram
-    participant User as User
-    participant Agent as Hermes
-    participant Hook as skillgene-sync
-    participant Store as Shared Skill Store
-
-    User->>Agent: Start or continue a task
-    Agent->>Hook: pre_llm_call
-    Hook->>Store: Pull team SKILL.md bundles
-    Store-->>Hook: Manifest + skill files
-    Hook-->>Agent: Update external skill directory
-    Agent->>Agent: Native skill discovery
-```
-
-Install example:
+## Development Verification
 
 ```bash
-python skillgene/integrations/hermes_skill_sync/install.py \
-  --url "http://<skillgene-host>:52010" \
-  --user "<skillgene-user>"
+python -m pip install -e ".[all,dev]"
+npm --prefix web-ui ci
+bash scripts/verify_local.sh
 ```
 
-The default installer uses the SkillGene service backend. Local Hermes machines
-only need the SkillGene service URL and SkillGene user name; OpenViking endpoint,
-team key, root prefix, and related shared-storage settings stay on the cloud
-SkillGene service.
-
-The installer writes configuration similar to:
-
-```yaml
-skills:
-  external_dirs:
-    - <HERMES_HOME>/team_skills/skillgene
-hooks:
-  pre_llm_call:
-    - command: "python3 <HERMES_HOME>/skills/skillgene-sync/sync_skills.py"
-      timeout: 60
-```
-
-The generated `sync.json` is similar to:
-
-```json
-{
-  "backend": "service",
-  "base_url": "http://<skillgene-host>:52010",
-  "user_alias": "<skillgene-user>",
-  "target_dir": "<HERMES_HOME>/team_skills/skillgene"
-}
-```
-
-If the agent is already running, execute `/reload-skills` to refresh the current session cache. New sessions pick up synced skills automatically.
-
-### Session Skill Attribution and Efficiency Metrics
-
-The `skillgene-feed` `on_session_end` hook reads the complete Hermes trajectory
-from `state.db`, including system, user, assistant, and tool messages:
-
-- `injected_skills`: skills actually exposed in the system prompt's `<available_skills>` block.
-- `used_skills`: skills actually loaded through `skill_view`.
-- `metrics`: interaction turns, tool-call count, and input/output/cache/reasoning tokens.
-
-After installing `skillgene-feed`, these fields are sent through `/ingest_session`
-and preserved in the session archive and console details.
-
----
-
-## OpenViking / Object Storage
-
-Remote sync uses SkillGene's object-store abstraction. The default endpoint uses VolcEngine-hosted OpenViking:
-
-```bash
-skillgene config sharing.enabled true
-skillgene config sharing.backend viking
-skillgene config sharing.viking_team_api_key "<team-key>"
-skillgene config sharing.viking_personal_api_key "<personal-key>"
-skillgene config sharing.viking_root_prefix "skillgene"
-```
-
-For self-hosted OpenViking Server deployments, see [volcengine/OpenViking](https://github.com/volcengine/OpenViking) and override the default service URL with `skillgene config sharing.viking_endpoint "<your-server-url>"`.
-
-Do not commit real API keys. Use local configuration, environment variables, or your deployment platform's secret manager.
-
----
-
-## True Replay: Validate Skills with Real Trajectories
-
-Plain-text A/B checks can only compare answers. True Replay starts real agents in isolated environments and runs baseline and candidate branches. If a task is incomplete, judge feedback becomes the next user message in the same session. The primary comparison dimensions are:
-
-1. User/agent interaction turns needed to complete the task; fewer is better.
-2. Tool-call count; fewer calls usually indicate a more direct execution path.
-3. Total tokens, with input/output/cache/reasoning details retained.
-
-```mermaid
-flowchart LR
-    Job["Candidate Job"] --> Base["Baseline Sandbox"]
-    Job --> Cand["Candidate Sandbox"]
-    Base --> TraceA["Tool Trace A"]
-    Cand --> TraceB["Tool Trace B"]
-    TraceA --> Score["Replay Scoring"]
-    TraceB --> Score
-    Score --> Decision["Keep / Revise / Publish"]
-```
-
-Install dependencies:
-
-```bash
-python -m pip install -e ".[truereplay]"
-```
-
-Replay a shared validation job:
-
-```bash
-python -m skillgene.true_replay --job-id <validation-job-id> --json
-```
-
-Replay a local JSON job file:
-
-```bash
-python -m skillgene.true_replay --job-file ./candidate_job.json --dry-run
-python -m skillgene.true_replay --job-file ./candidate_job.json --json
-```
-
-True Replay creates temporary `HOME` and `HERMES_HOME` directories for both branches and does not modify your real agent configuration. To use a local agent checkout, set `HERMES_ORIGIN`.
-
----
-
-## Project Layout
-
-```text
-skillgene/
-├── skillgene/
-│   ├── cli/              # skillgene command line
-│   ├── config_store/     # local config store
-│   ├── proxy/            # service routes, console, and admin APIs
-│   ├── skills/           # SKILL.md management, bundling, sync
-│   ├── storage/          # local / OpenViking storage backends
-│   ├── integrations/     # Hermes integration
-│   ├── validation/       # optional candidate-skill validation
-│   ├── true_replay.py    # true A/B replay
-│   └── web/              # built console assets
-├── web-ui/               # React + TypeScript console source
-├── tests/
-├── scripts/
-└── pyproject.toml
-```
-
----
-
-## Development
-
-```bash
-python -m pip install -e ".[dev,all]"
-python -m pytest
-```
-
-Build the console and Python package:
-
-```bash
-npm --prefix web-ui install
-npm --prefix web-ui run build
-python -m pip install build
-python -m build
-```
-
----
-
-## References
-
-Related projects and references:
-- [SkillClaw](https://github.com/AMAP-ML/SkillClaw): a multi-agent skill evolution project.
-- [OpenSpace](https://github.com/HKUDS/OpenSpace): a quality-first skill hub for AI agents.
-- [Hermes Agent](https://github.com/nousresearch/hermes-agent): optional runtime dependency for True Replay.
-- [FastAPI](https://fastapi.tiangolo.com/): the SkillGene service framework.
-- [React](https://react.dev/) and [TypeScript](https://www.typescriptlang.org/): the SkillGene console stack.
-
----
+`verify_local.sh` runs Python compilation, the test suite, and the production frontend build.
 
 ## License
 
-MIT
+[MIT](./LICENSE)

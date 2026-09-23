@@ -1,9 +1,89 @@
 import * as React from "react";
+import { Info } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { fmtScore, scoreClass } from "@/lib/format";
+import { GLOSSARY } from "@/lib/glossary";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 export const DEFAULT_PAGE_SIZE = 50;
 export const MAX_VISIBLE_PAGES = 50;
+
+// ---- Term / jargon help -------------------------------------------------- //
+// Renders a term with a hover/focus explanation from the shared glossary, so
+// internal concepts (True Replay, Evidence, Bundle...) are explained in place
+// instead of forcing the admin to leave the page for the docs.
+export function Term({
+  term,
+  children,
+  className,
+}: {
+  term: keyof typeof GLOSSARY | string;
+  children?: React.ReactNode;
+  className?: string;
+}) {
+  const entry = GLOSSARY[term];
+  if (!entry) return <>{children ?? term}</>;
+  return (
+    <TooltipProvider delayDuration={120}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span
+            tabIndex={0}
+            className={cn(
+              "cursor-help border-b border-dotted border-muted-soft/70 outline-none focus-visible:border-foreground",
+              className
+            )}
+          >
+            {children ?? entry.label}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="max-w-[300px] leading-relaxed">
+          <span>
+            <b>{entry.label}</b>：{entry.desc}
+          </span>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
+// Small ⓘ affordance for headings and form rows where inline underline would
+// hurt layout. Renders nothing when the term is unknown.
+export function InfoTip({
+  term,
+  className,
+}: {
+  term?: keyof typeof GLOSSARY | string;
+  className?: string;
+}) {
+  const entry = term ? GLOSSARY[term] : undefined;
+  if (!entry) return null;
+  return (
+    <TooltipProvider delayDuration={120}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label={`术语说明：${entry.label}`}
+            // Inside a <label> row the click must not activate the control.
+            onClick={(event) => event.preventDefault()}
+            className={cn(
+              "inline-flex size-3.5 shrink-0 items-center justify-center rounded-full align-middle text-muted-soft transition-colors hover:text-foreground",
+              className
+            )}
+          >
+            <Info className="size-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="max-w-[300px] leading-relaxed">
+          <span>
+            <b>{entry.label}</b>：{entry.desc}
+          </span>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
 
 // ---- Status dot ---------------------------------------------------------- //
 export type DotState = "on" | "off" | "err" | "run";
@@ -26,7 +106,7 @@ export function Pill({
 }
 
 export function UserBadge({ name }: { name?: string | null }) {
-  return <Pill tone="purple">👤 {name || "unknown"}</Pill>;
+  return <Pill tone="purple">{name || "unknown"}</Pill>;
 }
 
 // ---- Consistent page identity header ----------------------------------- //
@@ -34,18 +114,29 @@ export function PageHeader({
   title,
   description,
   badge,
+  scope,
+  actions,
 }: {
   title: React.ReactNode;
   description: React.ReactNode;
   badge?: React.ReactNode;
+  scope?: "global" | "tenant";
+  actions?: React.ReactNode;
 }) {
   return (
-    <header className="border-b border-line bg-surface px-7 py-5">
-      <h1 className="flex flex-wrap items-center gap-2.5 text-[22px] font-bold tracking-tight">
-        {title}
-        {badge && <Pill tone="purple">{badge}</Pill>}
-      </h1>
-      <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{description}</p>
+    <header className="page-header">
+      <div className="min-w-0">
+        <h1 className="flex flex-wrap items-center gap-2 text-[20px] font-[800] leading-tight">
+          {title}
+          {badge && <Pill tone="purple">{badge}</Pill>}
+          {scope === "global" && <Pill tone="blue">全局生效</Pill>}
+          {scope === "tenant" && <Pill tone="amber">单租户</Pill>}
+        </h1>
+        {description ? (
+          <p className="mt-1 max-w-[840px] text-[12px] leading-relaxed text-[#626b80]">{description}</p>
+        ) : null}
+      </div>
+      {actions && <div className="shrink-0">{actions}</div>}
     </header>
   );
 }
@@ -81,12 +172,12 @@ export function StatCard({
   mono?: boolean;
 }) {
   return (
-    <div className="rounded-lg border border-border bg-surface p-4 shadow-[var(--shadow-soft)]">
-      <div className="mb-2 text-xs font-semibold text-muted-foreground">{label}</div>
+    <div className="min-h-[76px] rounded-[14px] border border-border bg-white p-[14px] shadow-[var(--shadow-soft)] transition-[border-color,box-shadow,transform] hover:-translate-y-px hover:border-border-strong hover:shadow-[0_14px_34px_rgba(15,23,42,0.075)]">
+      <div className="mb-1.5 text-[11px] font-[700] text-muted-foreground">{label}</div>
       <div
         className={cn(
-          "text-2xl font-bold tracking-tight",
-          mono && "mono text-xs break-all font-normal"
+          "text-[22px] font-[800] leading-tight",
+          mono && "mono break-all text-[11px] font-[500] leading-relaxed text-[#464c5e]"
         )}
       >
         {value}
@@ -101,16 +192,18 @@ export function Panel({
   count,
   extra,
   children,
+  className,
 }: {
   title: React.ReactNode;
   count?: React.ReactNode;
   extra?: React.ReactNode;
   children: React.ReactNode;
+  className?: string;
 }) {
   return (
-    <section className="mb-6 overflow-hidden rounded-lg border border-border bg-surface shadow-[var(--shadow-soft)]">
-      <div className="flex items-center justify-between gap-2 border-b border-line bg-surface-subtle px-4 py-3">
-        <h2 className="flex items-center gap-2 text-sm font-bold">
+    <section className={cn("ui-panel overflow-hidden rounded-[14px] border border-border bg-surface shadow-[var(--shadow-soft)]", className)}>
+      <div className="flex min-h-[46px] items-center justify-between gap-3 border-b border-line bg-surface-subtle px-[14px] py-[10px]">
+        <h2 className="flex items-center gap-2 text-[13px] font-[780]">
           <span>{title}</span>
           {count != null && (
             <span className="text-xs font-normal text-muted-foreground">{count}</span>
@@ -193,58 +286,51 @@ export function PaginationControls({
     return null;
   }
   const capped = Math.min(totalPages, Math.max(1, visiblePages));
-  const pages = Array.from({ length: capped }, (_, i) => i + 1);
-  const canGoBeyondVisible = totalPages > capped;
+  const maxButtons = Math.min(7, capped);
+  const candidates = new Set<number>([1, totalPages, page]);
+  for (let offset = 1; candidates.size < maxButtons && offset < totalPages; offset += 1) {
+    if (page - offset > 1) candidates.add(page - offset);
+    if (candidates.size < maxButtons && page + offset < totalPages) candidates.add(page + offset);
+  }
+  for (let edge = 2; candidates.size < maxButtons && edge < totalPages; edge += 1) {
+    candidates.add(edge);
+  }
+  const pages = [...candidates].sort((a, b) => a - b);
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line bg-surface-subtle px-4 py-3 text-xs text-muted-foreground">
+    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line bg-surface-subtle px-[14px] py-[10px] text-[11px] text-muted-foreground">
       <div>
         显示 {start + 1}-{end} / {total}，第 {page} / {totalPages} 页
       </div>
-      <div className="flex max-w-full flex-wrap items-center gap-1.5">
+      <div className="flex max-w-full flex-wrap items-center gap-1">
         <button
-          className="rounded-md border border-border bg-surface px-2 py-1 font-semibold disabled:opacity-40"
-          disabled={page <= 1}
-          onClick={() => onPageChange(1)}
-        >
-          首页
-        </button>
-        <button
-          className="rounded-md border border-border bg-surface px-2 py-1 font-semibold disabled:opacity-40"
+          className="min-w-7 rounded-lg border border-border bg-surface px-2 py-1.5 font-semibold hover:border-border-strong hover:bg-muted disabled:opacity-40"
           disabled={page <= 1}
           onClick={() => onPageChange(page - 1)}
         >
           上一页
         </button>
-        {pages.map((p) => (
-          <button
-            key={p}
-            className={cn(
-              "rounded-md border px-2 py-1 font-semibold",
-              p === page
-                ? "border-sidebar-primary bg-sidebar-primary text-white"
-                : "border-border bg-surface hover:bg-muted"
-            )}
-            onClick={() => onPageChange(p)}
-          >
-            {p}
-          </button>
+        {pages.map((p, index) => (
+          <React.Fragment key={p}>
+            {index > 0 && p - pages[index - 1] > 1 && <span className="px-1 text-muted-soft">…</span>}
+            <button
+              className={cn(
+                "min-w-7 rounded-lg border px-2 py-1.5 font-semibold",
+                p === page
+                  ? "border-sidebar-primary bg-sidebar-primary text-white shadow-sm"
+                  : "border-border bg-surface hover:border-border-strong hover:bg-muted"
+              )}
+              onClick={() => onPageChange(p)}
+            >
+              {p}
+            </button>
+          </React.Fragment>
         ))}
-        {canGoBeyondVisible && (
-          <span className="px-1 text-muted-soft">…</span>
-        )}
         <button
-          className="rounded-md border border-border bg-surface px-2 py-1 font-semibold disabled:opacity-40"
+          className="min-w-7 rounded-lg border border-border bg-surface px-2 py-1.5 font-semibold hover:border-border-strong hover:bg-muted disabled:opacity-40"
           disabled={page >= totalPages}
           onClick={() => onPageChange(page + 1)}
         >
           下一页
-        </button>
-        <button
-          className="rounded-md border border-border bg-surface px-2 py-1 font-semibold disabled:opacity-40"
-          disabled={page >= totalPages}
-          onClick={() => onPageChange(totalPages)}
-        >
-          末页
         </button>
       </div>
     </div>
@@ -253,8 +339,8 @@ export function PaginationControls({
 
 // ---- Empty / error rows -------------------------------------------------- //
 export function Empty({ children }: { children: React.ReactNode }) {
-  return <div className="px-4 py-6 text-center text-sm text-muted-foreground">{children}</div>;
+  return <div className="grid min-h-[160px] place-items-center px-4 py-8 text-center text-sm text-muted-foreground">{children}</div>;
 }
 export function ErrorText({ children }: { children: React.ReactNode }) {
-  return <div className="px-4 py-6 text-center text-sm text-destructive">{children}</div>;
+  return <div className="grid min-h-[120px] place-items-center px-4 py-8 text-center text-sm text-destructive">{children}</div>;
 }

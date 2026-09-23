@@ -1,0 +1,52 @@
+{
+  "checked_at": "2026-09-18T07:49:42.289556+00:00",
+  "checks": [
+    {
+      "file": "contracts/typed_query.schema.json",
+      "check": "Draft202012 schema validation",
+      "status": "passed"
+    },
+    {
+      "file": "contracts/publication_grant.schema.json",
+      "check": "Draft202012 schema validation",
+      "status": "passed"
+    },
+    {
+      "file": "contracts/candidate_bundle.schema.json",
+      "check": "Draft202012 schema validation",
+      "status": "passed"
+    },
+    {
+      "file": "contracts/context_packet.schema.json",
+      "check": "Draft202012 schema validation",
+      "status": "passed"
+    },
+    {
+      "file": "contracts/openapi-proposed.yaml",
+      "check": "YAML parse and local component references only, not full OpenAPI conformance",
+      "status": "passed",
+      "refs_checked": 3
+    },
+    {
+      "file": "docs/25_顺丰Ontology完整实施方案_TE入口_OV编译存储服务_V3_20260918.md",
+      "check": "balanced code fences and parsable JSON examples",
+      "status": "passed"
+    },
+    {
+      "file": "docs/24_飞虎材料精读与顺丰领域本体蓝图_20260918.md",
+      "check": "balanced code fences and parsable JSON examples",
+      "status": "passed"
+    },
+    {
+      "file": "docs/26_Ontology接口契约_增量发布与验收_20260918.md",
+      "check": "balanced code fences and parsable JSON examples",
+      "status": "passed"
+    },
+    {
+      "file": "docs/23_Ontology论文开源生态与选型_20260918.md",
+      "check": "balanced code fences and parsable JSON examples",
+      "status": "passed"
+    }
+  ],
+  "scope": "static syntax and local reference checks only"
+}

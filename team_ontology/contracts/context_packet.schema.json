@@ -1,0 +1,110 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "contract": {
+      "const": "sf.ontology.context.v1",
+      "default": "sf.ontology.context.v1",
+      "title": "Contract",
+      "type": "string"
+    },
+    "semantic_generation": {
+      "title": "Semantic Generation",
+      "type": "integer"
+    },
+    "schema_revision": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Schema Revision"
+    },
+    "facts": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Facts",
+      "type": "array"
+    },
+    "observations": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Observations",
+      "type": "array"
+    },
+    "user_claim": {
+      "title": "User Claim",
+      "type": "string"
+    },
+    "conflicts": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Conflicts",
+      "type": "array"
+    },
+    "missing_evidence": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Missing Evidence",
+      "type": "array"
+    },
+    "evaluations": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Evaluations",
+      "type": "array"
+    },
+    "next_queries": {
+      "default": [],
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Next Queries",
+      "type": "array"
+    },
+    "truncated": {
+      "title": "Truncated",
+      "type": "boolean"
+    },
+    "degraded": {
+      "default": false,
+      "title": "Degraded",
+      "type": "boolean"
+    },
+    "prompt_fragment": {
+      "title": "Prompt Fragment",
+      "type": "string"
+    },
+    "authorization_epoch": {
+      "title": "Authorization Epoch",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "semantic_generation",
+    "schema_revision",
+    "facts",
+    "observations",
+    "user_claim",
+    "conflicts",
+    "missing_evidence",
+    "evaluations",
+    "truncated",
+    "prompt_fragment",
+    "authorization_epoch"
+  ],
+  "title": "ContextPacket",
+  "type": "object"
+}

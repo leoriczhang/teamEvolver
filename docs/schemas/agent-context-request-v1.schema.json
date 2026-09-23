@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://teamevolver.local/schemas/agent-context-request-v1.schema.json",
+  "title": "teamEvolver Context Resolve Request V1",
+  "type": "object",
+  "required": [
+    "external_subject",
+    "query"
+  ],
+  "properties": {
+    "integration_id": {
+      "type": "string"
+    },
+    "external_subject": {
+      "type": "string",
+      "minLength": 1
+    },
+    "context_session_id": {
+      "type": "string"
+    },
+    "query": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8000
+    },
+    "scopes": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "personal_memory",
+          "team_memory",
+          "personal_skills",
+          "team_skills"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "max_items": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 50
+    },
+    "max_chars": {
+      "type": "integer",
+      "minimum": 500,
+      "maximum": 100000
+    }
+  },
+  "additionalProperties": true
+}

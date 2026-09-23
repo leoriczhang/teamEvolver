@@ -1,0 +1,260 @@
+openapi: 3.1.0
+info:
+  title: SF OV Enterprise Ontology draft
+  version: 0.1.0
+  description: Proposed endpoints. No server is implemented in this package. IAM and
+    authority checks are mandatory server-side.
+servers:
+- url: /
+security:
+- BearerAuth: []
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    TypedQuery:
+      type: object
+      properties:
+        contract:
+          const: sf.ontology.query.v1
+        scope_ref: &id001
+          type: string
+          minLength: 1
+          maxLength: 200
+          pattern: ^[A-Za-z0-9_:@./-]+$
+        schema_revision: *id001
+        entity_ids:
+          type: array
+          items: *id001
+          minItems: 1
+          maxItems: 50
+        predicates:
+          type: array
+          items: *id001
+          minItems: 1
+          maxItems: 20
+        valid_at: &id002
+          type: string
+          format: date-time
+        known_at: *id002
+        limits:
+          type: object
+          properties:
+            max_hops:
+              type: integer
+              minimum: 0
+              maximum: 2
+            max_nodes:
+              type: integer
+              minimum: 1
+              maximum: 100
+            max_assertions:
+              type: integer
+              minimum: 1
+              maximum: 200
+            max_examined_edges:
+              type: integer
+              minimum: 1
+              maximum: 5000
+          required:
+          - max_hops
+          - max_nodes
+          - max_assertions
+          - max_examined_edges
+          additionalProperties: false
+      required:
+      - contract
+      - scope_ref
+      - schema_revision
+      - entity_ids
+      - predicates
+      - valid_at
+      - known_at
+      - limits
+      additionalProperties: false
+      $schema: https://json-schema.org/draft/2020-12/schema
+      title: Draft bounded typed query, not SQL/SPARQL
+    ContextRequest:
+      type: object
+      properties:
+        contract:
+          const: sf.ontology.context-request.v1
+        scope_ref: *id001
+        issue_pack_revision: *id001
+        entity_refs:
+          type: array
+          items: *id001
+          minItems: 1
+          maxItems: 50
+        claim:
+          type: string
+          maxLength: 16000
+        observation_handles:
+          type: array
+          items: *id001
+          minItems: 0
+          maxItems: 100
+        purpose:
+          const: read_only_diagnosis
+        token_budget:
+          type: integer
+          minimum: 1
+          maximum: 16000
+      required:
+      - contract
+      - scope_ref
+      - issue_pack_revision
+      - entity_refs
+      - claim
+      - observation_handles
+      - purpose
+      - token_budget
+      additionalProperties: false
+    ContextPacket:
+      type: object
+      properties:
+        contract:
+          const: sf.ontology.context.v1
+        schema_revision: *id001
+        semantic_generation: *id001
+        valid_at: *id002
+        known_at: *id002
+        authorization_epoch:
+          type: integer
+          minimum: 0
+        renderer_version: *id001
+        facts:
+          type: array
+          items:
+            type: object
+            properties:
+              assertion_id: *id001
+              statement: &id003
+                type: string
+                minLength: 1
+                maxLength: 2048
+              qualifiers:
+                type: object
+                properties:
+                  product: *id003
+                  region: *id003
+                required:
+                - product
+                - region
+                additionalProperties: false
+              evidence_ids:
+                type: array
+                items: *id001
+                minItems: 1
+                maxItems: 10000
+              epistemic_kind:
+                enum:
+                - document_fact
+                - system_fact
+                - user_claim
+                - hypothesis
+                - derived_fact
+            required:
+            - assertion_id
+            - statement
+            - qualifiers
+            - evidence_ids
+            - epistemic_kind
+            additionalProperties: false
+          minItems: 0
+          maxItems: 200
+        missing_evidence:
+          type: array
+          items: *id001
+          minItems: 0
+          maxItems: 10000
+        conflicts:
+          type: array
+          items: *id001
+          minItems: 0
+          maxItems: 10000
+        truncated:
+          type: boolean
+        degraded:
+          type: boolean
+        prompt_fragment:
+          type: string
+          maxLength: 100000
+      required:
+      - contract
+      - schema_revision
+      - semantic_generation
+      - valid_at
+      - known_at
+      - authorization_epoch
+      - renderer_version
+      - facts
+      - missing_evidence
+      - conflicts
+      - truncated
+      - degraded
+      - prompt_fragment
+      additionalProperties: false
+      $schema: https://json-schema.org/draft/2020-12/schema
+      title: Draft ContextPacket transport subset
+paths:
+  /api/v1/enterprise/ontology/query:
+    post:
+      operationId: ontologyQuery
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TypedQuery'
+      responses:
+        '200':
+          description: Authorized result; unknown or truncated may be valid
+          content:
+            application/json:
+              schema:
+                type: object
+                description: Authorized facts, proofs, generation and cursor; full
+                  response contract pending integration.
+        '401':
+          description: Authentication required
+        '403':
+          description: Not permitted
+        '412':
+          description: Current evidence or policy invalid
+        '422':
+          description: Invalid contract
+        '429':
+          description: Server-enforced budget exceeded
+        '503':
+          description: Authority unavailable; fail closed
+  /api/v1/enterprise/context/compose:
+    post:
+      operationId: ontologyCompose
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContextRequest'
+      responses:
+        '200':
+          description: Authorized result; unknown or truncated may be valid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContextPacket'
+        '401':
+          description: Authentication required
+        '403':
+          description: Not permitted
+        '412':
+          description: Current evidence or policy invalid
+        '422':
+          description: Invalid contract
+        '429':
+          description: Server-enforced budget exceeded
+        '503':
+          description: Authority unavailable; fail closed

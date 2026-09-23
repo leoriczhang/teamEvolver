@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://teamevolver.local/schemas/agent-context-snapshot-v2.schema.json",
+  "title": "teamEvolver Private Context Snapshot V2",
+  "type": "object",
+  "required": ["schema_version", "snapshot_id", "tenant_id", "user_id", "subject", "items", "manifest_hash"],
+  "properties": {
+    "schema_version": {"const": "teamevolver.context-snapshot.v2"},
+    "snapshot_id": {"type": "string"},
+    "tenant_id": {"type": "string", "minLength": 1},
+    "user_id": {"type": "string", "minLength": 1, "maxLength": 160},
+    "subject": {
+      "type": "object", "required": ["tenant_id", "user_id"], "additionalProperties": false,
+      "properties": {"tenant_id": {"type": "string"}, "user_id": {"type": "string"}}
+    },
+    "session_id": {"type": "string"},
+    "items": {"type": "array", "items": {"type": "object", "required": ["context_ref", "scope", "uri_hash", "content_hash"]}},
+    "manifest_hash": {"type": "string"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "revoked": {"type": "boolean"}
+  }
+}

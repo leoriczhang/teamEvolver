@@ -1,0 +1,36 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "query": {
+      "maxLength": 2000,
+      "minLength": 1,
+      "title": "Query",
+      "type": "string"
+    },
+    "target_uri": {
+      "default": "",
+      "maxLength": 2000,
+      "title": "Target Uri",
+      "type": "string"
+    },
+    "limit": {
+      "default": 10,
+      "maximum": 50,
+      "minimum": 1,
+      "title": "Limit",
+      "type": "integer"
+    },
+    "token_budget": {
+      "default": 4000,
+      "maximum": 16000,
+      "minimum": 64,
+      "title": "Token Budget",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "query"
+  ],
+  "title": "SearchRequest",
+  "type": "object"
+}

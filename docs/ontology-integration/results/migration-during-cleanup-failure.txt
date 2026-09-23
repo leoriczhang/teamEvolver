@@ -1,0 +1,67 @@
+EEE................                                                      [100%]
+==================================== ERRORS ====================================
+____________ ERROR at setup of test_publish_read_and_receipt_replay ____________
+
+    @pytest_asyncio.fixture
+    async def domain():
+        store = Store(DSN)
+>       await store.start()
+
+tests/test_ontology_integration.py:44:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+../OpenViking/openviking/ontology/store.py:42: in start
+    await conn.execute(Path(__file__).with_name("schema.sql").read_text())
+/tmp/te-ontology-venv/lib/python3.12/site-packages/asyncpg/connection.py:354: in execute
+    result = await self._protocol.query(query, timeout)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+>   ???
+E   TimeoutError
+
+asyncpg/protocol/protocol.pyx:369: TimeoutError
+____________ ERROR at setup of test_context_keeps_entities_separate ____________
+
+    @pytest_asyncio.fixture
+    async def domain():
+        store = Store(DSN)
+>       await store.start()
+
+tests/test_ontology_integration.py:44:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+../OpenViking/openviking/ontology/store.py:42: in start
+    await conn.execute(Path(__file__).with_name("schema.sql").read_text())
+/tmp/te-ontology-venv/lib/python3.12/site-packages/asyncpg/connection.py:354: in execute
+    result = await self._protocol.query(query, timeout)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+>   ???
+E   TimeoutError
+
+asyncpg/protocol/protocol.pyx:369: TimeoutError
+_____ ERROR at setup of test_enterprise_error_contract_does_not_echo_input _____
+
+    @pytest_asyncio.fixture
+    async def domain():
+        store = Store(DSN)
+>       await store.start()
+
+tests/test_ontology_integration.py:44:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+../OpenViking/openviking/ontology/store.py:42: in start
+    await conn.execute(Path(__file__).with_name("schema.sql").read_text())
+/tmp/te-ontology-venv/lib/python3.12/site-packages/asyncpg/connection.py:354: in execute
+    result = await self._protocol.query(query, timeout)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+>   ???
+E   TimeoutError
+
+asyncpg/protocol/protocol.pyx:369: TimeoutError
+=========================== short test summary info ============================
+ERROR tests/test_ontology_integration.py::test_publish_read_and_receipt_replay
+ERROR tests/test_ontology_integration.py::test_context_keeps_entities_separate
+ERROR tests/test_ontology_integration.py::test_enterprise_error_contract_does_not_echo_input
+16 passed, 3 errors in 38.04s

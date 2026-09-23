@@ -1,0 +1,32 @@
+{
+  "scope": "synthetic PG projection sensitivity; direct service calls, not publication or HTTP throughput",
+  "results": [
+    {
+      "assertions": 100000,
+      "concurrency": 10,
+      "requests": 100,
+      "p95_ms": 19.079,
+      "insert_seconds": 3.634
+    },
+    {
+      "assertions": 1000000,
+      "concurrency": 10,
+      "requests": 100,
+      "p95_ms": 10.193,
+      "insert_seconds": 15.223
+    },
+    {
+      "assertions": 5000000,
+      "concurrency": 10,
+      "requests": 100,
+      "p95_ms": 2002.126,
+      "insert_seconds": 84.657
+    }
+  ],
+  "limitations": [
+    "one shared authorized evidence source",
+    "uniform one-fact subjects",
+    "no LLM calls",
+    "no production concurrency mix"
+  ]
+}

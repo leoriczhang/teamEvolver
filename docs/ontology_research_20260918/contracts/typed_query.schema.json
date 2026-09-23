@@ -1,0 +1,95 @@
+{
+  "type": "object",
+  "properties": {
+    "contract": {
+      "const": "sf.ontology.query.v1"
+    },
+    "scope_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9_:@./-]+$"
+    },
+    "schema_revision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9_:@./-]+$"
+    },
+    "entity_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200,
+        "pattern": "^[A-Za-z0-9_:@./-]+$"
+      },
+      "minItems": 1,
+      "maxItems": 50
+    },
+    "predicates": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200,
+        "pattern": "^[A-Za-z0-9_:@./-]+$"
+      },
+      "minItems": 1,
+      "maxItems": 20
+    },
+    "valid_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "known_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "max_hops": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "max_nodes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "max_assertions": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        },
+        "max_examined_edges": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5000
+        }
+      },
+      "required": [
+        "max_hops",
+        "max_nodes",
+        "max_assertions",
+        "max_examined_edges"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "contract",
+    "scope_ref",
+    "schema_revision",
+    "entity_ids",
+    "predicates",
+    "valid_at",
+    "known_at",
+    "limits"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Draft bounded typed query, not SQL/SPARQL"
+}

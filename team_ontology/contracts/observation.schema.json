@@ -1,0 +1,64 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "task_ref": {
+      "title": "Task Ref",
+      "type": "string"
+    },
+    "subject": {
+      "title": "Subject",
+      "type": "string"
+    },
+    "predicate": {
+      "title": "Predicate",
+      "type": "string"
+    },
+    "value": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        }
+      ],
+      "title": "Value"
+    },
+    "source_id": {
+      "title": "Source Id",
+      "type": "string"
+    },
+    "revision": {
+      "title": "Revision",
+      "type": "string"
+    },
+    "ttl_seconds": {
+      "default": 60,
+      "maximum": 300,
+      "minimum": 1,
+      "title": "Ttl Seconds",
+      "type": "integer"
+    },
+    "audience": {
+      "title": "Audience",
+      "type": "string"
+    }
+  },
+  "required": [
+    "task_ref",
+    "subject",
+    "predicate",
+    "value",
+    "source_id",
+    "revision",
+    "audience"
+  ],
+  "title": "Observation",
+  "type": "object"
+}

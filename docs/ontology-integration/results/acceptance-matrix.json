@@ -1,0 +1,293 @@
+{
+  "scope": "2026-09-19 local three-repository implementation; synthetic fixtures; not full V3 acceptance",
+  "cases": [
+    {
+      "id": "O01",
+      "scenario": "原生Compile能力协商",
+      "expected": "from/to/skill、输出制品、args和取消语义与固定部署匹配",
+      "owner": "OV",
+      "status": "blocked",
+      "evidence_or_gap": "原生 app/读取/任务列表可用；完整 Compile 协商未验，现有 Rust invalidate_cache 缺失阻塞 worker。"
+    },
+    {
+      "id": "O02",
+      "scenario": "Runtime凭证越界读取",
+      "expected": "Manifest外来源在工具侧实际被拒，非仅Prompt劝阻",
+      "owner": "OV／Runtime",
+      "status": "partial",
+      "evidence_or_gap": "任务专用 capability/Manifest 输入实现并测围栏；跨任务模糊测试未做。"
+    },
+    {
+      "id": "O03",
+      "scenario": "staging候选普通检索",
+      "expected": "list/read/find/search/导出均不向无权主体暴露候选",
+      "owner": "OV",
+      "status": "partial",
+      "evidence_or_gap": "新增语义查询不读候选；所有原生搜索/导出通道未逐一黑盒验证。"
+    },
+    {
+      "id": "O04",
+      "scenario": "同submission键并发请求",
+      "expected": "同请求同任务关联；异请求409；受理崩溃可恢复",
+      "owner": "OV",
+      "status": "partial",
+      "evidence_or_gap": "并发受理同任务及异请求冲突已测；事务中间杀进程未注入。"
+    },
+    {
+      "id": "O05",
+      "scenario": "受理成功但响应丢失",
+      "expected": "TE按键对账，不盲目启动重复业务步骤",
+      "owner": "TE／OV",
+      "status": "partial",
+      "evidence_or_gap": "HTTP 重复提交同任务、UI 保存原键；丢包代理场景未执行。"
+    },
+    {
+      "id": "O06",
+      "scenario": "模型臆造类型或扩大Schema",
+      "expected": "候选隔离，Schema变更独立审批",
+      "owner": "TE",
+      "status": "partial",
+      "evidence_or_gap": "批准 Schema 确定性校验；真实模型臆造测试缺配置。"
+    },
+    {
+      "id": "O07",
+      "scenario": "同名不同地区网点／不同类型",
+      "expected": "不错误合并，别名查询显示歧义",
+      "owner": "TE／OV",
+      "status": "partial",
+      "evidence_or_gap": "身份与 label 分离；完整别名歧义界面未实现。"
+    },
+    {
+      "id": "O08",
+      "scenario": "缺产品／地区／时点等必需限定",
+      "expected": "验证拒绝或输出缺口，不发布宽泛结论",
+      "owner": "OV",
+      "status": "partial",
+      "evidence_or_gap": "必要限定校验已实现；产品/地区业务金标未验收。"
+    },
+    {
+      "id": "O09",
+      "scenario": "Wiki摘要没有原始证据",
+      "expected": "不认定已证实事实，无伪造片段或页码",
+      "owner": "TE／Runtime",
+      "status": "partial",
+      "evidence_or_gap": "旧 KG 缺片段进入隔离 helper；自动 Wiki 导入未接入。"
+    },
+    {
+      "id": "O10",
+      "scenario": "循环生成来源互相证明",
+      "expected": "证明图拒绝无原始叶子的自支持环",
+      "owner": "OV",
+      "status": "partial",
+      "evidence_or_gap": "证明 DAG 循环/深度校验；完整生成来源自支持场景未执行。"
+    },
+    {
+      "id": "O11",
+      "scenario": "UserClaim伪装SystemFact",
+      "expected": "缺可信观察证明不能晋升为系统事实",
+      "owner": "OV／网关",
+      "status": "partial",
+      "evidence_or_gap": "非可信来源不能声明 system_fact；真实业务连接器未接入。"
+    },
+    {
+      "id": "O12",
+      "scenario": "工具结果过期／跨主体句柄",
+      "expected": "UNKNOWN或拒绝，不沿用旧肯定结论",
+      "owner": "OV／网关",
+      "status": "partial",
+      "evidence_or_gap": "观察 task/audience/subject/expiry 绑定测试；真实接口 TTL 场景未验。"
+    },
+    {
+      "id": "O13",
+      "scenario": "业务有效期与记录时点交叉查询",
+      "expected": "bitemporal结果和修订轨迹正确",
+      "owner": "OV",
+      "status": "partial",
+      "evidence_or_gap": "valid/known-at 与历史撤回门禁测试；完整版本轨迹界面未实现。"
+    },
+    {
+      "id": "O14",
+      "scenario": "多必要源中一项无权或撤回",
+      "expected": "该证明不再可用，不以证据数组取并集放权",
+      "owner": "OV",
+      "status": "partial",
+      "evidence_or_gap": "保守全引用 AND 与当前 ACL；完整复合证明矩阵待补。"
+    },
+    {
+      "id": "O15",
+      "scenario": "多个独立证明",
+      "expected": "仅完整且受权的证明可用于返回，明确独立性",
+      "owner": "OV／TE",
+      "status": "not_run",
+      "evidence_or_gap": "独立 OR 证明未实现；使用保守 AND 可能降低可用性。"
+    },
+    {
+      "id": "O16",
+      "scenario": "候选摘要批准后被替换",
+      "expected": "grant失效，正式head不变",
+      "owner": "OV",
+      "status": "partial",
+      "evidence_or_gap": "候选不可变与批准摘要校验；替换被拒。"
+    },
+    {
+      "id": "O17",
+      "scenario": "两个候选同base并发commit",
+      "expected": "只有匹配基线者生效，另一方重基准",
+      "owner": "OV",
+      "status": "partial",
+      "evidence_or_gap": "同基线竞争 Commit 只有一个成功；rebase 冻结新基线。"
+    },
+    {
+      "id": "O18",
+      "scenario": "commit成功但回执丢失",
+      "expected": "查到同一receipt，无重复激活／通知副作用",
+      "owner": "OV／TE",
+      "status": "partial",
+      "evidence_or_gap": "同键返回相同回执；提交后精确时刻崩溃未注入。"
+    },
+    {
+      "id": "O19",
+      "scenario": "撤权与commit／读取竞态",
+      "expected": "新水位阻断过期批准、缓存、候选和正式返回",
+      "owner": "OV",
+      "status": "partial",
+      "evidence_or_gap": "租户锁线性化授权/撤回，测试 epoch 围栏；穷举竞态未执行。"
+    },
+    {
+      "id": "O20",
+      "scenario": "取消后迟到Runtime结果",
+      "expected": "私有产物不成为正式知识，fence有效",
+      "owner": "OV",
+      "status": "partial",
+      "evidence_or_gap": "取消阻断迟到上传/发布；模型线程强制终止未实现。"
+    },
+    {
+      "id": "O21",
+      "scenario": "老版本回滚／备份恢复",
+      "expected": "当前源权限与撤回先检查，不复活已撤回内容",
+      "owner": "OV",
+      "status": "partial",
+      "evidence_or_gap": "回滚重审且查当前源；独立新库备份恢复通过；外部 IAM 联动未验。"
+    },
+    {
+      "id": "O22",
+      "scenario": "隐藏节点与证明",
+      "expected": "不从边、标题、计数、解释或错误泄漏存在性",
+      "owner": "OV",
+      "status": "partial",
+      "evidence_or_gap": "隐藏证明标识过滤；计数/时序等全部侧信道未穷举。"
+    },
+    {
+      "id": "O23",
+      "scenario": "高出度节点／恶意QueryPlan",
+      "expected": "扫描、输出和deadline均有上限",
+      "owner": "OV",
+      "status": "partial",
+      "evidence_or_gap": "恶意查询与预算检查；高出度对抗图未压测。"
+    },
+    {
+      "id": "O24",
+      "scenario": "上下文预算不足",
+      "expected": "完整省略事实包；不截断否定、例外或证明",
+      "owner": "OV",
+      "status": "partial",
+      "evidence_or_gap": "整条事实/观察裁剪且重算规则，缺证据仍 UNKNOWN。"
+    },
+    {
+      "id": "O25",
+      "scenario": "原文提示注入／恶意工具URL",
+      "expected": "当数据处理，不能改指令或注册执行端点",
+      "owner": "Runtime／Agent",
+      "status": "partial",
+      "evidence_or_gap": "不执行源 URL、Broker 白名单；真实模型注入未测。"
+    },
+    {
+      "id": "O26",
+      "scenario": "TE停机、授权服务正常",
+      "expected": "已发布合法读取可用，新审核暂停",
+      "owner": "OV",
+      "status": "passed",
+      "evidence_or_gap": "精确 PID 停 TE、端口关闭后直接 OV HTTP 仍有授权事实。"
+    },
+    {
+      "id": "O27",
+      "scenario": "权限服务不可用",
+      "expected": "fail closed，不以缓存继续返回敏感内容",
+      "owner": "OV",
+      "status": "partial",
+      "evidence_or_gap": "没有授权缓存回退；数据库故障 fail closed，完整故障注入待做。"
+    },
+    {
+      "id": "O28",
+      "scenario": "Source503／同步暂时失败",
+      "expected": "UNKNOWN，不自动执行破坏性删除",
+      "owner": "OV／TE",
+      "status": "partial",
+      "evidence_or_gap": "Source unavailable 产生 degraded/UNKNOWN，恢复事件已测。"
+    },
+    {
+      "id": "O29",
+      "scenario": "Wiki新版本、本体旧generation",
+      "expected": "明确as-of与lag，不混拼不兼容事实",
+      "owner": "OV",
+      "status": "not_run",
+      "evidence_or_gap": "冻结来源版本与 generation；Wiki 增量补拉与 lag 对账未实现。"
+    },
+    {
+      "id": "O30",
+      "scenario": "批量编译与在线查询并发",
+      "expected": "读延迟、模型配额、公平队列和积压可量化",
+      "owner": "平台",
+      "status": "partial",
+      "evidence_or_gap": "万文档 fixture 构建与并发查询实测；模型公平性/生产混合负载未测。"
+    },
+    {
+      "id": "O31",
+      "scenario": "人工改、AutoFix、回滚工具",
+      "expected": "均产生候选与真实receipt，无正式写旁路",
+      "owner": "TE／OV",
+      "status": "partial",
+      "evidence_or_gap": "rebase/rollback 走候选/真实回执；完整人审编辑与 AutoFix 未实现。"
+    },
+    {
+      "id": "O32",
+      "scenario": "真实业务写动作绕过Skill",
+      "expected": "网关仍检查当前身份、版本、确认和幂等",
+      "owner": "业务系统",
+      "status": "not_applicable",
+      "evidence_or_gap": "本轮排除真实业务写；actions/execute 返回404。"
+    },
+    {
+      "id": "O33",
+      "scenario": "工具Schema升级与旧Rule",
+      "expected": "旧字段解释被阻断，重校验后恢复",
+      "owner": "TE／OV",
+      "status": "partial",
+      "evidence_or_gap": "ToolContract 固定在 Schema、建议按权限过滤；外部升级协议未验。"
+    },
+    {
+      "id": "O34",
+      "scenario": "不同用户同问句缓存",
+      "expected": "结果按当前授权隔离且撤回立即可见",
+      "owner": "OV",
+      "status": "partial",
+      "evidence_or_gap": "无跨主体结果缓存、不同读者隔离已测；既有其他检索缓存不在新路由内。"
+    },
+    {
+      "id": "O35",
+      "scenario": "同源工单改写进入评测两侧",
+      "expected": "检出数据泄漏，按来源家族／时间重切分",
+      "owner": "评测",
+      "status": "not_run",
+      "evidence_or_gap": "无真实业务金标，未执行来源家族/时间泄漏检测。"
+    },
+    {
+      "id": "O36",
+      "scenario": "文档首导／日更放大",
+      "expected": "记录Token、成功事实、重试、写放大与人审成本",
+      "owner": "平台／TE",
+      "status": "partial",
+      "evidence_or_gap": "万文档时间/调用数已记录；真实 Token 与人审成本未测。"
+    }
+  ]
+}

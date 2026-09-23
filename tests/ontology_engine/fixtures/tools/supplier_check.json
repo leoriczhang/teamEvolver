@@ -1,0 +1,13 @@
+{
+  "name": "供应商核验",
+  "description": "按供应商名称查询工商状态",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "supplier_name": {"type": "string", "minLength": 2},
+      "risk_level": {"type": "string", "enum": ["低", "中", "高"]},
+      "check_licenses": {"type": "boolean", "default": false}
+    },
+    "required": ["supplier_name"]
+  }
+}

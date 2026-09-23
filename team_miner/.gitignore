@@ -1,0 +1,31 @@
+# Secrets and local Hermes state
+.env
+.hermes_home/
+
+# User-managed knowledge sources are runtime data, not repository content.
+data/*
+!data/input/
+data/input/*
+!data/input/.gitkeep
+!data/中文金融客服测试/
+!data/中文金融客服测试/**
+
+# Pipeline and evaluation artifacts
+sample_packages/
+semantic_reports/
+compiled_skill/
+reflection_rounds/
+run_history/
+benchmark_results/
+benchmark_sessions/
+trajectory_benchmarks/
+coverage_reports/
+skill_test_results/
+lift_datasets/
+mining_jobs/
+
+# Logs and caches
+*.log
+__pycache__/
+*.py[cod]
+.DS_Store

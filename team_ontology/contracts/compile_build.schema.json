@@ -1,0 +1,39 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "contract": {
+      "const": "sf.te.ontology.compile.v1",
+      "default": "sf.te.ontology.compile.v1",
+      "title": "Contract",
+      "type": "string"
+    },
+    "submission_key": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Submission Key",
+      "type": "string"
+    },
+    "collection_id": {
+      "title": "Collection Id",
+      "type": "string"
+    },
+    "expected_generation": {
+      "minimum": 0,
+      "title": "Expected Generation",
+      "type": "integer"
+    },
+    "skill_uri": {
+      "default": "",
+      "maxLength": 2000,
+      "title": "Skill Uri",
+      "type": "string"
+    }
+  },
+  "required": [
+    "submission_key",
+    "collection_id",
+    "expected_generation"
+  ],
+  "title": "CompileBuildRequest",
+  "type": "object"
+}

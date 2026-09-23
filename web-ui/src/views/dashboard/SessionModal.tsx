@@ -16,7 +16,14 @@ import {
 } from "@/components/common";
 import { cn } from "@/lib/utils";
 import { fmtTime } from "@/lib/format";
-import { api, type SessionDetail, type SessionProcess } from "@/api/client";
+import {
+  api,
+  type EvidenceClassification,
+  type SessionDetail,
+  type SessionJudgeDetail,
+  type SessionJudgeReasons,
+  type SessionProcess,
+} from "@/api/client";
 
 export type SessTab = "detail" | "process";
 
@@ -24,6 +31,152 @@ function StatusBadge({ status }: { status?: string }) {
   if (status === "consumed") return <Pill tone="green">已消费</Pill>;
   if (status === "queued") return <Pill tone="amber">排队中</Pill>;
   return <Pill tone="gray">{status || "-"}</Pill>;
+}
+
+const GOOD_CASE_THRESHOLD = 0.6;
+
+function casePill(score?: number | null) {
+  if (score == null || typeof score !== "number") {
+    return <Pill tone="gray">未评分</Pill>;
+  }
+  return score >= GOOD_CASE_THRESHOLD ? (
+    <Pill tone="green">Good Case</Pill>
+  ) : (
+    <Pill tone="red">Bad Case</Pill>
+  );
+}
+
+function ValueJudgeBadges({ value }: { value?: SessionDetail["value_judge"] }) {
+  if (!value || !value.decision) return null;
+  const tone =
+    value.decision === "valuable" ? "green" : value.decision === "chitchat" ? "gray" : "amber";
+  const labels: Record<string, string> = {
+    valuable: "有价值会话",
+    chitchat: "闲聊",
+  };
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+      <Pill tone={tone}>{labels[value.decision] || value.decision}</Pill>
+      {value.confidence != null && (
+        <span className="text-muted-foreground">
+          置信度 {Math.round(value.confidence * 100)}%
+        </span>
+      )}
+      {value.reason && <span className="text-muted-foreground">· {value.reason}</span>}
+    </div>
+  );
+}
+
+const JUDGE_DIMENSIONS: [keyof SessionJudgeReasons & keyof SessionJudgeDetail, string][] = [
+  ["task_completion", "任务完成"],
+  ["response_quality", "回答质量"],
+  ["efficiency", "效率"],
+  ["tool_usage", "工具使用"],
+];
+
+function JudgeCard({ judge }: { judge?: SessionJudgeDetail }) {
+  if (!judge || (judge.overall_score == null && !judge.rationale && !judge.reasons)) return null;
+  const score = judge.overall_score;
+  const reasons = judge.reasons || {};
+  const reasonRows = JUDGE_DIMENSIONS.filter(([key]) => (reasons[key] || []).length > 0);
+  return (
+    <div className="mb-3 rounded-md border border-border bg-background/70 p-2.5 text-xs">
+      <div className="mb-1.5 flex flex-wrap items-center gap-2">
+        <span className="font-semibold text-muted-foreground">会话评审打分</span>
+        {casePill(score)}
+        {score != null && (
+          <span className="font-mono font-semibold">综合 {score.toFixed(2)}</span>
+        )}
+      </div>
+      {score != null && (
+        <div className="mb-1.5 flex flex-wrap gap-x-3 gap-y-1 text-muted-foreground">
+          {JUDGE_DIMENSIONS.filter(([key]) => {
+            const v = judge[key];
+            return typeof v === "number";
+          }).map(([key, label]) => (
+            <span key={key}>
+              {label}{" "}
+              <span className="font-mono">{(judge[key] as number).toFixed(2)}</span>
+            </span>
+          ))}
+        </div>
+      )}
+      {reasonRows.length > 0 && (
+        <div className="mb-1.5 space-y-1.5">
+          {reasonRows.map(([key, label]) => (
+            <div key={key}>
+              <div className="font-semibold text-muted-foreground">
+                {label}
+                {typeof judge[key] === "number" && (
+                  <span className="ml-1 font-mono">{(judge[key] as number).toFixed(2)}</span>
+                )}
+                ：
+              </div>
+              <ul className="ml-4 list-disc space-y-0.5 leading-relaxed text-muted-foreground">
+                {(reasons[key] || []).map((item, i) => (
+                  <li key={i}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
+      {judge.rationale && (
+        <div className="leading-relaxed text-muted-foreground">{judge.rationale}</div>
+      )}
+    </div>
+  );
+}
+
+function isNoActionNormal(c: NonNullable<SessionProcess["cycles"]>[number], evos: unknown[]) {
+  return (
+    !evos.length &&
+    !c.had_processing_error &&
+    Number(c.sessions || 0) > 0 &&
+    Number(c.skill_groups || 0) > 0 &&
+    Number(c.actions || 0) === 0 &&
+    Number(c.uploaded_skills || 0) === 0 &&
+    Number(c.candidates_queued || 0) === 0
+  );
+}
+
+function EvidenceRouting({ value }: { value?: EvidenceClassification }) {
+  const rows = [
+    ["团队 SOP", value?.team_skill || []],
+    ["用户 Memory 候选", value?.user_memory || []],
+    ["当前任务要求", value?.task_requirement || []],
+    ["运行时问题", value?.agent_runtime || []],
+    ["证据不足", value?.insufficient_evidence || []],
+  ] as const;
+  const populated = rows.filter(([, items]) => items.length);
+  if (!populated.length) return null;
+
+  const describe = (item: string | Record<string, unknown>) => {
+    if (typeof item === "string") return item;
+    for (const key of ["claim", "preference", "requirement", "issue", "observation", "reason"]) {
+      if (typeof item[key] === "string" && item[key]) return String(item[key]);
+    }
+    return JSON.stringify(item);
+  };
+
+  return (
+    <div className="mt-2 rounded-md border border-border bg-background/70 p-2.5 text-xs">
+      <div className="mb-1.5 font-semibold text-muted-foreground">证据归属</div>
+      <div className="space-y-1.5">
+        {populated.map(([label, items]) => (
+          <div key={label}>
+            <span className="font-medium">{label} ({items.length})</span>
+            <span className="text-muted-foreground">：{items.slice(0, 2).map(describe).join("；")}</span>
+          </div>
+        ))}
+      </div>
+      {(value?.user_memory?.length || 0) > 0 && (
+        <div className="mt-2 text-muted-foreground">
+          此处仅为个人记忆候选，尚未写入用户 Memory。
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function SessionModal({
@@ -72,7 +225,7 @@ export default function SessionModal({
     };
   }, [open, sid, tab]);
 
-  const title = detail?.meta?.title || "会话详情";
+  const title = detail?.summary?.title || "会话详情";
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
@@ -114,11 +267,16 @@ export default function SessionModal({
 }
 
 function DetailBody({ d }: { d: SessionDetail | null }) {
-  const m = d?.meta || {};
+  const summary = d?.summary || {};
+  const meta = d?.meta || {};
   const metrics = d?.metrics || {};
   const turns = d?.turns || [];
   const turnsPager = usePagedItems(turns);
   if (!d) return null;
+  const identity: [string, string][] = [
+    ["User ID", meta.user_id || ""],
+    ["Trace ID", meta.trace_id || ""],
+  ];
   return (
     <div className="space-y-3 text-sm">
       <div>
@@ -126,16 +284,29 @@ function DetailBody({ d }: { d: SessionDetail | null }) {
           提交人 / 状态 / 轮数
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <UserBadge name={m.user_alias} />
+          <UserBadge name={summary.user_alias} />
           <span className="text-muted-foreground">·</span>
-          <StatusBadge status={m.status} />
+          <StatusBadge status={summary.status} />
           <span className="text-muted-foreground">·</span>
-          <span>{m.num_turns != null ? m.num_turns : "-"} 轮</span>
+          <span>{summary.num_turns != null ? summary.num_turns : "-"} 轮</span>
         </div>
+        {identity.some(([, value]) => value) && (
+          <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+            {identity
+              .filter(([, value]) => value)
+              .map(([label, value]) => (
+                <span key={label} className="mono">
+                  {label}：{value}
+                </span>
+              ))}
+          </div>
+        )}
+        <ValueJudgeBadges value={d.value_judge} />
+        <JudgeCard judge={d.judge} />
       </div>
       <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
         {[
-          ["交互轮次", metrics.interaction_turns ?? m.num_turns ?? 0],
+          ["交互轮次", metrics.interaction_turns ?? summary.num_turns ?? 0],
           ["工具调用", metrics.tool_call_count ?? 0],
           ["Total Tokens", metrics.total_tokens ?? 0],
           ["API 调用", metrics.api_call_count ?? 0],
@@ -196,7 +367,8 @@ function DetailBody({ d }: { d: SessionDetail | null }) {
                     </div>
                     {t.tool_calls.map((call, callIndex) => (
                       <div key={call.id || callIndex} className="mb-1 font-mono text-[11px] break-all">
-                        {call.function?.name || "unknown"}({String(call.function?.arguments || "")})
+                        {call.function?.name || (call as { name?: string }).name || "unknown"}(
+                        {String(call.function?.arguments ?? (call as { input?: string }).input ?? "")})
                       </div>
                     ))}
                   </div>
@@ -265,71 +437,75 @@ function ProcessBody({ p }: { p: SessionProcess | null }) {
         {cyclesPager.items.map((c, i) => {
           const j = c.judge || {};
           const evos = c.evolutions || [];
+          const noActionNormal = isNoActionNormal(c, evos);
           return (
             <div key={`${c.timestamp || "cycle"}-${cyclesPager.start + i}`} className="rounded-lg border border-border p-4">
-            <div className="mb-2.5 text-xs text-muted-foreground">
-              🕑 {fmtTime(c.timestamp)} &nbsp;·&nbsp; 本周期 {c.sessions ?? "?"} 会话 /{" "}
-              {c.skill_groups ?? "?"} 技能组 / 上传 {c.uploaded_skills ?? 0} / 候选{" "}
-              {c.candidates_queued ?? 0}
+            <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+              <span>
+                🕑 {fmtTime(c.timestamp)} &nbsp;·&nbsp; 本周期 {c.sessions ?? "?"} 会话 /{" "}
+                {c.skill_groups ?? "?"} 技能组 / 上传 {c.uploaded_skills ?? 0} / 候选{" "}
+                {c.candidates_queued ?? 0}
+              </span>
+              {noActionNormal && <Pill tone="blue">无需进化</Pill>}
             </div>
             <div className="mb-3">
               <div className="mb-1.5 text-xs font-semibold text-muted-foreground">
                 会话评审
               </div>
-              <div>
-                {j.overall_score != null ? (
-                  <>
-                    会话评审总分 <b>{j.overall_score}</b>
-                    {j.rationale && (
-                      <span className="text-muted-foreground"> — {j.rationale}</span>
-                    )}
-                  </>
-                ) : (
-                  <span className="text-muted-foreground">本周期无该会话的评审明细</span>
-                )}
-              </div>
+              {j.overall_score == null && !j.rationale ? (
+                <span className="text-xs text-muted-foreground">
+                  本周期无该会话的评审明细
+                </span>
+              ) : (
+                <JudgeCard judge={j} />
+              )}
             </div>
             <div>
               <div className="mb-1.5 text-xs font-semibold text-muted-foreground">
                 本会话相关的技能进化
               </div>
               {evos.length ? (
-                <table className="w-full border-collapse">
-                  <thead>
-                    <tr>
-                      {["技能", "动作", "已上传", "原因"].map((h) => (
-                        <th
-                          key={h}
-                          className="border-b border-line px-3 py-2 text-left text-xs font-semibold text-muted-foreground"
-                        >
-                          {h}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {evos.map((e, k) => (
-                      <tr key={k}>
-                        <td className="border-b border-line px-3 py-2 align-top">
-                          {e.skill_name || "-"}
-                        </td>
-                        <td className="border-b border-line px-3 py-2 align-top">
-                          {e.action || "-"}
-                        </td>
-                        <td className="border-b border-line px-3 py-2 align-top">
-                          {e.uploaded ? "✅" : "—"}
-                        </td>
-                        <td className="border-b border-line px-3 py-2 align-top text-xs text-muted-foreground">
-                          {e.reason || ""}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              ) : (
-                <div className="text-xs text-muted-foreground">
-                  本会话未直接触发技能变更（可能仅参与聚合评估）。
+                <div className="space-y-2.5">
+                  {evos.map((e, k) => {
+                    const legacyVerifier = e.action === "verification_rejected";
+                    const reason = e.reason || e.rationale || "";
+                    return (
+                      <div key={k} className="rounded-lg border border-line bg-surface-subtle p-3">
+                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="mono text-xs font-semibold">{e.skill_name || "-"}</span>
+                            <Pill tone={legacyVerifier ? "gray" : "blue"}>
+                              {legacyVerifier ? "未进入回放（旧流程）" : e.action || "-"}
+                            </Pill>
+                            {e.uploaded ? <Pill tone="green">已上传</Pill> : <Pill tone="gray">未上传</Pill>}
+                          </div>
+                          {e.version != null && <span className="text-xs text-muted-foreground">v{e.version}</span>}
+                        </div>
+                        {legacyVerifier ? (
+                          <div className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                            该记录由旧版预检流程产生；当前版本仅比较 True Replay 的轮次、工具调用和 Token。
+                          </div>
+                        ) : reason ? (
+                          <div className="mt-2 text-xs leading-relaxed text-muted-foreground">{reason}</div>
+                        ) : null}
+                        <EvidenceRouting value={e.evidence_classification} />
+                      </div>
+                    );
+                  })}
                 </div>
+              ) : (
+                noActionNormal ? (
+                  <div className="rounded-lg border border-border bg-background/60 p-3 text-xs leading-relaxed text-muted-foreground">
+                    <Pill tone="blue">流程正常</Pill>
+                    <div className="mt-2">
+                      该会话已完成评审与 Skill 分组，planner 判断当前 Skill 无需优化，也无需创建新 Skill。
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-xs text-muted-foreground">
+                    本会话未直接触发技能变更（可能仅参与聚合评估）。
+                  </div>
+                )
               )}
             </div>
             </div>

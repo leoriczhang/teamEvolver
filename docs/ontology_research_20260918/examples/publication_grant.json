@@ -1,0 +1,14 @@
+{
+  "contract": "sf.ontology.publication-grant.v1",
+  "tenant": "demo-tenant",
+  "scope_ref": "scope-demo",
+  "prepared_id": "prepared-demo",
+  "candidate_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "evidence_manifest_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "schema_revision": "sf-core@1.0.0",
+  "expected_generation": "gen-demo-000",
+  "approval_ref": "approval-demo",
+  "nonce": "nonce-demo",
+  "expires_at": "2026-09-19T00:00:00Z",
+  "signature_ref": "NOT-A-REAL-SIGNATURE"
+}

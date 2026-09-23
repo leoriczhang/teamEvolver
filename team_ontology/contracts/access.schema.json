@@ -1,0 +1,43 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "subject": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Subject",
+      "type": "string"
+    },
+    "enabled": {
+      "default": true,
+      "title": "Enabled",
+      "type": "boolean"
+    },
+    "active": {
+      "default": true,
+      "title": "Active",
+      "type": "boolean"
+    },
+    "permissions": {
+      "items": {
+        "enum": [
+          "read",
+          "build",
+          "approve",
+          "publish",
+          "observe",
+          "feedback"
+        ],
+        "type": "string"
+      },
+      "maxItems": 6,
+      "title": "Permissions",
+      "type": "array"
+    }
+  },
+  "required": [
+    "subject",
+    "permissions"
+  ],
+  "title": "AccessRequest",
+  "type": "object"
+}

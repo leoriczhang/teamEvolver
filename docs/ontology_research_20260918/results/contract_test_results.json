@@ -1,0 +1,182 @@
+{
+  "executed_at": "2026-09-18T07:42:33.390473+00:00",
+  "scope": "offline synthetic contract and pure-function invariants only",
+  "python": "3.13.5",
+  "jsonschema": "4.26.0",
+  "tests_run": 40,
+  "passed": 40,
+  "failed": 0,
+  "errors": 0,
+  "success": true,
+  "not_tested": [
+    "deployed TE/OpenViking integration",
+    "real IAM and credentials",
+    "database transactions",
+    "LLM extraction",
+    "network isolation",
+    "production source authenticity",
+    "latency or throughput"
+  ],
+  "tests": [
+    {
+      "test": "test_contracts.ContractTests.test_01_positive_candidate",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_02_unknown_root_field",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_03_duplicate_entity",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_04_dangling_endpoint",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_05_wrong_relation_direction",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_06_unknown_type",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_07_unknown_predicate",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_08_missing_qualifier",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_09_empty_proof",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_10_unresolvable_proof",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_11_unknown_support",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_12_duplicate_proof_member",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_13_tenant_mismatch",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_14_schema_not_approved",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_15_source_digest_changed",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_16_source_version_changed",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_17_source_revoked_after_extraction",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_18_fake_system_fact",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_19_forged_authority_label",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_20_reversed_time",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_21_missing_timezone",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_22_unknown_observation_not_true",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_23_unverified_observation_not_true",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_24_stale_observation_not_true",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_25_conflict_not_true",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_26_verified_fresh_comparison",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_27_bool_not_integer",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_28_three_valued_conjunction",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_29_atomic_budget_truncation",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_30_budget_invalid_cost",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_31_visibility_positive",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_32_no_permission_to_proof",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_33_hidden_endpoint",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_34_fail_closed_authority_unavailable",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_35_revoked_source_not_visible",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_36_other_tenant_not_visible",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_37_other_example_shapes",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_38_query_cannot_increase_hops",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_39_query_cannot_include_sql",
+      "status": "passed"
+    },
+    {
+      "test": "test_contracts.ContractTests.test_40_all_required_proof_members",
+      "status": "passed"
+    }
+  ]
+}
