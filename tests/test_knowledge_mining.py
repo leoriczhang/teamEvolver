@@ -21,6 +21,7 @@ from teamEvolver.proxy.knowledge_mining import (
     _content_editable,
     _extract_markdown_links,
     _knowledge_compile_progress,
+    _knowledge_compile_target,
     _knowledge_directory_uri,
     _knowledge_file_uri,
     _knowledge_wiki_root,
@@ -49,6 +50,22 @@ def test_source_tree_excludes_wiki_output_subtree() -> None:
         f"{_SOURCE_ROOT}/docs",
         f"{_SOURCE_ROOT}/docs/guide.md",
     ]
+
+
+def test_default_wiki_skill_requires_valid_okf_frontmatter() -> None:
+    skill = knowledge_mining_module._DEFAULT_WIKI_SKILL
+    auxiliary = knowledge_mining_module._DEFAULT_WIKI_SKILL_AUXILIARY_FILES
+    template = auxiliary["templates/okf-frontmatter.md"]
+
+    assert "`type`, `title`, and one-line `description`" in skill
+    assert "both Map and Reduce" in skill
+    assert "`p.finalize(...)`" in skill
+    assert "Do not add a second global/all Shuffle" in skill
+    assert "type: concept" in template
+    assert "title: 稳定的知识主题标题" in template
+    assert "description: 用一句话说明本页覆盖的知识范围。" in template
+    assert "templates/okf.md" in auxiliary
+    assert "templates/wiki-page.md" in auxiliary
 
 
 @pytest.mark.parametrize(
@@ -359,6 +376,46 @@ def test_compile_progress_prefers_reported_counters_and_falls_back_to_real_stage
         "stage": "candidate_knowledge",
         "label": "提炼候选知识",
     }
+
+
+def test_compile_target_reads_running_task_request_before_source_resource_id() -> None:
+    task = {
+        "status": "running",
+        "resource_id": _SOURCE_ROOT,
+        "meta": {"request": {"from": [_SOURCE_ROOT], "to": _WIKI_ROOT}},
+        "result": None,
+    }
+
+    assert _knowledge_compile_target(task) == _WIKI_ROOT
+
+
+def test_running_compile_remains_listed_after_browser_refresh(monkeypatch) -> None:
+    task = {
+        "task_id": "cmp_running",
+        "task_type": "compile",
+        "status": "running",
+        "stage": "compile: pipeline",
+        "resource_id": _SOURCE_ROOT,
+        "meta": {"request": {"from": [_SOURCE_ROOT], "to": _WIKI_ROOT}},
+        "result": None,
+    }
+
+    class Owner(KnowledgeMiningMixin):
+        def _knowledge_account(self, account):
+            return str(account)
+
+        async def _knowledge_request(self, _account, _method, path, **_kwargs):
+            assert path == "/api/v1/tasks"
+            return {"tasks": [task]}
+
+    monkeypatch.setattr(knowledge_mining_module, "_require_admin_request", lambda _request: None)
+    app = FastAPI()
+    Owner()._register_knowledge_mining_routes(app)
+
+    response = TestClient(app).get("/api/knowledge-mining/tasks?account=demo")
+
+    assert response.status_code == 200
+    assert [item["task_id"] for item in response.json()["tasks"]] == ["cmp_running"]
 
 
 def test_knowledge_editor_only_allows_openviking_text_extensions() -> None:

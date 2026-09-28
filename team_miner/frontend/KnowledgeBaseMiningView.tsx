@@ -89,6 +89,7 @@ interface MiningTask {
   resource_id?: string;
   created_at?: string;
   updated_at?: string;
+  processing_seconds?: number;
   result?: Record<string, any> | null;
   error?: Record<string, any> | string | null;
   events?: Array<Record<string, any>>;
@@ -182,6 +183,11 @@ type WikiViewMode = "files" | "graph";
 const ACTIVE_TASK_STATES = new Set(["accepted", "pending", "queued", "running", "committing", "cancelling"]);
 const TERMINAL_TASK_STATES = new Set(["completed", "failed", "cancelled"]);
 const KNOWLEDGE_UPLOAD_ACCEPT = ".md,.markdown,.txt,.docx,.xlsx,.pptx,.pdf,.csv";
+
+function initialWorkspaceTab(): WorkspaceTab {
+  const requested = new URLSearchParams(window.location.search).get("knowledgeTab");
+  return requested === "source" || requested === "wiki" || requested === "mining" ? requested : "source";
+}
 
 function uploadJson<T>(
   path: string,
@@ -340,6 +346,15 @@ function formatCompileTime(value?: string | null) {
   if (!value) return "首次运行 · 全量编译";
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
+}
+
+function formatProcessingTime(value?: number) {
+  const seconds = Math.max(0, Math.round(Number(value) || 0));
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  if (minutes < 60) return `${minutes} 分 ${remainder} 秒`;
+  return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
 }
 
 function buildTree(entries: TreeEntry[], rootUri: string): TreeNode[] {
@@ -539,7 +554,7 @@ function taskLogLines(task: MiningTask | null): string[] {
 }
 
 export default function KnowledgeBaseMiningView({ active }: { active: boolean }) {
-  const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>("source");
+  const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>(initialWorkspaceTab);
   const [config, setConfig] = useState<MiningConfig | null>(null);
   const [account, setAccount] = useState("");
   const [wikiRoot, setWikiRoot] = useState("");
@@ -667,6 +682,11 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
       const response = await api<{ task: MiningTask }>(
         `/api/knowledge-mining/tasks/${encodeURIComponent(selectedTaskId)}?account=${encodeURIComponent(account)}`,
       );
+      setTasks((previous) =>
+        previous.map((task) =>
+          task.task_id === response.task.task_id ? { ...task, ...response.task } : task,
+        ),
+      );
       setSelectedTask((previous) => {
         if (response.task.status === "completed" && previous?.status !== "completed") {
           setWikiGraph(null);
@@ -692,6 +712,13 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
     if (!active) return;
     void loadConfig();
   }, [active, loadConfig]);
+
+  useEffect(() => {
+    if (!active) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set("knowledgeTab", workspaceTab);
+    window.history.replaceState(window.history.state, "", url.toString());
+  }, [active, workspaceTab]);
 
   useEffect(() => {
     if (!active || !account) return;
@@ -738,6 +765,8 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
 
   const currentStatus = String(selectedTask?.status || "");
   const running = ACTIVE_TASK_STATES.has(currentStatus);
+  const completed = currentStatus === "completed";
+  const terminal = TERMINAL_TASK_STATES.has(currentStatus);
   const logs = useMemo(() => taskLogLines(selectedTask), [selectedTask]);
   const contentDirty = Boolean(selectedContent && editorValue !== originalContent);
   const selectedIsMarkdown = /\.md$/i.test(selectedContent?.name || "");
@@ -1653,8 +1682,16 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
                       <div className="mb-1.5 flex items-center justify-between gap-3 text-[11px]">
                         <span className="font-semibold text-foreground">{selectedTask.progress.label}</span>
                         <span className="shrink-0 text-muted-foreground">
-                          {selectedTask.progress.percent.toFixed(0)}%
-                          {selectedTask.progress.mode === "stage" ? " · 阶段进度" : ""}
+                          {completed
+                            ? "100%"
+                            : terminal
+                              ? "已结束"
+                              : selectedTask.progress.mode === "reported"
+                            ? `${selectedTask.progress.percent.toFixed(0)}%`
+                            : "实时阶段"}
+                          {selectedTask.processing_seconds != null
+                            ? ` · 已运行 ${formatProcessingTime(selectedTask.processing_seconds)}`
+                            : ""}
                         </span>
                       </div>
                       <div
@@ -1663,19 +1700,29 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
                         aria-label="OpenViking Compile 进度"
                         aria-valuemin={0}
                         aria-valuemax={100}
-                        aria-valuenow={selectedTask.progress.percent}
+                        aria-valuenow={completed ? 100 : selectedTask.progress.mode === "reported" ? selectedTask.progress.percent : undefined}
+                        aria-valuetext={
+                          selectedTask.progress.mode === "stage"
+                            ? completed
+                              ? "OpenViking Compile 已完成"
+                              : terminal
+                                ? `OpenViking Compile ${taskLabel(currentStatus)}`
+                                : "OpenViking 未返回可计算百分比"
+                            : undefined
+                        }
                       >
                         <div
                           className={cn(
                             "h-full rounded-full transition-[width] duration-500",
                             currentStatus === "failed" || currentStatus === "cancelled" ? "bg-destructive" : "bg-accent",
+                            selectedTask.progress.mode === "stage" && running && "animate-pulse opacity-70",
                           )}
-                          style={{ width: `${selectedTask.progress.percent}%` }}
+                          style={{ width: completed || selectedTask.progress.mode === "stage" ? "100%" : `${selectedTask.progress.percent}%` }}
                         />
                       </div>
                       {selectedTask.progress.mode === "stage" && running && (
                         <div className="mt-1.5 text-[10px] text-muted-foreground">
-                          OpenViking 暂未返回文件级百分比，当前按真实 Compile 阶段展示。
+                          OpenViking 正在运行，但未返回可计算的总工作量；这里只展示真实阶段和运行时长。
                         </div>
                       )}
                     </div>

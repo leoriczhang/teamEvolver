@@ -125,6 +125,11 @@ class MiningJobManager:
 
     def _recover_interrupted_jobs(self) -> None:
         for job in self._jobs.values():
+            # OV Compile tasks are owned and recovered by the FastAPI bridge;
+            # this legacy subprocess may read them for shared history but must
+            # never relaunch or mark them interrupted.
+            if job.get("engine") == "ov_compile":
+                continue
             if job.get("status") in {"preparing", "running", "waiting", "stopping"}:
                 job["status"] = "interrupted"
                 job["finished_at"] = _utc_now()
@@ -264,7 +269,11 @@ class MiningJobManager:
                 return
             active = sum(1 for process in self._processes.values() if process.poll() is None)
             queued = sorted(
-                (job for job in self._jobs.values() if job.get("status") == "queued"),
+                (
+                    job
+                    for job in self._jobs.values()
+                    if job.get("status") == "queued" and job.get("engine") != "ov_compile"
+                ),
                 key=lambda item: item.get("created_at", ""),
             )
             for job in queued[: max(0, self.max_parallel - active)]:

@@ -1,0 +1,8 @@
+FROM openviking:compile-mrs-bd4abfd2
+
+# The feature branch calls AsyncHTTPClient.ls(offset=...), but its lockfile
+# still resolves the separately published 0.1.9 SDK. Overlay the SDK source
+# from the same branch commit so VikingBot and the server API stay in sync.
+COPY sdk/python/openviking_sdk/ /app/.venv/lib/python3.13/site-packages/openviking_sdk/
+
+RUN /app/.venv/bin/python -I -c "import inspect; from openviking_sdk.client import AsyncHTTPClient; signature = inspect.signature(AsyncHTTPClient.ls); raise SystemExit(0 if 'offset' in signature.parameters else f'AsyncHTTPClient.ls{signature} lacks offset')"

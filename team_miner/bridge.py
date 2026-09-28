@@ -14,6 +14,9 @@ talk to a single origin.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import json
 import logging
 import os
 import shutil
@@ -23,15 +26,29 @@ import sys
 import tempfile
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from teamEvolver.config_store import ConfigStore
+from team_memory.compile_client import CompileClient
+from teamEvolver.config_store import CONFIG_DIR, ConfigStore
+from teamEvolver.proxy.knowledge_document_converter import convert_knowledge_upload
+from teamEvolver.proxy.knowledge_mining import _content_editable, _content_text
 
+from .ov_compile_mining import (
+    ACTIVE_JOB_STATES,
+    RUNS_ROOT,
+    SKILL_BODY,
+    SKILL_NAME,
+    SKILL_URI,
+    OvSkillMiningRepository,
+    utc_now,
+    validate_descendant,
+    validate_resource_uri,
+)
 from .settings import (
     reset_prompt,
     settings_payload,
@@ -76,6 +93,178 @@ class SkillMinerBridgeMixin:
     _skillminer_port: Optional[int] = None
     _skillminer_ready: bool = False
     _skillminer_lock = threading.Lock()
+
+    def _ov_skill_mining_repository(self) -> OvSkillMiningRepository:
+        repository = getattr(self, "_ov_skill_mining_repo", None)
+        if repository is None:
+            repository = OvSkillMiningRepository(
+                CONFIG_DIR / "skill_mining",
+                _SKILLMINER_ROOT,
+            )
+            self._ov_skill_mining_repo = repository
+        return repository
+
+    def _ov_skill_mining_lock(self, job_id: str) -> asyncio.Lock:
+        locks = getattr(self, "_ov_skill_mining_locks", None)
+        if locks is None:
+            locks = {}
+            self._ov_skill_mining_locks = locks
+        return locks.setdefault(job_id, asyncio.Lock())
+
+    async def _ov_source_detail(self, record: dict) -> dict:
+        account = await asyncio.to_thread(self._knowledge_account, record.get("account"))
+        uri = validate_resource_uri(record.get("uri"))
+        tree = await self._knowledge_tree(account, uri)
+        entries = tree.get("entries") or []
+        files = [entry for entry in entries if not entry.get("is_dir")]
+        exists = bool(tree.get("exists"))
+        status = "ready" if exists and files else "empty" if exists else "missing"
+        return {
+            "source_id": record["source_id"],
+            "account": account,
+            "path": uri,
+            "uri": uri,
+            "name": str(record.get("name") or uri.rsplit("/", 1)[-1]),
+            "document_count": len(files),
+            "total_bytes": sum(int(entry.get("size") or 0) for entry in files),
+            "ready": status == "ready",
+            "status": status,
+            "created_at": record.get("created_at") or "",
+            "ingestion": {
+                "schema_version": 1,
+                "source_path": uri,
+                "batch_id": "",
+                "status": "ready" if status == "ready" else "empty" if status == "empty" else "failed",
+                "stage": "complete" if exists else "failed",
+                "progress": 100,
+                "processed_files": len(files),
+                "total_files": len(files),
+                "current_file": "",
+                "error": "" if exists else "OpenViking 中的目录已被删除，请重新选择知识源目录",
+                "started_at": "",
+                "updated_at": utc_now(),
+                "finished_at": utc_now(),
+            },
+            "tree": tree,
+        }
+
+    async def _materialize_ov_skill_job(self, job: dict) -> dict:
+        repository = self._ov_skill_mining_repository()
+        output_uri = validate_resource_uri(job.get("output_uri"))
+        tree = await self._knowledge_tree(str(job.get("account") or ""), output_uri)
+        if not tree.get("exists"):
+            raise ValueError("OV Compile 已结束，但输出目录不存在")
+        files = [entry for entry in tree.get("entries") or [] if not entry.get("is_dir")]
+        if len(files) > 128:
+            raise ValueError("OV Compile 产物超过 128 个文件，拒绝物化")
+        total_bytes = 0
+        written = 0
+        for entry in files:
+            uri = validate_descendant(output_uri, entry.get("uri"), allow_root=False)
+            relative = uri[len(output_uri) + 1 :]
+            if PurePosixPath(relative).name.startswith("."):
+                continue
+            result = await self._knowledge_request(
+                str(job.get("account") or ""),
+                "GET",
+                "/api/v1/content/read",
+                params={"uri": uri, "offset": 0, "limit": -1, "raw": "true"},
+            )
+            content = _content_text(result)
+            total_bytes += len(content.encode("utf-8"))
+            if total_bytes > 16 * 1024 * 1024:
+                raise ValueError("OV Compile 产物超过 16 MB，拒绝物化")
+            await asyncio.to_thread(repository.write_output, job["job_id"], relative, content)
+            written += 1
+        repository.append_log(job["job_id"], f"已从 OpenViking 物化 {written} 个候选产物")
+        return await asyncio.to_thread(repository.finalize_materialized, job["job_id"])
+
+    async def _refresh_ov_skill_job(self, job: dict, *, detail: bool = False) -> dict:
+        repository = self._ov_skill_mining_repository()
+        if job.get("engine") != "ov_compile":
+            return await asyncio.to_thread(repository.public_job, job, detail=detail)
+        if job.get("status") not in ACTIVE_JOB_STATES:
+            return await asyncio.to_thread(repository.public_job, job, detail=detail)
+        task_id = str(job.get("ov_task_id") or "")
+        if not task_id:
+            return await asyncio.to_thread(repository.public_job, job, detail=detail)
+        async with self._ov_skill_mining_lock(job["job_id"]):
+            job = await asyncio.to_thread(repository.get_job, job["job_id"])
+            if job.get("status") not in ACTIVE_JOB_STATES:
+                return await asyncio.to_thread(repository.public_job, job, detail=detail)
+            task = await self._knowledge_request(
+                str(job.get("account") or ""),
+                "GET",
+                f"/api/v1/tasks/{task_id}",
+                params={"include_events": "true"},
+            )
+            status = str((task or {}).get("status") or "").lower() if isinstance(task, dict) else ""
+            stage = str((task or {}).get("stage") or status) if isinstance(task, dict) else status
+            if status in {"accepted", "pending", "queued"}:
+                public_status = "queued"
+                phase = {"step1": "active", "step2": "idle", "step3": "idle"}
+            elif status in {"running", "committing", "cancelling"}:
+                public_status = "stopping" if status == "cancelling" else "running"
+                phase = {"step1": "done", "step2": "active", "step3": "idle"}
+            elif status in {"completed", "succeeded", "success"}:
+                public_status = "succeeded"
+                phase = {"step1": "done", "step2": "done", "step3": "active"}
+            elif status in {"cancelled", "canceled"}:
+                public_status = "stopped"
+                phase = {"step1": "done", "step2": "done", "step3": "idle"}
+            elif status == "failed":
+                public_status = "failed"
+                phase = {"step1": "done", "step2": "done", "step3": "idle"}
+            else:
+                public_status = str(job.get("status") or "running")
+                phase = job.get("phase") or {"step1": "done", "step2": "active", "step3": "idle"}
+            error = ""
+            if public_status == "failed":
+                raw_error = (task or {}).get("error") if isinstance(task, dict) else None
+                error = raw_error if isinstance(raw_error, str) else json.dumps(raw_error or {}, ensure_ascii=False)
+            changes = {
+                "status": public_status,
+                "phase": phase,
+                "ov_status": status,
+                "ov_stage": stage,
+                "error": error,
+            }
+            if public_status in {"succeeded", "failed", "stopped"}:
+                changes["finished_at"] = str((task or {}).get("updated_at") or utc_now())
+            job = await asyncio.to_thread(repository.update_job, job["job_id"], **changes)
+            if public_status == "succeeded" and not job.get("materialized"):
+                try:
+                    job = await self._materialize_ov_skill_job(job)
+                    job = await asyncio.to_thread(
+                        repository.update_job,
+                        job["job_id"],
+                        status="succeeded",
+                        phase={"step1": "done", "step2": "done", "step3": "done"},
+                        finished_at=job.get("finished_at") or utc_now(),
+                    )
+                except Exception as exc:
+                    repository.append_log(job["job_id"], f"候选产物物化失败：{exc}")
+                    attempts = int(job.get("materialize_attempts") or 0) + 1
+                    if attempts < 5:
+                        job = await asyncio.to_thread(
+                            repository.update_job,
+                            job["job_id"],
+                            status="running",
+                            error="",
+                            finished_at="",
+                            materialize_attempts=attempts,
+                            ov_stage="materializing",
+                        )
+                        return await asyncio.to_thread(repository.public_job, job, detail=detail)
+                    job = await asyncio.to_thread(
+                        repository.update_job,
+                        job["job_id"],
+                        status="failed",
+                        error=f"候选产物物化失败：{exc}",
+                        finished_at=utc_now(),
+                        materialize_attempts=attempts,
+                    )
+            return await asyncio.to_thread(repository.public_job, job, detail=detail)
 
     # ------------------------------------------------------------------ #
     # Enablement / lifecycle                                             #
@@ -448,6 +637,509 @@ class SkillMinerBridgeMixin:
                 )
             owner._stop_skillminer()
             return JSONResponse(content=payload)
+
+        @app.get("/api/mining/ov-sources")
+        async def mining_ov_sources(request: Request):
+            denied = _require_admin(request)
+            if denied is not None:
+                return denied
+            repository = owner._ov_skill_mining_repository()
+            accounts = await asyncio.to_thread(owner._knowledge_accounts)
+            records = await asyncio.to_thread(repository.list_source_records)
+            source_probe_limit = asyncio.Semaphore(8)
+
+            async def describe(record: dict) -> dict:
+                try:
+                    async with source_probe_limit:
+                        return await owner._ov_source_detail(record)
+                except Exception as exc:  # Keep a deleted/unavailable reference visible for repair.
+                    uri = str(record.get("uri") or "")
+                    return {
+                        "source_id": record.get("source_id"),
+                        "account": record.get("account"),
+                        "path": uri,
+                        "uri": uri,
+                        "name": record.get("name") or uri.rsplit("/", 1)[-1],
+                        "document_count": 0,
+                        "total_bytes": 0,
+                        "ready": False,
+                        "status": "unavailable",
+                        "created_at": record.get("created_at") or "",
+                        "error": str(exc),
+                        "ingestion": {
+                            "schema_version": 1,
+                            "source_path": uri,
+                            "batch_id": "",
+                            "status": "failed",
+                            "stage": "failed",
+                            "progress": 100,
+                            "processed_files": 0,
+                            "total_files": 0,
+                            "current_file": "",
+                            "error": "暂时无法检查 OpenViking 目录，请稍后重试",
+                            "started_at": "",
+                            "updated_at": utc_now(),
+                            "finished_at": utc_now(),
+                        },
+                    }
+
+            sources = await asyncio.gather(*(describe(record) for record in records)) if records else []
+            return JSONResponse(
+                {
+                    "accounts": accounts.get("accounts") or [],
+                    "current": accounts.get("current") or "",
+                    "root_uri": "viking://resources",
+                    "sources": sources,
+                    "skill_uri": SKILL_URI,
+                    "error": accounts.get("error") or "",
+                }
+            )
+
+        @app.get("/api/mining/ov-tree")
+        async def mining_ov_tree(
+            request: Request,
+            account: str = Query(...),
+            uri: str = Query("viking://resources"),
+        ):
+            denied = _require_admin(request)
+            if denied is not None:
+                return denied
+            selected = await asyncio.to_thread(owner._knowledge_account, account)
+            root = validate_resource_uri(uri, allow_root=True)
+            tree = await owner._knowledge_tree(selected, root)
+            return JSONResponse({"account": selected, **tree})
+
+        @app.post("/api/mining/ov-sources", status_code=201)
+        async def mining_ov_source_create(request: Request):
+            denied = _require_admin(request)
+            if denied is not None:
+                return denied
+            body = await request.json()
+            selected = await asyncio.to_thread(owner._knowledge_account, body.get("account"))
+            uri = validate_resource_uri(body.get("uri"))
+            tree = await owner._knowledge_tree(selected, uri)
+            if not tree.get("exists"):
+                raise HTTPException(status_code=404, detail="所选 OpenViking 目录不存在")
+            repository = owner._ov_skill_mining_repository()
+            record = await asyncio.to_thread(
+                repository.save_source,
+                selected,
+                uri,
+                name=str(body.get("name") or ""),
+            )
+            source = await owner._ov_source_detail(record)
+            return JSONResponse(status_code=201, content={"ok": True, "source": source})
+
+        @app.delete("/api/mining/ov-sources/{source_id}")
+        async def mining_ov_source_remove(source_id: str, request: Request):
+            denied = _require_admin(request)
+            if denied is not None:
+                return denied
+            repository = owner._ov_skill_mining_repository()
+            try:
+                record = await asyncio.to_thread(repository.remove_source, source_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="知识源引用不存在") from exc
+            # Removing a source unregisters only the reference.  The OV folder
+            # is deliberately preserved; entries are deleted via /ov-entry.
+            return JSONResponse({"ok": True, "source_id": source_id, "uri": record.get("uri")})
+
+        @app.get("/api/mining/ov-source-tree")
+        async def mining_ov_source_tree(request: Request, source_id: str = Query(...)):
+            denied = _require_admin(request)
+            if denied is not None:
+                return denied
+            repository = owner._ov_skill_mining_repository()
+            try:
+                record = await asyncio.to_thread(repository.get_source, source_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="知识源引用不存在") from exc
+            source = await owner._ov_source_detail(record)
+            return JSONResponse(
+                {
+                    "source": {key: value for key, value in source.items() if key != "tree"},
+                    **source["tree"],
+                }
+            )
+
+        @app.get("/api/mining/ov-source-content")
+        async def mining_ov_source_content(
+            request: Request,
+            source_id: str = Query(...),
+            uri: str = Query(...),
+        ):
+            denied = _require_admin(request)
+            if denied is not None:
+                return denied
+            repository = owner._ov_skill_mining_repository()
+            try:
+                record = await asyncio.to_thread(repository.get_source, source_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="知识源引用不存在") from exc
+            target = validate_descendant(str(record.get("uri") or ""), uri, allow_root=False)
+            result = await owner._knowledge_request(
+                str(record.get("account") or ""),
+                "GET",
+                "/api/v1/content/read",
+                params={"uri": target, "offset": 0, "limit": -1, "raw": "true"},
+            )
+            return JSONResponse(
+                {
+                    "source_id": source_id,
+                    "uri": target,
+                    "name": target.rsplit("/", 1)[-1],
+                    "content": _content_text(result),
+                    "editable": _content_editable(target),
+                }
+            )
+
+        @app.post("/api/mining/ov-source-content")
+        async def mining_ov_source_content_save(request: Request):
+            denied = _require_admin(request)
+            if denied is not None:
+                return denied
+            body = await request.json()
+            repository = owner._ov_skill_mining_repository()
+            try:
+                record = await asyncio.to_thread(repository.get_source, str(body.get("source_id") or ""))
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="知识源引用不存在") from exc
+            target = validate_descendant(str(record.get("uri") or ""), body.get("uri"), allow_root=False)
+            if not _content_editable(target):
+                raise HTTPException(status_code=400, detail="该文件类型不支持在线编辑")
+            content = body.get("content")
+            original = body.get("original_content")
+            if not isinstance(content, str) or not isinstance(original, str):
+                raise HTTPException(status_code=400, detail="文件内容必须是文本")
+            if len(content.encode("utf-8")) > 2 * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="知识源文件不能超过 2 MB")
+            current_result = await owner._knowledge_request(
+                str(record.get("account") or ""),
+                "GET",
+                "/api/v1/content/read",
+                params={"uri": target, "offset": 0, "limit": -1, "raw": "true"},
+            )
+            current = _content_text(current_result)
+            if current not in {original, content}:
+                raise HTTPException(status_code=409, detail="文件已被其他操作更新，请重新打开")
+            result = await owner._knowledge_request(
+                str(record.get("account") or ""),
+                "POST",
+                "/api/v1/content/write",
+                json={"uri": target, "content": content, "mode": "replace", "wait": False},
+            )
+            return JSONResponse({"saved": True, "uri": target, "content": content, "result": result})
+
+        @app.post("/api/mining/ov-source-upload", status_code=202)
+        async def mining_ov_source_upload(request: Request):
+            denied = _require_admin(request)
+            if denied is not None:
+                return denied
+            body = await request.json()
+            repository = owner._ov_skill_mining_repository()
+            try:
+                record = await asyncio.to_thread(repository.get_source, str(body.get("source_id") or ""))
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="知识源引用不存在") from exc
+            root = str(record.get("uri") or "")
+            parent = validate_descendant(root, body.get("parent_uri") or root)
+            files = body.get("files")
+            if not isinstance(files, list) or not files or len(files) > 50:
+                raise HTTPException(status_code=400, detail="单次需上传 1 到 50 个文件")
+            prepared: list[tuple[str, str]] = []
+            total = 0
+            seen: set[str] = set()
+            for item in files:
+                if not isinstance(item, dict):
+                    raise HTTPException(status_code=400, detail="上传文件格式无效")
+                relative = str(item.get("relative_path") or item.get("name") or "").replace("\\", "/").lstrip("/")
+                parts = [part for part in relative.split("/") if part]
+                if not parts or any(part in {".", ".."} or part.startswith(".") for part in parts):
+                    raise HTTPException(status_code=400, detail=f"上传路径无效：{relative}")
+                encoded = item.get("content_b64")
+                try:
+                    raw = base64.b64decode(encoded, validate=True) if isinstance(encoded, str) else b""
+                except (binascii.Error, ValueError) as exc:
+                    raise HTTPException(status_code=400, detail=f"文件编码无效：{relative}") from exc
+                total += len(raw)
+                if len(raw) > 20 * 1024 * 1024 or total > 100 * 1024 * 1024:
+                    raise HTTPException(status_code=413, detail="上传文件超过大小限制")
+                converted = await asyncio.to_thread(convert_knowledge_upload, PurePosixPath(relative).name, raw)
+                markdown_relative = str(PurePosixPath(relative).with_suffix(".md"))
+                if markdown_relative in seen:
+                    raise HTTPException(status_code=400, detail=f"多个文件转换为同一路径：{markdown_relative}")
+                seen.add(markdown_relative)
+                prepared.append((markdown_relative, converted.markdown))
+            directories = {parent}
+            destinations: list[tuple[str, str]] = []
+            current_tree = await owner._knowledge_tree(str(record.get("account") or ""), root)
+            occupied = {str(entry.get("uri") or "") for entry in current_tree.get("entries") or []}
+            for relative, content in prepared:
+                target = validate_descendant(root, f"{parent}/{relative}", allow_root=False)
+                if target in occupied:
+                    candidate = PurePosixPath(relative)
+                    for suffix_index in range(2, 10_000):
+                        renamed = candidate.with_name(f"{candidate.stem}-{suffix_index}{candidate.suffix}")
+                        target = validate_descendant(root, f"{parent}/{renamed}", allow_root=False)
+                        if target not in occupied:
+                            break
+                    else:
+                        raise HTTPException(status_code=409, detail=f"无法为重名文件生成新名称：{relative}")
+                occupied.add(target)
+                destinations.append((target, content))
+                cursor = target.rsplit("/", 1)[0]
+                while cursor == parent or cursor.startswith(f"{parent}/"):
+                    directories.add(cursor)
+                    if cursor == parent:
+                        break
+                    cursor = cursor.rsplit("/", 1)[0]
+            for directory in sorted(directories, key=lambda item: (item.count("/"), item)):
+                try:
+                    await owner._knowledge_request(
+                        str(record.get("account") or ""),
+                        "POST",
+                        "/api/v1/fs/mkdir",
+                        json={"uri": directory},
+                    )
+                except HTTPException as exc:
+                    if exc.status_code != 409 and "ALREADY_EXISTS" not in str(exc.detail).upper():
+                        raise
+            written = []
+            for target, content in destinations:
+                try:
+                    result = await owner._knowledge_request(
+                        str(record.get("account") or ""),
+                        "POST",
+                        "/api/v1/content/write",
+                        timeout=180.0,
+                        json={"uri": target, "content": content, "mode": "create", "wait": False},
+                    )
+                except HTTPException as exc:
+                    if exc.status_code == 409 or "ALREADY_EXISTS" in str(exc.detail).upper():
+                        raise HTTPException(
+                            status_code=409,
+                            detail=f"文件上传时发生重名竞争，请刷新后重试：{target}",
+                        ) from exc
+                    raise
+                written.append({"uri": target, "result": result})
+            return JSONResponse(status_code=202, content={"ok": True, "written": written, "file_count": len(written)})
+
+        @app.delete("/api/mining/ov-entry")
+        async def mining_ov_entry_delete(request: Request):
+            denied = _require_admin(request)
+            if denied is not None:
+                return denied
+            body = await request.json()
+            repository = owner._ov_skill_mining_repository()
+            try:
+                record = await asyncio.to_thread(repository.get_source, str(body.get("source_id") or ""))
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="知识源引用不存在") from exc
+            target = validate_descendant(str(record.get("uri") or ""), body.get("uri"), allow_root=False)
+            result = await owner._knowledge_request(
+                str(record.get("account") or ""),
+                "DELETE",
+                "/api/v1/fs",
+                timeout=180.0,
+                params={"uri": target, "recursive": "true", "wait": "false"},
+            )
+            return JSONResponse({"deleted": True, "uri": target, "result": result})
+
+        @app.get("/api/mining/jobs")
+        async def mining_jobs_list(request: Request):
+            denied = _require_admin(request)
+            if denied is not None:
+                return denied
+            repository = owner._ov_skill_mining_repository()
+            jobs = await asyncio.to_thread(repository.list_jobs)
+            refreshed = await asyncio.gather(
+                *(owner._refresh_ov_skill_job(job) for job in jobs),
+                return_exceptions=True,
+            )
+            public_jobs = []
+            for original, result in zip(jobs, refreshed):
+                if isinstance(result, Exception):
+                    repository.append_log(original["job_id"], f"刷新任务状态失败：{result}")
+                    public_jobs.append(await asyncio.to_thread(repository.public_job, original))
+                else:
+                    public_jobs.append(result)
+            return JSONResponse({"jobs": public_jobs, "summary": repository.summary(public_jobs)})
+
+        @app.post("/api/mining/jobs", status_code=201)
+        async def mining_jobs_create(request: Request):
+            denied = _require_admin(request)
+            if denied is not None:
+                return denied
+            body = await request.json()
+            source_uri = validate_resource_uri(body.get("input_dir"))
+            repository = owner._ov_skill_mining_repository()
+            requested_source_id = str(body.get("source_id") or "")
+            records = await asyncio.to_thread(repository.list_source_records)
+            record = next(
+                (
+                    item
+                    for item in records
+                    if (
+                        item.get("source_id") == requested_source_id
+                        if requested_source_id
+                        else item.get("uri") == source_uri
+                    )
+                ),
+                None,
+            )
+            if record is None:
+                raise HTTPException(status_code=400, detail="请先将所选 OpenViking 目录登记为知识源")
+            source = await owner._ov_source_detail(record)
+            if source.get("status") == "missing":
+                raise HTTPException(status_code=409, detail="知识源目录已被删除，请重新选择")
+            if not source.get("ready"):
+                raise HTTPException(status_code=409, detail="知识源目录中没有可挖掘文件")
+            name = str(body.get("name") or f"{source.get('name')} 挖掘任务").strip()
+            if len(name) > 120:
+                raise HTTPException(status_code=400, detail="任务名称不能超过 120 个字符")
+            try:
+                job = await asyncio.to_thread(
+                    repository.create_job,
+                    name=name,
+                    account=str(record.get("account") or ""),
+                    source_uri=source_uri,
+                    source_snapshot_uri=f"{RUNS_ROOT}/pending/source",
+                    output_uri=f"{RUNS_ROOT}/pending/output",
+                    document_count=int(source.get("document_count") or 0),
+                    max_rounds=int(body.get("max_rounds") or 3),
+                )
+            except RuntimeError as exc:
+                raise HTTPException(status_code=429, detail=str(exc)) from exc
+            run_root = f"{RUNS_ROOT}/{job['job_id']}"
+            snapshot_uri = f"{run_root}/source"
+            output_uri = f"{run_root}/output"
+            job = await asyncio.to_thread(
+                repository.update_job,
+                job["job_id"],
+                source_snapshot=snapshot_uri,
+                output_uri=output_uri,
+            )
+            client = CompileClient(
+                endpoint=owner._knowledge_endpoint(),
+                account_id=str(record.get("account") or ""),
+                user_id=owner._knowledge_team_user(),
+                api_key=owner._knowledge_api_key(),
+                agent_id="team-skill-evolver",
+            )
+            try:
+                provisioned = await client.publish_shared_skill(
+                    skill_name=SKILL_NAME,
+                    skill_body=SKILL_BODY,
+                    version_message="Provision OV Compile SkillMiner v1",
+                )
+                if not provisioned.get("ok"):
+                    raise ValueError(str(provisioned.get("stderr") or "无法发布 SkillMiner Compile Skill"))
+                await client.mkdir(run_root)
+                copied = await client.copy_tree(source_uri=source_uri, target_uri=snapshot_uri)
+                if not copied.get("ok"):
+                    raise ValueError(str(copied.get("stderr") or "无法冻结知识源快照"))
+                accepted = await owner._knowledge_request(
+                    str(record.get("account") or ""),
+                    "POST",
+                    "/api/v1/compile",
+                    timeout=60.0,
+                    extra_headers={"Idempotency-Key": f"te-sm-{job['job_id']}"},
+                    json={
+                        "from": [snapshot_uri],
+                        "to": output_uri,
+                        "skill": SKILL_URI,
+                        "instruction": (
+                            f"任务名称：{name}。最多进行 {job['max_rounds']} 轮内部证据复核；"
+                            "只输出契约文件，不发布 Skill。"
+                        ),
+                    },
+                )
+                task_id = str((accepted or {}).get("task_id") or "") if isinstance(accepted, dict) else ""
+                if not task_id:
+                    raise ValueError("OpenViking Compile 未返回 task_id")
+                revision = ""
+                provisioned_result = provisioned.get("result") if isinstance(provisioned, dict) else None
+                if isinstance(provisioned_result, dict):
+                    revision = str(provisioned_result.get("revision") or provisioned_result.get("content_sha256") or "")
+                job = await asyncio.to_thread(
+                    repository.update_job,
+                    job["job_id"],
+                    status="queued",
+                    started_at=utc_now(),
+                    ov_task_id=task_id,
+                    skill_revision=revision,
+                )
+                repository.append_log(job["job_id"], f"知识源快照已冻结：{snapshot_uri}")
+                repository.append_log(job["job_id"], f"OV Compile 已受理：{task_id}")
+            except Exception as exc:
+                repository.append_log(job["job_id"], f"启动失败：{exc}")
+                await asyncio.to_thread(
+                    repository.update_job,
+                    job["job_id"],
+                    status="failed",
+                    error=str(exc),
+                    finished_at=utc_now(),
+                )
+                raise HTTPException(status_code=502, detail=f"启动 OV Compile 挖掘失败：{exc}") from exc
+            return JSONResponse(
+                status_code=201,
+                content={"ok": True, "jobs": [repository.public_job(job)], "summary": repository.summary([job])},
+            )
+
+        @app.get("/api/mining/jobs/{job_id}")
+        async def mining_job_detail(job_id: str, request: Request):
+            denied = _require_admin(request)
+            if denied is not None:
+                return denied
+            repository = owner._ov_skill_mining_repository()
+            try:
+                job = await asyncio.to_thread(repository.get_job, job_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="挖掘任务不存在") from exc
+            refreshed = await owner._refresh_ov_skill_job(job, detail=True)
+            return JSONResponse({"ok": True, "job": refreshed})
+
+        @app.post("/api/mining/jobs/{job_id}/stop")
+        async def mining_job_stop(job_id: str, request: Request):
+            denied = _require_admin(request)
+            if denied is not None:
+                return denied
+            repository = owner._ov_skill_mining_repository()
+            try:
+                job = await asyncio.to_thread(repository.get_job, job_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="挖掘任务不存在") from exc
+            if job.get("engine") != "ov_compile":
+                return await owner._dispatch_skillminer_request(request)
+            if job.get("status") not in ACTIVE_JOB_STATES:
+                raise HTTPException(status_code=409, detail="该挖掘任务当前不可停止")
+            task_id = str(job.get("ov_task_id") or "")
+            if task_id:
+                await owner._knowledge_request(
+                    str(job.get("account") or ""),
+                    "POST",
+                    f"/api/v1/tasks/{task_id}/cancel",
+                )
+            job = await asyncio.to_thread(repository.update_job, job_id, status="stopping", stop_reason="用户手动停止")
+            return JSONResponse({"ok": True, "job": repository.public_job(job, detail=True)})
+
+        @app.delete("/api/mining/jobs/{job_id}")
+        async def mining_job_delete(job_id: str, request: Request):
+            denied = _require_admin(request)
+            if denied is not None:
+                return denied
+            repository = owner._ov_skill_mining_repository()
+            try:
+                job = await asyncio.to_thread(repository.get_job, job_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="挖掘任务不存在") from exc
+            if job.get("engine") != "ov_compile":
+                return await owner._dispatch_skillminer_request(request)
+            try:
+                result = await asyncio.to_thread(repository.delete_job, job_id)
+            except RuntimeError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            return JSONResponse(result)
 
         async def _mining_proxy(request: Request):
             response = await owner._dispatch_skillminer_request(request)

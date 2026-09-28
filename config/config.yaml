@@ -16,7 +16,7 @@ team:
 llm:
   model_id: "volcengine/glm-5.2-aicc"                    # 【必填】模型名
   api_base: "http://llm-model-hub-proxy.sit.sf-express.com/v1"   # 【必填】Base URL（OpenAI 客户端拼接 /chat/completions，网关需带 /v1）
-  api_key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3NLZXkiOiJhcGkyXzhiMjc5YmRmLTE2OTUtNGUxOS04ZmVlLTk4OGJmNjkxYzVkNiIsImVudiI6InNpdCIsImp0aSI6MzI3MzUsInByb2plY3RfaWQiOjI0MjQ5LCJzeXN0ZW1LZXkiOiI4MzIxOTU1Zi1jZDQ3LTQyZjItYjlmZS05OWM0MGVlMzliZmMifQ.sIS9KuWd4rKkaswCCO5b566Mp-nsfDXJpTwDlgoGc5U"                     # 【必填】模型 API Key
+  api_key: ""
   max_tokens: 100000              # 单次生成上限，按所选模型调整
   temperature: 0.4
 
@@ -35,8 +35,8 @@ sharing:
   backend: viking
   viking_deployment: local        # local=自建 openviking-server；cloud=火山云托管
   viking_endpoint: "http://openviking.intsit.sfcloud.local:1080"  # SIT 自建服务地址
-  viking_api_key: "26c0c0cc10a3c333bdea4059aa74eb2b564410563e2c2f6f5d9085ee9c4bb6a1"  # 账号 ROOT Key：仅管理 API（用户同步/账号列表）使用，不能访问数据 API
-  viking_team_api_key: "ZGVmYXVsdA.dGVhbQ.MWY5NmNlYjk0NzFmZDA1NjQ1OTMwMjk3OGNjZGQwZjJkYzYwZWEzMmNiMzNhNmVlYjk4M2RlNDliMTliZGNjZQ"  # default 账号 team 用户的服务 Key（数据操作优先用它）
+  viking_api_key: ""
+  viking_team_api_key: ""
   viking_account: "default"       # OpenViking 账户名，需与 OpenViking 服务侧约定一致
   viking_user: "team"             # 团队资源所在的 OpenViking 用户（default 会自动归一为 team）
 

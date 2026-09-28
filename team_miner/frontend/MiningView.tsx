@@ -11,6 +11,7 @@ import { cn } from "@/lib/utils";
 import DropZone from "@/views/skills/DropZone";
 import MarkdownWorkspace, { MarkdownDocument } from "@/components/MarkdownWorkspace";
 import MiningWhiteboxPanel from "@miner/MiningWhiteboxPanel";
+import SkillSourceWorkspace from "@miner/SkillSourceWorkspace";
 import {
   Boxes,
   ScanSearch,
@@ -51,7 +52,7 @@ export type MinePage = "overview" | "sources" | "jobs";
 
 const PAGE_META: Record<MinePage, { title: string; description: string }> = {
   overview: { title: "挖掘总览", description: "查看知识源、挖掘任务与产物编译状态，快速掌握 SkillMiner 当前工作负载。" },
-  sources: { title: "知识源", description: "管理用于技能挖掘的文档目录，支持上传、新建、重命名、合并与删除。" },
+  sources: { title: "知识源", description: "选择 OpenViking 中的目录作为 Skill 挖掘知识源；上传不会覆盖同名文件，并可在同一界面删除、查看和编辑文件。" },
   jobs: { title: "挖掘任务", description: "并行创建和跟踪挖掘任务；任务完成后可审核、编辑产物并提交进化。" },
 };
 
@@ -76,10 +77,15 @@ interface SourceIngestionStatus {
 }
 
 interface InputSource {
+  source_id?: string;
+  account?: string;
+  name?: string;
   path: string;
   document_count: number;
   total_bytes: number;
   ready: boolean;
+  status?: "ready" | "empty" | "missing" | string;
+  error?: string;
   ingestion?: SourceIngestionStatus;
 }
 
@@ -303,7 +309,17 @@ function useMining(active: boolean) {
 
   const refreshConfig = useCallback(async (notifyFailure = true) => {
     try {
-      const next = await api<MiningConfig>("/api/mining/config");
+      const [base, ovSources] = await Promise.all([
+        api<MiningConfig>("/api/mining/config"),
+        api<{ sources: InputSource[] }>("/api/mining/ov-sources"),
+      ]);
+      const sources = ovSources.sources || [];
+      const next: MiningConfig = {
+        ...base,
+        input_sources: sources,
+        input_dirs: sources.map((source) => source.path),
+        default_input_dir: sources.find((source) => source.ready)?.path || sources[0]?.path || "",
+      };
       setConfig(next);
       await refreshJobs(false);
       return next;
@@ -316,9 +332,16 @@ function useMining(active: boolean) {
   useEffect(() => {
     if (!active) return;
     refreshConfig(true);
-    const timer = window.setInterval(() => refreshConfig(false), 2000);
-    return () => window.clearInterval(timer);
-  }, [active, refreshConfig]);
+    const jobsTimer = window.setInterval(() => refreshJobs(false), 2000);
+    // Source refresh performs an OV tree probe for every registered folder so
+    // a deleted path becomes visible.  Keep that health check periodic without
+    // turning the two-second task poll into an unbounded remote scan.
+    const sourceTimer = window.setInterval(() => refreshConfig(false), 15000);
+    return () => {
+      window.clearInterval(jobsTimer);
+      window.clearInterval(sourceTimer);
+    };
+  }, [active, refreshConfig, refreshJobs]);
 
   return { config, jobs, jobSummary, refreshConfig, refreshJobs };
 }
@@ -400,7 +423,7 @@ export default function MiningView({
       ? preferredInputDir
       : selectedInputDir && config.input_dirs.includes(selectedInputDir)
         ? selectedInputDir
-        : config.default_input_dir || config.input_dirs[0] || "data/input";
+        : config.default_input_dir || config.input_dirs[0] || "";
     setSelectedInputDir(next);
     if (!uploadTarget || (!config.input_dirs.includes(uploadTarget) && uploadTarget !== "__new__")) {
       setUploadTarget(next);
@@ -443,7 +466,7 @@ export default function MiningView({
   if (!active) return null;
 
   const meta = PAGE_META[page];
-  const inputDir = selectedInputDir || config?.default_input_dir || "data/input";
+  const inputDir = selectedInputDir || config?.default_input_dir || "";
   const maxRounds = config?.max_rounds_range?.[1] ?? 5;
   const minRounds = config?.max_rounds_range?.[0] ?? 1;
   const inputSources = config?.input_sources ?? [];
@@ -664,6 +687,7 @@ export default function MiningView({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: taskName.trim() || `${selectedSource?.path.split("/").pop() || "知识源"} 挖掘任务`,
+          source_id: selectedSource?.source_id || "",
           input_dir: inputDir,
           max_rounds: rounds,
           human_checkpoints: humanCheckpoints,
@@ -1380,227 +1404,16 @@ export default function MiningView({
 
       {/* ---- 知识源 ---- */}
       {page === "sources" && (
-        <div className="space-y-[18px] px-[22px] py-[22px]">
-          <Panel
-            title="上传文档"
-            extra={
-              <div className="flex items-center gap-2">
-                <Button size="sm" variant="outline" onClick={() => setCreateSourceOpen(true)}>
-                  <FolderPlus className="size-3.5" /> 新建知识源
-                </Button>
-                <Button size="sm" variant="outline" disabled={inputSources.length < 2} onClick={() => setMergeSourceOpen(true)}>
-                  <FolderInput className="size-3.5" /> 合并知识源
-                </Button>
-              </div>
-            }
-          >
-            <div className="grid gap-5 p-4 lg:grid-cols-[minmax(0,1fr)_260px]">
-              <div>
-                <DropZone
-                  multiple
-                  accept=".md,.markdown,.txt,.docx,.xlsx,.pdf"
-                  disabled={
-                    uploading
-                    || !config
-                    || uploadTargetIngestion?.status === "processing"
-                    || (uploadTarget === "__new__" && !newUploadSourceName.trim())
-                  }
-                  onFiles={uploadKnowledgeFiles}
-                  label={
-                    uploading
-                      ? "正在上传并校验文档…"
-                      : "点击选择或将多个知识文档拖拽到这里"
-                  }
-                />
-                <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
-                  支持 Markdown、TXT、Word（.docx）、Excel（.xlsx）和 PDF，上传后统一转为 Markdown；扫描版 PDF 需要先完成 OCR。
-                  单文件不超过 10 MB，单次最多 50 个、合计不超过 40 MB。
-                </p>
-                {uploading && uploadProgress && (
-                  <div className="mt-3 rounded-lg border border-border bg-background/70 p-3">
-                    <div className="mb-2 flex items-center justify-between gap-3 text-[11px] font-semibold">
-                      <span className="min-w-0 truncate">
-                        {ingestionStageLabel(uploadProgress.stage)}
-                        {uploadProgress.current_file ? ` · ${uploadProgress.current_file}` : ""}
-                      </span>
-                      <span className="mono shrink-0 text-accent">{uploadProgress.progress}%</span>
-                    </div>
-                    <div className="h-1.5 overflow-hidden rounded-full bg-muted">
-                      <div
-                        className="h-full rounded-full bg-accent transition-[width] duration-300"
-                        style={{ width: `${uploadProgress.progress}%` }}
-                      />
-                    </div>
-                    <div className="mt-1.5 text-[10.5px] text-muted-foreground">
-                      {uploadProgress.processed_files} / {uploadProgress.total_files} 个文件
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <div className="rounded-lg border border-border bg-background/60 p-3.5">
-                <Label htmlFor="knowledge-source-target" className="mb-1.5 block text-xs font-semibold text-muted-foreground">
-                  上传到知识源
-                </Label>
-                <select
-                  id="knowledge-source-target"
-                  value={uploadTarget || inputDir}
-                  disabled={uploading || !config}
-                  onChange={(e) => setUploadTarget(e.target.value)}
-                  className="mono w-full rounded-lg border border-border bg-background px-3 py-2 text-[13px] outline-none focus:border-accent disabled:opacity-60"
-                >
-                  {(config?.input_dirs ?? [inputDir]).map((dir) => (
-                    <option key={dir} value={dir}>{sourceDisplayName(dir)}</option>
-                  ))}
-                  <option value="__new__">＋ 上传为新知识源</option>
-                </select>
-                {uploadTarget === "__new__" && (
-                  <Input
-                    className="mt-2"
-                    value={newUploadSourceName}
-                    onChange={(event) => setNewUploadSourceName(event.target.value)}
-                    placeholder="新知识源名称，如 abc"
-                    maxLength={80}
-                  />
-                )}
-                <div className="mt-3 flex items-start gap-2 text-[11px] leading-relaxed text-muted-foreground">
-                  <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-success" />
-                  <span>不会覆盖同名文件；系统会自动添加序号，并统一保存为 UTF-8 文本。</span>
-                </div>
-              </div>
-            </div>
-          </Panel>
-
-          <Panel
-            title="知识源目录"
-            count={config ? `${inputSources.length} 个目录` : undefined}
-          >
-            {!config ? (
-              <div className="p-6 text-center text-sm text-muted-soft">加载中…</div>
-            ) : inputSources.length === 0 ? (
-              <div className="p-6 text-center text-sm text-muted-soft">
-                尚无知识源。请先新建知识源并上传待挖掘文档。
-              </div>
-            ) : (
-              <table className="w-full border-collapse text-[13px]">
-                <thead>
-                  <tr className="border-b border-line text-[11px] uppercase tracking-wide text-muted-foreground">
-                    <th className="px-4 py-2.5 text-left font-semibold">目录名称</th>
-                    <th className="px-4 py-2.5 text-left font-semibold">文档</th>
-                    <th className="px-4 py-2.5 text-left font-semibold">状态</th>
-                    <th className="px-4 py-2.5 text-right font-semibold">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {inputSources.map((source) => (
-                    <tr key={source.path} className="border-b border-line last:border-none">
-                      <td className="px-4 py-3">
-                        <div className="flex min-w-[220px] items-center font-semibold">
-                          <div className="group/rename relative min-w-0 max-w-[320px] flex-1">
-                            <input
-                              value={renamingSourcePath === source.path ? renameSourceName : sourceDisplayName(source.path)}
-                              onFocus={() => beginSourceRename(source)}
-                              onChange={(event) => {
-                                const value = event.target.value;
-                                setRenameSourceName(value);
-                                setRenameSourceError(validateSourceRename(source, value));
-                              }}
-                              onBlur={() => commitSourceRename(source)}
-                              onKeyDown={(event) => {
-                                if (event.key === "Enter") event.currentTarget.blur();
-                                if (event.key === "Escape") {
-                                  event.preventDefault();
-                                  cancelSourceRename(source, event.currentTarget);
-                                }
-                              }}
-                              disabled={Boolean(renamePendingPath) || sourceIngestion(source).status === "processing"}
-                              aria-label={`重命名知识源 ${sourceDisplayName(source.path)}`}
-                              aria-invalid={renamingSourcePath === source.path && Boolean(renameSourceError)}
-                              aria-describedby={renamingSourcePath === source.path && renameSourceError ? `rename-error-${encodeURIComponent(source.path)}` : undefined}
-                              className={cn(
-                                "mono h-7 w-full rounded-md border border-transparent bg-transparent py-1 pl-1 pr-7 text-[13px] font-semibold outline-none transition-colors",
-                                "hover:border-input hover:bg-background focus:border-ring focus:bg-background focus:ring-2 focus:ring-ring/20",
-                                renamingSourcePath === source.path && renameSourceError && "border-destructive bg-background ring-2 ring-destructive/15"
-                              )}
-                            />
-                            <Pencil className="pointer-events-none absolute right-2 top-1/2 size-3 -translate-y-1/2 text-muted-soft transition-colors group-hover/rename:text-muted-foreground" />
-                          </div>
-                        </div>
-                        {renamingSourcePath === source.path && renameSourceError && (
-                          <div id={`rename-error-${encodeURIComponent(source.path)}`} role="alert" className="mt-1 text-[11px] text-destructive">
-                            {renameSourceError}
-                          </div>
-                        )}
-                        {(renamePendingPath === source.path || source.path === config.default_input_dir) && (
-                          <div className="mt-0.5 text-[11px] text-muted-foreground">
-                            {renamePendingPath === source.path ? "正在保存新名称…" : "默认挖掘输入"}
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 text-muted-foreground">
-                        {source.document_count} 个 · {formatBytes(source.total_bytes)}
-                      </td>
-                      <td className="px-4 py-3">
-                        <Pill tone={sourceStatusMeta(source).tone}>{sourceStatusMeta(source).label}</Pill>
-                        {sourceIngestion(source).status === "processing" && (
-                          <div className="mt-2 w-28">
-                            <div className="h-1 overflow-hidden rounded-full bg-muted">
-                              <div
-                                className="h-full rounded-full bg-accent transition-[width] duration-300"
-                                style={{ width: `${sourceIngestion(source).progress}%` }}
-                              />
-                            </div>
-                            <div className="mono mt-1 text-[10px] text-muted-foreground">
-                              {sourceIngestion(source).progress}%
-                            </div>
-                          </div>
-                        )}
-                        {sourceIngestion(source).status === "failed" && sourceIngestion(source).error && (
-                          <div className="mt-1 max-w-52 truncate text-[10px] text-destructive" title={sourceIngestion(source).error}>
-                            {sourceIngestion(source).error}
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <div className="flex justify-end gap-2">
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={source.document_count === 0}
-                            onClick={() => openKnowledgeSourcePreview(source)}
-                          >
-                            <Eye className="size-3.5" /> 查看内容
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={!source.ready}
-                            onClick={() => {
-                              selectInputDir(source.path);
-                              onNavigate?.("jobs");
-                            }}
-                          >
-                            用于挖掘 <ArrowRight className="size-3.5" />
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={sourceIngestion(source).status === "processing"}
-                            className="text-destructive hover:text-destructive"
-                            onClick={() => setDeleteSource(source)}
-                            aria-label={`删除 ${sourceDisplayName(source.path)}`}
-                          >
-                            <Trash2 className="size-3.5" />
-                          </Button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </Panel>
-        </div>
+        <SkillSourceWorkspace
+          sources={inputSources}
+          selectedPath={inputDir}
+          onSelect={selectInputDir}
+          onRefresh={() => mining.refreshConfig(false)}
+          onUseForMining={(path) => {
+            selectInputDir(path);
+            onNavigate?.("jobs");
+          }}
+        />
       )}
 
       {/* ---- 挖掘任务 ---- */}

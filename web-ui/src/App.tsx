@@ -360,6 +360,14 @@ export default function App() {
   // mount is enough; there is no in-place mutation to track.
   const [activeTenantId] = useState(() => getActiveTenantId());
 
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("view", view);
+    if (view === "dashboard") url.searchParams.set("tab", dashTab);
+    else url.searchParams.delete("tab");
+    window.history.replaceState(window.history.state, "", url.toString());
+  }, [view, dashTab]);
+
   const refreshAuth = useCallback(async (silent = false) => {
     setCheckingAuth(true);
     setAuthCheckFailed(false);

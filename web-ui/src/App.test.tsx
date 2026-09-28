@@ -211,6 +211,16 @@ describe("original console functionality", () => {
     expect(within(navigation).getByRole("button", { name: "实验工作台" })).toBeVisible();
   });
 
+  it("keeps the selected page in the URL so a browser refresh restores it", async () => {
+    render(<App />);
+    const navigation = await screen.findByRole("navigation", { name: "主导航" });
+
+    fireEvent.click(within(navigation).getByRole("button", { name: "知识库挖掘" }));
+
+    expect(await screen.findByText("knowledge-base-mining-body")).toBeVisible();
+    expect(new URLSearchParams(window.location.search).get("view")).toBe("mine-knowledge-base");
+  });
+
   it("keeps a direct OpenViking knowledge-base link on the page and explains how to enable it", async () => {
     state.openVikingConfigured = false;
     window.history.replaceState(null, "", "/?view=mine-knowledge-base");

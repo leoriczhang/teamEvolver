@@ -99,6 +99,11 @@ Transform the selected source tree into a concise, navigable Markdown Wiki.
 
 ## Requirements
 
+- Start every generated Markdown page with valid OKF YAML frontmatter containing non-empty
+  `type`, `title`, and one-line `description` string fields. Use a stable page type such as
+  `concept`, `method`, `comparison`, `analysis`, `entity`, or `index`.
+- Apply that OKF frontmatter rule to every Markdown draft emitted during both Map and Reduce;
+  never submit a `.md` file whose first bytes are not the opening `---` delimiter.
 - Organize pages by stable concepts instead of mirroring file names.
 - Preserve important facts, terminology, constraints, and procedures.
 - Cite source Viking URIs near claims so readers can trace the evidence.
@@ -106,7 +111,83 @@ Transform the selected source tree into a concise, navigable Markdown Wiki.
 - Use ordinary relative Markdown links between generated pages.
 - Keep existing useful pages during incremental refreshes and update only what changed.
 - Do not create semantic sidecar files such as `.abstract.md` or `.overview.md`.
+
+## Compile plan constraints
+
+- Use one Map pass, one semantic Shuffle, and one topic-level Reduce pass.
+- Treat every accepted topic-level Reduce Markdown file as a final Wiki artifact and pass those
+  records directly to `p.finalize(...)`.
+- Do not add a second global/all Shuffle or a corpus-wide final Reduce. A single final reducer can
+  exceed the Compile job wall-clock budget and discard otherwise valid topic pages.
+- Each topic reducer should emit one self-contained Wiki page with valid OKF frontmatter. Cross-link
+  related topic pages with stable relative Markdown links when their paths are known.
 """
+
+_DEFAULT_WIKI_SKILL_AUXILIARY_FILES = {
+    "README.md": """# Knowledge Wiki Compiler
+
+This Skill compiles selected source documents into an evidence-grounded Markdown Wiki.
+The complete runtime contract is in `SKILL.md`; this README exists for Compile workers
+that inspect conventional Skill documentation before generating pages.
+""",
+    "templates/README.md": """# Wiki templates
+
+No fixed page template is required. Generate concise Markdown pages with stable concept
+headings, relative links, and source Viking URI citations near the supported claims.
+""",
+    "templates/okf-frontmatter.md": """# Required OKF frontmatter
+
+Every generated Markdown page must start with YAML frontmatter in this shape:
+
+```yaml
+---
+type: concept
+title: 稳定的知识主题标题
+description: 用一句话说明本页覆盖的知识范围。
+---
+```
+
+`type`, `title`, and `description` must all be non-empty strings, and `description` must stay on
+one line. Choose the most suitable type from `entity`, `concept`, `method`, `comparison`,
+`analysis`, or `index`. Put source Viking URI citations in the Markdown body near the claims
+they support; do not use angle-bracket placeholders in emitted frontmatter.
+""",
+    "templates/okf.md": """# Required OKF frontmatter
+
+Every generated Markdown page, including Map and Reduce drafts, must begin exactly like this:
+
+```yaml
+---
+type: concept
+title: 稳定的知识主题标题
+description: 用一句话说明本页覆盖的知识范围。
+---
+```
+
+All three fields are required non-empty strings. Keep `description` on one line and use
+`entity`, `concept`, `method`, `comparison`, `analysis`, or `index` as the page type.
+""",
+    "templates/wiki-page.md": """# Wiki page template
+
+```yaml
+---
+type: concept
+title: 稳定的知识主题标题
+description: 用一句话说明本页覆盖的知识范围。
+---
+```
+
+# 稳定的知识主题标题
+
+Write an evidence-grounded synthesis here. Cite exact source Viking URIs near supported claims.
+The `type`, `title`, and one-line `description` frontmatter fields are mandatory for every page.
+""",
+    "config/README.md": """# Compiler configuration
+
+No external configuration is required. The complete compiler contract is in `SKILL.md`.
+Use Chinese for generated pages and preserve source Viking URI citations.
+""",
+}
 
 
 def _response_payload(response: httpx.Response) -> Any:
@@ -272,6 +353,28 @@ def _knowledge_compile_progress(task: Any) -> dict[str, Any]:
         "stage": stage,
         "label": label,
     }
+
+
+def _knowledge_compile_target(task: Any) -> str:
+    """Read a Compile destination across OV task-list response versions."""
+    if not isinstance(task, dict):
+        return ""
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    meta = task.get("meta") if isinstance(task.get("meta"), dict) else {}
+    request = meta.get("request") if isinstance(meta.get("request"), dict) else {}
+    meta_sanitized = (
+        meta.get("sanitized_request") if isinstance(meta.get("sanitized_request"), dict) else {}
+    )
+    sanitized = task.get("sanitized_request") if isinstance(task.get("sanitized_request"), dict) else {}
+    return str(
+        result.get("to")
+        or request.get("to")
+        or meta_sanitized.get("to")
+        or sanitized.get("to")
+        or task.get("target_uri")
+        or task.get("resource_id")
+        or ""
+    )
 
 
 def _markdown_without_code(content: str) -> str:
@@ -1479,6 +1582,7 @@ class KnowledgeMiningMixin:
                     skill_name="llm-wiki",
                     skill_body=_DEFAULT_WIKI_SKILL,
                     version_message="Provision teamEvolver knowledge Wiki compiler",
+                    auxiliary_files=_DEFAULT_WIKI_SKILL_AUXILIARY_FILES,
                 )
                 if not provisioned.get("ok"):
                     raise HTTPException(
@@ -1560,9 +1664,7 @@ class KnowledgeMiningMixin:
             for row in rows:
                 if not isinstance(row, dict) or str(row.get("task_type") or "").lower() != "compile":
                     continue
-                resource_id = str(row.get("resource_id") or row.get("target_uri") or "")
-                nested = row.get("result") if isinstance(row.get("result"), dict) else {}
-                target = str(nested.get("to") or resource_id)
+                target = _knowledge_compile_target(row)
                 if target and target.rstrip("/") != _WIKI_ROOT:
                     continue
                 tasks.append({**row, "progress": _knowledge_compile_progress(row)})
