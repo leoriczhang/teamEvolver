@@ -1,0 +1,6 @@
+[
+  {"op": "replace", "path": "/vlm/max_concurrent", "value": 32},
+  {"op": "replace", "path": "/bot/compile/map_concurrency", "value": 32},
+  {"op": "replace", "path": "/bot/compile/shuffle_concurrency", "value": 32},
+  {"op": "replace", "path": "/bot/compile/reduce_concurrency", "value": 32}
+]
