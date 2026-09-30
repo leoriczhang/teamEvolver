@@ -1,27 +1,30 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
-  ChevronDown,
-  ChevronRight,
   File,
   Folder,
   FolderInput,
-  Pencil,
   RefreshCw,
-  Save,
+  Search,
   Trash2,
   Upload,
 } from "lucide-react";
 
 import { api } from "@/api/client";
 import { MarkdownDocument } from "@/components/MarkdownWorkspace";
-import { Panel, Pill } from "@/components/common";
+import { Panel } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { fileToB64 } from "@/lib/file";
 import { toastErr, toastOk } from "@/lib/toast";
 import { cn } from "@/lib/utils";
+
+import {
+  KnowledgeFileEditorToolbar,
+  KnowledgeVersionPanel,
+  type KnowledgeEditorMode,
+} from "./KnowledgeFileEditorControls";
+import { KnowledgeWorkspaceTree } from "./KnowledgeWorkspaceTree";
 
 interface SkillSource {
   source_id?: string;
@@ -33,6 +36,17 @@ interface SkillSource {
   ready: boolean;
   status?: "ready" | "empty" | "missing" | "unavailable" | string;
   error?: string;
+  tags?: Array<"skill" | "knowledge" | string>;
+  default?: boolean;
+}
+
+const SOURCE_TAGS = [
+  { value: "skill", label: "Skill 知识源" },
+  { value: "knowledge", label: "知识库知识源" },
+] as const;
+
+function hasSourceTag(source: SkillSource | undefined, tag: "skill" | "knowledge") {
+  return Boolean(source?.tags?.includes(tag));
 }
 
 interface TreeEntry {
@@ -70,23 +84,16 @@ function formatBytes(value?: number | null) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function relativeDepth(uri: string, root: string) {
-  const relative = uri.startsWith(`${root}/`) ? uri.slice(root.length + 1) : uri;
-  return Math.max(0, relative.split("/").length - 1);
-}
-
 export default function SkillSourceWorkspace({
   sources,
   selectedPath,
   onSelect,
   onRefresh,
-  onUseForMining,
 }: {
   sources: SkillSource[];
   selectedPath: string;
   onSelect: (path: string) => void;
   onRefresh: () => Promise<unknown>;
-  onUseForMining: (path: string) => void;
 }) {
   const [config, setConfig] = useState<SourceConfig | null>(null);
   const [activeSourceId, setActiveSourceId] = useState("");
@@ -96,7 +103,8 @@ export default function SkillSourceWorkspace({
   const [content, setContent] = useState<SourceContent | null>(null);
   const [draft, setDraft] = useState("");
   const [original, setOriginal] = useState("");
-  const [editing, setEditing] = useState(false);
+  const [editorMode, setEditorMode] = useState<KnowledgeEditorMode>("preview");
+  const [versionPanelOpen, setVersionPanelOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -106,6 +114,10 @@ export default function SkillSourceWorkspace({
   const [pickerUri, setPickerUri] = useState("");
   const [pickerLoading, setPickerLoading] = useState(false);
   const [replaceSourceId, setReplaceSourceId] = useState("");
+  const [pickerTags, setPickerTags] = useState<Array<"skill" | "knowledge">>(["skill"]);
+  const [tagSaving, setTagSaving] = useState(false);
+  const [treeQuery, setTreeQuery] = useState("");
+  const [treeSearchUnlocked, setTreeSearchUnlocked] = useState(false);
   const fileInput = useRef<HTMLInputElement | null>(null);
   const folderInput = useRef<HTMLInputElement | null>(null);
 
@@ -113,7 +125,16 @@ export default function SkillSourceWorkspace({
     || sources.find((source) => source.path === selectedPath)
     || sources[0];
   const dirty = Boolean(content && draft !== original);
-  const rows = useMemo(() => tree?.entries || [], [tree]);
+  const sourceActions = (
+    <div className="flex items-center gap-1.5">
+      <Button size="sm" variant="outline" onClick={() => void onRefresh()}>
+        <RefreshCw className="size-3.5" /> 刷新
+      </Button>
+      <Button size="sm" onClick={() => void openPicker()}>
+        <FolderInput className="size-3.5" /> 添加知识源
+      </Button>
+    </div>
+  );
 
   useEffect(() => {
     void api<SourceConfig & { sources: SkillSource[] }>("/api/mining/ov-sources")
@@ -129,12 +150,22 @@ export default function SkillSourceWorkspace({
       setTree(activeSource?.status === "missing" ? { root_uri: activeSource.path, exists: false, entries: [] } : null);
       setSelectedEntry(null);
       setContent(null);
+      setVersionPanelOpen(false);
       return;
     }
     setActiveSourceId(activeSource.source_id);
     void loadTree(activeSource.source_id, false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSource?.source_id, activeSource?.status]);
+
+  useEffect(() => {
+    if (!versionPanelOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setVersionPanelOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [versionPanelOpen]);
 
   async function loadTree(sourceId: string, notify = false) {
     setLoading(true);
@@ -158,7 +189,7 @@ export default function SkillSourceWorkspace({
     if (entry.is_dir) {
       setSelectedDirectory(entry.uri);
       setContent(null);
-      setEditing(false);
+      setVersionPanelOpen(false);
       return;
     }
     setLoading(true);
@@ -169,7 +200,8 @@ export default function SkillSourceWorkspace({
       setContent(next);
       setDraft(next.content);
       setOriginal(next.content);
-      setEditing(false);
+      setEditorMode(/\.md$/i.test(next.name) ? "preview" : "edit");
+      setVersionPanelOpen(false);
     } catch (error: any) {
       toastErr("读取文件失败", error.message);
     } finally {
@@ -194,7 +226,6 @@ export default function SkillSourceWorkspace({
       setOriginal(result.content);
       setDraft(result.content);
       setContent({ ...content, content: result.content });
-      setEditing(false);
       toastOk("文件已保存", content.name);
     } catch (error: any) {
       toastErr("保存文件失败", error.message);
@@ -252,7 +283,7 @@ export default function SkillSourceWorkspace({
   }
 
   async function removeSource(source: SkillSource) {
-    if (!source.source_id) return;
+    if (!source.source_id || source.default) return;
     if (!window.confirm(`移除知识源“${source.name || source.path}”？OpenViking 原目录不会被删除。`)) return;
     try {
       await api(`/api/mining/ov-sources/${encodeURIComponent(source.source_id)}`, { method: "DELETE" });
@@ -266,6 +297,11 @@ export default function SkillSourceWorkspace({
 
   async function openPicker(sourceId = "") {
     setReplaceSourceId(sourceId);
+    const replaced = sources.find((source) => source.source_id === sourceId);
+    setPickerTags(
+      replaced?.tags?.filter((tag): tag is "skill" | "knowledge" => tag === "skill" || tag === "knowledge")
+        || ["skill"],
+    );
     setPickerOpen(true);
     const account = pickerAccount || config?.current || config?.accounts[0] || "";
     if (!account) return;
@@ -302,12 +338,12 @@ export default function SkillSourceWorkspace({
   }
 
   async function registerSource() {
-    if (!pickerAccount || !pickerUri) return;
+    if (!pickerAccount || !pickerUri || !pickerTags.length) return;
     try {
       const result = await api<{ source: SkillSource }>("/api/mining/ov-sources", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ account: pickerAccount, uri: pickerUri }),
+        body: JSON.stringify({ account: pickerAccount, uri: pickerUri, tags: pickerTags }),
       });
       if (replaceSourceId && replaceSourceId !== result.source.source_id) {
         await api(`/api/mining/ov-sources/${encodeURIComponent(replaceSourceId)}`, { method: "DELETE" });
@@ -322,82 +358,246 @@ export default function SkillSourceWorkspace({
     }
   }
 
+  async function toggleSourceTag(source: SkillSource, tag: "skill" | "knowledge") {
+    if (!source.source_id || tagSaving || (source.default && tag === "knowledge")) return;
+    const current = source.tags?.filter((item): item is "skill" | "knowledge" => item === "skill" || item === "knowledge") || [];
+    const next = current.includes(tag) ? current.filter((item) => item !== tag) : [...current, tag];
+    if (!next.length) {
+      toastErr("无法移除用途标签", "知识源至少需要保留一种用途");
+      return;
+    }
+    setTagSaving(true);
+    try {
+      await api(`/api/mining/ov-sources/${encodeURIComponent(source.source_id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tags: next }),
+      });
+      toastOk("知识源用途已更新", next.map((item) => item === "skill" ? "Skill 知识源" : "知识库知识源").join("、"));
+      await onRefresh();
+    } catch (error: any) {
+      toastErr("更新知识源用途失败", error.message);
+    } finally {
+      setTagSaving(false);
+    }
+  }
+
   return (
-    <div className="space-y-[18px] px-[22px] py-[22px]">
-      <Panel
-        title="OpenViking 知识源"
-        count={`${sources.length} 个目录引用`}
-        extra={(
-          <div className="flex gap-2">
-            <Button size="sm" variant="outline" onClick={() => void onRefresh()}><RefreshCw className="size-3.5" /> 刷新</Button>
-            <Button size="sm" onClick={() => void openPicker()}><FolderInput className="size-3.5" /> 选择 OV 文件夹</Button>
-          </div>
-        )}
-      >
-        {sources.length === 0 ? (
+    <div className="space-y-3 px-[22px] py-[22px]">
+      {sources.length === 0 ? (
+        <Panel title="知识源" count="0 个目录引用" extra={sourceActions}>
           <div className="grid min-h-44 place-items-center px-6 text-center text-sm text-muted-foreground">
-            <div><Folder className="mx-auto mb-3 size-8 text-muted-soft" />选择 OpenViking Resources 中的一个现有文件夹，将其登记为 Skill 挖掘知识源。</div>
+            <div><Folder className="mx-auto mb-3 size-8 text-muted-soft" />添加 OpenViking Resources 中的文件夹，并标记为 Skill 知识源、知识库知识源，或同时用于两种挖掘。</div>
           </div>
-        ) : (
-          <div className="grid min-h-[620px] lg:grid-cols-[270px_320px_minmax(0,1fr)]">
-            <aside className="border-b border-border bg-surface-subtle p-2 lg:border-b-0 lg:border-r">
-              {sources.map((source) => (
-                <button
-                  key={source.source_id || source.path}
-                  type="button"
-                  className={cn("mb-1 w-full rounded-lg border px-3 py-3 text-left", activeSource?.path === source.path ? "border-accent bg-accent-soft" : "border-transparent hover:bg-background")}
-                  onClick={() => {
-                    setActiveSourceId(source.source_id || "");
-                    onSelect(source.path);
-                  }}
-                >
-                  <div className="flex items-center gap-2"><Folder className="size-4 shrink-0 text-accent" /><span className="min-w-0 flex-1 truncate text-xs font-semibold">{source.name || source.path.split("/").pop()}</span><Pill tone={source.status === "missing" ? "red" : source.ready ? "green" : "amber"}>{source.status === "missing" ? "路径已删除" : source.status === "unavailable" ? "暂不可用" : source.ready ? "可用" : "空目录"}</Pill></div>
-                  <div className="mono mt-2 break-all text-[10px] leading-4 text-muted-foreground">{source.path}</div>
-                  <div className="mt-2 flex items-center justify-between text-[10.5px] text-muted-foreground"><span>{source.document_count} 个文件 · {formatBytes(source.total_bytes)}</span><span>{source.account}</span></div>
-                </button>
-              ))}
-              {activeSource && (
-                <div className="mt-3 space-y-2 border-t border-border pt-3">
-                  {activeSource.status === "missing" && <Button size="sm" className="w-full" onClick={() => void openPicker(activeSource.source_id)}><FolderInput className="size-3.5" /> 重新选择路径</Button>}
-                  <Button size="sm" variant="outline" className="w-full" onClick={() => onUseForMining(activeSource.path)} disabled={!activeSource.ready}>用于 Skill 挖掘</Button>
-                  <Button size="sm" variant="outline" className="w-full text-destructive hover:text-destructive" onClick={() => void removeSource(activeSource)}><Trash2 className="size-3.5" /> 移除目录引用</Button>
+        </Panel>
+      ) : (
+        <div className="grid h-[calc(100vh-190px)] min-h-[620px] grid-cols-[190px_minmax(0,1fr)] gap-3 xl:grid-cols-[240px_minmax(0,1fr)]">
+          <Panel className="flex min-h-0 flex-col" title="知识源" count={`${sources.length} 个目录引用`}>
+            <nav className="min-h-0 flex-1 space-y-1 overflow-auto bg-surface-subtle p-2" aria-label="知识源导航">
+              {sources.map((source) => {
+                const active = activeSource?.path === source.path;
+                return (
+                  <div
+                    key={source.source_id || source.path}
+                    className={cn(
+                      "rounded-[10px] border p-2.5 transition-colors",
+                      active ? "border-foreground bg-foreground text-white shadow-sm" : "border-transparent bg-transparent text-foreground hover:border-border hover:bg-white",
+                    )}
+                  >
+                    <button
+                      type="button"
+                      className="w-full text-left"
+                      onClick={() => {
+                        setActiveSourceId(source.source_id || "");
+                        onSelect(source.path);
+                      }}
+                    >
+                      <div className="flex items-center gap-2">
+                        <Folder className={cn("size-4 shrink-0", active ? "text-emerald-300" : "text-accent")} />
+                        <span className="min-w-0 flex-1 truncate text-xs font-semibold" title={source.name || source.path.split("/").pop()}>{source.name || source.path.split("/").pop()}</span>
+                        <span className={cn("shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-bold", source.status === "missing" ? "bg-red-100 text-red-700" : source.ready ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>{source.status === "missing" ? "路径已删除" : source.status === "unavailable" ? "暂不可用" : source.ready ? "可用" : "空目录"}</span>
+                      </div>
+                      <div title={source.path} className={cn("mono mt-1.5 line-clamp-2 break-all text-[9.5px] leading-4", active ? "text-white/60" : "text-muted-foreground")}>{source.path}</div>
+                      <div className={cn("mt-1.5 flex items-center justify-between text-[10px]", active ? "text-white/60" : "text-muted-foreground")}><span>{source.document_count} 个文件 · {formatBytes(source.total_bytes)}</span><span>{source.account}</span></div>
+                    </button>
+
+                    <div className={cn("mt-2 flex flex-wrap gap-1 border-t pt-2", active ? "border-white/15" : "border-border")}>
+                      {source.default && <span className={cn("rounded px-1.5 py-0.5 text-[9px] font-bold", active ? "bg-white/10 text-white/75" : "bg-muted text-muted-foreground")}>默认</span>}
+                      {SOURCE_TAGS.map((tag) => {
+                        const selected = hasSourceTag(source, tag.value);
+                        const locked = Boolean(source.default && tag.value === "knowledge");
+                        return (
+                          <button
+                            key={tag.value}
+                            type="button"
+                            disabled={tagSaving || locked}
+                            aria-pressed={selected}
+                            title={locked ? "默认知识库知识源必须保留知识库标签" : `切换${tag.label}`}
+                            onClick={() => void toggleSourceTag(source, tag.value)}
+                            className={cn(
+                              "rounded border px-1.5 py-0.5 text-[9px] font-semibold",
+                              active
+                                ? selected ? "border-white/25 bg-white/15 text-white" : "border-white/15 text-white/55"
+                                : selected ? "border-accent/45 bg-accent-soft text-accent" : "border-border text-muted-foreground",
+                              (tagSaving || locked) && "cursor-not-allowed opacity-70",
+                            )}
+                          >
+                            {tag.label}{locked ? " · 默认" : ""}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <div className="mt-2 flex justify-end gap-1.5">
+                      {source.status === "missing" && !source.default && (
+                        <button type="button" className={cn("rounded-md border px-2 py-1 text-[10px] font-semibold", active ? "border-white/20 text-white/80 hover:bg-white/10" : "border-border text-muted-foreground hover:bg-white")} onClick={() => void openPicker(source.source_id)}><FolderInput className="mr-1 inline size-3" />重选</button>
+                      )}
+                      <button
+                        type="button"
+                        className={cn("rounded-md border px-2 py-1 text-[10px] font-semibold", active ? "border-white/20 text-red-200 hover:bg-white/10" : "border-border text-destructive hover:bg-white", source.default && "cursor-not-allowed opacity-45")}
+                        disabled={source.default}
+                        title={source.default ? "默认来源不可移除" : `删除知识源 ${source.name || source.path}`}
+                        aria-label={source.default ? "默认来源不可移除" : `删除知识源 ${source.name || source.path}`}
+                        onClick={() => void removeSource(source)}
+                      >
+                        <Trash2 className="mr-1 inline size-3" />删除
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </nav>
+          </Panel>
+
+          <Panel
+            className="!mt-0 flex min-h-0 flex-col"
+            title={<span className="flex min-w-0 items-center gap-2"><FolderInput className="size-4 text-accent" /><span className="truncate" title={activeSource?.name || "知识源文件"}>{activeSource?.name || "知识源文件"}</span></span>}
+            count={tree?.exists ? `${tree.entries.length} 项` : undefined}
+            extra={sourceActions}
+          >
+            <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(220px,0.4fr)_minmax(0,1fr)] lg:grid-cols-[minmax(230px,0.36fr)_minmax(0,1fr)] lg:grid-rows-1 xl:grid-cols-[minmax(270px,0.38fr)_minmax(0,1fr)]">
+              <section className="flex min-h-0 flex-col border-b border-line lg:border-b-0 lg:border-r">
+                <div className="flex flex-wrap items-center gap-1.5 border-b border-line bg-background/60 p-2">
+                  <input ref={fileInput} type="file" multiple className="hidden" accept=".md,.markdown,.txt,.docx,.xlsx,.pptx,.pdf,.csv" onChange={(event) => void uploadFiles(event.target.files)} />
+                  <input ref={(node) => { folderInput.current = node; if (node) node.setAttribute("webkitdirectory", ""); }} type="file" multiple className="hidden" onChange={(event) => void uploadFiles(event.target.files)} />
+                  <Button size="sm" variant="outline" title="上传文件" aria-label="上传文件" disabled={!activeSource || ["missing", "unavailable"].includes(activeSource.status || "") || uploading} onClick={() => fileInput.current?.click()}><Upload className="size-3.5" /> <span className="hidden lg:inline">文件</span></Button>
+                  <Button size="sm" variant="outline" title="上传文件夹" aria-label="上传文件夹" disabled={!activeSource || ["missing", "unavailable"].includes(activeSource.status || "") || uploading} onClick={() => folderInput.current?.click()}><FolderInput className="size-3.5" /> <span className="hidden lg:inline">文件夹</span></Button>
+                  <Button size="sm" variant="outline" disabled={!selectedEntry} aria-label={selectedEntry ? `删除 ${selectedEntry.name}` : "删除条目"} title={selectedEntry ? `删除 ${selectedEntry.name}` : "请先选择条目"} onClick={() => void deleteEntry()}><Trash2 className="size-3.5" /> <span className="hidden lg:inline">删除</span></Button>
                 </div>
-              )}
-            </aside>
+                <div className="border-b border-line bg-background/60 px-3 py-2">
+                  <div className="flex items-center gap-2"><span className="shrink-0 text-[10px] font-bold text-muted-foreground">知识源</span><code title={activeSource?.path || ""} className="block min-w-0 flex-1 truncate text-[10px] text-foreground">{activeSource?.path || "—"}</code></div>
+                </div>
+                <div className="border-b border-line p-2">
+                  <div className="flex h-8 items-center gap-2 rounded-lg border border-input bg-white px-2.5">
+                    <Search className="size-3.5 text-muted-soft" />
+                    <input
+                      type="search"
+                      name="skill-source-file-search"
+                      autoComplete="one-time-code"
+                      data-lpignore="true"
+                      readOnly={!treeSearchUnlocked}
+                      onFocus={() => setTreeSearchUnlocked(true)}
+                      value={treeQuery}
+                      onChange={(event) => setTreeQuery(event.target.value)}
+                      className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-soft"
+                      placeholder="搜索文件…"
+                    />
+                  </div>
+                </div>
+                <div className="min-h-0 flex-1">
+                  <KnowledgeWorkspaceTree
+                    tree={activeSource?.status === "unavailable" ? { root_uri: activeSource.path, exists: false, entries: [] } : tree}
+                    emptyText={activeSource?.status === "missing"
+                      ? "该知识源路径已从 OpenViking 删除，已禁止用于挖掘。"
+                      : activeSource?.status === "unavailable"
+                        ? "暂时无法检查该知识源，已禁止用于挖掘。请稍后刷新。"
+                        : "该知识源为空，可上传文件或文件夹。"}
+                    selectedUri={selectedEntry?.uri || content?.uri || ""}
+                    selectedDirectoryUri={selectedDirectory}
+                    query={treeQuery}
+                    onSelect={(entry) => void openEntry(entry)}
+                  />
+                </div>
+              </section>
 
-            <section className="flex min-h-0 flex-col border-b border-border lg:border-b-0 lg:border-r">
-              <div className="flex flex-wrap items-center gap-2 border-b border-border p-3">
-                <input ref={fileInput} type="file" multiple className="hidden" accept=".md,.markdown,.txt,.docx,.xlsx,.pptx,.pdf,.csv" onChange={(event) => void uploadFiles(event.target.files)} />
-                <input ref={(node) => { folderInput.current = node; if (node) node.setAttribute("webkitdirectory", ""); }} type="file" multiple className="hidden" onChange={(event) => void uploadFiles(event.target.files)} />
-                <Button size="sm" variant="outline" disabled={!activeSource || ["missing", "unavailable"].includes(activeSource.status || "") || uploading} onClick={() => fileInput.current?.click()}><Upload className="size-3.5" /> 上传文件</Button>
-                <Button size="sm" variant="outline" disabled={!activeSource || ["missing", "unavailable"].includes(activeSource.status || "") || uploading} onClick={() => folderInput.current?.click()}><FolderInput className="size-3.5" /> 上传文件夹</Button>
-                <Button size="sm" variant="outline" disabled={!selectedEntry} className="ml-auto text-destructive hover:text-destructive" onClick={() => void deleteEntry()}><Trash2 className="size-3.5" /></Button>
-              </div>
-              <div className="mono truncate border-b border-border px-3 py-2 text-[10px] text-muted-foreground">上传位置：{selectedDirectory || activeSource?.path || "—"}</div>
-              <div className="min-h-0 flex-1 overflow-auto p-2">
-                {activeSource?.status === "unavailable" ? <div className="p-4 text-xs leading-5 text-amber-700">暂时无法连接 OpenViking 检查该目录。请稍后刷新；为避免使用不确定输入，新任务暂不可启动。</div> : loading && !tree ? <div className="p-4 text-xs text-muted-foreground">正在读取目录…</div> : !tree?.exists ? <div className="p-4 text-xs leading-5 text-destructive">该知识源路径已从 OpenViking 删除。已有任务仍保留创建时的私有快照；新任务已禁止启动。</div> : rows.length === 0 ? <div className="p-4 text-xs text-muted-foreground">目录为空，可在此上传文件。</div> : rows.map((entry) => {
-                  const depth = relativeDepth(entry.uri, tree.root_uri);
-                  return <button key={entry.uri} type="button" onClick={() => void openEntry(entry)} title={entry.uri} className={cn("mb-0.5 flex min-h-8 w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-accent-soft", selectedEntry?.uri === entry.uri && "bg-accent-soft text-accent")} style={{ paddingLeft: `${8 + depth * 14}px` }}>{entry.is_dir ? <><ChevronRight className="size-3" /><Folder className="size-3.5 text-accent" /></> : <><span className="w-3" /><File className="size-3.5 text-slate-500" /></>}<span className="min-w-0 flex-1 truncate">{entry.name}</span>{!entry.is_dir && <span className="text-[10px] text-muted-soft">{formatBytes(entry.size)}</span>}</button>;
-                })}
-              </div>
-            </section>
+              <section className="flex min-h-0 flex-col">
+                <div className="flex min-h-[46px] flex-wrap items-center justify-between gap-2 border-b border-line bg-surface-subtle px-[14px] py-2">
+                  <span className="flex min-w-0 items-center gap-2 text-[13px] font-[780]"><File className="size-4 shrink-0 text-accent" /><span className="truncate" title={content?.name || "文件内容"}>{content?.name || "文件内容"}</span></span>
+                  {content && (
+                    <KnowledgeFileEditorToolbar
+                      isMarkdown={/\.md$/i.test(content.name)}
+                      mode={editorMode}
+                      onModeChange={setEditorMode}
+                      onVersion={() => setVersionPanelOpen(true)}
+                      editable={content.editable}
+                      dirty={dirty}
+                      saving={saving}
+                      onSave={() => void saveContent()}
+                    />
+                  )}
+                </div>
+                {content && <div className="flex items-center gap-2 border-b border-line bg-background/60 px-3 py-2"><code title={content.uri} className="block min-w-0 flex-1 truncate text-[11px] text-muted-foreground">{content.uri}</code>{dirty && <span className="shrink-0 text-[10px] font-semibold text-accent">未保存</span>}</div>}
+                <div className="min-h-0 flex-1">
+                  {!content ? (
+                    <div className="grid h-full place-items-center px-6 text-center text-xs leading-6 text-muted-foreground"><div><File className="mx-auto mb-2 size-8 text-muted-soft" />从左侧目录选择文件</div></div>
+                  ) : /\.md$/i.test(content.name) && editorMode === "preview" ? (
+                    <div className="h-full overflow-auto bg-white px-7 py-6"><MarkdownDocument content={draft} /></div>
+                  ) : content.editable ? (
+                    <textarea value={draft} onChange={(event) => setDraft(event.target.value)} spellCheck={false} className="h-full w-full resize-none border-0 bg-[#fbfcfe] p-5 font-mono text-xs leading-6 outline-none" aria-label={`${content.name} 文件编辑器`} />
+                  ) : (
+                    <pre className="h-full overflow-auto whitespace-pre-wrap break-words bg-[#fbfcfe] p-5 font-mono text-xs leading-6">{draft}</pre>
+                  )}
+                </div>
+                {content && <div className="flex h-8 items-center border-t border-line bg-surface-subtle px-3 text-[10px] text-muted-foreground"><span>{content.editable ? "可编辑" : "当前类型只读"}</span><span className="ml-auto">{draft.split("\n").length} 行 · {draft.length.toLocaleString()} 字符</span></div>}
+              </section>
+            </div>
+          </Panel>
+        </div>
+      )}
 
-            <section className="flex min-h-0 flex-col bg-background">
-              {!content ? <div className="grid flex-1 place-items-center px-6 text-center text-sm text-muted-foreground">从文件树选择 Markdown 文件后，可在这里查看和编辑。</div> : <>
-                <div className="flex items-center gap-2 border-b border-border px-4 py-3"><span className="mono min-w-0 flex-1 truncate text-xs font-semibold">{content.name}</span>{content.editable && !editing && <Button size="sm" variant="outline" onClick={() => setEditing(true)}><Pencil className="size-3.5" /> 编辑</Button>}{editing && <Button size="sm" disabled={saving || !dirty} onClick={() => void saveContent()}><Save className="size-3.5" /> {saving ? "保存中…" : "保存"}</Button>}</div>
-                {editing ? <Textarea value={draft} onChange={(event) => setDraft(event.target.value)} className="mono min-h-0 flex-1 resize-none rounded-none border-0 p-5 text-xs focus-visible:ring-0" /> : <div className="min-h-0 flex-1 overflow-auto p-5">{/\.md$/i.test(content.name) ? <MarkdownDocument content={draft} /> : <pre className="mono whitespace-pre-wrap break-words text-xs leading-6">{draft}</pre>}</div>}
-              </>}
-            </section>
-          </div>
-        )}
-      </Panel>
+      <KnowledgeVersionPanel
+        open={versionPanelOpen && Boolean(content)}
+        name={content?.name || ""}
+        uri={content?.uri || ""}
+        onClose={() => setVersionPanelOpen(false)}
+      />
 
       <Dialog open={pickerOpen} onOpenChange={setPickerOpen}>
         <DialogContent className="flex h-[78vh] w-[calc(100vw-32px)] flex-col overflow-hidden p-0 !max-w-[820px]">
-          <DialogHeader className="border-b border-border px-5 py-4"><DialogTitle>{replaceSourceId ? "重新选择知识源路径" : "选择 OpenViking 文件夹"}</DialogTitle></DialogHeader>
-          <div className="flex items-center gap-3 border-b border-border p-4"><select value={pickerAccount} onChange={(event) => void reloadPicker(event.target.value)} className="rounded-lg border border-border bg-background px-3 py-2 text-xs">{config?.accounts.map((account) => <option key={account} value={account}>{account}</option>)}</select><Input value={pickerUri} readOnly placeholder="请从下方选择一个文件夹" className="mono flex-1 text-xs" /></div>
-          <div className="min-h-0 flex-1 overflow-auto p-3">{pickerLoading ? <div className="p-4 text-xs text-muted-foreground">正在读取 OpenViking 目录…</div> : (pickerTree?.entries || []).filter((entry) => entry.is_dir).map((entry) => <button key={entry.uri} type="button" onClick={() => setPickerUri(entry.uri)} className={cn("mb-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-accent-soft", pickerUri === entry.uri && "bg-accent-soft text-accent")} style={{ paddingLeft: `${12 + relativeDepth(entry.uri, pickerTree?.root_uri || "viking://resources") * 16}px` }}><ChevronDown className="size-3 text-muted-soft" /><Folder className="size-4 text-accent" /><span className="min-w-0 flex-1 truncate">{entry.name}</span><span className="mono hidden max-w-[55%] truncate text-[10px] text-muted-soft sm:block">{entry.uri}</span></button>)}</div>
-          <div className="flex justify-end gap-2 border-t border-border p-4"><Button variant="outline" onClick={() => setPickerOpen(false)}>取消</Button><Button disabled={!pickerUri} onClick={() => void registerSource()}>确认设为知识源</Button></div>
+          <DialogHeader className="border-b border-border px-5 py-4"><DialogTitle>{replaceSourceId ? "重新选择知识源路径" : "添加知识源"}</DialogTitle></DialogHeader>
+          <div className="space-y-3 border-b border-border p-4">
+            <div className="flex items-center gap-3"><select value={pickerAccount} onChange={(event) => void reloadPicker(event.target.value)} className="rounded-lg border border-border bg-background px-3 py-2 text-xs">{config?.accounts.map((account) => <option key={account} value={account}>{account}</option>)}</select><Input value={pickerUri} title={pickerUri} readOnly placeholder="请从下方选择一个文件夹" className="mono flex-1 text-xs" /></div>
+            <fieldset>
+              <legend className="mb-2 text-[11px] font-bold text-muted-foreground">知识源用途（可多选）</legend>
+              <div className="flex flex-wrap gap-2">
+                {SOURCE_TAGS.map((tag) => (
+                  <label key={tag.value} className={cn("flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-xs font-semibold", pickerTags.includes(tag.value) ? "border-accent bg-accent-soft text-accent" : "border-border bg-background text-muted-foreground")}>
+                    <input
+                      type="checkbox"
+                      checked={pickerTags.includes(tag.value)}
+                      onChange={(event) => setPickerTags((previous) => event.target.checked ? [...previous, tag.value] : previous.filter((item) => item !== tag.value))}
+                    />
+                    {tag.label}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+          </div>
+          <div className="min-h-0 flex-1">
+            {pickerLoading ? (
+              <div className="p-4 text-xs text-muted-foreground">正在读取 OpenViking 目录…</div>
+            ) : (
+              <KnowledgeWorkspaceTree
+                tree={pickerTree ? { ...pickerTree, entries: pickerTree.entries.filter((entry) => entry.is_dir) } : null}
+                emptyText="OpenViking Resources 中暂无可选择的文件夹。"
+                selectedUri={pickerUri}
+                selectedDirectoryUri={pickerUri}
+                query=""
+                onSelect={(entry) => setPickerUri(entry.uri)}
+              />
+            )}
+          </div>
+          <div className="flex justify-end gap-2 border-t border-border p-4"><Button variant="outline" onClick={() => setPickerOpen(false)}>取消</Button><Button disabled={!pickerUri || !pickerTags.length} onClick={() => void registerSource()}>确认设为知识源</Button></div>
         </DialogContent>
       </Dialog>
     </div>

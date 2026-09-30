@@ -86,7 +86,7 @@ const NAV_SECTIONS: {
     items: [
       { key: "mine-overview", label: "挖掘总览", icon: LayoutDashboard },
       { key: "mine-sources", label: "知识源", icon: Database },
-      { key: "mine-jobs", label: "挖掘任务", icon: ListChecks },
+      { key: "mine-jobs", label: "Skill 挖掘", icon: ListChecks },
       { key: "mine-knowledge-base", label: "知识库挖掘", icon: BookOpenText, adminOnly: true, requiresOpenViking: true },
     ],
   },
@@ -338,6 +338,38 @@ const DASH_PAGE_META: Record<DashTab, { title: string; description: string }> = 
 };
 
 export default function App() {
+  useEffect(() => {
+    let frame = 0;
+    const syncOverflowTitles = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        document.querySelectorAll<HTMLElement>(`.truncate, [class*="line-clamp-"]`).forEach((element) => {
+          const overflowed = element.scrollWidth > element.clientWidth || element.scrollHeight > element.clientHeight;
+          const generated = element.dataset.overflowTitle === "true";
+          if (overflowed && !element.title) {
+            const fullText = element.textContent?.trim();
+            if (fullText) {
+              element.title = fullText;
+              element.dataset.overflowTitle = "true";
+            }
+          } else if (!overflowed && generated) {
+            element.removeAttribute("title");
+            delete element.dataset.overflowTitle;
+          }
+        });
+      });
+    };
+    const observer = new MutationObserver(syncOverflowTitles);
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class"] });
+    window.addEventListener("resize", syncOverflowTitles);
+    syncOverflowTitles();
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", syncOverflowTitles);
+      window.cancelAnimationFrame(frame);
+    };
+  }, []);
+
   const [view, setView] = useState<ViewKey>(initialView);
   const [dashTab, setDashTab] = useState<DashTab>(() => {
     const tab = new URLSearchParams(window.location.search).get("tab");

@@ -27,6 +27,12 @@ from . import benchmark_format
 SKILL_NAME = "skill-miner-compile-v1"
 SKILL_URI = f"viking://agent/skills/{SKILL_NAME}"
 RUNS_ROOT = "viking://resources/agent_skill_workspace/runs"
+SOURCE_TAG_SKILL = "skill"
+SOURCE_TAG_KNOWLEDGE = "knowledge"
+SOURCE_TAGS = frozenset({SOURCE_TAG_SKILL, SOURCE_TAG_KNOWLEDGE})
+DEFAULT_KNOWLEDGE_SOURCE_URI = (
+    "viking://resources/agent_knowledge_workspace/input/raw_knowledge_base"
+)
 ACTIVE_JOB_STATES = {"preparing", "queued", "running", "stopping"}
 TERMINAL_JOB_STATES = {"succeeded", "failed", "stopped", "interrupted"}
 MAX_PARALLEL_JOBS = 8
@@ -88,6 +94,30 @@ def source_id(account: str, uri: str) -> str:
     return f"ovsrc-{digest}"
 
 
+def normalize_source_tags(value: Any, *, default: tuple[str, ...] = ()) -> list[str]:
+    """Return stable source-purpose tags and reject unknown or empty selections."""
+    raw = default if value is None else value
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple, set, frozenset)):
+        raise ValueError("知识源用途标签格式无效")
+    tags: list[str] = []
+    for item in raw:
+        tag = str(item or "").strip().lower()
+        if tag not in SOURCE_TAGS:
+            raise ValueError(f"不支持的知识源用途标签：{tag or '(empty)'}")
+        if tag not in tags:
+            tags.append(tag)
+    if not tags:
+        raise ValueError("请至少选择一种知识源用途")
+    return [tag for tag in (SOURCE_TAG_SKILL, SOURCE_TAG_KNOWLEDGE) if tag in tags]
+
+
+def source_has_tag(record: dict[str, Any], tag: str) -> bool:
+    # Records created before the unified source registry were Skill-only.
+    return tag in normalize_source_tags(record.get("tags"), default=(SOURCE_TAG_SKILL,))
+
+
 def validate_resource_uri(value: Any, *, allow_root: bool = False) -> str:
     uri = str(value or "").strip().rstrip("/")
     prefix = "viking://resources"
@@ -127,7 +157,21 @@ class OvSkillMiningRepository:
         except (FileNotFoundError, OSError, json.JSONDecodeError):
             return []
         rows = payload.get("sources") if isinstance(payload, dict) else None
-        return [dict(row) for row in rows or [] if isinstance(row, dict)]
+        normalized: list[dict[str, Any]] = []
+        for raw in rows or []:
+            if not isinstance(raw, dict):
+                continue
+            row = dict(raw)
+            row["tags"] = normalize_source_tags(
+                row.get("tags"),
+                default=(SOURCE_TAG_SKILL,),
+            )
+            row["default"] = bool(row.get("default"))
+            normalized.append(row)
+        return normalized
+
+    def _save_sources(self, rows: list[dict[str, Any]]) -> None:
+        _atomic_json(self.sources_path, {"schema_version": 2, "sources": rows})
 
     def list_source_records(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -140,26 +184,82 @@ class OvSkillMiningRepository:
             raise KeyError(identity)
         return match
 
-    def save_source(self, account: str, uri: str, *, name: str = "") -> dict[str, Any]:
+    def save_source(
+        self,
+        account: str,
+        uri: str,
+        *,
+        name: str = "",
+        tags: Any = None,
+        replace_tags: bool = False,
+        default: bool = False,
+    ) -> dict[str, Any]:
         normalized = validate_resource_uri(uri)
         identity = source_id(account, normalized)
+        requested_tags = normalize_source_tags(tags, default=(SOURCE_TAG_SKILL,))
+        if default and SOURCE_TAG_KNOWLEDGE not in requested_tags:
+            requested_tags.append(SOURCE_TAG_KNOWLEDGE)
         with self._lock:
             rows = self._load_sources()
             existing = next((row for row in rows if row.get("source_id") == identity), None)
             if existing:
-                return existing
+                current_tags = normalize_source_tags(existing.get("tags"), default=(SOURCE_TAG_SKILL,))
+                next_tags = requested_tags if replace_tags else list(dict.fromkeys([*current_tags, *requested_tags]))
+                if existing.get("default") or default:
+                    next_tags = list(dict.fromkeys([*next_tags, SOURCE_TAG_KNOWLEDGE]))
+                next_tags = normalize_source_tags(next_tags)
+                changed = next_tags != current_tags or (default and not existing.get("default"))
+                if name and str(name).strip() != str(existing.get("name") or ""):
+                    existing["name"] = str(name).strip()
+                    changed = True
+                if changed:
+                    existing["tags"] = next_tags
+                    existing["default"] = bool(existing.get("default") or default)
+                    existing["updated_at"] = utc_now()
+                    self._save_sources(rows)
+                return dict(existing)
             now = utc_now()
             record = {
                 "source_id": identity,
                 "account": str(account),
                 "uri": normalized,
                 "name": str(name or normalized.rsplit("/", 1)[-1]),
+                "tags": normalize_source_tags(requested_tags),
+                "default": bool(default),
                 "created_at": now,
                 "updated_at": now,
             }
             rows.append(record)
-            _atomic_json(self.sources_path, {"schema_version": 1, "sources": rows})
-            return record
+            self._save_sources(rows)
+            return dict(record)
+
+    def ensure_default_knowledge_source(self, account: str) -> dict[str, Any]:
+        identity = source_id(account, DEFAULT_KNOWLEDGE_SOURCE_URI)
+        with self._lock:
+            exists = any(row.get("source_id") == identity for row in self._load_sources())
+        return self.save_source(
+            account,
+            DEFAULT_KNOWLEDGE_SOURCE_URI,
+            name="" if exists else "默认知识库知识源",
+            tags=[SOURCE_TAG_KNOWLEDGE],
+            default=True,
+        )
+
+    def update_source(self, identity: str, *, tags: Any, name: str | None = None) -> dict[str, Any]:
+        with self._lock:
+            rows = self._load_sources()
+            match = next((row for row in rows if row.get("source_id") == identity), None)
+            if match is None:
+                raise KeyError(identity)
+            next_tags = normalize_source_tags(tags)
+            if match.get("default") and SOURCE_TAG_KNOWLEDGE not in next_tags:
+                raise ValueError("默认知识库知识源必须保留“知识库知识源”标签")
+            match["tags"] = next_tags
+            if name is not None and str(name).strip():
+                match["name"] = str(name).strip()
+            match["updated_at"] = utc_now()
+            self._save_sources(rows)
+            return dict(match)
 
     def remove_source(self, identity: str) -> dict[str, Any]:
         with self._lock:
@@ -167,10 +267,9 @@ class OvSkillMiningRepository:
             match = next((row for row in rows if row.get("source_id") == identity), None)
             if match is None:
                 raise KeyError(identity)
-            _atomic_json(
-                self.sources_path,
-                {"schema_version": 1, "sources": [row for row in rows if row.get("source_id") != identity]},
-            )
+            if match.get("default"):
+                raise ValueError("默认知识库知识源不能移除")
+            self._save_sources([row for row in rows if row.get("source_id") != identity])
             return match
 
     def _job_dir(self, job_id: str) -> Path:
@@ -201,6 +300,7 @@ class OvSkillMiningRepository:
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
             job_id = f"ovmine-{stamp}-{_safe_slug(name)}-{uuid.uuid4().hex[:8]}"
             now = utc_now()
+            normalized_rounds = max(1, min(5, int(max_rounds)))
             job = {
                 "job_id": job_id,
                 "name": str(name or f"{source_uri.rsplit('/', 1)[-1]} 挖掘任务")[:120],
@@ -214,7 +314,7 @@ class OvSkillMiningRepository:
                 "skill_uri": SKILL_URI,
                 "ov_task_id": "",
                 "document_count": int(document_count),
-                "max_rounds": max(1, min(5, int(max_rounds))),
+                "max_rounds": normalized_rounds,
                 "current_round": 1,
                 "phase": {"step1": "active", "step2": "idle", "step3": "idle"},
                 "created_at": now,
@@ -225,6 +325,11 @@ class OvSkillMiningRepository:
                 "stop_reason": "",
                 "artifact_quality": None,
                 "materialized": False,
+                "ov_last_synced_at": "",
+                "ov_last_sync_attempt_at": "",
+                "ov_sync_error": "",
+                "ov_sync_failures": 0,
+                "ov_next_retry_at": "",
             }
             job_dir = self._job_dir(job_id)
             (job_dir / "workspace" / "compiled_skill").mkdir(parents=True, exist_ok=False)
@@ -386,6 +491,11 @@ class OvSkillMiningRepository:
     def public_job(self, job: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
         hidden = {"workspace"}
         result = {key: value for key, value in job.items() if key not in hidden}
+        result["remote_state_stale"] = bool(
+            job.get("engine") == "ov_compile"
+            and job.get("status") in ACTIVE_JOB_STATES
+            and job.get("ov_sync_error")
+        )
         if not detail:
             return result
         workspace = self.workspace(job)
@@ -458,11 +568,16 @@ __all__ = [
     "MAX_PARALLEL_JOBS",
     "OvSkillMiningRepository",
     "RUNS_ROOT",
+    "DEFAULT_KNOWLEDGE_SOURCE_URI",
+    "SOURCE_TAG_KNOWLEDGE",
+    "SOURCE_TAG_SKILL",
     "SKILL_BODY",
     "SKILL_NAME",
     "SKILL_URI",
     "TERMINAL_JOB_STATES",
     "source_id",
+    "source_has_tag",
+    "normalize_source_tags",
     "utc_now",
     "validate_descendant",
     "validate_resource_uri",

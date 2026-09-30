@@ -27,6 +27,11 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from team_memory.compile_client import CompileClient
+from team_miner.ov_compile_mining import (
+    SOURCE_TAG_KNOWLEDGE,
+    source_has_tag,
+    validate_resource_uri,
+)
 
 from ..config_store import CONFIG_DIR
 from ..storage import LocalObjectStore
@@ -260,13 +265,20 @@ def _knowledge_wiki_root(value: Any = None) -> str:
     return uri
 
 
-def _knowledge_file_uri(kind: str, value: Any, *, wiki_root: str = _WIKI_ROOT) -> str:
+def _knowledge_file_uri(
+    kind: str,
+    value: Any,
+    *,
+    wiki_root: str = _WIKI_ROOT,
+    source_root: str = _SOURCE_ROOT,
+) -> str:
     """Validate a file URI against the source or Wiki workspace boundary."""
     if kind not in {"source", "wiki"}:
         raise HTTPException(status_code=400, detail="kind must be source or wiki")
     uri = str(value or "").strip().rstrip("/")
     selected_wiki_root = _knowledge_wiki_root(wiki_root)
-    root = _SOURCE_ROOT if kind == "source" else selected_wiki_root
+    selected_source_root = validate_resource_uri(source_root)
+    root = selected_source_root if kind == "source" else selected_wiki_root
     if not uri.startswith(f"{root}/") or len(uri) > 1000:
         raise HTTPException(status_code=400, detail=f"file must be below {root}")
     relative = uri[len(root) + 1 :]
@@ -277,12 +289,19 @@ def _knowledge_file_uri(kind: str, value: Any, *, wiki_root: str = _WIKI_ROOT) -
     return uri
 
 
-def _knowledge_directory_uri(kind: str, value: Any, *, wiki_root: str = _WIKI_ROOT) -> str:
+def _knowledge_directory_uri(
+    kind: str,
+    value: Any,
+    *,
+    wiki_root: str = _WIKI_ROOT,
+    source_root: str = _SOURCE_ROOT,
+) -> str:
     """Validate an upload directory without allowing workspace escape."""
     if kind not in {"source", "wiki"}:
         raise HTTPException(status_code=400, detail="kind must be source or wiki")
     selected_wiki_root = _knowledge_wiki_root(wiki_root)
-    root = _SOURCE_ROOT if kind == "source" else selected_wiki_root
+    selected_source_root = validate_resource_uri(source_root)
+    root = selected_source_root if kind == "source" else selected_wiki_root
     uri = str(value or root).strip().rstrip("/")
     if uri != root and not uri.startswith(f"{root}/"):
         raise HTTPException(status_code=400, detail=f"directory must be {root} or below it")
@@ -545,6 +564,43 @@ def _build_wiki_link_index(
 
 
 class KnowledgeMiningMixin:
+    def _knowledge_source_record(self, account: str, source_uri: Any) -> dict[str, Any]:
+        """Resolve one registered Knowledge source and enforce its purpose tag."""
+        try:
+            normalized = validate_resource_uri(source_uri or _SOURCE_ROOT)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        repository_factory = getattr(self, "_ov_skill_mining_repository", None)
+        if not callable(repository_factory):
+            # Isolated route tests and older embedders predate the unified
+            # source registry. Keep only the historical default implicit.
+            if normalized == _SOURCE_ROOT:
+                return {
+                    "source_id": "default-knowledge-source",
+                    "account": account,
+                    "uri": normalized,
+                    "tags": [SOURCE_TAG_KNOWLEDGE],
+                    "default": True,
+                }
+            raise HTTPException(status_code=400, detail="请先将所选目录登记为知识库知识源")
+        repository = repository_factory()
+        if normalized == _SOURCE_ROOT:
+            repository.ensure_default_knowledge_source(account)
+        record = next(
+            (
+                item
+                for item in repository.list_source_records()
+                if str(item.get("account") or "") == account
+                and str(item.get("uri") or "").rstrip("/") == normalized
+            ),
+            None,
+        )
+        if record is None:
+            raise HTTPException(status_code=400, detail="请先将所选目录登记为知识源")
+        if not source_has_tag(record, SOURCE_TAG_KNOWLEDGE):
+            raise HTTPException(status_code=409, detail="所选目录没有“知识库知识源”标签")
+        return record
+
     """Routes for compiling one OpenViking account's Resources into a Wiki."""
 
     def _knowledge_compile_store(self) -> LocalObjectStore:
@@ -1147,15 +1203,20 @@ class KnowledgeMiningMixin:
             account: str = Query(...),
             kind: str = Query(...),
             wiki_root: str = Query(_WIKI_ROOT),
+            source_root: str = Query(_SOURCE_ROOT),
         ):
             _require_admin_request(request)
             selected = await asyncio.to_thread(owner._knowledge_account, account)
             if kind not in {"source", "wiki"}:
                 raise HTTPException(status_code=400, detail="kind must be source or wiki")
             selected_wiki_root = _knowledge_wiki_root(wiki_root)
+            selected_source_root = _SOURCE_ROOT
+            if kind == "source":
+                record = await asyncio.to_thread(owner._knowledge_source_record, selected, source_root)
+                selected_source_root = str(record.get("uri") or source_root).rstrip("/")
             tree = await owner._knowledge_tree(
                 selected,
-                _SOURCE_ROOT if kind == "source" else selected_wiki_root,
+                selected_source_root if kind == "source" else selected_wiki_root,
                 exclude_wiki=kind == "source",
             )
             return JSONResponse({"account": selected, "kind": kind, **tree})
@@ -1175,15 +1236,21 @@ class KnowledgeMiningMixin:
             )
 
         @app.get("/api/knowledge-mining/capabilities")
-        async def knowledge_mining_capabilities(request: Request, account: str = Query(...)):
+        async def knowledge_mining_capabilities(
+            request: Request,
+            account: str = Query(...),
+            source_uri: str = Query(_SOURCE_ROOT),
+        ):
             """Expose OV's account-scoped Compile readiness to the console."""
             _require_admin_request(request)
             selected = await asyncio.to_thread(owner._knowledge_account, account)
+            record = await asyncio.to_thread(owner._knowledge_source_record, selected, source_uri)
+            selected_source_uri = str(record.get("uri") or source_uri).rstrip("/")
             capabilities = await owner._knowledge_compile_capabilities(selected)
             last_compile_time = await asyncio.to_thread(
                 owner._knowledge_last_compile_time,
                 selected,
-                _SOURCE_ROOT,
+                selected_source_uri,
                 _WIKI_ROOT,
                 _DEFAULT_SKILL_URI,
             )
@@ -1250,12 +1317,22 @@ class KnowledgeMiningMixin:
             kind: str = Query(...),
             uri: str = Query(...),
             wiki_root: str = Query(_WIKI_ROOT),
+            source_root: str = Query(_SOURCE_ROOT),
         ):
             """Read one source or Wiki file as account-scoped L2 text."""
             _require_admin_request(request)
             selected = await asyncio.to_thread(owner._knowledge_account, account)
             selected_wiki_root = _knowledge_wiki_root(wiki_root)
-            target = _knowledge_file_uri(kind, uri, wiki_root=selected_wiki_root)
+            selected_source_root = _SOURCE_ROOT
+            if kind == "source":
+                record = await asyncio.to_thread(owner._knowledge_source_record, selected, source_root)
+                selected_source_root = str(record.get("uri") or source_root).rstrip("/")
+            target = _knowledge_file_uri(
+                kind,
+                uri,
+                wiki_root=selected_wiki_root,
+                source_root=selected_source_root,
+            )
             result = await owner._knowledge_request(
                 selected,
                 "GET",
@@ -1292,7 +1369,20 @@ class KnowledgeMiningMixin:
             selected = await asyncio.to_thread(owner._knowledge_account, body.get("account"))
             kind = str(body.get("kind") or "")
             selected_wiki_root = _knowledge_wiki_root(body.get("wiki_root"))
-            target = _knowledge_file_uri(kind, body.get("uri"), wiki_root=selected_wiki_root)
+            selected_source_root = _SOURCE_ROOT
+            if kind == "source":
+                record = await asyncio.to_thread(
+                    owner._knowledge_source_record,
+                    selected,
+                    body.get("source_root") or _SOURCE_ROOT,
+                )
+                selected_source_root = str(record.get("uri") or _SOURCE_ROOT).rstrip("/")
+            target = _knowledge_file_uri(
+                kind,
+                body.get("uri"),
+                wiki_root=selected_wiki_root,
+                source_root=selected_source_root,
+            )
             if not _content_editable(target):
                 raise HTTPException(status_code=400, detail="this file type is read-only")
             content = body.get("content")
@@ -1351,11 +1441,20 @@ class KnowledgeMiningMixin:
             if kind not in {"source", "wiki"}:
                 raise HTTPException(status_code=400, detail="kind must be source or wiki")
             selected_wiki_root = _knowledge_wiki_root(body.get("wiki_root"))
-            upload_root = _SOURCE_ROOT if kind == "source" else selected_wiki_root
+            selected_source_root = _SOURCE_ROOT
+            if kind == "source":
+                record = await asyncio.to_thread(
+                    owner._knowledge_source_record,
+                    selected,
+                    body.get("source_root") or _SOURCE_ROOT,
+                )
+                selected_source_root = str(record.get("uri") or _SOURCE_ROOT).rstrip("/")
+            upload_root = selected_source_root if kind == "source" else selected_wiki_root
             upload_parent = _knowledge_directory_uri(
                 kind,
                 body.get("parent_uri") or upload_root,
                 wiki_root=selected_wiki_root,
+                source_root=selected_source_root,
             )
             files = body.get("files")
             if not isinstance(files, list) or not files:
@@ -1441,6 +1540,7 @@ class KnowledgeMiningMixin:
                     kind,
                     f"{upload_parent}/{relative_path}",
                     wiki_root=selected_wiki_root,
+                    source_root=selected_source_root,
                 )
                 destinations.append((relative_path, target, raw))
                 parent = target.rsplit("/", 1)[0]
@@ -1518,7 +1618,20 @@ class KnowledgeMiningMixin:
             selected = await asyncio.to_thread(owner._knowledge_account, body.get("account"))
             kind = str(body.get("kind") or "").strip().lower()
             selected_wiki_root = _knowledge_wiki_root(body.get("wiki_root"))
-            target = _knowledge_file_uri(kind, body.get("uri"), wiki_root=selected_wiki_root)
+            selected_source_root = _SOURCE_ROOT
+            if kind == "source":
+                record = await asyncio.to_thread(
+                    owner._knowledge_source_record,
+                    selected,
+                    body.get("source_root") or _SOURCE_ROOT,
+                )
+                selected_source_root = str(record.get("uri") or _SOURCE_ROOT).rstrip("/")
+            target = _knowledge_file_uri(
+                kind,
+                body.get("uri"),
+                wiki_root=selected_wiki_root,
+                source_root=selected_source_root,
+            )
             result = await owner._knowledge_request(
                 selected,
                 "DELETE",
@@ -1551,11 +1664,18 @@ class KnowledgeMiningMixin:
             selected = await asyncio.to_thread(owner._knowledge_account, body.get("account"))
             source_uri = str(body.get("source_uri") or _SOURCE_ROOT).strip().rstrip("/")
             target_uri = str(body.get("target_uri") or _WIKI_ROOT).strip().rstrip("/")
-            if source_uri != _SOURCE_ROOT or target_uri != _WIKI_ROOT:
+            if target_uri != _WIKI_ROOT:
                 raise HTTPException(
                     status_code=400,
-                    detail="knowledge mining uses the configured input and output roots",
+                    detail="knowledge mining uses the configured output root",
                 )
+            record = await asyncio.to_thread(owner._knowledge_source_record, selected, source_uri)
+            source_uri = str(record.get("uri") or source_uri).rstrip("/")
+            source_tree = await owner._knowledge_tree(selected, source_uri, exclude_wiki=True)
+            if not source_tree.get("exists"):
+                raise HTTPException(status_code=409, detail="知识库知识源路径已被删除，不能用于挖掘")
+            if not any(not entry.get("is_dir") for entry in source_tree.get("entries") or []):
+                raise HTTPException(status_code=409, detail="知识库知识源中没有可挖掘文件")
             skill_uri = str(body.get("skill_uri") or _DEFAULT_SKILL_URI).strip().rstrip("/")
             if not skill_uri.startswith("viking://agent/skills/"):
                 raise HTTPException(status_code=400, detail="skill_uri must be an account-shared Skill")

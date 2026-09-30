@@ -11,6 +11,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
+from team_miner.ov_compile_mining import OvSkillMiningRepository
 from teamEvolver.proxy import knowledge_mining as knowledge_mining_module
 from teamEvolver.proxy.knowledge_document_converter import convert_knowledge_upload
 from teamEvolver.proxy.knowledge_mining import (
@@ -232,6 +233,27 @@ def test_knowledge_directory_uri_accepts_root_and_rejects_escape() -> None:
     assert _knowledge_directory_uri("source", f"{_SOURCE_ROOT}/docs") == f"{_SOURCE_ROOT}/docs"
     with pytest.raises(HTTPException):
         _knowledge_directory_uri("source", f"{_WIKI_ROOT}/docs")
+
+
+def test_knowledge_source_uri_helpers_support_a_registered_dynamic_root() -> None:
+    source_root = "viking://resources/customer-support"
+
+    assert _knowledge_directory_uri(
+        "source",
+        f"{source_root}/docs",
+        source_root=source_root,
+    ) == f"{source_root}/docs"
+    assert _knowledge_file_uri(
+        "source",
+        f"{source_root}/docs/guide.md",
+        source_root=source_root,
+    ) == f"{source_root}/docs/guide.md"
+    with pytest.raises(HTTPException):
+        _knowledge_file_uri(
+            "source",
+            f"{_SOURCE_ROOT}/guide.md",
+            source_root=source_root,
+        )
 
 
 def test_knowledge_entry_delete_calls_openviking_fs(monkeypatch) -> None:
@@ -573,6 +595,13 @@ def test_knowledge_compile_passes_only_the_last_successful_compile_time(tmp_path
         async def _knowledge_compile_capabilities(self, _account):
             return {"can_create": True}
 
+        async def _knowledge_tree(self, _account, root, **_kwargs):
+            return {
+                "root_uri": root,
+                "exists": True,
+                "entries": [{"uri": f"{root}/source.md", "is_dir": False}],
+            }
+
         async def _knowledge_request(self, _account, _method, path, **kwargs):
             assert path == "/api/v1/compile"
             compile_requests.append(kwargs["json"])
@@ -612,6 +641,70 @@ def test_knowledge_compile_passes_only_the_last_successful_compile_time(tmp_path
         "last_compile_time": first_body["compile_started_at"],
     }
     assert second.json()["last_compile_time"] == first_body["compile_started_at"]
+
+
+def test_knowledge_compile_accepts_only_registered_knowledge_sources(tmp_path, monkeypatch) -> None:
+    source_uri = "viking://resources/customer-support/source"
+    repository = OvSkillMiningRepository(tmp_path / "source-state", tmp_path / "miner")
+    source = repository.save_source("demo", source_uri, tags=["skill"])
+    compile_requests: list[dict] = []
+
+    class Owner(KnowledgeMiningMixin):
+        def __init__(self) -> None:
+            self.config = SimpleNamespace(sharing_viking_endpoint="https://openviking.example")
+            self._knowledge_compile_state_store = LocalObjectStore(tmp_path / "compile-state")
+
+        def _ov_skill_mining_repository(self):
+            return repository
+
+        def _knowledge_account(self, account):
+            return str(account)
+
+        async def _knowledge_tree(self, _account, root, **_kwargs):
+            return {
+                "root_uri": root,
+                "exists": True,
+                "entries": [{"uri": f"{root}/guide.md", "is_dir": False}],
+            }
+
+        async def _knowledge_compile_capabilities(self, _account):
+            return {"can_create": True}
+
+        async def _knowledge_request(self, _account, _method, path, **kwargs):
+            assert path == "/api/v1/compile"
+            compile_requests.append(kwargs["json"])
+            return {"task_id": "cmp_custom_source", "status": "accepted"}
+
+        def _start_knowledge_compile_watch(self, _account, _task_id):
+            pass
+
+    monkeypatch.setattr(knowledge_mining_module, "_require_admin_request", lambda _request: None)
+    owner = Owner()
+    app = FastAPI()
+    owner._register_knowledge_mining_routes(app)
+    client = TestClient(app)
+    payload = {
+        "account": "demo",
+        "source_uri": source_uri,
+        "target_uri": _WIKI_ROOT,
+        "skill_uri": "viking://agent/skills/custom-wiki",
+    }
+
+    rejected = client.post("/api/knowledge-mining/tasks", json=payload)
+    assert rejected.status_code == 409
+    assert "知识库知识源" in rejected.json()["detail"]
+
+    repository.update_source(source["source_id"], tags=["skill", "knowledge"])
+    accepted = client.post("/api/knowledge-mining/tasks", json=payload)
+
+    assert accepted.status_code == 202
+    assert compile_requests == [
+        {
+            "from": [source_uri],
+            "to": _WIKI_ROOT,
+            "skill": "viking://agent/skills/custom-wiki",
+        }
+    ]
 
 
 def test_failed_compile_does_not_advance_incremental_watermark(tmp_path) -> None:

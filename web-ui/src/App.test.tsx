@@ -134,7 +134,7 @@ describe("original console functionality", () => {
     render(<App />);
     const navigation = await screen.findByRole("navigation", { name: "主导航" });
     await within(navigation).findByRole("button", { name: "实验工作台" });
-    for (const name of ["挖掘总览", "知识源", "挖掘任务", "运行总览", "经验库", "数据源接入", "进化链路",
+    for (const name of ["挖掘总览", "知识源", "Skill 挖掘", "运行总览", "经验库", "数据源接入", "进化链路",
       "实验工作台", "个人与团队资产", "平台资产", "模型配置", "用户与权限", "租户管理", "运行状态", "使用文档"]) {
       expect(within(navigation).getByRole("button", { name })).toBeVisible();
     }

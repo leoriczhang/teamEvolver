@@ -6,24 +6,17 @@ import {
   ChevronDown,
   ChevronRight,
   CircleStop,
-  Eye,
   File,
-  Folder,
   FolderInput,
-  GitCompareArrows,
-  History,
   Link2,
   LoaderCircle,
   Network,
-  PencilLine,
   Play,
   RefreshCw,
-  Save,
   Search,
   Server,
   Trash2,
   Upload,
-  X,
 } from "lucide-react";
 
 import { api, ApiError, tenantHeaders } from "@/api/client";
@@ -36,6 +29,13 @@ import { fileToB64 } from "@/lib/file";
 import { toastErr, toastOk } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
+import {
+  KnowledgeFileEditorToolbar,
+  KnowledgeVersionPanel,
+  type KnowledgeEditorMode,
+} from "./KnowledgeFileEditorControls";
+import { KnowledgeWorkspaceTree as TreeList } from "./KnowledgeWorkspaceTree";
+
 interface MiningConfig {
   accounts: string[];
   current: string;
@@ -45,6 +45,21 @@ interface MiningConfig {
   endpoint: string;
   account_source: string;
   error?: string;
+}
+
+interface KnowledgeSource {
+  source_id: string;
+  account: string;
+  path: string;
+  uri?: string;
+  name?: string;
+  document_count: number;
+  total_bytes: number;
+  ready: boolean;
+  status?: "ready" | "empty" | "missing" | "unavailable" | string;
+  error?: string;
+  tags?: Array<"skill" | "knowledge" | string>;
+  default?: boolean;
 }
 
 interface TreeEntry {
@@ -172,12 +187,7 @@ interface UploadProgressState {
   totalFiles: number;
 }
 
-interface TreeNode extends TreeEntry {
-  children: TreeNode[];
-}
-
 type WorkspaceTab = "source" | "wiki" | "mining";
-type EditorMode = "edit" | "preview";
 type WikiViewMode = "files" | "graph";
 
 const ACTIVE_TASK_STATES = new Set(["accepted", "pending", "queued", "running", "committing", "cancelling"]);
@@ -357,181 +367,6 @@ function formatProcessingTime(value?: number) {
   return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
 }
 
-function buildTree(entries: TreeEntry[], rootUri: string): TreeNode[] {
-  const byUri = new Map<string, TreeNode>();
-  const roots: TreeNode[] = [];
-  for (const entry of entries) byUri.set(entry.uri, { ...entry, children: [] });
-  for (const entry of entries) {
-    const node = byUri.get(entry.uri)!;
-    const parentUri = entry.uri.slice(0, entry.uri.lastIndexOf("/"));
-    const parent = byUri.get(parentUri);
-    if (parent && parent.uri !== rootUri) parent.children.push(node);
-    else roots.push(node);
-  }
-  const sortNodes = (nodes: TreeNode[]) => {
-    nodes.sort((left, right) => Number(right.is_dir) - Number(left.is_dir) || left.name.localeCompare(right.name));
-    nodes.forEach((node) => sortNodes(node.children));
-  };
-  sortNodes(roots);
-  return roots;
-}
-
-function filterTree(nodes: TreeNode[], query: string): TreeNode[] {
-  if (!query) return nodes;
-  const lowered = query.toLowerCase();
-  return nodes.flatMap((node) => {
-    const children = filterTree(node.children, query);
-    return node.name.toLowerCase().includes(lowered) || children.length
-      ? [{ ...node, children }]
-      : [];
-  });
-}
-
-function TreeList({
-  tree,
-  emptyText,
-  selectedUri,
-  selectedDirectoryUri,
-  query,
-  onSelect,
-}: {
-  tree: TreeResponse | null;
-  emptyText: string;
-  selectedUri: string;
-  selectedDirectoryUri: string;
-  query: string;
-  onSelect: (entry: TreeEntry) => void;
-}) {
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const selectedRowRef = useRef<HTMLButtonElement | null>(null);
-  const lastScrolledUriRef = useRef("");
-  const nodes = useMemo(
-    () => filterTree(buildTree(tree?.entries || [], tree?.root_uri || ""), query.trim()),
-    [query, tree],
-  );
-  const ancestorDirs = useMemo(() => {
-    const paths = new Map<string, string[]>();
-    const walk = (items: TreeNode[], ancestors: string[]) => {
-      for (const item of items) {
-        paths.set(item.uri, ancestors);
-        if (item.children.length) walk(item.children, [...ancestors, item.uri]);
-      }
-    };
-    walk(buildTree(tree?.entries || [], tree?.root_uri || ""), []);
-    return paths;
-  }, [tree]);
-
-  // File jumps (wiki links, history back/forward) only change selectedUri, so
-  // expand the selected file's ancestor directories here to keep it visible.
-  useEffect(() => {
-    if (!selectedUri) return;
-    const ancestors = ancestorDirs.get(selectedUri);
-    if (!ancestors?.length) return;
-    setExpanded((previous) => {
-      if (ancestors.every((uri) => previous.has(uri))) return previous;
-      const next = new Set(previous);
-      for (const uri of ancestors) next.add(uri);
-      return next;
-    });
-  }, [selectedUri, ancestorDirs]);
-
-  // Scroll to the selected row once it is rendered (the expansion above may
-  // need a re-render first). Only once per selection change, so manual tree
-  // browsing and background tree refreshes do not yank the scroll position.
-  useEffect(() => {
-    if (!selectedUri || lastScrolledUriRef.current === selectedUri) return;
-    const row = selectedRowRef.current;
-    if (!row) return;
-    lastScrolledUriRef.current = selectedUri;
-    // Center the row within the tree's own scroll container so the user can
-    // see where the jump landed. Scroll only that container (not every
-    // scrollable ancestor) so the rest of the page does not move.
-    let container = row.parentElement;
-    while (container) {
-      const style = window.getComputedStyle(container);
-      if (
-        (style.overflowY === "auto" || style.overflowY === "scroll") &&
-        container.scrollHeight > container.clientHeight
-      ) {
-        break;
-      }
-      container = container.parentElement;
-    }
-    if (container) {
-      const rowRect = row.getBoundingClientRect();
-      const boxRect = container.getBoundingClientRect();
-      container.scrollTop += rowRect.top - boxRect.top - (boxRect.height - rowRect.height) / 2;
-    } else {
-      row.scrollIntoView?.({ block: "center" });
-    }
-  }, [selectedUri, expanded]);
-
-  if (!tree) {
-    return <div className="grid h-full min-h-40 place-items-center text-xs text-muted-foreground">正在读取目录…</div>;
-  }
-  if (!tree.exists || !tree.entries.length) {
-    if (!emptyText) return <div className="h-full" aria-hidden="true" />;
-    return (
-      <div className="grid h-full min-h-40 place-items-center px-6 text-center text-xs leading-5 text-muted-foreground">
-        {emptyText}
-      </div>
-    );
-  }
-
-  function toggle(uri: string) {
-    setExpanded((previous) => {
-      const next = new Set(previous);
-      if (next.has(uri)) next.delete(uri);
-      else next.add(uri);
-      return next;
-    });
-  }
-
-  function renderNode(node: TreeNode, depth: number): React.ReactNode {
-    const open = expanded.has(node.uri) || Boolean(query.trim());
-    const Icon = node.is_dir ? Folder : File;
-    return (
-      <div key={node.uri}>
-        <button
-          ref={selectedUri === node.uri ? selectedRowRef : undefined}
-          type="button"
-          role="treeitem"
-          aria-expanded={node.is_dir ? open : undefined}
-          title={node.uri}
-          className={cn(
-            "group flex min-h-8 w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs hover:bg-accent-soft/60",
-            selectedUri === node.uri && "bg-accent-soft text-accent",
-            node.is_dir && selectedDirectoryUri === node.uri && "ring-1 ring-inset ring-accent/45",
-          )}
-          style={{ paddingLeft: `${8 + depth * 16}px` }}
-          onClick={() => {
-            if (node.is_dir) toggle(node.uri);
-            onSelect(node);
-          }}
-        >
-          {node.is_dir
-            ? open ? <ChevronDown className="size-3 text-muted-soft" /> : <ChevronRight className="size-3 text-muted-soft" />
-            : <span className="w-3" />}
-          <Icon className={cn("size-3.5 shrink-0", node.is_dir ? "text-accent" : "text-slate-500")} />
-          <span className="min-w-0 flex-1 truncate font-medium">{node.name}</span>
-          {!node.is_dir && node.size != null && (
-            <span className="shrink-0 text-[10px] text-muted-soft">{formatBytes(node.size)}</span>
-          )}
-        </button>
-        {node.is_dir && open && node.children.map((child) => renderNode(child, depth + 1))}
-      </div>
-    );
-  }
-
-  return (
-    <div className="h-full overflow-auto p-2" role="tree">
-      {nodes.length ? nodes.map((node) => renderNode(node, 0)) : (
-        <div className="grid min-h-40 place-items-center text-xs text-muted-foreground">没有匹配的文件</div>
-      )}
-    </div>
-  );
-}
-
 function taskLogLines(task: MiningTask | null): string[] {
   if (!task) return ["等待启动知识库挖掘任务…"];
   const lines: string[] = [];
@@ -557,6 +392,8 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>(initialWorkspaceTab);
   const [config, setConfig] = useState<MiningConfig | null>(null);
   const [account, setAccount] = useState("");
+  const [knowledgeSources, setKnowledgeSources] = useState<KnowledgeSource[]>([]);
+  const [sourceRoot, setSourceRoot] = useState("");
   const [wikiRoot, setWikiRoot] = useState("");
   const [wikiRoots, setWikiRoots] = useState<WikiRoot[]>([]);
   const [sourceTree, setSourceTree] = useState<TreeResponse | null>(null);
@@ -576,10 +413,11 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
   const [selectedTreeEntry, setSelectedTreeEntry] = useState<TreeEntry | null>(null);
   const [selectedDirectoryUri, setSelectedDirectoryUri] = useState("");
   const [treeQuery, setTreeQuery] = useState("");
+  const [treeSearchUnlocked, setTreeSearchUnlocked] = useState(false);
   const [selectedContent, setSelectedContent] = useState<KnowledgeContent | null>(null);
   const [editorValue, setEditorValue] = useState("");
   const [originalContent, setOriginalContent] = useState("");
-  const [editorMode, setEditorMode] = useState<EditorMode>("preview");
+  const [editorMode, setEditorMode] = useState<KnowledgeEditorMode>("preview");
   const [previewAnchor, setPreviewAnchor] = useState("");
   const [loadingContent, setLoadingContent] = useState(false);
   const [savingContent, setSavingContent] = useState(false);
@@ -595,20 +433,50 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const logRef = useRef<HTMLPreElement | null>(null);
 
-  const loadConfig = useCallback(async () => {
+  const loadConfig = useCallback(async (notifyFailure = true) => {
     try {
-      const next = await api<MiningConfig>("/api/knowledge-mining/config");
+      const [next, sourceRegistry] = await Promise.all([
+        api<MiningConfig>("/api/knowledge-mining/config"),
+        api<{ sources: KnowledgeSource[] }>("/api/mining/ov-sources"),
+      ]);
+      const nextKnowledgeSources = (sourceRegistry.sources || []).filter((source) => source.tags?.includes("knowledge"));
       setConfig(next);
+      setKnowledgeSources(nextKnowledgeSources);
       setSkillUri((previous) => previous || next.skill_uri);
       setWikiRoot((previous) => previous || next.wiki_root);
+      setSourceRoot((previous) => previous || next.source_root);
       setAccount((previous) => previous && next.accounts.includes(previous)
         ? previous
         : next.current || next.accounts[0] || "");
       if (next.error) toastErr("读取 OpenViking 账号失败", next.error);
     } catch (error: any) {
-      toastErr("加载知识库挖掘配置失败", error.message);
+      if (notifyFailure) toastErr("加载知识库挖掘配置失败", error.message);
     }
   }, []);
+
+  const accountKnowledgeSources = useMemo(
+    () => knowledgeSources.filter((source) => source.account === account),
+    [account, knowledgeSources],
+  );
+  const selectedKnowledgeSource = accountKnowledgeSources.find((source) => source.path === sourceRoot);
+  const selectedKnowledgeSourceId = selectedKnowledgeSource?.source_id || "";
+  const sourceBrowsable = Boolean(
+    selectedKnowledgeSource
+    && selectedKnowledgeSource.status !== "missing"
+    && selectedKnowledgeSource.status !== "unavailable",
+  );
+
+  useEffect(() => {
+    if (!account || !config) return;
+    setSourceRoot((previous) => {
+      if (accountKnowledgeSources.some((source) => source.path === previous)) return previous;
+      return accountKnowledgeSources.find((source) => source.default)?.path
+        || accountKnowledgeSources.find((source) => source.path === config.source_root)?.path
+        || accountKnowledgeSources.find((source) => source.ready)?.path
+        || accountKnowledgeSources[0]?.path
+        || "";
+    });
+  }, [account, accountKnowledgeSources, config]);
 
   const loadWikiRoots = useCallback(async () => {
     if (!account || !config) return;
@@ -651,14 +519,14 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
   }, [account, wikiRoot]);
 
   const loadWorkspace = useCallback(async (notify = false) => {
-    if (!account || !wikiRoot) return;
+    if (!account || !wikiRoot || !sourceRoot || !selectedKnowledgeSourceId) return;
     setLoading(true);
     try {
       const [source, wiki, taskList, compileCapabilities] = await Promise.all([
-        api<TreeResponse>(`/api/knowledge-mining/tree?account=${encodeURIComponent(account)}&kind=source`),
+        api<TreeResponse>(`/api/knowledge-mining/tree?account=${encodeURIComponent(account)}&kind=source&source_root=${encodeURIComponent(sourceRoot)}`),
         api<TreeResponse>(`/api/knowledge-mining/tree?account=${encodeURIComponent(account)}&kind=wiki&wiki_root=${encodeURIComponent(wikiRoot)}`),
         api<{ tasks: MiningTask[] }>(`/api/knowledge-mining/tasks?account=${encodeURIComponent(account)}`),
-        api<CompileCapabilities>(`/api/knowledge-mining/capabilities?account=${encodeURIComponent(account)}`),
+        api<CompileCapabilities>(`/api/knowledge-mining/capabilities?account=${encodeURIComponent(account)}&source_uri=${encodeURIComponent(sourceRoot)}`),
       ]);
       setSourceTree(source);
       setWikiTree(wiki);
@@ -671,7 +539,7 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
     } finally {
       setLoading(false);
     }
-  }, [account, wikiRoot]);
+  }, [account, selectedKnowledgeSourceId, sourceRoot, wikiRoot]);
 
   const loadTask = useCallback(async () => {
     if (!account || !selectedTaskId) {
@@ -698,7 +566,7 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
           api<TreeResponse>(
             `/api/knowledge-mining/tree?account=${encodeURIComponent(account)}&kind=wiki&wiki_root=${encodeURIComponent(wikiRoot)}`,
           ),
-          api<CompileCapabilities>(`/api/knowledge-mining/capabilities?account=${encodeURIComponent(account)}`),
+          api<CompileCapabilities>(`/api/knowledge-mining/capabilities?account=${encodeURIComponent(account)}&source_uri=${encodeURIComponent(sourceRoot)}`),
         ]);
         setWikiTree(wiki);
         setCapabilities(compileCapabilities);
@@ -706,11 +574,13 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
     } catch (error: any) {
       toastErr("读取挖掘任务失败", error.message);
     }
-  }, [account, selectedTaskId, wikiRoot]);
+  }, [account, selectedTaskId, sourceRoot, wikiRoot]);
 
   useEffect(() => {
     if (!active) return;
-    void loadConfig();
+    void loadConfig(true);
+    const timer = window.setInterval(() => void loadConfig(false), 15000);
+    return () => window.clearInterval(timer);
   }, [active, loadConfig]);
 
   useEffect(() => {
@@ -726,7 +596,7 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
   }, [active, account, loadWikiRoots]);
 
   useEffect(() => {
-    if (!active || !account || !wikiRoot) return;
+    if (!active || !account || !wikiRoot || !sourceRoot || !selectedKnowledgeSourceId) return;
     setSourceTree(null);
     setWikiTree(null);
     setTasks([]);
@@ -745,7 +615,7 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
     setWikiGraphError("");
     setFileNavigation({ entries: [], index: -1 });
     void loadWorkspace(false);
-  }, [active, account, loadWorkspace, wikiRoot]);
+  }, [active, account, loadWorkspace, selectedKnowledgeSourceId, sourceRoot, wikiRoot]);
 
   useEffect(() => {
     if (!active || workspaceTab !== "wiki" || wikiViewMode !== "graph" || wikiGraph || loadingWikiGraph) return;
@@ -812,7 +682,7 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
     setLoadingContent(true);
     try {
       const response = await api<KnowledgeContent>(
-        `/api/knowledge-mining/content?account=${encodeURIComponent(account)}&kind=${kind}&uri=${encodeURIComponent(entry.uri)}&wiki_root=${encodeURIComponent(requestWikiRoot)}`,
+        `/api/knowledge-mining/content?account=${encodeURIComponent(account)}&kind=${kind}&uri=${encodeURIComponent(entry.uri)}&wiki_root=${encodeURIComponent(requestWikiRoot)}&source_root=${encodeURIComponent(sourceRoot)}`,
       );
       if (options.activateWorkspace) {
         setWorkspaceTab(kind);
@@ -876,7 +746,7 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
     const destination = resolveKnowledgeHref(
       href,
       selectedContent,
-      config.source_root,
+      sourceRoot,
       wikiRoot,
       sourceTree,
       wikiTree,
@@ -904,6 +774,7 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
           kind: selectedContent.kind,
           uri: selectedContent.uri,
           wiki_root: wikiRoot,
+          source_root: sourceRoot,
           content: editorValue,
           original_content: originalContent,
         }),
@@ -958,7 +829,7 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
       }
       const response = await uploadJson<{ file_count: number; parent_uri: string }>(
         "/api/knowledge-mining/upload",
-        { account, kind: activeKind, wiki_root: wikiRoot, parent_uri: parentUri, files: payload },
+        { account, kind: activeKind, wiki_root: wikiRoot, source_root: sourceRoot, parent_uri: parentUri, files: payload },
         (ratio) => setUploadProgress({
           percent: ratio >= 1 ? 85 : 35 + Math.round(ratio * 45),
           label: ratio >= 1 ? "OpenViking 正在转换并写入" : "正在上传",
@@ -1002,6 +873,7 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
           account,
           kind: activeKind,
           wiki_root: wikiRoot,
+          source_root: sourceRoot,
           uri: entry.uri,
         }),
       });
@@ -1028,7 +900,7 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
   }
 
   async function startMining() {
-    if (!account || !config) return;
+    if (!account || !config || !selectedKnowledgeSource?.ready) return;
     setStarting(true);
     try {
       const response = await api<{ task_id: string }>("/api/knowledge-mining/tasks", {
@@ -1036,7 +908,7 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           account,
-          source_uri: config.source_root,
+          source_uri: sourceRoot,
           target_uri: config.wiki_root,
           skill_uri: skillUri,
           instruction: instruction.trim(),
@@ -1102,7 +974,7 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
 
   const activeKind: "source" | "wiki" = workspaceTab === "wiki" ? "wiki" : "source";
   const activeTree = activeKind === "source" ? sourceTree : wikiTree;
-  const activeRoot = activeKind === "source" ? config?.source_root : wikiRoot;
+  const activeRoot = activeKind === "source" ? sourceRoot : wikiRoot;
   const activeUploadParent = selectedDirectoryUri || activeRoot || "";
 
   return (
@@ -1129,7 +1001,7 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
                 </select>
               </div>
               <div className="min-w-0 text-[11px] leading-5 text-muted-foreground">
-                <div className="truncate">{config?.endpoint || "尚未配置 OpenViking Endpoint"}</div>
+                <div className="truncate" title={config?.endpoint || "尚未配置 OpenViking Endpoint"}>{config?.endpoint || "尚未配置 OpenViking Endpoint"}</div>
                 <div className="flex items-center gap-2">
                   <Pill tone={config?.account_source === "openviking" ? "green" : "amber"}>
                     {config?.account_source === "openviking" ? "账号已同步" : "本地配置"}
@@ -1141,7 +1013,7 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
             ) : (
               <div className="min-w-0">
                 <div className="text-[11px] font-bold text-muted-foreground">OpenViking 账号</div>
-                <div className="truncate text-sm font-semibold text-foreground">{account || "尚未选择"}</div>
+                <div className="truncate text-sm font-semibold text-foreground" title={account || "尚未选择"}>{account || "尚未选择"}</div>
               </div>
             )}
           </div>
@@ -1152,6 +1024,7 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
             size="sm"
             disabled={loading || loadingWikiGraph || !account}
             onClick={() => {
+              void loadConfig(false);
               void loadWorkspace(true);
               if (workspaceTab === "wiki" && wikiViewMode === "graph") void loadWikiGraph();
             }}
@@ -1290,7 +1163,6 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
                     {activeKind === "source" ? "知识源" : "知识库"}
                   </span>
                 )}
-                count={activeTree?.exists ? `${activeTree.entries.length} 项` : activeKind === "wiki" ? "尚未生成" : undefined}
                 extra={(
                   <div className="flex items-center gap-1.5">
                     <input
@@ -1310,10 +1182,10 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
                       {...({ webkitdirectory: "", directory: "" } as any)}
                       onChange={(event) => void uploadFiles(Array.from(event.target.files || []))}
                     />
-                    <Button variant="outline" size="sm" disabled={uploading} title={`上传文件到${activeKind === "source" ? "知识源" : "知识库"}`} onClick={() => fileInputRef.current?.click()}>
+                    <Button variant="outline" size="sm" disabled={uploading || (activeKind === "source" && !sourceBrowsable)} title={`上传文件到${activeKind === "source" ? "知识源" : "知识库"}`} onClick={() => fileInputRef.current?.click()}>
                       <Upload className="size-3.5" /> 文件
                     </Button>
-                    <Button variant="outline" size="sm" disabled={uploading} title={`上传文件夹到${activeKind === "source" ? "知识源" : "知识库"}`} onClick={() => folderInputRef.current?.click()}>
+                    <Button variant="outline" size="sm" disabled={uploading || (activeKind === "source" && !sourceBrowsable)} title={`上传文件夹到${activeKind === "source" ? "知识源" : "知识库"}`} onClick={() => folderInputRef.current?.click()}>
                       <FolderInput className="size-3.5" /> 文件夹
                     </Button>
                     <Button
@@ -1331,27 +1203,53 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
               >
                 <div className="flex min-h-0 flex-1 flex-col">
                   <div className="border-b border-line bg-background/60 px-3 py-2">
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        className={cn(
-                          "shrink-0 rounded-md border px-2 py-1 text-[10px] font-bold",
-                          activeUploadParent === activeRoot
-                            ? "border-accent/50 bg-accent-soft text-accent"
-                            : "border-border bg-white text-muted-foreground hover:text-foreground",
-                        )}
-                        onClick={() => {
-                          setSelectedDirectoryUri("");
-                          if (selectedTreeEntry?.is_dir) setSelectedTreeEntry(null);
-                        }}
-                      >
-                        根目录
-                      </button>
-                      <span className="shrink-0 text-[10px] text-muted-foreground">上传到</span>
-                      <code className="block min-w-0 flex-1 truncate text-[11px] font-semibold text-foreground">
-                        {activeUploadParent}
-                      </code>
-                    </div>
+                    {activeKind === "source" ? (
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="shrink-0 text-[10px] font-bold text-muted-foreground">知识源</span>
+                          <select
+                            aria-label="知识库知识源"
+                            value={sourceRoot}
+                            onChange={(event) => setSourceRoot(event.target.value)}
+                            className="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-[11px] font-semibold"
+                            title={sourceRoot}
+                          >
+                            {!accountKnowledgeSources.length && <option value="">暂无知识库知识源</option>}
+                            {accountKnowledgeSources.map((source) => (
+                              <option key={source.source_id || source.path} value={source.path}>
+                                {source.default ? "默认 · " : ""}{source.name || source.path.split("/").pop()}
+                                {source.status === "missing" ? "（路径已删除）" : source.status === "unavailable" ? "（暂不可用）" : source.status === "empty" ? "（空目录）" : `（${source.document_count} 个文件）`}
+                              </option>
+                            ))}
+                          </select>
+                          {selectedKnowledgeSource && (
+                            <Pill tone={selectedKnowledgeSource.status === "missing" ? "red" : selectedKnowledgeSource.ready ? "green" : "amber"}>
+                              {selectedKnowledgeSource.status === "missing" ? "路径已删除" : selectedKnowledgeSource.status === "unavailable" ? "暂不可用" : selectedKnowledgeSource.ready ? "可挖掘" : "空目录"}
+                            </Pill>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          className={cn(
+                            "shrink-0 rounded-md border px-2 py-1 text-[10px] font-bold",
+                            activeUploadParent === activeRoot
+                              ? "border-accent/50 bg-accent-soft text-accent"
+                              : "border-border bg-white text-muted-foreground hover:text-foreground",
+                          )}
+                          onClick={() => {
+                            setSelectedDirectoryUri("");
+                            if (selectedTreeEntry?.is_dir) setSelectedTreeEntry(null);
+                          }}
+                        >
+                          知识库
+                        </button>
+                        <span className="shrink-0 text-[10px] text-muted-foreground">上传到</span>
+                        <code title={activeUploadParent} className="block min-w-0 flex-1 truncate text-[11px] font-semibold text-foreground">{activeUploadParent}</code>
+                      </div>
+                    )}
                     {uploadProgress && (
                       <div className="mt-2" aria-live="polite">
                         <div
@@ -1369,7 +1267,7 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
                         </div>
                         <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
                           <span className="font-semibold text-foreground">{uploadProgress.label}</span>
-                          {uploadProgress.currentFile && <span className="min-w-0 flex-1 truncate">{uploadProgress.currentFile}</span>}
+                          {uploadProgress.currentFile && <span className="min-w-0 flex-1 truncate" title={uploadProgress.currentFile}>{uploadProgress.currentFile}</span>}
                           <span className="ml-auto shrink-0">
                             {uploadProgress.completedFiles}/{uploadProgress.totalFiles} · {uploadProgress.percent}%
                           </span>
@@ -1381,6 +1279,12 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
                     <div className="flex h-8 items-center gap-2 rounded-lg border border-input bg-white px-2.5">
                       <Search className="size-3.5 text-muted-soft" />
                       <input
+                        type="search"
+                        name="knowledge-workspace-file-search"
+                        autoComplete="one-time-code"
+                        data-lpignore="true"
+                        readOnly={!treeSearchUnlocked}
+                        onFocus={() => setTreeSearchUnlocked(true)}
                         value={treeQuery}
                         onChange={(event) => setTreeQuery(event.target.value)}
                         className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-soft"
@@ -1391,7 +1295,13 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
                   <div className="min-h-0 flex-1">
                     <TreeList
                       tree={activeTree}
-                      emptyText={activeKind === "source" ? "暂无知识源，可上传文件或文件夹。" : "暂无知识库文件，可上传文件或执行知识库挖掘。"}
+                      emptyText={activeKind === "source"
+                        ? selectedKnowledgeSource?.status === "missing"
+                          ? "该知识源路径已从 OpenViking 删除，已禁止用于挖掘。请在“知识源”页面修复或选择其他目录。"
+                          : selectedKnowledgeSource?.status === "unavailable"
+                            ? "暂时无法检查该知识源，已禁止用于挖掘。请稍后刷新。"
+                            : "该知识源为空，可上传文件或文件夹。"
+                        : "暂无知识库文件，可上传文件或执行知识库挖掘。"}
                       selectedUri={selectedTreeEntry?.uri || (selectedContent?.kind === activeKind ? selectedContent.uri : "")}
                       selectedDirectoryUri={activeUploadParent}
                       query={treeQuery}
@@ -1409,7 +1319,7 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
               </Panel>
 
               <Panel
-                className="flex min-h-0 flex-col"
+                className="!mt-0 flex min-h-0 flex-col"
                 title={(
                   <span className="flex min-w-0 items-center gap-2">
                     <span className="flex shrink-0 items-center rounded-md border border-border bg-surface-subtle p-0.5" role="group" aria-label="文件浏览历史">
@@ -1435,46 +1345,26 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
                       </button>
                     </span>
                     <File className="size-4 shrink-0 text-accent" />
-                    <span className="truncate">{selectedContent?.name || "文件内容"}</span>
+                    <span className="truncate" title={selectedContent?.name || "文件内容"}>{selectedContent?.name || "文件内容"}</span>
                   </span>
                 )}
                 extra={selectedContent ? (
-                  <div className="flex items-center gap-1.5">
-                    {selectedIsMarkdown && (
-                      <div className="flex rounded-lg border border-border bg-surface-subtle p-0.5">
-                        <button
-                          type="button"
-                          className={cn("flex h-7 items-center gap-1 rounded-md px-2 text-[11px] font-semibold", editorMode === "edit" && "bg-white shadow-sm")}
-                          onClick={() => setEditorMode("edit")}
-                        >
-                          <PencilLine className="size-3" /> 编辑
-                        </button>
-                        <button
-                          type="button"
-                          className={cn("flex h-7 items-center gap-1 rounded-md px-2 text-[11px] font-semibold", editorMode === "preview" && "bg-white shadow-sm")}
-                          onClick={() => setEditorMode("preview")}
-                        >
-                          <Eye className="size-3" /> 预览
-                        </button>
-                      </div>
-                    )}
-                    <Button variant="outline" size="sm" onClick={() => setVersionPanelOpen(true)}>
-                      <History className="size-3.5" />
-                      版本
-                    </Button>
-                    {selectedContent.editable ? (
-                      <Button size="sm" disabled={!contentDirty || savingContent} onClick={() => void saveFile()}>
-                        {savingContent ? <LoaderCircle className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
-                        {savingContent ? "保存中" : "保存"}
-                      </Button>
-                    ) : <Pill tone="gray">只读</Pill>}
-                  </div>
+                  <KnowledgeFileEditorToolbar
+                    isMarkdown={selectedIsMarkdown}
+                    mode={editorMode}
+                    onModeChange={setEditorMode}
+                    onVersion={() => setVersionPanelOpen(true)}
+                    editable={selectedContent.editable}
+                    dirty={contentDirty}
+                    saving={savingContent}
+                    onSave={() => void saveFile()}
+                  />
                 ) : undefined}
               >
                 <div className="flex min-h-0 flex-1 flex-col">
                   {selectedContent && (
                     <div className="flex items-center gap-2 border-b border-line bg-background/60 px-3 py-2 text-[11px] text-muted-foreground">
-                      <code className="min-w-0 flex-1 truncate">{selectedContent.uri}</code>
+                      <code className="min-w-0 flex-1 truncate" title={selectedContent.uri}>{selectedContent.uri}</code>
                       {contentDirty && <span className="shrink-0 font-semibold text-accent">未保存</span>}
                     </div>
                   )}
@@ -1622,11 +1512,11 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
                   <div className="grid grid-cols-2 gap-2">
                     <div className="rounded-xl border border-border bg-surface-subtle p-3">
                       <div className="text-[10px] font-bold uppercase tracking-wider text-accent">FROM</div>
-                      <code className="mt-1 block truncate text-[11px] font-semibold">{config?.source_root}</code>
+                      <code className="mt-1 block truncate text-[11px] font-semibold" title={sourceRoot || "尚未选择知识库知识源"}>{sourceRoot || "尚未选择知识库知识源"}</code>
                     </div>
                     <div className="rounded-xl border border-border bg-surface-subtle p-3">
                       <div className="text-[10px] font-bold uppercase tracking-wider text-accent">TO</div>
-                      <code className="mt-1 block truncate text-[11px] font-semibold">{config?.wiki_root}</code>
+                      <code className="mt-1 block truncate text-[11px] font-semibold" title={config?.wiki_root}>{config?.wiki_root}</code>
                     </div>
                   </div>
                   <div>
@@ -1643,7 +1533,7 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
                     <div className="flex gap-2">
                       <Button
                         className="flex-1"
-                        disabled={starting || running || !sourceTree?.entries.length || !capabilities?.can_create}
+                        disabled={starting || running || !selectedKnowledgeSource?.ready || !sourceTree?.entries.length || !capabilities?.can_create}
                         onClick={() => void startMining()}
                       >
                         {starting ? <LoaderCircle className="size-4 animate-spin" /> : <Play className="size-4" />}
@@ -1740,66 +1630,12 @@ export default function KnowledgeBaseMiningView({ active }: { active: boolean })
         </div>
       )}
 
-      {versionPanelOpen && selectedContent && (
-        <div
-          className="fixed inset-0 z-[80] flex justify-end bg-black/45"
-          role="dialog"
-          aria-modal="true"
-          aria-label={`${selectedContent.name} 版本历史`}
-          onMouseDown={() => setVersionPanelOpen(false)}
-        >
-          <aside
-            className="flex h-full w-[min(920px,78vw)] min-w-[640px] flex-col bg-white shadow-2xl"
-            onMouseDown={(event) => event.stopPropagation()}
-          >
-            <header className="flex h-[68px] shrink-0 items-center gap-3 border-b border-line px-5">
-              <span className="grid size-9 place-items-center rounded-xl bg-surface-subtle text-accent">
-                <History className="size-5" />
-              </span>
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-base font-bold">版本历史 · {selectedContent.name}</div>
-                <code className="mt-0.5 block truncate text-[10px] text-muted-foreground">{selectedContent.uri}</code>
-              </div>
-              <button
-                type="button"
-                className="grid size-9 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-surface-subtle hover:text-foreground"
-                aria-label="关闭版本历史"
-                onClick={() => setVersionPanelOpen(false)}
-              >
-                <X className="size-5" />
-              </button>
-            </header>
-
-            <div className="grid min-h-0 flex-1 grid-cols-[260px_minmax(0,1fr)]">
-              <section className="flex min-h-0 flex-col border-r border-line bg-[#fbfcfe]">
-                <div className="border-b border-line px-5 py-3 text-xs font-bold">版本记录</div>
-                <div className="grid min-h-0 flex-1 place-items-center px-5 text-center">
-                  <div>
-                    <History className="mx-auto mb-3 size-8 text-muted-soft" />
-                    <div className="text-xs font-semibold text-foreground">暂无版本记录</div>
-                  </div>
-                </div>
-              </section>
-
-              <section className="flex min-h-0 flex-col">
-                <div className="border-b border-line px-6 py-3">
-                  <div className="text-xs font-bold">版本差异</div>
-                  <div className="mt-0.5 text-[10px] text-muted-foreground">选择两个版本后查看文件变更</div>
-                </div>
-                <div className="grid min-h-0 flex-1 place-items-center px-8 text-center">
-                  <div className="max-w-sm">
-                    <GitCompareArrows className="mx-auto mb-4 size-10 text-muted-soft" />
-                    <div className="text-sm font-bold text-foreground">版本管理暂不可用</div>
-                    <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                      OpenViking 暂未提供文件版本接口。接口可用后，这里将显示版本列表和版本差异。
-                    </p>
-                  </div>
-                </div>
-              </section>
-            </div>
-          </aside>
-        </div>
-      )}
+      <KnowledgeVersionPanel
+        open={versionPanelOpen && Boolean(selectedContent)}
+        name={selectedContent?.name || ""}
+        uri={selectedContent?.uri || ""}
+        onClose={() => setVersionPanelOpen(false)}
+      />
     </div>
   );
 }

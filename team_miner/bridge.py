@@ -26,6 +26,7 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Optional
 
@@ -44,7 +45,10 @@ from .ov_compile_mining import (
     SKILL_BODY,
     SKILL_NAME,
     SKILL_URI,
+    SOURCE_TAG_SKILL,
     OvSkillMiningRepository,
+    normalize_source_tags,
+    source_has_tag,
     utc_now,
     validate_descendant,
     validate_resource_uri,
@@ -111,6 +115,120 @@ class SkillMinerBridgeMixin:
             self._ov_skill_mining_locks = locks
         return locks.setdefault(job_id, asyncio.Lock())
 
+    @staticmethod
+    def _ov_skill_refresh_due(job: dict) -> bool:
+        raw = str(job.get("ov_next_retry_at") or "").strip()
+        if not raw:
+            return True
+        try:
+            retry_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return True
+        return retry_at <= datetime.now(timezone.utc)
+
+    def _schedule_ov_skill_job_refresh(self, job: dict, *, force: bool = False) -> None:
+        """Start at most one remote refresh per job without delaying API reads."""
+        if (
+            job.get("engine") != "ov_compile"
+            or job.get("status") not in ACTIVE_JOB_STATES
+            or not job.get("ov_task_id")
+            or (not force and not self._ov_skill_refresh_due(job))
+        ):
+            return
+        tasks = getattr(self, "_ov_skill_refresh_tasks", None)
+        if tasks is None:
+            tasks = {}
+            self._ov_skill_refresh_tasks = tasks
+        existing = tasks.get(job["job_id"])
+        if existing is not None and not existing.done():
+            return
+
+        async def refresh() -> None:
+            try:
+                await self._refresh_ov_skill_job(job)
+            except Exception:
+                logger.exception("unexpected OV Skill mining refresh failure for %s", job["job_id"])
+
+        create_task = getattr(self, "_safe_create_task", None)
+        task = create_task(refresh()) if callable(create_task) else asyncio.create_task(refresh())
+        tasks[job["job_id"]] = task
+
+        def forget(completed: asyncio.Task) -> None:
+            if tasks.get(job["job_id"]) is completed:
+                tasks.pop(job["job_id"], None)
+
+        task.add_done_callback(forget)
+
+    @staticmethod
+    def _ov_task_observability(job: dict, task: dict, stage: str, observed_at: str) -> dict:
+        """Build a bounded, payload-free timeline from OV task observations."""
+        history = [dict(item) for item in job.get("ov_stage_history") or [] if isinstance(item, dict)]
+        if stage:
+            if history and history[-1].get("stage") == stage:
+                history[-1]["last_seen_at"] = observed_at
+                history[-1]["observations"] = int(history[-1].get("observations") or 1) + 1
+            else:
+                history.append(
+                    {
+                        "stage": stage,
+                        "first_seen_at": observed_at,
+                        "last_seen_at": observed_at,
+                        "observations": 1,
+                    }
+                )
+        history = history[-64:]
+
+        timeline = [dict(item) for item in job.get("ov_event_timeline") or [] if isinstance(item, dict)]
+        raw_events = task.get("events") or []
+        if isinstance(raw_events, dict):
+            raw_events = list(raw_events.values())
+        for raw in raw_events if isinstance(raw_events, list) else []:
+            if not isinstance(raw, dict):
+                continue
+            label = str(
+                raw.get("stage")
+                or raw.get("event")
+                or raw.get("type")
+                or raw.get("name")
+                or raw.get("status")
+                or ""
+            ).strip()
+            at = str(
+                raw.get("timestamp")
+                or raw.get("created_at")
+                or raw.get("updated_at")
+                or raw.get("at")
+                or ""
+            ).strip()
+            status = str(raw.get("status") or "").strip()
+            if not label:
+                continue
+            event = {"label": label, "at": at, "status": status}
+            if event not in timeline:
+                timeline.append(event)
+        return {
+            "ov_stage_history": history,
+            "ov_event_timeline": timeline[-200:],
+            "ov_task_created_at": str(task.get("created_at") or job.get("ov_task_created_at") or ""),
+            "ov_task_started_at": str(task.get("started_at") or job.get("ov_task_started_at") or ""),
+            "ov_task_updated_at": str(task.get("updated_at") or job.get("ov_task_updated_at") or ""),
+        }
+
+    @staticmethod
+    def _elapsed_seconds(started_at: str, finished_at: str) -> float | None:
+        try:
+            start = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+            finish = datetime.fromisoformat(str(finished_at).replace("Z", "+00:00"))
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            if finish.tzinfo is None:
+                finish = finish.replace(tzinfo=timezone.utc)
+            return round(max(0.0, (finish - start).total_seconds()), 3)
+        except (TypeError, ValueError):
+            return None
+
     async def _ov_source_detail(self, record: dict) -> dict:
         account = await asyncio.to_thread(self._knowledge_account, record.get("account"))
         uri = validate_resource_uri(record.get("uri"))
@@ -125,6 +243,8 @@ class SkillMinerBridgeMixin:
             "path": uri,
             "uri": uri,
             "name": str(record.get("name") or uri.rsplit("/", 1)[-1]),
+            "tags": normalize_source_tags(record.get("tags"), default=(SOURCE_TAG_SKILL,)),
+            "default": bool(record.get("default")),
             "document_count": len(files),
             "total_bytes": sum(int(entry.get("size") or 0) for entry in files),
             "ready": status == "ready",
@@ -192,14 +312,43 @@ class SkillMinerBridgeMixin:
             job = await asyncio.to_thread(repository.get_job, job["job_id"])
             if job.get("status") not in ACTIVE_JOB_STATES:
                 return await asyncio.to_thread(repository.public_job, job, detail=detail)
-            task = await self._knowledge_request(
-                str(job.get("account") or ""),
-                "GET",
-                f"/api/v1/tasks/{task_id}",
-                params={"include_events": "true"},
+            attempt_at = utc_now()
+            job = await asyncio.to_thread(
+                repository.update_job,
+                job["job_id"],
+                ov_last_sync_attempt_at=attempt_at,
             )
+            previous_error = str(job.get("ov_sync_error") or "")
+            try:
+                task = await self._knowledge_request(
+                    str(job.get("account") or ""),
+                    "GET",
+                    f"/api/v1/tasks/{task_id}",
+                    timeout=5.0,
+                    params={"include_events": "true"},
+                )
+            except Exception as exc:
+                failures = int(job.get("ov_sync_failures") or 0) + 1
+                delay = min(300, 5 * (2 ** min(failures - 1, 6)))
+                detail_text = getattr(exc, "detail", None)
+                message = str(detail_text if detail_text is not None else exc)[:1000]
+                job = await asyncio.to_thread(
+                    repository.update_job,
+                    job["job_id"],
+                    ov_sync_error=message,
+                    ov_sync_failures=failures,
+                    ov_next_retry_at=(datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat(),
+                )
+                if message != previous_error or failures == 1 or failures & (failures - 1) == 0:
+                    repository.append_log(
+                        job["job_id"],
+                        f"远端状态暂不可用，将在 {delay} 秒后重试（本地任务记录已保留）：{message}",
+                    )
+                return await asyncio.to_thread(repository.public_job, job, detail=detail)
             status = str((task or {}).get("status") or "").lower() if isinstance(task, dict) else ""
             stage = str((task or {}).get("stage") or status) if isinstance(task, dict) else status
+            observed_at = utc_now()
+            previous_stage = str(job.get("ov_stage") or "")
             if status in {"accepted", "pending", "queued"}:
                 public_status = "queued"
                 phase = {"step1": "active", "step2": "idle", "step3": "idle"}
@@ -228,21 +377,49 @@ class SkillMinerBridgeMixin:
                 "ov_status": status,
                 "ov_stage": stage,
                 "error": error,
+                "ov_last_synced_at": utc_now(),
+                "ov_sync_error": "",
+                "ov_sync_failures": 0,
+                "ov_next_retry_at": "",
+                **self._ov_task_observability(job, task if isinstance(task, dict) else {}, stage, observed_at),
             }
+            elapsed = self._elapsed_seconds(str(job.get("started_at") or ""), observed_at)
+            if elapsed is not None:
+                changes["compile_observed_seconds"] = elapsed
             if public_status in {"succeeded", "failed", "stopped"}:
                 changes["finished_at"] = str((task or {}).get("updated_at") or utc_now())
             job = await asyncio.to_thread(repository.update_job, job["job_id"], **changes)
+            if stage and stage != previous_stage:
+                repository.append_log(
+                    job["job_id"],
+                    f"OpenViking 阶段切换：{previous_stage or '(未上报)'} -> {stage}（累计 {elapsed or 0:.3f} 秒）",
+                )
+            if job.get("ov_last_sync_attempt_at") and previous_error:
+                repository.append_log(job["job_id"], "OpenViking 连接已恢复，任务状态同步成功")
             if public_status == "succeeded" and not job.get("materialized"):
+                materialize_started = time.perf_counter()
+                materialize_started_at = utc_now()
+                job = await asyncio.to_thread(
+                    repository.update_job,
+                    job["job_id"],
+                    materialize_started_at=materialize_started_at,
+                    ov_stage="materializing",
+                )
                 try:
                     job = await self._materialize_ov_skill_job(job)
+                    materialize_seconds = round(time.perf_counter() - materialize_started, 3)
                     job = await asyncio.to_thread(
                         repository.update_job,
                         job["job_id"],
                         status="succeeded",
                         phase={"step1": "done", "step2": "done", "step3": "done"},
                         finished_at=job.get("finished_at") or utc_now(),
+                        materialize_finished_at=utc_now(),
+                        materialize_seconds=materialize_seconds,
                     )
+                    repository.append_log(job["job_id"], f"候选产物物化耗时 {materialize_seconds:.3f} 秒")
                 except Exception as exc:
+                    materialize_seconds = round(time.perf_counter() - materialize_started, 3)
                     repository.append_log(job["job_id"], f"候选产物物化失败：{exc}")
                     attempts = int(job.get("materialize_attempts") or 0) + 1
                     if attempts < 5:
@@ -254,6 +431,7 @@ class SkillMinerBridgeMixin:
                             finished_at="",
                             materialize_attempts=attempts,
                             ov_stage="materializing",
+                            materialize_seconds=materialize_seconds,
                         )
                         return await asyncio.to_thread(repository.public_job, job, detail=detail)
                     job = await asyncio.to_thread(
@@ -263,6 +441,7 @@ class SkillMinerBridgeMixin:
                         error=f"候选产物物化失败：{exc}",
                         finished_at=utc_now(),
                         materialize_attempts=attempts,
+                        materialize_seconds=materialize_seconds,
                     )
             return await asyncio.to_thread(repository.public_job, job, detail=detail)
 
@@ -645,6 +824,13 @@ class SkillMinerBridgeMixin:
                 return denied
             repository = owner._ov_skill_mining_repository()
             accounts = await asyncio.to_thread(owner._knowledge_accounts)
+            account_names = [str(item) for item in accounts.get("accounts") or [] if str(item)]
+            current_account = str(accounts.get("current") or "")
+            if current_account and current_account not in account_names:
+                account_names.append(current_account)
+            await asyncio.gather(
+                *(asyncio.to_thread(repository.ensure_default_knowledge_source, item) for item in account_names)
+            )
             records = await asyncio.to_thread(repository.list_source_records)
             source_probe_limit = asyncio.Semaphore(8)
 
@@ -660,6 +846,11 @@ class SkillMinerBridgeMixin:
                         "path": uri,
                         "uri": uri,
                         "name": record.get("name") or uri.rsplit("/", 1)[-1],
+                        "tags": normalize_source_tags(
+                            record.get("tags"),
+                            default=(SOURCE_TAG_SKILL,),
+                        ),
+                        "default": bool(record.get("default")),
                         "document_count": 0,
                         "total_bytes": 0,
                         "ready": False,
@@ -686,7 +877,7 @@ class SkillMinerBridgeMixin:
             sources = await asyncio.gather(*(describe(record) for record in records)) if records else []
             return JSONResponse(
                 {
-                    "accounts": accounts.get("accounts") or [],
+                    "accounts": account_names,
                     "current": accounts.get("current") or "",
                     "root_uri": "viking://resources",
                     "sources": sources,
@@ -726,9 +917,32 @@ class SkillMinerBridgeMixin:
                 selected,
                 uri,
                 name=str(body.get("name") or ""),
+                tags=body.get("tags"),
+                replace_tags=True,
             )
             source = await owner._ov_source_detail(record)
             return JSONResponse(status_code=201, content={"ok": True, "source": source})
+
+        @app.patch("/api/mining/ov-sources/{source_id}")
+        async def mining_ov_source_update(source_id: str, request: Request):
+            denied = _require_admin(request)
+            if denied is not None:
+                return denied
+            body = await request.json()
+            repository = owner._ov_skill_mining_repository()
+            try:
+                record = await asyncio.to_thread(
+                    repository.update_source,
+                    source_id,
+                    tags=body.get("tags"),
+                    name=body.get("name"),
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="知识源引用不存在") from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            source = await owner._ov_source_detail(record)
+            return JSONResponse({"ok": True, "source": source})
 
         @app.delete("/api/mining/ov-sources/{source_id}")
         async def mining_ov_source_remove(source_id: str, request: Request):
@@ -740,6 +954,8 @@ class SkillMinerBridgeMixin:
                 record = await asyncio.to_thread(repository.remove_source, source_id)
             except KeyError as exc:
                 raise HTTPException(status_code=404, detail="知识源引用不存在") from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
             # Removing a source unregisters only the reference.  The OV folder
             # is deliberately preserved; entries are deleted via /ov-entry.
             return JSONResponse({"ok": True, "source_id": source_id, "uri": record.get("uri")})
@@ -952,17 +1168,9 @@ class SkillMinerBridgeMixin:
                 return denied
             repository = owner._ov_skill_mining_repository()
             jobs = await asyncio.to_thread(repository.list_jobs)
-            refreshed = await asyncio.gather(
-                *(owner._refresh_ov_skill_job(job) for job in jobs),
-                return_exceptions=True,
-            )
-            public_jobs = []
-            for original, result in zip(jobs, refreshed):
-                if isinstance(result, Exception):
-                    repository.append_log(original["job_id"], f"刷新任务状态失败：{result}")
-                    public_jobs.append(await asyncio.to_thread(repository.public_job, original))
-                else:
-                    public_jobs.append(result)
+            for job in jobs:
+                owner._schedule_ov_skill_job_refresh(job)
+            public_jobs = [repository.public_job(job) for job in jobs]
             return JSONResponse({"jobs": public_jobs, "summary": repository.summary(public_jobs)})
 
         @app.post("/api/mining/jobs", status_code=201)
@@ -989,6 +1197,8 @@ class SkillMinerBridgeMixin:
             )
             if record is None:
                 raise HTTPException(status_code=400, detail="请先将所选 OpenViking 目录登记为知识源")
+            if not source_has_tag(record, SOURCE_TAG_SKILL):
+                raise HTTPException(status_code=409, detail="所选目录没有“Skill 知识源”标签")
             source = await owner._ov_source_detail(record)
             if source.get("status") == "missing":
                 raise HTTPException(status_code=409, detail="知识源目录已被删除，请重新选择")
@@ -1018,6 +1228,8 @@ class SkillMinerBridgeMixin:
                 job["job_id"],
                 source_snapshot=snapshot_uri,
                 output_uri=output_uri,
+                submission_started_at=utc_now(),
+                setup_timings={},
             )
             client = CompileClient(
                 endpoint=owner._knowledge_endpoint(),
@@ -1026,33 +1238,69 @@ class SkillMinerBridgeMixin:
                 api_key=owner._knowledge_api_key(),
                 agent_id="team-skill-evolver",
             )
+            setup_started = time.perf_counter()
+            setup_timings: dict[str, dict] = {}
+
+            async def measured(label: str, operation):
+                phase_started = time.perf_counter()
+                phase_started_at = utc_now()
+                state = "succeeded"
+                try:
+                    return await operation
+                except Exception:
+                    state = "failed"
+                    raise
+                finally:
+                    duration = round(time.perf_counter() - phase_started, 3)
+                    setup_timings[label] = {
+                        "started_at": phase_started_at,
+                        "finished_at": utc_now(),
+                        "duration_seconds": duration,
+                        "status": state,
+                    }
+                    await asyncio.to_thread(
+                        repository.update_job,
+                        job["job_id"],
+                        setup_timings=dict(setup_timings),
+                    )
+                    repository.append_log(job["job_id"], f"启动阶段 {label} 耗时 {duration:.3f} 秒（{state}）")
+
             try:
-                provisioned = await client.publish_shared_skill(
-                    skill_name=SKILL_NAME,
-                    skill_body=SKILL_BODY,
-                    version_message="Provision OV Compile SkillMiner v1",
+                provisioned = await measured(
+                    "publish_skill",
+                    client.publish_shared_skill(
+                        skill_name=SKILL_NAME,
+                        skill_body=SKILL_BODY,
+                        version_message="Provision OV Compile SkillMiner v1",
+                    ),
                 )
                 if not provisioned.get("ok"):
                     raise ValueError(str(provisioned.get("stderr") or "无法发布 SkillMiner Compile Skill"))
-                await client.mkdir(run_root)
-                copied = await client.copy_tree(source_uri=source_uri, target_uri=snapshot_uri)
+                await measured("mkdir_run_root", client.mkdir(run_root))
+                copied = await measured(
+                    "copy_source_snapshot",
+                    client.copy_tree(source_uri=source_uri, target_uri=snapshot_uri),
+                )
                 if not copied.get("ok"):
                     raise ValueError(str(copied.get("stderr") or "无法冻结知识源快照"))
-                accepted = await owner._knowledge_request(
-                    str(record.get("account") or ""),
-                    "POST",
-                    "/api/v1/compile",
-                    timeout=60.0,
-                    extra_headers={"Idempotency-Key": f"te-sm-{job['job_id']}"},
-                    json={
-                        "from": [snapshot_uri],
-                        "to": output_uri,
-                        "skill": SKILL_URI,
-                        "instruction": (
-                            f"任务名称：{name}。最多进行 {job['max_rounds']} 轮内部证据复核；"
-                            "只输出契约文件，不发布 Skill。"
-                        ),
-                    },
+                accepted = await measured(
+                    "submit_compile",
+                    owner._knowledge_request(
+                        str(record.get("account") or ""),
+                        "POST",
+                        "/api/v1/compile",
+                        timeout=60.0,
+                        extra_headers={"Idempotency-Key": f"te-sm-{job['job_id']}"},
+                        json={
+                            "from": [snapshot_uri],
+                            "to": output_uri,
+                            "skill": SKILL_URI,
+                            "instruction": (
+                                f"任务名称：{name}。最多进行 {job['max_rounds']} 轮内部证据复核；"
+                                "只输出契约文件，不发布 Skill。"
+                            ),
+                        },
+                    ),
                 )
                 task_id = str((accepted or {}).get("task_id") or "") if isinstance(accepted, dict) else ""
                 if not task_id:
@@ -1068,10 +1316,13 @@ class SkillMinerBridgeMixin:
                     started_at=utc_now(),
                     ov_task_id=task_id,
                     skill_revision=revision,
+                    submission_finished_at=utc_now(),
+                    submission_seconds=round(time.perf_counter() - setup_started, 3),
                 )
                 repository.append_log(job["job_id"], f"知识源快照已冻结：{snapshot_uri}")
                 repository.append_log(job["job_id"], f"OV Compile 已受理：{task_id}")
             except Exception as exc:
+                submission_seconds = round(time.perf_counter() - setup_started, 3)
                 repository.append_log(job["job_id"], f"启动失败：{exc}")
                 await asyncio.to_thread(
                     repository.update_job,
@@ -1079,6 +1330,8 @@ class SkillMinerBridgeMixin:
                     status="failed",
                     error=str(exc),
                     finished_at=utc_now(),
+                    submission_finished_at=utc_now(),
+                    submission_seconds=submission_seconds,
                 )
                 raise HTTPException(status_code=502, detail=f"启动 OV Compile 挖掘失败：{exc}") from exc
             return JSONResponse(
@@ -1096,8 +1349,9 @@ class SkillMinerBridgeMixin:
                 job = await asyncio.to_thread(repository.get_job, job_id)
             except KeyError as exc:
                 raise HTTPException(status_code=404, detail="挖掘任务不存在") from exc
-            refreshed = await owner._refresh_ov_skill_job(job, detail=True)
-            return JSONResponse({"ok": True, "job": refreshed})
+            owner._schedule_ov_skill_job_refresh(job)
+            public_job = await asyncio.to_thread(repository.public_job, job, detail=True)
+            return JSONResponse({"ok": True, "job": public_job})
 
         @app.post("/api/mining/jobs/{job_id}/stop")
         async def mining_job_stop(job_id: str, request: Request):
@@ -1119,6 +1373,7 @@ class SkillMinerBridgeMixin:
                     str(job.get("account") or ""),
                     "POST",
                     f"/api/v1/tasks/{task_id}/cancel",
+                    timeout=10.0,
                 )
             job = await asyncio.to_thread(repository.update_job, job_id, status="stopping", stop_reason="用户手动停止")
             return JSONResponse({"ok": True, "job": repository.public_job(job, detail=True)})

@@ -22,6 +22,32 @@ const mockedApi = vi.mocked(api);
 
 const sourceRoot = "viking://resources/agent_knowledge_workspace/input/raw_knowledge_base";
 const wikiRoot = "viking://resources/agent_knowledge_workspace/output/processed_knowledge";
+const alternateSourceRoot = "viking://resources/customer-support/source";
+const registeredSources = [
+  {
+    source_id: "default-source",
+    account: "demo",
+    path: sourceRoot,
+    name: "默认知识库知识源",
+    document_count: 1,
+    total_bytes: 100,
+    ready: true,
+    status: "ready",
+    tags: ["knowledge"],
+    default: true,
+  },
+  {
+    source_id: "alternate-source",
+    account: "demo",
+    path: alternateSourceRoot,
+    name: "客服知识",
+    document_count: 0,
+    total_bytes: 0,
+    ready: false,
+    status: "missing",
+    tags: ["skill", "knowledge"],
+  },
+];
 const current = {
   account: "demo",
   kind: "wiki" as const,
@@ -130,6 +156,7 @@ describe("resolveKnowledgeHref", () => {
 describe("KnowledgeBaseMiningView collapsible regions", () => {
   beforeEach(() => {
     mockedApi.mockReset();
+    window.history.replaceState({}, "", "/");
     Element.prototype.scrollIntoView = vi.fn();
   });
 
@@ -148,6 +175,7 @@ describe("KnowledgeBaseMiningView collapsible regions", () => {
           account_source: "openviking",
         };
       }
+      if (path === "/api/mining/ov-sources") return { sources: registeredSources };
       if (path.startsWith("/api/knowledge-mining/wiki-roots")) return { default: wikiRoot, roots: [] };
       if (path.includes("/api/knowledge-mining/tree") && path.includes("kind=source")) return sourceTree;
       if (path.includes("/api/knowledge-mining/tree") && path.includes("kind=wiki")) return wikiTree;
@@ -195,5 +223,44 @@ describe("KnowledgeBaseMiningView collapsible regions", () => {
     fireEvent.click(backlinksToggle);
     expect(backlinksToggle).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByText("referrer.md")).not.toBeInTheDocument();
+  });
+
+  it("switches registered Knowledge source roots and disables a deleted source", async () => {
+    mockedApi.mockImplementation(async (path: string) => {
+      if (path === "/api/knowledge-mining/config") {
+        return {
+          accounts: ["demo"],
+          current: "demo",
+          source_root: sourceRoot,
+          wiki_root: wikiRoot,
+          skill_uri: "viking://agent/skills/llm-wiki",
+          endpoint: "http://openviking.test",
+          account_source: "openviking",
+        };
+      }
+      if (path === "/api/mining/ov-sources") return { sources: registeredSources };
+      if (path.startsWith("/api/knowledge-mining/wiki-roots")) return { default: wikiRoot, roots: [] };
+      if (path.includes("/api/knowledge-mining/tree") && path.includes("kind=source")) {
+        if (path.includes(encodeURIComponent(alternateSourceRoot))) {
+          return { ...sourceTree, root_uri: alternateSourceRoot, exists: false, entries: [] };
+        }
+        return sourceTree;
+      }
+      if (path.includes("/api/knowledge-mining/tree") && path.includes("kind=wiki")) return wikiTree;
+      if (path.startsWith("/api/knowledge-mining/tasks?")) return { tasks: [] };
+      if (path.startsWith("/api/knowledge-mining/capabilities?")) {
+        return { account: "demo", configured: true, can_create: true };
+      }
+      throw new Error(`Unexpected API call: ${path}`);
+    });
+
+    render(<KnowledgeBaseMiningView active />);
+
+    const sourceSelector = await screen.findByRole("combobox", { name: "知识库知识源" });
+    fireEvent.change(sourceSelector, { target: { value: alternateSourceRoot } });
+    expect(await screen.findByText("该知识源路径已从 OpenViking 删除，已禁止用于挖掘。请在“知识源”页面修复或选择其他目录。")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("tab", { name: "挖掘" }));
+    expect(screen.getByRole("button", { name: "知识库挖掘" })).toBeDisabled();
   });
 });

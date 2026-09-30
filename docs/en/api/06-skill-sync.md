@@ -16,7 +16,7 @@ Skill Sync is used to synchronize team Skills published/rolled back by teamEvolv
 Push mode supports idempotent delivery (`Idempotency-Key` header), failure retry, and acknowledgment verification. Agents must return version numbers and hash verification results for each Skill in the response; teamEvolver marks sync as successful only after verifying matches.
 
 Code implementation: `teamEvolver/integrations/skill_sync_adapters.py`
-Skill change delivery: `teamEvolver/skills/mutations.py` (SkillMutationService)
+Skill change delivery: `team_skills/library/mutations.py` (SkillMutationService)
 Lightweight snapshot endpoint: `teamEvolver/proxy/skills_admin.py:511` (`/sync/skills`)
 
 ## 2. Interface and Parameter Specification

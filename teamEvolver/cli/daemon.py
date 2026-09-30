@@ -94,7 +94,7 @@ def _ensure_daemon_not_running():
     )
 
 
-def _wait_for_daemon_ready(proc, port: int, log_path: Path, timeout_s: float = 15.0):
+def _wait_for_daemon_ready(proc, port: int, log_path: Path, timeout_s: float = 60.0):
     import time
 
     deadline = time.monotonic() + timeout_s
@@ -109,7 +109,11 @@ def _wait_for_daemon_ready(proc, port: int, log_path: Path, timeout_s: float = 1
     raise click.ClickException(f"teamEvolver daemon did not become healthy in time. Check logs: {log_path}")
 
 
-def _daemon_ready_timeout_seconds(default: float = 15.0) -> float:
+def _daemon_ready_timeout_seconds(default: float = 60.0) -> float:
+    # When OpenViking is unreachable, startup deliberately waits for the
+    # remote probes to time out before enabling LocalObjectStore fallback.
+    # Keep the daemon health window longer than those bounded probes so a
+    # healthy fallback startup is not mistaken for a hung process.
     raw = str(os.environ.get("TEAMEVOLVER_DAEMON_READY_TIMEOUT_S", "")).strip()
     if not raw:
         return default

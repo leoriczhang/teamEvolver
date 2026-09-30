@@ -52,8 +52,8 @@ export type MinePage = "overview" | "sources" | "jobs";
 
 const PAGE_META: Record<MinePage, { title: string; description: string }> = {
   overview: { title: "挖掘总览", description: "查看知识源、挖掘任务与产物编译状态，快速掌握 SkillMiner 当前工作负载。" },
-  sources: { title: "知识源", description: "选择 OpenViking 中的目录作为 Skill 挖掘知识源；上传不会覆盖同名文件，并可在同一界面删除、查看和编辑文件。" },
-  jobs: { title: "挖掘任务", description: "并行创建和跟踪挖掘任务；任务完成后可审核、编辑产物并提交进化。" },
+  sources: { title: "知识源", description: "统一登记 OpenViking 目录，并标记为 Skill 知识源、知识库知识源或同时用于两种挖掘；上传不会覆盖同名文件。" },
+  jobs: { title: "Skill 挖掘", description: "从标记为 Skill 知识源的目录创建和跟踪挖掘任务；完成后可审核、编辑产物并提交进化。" },
 };
 
 // ---- Backend types (subset of SkillMiner /api/config & SSE events) -------- //
@@ -86,6 +86,8 @@ interface InputSource {
   ready: boolean;
   status?: "ready" | "empty" | "missing" | string;
   error?: string;
+  tags?: Array<"skill" | "knowledge" | string>;
+  default?: boolean;
   ingestion?: SourceIngestionStatus;
 }
 
@@ -167,6 +169,32 @@ interface MiningJob {
   } | null;
   knowledge_supplements?: KnowledgeSupplementRound[];
   artifact_quality?: MiningArtifactQuality | null;
+  engine?: string;
+  ov_status?: string;
+  ov_stage?: string;
+  ov_last_synced_at?: string;
+  ov_last_sync_attempt_at?: string;
+  ov_sync_error?: string;
+  ov_sync_failures?: number;
+  ov_next_retry_at?: string;
+  remote_state_stale?: boolean;
+  setup_timings?: Record<string, {
+    started_at: string;
+    finished_at: string;
+    duration_seconds: number;
+    status: "succeeded" | "failed" | string;
+  }>;
+  submission_seconds?: number;
+  compile_observed_seconds?: number;
+  materialize_seconds?: number;
+  materialize_started_at?: string;
+  ov_stage_history?: Array<{
+    stage: string;
+    first_seen_at: string;
+    last_seen_at: string;
+    observations: number;
+  }>;
+  ov_event_timeline?: Array<{ label: string; at: string; status: string }>;
 }
 
 interface HumanCheckpointQuestion {
@@ -292,47 +320,67 @@ function useMining(active: boolean) {
   const [jobSummary, setJobSummary] = useState<MiningJobSummary>({
     total: 0, running: 0, queued: 0, completed: 0, failed: 0, max_parallel: 3,
   });
+  const jobsRefreshInFlight = useRef<Promise<MiningJob[]> | null>(null);
+  const configRefreshInFlight = useRef<Promise<MiningConfig | null> | null>(null);
 
-  const refreshJobs = useCallback(async (notifyFailure = false) => {
-    try {
-      const response = await api<{ jobs: MiningJob[]; summary: MiningJobSummary }>("/api/mining/jobs");
-      setJobs(response.jobs || []);
-      setJobSummary(response.summary || {
-        total: 0, running: 0, queued: 0, completed: 0, failed: 0, max_parallel: 3,
-      });
-      return response.jobs || [];
-    } catch (e: any) {
-      if (notifyFailure) toastErr("加载挖掘任务失败", e.message);
-      return [];
-    }
+  const refreshJobs = useCallback((notifyFailure = false) => {
+    if (jobsRefreshInFlight.current) return jobsRefreshInFlight.current;
+    const request = (async () => {
+      try {
+        const response = await api<{ jobs: MiningJob[]; summary: MiningJobSummary }>("/api/mining/jobs");
+        setJobs(response.jobs || []);
+        setJobSummary(response.summary || {
+          total: 0, running: 0, queued: 0, completed: 0, failed: 0, max_parallel: 3,
+        });
+        return response.jobs || [];
+      } catch (e: any) {
+        if (notifyFailure) toastErr("加载挖掘任务失败", e.message);
+        return [];
+      }
+    })().finally(() => {
+      jobsRefreshInFlight.current = null;
+    });
+    jobsRefreshInFlight.current = request;
+    return request;
   }, []);
 
-  const refreshConfig = useCallback(async (notifyFailure = true) => {
-    try {
-      const [base, ovSources] = await Promise.all([
-        api<MiningConfig>("/api/mining/config"),
-        api<{ sources: InputSource[] }>("/api/mining/ov-sources"),
-      ]);
-      const sources = ovSources.sources || [];
-      const next: MiningConfig = {
-        ...base,
-        input_sources: sources,
-        input_dirs: sources.map((source) => source.path),
-        default_input_dir: sources.find((source) => source.ready)?.path || sources[0]?.path || "",
-      };
-      setConfig(next);
-      await refreshJobs(false);
-      return next;
-    } catch (e: any) {
-      if (notifyFailure) toastErr("加载挖掘配置失败", e.message);
-      return null;
-    }
+  const refreshConfig = useCallback((notifyFailure = true) => {
+    if (configRefreshInFlight.current) return configRefreshInFlight.current;
+    const request = (async () => {
+      try {
+        const [base, ovSources] = await Promise.all([
+          api<MiningConfig>("/api/mining/config"),
+          api<{ sources: InputSource[] }>("/api/mining/ov-sources"),
+        ]);
+        const sources = ovSources.sources || [];
+        const skillSources = sources.filter((source) => source.tags?.includes("skill"));
+        const next: MiningConfig = {
+          ...base,
+          input_sources: sources,
+          input_dirs: skillSources.map((source) => source.path),
+          default_input_dir: skillSources.find((source) => source.ready)?.path || skillSources[0]?.path || "",
+        };
+        setConfig(next);
+        await refreshJobs(false);
+        return next;
+      } catch (e: any) {
+        if (notifyFailure) toastErr("加载挖掘配置失败", e.message);
+        return null;
+      }
+    })().finally(() => {
+      configRefreshInFlight.current = null;
+    });
+    configRefreshInFlight.current = request;
+    return request;
   }, [refreshJobs]);
 
   useEffect(() => {
     if (!active) return;
+    // Job summaries are local control-plane state and must not wait for the
+    // remote source-tree health probe performed by refreshConfig.
+    refreshJobs(false);
     refreshConfig(true);
-    const jobsTimer = window.setInterval(() => refreshJobs(false), 2000);
+    const jobsTimer = window.setInterval(() => refreshJobs(false), 5000);
     // Source refresh performs an OV tree probe for every registered folder so
     // a deleted path becomes visible.  Keep that health check periodic without
     // turning the two-second task poll into an unbounded remote scan.
@@ -434,7 +482,10 @@ export default function MiningView({
   useEffect(() => {
     if (!active || page !== "jobs" || !selectedJobId) return;
     let cancelled = false;
+    let inFlight = false;
     async function loadDetail() {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const response = await api<{ ok: boolean; job: MiningJob }>(
           `/api/mining/jobs/${encodeURIComponent(selectedJobId)}`
@@ -442,12 +493,14 @@ export default function MiningView({
         if (!cancelled) setSelectedJob(response.job);
       } catch (e: any) {
         if (!cancelled) toastErr("加载任务详情失败", e.message);
+      } finally {
+        inFlight = false;
       }
     }
     loadDetail();
     const selected = mining.jobs.find((job) => job.job_id === selectedJobId);
     const timer = selected && isActiveJob(selected.status)
-      ? window.setInterval(loadDetail, 2000)
+      ? window.setInterval(loadDetail, 5000)
       : undefined;
     return () => {
       cancelled = true;
@@ -470,7 +523,8 @@ export default function MiningView({
   const maxRounds = config?.max_rounds_range?.[1] ?? 5;
   const minRounds = config?.max_rounds_range?.[0] ?? 1;
   const inputSources = config?.input_sources ?? [];
-  const selectedSource = inputSources.find((source) => source.path === inputDir);
+  const skillSources = inputSources.filter((source) => source.tags?.includes("skill"));
+  const selectedSource = skillSources.find((source) => source.path === inputDir);
   const uploadTargetSource = inputSources.find((source) => source.path === uploadTarget);
   const selectedIngestion = selectedSource ? sourceIngestion(selectedSource) : null;
   const uploadTargetIngestion = uploadTargetSource ? sourceIngestion(uploadTargetSource) : null;
@@ -966,6 +1020,17 @@ export default function MiningView({
     const supplementRounds = job.knowledge_supplements || [];
     const supplementQuestions = job.pending_checkpoint?.questions || durableGaps;
     const hasKnowledgeSupplement = supplementQuestions.length > 0 || supplementRounds.length > 0;
+    const setupTimingRows = [
+      ["Skill 编译器发布", job.setup_timings?.publish_skill],
+      ["运行目录创建", job.setup_timings?.mkdir_run_root],
+      ["知识源快照复制", job.setup_timings?.copy_source_snapshot],
+      ["Compile 提交", job.setup_timings?.submit_compile],
+    ] as const;
+    const compileSeconds = job.compile_observed_seconds ?? elapsedSeconds(job.started_at, job.finished_at);
+    const hasTimingData = Boolean(
+      job.engine === "ov_compile"
+      && (job.started_at || job.submission_seconds !== undefined || job.materialize_seconds !== undefined)
+    );
     return (
       <div className="space-y-4 border-t border-accent/20 bg-accent-soft/35 px-5 py-5">
         <div className="flex items-start justify-between gap-3">
@@ -990,6 +1055,63 @@ export default function MiningView({
             )}
           </div>
         </div>
+
+        {job.remote_state_stale && (
+          <div className="flex items-start gap-2.5 rounded-xl border border-amber-300/70 bg-amber-50/80 px-4 py-3 text-[12px] text-amber-900">
+            <ShieldAlert className="mt-0.5 size-4 shrink-0" />
+            <div>
+              <div className="font-bold">远端状态暂不可用</div>
+              <div className="mt-0.5 leading-relaxed">
+                页面正在显示本地保存的最后已知状态，任务记录不会丢失；系统会按退避间隔自动重连。
+                {job.ov_last_synced_at ? ` 上次同步：${formatDateTime(job.ov_last_synced_at)}。` : ""}
+              </div>
+              {job.ov_sync_error && <div className="mono mt-1 break-all text-[10px] text-amber-800">{job.ov_sync_error}</div>}
+            </div>
+          </div>
+        )}
+
+        {hasTimingData && (
+          <div className="rounded-xl border border-border bg-background p-4">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="text-[13px] font-bold">耗时分析</div>
+              {job.ov_stage && <span className="mono text-[10.5px] text-muted-foreground">当前阶段：{job.ov_stage}</span>}
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {job.submission_seconds !== undefined && (
+                <TimingCard label="启动准备合计" seconds={job.submission_seconds} />
+              )}
+              {setupTimingRows.map(([label, timing]) => timing && (
+                <TimingCard
+                  key={label}
+                  label={label}
+                  seconds={timing.duration_seconds}
+                  failed={timing.status === "failed"}
+                />
+              ))}
+              {compileSeconds !== null && (
+                <TimingCard label={job.finished_at ? "OV Compile" : "OV Compile（累计）"} seconds={compileSeconds} />
+              )}
+              {job.materialize_seconds !== undefined && (
+                <TimingCard label="产物物化" seconds={job.materialize_seconds} />
+              )}
+            </div>
+            {(job.ov_stage_history?.length || 0) > 0 && (
+              <div className="mt-3 border-t border-line pt-3">
+                <div className="mb-2 text-[10.5px] font-semibold text-muted-foreground">远端阶段观测</div>
+                <div className="flex flex-wrap gap-2">
+                  {job.ov_stage_history?.map((entry, index) => (
+                    <span key={`${entry.stage}-${index}`} className="rounded-md border border-border bg-surface-subtle px-2 py-1 text-[10px]">
+                      <span className="font-semibold">{entry.stage}</span>
+                      <span className="ml-1 text-muted-foreground">
+                        {formatDuration(elapsedSeconds(entry.first_seen_at, entry.last_seen_at) || 0)}
+                      </span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {hasKnowledgeSupplement && (
           <div className="overflow-hidden rounded-xl border border-amber-300/70 bg-amber-50/80 shadow-sm">
@@ -1409,10 +1531,6 @@ export default function MiningView({
           selectedPath={inputDir}
           onSelect={selectInputDir}
           onRefresh={() => mining.refreshConfig(false)}
-          onUseForMining={(path) => {
-            selectInputDir(path);
-            onNavigate?.("jobs");
-          }}
         />
       )}
 
@@ -1428,7 +1546,7 @@ export default function MiningView({
           </div>
 
           <Panel
-            title="挖掘任务"
+            title="Skill 挖掘任务"
             count={filteredJobs.length ? `${filteredJobs.length} 个` : undefined}
             extra={
               <div className="flex items-center gap-2">
@@ -1443,7 +1561,7 @@ export default function MiningView({
                   <option value="failed">异常 / 已停止</option>
                 </select>
                 <Button size="sm" onClick={() => setCreateJobOpen(true)}>
-                  <FolderPlus className="size-3.5" /> 新建挖掘任务
+                  <FolderPlus className="size-3.5" /> 新建 Skill 挖掘
                 </Button>
               </div>
             }
@@ -1483,7 +1601,10 @@ export default function MiningView({
                           expanded && "bg-accent-soft"
                         )}
                       >
-                        <span><Pill tone={status.tone as any}>{status.label}</Pill></span>
+                        <span className="flex flex-col items-start gap-1">
+                          <Pill tone={status.tone as any}>{status.label}</Pill>
+                          {job.remote_state_stale && <span className="text-[9px] font-semibold text-amber-700">远端待同步</span>}
+                        </span>
                         <span className="min-w-0 pr-4">
                           <span className="block truncate font-semibold select-text">{job.name}</span>
                           <span className="mono mt-0.5 block truncate text-[10px] text-muted-soft select-text">{job.job_id}</span>
@@ -1512,7 +1633,7 @@ export default function MiningView({
       <Dialog open={createJobOpen} onOpenChange={(open) => !starting && setCreateJobOpen(open)}>
         <DialogContent className="max-h-[90vh] w-[calc(100vw-32px)] overflow-y-auto !max-w-[1120px]">
           <DialogHeader>
-            <DialogTitle>新建挖掘任务</DialogTitle>
+            <DialogTitle>新建 Skill 挖掘任务</DialogTitle>
           </DialogHeader>
 
           <div className="grid gap-5 lg:grid-cols-[320px_minmax(0,1fr)]">
@@ -1531,25 +1652,21 @@ export default function MiningView({
                 </label>
 
                 <label className="block">
-                  <span className="mb-1.5 block text-xs font-semibold text-muted-foreground">输入文档目录</span>
-                  {config && config.input_dirs.length > 1 ? (
-                    <select
-                      value={inputDir}
-                      disabled={starting}
-                      onChange={(event) => selectInputDir(event.target.value)}
-                      className="mono w-full rounded-lg border border-border bg-background px-3 py-2 text-[13px] outline-none focus:border-accent disabled:opacity-60"
-                    >
-                      {inputSources.map((source) => (
-                        <option key={source.path} value={source.path} disabled={!source.ready}>
-                          {sourceDisplayName(source.path)}{source.ready ? "" : `（${sourceStatusMeta(source).label}）`}
-                        </option>
-                      ))}
-                    </select>
-                  ) : (
-                    <div className="mono rounded-lg border border-border bg-background px-3 py-2 text-[13px]">
-                      {sourceDisplayName(inputDir)}
-                    </div>
-                  )}
+                  <span className="mb-1.5 block text-xs font-semibold text-muted-foreground">选择知识源</span>
+                  <select
+                    aria-label="选择 Skill 知识源"
+                    value={inputDir}
+                    disabled={starting || !skillSources.length}
+                    onChange={(event) => selectInputDir(event.target.value)}
+                    className="w-full rounded-lg border border-border bg-background px-3 py-2 text-[13px] outline-none focus:border-accent disabled:opacity-60"
+                  >
+                    {!skillSources.length && <option value="">暂无可用的 Skill 知识源</option>}
+                    {skillSources.map((source) => (
+                      <option key={source.path} value={source.path} disabled={!source.ready}>
+                        {source.name || source.path.split("/").pop()}{source.ready ? "" : `（${sourceStatusMeta(source).label}）`}
+                      </option>
+                    ))}
+                  </select>
                   <div className={cn(
                     "mt-1.5 text-[11px]",
                     selectedSource?.ready ? "text-muted-foreground" : selectedIngestion?.status === "failed" ? "text-destructive" : "text-amber-700"
@@ -1557,7 +1674,7 @@ export default function MiningView({
                     {!config
                       ? "正在检查目录…"
                       : selectedSource?.ready
-                        ? `已检测到 ${selectedSource.document_count} 个文档 · ${formatBytes(selectedSource.total_bytes)}`
+                        ? `${selectedSource.path} · ${selectedSource.document_count} 个文档 · ${formatBytes(selectedSource.total_bytes)}`
                         : selectedIngestion?.status === "processing"
                           ? `知识源正在后处理（${selectedIngestion.progress}%），完成前不可用于挖掘。`
                           : selectedIngestion?.status === "failed"
@@ -1924,6 +2041,31 @@ export default function MiningView({
   );
 }
 
+function TimingCard({ label, seconds, failed = false }: { label: string; seconds: number; failed?: boolean }) {
+  return (
+    <div className={cn("rounded-lg border px-3 py-2.5", failed ? "border-destructive/30 bg-destructive/5" : "border-border bg-surface-subtle") }>
+      <div className="text-[10px] font-semibold text-muted-foreground">{label}</div>
+      <div className={cn("mt-0.5 mono text-[14px] font-bold", failed && "text-destructive")}>{formatDuration(seconds)}</div>
+    </div>
+  );
+}
+
+function elapsedSeconds(startedAt?: string, finishedAt?: string) {
+  if (!startedAt) return null;
+  const start = Date.parse(startedAt);
+  const finish = finishedAt ? Date.parse(finishedAt) : Date.now();
+  if (!Number.isFinite(start) || !Number.isFinite(finish)) return null;
+  return Math.max(0, (finish - start) / 1000);
+}
+
+function formatDuration(seconds: number) {
+  const value = Math.max(0, Number(seconds) || 0);
+  if (value < 1) return `${value.toFixed(3)} 秒`;
+  if (value < 60) return `${value.toFixed(1)} 秒`;
+  if (value < 3600) return `${Math.floor(value / 60)} 分 ${Math.round(value % 60)} 秒`;
+  return `${Math.floor(value / 3600)} 小时 ${Math.floor((value % 3600) / 60)} 分`;
+}
+
 function isActiveJob(status: MiningJobStatus) {
   return status === "preparing" || status === "queued" || status === "running" || status === "waiting" || status === "stopping";
 }
@@ -1959,6 +2101,8 @@ function pipelineStepLabel(state: PhaseState[keyof PhaseState]) {
 }
 
 function sourceStatusMeta(source: InputSource): { label: string; tone: PillTone } {
+  if (source.status === "missing") return { label: "路径已删除", tone: "red" };
+  if (source.status === "unavailable") return { label: "暂不可用", tone: "amber" };
   const ingestion = sourceIngestion(source);
   if (ingestion.status === "processing") return { label: "后处理中", tone: "blue" };
   if (ingestion.status === "failed") return { label: "处理失败", tone: "red" };
