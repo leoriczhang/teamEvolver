@@ -25,7 +25,25 @@ async function mockRequest(path: string, init?: RequestInit): Promise<any> {
   }
   if (path === "/api/replay-lab/skills") return { skills: index.skills };
   if (path === "/api/replay-lab/skills/demo") return { name: "demo", skill_md: md };
-  if (path.startsWith("/api/replay-lab/datasets?")) return { datasets: [{ dataset_id: "ds-1", skill_name: "demo", name: "测试数据集", query: "Run the skill", requirements: "1. Complete" }] };
+  if (path.startsWith("/api/replay-lab/datasets?")) return { datasets: [{
+    schema_version: "team-replay.dataset",
+    dataset_id: "ds-1",
+    name: "测试数据集",
+    description: "",
+    skills: [{ skill_id: "demo" }],
+    source: { kind: "manual" },
+    cases: [{
+      case_id: "case-1",
+      query: "Run the skill",
+      skill_ids: ["demo"],
+      checks: [{ id: "R01", kind: "output", text: "Complete" }],
+      materials: [],
+      provenance: {},
+      replay: { progressive_disclosure: { batch_size: 4 } },
+      metadata: {},
+    }],
+    metadata: {},
+  }] };
   if (path.startsWith("/api/replay-lab/runs?")) return { runs: [] };
   if (path === "/api/replay-lab/runs" && init?.method === "POST") {
     runBody = JSON.parse(String(init.body));

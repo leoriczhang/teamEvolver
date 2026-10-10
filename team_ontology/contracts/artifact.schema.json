@@ -61,9 +61,17 @@
           "type": "string"
         },
         "valid_from": {
-          "format": "date-time",
-          "title": "Valid From",
-          "type": "string"
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid From"
         },
         "valid_to": {
           "anyOf": [
@@ -104,7 +112,6 @@
         "subject",
         "predicate",
         "value",
-        "valid_from",
         "support_sets"
       ],
       "title": "Assertion",

@@ -43,15 +43,11 @@ class ImportStore(Store):
             else:
                 payload = next(row["meta"] for row in self.index if row["session_id"] == source["session_id"]
                                and row["index_key"] == source["key"])
-            evidence = "/skill_evidence/" in "/" + source["key"]
-            if evidence:
-                records = [{"skill_name": payload["skill_name"], **row} for row in payload["evidence"]]
-            else:
-                records = []
-                for row in history_rows(source["key"], payload, index=source["phase"] == "index"):
-                    for entry in row.get("experiences") or []:
-                        records.append({"session_id": row.get("session_id"), "timestamp": row.get("timestamp"),
-                                        "ingested_at": row.get("ingested_at"), **entry})
+            records = []
+            for row in history_rows(source["key"], payload, index=source["phase"] == "index"):
+                for entry in row.get("experiences") or []:
+                    records.append({"session_id": row.get("session_id"), "timestamp": row.get("timestamp"),
+                                    "ingested_at": row.get("ingested_at"), **entry})
             return {"total": len(records), "records": [
                 {"ordinal": index + 1, "record": row, "record_bytes": len(canonical(row)), "error": None}
                 for index, row in enumerate(records) if offset <= index < offset + limit]}
@@ -87,14 +83,17 @@ def test_import_all_sources_dedup_excludes_defects_and_never_exports_private_fie
     store.put_object("experience_library/review.json", canonical(source()))
     store.put_object("experience_library/sessions/old.json", canonical(session(description="旧文本")))
     store.put_object("session_archive/s1.json", canonical({
-        "session_id": "s1", "timestamp": "2026-09-01",
-        "_judge_scores": {"skill_experiences": [lesson("归档文本")]},
+        "session_id": "archive", "timestamp": "2026-09-01",
+        "judge": {"skill_experiences": [lesson("归档文本", experience_key="archive")]},
         "messages": [{"content": "private-trajectory"}],
     }))
     store.put_object("skill_evidence/review.json", canonical({"skill_name": "review", "evidence": [
         {"session_id": "historical", "evolution_evidence": "exemplary", "evidence_reason": "历史成功实践"},
         {"session_id": "defect", "evolution_evidence": "defect", "evidence_reason": "禁止导出"},
     ]}))
+    store.put_object("sessions/queued.json", canonical({
+        "session_id": "queued", "judge": {"skill_experiences": [lesson("队列副本")]},
+    }))
     store.put_object("session_archive/.hidden.json", canonical({"session_id": "hidden"}))
     indexed(store, session(description="最终文本"))
     indexed(store, session("s2", experiences=[lesson(kind="defect")]))
@@ -108,15 +107,17 @@ def test_import_all_sources_dedup_excludes_defects_and_never_exports_private_fie
     finish(w)
     progress = w.status()["manual"]["import"]
     assert progress["phase"] == "complete"
-    assert progress["processed_sources"] == 5  # 3 history objects, 2 index rows
+    assert progress["processed_sources"] == 3  # One archive and two index rows.
     assert progress["prepared_documents"] == 2
     assert progress["rejected_sources"] == 0
-    assert w.writer.writes == 3  # Legacy per-Skill doc + 2 imported lessons.
+    assert w.writer.writes == 3  # Existing per-Skill doc + 2 imported lessons.
     exported = b"\n".join(w.writer.content.values()).decode()
-    for forbidden in ["private-person", "private-trajectory", "session_ids", "occurrence_count", "禁止导出"]:
+    for forbidden in [
+        "private-person", "private-trajectory", "session_ids", "occurrence_count",
+        "禁止导出", "旧文本", "历史成功实践", "队列副本",
+    ]:
         assert forbidden not in exported
-    assert "最终文本" in exported and "历史成功实践" in exported
-    assert "旧文本" not in exported and "归档文本" not in exported
+    assert "最终文本" in exported and "归档文本" in exported
 
 
 def test_reimport_count_changes_do_not_write_and_text_changes_reuse_uri():
@@ -173,8 +174,8 @@ def test_import_restart_cursor_and_stage_durability(monkeypatch):
 def test_invalid_sources_are_counted_without_body_leaks_or_blocking_valid_rows():
     store = ImportStore()
     w = worker(store)
-    store.put_object("experience_library/sessions/bad.json", b"private-invalid-json")
-    store.put_object("session_archive/bad-score.json", canonical({"_judge_scores": ["invalid"]}))
+    store.put_object("session_archive/bad.json", b"private-invalid-json")
+    store.put_object("session_archive/bad-score.json", canonical({"judge": ["invalid"]}))
     indexed(store, {"session_id": "missing-field"})
     indexed(store, session())
     store.index.append({"index_key": "session_index.json", "session_id": "oversized", "meta": None})
@@ -229,7 +230,7 @@ def test_duplicate_quote_ties_and_identity_are_stable():
     assert a[0][1]["document"]["kind"] == "exemplary"
 
 
-def test_upgrade_retains_old_cursor_and_historical_gap_until_new_import():
+def test_resume_retains_cursor_and_error_counts_until_new_import():
     store = ImportStore()
     w = worker(store)
     for name in ("a", "b"):

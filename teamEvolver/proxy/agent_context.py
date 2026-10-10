@@ -9,9 +9,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
-from ..integrations.agent_protocol import CONTEXT_RESULT_SCHEMA_V1
-from ..integrations.agent_principal import AgentPrincipal
-from ..integrations.legacy_agent_identity import resolve_request_principal
+from ..integrations.agent_principal import AgentPrincipal, resolve_agent_principal
 from ..integrations.context_workspace import ContextStateStore, stable_hash
 from ..tenants.registry import AGENT_TOKEN_PREFIX, get_current_tenant
 from team_skills.library.frontmatter import parse_skill_md_text
@@ -135,15 +133,12 @@ class AgentContextMixin:
     def _agent_context_identity(self, request: Request, body: dict) -> tuple[AgentPrincipal, dict]:
         if not isinstance(body, dict):
             raise HTTPException(status_code=400, detail="body must be an object")
-        principal = resolve_request_principal(request, self._workspace_config(), body)
+        principal = resolve_agent_principal(request, self._workspace_config(), body.get("user_id"))
         user = {
             "id": principal.user_id,
             "personal_space": {"viking_user": principal.user_id},
             "_agent_principal": principal,
         }
-        legacy_user = getattr(request.state, "agent_legacy_user", None)
-        if legacy_user is not None:
-            user["personal_space"] = legacy_user.get("personal_space") or {"viking_user": principal.user_id}
         return principal, user
 
     def _agent_context_scopes(
@@ -403,21 +398,16 @@ class AgentContextMixin:
     def _register_agent_context_routes(self, app: FastAPI) -> None:
         owner = self
 
-        def store(request: Request) -> ContextStateStore:
-            legacy = getattr(request.state, "agent_legacy_record", {})
-            return ContextStateStore(owner._workspace_config(), legacy_agent_id=legacy.get("agent_id", ""))
+        def store() -> ContextStateStore:
+            return ContextStateStore(owner._workspace_config())
 
         @app.get("/internal/agents/context/describe")
         async def agent_context_describe(
             request: Request,
-            external_subject: str = Query(default=""),
-            integration_id: str = Query(default=""),
             user_id: str | None = Query(default=None),
         ):
             owner._agent_context_auth(request)
-            identity = {"external_subject": external_subject, "integration_id": integration_id}
-            if user_id is not None:
-                identity["user_id"] = user_id
+            identity = {"user_id": user_id}
             principal, user = await asyncio.to_thread(owner._agent_context_identity, request, identity)
             scopes = owner._agent_context_scopes(user)
             payload = {
@@ -441,10 +431,8 @@ class AgentContextMixin:
                     "max_skill_bytes": _MAX_READ_CHARS,
                 },
             }
-            if getattr(request.state, "agent_legacy_identity", False):
-                payload.update(protocol_version="1.0", integration_id=integration_id)
             await asyncio.to_thread(
-                store(request).audit,
+                store().audit,
                 action="describe",
                 principal=principal,
             )
@@ -487,7 +475,7 @@ class AgentContextMixin:
                     for name in selected_names
                 ]
             )
-            state = store(request)
+            state = store()
             session_id = str(body.get("context_session_id") or "")
             if session_id and await asyncio.to_thread(state.get_session, session_id, principal=principal) is None:
                 raise HTTPException(status_code=409, detail="context session subject binding conflict")
@@ -640,21 +628,10 @@ class AgentContextMixin:
             )
             return JSONResponse(
                 content={
-                    "schema_version": (
-                        CONTEXT_RESULT_SCHEMA_V1 if getattr(request.state, "agent_legacy_identity", False)
-                        else "teamevolver.context-result.v2"
-                    ),
+                    "schema_version": "teamevolver.context-result.v2",
                     "subject": {
                         "tenant_id": principal.tenant_id,
                         "user_id": principal.user_id,
-                        **(
-                            {
-                                "integration_id": request.state.agent_legacy_record.get("agent_id"),
-                                "runtime_type": request.state.agent_legacy_record.get("runtime_type"),
-                                "session_id": session_id,
-                            }
-                            if getattr(request.state, "agent_legacy_identity", False) else {}
-                        ),
                     },
                     "snapshot_id": snapshot_id,
                     "items": items,
@@ -689,7 +666,7 @@ class AgentContextMixin:
             level = str(body.get("level") or "l1").lower()
             if level not in {"l0", "l1", "l2", "full"}:
                 raise HTTPException(status_code=400, detail="unsupported content level")
-            state = store(request)
+            state = store()
             ref = await asyncio.to_thread(
                 state.resolve_ref,
                 context_ref,
@@ -744,18 +721,14 @@ class AgentContextMixin:
         @app.get("/internal/agents/context/skills")
         async def agent_context_skills(
             request: Request,
-            external_subject: str = Query(default=""),
             scope: str = Query(default="all"),
             context_session_id: str = Query(default=""),
-            integration_id: str = Query(default=""),
             user_id: str | None = Query(default=None),
         ):
             owner._agent_context_auth(request)
-            identity = {"external_subject": external_subject, "integration_id": integration_id}
-            if user_id is not None:
-                identity["user_id"] = user_id
+            identity = {"user_id": user_id}
             principal, user = await asyncio.to_thread(owner._agent_context_identity, request, identity)
-            state = store(request)
+            state = store()
             if context_session_id:
                 session = await asyncio.to_thread(
                     state.get_session,
@@ -878,7 +851,7 @@ class AgentContextMixin:
             principal, user = await asyncio.to_thread(owner._agent_context_identity, request, body)
             context_session_id = str(body.get("context_session_id") or "")
             if context_session_id and await asyncio.to_thread(
-                store(request).get_session, context_session_id, principal=principal,
+                store().get_session, context_session_id, principal=principal,
             ) is None:
                 raise HTTPException(status_code=409, detail="context session subject binding conflict")
             content = str(body.get("content") or "").strip()
@@ -930,7 +903,7 @@ class AgentContextMixin:
                     "wait": False,
                 },
             )
-            state = store(request)
+            state = store()
             context_ref, receipt = await asyncio.to_thread(
                 state.issue_ref,
                 principal=principal,
@@ -961,7 +934,7 @@ class AgentContextMixin:
             body = await request.json()
             principal, user = await asyncio.to_thread(owner._agent_context_identity, request, body)
             context_ref = str(body.get("context_ref") or "")
-            state = store(request)
+            state = store()
             ref = await asyncio.to_thread(
                 state.resolve_ref,
                 context_ref,
@@ -1009,7 +982,7 @@ class AgentContextMixin:
                     status_code=400,
                     detail="external_session_id is required",
                 )
-            state = store(request)
+            state = store()
             session, created = await asyncio.to_thread(
                 state.start_session,
                 principal=principal,
@@ -1075,7 +1048,7 @@ class AgentContextMixin:
                 raise HTTPException(status_code=400, detail="invalid context event")
             if len(content.encode("utf-8")) > _MAX_REMEMBER_BYTES:
                 raise HTTPException(status_code=413, detail="context event is too large")
-            state = store(request)
+            state = store()
             event_hash = stable_hash(
                 {"sequence": sequence, "role": role, "content": content}
             )
@@ -1142,7 +1115,7 @@ class AgentContextMixin:
             body = await request.json()
             principal, user = await asyncio.to_thread(owner._agent_context_identity, request, body)
             context_session_id = str(body.get("context_session_id") or "")
-            state = store(request)
+            state = store()
             session = await asyncio.to_thread(
                 state.get_session,
                 context_session_id,

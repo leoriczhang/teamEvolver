@@ -2,7 +2,7 @@
 
 One account-shared Resource directory is authoritative. Private snapshots and
 per-run Skill copies are inputs, never a second published Memory directory.
-Legacy ReAct code is retained only for old imports and historical Replay.
+The historical Job/ReAct maintenance engine is not part of this package.
 """
 
 from __future__ import annotations

@@ -87,7 +87,7 @@ def list_workspace(owner: Any) -> dict[str, Any]:
     """Skill list + version for every team skill, straight from the hub."""
     hub = team_hub(owner)
     skills: list[dict[str, Any]] = []
-    for record in hub.list_remote():
+    for record in hub.list_skills():
         name = str(record.get("name") or "")
         if not name:
             continue
@@ -135,7 +135,7 @@ def read_skill_detail(owner: Any, name: str) -> dict[str, Any]:
     """One team skill's SKILL.md + metadata, read from the hub."""
     hub = team_hub(owner)
     record = next(
-        (item for item in hub.list_remote() if str(item.get("name") or "") == name),
+        (item for item in hub.list_skills() if str(item.get("name") or "") == name),
         None,
     )
     if record is None:
@@ -215,7 +215,11 @@ def register_skill_workspace_routes(owner: Any, app: FastAPI) -> None:
             index = await asyncio.to_thread(list_workspace, owner)
         except Exception as exc:  # noqa: BLE001 - surfaces storage outages to the UI
             raise HTTPException(status_code=502, detail=f"读取团队技能库失败: {exc}") from exc
-        return {"sharing_enabled": index["source"]["backend"] != "local", "skills": index["skills"]}
+        return {
+            "skill_backend": index["source"]["backend"],
+            "delivery_mode": "pull",
+            "skills": index["skills"],
+        }
 
     @app.get("/api/replay-lab/skills/{name}")
     async def lab_skill_detail(name: str):

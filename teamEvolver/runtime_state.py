@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import platform
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -114,26 +113,6 @@ def clear_pid_if_matches(pid: int):
         return
     if read_pid() == pid:
         clear_pid()
-
-
-def _write_text_atomic(path: Path, text: str):
-    tmp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            delete=False,
-        ) as handle:
-            tmp_path = Path(handle.name)
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_path, path)
-    finally:
-        if tmp_path is not None:
-            tmp_path.unlink(missing_ok=True)
 
 
 @contextmanager

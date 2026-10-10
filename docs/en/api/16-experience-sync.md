@@ -17,7 +17,7 @@ After persisting the intent, returns HTTP 202 with `tenant_id` and `manual: {req
 
 The worker performs a paginated full reconciliation using the existing digest comparison and readback. Unchanged documents are not rewritten; retry backoff is preserved and OV files are not deleted. Page filters do not narrow the pass. Requests use the existing tenant advisory lock and the same two-worker scheduler. Pending/running requests coalesce to the same ID when the lock is available, and durable progress survives restart.
 
-Errors: 403 for non-admin/inactive tenant; 409 `SYNC_DISABLED` or `SYNC_ALREADY_RUNNING` (worker holds the lock); 429 `SYNC_BUSY` (two concurrent registrations or 32 pending wakeup tenants on this instance); 503 `SYNC_NOT_RUNNING`, `SYNC_STOPPING`, safe configuration error codes or `SYNC_STORAGE_FAILURE`. Configuration errors include `PG_REQUIRED`, `SHARING_DISABLED`, `OV_IDENTITY_OR_KEY_MISSING`, `INVALID_SYNC_CONFIG`, `INVALID_SYNC_TARGET_DIRECTORY`, and `INVALID_OV_ENDPOINT`.
+Errors: 403 for non-admin/inactive tenant; 409 `SYNC_DISABLED` or `SYNC_ALREADY_RUNNING` (worker holds the lock); 429 `SYNC_BUSY` (two concurrent registrations or 32 pending wakeup tenants on this instance); 503 `SYNC_NOT_RUNNING`, `SYNC_STOPPING`, safe configuration error codes or `SYNC_STORAGE_FAILURE`. Configuration errors include `PG_REQUIRED`, `OV_IDENTITY_OR_KEY_MISSING`, `INVALID_SYNC_CONFIG`, `INVALID_SYNC_TARGET_DIRECTORY`, and `INVALID_OV_ENDPOINT`.
 
 Only exemplary records already in per-Skill experience JSON are eligible. The Experience Library list is sourced from Session analysis; listed entries outside this legacy JSON flow are not uploaded by this action.
 

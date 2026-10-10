@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from team_replay.datasets.batch import BatchCapacityError, DatasetBatchRunner, replay_snapshot
-from team_replay.datasets.collections import DatasetCollectionStore, DatasetConflict, DatasetNotFound, snapshot_item
+from team_replay.datasets.collections import DatasetCollectionStore, DatasetConflict, DatasetNotFound, snapshot_case
 from teamEvolver.config import TeamEvolverConfig
 from teamEvolver.proxy.dataset_routes import register_dataset_routes
 from teamEvolver.session_store import SessionStore
@@ -28,34 +28,37 @@ def sample(sid="s1"):
 
 def collection(tmp_path, count=2):
     store = DatasetCollectionStore(LocalObjectStore(tmp_path))
-    items = [snapshot_item(sample(f"s{i}"), {}) for i in range(count)]
-    dataset = store.create("测试 / 数据集", "说明", items, {"kind": "sessions"})
+    cases = [snapshot_case(sample(f"s{i}"), {}) for i in range(count)]
+    dataset = store.create("测试 / 数据集", "说明", cases, {"kind": "sessions"})
     return store, dataset
 
 
 def test_snapshot_export_and_edits_do_not_mutate_source(tmp_path):
     source = sample()
-    item = snapshot_item(source, {})
+    case = snapshot_case(source, {})
     store = DatasetCollectionStore(LocalObjectStore(tmp_path))
-    dataset = store.create("集合", "说明", [item], {})
+    dataset = store.create("集合", "说明", [case], {})
     source["turns"][0]["prompt_text"] = "changed"
-    store.change_item(dataset["dataset_id"], item["item_id"], {"query": "新的 Query", "requirements": ["新要求"]})
+    store.change_case(dataset["dataset_id"], case["case_id"], {
+        "query": "新的 Query",
+        "checks": [{"id": "R01", "kind": "output", "text": "新要求"}],
+    })
     stored = store.load_document(dataset["dataset_id"])
-    assert stored["schema_version"] == "team-replay.dataset.v2"
+    assert stored["schema_version"] == "team-replay.dataset"
     assert "session_snapshot" not in stored["cases"][0]["provenance"]
     with zipfile.ZipFile(store.export_zip(dataset["dataset_id"])) as archive:
         case = json.loads(archive.read("cases.jsonl"))
-        saved = json.loads(archive.read(f"snapshots/{item['item_id']}.json"))
+        saved = json.loads(archive.read(f"snapshots/{case['case_id']}.json"))
         assert case["query"] == "新的 Query"
         assert case["checks"] == [{"id": "R01", "kind": "output", "text": "新要求"}]
         assert saved["turns"][0]["prompt_text"] == "生成报告"
         assert case["provenance"]["timestamp"] != case["provenance"]["ingested_at"]
         assert case["provenance"]["trace_id"] == "business-trace"
         assert "session_snapshot" not in case["provenance"]
-        assert case["provenance"]["snapshot_ref"] == f"snapshots/{item['item_id']}.json"
+        assert case["provenance"]["snapshot_ref"] == f"snapshots/{case['case_id']}.json"
         exported = json.loads(archive.read("dataset.json"))
-        assert exported["schema_version"] == "team-replay.dataset.v2"
-        assert exported["metadata"]["item_count"] == 1
+        assert exported["schema_version"] == "team-replay.dataset"
+        assert exported["metadata"]["case_count"] == 1
     # New store instance reads the same durable snapshot.
     assert DatasetCollectionStore(LocalObjectStore(tmp_path)).metadata(dataset["dataset_id"])["name"] == "集合"
 
@@ -69,36 +72,36 @@ def test_missing_and_invalid_selection_never_writes_partial_dataset(tmp_path):
     with pytest.raises(ValueError):
         store.create("", "", [], {})
     with pytest.raises(ValueError):
-        store.change_item(dataset["dataset_id"], store.load(dataset["dataset_id"])["items"][0]["item_id"],
-                          {"query": "Query", "requirements": [""]})
+        store.change_case(dataset["dataset_id"], store.load(dataset["dataset_id"])["cases"][0]["case_id"],
+                          {"query": "Query", "checks": []})
     assert len(store.list()) == 1
 
 
 def test_active_batch_freezes_input_and_recovery_preserves_completed_results(tmp_path):
     store, dataset = collection(tmp_path)
     did = dataset["dataset_id"]
-    run, items = store.create_run(did, {"concurrency": 1}, "old-process")
+    run, cases = store.create_run(did, {"concurrency": 1}, "old-process")
     with pytest.raises(DatasetConflict):
         store.delete(did)
     with pytest.raises(DatasetConflict):
         store.update(did, {"name": "renamed"})
     with pytest.raises(DatasetConflict):
         store.create_run(did, {}, "other")
-    store.item_running(did, run["run_id"], items[0]["item_id"])
-    store.finish_item(did, run["run_id"], items[0]["item_id"], {"ok": True, "completed": False})
+    store.case_running(did, run["run_id"], cases[0]["case_id"])
+    store.finish_case(did, run["run_id"], cases[0]["case_id"], {"ok": True, "completed": False})
     store.recover("new-process")
     recovered = store.run(did, run["run_id"])
     assert recovered["status"] == "interrupted"
     assert recovered["completed"] == recovered["failed"] == 1
-    assert recovered["items"][0]["success"] is False
-    assert recovered["items"][1]["success"] is None
-    assert recovered["items"][1]["status"] == "interrupted"
-    store.change_item(did, items[0]["item_id"], None)
+    assert recovered["cases"][0]["success"] is False
+    assert recovered["cases"][1]["success"] is None
+    assert recovered["cases"][1]["status"] == "interrupted"
+    store.change_case(did, cases[0]["case_id"], None)
     frozen = store.read(store.run_key(did, run["run_id"], "input.json"))
-    assert frozen["schema_version"] == "team-replay.dataset.v2"
+    assert frozen["schema_version"] == "team-replay.dataset"
     assert len(frozen["cases"]) == 2
     historical = store.present_document(did, frozen, run_id=run["run_id"])
-    assert historical["items"][0]["session"]["session_id"] == "s0"
+    assert historical["cases"][0]["provenance"]["session_snapshot"]["session_id"] == "s0"
 
 
 def test_bounded_batch_keeps_per_item_failure_and_tenant_context(tmp_path):
@@ -106,10 +109,10 @@ def test_bounded_batch_keeps_per_item_failure_and_tenant_context(tmp_path):
         store, dataset = collection(tmp_path)
         seen = []
 
-        def evaluate(item, options):
+        def evaluate(case, options):
             from teamEvolver.tenants.registry import current_tenant_id
             seen.append(current_tenant_id())
-            if item["session_id"] == "s0":
+            if case["provenance"]["session_id"] == "s0":
                 raise RuntimeError("one item failed")
             return {"ok": True, "completed": True, "request_id": "replay-test"}
 
@@ -121,15 +124,15 @@ def test_bounded_batch_keeps_per_item_failure_and_tenant_context(tmp_path):
         runner.release()
         token = set_current_tenant(TenantContext(tenant_id="tenant-a"))
         try:
-            run, items = store.create_run(dataset["dataset_id"], {"concurrency": 2}, runner.owner_id)
-            await runner.execute(store, run, items)
+            run, cases = store.create_run(dataset["dataset_id"], {"concurrency": 2}, runner.owner_id)
+            await runner.execute(store, run, cases)
         finally:
             reset_current_tenant(token)
             runner.stop()
         result = store.run(dataset["dataset_id"], run["run_id"])
         assert result["status"] == "completed"
         assert result["completed"] == 2 and result["failed"] == result["succeeded"] == 1
-        assert result["items"][0]["success"] is None
+        assert result["cases"][0]["success"] is None
         assert set(seen) == {"tenant-a"}
         assert runner.active == 0
     asyncio.run(exercise())
@@ -141,16 +144,16 @@ def test_cancel_stops_pending_items_after_current_item(tmp_path):
         entered, release = threading.Event(), threading.Event()
         calls = []
 
-        def evaluate(item, options):
-            calls.append(item["item_id"])
+        def evaluate(case, options):
+            calls.append(case["case_id"])
             entered.set()
             assert release.wait(5)
             return {"ok": True, "completed": True}
 
         runner = DatasetBatchRunner(evaluate)
         runner.reserve()
-        run, items = store.create_run(dataset["dataset_id"], {"concurrency": 1}, runner.owner_id)
-        task = asyncio.create_task(runner.execute(store, run, items))
+        run, cases = store.create_run(dataset["dataset_id"], {"concurrency": 1}, runner.owner_id)
+        task = asyncio.create_task(runner.execute(store, run, cases))
         try:
             assert await asyncio.to_thread(entered.wait, 5)
             store.request_cancel(dataset["dataset_id"], run["run_id"])
@@ -162,7 +165,7 @@ def test_cancel_stops_pending_items_after_current_item(tmp_path):
         result = store.run(dataset["dataset_id"], run["run_id"])
         assert len(calls) == 1
         assert result["status"] == "cancelled" and result["completed"] == 1
-        assert [row["status"] for row in result["items"]] == ["completed", "cancelled", "cancelled"]
+        assert [row["status"] for row in result["cases"]] == ["completed", "cancelled", "cancelled"]
     asyncio.run(exercise())
 
 
@@ -192,7 +195,7 @@ def test_replay_uses_saved_query_and_real_factory_contract(monkeypatch):
         *a, **kw, judge=lambda **_: {"judge": "model", "all_satisfied": True},
     ))
     try:
-        item = snapshot_item(sample(), {})
+        item = snapshot_case(sample(), {})
         before = copy.deepcopy(item)
         result = replay_snapshot(item, {"timeout_seconds": 30, "max_interactions": 1})
         assert result["ok"] and result["completed"]
@@ -214,7 +217,7 @@ def dataset_api(tmp_path, monkeypatch):
         return SessionStore(bucket)
 
     monkeypatch.setattr(SessionStore, "from_config", sessions)
-    config = TeamEvolverConfig(users_registry_path=str(tmp_path / "users.json"))
+    config = TeamEvolverConfig(_config_file=str(tmp_path / "config.yaml"))
     owner = SimpleNamespace(config=config, _safe_create_task=lambda coro: asyncio.create_task(coro))
     app = FastAPI()
 
@@ -229,9 +232,9 @@ def dataset_api(tmp_path, monkeypatch):
     register_dataset_routes(owner, app)
     token = set_current_tenant(TenantContext(tenant_id="a"))
     try:
-        bucket = sessions(config)._bucket
+        session_store = sessions(config)
         source = sample()
-        bucket.put_object("session_archive/s1.json", json.dumps(source).encode())
+        session_store.save_skipped(source)
     finally:
         reset_current_tenant(token)
     with TestClient(app) as client:
@@ -245,7 +248,7 @@ def test_routes_crud_isolation_zip_and_validation(dataset_api):
     assert response.status_code == 201, response.text
     did = response.json()["dataset_id"]
     detail = client.get(f"/api/datasets/{did}").json()
-    assert detail["item_count"] == 1 and "session" not in detail["items"][0]
+    assert detail["case_count"] == 1 and "session" not in detail["cases"][0]
     assert client.get(f"/api/datasets/{did}", headers={"x-test-tenant": "b"}).status_code == 404
     assert client.get("/api/datasets", headers={"x-test-tenant": "b"}).json()["total"] == 0
     assert client.post("/api/datasets", json={"name": "other", "session_ids": ["s1"]},
@@ -282,10 +285,10 @@ def test_routes_accept_batch_and_preserve_historical_source_after_removal(datase
             break
         time.sleep(0.01)
     assert run["status"] == "completed" and run["succeeded"] == 1
-    iid = run["items"][0]["item_id"]
+    iid = run["cases"][0]["case_id"]
     assert client.get(f"{path}/runs/{rid}/results/{iid}").json()["final_response"] == "生成报告"
-    assert client.delete(f"{path}/items/{iid}").status_code == 200
-    assert client.get(f"{path}/items/{iid}").status_code == 404
-    historical = client.get(f"{path}/runs/{rid}/items/{iid}")
+    assert client.delete(f"{path}/cases/{iid}").status_code == 200
+    assert client.get(f"{path}/cases/{iid}").status_code == 404
+    historical = client.get(f"{path}/runs/{rid}/cases/{iid}")
     assert historical.status_code == 200 and historical.json()["query"] == "生成报告"
     assert client.get(f"{path}/runs/{rid}", headers={"x-test-tenant": "b"}).status_code == 404

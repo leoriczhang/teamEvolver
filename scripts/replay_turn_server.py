@@ -1,4 +1,4 @@
-"""Compatibility entry point for the canonical Replay turn server."""
+"""CLI entry point for the Replay turn server."""
 
 from __future__ import annotations
 

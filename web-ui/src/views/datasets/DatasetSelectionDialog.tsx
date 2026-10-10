@@ -35,9 +35,9 @@ export default function DatasetSelectionDialog({ onClose, onSaved, selection, se
     setSaving(true);
     try {
       const scope = selection || (mode === "selected" ? { session_ids: selected } : { filters });
-      const saved = await api<SessionDataset>(appendTo ? `${datasetPath(appendTo.dataset_id)}/items` : "/api/datasets",
+      const saved = await api<SessionDataset>(appendTo ? `${datasetPath(appendTo.dataset_id)}/cases` : "/api/datasets",
         jsonBody(appendTo ? scope : { name: name.trim(), description, ...scope }));
-      toastOk(appendTo ? "已添加到数据集" : "数据集已创建", `${saved.name} · ${saved.item_count} 条`);
+      toastOk(appendTo ? "已添加到数据集" : "数据集已创建", `${saved.name} · ${saved.case_count} 条`);
       onSaved(saved);
     } catch (error: any) {
       toastErr(appendTo ? "添加失败" : "创建失败", error.message);

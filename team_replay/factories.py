@@ -7,10 +7,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .adapters import HttpReplayAdapter, MappedHttpAdapter, TurnBasedReplayAdapter
+from .adapters import MappedHttpAdapter, TurnBasedReplayAdapter
 from .artifacts import skill_treatment_members
 from .hooks import AgentObservation, ReplayContext, ReplayUnsupported, validate_observation
-from .protocol import REPLAY_REQUEST_SCHEMA_V1, REPLAY_TURN_REQUEST_SCHEMA_V1
+from .protocol import REPLAY_TURN_REQUEST_SCHEMA
 
 
 class TurnSession:
@@ -28,7 +28,7 @@ class TurnSession:
         if remaining <= 0:
             raise TimeoutError("Replay session timed out")
         request = {
-            "schema_version": REPLAY_TURN_REQUEST_SCHEMA_V1, "protocol_version": "1.0",
+            "schema_version": REPLAY_TURN_REQUEST_SCHEMA, "protocol_version": "1.0",
             "request_id": self.context.request_id, "turn_num": len(self.history) + 1,
             "branch": self.context.treatment.branch, "prompt": user_message,
             "history": copy.deepcopy(self.history),
@@ -132,49 +132,3 @@ class DeapReplayFactory:
             self.endpoint, employee_no=self.employee_no, auth_profile=self.auth_profile,
             client=self.client_factory() if self.client_factory else None,
         ))
-
-
-class LegacyBranchSession:
-    """One-turn migration bridge. Never exposes an evaluation Checklist."""
-
-    def __init__(self, context: ReplayContext, adapter: HttpReplayAdapter):
-        self.context = copy.deepcopy(context)
-        self.adapter = adapter
-        self.sent = False
-        self.closed = False
-
-    def send(self, user_message: str) -> AgentObservation:
-        if self.sent or self.closed:
-            raise ReplayUnsupported("legacy branch transport cannot resume; bind a turn-based factory")
-        self.sent = True
-        result = self.adapter.execute_branch({
-            "schema_version": REPLAY_REQUEST_SCHEMA_V1, "protocol_version": "1.0",
-            "request_id": self.context.request_id, "job_id": self.context.request_id,
-            "branch": self.context.treatment.branch, "skill": self.context.treatment.skill,
-            "skills": skill_treatment_members(self.context.treatment.skill),
-            "case": {"query": user_message, "materials": list(self.context.materials)},
-            "context_snapshot": self.context.context_snapshot,
-            "limits": {"timeout_seconds": self.context.timeout_seconds, "max_interactions": 1},
-        })
-        if result.get("status") != "succeeded":
-            raise ReplayUnsupported(str((result.get("error") or {}).get("message") or "legacy execution failed"))
-        metrics = {key: value for key, value in (result.get("metrics") or {}).items() if key != "interaction_turns"}
-        return validate_observation(AgentObservation(
-            response=(result.get("output") or {}).get("final_response"),
-            messages=tuple((result.get("trace") or {}).get("messages") or []),
-            artifacts=tuple(result.get("artifacts") or []), metrics=metrics,
-        ))
-
-    def close(self) -> None:
-        self.closed = True
-
-
-@dataclass
-class LegacyBranchFactory:
-    adapter_builder: Callable[[], HttpReplayAdapter]
-    isolated_sessions: bool = False
-
-    def open(self, context: ReplayContext) -> LegacyBranchSession:
-        if not self.isolated_sessions:
-            raise ReplayUnsupported("legacy runtime must guarantee isolated branch execution")
-        return LegacyBranchSession(context, self.adapter_builder())

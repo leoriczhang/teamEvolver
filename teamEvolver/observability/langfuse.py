@@ -118,7 +118,7 @@ class LangfuseTracingSettings:
         )
         timeout_seconds = _env_int(
             "LANGFUSE_TIMEOUT",
-            int(get("langfuse_timeout_seconds", 30) or 30),
+            int(get("langfuse_tracing_timeout_seconds", 30) or 30),
         )
         return cls(
             enabled=enabled,

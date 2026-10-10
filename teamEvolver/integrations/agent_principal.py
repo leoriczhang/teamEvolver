@@ -9,7 +9,6 @@ from typing import Any
 from fastapi import HTTPException
 
 from ..tenants.registry import current_tenant_id, effective_config, get_current_tenant
-from .protocol_metrics import increment
 
 
 @dataclass(frozen=True)
@@ -49,20 +48,13 @@ def resolve_agent_principal(request: Any, config: Any, user_id: Any) -> AgentPri
         or tenant is None
         or tenant.status != "active"
     ):
-        increment("agent_identity_rejected_total", reason="TENANT_TOKEN_REQUIRED")
         raise HTTPException(status_code=401, detail="TENANT_TOKEN_REQUIRED")
     try:
         normalized = normalize_user_id(user_id)
     except ValueError as exc:
-        increment("agent_identity_rejected_total", reason=str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     resolved = effective_config(None, tenant, config)
     account = str(getattr(resolved, "sharing_viking_account", "") or "").strip()
     if not account:
-        increment("agent_identity_rejected_total", reason="TENANT_ACCOUNT_REQUIRED")
         raise HTTPException(status_code=503, detail="TENANT_ACCOUNT_REQUIRED")
-    if not getattr(request.state, "agent_identity_counted", False):
-        mode = "legacy" if getattr(request.state, "agent_legacy_identity", False) else "tenant_user"
-        increment("agent_identity_requests_total", mode=mode)
-        request.state.agent_identity_counted = True
     return AgentPrincipal(current_tenant_id(), account, normalized)

@@ -147,3 +147,23 @@ it("submits a custom Skill URI and keeps it unchanged while reconciling a lost r
   await waitFor(() => expect(writes.filter(w => w.path.endsWith("/jobs"))).toHaveLength(2));
   expect(writes.filter(w => w.path.endsWith("/jobs"))[1].init.body).toBe(first.init.body);
 });
+
+it("shows the predicted duration and elapsed progress for a running build", async () => {
+  enabled = true;
+  jobs = [{
+    id: "ont_predicted", key: "build-1", state: "running",
+    result: {
+      stage: "poll", remote_status: "running", compile_id: "cmp_1",
+      predicted: { batches: 2, total_characters: 15033, duration_seconds: 12150, note: "预计编译 ~3 小时", estimated: false },
+      deadline_seconds: 12150, deadline_at: "2026-09-29T07:16:46+00:00", elapsed_seconds: 483,
+    },
+    request: {},
+  }];
+  render(<OntologyView active scope="predicted" />);
+  fireEvent.click(await screen.findByRole("button", { name: "构建" }));
+  expect(await screen.findByText(/预计编译 ~3 小时/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "查看" }));
+  expect(await screen.findByText(/Compile：cmp_1 · running · poll · 预计编译 ~3 小时/)).toBeInTheDocument();
+  expect(screen.getByText(/已运行 8 分钟/)).toBeInTheDocument();
+  expect(screen.getByText(/预计截止/)).toBeInTheDocument();
+});

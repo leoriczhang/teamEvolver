@@ -11,25 +11,33 @@ def register_replay_routes(owner, app: FastAPI, *, session_user):
 
     _session_user = session_user
 
-    @app.post("/trigger-dreamcycle")
-    async def trigger_dreamcycle():
-        result = owner._trigger_dreamcycle()
+    @app.post("/api/memory/maintenance/run")
+    async def trigger_memory_maintenance(request: Request):
+        _require_admin_user(
+            getattr(request.state, "console_user", None)
+            or _session_user(request)
+        )
+        result = owner._trigger_memory_maintenance()
         status = str(result.get("status") or "")
         if status == "not_configured":
             return JSONResponse(content=result, status_code=503)
         return JSONResponse(content=result, status_code=202)
 
-    @app.get("/trigger-dreamcycle/status")
-    async def dreamcycle_status():
-        return owner._dreamcycle_status()
+    @app.get("/api/memory/maintenance/status")
+    async def memory_maintenance_status(request: Request):
+        _require_admin_user(
+            getattr(request.state, "console_user", None)
+            or _session_user(request)
+        )
+        return owner._memory_maintenance_status()
 
-    @app.get("/trigger-dreamcycle/dry-run")
-    async def dreamcycle_dry_run(request: Request):
+    @app.get("/api/memory/maintenance/dry-run")
+    async def memory_maintenance_dry_run(request: Request):
         _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
-        return owner._dreamcycle_dry_run()
+        return owner._memory_maintenance_dry_run()
 
-    @app.get("/trigger-dreamcycle/memory-changes")
-    async def dreamcycle_memory_changes(
+    @app.get("/api/memory/changes")
+    async def memory_changes(
         request: Request,
         limit: int = 100,
     ):
@@ -39,13 +47,13 @@ def register_replay_routes(owner, app: FastAPI, *, session_user):
                 status_code=400,
                 detail="limit must be between 1 and 500",
             )
-        return owner._dreamcycle_memory_changes(
+        return owner._memory_changes(
             limit=limit,
             config=_tenant_effective_config(owner),
         )
 
-    @app.post("/trigger-dreamcycle/memory-changes/{change_id}/true-replay")
-    async def dreamcycle_memory_true_replay(
+    @app.post("/api/memory/changes/{change_id}/true-replay")
+    async def memory_true_replay(
         change_id: str,
         request: Request,
     ):
@@ -65,7 +73,7 @@ def register_replay_routes(owner, app: FastAPI, *, session_user):
             checklist = []
         try:
             return await asyncio.to_thread(
-                owner._run_dreamcycle_memory_replay,
+                owner._run_memory_replay,
                 change_id=change_id,
                 query=str(body.get("query") or ""),
                 checklist=checklist,
@@ -85,8 +93,8 @@ def register_replay_routes(owner, app: FastAPI, *, session_user):
                 detail=str(exc),
             ) from exc
 
-    @app.get("/trigger-dreamcycle/memory-changes/{change_id}/true-replays")
-    async def dreamcycle_memory_true_replays(
+    @app.get("/api/memory/changes/{change_id}/true-replays")
+    async def memory_true_replays(
         change_id: str,
         request: Request,
         limit: int = 100,
@@ -97,7 +105,7 @@ def register_replay_routes(owner, app: FastAPI, *, session_user):
                 status_code=400,
                 detail="limit must be between 1 and 500",
             )
-        return owner._dreamcycle_memory_replays(
+        return owner._memory_replays(
             change_id=change_id,
             limit=limit,
             config=_tenant_effective_config(owner),
@@ -127,7 +135,7 @@ def register_replay_routes(owner, app: FastAPI, *, session_user):
             checklist = []
         try:
             return await asyncio.to_thread(
-                owner._run_dreamcycle_memory_replay_adhoc,
+                owner._run_memory_replay_adhoc,
                 memory_path=str(body.get("memory_path") or ""),
                 before_content=str(body.get("before_content") or ""),
                 after_content=str(body.get("after_content") or ""),
@@ -144,29 +152,3 @@ def register_replay_routes(owner, app: FastAPI, *, session_user):
                 status_code=400,
                 detail=str(exc),
             ) from exc
-
-    @app.post("/trigger-dreamcycle/reset")
-    async def dreamcycle_reset(request: Request):
-        _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
-        body = await request.json()
-        if not isinstance(body, dict):
-            raise HTTPException(
-                status_code=400,
-                detail="DreamCycle reset body must be an object",
-            )
-        remote = bool(body.get("remote", False))
-        dry_run = bool(body.get("dry_run", True))
-        if not dry_run:
-            expected = "ARCHIVE_REMOTE_MEMORY" if remote else "RESET_LOCAL_STATE"
-            if str(body.get("confirmation") or "") != expected:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"confirmation must equal {expected}",
-                )
-        result = owner._dreamcycle_reset(
-            remote=remote,
-            dry_run=dry_run,
-        )
-        if result.get("status") == "running":
-            return JSONResponse(content=result, status_code=409)
-        return result

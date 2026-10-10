@@ -1,0 +1,37 @@
+{
+  "date": "2026-09-23",
+  "baseline": "ad04bba56b112cf8a7c33dbd36d5e4bce25fdc11",
+  "scope": "TE native filesystem conflict reconciliation; OV unchanged; no deployment, commit or push",
+  "source_sha256": {
+    "team_ontology/compile_flow.py": "63dc78b6c7a1d2e5bb16c2647c5048f37a0fd600607e20f2a52c6110550ffea0",
+    "tests/test_ontology_compile.py": "45d3cc3e1cd162363549db9414dc220e03ad05346da3f68258b86260d214f9cd",
+    "docs/ontology-integration/45-native-compile-wiki-operations.md": "c8481d7144fb5125771b0b2194c37131b6828fd0032f11119f8e02d12c11cea5"
+  },
+  "reproduction": "Before the fix, the directory-to-Schema regression fails with stage_inputs CONFLICT when mock mkdir faithfully returns HTTP 409 on existing paths.",
+  "checks": {
+    "focused": "72 passed (HTTP mock; no real-model claim)",
+    "full": "5 failed, 853 passed, 64 skipped",
+    "compileall": "passed",
+    "ruff_changed_files": "passed",
+    "diff_check": "passed",
+    "docs_refs": "one existing broken reference: docs/en/api/06-skill-sync.md -> teamEvolver/skills/mutations.py",
+    "isolated_restart": "two launches and clean shutdowns, launcher ready and HTTP 200; Ontology disabled in startup smoke profile"
+  },
+  "known_failures": [
+    "test_routes_accept_batch_and_preserve_historical_source_after_removal",
+    "test_engine_candidate_is_visible_to_tenant_validation_worker",
+    "test_tenant_model_settings_are_isolated_and_secrets_are_masked",
+    "test_envelope_only_prompt_title_comes_from_nested_query",
+    "test_storage_status_reports_local_skills_and_pg_sessions"
+  ],
+  "not_executed": [
+    "real OV endpoint validation",
+    "SIT deployment and retry",
+    "real model Compile",
+    "PG integrations requiring explicit test DSNs"
+  ],
+  "logs": [
+    "/tmp/te-ontology-conflict-full-tests.log",
+    "/tmp/te-ontology-acl-smoke/conflict-restart-verified.log"
+  ]
+}

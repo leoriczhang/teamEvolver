@@ -9,9 +9,9 @@ from team_memory.aggregation.sources import SourceExpansionError
 from team_memory.aggregation.staging import DeterministicStagingClient
 
 if TYPE_CHECKING:
+    from team_memory.aggregation.state import AggregationState
     from team_memory.compile_client import CompileClient
     from team_memory.service import AggregationRun, MemoryAggregationService
-    from team_memory.aggregation.state import AggregationState
 
 
 async def ensure_private_parents(client: CompileClient, uri: str) -> None:
@@ -129,7 +129,9 @@ async def maintain(
         ),
     )
     if not result.get("ok"):
-        raise SourceExpansionError("DreamCycle compile failed; aggregation and snapshot are retained")
+        raise SourceExpansionError(
+            "Team Memory maintenance compile failed; aggregation and snapshot are retained"
+        )
     after = await inspector.inspect((), source_root=run.target_uri, include_all_kinds=True)
     state.metadata["maintenance"] = {
         "output_fingerprint": after.fingerprint,

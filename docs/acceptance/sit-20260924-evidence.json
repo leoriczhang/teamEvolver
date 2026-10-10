@@ -1,0 +1,898 @@
+{
+  "date": "2026-09-24",
+  "local_baseline": "e630e92",
+  "sit_commit": "not_verified",
+  "tenant": "te-acceptance-20260924",
+  "requests": [
+    {
+      "label": "create-test-tenant",
+      "method": "POST",
+      "path": "/api/tenants",
+      "status": 200,
+      "duration": 7.66,
+      "request_id": "967b55fbc5214ad88a5b02f31d07176e"
+    },
+    {
+      "label": "tenant-registration-override-denied",
+      "method": "PUT",
+      "path": "/api/tenants/te-acceptance-20260924/config",
+      "status": 400,
+      "duration": 0.16,
+      "request_id": "66d3bd7e5d3947be853baa5a8ac15319"
+    },
+    {
+      "label": "registration-no-key",
+      "method": "POST",
+      "path": "/api/auth/register",
+      "status": 403,
+      "duration": 0.14,
+      "request_id": "0b3330d2f6b44102af81a59779d8a590"
+    },
+    {
+      "label": "registration-invalid-key",
+      "method": "POST",
+      "path": "/api/auth/register",
+      "status": 403,
+      "duration": 0.16,
+      "request_id": "0a966872a2c5404bb18d55cc033eff72"
+    },
+    {
+      "label": "registration-root-key",
+      "method": "POST",
+      "path": "/api/auth/register",
+      "status": 200,
+      "duration": 1.29,
+      "request_id": "7aa4b2f2e6b74a699cc956df4603c846"
+    },
+    {
+      "label": "registration-duplicate",
+      "method": "POST",
+      "path": "/api/auth/register",
+      "status": 409,
+      "duration": 0.16,
+      "request_id": "fd5b2be034fc4380a0ddbfcd17b156f6"
+    },
+    {
+      "label": "test-user-login",
+      "method": "POST",
+      "path": "/api/auth/login",
+      "status": 200,
+      "duration": 0.6,
+      "request_id": "a4a19a7d1f374150a115ddbaf5536006"
+    },
+    {
+      "label": "test-user-status",
+      "method": "GET",
+      "path": "/api/auth/status",
+      "status": 200,
+      "duration": 2.27,
+      "request_id": "f12c6b2d08fd45a090b0781462debd62"
+    },
+    {
+      "label": "user-denied-import",
+      "method": "POST",
+      "path": "/api/experience-sync/import",
+      "status": 403,
+      "duration": 0.13,
+      "request_id": "e2f6c27f76c24f1fabfc571a920a9c66"
+    },
+    {
+      "label": "user-denied-logging",
+      "method": "GET",
+      "path": "/api/logging/status",
+      "status": 403,
+      "duration": 0.12,
+      "request_id": "8292afd33c8b430ab053521409e5ee38"
+    },
+    {
+      "label": "test-user-logout",
+      "method": "POST",
+      "path": "/api/auth/logout",
+      "status": 200,
+      "duration": 0.16,
+      "request_id": "7023fe4cbdf14e7bb152b4f72a7213ec"
+    },
+    {
+      "label": "test-user-status-after-logout",
+      "method": "GET",
+      "path": "/api/auth/status",
+      "status": 200,
+      "duration": 0.13,
+      "request_id": "e4644bd5353c4e7ab9bb45af92884989"
+    },
+    {
+      "label": "isolated-workspace-config",
+      "method": "GET",
+      "path": "/api/openviking/workspace/config",
+      "status": 200,
+      "duration": 0.24,
+      "request_id": "e24698c916b74c9ba623a1d0e808c899"
+    },
+    {
+      "label": "isolated-config",
+      "method": "PUT",
+      "path": "/api/tenants/te-acceptance-20260924/config",
+      "status": 200,
+      "duration": 0.13,
+      "request_id": "1b43f1e080e64b88b2706750cd95bbc3"
+    },
+    {
+      "label": "ontology-disabled-isolated",
+      "method": "GET",
+      "path": "/te/enterprise/v1/capabilities",
+      "status": 403,
+      "duration": 0.27,
+      "request_id": "664a3a4fa532402a8376ba229113bef4"
+    },
+    {
+      "label": "ontology-enable-isolated",
+      "method": "PUT",
+      "path": "/te/enterprise/v1/access",
+      "status": 200,
+      "duration": 0.25,
+      "request_id": "0692e26c268542e5a18fdf125f92515b"
+    },
+    {
+      "label": "ontology-capabilities-isolated",
+      "method": "GET",
+      "path": "/te/enterprise/v1/capabilities",
+      "status": 200,
+      "duration": 0.21,
+      "request_id": "d64e4b5963704e26b772684894b9906f"
+    },
+    {
+      "label": "isolated-workspace-list",
+      "method": "GET",
+      "path": "/api/openviking/workspace/list",
+      "status": 200,
+      "duration": 0.22,
+      "request_id": "472bed9cabd84677a323d45bbcd87e86"
+    },
+    {
+      "label": "isolated-wiki-capabilities",
+      "method": "GET",
+      "path": "/api/knowledge-mining/capabilities",
+      "status": 200,
+      "duration": 0.25,
+      "request_id": "a4f46e2cf8334e06a4debe4b52905648"
+    },
+    {
+      "label": "isolated-wiki-roots",
+      "method": "GET",
+      "path": "/api/knowledge-mining/wiki-roots",
+      "status": 200,
+      "duration": 0.17,
+      "request_id": "a245b283d04d42468f88baada4670634"
+    },
+    {
+      "label": "isolated-wiki-tasks",
+      "method": "GET",
+      "path": "/api/knowledge-mining/tasks",
+      "status": 200,
+      "duration": 0.15,
+      "request_id": "2f9a28bb47c249488f14f1063a828804"
+    },
+    {
+      "label": "isolated-wiki-tree",
+      "method": "GET",
+      "path": "/api/knowledge-mining/tree",
+      "status": 200,
+      "duration": 0.16,
+      "request_id": "760c36fd92cf471584fe46f01f86bd57"
+    },
+    {
+      "label": "isolated-datasets",
+      "method": "GET",
+      "path": "/api/replay-lab/datasets",
+      "status": 200,
+      "duration": 0.14,
+      "request_id": "2c6ea231fbc1410a94dfb46df1956f87"
+    },
+    {
+      "label": "workspace-mkdir",
+      "method": "POST",
+      "path": "/api/openviking/workspace/mkdir",
+      "status": 200,
+      "duration": 0.33,
+      "request_id": "ed1c47d6490948c1a1d4963e7127884a"
+    },
+    {
+      "label": "workspace-create",
+      "method": "POST",
+      "path": "/api/openviking/workspace/content",
+      "status": 200,
+      "duration": 0.34,
+      "request_id": "88f4408eaba24d1098f1b8cd8c391e02"
+    },
+    {
+      "label": "workspace-read",
+      "method": "GET",
+      "path": "/api/openviking/workspace/content",
+      "status": 200,
+      "duration": 0.27,
+      "request_id": "471aa8b3c9f840bd952d869704a60e69"
+    },
+    {
+      "label": "workspace-replace",
+      "method": "POST",
+      "path": "/api/openviking/workspace/content",
+      "status": 200,
+      "duration": 0.36,
+      "request_id": "6a5425d8981b4f36a60348f2c6e99cdf"
+    },
+    {
+      "label": "workspace-path-escape-denied",
+      "method": "GET",
+      "path": "/api/openviking/workspace/content",
+      "status": 403,
+      "duration": 0.13,
+      "request_id": "765ab1359a764ac68f18478ff1ca08f2"
+    },
+    {
+      "label": "source-collection",
+      "method": "POST",
+      "path": "/te/enterprise/v1/source-collections",
+      "status": 202,
+      "duration": 0.16,
+      "request_id": "b5b368c4b3c94a569c6557cc19e88dfe"
+    },
+    {
+      "label": "source-collection-duplicate",
+      "method": "POST",
+      "path": "/te/enterprise/v1/source-collections",
+      "status": 202,
+      "duration": 0.15,
+      "request_id": "cf7bd8994bb843be91099ce738b5ffc3"
+    },
+    {
+      "label": "experience-sync-trigger",
+      "method": "POST",
+      "path": "/api/experience-sync/trigger",
+      "status": 202,
+      "duration": 0.14,
+      "request_id": "98708658d5c64f1a8f0a30c406e1ff9f"
+    },
+    {
+      "label": "source-collection-result",
+      "method": "GET",
+      "path": "/te/enterprise/v1/source-collections/ont_8b6ce125e5d8ffacc0d2fa25",
+      "status": 200,
+      "duration": 0.21,
+      "request_id": "f67bbaf898224dd19cf1a31d92a66abb"
+    },
+    {
+      "label": "compile-submit",
+      "method": "POST",
+      "path": "/te/enterprise/v1/jobs",
+      "status": 202,
+      "duration": 0.4,
+      "request_id": "db6c0c649a304d9d800e6dfcccf1d1c8"
+    },
+    {
+      "label": "compile-current",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_dd1a853175f663990ee6f206",
+      "status": 200,
+      "duration": 0.16,
+      "request_id": "14b6faa03ac0455d92fa0c7c74918af8"
+    },
+    {
+      "label": "compile-poll-2",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_dd1a853175f663990ee6f206",
+      "status": 200,
+      "duration": 0.34,
+      "request_id": "c22bb2c412704c74a5201275cbd5b7af"
+    },
+    {
+      "label": "isolated-import-status",
+      "method": "GET",
+      "path": "/api/experience-sync/status",
+      "status": 200,
+      "duration": 0.18,
+      "request_id": "58ba109d05e74669bbc33bcc3856ae57"
+    },
+    {
+      "label": "workspace-tree",
+      "method": "GET",
+      "path": "/api/openviking/workspace/tree",
+      "status": 200,
+      "duration": 0.26,
+      "request_id": "d068ce5a7f764084b48c26d39589a57e"
+    },
+    {
+      "label": "ontology-feedback",
+      "method": "GET",
+      "path": "/te/enterprise/v1/feedback",
+      "status": 200,
+      "duration": 0.25,
+      "request_id": "941bcea434394f35a3ba938718be2fbd"
+    },
+    {
+      "label": "ontology-versions",
+      "method": "GET",
+      "path": "/te/enterprise/v1/versions",
+      "status": 200,
+      "duration": 0.33,
+      "request_id": "0c450f57321b4d8fa84800d235ca1866"
+    },
+    {
+      "label": "knowledge-content",
+      "method": "GET",
+      "path": "/api/knowledge-mining/content",
+      "status": 422,
+      "duration": 0.13,
+      "request_id": "ea778cb3a41d487da7df7ab589990112"
+    },
+    {
+      "label": "skill-import",
+      "method": "POST",
+      "path": "/api/skills/import-zip",
+      "status": 500,
+      "duration": 0.38,
+      "request_id": "cf1ec140bb9145a8aa68fc0a1ecf6490"
+    },
+    {
+      "label": "skill-reimport",
+      "method": "POST",
+      "path": "/api/skills/import-zip",
+      "status": 500,
+      "duration": 0.2,
+      "request_id": "52fa63d58c16413a88ec3cabd973a353"
+    },
+    {
+      "label": "skill-list",
+      "method": "GET",
+      "path": "/api/skills/transfer/skills",
+      "status": 200,
+      "duration": 0.16,
+      "request_id": "5c596274724a443d9a221214e88afb3b"
+    },
+    {
+      "label": "skill-export",
+      "method": "POST",
+      "path": "/api/skills/export",
+      "status": 404,
+      "duration": 0.14,
+      "request_id": "790724230b5b48139ab56b16d67a3204"
+    },
+    {
+      "label": "memory-empty-run",
+      "method": "POST",
+      "path": "/api/aggregation/run",
+      "status": 400,
+      "duration": 0.13,
+      "request_id": "b2f7b1e070824e20b6d1d7be41c5ebfb"
+    },
+    {
+      "label": "tenant-key-register-denied",
+      "method": "POST",
+      "path": "/api/auth/register",
+      "status": 403,
+      "duration": 0.21,
+      "request_id": "2e5a2f3bc4c1427999a835cec9180336"
+    },
+    {
+      "label": "agent-session-ingest",
+      "method": "POST",
+      "path": "/ingest_session",
+      "status": 200,
+      "duration": 41.27,
+      "request_id": "94190f23870f4c5a9bfb1e84fd198d94"
+    },
+    {
+      "label": "skill-json-import",
+      "method": "POST",
+      "path": "/api/skills/import-zip",
+      "status": 200,
+      "duration": 0.58,
+      "request_id": "62d1b714505c4a7ebc4c4ba67e7ad186"
+    },
+    {
+      "label": "skill-json-reimport",
+      "method": "POST",
+      "path": "/api/skills/import-zip",
+      "status": 200,
+      "duration": 0.33,
+      "request_id": "df810677a962443bae334689d1eb519d"
+    },
+    {
+      "label": "skill-zip-export",
+      "method": "POST",
+      "path": "/api/skills/export",
+      "status": 200,
+      "duration": 0.17,
+      "request_id": "d33556e020e643f8bb79ac760b6a0abd"
+    },
+    {
+      "label": "memory-test-run",
+      "method": "POST",
+      "path": "/api/aggregation/run",
+      "status": 202,
+      "duration": 0.19,
+      "request_id": "d0cd7ad92fb54354b27a5eb0526533b3"
+    },
+    {
+      "label": "experience-import-analyzed-session",
+      "method": "POST",
+      "path": "/api/experience-sync/import",
+      "status": 202,
+      "duration": 0.19,
+      "request_id": "4f427ad43cf24ff0924106427c1fbb10"
+    },
+    {
+      "label": "compile-poll-3",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_dd1a853175f663990ee6f206",
+      "status": 200,
+      "duration": 0.14,
+      "request_id": "188ed7fae2b1467aa44e2eca18ff630c"
+    },
+    {
+      "label": "product-wiki-capabilities",
+      "method": "GET",
+      "path": "/api/knowledge-mining/capabilities",
+      "status": 200,
+      "duration": 0.17,
+      "request_id": "60ceac3d65d2473fa00db7e2ca04dda2"
+    },
+    {
+      "label": "product-wiki-roots",
+      "method": "GET",
+      "path": "/api/knowledge-mining/wiki-roots",
+      "status": 200,
+      "duration": 0.2,
+      "request_id": "9f91e9ade8ac4284807c98f7e4972f96"
+    },
+    {
+      "label": "product-wiki-tasks",
+      "method": "GET",
+      "path": "/api/knowledge-mining/tasks",
+      "status": 200,
+      "duration": 0.31,
+      "request_id": "8d3ccb4f23c94be7aab0111c121fe6ea"
+    },
+    {
+      "label": "compile-poll-4",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_dd1a853175f663990ee6f206",
+      "status": 200,
+      "duration": 0.31,
+      "request_id": "3ef0a6e4bc894763a8c070df336210cb"
+    },
+    {
+      "label": "experience-after-import",
+      "method": "GET",
+      "path": "/api/experience-sync/status",
+      "status": 200,
+      "duration": 0.19,
+      "request_id": "5af2ba392c5d403ba65207dab65737cb"
+    },
+    {
+      "label": "memory-result",
+      "method": "GET",
+      "path": "/api/aggregation/status/agg_dcGt0KdU56VSsvspSZZUKXVDnUwZfCvJ",
+      "status": 200,
+      "duration": 0.19,
+      "request_id": "1aa8d5b143014285a0c6df9fb6dedbb9"
+    },
+    {
+      "label": "compile-latest",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_dd1a853175f663990ee6f206",
+      "status": 200,
+      "duration": 0.19,
+      "request_id": "6d406dc43c0c4cd88868204726485cd8"
+    },
+    {
+      "label": "sync-latest",
+      "method": "GET",
+      "path": "/api/experience-sync/status",
+      "status": 200,
+      "duration": 0.14,
+      "request_id": "e202e3f3455f40878f649116a4c9858d"
+    },
+    {
+      "label": "compile-retry-after-native-terminal",
+      "method": "POST",
+      "path": "/te/enterprise/v1/jobs/ont_dd1a853175f663990ee6f206/retry",
+      "status": 200,
+      "duration": 0.17,
+      "request_id": "5f564fa964f9434aa59332d80f29969f"
+    },
+    {
+      "label": "wiki-content-correct",
+      "method": "GET",
+      "path": "/api/knowledge-mining/content",
+      "status": 200,
+      "duration": 0.27,
+      "request_id": "c25c5c41199d4ab799f560bdb5cabb94"
+    },
+    {
+      "label": "wiki-tree-populated",
+      "method": "GET",
+      "path": "/api/knowledge-mining/tree",
+      "status": 200,
+      "duration": 0.18,
+      "request_id": "7bb6a850b5984580b17bc1ac60f275c9"
+    },
+    {
+      "label": "compile-after-retry",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_dd1a853175f663990ee6f206",
+      "status": 200,
+      "duration": 0.14,
+      "request_id": "fe3e84bc34504a86891a3cfd232763d8"
+    },
+    {
+      "label": "wiki-graph",
+      "method": "POST",
+      "path": "/api/knowledge-mining/graph",
+      "status": 200,
+      "duration": 0.28,
+      "request_id": "ceb7a8015c294d7faa6ff665896bd175"
+    },
+    {
+      "label": "wiki-editor-save",
+      "method": "POST",
+      "path": "/api/knowledge-mining/content",
+      "status": 200,
+      "duration": 0.3,
+      "request_id": "92c7feb4f2b440a3a7b712e31fea4821"
+    },
+    {
+      "label": "wiki-editor-conflict",
+      "method": "POST",
+      "path": "/api/knowledge-mining/content",
+      "status": 409,
+      "duration": 0.27,
+      "request_id": "b6d8fa48bd9e43e8a6c7e6c3edecd188"
+    },
+    {
+      "label": "wiki-editor-readback",
+      "method": "GET",
+      "path": "/api/knowledge-mining/content",
+      "status": 200,
+      "duration": 0.26,
+      "request_id": "b91631fecfb0463dacb9256223310ca6"
+    },
+    {
+      "label": "compile-retry-status",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_dd1a853175f663990ee6f206",
+      "status": 200,
+      "duration": 0.71,
+      "request_id": "683ae5c8db3c458f8d19c9fceee51aa1"
+    },
+    {
+      "label": "sync-final-sample",
+      "method": "GET",
+      "path": "/api/experience-sync/status",
+      "status": 200,
+      "duration": 0.21,
+      "request_id": "48056e0ccdc74d47980e64ab4d33fa2e"
+    },
+    {
+      "label": "compile-final-check",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_dd1a853175f663990ee6f206",
+      "status": 200,
+      "duration": 0.16,
+      "request_id": "249d0a28106d4743a3bdc7e71e4bff49"
+    },
+    {
+      "label": "compile-retry-check-2",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_dd1a853175f663990ee6f206",
+      "status": 200,
+      "duration": 0.2,
+      "request_id": "c9df5a7762ed4f96832a057342c234ec"
+    },
+    {
+      "label": "compile-before-cancel",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_dd1a853175f663990ee6f206",
+      "status": 200,
+      "duration": 0.22,
+      "request_id": "3c1c4ef760d840bfb8607c0860d5ad43"
+    },
+    {
+      "label": "compile-cancel",
+      "method": "POST",
+      "path": "/te/enterprise/v1/jobs/ont_dd1a853175f663990ee6f206/cancel",
+      "status": 200,
+      "duration": 0.61,
+      "request_id": "45410ef639b0471391c6363f1c6292c5"
+    },
+    {
+      "label": "isolated-sync-pause",
+      "method": "PUT",
+      "path": "/api/tenants/te-acceptance-20260924/config",
+      "status": 200,
+      "duration": 0.26,
+      "request_id": "8103659b76c14d6d8ed2209251c62ee1"
+    },
+    {
+      "label": "compile-cancel-verify",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_dd1a853175f663990ee6f206",
+      "status": 200,
+      "duration": 0.23,
+      "request_id": "7cba19736f9741e08a7e8f4b2f4dd5e0"
+    },
+    {
+      "label": "isolated-sync-disabled",
+      "method": "GET",
+      "path": "/api/experience-sync/status",
+      "status": 200,
+      "duration": 0.14,
+      "request_id": "d0a88cc7513a4fcd8ee725fbab56ac0b"
+    },
+    {
+      "label": "compile-cancel-final",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_dd1a853175f663990ee6f206",
+      "status": 200,
+      "duration": 0.18,
+      "request_id": "1e2c5c4c8e8e4befb973105d7da69abe"
+    },
+    {
+      "label": "compile-cancel-confirmed",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_dd1a853175f663990ee6f206",
+      "status": 200,
+      "duration": 0.17,
+      "request_id": "a6eee1f1587144238012ff8ee6f6ae0f"
+    },
+    {
+      "label": "compile-cancel-reconcile",
+      "method": "POST",
+      "path": "/te/enterprise/v1/jobs/ont_dd1a853175f663990ee6f206/cancel",
+      "status": 200,
+      "duration": 0.22,
+      "request_id": "bda40f6db4c6401fb74f88426a1f74d8"
+    },
+    {
+      "label": "single-source-new",
+      "method": "POST",
+      "path": "/te/enterprise/v1/source-collections",
+      "status": 202,
+      "duration": 0.66,
+      "request_id": "57179cc8d9fb4ce488dd21fab8b35dd8"
+    },
+    {
+      "label": "single-source-ready",
+      "method": "GET",
+      "path": "/te/enterprise/v1/source-collections/ont_5351c08d4f3acf3ab88d1b36",
+      "status": 200,
+      "duration": 0.24,
+      "request_id": "01b6d4802bef428e8104066993af5c9f"
+    },
+    {
+      "label": "single-build-new",
+      "method": "POST",
+      "path": "/te/enterprise/v1/jobs",
+      "status": 202,
+      "duration": 0.2,
+      "request_id": "371d59baab25403c8c03892f648cadc4"
+    },
+    {
+      "label": "single-build-status-1",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_93b91a685042201bf1bd322f",
+      "status": 200,
+      "duration": 0.17,
+      "request_id": "ca72494b7f7c463687e6a0ae77eb823c"
+    },
+    {
+      "label": "single-commit-before-approval",
+      "method": "POST",
+      "path": "/te/enterprise/v1/jobs/ont_93b91a685042201bf1bd322f/commit",
+      "status": 409,
+      "duration": 0.2,
+      "request_id": "7fbb8868e0954631851d061058ab2725"
+    },
+    {
+      "label": "single-build-status-2",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_93b91a685042201bf1bd322f",
+      "status": 200,
+      "duration": 0.12,
+      "request_id": "30b3382db5e64d3dbaec4d458056224c"
+    },
+    {
+      "label": "restart-sync-enable",
+      "method": "PUT",
+      "path": "/api/tenants/te-acceptance-20260924/config",
+      "status": 200,
+      "duration": 0.31,
+      "request_id": "44f698ec868c4361bfb6594addbe9f25"
+    },
+    {
+      "label": "restart-sync-trigger",
+      "method": "POST",
+      "path": "/api/experience-sync/trigger",
+      "status": 202,
+      "duration": 0.13,
+      "request_id": "06f62d4d8c0049ff8faddca5478036d2"
+    },
+    {
+      "label": "single-build-status-3",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_93b91a685042201bf1bd322f",
+      "status": 200,
+      "duration": 0.13,
+      "request_id": "5b97a56e959f4773a8508e5076328a99"
+    },
+    {
+      "label": "single-retry-after-second-restart",
+      "method": "POST",
+      "path": "/te/enterprise/v1/jobs/ont_93b91a685042201bf1bd322f/retry",
+      "status": 200,
+      "duration": 0.15,
+      "request_id": "5982ae4f068f4ea19c65d30836edb6cd"
+    },
+    {
+      "label": "restart-sync-result",
+      "method": "GET",
+      "path": "/api/experience-sync/status",
+      "status": 200,
+      "duration": 0.12,
+      "request_id": "c2c7bca295ed421d8114f114859f08aa"
+    },
+    {
+      "label": "single-retry-status-1",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_93b91a685042201bf1bd322f",
+      "status": 200,
+      "duration": 1.18,
+      "request_id": "15a3a29202c84e1c94df57bb4c722419"
+    },
+    {
+      "label": "single-retry-status-2",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_93b91a685042201bf1bd322f",
+      "status": 200,
+      "duration": 0.17,
+      "request_id": "ec157ddcf0d74ff09e839cb0caf9b262"
+    },
+    {
+      "label": "single-retry-status-3",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_93b91a685042201bf1bd322f",
+      "status": 200,
+      "duration": 0.24,
+      "request_id": "07b8ce77b0e94117913bb369e131a990"
+    },
+    {
+      "label": "restart-sync-result-2",
+      "method": "GET",
+      "path": "/api/experience-sync/status",
+      "status": 200,
+      "duration": 0.11,
+      "request_id": "5d222a2d667c4351ab5dca1534638bb2"
+    },
+    {
+      "label": "single-retry-status-4",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_93b91a685042201bf1bd322f",
+      "status": 200,
+      "duration": 0.12,
+      "request_id": "132de51931ad4f60afbab51ef3cc45c3"
+    },
+    {
+      "label": "single-retry-status-5",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_93b91a685042201bf1bd322f",
+      "status": 200,
+      "duration": 0.15,
+      "request_id": "4ee10b5632874f3680ee10c5eb67ccb3"
+    },
+    {
+      "label": "restart-sync-end",
+      "method": "GET",
+      "path": "/api/experience-sync/status",
+      "status": 200,
+      "duration": 0.16,
+      "request_id": "02b0ede70b9544869accc6e6b17c3203"
+    },
+    {
+      "label": "restart-sync-pause",
+      "method": "PUT",
+      "path": "/api/tenants/te-acceptance-20260924/config",
+      "status": 200,
+      "duration": 0.12,
+      "request_id": "4fbf7efb183b4ff1a181f5bd553ddaa9"
+    },
+    {
+      "label": "single-retry-status-6",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_93b91a685042201bf1bd322f",
+      "status": 200,
+      "duration": 0.19,
+      "request_id": "9a796b84413343f0ac13b183e8ee6d59"
+    },
+    {
+      "label": "single-retry-status-7",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_93b91a685042201bf1bd322f",
+      "status": 200,
+      "duration": 0.18,
+      "request_id": "f54ba2834cbe4abd839e172230c8401e"
+    },
+    {
+      "label": "single-retry-status-8",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_93b91a685042201bf1bd322f",
+      "status": 200,
+      "duration": 0.16,
+      "request_id": "fcae011fa65f4e9da5076faa0c590b05"
+    },
+    {
+      "label": "single-deadline-result",
+      "method": "GET",
+      "path": "/te/enterprise/v1/jobs/ont_93b91a685042201bf1bd322f",
+      "status": 200,
+      "duration": 0.15,
+      "request_id": "860a1fa613bb4dcfb28b8d157ab3d516"
+    },
+    {
+      "label": "single-final-capabilities",
+      "method": "GET",
+      "path": "/te/enterprise/v1/capabilities",
+      "status": 200,
+      "duration": 0.37,
+      "request_id": "3582e8e1c81543ffbc391ba367601d12"
+    },
+    {
+      "label": "single-final-sync",
+      "method": "GET",
+      "path": "/api/experience-sync/status",
+      "status": 200,
+      "duration": 0.13,
+      "request_id": "d67063c4018f47a4b28d219c24d3c18f"
+    }
+  ],
+  "checks": {
+    "ontology_compile_pytest": {
+      "passed": 72
+    },
+    "python_full": {
+      "passed": 900,
+      "skipped": 64,
+      "failed_existing": 5
+    },
+    "frontend": {
+      "passed": 89
+    },
+    "frontend_build": "passed",
+    "docs_refs": "existing_missing_teamEvolver/skills/mutations.py"
+  },
+  "local_changes": [
+    {
+      "path": "team_ontology/compile_flow.py",
+      "sha256": "05fae9e0945b05e6faa215e1fedd4afb50f83d3b2ff7bb71f941f77f4e2059f5"
+    },
+    {
+      "path": "team_ontology/skills/ontology-extraction-v1/SKILL.md",
+      "sha256": "ab6653f6a4e4f42b51e79f1f2500cffa10ec92991b2d1603d9a2a2af037dabce"
+    },
+    {
+      "path": "teamEvolver/proxy/skill_transfer.py",
+      "sha256": "2e73ad002e70611070b2514060a3e5bb6893f35692bb56d242637743bc8a972c"
+    },
+    {
+      "path": "tests/test_ontology_compile.py",
+      "sha256": "19fb14071a9dd817ec995c85c6cf25b4e80492b1fc111dc91b0ae745d7e867e2"
+    },
+    {
+      "path": "tests/test_skill_transfer.py",
+      "sha256": "057b3f2bf0349b02b32212171da7c7274f2e6f44b9d569eb786758aa52c09199"
+    }
+  ],
+  "cleanup": {
+    "te_compile_state": "cancelled",
+    "ov_compile_state": "cancelled",
+    "isolated_experience_sync_enabled": false
+  }
+}

@@ -119,37 +119,8 @@ export default function DashboardView({
   });
   const [evalCache, setEvalCache] = useState<Record<string, EvalResult>>({});
   const [evaluating, setEvaluating] = useState<Record<string, boolean>>({});
-  const [backfilling, setBackfilling] = useState(false);
   // Skill management modal: editName null=create, string=edit.
   const [skillEditName, setSkillEditName] = useState<string | null | undefined>(undefined);
-
-  // Sweep archived sessions lacking a quality score into the server's async
-  // judge worker (fills historical task_only/chitchat sessions that never ran
-  // through an evolution cycle). Scores then appear via the normal 15s poll.
-  const backfillJudges = useCallback(async () => {
-    if (backfilling) return;
-    if (!window.confirm("将对本租户尚无评审分、且有正文的会话批量补评（后台异步、有速率上限）。继续？")) {
-      return;
-    }
-    setBackfilling(true);
-    try {
-      const r = await api<{ enqueued: number; backlog?: number }>(
-        "/conversations/judge-backfill",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ limit: 200 }),
-        }
-      );
-      toastOk(`已加入补评队列 ${r.enqueued} 个会话`, "评审在后台进行，稍后自动刷新出现分数");
-      sessions.reload();
-    } catch (e: any) {
-      toastErr("发起补评失败", e?.message || String(e));
-    } finally {
-      setBackfilling(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backfilling]);
 
   const inflight = useRef(false);
   const evaluatingRef = useRef<Record<string, boolean>>({});
@@ -382,15 +353,6 @@ export default function DashboardView({
         <div className="flex flex-wrap items-center gap-2">
           <ConnBadge storage={storage} />
           <span className="text-xs text-muted-foreground">{lastUpdate}</span>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={backfilling}
-            title="对本租户尚无评审分的历史会话在后台批量补评"
-            onClick={backfillJudges}
-          >
-            {backfilling ? "补评中…" : "补评历史会话"}
-          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -754,7 +716,6 @@ function ConnBadge({ storage }: { storage: StorageStatus | null }) {
     );
   }
   const ok = storage.reachable;
-  const paused = !ok && storage.reason === "sharing_disabled";
   const backend = storage.pg ? "PostgreSQL" : (storage.backend || "?").toUpperCase();
   const label = backend === "VIKING" ? "OpenViking" : backend;
   const title = [
@@ -769,8 +730,8 @@ function ConnBadge({ storage }: { storage: StorageStatus | null }) {
       className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
       title={title}
     >
-      <Dot state={ok ? "on" : paused ? "off" : "err"} /> {label}：
-      {ok ? "已连接" : paused ? "同步已暂停" : "不可达"}
+      <Dot state={ok ? "on" : "err"} /> {label}：
+      {ok ? "已连接" : "不可达"}
     </span>
   );
 }

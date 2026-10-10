@@ -467,25 +467,18 @@ function ProcessBody({ p }: { p: SessionProcess | null }) {
               {evos.length ? (
                 <div className="space-y-2.5">
                   {evos.map((e, k) => {
-                    const legacyVerifier = e.action === "verification_rejected";
                     const reason = e.reason || e.rationale || "";
                     return (
                       <div key={k} className="rounded-lg border border-line bg-surface-subtle p-3">
                         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                           <div className="flex flex-wrap items-center gap-2">
                             <span className="mono text-xs font-semibold">{e.skill_name || "-"}</span>
-                            <Pill tone={legacyVerifier ? "gray" : "blue"}>
-                              {legacyVerifier ? "未进入回放（旧流程）" : e.action || "-"}
-                            </Pill>
+                            <Pill tone="blue">{e.action || "-"}</Pill>
                             {e.uploaded ? <Pill tone="green">已上传</Pill> : <Pill tone="gray">未上传</Pill>}
                           </div>
                           {e.version != null && <span className="text-xs text-muted-foreground">v{e.version}</span>}
                         </div>
-                        {legacyVerifier ? (
-                          <div className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                            该记录由旧版预检流程产生；当前版本仅比较 True Replay 的轮次、工具调用和 Token。
-                          </div>
-                        ) : reason ? (
+                        {reason ? (
                           <div className="mt-2 text-xs leading-relaxed text-muted-foreground">{reason}</div>
                         ) : null}
                         <EvidenceRouting value={e.evidence_classification} />
@@ -516,5 +509,3 @@ function ProcessBody({ p }: { p: SessionProcess | null }) {
     </div>
   );
 }
-
-export { StatusBadge };

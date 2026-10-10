@@ -124,7 +124,7 @@ export type InlineDiffRow = {
  * (in red) right where they were replaced, so the reader sees one continuous
  * document with only the changed lines colored.
  */
-export function diffLines(oldText: string, newText: string): InlineDiffRow[] {
+function diffLines(oldText: string, newText: string): InlineDiffRow[] {
   const a = oldText.replace(/\r\n/g, "\n").split("\n");
   const b = newText.replace(/\r\n/g, "\n").split("\n");
   const n = a.length;

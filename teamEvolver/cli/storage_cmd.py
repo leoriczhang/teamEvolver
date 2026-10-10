@@ -26,7 +26,7 @@ CONTROL_PLANE_PREFIXES = (
     "human_review/",
     "skill_version_context/",
     "skill_mutation_commits/",
-    "skill_sync_outbox/",
+    "skill_rollout_outbox/",
     "skill_tombstones/",
 )
 CONTROL_PLANE_KEYS = frozenset(

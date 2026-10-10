@@ -23,7 +23,7 @@ from session_ingestion.adapters._shared.langfuse_client import (
     SessionFilters,
 )
 from session_ingestion.adapters._shared.langfuse_convert import convert_langfuse_session
-from session_ingestion.adapters._shared.langfuse_mapper import _deep_merge_turn
+from session_ingestion.adapters._shared.mapping import merge_mapping
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +63,6 @@ def _preview_title(trace: dict[str, Any]) -> str:
 
 
 class LangfuseSource:
-    source_type = "langfuse"
-
     def __init__(
         self,
         config,
@@ -93,7 +91,6 @@ class LangfuseSource:
         self._local = threading.local()
         self._clients = []
         self._lock = threading.Lock()
-        self._preview: dict[str, dict[str, Any]] = {}
 
     def _configured(self) -> bool:
         return bool(self.host and self.public_key and self.secret_key)
@@ -132,6 +129,19 @@ class LangfuseSource:
         return self._client().list_session_ids(
             SessionFilters(**{**filters, "trace_name": self.trace_name}),
             max_sessions=max_sessions,
+        )
+
+    def iter_session_id_batches(
+        self,
+        filters,
+        *,
+        batch_size=100,
+    ):
+        client = self._client()
+        parsed = SessionFilters(**{**filters, "trace_name": self.trace_name})
+        yield from client.iter_session_id_batches(
+            parsed,
+            batch_size=batch_size,
         )
 
     def fetch_session(self, session_id):
@@ -183,7 +193,6 @@ class LangfuseSource:
                 "trace_count": len(group),
             })
         rows.sort(key=lambda r: str(r.get("timestamp") or ""), reverse=True)
-        self._preview = {row["session_id"]: row for row in rows}
         return rows[:max_sessions] if max_sessions else rows
 
     def convert_session(self, session, traces):
@@ -195,7 +204,7 @@ class LangfuseSource:
         """
         def mapped(trace, observations, turn_num, defaults):
             patch = self.mapper(trace, observations, turn_num, defaults) if self.mapper else None
-            return _deep_merge_turn(defaults, patch) if patch else defaults
+            return merge_mapping(defaults, patch) if patch else defaults
 
         flattened = [{**item["trace"], "observations": item.get("observations") or []} for item in traces]
         converted = convert_langfuse_session(session, flattened, mapper=mapped)

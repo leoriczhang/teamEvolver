@@ -5,22 +5,17 @@ The source builder is deliberately free of model logic. It:
 1. Enumerates real users under an OpenViking account via the Admin API
    (request-scoped Root/Admin Key), mirroring the request shape already used by
    ``users_admin._openviking_sync`` (``GET /api/v1/admin/accounts/{account}/users``).
-2. Retains the legacy per-category compile planner for compatibility. The
-   active aggregation pipeline stages deterministic per-user snapshots and
-   applies this batching limit only during merge tree reduction.
+2. Returns the normalized user credentials consumed by the deterministic
+   staging and tree-reduce pipeline.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any
 
 import httpx
 
-# ov compile hard limit today; keep headroom below 16 so the skill/target
-# roots do not push a batch over the ceiling.
-_COMPILE_SOURCE_CEILING = 16
-_DEFAULT_MAX_USERS_PER_BATCH = 12
 _DEFAULT_ACCOUNT_USER_LIMIT = 50_000
 _DEFAULT_ACCOUNT_USER_PAGE_SIZE = 1_000
 
@@ -40,24 +35,6 @@ DEFAULT_MEMORY_KINDS = (
     "tools",
     "skills",
 )
-
-
-@dataclass(frozen=True)
-class CompileBatch:
-    """One planned ``ov compile`` invocation for a single memory category."""
-
-    kind: str
-    target_uri: str
-    source_uris: tuple[str, ...]
-    batch_index: int = 0
-    total_batches: int = 1
-
-    @property
-    def group_key(self) -> str:
-        """Stable identifier for incremental state and status tracking."""
-        if self.total_batches > 1:
-            return f"{self.kind}#{self.batch_index}"
-        return self.kind
 
 
 class SourceExpansionError(RuntimeError):
@@ -81,8 +58,6 @@ class AccountSourceBuilder:
     endpoint: str
     api_key: str
     account_id: str
-    shared_knowledge_prefix: str = "shared-knowledge"
-    max_users_per_batch: int = _DEFAULT_MAX_USERS_PER_BATCH
     account_user_limit: int = _DEFAULT_ACCOUNT_USER_LIMIT
     account_user_page_size: int = _DEFAULT_ACCOUNT_USER_PAGE_SIZE
     timeout_seconds: float = 15.0
@@ -179,43 +154,6 @@ class AccountSourceBuilder:
                 "raise aggregation.account_user_limit explicitly"
             )
         return records
-
-    def plan_batches(
-        self,
-        user_ids: Iterable[str],
-        kinds: Iterable[str],
-    ) -> list[CompileBatch]:
-        """Plan compile batches for the given users and memory categories."""
-        users = [u for u in dict.fromkeys(user_ids) if u]
-        batches: list[CompileBatch] = []
-        cap = max(1, min(int(self.max_users_per_batch), _COMPILE_SOURCE_CEILING - 1))
-        for kind in dict.fromkeys(kinds):
-            target = self._target_uri(kind)
-            chunks = [users[i : i + cap] for i in range(0, len(users), cap)] or [[]]
-            total = len(chunks)
-            for index, chunk in enumerate(chunks):
-                source_uris = tuple(self._source_uri(uid, kind) for uid in chunk)
-                if not source_uris:
-                    continue
-                batches.append(
-                    CompileBatch(
-                        kind=kind,
-                        target_uri=target,
-                        source_uris=source_uris,
-                        batch_index=index,
-                        total_batches=total,
-                    )
-                )
-        return batches
-
-    def _target_uri(self, kind: str) -> str:
-        prefix = self.shared_knowledge_prefix.strip("/") or "shared-knowledge"
-        return f"viking://resources/{prefix}/{kind}"
-
-    @staticmethod
-    def _source_uri(user_id: str, kind: str) -> str:
-        return f"viking://user/{user_id}/memories/{kind}"
-
 
 def _extract_user_credentials(payload: Any) -> list[AccountUserCredential]:
     """Pull normalized user records from the admin list-users response."""

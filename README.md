@@ -19,9 +19,12 @@
 
 ## 产品定位
 
-新增的默认关闭实验模块 `team_ontology` 提供 Ontology 构建、审核与发布工作台；正式本体资产与读取由 OpenViking 承担。
-Wiki 目录、单文件与上传资料通过原生 OV Compile 生成 Schema 和事实草稿，TE 确认 Schema、校验证据并评审发布。操作、配置与未验证边界见 [V6 原生 Compile 指南](docs/ontology-integration/45-native-compile-wiki-operations.md)
-与 [可离线阅读的 HTML 工程说明](docs/reports/02-ontology-integration-explained.html)。
+KEE R6 将本仓库的控制台统一为知识进化平台，保留 `teamEvolver` 包、CLI、原路由与数据库标识。
+Ontology／方法编制、证据审核和 Wiki 发布由 KEE 管理，OpenViking 提供通用内容、ACL、检索与索引。
+新方法构建使用 KEE 内部隔离 Compile；团队 Memory 保持唯一维护入口，通过 Port 选择内部执行。
+本轮没有修改 UpClaw，也没有业务工具拦截或第二套 Session/Judge。
+配置、兼容边界、验收和未执行事项见 [R6 交付册](docs/kee-r6/HANDOFF.md)
+与 [离线工程说明](docs/kee-r6/architecture.html)。旧方案保留为历史依据。
 
 teamEvolver 位于 Agent 运行时之外，负责团队能力的持续进化与治理。它接收真实 Session 和领域资料，提取可追溯 Evidence，生成 Skill Candidate 或 Memory Change，再经过静态检查、True Replay、按需人工门禁、版本发布和受控分发形成闭环。
 
@@ -43,8 +46,8 @@ flowchart LR
     E --> F["True Replay<br/>Baseline vs Candidate"]
     F --> G["Candidate Review"]
     G --> H["版本发布"]
-    H --> I["Agent Skill Sync"]
-    D --> J["DreamCycle"]
+    H --> I["Agent Skill Pull"]
+    D --> J["Memory maintenance"]
     J --> K["Memory True Replay"]
     K --> L["团队 Memory"]
 ```
@@ -59,12 +62,12 @@ Checklist 是完成门禁，不是加权分数。通过门禁后，True Replay �
 | Skill Evolution | 总结、裁判、分组、改进/新建/冲突合并、同源 Test Dataset 生成 |
 | True Replay | 在真实 Agent Runtime 中并行运行 Baseline/Candidate，校验 Checklist、轨迹、产物和效率 |
 | Candidate Governance | 候选评审、强制/按回放发布、版本详情、完整 Bundle Diff、回滚与审计 |
-| Memory Evolution | DreamCycle 维护、跨 User 团队记忆聚合、可编辑聚合 Skill、增量编译及 Memory Replay |
+| Memory Evolution | Memory maintenance 维护、跨 User 团队记忆聚合、可编辑聚合 Skill、增量编译及 Memory Replay |
 | 实验工作台 | 编辑 Skill Bundle，并用数据集对未保存的多文件 Candidate 执行 True Replay |
 | 个人与团队资产 | 分别从 `viking://user` 和 `viking://resources` 浏览、编辑 OpenViking 资产 |
-| SkillMiner | 从文档知识源生成 Skill、语义报告、`EVALUATION.md` 和内部 Benchmark |
+| 知识库编译 | 将上传文档规范化后提交给 OpenViking 异步编译 |
 | Agent Protocol v2 | 租户主体、Context、Session ingest、ReplayAdapterFactory、Skill pull |
-| Observability | Langfuse Session 导入，以及模型、工具、Skill Evolution、DreamCycle 全链路追踪 |
+| Observability | Langfuse Session 导入，以及模型、工具、Skill Evolution、Memory maintenance 全链路追踪 |
 
 所有团队 Skill 变更统一经过 `SkillMutationService`，由提交记录、tombstone、持久化 outbox 和 Agent 分发状态共同保证一致性。
 
@@ -92,7 +95,6 @@ Checklist 是完成门禁，不是加权分数。通过门禁后，True Replay �
 flowchart TB
     subgraph Sources["Evidence Sources"]
         Pi["Pi Agent"]
-        Hermes["Hermes"]
         Generic["Agent Protocol v2"]
         LFIn["Langfuse Sessions"]
         Docs["Domain Documents"]
@@ -103,7 +105,7 @@ flowchart TB
         API["FastAPI"]
         Evolution["Skill Evolution"]
         Replay["Validation Worker / True Replay"]
-        Memory["DreamCycle / Team Memory Aggregation"]
+        Memory["Memory maintenance / Team Memory Aggregation"]
         Mutation["SkillMutationService / Outbox"]
     end
 
@@ -125,15 +127,14 @@ flowchart TB
     API <--> Memories
     Replay <--> Snapshots
     Mutation --> Pi
-    Mutation --> Hermes
     Mutation --> Generic
 ```
 
-控制台、进化引擎、验证队列、DreamCycle、SkillMiner 和 Agent 集成共享同一个 FastAPI 服务与配置源。
+控制台、进化引擎、验证队列、Memory maintenance、知识库编译和 Agent 集成共享同一个 FastAPI 服务与配置源。
 
 ## 快速开始
 
-要求：Python 3.10+。完整安装会在项目虚拟环境内安装文档挖掘和 True Replay 所需的 Hermes。
+要求：Python 3.10+。
 
 ```bash
 git clone https://github.com/leoriczhang/teamEvolver.git
@@ -191,7 +192,6 @@ docker compose ps
 Context 和 Session 归属固定为 tenant/user；Account 由租户有效配置解析。
 Skill 通过认证 pull 获取，True Replay 通过租户绑定的 ReplayAdapterFactory 创建独立会话。
 OpenViking Root Key 与模型 Key 保留在服务端。
-旧部署按 [分阶段迁移](./docs/zh/guides/11-agent-deregistration.md) 升级；数据迁移与最终清理分别发布。
 
 ## 安全与一致性
 
@@ -200,7 +200,7 @@ OpenViking Root Key 与模型 Key 保留在服务端。
 - 网络副作用默认 fail-closed；无法确定性重放的外部工具不会回退到真实调用。
 - Context 引用由服务端签发并校验 Tenant、User、Session 和过期时间。
 - 团队 Memory 与团队 Skill 对普通 Agent 只读；个人 Memory 写入受 tenant/user 归属约束。
-- Skill 发布、回滚、删除和同步使用统一 mutation 流程；pull 模式保留版本和 tombstone。
+- Skill 发布、回滚和删除使用统一 mutation 流程；Agent 固定通过 pull 获取版本。
 - Langfuse 上报 fail-open，不阻塞进化和 Memory 维护。
 
 ## 项目结构
@@ -208,17 +208,14 @@ OpenViking Root Key 与模型 Key 保留在服务端。
 ```text
 teamEvolver/
 ├── teamEvolver/
-│   ├── evolve/          # Evidence、Skill Evolution、Dataset、发布
-│   ├── replay.py        # team_replay 虚拟兼容入口
-│   ├── validation/      # Candidate 队列、结果存储与 Validation Worker
-│   ├── aggregation/     # 跨 User 团队记忆聚合与增量状态
-│   ├── integrations/    # 租户主体、Context、协议与 Skill pull
+│   ├── admin/           # 控制台身份、授权与租户设置
+│   ├── cli/             # 服务、数据源、诊断和存储命令
+│   ├── integrations/    # 租户主体、Context 与 skillopt rollout
 │   ├── proxy/           # FastAPI、控制台与 Workspace 接口
 │   ├── config_store/    # YAML 配置默认值、持久化与运行时桥接
-│   ├── skills/          # Bundle、版本与 SkillMutationService
-│   └── storage/         # OpenViking 存储适配
+│   ├── storage/         # PostgreSQL、本地与 OpenViking 存储适配
+│   └── true_replay.py   # Replay 子进程宿主装配入口
 ├── session_ingestion/   # Session Push、Pull、共享接入管线与数据源 Adapter
-├── team_miner/          # Skill 挖掘、Benchmark、任务编排与主服务桥接
 ├── team_memory/         # Memory 聚合、维护、账本与路由
 ├── team_replay/         # True Replay Interface、引擎、策略与 Runtime Adapter
 ├── web-ui/              # React + TypeScript 控制台源码
@@ -233,11 +230,11 @@ teamEvolver/
 | 章节 | 内容 |
 | --- | --- |
 | 开始使用 | [产品简介](./docs/zh/getting-started/01-introduction.md)、[快速开始](./docs/zh/getting-started/02-quickstart.md)、[安装部署](./docs/zh/getting-started/03-installation.md) |
-| 核心概念 | [架构总览](./docs/zh/concepts/01-architecture.md)、[进化闭环](./docs/zh/concepts/02-evolution-loop.md)、[Skill 体系](./docs/zh/concepts/03-skills.md)、[Memory & DreamCycle](./docs/zh/concepts/04-memory.md)、[True Replay](./docs/zh/concepts/06-true-replay.md) |
+| 核心概念 | [架构总览](./docs/zh/concepts/01-architecture.md)、[进化闭环](./docs/zh/concepts/02-evolution-loop.md)、[Skill 体系](./docs/zh/concepts/03-skills.md)、[Memory & Memory maintenance](./docs/zh/concepts/04-memory.md)、[True Replay](./docs/zh/concepts/06-true-replay.md) |
 | 使用指南 | [配置参考](./docs/zh/guides/01-configuration.md)、[生产部署](./docs/zh/guides/02-deployment.md)、[Web 控制台](./docs/zh/guides/03-console.md)、[可观测性](./docs/zh/guides/04-observability.md)、[故障排查](./docs/zh/guides/06-troubleshooting.md) |
-| Agent 接入 | [接入概览](./docs/zh/agent-integrations/01-overview.md)、[Protocol v2 规范](./docs/zh/agent-integrations/06-protocol-v2.md)、[Hermes 接入](./docs/zh/agent-integrations/03-hermes.md)、[自定义接入](./docs/zh/agent-integrations/05-custom-agent.md) |
-| API 参考 | [API 概览](./docs/zh/api/01-overview.md)、[Agent 注册](./docs/zh/api/02-agent-register.md)、[Session 上报](./docs/zh/api/03-session-ingest.md)、[Context Workspace](./docs/zh/api/04-context-workspace.md)、[Skill 管理](./docs/zh/api/09-skills-admin.md)、[团队记忆聚合](./docs/zh/api/11-team-memory-aggregation.md) |
-| 设计文档 | [Master PRD](./docs/design/01-master-prd.md)、[DreamCycle 评估](./docs/design/02-dreamcycle-snapshot-evaluation.md)、[OpenViking 能力调研](./docs/design/03-openviking-capabilities.md) |
+| Agent 接入 | [接入概览](./docs/zh/agent-integrations/01-overview.md)、[Protocol v2 规范](./docs/zh/agent-integrations/06-protocol-v2.md)、[Pi Agent 接入](./docs/zh/agent-integrations/04-pi-agent.md)、[自定义接入](./docs/zh/agent-integrations/05-custom-agent.md) |
+| API 参考 | [API 概览](./docs/zh/api/01-overview.md)、[Session 上报](./docs/zh/api/03-session-ingest.md)、[Context Workspace](./docs/zh/api/04-context-workspace.md)、[Skill 管理](./docs/zh/api/09-skills-admin.md)、[团队记忆聚合](./docs/zh/api/11-team-memory-aggregation.md) |
+| 设计文档 | [Master PRD](./docs/design/01-master-prd.md)、[Memory maintenance 评估](./docs/design/02-dreamcycle-snapshot-evaluation.md)、[OpenViking 能力调研](./docs/design/03-openviking-capabilities.md) |
 
 ### 文档同步约定
 

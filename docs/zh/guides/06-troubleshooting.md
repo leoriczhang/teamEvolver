@@ -99,12 +99,7 @@ journalctl -u teamevolver -n 100 --no-pager
 
 **排查步骤**：
 
-1. 检查共享是否启用：
-   ```bash
-   teamEvolver config sharing.enabled
-   ```
-
-2. 检查部署模式配置：
+1. 检查部署模式配置：
    ```bash
    teamEvolver config sharing.viking_deployment
    ```
@@ -161,15 +156,15 @@ journalctl -u teamevolver -n 100 --no-pager
 
 ### 问题：Agent 上报会话返回 403 Forbidden
 
-**症状**：返回 "subject not mapped" 或 403 错误。
+**症状**：返回用户不存在或 403 错误。
 
-**原因**：Agent 注册后，其 subject（身份标识）需要映射到一个 teamEvolver 用户。
+**原因**：请求中的 `user_id` 不属于当前租户，或租户凭证与 Account 不匹配。
 
 **解决方法**：
 
 1. 访问控制台「用户与权限」页面
-2. 找到对应 Agent，配置 subject 到用户的映射
-3. 或在配置中确认 `sharing.viking_personal_user` 等用户标识正确
+2. 确认 `user_id` 已加入当前租户且状态为 active
+3. 确认请求使用该租户的 `tevt_` 凭证
 
 ### 问题：Agent 上报会话无响应或超时
 
@@ -210,12 +205,11 @@ journalctl -u teamevolver -n 100 --no-pager
 **排查步骤**：
 
 1. 检查技能同步 outbox：查看是否有未成功上传的变更事件
-2. 确认 `sharing.enabled` 为 `true`
-3. 检查 `skill_reload_mode` 配置：
+2. 检查 `skill_reload_mode` 配置：
    - `off`：不自动重载，需要手动触发
    - `poll`：按 `skill_reload_interval_seconds` 轮询（默认 30 秒）
    - `callback`：回调模式（需要 OpenViking 支持 webhook）
-4. 手动触发同步：
+3. 手动触发同步：
    ```bash
    teamEvolver skills sync
    ```

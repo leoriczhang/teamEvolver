@@ -3,7 +3,7 @@
 The standalone judge LLM stage was merged into the single ``analyze_session``
 call (see ``stages/analyze.py``). Only the programmatic helpers survive here —
 JSON/score parsing, weighted overall, artifact extraction, and the
-defect/exemplary predicates — which ``analyze`` and the orchestrator reuse so
+defect-evidence predicate — which ``analyze`` and the orchestrator reuse so
 scoring stays byte-identical.
 """
 
@@ -154,21 +154,6 @@ def _compute_weighted_overall(scores: dict[str, float]) -> float:
     for key in _DIMENSION_KEYS:
         total += scores[key] * _WEIGHTS[key]
     return round(total, 3)
-
-
-def _build_judge_payload(session: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "session_id": session.get("session_id"),
-        "num_turns": session.get("num_turns"),
-        "skills_referenced": sorted(session.get("_skills_referenced") or []),
-        "has_tool_errors": bool(session.get("_has_tool_errors")),
-        "prior_prm_scores": list(session.get("_prm_scores") or []),
-        "avg_prm_before_judge": session.get("_avg_prm"),
-        "source_artifacts": _extract_source_artifacts(session),
-        "output_artifacts": _extract_output_artifacts(session),
-        "trajectory": session.get("_trajectory") or "",
-        "summary": session.get("_summary") or "",
-    }
 
 
 def _extract_output_artifacts(
@@ -400,10 +385,3 @@ def judge_has_defect_evidence(scores: Any, threshold: Optional[float] = None) ->
     ):
         return True
     return str(scores.get("evolution_evidence") or "").strip().lower() == "defect"
-
-
-def judge_is_exemplary(scores: Any) -> bool:
-    """True when the judge flagged the session as an exemplary goodcase."""
-    if not isinstance(scores, dict):
-        return False
-    return str(scores.get("evolution_evidence") or "").strip().lower() == "exemplary"

@@ -10,7 +10,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 
-from team_replay.datasets.schema import legacy_case_view
+from team_replay.datasets.schema import DATASET_SCHEMA, make_document
 from team_replay.datasets.synthesis import synthesize_evolution_datasets
 from team_replay.lab.service import (
     SkillLabError,
@@ -20,6 +20,11 @@ from team_replay.lab.service import (
     parse_skill_markdown,
     prepare_experiment_job,
     resolve_dataset,
+)
+from ..config import (
+    DEFAULT_LLM_MAX_CONCURRENCY,
+    DEFAULT_LLM_MAX_TOKENS,
+    DEFAULT_LLM_QUEUE_CAPACITY,
 )
 from ..tenants.registry import current_tenant_id
 from .skills_admin import _clear_version_cache, _require_admin_request
@@ -124,7 +129,7 @@ class SkillLabMixin:
                 for item in persisted
                 if item.get("dataset_id")
             }
-            legacy_evolution = [
+            generated = [
                 item
                 for item in evolution_datasets(
                     _eff_config(),
@@ -132,7 +137,7 @@ class SkillLabMixin:
                 )
                 if str(item.get("dataset_id") or "") not in seen
             ]
-            return [*persisted, *legacy_evolution]
+            return [*persisted, *generated]
 
         def latest_skill_session_id(skill_name: str) -> str:
             try:
@@ -189,29 +194,33 @@ class SkillLabMixin:
                 "regression_count": sum(
                     1
                     for item in datasets
-                    if bool(item.get("enabled_for_evolution"))
+                    if bool((item.get("metadata") or {}).get("enabled_for_evolution"))
                 ),
             }
 
         @app.post("/api/replay-lab/datasets")
         async def api_skill_lab_save_dataset(body: dict[str, Any]):
             payload = dict(body)
-            markdown = str(payload.get("dataset_markdown") or "").strip()
+            markdown = str(payload.pop("dataset_markdown", "") or "").strip()
+            payload.pop("material_integrity", None)
+            payload.pop("case_count", None)
             if markdown:
                 try:
                     sections = parse_dataset_markdown(markdown)
                 except SkillLabError as exc:
                     raise HTTPException(status_code=400, detail=str(exc)) from exc
-                for key, value in sections.items():
-                    if not str(payload.get(key) or "").strip():
-                        payload[key] = value
+                cases = payload.get("cases")
+                if not isinstance(cases, list) or not cases:
+                    raise HTTPException(status_code=400, detail="cases 必须是非空数组")
+                cases[0] = {**cases[0], **sections}
             files = payload.pop("files", None)
             if files is not None and not isinstance(files, list):
                 raise HTTPException(status_code=400, detail="files 必须是数组")
             try:
                 store = lab_store()
                 dataset_id = str(payload.get("dataset_id") or "").strip()
-                skill_name = str(payload.get("skill_name") or "").strip()
+                skills = payload.get("skills") if isinstance(payload.get("skills"), list) else []
+                skill_name = str((skills[0] or {}).get("skill_id") or "") if skills else ""
                 if dataset_id and skill_name:
                     source_dataset = resolve_dataset(
                         _eff_config(),
@@ -220,14 +229,7 @@ class SkillLabMixin:
                         dataset_id=dataset_id,
                     )
                     if source_dataset:
-                        for key in (
-                            "source",
-                            "dataset_format",
-                            "skills",
-                            "skill_ids",
-                            "created_at",
-                            "enabled_for_evolution",
-                        ):
+                        for key in ("source", "skills", "created_at", "metadata"):
                             if key not in payload:
                                 payload[key] = source_dataset.get(key)
                 dataset = store.save_dataset(payload, files=files)
@@ -247,7 +249,7 @@ class SkillLabMixin:
                 if str(item or "").strip()
             }
             try:
-                from team_skills.evolution.kernel.llm import AsyncLLMClient
+                from teamEvolver.llm import AsyncLLMClient
                 from team_skills.evolution.stages.summarize import (
                     _extract_session_metadata,
                     build_session_trajectory,
@@ -337,19 +339,27 @@ class SkillLabMixin:
                 llm = AsyncLLMClient(
                     api_key=str(_cfg.llm_api_key or ""),
                     base_url=str(_cfg.llm_api_base or ""),
-                    model=str(
-                        _cfg.llm_model_id
-                        or _cfg.model_name
-                        or ""
+                    model=str(_cfg.llm_model_id or ""),
+                    max_tokens=int(
+                        _cfg.llm_max_tokens or DEFAULT_LLM_MAX_TOKENS
                     ),
-                    max_tokens=int(_cfg.llm_max_tokens or 100_000),
                     temperature=float(_cfg.llm_temperature),
                     tenant_id=current_tenant_id(),
                     max_concurrency=int(
-                        getattr(_cfg, "llm_max_concurrency", 8) or 8
+                        getattr(
+                            _cfg,
+                            "llm_max_concurrency",
+                            DEFAULT_LLM_MAX_CONCURRENCY,
+                        )
+                        or DEFAULT_LLM_MAX_CONCURRENCY
                     ),
                     queue_capacity=int(
-                        getattr(_cfg, "llm_queue_capacity", 64) or 64
+                        getattr(
+                            _cfg,
+                            "llm_queue_capacity",
+                            DEFAULT_LLM_QUEUE_CAPACITY,
+                        )
+                        or DEFAULT_LLM_QUEUE_CAPACITY
                     ),
                 )
                 generated = await synthesize_evolution_datasets(
@@ -400,40 +410,19 @@ class SkillLabMixin:
                     ),
                 )
                 store = lab_store()
-                generated_views = [
-                    (dataset, legacy_case_view(dataset))
-                    for dataset in generated
-                ]
                 saved = [
                     store.save_dataset(
-                        {
-                            "skill_name": skill_name,
-                            "dataset_id": dataset.get("case_id"),
-                            "name": dataset.get("name"),
-                            "query": dataset.get("query"),
-                            "requirements": view.get("requirements"),
-                            "trajectory_requirements": view.get(
-                                "trajectory_requirements"
-                            ),
-                            "progressive_disclosure": view.get(
-                                "progressive_disclosure"
-                            ),
-                            "source": {
+                        make_document(
+                            dataset_id=str(dataset["case_id"]),
+                            name=str((dataset.get("metadata") or {}).get("name") or dataset["case_id"]),
+                            skills=[skill_name],
+                            source={
                                 "kind": "synthesized",
-                                "source_session_ids": view.get(
-                                    "source_session_ids"
-                                )
-                                or [],
-                                "evidence_window": view.get(
-                                    "evidence_window"
-                                ),
                                 "candidate_job_id": latest.get("job_id"),
-                                "synthesis_mode": view.get(
-                                    "synthesis_mode"
-                                ),
                             },
-                            "enabled_for_evolution": False,
-                        },
+                            cases=[dataset],
+                            metadata={"enabled_for_evolution": False},
+                        ),
                         files=[
                             item
                             for item in dataset.get("materials") or []
@@ -442,7 +431,7 @@ class SkillLabMixin:
                             and item.get("content_b64")
                         ],
                     )
-                    for dataset, view in generated_views
+                    for dataset in generated
                 ]
             except HTTPException:
                 raise
@@ -479,25 +468,35 @@ class SkillLabMixin:
                     raise SkillLabError("数据集材料不完整，请先编辑并补齐材料")
                 source_files = (
                     store.material_payloads(source)
-                    if source.get("materials")
+                    if any(case.get("materials") for case in source.get("cases") or [])
                     else []
                 )
+                cloned_cases = []
+                for case in source.get("cases") or []:
+                    cloned_cases.append({
+                        **case,
+                        "case_id": f"case-{hashlib.sha256(os.urandom(16)).hexdigest()[:20]}",
+                        "metadata": {
+                            **dict(case.get("metadata") or {}),
+                            "read_only": False,
+                        },
+                    })
                 cloned = store.save_dataset(
-                    {
-                        "skill_name": skill_name,
-                        "skill_ids": source.get("skill_ids") or [skill_name],
-                        "name": str(body.get("name") or f"{source.get('name')} · 副本"),
-                        "query": source.get("query"),
-                        "requirements": source.get("requirements"),
-                        "trajectory_requirements": source.get(
-                            "trajectory_requirements"
-                        ),
-                        "source": {
+                    make_document(
+                        dataset_id=f"clone-{hashlib.sha256(os.urandom(16)).hexdigest()[:20]}",
+                        name=str(body.get("name") or f"{source.get('name')} · 副本"),
+                        skills=source.get("skills") or [{"skill_id": skill_name}],
+                        cases=cloned_cases,
+                        source={
                             "kind": "cloned",
                             "dataset_id": dataset_id,
                             "origin": source.get("source") or {},
                         },
-                    },
+                        metadata={
+                            **dict(source.get("metadata") or {}),
+                            "read_only": False,
+                        },
+                    ),
                     files=source_files,
                 )
             except (SkillLabError, ValueError) as exc:
@@ -585,44 +584,28 @@ class SkillLabMixin:
                             "请先编辑数据集并上传对应材料。"
                         ),
                     )
-                source = (
-                    dict(dataset.get("source"))
-                    if isinstance(dataset.get("source"), dict)
-                    else {}
-                )
-                if not (
-                    source.get("session_id")
-                    or source.get("source_session_ids")
+                cases = [dict(case) for case in dataset.get("cases") or []]
+                if not cases:
+                    raise HTTPException(status_code=400, detail="数据集没有 Case")
+                if not any(
+                    (case.get("provenance") or {}).get("session_id")
+                    or (case.get("provenance") or {}).get("session_ids")
+                    for case in cases
                 ):
                     fallback_session_id = latest_skill_session_id(skill_name)
                     if fallback_session_id:
-                        source["session_id"] = fallback_session_id
-                        source["runtime_context_source"] = (
-                            "latest_skill_session"
-                        )
-                        dataset = {**dataset, "source": source}
-                requirements = (
-                    str(dataset.get("requirements") or "").splitlines()
-                )
-                trajectory_requirements = (
-                    str(
-                        dataset.get("trajectory_requirements") or ""
-                    ).splitlines()
-                )
-                checklist_count = len(
-                    [
-                        line
-                        for line in [
-                            *requirements,
-                            *trajectory_requirements,
-                        ]
-                        if line.strip()
-                    ]
-                )
+                        cases[0]["provenance"] = {
+                            **dict(cases[0].get("provenance") or {}),
+                            "session_id": fallback_session_id,
+                            "session_ids": [fallback_session_id],
+                            "runtime_context_source": "latest_skill_session",
+                        }
+                        dataset = {**dataset, "cases": cases}
+                checklist_count = sum(len(case.get("checks") or []) for case in cases)
                 disclosure = (
-                    dataset.get("progressive_disclosure")
+                    (cases[0].get("replay") or {}).get("progressive_disclosure")
                     if isinstance(
-                        dataset.get("progressive_disclosure"),
+                        (cases[0].get("replay") or {}).get("progressive_disclosure"),
                         dict,
                     )
                     else {}
@@ -647,7 +630,7 @@ class SkillLabMixin:
                 )
                 materials = (
                     store.material_payloads(dataset)
-                    if not bool(dataset.get("read_only"))
+                    if not bool((dataset.get("metadata") or {}).get("read_only"))
                     else []
                 )
                 run_id = store.make_run_id()

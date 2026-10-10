@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { ArrowLeft, Download, Eye, FolderOpen, Pencil, Plus, RefreshCw, Repeat2, Search, Square, Trash2 } from "lucide-react";
 import {
   api, datasetPath, downloadDataset, isActiveRun, jsonBody,
-  type DatasetDetail, type DatasetItem, type DatasetRun, type SessionDataset,
+  type DatasetCase, type DatasetDetail, type DatasetRun, type SessionDataset,
 } from "@/api/datasets";
 import { Empty, Pill } from "@/components/common";
 import { Button } from "@/components/ui/button";
@@ -104,7 +104,7 @@ export default function DatasetsView({ active }: { active: boolean }) {
         <tbody>{datasets.map(dataset => <tr key={dataset.dataset_id} className="hover:bg-muted/20">
           <td className={td}><button className="flex items-center gap-2 font-semibold text-accent hover:underline" onClick={() => setDatasetId(dataset.dataset_id)}><FolderOpen className="size-4" />{dataset.name}</button></td>
           <td className={`${td} max-w-[400px] text-muted-foreground`}><p className="line-clamp-2">{dataset.description || "—"}</p></td>
-          <td className={td}><Pill tone="blue">{dataset.item_count} 条</Pill></td>
+          <td className={td}><Pill tone="blue">{dataset.case_count} 条</Pill></td>
           <td className={`${td} whitespace-nowrap text-muted-foreground`}>{fmtTime(dataset.created_at)}</td>
           <td className={td}><div className="flex gap-1">
             <Button variant="ghost" size="icon-sm" aria-label={`查看 ${dataset.name}`} onClick={() => setDatasetId(dataset.dataset_id)}><Eye className="size-4" /></Button>
@@ -133,10 +133,10 @@ function DatasetContents({ datasetId, active, onBack }: { datasetId: string; act
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState(false);
   const [running, setRunning] = useState(false);
-  const [item, setItem] = useState<DatasetItem | null>(null);
+  const [selectedCase, setSelectedCase] = useState<DatasetCase | null>(null);
   const [historicalItem, setHistoricalItem] = useState(false);
   const [downloadBusy, setDownloadBusy] = useState(false);
-  const [busyItem, setBusyItem] = useState("");
+  const [busyCase, setBusyCase] = useState("");
   const [runs, setRuns] = useState<DatasetRun[]>([]);
   const [runListPage, setRunListPage] = useState(1);
   const [runTotal, setRunTotal] = useState(0);
@@ -153,7 +153,7 @@ function DatasetContents({ datasetId, active, onBack }: { datasetId: string; act
     if (!active) return;
     const controller = new AbortController();
     api<DatasetDetail>(`${path}?search=${encodeURIComponent(debounced)}&limit=${SIZE}&offset=${(page - 1) * SIZE}`, { signal: controller.signal })
-      .then(value => { if (!controller.signal.aborted) { setData(value); setError(""); if (page > 1 && !value.items.length) setPage(page - 1); } })
+      .then(value => { if (!controller.signal.aborted) { setData(value); setError(""); if (page > 1 && !value.cases.length) setPage(page - 1); } })
       .catch(e => { if (!controller.signal.aborted) setError(e.message); });
     return () => controller.abort();
   }, [active, path, page, debounced, tick]);
@@ -183,28 +183,28 @@ function DatasetContents({ datasetId, active, onBack }: { datasetId: string; act
     return () => clearTimeout(timer);
   }, [active, hasActive, runTick]);
 
-  async function removeItem(row: DatasetItem) {
+  async function removeCase(row: DatasetCase) {
     if (!window.confirm("从数据集移除此条 Session？来源 Session 会保留。")) return;
-    setBusyItem(row.item_id);
-    try { await api(`${path}/items/${row.item_id}`, { method: "DELETE" }); setTick(t => t + 1); toastOk("条目已移除"); }
+    setBusyCase(row.case_id);
+    try { await api(`${path}/cases/${row.case_id}`, { method: "DELETE" }); setTick(t => t + 1); toastOk("Case 已移除"); }
     catch (e: any) { toastErr("移除失败", e.message); }
-    finally { setBusyItem(""); }
+    finally { setBusyCase(""); }
   }
-  async function openItem(rowId: string, historical = false) {
-    setBusyItem(rowId);
+  async function openCase(caseId: string, historical = false) {
+    setBusyCase(caseId);
     try {
       const sourcePath = historical ? `${path}/runs/${encodeURIComponent(runId)}` : path;
-      const detail = await api<DatasetItem>(`${sourcePath}/items/${encodeURIComponent(rowId)}`);
-      setHistoricalItem(historical); setItem(detail);
+      const detail = await api<DatasetCase>(`${sourcePath}/cases/${encodeURIComponent(caseId)}`);
+      setHistoricalItem(historical); setSelectedCase(detail);
     }
     catch (e: any) { toastErr("加载条目失败", e.message); }
-    finally { setBusyItem(""); }
+    finally { setBusyCase(""); }
   }
-  async function openResult(rowId: string) {
-    setBusyItem(rowId);
-    try { setResult(await api(`${path}/runs/${encodeURIComponent(runId)}/results/${encodeURIComponent(rowId)}`)); }
+  async function openResult(caseId: string) {
+    setBusyCase(caseId);
+    try { setResult(await api(`${path}/runs/${encodeURIComponent(runId)}/results/${encodeURIComponent(caseId)}`)); }
     catch (e: any) { toastErr("加载结果失败", e.message); }
-    finally { setBusyItem(""); }
+    finally { setBusyCase(""); }
   }
   async function stop() {
     setStopping(true);
@@ -222,26 +222,26 @@ function DatasetContents({ datasetId, active, onBack }: { datasetId: string; act
   return <div className="space-y-4 px-[22px] pb-8 pt-4">
     <div className="flex items-center gap-2 text-sm text-muted-foreground"><button className="hover:text-accent" onClick={onBack}>数据集</button><span>/</span><span>{data?.name || "详情"}</span></div>
     <div className="flex flex-wrap items-start justify-between gap-4">
-      <div><h2 className="text-xl font-bold">{data?.name || "加载中…"}</h2><p className="mt-1 text-xs text-muted-foreground">创建于 {fmtTime(data?.created_at)} · {data?.item_count ?? "—"} 条 Session</p>{data?.description && <p className="mt-2 max-w-[640px] text-sm text-muted-foreground">{data.description}</p>}</div>
+      <div><h2 className="text-xl font-bold">{data?.name || "加载中…"}</h2><p className="mt-1 text-xs text-muted-foreground">创建于 {fmtTime(data?.created_at)} · {data?.case_count ?? "—"} 条 Session</p>{data?.description && <p className="mt-2 max-w-[640px] text-sm text-muted-foreground">{data.description}</p>}</div>
       <div className="flex flex-wrap gap-2">
         <Button variant="outline" onClick={onBack}><ArrowLeft className="size-4" />返回</Button>
         <Button variant="outline" disabled={!data || hasActive} onClick={() => setEditing(true)}><Pencil className="size-4" />编辑</Button>
         <Button variant="outline" disabled={!data || hasActive} onClick={() => setAdding(true)}><Plus className="size-4" />添加 Session</Button>
-        <Button variant="outline" disabled={!data?.item_count || hasActive} onClick={() => setRunning(true)}><Repeat2 className="size-4" />批量重回放</Button>
+        <Button variant="outline" disabled={!data?.case_count || hasActive} onClick={() => setRunning(true)}><Repeat2 className="size-4" />批量重回放</Button>
         <Button disabled={!data || downloadBusy} onClick={download}><Download className="size-4" />{downloadBusy ? "导出中…" : "导出 ZIP"}</Button>
       </div>
     </div>
     {error && <p role="alert" className="text-destructive">{error}<Button variant="ghost" size="sm" onClick={() => setTick(t => t + 1)}>重试</Button></p>}
     <SearchBox value={search} onChange={value => { setSearch(value); setPage(1); }} placeholder="搜索 Trace ID、Session ID 或用户问题" />
     <Box><div className="overflow-auto"><table className="w-full min-w-[960px] border-collapse"><thead><tr>{["业务时间 / 拉取入库", "来源 Trace / Session", "用户问题", "Skill", "操作"].map(text => <th key={text} className={th}>{text}</th>)}</tr></thead>
-      <tbody>{data?.items.map(row => <tr key={row.item_id}>
-        <td className={`${td} whitespace-nowrap text-xs`}><div>{fmtTime(row.timestamp)}</div><div className="mt-1 text-muted-foreground">拉取 {fmtTime(row.ingested_at)}</div></td>
-        <td className={td}><button className="block max-w-[180px] truncate font-mono text-xs text-accent" title={row.trace_id || row.session_id} onClick={() => openItem(row.item_id)}>{row.trace_id || row.session_id}</button><div className="mt-1 text-xs text-muted-foreground">{row.user_alias || "—"}</div></td>
-        <td className={td}><button className="line-clamp-2 max-w-[560px] text-left hover:text-accent" title={row.query} onClick={() => openItem(row.item_id)}>{row.query || row.title || "缺少 Query，请编辑补齐"}</button><span className="mt-1 block text-xs text-muted-foreground">{row.requirements.length} 条 Checklist</span></td>
-        <td className={td}><div className="flex max-w-[200px] flex-wrap gap-1">{row.used_skills.length ? row.used_skills.map(skill => <Pill key={skill} tone="blue">{skill}</Pill>) : "—"}</div></td>
-        <td className={td}><div className="flex gap-1"><Button variant="ghost" size="icon-sm" disabled={busyItem === row.item_id} aria-label={`查看条目 ${row.session_id}`} onClick={() => openItem(row.item_id)}><Eye className="size-4" /></Button><Button variant="ghost" size="icon-sm" className="text-destructive" disabled={hasActive || busyItem === row.item_id} aria-label={`移除条目 ${row.session_id}`} onClick={() => removeItem(row)}><Trash2 className="size-4" /></Button></div></td>
+      <tbody>{data?.cases.map(row => <tr key={row.case_id}>
+        <td className={`${td} whitespace-nowrap text-xs`}><div>{fmtTime(row.provenance.timestamp)}</div><div className="mt-1 text-muted-foreground">拉取 {fmtTime(row.provenance.ingested_at)}</div></td>
+        <td className={td}><button className="block max-w-[180px] truncate font-mono text-xs text-accent" title={row.provenance.trace_id || row.provenance.session_id} onClick={() => openCase(row.case_id)}>{row.provenance.trace_id || row.provenance.session_id}</button><div className="mt-1 text-xs text-muted-foreground">{row.metadata.user_alias || "—"}</div></td>
+        <td className={td}><button className="line-clamp-2 max-w-[560px] text-left hover:text-accent" title={row.query} onClick={() => openCase(row.case_id)}>{row.query || row.metadata.title || "缺少 Query，请编辑补齐"}</button><span className="mt-1 block text-xs text-muted-foreground">{row.checks.length} 条 Checklist</span></td>
+        <td className={td}><div className="flex max-w-[200px] flex-wrap gap-1">{row.skill_ids.length ? row.skill_ids.map(skill => <Pill key={skill} tone="blue">{skill}</Pill>) : "—"}</div></td>
+        <td className={td}><div className="flex gap-1"><Button variant="ghost" size="icon-sm" disabled={busyCase === row.case_id} aria-label={`查看 Case ${row.provenance.session_id}`} onClick={() => openCase(row.case_id)}><Eye className="size-4" /></Button><Button variant="ghost" size="icon-sm" className="text-destructive" disabled={hasActive || busyCase === row.case_id} aria-label={`移除 Case ${row.provenance.session_id}`} onClick={() => removeCase(row)}><Trash2 className="size-4" /></Button></div></td>
       </tr>)}</tbody></table></div>
-      {!data?.items.length && <Empty>{!data ? "加载条目中…" : search ? "没有匹配的条目" : "数据集为空，可添加 Session"}</Empty>}
+      {!data?.cases.length && <Empty>{!data ? "加载 Case 中…" : search ? "没有匹配的 Case" : "数据集为空，可添加 Session"}</Empty>}
       <Pager page={page} total={data?.total || 0} onChange={setPage} />
     </Box>
     <Box>
@@ -262,19 +262,19 @@ function DatasetContents({ datasetId, active, onBack }: { datasetId: string; act
         {run?.error && <p className="px-4 pb-3 text-sm text-destructive">{run.error}</p>}
         {run && <><div className="mx-4 mb-3 h-1.5 overflow-hidden rounded bg-muted" role="progressbar" aria-label="重回放进度" aria-valuemin={0} aria-valuemax={run.total} aria-valuenow={run.completed}><div className="h-full bg-accent transition-all" style={{ width: `${100 * run.completed / Math.max(1, run.total)}%` }} /></div>
           <div className="overflow-auto"><table className="w-full min-w-[960px] border-collapse"><thead><tr>{["#", "用户问题", "执行状态", "是否成功", "重回放 Trace", "来源 Trace", "操作"].map(text => <th className={th} key={text}>{text}</th>)}</tr></thead>
-            <tbody>{run.items?.map((row, index) => <tr key={row.item_id}>
+            <tbody>{run.cases?.map((row, index) => <tr key={row.case_id}>
               <td className={td}>{(runPage - 1) * SIZE + index + 1}</td><td className={td}><p className="line-clamp-2 max-w-[480px]" title={row.query}>{row.query}</p>{row.error && <p className="mt-1 max-w-[480px] text-xs text-destructive">{row.error}</p>}</td>
               <td className={td}><Status status={row.status} /></td><td className={td}>{row.success == null ? <span className="text-muted-foreground">未判定</span> : <Pill tone={row.success ? "green" : "red"}>{row.success ? "成功" : "未通过"}</Pill>}</td>
-              <td className={td}>{row.replay_trace_id ? <button className="max-w-[160px] truncate font-mono text-xs text-accent" title={row.replay_trace_id} onClick={() => openResult(row.item_id)}>{row.replay_trace_id}</button> : "—"}</td>
-              <td className={td}><button className="max-w-[160px] truncate font-mono text-xs text-accent" title={row.trace_id || row.session_id} onClick={() => openItem(row.item_id, true)}>{row.trace_id || row.session_id}</button></td>
-              <td className={td}><Button variant="ghost" size="sm" disabled={busyItem === row.item_id || !["completed", "failed", "skipped"].includes(row.status)} onClick={() => openResult(row.item_id)}>结果</Button></td>
+              <td className={td}>{row.replay_trace_id ? <button className="max-w-[160px] truncate font-mono text-xs text-accent" title={row.replay_trace_id} onClick={() => openResult(row.case_id)}>{row.replay_trace_id}</button> : "—"}</td>
+              <td className={td}><button className="max-w-[160px] truncate font-mono text-xs text-accent" title={row.trace_id || row.session_id} onClick={() => openCase(row.case_id, true)}>{row.trace_id || row.session_id}</button></td>
+              <td className={td}><Button variant="ghost" size="sm" disabled={busyCase === row.case_id || !["completed", "failed", "skipped"].includes(row.status)} onClick={() => openResult(row.case_id)}>结果</Button></td>
             </tr>)}</tbody></table></div><Pager page={runPage} total={run.total} onChange={setRunPage} /></>}
       </>}
     </Box>
     {adding && data && <DatasetSelectionDialog appendTo={data} onClose={() => setAdding(false)} onSaved={() => { setAdding(false); setTick(t => t + 1); }} />}
     {editing && data && <MetadataDialog dataset={data} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); setTick(t => t + 1); }} />}
-    {item && <ItemDialog item={item} path={path} readOnly={hasActive || historicalItem} onClose={() => setItem(null)} onSaved={() => { setItem(null); setTick(t => t + 1); }} />}
-    {running && <RunDialog path={path} count={data?.item_count || 0} onClose={() => setRunning(false)} onStarted={value => { setRunning(false); setRunId(value.run_id); setRunPage(1); setRunListPage(1); setRun(value); setRunTick(t => t + 1); }} />}
+    {selectedCase && <CaseDialog datasetCase={selectedCase} path={path} readOnly={hasActive || historicalItem} onClose={() => setSelectedCase(null)} onSaved={() => { setSelectedCase(null); setTick(t => t + 1); }} />}
+    {running && <RunDialog path={path} count={data?.case_count || 0} onClose={() => setRunning(false)} onStarted={value => { setRunning(false); setRunId(value.run_id); setRunPage(1); setRunListPage(1); setRun(value); setRunTick(t => t + 1); }} />}
     {result && <ResultDialog result={result} onClose={() => setResult(null)} />}
   </div>;
 }
@@ -295,25 +295,33 @@ function MetadataDialog({ dataset, onClose, onSaved }: { dataset: SessionDataset
     <div className="flex justify-end gap-2"><Button variant="outline" disabled={busy} onClick={onClose}>取消</Button><Button disabled={busy || !name.trim()} onClick={save}>{busy ? "保存中…" : "保存"}</Button></div>
   </DialogContent></Dialog>;
 }
-function ItemDialog({ item, path, readOnly, onClose, onSaved }: { item: DatasetItem; path: string; readOnly: boolean; onClose: () => void; onSaved: () => void }) {
-  const [query, setQuery] = useState(item.query);
-  const [requirements, setRequirements] = useState(item.requirements.join("\n"));
+function CaseDialog({ datasetCase, path, readOnly, onClose, onSaved }: { datasetCase: DatasetCase; path: string; readOnly: boolean; onClose: () => void; onSaved: () => void }) {
+  const [query, setQuery] = useState(datasetCase.query);
+  const [outputChecks, setOutputChecks] = useState(datasetCase.checks.filter(check => check.kind === "output").map(check => check.text).join("\n"));
+  const [trajectoryChecks, setTrajectoryChecks] = useState(datasetCase.checks.filter(check => check.kind === "trajectory").map(check => check.text).join("\n"));
   const [busy, setBusy] = useState(false);
   async function save() {
     setBusy(true);
-    try { await api(`${path}/items/${item.item_id}`, jsonBody({ query, requirements: requirements.split("\n").map(text => text.trim()).filter(Boolean) }, "PATCH")); toastOk("重回放条目已更新"); onSaved(); }
+    const output = outputChecks.split("\n").map(text => text.trim()).filter(Boolean);
+    const trajectory = trajectoryChecks.split("\n").map(text => text.trim()).filter(Boolean);
+    const checks = [
+      ...output.map((text, index) => ({ id: `R${String(index + 1).padStart(2, "0")}`, kind: "output", text })),
+      ...trajectory.map((text, index) => ({ id: `T${String(index + 1).padStart(2, "0")}`, kind: "trajectory", text })),
+    ];
+    try { await api(`${path}/cases/${datasetCase.case_id}`, jsonBody({ query, checks }, "PATCH")); toastOk("重回放 Case 已更新"); onSaved(); }
     catch (e: any) { toastErr("保存失败", e.message); }
     finally { setBusy(false); }
   }
   return <Dialog open onOpenChange={open => !open && !busy && onClose()}><DialogContent className="sm:max-w-[850px] max-h-[90vh] overflow-y-auto"><DialogTitle>Session 与重回放条件</DialogTitle>
-    <DialogDescription>来源 {item.trace_id || item.session_id}。Checklist 默认采用首轮用户请求，可按每行一条细化。</DialogDescription>
+    <DialogDescription>来源 {datasetCase.provenance.trace_id || datasetCase.provenance.session_id}。Checklist 默认采用首轮用户请求，可按每行一条细化。</DialogDescription>
     <label className="space-y-2">初始 Query<Textarea aria-label="初始 Query" className="min-h-[120px]" disabled={readOnly} value={query} onChange={e => setQuery(e.target.value)} /></label>
-    <label className="space-y-2">Checklist（每行一条）<Textarea aria-label="Checklist" className="min-h-[140px]" disabled={readOnly} value={requirements} onChange={e => setRequirements(e.target.value)} /></label>
+    <label className="space-y-2">输出 Checklist（每行一条）<Textarea aria-label="输出 Checklist" className="min-h-[140px]" disabled={readOnly} value={outputChecks} onChange={e => setOutputChecks(e.target.value)} /></label>
+    <label className="space-y-2">轨迹 Checklist（每行一条）<Textarea aria-label="轨迹 Checklist" className="min-h-[120px]" disabled={readOnly} value={trajectoryChecks} onChange={e => setTrajectoryChecks(e.target.value)} /></label>
     <details className="rounded-lg border p-3"><summary className="cursor-pointer font-semibold">原始 Session 快照</summary>
-      {(item.session?.turns || []).map((turn: any, index: number) => <div className="mt-3 space-y-2 border-t pt-3" key={index}><p className="text-xs font-semibold text-muted-foreground">第 {index + 1} 轮</p><p className="whitespace-pre-wrap break-words">{turn.prompt_text || "—"}</p><p className="whitespace-pre-wrap break-words rounded bg-muted/50 p-3">{turn.response_text || "—"}</p></div>)}
-      <details className="mt-3"><summary className="cursor-pointer text-xs text-muted-foreground">完整 JSON（含工具调用）</summary><pre className="mt-2 max-h-[300px] overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(item.session, null, 2)}</pre></details>
+      {(datasetCase.provenance.session_snapshot?.turns || []).map((turn: any, index: number) => <div className="mt-3 space-y-2 border-t pt-3" key={index}><p className="text-xs font-semibold text-muted-foreground">第 {index + 1} 轮</p><p className="whitespace-pre-wrap break-words">{turn.prompt_text || "—"}</p><p className="whitespace-pre-wrap break-words rounded bg-muted/50 p-3">{turn.response_text || "—"}</p></div>)}
+      <details className="mt-3"><summary className="cursor-pointer text-xs text-muted-foreground">完整 JSON（含工具调用）</summary><pre className="mt-2 max-h-[300px] overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(datasetCase.provenance.session_snapshot, null, 2)}</pre></details>
     </details>
-    <div className="flex justify-end gap-2"><Button variant="outline" onClick={onClose}>关闭</Button><Button disabled={readOnly || busy || !query.trim() || !requirements.trim()} onClick={save}>{readOnly ? "快照只读" : busy ? "保存中…" : "保存条件"}</Button></div>
+    <div className="flex justify-end gap-2"><Button variant="outline" onClick={onClose}>关闭</Button><Button disabled={readOnly || busy || !query.trim() || !(outputChecks.trim() || trajectoryChecks.trim())} onClick={save}>{readOnly ? "快照只读" : busy ? "保存中…" : "保存条件"}</Button></div>
   </DialogContent></Dialog>;
 }
 function RunDialog({ path, count, onClose, onStarted }: { path: string; count: number; onClose: () => void; onStarted: (run: DatasetRun) => void }) {

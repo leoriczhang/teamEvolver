@@ -32,6 +32,23 @@ SESSIONS_DIR_DEFAULT = TEAM_ROOT.parent / "openclaw_sessions_converted"
 RUNS_ROOT = TEAM_ROOT.parent
 
 
+def _has_meaningful_content(session: dict) -> bool:
+    for turn in session.get("turns") or []:
+        if not isinstance(turn, dict):
+            continue
+        if (
+            str(turn.get("prompt_text") or "").strip()
+            or str(turn.get("response_text") or "").strip()
+            or turn.get("tool_calls")
+            or turn.get("tool_results")
+        ):
+            return True
+        metrics = turn.get("metrics")
+        if isinstance(metrics, dict) and int(metrics.get("total_tokens") or 0) > 0:
+            return True
+    return False
+
+
 # ------------------------------------------------------------------------- #
 # Phase 0: seed current skills from the OpenViking team library              #
 # ------------------------------------------------------------------------- #
@@ -51,7 +68,7 @@ def seed_current_skills(store_root: Path) -> dict:
 
     cfg = ConfigStore().to_config()
     endpoint = str(cfg.sharing_viking_endpoint or "").strip()
-    api_key = str(cfg.sharing_viking_team_api_key or cfg.sharing_viking_api_key or "")
+    api_key = str(cfg.sharing_viking_api_key or "")
     if not endpoint or not api_key:
         print("[seed] viking endpoint/key not configured; skipping skill seed", flush=True)
         return {"seeded": 0, "reason": "not_configured"}
@@ -157,10 +174,7 @@ async def run_ingest(cfg, sessions_dir: Path, run_dir: Path, concurrency: int) -
     from team_skills.evolution.stages.analyze import analyze_session
     from team_skills.evolution.stages.judge import judge_has_defect_evidence
     from team_skills.evolution.stages.trace_analyze import analyze_and_dispatch_traces
-    from teamEvolver.integrations.langfuse_pull import (
-        _has_meaningful_content,
-        sanitize_session_id,
-    )
+    from session_ingestion.identifiers import sanitize_session_id
     from teamEvolver.session_store import SessionStore
 
     store = SessionStore.from_config(cfg)
@@ -353,10 +367,8 @@ async def run_evolve(cfg, run_dir: Path, max_cycles: int) -> list[dict]:
     from team_skills.evolution.runtime.orchestrator import EvolveServer
 
     server_cfg = EvolveServerConfig.from_teamEvolver_config(cfg)
-    # from_teamEvolver_config does not read EVOLVE_HISTORY_LOG (only from_env
-    # does), so pin the history/processed logs inside the run dir explicitly.
+    # Pin the history log inside the isolated run directory.
     server_cfg.history_path = str(run_dir / "evolve_history.jsonl")
-    server_cfg.processed_log_path = str(run_dir / "evolve_processed.json")
     server = EvolveServer(server_cfg)
 
     summaries: list[dict] = []
@@ -851,8 +863,6 @@ def main() -> int:
     os.environ.update({
         "EVOLVE_STORAGE_BACKEND": "local",
         "EVOLVE_STORAGE_LOCAL_ROOT": str(store_root),
-        "EVOLVE_HISTORY_LOG": str(run_dir / "evolve_history.jsonl"),
-        "EVOLVE_PROCESSED_LOG": str(run_dir / "evolve_processed.json"),
         "EVOLVE_DRAIN_MAX_PER_CYCLE": str(args.drain_max_per_cycle),
     })
 

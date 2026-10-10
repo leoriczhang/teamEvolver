@@ -1,21 +1,19 @@
-"""Skill Hub: durable Skill sync via pluggable object storage.
+"""Durable tenant Skill registry backed by pluggable object storage.
 
-A bidirectional sync between a working Skill directory and local/NAS or
-OpenViking object storage, with incremental (sha256-based) transfers. Default
-pull mirrors the durable snapshot into the working directory with backup and
-rollback safety.
+Published Skill bundles, manifests and versions live in the configured backend.
+File-based runtimes receive rebuildable cache materializations. Explicit import
+workspaces can be published, but runtime caches are never treated as authority.
 
 Usage::
 
     hub = SkillHub.team_from_config(config)
-    hub.pull_skills("/path/to/local/skills")   # mirror durable snapshot locally
-    hub.push_skills("/path/to/local/skills")   # upload new/updated skills
-    hub.list_remote()                          # list stored skills
+    hub.materialize_runtime_cache("/path/to/runtime/cache")
+    hub.publish_bundle("skill-name", {"SKILL.md": b"..."})
+    hub.list_skills()
 """
 
 from __future__ import annotations
 
-import glob
 import hashlib
 import json
 import logging
@@ -71,7 +69,7 @@ class SkillFileConflictError(RuntimeError):
 
 
 class SkillHub:
-    """Sync skills between a local directory and a shared object store."""
+    """Read and mutate the authoritative tenant Skill registry."""
 
     def __init__(
         self,
@@ -86,9 +84,7 @@ class SkillHub:
         viking_account: str = "",
         viking_user: str = "",
         viking_agent: str = "",
-        viking_agent_id: str = "",
         viking_root_prefix: str = "",
-        viking_group_id: str = "",
         viking_namespace: str = "resources",
         allow_fallback: bool = False,
         fallback_root: str = "",
@@ -117,9 +113,7 @@ class SkillHub:
             viking_user=viking_user,
             viking_agent=viking_agent,
             viking_api_key=viking_api_key,
-            viking_agent_id=viking_agent_id,
             viking_root_prefix=viking_root_prefix,
-            viking_group_id=viking_group_id,
             viking_namespace=viking_namespace,
             allow_fallback=allow_fallback,
             fallback_root=fallback_root,
@@ -262,36 +256,21 @@ class SkillHub:
         # Agent that needs to read the mirrored library from OpenViking sets
         # sharing_skill_backend="viking" explicitly.
         #
-        # The previous sharing_backend=="viking" inheritance is removed: it
-        # contradicted the contract because sharing_local_root="" means "use the
-        # default root", not "no local store", so treating its emptiness as a
-        # remote-Agent signal mis-routed teamEvolver's own service to viking
-        # — candidates written locally were invisible to the read-side UI.
         if purpose_backend:
             backend = purpose_backend
         else:
             backend = "local"
-        endpoint = str(getattr(config, "sharing_endpoint", "") or "")
-        legacy_viking_api_key = str(getattr(config, "sharing_viking_api_key", "") or "")
-        personal_viking_api_key = str(getattr(config, "sharing_viking_personal_api_key", "") or "")
-        team_viking_api_key = str(getattr(config, "sharing_viking_team_api_key", "") or "")
-        if key_scope == "personal":
-            viking_api_key = personal_viking_api_key or legacy_viking_api_key
-        else:
-            viking_api_key = team_viking_api_key or legacy_viking_api_key
+        endpoint = ""
+        viking_api_key = str(getattr(config, "sharing_viking_api_key", "") or "")
         has_viking_key = bool(viking_api_key)
-        sharing_enabled = bool(getattr(config, "sharing_enabled", False))
 
         if allow_none:
             resolved = normalize_backend(backend, endpoint=viking_endpoint)
             if not resolved:
                 # No per-purpose backend and no explicit request for local: fall
-                # back to viking when an endpoint exists (legacy configs that
-                # predate the local backend), otherwise bail out.
-                if viking_endpoint and (sharing_enabled or has_viking_key):
+                # back to viking only when a usable OV target exists.
+                if viking_endpoint and has_viking_key:
                     resolved = "viking"
-                elif sharing_enabled:
-                    resolved = "local"
             if not resolved:
                 return None
             backend = resolved
@@ -311,9 +290,7 @@ class SkillHub:
             viking_account=str(getattr(config, "sharing_viking_account", "") or "default"),
             viking_user=str(getattr(config, "sharing_viking_user", "") or "team"),
             viking_agent=str(getattr(config, "sharing_viking_agent", "") or _VIKING_ROOT_PREFIX),
-            viking_agent_id=str(getattr(config, "sharing_viking_agent_id", "") or ""),
             viking_root_prefix=str(getattr(config, "sharing_viking_root_prefix", "") or _VIKING_ROOT_PREFIX),
-            viking_group_id=str(getattr(config, "sharing_viking_group_id", "") or ""),
         )
         # PostgreSQL local-state backend options (used when the resolved backend
         # is "postgres"); ignored by the other backends.
@@ -343,7 +320,6 @@ class SkillHub:
             endpoint=endpoint,
             local_root=local_root,
             customer_id=customer_id,
-            user_alias=getattr(config, "sharing_user_alias", ""),
             allow_fallback=allow_fallback,
             fallback_root=local_root,
             fallback_backend=fallback_backend if key_scope == "team" else "local",
@@ -365,14 +341,13 @@ class SkillHub:
             isinstance(hub._bucket, (LocalObjectStore, PgObjectStore))
             and mirror_enabled
             and viking_endpoint
-            and sharing_enabled
+            and has_viking_key
             and key_scope == "team"
         ):
             hub._mirror_viking_hub = cls(
                 backend="viking",
                 endpoint=viking_endpoint,
                 customer_id=customer_id,
-                user_alias=getattr(config, "sharing_user_alias", ""),
                 allow_fallback=False,
                 mirror_spool_dir=str(getattr(config, "sharing_skill_mirror_spool_dir", "") or ""),
                 viking_namespace=namespace,
@@ -383,13 +358,13 @@ class SkillHub:
 
     @classmethod
     def from_config(cls, config, tenant_id: str = "default") -> "SkillHub":
-        """Build a hub for the caller's personal skills under ``resources``."""
+        """Build the tenant-scoped Skill hub under ``resources``."""
         return cls._build(
             config,
             backend_field="sharing_skill_backend",
-            customer_id=getattr(config, "sharing_viking_customer_id", ""),
+            customer_id="",
             namespace="resources",
-            key_scope="personal",
+            key_scope="team",
             tenant_id=tenant_id,
         )
 
@@ -416,7 +391,7 @@ class SkillHub:
         return cls._build(
             config,
             backend_field="sharing_session_backend",
-            customer_id=getattr(config, "sharing_viking_customer_id", ""),
+            customer_id="",
             namespace="resources",
             key_scope="team",
             allow_none=True,
@@ -521,7 +496,7 @@ class SkillHub:
             if key and key not in keep_keys:
                 self._bucket.delete_object(key)
         record = {
-            "format": "bundle_v1",
+            "format": "skill-bundle",
             "entrypoint": "SKILL.md",
             "tree_sha256": bundle_tree_sha256(stored_bundle),
             "files": bundle_file_records(stored_bundle),
@@ -537,7 +512,7 @@ class SkillHub:
         bundle, _records, tree_sha = read_skill_bundle_with_meta(skill_dir)
         if not bundle:
             return False
-        if record.get("format") == "bundle_v1":
+        if record.get("format") == "skill-bundle":
             return str(record.get("tree_sha256") or "") == tree_sha
 
         try:
@@ -561,7 +536,7 @@ class SkillHub:
             if is_not_found_error(e):
                 return {}
             logger.warning("[SkillHub] failed to load manifest: %s", e)
-            return {}
+            raise
 
         manifest: dict[str, dict[str, Any]] = {}
         for line in content.strip().splitlines():
@@ -607,7 +582,7 @@ class SkillHub:
                     )
                     current = manifest.get(name) or {}
                     if (
-                        current.get("format") == "bundle_v1"
+                        current.get("format") == "skill-bundle"
                         and str(current.get("tree_sha256") or "") == tree_sha
                     ):
                         return {
@@ -626,7 +601,7 @@ class SkillHub:
                         hashlib.sha256(entrypoint).hexdigest(),
                         action=action,
                         bundle_record={
-                            "format": "bundle_v1",
+                            "format": "skill-bundle",
                             "entrypoint": "SKILL.md",
                             "tree_sha256": tree_sha,
                             "files": file_records,
@@ -639,7 +614,7 @@ class SkillHub:
                         "version": version,
                         "sha256": hashlib.sha256(entrypoint).hexdigest(),
                         "tree_sha256": tree_sha,
-                        "format": "bundle_v1",
+                        "format": "skill-bundle",
                         "entrypoint": "SKILL.md",
                         "files": file_records,
                         "uploaded_by": self._user_alias,
@@ -679,7 +654,7 @@ class SkillHub:
             manifest = self._load_remote_manifest()
             current = manifest.get(name) or {}
             if (
-                current.get("format") == "bundle_v1"
+                current.get("format") == "skill-bundle"
                 and str(current.get("tree_sha256") or "") == tree_sha
             ):
                 return {
@@ -709,15 +684,11 @@ class SkillHub:
         action: str,
         manifest: dict[str, dict[str, Any]],
         registry: SkillIDRegistry,
-        skill_path: str = "",
     ) -> dict[str, Any]:
         """Publish *bundle_files* as the live skill and record a new version.
 
-        Shared by the directory push (:meth:`push_skills`) and the hub-only file
-        API (:meth:`write_skill_file`), so both paths produce identical
-        live-object, version-snapshot, manifest and registry state. Updates
-        ``manifest`` in place and returns the new manifest entry; the caller owns
-        persisting manifest + registry.
+        Updates ``manifest`` in place and returns the new manifest entry; the
+        caller owns persisting manifest and registry state.
         """
         entrypoint = bundle_entrypoint_bytes(bundle_files)
         self._bucket.put_object(self._skill_key(skill_name), entrypoint)
@@ -738,7 +709,7 @@ class SkillHub:
             sha,
             action=action,
             bundle_record={
-                "format": "bundle_v1",
+                "format": "skill-bundle",
                 "entrypoint": "SKILL.md",
                 "tree_sha256": tree_sha,
                 "files": file_records,
@@ -753,128 +724,26 @@ class SkillHub:
             "version": version,
             "sha256": sha,
             "tree_sha256": tree_sha,
-            "format": "bundle_v1",
+            "format": "skill-bundle",
             "entrypoint": "SKILL.md",
             "files": file_records,
             "uploaded_by": self._user_alias,
             "uploaded_at": datetime.now(timezone.utc).isoformat(),
         }
-        if skill_path:
-            frontmatter.enrich_manifest_entry(entry, skill_path)
-        else:
-            frontmatter.enrich_manifest_entry_from_raw(entry, stored_entrypoint, skill_name)
+        frontmatter.enrich_manifest_entry_from_raw(entry, stored_entrypoint, skill_name)
         entry.pop("deleted", None)
         manifest[skill_name] = entry
         return entry
 
     # ------------------------------------------------------------------ #
-    # Push (working directory -> durable store)                            #
-    # ------------------------------------------------------------------ #
-
-    def push_skills(
-        self,
-        skills_dir: str,
-        skill_filter: Optional[dict[str, Any]] = None,
-        include_names: Optional[Collection[str]] = None,
-    ) -> dict[str, int]:
-        """Upload new/changed skills from local directory to shared storage.
-
-        Parameters
-        ----------
-        skills_dir:
-            Path to the local skills directory.
-        skill_filter:
-            Optional quality gate. When provided, must contain ``"stats"``
-            (skill_name → stats record), ``"min_injections"`` (skills below this
-            are still on probation and not uploaded) and ``"min_effectiveness"``
-            (skills below this after probation are blocked). Skills that have
-            *never* been injected are treated as brand-new and allowed through.
-        include_names:
-            Optional subset of skill names to push; every other local skill is
-            ignored. Used by the management UI to sync a single just-edited
-            skill without scanning the whole library.
-
-        Returns ``{"uploaded": N, "skipped": M, "filtered": F, "total_local": T}``.
-        """
-        paths = layout.skill_md_paths(skills_dir)
-        include_set = {str(n or "").strip() for n in (include_names or []) if str(n or "").strip()}
-        if include_set:
-            paths = [p for p in paths if os.path.basename(os.path.dirname(p)) in include_set]
-        if not paths:
-            logger.info("[SkillHub] no local skills to push")
-            return {"uploaded": 0, "skipped": 0, "filtered": 0, "total_local": 0}
-
-        manifest = self._load_remote_manifest()
-        uploaded = 0
-        skipped = 0
-        filtered = 0
-
-        stats = (skill_filter or {}).get("stats", {})
-        min_inj = (skill_filter or {}).get("min_injections", 0)
-        min_eff = (skill_filter or {}).get("min_effectiveness", 0.0)
-        use_filter = skill_filter is not None
-
-        for path in paths:
-            skill_name = os.path.basename(os.path.dirname(path))
-            skill_dir = os.path.dirname(path)
-
-            if use_filter and skill_name in stats:
-                entry = stats[skill_name]
-                inj = entry.get("inject_count", 0)
-                eff = entry.get("effectiveness", 0.5)
-                if inj >= min_inj and eff < min_eff:
-                    logger.info(
-                        "[SkillHub] filtered out skill %s (effectiveness=%.2f < %.2f, injections=%d)",
-                        skill_name,
-                        eff,
-                        min_eff,
-                        inj,
-                    )
-                    filtered += 1
-                    continue
-
-            bundle_files = read_skill_bundle_with_meta(skill_dir)[0]
-
-            remote_rec = manifest.get(skill_name)
-            if remote_rec and self._local_bundle_matches_record(skill_dir, remote_rec):
-                skipped += 1
-                continue
-
-            result = self.publish_bundle(
-                skill_name,
-                bundle_files,
-                action="push",
-            )
-            if int(result.get("uploaded") or 0):
-                uploaded += 1
-                logger.info("[SkillHub] pushed skill: %s", skill_name)
-                manifest[skill_name] = dict(result.get("record") or {})
-            else:
-                skipped += 1
-
-        logger.info(
-            "[SkillHub] push complete: %d uploaded, %d skipped, %d filtered, %d total",
-            uploaded,
-            skipped,
-            filtered,
-            len(paths),
-        )
-        return {"uploaded": uploaded, "skipped": skipped, "filtered": filtered, "total_local": len(paths)}
-
-    # ------------------------------------------------------------------ #
-    # Local skill discovery                                                #
+    # Runtime-cache discovery                                              #
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _list_local_skill_dirs(skills_dir: str) -> dict[str, list[str]]:
-        """Return ``{skill_name: [skill_dir, ...]}`` for local skill folders."""
+    def _list_cached_skill_dirs(skills_dir: str) -> dict[str, list[str]]:
+        """Return ``{skill_name: [skill_dir, ...]}`` for cached Skill folders."""
         out: dict[str, list[str]] = {}
         if not os.path.isdir(skills_dir):
-            return out
-        if layout.is_hermes_skill_root(skills_dir):
-            for path in sorted(glob.glob(os.path.join(skills_dir, "**", "SKILL.md"), recursive=True)):
-                skill_dir = os.path.dirname(path)
-                out.setdefault(os.path.basename(skill_dir), []).append(skill_dir)
             return out
         for entry in os.scandir(skills_dir):
             if not entry.is_dir():
@@ -884,31 +753,15 @@ class SkillHub:
         return out
 
     @staticmethod
-    def _resolve_pull_target_dir(
+    def _resolve_cache_target_dir(
         skills_dir: str,
         skill_name: str,
         category: str,
         local_dirs_by_name: dict[str, list[str]],
     ) -> str:
-        """Choose the local directory to write a pulled skill into.
-
-        Honors an existing single category-nested location under the hermes
-        root when the incoming category is unspecified; otherwise the
-        category-derived path.
-        """
+        """Choose the runtime-cache directory for a materialized Skill."""
+        del local_dirs_by_name
         target = layout.skill_dir_for(skills_dir, skill_name, category)
-        if not layout.is_hermes_skill_root(skills_dir):
-            return target
-
-        existing_dirs = local_dirs_by_name.get(skill_name) or []
-        if not existing_dirs:
-            return target
-
-        if str(category or "general").strip() == "general":
-            nested = [path for path in existing_dirs if len(os.path.relpath(path, skills_dir).split(os.sep)) >= 2]
-            if len(nested) == 1:
-                return nested[0]
-
         return target
 
     @staticmethod
@@ -941,12 +794,11 @@ class SkillHub:
                 pass
 
     # ------------------------------------------------------------------ #
-    # Pull (durable store -> working directory)                            #
+    # Durable store -> runtime cache                                       #
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _pull_result(
-        include_meta: dict[str, Any],
+    def _materialization_result(
         *,
         downloaded: int,
         skipped: int,
@@ -955,7 +807,7 @@ class SkillHub:
         restored_from_backup: bool,
         backup_dir: str,
     ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
+        return {
             "downloaded": downloaded,
             "skipped": skipped,
             "deleted": deleted,
@@ -963,142 +815,31 @@ class SkillHub:
             "restored_from_backup": restored_from_backup,
             "backup_dir": backup_dir,
         }
-        if include_meta:
-            payload.update(include_meta)
-        return payload
 
-    def pull_skills(
+    def materialize_runtime_cache(
         self,
-        skills_dir: str,
-        mirror: bool = True,
-        skip_names: Optional[Collection[str]] = None,
-        include_names: Optional[Collection[str]] = None,
+        runtime_cache_dir: str,
     ) -> dict[str, Any]:
-        """Pull stored skills into a local working directory.
+        """Materialize stored Skills into a rebuildable runtime cache.
 
-        When *mirror* is ``True`` (default) local skill folders absent from the
-        remote manifest are deleted, with backup + rollback safety. When
-        ``False`` (or when *include_names* is given) an incremental pull only
-        downloads/updates remote skills and never deletes local extras.
-
-        Parameters
-        ----------
-        skip_names:
-            Skill names preserved from local disk during this pull.
-        include_names:
-            Optional subset of remote skill names to download; forces
-            incremental mode to avoid deleting unrelated local skills.
-
-        Returns a dict with ``downloaded``/``skipped``/``deleted``/
-        ``total_remote``/``restored_from_backup``/``backup_dir`` (plus
-        ``requested``/``matched_remote``/``missing``/``missing_names`` when
-        *include_names* is used).
+        The cache strictly mirrors the authoritative manifest. Materialization
+        is staged and backed up so a failed download cannot expose a partial
+        cache to file-based runtimes.
         """
-        os.makedirs(skills_dir, exist_ok=True)
-        local_dirs_by_name = self._list_local_skill_dirs(skills_dir)
+        os.makedirs(runtime_cache_dir, exist_ok=True)
+        cached_dirs = self._list_cached_skill_dirs(runtime_cache_dir)
         manifest = self._load_remote_manifest()
+        return self._materialize_mirror(
+            runtime_cache_dir,
+            manifest,
+            cached_dirs,
+        )
 
-        skip_set = {str(name or "").strip() for name in (skip_names or []) if str(name or "").strip()}
-        include_set = {str(name or "").strip() for name in (include_names or []) if str(name or "").strip()}
-        if include_set and mirror:
-            mirror = False
-        if include_set:
-            manifest = {name: rec for name, rec in manifest.items() if name in include_set}
-
-        missing_names = sorted(include_set - set(manifest))
-        include_meta: dict[str, Any] = {}
-        if include_set:
-            include_meta = {
-                "requested": len(include_set),
-                "matched_remote": len(manifest),
-                "missing": len(missing_names),
-                "missing_names": missing_names,
-            }
-
-        if not manifest:
-            # Empty/failed manifest is a no-op to avoid an accidental wipe.
-            if include_set:
-                logger.info(
-                    "[SkillHub] none of the requested remote skills matched the manifest: %s",
-                    ", ".join(missing_names) or "(empty request)",
-                )
-            else:
-                logger.warning("[SkillHub] remote manifest empty; skip mirror pull (downloaded=0 skipped=0 deleted=0)")
-            return self._pull_result(
-                include_meta,
-                downloaded=0,
-                skipped=0,
-                deleted=0,
-                total_remote=0,
-                restored_from_backup=False,
-                backup_dir="",
-            )
-
-        if mirror:
-            return self._pull_mirror(skills_dir, manifest, local_dirs_by_name, skip_set, include_meta)
-        return self._pull_incremental(skills_dir, manifest, local_dirs_by_name, skip_set, include_meta)
-
-    def _pull_incremental(
+    def _materialize_mirror(
         self,
         skills_dir: str,
         manifest: dict[str, dict[str, Any]],
         local_dirs_by_name: dict[str, list[str]],
-        skip_set: set[str],
-        include_meta: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Download/update remote skills without deleting local extras."""
-        downloaded = 0
-        skipped = 0
-        for name, rec in manifest.items():
-            category = str(rec.get("category", "general") or "general")
-            local_dir = self._resolve_pull_target_dir(skills_dir, name, category, local_dirs_by_name)
-            local_path = os.path.join(local_dir, "SKILL.md")
-
-            if name in skip_set and os.path.exists(local_path):
-                skipped += 1
-                self._remove_duplicate_local_skill_dirs(name, local_dir, local_dirs_by_name)
-                logger.info("[SkillHub] preserved local skill during pull: %s", name)
-                continue
-
-            if os.path.isdir(local_dir) and self._local_bundle_matches_record(local_dir, rec):
-                skipped += 1
-                self._remove_duplicate_local_skill_dirs(name, local_dir, local_dirs_by_name)
-                continue
-
-            try:
-                bundle = self._download_skill_bundle(name, rec)
-            except Exception as e:
-                logger.warning("[SkillHub] failed to download skill %s: %s", name, e)
-                continue
-
-            write_skill_bundle(local_dir, bundle, clean=True)
-            downloaded += 1
-            self._remove_duplicate_local_skill_dirs(name, local_dir, local_dirs_by_name)
-            logger.info("[SkillHub] pulled skill: %s", name)
-
-        logger.info(
-            "[SkillHub] incremental pull complete: %d downloaded, %d skipped, %d total remote",
-            downloaded,
-            skipped,
-            len(manifest),
-        )
-        return self._pull_result(
-            include_meta,
-            downloaded=downloaded,
-            skipped=skipped,
-            deleted=0,
-            total_remote=len(manifest),
-            restored_from_backup=False,
-            backup_dir="",
-        )
-
-    def _pull_mirror(
-        self,
-        skills_dir: str,
-        manifest: dict[str, dict[str, Any]],
-        local_dirs_by_name: dict[str, list[str]],
-        skip_set: set[str],
-        include_meta: dict[str, Any],
     ) -> dict[str, Any]:
         """Full mirror pull: stage into a temp dir, then swap in with rollback."""
         local_skills = {name: dirs[-1] for name, dirs in local_dirs_by_name.items() if dirs}
@@ -1115,8 +856,7 @@ class SkillHub:
             shutil.copytree(skills_dir, backup_dir)
         except Exception as e:
             logger.warning("[SkillHub] backup before pull failed: %s", e)
-            return self._pull_result(
-                include_meta,
+            return self._materialization_result(
                 downloaded=0,
                 skipped=0,
                 deleted=0,
@@ -1134,17 +874,9 @@ class SkillHub:
         try:
             for name, rec in manifest.items():
                 category = str(rec.get("category", "general") or "general")
-                target_dir = self._resolve_pull_target_dir(skills_dir, name, category, local_dirs_by_name)
+                target_dir = self._resolve_cache_target_dir(skills_dir, name, category, local_dirs_by_name)
                 resolved_targets[name] = target_dir
-                local_path = os.path.join(target_dir, "SKILL.md")
                 staged_dir = os.path.join(staging_dir, os.path.relpath(target_dir, skills_dir))
-
-                if name in skip_set and os.path.exists(local_path):
-                    skipped += 1
-                    if os.path.isdir(target_dir):
-                        shutil.copytree(target_dir, staged_dir, dirs_exist_ok=True)
-                    logger.info("[SkillHub] preserved local skill during pull: %s", name)
-                    continue
 
                 if os.path.isdir(target_dir) and self._local_bundle_matches_record(target_dir, rec):
                     skipped += 1
@@ -1158,7 +890,7 @@ class SkillHub:
 
                 write_skill_bundle(staged_dir, bundle, clean=True)
                 downloaded += 1
-                logger.info("[SkillHub] pulled skill: %s", name)
+                logger.info("[SkillHub] materialized Skill: %s", name)
 
             remote_names = set(manifest.keys())
             local_names = set(local_skills.keys())
@@ -1169,7 +901,7 @@ class SkillHub:
             for name in sorted(remote_names):
                 rec = manifest.get(name, {})
                 category = str(rec.get("category", "general") or "general")
-                dst_dir = resolved_targets.get(name) or self._resolve_pull_target_dir(
+                dst_dir = resolved_targets.get(name) or self._resolve_cache_target_dir(
                     skills_dir, name, category, local_dirs_by_name
                 )
                 src_dir = os.path.join(staging_dir, os.path.relpath(dst_dir, skills_dir))
@@ -1190,8 +922,7 @@ class SkillHub:
                 logger.info("[SkillHub] local skills restored from backup: %s", backup_dir)
             except Exception as restore_err:
                 logger.error("[SkillHub] backup restore failed: %s", restore_err)
-            return self._pull_result(
-                include_meta,
+            return self._materialization_result(
                 downloaded=0,
                 skipped=0,
                 deleted=0,
@@ -1204,15 +935,14 @@ class SkillHub:
                 shutil.rmtree(staging_dir, ignore_errors=True)
 
         logger.info(
-            "[SkillHub] pull complete: %d downloaded, %d skipped, %d deleted, %d total remote",
+            "[SkillHub] cache materialized: %d downloaded, %d skipped, %d deleted, %d total",
             downloaded,
             skipped,
             deleted,
             len(manifest),
         )
         self._prune_backups(backup_root, backup_prefix, keep=3)
-        return self._pull_result(
-            include_meta,
+        return self._materialization_result(
             downloaded=downloaded,
             skipped=skipped,
             deleted=deleted,
@@ -1222,15 +952,14 @@ class SkillHub:
         )
 
     # ------------------------------------------------------------------ #
-    # Delete (cloud)                                                       #
+    # Delete from durable storage                                         #
     # ------------------------------------------------------------------ #
 
     def delete_skill(self, skill_name: str) -> dict[str, Any]:
         """Remove a skill from shared storage: manifest, bundle, and versions.
 
         Idempotent — deleting an absent skill returns ``{"deleted": False}``
-        rather than raising, so the management UI can keep local and remote in
-        sync even after a partial failure.
+        rather than raising.
         """
         name = str(skill_name or "").strip()
         if not name:
@@ -1266,8 +995,8 @@ class SkillHub:
     # List / sync                                                          #
     # ------------------------------------------------------------------ #
 
-    def list_remote(self) -> list[dict[str, Any]]:
-        """Return a list of skill metadata dicts from the remote manifest."""
+    def list_skills(self) -> list[dict[str, Any]]:
+        """Return the tenant's published Skill metadata."""
         return list(self._load_remote_manifest().values())
 
     def describe_source(self) -> dict[str, Any]:
@@ -1315,20 +1044,6 @@ class SkillHub:
         ):
             raise ValueError(f"invalid skill file path: {rel_path!r}")
         return clean
-
-    def skill_file_records(self, skill_name: str) -> list[dict[str, Any]]:
-        """Return the current bundle's file records without downloading them."""
-        record = self._load_remote_manifest().get(self._clean_skill_name(skill_name)) or {}
-        files = record.get("files")
-        if isinstance(files, list) and files:
-            return [dict(item) for item in files if isinstance(item, dict)]
-        if record:
-            return [{
-                "path": "SKILL.md",
-                "sha256": str(record.get("sha256") or ""),
-                "size": int(record.get("size") or 0),
-            }]
-        raise FileNotFoundError(f"skill not found in storage: {skill_name}")
 
     def read_skill_bundle(self, skill_name: str) -> dict[str, bytes]:
         """Read a skill's live bundle as ``{relative_path: bytes}``."""
@@ -1385,20 +1100,6 @@ class SkillHub:
                 )
             bundle[clean] = payload
             result = self.publish_bundle(name, bundle, action=action)
-        return dict(result["record"])
-
-    def delete_skill_file(self, skill_name: str, rel_path: str) -> dict[str, Any]:
-        """Remove one (non-entrypoint) file from a skill and record a version."""
-        name = self._clean_skill_name(skill_name)
-        clean = self._clean_rel_path(rel_path)
-        if clean == "SKILL.md":
-            raise ValueError("SKILL.md 是技能入口文件，不能删除")
-        with _BUNDLE_WRITE_LOCK:
-            bundle = self.read_skill_bundle(name)
-            if clean not in bundle:
-                raise FileNotFoundError(f"{name}/{clean} not found")
-            bundle.pop(clean)
-            result = self.publish_bundle(name, bundle, action="edit")
         return dict(result["record"])
 
     # ------------------------------------------------------------------ #
@@ -1546,7 +1247,7 @@ class SkillHub:
         self._delete_remote_bundle_extras(name, bundle.keys())
 
         bundle_record = {
-            "format": "bundle_v1",
+            "format": "skill-bundle",
             "entrypoint": "SKILL.md",
             "tree_sha256": tree_sha,
             "files": bundle_records,
@@ -1566,7 +1267,7 @@ class SkillHub:
             "version": new_version,
             "sha256": local_sha,
             "tree_sha256": tree_sha,
-            "format": "bundle_v1",
+            "format": "skill-bundle",
             "entrypoint": "SKILL.md",
             "files": bundle_records,
             "uploaded_by": self._user_alias,
@@ -1584,9 +1285,3 @@ class SkillHub:
             "new_version": new_version,
             "bundle": bundle,
         }
-
-    def sync_skills(self, skills_dir: str) -> dict[str, dict[str, Any]]:
-        """Bidirectional sync: incremental pull (no deletes), then push."""
-        pull_result = self.pull_skills(skills_dir, mirror=False)
-        push_result = self.push_skills(skills_dir)
-        return {"pull": pull_result, "push": push_result}

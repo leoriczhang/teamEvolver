@@ -17,7 +17,6 @@ def _config(**overrides) -> SimpleNamespace:
         "llm_api_key": "",
         "llm_api_base": "",
         "llm_model_id": "",
-        "model_name": "",
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -310,10 +309,7 @@ def test_ingest_splits_and_queues_each_segment(monkeypatch) -> None:
         ),
     )
 
-    owner = SimpleNamespace(
-        config=_config(),
-        _session_judge_queue=None,
-    )
+    owner = SimpleNamespace(config=_config())
     owner._schedule_evolve_trigger = lambda: True
 
     invalidated: list[tuple] = []
@@ -376,10 +372,7 @@ def test_ingest_unsplit_path_unchanged(monkeypatch) -> None:
 
     monkeypatch.setattr(service_mod, "_classify_session", _stub_session_analysis)
 
-    owner = SimpleNamespace(
-        config=_config(),
-        _session_judge_queue=None,
-    )
+    owner = SimpleNamespace(config=_config())
     owner._schedule_evolve_trigger = lambda: True
 
     session = _session([_turn(f"q{i}") for i in range(4)])

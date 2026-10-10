@@ -1,0 +1,78 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "contract": {
+      "const": "kee.wiki-release.v1",
+      "default": "kee.wiki-release.v1",
+      "title": "Contract",
+      "type": "string"
+    },
+    "pack_digest": {
+      "title": "Pack Digest",
+      "type": "string"
+    },
+    "target_uri": {
+      "title": "Target Uri",
+      "type": "string"
+    },
+    "baseline": {
+      "default": "",
+      "title": "Baseline",
+      "type": "string"
+    },
+    "pages": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Pages",
+      "type": "object"
+    },
+    "sources": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Sources",
+      "type": "array"
+    },
+    "approval_id": {
+      "title": "Approval Id",
+      "type": "string"
+    },
+    "state": {
+      "default": "private",
+      "enum": [
+        "private",
+        "uploading",
+        "content_verified",
+        "index_wait",
+        "entry_unknown",
+        "published",
+        "withdraw_unknown",
+        "withdrawn"
+      ],
+      "title": "State",
+      "type": "string"
+    },
+    "processing_task_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Processing Task Ids",
+      "type": "array"
+    },
+    "receipt": {
+      "additionalProperties": true,
+      "title": "Receipt",
+      "type": "object"
+    }
+  },
+  "required": [
+    "pack_digest",
+    "target_uri",
+    "pages",
+    "sources",
+    "approval_id"
+  ],
+  "title": "WikiRelease",
+  "type": "object"
+}

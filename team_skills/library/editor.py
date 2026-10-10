@@ -1,34 +1,21 @@
-"""Local skill library editing: create, update, delete, and bundle files.
+"""Filesystem helpers for temporary Skill authoring workspaces.
 
-Pure on-disk operations over the configured ``skills_dir`` used by the skill
-management UI. Cloud sync is layered on top by the service admin routes; this
-module never touches object storage so it stays trivially testable.
+These helpers do not own published Skill state. Service routes stage edits in a
+temporary directory, commit the resulting bundle through ``SkillHub``, and may
+then materialize it into a rebuildable runtime cache.
 
 All operations build on the shared :mod:`team_skills.library.bundle`,
 :mod:`team_skills.library.frontmatter` and :mod:`team_skills.library.layout` helpers
-so the on-disk representation never diverges from what the manager loads and the
-hub syncs.
+so temporary and materialized bundle layouts match durable storage.
 """
 
 from __future__ import annotations
 
-import io
 import os
 import re
-import shutil
-import zipfile
-from datetime import datetime, timezone
 from typing import Any, Mapping, Optional
 
 from team_skills.library import frontmatter, layout
-from team_skills.library.bundle import (
-    SkillBundleError,
-    coerce_skill_bundle,
-    is_ignored_bundle_rel_path,
-    list_skill_bundle_paths,
-    normalize_bundle_rel_path,
-    write_skill_bundle,
-)
 
 # Skill folder names double as object-store keys and shell paths, so keep them
 # to a conservative, traversal-safe charset.
@@ -61,8 +48,7 @@ def validate_skill_name(name: str) -> str:
 def find_skill_dir(skills_dir: str, name: str) -> Optional[str]:
     """Return the on-disk directory of *name*, or ``None`` when absent.
 
-    Handles both the flat and hermes (category-nested) layouts by matching the
-    basename of every discovered ``SKILL.md`` parent directory.
+    Matches the basename of every discovered ``SKILL.md`` parent directory.
     """
     target = validate_skill_name(name)
     for path in layout.skill_md_paths(skills_dir):
@@ -96,54 +82,6 @@ def build_skill_md(
         content=body,
         extra_frontmatter=dict(extra_frontmatter or {}),
     )
-
-
-# ---------------------------------------------------------------------------- #
-# Introspection                                                                 #
-# ---------------------------------------------------------------------------- #
-
-
-def _skill_summary(skills_dir: str, skill_md_path: str) -> dict[str, Any]:
-    skill_dir = os.path.dirname(skill_md_path)
-    parsed = frontmatter.parse_skill_md(skill_md_path) or {}
-    try:
-        mtime = os.path.getmtime(skill_md_path)
-        updated_at = datetime.fromtimestamp(mtime, timezone.utc).isoformat()
-    except OSError:
-        updated_at = ""
-    bundle_paths = list_skill_bundle_paths(skill_dir)
-    return {
-        "name": os.path.basename(skill_dir),
-        "description": parsed.get("description", ""),
-        "category": parsed.get("category", "general"),
-        "files": bundle_paths,
-        "file_count": len(bundle_paths),
-        "updated_at": updated_at,
-    }
-
-
-def list_skills(skills_dir: str) -> list[dict[str, Any]]:
-    """Return summary metadata for every local skill, sorted by name."""
-    summaries = [
-        _skill_summary(skills_dir, path) for path in layout.skill_md_paths(skills_dir)
-    ]
-    return sorted(summaries, key=lambda s: s["name"].lower())
-
-
-def get_skill(skills_dir: str, name: str) -> dict[str, Any]:
-    """Return the full editable payload for a single skill."""
-    skill_dir = find_skill_dir(skills_dir, name)
-    if not skill_dir:
-        raise SkillEditorError(f"Skill not found: {name}")
-    skill_md_path = os.path.join(skill_dir, _ENTRYPOINT)
-    parsed = frontmatter.parse_skill_md(skill_md_path) or {}
-    summary = _skill_summary(skills_dir, skill_md_path)
-    return {
-        **summary,
-        "body": parsed.get("content", ""),
-        "extra_frontmatter": parsed.get("_extra_frontmatter", {}),
-        "skill_md": open(skill_md_path, encoding="utf-8").read(),
-    }
 
 
 # ---------------------------------------------------------------------------- #
@@ -188,228 +126,3 @@ def save_skill(
         f.write(content)
 
     return {"name": name, "created": created, "dir": target_dir}
-
-
-def delete_skill(skills_dir: str, name: str) -> dict[str, Any]:
-    """Remove a skill directory from disk."""
-    skill_dir = find_skill_dir(skills_dir, name)
-    if not skill_dir:
-        raise SkillEditorError(f"Skill not found: {name}")
-    shutil.rmtree(skill_dir)
-    return {"name": validate_skill_name(name), "deleted": True}
-
-
-def add_bundle_files(
-    skills_dir: str,
-    name: str,
-    files: Mapping[str, bytes],
-) -> dict[str, Any]:
-    """Add or replace bundle files under an existing skill.
-
-    ``SKILL.md`` cannot be written through this path — use :func:`save_skill`.
-    """
-    skill_dir = find_skill_dir(skills_dir, name)
-    if not skill_dir:
-        raise SkillEditorError(f"Skill not found: {name}")
-
-    written: list[str] = []
-    for raw_rel, data in files.items():
-        rel = normalize_bundle_rel_path(raw_rel)
-        if rel == _ENTRYPOINT:
-            raise SkillEditorError("Use the editor to change SKILL.md, not file upload")
-        if is_ignored_bundle_rel_path(rel):
-            continue
-        dest = os.path.join(skill_dir, rel)
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        with open(dest, "wb") as f:
-            f.write(bytes(data))
-        written.append(rel)
-    return {"name": validate_skill_name(name), "written": sorted(written)}
-
-
-def delete_bundle_file(skills_dir: str, name: str, rel_path: str) -> dict[str, Any]:
-    """Delete one bundle file from a skill (never ``SKILL.md``)."""
-    skill_dir = find_skill_dir(skills_dir, name)
-    if not skill_dir:
-        raise SkillEditorError(f"Skill not found: {name}")
-    rel = normalize_bundle_rel_path(rel_path)
-    if rel == _ENTRYPOINT:
-        raise SkillEditorError("SKILL.md cannot be deleted; delete the whole skill instead")
-    dest = os.path.join(skill_dir, rel)
-    if not os.path.isfile(dest):
-        raise SkillEditorError(f"File not found: {rel}")
-    os.remove(dest)
-    return {"name": validate_skill_name(name), "removed": rel}
-
-
-# ---------------------------------------------------------------------------- #
-# Zip import                                                                    #
-# ---------------------------------------------------------------------------- #
-
-
-def bundle_from_zip(zip_bytes: bytes) -> dict[str, bytes]:
-    """Extract a skill bundle from zip *bytes*, stripping a single wrapper dir.
-
-    Returns ``{rel_path: data}`` with ignored/unsafe entries dropped. The caller
-    is responsible for verifying a ``SKILL.md`` entrypoint is present.
-    """
-    try:
-        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
-    except zipfile.BadZipFile as e:
-        raise SkillEditorError(f"Not a valid zip file: {e}") from e
-
-    raw: dict[str, bytes] = {}
-    for info in zf.infolist():
-        if info.is_dir():
-            continue
-        raw[info.filename.replace("\\", "/")] = zf.read(info)
-
-    if _ENTRYPOINT not in raw:
-        top_dirs = {p.split("/", 1)[0] for p in raw if "/" in p}
-        if len(top_dirs) == 1:
-            top = next(iter(top_dirs)) + "/"
-            raw = {p[len(top):]: b for p, b in raw.items() if p.startswith(top)}
-
-    bundle: dict[str, bytes] = {}
-    for path, data in raw.items():
-        try:
-            rel = normalize_bundle_rel_path(path)
-        except SkillBundleError:
-            continue
-        if is_ignored_bundle_rel_path(rel):
-            continue
-        bundle[rel] = data
-    return bundle
-
-
-def import_zip(
-    skills_dir: str,
-    zip_bytes: bytes,
-    *,
-    name_override: str = "",
-) -> dict[str, Any]:
-    """Import a zipped skill package into the local library.
-
-    The skill name is taken from the uploaded ``SKILL.md`` frontmatter, falling
-    back to *name_override*. Any existing skill of the same name is replaced.
-    """
-    bundle = bundle_from_zip(zip_bytes)
-    if _ENTRYPOINT not in bundle:
-        raise SkillEditorError("Zip package must contain a SKILL.md at its root")
-
-    parsed = frontmatter._load_frontmatter_from_raw(  # noqa: SLF001 - shared parser
-        bundle[_ENTRYPOINT].decode("utf-8", errors="replace")
-    )
-    fm_name = str((parsed or {}).get("name", "")).strip()
-    name = validate_skill_name(name_override or fm_name)
-    if not (parsed or {}).get("description"):
-        raise SkillEditorError("Uploaded SKILL.md must define name and description")
-
-    category = frontmatter.resolve_category(parsed or {}) or "general"
-    existing_dir = find_skill_dir(skills_dir, name)
-    created = existing_dir is None
-    target_dir = existing_dir or layout.skill_dir_for(skills_dir, name, category)
-    write_skill_bundle(target_dir, coerce_skill_bundle(bundle), clean=True)
-
-    return {
-        "name": name,
-        "created": created,
-        "dir": target_dir,
-        "files": sorted(coerce_skill_bundle(bundle).keys()),
-    }
-
-
-def import_zip_batch(
-    skills_dir: str,
-    zip_bytes: bytes,
-) -> dict[str, Any]:
-    """Import a zipped package containing *multiple* skill bundles.
-
-    Expected structure: ``skills/<skill_name>/SKILL.md`` (plus arbitrary files
-    under each ``<skill_name>/``). A single-wrapper-dir zip (``<name>/SKILL.md``
-    at root) is handled by falling back to :func:`import_zip` for that one skill.
-
-    Returns ``{"imported": [...], "skipped": [...], "errors": [...]}``.
-    """
-    try:
-        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
-    except zipfile.BadZipFile as e:
-        raise SkillEditorError(f"Not a valid zip file: {e}") from e
-
-    # Collect all SKILL.md paths, skipping macOS metadata.
-    skill_paths: dict[str, str] = {}  # skill_name → zip-internal SKILL.md path
-    for info in zf.infolist():
-        if info.is_dir():
-            continue
-        name = info.filename.replace("\\", "/")
-        if "__MACOSX" in name or name.endswith("/.DS_Store") or name.endswith("/._SKILL.md"):
-            continue
-        if name.endswith("/SKILL.md") or name == "SKILL.md":
-            parts = name.split("/")
-            if name == "SKILL.md":
-                skill_paths.setdefault("", name)
-            else:
-                skill_name = parts[-2]
-                skill_paths.setdefault(skill_name, name)
-
-    if not skill_paths:
-        raise SkillEditorError("Zip contains no SKILL.md files")
-
-    # If only one SKILL.md at root, delegate to single import.
-    if len(skill_paths) == 1 and "" in skill_paths:
-        return {"imported": [import_zip(skills_dir, zip_bytes)], "skipped": [], "errors": []}
-
-    imported: list[dict[str, Any]] = []
-    skipped: list[dict[str, str]] = []
-    errors: list[dict[str, str]] = []
-
-    for skill_name, md_path in sorted(skill_paths.items()):
-        # Gather all files under the same parent directory as SKILL.md.
-        prefix = md_path.rsplit("/", 1)[0] + "/" if "/" in md_path else ""
-        bundle: dict[str, bytes] = {}
-        for info in zf.infolist():
-            if info.is_dir():
-                continue
-            fname = info.filename.replace("\\", "/")
-            if "__MACOSX" in fname:
-                continue
-            if not fname.startswith(prefix):
-                continue
-            rel = fname[len(prefix):]
-            if not rel or rel == ".DS_Store":
-                continue
-            try:
-                rel = normalize_bundle_rel_path(rel)
-            except SkillBundleError:
-                continue
-            if is_ignored_bundle_rel_path(rel):
-                continue
-            bundle[rel] = zf.read(info)
-
-        if _ENTRYPOINT not in bundle:
-            errors.append({"name": skill_name, "error": "SKILL.md missing after prefix strip"})
-            continue
-
-        try:
-            parsed = frontmatter._load_frontmatter_from_raw(  # noqa: SLF001
-                bundle[_ENTRYPOINT].decode("utf-8", errors="replace")
-            )
-            fm_name = str((parsed or {}).get("name", "")).strip()
-            name = validate_skill_name(fm_name or skill_name)
-            if not (parsed or {}).get("description"):
-                raise SkillEditorError("SKILL.md must define name and description")
-            category = frontmatter.resolve_category(parsed or {}) or "general"
-            existing_dir = find_skill_dir(skills_dir, name)
-            created = existing_dir is None
-            target_dir = existing_dir or layout.skill_dir_for(skills_dir, name, category)
-            write_skill_bundle(target_dir, coerce_skill_bundle(bundle), clean=True)
-            imported.append({
-                "name": name,
-                "created": created,
-                "dir": target_dir,
-                "files": sorted(coerce_skill_bundle(bundle).keys()),
-            })
-        except Exception as e:
-            errors.append({"name": skill_name, "error": f"{type(e).__name__}: {e}"})
-
-    return {"imported": imported, "skipped": skipped, "errors": errors}

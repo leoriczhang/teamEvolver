@@ -112,7 +112,7 @@ it("shows partial completion, per-source gaps and separate index pending counts"
       rejected_sources: 2, rejected_records: 1, last_error: "IMPORT_RECORD_TOO_LARGE",
       error_counts: { IMPORT_SOURCE_TOO_LARGE: 1, IMPORT_RECORD_TOO_LARGE: 1 },
       errors_sample: [{ source_key: "session_archive/large.json", code: "IMPORT_SOURCE_TOO_LARGE",
-        source_bytes: 80000000, limit_bytes: 67108864 }, { source_key: "skill_evidence/report.json",
+        source_bytes: 80000000, limit_bytes: 67108864 }, { source_key: "session_archive/report.json",
         code: "IMPORT_RECORD_TOO_LARGE", record_bytes: 300000, limit_bytes: 262144, ordinal: 21 }],
     },
   } });
@@ -121,7 +121,7 @@ it("shows partial completion, per-source gaps and separate index pending counts"
     expect(await screen.findByRole("status")).toHaveTextContent("部分完成");
     expect(screen.getByText(/正文已写入、索引待确认/)).toHaveTextContent("2 条");
     expect(screen.getByText(/session_archive\/large.json/)).toHaveTextContent("80000000 字节");
-    expect(screen.getByText(/skill_evidence\/report.json/)).toHaveTextContent("第 21 条");
+    expect(screen.getByText(/session_archive\/report.json/)).toHaveTextContent("第 21 条");
     expect(screen.getByText(/来源读取缺口/)).toHaveTextContent("2 个来源");
   } finally { view.unmount(); }
 });

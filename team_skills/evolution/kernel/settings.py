@@ -5,6 +5,15 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from teamEvolver.config import (
+    DEFAULT_LLM_API_BASE,
+    DEFAULT_LLM_MAX_CONCURRENCY,
+    DEFAULT_LLM_MAX_TOKENS,
+    DEFAULT_LLM_MODEL_ID,
+    DEFAULT_LLM_QUEUE_CAPACITY,
+    DEFAULT_LLM_TEMPERATURE,
+)
+
 
 def _first_env(*names: str, default: str = "") -> str:
     for name in names:
@@ -12,24 +21,6 @@ def _first_env(*names: str, default: str = "") -> str:
         if value not in (None, ""):
             return value
     return default
-
-
-def _infer_storage_backend(endpoint: str, local_root: str = "") -> str:
-    """Resolve the evolve engine's storage backend.
-
-    Default is the built-in local backend: the engine's ledgers (sessions /
-    registry / manifest / evidence / validation) are its own hot read/write
-    data and belong on local storage. ``EVOLVE_STORAGE_BACKEND=viking`` (or a
-    viking endpoint with an explicit backend request) opts back into OpenViking.
-    """
-    backend = _first_env("EVOLVE_STORAGE_BACKEND", default="").strip().lower()
-    if backend in {"local", "localfs", "local-fs", "builtin"}:
-        return "local"
-    if backend:
-        return "viking"
-    # No explicit choice: local by default — viking is only the skill mirror
-    # target and the mining/memory surface, not the engine ledger backend.
-    return "local"
 
 
 @dataclass
@@ -51,18 +42,10 @@ class EvolveServerConfig:
     viking_account: str = "default"
     viking_user: str = "team"
     viking_agent: str = "team-skill-evolver"
-    # Identity fields sent to OpenViking for attribution. Evolved skills are
-    # written to the resources namespace; customer_id may still scope isolated
-    # prefixes such as ``peers/{customer_id}/`` when a caller explicitly uses it.
-    viking_agent_id: str = ""
-    viking_customer_id: str = ""
-    # Account-scoped, team-shared resources root layout
-    # (``viking://resources/{root_prefix}/...``, with an optional ``{group_id}``
-    # segment when set). Skills, manifest, registry, and version bundles all live
-    # here so Hermes' ``OpenVikingSkillSource`` can read them directly. Empty
-    # group_id (default) means the team library has no group segment.
+    # Account-scoped, team-shared resources root. Tenant isolation is carried
+    # by object keys or PostgreSQL RLS, not legacy customer/group identifiers.
     viking_root_prefix: str = "team-skill-evolver"
-    viking_group_id: str = ""
+    experience_pattern_root: str = ""
 
     # Built-in local-storage fallback: when the configured OpenViking
     # deployment is unavailable (connection error / timeout / HTTP 5xx), the
@@ -100,11 +83,8 @@ class EvolveServerConfig:
     llm_temperature: float = 0.4
     llm_api_type: str = "openai-completions"
     evolve_strategy: str = "dynamic_edit_conservative"
-    use_success_feedback: bool = True
 
     # Evolution
-    evolve_batch_size: int = 20
-    reject_rewrite: bool = False  # Reject skill improvements that look like full rewrites
     use_session_judge: bool = True
     # Cross-cycle evidence keeps long-term skill context while recent sessions
     # remain a distinct, high-sensitivity window.
@@ -151,32 +131,17 @@ class EvolveServerConfig:
     bundle_static_checks_enabled: bool = True
     publish_mode: str = "validated"
     validation_runtimes: list[str] = field(
-        default_factory=lambda: ["hermes", "deap", "agentshub", "langfuse", "doris"]
+        default_factory=lambda: ["deap", "langfuse", "doris"]
     )
-    validation_required_results: int = 3
-    validation_required_approvals: int = 2
-    validation_max_rejections: int = 1
-    # Human-in-the-loop: when client replay/AB validation is inconclusive (the
+    # Human-in-the-loop: when centralized replay/AB validation is inconclusive (the
     # gray zone), escalate the job to a human review queue instead of leaving it
     # pending forever. Non-blocking: a reminder is surfaced each cycle until a
     # human resolves it via the dashboard review endpoint.
     human_review_enabled: bool = True
-    human_review_pending_timeout_seconds: int = 86400
     debug_dump_dir: str = ""
 
     # Scheduling
     interval_seconds: int = 600
-    http_port: int = 52010
-
-    # Optional bearer token guarding the session-ingest endpoint. When empty the
-    # endpoint is open (relies on network-level isolation). Set it to require
-    # ``Authorization: Bearer <token>`` on POST /ingest_session so remote
-    # machines can push sessions without holding any OpenViking credentials.
-    ingest_api_key: str = ""
-
-    # Local persistence
-    history_path: str = "evolve_history.jsonl"
-    processed_log_path: str = "evolve_processed.json"
 
     def __post_init__(self) -> None:
         self.engine = str(self.engine or "workflow").strip().lower() or "workflow"
@@ -241,152 +206,6 @@ class EvolveServerConfig:
         self.publish_mode = str(self.publish_mode or "direct").strip().lower() or "direct"
         if self.publish_mode not in {"direct", "validated"}:
             self.publish_mode = "direct"
-        self.validation_required_results = max(1, int(self.validation_required_results or 1))
-        self.validation_required_approvals = max(1, int(self.validation_required_approvals or 1))
-        self.validation_max_rejections = max(1, int(self.validation_max_rejections or 1))
-
-    @classmethod
-    def from_env(cls) -> "EvolveServerConfig":
-        """Populate every field from environment variables."""
-        storage_endpoint = _first_env("EVOLVE_STORAGE_ENDPOINT")
-        storage_backend = _infer_storage_backend(storage_endpoint)
-        skill_storage_backend = _first_env(
-            "EVOLVE_SKILL_STORAGE_BACKEND",
-            default=storage_backend,
-        ).strip().lower()
-        engine = _first_env("EVOLVE_ENGINE", default="workflow").strip().lower() or "workflow"
-
-        llm_api_key = os.environ.get("OPENAI_API_KEY", "")
-        llm_base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        llm_model = os.environ.get("EVOLVE_MODEL", "gpt-4o")
-        llm_api_type = os.environ.get("EVOLVE_LLM_API_TYPE", "openai-completions")
-
-        return cls(
-            engine=engine,
-            storage_backend=storage_backend,
-            storage_endpoint=storage_endpoint,
-            skill_storage_backend=skill_storage_backend,
-            skill_storage_local_root=os.environ.get(
-                "EVOLVE_SKILL_STORAGE_LOCAL_ROOT",
-                os.environ.get("EVOLVE_STORAGE_LOCAL_ROOT", ""),
-            ),
-            viking_endpoint=os.environ.get("EVOLVE_VIKING_ENDPOINT", ""),
-            viking_api_key=_first_env("EVOLVE_VIKING_TEAM_API_KEY", "EVOLVE_VIKING_API_KEY"),
-            viking_account=os.environ.get("EVOLVE_VIKING_ACCOUNT", "default"),
-            viking_user=os.environ.get("EVOLVE_VIKING_USER", "team"),
-            viking_agent=os.environ.get("EVOLVE_VIKING_AGENT", "team-skill-evolver"),
-            viking_agent_id=_first_env("EVOLVE_VIKING_AGENT_ID", "EVOLVE_VIKING_USER_ID"),
-            viking_customer_id=_first_env("EVOLVE_VIKING_CUSTOMER_ID", "EVOLVE_VIKING_PEER_ID"),
-            viking_root_prefix=os.environ.get("EVOLVE_VIKING_ROOT_PREFIX", "team-skill-evolver"),
-            viking_group_id=_first_env("EVOLVE_VIKING_GROUP_ID", "EVOLVE_VIKING_GROUP", default=""),
-            storage_fallback_enabled=os.environ.get(
-                "EVOLVE_STORAGE_FALLBACK", "1"
-            ).lower() not in {"0", "false", "no"},
-            storage_local_root=os.environ.get("EVOLVE_STORAGE_LOCAL_ROOT", ""),
-            pg_dsn=os.environ.get("EVOLVE_PG_DSN", ""),
-            pg_schema=os.environ.get("EVOLVE_PG_SCHEMA", "teamevolver"),
-            pg_pool_min=int(os.environ.get("EVOLVE_PG_POOL_MIN", "2")),
-            pg_pool_max=int(os.environ.get("EVOLVE_PG_POOL_MAX", "20")),
-            pg_command_timeout_seconds=float(os.environ.get("EVOLVE_PG_COMMAND_TIMEOUT", "30")),
-            pg_ssl=os.environ.get("EVOLVE_PG_SSL", "prefer"),
-            pg_tenant_id=os.environ.get("EVOLVE_PG_TENANT", "default"),
-            skill_mirror_enabled=os.environ.get(
-                "EVOLVE_SKILL_MIRROR", "1"
-            ).lower() not in {"0", "false", "no"},
-            skill_mirror_spool_dir=os.environ.get("EVOLVE_SKILL_MIRROR_SPOOL_DIR", ""),
-            llm_api_key=llm_api_key,
-            llm_base_url=llm_base_url,
-            llm_model=llm_model,
-            llm_max_tokens=int(os.environ.get("EVOLVE_LLM_MAX_TOKENS", "100000")),
-            llm_temperature=float(os.environ.get("EVOLVE_LLM_TEMPERATURE", "0.4")),
-            llm_api_type=llm_api_type,
-            evolve_strategy=os.environ.get("EVOLVE_STRATEGY", "dynamic_edit_conservative"),
-            use_success_feedback=os.environ.get("EVOLVE_USE_SUCCESS_FEEDBACK", "1").lower() not in {"0", "false", "no"},
-            evolve_batch_size=int(os.environ.get("EVOLVE_BATCH_SIZE", "20")),
-            reject_rewrite=os.environ.get("EVOLVE_REJECT_REWRITE", "0").lower() in {"1", "true", "yes"},
-            use_session_judge=os.environ.get("EVOLVE_USE_SESSION_JUDGE", "1").lower() not in {"0", "false", "no"},
-            evidence_enabled=os.environ.get("EVOLVE_EVIDENCE_ENABLED", "1").lower() not in {"0", "false", "no"},
-            evidence_max_entries=int(os.environ.get("EVOLVE_EVIDENCE_MAX_ENTRIES", "400")),
-            evidence_recent_limit=int(os.environ.get("EVOLVE_EVIDENCE_RECENT_LIMIT", "20")),
-            evidence_historical_limit=int(os.environ.get("EVOLVE_EVIDENCE_HISTORICAL_LIMIT", "20")),
-            evidence_replay_cases_per_window=int(
-                os.environ.get("EVOLVE_EVIDENCE_REPLAY_CASES_PER_WINDOW", "1")
-            ),
-            evidence_change_debt_threshold=int(
-                os.environ.get("EVOLVE_EVIDENCE_CHANGE_DEBT_THRESHOLD", "3")
-            ),
-            dataset_synthesis_enabled=os.environ.get(
-                "EVOLVE_DATASET_SYNTHESIS_ENABLED", "1"
-            ).lower()
-            not in {"0", "false", "no"},
-            dataset_test_cases=int(
-                os.environ.get("EVOLVE_DATASET_TEST_CASES", "2")
-            ),
-            dataset_min_requirements=int(
-                os.environ.get("EVOLVE_DATASET_MIN_REQUIREMENTS", "12")
-            ),
-            dataset_max_requirements=int(
-                os.environ.get("EVOLVE_DATASET_MAX_REQUIREMENTS", "24")
-            ),
-            dataset_disclosure_batch_size=int(
-                os.environ.get("EVOLVE_DATASET_DISCLOSURE_BATCH_SIZE", "4")
-            ),
-            candidate_coalesce_enabled=os.environ.get(
-                "EVOLVE_CANDIDATE_COALESCE_ENABLED", "1"
-            ).lower()
-            not in {"0", "false", "no"},
-            max_parallel_groups=int(
-                os.environ.get("EVOLVE_MAX_PARALLEL_GROUPS", "8")
-            ),
-            agent_max_rounds=int(
-                os.environ.get("EVOLVE_AGENT_MAX_ROUNDS", "12")
-            ),
-            agent_max_tool_calls_per_round=int(
-                os.environ.get("EVOLVE_AGENT_MAX_TOOL_CALLS_PER_ROUND", "8")
-            ),
-            llm_max_concurrency=int(
-                os.environ.get("EVOLVE_LLM_MAX_CONCURRENCY", "8")
-            ),
-            llm_queue_capacity=int(
-                os.environ.get("EVOLVE_LLM_QUEUE_CAPACITY", "64")
-            ),
-            min_group_sessions=int(
-                os.environ.get("EVOLVE_MIN_GROUP_SESSIONS", "2")
-            ),
-            min_group_users=int(os.environ.get("EVOLVE_MIN_GROUP_USERS", "2")),
-            bundle_text_extensions=os.environ.get(
-                "EVOLVE_BUNDLE_TEXT_EXTENSIONS", ".py,.sh"
-            ).split(","),
-            bundle_max_file_bytes=int(
-                os.environ.get("EVOLVE_BUNDLE_MAX_FILE_BYTES", "262144")
-            ),
-            bundle_max_prompt_bytes=int(
-                os.environ.get("EVOLVE_BUNDLE_MAX_PROMPT_BYTES", "786432")
-            ),
-            bundle_allow_delete=os.environ.get(
-                "EVOLVE_BUNDLE_ALLOW_DELETE", "1"
-            ).lower()
-            not in {"0", "false", "no"},
-            bundle_static_checks_enabled=os.environ.get(
-                "EVOLVE_BUNDLE_STATIC_CHECKS_ENABLED", "1"
-            ).lower()
-            not in {"0", "false", "no"},
-            publish_mode=os.environ.get("EVOLVE_PUBLISH_MODE", "validated"),
-            validation_runtimes=os.environ.get(
-                "TEAMEVOLVER_VALIDATION_RUNTIMES", "hermes,deap,agentshub,langfuse,doris"
-            ).replace(",", " ").split(),
-            validation_required_results=int(os.environ.get("EVOLVE_VALIDATION_REQUIRED_RESULTS", "3")),
-            validation_required_approvals=int(os.environ.get("EVOLVE_VALIDATION_REQUIRED_APPROVALS", "2")),
-            validation_max_rejections=int(os.environ.get("EVOLVE_VALIDATION_MAX_REJECTIONS", "1")),
-            human_review_enabled=os.environ.get("EVOLVE_HUMAN_REVIEW_ENABLED", "1").lower() not in {"0", "false", "no"},
-            human_review_pending_timeout_seconds=int(os.environ.get("EVOLVE_HUMAN_REVIEW_TIMEOUT_SECONDS", "86400")),
-            interval_seconds=int(os.environ.get("EVOLVE_INTERVAL", "600")),
-            http_port=int(os.environ.get("EVOLVE_PORT", "52010")),
-            ingest_api_key=os.environ.get("EVOLVE_INGEST_API_KEY", ""),
-            history_path=os.environ.get("EVOLVE_HISTORY_LOG", "evolve_history.jsonl"),
-            processed_log_path=os.environ.get("EVOLVE_PROCESSED_LOG", "evolve_processed.json"),
-        )
-
     @classmethod
     def from_teamEvolver_config(cls, config) -> "EvolveServerConfig":
         """Build from teamEvolver's primary configuration object."""
@@ -396,23 +215,32 @@ class EvolveServerConfig:
         llm_api_key = str(getattr(config, "llm_api_key", "") or "")
         llm_base_url = str(
             getattr(config, "llm_api_base", "")
-            or "https://ark.cn-beijing.volces.com/api/v3"
+            or DEFAULT_LLM_API_BASE
         )
         llm_model = os.environ.get(
             "EVOLVE_MODEL",
-            str(getattr(config, "llm_model_id", "") or "doubao-seed-evolving"),
+            str(getattr(config, "llm_model_id", "") or DEFAULT_LLM_MODEL_ID),
         )
         llm_api_type = os.environ.get("EVOLVE_LLM_API_TYPE", "openai-completions")
         llm_max_tokens = int(
             os.environ.get(
                 "EVOLVE_LLM_MAX_TOKENS",
-                str(getattr(config, "llm_max_tokens", 100000) or 100000),
+                str(
+                    getattr(config, "llm_max_tokens", DEFAULT_LLM_MAX_TOKENS)
+                    or DEFAULT_LLM_MAX_TOKENS
+                ),
             )
         )
         llm_temperature = float(
             os.environ.get(
                 "EVOLVE_LLM_TEMPERATURE",
-                str(getattr(config, "llm_temperature", 0.4)),
+                str(
+                    getattr(
+                        config,
+                        "llm_temperature",
+                        DEFAULT_LLM_TEMPERATURE,
+                    )
+                ),
             )
         )
 
@@ -450,18 +278,19 @@ class EvolveServerConfig:
                 ),
             ),
             viking_endpoint=viking_endpoint,
-            viking_api_key=str(
-                getattr(config, "sharing_viking_team_api_key", "")
-                or getattr(config, "sharing_viking_api_key", "")
-                or ""
-            ),
+            viking_api_key=str(getattr(config, "sharing_viking_api_key", "") or ""),
             viking_account=str(getattr(config, "sharing_viking_account", "") or "default"),
             viking_user=str(getattr(config, "sharing_viking_user", "") or "team"),
             viking_agent=str(getattr(config, "sharing_viking_agent", "") or "team-skill-evolver"),
-            viking_agent_id=str(getattr(config, "sharing_viking_agent_id", "") or ""),
-            viking_customer_id=str(getattr(config, "sharing_viking_customer_id", "") or ""),
             viking_root_prefix=str(getattr(config, "sharing_viking_root_prefix", "") or "team-skill-evolver"),
-            viking_group_id=str(getattr(config, "sharing_viking_group_id", "") or ""),
+            experience_pattern_root=str(
+                (
+                    getattr(config, "experience_sync", {})
+                    if isinstance(getattr(config, "experience_sync", {}), dict)
+                    else {}
+                ).get("target_directory")
+                or ""
+            ),
             storage_fallback_enabled=os.environ.get(
                 "EVOLVE_STORAGE_FALLBACK",
                 "1" if getattr(config, "sharing_local_fallback_enabled", True) else "0",
@@ -494,9 +323,6 @@ class EvolveServerConfig:
             llm_temperature=llm_temperature,
             llm_api_type=llm_api_type,
             evolve_strategy=os.environ.get("EVOLVE_STRATEGY", "dynamic_edit_conservative"),
-            use_success_feedback=os.environ.get("EVOLVE_USE_SUCCESS_FEEDBACK", "1").lower() not in {"0", "false", "no"},
-            evolve_batch_size=int(os.environ.get("EVOLVE_BATCH_SIZE", "20")),
-            reject_rewrite=os.environ.get("EVOLVE_REJECT_REWRITE", "0").lower() in {"1", "true", "yes"},
             use_session_judge=os.environ.get(
                 "EVOLVE_USE_SESSION_JUDGE",
                 "1"
@@ -632,13 +458,27 @@ class EvolveServerConfig:
             llm_max_concurrency=int(
                 os.environ.get(
                     "EVOLVE_LLM_MAX_CONCURRENCY",
-                    str(getattr(config, "llm_max_concurrency", 8) or 8),
+                    str(
+                        getattr(
+                            config,
+                            "llm_max_concurrency",
+                            DEFAULT_LLM_MAX_CONCURRENCY,
+                        )
+                        or DEFAULT_LLM_MAX_CONCURRENCY
+                    ),
                 )
             ),
             llm_queue_capacity=int(
                 os.environ.get(
                     "EVOLVE_LLM_QUEUE_CAPACITY",
-                    str(getattr(config, "llm_queue_capacity", 64) or 64),
+                    str(
+                        getattr(
+                            config,
+                            "llm_queue_capacity",
+                            DEFAULT_LLM_QUEUE_CAPACITY,
+                        )
+                        or DEFAULT_LLM_QUEUE_CAPACITY
+                    ),
                 )
             ),
             min_group_sessions=int(
@@ -684,51 +524,10 @@ class EvolveServerConfig:
                 ),
             ),
             validation_runtimes=list(config.validation_runtimes),
-            validation_required_results=int(
-                os.environ.get(
-                    "EVOLVE_VALIDATION_REQUIRED_RESULTS",
-                    str(getattr(config, "validation_required_results", 3) or 3),
-                )
-            ),
-            validation_required_approvals=int(
-                os.environ.get(
-                    "EVOLVE_VALIDATION_REQUIRED_APPROVALS",
-                    str(getattr(config, "validation_required_approvals", 2) or 2),
-                )
-            ),
-            validation_max_rejections=int(
-                os.environ.get(
-                    "EVOLVE_VALIDATION_MAX_REJECTIONS",
-                    str(
-                        getattr(
-                            config,
-                            "evolve_validation_max_rejections",
-                            1,
-                        )
-                        or 1
-                    ),
-                )
-            ),
             human_review_enabled=os.environ.get(
                 "EVOLVE_HUMAN_REVIEW_ENABLED",
-                "1"
-                if getattr(config, "evolve_human_review_enabled", True)
-                else "0",
-            ).lower()
-            not in {"0", "false", "no"},
-            human_review_pending_timeout_seconds=int(
-                os.environ.get(
-                    "EVOLVE_HUMAN_REVIEW_TIMEOUT_SECONDS",
-                    str(
-                        getattr(
-                            config,
-                            "evolve_human_review_timeout_seconds",
-                            86400,
-                        )
-                        or 86400
-                    ),
-                )
-            ),
+                "1" if getattr(config, "evolve_human_review_enabled", True) else "0",
+            ).lower() not in {"0", "false", "no"},
             interval_seconds=int(
                 os.environ.get(
                     "EVOLVE_INTERVAL",
@@ -737,9 +536,5 @@ class EvolveServerConfig:
                         or 600
                     ),
                 )
-            ),
-            ingest_api_key=os.environ.get(
-                "EVOLVE_INGEST_API_KEY",
-                str(getattr(config, "proxy_api_key", "") or ""),
             ),
         )

@@ -34,13 +34,13 @@ _SKILL_FAMILIES = {
     "experience_library": "Skill 使用经验",
     "skill_version_context": "Skill 版本上下文",
     "skill_mutation_commits": "Skill 变更提交记录",
-    "skill_sync_outbox": "Skill 分发发件箱",
+    "skill_rollout_outbox": "Skillopt Rollout 发件箱",
     "skill_tombstones": "Skill 删除标记",
     "candidate_skills": "Skill Candidate",
     "validation_jobs": "True Replay 验证任务",
     "validation_claims": "验证任务认领记录",
-    "validation_results": "独立验证结果",
-    "validation_evaluations": "验证聚合评估",
+    "validation_results": "中心验证结果",
+    "validation_evaluations": "True Replay 评估",
     "validation_decisions": "Candidate Review 裁决",
     "validation_decision_index.json": "验证裁决索引",
     "validation_open_jobs.json": "开放验证任务索引",
@@ -295,7 +295,9 @@ class PlatformAssetsMixin:
 
         @app.get("/api/platform-assets/tree")
         async def platform_assets_tree(request: Request):
-            _request_user(request)
+            from ..admin.authorization import require_tenant_admin
+
+            require_tenant_admin(_request_user(request))
             tenant_id = current_tenant_id()
             config = owner._platform_assets_config()
             try:
@@ -338,7 +340,9 @@ class PlatformAssetsMixin:
             request: Request,
             uri: str = Query(...),
         ):
-            _request_user(request)
+            from ..admin.authorization import require_tenant_admin
+
+            require_tenant_admin(_request_user(request))
             tenant_id = current_tenant_id()
             config = owner._platform_assets_config()
             try:

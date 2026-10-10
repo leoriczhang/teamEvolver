@@ -23,6 +23,8 @@ HTTP implementation: `teamEvolver/proxy/skill_transfer.py:register_skill_transfe
 
 Channels: `zip`, `marketplace`, `git`. Import conflict policy: `replace` (default), `skip`, or `error` (reject the whole batch before writing). Export requires explicit, unique `names`. Limits per operation: 256 Skills, 4096 files, 128 MiB content and 64 MiB ZIP. Traversal paths, duplicate names, encrypted ZIP entries and symlinks are rejected.
 
+All POST endpoints expect JSON. Direct multipart or binary ZIP uploads return 415; encode ZIP bytes in `zip_b64` instead of uploading a form file.
+
 ### ZIP
 
 Import requires `options.zip_b64`; optional `name` applies only to a single Skill. Root, wrapped and nested multi-Skill archives are recognized. Description frontmatter is required; names default to frontmatter then directory names. Exports contain `<name>/SKILL.md` and attachments and can be reimported.
@@ -74,4 +76,4 @@ Import results include `imported`, `skipped`, and `errors`. Imported entries inc
 
 ZIP export returns a download. Remote exports return `exported`; Git also returns `url`, `branch`, and `commit`. Remote writes are not automatically retried.
 
-HTTP errors: 400/422 invalid input, 403 admin required, 404 missing Skill, 409 conflict, 413 size limits, 429 transfer capacity, 502 remote/storage error, 503 Git unavailable, 504 Git timeout. Blocking I/O runs in worker threads; requests wait for completion with two transfer slots per process. Credentials are not persisted in URLs, cache configuration or results. Live marketplace publishing and hosted repository creation require deployment network access and permissions.
+HTTP errors: 400/422 invalid input, 403 admin required, 404 missing Skill, 409 conflict, 413 size limits, 415 unsupported request media type, 429 transfer capacity, 502 remote/storage error, 503 Git unavailable, 504 Git timeout. Blocking I/O runs in worker threads; requests wait for completion with two transfer slots per process. Credentials are not persisted in URLs, cache configuration or results. Live marketplace publishing and hosted repository creation require deployment network access and permissions.

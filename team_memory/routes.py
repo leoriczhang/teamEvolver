@@ -10,9 +10,8 @@ Management endpoints remain console-admin-only.
 - ``GET  /api/aggregation/okf-skill`` -> read the default OKF Skill body
 - ``PUT  /api/aggregation/okf-skill`` -> (placeholder) persist an edited Skill
 
-The mixin owns a single :class:`MemoryAggregationService` bound to the current
-config and runs each task in a worker thread (same style as DreamCycle's
-trigger), so the request returns 202 immediately.
+The mixin owns a tenant-scoped :class:`MemoryAggregationService` and runs each
+task in a worker thread, so the request returns 202 immediately.
 """
 
 from __future__ import annotations
@@ -27,6 +26,9 @@ from fastapi.responses import JSONResponse
 from team_memory import MemoryAggregationService
 from team_memory.service import RunConflictError
 from teamEvolver.config_store import ConfigStore
+from teamEvolver.admin.authorization import is_tenant_admin, require_tenant_admin
+from teamEvolver.admin.tenant_settings import save_settings, settings_data
+from teamEvolver.tenants.registry import current_tenant_id, effective_config, get_current_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -50,12 +52,16 @@ class AggregationMixin:
     """Team-memory aggregation console endpoints."""
 
     def _aggregation_service(self) -> MemoryAggregationService:
-        service = getattr(self, "_aggregation_service_instance", None)
+        config = effective_config(None, get_current_tenant(), self.config)
+        services = getattr(self, "_tenant_aggregation_services", None)
+        if services is None:
+            services = self._tenant_aggregation_services = {}
+        service = services.get(current_tenant_id())
         if service is None:
-            service = MemoryAggregationService(self.config)
-            self._aggregation_service_instance = service
-        elif getattr(service, "config", None) is not self.config and not service._active_targets:
-            service.config = self.config
+            service = MemoryAggregationService(config)
+            services[current_tenant_id()] = service
+        elif getattr(service, "config", None) is not config and not service._active_targets:
+            service.config = config
         return service
 
     def _aggregation_request_context(
@@ -63,9 +69,10 @@ class AggregationMixin:
         request: Request,
         body: dict,
     ) -> _AggregationRequestContext:
+        config = effective_config(None, get_current_tenant(), self.config)
         account_id = str(
             body.get("account_id")
-            or getattr(self.config, "sharing_viking_account", "")
+            or getattr(config, "sharing_viking_account", "")
             or "default"
         ).strip()
         raw_endpoint = body.get("endpoint")
@@ -98,17 +105,17 @@ class AggregationMixin:
             auth_mode = "api_key"
         else:
             user = _request_user(request)
-            if str(user.get("role") or "") != "admin":
+            if not is_tenant_admin(user):
                 raise HTTPException(
                     status_code=400,
                     detail="exactly one of root_key or admin_key is required",
                 )
             if endpoint != self._aggregation_service().resolve_endpoint():
                 raise HTTPException(status_code=400, detail="A different endpoint requires an explicit credential")
+            if account_id != str(getattr(config, "sharing_viking_account", "") or "default"):
+                raise HTTPException(status_code=403, detail="TENANT_ACCOUNT_MISMATCH")
             api_key = str(
-                getattr(self.config, "sharing_viking_team_api_key", "")
-                or getattr(self.config, "sharing_viking_api_key", "")
-                or ""
+                getattr(config, "sharing_viking_api_key", "") or ""
             ).strip()
             if not api_key:
                 raise HTTPException(
@@ -127,11 +134,7 @@ class AggregationMixin:
     @staticmethod
     def _require_admin(request: Request) -> None:
         user = _request_user(request)
-        if str(user.get("role") or "user") != "admin":
-            raise HTTPException(
-                status_code=403,
-                detail="team memory aggregation requires an administrator",
-            )
+        require_tenant_admin(user)
 
     @staticmethod
     def _aggregation_settings_payload(agg: dict) -> dict:
@@ -154,7 +157,6 @@ class AggregationMixin:
             "maintenance_skill_uri": str(
                 agg.get("maintenance_skill_uri") or "viking://agent/skills/team-memory-maintenance"
             ),
-            "key_seed": str(agg.get("key_seed") or "teamevolver-aggregation"),
             "kinds": agg.get("kinds") or [],
             "account_user_limit": max(
                 1, int(agg.get("account_user_limit", 50_000) or 50_000)
@@ -372,8 +374,13 @@ class AggregationMixin:
                 if config_file
                 else ConfigStore()
             )
-            data = store.load()
-            agg = data.get("aggregation", {}) if isinstance(data.get("aggregation"), dict) else {}
+            data = settings_data(store.load())
+            memory = data.get("memory", {}) if isinstance(data.get("memory"), dict) else {}
+            agg = (
+                memory.get("aggregation")
+                if isinstance(memory.get("aggregation"), dict)
+                else {}
+            )
             return JSONResponse(self._aggregation_settings_payload(agg))
 
         @app.post("/api/aggregation/settings")
@@ -397,8 +404,8 @@ class AggregationMixin:
                 if config_file
                 else ConfigStore()
             )
-            data = store.load()
-            agg = data.setdefault("aggregation", {})
+            data = settings_data(store.load())
+            agg = data.setdefault("memory", {}).setdefault("aggregation", {})
 
             if "shared_knowledge_prefix" in body:
                 prefix = str(body.get("shared_knowledge_prefix") or "").strip().strip("/")
@@ -468,6 +475,8 @@ class AggregationMixin:
                     )
                 agg[key] = value
 
+            if await save_settings(self, store, data):
+                return JSONResponse({**self._aggregation_settings_payload(agg), "ok": True})
             store.save(data)
             new_config = store.to_config()
             self.config = new_config

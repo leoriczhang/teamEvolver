@@ -139,7 +139,7 @@ def available(config) -> list[dict]:
 
 def binding(config, tenant) -> str:
     # A non-default tenant must NEVER inherit the default tenant's binding.
-    if tenant is not None and not tenant.is_default():
+    if tenant is not None and (not tenant.is_default() or "datasource_adapter" in tenant.config_overrides):
         return str((tenant.config_overrides or {}).get("datasource_adapter") or "")
     return str(getattr(config, "datasource_adapter", "") or "")
 
@@ -188,7 +188,14 @@ def _build_adapter(content: str, filename: str):
     if not callable(factory):
         raise AdapterError(f"{filename}: build_adapter() is required")
     adapter = factory()
-    for method in ("list_session_ids", "fetch_session", "convert_session", "health", "close"):
+    for method in (
+        "list_session_ids",
+        "iter_session_id_batches",
+        "fetch_session",
+        "convert_session",
+        "health",
+        "close",
+    ):
         if not callable(getattr(adapter, method, None)):
             close = getattr(adapter, "close", None)
             if callable(close):

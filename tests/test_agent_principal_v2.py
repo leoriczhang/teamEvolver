@@ -20,11 +20,10 @@ BASE = "/internal/agents/context"
 
 def config_for(tmp_path, **kwargs):
     return TeamEvolverConfig(
-        users_registry_path=str(tmp_path / "users.json"),
-        skills_dir=str(tmp_path / "skills"),
-        sharing_enabled=False, sharing_skill_mirror_enabled=False,
-        sharing_viking_account="account-a", tenant_machine_token=TOKEN,
-        agent_protocol_identity_mode="tenant_user", **kwargs,
+        _config_file=str(tmp_path / "config.yaml"),
+        skills_runtime_cache_dir=str(tmp_path / "skills"),
+        sharing_skill_mirror_enabled=False,
+        sharing_viking_account="account-a", tenant_machine_token=TOKEN, **kwargs,
     )
 
 
@@ -49,7 +48,6 @@ def client_for(tmp_path, monkeypatch):
         raise AssertionError("Agent v2 consulted a registry")
 
     monkeypatch.setattr("teamEvolver.proxy.users_admin._load_registry", forbidden)
-    monkeypatch.setattr("teamEvolver.integrations.agent_registry.resolve_active_agent", forbidden)
     return TestClient(server.app), config, calls
 
 
@@ -148,6 +146,14 @@ def test_v2_ingest_no_registration_and_canonical_meta(tmp_path, monkeypatch):
     assert client.post("/ingest_session", json=body, headers=HEADERS).status_code == 400
 
 
+def test_agent_registration_routes_are_not_mounted(tmp_path, monkeypatch):
+    client, _, _ = client_for(tmp_path, monkeypatch)
+    paths = {getattr(route, "path", "") for route in client.app.routes}
+    assert "/internal/agents/register" not in paths
+    assert "/internal/agentshub/openviking-config" not in paths
+    assert "/api/agent-integrations" not in paths
+
+
 def test_tenant_state_and_snapshot_usage_isolation(tmp_path):
     config = config_for(tmp_path)
     a = AgentPrincipal("tenant-a", "account-a", "alice")
@@ -181,21 +187,13 @@ def test_pg_failure_never_falls_back(tmp_path, monkeypatch):
 def test_config_roundtrip_env_and_deployment_switches(tmp_path, monkeypatch):
     store = ConfigStore(tmp_path / "config.yaml")
     store.save({
-        "agent_protocol": {"identity_mode": "tenant_user"}, "skills": {"delivery_mode": "pull"},
         "replay": {"adapter": "customer.py", "adapters_dir": str(tmp_path)},
         "validation": {"runtimes": ["custom"]},
     })
     config = store.to_config()
-    assert config.agent_protocol_identity_mode == "tenant_user"
-    assert config.skills_delivery_mode == "pull"
     assert config.validation_runtimes == ["custom"]
     overrides = effective_config(None, TenantContext("tenant-a", config_overrides={
-        "agent_protocol_identity_mode": "dual", "skills_delivery_mode": "push",
         "replay_adapters_dir": "/evil", "replay_adapter": "other.py",
     }), config)
-    assert overrides.agent_protocol_identity_mode == "tenant_user"
-    assert overrides.skills_delivery_mode == "pull"
     assert overrides.replay_adapters_dir == str(tmp_path)
     assert overrides.replay_adapter == "other.py"
-    monkeypatch.setenv("TEAMEVOLVER_AGENT_IDENTITY_MODE", "dual")
-    assert store.to_config().agent_protocol_identity_mode == "dual"

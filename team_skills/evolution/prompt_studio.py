@@ -348,9 +348,6 @@ _STAGE_CATALOG: dict[str, dict[str, Any]] = {
     },
 }
 
-STAGE_IDS = tuple(_STAGE_CATALOG.keys())
-
-
 def _default_prompt(stage_id: str) -> str:
     entry = _STAGE_CATALOG.get(stage_id)
     if not entry:
@@ -489,7 +486,6 @@ def set_stage_settings(stage_id: str, settings: dict[str, Any], config: Any = No
         raise ValueError("temperature must be between 0 and 2")
     if max_tokens < 1:
         raise ValueError("max_tokens must be at least 1")
-    provider = str(settings.get("provider") or "").strip()
     base_url = str(settings.get("base_url") or "").strip().rstrip("/")
     if base_url and not base_url.startswith(("http://", "https://")):
         raise ValueError("base_url must start with http:// or https://")
@@ -504,7 +500,6 @@ def set_stage_settings(stage_id: str, settings: dict[str, Any], config: Any = No
     else:
         api_key = str(existing.get("api_key") or "").strip()
     normalized = {
-        "provider": provider,
         "base_url": base_url,
         "model": model,
         "api_key": api_key,
@@ -512,7 +507,6 @@ def set_stage_settings(stage_id: str, settings: dict[str, Any], config: Any = No
         "max_tokens": max_tokens,
     }
     defaults = {
-        "provider": "",
         "base_url": "",
         "model": "",
         "api_key": "",
@@ -560,9 +554,6 @@ def stage_call_options(stage_id: str, config: Any = None) -> dict[str, Any]:
     api_key = str(override.get("api_key") or "").strip()
     if api_key:
         options["api_key"] = api_key
-    provider = str(override.get("provider") or "").strip()
-    if provider:
-        options["provider"] = provider
     return options
 
 
@@ -659,7 +650,6 @@ def list_prompts(config: Any = None) -> list[dict[str, Any]]:
                 "temperature": runtime["temperature"],
                 "max_tokens": runtime["max_tokens"],
                 "model": runtime.get("model", ""),
-                "provider": runtime.get("provider", ""),
                 "base_url": runtime.get("base_url", ""),
                 "api_key_present": bool(runtime.get("api_key")),
                 "settings_overridden": stage_id in stage_settings,
@@ -691,7 +681,6 @@ def get_prompt(stage_id: str, config: Any = None) -> dict[str, Any]:
         "temperature": runtime["temperature"],
         "max_tokens": runtime["max_tokens"],
         "model": runtime.get("model", ""),
-        "provider": runtime.get("provider", ""),
         "base_url": runtime.get("base_url", ""),
         "api_key_present": bool(runtime.get("api_key")),
         "default_temperature": float(entry["temperature"]),

@@ -32,7 +32,6 @@ teamEvolver config <key> <value>
 ```bash
 teamEvolver config llm.api_key sk-xxxxxxxx
 teamEvolver config service.port 52010
-teamEvolver config sharing.enabled true
 teamEvolver config langfuse.tracing_enabled true
 ```
 
@@ -428,7 +427,6 @@ skills:
   dir: "~/.hermes/skills"
 
 sharing:
-  enabled: true
   backend: "viking"
   viking_deployment: "local"
   # 自建服务在其他机器时填写其可达地址；留空则使用 http://localhost:1933
@@ -496,6 +494,9 @@ langfuse:
   tracing_sample_rate: 0.1
 ```
 
+`sharing.enabled` 已废弃并不再控制运行行为；兼容期内仍可读取旧配置，
+新配置无需设置该字段。Skill 拉取、镜像、经验同步和验证分别使用各自配置。
+
 ## 配置热重载
 
 大部分配置项在修改后需要重启服务才能生效。以下配置项支持通过 Web 控制台动态修改而无需重启：
@@ -511,3 +512,25 @@ langfuse:
 - Prompt 覆盖（通过 Prompt Studio）
 
 通过 CLI `teamEvolver config <key> <value>` 修改的其他配置，建议重启服务后使用。
+
+## 控制台自主注册
+
+服务级配置（不允许租户覆盖）：
+
+```yaml
+service:
+  self_registration_enabled: false
+```
+
+代码默认及本地、SIT 模板为 `true`；PRD 模板为 `false`。可用环境变量
+`TEAMEVOLVER_SELF_REGISTRATION_ENABLED=false` 覆盖 YAML，支持 `true/false` 或 `1/0`。
+配置或环境变量修改后需重启 TE，已有实例不会因仓库模板更新而自动改变。
+
+关闭后，登录页隐藏“新用户注册”，匿名调用 `POST /api/auth/register` 返回
+`403 SELF_REGISTRATION_DISABLED`。登录、首次管理员初始化和管理员用户管理流程保持原有规则。
+
+后端程序使用 `Authorization: Bearer <TEAMEVOLVER_ROOT_API_KEY>` 调用同一注册接口，
+经服务端验证后，无论开关是否开启都可创建普通用户。该 Key 是 **TE 服务 Root Key**，
+不是 OV Key 或租户 Agent Key；不应提供给浏览器。空 Key、错误 Key、管理员登录 Cookie
+或自行声明的管理员请求头均不能绕过开关。原有必填字段、重名检查及首次初始化要求仍有效。
+接口细节见 [API 概览](../api/01-overview.md#控制台账号注册)。

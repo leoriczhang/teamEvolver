@@ -15,8 +15,8 @@ from team_miner.lifecycle import (
     resolve_mined_skill_dir,
     submit_mined_skill,
 )
-from teamEvolver.storage import InMemoryObjectStore
 from team_skills.candidates.store import ValidationStore
+from teamEvolver.storage import InMemoryObjectStore
 
 
 def _store(root: Path) -> ValidationStore:
@@ -47,10 +47,8 @@ def _write_mined_skill(root: Path, name: str = "demo-skill") -> Path:
             "must_avoid": ["invent evidence"],
         },
     }
-    (skill_dir / "benchmark.jsonl").write_text(
-        json.dumps(question, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    document, _ = progressive_benchmark.build_document_with_quality(name, [question])
+    progressive_benchmark.write_document(skill_dir / "benchmark.json", document)
     (skill_dir / "BENCHMARK.md").write_text("# Benchmark\n", encoding="utf-8")
     return skill_dir
 
@@ -81,9 +79,11 @@ def test_submit_mined_skill_creates_internal_candidate_and_is_idempotent(tmp_pat
     assert job["source"]["kind"] == "skillminer"
     assert job["source"]["dataset_format"] == INTERNAL_BENCHMARK_FORMAT
     assert job["source"]["question_count"] == 1
-    assert job["replay_cases"][0]["gold"]["must_hit"] == ["cite the verified rule"]
-    assert "benchmark.jsonl" in job["candidate_skill"]["bundle_files"]
-    assert "EVALUATION.md" in job["candidate_skill"]["bundle_files"]
+    document = json.loads((miner_root / "compiled_skill/demo-skill/benchmark.json").read_text())
+    assert job["replay_cases"] == document["cases"]
+    assert job["replay_cases"][0]["metadata"]["gold"]["must_hit"] == ["cite the verified rule"]
+    assert "benchmark.json" in {item["path"] for item in job["candidate_skill"]["bundle"]["files"]}
+    assert "EVALUATION.md" in {item["path"] for item in job["candidate_skill"]["bundle"]["files"]}
 
 
 def test_mined_skill_status_tracks_candidate_and_publish_decision(tmp_path: Path) -> None:
@@ -110,7 +110,7 @@ def test_mined_skill_status_tracks_candidate_and_publish_decision(tmp_path: Path
 def test_submit_requires_complete_artifacts_and_rejects_path_escape(tmp_path: Path) -> None:
     miner_root = tmp_path / "skillminer"
     skill_dir = _write_mined_skill(miner_root)
-    (skill_dir / "benchmark.jsonl").unlink()
+    (skill_dir / "benchmark.json").unlink()
 
     with pytest.raises(MiningLifecycleError, match="benchmark.json"):
         submit_mined_skill(_store(tmp_path), "demo-skill", skillminer_root=miner_root)
@@ -121,7 +121,7 @@ def test_submit_requires_complete_artifacts_and_rejects_path_escape(tmp_path: Pa
 def test_submit_mined_skill_accepts_progressive_benchmark_json(tmp_path: Path) -> None:
     miner_root = tmp_path / "skillminer"
     skill_dir = _write_mined_skill(miner_root)
-    (skill_dir / "benchmark.jsonl").unlink()
+    (skill_dir / "benchmark.json").unlink()
     benchmark = progressive_benchmark.build_document(
         "demo-skill",
         [{
@@ -137,7 +137,7 @@ def test_submit_mined_skill_accepts_progressive_benchmark_json(tmp_path: Path) -
 
     assert submitted["created"] is True
     assert submitted["job"]["source"]["question_count"] == 1
-    assert submitted["job"]["replay_cases"][0]["gold"]["must_hit"] == [
+    assert submitted["job"]["replay_cases"][0]["metadata"]["gold"]["must_hit"] == [
         f"criterion {index}" for index in range(1, 13)
     ]
 
@@ -183,7 +183,7 @@ def test_completed_job_workspace_submits_current_benchmark_json(tmp_path: Path) 
     job_dir = miner_root / "mining_jobs" / job_id
     workspace = job_dir / "workspace"
     skill_dir = _write_mined_skill(workspace)
-    (skill_dir / "benchmark.jsonl").unlink()
+    (skill_dir / "benchmark.json").unlink()
     progressive_benchmark.write_document(
         skill_dir / "benchmark.json",
         progressive_benchmark.build_document(
@@ -260,3 +260,65 @@ def test_legacy_job_skill_root_is_resolved_from_its_archived_artifact(tmp_path: 
             artifact_path=artifact_path,
             skillminer_root=miner_root,
         )
+
+
+def test_console_mined_submission_uses_tenant_hub_and_complete_bundles(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from team_skills.library.bundle import candidate_skill_bundle
+    from team_skills.library.hub import SkillHub
+    from teamEvolver.config import TeamEvolverConfig
+    from teamEvolver.proxy import ProxyServer, routes
+
+    miner_root = tmp_path / "miner"
+    skill_dir = _write_mined_skill(miner_root)
+    published_bundle = {"SKILL.md": (skill_dir / "SKILL.md").read_bytes(), "references/rule.md": b"published rule"}
+    store = _store(tmp_path)
+    captured = []
+
+    class Hub:
+        def list_skills(self):
+            return [{"name": "demo-skill"}]
+
+        def read_skill_bundle(self, name):
+            assert name == "demo-skill"
+            return published_bundle
+
+    def hub_for_config(config, *, tenant_id):
+        captured.append(tenant_id)
+        return Hub()
+
+    monkeypatch.setattr(SkillHub, "team_from_config", hub_for_config)
+    monkeypatch.setattr(routes.ValidationStore, "from_config", lambda *args, **kwargs: store)
+    original_submit = routes.submit_mined_skill
+    monkeypatch.setattr(routes, "submit_mined_skill", lambda *args, **kwargs: original_submit(
+        *args, **kwargs, skillminer_root=miner_root
+    ))
+    server = ProxyServer(TeamEvolverConfig(
+        _config_file=str(tmp_path / "config.yaml"),
+        skills_runtime_cache_dir=str(tmp_path / "cache"),
+        sharing_skill_mirror_enabled=False,
+    ))
+    client = TestClient(server.app)
+    assert client.get("/api/mined-skills").status_code == 401
+    assert client.post("/api/auth/bootstrap", json={"username": "admin", "password": "test-password"}).status_code == 200
+    from teamEvolver.admin.identity_store import IdentityStore
+
+    IdentityStore(server.config).set_member("default", "admin", "tenant_admin", "active", "admin")
+    response = client.post("/api/mined-skills/demo-skill/submit", headers={"X-Tenant-Id": "default"})
+    assert response.status_code == 200, response.text
+    job = store.load_job(response.json()["job_id"])
+    assert candidate_skill_bundle(job["current_skill"]) == published_bundle
+    assert candidate_skill_bundle(job["candidate_skill"])["benchmark.json"] == (skill_dir / "benchmark.json").read_bytes()
+    assert job["replay_cases"][0]["checks"]
+    assert captured and set(captured) == {"default"}
+
+
+def test_jsonl_artifact_cannot_enter_candidate_review(tmp_path):
+    from team_miner.lifecycle import load_internal_benchmark
+
+    skill_dir = _write_mined_skill(tmp_path / "miner")
+    (skill_dir / "benchmark.json").unlink()
+    (skill_dir / "benchmark.jsonl").write_text('{"input": "Old task"}\n')
+    with pytest.raises(MiningLifecycleError, match="缺少 benchmark.json"):
+        load_internal_benchmark(skill_dir)

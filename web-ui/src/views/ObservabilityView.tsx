@@ -28,7 +28,7 @@ export default function ObservabilityView({ active, user }: { active: boolean; u
       toastOk(test ? "观测连接正常" : "全局观测配置已保存");
     } catch (e: any) { toastErr("观测配置操作失败", e.message); } finally { setBusy(""); }
   }
-  const disabled = user?.role !== "admin" || !!busy;
+  const disabled = user?.platform_role !== "platform_admin" || !!busy;
   return <div className="mx-auto max-w-[1000px] space-y-5 p-5">
     <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-base font-semibold">全局链路观测 Langfuse</h2>
       <Pill tone={form.status?.initialized ? "green" : "gray"}>{form.status?.initialized ? "已初始化" : "未初始化"}</Pill></div>

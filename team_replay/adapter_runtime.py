@@ -102,7 +102,7 @@ def available(config: Any) -> list[dict[str, Any]]:
 
 
 def binding(config: Any, tenant: Any) -> str:
-    if tenant is not None and tenant.tenant_id != "default":
+    if tenant is not None and (tenant.tenant_id != "default" or "replay_adapter" in tenant.config_overrides):
         return str((tenant.config_overrides or {}).get("replay_adapter") or "")
     return str(getattr(config, "replay_adapter", "") or "")
 

@@ -45,8 +45,8 @@ type DatasetDraft = {
   skill_ids: string[];
   name: string;
   query: string;
-  requirements: string;
-  trajectory_requirements: string;
+  outputChecks: string;
+  trajectoryChecks: string;
   disclosure_batch_size: number;
   enabled_for_evolution: boolean;
 };
@@ -55,8 +55,8 @@ const EMPTY_DATASET: DatasetDraft = {
   skill_ids: [],
   name: "",
   query: "",
-  requirements: "",
-  trajectory_requirements: "",
+  outputChecks: "",
+  trajectoryChecks: "",
   disclosure_batch_size: 4,
   enabled_for_evolution: false,
 };
@@ -66,6 +66,17 @@ const METRICS = [
   { key: "tool_call_count", label: "Tool 调用" },
   { key: "total_tokens", label: "Tokens" },
 ] as const;
+
+const primaryCase = (dataset?: SkillLabDataset | null) => dataset?.cases?.[0];
+const checkText = (dataset: SkillLabDataset, kind: "output" | "trajectory") =>
+  (primaryCase(dataset)?.checks || [])
+    .filter((check) => check.kind === kind)
+    .map((check) => check.text)
+    .join("\n");
+const datasetMaterials = (dataset: SkillLabDataset) => primaryCase(dataset)?.materials || [];
+const datasetSkillIds = (dataset: SkillLabDataset) => dataset.skills.map((skill) => skill.skill_id);
+const datasetReadOnly = (dataset: SkillLabDataset) => !!dataset.metadata?.read_only;
+const datasetForEvolution = (dataset: SkillLabDataset) => !!dataset.metadata?.enabled_for_evolution;
 
 export default function SkillLabView({
   active,
@@ -262,19 +273,20 @@ export default function SkillLabView({
   }
 
   function editDataset(dataset: SkillLabDataset) {
+    const datasetCase = primaryCase(dataset);
     setDatasetDraft({
       dataset_id: dataset.dataset_id,
-      skill_ids: dataset.skill_ids?.length ? dataset.skill_ids : (skillName ? [skillName] : []),
+      skill_ids: datasetSkillIds(dataset).length ? datasetSkillIds(dataset) : (skillName ? [skillName] : []),
       name: dataset.name || "",
-      query: dataset.query || "",
-      requirements: dataset.requirements || "",
-      trajectory_requirements: dataset.trajectory_requirements || "",
-      disclosure_batch_size: dataset.progressive_disclosure?.batch_size || 4,
-      enabled_for_evolution: !!dataset.enabled_for_evolution,
+      query: datasetCase?.query || "",
+      outputChecks: checkText(dataset, "output"),
+      trajectoryChecks: checkText(dataset, "trajectory"),
+      disclosure_batch_size: datasetCase?.replay?.progressive_disclosure?.batch_size || 4,
+      enabled_for_evolution: datasetForEvolution(dataset),
     });
     setDatasetFiles([]);
-    setExistingMaterials(dataset.materials || []);
-    setMaterialRoot(commonMaterialRoot(dataset.materials || []));
+    setExistingMaterials(datasetMaterials(dataset));
+    setMaterialRoot(commonMaterialRoot(datasetMaterials(dataset)));
     setFilesTouched(false);
     setShowDatasetForm(true);
   }
@@ -305,17 +317,45 @@ export default function SkillLabView({
     }
     setSavingDataset(true);
     try {
+      const output = checklistLines(datasetDraft.outputChecks);
+      const trajectory = checklistLines(datasetDraft.trajectoryChecks);
       const payload: Record<string, any> = {
-        ...datasetDraft,
-        skill_name: skillName,
-        progressive_disclosure: {
-          enabled: true,
-          initial_visibility: "query_only",
-          batch_size: datasetDraft.disclosure_batch_size,
-          stop_when: "all_checklist_items_satisfied",
+        schema_version: "team-replay.dataset",
+        dataset_id: datasetDraft.dataset_id,
+        name: datasetDraft.name,
+        description: "",
+        skills: datasetDraft.skill_ids.map((skill_id) => ({ skill_id })),
+        source: editingDataset?.source || { kind: "manual" },
+        cases: [{
+          case_id: primaryCase(editingDataset)?.case_id || `case-${crypto.randomUUID()}`,
+          query: datasetDraft.query,
+          skill_ids: datasetDraft.skill_ids,
+          checks: [
+            ...output.map((text, index) => ({ id: `R${String(index + 1).padStart(2, "0")}`, kind: "output", text })),
+            ...trajectory.map((text, index) => ({ id: `T${String(index + 1).padStart(2, "0")}`, kind: "trajectory", text })),
+          ],
+          materials: existingMaterials,
+          provenance: primaryCase(editingDataset)?.provenance || {},
+          replay: {
+            progressive_disclosure: {
+              enabled: true,
+              initial_visibility: "query_only",
+              batch_size: datasetDraft.disclosure_batch_size,
+              stop_when: "all_checklist_items_satisfied",
+            },
+          },
+          metadata: primaryCase(editingDataset)?.metadata || {},
+        }],
+        created_at: editingDataset?.created_at,
+        updated_at: new Date().toISOString(),
+        metadata: {
+          ...(editingDataset?.metadata || {}),
+          read_only: false,
+          enabled_for_evolution: datasetDraft.enabled_for_evolution,
         },
       };
-      delete payload.disclosure_batch_size;
+      if (!payload.dataset_id) delete payload.dataset_id;
+      if (!payload.created_at) delete payload.created_at;
       if (filesTouched) payload.files = datasetFiles;
       const saved = await api<SkillLabDataset>("/api/replay-lab/datasets", {
         method: "POST",
@@ -365,9 +405,23 @@ export default function SkillLabView({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          skill_name: skillName,
-          skill_ids: skillName ? [skillName] : [],
+          schema_version: "team-replay.dataset",
+          dataset_id: `import-${crypto.randomUUID()}`,
           name: definition.name.replace(/\.md$/i, ""),
+          description: "",
+          skills: skillName ? [{ skill_id: skillName }] : [],
+          source: { kind: "manual_import" },
+          cases: [{
+            case_id: `case-${crypto.randomUUID()}`,
+            query: "Imported Dataset",
+            skill_ids: skillName ? [skillName] : [],
+            checks: [{ id: "R01", kind: "output", text: "Imported check" }],
+            materials: [],
+            provenance: {},
+            replay: { progressive_disclosure: { batch_size: 4 } },
+            metadata: {},
+          }],
+          metadata: { read_only: false, enabled_for_evolution: false },
           dataset_markdown: datasetMarkdown,
           files: materials,
         }),
@@ -509,7 +563,7 @@ export default function SkillLabView({
 
   const manualCount = datasets.filter((item) => item.source?.kind !== "evolution").length;
   const evolvedCount = datasets.filter((item) => item.source?.kind === "evolution").length;
-  const regressionCount = datasets.filter((item) => item.enabled_for_evolution).length;
+  const regressionCount = datasets.filter(datasetForEvolution).length;
   const completedCount = runs.filter((run) => run.status === "completed").length;
   const selectedDataset = datasets.find(
     (item) => item.dataset_id === selectedDatasetId
@@ -562,7 +616,7 @@ export default function SkillLabView({
               {!datasets.length && <option value="">请先创建数据集</option>}
               {datasets.map((item) => (
                 <option key={item.dataset_id} value={item.dataset_id}>
-                  {item.enabled_for_evolution
+                  {datasetForEvolution(item)
                     ? "[回归] "
                     : item.source?.kind === "evolution"
                     ? "[进化] "
@@ -621,7 +675,7 @@ export default function SkillLabView({
           <p>当前 Skill 的未保存文件一起参与 Candidate 运行。</p>
           <Button variant="outline" size="sm" disabled={!skillName} onClick={createDataset}><Plus className="size-3.5" />新建数据集</Button>
           {selectedDataset && <Button variant="ghost" size="sm" onClick={() => editDataset(selectedDataset)}>编辑数据集</Button>}
-          {selectedDataset && <p className="lab-query-preview">{selectedDataset.query}</p>}
+          {selectedDataset && <p className="lab-query-preview">{primaryCase(selectedDataset)?.query}</p>}
         </div>
       )}
       {!compact && <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.05fr)_minmax(420px,0.95fr)]">
@@ -762,7 +816,7 @@ export default function SkillLabView({
                               <Pill tone={evolved ? "purple" : synthesized ? "green" : "blue"}>
                                 {evolved ? "进化同步生成" : synthesized ? "Session / SOP 合成" : "手工"}
                               </Pill>
-                              {dataset.enabled_for_evolution && (
+                              {datasetForEvolution(dataset) && (
                                 <Pill tone="amber">固定回归</Pill>
                               )}
                               {materialIntegrity?.status === "missing" ? (
@@ -774,25 +828,25 @@ export default function SkillLabView({
                               ) : materialIntegrity?.status === "complete" ? (
                                 <Pill tone="green">材料齐全</Pill>
                               ) : null}
-                              {!!dataset.materials?.length && (
-                                <Pill tone="gray">{dataset.materials.length} 个材料</Pill>
+                              {!!datasetMaterials(dataset).length && (
+                                <Pill tone="gray">{datasetMaterials(dataset).length} 个材料</Pill>
                               )}
-                              {!!dataset.skill_ids?.length && (
-                                <Pill tone="gray">{dataset.skill_ids.length} 个 Skills</Pill>
+                              {!!datasetSkillIds(dataset).length && (
+                                <Pill tone="gray">{datasetSkillIds(dataset).length} 个 Skills</Pill>
                               )}
-                              {(dataset.task_count || 1) > 1 && (
-                                <Pill tone="gray">{dataset.task_count} 个任务</Pill>
+                              {dataset.cases.length > 1 && (
+                                <Pill tone="gray">{dataset.cases.length} 个任务</Pill>
                               )}
                               <Pill tone="gray">
-                                {checklistLines(dataset.requirements).length} 条 Checklist
+                                {primaryCase(dataset)?.checks.length || 0} 条 Checklist
                               </Pill>
                             </div>
                             <div className="mt-1 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
-                              {dataset.query}
+                              {primaryCase(dataset)?.query}
                             </div>
                             <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-muted-soft">
-                              {dataset.source?.session_id && (
-                                <span className="mono">session: {dataset.source.session_id}</span>
+                              {primaryCase(dataset)?.provenance.session_id && (
+                                <span className="mono">session: {primaryCase(dataset)?.provenance.session_id}</span>
                               )}
                               {dataset.source?.job_id && (
                                 <span className="mono">job: {dataset.source.job_id}</span>
@@ -909,21 +963,21 @@ export default function SkillLabView({
             <ChecklistEditor
               label="要求 Checklist"
               hint="首轮隐藏；每条独立编辑，作为逐轮完成条件，不计算综合分数。"
-              value={datasetDraft.requirements}
+              value={datasetDraft.outputChecks}
               placeholder="例如：最终产物保存到指定目录"
-              onChange={(requirements) => setDatasetDraft({
+              onChange={(outputChecks) => setDatasetDraft({
                 ...datasetDraft,
-                requirements,
+                outputChecks,
               })}
             />
             <ChecklistEditor
               label="轨迹要求"
               hint="每条描述一个材料读取、工具调用、计算、校验或产物写入动作。"
-              value={datasetDraft.trajectory_requirements}
+              value={datasetDraft.trajectoryChecks}
               placeholder="例如：读取 q1_materials 下的全部材料"
-              onChange={(trajectory_requirements) => setDatasetDraft({
+              onChange={(trajectoryChecks) => setDatasetDraft({
                 ...datasetDraft,
-                trajectory_requirements,
+                trajectoryChecks,
               })}
             />
             <Field label="每轮披露条数" hint="每轮只披露下一批尚未满足的 Checklist。">
@@ -1069,12 +1123,13 @@ export default function SkillLabView({
 }
 
 function DatasetDetail({ dataset }: { dataset: SkillLabDataset }) {
-  const requirements = checklistLines(dataset.requirements);
-  const trajectory = checklistLines(dataset.trajectory_requirements);
+  const datasetCase = primaryCase(dataset);
+  const requirements = (datasetCase?.checks || []).filter((check) => check.kind === "output").map((check) => check.text);
+  const trajectory = (datasetCase?.checks || []).filter((check) => check.kind === "trajectory").map((check) => check.text);
   const materialIntegrity = dataset.material_integrity;
   const sourceSessionIds = Array.from(new Set([
-    ...(dataset.source?.source_session_ids || []),
-    ...(dataset.source?.session_id ? [dataset.source.session_id] : []),
+    ...(datasetCase?.provenance.session_ids || []),
+    ...(datasetCase?.provenance.session_id ? [datasetCase.provenance.session_id] : []),
   ]));
   return (
     <div
@@ -1087,13 +1142,13 @@ function DatasetDetail({ dataset }: { dataset: SkillLabDataset }) {
           <Pill tone="blue">初始 Query</Pill>
           <Pill tone="amber">{requirements.length} 条 Checklist</Pill>
           <Pill tone="purple">{trajectory.length} 条轨迹要求</Pill>
-          {!!dataset.skill_ids?.length && (
-            <Pill tone="gray">Skills: {dataset.skill_ids.join("、")}</Pill>
+          {!!datasetSkillIds(dataset).length && (
+            <Pill tone="gray">Skills: {datasetSkillIds(dataset).join("、")}</Pill>
           )}
-          {(dataset.task_count || 1) > 1 && (
-            <Pill tone="gray">{dataset.task_count} 个任务</Pill>
+          {dataset.cases.length > 1 && (
+            <Pill tone="gray">{dataset.cases.length} 个任务</Pill>
           )}
-          {dataset.enabled_for_evolution && <Pill tone="amber">固定回归集</Pill>}
+          {datasetForEvolution(dataset) && <Pill tone="amber">固定回归集</Pill>}
           {materialIntegrity?.status === "missing" ? (
             <Pill tone="red">材料不完整</Pill>
           ) : materialIntegrity?.mode === "inline" ? (
@@ -1102,14 +1157,14 @@ function DatasetDetail({ dataset }: { dataset: SkillLabDataset }) {
             <Pill tone="green">材料齐全</Pill>
           ) : null}
           <Pill tone="gray">
-            每轮披露 {dataset.progressive_disclosure?.batch_size || 4} 条
+            每轮披露 {datasetCase?.replay.progressive_disclosure?.batch_size || 4} 条
           </Pill>
         </div>
       </div>
 
       <DatasetSection title="初始 Query">
         <pre className="mono whitespace-pre-wrap break-words text-[12px] leading-relaxed">
-          {dataset.query || "（空）"}
+          {datasetCase?.query || "（空）"}
         </pre>
       </DatasetSection>
 
@@ -1124,7 +1179,7 @@ function DatasetDetail({ dataset }: { dataset: SkillLabDataset }) {
         <PagedTextWindow items={trajectory} empty="无额外轨迹要求。" />
       </DatasetSection>
 
-      <DatasetSection title={`相关材料（${dataset.materials?.length || 0}）`}>
+      <DatasetSection title={`相关材料（${datasetMaterials(dataset).length}）`}>
         {materialIntegrity?.status === "missing" ? (
           <div className="space-y-2">
             <div className="text-xs font-semibold text-destructive">
@@ -1136,9 +1191,9 @@ function DatasetDetail({ dataset }: { dataset: SkillLabDataset }) {
               </div>
             ))}
           </div>
-        ) : dataset.materials?.length ? (
+        ) : datasetMaterials(dataset).length ? (
           <div className="space-y-1.5">
-            {dataset.materials.map((material) => (
+            {datasetMaterials(dataset).map((material) => (
               <div key={material.path} className="flex items-center justify-between gap-3 rounded border border-border px-2.5 py-2 text-xs">
                 <span className="mono break-all">{material.path}</span>
                 <span className="shrink-0 text-muted-foreground">{formatBytes(material.size || 0)}</span>
@@ -1147,7 +1202,7 @@ function DatasetDetail({ dataset }: { dataset: SkillLabDataset }) {
           </div>
         ) : materialIntegrity?.mode === "inline" ? (
           <pre className="mono max-h-[280px] overflow-auto whitespace-pre-wrap break-words rounded-md border border-success/30 bg-success/5 p-3 text-[11px] leading-relaxed">
-            {inlineMaterialText(dataset.query) || "材料已直接写入初始 Query。"}
+            {inlineMaterialText(datasetCase?.query || "") || "材料已直接写入初始 Query。"}
           </pre>
         ) : sourceSessionIds.length ? (
           <span className="text-xs text-muted-foreground">

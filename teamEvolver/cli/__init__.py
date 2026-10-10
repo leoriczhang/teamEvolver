@@ -19,7 +19,7 @@ except ImportError:
 
 from .config_cmd import config_cmd
 from .daemon import start, status, stop
-from .diag import doctor, restore, validation
+from .diag import validation
 from .datasource_cmd import datasource
 from .skills_cmd import skills
 from .storage_cmd import storage
@@ -34,8 +34,6 @@ main.add_command(config_cmd)
 main.add_command(start)
 main.add_command(stop)
 main.add_command(status)
-main.add_command(doctor)
-main.add_command(restore)
 main.add_command(validation)
 main.add_command(skills)
 main.add_command(datasource)

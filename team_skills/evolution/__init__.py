@@ -3,7 +3,7 @@
 from typing import Any
 
 from team_skills.evolution.kernel.enums import FAILURE_LABELS, NO_SKILL_KEY, DecisionAction, FailureType
-from team_skills.evolution.kernel.registry import SkillIDRegistry
+from team_skills.library.registry import SkillIDRegistry
 from team_skills.evolution.kernel.settings import EvolveServerConfig
 
 __all__ = [

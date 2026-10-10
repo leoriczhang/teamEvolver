@@ -26,7 +26,6 @@ class _TenantRegistry:
             display_name="Tenant A",
             status="active",
             config_overrides={
-                "llm_provider": "custom",
                 "llm_api_base": "https://tenant.example/v1",
                 "llm_api_key": "tenant-secret",
                 "llm_model_id": "tenant-model",
@@ -40,6 +39,9 @@ class _TenantRegistry:
 
     def get(self, tenant_id):
         return self.ctx if tenant_id == self.ctx.tenant_id else None
+
+    def list_tenants(self):
+        return [self.ctx]
 
     def update_tenant_config(self, tenant_id, overrides):
         if tenant_id != self.ctx.tenant_id:
@@ -62,9 +64,7 @@ class _TenantRegistry:
 def _server(tmp_path):
     config = TeamEvolverConfig(
         _config_file=str(tmp_path / "config.yaml"),
-        users_registry_path=str(tmp_path / "users.json"),
-        skills_dir=str(tmp_path / "skills"),
-        sharing_enabled=False,
+        skills_runtime_cache_dir=str(tmp_path / "skills"),
         sharing_skill_mirror_enabled=False,
         llm_api_base="https://global.example/v1",
         llm_api_key="global-secret",
@@ -73,7 +73,6 @@ def _server(tmp_path):
     server = ProxyServer(config)
     server._tenant_registry = _TenantRegistry()
     server._get_engine_pool = lambda: None
-    server._stop_skillminer = lambda: None
     return server
 
 
@@ -92,11 +91,12 @@ def test_tenant_model_settings_are_isolated_and_secrets_are_masked(tmp_path):
     assert current.json() == {
         "tenant_id": "tenant-a",
         "scope": "tenant",
-        "provider": "custom",
         "base_url": "https://tenant.example/v1",
         "model": "tenant-model",
         "max_tokens": 16384,
         "temperature": 0.2,
+        "max_concurrency": 8,
+        "queue_capacity": 64,
         "api_key_present": True,
     }
 
@@ -104,7 +104,6 @@ def test_tenant_model_settings_are_isolated_and_secrets_are_masked(tmp_path):
         "/api/model-settings",
         headers=headers,
         json={
-            "provider": "custom",
             "base_url": "https://other.example/v1",
             "model": "other-model",
             "api_key": "other-secret",
@@ -118,7 +117,7 @@ def test_tenant_model_settings_are_isolated_and_secrets_are_masked(tmp_path):
     assert server.config.llm_model_id == "global-model"
     assert server._tenant_registry.ctx.config_overrides["llm_api_key"] == "other-secret"
 
-    tenant_config = client.get("/api/tenants/tenant-a/config")
+    tenant_config = client.get("/api/tenants/tenant-a/config", headers=headers)
     assert tenant_config.status_code == 200
     assert "llm_api_key" not in tenant_config.json()["config_overrides"]
     assert tenant_config.json()["secret_presence"]["llm_api_key"] is True
@@ -134,7 +133,6 @@ def test_stage_settings_keep_secret_private_and_support_full_connection(tmp_path
     prompt_studio.set_stage_settings(
         "analyze_session",
         {
-            "provider": "custom",
             "base_url": "https://stage.example/v1/",
             "model": "stage-model",
             "api_key": "stage-secret",
@@ -145,7 +143,6 @@ def test_stage_settings_keep_secret_private_and_support_full_connection(tmp_path
     )
 
     detail = prompt_studio.get_prompt("analyze_session")
-    assert detail["provider"] == "custom"
     assert detail["base_url"] == "https://stage.example/v1"
     assert detail["model"] == "stage-model"
     assert detail["api_key_present"] is True
@@ -158,7 +155,6 @@ def test_stage_settings_keep_secret_private_and_support_full_connection(tmp_path
     prompt_studio.set_stage_settings(
         "analyze_session",
         {
-            "provider": "custom",
             "base_url": "https://stage.example/v1",
             "model": "stage-model-v2",
             "temperature": 0.4,
@@ -305,7 +301,6 @@ def test_llm_client_uses_stage_endpoint_and_key(monkeypatch):
     result = asyncio.run(
         client.chat(
             [{"role": "user", "content": "test"}],
-            provider="custom",
             base_url="https://stage.example/v1/",
             api_key="stage-key",
             model="stage-model",

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -9,6 +10,8 @@ from fastapi.testclient import TestClient
 
 from team_skills.candidates.feedback import CandidateFeedbackStore
 from team_skills.candidates.store import ValidationStore
+from team_skills.library.bundle import attach_bundle_payload
+from teamEvolver.admin.identity_store import IdentityStore
 from teamEvolver.config import TeamEvolverConfig
 from teamEvolver.proxy import ProxyServer
 from teamEvolver.storage import LocalObjectStore
@@ -125,24 +128,29 @@ def test_unavailable_or_corrupt_storage_is_not_overwritten(tmp_path, monkeypatch
 @pytest.fixture
 def candidate_api(tmp_path, monkeypatch):
     config = TeamEvolverConfig(
-        users_registry_path=str(tmp_path / "users.json"),
-        skills_dir=str(tmp_path / "skills"),
-        sharing_enabled=False,
+        _config_file=str(tmp_path / "config.yaml"),
+        skills_runtime_cache_dir=str(tmp_path / "skills"),
         sharing_skill_mirror_enabled=False,
         sharing_skill_backend="local",
         sharing_local_root=str(tmp_path / "storage"),
     )
     monkeypatch.setenv("TEAMEVOLVER_ROOT_API_KEY", "test-root-key")
     server = ProxyServer(config)
-    client = TestClient(server.app, headers={"Authorization": "Bearer test-root-key"})
+    client = TestClient(server.app, headers={
+        "Authorization": "Bearer test-root-key",
+        "X-Tenant-Id": "default",
+    })
     store = ValidationStore.from_config(config)
     store.save_job({
         "job_id": "job", "candidate_revision": 1, "proposed_action": "create_skill",
-        "candidate_skill": {
-            "name": "example",
-            "description": "Example candidate",
-            "content": "candidate body",
-        },
+        "candidate_skill": attach_bundle_payload(
+            {
+                "name": "example",
+                "description": "Example candidate",
+                "content": "candidate body",
+            },
+            {},
+        ),
     })
     return client, store, config, server
 
@@ -182,27 +190,32 @@ def test_api_rejects_invalid_feedback(candidate_api, body):
 
 
 def test_api_checks_candidate_and_authenticated_user(candidate_api):
-    import time
-
     from teamEvolver.proxy.routes import _SESSION_COOKIE
 
     client, _, config, server = candidate_api
     assert client.patch("/api/skill-candidates/missing/feedback", json={"reviewed": True}).status_code == 404
     anonymous = TestClient(server.app)
     assert anonymous.patch("/api/skill-candidates/job/feedback", json={"reviewed": True}).status_code == 401
-    # Exercise the real console session identity, without trusting an actor in the body.
-    from pathlib import Path
-
-    users = [{"id": "alice", "username": "alice", "display_name": "Alice", "role": "admin"}]
-    Path(config.users_registry_path).write_text(json.dumps({"users": users}))
-    server._console_sessions["test-session"] = {"user_id": "alice", "expires_at": time.time() + 3600}
-    anonymous.cookies.set(_SESSION_COOKIE, "test-session")
+    # Exercise the real console identity and membership, without trusting an actor in the body.
+    store = IdentityStore(config)
+    store.edit_users(
+        lambda data: data["users"].extend([
+            {"id": "alice", "display_name": "Alice", "platform_role": "user", "status": "active"},
+            {"id": "bob", "display_name": "Bob", "platform_role": "user", "status": "active"},
+        ]),
+        actor="test",
+    )
+    store.set_member("default", "alice", "tenant_admin", "active", "test")
+    store.set_member("default", "bob", "tenant_admin", "active", "test")
+    store.session("test-session", value={"user_id": "alice", "expires_at": time.time() + 3600})
+    suffix = hashlib.sha256(b"testserver:80/").hexdigest()[:12]
+    anonymous.cookies.set(f"{_SESSION_COOKIE}_{suffix}", "test-session")
+    anonymous.headers["X-Tenant-Id"] = "default"
     response = anonymous.patch("/api/skill-candidates/job/feedback", json={"reviewed": True})
     assert response.status_code == 200, response.text
     event = response.json()["feedback"]["history"][-1]
     assert (event["actor_id"], event["actor_name"]) == ("alice", "Alice")
-    users[0]["role"] = "user"
-    Path(config.users_registry_path).write_text(json.dumps({"users": users}))
+    store.set_member("default", "alice", "member", "active", "test")
     assert anonymous.patch("/api/skill-candidates/job/feedback", json={"reviewed": False}).status_code == 403
 
 
@@ -219,7 +232,6 @@ def test_reject_keeps_candidate_and_marks_it_rejected(candidate_api):
     assert store.load_job("job") is not None
     history = client.get("/api/skill-candidates?scope=processed").json()["candidates"]
     assert history[0]["feedback"]["rejected"] is True
-    assert client.delete("/api/skill-candidates/job").status_code == 200
     assert store.load_job("job") is not None
 
 

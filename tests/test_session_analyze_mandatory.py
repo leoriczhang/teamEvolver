@@ -12,7 +12,6 @@ from session_ingestion.service import _classify_session
 from team_skills.evolution import prompt_studio
 from team_skills.evolution.runtime.orchestrator import EvolveServer
 from team_skills.evolution.session_filter import SessionValueClassifier
-from team_skills.evolution.session_judge_queue import AsyncSessionJudgeQueue
 from team_skills.evolution.stages.analyze import SessionAnalysisError, session_has_merged_outputs
 from team_skills.evolution.stages.trace_analyze import TraceAnalysisError
 from teamEvolver.session_store import SessionStore
@@ -175,12 +174,10 @@ def test_prompt_studio_connection_can_supply_mandatory_analysis_client(
         llm_api_key="",
         llm_api_base="",
         llm_model_id="",
-        model_name="",
     )
     prompt_studio.set_stage_settings(
         "analyze_session",
         {
-            "provider": "custom",
             "base_url": "https://stage.example/v1",
             "model": "stage-model",
             "api_key": "stage-secret",
@@ -196,7 +193,7 @@ def test_prompt_studio_connection_can_supply_mandatory_analysis_client(
     assert classifier.client.model == "stage-model"
 
 
-def test_evolution_backfills_missing_session_analysis():
+def test_evolution_rejects_missing_session_analysis():
     client = _FakeClient(_analysis_reply())
     owner = SimpleNamespace(
         config=SimpleNamespace(use_session_judge=True),
@@ -204,12 +201,9 @@ def test_evolution_backfills_missing_session_analysis():
     )
     session = _session()
 
-    judged = asyncio.run(EvolveServer._prepare_sessions(owner, [session]))
-
-    assert judged == 1
-    assert len(client.calls) == 1
-    assert session["_summary"]
-    assert session["_judge_scores"]["overall_score"] == pytest.approx(0.805)
+    with pytest.raises(ValueError, match="mandatory ingest analysis"):
+        asyncio.run(EvolveServer._prepare_sessions(owner, [session]))
+    assert client.calls == []
 
 
 @pytest.mark.parametrize("bad_classification", ["not json", "null", '{"decision":"skip"}'])
@@ -234,19 +228,16 @@ def test_invalid_model_scores_are_rejected(value):
     assert "_judge_scores" not in session
 
 
-def test_legacy_score_cannot_bypass_model_analysis():
+def test_partial_score_cannot_bypass_mandatory_ingest_analysis():
     session = _session()
     session["_summary"] = "legacy summary"
     session["_judge_scores"] = {"overall_score": 0.9}
     assert not session_has_merged_outputs(session)
     client = _FakeClient(_analysis_reply())
     owner = SimpleNamespace(config=SimpleNamespace(use_session_judge=True), _llm=client)
-    asyncio.run(EvolveServer._prepare_sessions(owner, [session]))
-    assert len(client.calls) == 1
-    assert session["_judge_scores"]["source"] == "llm"
-    assert session_has_merged_outputs(session)
-    asyncio.run(EvolveServer._prepare_sessions(owner, [session]))
-    assert len(client.calls) == 1
+    with pytest.raises(ValueError, match="mandatory ingest analysis"):
+        asyncio.run(EvolveServer._prepare_sessions(owner, [session]))
+    assert client.calls == []
 
 
 def test_trace_failure_prevents_ingest_storage(monkeypatch):
@@ -302,25 +293,15 @@ def test_legacy_heuristic_archive_is_not_treated_as_already_analyzed(tmp_path):
     EvolveServer._archive_sessions(engine, [session])
     assert store.duplicate_of_processed(session) is True
 
-
-def test_backfill_does_not_skip_for_legacy_score_or_disabled_judge(monkeypatch):
+def test_removed_converter_metadata_does_not_change_session_fingerprint(tmp_path):
+    store = SessionStore(LocalObjectStore(str(tmp_path)))
     session = _session()
-    session["judge"] = {"overall_score": 0.9}
-    client = _FakeClient(_analysis_reply())
-    engine = SimpleNamespace(config=SimpleNamespace(use_session_judge=False), _llm=client)
-    owner = SimpleNamespace(
-        config=SimpleNamespace(storage_pg_enabled=False),
-        _get_embedded_evolve_server=lambda tenant_id: engine,
+    asyncio.run(
+        _classify_session(
+            session,
+            SessionValueClassifier(client=_FakeClient(_analysis_reply())),
+        )
     )
-    saved = []
-    store = SimpleNamespace(
-        has_judge_score=lambda sid: True,
-        load_archived=lambda sid: session,
-        save_session_judge=lambda sid, scores: saved.append(scores),
-    )
-    monkeypatch.setattr(SessionStore, "from_config", lambda *args: store)
-    queue = AsyncSessionJudgeQueue(owner)
-    monkeypatch.setattr(queue, "_tenant_context", lambda tid: None)
-    asyncio.run(queue._review_one("default", "sess-mandatory"))
-    assert len(client.calls) == 1
-    assert saved[0]["overall_score"] == pytest.approx(0.805)
+    store.save_skipped({**session, "legacy_converter": {"name": "retired"}})
+
+    assert store.duplicate_of_processed(session) is True

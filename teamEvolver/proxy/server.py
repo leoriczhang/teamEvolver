@@ -1,6 +1,6 @@
 """Proxy server composition and lifecycle.
 
-``ProxyServer`` composes the FastAPI route and skill synchronization mixins
+``ProxyServer`` composes the FastAPI route and Skill-management mixins
 into the teamEvolver service. It owns threading lifecycle (uvicorn in a
 background thread) and idle/validation accessors.
 """
@@ -22,10 +22,10 @@ import uvicorn
 from starlette.responses import Response
 
 from team_memory.debug_routes import MemoryDebugMixin
-from team_memory.maintenance.runtime import TeamMemorySupervisor as DreamCycleSupervisor
+from team_memory.maintenance.runtime import TeamMemorySupervisor
 from team_memory.routes import AggregationMixin
 from team_miner.bridge import SkillMinerBridgeMixin
-from team_skills.library.manager import SkillManager
+from team_miner.routes import KnowledgeMiningMixin
 
 from ..config import TeamEvolverConfig
 from ..observability import configure_langfuse, flush_langfuse
@@ -37,8 +37,6 @@ from ..tenants.registry import (
     tenant_quotas,
 )
 from .agent_context import AgentContextMixin
-from .docs import DocsMixin
-from .knowledge_mining import KnowledgeMiningMixin
 from .openviking_workspace import OpenVikingWorkspaceMixin
 from .platform_assets import PlatformAssetsMixin
 from .routes import RoutesMixin
@@ -55,8 +53,8 @@ _RESET = "\033[0m"
 
 
 class ProxyServer(
-    RoutesMixin,
     SkillMinerBridgeMixin,
+    RoutesMixin,
     SkillLabMixin,
     SkillsAdminMixin,
     UploadsMixin,
@@ -67,44 +65,24 @@ class ProxyServer(
     MemoryDebugMixin,
     AgentContextMixin,
     AggregationMixin,
-    DocsMixin,
 ):
-    """teamEvolver service: console, skill sync, user management, and validation.
-
-    Parameters
-    ----------
-    config:
-        TeamEvolverConfig instance.
-    skill_manager:
-        Optional SkillManager for injecting skills into system prompts.
-    """
+    """teamEvolver service: console, Skill storage, user management and validation."""
 
     def __init__(
         self,
         config: TeamEvolverConfig,
-        sampling_client=None,
-        skill_manager: Optional[SkillManager] = None,
         last_request_tracker=None,
     ):
         from ..replay_adapter import ensure_replay_host
 
         ensure_replay_host()
         self.config = config
-        self._sampling_client = sampling_client
-        self.skill_manager = skill_manager
         self._last_request_tracker = last_request_tracker
         self._last_request_at = time.time()
 
         self._background_tasks: set[asyncio.Task] = set()
         self._skill_reload_task: Optional[asyncio.Task] = None
         self._shutdown_drain_timeout_seconds = 15
-        self._skill_reload_interval_seconds = max(
-            5,
-            int(getattr(config, "sharing_skill_reload_interval_seconds", 30) or 30),
-        )
-        # Default-tenant engine slot — kept for hot-reload change detection and
-        # test doubles; the authoritative per-tenant engines live in the pool.
-        self._embedded_evolve_server = None
         # Per-tenant engines (multi-tenancy plan Phase 2): LRU pool + per-tenant
         # HTTP apps + per-tenant cycle pacing for the global scheduler.
         self._engine_pool = None
@@ -121,19 +99,15 @@ class ProxyServer(
         # user. Ensure it exists on every deployment; the sync helper is
         # idempotent and fail-open when OpenViking is unavailable.
         sync_openviking_user(config, "team")
-        self._dreamcycle = DreamCycleSupervisor(config, self._aggregation_service())
+        self._memory_maintenance = TeamMemorySupervisor(
+            config,
+            self._aggregation_service(),
+        )
         # Durable skill-mirror outbox: delivers the local skill library subtree
         # to OpenViking with retry/backoff so remote Agents keep reading team
         # skills even while OpenViking is flaky. Never on the evolution path.
         self._mirror_flusher = None
         self._start_skill_mirror_flusher()
-
-        # Compatibility/backfill queue for historical archived Sessions that
-        # predate mandatory ingest-time Session Analyze. New Sessions already
-        # carry their complete review before storage.
-        from team_skills.evolution.session_judge_queue import AsyncSessionJudgeQueue
-
-        self._session_judge_queue = AsyncSessionJudgeQueue(self)
 
         self.app = self._build_app()
 
@@ -195,11 +169,6 @@ class ProxyServer(
             self._skill_reload_task.cancel()
             await asyncio.gather(self._skill_reload_task, return_exceptions=True)
             self._skill_reload_task = None
-        knowledge_watchers = list(getattr(self, "_knowledge_compile_watchers", {}).values())
-        for task in knowledge_watchers:
-            task.cancel()
-        if knowledge_watchers:
-            await asyncio.gather(*knowledge_watchers, return_exceptions=True)
         if self._mirror_flusher is not None:
             self._mirror_flusher.stop()
             self._mirror_flusher = None
@@ -209,18 +178,9 @@ class ProxyServer(
                 await datasource_runtime.stop()
             except Exception:  # noqa: BLE001 - shutdown must proceed
                 logger.debug("[DatasourceSchedule] shutdown failed", exc_info=True)
-        self._dreamcycle.stop()
-        judge_queue = getattr(self, "_session_judge_queue", None)
-        if judge_queue is not None:
-            try:
-                await asyncio.wait_for(judge_queue.stop(), timeout=5.0)
-            except Exception:  # noqa: BLE001 - shutdown must proceed
-                logger.debug("[SessionJudge] queue stop failed", exc_info=True)
+        await asyncio.to_thread(self._stop_skillminer)
+        self._memory_maintenance.stop()
         await self._stop_embedded_evolve()
-        try:
-            self._stop_skillminer()
-        except Exception:
-            logger.debug("[SkillMiner] shutdown stop failed", exc_info=True)
         await self._await_background_tasks(self._shutdown_drain_timeout_seconds)
         try:
             await self.aclose_knowledge_http()
@@ -233,30 +193,30 @@ class ProxyServer(
         self.config = config
         return configure_langfuse(config)
 
-    def _start_dreamcycle(self) -> None:
+    def _start_memory_maintenance(self) -> None:
         try:
-            self._dreamcycle.start()
+            self._memory_maintenance.start()
         except Exception:
-            logger.warning("[DreamCycle] startup failed", exc_info=True)
+            logger.warning("[TeamMemory] maintenance startup failed", exc_info=True)
 
-    def _trigger_dreamcycle(self) -> dict:
-        return self._dreamcycle.trigger()
+    def _trigger_memory_maintenance(self) -> dict:
+        return self._memory_maintenance.trigger()
 
-    def _dreamcycle_status(self) -> dict:
-        return self._dreamcycle.status()
+    def _memory_maintenance_status(self) -> dict:
+        return self._memory_maintenance.status()
 
-    def _dreamcycle_dry_run(self) -> dict:
-        return self._dreamcycle.dry_run()
+    def _memory_maintenance_dry_run(self) -> dict:
+        return self._memory_maintenance.dry_run()
 
-    def _dreamcycle_memory_changes(
+    def _memory_changes(
         self,
         *,
         limit: int = 100,
         config: Any = None,
     ) -> dict:
-        return self._dreamcycle.memory_changes(limit=limit, config=config)
+        return self._memory_maintenance.memory_changes(limit=limit, config=config)
 
-    def _run_dreamcycle_memory_replay(
+    def _run_memory_replay(
         self,
         *,
         change_id: str,
@@ -267,7 +227,7 @@ class ProxyServer(
         timeout_seconds: int = 600,
         config: Any = None,
     ) -> dict:
-        return self._dreamcycle.run_memory_replay(
+        return self._memory_maintenance.run_memory_replay(
             change_id=change_id,
             query=query,
             checklist=checklist,
@@ -277,7 +237,7 @@ class ProxyServer(
             config=config,
         )
 
-    def _run_dreamcycle_memory_replay_adhoc(
+    def _run_memory_replay_adhoc(
         self,
         *,
         memory_path: str,
@@ -291,7 +251,7 @@ class ProxyServer(
         timeout_seconds: int = 600,
         config: Any = None,
     ) -> dict:
-        return self._dreamcycle.run_memory_replay_adhoc(
+        return self._memory_maintenance.run_memory_replay_adhoc(
             memory_path=memory_path,
             before_content=before_content,
             after_content=after_content,
@@ -304,26 +264,18 @@ class ProxyServer(
             config=config,
         )
 
-    def _dreamcycle_memory_replays(
+    def _memory_replays(
         self,
         *,
         change_id: str,
         limit: int = 100,
         config: Any = None,
     ) -> dict:
-        return self._dreamcycle.memory_replays(
+        return self._memory_maintenance.memory_replays(
             change_id=change_id,
             limit=limit,
             config=config,
         )
-
-    def _dreamcycle_reset(
-        self,
-        *,
-        remote: bool = False,
-        dry_run: bool = True,
-    ) -> dict:
-        return self._dreamcycle.reset(remote=remote, dry_run=dry_run)
 
     async def _reload_openviking_integrations(
         self,
@@ -334,17 +286,19 @@ class ProxyServer(
         next_evolve_config = self._build_embedded_evolve_config(config)
         evolve_config_changed = current_evolve_config != next_evolve_config
 
-        await asyncio.to_thread(self._dreamcycle.stop)
+        await asyncio.to_thread(self._memory_maintenance.stop)
         self.config = config
         configure_langfuse(config)
-        self._dreamcycle = DreamCycleSupervisor(config, self._aggregation_service())
+        self._memory_maintenance = TeamMemorySupervisor(
+            config,
+            self._aggregation_service(),
+        )
         # Tenant registry binds to storage_pg settings — rebuild on reload so
         # enabling/disabling PG or changing its DSN takes effect at once.
         self._tenant_registry = TenantRegistry(config)
 
         if evolve_config_changed:
             await self._stop_embedded_evolve(graceful=True)
-            self._embedded_evolve_server = None
             self._embedded_evolve_apps = {}
             self._engine_pool = None
             self._evolve_next_due = {}
@@ -355,8 +309,11 @@ class ProxyServer(
                 "[EvolveServer] OpenViking sync did not change evolve config; "
                 "keeping the active cycle"
             )
-        # DreamCycle is retired; a credential reload no longer restarts it.
-        # Team memory is maintained via the ov compile aggregation service.
+        # Team Memory maintenance is implemented by the OpenViking compile runtime.
+        if bool(getattr(config, "memory_maintenance_enabled", False)) and bool(
+            getattr(config, "memory_maintenance_auto_start", False)
+        ):
+            self._start_memory_maintenance()
 
     # ------------------------------------------------------------------ #
     # Embedded evolve server                                               #
@@ -375,7 +332,6 @@ class ProxyServer(
         from team_skills.evolution import EvolveServerConfig
 
         evolve_config = EvolveServerConfig.from_teamEvolver_config(config)
-        evolve_config.http_port = int(getattr(config, "proxy_port", 52010) or 52010)
         interval = os.environ.get("TEAMEVOLVER_EMBEDDED_EVOLVE_INTERVAL_S", "").strip()
         if interval:
             evolve_config.interval_seconds = max(1, int(interval))
@@ -399,13 +355,9 @@ class ProxyServer(
     def _embedded_evolve_config_snapshot(self):
         """Currently active evolve config for hot-reload change detection.
 
-        Reads the resident default-tenant engine (or a test-injected stand-in)
-        without constructing anything; falls back to a cheap config-only build
-        from the pool.
+        Reads the resident default-tenant engine without constructing anything;
+        otherwise builds only its configuration.
         """
-        config = getattr(self._embedded_evolve_server, "config", None)
-        if config is not None:
-            return config
         pool = self._engine_pool
         if pool is not None:
             return pool.peek_config(DEFAULT_TENANT_ID)
@@ -417,11 +369,7 @@ class ProxyServer(
         if pool is None:
             return None
         tid = str(tenant_id or current_tenant_id() or DEFAULT_TENANT_ID)
-        engine = pool.get(tid)
-        if tid == DEFAULT_TENANT_ID:
-            # Keep the legacy slot in sync for reload detection and tests.
-            self._embedded_evolve_server = engine
-        return engine
+        return pool.get(tid)
 
     def _get_embedded_evolve_app(self, tenant_id: Optional[str] = None):
         server = self._get_embedded_evolve_server(tenant_id)
@@ -697,9 +645,6 @@ class ProxyServer(
         pool = self._engine_pool
         if pool is not None:
             engines.extend(pool.engines())
-        legacy = self._embedded_evolve_server
-        if legacy is not None and all(legacy is not engine for engine in engines):
-            engines.append(legacy)
         if graceful:
             timeout = max(
                 1.0,
@@ -724,11 +669,6 @@ class ProxyServer(
                     )
                 else:
                     run_lock.release()
-        for engine in engines:
-            try:
-                engine.stop()
-            except Exception:
-                logger.debug("[EvolveServer] embedded stop failed", exc_info=True)
         task = self._embedded_evolve_task
         if task is not None:
             task.cancel()

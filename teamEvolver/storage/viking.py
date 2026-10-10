@@ -12,8 +12,7 @@ from typing import Any, Iterator, Mapping
 
 from .base import ObjectInfo, _BytesObject, read_bytes
 
-# Wire constant, do not rename. This string is a shared data contract: Hermes'
-# AgentsHub and the evolve server read team skills from this shared contract.
+# Wire constant, do not rename. This string is the shared Skill namespace.
 _VIKING_ROOT_PREFIX = "team-skill-evolver"
 
 # Prefix written before base64-encoded binary content so get_object can
@@ -71,17 +70,14 @@ class OpenVikingObjectStore:
     Maps the object-store contract onto OpenViking's filesystem-style REST API.
     Every object lives under the account-scoped, team-shared *resources* root::
 
-        viking://resources/{root_prefix}/...                  # group_id empty
-        viking://resources/{root_prefix}/{group_id}/...       # group_id set
+        viking://resources/{root_prefix}/...
 
-    ``root_prefix`` defaults to the wire constant ``team-skill-evolver`` and
-    ``group_id`` defaults to empty so the team library lives directly under
-    ``viking://resources/team-skill-evolver/``, matching what AgentsHub and
-    Hermes'
-    ``OpenVikingSkillSource`` scans
-    (``viking://resources/team-skill-evolver/skills/<name>/``). Isolated runs
-    use a separate root prefix rather
-    than a group segment. The shared key ``X-API-Key`` authenticates as
+    ``root_prefix`` defaults to the wire constant ``team-skill-evolver`` so the
+    team library lives directly under
+    ``viking://resources/team-skill-evolver/``. Agent integrations read
+    ``viking://resources/team-skill-evolver/skills/<name>/``. Isolated runs
+    use a separate root prefix rather than a group segment. The shared key
+    ``X-API-Key`` authenticates as
     ``account=default`` with write access to the ``resources/`` namespace, so no
     per-user space is needed.
 
@@ -116,19 +112,10 @@ class OpenVikingObjectStore:
         account: str = "default",
         user: str = "default",
         agent: str = _VIKING_ROOT_PREFIX,
-        agent_id: str = "",
         root_prefix: str = _VIKING_ROOT_PREFIX,
-        group_id: str = "",
         namespace: str = "resources",
         timeout: float = 30.0,
     ) -> None:
-        try:
-            import httpx
-        except ImportError as exc:  # pragma: no cover - httpx is a core dep
-            raise ImportError(
-                "OpenViking storage backend requires the 'httpx' package."
-            ) from exc
-
         if not endpoint:
             raise ValueError("OpenViking storage backend requires an endpoint.")
         self._endpoint = endpoint.rstrip("/")
@@ -136,14 +123,7 @@ class OpenVikingObjectStore:
         self._account = account or "default"
         self._user = user or "default"
         self._agent = agent or _VIKING_ROOT_PREFIX
-        # Retained for header attribution / backward-compatible callers; the
-        # resources namespace is account-scoped so it no longer drives the URI.
-        self._agent_id = (agent_id or self._user or "default").strip("/")
         self._root_prefix = (root_prefix or _VIKING_ROOT_PREFIX).strip("/")
-        # Empty group_id means "no group segment": objects live directly under
-        # ``viking://resources/{root_prefix}/``. A non-empty group adds one path
-        # segment for isolation (used by eval via a separate root_prefix instead).
-        self._group_id = (group_id or "").strip("/")
         self._namespace = (namespace or "resources").strip().lower()
         self._timeout = timeout
         # Defaults to the shared pooled client; tests may inject a fake
@@ -157,18 +137,12 @@ class OpenVikingObjectStore:
     def _base_uri(self) -> str:
         """Return the account-scoped, team-shared resources root prefix.
 
-        When ``group_id`` is empty the group segment is omitted entirely::
-
-            viking://resources/{root_prefix}/
-
-        A non-empty group adds one isolating segment::
-
-            viking://resources/{root_prefix}/{group_id}/
+        Team resources always live directly below ``root_prefix``. Tenant
+        isolation is handled by object keys or PostgreSQL RLS, not by an
+        additional OpenViking group segment.
         """
         if self._namespace == "user":
             return f"viking://user/{self._user}/"
-        if self._group_id:
-            return f"viking://resources/{self._root_prefix}/{self._group_id}/"
         return f"viking://resources/{self._root_prefix}/"
 
     def _uri(self, key: str) -> str:
@@ -291,10 +265,7 @@ class OpenVikingObjectStore:
         objects: Mapping[str, bytes | str | io.IOBase],
         *,
         preconditions: Mapping[str, Mapping[str, str]] | None = None,
-        wait: bool = True,
         timeout: float | None = None,
-        telemetry: bool = True,
-        default_mode: str = "upsert",
     ) -> dict[str, Any]:
         """Write one conditional batch below this store's configured root.
 
@@ -531,7 +502,6 @@ def _probe_cache_key(store: "OpenVikingObjectStore", timeout: float) -> tuple:
         store._user,
         store._api_key,
         store._root_prefix,
-        store._group_id,
         store._namespace,
         float(timeout),
     )
@@ -597,9 +567,3 @@ def probe_viking_availability(
     with _PROBE_CACHE_GUARD:
         _PROBE_CACHE[key] = (time.monotonic(), available, reason)
     return available, reason
-
-
-def reset_probe_cache() -> None:
-    """Drop all cached probe verdicts (tests only)."""
-    with _PROBE_CACHE_GUARD:
-        _PROBE_CACHE.clear()

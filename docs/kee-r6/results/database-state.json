@@ -1,0 +1,21 @@
+{
+  "environment": "isolated loopback PG; synthetic data only",
+  "postgresql_version": "17.11 (Homebrew)",
+  "role": {
+    "role": "kee_r6_app",
+    "rolsuper": false,
+    "rolbypassrls": false
+  },
+  "objects_rls": {
+    "relrowsecurity": true,
+    "relforcerowsecurity": true
+  },
+  "console_job_counts": [
+    {
+      "state": "published",
+      "count": 3
+    }
+  ],
+  "service_restart_and_http_flow": "passed; see http-smoke.json",
+  "production_state": "not inspected or changed"
+}

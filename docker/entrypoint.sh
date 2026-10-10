@@ -2,23 +2,6 @@
 set -eu
 
 port="${TEAMEVOLVER_PORT:-52010}"
-skillminer_root="/app/team_miner"
-
-# Bind mounts start empty on a fresh host. Create the layout expected by the
-# embedded SkillMiner service before teamEvolver starts.
-for relative_path in \
-  "data/input" \
-  ".knowledge_originals" \
-  "mining_jobs" \
-  "sample_packages" \
-  "semantic_reports" \
-  "compiled_skill" \
-  "benchmark_results" \
-  "reflection_rounds" \
-  "run_history" \
-  "lift_datasets"; do
-  mkdir -p "${skillminer_root}/${relative_path}"
-done
 
 # The CLI deliberately requires an explicit config file. Initialise defaults
 # on first start, then keep the bind-mounted configuration across upgrades.

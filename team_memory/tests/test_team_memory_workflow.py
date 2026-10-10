@@ -157,7 +157,6 @@ def test_uncertain_tasks_keep_target_locked_after_restart(tmp_path, monkeypatch)
     service._track_task(first, "cmp_1", "pending")
     restored = make_service(tmp_path)
     second = restored.new_run("acct")
-    assert restored.target_is_active(second)
     with pytest.raises(RunConflictError):
         restored._acquire_target(second)
 
@@ -166,7 +165,8 @@ def test_uncertain_tasks_keep_target_locked_after_restart(tmp_path, monkeypatch)
 
     monkeypatch.setattr(CompileClient, "task_status", status)
     asyncio.run(restored.reconcile(second, "secret"))
-    assert not restored.target_is_active(second)
+    restored._acquire_target(second)
+    restored._release_target(second)
 
 
 def test_new_compile_contract_and_copy_endpoint(monkeypatch):
@@ -206,7 +206,6 @@ def test_new_compile_contract_and_copy_endpoint(monkeypatch):
                 source_uris=["viking://resources/team"],
                 target_uri="viking://resources/team",
                 skill_uri="viking://agent/skills/maintenance",
-                skill_revision="old",
                 reason="maintain",
             )
         )["ok"]
@@ -215,7 +214,7 @@ def test_new_compile_contract_and_copy_endpoint(monkeypatch):
     assert task_events == [("cmp_1", "pending"), ("cmp_1", "completed")]
 
 
-def test_stage_skill_routes_keep_accounts_and_stages_separate(tmp_path, monkeypatch):
+def test_stage_skill_routes_reject_other_accounts_and_keep_stages(tmp_path, monkeypatch):
     import team_memory.routes as routes
 
     service = make_service(tmp_path)
@@ -226,20 +225,31 @@ def test_stage_skill_routes_keep_accounts_and_stages_separate(tmp_path, monkeypa
         return {"content": "body", "revision": "rev"}
 
     monkeypatch.setattr(service, "get_shared_skill", get_skill)
-    monkeypatch.setattr(routes, "_request_user", lambda request: {"role": "admin"})
+    monkeypatch.setattr(
+        routes,
+        "_request_user",
+        lambda request: {
+            "role": "admin",
+            "tenant_id": "default",
+            "capabilities": ["tenant.manage"],
+        },
+    )
 
     class Owner(AggregationMixin):
-        config = replace(service.config, sharing_viking_team_api_key="secret")
-        _aggregation_service_instance = service
+        config = replace(service.config, sharing_viking_api_key="secret")
 
         def _mark_request_activity(self):
             pass
 
+        def _aggregation_service(self):
+            return service
+
     app = FastAPI()
     Owner()._register_aggregation_routes(app)
     with TestClient(app) as client:
-        assert client.get("/api/aggregation/okf-skill?stage=maintenance&account_id=other").status_code == 200
-        assert seen[-1]["stage"] == "maintenance" and seen[-1]["account_id"] == "other"
+        assert client.get("/api/aggregation/okf-skill?stage=maintenance&account_id=other").status_code == 403
+        assert client.get("/api/aggregation/okf-skill?stage=maintenance&account_id=acct").status_code == 200
+        assert seen[-1]["stage"] == "maintenance" and seen[-1]["account_id"] == "acct"
         assert client.get("/api/aggregation/okf-skill?stage=invalid").status_code == 400
 
 

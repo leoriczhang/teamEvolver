@@ -26,7 +26,9 @@ Skill 编辑器：`team_skills/library/editor.py`
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `sharing_enabled` | boolean | 是否启用云端共享 |
+| `sharing_enabled` | boolean | 已废弃的兼容字段，固定返回 true |
+| `skill_backend` | string | Skill 权威存储后端 |
+| `delivery_mode` | string | Agent 分发模式：`push` 或 `pull` |
 | `skills` | array | Skill 摘要列表 |
 
 **Skill 摘要字段：**
@@ -298,6 +300,8 @@ curl -b "teamEvolver_console_session=<token>" \
 ```json
 {
   "sharing_enabled": true,
+  "skill_backend": "postgres",
+  "delivery_mode": "push",
   "skills": [
     {
       "name": "database-debugging",

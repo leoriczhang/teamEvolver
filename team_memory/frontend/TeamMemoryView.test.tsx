@@ -32,8 +32,8 @@ describe("TeamMemoryView", () => {
   it("edits the maintenance Skill independently", async () => {
     render(<TeamMemoryView active user={{ id: "admin", role: "admin" }} />);
     await screen.findByDisplayValue("maintenance body");
-    fireEvent.change(screen.getByLabelText("DreamCycle Skill内容"), { target: { value: "maintenance revised" } });
-    fireEvent.click(screen.getByLabelText("保存DreamCycle Skill"));
+    fireEvent.change(screen.getByLabelText("维护 Skill内容"), { target: { value: "maintenance revised" } });
+    fireEvent.click(screen.getByLabelText("保存维护 Skill"));
     await waitFor(() => expect(mock).toHaveBeenCalledWith(
       expect.stringContaining("stage=maintenance"), expect.objectContaining({ method: "PUT", body: expect.stringContaining("maintenance revised") }),
     ));
@@ -48,7 +48,7 @@ describe("TeamMemoryView", () => {
     await screen.findByText("alice");
     fireEvent.click(screen.getByRole("button", { name: "运行" }));
     await waitFor(() => expect(mock).toHaveBeenCalledWith("/api/aggregation/run", expect.objectContaining({ body: expect.stringContaining('"pipeline":"both"') })));
-    fireEvent.click(screen.getByRole("button", { name: "仅 DreamCycle" }));
+    fireEvent.click(screen.getByRole("button", { name: "仅维护" }));
     fireEvent.click(screen.getByRole("button", { name: "运行" }));
     await waitFor(() => expect(mock).toHaveBeenCalledWith("/api/aggregation/run", expect.objectContaining({ body: expect.stringContaining('"pipeline":"maintain"') })));
   });
@@ -56,6 +56,6 @@ describe("TeamMemoryView", () => {
   it("does not fetch privileged data for non-admins", () => {
     render(<TeamMemoryView active user={{ id: "reader", role: "user" }} />);
     expect(mock).not.toHaveBeenCalled();
-    expect(screen.queryByLabelText("DreamCycle Skill内容")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("维护 Skill内容")).not.toBeInTheDocument();
   });
 });

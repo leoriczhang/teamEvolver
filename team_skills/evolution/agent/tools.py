@@ -477,7 +477,6 @@ def build_protocol_appendix(stage: str, *, max_tool_calls_per_round: int = 8) ->
                 '不是带 frontmatter 的完整 SKILL.md>"}}',
                 "```",
                 "可选字段：skill 内的 metadata / extra_frontmatter。",
-                "也接受旧式顶层对象 {\"name\", \"description\", \"content\"}。",
                 "",
                 "提交前对照任务卡中的合并原则逐项自检，然后一次性输出 final。",
             ]

@@ -272,22 +272,6 @@ class PgObjectStore:
         rows = self._runtime.run(read(), timeout=self._op_timeout)
         return [json.loads(row["meta"]) if isinstance(row["meta"], str) else row["meta"] for row in rows]
 
-    def backfill_session_index_fields(self, index_key: str, rows: list[dict]) -> None:
-        """Fill missing metadata without overwriting a concurrent re-ingest."""
-        async def backfill():
-            async with self._runtime.tenant_conn(self._tenant_id) as conn:
-                async with conn.transaction():
-                    for row in rows:
-                        fields = {key: row[key] for key in ("used_skills", "meta", "experiences") if key in row}
-                        await conn.execute(
-                            f"UPDATE {self._schema}.session_index AS current SET meta = current.meta || "
-                            "(SELECT COALESCE(jsonb_object_agg(field.key, field.value), '{}'::jsonb) "
-                            "FROM jsonb_each($4::jsonb) AS field WHERE NOT (current.meta ? field.key)) "
-                            "WHERE current.tenant_id=$1 AND current.index_key=$2 AND current.session_id=$3",
-                            self._tenant_id, index_key, row["session_id"], json.dumps(fields),
-                        )
-        self._runtime.run(backfill(), timeout=self._op_timeout)
-
     def experience_import_sources(self, **kwargs):
         from .experience_import import sources_page
 
@@ -302,22 +286,6 @@ class PgObjectStore:
         from .experience_import import source_unchanged
 
         return source_unchanged(self, source)
-
-    def session_experience_page(self, *, after_index: str = "", after_session: str = "",
-                                until: str, limit: int = 100) -> list[dict]:
-        """Tenant-scoped keyset scan without the UI's 10,000 Session limit."""
-        async def read():
-            async with self._runtime.tenant_conn(self._tenant_id) as conn:
-                rows = await conn.fetch(
-                    f"SELECT index_key,session_id,CASE WHEN octet_length(meta::text)<=1048576 THEN meta END AS meta "
-                    f"FROM {self._schema}.session_index WHERE tenant_id=$1 "
-                    "AND (index_key,session_id)>($2,$3) AND updated_at<=$4::text::timestamptz "
-                    "ORDER BY index_key,session_id LIMIT $5",
-                    self._tenant_id, after_index, after_session, until, max(1, min(100, limit)),
-                )
-                return [{**dict(row), "meta": json.loads(row["meta"]) if isinstance(row["meta"], str)
-                         else row["meta"]} for row in rows]
-        return self._runtime.run(read(), timeout=self._op_timeout)
 
     # -- conditional batch write ------------------------------------------- #
 
@@ -394,10 +362,7 @@ class PgObjectStore:
         objects: Mapping[str, bytes | str | io.IOBase],
         *,
         preconditions: Mapping[str, Mapping[str, str]] | None = None,
-        wait: bool = True,
         timeout: float | None = None,
-        telemetry: bool = True,
-        default_mode: str = "upsert",
     ) -> dict[str, Any]:
         """Write one all-or-nothing batch under this tenant's scope.
 

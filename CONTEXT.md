@@ -2,19 +2,27 @@
 
 teamEvolver 是 Agent 团队能力进化控制面。它把真实工作中产生的经验转化为可复用、可验证、可治理的团队 Skill 与团队 Memory。
 
-## Ontology 扩展术语
+## KEE R6 与 Ontology 术语
 
-**Ontology**：通过批准的 Schema、实体、带证据和时间限定的断言、受限规则与 IssuePack 表达领域语义的资产。
-_Avoid_: 团队 Memory、Skill、普通知识图谱文件
+**KEE**：本仓库的统一知识进化平台入口；内部包名、CLI、数据库 ID 保持 teamEvolver 兼容。
+_Avoid_: 新 Agent Runtime、UpClaw 执行拦截器
 
-**Ontology Candidate**：OV Compile 草稿经 TE 确认 Schema、校验证据和后处理，再由 OV 校验并等待审核的私有本体候选，尚未改变正式 generation。
+**Ontology**：由 KEE 管理的版本化领域结构、证据及方法约束；批准结构可确定性导出为 Wiki。
+_Avoid_: 团队 Memory、已发布 Skill、执行授权
+
+**Ontology Candidate**：内部 Compile 生成、经人工确认 Schema 和证据核验的私有方法结构，发布前不改变已发布 Wiki。
 _Avoid_: 已发布本体、Memory Change、Skill Candidate
 
-**Ontology Publication**：OV 验证 trusted Root Key、当前证据、主体资格和人工审批记录后，以原子提交激活 generation 并返回回执。
-_Avoid_: 保存候选、Compile 完成、Skill Publish
+**WikiRelease**：同一批准结构的不可变 Wiki 版本、页面摘要、来源和发布回执。KEE 决定生效入口；OV 提供内容、ACL、索引。
+_Avoid_: 包级原子提交、Compile 完成、Skill Publish
 
-**IssuePack**：固定 Schema、证据槽、规则和只读 ToolContract 版本的领域诊断配置。
-_Avoid_: 提示词、业务执行授权
+**CapabilityBinding**：真实 Skill ID／版本及输入输出的编制引用；不授权或拦截 Skill 执行。
+_Avoid_: 工具调用门禁、第二套 Skill 注册表
+
+**CaseEvidence**：既有 Evidence、Session 或回执的引用及必要元数据，不复制完整轨迹。
+_Avoid_: 第二套 Session/Judge
+
+历史 Ontology Publication、IssuePack、OV generation 的定义以当时方案为准；R6 不自动转换或删除历史记录。
 
 ## Language
 

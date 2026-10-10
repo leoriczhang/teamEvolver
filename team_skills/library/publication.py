@@ -44,7 +44,7 @@ def skill_version_record_key(prefix: str, skill_name: str, version: int) -> str:
 def build_bundle_record(bundle_files: dict[str, bytes]) -> dict[str, Any]:
     bundle = coerce_skill_bundle(bundle_files)
     return {
-        "format": "bundle_v1",
+        "format": "skill-bundle",
         "entrypoint": "SKILL.md",
         "tree_sha256": bundle_tree_sha256(bundle),
         "files": bundle_file_records(bundle),
@@ -143,8 +143,6 @@ def publish_skill_bundle_batch(
     result = bucket.batch_write(
         objects,
         preconditions=preconditions,
-        wait=True,
-        telemetry=True,
     )
 
     for obj in bucket.iter_objects(

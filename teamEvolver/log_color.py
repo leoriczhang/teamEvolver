@@ -13,7 +13,6 @@ ANSI_GREEN = "\033[32m"
 ANSI_YELLOW = "\033[33m"
 ANSI_RED = "\033[31m"
 ANSI_MAGENTA = "\033[35m"
-ANSI_ORANGE = "\033[38;5;208m"  # orange (256-color)
 
 
 def _info_color_for_logger(logger_name: str) -> str:
@@ -31,8 +30,6 @@ def _info_color_for_logger(logger_name: str) -> str:
 
 def _colorize_message(message: str, *, level: str, logger_name: str) -> str:
     text = message
-    if "[SkillManager]" in text:
-        return f"{ANSI_BOLD}{ANSI_MAGENTA}{text}{ANSI_RESET}"
     if "teamEvolver service ready" in text:
         return f"{ANSI_BOLD}{ANSI_CYAN}{text}{ANSI_RESET}"
     if text.startswith("======================================================================"):

@@ -54,10 +54,8 @@ def _write_source_skill(skillminer_root: Path) -> Path:
         _question("BM-02", "medium", "维度二"),
         _question("BM-03", "hard", "维度一"),
     ]
-    (skill_dir / "benchmark.jsonl").write_text(
-        "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in questions),
-        encoding="utf-8",
-    )
+    document, _ = li.bf.build_document_with_quality("demo-skill", questions)
+    li.bf.write_document(skill_dir / "benchmark.json", document)
     return skill_dir
 
 

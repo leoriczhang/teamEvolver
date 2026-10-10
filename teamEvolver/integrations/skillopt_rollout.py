@@ -1,10 +1,10 @@
-"""skillopt rollout: second outbox consumer pushing Skill bundles to DEAP.
+"""Push committed Skill bundles to DEAP through a dedicated rollout outbox.
 
 After a skill publish commits, the full version bundle is written into a
 persistent DEAP workspace (``rollout-<timestamp>-<suffix>``, one per outbox event,
 never deleted) via the agent's ``/skillopt/update`` endpoint. The v2
-skill-sync delivery in :mod:`skill_sync_adapters` is unaffected; rollout
-state lives under ``event["deliveries"]["skillopt_rollout"]``.
+Skill pull data plane is independent; rollout state lives under
+``event["deliveries"]["skillopt_rollout"]``.
 """
 
 from __future__ import annotations
@@ -21,11 +21,9 @@ import httpx
 
 from team_skills.library.frontmatter import validate_skill_md
 
-from .skill_sync_adapters import SKILLOPT_ROLLOUT_CONSUMER, _delivery_due
-
 logger = logging.getLogger(__name__)
 
-CONSUMER_ID = SKILLOPT_ROLLOUT_CONSUMER
+CONSUMER_ID = "skillopt_rollout"
 MAX_ATTEMPTS = 8
 
 _SKILL_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
@@ -91,6 +89,16 @@ def _event_skills(event: dict[str, Any]) -> list[dict[str, Any]]:
         for item in event.get("skills") or []
         if isinstance(item, dict)
     ]
+
+
+def _delivery_due(delivery: dict[str, Any]) -> bool:
+    try:
+        value = datetime.fromisoformat(str(delivery.get("next_retry_at") or ""))
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value <= datetime.now(timezone.utc)
+    except (TypeError, ValueError):
+        return True
 
 
 def _prepare_posts(service: Any, live: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
@@ -330,7 +338,7 @@ async def rollout_tick(
     """One consumer pass over the outbox; caps attempted events per tick."""
     synced = failed = 0
     attempted = 0
-    for _, event in service.iter_outbox_events():
+    for _, event in service.iter_rollout_events():
         if attempted >= max_events:
             break
         result = await deliver_rollout(config, service, event)

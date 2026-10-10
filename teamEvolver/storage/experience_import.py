@@ -79,41 +79,20 @@ def project_page(store, source, *, offset, max_source_bytes, limit=100):
     sql, args, body = _source_sql(store, source)
     n = len(args)
     cap, start, count = f"${n+1}", f"${n+2}", f"${n+3}"
-    key = "/" + source["key"]
-    evidence = "/skill_evidence/" in key
-    archive = source["phase"] == "objects" and not evidence and "/experience_library/sessions/" not in key
-    # Preserve the existing public-judge precedence without returning scores or trajectories.
-    if evidence:
-        array = "body->'evidence'"
-        invalid = "false"
-    elif archive:
-        scores = ("CASE WHEN jsonb_typeof(body->'judge')='object' AND (body->'judge') ? 'skill_experiences' "
-                  "THEN body->'judge' WHEN jsonb_typeof(body->'_judge_scores')='object' "
-                  "AND body->'_judge_scores'<>'{}'::jsonb THEN body->'_judge_scores' "
-                  "ELSE body->'judge' END")
-        array = f"({scores})->'skill_experiences'"
+    archive = source["phase"] == "objects"
+    if archive:
+        array = "body->'judge'->'skill_experiences'"
         invalid = ("EXISTS(SELECT 1 FROM jsonb_each(CASE WHEN jsonb_typeof(body)='object' THEN body "
-                   "ELSE '{}'::jsonb END) f WHERE f.key IN ('judge','_judge_scores') "
+                   "ELSE '{}'::jsonb END) f WHERE f.key='judge' "
                    "AND jsonb_typeof(f.value) NOT IN ('object','null'))")
     else:
         array = "body->'experiences'"
         invalid = "NOT (body ? 'experiences')"
-    if evidence:
-        projection = """jsonb_build_object(
-            'skill_name',body->'skill_name','session_id',entry->'session_id',
-            'timestamp',entry->'timestamp','ingested_at',entry->'ingested_at',
-            'evolution_evidence',entry->'evolution_evidence','evidence_reason',entry->'evidence_reason')"""
-    else:
-        projection = """jsonb_build_object(
-            'session_id',body->'session_id','timestamp',body->'timestamp','ingested_at',body->'ingested_at',
-            'skill_name',entry->'skill_name','kind',entry->'kind',
-            'experience_key',entry->'experience_key','description',entry->'description')"""
-    if evidence:
-        eligible = "lower(btrim(COALESCE(entry->>'evolution_evidence','')))='exemplary'"
-    elif archive:
-        eligible = "lower(btrim(COALESCE(entry->>'kind','')))='exemplary'"
-    else:
-        eligible = "COALESCE(entry->>'kind','')='exemplary'"
+    projection = """jsonb_build_object(
+        'session_id',body->'session_id','timestamp',body->'timestamp','ingested_at',body->'ingested_at',
+        'skill_name',entry->'skill_name','kind',entry->'kind',
+        'experience_key',entry->'experience_key','description',entry->'description')"""
+    eligible = "COALESCE(entry->>'kind','')='exemplary'"
     # The materialized source guards the cast by source size. Budgeting happens
     # in PG, before returning data; a giant individual description is never sent.
     query = f"""

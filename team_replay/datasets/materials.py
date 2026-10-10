@@ -102,8 +102,8 @@ def collect_session_materials(
     """Collect deduplicated real uploads from source sessions.
 
     Embedded ``source_materials`` support cross-host Agents, while
-    ``sandbox_snapshot_path`` recovers same-host AgentsHub uploads without
-    inflating the ingest payload.
+    ``sandbox_snapshot_path`` recovers same-host uploads without inflating the
+    ingest payload.
     """
     output: list[dict[str, Any]] = []
     seen_hashes: set[str] = set()

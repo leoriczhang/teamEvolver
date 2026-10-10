@@ -1,0 +1,47 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "contract": {
+      "const": "kee.case-evidence.v1",
+      "default": "kee.case-evidence.v1",
+      "title": "Contract",
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "Evidence",
+        "Session",
+        "receipt"
+      ],
+      "title": "Kind",
+      "type": "string"
+    },
+    "reference": {
+      "maxLength": 2000,
+      "minLength": 1,
+      "title": "Reference",
+      "type": "string"
+    },
+    "digest": {
+      "default": "",
+      "title": "Digest",
+      "type": "string"
+    },
+    "outcome": {
+      "default": "unknown",
+      "enum": [
+        "supported",
+        "contradicted",
+        "unknown"
+      ],
+      "title": "Outcome",
+      "type": "string"
+    }
+  },
+  "required": [
+    "kind",
+    "reference"
+  ],
+  "title": "CaseEvidence",
+  "type": "object"
+}

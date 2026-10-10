@@ -23,6 +23,7 @@ from typing import Any
 from team_skills.library.frontmatter import parse_skill_md
 
 from . import benchmark_format
+from .compile_strategy import compiler_execution_guidance
 
 SKILL_NAME = "skill-miner-compile-v1"
 SKILL_URI = f"viking://agent/skills/{SKILL_NAME}"
@@ -56,9 +57,22 @@ Write the following files below the requested output directory:
 - `analysis/gaps.md`: contradictions, missing evidence, and questions that need human supplementation.
 - `compiled_skill/<skill-name>/SKILL.md`: a valid reusable Skill with YAML `name` and `description` frontmatter.
 - `compiled_skill/<skill-name>/EVALUATION.md`: scope, positive/negative examples, risks, and acceptance criteria.
-- `compiled_skill/<skill-name>/benchmark_cases.json`: a JSON array of 12-24 diverse test cases.
-  Every item must contain `input`, at least 12 concrete `requirements`, `difficulty`,
-  `target_dimensions`, and `source_session_ids` containing source Viking URIs.
+- `compiled_skill/<skill-name>/benchmark.json`: one `team-replay.dataset` document with 12-24 diverse test cases.
+  The document must contain `schema_version` (exactly `team-replay.dataset`), a nonempty
+  `dataset_id` and `name`, `description`, `skills` ([{"skill_id": "<skill-name>"}]),
+  `source` ({"kind": "skill_miner"}), `cases`, ISO `created_at` and `updated_at`,
+  and `metadata` ({"candidate_revision": 1}).
+  Each case must contain exactly `case_id`, `query`, `skill_ids` (["<skill-name>"]),
+  `checks`, `materials` (an array), `provenance`, `replay`, and `metadata`.
+  `checks` must contain at least 12 distinct concrete output completion conditions
+  and at least one trajectory condition, each with unique `id`, `kind` (`output` or
+  `trajectory`), and `text`; prohibitions may include `polarity`: `must_not`.
+  Put source Viking URIs in `provenance.session_ids`.
+  Set `replay.progressive_disclosure` to {"enabled": true, "initial_visibility":
+  "query_only", "batch_size": 4, "stop_when": "all_checklist_items_satisfied"}.
+  Put `split`: `test`, `minimum_requirement_target`: 12, `difficulty`,
+  `target_dimensions`, and the display `name` in case `metadata`.
+  Do not emit alternative formats, `input`, `requirements`, or `name` at case top level.
 - `compiled_skill/<skill-name>/BENCHMARK.md`: a human-readable view of the same test cases.
 
 ## Quality rules
@@ -70,6 +84,9 @@ Write the following files below the requested output directory:
 - Include boundary, refusal, ambiguity, and adversarial cases in the test set.
 - Do not write outside the requested output directory.
 """
+
+
+SKILL_BODY += compiler_execution_guidance()
 
 
 def utc_now() -> str:
@@ -288,7 +305,11 @@ class OvSkillMiningRepository:
         output_uri: str,
         document_count: int,
         max_rounds: int,
+        runtime_timeout_seconds: int = 3600,
+        human_checkpoints: bool = True,
     ) -> dict[str, Any]:
+        if not 60 <= runtime_timeout_seconds <= 7200:
+            raise ValueError("运行期限必须在 60 到 7200 秒之间")
         with self._lock:
             active = sum(
                 1
@@ -315,7 +336,16 @@ class OvSkillMiningRepository:
                 "ov_task_id": "",
                 "document_count": int(document_count),
                 "max_rounds": normalized_rounds,
-                "current_round": 1,
+                "current_round": None,
+                "runtime_timeout_seconds": runtime_timeout_seconds,
+                "human_checkpoints_requested": bool(human_checkpoints),
+                "human_checkpoints_effective": False,
+                "rounds_mode": "instruction_hint",
+                "options_warnings": ["OV Compile 不支持暂停表单问答；轮数仅作为内部复核提示，不代表已执行轮次"],
+                "ov_cancel_requested_at": "",
+                "ov_cancel_reason": "",
+                "ov_cancel_sent_at": "",
+                "ov_cancel_error": "",
                 "phase": {"step1": "active", "step2": "idle", "step3": "idle"},
                 "created_at": now,
                 "started_at": "",
@@ -409,7 +439,7 @@ class OvSkillMiningRepository:
         if parts[0] == "analysis":
             parts[0] = "semantic_reports"
         elif parts[0] != "compiled_skill":
-            if parts[-1] in {"SKILL.md", "EVALUATION.md", "BENCHMARK.md", "benchmark.json", "benchmark_cases.json"}:
+            if parts[-1] in {"SKILL.md", "EVALUATION.md", "BENCHMARK.md", "benchmark.json"}:
                 parts.insert(0, "compiled_skill")
         target = (workspace / Path(*parts)).resolve()
         if workspace not in target.parents:
@@ -421,6 +451,10 @@ class OvSkillMiningRepository:
     def finalize_materialized(self, job_id: str) -> dict[str, Any]:
         job = self.get_job(job_id)
         workspace = self.workspace(job)
+        for name in ("evidence-map.md", "gaps.md"):
+            report = workspace / "semantic_reports" / name
+            if not report.is_file() or not report.read_text(encoding="utf-8").strip():
+                raise ValueError(f"OV Compile 未生成 analysis/{name}")
         skill_files = sorted((workspace / "compiled_skill").glob("*/SKILL.md"))
         if len(skill_files) != 1:
             raise ValueError(f"OV Compile 应生成一个 Skill Candidate，实际找到 {len(skill_files)} 个")
@@ -433,39 +467,30 @@ class OvSkillMiningRepository:
             raise ValueError("OV Compile 未生成 EVALUATION.md")
 
         benchmark_path = skill_dir / "benchmark.json"
-        cases_path = skill_dir / "benchmark_cases.json"
         warnings: list[str] = []
-        if cases_path.is_file():
-            try:
-                payload = json.loads(cases_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError as exc:
-                raise ValueError("benchmark_cases.json 不是有效 JSON") from exc
-            cases = payload.get("cases") if isinstance(payload, dict) else payload
-            if not isinstance(cases, list):
-                raise ValueError("benchmark_cases.json 必须是数组或包含 cases 数组")
-            document, quality = benchmark_format.build_document_with_quality(skill_dir.name, cases)
-            benchmark_path.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            warnings.extend(str(item.get("message") or "") for item in quality if isinstance(item, dict))
         if not benchmark_path.is_file():
-            raise ValueError("OV Compile 未生成 benchmark.json 或 benchmark_cases.json")
+            raise ValueError("OV Compile 未生成 benchmark.json")
         document, errors = benchmark_format.read_document(benchmark_path)
         if document is not None:
             errors.extend(benchmark_format.validate_document(document, expected_skill_name=skill_dir.name))
         if errors:
             raise ValueError("Test Dataset 格式不合法：" + "；".join(dict.fromkeys(errors)))
+        case_count = len((document or {}).get("cases") or [])
+        if not 12 <= case_count <= 24:
+            raise ValueError(f"Test Dataset 应有 12–24 条案例，实际为 {case_count} 条")
+        for case in (document or {}).get("cases") or []:
+            citations = (case.get("provenance") or {}).get("session_ids") or []
+            if not citations or any(not isinstance(uri, str) or not uri.startswith("viking://") for uri in citations):
+                raise ValueError("每条 Test Dataset 案例必须包含非空的来源 Viking URI")
+            for uri in citations:
+                if not any(
+                    str(uri).startswith(str(job.get(key) or "") + "/")
+                    for key in ("source_uri", "source_snapshot") if job.get(key)
+                ):
+                    raise ValueError("Test Dataset 引用不属于本任务知识源")
         benchmark_md = skill_dir / "BENCHMARK.md"
-        if not benchmark_md.is_file():
-            lines = [f"# {skill_dir.name} Test Dataset", ""]
-            for index, case in enumerate((document or {}).get("cases") or [], start=1):
-                lines.extend(
-                    [
-                        f"## {index}. {case.get('name') or case.get('case_id')}",
-                        "",
-                        str(case.get("query") or ""),
-                        "",
-                    ]
-                )
-            benchmark_md.write_text("\n".join(lines), encoding="utf-8")
+        if not benchmark_md.is_file() or not benchmark_md.read_text(encoding="utf-8").strip():
+            raise ValueError("OV Compile 未生成完整的 BENCHMARK.md，禁止自动补齐必需产物")
         question_count = len((document or {}).get("cases") or [])
         quality = {
             "has_skill": True,
@@ -481,7 +506,7 @@ class OvSkillMiningRepository:
                     "kind": "benchmark",
                     "state": "ready",
                     "label": f"Test Dataset · {question_count} 条",
-                    "detail": "已转换为统一 v2 格式。",
+                    "detail": "已通过 Test Dataset 结构校验。",
                 },
             ],
             "can_submit": True,
@@ -505,7 +530,6 @@ class OvSkillMiningRepository:
             "EVALUATION.md": "evaluation",
             "BENCHMARK.md": "benchmark",
             "benchmark.json": "benchmark",
-            "benchmark_cases.json": "benchmark",
         }
         for path in sorted(workspace.rglob("*")):
             if not path.is_file():

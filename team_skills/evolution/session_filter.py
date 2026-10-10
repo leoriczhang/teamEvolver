@@ -5,8 +5,11 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any
 
+from teamEvolver.config import (
+    DEFAULT_LLM_MAX_CONCURRENCY,
+    DEFAULT_LLM_QUEUE_CAPACITY,
+)
 from teamEvolver.llm import AsyncLLMClient
 from teamEvolver.tenants.registry import current_tenant_id
 
@@ -49,7 +52,6 @@ class SessionValueClassifier:
         model = str(
             stage_options.get("model")
             or getattr(config, "llm_model_id", "")
-            or getattr(config, "model_name", "")
             or ""
         ).strip()
         if not api_key or not base_url or not model:
@@ -77,26 +79,23 @@ class SessionValueClassifier:
                     max_retries=1,
                     tenant_id=current_tenant_id(),
                     max_concurrency=int(
-                        getattr(config, "llm_max_concurrency", 8) or 8
+                        getattr(
+                            config,
+                            "llm_max_concurrency",
+                            DEFAULT_LLM_MAX_CONCURRENCY,
+                        )
+                        or DEFAULT_LLM_MAX_CONCURRENCY
                     ),
                     queue_capacity=int(
-                        getattr(config, "llm_queue_capacity", 64) or 64
+                        getattr(
+                            config,
+                            "llm_queue_capacity",
+                            DEFAULT_LLM_QUEUE_CAPACITY,
+                        )
+                        or DEFAULT_LLM_QUEUE_CAPACITY
                     ),
                 )
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[SessionFilter] classifier client unavailable: %s", exc)
             return cls(client=None)
-
-    async def classify(self, session: dict[str, Any]) -> dict[str, Any]:
-        """Run mandatory merged analysis; never return a heuristic substitute."""
-        from team_skills.evolution.stages.analyze import (
-            SessionAnalysisError,
-            analyze_session,
-        )
-
-        if self.client is None:
-            raise SessionAnalysisError(
-                "Session Analyze requires a configured LLM client"
-            )
-        return await analyze_session(self.client, session)

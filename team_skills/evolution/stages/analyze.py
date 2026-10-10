@@ -180,7 +180,7 @@ _FOCUS_NO_SKILLS = """\
 重点判断会话是否包含可沉淀为**新** Skill 的团队 SOP——是否存在可复用、可泛化的任务方法/操作规程。若存在且证据充分，decision 应为 valuable 并在 summary 中说明可抽象出的 SOP；若只是一次性、无法泛化的操作，则不要拔高为 valuable。"""
 
 _EXPERIENCE_OUTPUT_ADDENDUM = """\
-## 兼容要求：Skill 使用经验
+## 输出要求：Skill 使用经验
 <judge> JSON 必须包含 `skill_experiences` 数组。只记录本会话实际使用且有明确因果证据的 Skill；
 每项包含 skill_name、kind（defect 或 exemplary）、稳定的 experience_key 和一段中文 description。
 skill_name 必须来自 used_skills，但对应 Skill 无需预先上传到 teamEvolver Skill 库。
@@ -299,7 +299,7 @@ async def analyze_session(
 ) -> dict[str, Any]:
     """Run the merged analysis for one session.
 
-    Side effects (to preserve the three legacy consumer contracts):
+    Side effects:
     - ``session["_trajectory"]`` and metadata are (re)built.
     - ``session["_summary"]`` is set to the merged summary text.
     - ``session["_judge_scores"]`` / ``_prm_scores`` / ``_avg_prm`` are applied

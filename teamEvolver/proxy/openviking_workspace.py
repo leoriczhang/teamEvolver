@@ -21,11 +21,10 @@ from fastapi.responses import JSONResponse
 from ..storage import LocalObjectStore, is_not_found_error
 from ..storage import _VIKING_ROOT_PREFIX
 from ..storage import _effective_fallback_root
+from ..admin.identity_store import IdentityStore
 from .users_admin import (
     _find_user,
-    _load_registry,
     _openviking_root_key,
-    _registry_path,
     _request_user,
     _require_self_or_admin,
 )
@@ -101,11 +100,7 @@ def _scope_map(
         getattr(config, "sharing_viking_root_prefix", "") or "team-skill-evolver"
     ).strip().strip("/")
     shared = f"viking://resources/{prefix}"
-    personal_owner = str(
-        personal_user
-        or user_id
-        or getattr(config, "sharing_viking_personal_user", "")
-    ).strip()
+    personal_owner = str(personal_user or user_id).strip()
     # Identity used to reach account-shared team resources. It is only the
     # ``X-OpenViking-User`` header value for viking://resources/* access (which
     # is account-shared and role-agnostic), not a private storage owner. Read it
@@ -393,7 +388,6 @@ def _scope_fallback_root(config, scope: "_WorkspaceScope", endpoint: str) -> tup
         account=str(getattr(config, "sharing_viking_account", "") or "default"),
         user=scope.openviking_user or "default",
         root_prefix=root_prefix,
-        group_id=str(getattr(config, "sharing_viking_group_id", "") or ""),
         namespace=namespace,
     )
     return root, key_base
@@ -570,9 +564,10 @@ class OpenVikingWorkspaceMixin:
         if not target_id:
             raise HTTPException(status_code=400, detail="user_id is required")
         _require_self_or_admin(request, target_id)
-        registry = _load_registry(_registry_path(self.config), self.config)
+        registry = IdentityStore(self.config).load_registry()
         _index, user = _find_user(registry, target_id)
-        return user, str(current.get("role") or "user") == "admin"
+        from ..admin.authorization import is_tenant_admin
+        return user, is_tenant_admin(current)
 
     def _workspace_scope(
         self, request: Request, requested_user_id: str, scope_name: str
@@ -762,8 +757,7 @@ class OpenVikingWorkspaceMixin:
                 cli_available = False
             return JSONResponse(content={
                 "enabled": bool(
-                    getattr(config, "sharing_enabled", False)
-                    and endpoint
+                    endpoint
                     and root_key_configured
                 ),
                 "deployment": deployment,
@@ -777,7 +771,7 @@ class OpenVikingWorkspaceMixin:
                     else ""
                 ),
                 "cli_available": cli_available,
-                "cli_full_access": is_admin,
+                "cli_full_access": is_admin and bool(_request_user(request).get("platform_role") == "platform_admin"),
                 "user_id": str(user.get("id") or ""),
                 "account": str(getattr(config, "sharing_viking_account", "") or "default"),
                 "root_key_configured": root_key_configured,
@@ -1207,7 +1201,7 @@ class OpenVikingWorkspaceMixin:
                             "wait": False,
                         },
                     )
-                except _OpenVikingUnavailable as exc:
+                except _OpenVikingUnavailable:
                     # OpenViking answered reads but the batch-write endpoint is
                     # unhealthy (it has deadlocked before, see storage/viking.py).
                     # Degrade to per-object writes against the *same* live OV so
@@ -1286,7 +1280,8 @@ class OpenVikingWorkspaceMixin:
                 _normalize_cli_argv(str(body.get("command") or "")),
                 current_uri,
             )
-            is_admin = str(_request_user(request).get("role") or "user") == "admin"
+            from ..admin.authorization import is_platform_admin, is_tenant_admin
+            is_admin = is_tenant_admin(_request_user(request)) and is_platform_admin(_request_user(request))
             if not is_admin:
                 argv = _scope_regular_cli_search(argv, current_uri)
             result = await owner._workspace_cli(

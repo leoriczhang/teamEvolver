@@ -9,22 +9,8 @@ import {
 } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import {
   api,
-  registerAgentIntegration,
-  type AgentIntegration,
-  type AgentIntegrationsResp,
-  type RegisterAgentPayload,
   type ReplayAdapterInfo,
   type EvolveModelSettings,
   type SharingConfig,
@@ -56,14 +42,12 @@ type Check = {
 };
 
 type SharingUpdate = {
-  enabled: boolean;
   deployment: VikingDeployment;
   endpoint_override: string;
   account: string;
   team_user?: string;
   root_prefix?: string;
-  service_api_key?: string;
-  team_api_key?: string;
+  api_key?: string;
 };
 
 export default function HealthView({
@@ -87,8 +71,6 @@ export default function HealthView({
   const [candidateCount, setCandidateCount] = useState<number | null>(null);
   const [sharing, setSharing] = useState<SharingConfig | null>(null);
   const [replay, setReplay] = useState<ReplayAdapterInfo | null>(null);
-  const [agents, setAgents] = useState<AgentIntegration[]>([]);
-  const [agentFormOpen, setAgentFormOpen] = useState(false);
   const [logs, setLogs] = useState<LoggingStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const loaded = useRef(false);
@@ -96,7 +78,7 @@ export default function HealthView({
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [h, st, sto, mdl, us, sk, sess, cands, shr, replayInfo, agentsInfo, logInfo] = await Promise.allSettled([
+      const [h, st, sto, mdl, us, sk, sess, cands, shr, replayInfo, logInfo] = await Promise.allSettled([
         api<{ status?: string }>("/health"),
         api<StatusResp>("/status"),
         api<StorageStatus>("/storage/status"),
@@ -109,8 +91,7 @@ export default function HealthView({
         ),
         api<SharingConfig>("/api/sharing-config"),
         api<ReplayAdapterInfo>("/api/replay-adapter"),
-        api<AgentIntegrationsResp>("/api/agent-integrations"),
-        user?.role === "admin" ? api<LoggingStatus>("/api/logging/status") : Promise.resolve(null),
+        user?.platform_role === "platform_admin" ? api<LoggingStatus>("/api/logging/status") : Promise.resolve(null),
       ]);
       setHealth(h.status === "fulfilled" ? h.value : health);
       setStatus(st.status === "fulfilled" ? st.value : status);
@@ -126,7 +107,6 @@ export default function HealthView({
         onSharingConfigChange?.(shr.value);
       }
       if (replayInfo.status === "fulfilled") setReplay(replayInfo.value);
-      if (agentsInfo.status === "fulfilled") setAgents(agentsInfo.value.agents || []);
       setLogs(logInfo.status === "fulfilled" ? logInfo.value : null);
       setQueueCount(
         sess.status === "fulfilled"
@@ -145,6 +125,7 @@ export default function HealthView({
     }
   }, [
     user?.role,
+    user?.platform_role,
     candidateCount,
     health,
     model,
@@ -178,8 +159,18 @@ export default function HealthView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTenantId]);
 
+  const skillBackend =
+    skills?.skill_backend === "postgres"
+      ? "PostgreSQL"
+      : skills?.skill_backend === "viking"
+        ? "OpenViking"
+        : skills?.skill_backend === "local"
+          ? "本地对象存储"
+          : "未知";
+  const skillDelivery = "Agent 拉取";
+
   const checks: Check[] = [
-    ...(user?.role === "admin" ? [{
+    ...(user?.platform_role === "platform_admin" ? [{
       name: "服务日志",
       ok: logs?.file_state === "active" || logs?.file_state === "disabled",
       detail: logs ? (logs.file_state === "active"
@@ -202,17 +193,15 @@ export default function HealthView({
           ? `内置本地存储（回退）· OpenViking ${storage.deployment === "local" ? "自建" : "火山云"}不可达`
           : storage.effective_backend === "local"
             ? `内置本地存储 · ${storage.mirror_enabled ? `技能镜像到 OpenViking${storage.mirror?.backlog ? `（积压 ${storage.mirror.backlog}）` : ""}` : "OpenViking 仅作技能镜像目标"}`
-            : `OpenViking · ${storage.deployment === "local" ? "自建" : "火山云"} · ${storage.reachable ? "可达" : storage.reason === "sharing_disabled" ? "同步已暂停" : "不可达"}`
+            : `OpenViking · ${storage.deployment === "local" ? "自建" : "火山云"} · ${storage.reachable ? "可达" : "不可达"}`
         : "无法读取 /storage/status",
       action: storage?.fallback_active
         ? `OpenViking 暂不可用，数据正写入本地存储${storage.local_root ? `（${storage.local_root}）` : ""}；恢复后新数据自动回到 OpenViking，停机期间的本地数据不会自动回传`
         : storage?.reachable
           ? undefined
-          : storage?.reason === "sharing_disabled"
-            ? "存储连通正常；团队技能同步（sharing）已关闭，如需同步在配置中开启 sharing.enabled"
-            : storage?.deployment === "local"
-              ? "确认自建 openviking-server 已启动且网络可达（Endpoint 覆盖地址是否正确）"
-              : "检查火山云 OpenViking Key 与网络连通",
+          : storage?.deployment === "local"
+            ? "确认自建 openviking-server 已启动且网络可达（Endpoint 覆盖地址是否正确）"
+            : "检查火山云 OpenViking Key 与网络连通",
     },
     {
       name: "进化模型",
@@ -235,14 +224,14 @@ export default function HealthView({
       : []),
     {
       name: "用户注册表",
-      ok: users.length > 0 && users.some((u) => u.role === "admin"),
-      detail: `${users.length} 个用户 · ${users.filter((u) => u.role === "admin").length} 个管理员`,
-      action: users.some((u) => u.role === "admin") ? undefined : "至少保留 1 个管理员账号",
+      ok: users.length > 0,
+      detail: `${users.length} 个可见用户`,
+      action: users.length ? undefined : "请检查当前租户的成员关系",
     },
     {
       name: "团队技能库",
       ok: !!skills,
-      detail: skills ? `${skills.skills.length} 个团队技能 · ${skills.sharing_enabled ? "云同步开启" : "云同步关闭"}` : "无法读取技能列表",
+      detail: skills ? `${skills.skills.length} 个团队技能 · ${skillBackend} · ${skillDelivery}` : "无法读取技能列表",
     },
 
   ];
@@ -315,66 +304,10 @@ export default function HealthView({
 
       <ReplayBindingPanel info={replay} isAdmin={isAdmin} onSaved={refresh} />
 
-      <Panel
-        title="Agent 接入"
-        count={`${agents.length} 个`}
-        extra={
-          isAdmin ? (
-            <Button size="sm" onClick={() => setAgentFormOpen(true)}>
-              注册 Agent
-            </Button>
-          ) : undefined
-        }
-      >
-        <div className="grid gap-3 p-4 md:grid-cols-2">
-          {agents.map((agent) => (
-            <div key={agent.agent_id} className="rounded-lg border border-border bg-background/60 p-3">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="text-sm font-bold">
-                    {agent.display_name || agent.agent_id}
-                  </div>
-                  <div className="mono mt-1 text-[11px] text-muted-foreground">
-                    {agent.agent_id}
-                  </div>
-                </div>
-                <Dot state={agent.status === "active" ? "on" : "off"} />
-              </div>
-              <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
-                <Info label="协议" value={agent.protocol_version || "legacy"} />
-                <Info label="兼容状态" value={agent.compatibility || "legacy"} />
-                <Info
-                  label="Replay"
-                  value={agent.endpoints?.replay_url ? "HTTP" : agent.runtime_type === "hermes" ? "Local" : "未配置"}
-                />
-              </div>
-              <div className="mt-3 flex flex-wrap gap-1.5">
-                {(agent.capability_ids || agent.capabilities || []).map((capability) => (
-                  <span key={capability} className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                    {capability}
-                  </span>
-                ))}
-              </div>
-            </div>
-          ))}
-          {!agents.length && (
-            <div className="col-span-full rounded-lg border border-dashed border-border p-5 text-center text-sm text-muted-foreground">
-              暂无已注册 Agent。
-            </div>
-          )}
-        </div>
-      </Panel>
-
-      <AgentRegisterDialog
-        open={agentFormOpen}
-        onOpenChange={setAgentFormOpen}
-        onRegistered={refresh}
-      />
-
       <DeploymentPanel
         sharing={sharing}
         storage={storage}
-        isAdmin={isAdmin}
+        isAdmin={isAdmin && user?.platform_role === "platform_admin"}
         onSave={saveDeployment}
       />
 
@@ -403,8 +336,8 @@ export default function HealthView({
           <Info label="存储命名空间" value={storage?.namespace || "未返回"} />
           <Info label="模型" value={model?.model || "未配置"} state={model?.model ? "on" : "err"} />
           <Info label="模型 Base URL" value={model?.base_url || "未配置"} />
-          <Info label="团队技能同步" value={skills?.sharing_enabled ? "开启" : "关闭"} state={skills?.sharing_enabled ? "on" : "off"} />
-          <Info label="当前登录角色" value={user?.role === "admin" ? "管理员" : "一般用户"} state={user?.role === "admin" ? "on" : "off"} />
+          <Info label="团队 Skill 注册表" value={`${skillBackend} · ${skillDelivery}`} state={skills ? "on" : "err"} />
+          <Info label="当前登录角色" value={user?.platform_role === "platform_admin" ? "平台超级管理员" : isAdmin ? "租户管理员" : "普通成员"} state={isAdmin ? "on" : "off"} />
         </div>
       </Panel>
     </div>
@@ -441,8 +374,8 @@ function DeploymentPanel({
   const [deployment, setDeployment] = useState<VikingDeployment>("cloud");
   const [override, setOverride] = useState("");
   const [account, setAccount] = useState("default");
-  const [teamKey, setTeamKey] = useState("");
-  const [teamKeyDirty, setTeamKeyDirty] = useState(false);
+  const [rootKey, setRootKey] = useState("");
+  const [rootKeyDirty, setRootKeyDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [bootstrapping, setBootstrapping] = useState(false);
@@ -455,8 +388,8 @@ function DeploymentPanel({
     setDeployment((sharing.deployment as VikingDeployment) || "cloud");
     setOverride(sharing.endpoint_override || "");
     setAccount(sharing.account || "default");
-    setTeamKey("");
-    setTeamKeyDirty(false);
+    setRootKey("");
+    setRootKeyDirty(false);
   }, [sharing, dirty]);
 
   const cloudEndpoint = sharing?.cloud_endpoint || "";
@@ -468,13 +401,12 @@ function DeploymentPanel({
     setSaving(true);
     try {
       await onSave({
-        enabled: true,
         deployment,
         endpoint_override: override.trim(),
         account: account.trim() || "default",
         // team_user / root_prefix are no longer user-configurable: the account
         // is the tenant boundary, so the backend keeps its internal defaults.
-        ...(teamKeyDirty ? { service_api_key: teamKey, team_api_key: teamKey } : {}),
+        ...(rootKeyDirty ? { api_key: rootKey } : {}),
       });
       setDirty(false);
     } catch (e: any) {
@@ -578,11 +510,7 @@ function DeploymentPanel({
             {storage ? (
               <>
                 {" · "}当前{" "}
-                {storage.reachable
-                  ? "可达"
-                  : storage.reason === "sharing_disabled"
-                    ? "同步已暂停"
-                    : "不可达"}
+                {storage.reachable ? "可达" : "不可达"}
               </>
             ) : null}
           </div>
@@ -596,11 +524,11 @@ function DeploymentPanel({
             onChange={(value) => { setAccount(value); setDirty(true); }}
           />
           <ConfigInput
-            label={`OpenViking Root Key${(sharing?.service_api_key_present ?? sharing?.team_api_key_present) ? "（已配置，留空保留）" : ""}`}
-            value={teamKey}
+            label={`OpenViking Root Key${sharing?.api_key_present ? "（已配置，留空保留）" : ""}`}
+            value={rootKey}
             type="password"
             disabled={!isAdmin}
-            onChange={(value) => { setTeamKey(value); setTeamKeyDirty(true); setDirty(true); }}
+            onChange={(value) => { setRootKey(value); setRootKeyDirty(true); setDirty(true); }}
           />
         </div>
 
@@ -624,8 +552,8 @@ function DeploymentPanel({
                 setDeployment((sharing?.deployment as VikingDeployment) || "cloud");
                 setOverride(sharing?.endpoint_override || "");
                 setAccount(sharing?.account || "default");
-                setTeamKey("");
-                setTeamKeyDirty(false);
+                setRootKey("");
+                setRootKeyDirty(false);
                 setDirty(false);
               }}
             >
@@ -729,296 +657,5 @@ function ReplayBindingPanel({ info, isAdmin, onSaved }: {
         <p className="text-xs text-muted-foreground">{!info ? "无法读取运行环境配置" : info.configured && info.enabled ? "已绑定；真实执行结果以 Replay 记录为准。" : "尚未绑定可用的运行环境。"}</p>
       </div>
     </Panel>
-  );
-}
-
-const EMPTY_AGENT_FORM = {
-  agent_id: "",
-  runtime_type: "",
-  display_name: "",
-  runtime_version: "1.0.0",
-  replay_url: "",
-  orchestration: "server_driven",
-  max_interactions: "10",
-  auth_profile: "",
-  session_ingest: false,
-  agent_mode: "plain_http",
-  request_template: JSON.stringify(
-    {
-      message: "{{prompt}}",
-      session_id: "{{request_id}}",
-      history: "{{history}}",
-    },
-    null,
-    2
-  ),
-  map_final_response: "answer",
-  map_messages: "messages",
-  map_tool_call_count: "usage.tool_calls",
-  map_total_tokens: "usage.total_tokens",
-  map_status: "status",
-  map_error: "error.message",
-};
-
-const AGENT_MODE_HINTS: Record<string, string> = {
-  plain_http: "Agent 侧零感知：无需安装任何组件，teamEvolver 按下方模板直接调用 Agent 已有接口。",
-  server_driven: "Agent 侧运行 scripts/replay_turn_server.py 并实现 replay-turn 协议端点。",
-};
-
-function AgentRegisterDialog({ open, onOpenChange, onRegistered }: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onRegistered: () => void;
-}) {
-  const [form, setForm] = useState({ ...EMPTY_AGENT_FORM });
-  const [saving, setSaving] = useState(false);
-
-  const set = (key: keyof typeof EMPTY_AGENT_FORM) => (value: string | boolean) =>
-    setForm((prev) => ({ ...prev, [key]: value }));
-
-  const close = () => {
-    onOpenChange(false);
-    setForm({ ...EMPTY_AGENT_FORM });
-  };
-
-  const submit = async () => {
-    if (!form.agent_id.trim() || !form.runtime_type.trim() || !form.replay_url.trim()) {
-      toastErr("请填写 agent_id、runtime_type 和 replay_url");
-      return;
-    }
-    const payload: RegisterAgentPayload = {
-      agent_id: form.agent_id.trim(),
-      runtime_type: form.runtime_type.trim(),
-      runtime_version: form.runtime_version.trim() || "1.0.0",
-      display_name: form.display_name.trim() || form.agent_id.trim(),
-      replay_url: form.replay_url.trim(),
-      orchestration: "server_driven",
-      max_interactions: Number(form.max_interactions) || 10,
-      auth_profile: form.auth_profile.trim(),
-      session_ingest: form.session_ingest,
-    };
-    if (form.agent_mode === "plain_http") {
-      let template: unknown;
-      try {
-        template = JSON.parse(form.request_template);
-      } catch {
-        toastErr("请求体模板不是合法 JSON");
-        return;
-      }
-      payload.request_template = template as Record<string, unknown>;
-      payload.response_mapping = {
-        final_response: form.map_final_response.trim(),
-        messages: form.map_messages.trim(),
-        tool_call_count: form.map_tool_call_count.trim(),
-        total_tokens: form.map_total_tokens.trim(),
-        status: form.map_status.trim(),
-        "error.message": form.map_error.trim(),
-      };
-    }
-    setSaving(true);
-    try {
-      await registerAgentIntegration(payload);
-      onRegistered();
-      toastOk("Agent 注册成功");
-      close();
-    } catch (e: any) {
-      toastErr("Agent 注册失败", e.message);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        if (!next) close();
-      }}
-    >
-      <DialogContent className="sm:max-w-[520px]">
-        <DialogHeader>
-          <DialogTitle>注册 Agent</DialogTitle>
-          <DialogDescription>
-            将 Agent 的回放端点接入 teamEvolver。配合
-            <span className="mono"> scripts/replay_turn_server.py </span>
-            使用时，每个 Agent 注册一条，endpoint 指向
-            <span className="mono"> /turn/&lt;runtime_type&gt; </span>路由。
-          </DialogDescription>
-        </DialogHeader>
-        <div className="grid gap-3.5 py-1">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <Label className="mb-1.5 block text-xs font-semibold text-muted-foreground">
-                  Agent ID *
-                </Label>
-                <Input
-                  value={form.agent_id}
-                  placeholder="openclaw:prod"
-                  onChange={(e) => set("agent_id")(e.target.value)}
-                />
-              </div>
-              <div>
-                <Label className="mb-1.5 block text-xs font-semibold text-muted-foreground">
-                  Runtime Type *
-                </Label>
-                <Input
-                  value={form.runtime_type}
-                  placeholder="openclaw"
-                  onChange={(e) => set("runtime_type")(e.target.value)}
-                />
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <Label className="mb-1.5 block text-xs font-semibold text-muted-foreground">
-                  显示名称
-                </Label>
-                <Input
-                  value={form.display_name}
-                  placeholder="与 Agent ID 相同"
-                  onChange={(e) => set("display_name")(e.target.value)}
-                />
-              </div>
-              <div>
-                <Label className="mb-1.5 block text-xs font-semibold text-muted-foreground">
-                  Runtime 版本
-                </Label>
-                <Input
-                  value={form.runtime_version}
-                  onChange={(e) => set("runtime_version")(e.target.value)}
-                />
-              </div>
-            </div>
-            <div>
-              <Label className="mb-1.5 block text-xs font-semibold text-muted-foreground">
-                回放端点（replay_url）*
-              </Label>
-              <Input
-                value={form.replay_url}
-                placeholder="http://agent-host:8010/turn/openclaw"
-                onChange={(e) => set("replay_url")(e.target.value)}
-              />
-              <p className="mt-1 text-[11px] text-muted-foreground">
-                teamEvolver 逐轮主动调用该端点（orchestration=server_driven）。
-              </p>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <Label className="mb-1.5 block text-xs font-semibold text-muted-foreground">
-                  Agent 接口模式
-                </Label>
-                <select
-                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-2.5 py-1 text-sm shadow-xs focus-visible:outline-none"
-                  value={form.agent_mode}
-                  onChange={(e) => set("agent_mode")(e.target.value)}
-                >
-                  <option value="plain_http">直调已有接口（零感知，推荐）</option>
-                  <option value="server_driven">协议端点（需运行脚本）</option>
-                </select>
-              </div>
-              <div>
-                <Label className="mb-1.5 block text-xs font-semibold text-muted-foreground">
-                  最大交互轮数
-                </Label>
-                <Input
-                  type="number"
-                  min={1}
-                  max={20}
-                  value={form.max_interactions}
-                  onChange={(e) => set("max_interactions")(e.target.value)}
-                />
-              </div>
-            </div>
-            <p className="rounded-md bg-muted/60 px-2.5 py-2 text-[11px] leading-relaxed text-muted-foreground">
-              {AGENT_MODE_HINTS[form.agent_mode]}
-            </p>
-            {form.agent_mode === "plain_http" && (
-              <>
-                <div>
-                  <Label className="mb-1.5 block text-xs font-semibold text-muted-foreground">
-                    请求体模板（每轮 POST 的 JSON，支持 {"{{prompt}}"} / {"{{request_id}}"} /{" "}
-                    {"{{history}}"} / {"{{skill_content}}"} / {"{{context_snapshot}}"} /{" "}
-                    {"{{materials}}"})
-                  </Label>
-                  <Textarea
-                    className="mono min-h-[88px] font-mono text-xs"
-                    value={form.request_template}
-                    onChange={(e) => set("request_template")(e.target.value)}
-                  />
-                </div>
-                <div>
-                  <Label className="mb-1.5 block text-xs font-semibold text-muted-foreground">
-                    响应字段映射（Agent 自身响应的点路径）
-                  </Label>
-                  <div className="grid grid-cols-2 gap-2">
-                    <Input
-                      value={form.map_final_response}
-                      placeholder="final_response 路径，如 answer"
-                      onChange={(e) => set("map_final_response")(e.target.value)}
-                    />
-                    <Input
-                      value={form.map_messages}
-                      placeholder="messages（trace）路径"
-                      onChange={(e) => set("map_messages")(e.target.value)}
-                    />
-                    <Input
-                      value={form.map_tool_call_count}
-                      placeholder="tool_call_count 路径（缺省按 0）"
-                      onChange={(e) => set("map_tool_call_count")(e.target.value)}
-                    />
-                    <Input
-                      value={form.map_total_tokens}
-                      placeholder="total_tokens 路径（缺省按 0）"
-                      onChange={(e) => set("map_total_tokens")(e.target.value)}
-                    />
-                    <Input
-                      value={form.map_status}
-                      placeholder="status 路径（缺省 HTTP 2xx 即成功）"
-                      onChange={(e) => set("map_status")(e.target.value)}
-                    />
-                    <Input
-                      value={form.map_error}
-                      placeholder="error.message 路径"
-                      onChange={(e) => set("map_error")(e.target.value)}
-                    />
-                  </div>
-                </div>
-              </>
-            )}
-            <div>
-              <Label className="mb-1.5 block text-xs font-semibold text-muted-foreground">
-                回放密钥 Profile（可选）
-              </Label>
-              <Input
-                value={form.auth_profile}
-                placeholder="留空 = 回放调用不带 Bearer 密钥（内网可信部署）"
-                onChange={(e) => set("auth_profile")(e.target.value)}
-              />
-              <p className="mt-1 text-[11px] text-muted-foreground">
-                填写时，teamEvolver 侧需设置
-                <span className="mono"> TEAMEVOLVER_AGENT_&lt;PROFILE大写&gt;_REPLAY_API_KEY</span>
-                ，并与其一致。
-              </p>
-            </div>
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                className="size-4 accent-primary"
-                checked={form.session_ingest}
-                onChange={(e) => set("session_ingest")(e.target.checked)}
-              />
-              同时开启会话接入（声明 session.ingest.v1 能力；接入凭证为租户管理页的全权机器凭证）
-            </label>
-          </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={close} disabled={saving}>
-            取消
-          </Button>
-          <Button onClick={submit} disabled={saving}>
-            {saving ? "注册中…" : "注册"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }

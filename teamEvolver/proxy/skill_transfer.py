@@ -5,7 +5,7 @@ import asyncio
 import threading
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
@@ -32,11 +32,25 @@ class ExportBody(BaseModel):
 def register_skill_transfer_routes(app: FastAPI, owner) -> None:
     slots = threading.BoundedSemaphore(2)
 
+    async def require_json(request: Request):
+        _require_admin_request(request)
+        media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if media_type and media_type != "application/json" and not (
+            media_type.startswith("application/") and media_type.endswith("+json")
+        ):
+            # Reject binary/multipart bodies before model validation tries to
+            # serialize the invalid byte input into FastAPI's error response.
+            raise HTTPException(415, "Skill 导入导出接口需要 application/json；ZIP 请使用 zip_b64 字段")
+
     def service() -> SkillTransferService:
         from .routes import _tenant_effective_config
         config = _tenant_effective_config(owner)
-        return SkillTransferService(owner._skills_dir(),
-                                    SkillMutationService.from_config(config, tenant_id=current_tenant_id()))
+        return SkillTransferService(
+            SkillMutationService.from_config(
+                config,
+                tenant_id=current_tenant_id(),
+            )
+        )
 
     async def execute(callback):
         if not slots.acquire(blocking=False):
@@ -70,15 +84,29 @@ def register_skill_transfer_routes(app: FastAPI, owner) -> None:
         _require_admin_request(request)
 
         def work():
-            result = service().import_skills(body.channel, body.options, conflict=body.conflict)
-            result["loaded_skills"] = owner._reload_skill_manager()
+            transfer = service()
+            result = transfer.import_skills(
+                body.channel,
+                body.options,
+                conflict=body.conflict,
+            )
+            for item in result.get("imported") or []:
+                name = str(item.get("name") or "")
+                if not name:
+                    continue
+                bundle = transfer.hub.read_skill_bundle(name)
+                owner._materialize_runtime_bundle(
+                    name,
+                    bundle,
+                    category=str(item.get("category") or "general"),
+                )
             _clear_version_cache()
             return result
         return await execute(work)
 
-    app.post("/api/skills/import")(run_import)
+    app.post("/api/skills/import", dependencies=[Depends(require_json)])(run_import)
 
-    @app.post("/api/skills/export")
+    @app.post("/api/skills/export", dependencies=[Depends(require_json)])
     async def export_skills(body: ExportBody, request: Request):
         _require_admin_request(request)
         result = await execute(lambda: service().export_skills(body.channel, body.names, body.options))
@@ -86,19 +114,3 @@ def register_skill_transfer_routes(app: FastAPI, owner) -> None:
             return Response(result.content, media_type="application/zip",
                             headers={"Content-Disposition": f'attachment; filename="{result.filename}"'})
         return result.metadata
-
-    @app.post("/api/skills/import-zip")
-    async def legacy_zip(body: dict[str, Any], request: Request):
-        result = await run_import(ImportBody(channel="zip", options={**body, "single": True}), request)
-        if result["errors"]:
-            raise HTTPException(502, result["errors"][0]["error"])
-        if len(result["imported"]) != 1:
-            raise HTTPException(400, "请使用批量导入接口")
-        item = result["imported"][0]
-        return {**item, "loaded_skills": result["loaded_skills"]}
-
-    @app.post("/api/skills/import-zip-batch")
-    async def legacy_batch(body: dict[str, Any], request: Request):
-        result = await run_import(ImportBody(channel="zip", options=body), request)
-        return {**result, "cloud": [{"name": item["name"], "cloud": item["cloud"]}
-                                    for item in result["imported"]]}

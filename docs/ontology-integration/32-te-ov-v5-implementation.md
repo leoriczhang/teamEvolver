@@ -1,3 +1,5 @@
+> 历史 V5 实施记录。最新入口为 [KEE R6 简化实施](../kee-r6/HANDOFF.md)，本页结论保留作版本证据。R6 新方法结构与审批归 KEE，OV 提供通用 Wiki 内容、权限和索引。
+
 > 后续调整（2026-09-21）：发布改用 [trusted + Root Key](38-trusted-root-publication.md)，保留人工审批。下文保留当时设计与验收记录；独立发布签名不再是启用条件。
 
 > 后续版本：[V6 原生 Compile Wiki 本体构建](45-native-compile-wiki-operations.md)。本文保留 V5 实施历史，新任务不再使用这里的 TE 内置抽取流程。

@@ -18,6 +18,13 @@ import logging
 from fastapi import HTTPException, Request
 
 from ..tenants.registry import TenantRegistry
+from ..admin.authorization import authorize_target, available_tenants, is_platform_admin, require_platform_admin
+
+TENANT_CONFIG_KEYS = {
+    "llm_provider", "llm_api_base", "llm_model_id", "llm_api_key", "llm_max_tokens",
+    "llm_temperature", "llm_max_concurrency", "llm_queue_capacity", "llm_request_timeout_seconds",
+    "max_concurrent_sessions", "max_evolve_per_day",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -32,20 +39,17 @@ def get_tenant_registry(owner) -> TenantRegistry:
 
 
 def register_tenant_routes(owner, app) -> None:
-    from .routes import _read_limited_json_body, _require_admin_user
-
-
-
-
-
-
-
-
+    from .routes import _read_limited_json_body
     @app.get("/api/tenants")
     async def list_tenants(request: Request):
-        _require_admin_user(getattr(request.state, "console_user", None))
+        user = getattr(request.state, "console_user", None)
+        if user is None:
+            raise HTTPException(401, "login required")
         registry = get_tenant_registry(owner)
-        tenants = await asyncio.to_thread(registry.list_tenants)
+        tenants = await asyncio.to_thread(available_tenants, owner, user)
+        if is_platform_admin(user):
+            tenants = [{"tenant_id": t.tenant_id, "display_name": t.display_name, "status": t.status}
+                       for t in await asyncio.to_thread(registry.list_tenants)]
         return {
             "mode": registry.mode,
             # Single-tenant deployments configure one credential instead of
@@ -55,19 +59,12 @@ def register_tenant_routes(owner, app) -> None:
                 "env_var": "TEAMEVOLVER_TENANT_TOKEN",
                 "prefix": "tevt_",
             },
-            "tenants": [
-                {
-                    "tenant_id": t.tenant_id,
-                    "display_name": t.display_name,
-                    "status": t.status,
-                }
-                for t in tenants
-            ],
+            "tenants": tenants,
         }
 
     @app.post("/api/tenants")
     async def create_tenant(request: Request):
-        _require_admin_user(getattr(request.state, "console_user", None))
+        require_platform_admin(getattr(request.state, "console_user", None))
         registry = get_tenant_registry(owner)
         body = await _read_limited_json_body(request)
         display_name = str((body or {}).get("display_name") or "").strip() or "Untitled tenant"
@@ -81,9 +78,8 @@ def register_tenant_routes(owner, app) -> None:
             raise HTTPException(status_code=400, detail=str(exc))
         logger.info("[Tenants] created tenant %s", ctx.tenant_id)
         # Best-effort OpenViking account provisioning: an account named after
-        # the tenant_id is created as the default binding; the admin can freely
-        # re-point the tenant to a different OV account in the console (the
-        # account is no longer locked to the tenant_id).
+        # the tenant_id is created as the default binding. Only platform
+        # administrators may later change this infrastructure binding.
         # If the account already exists it is reused; otherwise it is created.
         # Fail-open: errors do not roll back the PG tenant; the result is
         # returned so the console can warn the operator to provision manually.
@@ -95,8 +91,6 @@ def register_tenant_routes(owner, app) -> None:
         # Persist the provisioned OpenViking account as the tenant's default
         # binding in config_overrides, so the effective config points at this
         # account even though it is no longer forced to equal the tenant_id.
-        # The admin may later re-point it to a different account from the
-        # console (运行状态 → OpenViking 部署).
         default_account = str(viking.get("account_id") or ctx.tenant_id).strip() or ctx.tenant_id
         try:
             await asyncio.to_thread(
@@ -149,7 +143,7 @@ def register_tenant_routes(owner, app) -> None:
 
     @app.post("/api/tenants/{tenant_id}/rotate-token")
     async def rotate_tenant_token(tenant_id: str, request: Request):
-        _require_admin_user(getattr(request.state, "console_user", None))
+        authorize_target(request, tenant_id)
         registry = get_tenant_registry(owner)
         try:
             token = await asyncio.to_thread(registry.rotate_token, tenant_id)
@@ -163,7 +157,7 @@ def register_tenant_routes(owner, app) -> None:
 
     @app.post("/api/tenants/{tenant_id}/status")
     async def set_tenant_status(tenant_id: str, request: Request):
-        _require_admin_user(getattr(request.state, "console_user", None))
+        require_platform_admin(getattr(request.state, "console_user", None))
         registry = get_tenant_registry(owner)
         body = await _read_limited_json_body(request)
         status = str((body or {}).get("status") or "").strip().lower()
@@ -204,15 +198,29 @@ def register_tenant_routes(owner, app) -> None:
         return fields | set(QUOTA_KEYS)
 
     def _public_tenant_overrides(overrides) -> tuple[dict, dict[str, bool]]:
-        public = dict(overrides or {})
-        secret_presence = {
-            "llm_api_key": bool(str(public.pop("llm_api_key", "") or "")),
-        }
+        secret_presence = {}
+        def redact(value, path=""):
+            if isinstance(value, list):
+                return [redact(item, f"{path}.{i}") for i, item in enumerate(value)]
+            if not isinstance(value, dict):
+                return value
+            public = {}
+            for key, item in value.items():
+                field = f"{path}.{key}" if path else key
+                if any(part in key.lower() for part in (
+                    "key", "token", "password", "secret", "credential", "headers", "dsn",
+                )):
+                    secret_presence[field] = bool(item)
+                else:
+                    public[key] = redact(item, field)
+            return public
+        public = redact(dict(overrides or {}))
+        secret_presence.setdefault("llm_api_key", False)
         return public, secret_presence
 
     @app.get("/api/tenants/{tenant_id}/config")
     async def get_tenant_config(tenant_id: str, request: Request):
-        _require_admin_user(getattr(request.state, "console_user", None))
+        authorize_target(request, tenant_id)
         registry = get_tenant_registry(owner)
         try:
             ctx = await asyncio.to_thread(registry.get, tenant_id)
@@ -226,10 +234,12 @@ def register_tenant_routes(owner, app) -> None:
         return {
             "tenant_id": ctx.tenant_id,
             "display_name": ctx.display_name,
-            # default 租户的生效配置就是全局 config.yaml，overrides 恒为空
+            # default follows the same override isolation as other tenants.
             "config_overrides": public_overrides,
             "secret_presence": secret_presence,
-            "editable_keys": sorted(_tenant_config_keys()),
+            "editable_keys": sorted(_tenant_config_keys() if is_platform_admin(
+                getattr(request.state, "console_user", None)
+            ) else TENANT_CONFIG_KEYS),
         }
 
     @app.put("/api/tenants/{tenant_id}/config")
@@ -239,17 +249,15 @@ def register_tenant_routes(owner, app) -> None:
             apply_tenant_config_overrides,
         )
 
-        _require_admin_user(getattr(request.state, "console_user", None))
+        authorize_target(request, tenant_id)
         registry = get_tenant_registry(owner)
-        if tenant_id == DEFAULT_TENANT_ID:
-            raise HTTPException(
-                status_code=400,
-                detail="default 租户直接使用全局 config.yaml，不支持 overrides；请编辑配置文件",
-            )
         body = await _read_limited_json_body(request)
         overrides = (body or {}).get("overrides")
         if not isinstance(overrides, dict) or not overrides:
             raise HTTPException(status_code=400, detail="overrides must be a non-empty object")
+        if not is_platform_admin(getattr(request.state, "console_user", None)):
+            if set(overrides) - TENANT_CONFIG_KEYS:
+                raise HTTPException(403, "PLATFORM_CONFIG_REQUIRED")
         # JSON null 删除该键（_update_config 语义）；这里先剥掉再校验。
         unknown = sorted(
             str(k) for k in overrides if str(k) not in _tenant_config_keys()

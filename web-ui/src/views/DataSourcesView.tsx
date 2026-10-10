@@ -45,11 +45,12 @@ interface DatasourceSchedule {
   time: string;
   timezone: string;
   window: "previous_day";
-  max_sessions: number;
 }
 
 interface DatasourceScheduleStatus {
   running: boolean;
+  job_id?: string;
+  job_type?: "manual" | "scheduled";
   next_run_at?: string;
   last_started_at?: string;
   last_finished_at?: string;
@@ -60,6 +61,11 @@ interface DatasourceScheduleStatus {
   last_target_date?: string;
   last_total?: number;
   last_counts?: Record<string, number>;
+  current_total?: number;
+  current_counts?: Record<string, number>;
+  last_results?: SessionRow[];
+  last_results_truncated?: boolean;
+  last_result_limit?: number;
 }
 
 interface SessionRow {
@@ -93,7 +99,6 @@ const DEFAULT_SCHEDULE: DatasourceSchedule = {
   time: "00:00",
   timezone: "Asia/Shanghai",
   window: "previous_day",
-  max_sessions: 1000,
 };
 
 const SCHEDULE_TIMEZONES = [
@@ -156,6 +161,9 @@ class Adapter:
     def list_session_ids(self, filters, *, max_sessions):
         raise NotImplementedError
 
+    def iter_session_id_batches(self, filters, *, batch_size):
+        raise NotImplementedError
+
     def fetch_session(self, session_id):
         raise NotImplementedError
 
@@ -174,10 +182,11 @@ export default function DataSourcesView({
   user?: UserProfile | null;
 }) {
   const uploadRef = useRef<HTMLInputElement>(null);
+  const manualPullJobRef = useRef("");
   const [source, setSource] = useState<Datasource | null>(null);
   const [file, setFile] = useState("");
   const [filters, setFilters] = useState<Record<string, string>>({});
-  const [limit, setLimit] = useState("100");
+  const [previewLimit, setPreviewLimit] = useState("100");
   const [health, setHealth] = useState<{ ok: boolean; error?: string } | null>(null);
   const [rows, setRows] = useState<SessionRow[] | null>(null);
   const [counts, setCounts] = useState<Record<string, number> | null>(null);
@@ -192,7 +201,13 @@ export default function DataSourcesView({
   const [schedulePolling, setSchedulePolling] = useState(false);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [pullSummary, setPullSummary] = useState<{
+    total: number;
+    shown: number;
+    truncated: boolean;
+  } | null>(null);
   const isAdmin = user?.role === "admin";
+  const canEditSource = user?.platform_role === "platform_admin";
 
   const refresh = useCallback(async (selected?: string) => {
     const data = await api<Datasource>("/api/datasource");
@@ -201,6 +216,7 @@ export default function DataSourcesView({
     setHealth(null);
     setRows(null);
     setCounts(null);
+    setPullSummary(null);
     setSchedule(data.schedule || DEFAULT_SCHEDULE);
     setSchedulePolling(Boolean(data.schedule_status?.running));
     setError("");
@@ -218,7 +234,30 @@ export default function DataSourcesView({
           schedule_status: data.schedule_status,
         }
       : current);
-    if (!data.schedule_status.running) setSchedulePolling(false);
+    const status = data.schedule_status;
+    if (
+      status.job_type === "manual"
+      && (!manualPullJobRef.current || status.job_id === manualPullJobRef.current)
+    ) {
+      const currentTotal = status.running
+        ? Number(status.current_total || 0)
+        : Number(status.last_total || 0);
+      setCounts(status.running
+        ? status.current_counts || {}
+        : status.last_counts || {});
+      setPullSummary({
+        total: currentTotal,
+        shown: status.running ? 0 : status.last_results?.length || 0,
+        truncated: status.running
+          ? false
+          : Boolean(status.last_results_truncated),
+      });
+      if (!status.running) {
+        setRows(status.last_results || []);
+        manualPullJobRef.current = "";
+      }
+    }
+    if (!status.running) setSchedulePolling(false);
   }, []);
 
   useEffect(() => {
@@ -363,11 +402,6 @@ export default function DataSourcesView({
   }
 
   async function saveSchedule() {
-    if (!Number.isInteger(schedule.max_sessions)
-      || schedule.max_sessions < 1
-      || schedule.max_sessions > 1000) {
-      return toastErr("单次最大 Session 数必须为 1 到 1000");
-    }
     setBusy("schedule-save");
     try {
       const result = await api<{
@@ -453,9 +487,9 @@ export default function DataSourcesView({
 
   async function runDraft(mode: "validate" | "health" | "preview" | "session") {
     if (code === null) return;
-    const max = Number(limit);
+    const max = Number(previewLimit);
     if (!Number.isInteger(max) || max < 1 || max > 1000) {
-      return toastErr("最大会话数必须为 1 到 1000");
+      return toastErr("预览条数必须为 1 到 1000");
     }
     setBusy(`draft-${mode}`);
     setDraftResult(null);
@@ -514,11 +548,14 @@ export default function DataSourcesView({
       } else if (action === "test") {
         setHealth(await api("/api/datasource/test", { method: "POST" }));
       } else {
-        const max = Number(limit);
-        if (!Number.isInteger(max) || max < 1 || max > 1000) {
-          throw new Error("最大会话数必须为 1 到 1000");
+        const body: Record<string, unknown> = filterBody();
+        if (action === "sessions") {
+          const max = Number(previewLimit);
+          if (!Number.isInteger(max) || max < 1 || max > 1000) {
+            throw new Error("预览条数必须为 1 到 1000");
+          }
+          body.max_sessions = max;
         }
-        const body = { ...filterBody(), max_sessions: max };
         const endpoint = action === "sessions"
           ? "/api/datasource/sessions"
           : "/api/datasource/pull";
@@ -527,8 +564,34 @@ export default function DataSourcesView({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
         });
-        setRows(action === "sessions" ? result.sessions : result.results);
-        setCounts(action === "pull" ? result.counts : null);
+        if (action === "sessions") {
+          setRows(result.sessions);
+          setCounts(null);
+          setPullSummary(null);
+        } else {
+          const status = result.pull_status as DatasourceScheduleStatus;
+          manualPullJobRef.current = status.job_id || "";
+          const total = status.running
+            ? Number(status.current_total || 0)
+            : Number(status.last_total || 0);
+          const resultRows = status.running ? [] : status.last_results || [];
+          setRows(status.running ? null : resultRows);
+          setCounts(status.running
+            ? status.current_counts || {}
+            : status.last_counts || {});
+          setPullSummary({
+            total,
+            shown: resultRows.length,
+            truncated: status.running
+              ? false
+              : Boolean(status.last_results_truncated),
+          });
+          setSource((current) => current
+            ? { ...current, schedule_status: status }
+            : current);
+          setSchedulePolling(status.running);
+          toastOk("Session 拉取已启动", "将处理完整时间窗口");
+        }
       }
     } catch (e: any) {
       setError(e.message);
@@ -673,7 +736,7 @@ export default function DataSourcesView({
             <PlugZap className="size-4" />
             {busy === "test" ? "测试中" : "测试已保存连接"}
           </Button>
-          <Button variant="outline" disabled={!file || !!busy} onClick={loadCode}>
+          {canEditSource && <><Button variant="outline" disabled={!file || !!busy} onClick={loadCode}>
             <Code2 className="size-4" />
             编辑源码
           </Button>
@@ -697,6 +760,7 @@ export default function DataSourcesView({
             <FilePlus2 className="size-4" />
             新建
           </Button>
+          </>}
           {health && (
             <span role="status" className="self-center text-sm">
               {health.ok ? "连接正常" : `连接失败：${health.error || "上游不可用"}`}
@@ -734,7 +798,7 @@ export default function DataSourcesView({
           启用每日定时拉取
         </label>
 
-        <div className="grid min-w-0 gap-4 sm:grid-cols-3">
+        <div className="grid min-w-0 gap-4 sm:grid-cols-2">
           <label className="min-w-0 text-xs font-medium">
             每日触发时间
             <Input
@@ -765,22 +829,6 @@ export default function DataSourcesView({
                 <option key={timezone} value={timezone}>{timezone}</option>
               ))}
             </select>
-          </label>
-          <label className="min-w-0 text-xs font-medium">
-            单次最大 Session 数
-            <Input
-              aria-label="定时拉取最大 Session 数"
-              type="number"
-              min={1}
-              max={1000}
-              value={schedule.max_sessions}
-              disabled={!!busy}
-              className="mt-2"
-              onChange={(event) => setSchedule((current) => ({
-                ...current,
-                max_sessions: Number(event.target.value),
-              }))}
-            />
           </label>
         </div>
 
@@ -860,7 +908,7 @@ export default function DataSourcesView({
         </div>
       </section>
 
-      {code !== null && (
+      {canEditSource && code !== null && (
         <section className="space-y-4 border-b border-border pb-5">
           <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
             <div className="min-w-0">
@@ -992,15 +1040,15 @@ export default function DataSourcesView({
             </label>
           ))}
           <label className="text-xs font-medium">
-            最大会话数
+            预览条数
             <Input
-              aria-label="最大会话数"
+              aria-label="预览条数"
               type="number"
               min={1}
               max={1000}
-              value={limit}
+              value={previewLimit}
               disabled={!!busy}
-              onChange={(event) => setLimit(event.target.value)}
+              onChange={(event) => setPreviewLimit(event.target.value)}
               className="mt-2"
             />
           </label>
@@ -1015,11 +1063,13 @@ export default function DataSourcesView({
             {busy === "sessions" ? "查询中" : "预览已保存"}
           </Button>
           <Button
-            disabled={!savedReady || missing}
+            disabled={!savedReady || missing || scheduleStatus?.running}
             onClick={() => runSaved("pull")}
           >
             <DownloadCloud className="size-4" />
-            {busy === "pull" ? "拉取中" : "拉取入库"}
+            {busy === "pull" || (
+              scheduleStatus?.running && scheduleStatus.job_type === "manual"
+            ) ? "拉取中" : "拉取入库"}
           </Button>
         </div>
         {counts && (
@@ -1028,6 +1078,17 @@ export default function DataSourcesView({
               <span key={key}>{key}: {value}</span>
             ))}
           </div>
+        )}
+        {pullSummary && (
+          <p className="text-xs text-muted-foreground">
+            {scheduleStatus?.running && scheduleStatus.job_type === "manual"
+              ? `正在拉取，已处理 ${pullSummary.total} 个 Session`
+              : `已处理完整时间窗口内的 ${pullSummary.total} 个 Session${
+                pullSummary.truncated
+                  ? `，下方仅展示前 ${pullSummary.shown} 条明细`
+                  : ""
+              }`}
+          </p>
         )}
         {rows && (rows.length ? (
           <div className="overflow-auto">

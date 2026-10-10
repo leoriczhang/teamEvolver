@@ -52,13 +52,11 @@ def read_bytes(data: bytes | str | io.IOBase) -> bytes:
     return data.read()
 
 
-def normalize_backend(backend: str | None, *, endpoint: str = "", local_root: str = "") -> str:
+def normalize_backend(backend: str | None, *, endpoint: str = "") -> str:
     """Map user-facing aliases into the concrete backend names we support.
 
     ``viking`` selects cloud or self-hosted OpenViking; ``local`` selects the
     built-in filesystem store and ``postgres`` selects the PG object store.
-    ``local_root`` is accepted for call-site compatibility; backend selection
-    remains explicit.
     """
     value = str(backend or "").strip().lower().replace("_", "-")
     local_aliases = {"local", "localfs", "local-fs", "filesystem", "fs", "builtin", "built-in"}
@@ -76,8 +74,7 @@ def normalize_backend(backend: str | None, *, endpoint: str = "", local_root: st
     if value in {"pg", "postgres", "postgresql"}:
         return "postgres"
     if value:
-        # Unknown/legacy backend names collapse to the viking backend.
-        return "viking"
+        return value
     # No explicit backend: only a memory:// endpoint selects viking (test
     # buckets); a plain endpoint with no backend means "not configured" —
     # per-purpose callers default to the built-in local backend.

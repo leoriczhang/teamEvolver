@@ -7,7 +7,7 @@ import logging
 from typing import Any, Optional
 
 from team_skills.library.bundle import (
-    bundle_entrypoint_text,
+    bundle_entrypoint_bytes,
     bundle_file_records,
     bundle_tree_sha256,
     coerce_skill_bundle,
@@ -118,47 +118,26 @@ def fetch_skill_bundle(
     skill_name: str,
     record: Optional[dict[str, Any]] = None,
 ) -> dict[str, bytes]:
-    """Download a full skill bundle from storage.
-
-    Backward compatibility:
-      - bundle-aware records read nested files from ``skills/<name>/files/...``
-      - legacy records fall back to a single ``SKILL.md``
-    """
-    bundle: dict[str, bytes] = {}
-    file_entries = (record or {}).get("files")
-    if isinstance(file_entries, list) and file_entries:
-        for item in file_entries:
-            rel_path = str((item or {}).get("path") or "").strip().replace("\\", "/")
-            if not rel_path:
-                continue
-            if rel_path == "SKILL.md":
-                key = f"{prefix}skills/{skill_name}/SKILL.md"
-            else:
-                key = f"{prefix}skills/{skill_name}/files/{rel_path}"
-            bundle[rel_path] = bucket.get_object(key).read()
-        return bundle
-
-    content = fetch_skill_content(bucket, prefix, skill_name)
-    if content is None:
+    """Download a canonical full Skill bundle from storage."""
+    if not record:
         return {}
-    bundle["SKILL.md"] = content.encode("utf-8")
+    if record.get("format") != "skill-bundle":
+        raise ValueError(f"invalid Skill bundle record for {skill_name}")
+    bundle: dict[str, bytes] = {}
+    file_entries = record.get("files")
+    if not isinstance(file_entries, list) or not file_entries:
+        raise ValueError(f"Skill bundle file list is missing for {skill_name}")
+    for item in file_entries:
+        rel_path = str((item or {}).get("path") or "").strip().replace("\\", "/")
+        if not rel_path:
+            continue
+        if rel_path == "SKILL.md":
+            key = f"{prefix}skills/{skill_name}/SKILL.md"
+        else:
+            key = f"{prefix}skills/{skill_name}/files/{rel_path}"
+        bundle[rel_path] = bucket.get_object(key).read()
+    bundle_entrypoint_bytes(bundle)
     return bundle
-
-
-def fetch_skill_bundle_text(
-    bucket,
-    prefix: str,
-    skill_name: str,
-    record: Optional[dict[str, Any]] = None,
-) -> Optional[str]:
-    """Download the bundle and return its ``SKILL.md`` entrypoint text."""
-    bundle = fetch_skill_bundle(bucket, prefix, skill_name, record)
-    if not bundle:
-        return None
-    try:
-        return bundle_entrypoint_text(bundle)
-    except Exception:
-        return None
 
 
 def save_active_bundle(
@@ -181,7 +160,7 @@ def save_active_bundle(
         if key not in keep_keys:
             bucket.delete_object(key)
     return {
-        "format": "bundle_v1",
+        "format": "skill-bundle",
         "entrypoint": "SKILL.md",
         "tree_sha256": bundle_tree_sha256(stored),
         "files": bundle_file_records(stored),
@@ -228,7 +207,7 @@ def save_version_bundle(
         if key not in keep_keys:
             bucket.delete_object(key)
     record = {
-        "format": "bundle_v1",
+        "format": "skill-bundle",
         "entrypoint": "SKILL.md",
         "tree_sha256": bundle_tree_sha256(stored_bundle),
         "files": bundle_file_records(stored_bundle),
@@ -262,27 +241,34 @@ def fetch_version_bundle(
     record: Optional[dict[str, Any]] = None,
 ) -> dict[str, bytes]:
     bundle: dict[str, bytes] = {}
-    version_record = record or load_version_bundle_record(bucket, prefix, skill_name, version) or {}
-    file_entries = version_record.get("files")
-    if isinstance(file_entries, list) and file_entries:
-        for item in file_entries:
-            rel_path = str((item or {}).get("path") or "").strip().replace("\\", "/")
-            if not rel_path:
-                continue
-            key = skill_version_bundle_key(prefix, skill_name, version, rel_path)
-            bundle[rel_path] = bucket.get_object(key).read()
-        return bundle
-
-    try:
-        bundle["SKILL.md"] = bucket.get_object(skill_version_bundle_key(prefix, skill_name, version, "SKILL.md")).read()
-    except Exception:
+    version_record = (
+        record
+        or load_version_bundle_record(bucket, prefix, skill_name, version)
+        or {}
+    )
+    if not version_record:
         return {}
+    if version_record.get("format") != "skill-bundle":
+        raise ValueError(
+            f"invalid Skill version bundle record for {skill_name} v{version}"
+        )
+    file_entries = version_record.get("files")
+    if not isinstance(file_entries, list) or not file_entries:
+        raise ValueError(
+            f"Skill version bundle file list is missing for {skill_name} v{version}"
+        )
+    for item in file_entries:
+        rel_path = str((item or {}).get("path") or "").strip().replace("\\", "/")
+        if not rel_path:
+            continue
+        key = skill_version_bundle_key(prefix, skill_name, version, rel_path)
+        bundle[rel_path] = bucket.get_object(key).read()
+    bundle_entrypoint_bytes(bundle)
     return bundle
 
 
 # --------------------------------------------------------------------------- #
-# Evolution history (replaces evolve_history.jsonl; goes through the bucket  #
-# so PG RLS / per-tenant Viking credentials enforce isolation automatically)  #
+# Evolution history. Object-store scoping enforces tenant isolation.          #
 # --------------------------------------------------------------------------- #
 
 _HISTORY_PREFIX = "evolve_history/"
@@ -300,8 +286,7 @@ def append_history_record(bucket, record: dict[str, Any]) -> None:
 
     Each cycle gets its own object key under ``evolve_history/`` so the
     existing per-tenant RLS / Viking account scoping applies without any
-    new DDL.  The file-based ``evolve_history.jsonl`` remains as a fallback
-    for single-tenant / local-backend deployments.
+    new DDL.
     """
     ts = str(record.get("timestamp") or "")
     cid = str(record.get("cycle_id") or "")

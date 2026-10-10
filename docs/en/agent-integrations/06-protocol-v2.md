@@ -1,3 +1,7 @@
+# KEE R6 integration scope (2026-10-08)
+
+Agents continue reading approved Wiki through existing OV authentication. UpClaw is unchanged. Optional structural HTTP reads are disabled by default, have no MCP registration and do not authorize tool or Skill execution. No additional Session or Judge pipeline is introduced. See [R6 governance API](../api/20-kee-r6.md). The original protocol and IDs below remain compatible.
+
 # Agent integration protocol v2
 
 The Agent data plane uses `Authorization: Bearer tevt_...` and a declared `user_id`.
@@ -45,9 +49,7 @@ Schemas: [Session v2](../../schemas/agent-session-v2.schema.json),
 [Context result v2](../../schemas/agent-context-result-v2.schema.json),
 [Context snapshot v2](../../schemas/agent-context-snapshot-v2.schema.json).
 
-## Rollout
+## Boundaries
 
-The compatibility release defaults to `identity_mode=dual` and `delivery_mode=push`.
-Upgrade clients before switching to `tenant_user/pull`. Observe, migrate data, then release final
-compatibility removal separately. v1 schemas retain their original migration-only meaning.
-See [migration and restore](../guides/11-agent-deregistration.md).
+`identity_mode` is fixed to `tenant_user`; `delivery_mode` defaults to `pull`.
+Session, Context and Skill all use the tenant machine credential plus `user_id`.

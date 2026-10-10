@@ -7,6 +7,7 @@ health、以及租户 adapter 文件（产品设计-langfuse.py）经 _runtime �
 from __future__ import annotations
 
 import copy
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -65,8 +66,15 @@ class FakeClient:
         return {"ok": True, "host": self.host, "total_sessions": 3}
 
     def list_session_ids(self, filters, *, max_sessions=0):
-        self.calls.append(("list_session_ids", {"filters": filters.as_dict(), "max_sessions": max_sessions}))
+        self.calls.append(("list_session_ids", {"filters": asdict(filters), "max_sessions": max_sessions}))
         return [filters.session_id] if filters.session_id else ["s1", "s2"]
+
+    def iter_session_id_batches(self, filters, *, batch_size=100):
+        self.calls.append(("iter_session_id_batches", {
+            "filters": asdict(filters),
+            "batch_size": batch_size,
+        }))
+        yield ["s1", "s2"]
 
     def fetch_session_with_traces(self, session_id, *, trace_name=""):
         self.calls.append(("fetch_session_with_traces", {"session_id": session_id, "trace_name": trace_name}))
@@ -142,6 +150,18 @@ def test_unconfigured_client_raises(monkeypatch):
     source = LangfuseSource(None, {})
     with pytest.raises(Exception):
         source.list_session_ids({}, max_sessions=10)
+
+
+def test_session_batches_delegate_to_client_pagination(monkeypatch):
+    _set_env(monkeypatch)
+    source = LangfuseSource(None, {"trace_name": "openclaw-turn"})
+
+    assert list(source.iter_session_id_batches({}, batch_size=25)) == [["s1", "s2"]]
+    call = FakeClient.instances[-1].calls[-1]
+    assert call[0] == "iter_session_id_batches"
+    assert call[1]["filters"]["trace_name"] == "openclaw-turn"
+    assert call[1]["batch_size"] == 25
+    source.close()
 
 
 # --------------------------------------------------------------------- #

@@ -10,13 +10,10 @@ Attaches to each session dict:
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 from typing import Any
 
 from team_skills.evolution.kernel.helpers import compact_tool_calls, compact_tool_observations
-from team_skills.evolution.kernel.llm import AsyncLLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -68,10 +65,8 @@ def _format_tool_calls(turn: dict) -> list[str]:
         if not isinstance(tc, dict):
             continue
         func = tc.get("function") if isinstance(tc.get("function"), dict) else {}
-        # Canonical shape is {id, type, function:{name, arguments}}; accept the
-        # legacy mapper shape {name, input} so older sessions still render.
-        name = str(func.get("name") or tc.get("name") or "unknown")
-        args = _clip(str(func.get("arguments") or tc.get("input") or ""), _TOOL_ARG_MAX)
+        name = str(func.get("name") or "unknown")
+        args = _clip(str(func.get("arguments") or ""), _TOOL_ARG_MAX)
         call_id = str(tc.get("id") or "")
 
         outcome = ""

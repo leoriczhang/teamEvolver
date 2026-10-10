@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
@@ -171,6 +171,11 @@ def _iter_json_objects(raw_input: Any) -> Iterator[dict[str, Any]]:
                 if isinstance(parsed, dict):
                     yield parsed
                 start = None
+
+
+def iter_json_objects(raw_input: Any) -> Iterator[dict[str, Any]]:
+    """Public adapter helper for JSON objects embedded in mixed text."""
+    yield from _iter_json_objects(raw_input)
 
 
 def _clean_text(value: Any) -> str:
@@ -678,6 +683,16 @@ def _prompt_from_input(raw_input: Any, *, prefix: str) -> tuple[str, str]:
         if parsed is not raw_input:
             return _prompt_from_input(parsed, prefix=prefix)
         if "Conversation info" in raw_input or "```json" in raw_input:
+            embedded = list(_iter_json_objects(raw_input))
+            for index in range(len(embedded) - 1, -1, -1):
+                candidates = _candidate_values_with_paths(
+                    embedded[index],
+                    _PROMPT_KEYS,
+                    prefix=f"{prefix}.json[{index}]",
+                )
+                prompt = _best_prompt(value for value, _path in candidates)
+                if prompt and _prompt_score(prompt) > -500:
+                    return prompt, f"{prefix}.json[{index}]:json-envelope"
             return _fenced_prompt(raw_input), f"{prefix}:fenced-text"
         truncated = _best_prompt(_truncated_json_user_prompts(raw_input))
         if truncated:
@@ -736,18 +751,6 @@ def _observation_prompt(
         return "", ""
     _, prompt, source = max(candidates, key=lambda item: item[0])
     return prompt, source
-
-
-def extract_prompt_text(
-    raw_input: Any,
-    *,
-    observations: list[Any] | None = None,
-) -> str:
-    prompt, _ = _prompt_from_input(raw_input, prefix="trace.input")
-    if prompt and _prompt_score(prompt) > -500:
-        return prompt
-    observed, _ = _observation_prompt(observations)
-    return observed
 
 
 def _trace_prompt(
@@ -876,7 +879,10 @@ def _obs_text(value: Any) -> str:
     return str(value)
 
 
-def _tool_spans(observations: list[Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+def _collect_tool_spans(
+    observations: list[Any],
+    output_text: Callable[[Any], str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     calls: list[dict[str, Any]] = []
     results: list[dict[str, Any]] = []
     used_skills: list[str] = []
@@ -899,7 +905,7 @@ def _tool_spans(observations: list[Any]) -> tuple[list[dict[str, Any]], list[dic
                 "function": {"name": tool, "arguments": arguments},
             }
         )
-        content = _obs_text(observation.get("output"))
+        content = output_text(observation.get("output"))
         lowered = content.lower()
         results.append(
             {
@@ -914,6 +920,33 @@ def _tool_spans(observations: list[Any]) -> tuple[list[dict[str, Any]], list[dic
             if skill not in used_skills:
                 used_skills.append(skill)
     return calls, results, used_skills
+
+
+def _tool_spans(observations: list[Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    return _collect_tool_spans(observations, _obs_text)
+
+
+def _rich_observation_text(value: Any) -> str:
+    if isinstance(value, dict):
+        content = value.get("content")
+        if isinstance(content, list):
+            parts = [
+                item["text"]
+                if isinstance(item, dict) and isinstance(item.get("text"), str)
+                else json.dumps(item, ensure_ascii=False)
+                for item in content
+            ]
+            return "\n".join(part for part in parts if part)
+        if isinstance(content, str):
+            return content
+    if isinstance(value, (list, int, float, bool)):
+        return json.dumps(value, ensure_ascii=False)
+    return _obs_text(value)
+
+
+def tool_spans(observations: list[Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """Convert tool observations while preserving rich content payloads."""
+    return _collect_tool_spans(observations, _rich_observation_text)
 
 
 def _injected_skills(trace: dict[str, Any]) -> list[str]:

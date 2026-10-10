@@ -15,20 +15,3 @@ web-ui/node_modules/
 web-ui/dist/
 artifacts/
 ppt/
-
-# Runtime data is mounted by compose and must not inflate the application image.
-team_miner/.hermes_home/
-team_miner/.knowledge_originals/
-team_miner/.knowledge_locks/
-team_miner/data/*
-!team_miner/data/input/
-!team_miner/data/input/.gitkeep
-team_miner/mining_jobs/
-team_miner/sample_packages/
-team_miner/semantic_reports/
-team_miner/compiled_skill/
-team_miner/benchmark_results/
-team_miner/coverage_reports/
-team_miner/reflection_rounds/
-team_miner/run_history/
-team_miner/lift_datasets/

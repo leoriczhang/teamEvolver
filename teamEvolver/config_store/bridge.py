@@ -11,34 +11,78 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from session_ingestion.adapters._shared.langfuse_mapper import normalize_mapper_entries
 from team_memory.config import memory_config_values
 
 from ..config import (
+    DEFAULT_LLM_API_BASE,
+    DEFAULT_LLM_API_MODE,
+    DEFAULT_LLM_MAX_CONCURRENCY,
+    DEFAULT_LLM_MAX_TOKENS,
+    DEFAULT_LLM_MODEL_ID,
+    DEFAULT_LLM_QUEUE_CAPACITY,
+    DEFAULT_LLM_TEMPERATURE,
     TEAM_SKILL_ROOT_PREFIX,
     TeamEvolverConfig,
     resolve_viking_endpoint,
 )
 from .defaults import (
-    _DEFAULT_SKILLS_DIR,
+    _DEFAULT_SKILL_RUNTIME_CACHE_DIR,
     _DEFAULTS,
-    _FALLBACK_LLM_API_MODE,
-    _SKILL_RELOAD_MODES,
     CONFIG_DIR,
     CONFIG_FILE,
     _coerce,
     _deep_merge,
-    _first_non_empty,
-    _infer_sharing_backend,
     _normalize_choice,
     _normalize_extensions,
-    _normalize_non_negative_int,
-    _normalize_reload_interval,
     _normalize_string_list,
     _normalize_validation_mode,
     _normalize_viking_deployment,
-    resolve_skills_dir,
+    resolve_skill_runtime_cache_dir,
 )
+
+def _validate_config_shape(data: Any) -> dict:
+    if not isinstance(data, dict):
+        raise ValueError("configuration root must be an object")
+
+    unknown_sections = sorted(set(data) - set(_DEFAULTS))
+    if unknown_sections:
+        raise ValueError(
+            "unsupported configuration sections: "
+            + ", ".join(unknown_sections)
+        )
+
+    errors: list[str] = []
+    for section_name, value in data.items():
+        defaults = _DEFAULTS.get(section_name)
+        if isinstance(defaults, dict):
+            if not isinstance(value, dict):
+                errors.append(f"{section_name} must be an object")
+                continue
+            unknown = sorted(set(value) - set(defaults))
+            if unknown:
+                errors.append(
+                    f"unsupported {section_name} fields: "
+                    + ", ".join(unknown)
+                )
+            for child_name, child in value.items():
+                child_defaults = defaults.get(child_name)
+                if isinstance(child_defaults, dict):
+                    if not isinstance(child, dict):
+                        errors.append(
+                            f"{section_name}.{child_name} must be an object"
+                        )
+                        continue
+                    unknown_children = sorted(
+                        set(child) - set(child_defaults)
+                    )
+                    if unknown_children:
+                        errors.append(
+                            f"unsupported {section_name}.{child_name} fields: "
+                            + ", ".join(unknown_children)
+                        )
+    if errors:
+        raise ValueError("; ".join(errors))
+    return _deep_merge({}, data)
 
 
 class ConfigStore:
@@ -104,13 +148,6 @@ class ConfigStore:
     def exists(self) -> bool:
         return self.config_file.exists()
 
-    @staticmethod
-    def _strip_deprecated_aggregation_credentials(data: dict) -> dict:
-        aggregation = data.get("aggregation")
-        if isinstance(aggregation, dict):
-            aggregation.pop("root_api_key", None)
-        return data
-
     def load(self) -> dict:
         if not self.config_file.exists():
             return _deep_merge({}, _DEFAULTS)
@@ -119,21 +156,14 @@ class ConfigStore:
 
             with open(self.config_file, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
-            merged = self._strip_deprecated_aggregation_credentials(
-                _deep_merge(_DEFAULTS, data)
-            )
-            if "service" not in data and isinstance(data.get("proxy"), dict):
-                merged["service"] = dict(merged.get("proxy") or {})
-            return merged
         except Exception as exc:
             raise ValueError(f"invalid configuration file: {self.config_file}") from exc
+        return _deep_merge(_DEFAULTS, _validate_config_shape(data))
 
     def save(self, data: dict):
         import yaml
 
-        sanitized = self._strip_deprecated_aggregation_credentials(
-            _deep_merge({}, data)
-        )
+        sanitized = _validate_config_shape(data)
         self.config_file.parent.mkdir(parents=True, exist_ok=True)
         fd, name = tempfile.mkstemp(dir=self.config_file.parent, prefix=".config-")
         try:
@@ -183,6 +213,7 @@ class ConfigStore:
         data = self.load()
         for env, section, key in (
             ("TEAMEVOLVER_PG_DSN", "storage_pg", "dsn"),
+            ("TEAMEVOLVER_PG_SCHEMA", "storage_pg", "schema"),
             ("TEAMEVOLVER_LLM_API_KEY", "llm", "api_key"),
             ("TEAMEVOLVER_LLM_BASE_URL", "llm", "api_base"),
             ("TEAMEVOLVER_LLM_MODEL", "llm", "model_id"),
@@ -190,14 +221,11 @@ class ConfigStore:
             ("TEAMEVOLVER_LLM_QUEUE_CAPACITY", "llm", "queue_capacity"),
             ("TEAMEVOLVER_OV_ENDPOINT", "sharing", "viking_endpoint"),
             ("TEAMEVOLVER_OV_API_KEY", "sharing", "viking_api_key"),
-            ("TEAMEVOLVER_OV_ROOT_KEY", "sharing", "viking_team_api_key"),
             ("TEAMEVOLVER_SKILL_STORAGE_BACKEND", "sharing", "skill_backend"),
             ("TEAMEVOLVER_SKILL_STORAGE_ROOT", "sharing", "skill_local_root"),
             ("TEAMEVOLVER_LANGFUSE_TRACING_PUBLIC_KEY", "langfuse", "tracing_public_key"),
             ("TEAMEVOLVER_LANGFUSE_TRACING_SECRET_KEY", "langfuse", "tracing_secret_key"),
             ("TEAMEVOLVER_TENANT_TOKEN", "tenant", "machine_token"),
-            ("TEAMEVOLVER_AGENT_IDENTITY_MODE", "agent_protocol", "identity_mode"),
-            ("TEAMEVOLVER_SKILLS_DELIVERY_MODE", "skills", "delivery_mode"),
             ("TEAMEVOLVER_REPLAY_ADAPTER", "replay", "adapter"),
             ("TEAMEVOLVER_REPLAY_ADAPTERS_DIR", "replay", "adapters_dir"),
             ("TEAMEVOLVER_VALIDATION_RUNTIMES", "validation", "runtimes"),
@@ -214,34 +242,52 @@ class ConfigStore:
             or "Team"
         ).strip() or "Team"
         llm = data.get("llm", {})
-        llm_provider = llm.get("provider", "openai")
-        llm_api_base = llm.get("api_base", "")
+        llm_api_base = str(llm.get("api_base", "") or DEFAULT_LLM_API_BASE)
         llm_api_key = llm.get("api_key", "")
-        llm_model_id = llm.get("model_id", "")
-        llm_api_mode = str(llm.get("api_mode", _FALLBACK_LLM_API_MODE) or _FALLBACK_LLM_API_MODE)
-        llm_max_tokens = int(llm.get("max_tokens", 100000) or 100000)
-        llm_temperature = float(llm.get("temperature", 0.4) if llm.get("temperature") is not None else 0.4)
+        llm_model_id = str(llm.get("model_id", "") or DEFAULT_LLM_MODEL_ID)
+        llm_api_mode = str(
+            llm.get("api_mode", DEFAULT_LLM_API_MODE)
+            or DEFAULT_LLM_API_MODE
+        )
+        llm_max_tokens = int(
+            llm.get("max_tokens", DEFAULT_LLM_MAX_TOKENS)
+            or DEFAULT_LLM_MAX_TOKENS
+        )
+        llm_temperature = float(
+            llm.get("temperature", DEFAULT_LLM_TEMPERATURE)
+            if llm.get("temperature") is not None
+            else DEFAULT_LLM_TEMPERATURE
+        )
         llm_max_concurrency = max(
             1,
-            min(64, int(llm.get("max_concurrency", 8) or 8)),
+            min(
+                64,
+                int(
+                    llm.get("max_concurrency", DEFAULT_LLM_MAX_CONCURRENCY)
+                    or DEFAULT_LLM_MAX_CONCURRENCY
+                ),
+            ),
         )
         llm_queue_capacity = max(
             llm_max_concurrency,
-            min(10000, int(llm.get("queue_capacity", 64) or 64)),
+            min(
+                10000,
+                int(
+                    llm.get("queue_capacity", DEFAULT_LLM_QUEUE_CAPACITY)
+                    or DEFAULT_LLM_QUEUE_CAPACITY
+                ),
+            ),
         )
-        proxy = data.get("proxy", {})
         service = data.get("service", {})
+        registration_value = os.environ.get(
+            "TEAMEVOLVER_SELF_REGISTRATION_ENABLED", service.get("self_registration_enabled", True)
+        )
+        registration_value = str(registration_value).strip().lower()
+        if registration_value not in {"true", "false", "1", "0"}:
+            raise ValueError("service.self_registration_enabled must be true/false or 1/0")
         skills = data.get("skills", {})
-        agent_protocol = data.get("agent_protocol", {})
         replay = data.get("replay", {})
         rollout = data.get("skillopt_rollout", {}) if isinstance(data.get("skillopt_rollout"), dict) else {}
-        identity_mode = str(agent_protocol.get("identity_mode", "dual")).strip().lower()
-        delivery_mode = str(skills.get("delivery_mode", "push")).strip().lower()
-        if identity_mode not in {"dual", "tenant_user"}:
-            raise ValueError("agent_protocol.identity_mode must be dual or tenant_user")
-        if delivery_mode not in {"push", "pull"}:
-            raise ValueError("skills.delivery_mode must be push or pull")
-        orouter = data.get("openrouter", {})
 
         sharing = data.get("sharing", {})
         evolve = data.get("evolve", {})
@@ -251,10 +297,10 @@ class ConfigStore:
         langfuse = data.get("langfuse", {}) if isinstance(data.get("langfuse"), dict) else {}
         datasource = data.get("datasource", {}) if isinstance(data.get("datasource"), dict) else {}
         session_split = data.get("session_split", {}) if isinstance(data.get("session_split"), dict) else {}
-        sharing_backend = _infer_sharing_backend(sharing)
-        sharing_endpoint = _first_non_empty(sharing, "endpoint")
-        sharing_skill_backend = _first_non_empty(sharing, "skill_backend")
-        sharing_session_backend = _first_non_empty(sharing, "session_backend")
+        sharing_skill_backend = str(sharing.get("skill_backend", "") or "").strip()
+        sharing_session_backend = str(
+            sharing.get("session_backend", "") or ""
+        ).strip()
         if pg.get("enabled"):
             sharing_session_backend = "postgres"
             if not sharing_skill_backend:
@@ -276,15 +322,17 @@ class ConfigStore:
             str(sharing.get("viking_endpoint", "") or ""),
         )
 
-        skills_dir = resolve_skills_dir(skills.get("dir", str(_DEFAULT_SKILLS_DIR)))
+        skills_runtime_cache_dir = resolve_skill_runtime_cache_dir(
+            skills.get("runtime_cache_dir", str(_DEFAULT_SKILL_RUNTIME_CACHE_DIR))
+        )
 
         config = TeamEvolverConfig(
             _config_file=str(self.config_file),
             team_display_name=team_display_name,
             # LLM forwarding
-            llm_provider=llm_provider,
             llm_api_base=llm_api_base,
             ontology=dict(data.get("ontology") or {}),
+            compile=dict(data.get("compile") or {}),
             experience_sync=dict(data.get("experience_sync") or {}),
             logging=dict(data.get("logging") or {}),
             llm_api_key=llm_api_key,
@@ -294,21 +342,12 @@ class ConfigStore:
             llm_temperature=llm_temperature,
             llm_max_concurrency=llm_max_concurrency,
             llm_queue_capacity=llm_queue_capacity,
-            # OpenRouter
-            openrouter_app_name=orouter.get("app_name", "teamEvolver"),
-            openrouter_app_url=orouter.get("app_url", ""),
-            openrouter_route=orouter.get("route", "fallback"),
-            openrouter_fallback_models=orouter.get("fallback_models", ""),
-            openrouter_data_policy=orouter.get("data_policy", ""),
             # Service
-            proxy_port=service.get("port", proxy.get("port", 52010)),
-            proxy_host=service.get("host", proxy.get("host", "0.0.0.0")),
+            proxy_port=service.get("port", 52010),
+            proxy_host=service.get("host", "0.0.0.0"),
+            self_registration_enabled=registration_value in {"true", "1"},
             # Skills
-            use_skills=bool(skills.get("enabled", True)),
-            skills_dir=skills_dir,
-            skills_public_root=str(skills.get("public_root", "") or ""),
-            skills_delivery_mode=delivery_mode,
-            agent_protocol_identity_mode=identity_mode,
+            skills_runtime_cache_dir=skills_runtime_cache_dir,
             replay_adapter=str(replay.get("adapter", "") or ""),
             replay_adapters_dir=str(replay.get("adapters_dir", "") or ""),
             skillopt_rollout_enabled=bool(_coerce(rollout.get("enabled", False))),
@@ -316,14 +355,8 @@ class ConfigStore:
             skillopt_rollout_workspace_prefix=str(
                 rollout.get("workspace_prefix", "rollout-") or "rollout-"
             ),
-            max_context_tokens=int(data.get("max_context_tokens", 256000) or 256000),
-            # Model
-            model_name=llm.get("model_id") or "doubao-seed-evolving",
             # Sharing
-            sharing_enabled=bool(sharing.get("enabled", True)),
-            sharing_backend=sharing_backend,
             sharing_viking_deployment=sharing_viking_deployment,
-            sharing_endpoint=sharing_endpoint,
             sharing_skill_backend=sharing_skill_backend,
             sharing_session_backend=sharing_session_backend,
             sharing_local_fallback_enabled=sharing_local_fallback_enabled,
@@ -333,63 +366,13 @@ class ConfigStore:
             sharing_skill_mirror_spool_dir=sharing_skill_mirror_spool_dir,
             sharing_viking_endpoint=sharing_viking_endpoint,
             sharing_viking_api_key=str(sharing.get("viking_api_key", "") or ""),
-            sharing_viking_personal_api_key=str(
-                sharing.get("viking_personal_api_key", "")
-                or sharing.get("viking_user_api_key", "")
-                or ""
-            ),
-            sharing_viking_personal_api_keys=_normalize_string_list(
-                sharing.get("viking_personal_api_keys", [])
-            ),
-            sharing_viking_team_api_key=str(
-                sharing.get("viking_team_api_key", "")
-                or sharing.get("viking_resources_api_key", "")
-                or ""
-            ),
             sharing_viking_account=str(sharing.get("viking_account", "") or "default"),
-            sharing_viking_personal_user=str(
-                sharing.get("viking_personal_user", "") or ""
-            ),
-            # ``default`` was the legacy bootstrap identity. Team-owned
-            # memories/resources now live under the canonical ``team`` user.
-            sharing_viking_user=(
-                "team"
-                if str(sharing.get("viking_user", "") or "team").strip()
-                in {"", "default"}
-                else str(sharing.get("viking_user", "")).strip()
-            ),
+            sharing_viking_user=str(sharing.get("viking_user", "") or "team").strip() or "team",
             sharing_viking_agent=str(
                 sharing.get("viking_agent", "") or TEAM_SKILL_ROOT_PREFIX
             ),
-            sharing_viking_agent_id=str(
-                sharing.get("viking_agent_id", "") or sharing.get("viking_user_id", "") or ""
-            ),
-            sharing_viking_customer_id=str(
-                sharing.get("viking_customer_id", "") or sharing.get("viking_peer_id", "") or ""
-            ),
             sharing_viking_root_prefix=str(
-                sharing.get("viking_root_prefix", "")
-                or sharing.get("root_prefix", "")
-                or TEAM_SKILL_ROOT_PREFIX
-            ),
-            sharing_viking_group_id=str(
-                sharing.get("viking_group_id", "") or sharing.get("group_id", "") or ""
-            ),
-            sharing_user_alias=str(sharing.get("user_alias", "") or ""),
-            sharing_auto_pull_on_start=bool(sharing.get("auto_pull_on_start", True)),
-            sharing_push_min_injections=int(sharing.get("push_min_injections", 5)),
-            sharing_push_min_effectiveness=float(sharing.get("push_min_effectiveness", 0.3)),
-            sharing_session_upload_interval=_normalize_non_negative_int(
-                sharing.get("session_upload_interval", 0),
-                default=0,
-            ),
-            sharing_skill_reload_mode=_normalize_choice(
-                sharing.get("skill_reload_mode", "poll"),
-                _SKILL_RELOAD_MODES,
-                "poll",
-            ),
-            sharing_skill_reload_interval_seconds=_normalize_reload_interval(
-                sharing.get("skill_reload_interval_seconds", 30),
+                sharing.get("viking_root_prefix", "") or TEAM_SKILL_ROOT_PREFIX
             ),
             storage_pg_enabled=bool(pg.get("enabled", False)),
             storage_pg_dsn=str(pg.get("dsn", "") or ""),
@@ -415,14 +398,8 @@ class ConfigStore:
                 {"direct", "validated"},
                 "validated",
             ),
-            evolve_validation_max_rejections=max(
-                1, int(evolve.get("validation_max_rejections", 1))
-            ),
             evolve_human_review_enabled=bool(
                 evolve.get("human_review_enabled", True)
-            ),
-            evolve_human_review_timeout_seconds=max(
-                1, int(evolve.get("human_review_timeout_seconds", 86400))
             ),
             evolve_interval_seconds=max(
                 1, int(evolve.get("interval_seconds", 600))
@@ -505,27 +482,16 @@ class ConfigStore:
             **memory_config_values(data, _normalize_string_list),
             validation_enabled=bool(validation.get("enabled", True)),
             validation_mode=_normalize_validation_mode(validation.get("mode", "true_replay")),
-            validation_runtimes=_normalize_string_list(validation.get("runtimes", ["hermes", "deap", "agentshub", "langfuse", "doris"])),
+            validation_runtimes=_normalize_string_list(
+                validation.get(
+                    "runtimes",
+                    ["deap", "langfuse", "doris"],
+                )
+            ),
             validation_idle_after_seconds=int(validation.get("idle_after_seconds", 300)),
             validation_poll_interval_seconds=int(validation.get("poll_interval_seconds", 60)),
             validation_max_jobs_per_day=int(validation.get("max_jobs_per_day", 5)),
             validation_max_concurrency=max(1, int(validation.get("max_concurrency", 1))),
-            validation_required_results=max(
-                1, int(validation.get("required_results", 3))
-            ),
-            validation_required_approvals=max(
-                1, int(validation.get("required_approvals", 2))
-            ),
-            validation_agentshub_url=str(validation.get("agentshub_url", "") or ""),
-            validation_agentshub_api_key=str(
-                validation.get("agentshub_api_key", "") or ""
-            ),
-            langfuse_enabled=bool(langfuse.get("enabled", False)),
-            langfuse_host=str(
-                langfuse.get("host", "") or "https://cloud.langfuse.com"
-            ).rstrip("/"),
-            langfuse_public_key=str(langfuse.get("public_key", "") or ""),
-            langfuse_secret_key=str(langfuse.get("secret_key", "") or ""),
             langfuse_tracing_enabled=bool(
                 langfuse.get("tracing_enabled", False)
             ),
@@ -564,47 +530,15 @@ class ConfigStore:
                     or 1.0
                 ),
             ),
-            langfuse_timeout_seconds=max(
-                1, int(langfuse.get("timeout_seconds", 30) or 30)
-            ),
-            langfuse_page_limit=max(
-                1, min(100, int(langfuse.get("page_limit", 50) or 50))
-            ),
-            langfuse_max_sessions=max(
-                1, int(langfuse.get("max_sessions", 100) or 100)
-            ),
-            langfuse_default_environment=_normalize_string_list(
-                langfuse.get("default_environment", [])
-            ),
-            langfuse_default_user_id=str(langfuse.get("default_user_id", "") or ""),
-            langfuse_default_tags=_normalize_string_list(
-                langfuse.get("default_tags", [])
-            ),
-            langfuse_default_release=str(langfuse.get("default_release", "") or ""),
-            langfuse_default_version=str(langfuse.get("default_version", "") or ""),
-            langfuse_default_trace_name=str(
-                langfuse.get("default_trace_name", "") or ""
+            langfuse_tracing_timeout_seconds=max(
+                1, int(langfuse.get("tracing_timeout_seconds", 30) or 30)
             ),
             datasource_adapter=str(datasource.get("adapter") or ""),
             datasource_schedule=dict(datasource.get("schedule") or {}),
-            datasource_type=str(
-                datasource.get("type", "") or "langfuse"
-            ),
-            datasource_legacy_converter_code=str(datasource.get("legacy_converter_code", "") or ""),
-            datasource_legacy_project=str(datasource.get("legacy_project", "") or ""),
-            datasource_legacy_options=dict(datasource.get("legacy_options") or {}),
             datasource_adapters_dir=str(
                 datasource.get("adapters_dir", "") or ""
             ),
-            datasource_options=dict(datasource.get("options") or {}),
             session_split_enabled=bool(session_split.get("enabled", True)),
-            langfuse_mapper_enabled=bool(langfuse.get("mapper_enabled", False)),
-            langfuse_mapper_code=str(langfuse.get("mapper_code", "") or ""),
-            langfuse_mappers=normalize_mapper_entries(
-                langfuse.get("mappers"),
-                legacy_enabled=bool(langfuse.get("mapper_enabled", False)),
-                legacy_code=str(langfuse.get("mapper_code", "") or ""),
-            ),
         )
         from ..tenants.registry import effective_config, get_current_tenant
 
@@ -616,71 +550,47 @@ class ConfigStore:
         llm = data.get("llm", {})
         skills = data.get("skills", {})
         evolve = data.get("evolve", {})
-        dreamcycle = data.get("dreamcycle", {})
-        effective_skills_dir = resolve_skills_dir(skills.get("dir", str(_DEFAULT_SKILLS_DIR)))
+        memory = data.get("memory", {})
+        maintenance = (
+            memory.get("maintenance")
+            if isinstance(memory.get("maintenance"), dict)
+            else {}
+        )
+        runtime_cache_dir = resolve_skill_runtime_cache_dir(
+            skills.get("runtime_cache_dir", str(_DEFAULT_SKILL_RUNTIME_CACHE_DIR))
+        )
         lines = [
             f"team.display_name: {self.to_config().team_display_name}",
-            f"llm.provider:    {llm.get('provider', '?')}",
             f"llm.model_id:    {llm.get('model_id', '?')}",
             f"llm.api_base:    {llm.get('api_base', '—')}",
-            f"llm.concurrency: {llm.get('max_concurrency', 8)}",
-            f"llm.queue:       {llm.get('queue_capacity', 64)}",
-            *(
-                [
-                    f"openrouter.route:    {data.get('openrouter', {}).get('route', 'fallback')}",
-                    f"openrouter.fallback: {data.get('openrouter', {}).get('fallback_models', '') or '(none)'}",
-                    f"openrouter.data:     {data.get('openrouter', {}).get('data_policy', '') or 'allow'}",
-                ]
-                if llm.get("provider") == "openrouter"
-                else []
-            ),
-            f"service.port:    {data.get('service', {}).get('port', data.get('proxy', {}).get('port', 52010))}",
-            f"skills.enabled:  {skills.get('enabled', True)}",
-            f"skills.dir:      {effective_skills_dir}",
+            f"llm.concurrency: {llm.get('max_concurrency', DEFAULT_LLM_MAX_CONCURRENCY)}",
+            f"llm.queue:       {llm.get('queue_capacity', DEFAULT_LLM_QUEUE_CAPACITY)}",
+            f"service.port:    {data.get('service', {}).get('port', 52010)}",
+            f"skills.runtime_cache_dir: {runtime_cache_dir}",
         ]
         sharing = data.get("sharing", {})
         validation = data.get("validation", {})
-        if sharing.get("enabled"):
-            backend = _infer_sharing_backend(sharing) or "unknown"
-            skill_backend = str(sharing.get("skill_backend", "") or "").strip().lower()
-            lines += [
-                "sharing.enabled: True",
-                f"sharing.backend: {backend}",
-            ]
-            if skill_backend:
-                lines.append(f"sharing.skill_backend: {skill_backend}")
-            if backend == "viking":
-                deployment = _normalize_viking_deployment(sharing.get("viking_deployment"))
-                endpoint = resolve_viking_endpoint(
-                    deployment, str(sharing.get("viking_endpoint", "") or "")
-                )
-                service_key = (
-                    sharing.get("viking_api_key")
-                    or sharing.get("viking_team_api_key")
-                    or sharing.get("viking_resources_api_key")
-                    or ""
-                )
-                lines += [
-                    f"sharing.viking_deployment: {deployment}",
-                    f"sharing.viking_endpoint: {endpoint}",
-                    "sharing.viking_root_prefix: "
-                    f"{sharing.get('viking_root_prefix', '') or TEAM_SKILL_ROOT_PREFIX}",
-                    f"sharing.root_api_key: {'present' if service_key else 'missing'}",
-                ]
-            lines += [
-                f"sharing.agent_id:    {sharing.get('viking_agent_id', '') or '(default)'}",
-                f"sharing.customer_id: {sharing.get('viking_customer_id', '') or '(none)'}",
-                f"sharing.alias:   {sharing.get('user_alias', '?')}",
-                f"sharing.auto_pull: {sharing.get('auto_pull_on_start', False)}",
-                "sharing.session_upload_interval: "
-                f"{_normalize_non_negative_int(sharing.get('session_upload_interval', 0), default=0)}",
-                "sharing.skill_reload_mode: "
-                f"{_normalize_choice(sharing.get('skill_reload_mode', 'poll'), _SKILL_RELOAD_MODES, 'poll')}",
-                "sharing.skill_reload_interval: "
-                f"{_normalize_reload_interval(sharing.get('skill_reload_interval_seconds', 30))}",
-            ]
-        else:
-            lines.append("sharing.enabled: False")
+        pg_enabled = bool(data.get("storage_pg", {}).get("enabled", False))
+        skill_backend = str(
+            sharing.get("skill_backend") or ("postgres" if pg_enabled else "local")
+        ).strip().lower()
+        session_backend = "postgres" if pg_enabled else str(
+            sharing.get("session_backend") or "local"
+        ).strip().lower()
+        deployment = _normalize_viking_deployment(sharing.get("viking_deployment"))
+        endpoint = resolve_viking_endpoint(
+            deployment, str(sharing.get("viking_endpoint", "") or "")
+        )
+        lines += [
+            f"sharing.skill_backend: {skill_backend}",
+            f"sharing.session_backend: {session_backend}",
+            f"sharing.viking_deployment: {deployment}",
+            f"sharing.viking_endpoint: {endpoint}",
+            "sharing.viking_root_prefix: "
+            f"{sharing.get('viking_root_prefix', '') or TEAM_SKILL_ROOT_PREFIX}",
+            "sharing.root_api_key: "
+            f"{'present' if sharing.get('viking_api_key') else 'missing'}",
+        ]
         lines += [
             f"evolve.server_url: {evolve.get('server_url', '') or 'http://127.0.0.1:52010'}",
             f"evolve.evidence_enabled: {evolve.get('evidence_enabled', True)}",
@@ -694,39 +604,34 @@ class ConfigStore:
             f"{','.join(_normalize_extensions(evolve.get('bundle_text_extensions', ['.py', '.sh'])))}",
             f"evolve.bundle_allow_delete: {evolve.get('bundle_allow_delete', True)}",
             f"evolve.bundle_static_checks: {evolve.get('bundle_static_checks_enabled', True)}",
-            f"dreamcycle.enabled: {dreamcycle.get('enabled', False)}",
-            f"dreamcycle.auto_start: {dreamcycle.get('auto_start', False)}",
-            "dreamcycle.service_target: "
-            f"{'configured' if sharing.get('viking_team_api_key') else 'missing'}",
+            f"memory.maintenance.enabled: {maintenance.get('enabled', False)}",
+            f"memory.maintenance.auto_start: {maintenance.get('auto_start', False)}",
+            "memory.maintenance.service_target: "
+            f"{'configured' if sharing.get('viking_api_key') else 'missing'}",
             f"validation.enabled: {validation.get('enabled', True)}",
             f"validation.mode: {_normalize_validation_mode(validation.get('mode', 'true_replay'))}",
             f"validation.idle_after: {validation.get('idle_after_seconds', 300)}",
             f"validation.poll_interval: {validation.get('poll_interval_seconds', 60)}",
-            f"validation.required_results: {validation.get('required_results', 3)}",
-            f"validation.required_approvals: {validation.get('required_approvals', 2)}",
-            f"validation.agentshub_url: {validation.get('agentshub_url', '') or '(not set)'}",
         ]
         langfuse = data.get("langfuse", {}) if isinstance(data.get("langfuse"), dict) else {}
-        lines.append(f"langfuse.enabled: {bool(langfuse.get('enabled', False))}")
         lines.append(
             "langfuse.tracing_enabled: "
             f"{bool(langfuse.get('tracing_enabled', False))}"
         )
-        if langfuse.get("enabled") or langfuse.get("tracing_enabled"):
+        if langfuse.get("tracing_enabled"):
             lines += [
-                f"langfuse.host: {str(langfuse.get('host', '') or 'https://cloud.langfuse.com').rstrip('/')}",
-                f"langfuse.public_key: {'present' if langfuse.get('public_key') else 'missing'}",
-                f"langfuse.secret_key: {'present' if langfuse.get('secret_key') else 'missing'}",
+                f"langfuse.tracing_host: {str(langfuse.get('tracing_host', '') or '(not set)').rstrip('/')}",
+                "langfuse.tracing_public_key: "
+                f"{'present' if langfuse.get('tracing_public_key') else 'missing'}",
+                "langfuse.tracing_secret_key: "
+                f"{'present' if langfuse.get('tracing_secret_key') else 'missing'}",
                 "langfuse.tracing_environment: "
                 f"{langfuse.get('tracing_environment', 'local') or 'local'}",
                 "langfuse.tracing_sample_rate: "
                 f"{langfuse.get('tracing_sample_rate', 1.0)}",
-                f"langfuse.max_sessions: {langfuse.get('max_sessions', 100)}",
-                "langfuse.default_environment: "
-                f"{','.join(_normalize_string_list(langfuse.get('default_environment', []))) or '(any)'}",
-                f"langfuse.default_user_id: {langfuse.get('default_user_id', '') or '(any)'}",
-                "langfuse.default_tags: "
-                f"{','.join(_normalize_string_list(langfuse.get('default_tags', []))) or '(any)'}",
             ]
-        lines.append(f"datasource.type: {str(data.get('datasource', {}).get('type', 'langfuse'))}")
+        lines.append(
+            "datasource.adapter: "
+            f"{str(data.get('datasource', {}).get('adapter') or '(not bound)')}"
+        )
         return "\n".join(lines)

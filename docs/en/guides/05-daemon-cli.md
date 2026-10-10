@@ -234,7 +234,6 @@ Displays each skill's name, category, description, uploader, and upload time.
 Must correctly configure `sharing` section before using skill sync commands:
 
 ```bash
-teamEvolver config sharing.enabled true
 teamEvolver config sharing.viking_deployment cloud
 teamEvolver config sharing.viking_api_key "your-root-key"
 ```

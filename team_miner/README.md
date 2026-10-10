@@ -199,7 +199,7 @@ GET /api/mining/trajectory-benchmarks/<run_id>
 状态为 `running`、`done`、`error` 或 `stopped`。完成后返回标准化题目，并将三个产物写入 `trajectory_benchmarks/<run_id>/`：
 
 ```text
-benchmark.json        # team-replay.dataset.v2 题库
+benchmark.json        # team-replay.dataset 题库
 BENCHMARK.md          # 便于人工审核的可读版
 manifest.json         # 来源摘要、难度和维度统计
 ```
@@ -208,7 +208,7 @@ manifest.json         # 来源摘要、难度和维度统计
 
 ## LIFT 集成与人工审核
 
-SkillMiner 优先读取 `benchmark.json`（兼容旧 `benchmark.jsonl`）并默认生成一个 LIFT 待审核草稿。该动作只写入本项目的 `lift_datasets/drafts/`，不会直接修改 LIFT。若暂时不需要自动生成，可设置：
+SkillMiner 只读取统一格式的 `benchmark.json`；显式启用后可生成一个 LIFT 待审核草稿。该动作只写入本项目的 `lift_datasets/drafts/`，不会直接修改 LIFT。默认关闭自动生成；可显式设置：
 
 ```bash
 export SKILLMINER_LIFT_AUTO_DRAFT=0
@@ -277,7 +277,7 @@ python3 run_multi_session.py run --sessions 3
 python3 run_multi_session.py run --sessions 3 --only EVAL-01
 ```
 
-产物位于 `benchmark_sessions/`：`snapshots/build-N.json` 快照、`intersection.md` 交集清单、`DIM_*/session-N.md` 每个 session 的完整对话与阅卷、`SESSIONS_REPORT.md` 逐维稳定性汇总。历史 `build-N.jsonl` 仍可读取，但不会再生成。
+产物位于 `benchmark_sessions/`：`snapshots/build-N.json` 快照、`intersection.md` 交集清单、`DIM_*/session-N.md` 每个 session 的完整对话与阅卷、`SESSIONS_REPORT.md` 逐维稳定性汇总。快照只接受统一 Test Dataset 格式。
 
 ## Web 控制台
 

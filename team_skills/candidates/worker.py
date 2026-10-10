@@ -1,9 +1,8 @@
-"""Optional background validator for idle clients.
+"""Centralized background validator.
 
 This worker is intentionally conservative:
-- it is disabled by default
-- it only runs when sharing is enabled
-- it only picks up jobs when the local client appears idle
+- it evaluates a candidate only while the service appears idle
+- it aggregates all selected Replay cases into one authoritative result
 """
 
 from __future__ import annotations
@@ -25,14 +24,13 @@ from team_replay.gateway import EmbeddedReplayGateway
 from team_replay.policy import (
     select_replay_cases,
 )
-
-from team_skills.library.bundle import bundle_tree_sha256, candidate_skill_bundle
-from team_skills.candidates.static_checks import validate_candidate_bundle
 from team_replay.runtime_matrix import (
     evaluate_runtime_compatibility,
     runtime_type_for_case,
 )
-from team_skills.candidates.store import ValidationStore
+from team_skills.candidates.static_checks import validate_candidate_bundle
+from team_skills.candidates.store import CENTRAL_VALIDATOR_ID, ValidationStore
+from team_skills.library.bundle import bundle_tree_sha256, candidate_skill_bundle
 
 logger = logging.getLogger(__name__)
 
@@ -52,13 +50,13 @@ class ValidationRunSummary:
 
 
 class ValidationWorker:
-    """Idle-time client-side validator."""
+    """Idle-time validator owned by the centralized teamEvolver service."""
 
     CAPABILITIES = frozenset(
         {
-            "bundle_v1",
-            "bundle_static_v1",
-            "bundle_true_replay_v1",
+            "skill-bundle",
+            "bundle-static",
+            "bundle-true-replay",
         }
     )
 
@@ -68,17 +66,33 @@ class ValidationWorker:
         *,
         idle_provider: Optional[IdleStateProvider] = None,
         llm_client: Any = None,
+        tenant_id: str = "default",
+        tenant_context: Any = None,
     ) -> None:
         del llm_client
+        from teamEvolver.storage.pg_store import validate_tenant_id
+
         self.config = config
+        self.tenant_id = validate_tenant_id(tenant_id)
+        if (
+            tenant_context is not None
+            and str(getattr(tenant_context, "tenant_id", "") or "")
+            != self.tenant_id
+        ):
+            raise ValueError("tenant_context does not match tenant_id")
+        self._tenant_context = tenant_context
         self._idle_provider = idle_provider
-        self._store = ValidationStore.from_config(config)
+        self._store = ValidationStore.from_config(
+            config,
+            tenant_id=self.tenant_id,
+        )
         self._stop_event = asyncio.Event()
         self._jobs_completed_today = 0
         self._jobs_completed_date = datetime.now(timezone.utc).date().isoformat()
-        self._user_alias = str(config.sharing_user_alias or os.environ.get("USER", "anonymous"))
+        # A stable ID makes active replicas claim and overwrite the same
+        # authoritative result.
+        self._validator_id = CENTRAL_VALIDATOR_ID
         from team_replay.engine import evaluate_job
-
         from teamEvolver.replay_adapter import ensure_replay_host
 
         ensure_replay_host()
@@ -89,7 +103,7 @@ class ValidationWorker:
         self._stop_event.set()
 
     def _validation_enabled(self) -> bool:
-        return bool(self.config.validation_enabled and self.config.sharing_enabled)
+        return bool(self.config.validation_enabled)
 
     def _reset_daily_quota_if_needed(self) -> None:
         today = datetime.now(timezone.utc).date().isoformat()
@@ -100,10 +114,13 @@ class ValidationWorker:
 
     def _quota_file(self) -> Path:
         """Per-tenant quota file so multi-tenant deployments don't share a counter."""
-        tenant = str(getattr(self.config, "pg_tenant_id", "") or "default")
-        if tenant == "default":
+        if self.tenant_id == "default":
             return Path.home() / ".teamEvolver" / "validation_quota.json"
-        return Path.home() / ".teamEvolver" / f"validation_quota.{tenant}.json"
+        return (
+            Path.home()
+            / ".teamEvolver"
+            / f"validation_quota.{self.tenant_id}.json"
+        )
 
     def _save_quota(self) -> None:
         path = self._quota_file()
@@ -331,19 +348,47 @@ class ValidationWorker:
             ),
         }
 
+    def _bind_tenant_context(self):
+        from teamEvolver.tenants.registry import (
+            TenantContext,
+            get_current_tenant,
+            set_current_tenant,
+        )
+
+        context = self._tenant_context
+        if context is None:
+            current = get_current_tenant()
+            if (
+                current is not None
+                and current.tenant_id == self.tenant_id
+            ):
+                context = current
+            else:
+                context = TenantContext(tenant_id=self.tenant_id)
+        return set_current_tenant(context)
+
     async def run_once(self, *, force: bool = False) -> dict[str, Any]:
+        from teamEvolver.tenants.registry import reset_current_tenant
+
+        token = self._bind_tenant_context()
+        try:
+            return await self._run_once(force=force)
+        finally:
+            reset_current_tenant(token)
+
+    async def _run_once(self, *, force: bool = False) -> dict[str, Any]:
         summary = ValidationRunSummary()
         if not self._validation_enabled():
-            summary.reason = "validation disabled or sharing not configured"
+            summary.reason = "validation disabled"
             return summary.__dict__
         if not self._quota_available():
             summary.reason = "daily validation quota reached"
             return summary.__dict__
         if not self._is_idle(force=force):
-            summary.reason = "client is not idle"
+            summary.reason = "service is not idle"
             return summary.__dict__
 
-        jobs = self._store.list_open_jobs(user_alias=self._user_alias)
+        jobs = self._store.list_open_jobs(validator_id=self._validator_id)
         summary.checked_jobs = len(jobs)
         if not jobs:
             summary.reason = "no open validation jobs"
@@ -376,7 +421,7 @@ class ValidationWorker:
             )
             claim_token = self._store.claim_job(
                 job_id,
-                self._user_alias,
+                self._validator_id,
                 revision=candidate_revision,
                 lease_seconds=(
                     max(
@@ -408,7 +453,7 @@ class ValidationWorker:
                 logger.warning("[ValidationWorker] job %s failed: %s", job_id, exc)
                 self._store.release_job_claim(
                     job_id,
-                    self._user_alias,
+                    self._validator_id,
                     claim_token,
                 )
                 summary.skipped_jobs += 1
@@ -429,7 +474,7 @@ class ValidationWorker:
                 )
                 self._store.release_job_claim(
                     job_id,
-                    self._user_alias,
+                    self._validator_id,
                     claim_token,
                 )
                 summary.skipped_jobs += 1
@@ -444,14 +489,14 @@ class ValidationWorker:
             result["candidate_bundle_tree_sha256"] = bundle_tree_sha256(
                 candidate_skill_bundle(candidate)
             )
-            self._store.save_result(job_id, self._user_alias, result)
+            self._store.save_result(job_id, self._validator_id, result)
             # Candidate/replay UIs read the evaluation object, while the
-            # distributed publish quorum reads per-validator results. Persist
-            # both projections so automatic validation is immediately visible.
+            # centralized publish gate reads the authoritative worker result.
+            # Persist both projections so automatic validation is immediately visible.
             self._store.save_evaluation(job_id, result)
             self._store.release_job_claim(
                 job_id,
-                self._user_alias,
+                self._validator_id,
                 claim_token,
             )
             self._jobs_completed_today += 1
@@ -461,14 +506,14 @@ class ValidationWorker:
                 "[ValidationWorker] submitted result for job %s as %s "
                 "(decision=%s)",
                 job_id,
-                self._user_alias,
+                self._validator_id,
                 result.get("decision"),
             )
             finalized = await self._trigger_evolve_finalize()
             if finalized and result.get("accepted") is True:
                 expected = await self._wait_for_published_commit(job)
                 if expected is not None:
-                    await self._sync_registered_agents(job, expected)
+                    await self._record_skill_delivery(job, expected)
             if summary.validated_jobs >= max(1, int(self.config.validation_max_concurrency)):
                 break
 
@@ -487,7 +532,9 @@ class ValidationWorker:
             import httpx
 
             key = os.environ.get("TEAMEVOLVER_ROOT_API_KEY", "").strip()
-            headers = {"Authorization": f"Bearer {key}"} if key else {}
+            headers = {"X-Tenant-Id": self.tenant_id}
+            if key:
+                headers["Authorization"] = f"Bearer {key}"
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(f"{base_url}/trigger", headers=headers)
                 response.raise_for_status()
@@ -522,11 +569,14 @@ class ValidationWorker:
                 try:
                     from team_skills.library.hub import SkillHub
 
-                    hub = SkillHub.team_from_config(self.config)
+                    hub = SkillHub.team_from_config(
+                        self.config,
+                        tenant_id=self.tenant_id,
+                    )
                     record = next(
                         (
                             item
-                            for item in hub.list_remote()
+                            for item in hub.list_skills()
                             if str(item.get("name") or "") == name
                         ),
                         None,
@@ -535,7 +585,7 @@ class ValidationWorker:
                     expected_sha = str((record or {}).get("sha256") or "")
                     expected_tree = str((record or {}).get("tree_sha256") or "")
                     bundle = (
-                        hub._read_version_bundle(name, version)
+                        hub.read_version_bundle(name, version)
                         if version > 0
                         else {}
                     )
@@ -558,37 +608,13 @@ class ValidationWorker:
                     pass
             await asyncio.sleep(1.0)
 
-        self._save_agentshub_sync_status(
-            job_id,
-            status="failed",
-            detail="timed out waiting for committed published bundle",
-        )
         logger.warning(
             "[ValidationWorker] timed out waiting for published commit for %s",
             job_id,
         )
         return None
 
-    def _save_agentshub_sync_status(
-        self,
-        job_id: str,
-        *,
-        status: str,
-        expected: dict[str, Any] | None = None,
-        detail: Any = None,
-    ) -> None:
-        decision = self._store.load_decision(job_id)
-        if not decision:
-            return
-        decision["agentshub_sync"] = {
-            "status": status,
-            "expected": dict(expected or {}),
-            "detail": detail,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
-        self._store.save_decision(job_id, decision)
-
-    async def _sync_registered_agents(
+    async def _record_skill_delivery(
         self,
         job: dict[str, Any],
         expected: dict[str, Any],
@@ -596,116 +622,37 @@ class ValidationWorker:
         from team_skills.library.mutations import SkillMutationService
 
         job_id = str(job.get("job_id") or "")
-        service = SkillMutationService.from_config(self.config)
-        commit = await asyncio.to_thread(
+        service = SkillMutationService.from_config(
+            self.config,
+            tenant_id=self.tenant_id,
+        )
+        await asyncio.to_thread(
             service.record_committed,
             action="publish",
             mutation_id=job_id,
             expected=expected,
             tenant_ids=self._source_tenant_ids(job),
         )
-        if service.pull_enabled:
-            await asyncio.to_thread(service.cancel_pending_for_pull)
-            payload = {"status": "published", "delivery_mode": "pull"}
-        else:
-            await asyncio.to_thread(service.reconcile)
-            delivery = await service.drain()
-            payload = {
-                "event_id": commit["event_id"],
-                "status": (
-                    "synced" if delivery["synced"] > 0 and not delivery["failed"] and not delivery["pending"]
-                    else "available" if delivery.get("available") else "pending"
-                ),
-                "delivery": delivery,
-            }
+        payload = {"status": "published", "delivery_mode": "pull"}
         decision = self._store.load_decision(job_id)
         if decision:
-            decision["skill_delivery" if service.pull_enabled else "agent_sync"] = {
+            decision["skill_delivery"] = {
                 **payload,
                 "expected": dict(expected),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
-            if service.pull_enabled:
-                decision.pop("agent_sync", None)
-                decision.pop("agentshub_sync", None)
+            decision.pop("agent_sync", None)
             self._store.save_decision(job_id, decision)
         return payload
-
-    async def _sync_agentshub_skills(
-        self,
-        job: dict[str, Any],
-        expected: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        if getattr(self.config, "skills_delivery_mode", "push") == "pull":
-            return None
-        base_url = str(getattr(self.config, "validation_agentshub_url", "") or "").rstrip("/")
-        if not base_url:
-            return None
-        job_id = str(job.get("job_id") or "")
-        tenant_ids = self._source_tenant_ids(job)
-        if not tenant_ids:
-            self._save_agentshub_sync_status(
-                job_id,
-                status="failed",
-                expected=expected,
-                detail="source sessions do not contain an AgentsHub tenant",
-            )
-            return None
-        headers: dict[str, str] = {}
-        api_key = str(
-            getattr(self.config, "validation_agentshub_api_key", "") or ""
-        ).strip()
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        self._save_agentshub_sync_status(
-            job_id,
-            status="syncing",
-            expected=expected,
-        )
-        import httpx
-
-        last_error = ""
-        for attempt in range(8):
-            try:
-                async with httpx.AsyncClient(timeout=120.0) as client:
-                    response = await client.post(
-                        f"{base_url}/api/internal/team-evolver/sync",
-                        json={
-                            "tenant_ids": tenant_ids,
-                            "expected_skills": [expected],
-                        },
-                        headers=headers,
-                    )
-                    response.raise_for_status()
-                    payload = response.json()
-                self._save_agentshub_sync_status(
-                    job_id,
-                    status="synced",
-                    expected=expected,
-                    detail=payload,
-                )
-                return payload
-            except Exception as exc:  # noqa: BLE001 - retry committed visibility.
-                last_error = str(exc)
-                if attempt < 7:
-                    await asyncio.sleep(2.0)
-        self._save_agentshub_sync_status(
-            job_id,
-            status="failed",
-            expected=expected,
-            detail=last_error,
-        )
-        logger.warning(
-            "[ValidationWorker] AgentsHub verified skill sync callback failed: %s",
-            last_error,
-        )
-        return None
 
     def _source_tenant_ids(self, job: dict[str, Any]) -> list[str]:
         try:
             from teamEvolver.session_store import SessionStore
 
-            store = SessionStore.from_config(self.config)
+            store = SessionStore.from_config(
+                self.config,
+                tenant_id=self.tenant_id,
+            )
         except Exception:
             return []
         tenant_ids: list[str] = []
@@ -755,11 +702,10 @@ class ValidationWorker:
             except Exception:
                 pass
         return {
+            "tenant_id": self.tenant_id,
             "enabled": bool(self.config.validation_enabled),
             "mode": str(self.config.validation_mode or "replay"),
-            "sharing_enabled": bool(self.config.sharing_enabled),
-            "customer_id": str(self.config.sharing_viking_customer_id or ""),
-            "user_alias": self._user_alias,
+            "validator_id": self._validator_id,
             "idle_after_seconds": int(self.config.validation_idle_after_seconds),
             "poll_interval_seconds": int(self.config.validation_poll_interval_seconds),
             "max_jobs_per_day": int(self.config.validation_max_jobs_per_day),
@@ -767,7 +713,7 @@ class ValidationWorker:
             "active_sessions": active_sessions,
             "last_request_age_seconds": last_request_age,
             "idle_now": idle_now,
-            "open_jobs_for_me": len(self._store.list_open_jobs(user_alias=self._user_alias))
+            "open_jobs_for_me": len(self._store.list_open_jobs(validator_id=self._validator_id))
             if self._validation_enabled()
             else 0,
         }

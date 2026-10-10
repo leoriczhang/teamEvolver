@@ -19,8 +19,11 @@
 #   - 思考块 <think>...</think> 需剥离，只留正文
 #   - "tool:" SPAN → tool_calls/tool_results；systemPrompt → injected_skills
 
-import json
 import re
+
+from session_ingestion.adapters._shared.sf_agent_adapter import (
+    tool_spans as _tool_spans,
+)
 
 SOURCE = {
     "label": "安全运营",
@@ -51,73 +54,6 @@ SOURCE["_trace_name"] = (
     "invoke_agent eos_pass_sois_intentRoutingAgent,"
     "POST /v1/chat/completions"
 )
-
-
-def _obs_text(value):
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, dict):
-        content = value.get("content")
-        if isinstance(content, list):
-            parts = []
-            for item in content:
-                if isinstance(item, dict) and isinstance(item.get("text"), str):
-                    parts.append(item["text"])
-                else:
-                    parts.append(json.dumps(item, ensure_ascii=False))
-            return "\n".join(p for p in parts if p)
-        if isinstance(content, str):
-            return content
-        return json.dumps(value, ensure_ascii=False)
-    if isinstance(value, (list, int, float, bool)):
-        return json.dumps(value, ensure_ascii=False)
-    return str(value)
-
-
-def _tool_spans(observations):
-    """"tool: <name>" SPAN 观测 → (tool_calls, tool_results, used_skills)。"""
-    tool_calls = []
-    tool_results = []
-    used_skills = []
-    for obs in observations or []:
-        if not isinstance(obs, dict):
-            continue
-        name = str(obs.get("name") or "")
-        if not name.startswith("tool:"):
-            continue
-        tool = name.split(":", 1)[1].strip()
-        obs_id = str(obs.get("id") or "")
-        raw_in = obs.get("input")
-        if isinstance(raw_in, (dict, list)):
-            cmd_src = json.dumps(raw_in, ensure_ascii=False)
-        else:
-            cmd_src = str(raw_in or "")
-        tool_calls.append({
-            "id": obs_id,
-            "type": "function",
-            "function": {"name": tool, "arguments": cmd_src},
-        })
-        text = _obs_text(obs.get("output"))
-        level = str(obs.get("level") or "").upper()
-        lowered = text.lower()
-        has_error = (
-            level == "ERROR"
-            or "error" in lowered
-            or "exception" in lowered
-            or "traceback" in lowered
-        )
-        tool_results.append({
-            "tool_call_id": obs_id,
-            "tool_name": tool,
-            "content": text,
-            "has_error": has_error,
-        })
-        for m in re.findall(r"skills/([A-Za-z0-9_.-]+)", cmd_src):
-            if m not in used_skills:
-                used_skills.append(m)
-    return tool_calls, tool_results, used_skills
 
 
 def _injected_skills(trace):
@@ -261,44 +197,6 @@ def map_session(converted, session, traces):
                 break
 
     return out or None
-
-
-# --------------------------------------------------------------------------- #
-# Meta 信息（user_id / session_id / trace_id）—— 供“运行总览”会话列表展示
-#
-# 由用户按各自上游报文实现；缺字段返回空串即可（前端显示 “-”）。
-# 安全运营为 A2A 信封：用户标识可能在 parts/messages 或 trace.metadata 中；
-# trace_id 取用户在 metadata/input 里自定义的链路 id（非平台 trace 主键）。
-# --------------------------------------------------------------------------- #
-
-_USER_ID_KEYS = ("userId", "user_id", "userID", "sender", "sender_id", "empId", "emp_id", "user")
-
-
-def _a2a_user_id(tin):
-    """从 A2A parts/messages 信封里找用户标识；找不到返回 ""（交由通用深搜）。"""
-    if isinstance(tin, list):
-        for m in tin:
-            if isinstance(m, dict) and m.get("role") == "user":
-                for key in _USER_ID_KEYS:
-                    if str(m.get(key) or "").strip():
-                        return str(m[key]).strip()
-                for part in m.get("parts") or []:
-                    if isinstance(part, dict) and isinstance(part.get("metadata"), dict):
-                        for key in _USER_ID_KEYS:
-                            if str(part["metadata"].get(key) or "").strip():
-                                return str(part["metadata"][key]).strip()
-    elif isinstance(tin, dict):
-        for key in _USER_ID_KEYS:
-            if str(tin.get(key) or "").strip():
-                return str(tin[key]).strip()
-        msgs = tin.get("messages")
-        if isinstance(msgs, list):
-            for m in msgs:
-                if isinstance(m, dict) and m.get("role") == "user":
-                    for key in _USER_ID_KEYS:
-                        if str(m.get(key) or "").strip():
-                            return str(m[key]).strip()
-    return ""
 
 
 def extract_meta(converted, session, traces):

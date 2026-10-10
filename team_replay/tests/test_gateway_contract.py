@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from team_replay.contracts import (
-    CHECKLIST_FIRST_POLICY_V1,
-    REPLAY_RUN_RESULT_SCHEMA_V1,
+    CHECKLIST_FIRST_POLICY,
+    REPLAY_RUN_RESULT_SCHEMA,
     ReplayContractError,
     skill_job_from_spec,
     skill_replay_spec,
@@ -26,16 +26,20 @@ def _job() -> dict:
         },
         "replay_cases": [
             {
-                "dataset_id": "case-1",
-                "dataset_format": "teamEvolver-progressive-test-v1",
+                "case_id": "case-1",
                 "query": "Complete the task",
-                "checklist": [
+                "skill_ids": ["demo"],
+                "checks": [
                     {"id": "R01", "text": "Task is complete", "kind": "output"}
                 ],
+                "materials": [],
+                "provenance": {},
+                "replay": {"progressive_disclosure": {"batch_size": 4}},
+                "metadata": {},
             }
         ],
         "include_full_trace": True,
-        "source": {"kind": "skillminer"},
+        "source": {"kind": "dataset"},
     }
 
 
@@ -45,12 +49,12 @@ def test_skill_job_round_trip_preserves_checklist_first_contract() -> None:
     spec = skill_replay_spec(job, account_id="account-a")
     projected = skill_job_from_spec(spec)
 
-    assert spec.policy_id == CHECKLIST_FIRST_POLICY_V1
+    assert spec.policy_id == CHECKLIST_FIRST_POLICY
     assert spec.account_id == "account-a"
     assert spec.baseline.kind == "skill_bundle"
     assert spec.candidate.revision == "3"
     assert projected["replay_cases"] == job["replay_cases"]
-    assert projected["include_full_trace"] is True
+    assert "include_full_trace" not in projected
 
 
 def test_skill_set_treatments_round_trip_without_assigning_a_primary_skill() -> None:
@@ -85,7 +89,7 @@ def test_skill_set_treatments_round_trip_without_assigning_a_primary_skill() -> 
 def test_disabled_gateway_reports_not_run_without_rejecting_candidate() -> None:
     result = DisabledReplayGateway().evaluate(skill_replay_spec(_job()))
 
-    assert result["schema_version"] == REPLAY_RUN_RESULT_SCHEMA_V1
+    assert result["schema_version"] == REPLAY_RUN_RESULT_SCHEMA
     assert result["status"] == "not_run"
     assert result["verdict"] == "inconclusive"
     assert result["accepted"] is False
@@ -109,7 +113,7 @@ def test_embedded_gateway_delegates_through_common_spec() -> None:
         timeout_seconds=90,
     )
 
-    assert result["schema_version"] == REPLAY_RUN_RESULT_SCHEMA_V1
+    assert result["schema_version"] == REPLAY_RUN_RESULT_SCHEMA
     assert result["verdict"] == "accept"
     assert captured["job_id"] == "job-1"
     assert captured["job"]["candidate_revision"] == "3"

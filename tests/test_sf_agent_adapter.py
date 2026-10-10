@@ -1,8 +1,40 @@
 from __future__ import annotations
 
 from session_ingestion.adapters._shared.langfuse_convert import convert_langfuse_session
-from session_ingestion.adapters._shared.sf_agent_adapter import extract_mapping, map_session
+from session_ingestion.adapters._shared.sf_agent_adapter import (
+    extract_mapping,
+    iter_json_objects,
+    map_session,
+    tool_spans,
+)
 from session_ingestion.adapters.sources import doris
+
+
+def test_shared_adapter_helpers_preserve_custom_tool_mapping():
+    calls, results, skills = tool_spans(
+        [
+            {
+                "id": "tool-1",
+                "name": "tool: exec",
+                "input": {"path": "skills/demo/run.py"},
+                "output": {"content": [{"text": "done"}, {"code": 1}, {"text": ""}]},
+            }
+        ]
+    )
+
+    assert calls[0]["function"]["arguments"] == '{"path": "skills/demo/run.py"}'
+    assert results[0]["content"] == 'done\n{"code": 1}'
+    assert results[0]["has_error"] is False
+    assert skills == ["demo"]
+
+
+def test_shared_adapter_helper_extracts_json_from_mixed_text():
+    source = 'header {"note": "brace } in string"} middle {"sender_id": "42"}'
+
+    assert list(iter_json_objects(source)) == [
+        {"note": "brace } in string"},
+        {"sender_id": "42"},
+    ]
 
 
 def test_envelope_only_prompt_title_comes_from_nested_query():
@@ -224,17 +256,20 @@ def test_generated_user_is_not_presented_as_business_submitter():
 
 
 def test_doris_synthesizes_session_for_trace_without_upstream_session(monkeypatch):
-    rows = [
-        {
-            "id": "trace-1",
-            "session_id": None,
-            "name": "agent-call",
-            "timestamp": "2026-09-01 00:45:32",
-            "user_id": "097988",
-        }
-    ]
     monkeypatch.setattr(doris, "resolve_project_id", lambda _value: "project-1")
-    monkeypatch.setattr(doris, "fetch_traces_meta", lambda *_args, **_kwargs: rows)
+    monkeypatch.setattr(
+        doris,
+        "fetch_session_groups_page",
+        lambda *_args, **_kwargs: [
+            {
+                "session_id": "doris-trace:trace-1",
+                "timestamp": "2026-09-01 00:45:32",
+                "user_id": "097988",
+                "name": "agent-call",
+                "trace_count": 1,
+            }
+        ],
+    )
     adapter = doris.DorisSourceAdapter(
         None,
         {"project_id": "project-1", "trace_name": "agent-call"},
@@ -259,6 +294,55 @@ def test_doris_synthesizes_session_for_trace_without_upstream_session(monkeypatc
         )[0]["user_id"]
         == "097988"
     )
+
+
+def test_doris_session_batches_use_keyset_pagination_without_total_limit(monkeypatch):
+    calls = []
+    first_page = [
+        {
+            "session_id": f"s-{index:03d}",
+            "timestamp": f"2026-09-01 00:{index // 60:02d}:{index % 60:02d}",
+            "user_id": "u1",
+            "name": "agent-call",
+            "trace_count": 1,
+        }
+        for index in range(100)
+    ]
+    second_page = [
+        {
+            "session_id": "s-100",
+            "timestamp": "2026-09-01 00:01:40",
+            "user_id": "u1",
+            "name": "agent-call",
+            "trace_count": 1,
+        }
+    ]
+
+    def fake_page(*_args, **kwargs):
+        calls.append(kwargs)
+        return second_page if kwargs["after_session_id"] else first_page
+
+    monkeypatch.setattr(doris, "resolve_project_id", lambda _value: "project-1")
+    monkeypatch.setattr(doris, "fetch_session_groups_page", fake_page)
+    adapter = doris.DorisSourceAdapter(
+        None,
+        {"project_id": "project-1", "trace_name": "agent-call"},
+    )
+
+    batches = list(
+        adapter.iter_session_id_batches(
+            {
+                "from_timestamp": "2026-09-01T00:00:00Z",
+                "to_timestamp": "2026-10-01T00:00:00Z",
+            },
+            batch_size=25,
+        )
+    )
+
+    assert [len(batch) for batch in batches] == [25, 25, 25, 25, 1]
+    assert batches[-1][-1] == "s-100"
+    assert calls[1]["after_session_id"] == "s-099"
+    assert calls[1]["after_timestamp"] == first_page[-1]["timestamp"]
 
 
 def test_doris_fetches_synthetic_session_by_trace_id_and_multi_trace_name(monkeypatch):

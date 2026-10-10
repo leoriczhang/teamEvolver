@@ -143,7 +143,7 @@ This prevents Agents from re-entering same conversation into evolution pipeline 
 | Session value classifier | [session_filter.py](../../../teamEvolver/session_filter.py) |
 | Session materials collection | [session_materials.py](../../../teamEvolver/session_materials.py) |
 | Session Schema definition | [docs/schemas/agent-session-v1.schema.json](../../schemas/agent-session-v1.schema.json) |
-| Agent integration protocol (Session Ingest) | [Protocol V1 Specification](../agent-integrations/02-protocol-v1) |
+| Agent integration protocol (Session Ingest) | [Protocol V2 specification](../agent-integrations/06-protocol-v2.md) |
 
 ## Related Documentation
 

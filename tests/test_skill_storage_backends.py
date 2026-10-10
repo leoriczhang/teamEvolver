@@ -5,11 +5,13 @@ import pytest
 from team_skills.candidates.store import ValidationStore
 from team_skills.evolution.kernel.settings import EvolveServerConfig
 from team_skills.evolution.runtime.orchestrator import EvolveServer
+from team_skills.library.bundle import attach_bundle_payload
 from team_skills.library.hub import SkillHub
 from team_skills.library.mutations import SkillMutationService
 from teamEvolver.config import TeamEvolverConfig
 from teamEvolver.config_store import ConfigStore
 from teamEvolver.proxy import routes
+from teamEvolver.storage import build_object_store, normalize_backend
 from teamEvolver.storage.local import LocalObjectStore
 from teamEvolver.tenants.registry import TenantContext, effective_config
 
@@ -35,8 +37,6 @@ def test_config_store_keeps_pg_sessions_and_local_skill_storage(
     store.save(
         {
             "sharing": {
-                "enabled": True,
-                "backend": "local",
                 "session_backend": "local",
                 "skill_backend": "local",
                 "skill_local_root": str(skill_root),
@@ -49,7 +49,6 @@ def test_config_store_keeps_pg_sessions_and_local_skill_storage(
     )
 
     config = store.to_config()
-    assert config.sharing_backend == "local"
     assert config.sharing_session_backend == "postgres"
     assert config.sharing_skill_backend == "local"
     assert config.sharing_skill_local_root == str(skill_root)
@@ -113,27 +112,17 @@ def test_evolve_config_preserves_split_storage(tmp_path, monkeypatch):
 
 def test_local_skill_hub_archives_versions_and_scopes_tenant(tmp_path):
     storage_root = tmp_path / "nas"
-    working_root = tmp_path / "working"
-    skill_dir = working_root / "demo"
-    skill_dir.mkdir(parents=True)
-    skill_md = skill_dir / "SKILL.md"
     config = TeamEvolverConfig(
-        sharing_enabled=True,
         sharing_skill_backend="local",
         sharing_skill_local_root=str(storage_root),
         sharing_skill_mirror_enabled=False,
-        skills_delivery_mode="pull",
     )
     hub = SkillHub.team_from_config(config, tenant_id="tenant-a")
 
-    skill_md.write_text(
-        "---\nname: demo\ndescription: Demo\n---\nVersion one\n"
-    )
-    assert hub.push_skills(str(working_root))["uploaded"] == 1
-    skill_md.write_text(
-        "---\nname: demo\ndescription: Demo\n---\nVersion two\n"
-    )
-    assert hub.push_skills(str(working_root))["uploaded"] == 1
+    first = b"---\nname: demo\ndescription: Demo\n---\nVersion one\n"
+    second = b"---\nname: demo\ndescription: Demo\n---\nVersion two\n"
+    assert hub.publish_bundle("demo", {"SKILL.md": first})["uploaded"] == 1
+    assert hub.publish_bundle("demo", {"SKILL.md": second})["uploaded"] == 1
 
     prefix = storage_root / "tenants" / "tenant-a" / "skills" / "demo"
     assert (prefix / "versions" / "v1" / "SKILL.md").read_text().endswith(
@@ -171,22 +160,17 @@ def test_local_skill_hub_archives_versions_and_scopes_tenant(tmp_path):
 
 
 def test_viking_skill_hub_archives_versions_and_scopes_tenant(tmp_path):
-    working_root = tmp_path / "working"
-    skill_dir = working_root / "demo"
-    skill_dir.mkdir(parents=True)
-    skill_md = skill_dir / "SKILL.md"
     config = TeamEvolverConfig(
-        sharing_enabled=True,
         sharing_skill_backend="viking",
         sharing_viking_endpoint=f"memory://{tmp_path.name}",
         sharing_skill_mirror_enabled=False,
     )
     hub = SkillHub.team_from_config(config, tenant_id="tenant-a")
 
-    skill_md.write_text("---\nname: demo\n---\nViking version one\n")
-    assert hub.push_skills(str(working_root))["uploaded"] == 1
-    skill_md.write_text("---\nname: demo\n---\nViking version two\n")
-    assert hub.push_skills(str(working_root))["uploaded"] == 1
+    first = b"---\nname: demo\n---\nViking version one\n"
+    second = b"---\nname: demo\n---\nViking version two\n"
+    assert hub.publish_bundle("demo", {"SKILL.md": first})["uploaded"] == 1
+    assert hub.publish_bundle("demo", {"SKILL.md": second})["uploaded"] == 1
 
     prefix = "tenants/tenant-a/skills/demo"
     assert hub._bucket.get_object(
@@ -215,22 +199,28 @@ def test_evolution_upload_uses_local_skill_store_and_tenant_prefix(tmp_path):
     assert server._skill_prefix == "tenants/tenant-a/"
     assert (
         server._upload_skill(
-            {
-                "name": "evolved-demo",
-                "description": "Demo",
-                "content": "Version one",
-            },
+            attach_bundle_payload(
+                {
+                    "name": "evolved-demo",
+                    "description": "Demo",
+                    "content": "Version one",
+                },
+                {},
+            ),
             "create_skill",
         )
         == "uploaded"
     )
     assert (
         server._upload_skill(
-            {
-                "name": "evolved-demo",
-                "description": "Demo",
-                "content": "Version two",
-            },
+            attach_bundle_payload(
+                {
+                    "name": "evolved-demo",
+                    "description": "Demo",
+                    "content": "Version two",
+                },
+                {},
+            ),
             "update_skill",
         )
         == "uploaded"
@@ -260,7 +250,6 @@ def test_storage_status_reports_local_skills_and_pg_sessions(
         lambda config, tenant_id="default": FakeSessionHub(),
     )
     config = TeamEvolverConfig(
-        sharing_enabled=True,
         sharing_skill_backend="local",
         sharing_skill_local_root=str(tmp_path / "nas"),
         sharing_session_backend="postgres",
@@ -277,16 +266,12 @@ def test_storage_status_reports_local_skills_and_pg_sessions(
 
 
 def test_empty_skill_backend_defaults_to_local_not_viking(tmp_path):
-    """Per-purpose empty → local, even when sharing_backend=viking + endpoint.
+    """Per-purpose empty resolves to local even with a Viking endpoint.
 
-    Regression: _build used sharing_local_root="" as a "remote-Agent pull"
-    signal and inherited sharing_backend=viking, so teamEvolver's own service
-    read candidates from viking (404) while the evolution engine wrote them
-    locally — candidates were invisible.
+    The OpenViking endpoint is a mirror target, not an implicit authority for
+    the TeamEvolver Skill registry.
     """
     config = TeamEvolverConfig(
-        sharing_enabled=True,
-        sharing_backend="viking",
         sharing_viking_endpoint=f"memory://{tmp_path.name}",
         sharing_skill_backend="",
         sharing_local_root="",
@@ -294,3 +279,12 @@ def test_empty_skill_backend_defaults_to_local_not_viking(tmp_path):
     )
     hub = SkillHub.team_from_config(config, tenant_id="tenant-a")
     assert isinstance(hub._bucket, LocalObjectStore)
+
+
+def test_unknown_backend_is_rejected_instead_of_becoming_viking():
+    assert normalize_backend("removed-backend") == "removed-backend"
+    with pytest.raises(ValueError, match="Unsupported storage backend"):
+        build_object_store(
+            backend="removed-backend",
+            endpoint="memory://must-not-be-selected",
+        )

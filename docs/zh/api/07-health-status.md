@@ -116,7 +116,7 @@ Kubernetes 风格存活探针，返回简单的 ok 状态。
 | `endpoint` | string | OpenViking 端点地址 |
 | `namespace` | string | 命名空间 |
 | `api_key_present` | boolean | API Key 是否已配置 |
-| `sharing_enabled` | boolean | 是否启用共享（sharing）配置 |
+| `sharing_enabled` | boolean | 已废弃的兼容字段，固定返回 true |
 | `fallback_enabled` | boolean | 是否启用本地回退（`sharing.local_fallback_enabled`，默认 true） |
 | `effective_backend` | string | 实际生效的存储后端（`viking` 或 `local`） |
 | `fallback_active` | boolean | 配置为 `viking` 但探测失败、实际回退到本地存储时为 true |
@@ -126,7 +126,7 @@ Kubernetes 风格存活探针，返回简单的 ok 状态。
 | `mirror_enabled` | boolean | Skill 库是否启用异步镜像到 OpenViking |
 | `mirror` | object | 镜像 spool 健康摘要：`enabled`、`spool_dir`、`backlog`、`oldest_age_seconds`、`dead_letter`、`last_error` |
 | `reachable` | boolean | 存储是否可达（注意：回退状态下仍为 true） |
-| `reason` | string | 状态说明：`sharing_disabled`（共享被禁用）、`viking_unavailable: <原因>`（OpenViking 不可用已回退本地，此时 reachable=true）、或探测异常信息（此时 reachable=false） |
+| `reason` | string | 状态说明：`viking_unavailable: <原因>`（OpenViking 不可用已回退本地，此时 reachable=true），或存储探测异常信息（此时 reachable=false） |
 
 代码：`teamEvolver/proxy/routes.py:_storage_status`
 

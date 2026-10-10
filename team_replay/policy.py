@@ -4,39 +4,29 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from ._util import checklist_items, flatten_requirements
 from .metrics import objective_replay_decision
 
 
 def normalize_case_checklist(case: Mapping[str, Any]) -> list[dict[str, Any]]:
-    raw_checks = case.get("checks") or case.get("checklist") or []
-    explicit = [
+    raw_checks = case.get("checks") or []
+    return [
         {
-            "id": str(item.get("id") or f"C{index:02d}"),
-            "text": str(item.get("text") or item.get("requirement") or "").strip(),
-            "kind": str(item.get("kind") or "output"),
+            "id": str(item.get("id") or ""),
+            "text": str(item.get("text") or "").strip(),
+            "kind": str(item.get("kind") or ""),
+            **({"polarity": "must_not"} if item.get("polarity") == "must_not" else {}),
         }
-        for index, item in enumerate(raw_checks, start=1)
+        for item in raw_checks
         if isinstance(item, Mapping)
-        and str(item.get("text") or item.get("requirement") or "").strip()
+        and str(item.get("id") or "").strip()
+        and str(item.get("text") or "").strip()
+        and item.get("kind") in {"output", "trajectory"}
     ]
-    if explicit:
-        return explicit
-    return checklist_items(
-        flatten_requirements(case.get("requirements")),
-        flatten_requirements(case.get("trajectory_requirements")),
-    )
 
 
 def progressive_config(case: Mapping[str, Any]) -> dict[str, Any]:
     replay = case.get("replay") if isinstance(case.get("replay"), Mapping) else {}
-    raw = (
-        replay.get("progressive_disclosure")
-        if isinstance(replay.get("progressive_disclosure"), Mapping)
-        else case.get("progressive_disclosure")
-        if isinstance(case.get("progressive_disclosure"), Mapping)
-        else {}
-    )
+    raw = replay.get("progressive_disclosure") if isinstance(replay.get("progressive_disclosure"), Mapping) else {}
     return {
         "enabled": bool(raw.get("enabled", True)),
         "initial_visibility": "query_only",
@@ -46,43 +36,21 @@ def progressive_config(case: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def initial_query(case: Mapping[str, Any]) -> str:
-    return str(case.get("query") or case.get("instruction") or "").strip()
+    return str(case.get("query") or "").strip()
 
 
 def select_replay_cases(
     cases: list[Any],
 ) -> list[tuple[str, int]]:
-    """Run every progressive dataset case; retain one-per-window for legacy jobs."""
-    progressive = any(
-        isinstance(case, Mapping)
-        and (
-            bool(case.get("checklist"))
-            or bool(case.get("checks"))
-            or str(case.get("schema_version") or "") == "team-replay.dataset.v2"
-            or str(case.get("dataset_format") or "").startswith(
-                "teamEvolver-progressive-test"
-            )
-        )
-        for case in cases
-    )
+    """Run every canonical Dataset case."""
     selected: list[tuple[str, int]] = []
-    seen_windows: set[str] = set()
     for index, case in enumerate(cases):
         if not isinstance(case, Mapping):
             continue
-        window = str(case.get("evidence_window") or "recent")
-        if window not in {"recent", "historical"}:
-            window = "recent"
-        if progressive:
-            dataset_id = str(
-                case.get("dataset_id") or case.get("case_id") or index
-            )
-            selected.append((f"{window}:{dataset_id}", index))
-            continue
-        if window in seen_windows:
-            continue
-        selected.append((window, index))
-        seen_windows.add(window)
+        provenance = case.get("provenance") if isinstance(case.get("provenance"), Mapping) else {}
+        window = str(provenance.get("evidence_window") or "recent")
+        case_id = str(case.get("case_id") or index)
+        selected.append((f"{window}:{case_id}", index))
     return selected
 
 
@@ -241,7 +209,7 @@ def progressive_replay_decision(
         "baseline": baseline,
         "candidate": candidate,
     }
-    policy["policy"] = "progressive_checklist_then_turn_priority_v1"
+    policy["policy"] = "progressive-checklist-then-turn-priority"
     return policy
 
 
@@ -272,16 +240,3 @@ def select_disclosure_items(
             if not status.get(str(item.get("id") or ""), False)
         ][: max(1, int(batch_size or 1))]
     return [dict(item) for item in batch]
-
-
-def next_disclosure_prompt(
-    *, checklist: list[dict[str, Any]], report: Mapping[str, Any],
-    disclosed_ids: set[str], round_number: int, batch_size: int,
-) -> tuple[str, list[str]]:
-    """Legacy worker compatibility; standard execution uses render_user_feedback."""
-    batch = select_disclosure_items(
-        checklist=checklist, report=report, disclosed_ids=disclosed_ids, batch_size=batch_size,
-    )
-    if not batch:
-        return "", []
-    return "请继续补充这些内容：" + "；".join(str(item["text"]) for item in batch), [str(item["id"]) for item in batch]

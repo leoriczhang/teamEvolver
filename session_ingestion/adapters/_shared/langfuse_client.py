@@ -25,6 +25,7 @@ import json
 import logging
 import random
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -79,21 +80,6 @@ class SessionFilters:
             or self.metadata
         )
 
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "from_timestamp": self.from_timestamp,
-            "to_timestamp": self.to_timestamp,
-            "environment": list(self.environment),
-            "user_id": self.user_id,
-            "tags": list(self.tags),
-            "release": self.release,
-            "version": self.version,
-            "trace_name": self.trace_name,
-            "session_id": self.session_id,
-            "metadata": dict(self.metadata),
-        }
-
-
 def _clean_params(params: dict[str, Any]) -> dict[str, Any]:
     """Drop empty values so we never send blank query params."""
     cleaned: dict[str, Any] = {}
@@ -121,8 +107,8 @@ class LangfuseClient:
             host = _DEFAULT_HOST
         if not public_key or not secret_key:
             raise LangfuseError(
-                "Langfuse public_key and secret_key are required. "
-                "Set langfuse.public_key and langfuse.secret_key."
+                "Langfuse public_key and secret_key are required by the "
+                "tenant adapter."
             )
         self._base_url = f"{host}/api/public"
         self._auth = (public_key, secret_key)
@@ -142,16 +128,6 @@ class LangfuseClient:
     @property
     def retry_count(self) -> int:
         return self._retry_count
-
-    @classmethod
-    def from_config(cls, config) -> "LangfuseClient":
-        return cls(
-            host=str(getattr(config, "langfuse_host", "") or _DEFAULT_HOST),
-            public_key=str(getattr(config, "langfuse_public_key", "") or ""),
-            secret_key=str(getattr(config, "langfuse_secret_key", "") or ""),
-            timeout=float(getattr(config, "langfuse_timeout_seconds", 30) or 30),
-            page_limit=int(getattr(config, "langfuse_page_limit", 50) or 50),
-        )
 
     # ------------------------------------------------------------------ #
     # Low-level request helper                                            #
@@ -268,6 +244,25 @@ class LangfuseClient:
     ) -> list[dict[str, Any]]:
         """List sessions via ``GET /api/public/sessions`` with time/env filters."""
         results: list[dict[str, Any]] = []
+        for batch in self.iter_session_pages(
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+            environment=environment,
+            max_items=max_items,
+        ):
+            results.extend(batch)
+        return results
+
+    def iter_session_pages(
+        self,
+        *,
+        from_timestamp: str = "",
+        to_timestamp: str = "",
+        environment: Optional[Iterable[str]] = None,
+        max_items: int = 0,
+    ) -> Iterator[list[dict[str, Any]]]:
+        """Yield API-sized Session pages without accumulating the full range."""
+        emitted = 0
         page = 1
         while True:
             params: dict[str, Any] = {
@@ -281,15 +276,20 @@ class LangfuseClient:
                 params["environment"] = envs
             payload = self._get("/sessions", params)
             data = payload.get("data") if isinstance(payload.get("data"), list) else []
+            batch: list[dict[str, Any]] = []
             for item in data:
                 if isinstance(item, dict):
-                    results.append(item)
-                    if max_items and len(results) >= max_items:
-                        return results
+                    batch.append(item)
+                    emitted += 1
+                    if max_items and emitted >= max_items:
+                        if batch:
+                            yield batch
+                        return
+            if batch:
+                yield batch
             if not self._has_next_page(payload, page, len(data)):
                 break
             page += 1
-        return results
 
     def get_session(self, session_id: str) -> dict[str, Any]:
         """Fetch one session (incl. its traces) via ``/sessions/{id}``."""
@@ -324,6 +324,41 @@ class LangfuseClient:
         supports for trace listing.
         """
         results: list[dict[str, Any]] = []
+        for batch in self.iter_trace_pages(
+            session_id=session_id,
+            user_id=user_id,
+            name=name,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+            tags=tags,
+            version=version,
+            release=release,
+            environment=environment,
+            metadata=metadata,
+            order_by=order_by,
+            max_items=max_items,
+        ):
+            results.extend(batch)
+        return results
+
+    def iter_trace_pages(
+        self,
+        *,
+        session_id: str = "",
+        user_id: str = "",
+        name: str = "",
+        from_timestamp: str = "",
+        to_timestamp: str = "",
+        tags: Optional[Iterable[str]] = None,
+        version: str = "",
+        release: str = "",
+        environment: Optional[Iterable[str]] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        order_by: str = "timestamp.asc",
+        max_items: int = 0,
+    ) -> Iterator[list[dict[str, Any]]]:
+        """Yield API-sized Trace pages without accumulating the full range."""
+        emitted = 0
         page = 1
         tag_list = [str(t).strip() for t in (tags or []) if str(t).strip()]
         env_list = [str(e).strip() for e in (environment or []) if str(e).strip()]
@@ -349,15 +384,20 @@ class LangfuseClient:
                 params["filter"] = filter_json
             payload = self._get("/traces", params)
             data = payload.get("data") if isinstance(payload.get("data"), list) else []
+            batch: list[dict[str, Any]] = []
             for item in data:
                 if isinstance(item, dict):
-                    results.append(item)
-                    if max_items and len(results) >= max_items:
-                        return results
+                    batch.append(item)
+                    emitted += 1
+                    if max_items and emitted >= max_items:
+                        if batch:
+                            yield batch
+                        return
+            if batch:
+                yield batch
             if not self._has_next_page(payload, page, len(data)):
                 break
             page += 1
-        return results
 
     def get_trace(self, trace_id: str) -> dict[str, Any]:
         """Fetch one trace incl. observations + scores via ``/traces/{id}``."""
@@ -423,6 +463,64 @@ class LangfuseClient:
             if max_sessions and len(ordered) >= max_sessions:
                 break
         return ordered
+
+    def iter_session_id_batches(
+        self,
+        filters: SessionFilters,
+        *,
+        batch_size: int = 100,
+    ) -> Iterator[list[str]]:
+        """Yield unique matching Session IDs in bounded batches.
+
+        Upstream API pagination and trace-level filtering remain incremental,
+        so a weekly or monthly pull does not first materialize the complete
+        trace set.
+        """
+        batch_size = max(1, int(batch_size))
+        if filters.session_id:
+            yield [filters.session_id]
+            return
+
+        batch: list[str] = []
+
+        if filters.has_trace_level_filter():
+            pages = self.iter_trace_pages(
+                user_id=filters.user_id,
+                name=filters.trace_name,
+                from_timestamp=filters.from_timestamp,
+                to_timestamp=filters.to_timestamp,
+                tags=filters.tags,
+                version=filters.version,
+                release=filters.release,
+                environment=filters.environment,
+                metadata=filters.metadata,
+            )
+            id_field = "sessionId"
+            seen: set[str] | None = set()
+        else:
+            pages = self.iter_session_pages(
+                from_timestamp=filters.from_timestamp,
+                to_timestamp=filters.to_timestamp,
+                environment=filters.environment,
+            )
+            id_field = "id"
+            seen = None
+
+        for page in pages:
+            for item in page:
+                session_id = str(item.get(id_field) or "").strip()
+                if not session_id or (
+                    seen is not None and session_id in seen
+                ):
+                    continue
+                if seen is not None:
+                    seen.add(session_id)
+                batch.append(session_id)
+                if len(batch) >= batch_size:
+                    yield batch
+                    batch = []
+        if batch:
+            yield batch
 
     def fetch_session_with_traces(
         self,

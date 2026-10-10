@@ -35,34 +35,22 @@ dependencies = [
     "openpyxl>=3.1",
     "pypdf>=5.0",
     "pydantic-settings>=2.0",
-    "python-docx>=1.1",
     "tiktoken>=0.5",
+    "markdown>=3.6",
+    "rank-bm25>=0.2",
+    "python-docx>=1.1",
     "cryptography>=42",
     "jsonschema[format]>=4.18",
     "jieba>=0.42",
     "beautifulsoup4>=4.12",
-    "markdown>=3.6",
-    "rank-bm25>=0.2",
     "tomli-w>=1.0",
     "tomli>=2; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
-sharing = [
-    "boto3>=1.28",
-]
+mining = ["hermes-agent==0.19.0"]
 pg = [
     "asyncpg>=0.29.0",
-]
-mining = [
-    "hermes-agent==0.19.0",
-]
-validation = [
-    "openai>=1.0,<3",
-]
-truereplay = [
-    "hermes-agent==0.19.0",
-    "openai>=1.0,<3",
 ]
 dev = [
     "pytest>=8.0",
@@ -70,7 +58,7 @@ dev = [
     "anyio>=4.0",
 ]
 all = [
-    "teamEvolver[sharing,mining,validation,truereplay,pg]",
+    "teamEvolver[mining,pg]",
 ]
 
 [project.urls]
@@ -80,28 +68,26 @@ Issues = "https://github.com/leoriczhang/teamEvolver/issues"
 
 [project.scripts]
 teamEvolver = "teamEvolver.cli:main"
-teamEvolver-dreamcycle = "team_memory.__main__:main"
+teamEvolver-memory = "team_memory.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["teamEvolver*", "team_skills*", "team_miner*", "session_ingestion*", "team_memory*", "team_replay*", "team_ontology*"]
-exclude = ["team_memory.tests*", "team_memory.frontend*", "team_replay.tests*", "team_skills.tests*", "team_skills.frontend*", "team_miner.tests*", "team_miner.frontend*"]
+include = ["teamEvolver*", "team_skills*", "session_ingestion*", "team_memory*", "team_miner*", "team_replay*", "team_ontology*"]
+exclude = ["team_memory.tests*", "team_memory.frontend*", "team_miner.tests*", "team_miner.frontend*", "team_replay.tests*", "team_skills.tests*", "team_skills.frontend*"]
 
 [tool.setuptools.package-data]
-team_ontology = ["skills/*/SKILL.md", "contracts/*.json", "engine/LICENSE", "engine/SOURCE.json"]
+team_ontology = ["skills/*/SKILL.md", "contracts/*.json", "engine/LICENSE", "engine/SOURCE.json", "kee/compile-skill.md", "kee/contracts/*.json"]
 team_memory = ["README.md"]
 team_replay = ["README.md"]
 "session_ingestion" = ["README.md"]
 "session_ingestion.adapters" = ["*.py", "README.md"]
 "session_ingestion.adapters._shared" = ["*.md"]
-"session_ingestion.push.hermes" = ["SKILL.md"]
 teamEvolver = [
     "web/*.html",
     "web/dist/*.html",
     "web/dist/assets/*",
-    "integrations/hermes_skill_sync/*",
-    "integrations/hermes_context_provider/*",
 ]
+
 team_miner = [
     "*.md",
     ".env.example",
@@ -126,6 +112,3 @@ line-length = 120
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 ignore = ["E731", "F403", "F405"]
-
-[tool.ruff.lint.per-file-ignores]
-"team_miner/*_prompt.py" = ["E501"]

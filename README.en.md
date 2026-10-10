@@ -1,3 +1,7 @@
+> The console is now KEE. Package/CLI names, IDs and database schemas remain compatible.
+> R6 method governance and Wiki publication live in TE; OV supplies generic content/ACL/search/index.
+> See [R6 handoff](docs/kee-r6/HANDOFF.md) and [operations](docs/en/guides/20-kee-r6.md).
+
 # teamEvolver
 
 <div align="center">
@@ -39,8 +43,8 @@ flowchart LR
     E --> F["True Replay<br/>Baseline vs Candidate"]
     F --> G["Candidate Review"]
     G --> H["Versioned Release"]
-    H --> I["Agent Skill Sync"]
-    D --> J["DreamCycle"]
+    H --> I["Agent Skill Pull"]
+    D --> J["Memory maintenance"]
     J --> K["Memory True Replay"]
     K --> L["Team Memory"]
 ```
@@ -55,12 +59,12 @@ A Checklist is a completion gate, not a weighted score. Once the gate passes, Tr
 | Skill Evolution | Summarize, judge, group, improve/create/merge, and same-source Test Dataset synthesis |
 | True Replay | Run Baseline and Candidate in the real Agent Runtime; inspect Checklist completion, traces, artifacts, and efficiency |
 | Candidate Governance | Review, replay-gated or forced publish, version detail, full Bundle diff, rollback, and audit |
-| Memory Evolution | DreamCycle maintenance, cross-user team-memory aggregation, editable aggregation Skill, incremental compilation, and Memory Replay |
+| Memory Evolution | Memory maintenance, cross-user team-memory aggregation, editable aggregation Skill, incremental compilation, and Memory Replay |
 | Experiment Workbench | Edit Skill bundles and run True Replay against unsaved multi-file Candidates |
 | Personal and Team Assets | Browse and edit OpenViking assets from `viking://user` and `viking://resources` |
-| SkillMiner | Compile domain documents into Skills, semantic reports, `EVALUATION.md`, and internal Benchmarks |
+| Knowledge Compilation | Normalize uploaded documents and submit asynchronous OpenViking compile jobs |
 | Agent Protocol v2 | Tenant principals, Context, Session ingest, ReplayAdapterFactory, and Skill pull |
-| Observability | Langfuse Session import plus model, tool, Skill Evolution, and DreamCycle tracing |
+| Observability | Langfuse Session import plus model, tool, Skill Evolution, and Memory maintenance tracing |
 
 Every team Skill mutation goes through `SkillMutationService`, which owns commit records, tombstones, a durable outbox, and per-Agent delivery state.
 
@@ -88,7 +92,6 @@ The complete Skill Evolution pipeline, eight editable prompts, model and process
 flowchart TB
     subgraph Sources["Evidence Sources"]
         Pi["Pi Agent"]
-        Hermes["Hermes"]
         Generic["Agent Protocol v2"]
         LFIn["Langfuse Sessions"]
         Docs["Domain Documents"]
@@ -99,7 +102,7 @@ flowchart TB
         API["FastAPI"]
         Evolution["Skill Evolution"]
         Replay["Validation Worker / True Replay"]
-        Memory["DreamCycle / Team Memory Aggregation"]
+        Memory["Memory maintenance / Team Memory Aggregation"]
         Mutation["SkillMutationService / Outbox"]
     end
 
@@ -121,15 +124,14 @@ flowchart TB
     API <--> Memories
     Replay <--> Snapshots
     Mutation --> Pi
-    Mutation --> Hermes
     Mutation --> Generic
 ```
 
-The console, evolution engine, validation queue, DreamCycle, SkillMiner, and Agent integrations share one FastAPI service and one configuration source.
+The console, evolution engine, validation queue, Memory maintenance, knowledge compilation, and Agent integrations share one FastAPI service and one configuration source.
 
 ## Quick Start
 
-Requires Python 3.10+. The full install provisions Hermes inside the project virtual environment for document mining and True Replay.
+Requires Python 3.10+.
 
 ```bash
 git clone https://github.com/leoriczhang/teamEvolver.git
@@ -187,7 +189,6 @@ Use [v2](./docs/en/agent-integrations/06-protocol-v2.md) with a service URL, ten
 Context and Sessions belong to tenant/user; the tenant configuration determines the Account.
 Skills use authenticated pull; True Replay uses a tenant-bound ReplayAdapterFactory with independent sessions.
 OpenViking Root and model keys stay on the server.
-Existing deployments follow [staged migration](./docs/en/guides/11-agent-deregistration.md), with separate data migration and cleanup releases.
 
 ## Safety and Consistency
 
@@ -196,7 +197,7 @@ Existing deployments follow [staged migration](./docs/en/guides/11-agent-deregis
 - External side effects fail closed unless they can be replayed deterministically.
 - Context references are server-issued and bound to Tenant, User, Session, and expiry.
 - Team Memory and team Skills are read-only to regular Agents; personal-Memory writes validate tenant/user ownership.
-- Skill publish, rollback, delete, and sync use one mutation path, retaining versions and tombstones in pull mode.
+- Skill publish, rollback, and delete use one mutation path; Agents always pull versions.
 - Langfuse tracing is fail-open and never blocks evolution or Memory maintenance.
 
 ## Repository Layout
@@ -204,17 +205,14 @@ Existing deployments follow [staged migration](./docs/en/guides/11-agent-deregis
 ```text
 teamEvolver/
 ├── teamEvolver/
-│   ├── evolve/          # Evidence, Skill Evolution, Dataset, release
-│   ├── replay.py        # virtual compatibility entry point for team_replay
-│   ├── validation/      # Candidate queue, result storage, and Validation Worker
-│   ├── aggregation/     # Cross-user team-Memory aggregation and incremental state
-│   ├── integrations/    # Tenant principals, Context, protocol, and Skill pull
+│   ├── admin/           # Console identity, authorization, and tenant settings
+│   ├── cli/             # Service, datasource, diagnostics, and storage commands
+│   ├── integrations/    # Tenant principals, Context, and skillopt rollout
 │   ├── proxy/           # FastAPI, console, and Workspace interfaces
 │   ├── config_store/    # YAML defaults, persistence, and runtime bridge
-│   ├── skills/          # Bundles, versions, and SkillMutationService
-│   └── storage/         # OpenViking storage adapters
+│   ├── storage/         # PostgreSQL, local, and OpenViking storage adapters
+│   └── true_replay.py   # Replay subprocess host-wiring entry point
 ├── session_ingestion/   # Session push, pull, shared ingestion, and source Adapters
-├── team_miner/          # Skill mining, Benchmarks, job orchestration, and host bridge
 ├── team_memory/         # Memory aggregation, maintenance, ledger, and routes
 ├── team_replay/         # True Replay Interface, engine, policy, and Runtime Adapters
 ├── web-ui/              # React + TypeScript console source
@@ -229,11 +227,11 @@ Documentation is maintained as Markdown source files in `docs/`, available in bo
 | Section | Content |
 | --- | --- |
 | Getting Started | [Introduction](./docs/en/getting-started/01-introduction.md), [Quick Start](./docs/en/getting-started/02-quickstart.md), [Installation](./docs/en/getting-started/03-installation.md) |
-| Concepts | [Architecture](./docs/en/concepts/01-architecture.md), [Evolution Loop](./docs/en/concepts/02-evolution-loop.md), [Skills](./docs/en/concepts/03-skills.md), [Memory & DreamCycle](./docs/en/concepts/04-memory.md), [True Replay](./docs/en/concepts/06-true-replay.md) |
+| Concepts | [Architecture](./docs/en/concepts/01-architecture.md), [Evolution Loop](./docs/en/concepts/02-evolution-loop.md), [Skills](./docs/en/concepts/03-skills.md), [Memory & Memory maintenance](./docs/en/concepts/04-memory.md), [True Replay](./docs/en/concepts/06-true-replay.md) |
 | Guides | [Configuration](./docs/en/guides/01-configuration.md), [Deployment](./docs/en/guides/02-deployment.md), [Web Console](./docs/en/guides/03-console.md), [Observability](./docs/en/guides/04-observability.md), [Troubleshooting](./docs/en/guides/06-troubleshooting.md) |
-| Agent Integrations | [Overview](./docs/en/agent-integrations/01-overview.md), [Protocol v2 Spec](./docs/en/agent-integrations/06-protocol-v2.md), [Hermes Integration](./docs/en/agent-integrations/03-hermes.md), [Custom Agent](./docs/en/agent-integrations/05-custom-agent.md) |
-| API Reference | [Overview](./docs/en/api/01-overview.md), [Agent Register](./docs/en/api/02-agent-register.md), [Session Ingest](./docs/en/api/03-session-ingest.md), [Context Workspace](./docs/en/api/04-context-workspace.md), [Skills Admin](./docs/en/api/09-skills-admin.md), [Team Memory Aggregation](./docs/en/api/11-team-memory-aggregation.md) |
-| Design Notes | [Master PRD](./docs/design/01-master-prd.md), [DreamCycle Evaluation](./docs/design/02-dreamcycle-snapshot-evaluation.md), [OpenViking Research](./docs/design/03-openviking-capabilities.md) |
+| Agent Integrations | [Overview](./docs/en/agent-integrations/01-overview.md), [Protocol v2 Spec](./docs/en/agent-integrations/06-protocol-v2.md), [Pi Agent](./docs/en/agent-integrations/04-pi-agent.md), [Custom Agent](./docs/en/agent-integrations/05-custom-agent.md) |
+| API Reference | [Overview](./docs/en/api/01-overview.md), [Session Ingest](./docs/en/api/03-session-ingest.md), [Context Workspace](./docs/en/api/04-context-workspace.md), [Skills Admin](./docs/en/api/09-skills-admin.md), [Team Memory Aggregation](./docs/en/api/11-team-memory-aggregation.md) |
+| Design Notes | [Master PRD](./docs/design/01-master-prd.md), [Memory maintenance Evaluation](./docs/design/02-dreamcycle-snapshot-evaluation.md), [OpenViking Research](./docs/design/03-openviking-capabilities.md) |
 
 ### Documentation sync convention
 

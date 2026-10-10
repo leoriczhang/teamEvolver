@@ -174,19 +174,15 @@ def list_source_skills() -> list[dict[str, Any]]:
         if not skill_dir.is_dir() or not (skill_dir / "SKILL.md").is_file():
             continue
         benchmark = skill_dir / "benchmark.json"
-        legacy_benchmark = skill_dir / "benchmark.jsonl"
         question_count = 0
         if benchmark.is_file():
             payload, errors = bf.read_document(benchmark)
             if payload is not None and not errors:
                 question_count = len(payload.get("cases") or [])
-        elif legacy_benchmark.is_file():
-            lines = legacy_benchmark.read_text(encoding="utf-8", errors="ignore").splitlines()
-            question_count = sum(1 for line in lines if line.strip())
         rows.append({
             "name": skill_dir.name,
             "has_evaluation": (skill_dir / "EVALUATION.md").is_file(),
-            "has_benchmark": benchmark.is_file() or legacy_benchmark.is_file(),
+            "has_benchmark": benchmark.is_file(),
             "question_count": question_count,
         })
     return rows
@@ -211,22 +207,7 @@ def load_benchmark_questions(skill_dir: Path) -> list[dict[str, Any]]:
             raise ValueError("LIFT Suite 至少需要 2 道题，才能划分 warmup 与 holdout")
         return questions
 
-    path = skill_dir / "benchmark.jsonl"
-    if not path.is_file():
-        raise FileNotFoundError(f"缺少 benchmark.json 或 benchmark.jsonl: {skill_dir.name}")
-    questions = []
-    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        if not line.strip():
-            continue
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"benchmark.jsonl 第 {line_no} 行不是有效 JSON") from exc
-        if isinstance(item, dict) and str(item.get("input") or "").strip():
-            questions.append(item)
-    if len(questions) < 2:
-        raise ValueError("LIFT Suite 至少需要 2 道题，才能划分 warmup 与 holdout")
-    return questions
+    raise FileNotFoundError(f"缺少 benchmark.json: {skill_dir.name}")
 
 
 def _numbered(lines: list[str]) -> str:

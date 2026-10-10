@@ -1,4 +1,4 @@
-"""Content-level True Replay for an applied DreamCycle Memory Change."""
+"""Content-level True Replay for an applied Team Memory change."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from .policy import (
     progressive_replay_decision,
 )
 
-MEMORY_TRUE_REPLAY_SCHEMA_V1 = "teamevolver.memory-true-replay.v1"
+MEMORY_TRUE_REPLAY_SCHEMA = "teamevolver.memory-true-replay.v1"
 _MAX_QUERY_CHARS = 32_000
 _MAX_CHECKLIST_ITEMS = 50
 
@@ -61,12 +61,10 @@ class MemoryTrueReplayRunner:
         self,
         *,
         ledger: MemoryReplayLedger,
-        app_config: Any = None,
         branch_runner: Callable[..., dict[str, Any]] = spawn_native_agent_branch,
         session_store: ReplaySessionStore | None = None,
     ) -> None:
         self._ledger = ledger
-        self._app_config = app_config
         self._branch_runner = branch_runner
         self._session_store = session_store
 
@@ -334,7 +332,7 @@ class MemoryTrueReplayRunner:
             status = "evaluated"
 
         replay = {
-            "schema_version": MEMORY_TRUE_REPLAY_SCHEMA_V1,
+            "schema_version": MEMORY_TRUE_REPLAY_SCHEMA,
             "replay_id": replay_id,
             "change_id": change_id,
             "mode": "memory_true_replay",

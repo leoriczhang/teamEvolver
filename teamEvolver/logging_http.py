@@ -57,6 +57,7 @@ class RequestLogMiddleware:
                     "http.completed",
                     level,
                     method=scope["method"],
+                    path=scope.get("path", ""),
                     route=route or "<unmatched>",
                     status=status,
                     code=code,

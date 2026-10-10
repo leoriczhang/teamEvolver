@@ -216,7 +216,7 @@ GET /api/mining/trajectory-benchmarks/<run_id>
 ```
 
 Completed artifacts at `trajectory_benchmarks/<run_id>/`:
-- `benchmark.json`: `team-replay.dataset.v2` Test Dataset
+- `benchmark.json`: `team-replay.dataset` Test Dataset
 - `BENCHMARK.md`: Human-readable version
 - `manifest.json`: Source summary, difficulty and dimension statistics
 
@@ -271,7 +271,7 @@ python3 run_multi_session.py run --sessions 3 --only EVAL-01
 ```
 
 Artifacts at `benchmark_sessions/`:
-- `snapshots/build-N.json`: `team-replay.dataset.v2` snapshots from each build; legacy JSONL remains readable
+- `snapshots/build-N.json`: `team-replay.dataset` snapshots from each build; only the shared Test Dataset format is accepted
 - `intersection.md`: Intersection list
 - `DIM_*/session-N.md`: Complete dialogue and grading per session
 - `SESSIONS_REPORT.md`: Per-dimension stability summary
@@ -328,7 +328,7 @@ After starting teamEvolver main service, unified console also provides Skill Min
 
 ## LIFT Integration
 
-Skill Miner prefers `benchmark.json` (with legacy `benchmark.jsonl` fallback) and generates LIFT pending-review drafts under `lift_datasets/drafts/`. To disable:
+Skill Miner reads only canonical `benchmark.json` and, when explicitly enabled, generates LIFT pending-review drafts under `lift_datasets/drafts/`. To disable:
 
 ```bash
 export SKILLMINER_LIFT_AUTO_DRAFT=0
@@ -519,3 +519,9 @@ Main service `/api/mining/*` routes call lifecycle functions in `team_miner/life
 - Do not commit `.env`, `.hermes_home/`, model responses, runtime logs, or generated artifacts to version control
 - Generated Skills and Benchmarks should be reviewed by domain experts before production use
 - Trajectory Benchmark mining automatically redacts keys, phone numbers, emails, and local user paths; source trajectory original text not persisted, `manifest.json` retains only IDs, counts, and SHA-256 digests
+
+## Integration with the current control plane
+
+Knowledge mining routes, document conversion, and Wiki graphs live in `team_miner/routes.py`, `team_miner/document_converter.py`, and `team_miner/wiki_graph.py`. The console retains mining overview, sources, Skill mining, and knowledge mining under current tenant permissions.
+
+Mining artifacts directly use the shared Test Dataset contract in `team_replay/datasets/schema.py`; historical formats are unsupported. Skill Candidate submission includes a complete, verifiable Bundle; the Baseline reads the published Bundle from the current tenant SkillHub. Candidate Review and Publish continue through the shared workflow.

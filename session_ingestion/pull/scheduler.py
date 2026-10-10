@@ -8,6 +8,7 @@ import logging
 import os
 import tempfile
 import threading
+import uuid
 from datetime import datetime, timedelta, timezone
 from datetime import time as datetime_time
 from pathlib import Path
@@ -30,9 +31,8 @@ DEFAULT_SCHEDULE = {
     "time": "00:00",
     "timezone": "Asia/Shanghai",
     "window": "previous_day",
-    "max_sessions": 1000,
 }
-_SCHEDULE_FIELDS = frozenset(DEFAULT_SCHEDULE)
+_SCHEDULE_FIELDS = frozenset(DEFAULT_SCHEDULE) | {"max_sessions"}
 
 
 class PullBusyError(RuntimeError):
@@ -78,25 +78,18 @@ def normalize_schedule(value: Any) -> dict[str, Any]:
     if window != "previous_day":
         raise ValueError("schedule.window must be previous_day")
 
-    max_sessions = value.get("max_sessions", DEFAULT_SCHEDULE["max_sessions"])
-    if isinstance(max_sessions, bool) or not isinstance(max_sessions, int):
-        raise ValueError("schedule.max_sessions must be an integer")
-    if not 1 <= max_sessions <= 1000:
-        raise ValueError("schedule.max_sessions must be between 1 and 1000")
-
     return {
         "enabled": enabled,
         "time": trigger_time,
         "timezone": timezone_name,
         "window": window,
-        "max_sessions": max_sessions,
     }
 
 
 def schedule_for(config: Any, tenant: Any) -> dict[str, Any]:
     """Return a tenant's schedule without inheriting the default tenant's job."""
     raw: Any = None
-    if tenant is not None and not tenant.is_default():
+    if tenant is not None and (not tenant.is_default() or "datasource_schedule" in tenant.config_overrides):
         overrides = tenant.config_overrides if isinstance(tenant.config_overrides, dict) else {}
         raw = overrides.get("datasource_schedule")
     else:
@@ -300,7 +293,13 @@ class DatasourcePullRuntime:
             tenant_id in self._jobs and not self._jobs[tenant_id].done()
         )
 
-    async def pull(self, tenant: Any, body: dict[str, Any]) -> dict[str, Any]:
+    async def pull(
+        self,
+        tenant: Any,
+        body: dict[str, Any],
+        *,
+        progress=None,
+    ) -> dict[str, Any]:
         tenant_id = tenant.tenant_id
         async with self._active_lock:
             if tenant_id in self._active:
@@ -319,11 +318,75 @@ class DatasourcePullRuntime:
                     invalidate_cache=self.invalidate_cache,
                 ),
                 body,
+                progress=progress,
             )
         finally:
             reset_current_tenant(token)
             async with self._active_lock:
                 self._active.discard(tenant_id)
+
+    async def trigger_manual(
+        self,
+        tenant: Any,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        tenant_id = tenant.tenant_id
+        job_id = uuid.uuid4().hex
+        descriptor = await asyncio.to_thread(
+            adapters.describe,
+            self.owner.config,
+            tenant,
+        )
+        if not descriptor.get("configured") or not descriptor.get("enabled"):
+            raise adapters.AdapterError(
+                descriptor.get("error") or "Tenant adapter is disabled"
+            )
+        request = dict(body)
+        request.pop("max_sessions", None)
+        adapters.filters_for(descriptor, request)
+        async with self._active_lock:
+            if self.is_running(tenant_id):
+                raise PullBusyError("A pull is already running for this tenant")
+            running_tenants = set(self._active)
+            running_tenants.update(
+                key for key, task in self._jobs.items() if not task.done()
+            )
+            if len(running_tenants) >= self._max_active:
+                raise PullCapacityError("Datasource pull capacity reached")
+            await asyncio.to_thread(
+                self._state.update,
+                tenant_id,
+                {
+                    "last_job_id": job_id,
+                    "last_job_type": "manual",
+                    "last_started_at": _utc_iso(datetime.now(timezone.utc)),
+                    "last_finished_at": "",
+                    "last_status": "running",
+                    "last_error": "",
+                    "last_window_from": str(body.get("from_timestamp") or ""),
+                    "last_window_to": str(body.get("to_timestamp") or ""),
+                    "target_date": "",
+                    "current_total": 0,
+                    "current_counts": {},
+                    "last_total": 0,
+                    "last_counts": {},
+                    "last_results": [],
+                    "last_results_truncated": False,
+                    "last_result_limit": 0,
+                },
+            )
+            task = asyncio.create_task(
+                self._run_manual(tenant, body, job_id)
+            )
+            self._jobs[tenant_id] = task
+            task.add_done_callback(
+                lambda completed: self._job_done(
+                    tenant_id,
+                    completed,
+                    "DatasourcePull",
+                )
+            )
+        return await asyncio.to_thread(self.status, tenant)
 
     async def trigger(self, tenant: Any, *, force: bool = False) -> dict[str, Any]:
         tenant_id = tenant.tenant_id
@@ -335,7 +398,7 @@ class DatasourcePullRuntime:
         descriptor = await asyncio.to_thread(adapters.describe, self.owner.config, tenant)
         validate_schedule_descriptor(descriptor)
         window = previous_day_window(schedule)
-        self._spawn(tenant, schedule, descriptor, window)
+        self._spawn(tenant, descriptor, window)
         return await asyncio.to_thread(self.status, tenant)
 
     def status(self, tenant: Any) -> dict[str, Any]:
@@ -362,7 +425,81 @@ class DatasourcePullRuntime:
             "last_target_date": str(state.get("target_date") or ""),
             "last_total": int(state.get("last_total") or 0),
             "last_counts": dict(state.get("last_counts") or {}),
+            "job_id": str(state.get("last_job_id") or ""),
+            "job_type": str(state.get("last_job_type") or ""),
+            "current_total": int(state.get("current_total") or 0),
+            "current_counts": dict(state.get("current_counts") or {}),
+            "last_results": list(state.get("last_results") or []),
+            "last_results_truncated": bool(
+                state.get("last_results_truncated")
+            ),
+            "last_result_limit": int(state.get("last_result_limit") or 0),
         }
+
+    async def _run_manual(
+        self,
+        tenant: Any,
+        body: dict[str, Any],
+        job_id: str,
+    ) -> None:
+        tenant_id = tenant.tenant_id
+
+        async def update_progress(snapshot: dict[str, Any]) -> None:
+            await asyncio.to_thread(
+                self._state.update,
+                tenant_id,
+                {
+                    "current_total": int(snapshot.get("total") or 0),
+                    "current_counts": dict(snapshot.get("counts") or {}),
+                },
+            )
+
+        try:
+            result = await self.pull(
+                tenant,
+                body,
+                progress=update_progress,
+            )
+            counts = dict(result.get("counts") or {})
+            status = "partial" if int(counts.get("error") or 0) else "succeeded"
+            await asyncio.to_thread(
+                self._state.update,
+                tenant_id,
+                {
+                    "last_job_id": job_id,
+                    "last_finished_at": _utc_iso(datetime.now(timezone.utc)),
+                    "last_status": status,
+                    "last_error": "",
+                    "current_total": int(result.get("total") or 0),
+                    "current_counts": counts,
+                    "last_total": int(result.get("total") or 0),
+                    "last_counts": counts,
+                    "last_results": list(result.get("results") or []),
+                    "last_results_truncated": bool(
+                        result.get("results_truncated")
+                    ),
+                    "last_result_limit": int(result.get("result_limit") or 0),
+                },
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await asyncio.to_thread(
+                self._state.update,
+                tenant_id,
+                {
+                    "last_job_id": job_id,
+                    "last_finished_at": _utc_iso(datetime.now(timezone.utc)),
+                    "last_status": "failed",
+                    "last_error": str(exc)[:1000],
+                },
+            )
+            logger.warning(
+                "[DatasourcePull] tenant %s manual pull failed: %s",
+                tenant_id,
+                exc,
+                exc_info=True,
+            )
 
     async def _run_loop(self) -> None:
         tick = self._tick_seconds()
@@ -415,7 +552,7 @@ class DatasourcePullRuntime:
                     now=now,
                 ):
                     continue
-                self._spawn(tenant, schedule, descriptor, window)
+                self._spawn(tenant, descriptor, window)
             except Exception as exc:
                 logger.warning(
                     "[DatasourceSchedule] tenant %s schedule skipped: %s",
@@ -426,7 +563,6 @@ class DatasourcePullRuntime:
     def _spawn(
         self,
         tenant: Any,
-        schedule: dict[str, Any],
         descriptor: dict[str, Any],
         window: dict[str, str],
     ) -> None:
@@ -434,29 +570,40 @@ class DatasourcePullRuntime:
         if self.is_running(tenant_id):
             return
         task = asyncio.create_task(
-            self._run_scheduled(tenant, schedule, descriptor, window)
+            self._run_scheduled(tenant, descriptor, window)
         )
         self._jobs[tenant_id] = task
+        task.add_done_callback(
+            lambda completed: self._job_done(
+                tenant_id,
+                completed,
+                "DatasourceSchedule",
+            )
+        )
 
-        def done(completed: asyncio.Task) -> None:
+    def _job_done(
+        self,
+        tenant_id: str,
+        completed: asyncio.Task,
+        logger_name: str,
+    ) -> None:
+        if self._jobs.get(tenant_id) is completed:
             self._jobs.pop(tenant_id, None)
-            if completed.cancelled():
-                return
-            exc = completed.exception()
-            if exc is not None:
-                logger.error(
-                    "[DatasourceSchedule] tenant %s job failed: %s",
-                    tenant_id,
-                    exc,
-                    exc_info=exc,
-                )
-
-        task.add_done_callback(done)
+        if completed.cancelled():
+            return
+        exc = completed.exception()
+        if exc is not None:
+            logger.error(
+                "[%s] tenant %s job failed: %s",
+                logger_name,
+                tenant_id,
+                exc,
+                exc_info=exc,
+            )
 
     async def _run_scheduled(
         self,
         tenant: Any,
-        schedule: dict[str, Any],
         descriptor: dict[str, Any],
         window: dict[str, str],
     ) -> None:
@@ -487,22 +634,40 @@ class DatasourcePullRuntime:
                 tenant_id,
                 {
                     "adapter_file": descriptor["file"],
+                    "last_job_id": uuid.uuid4().hex,
+                    "last_job_type": "scheduled",
                     "target_date": window["target_date"],
                     "last_started_at": started_at,
                     "last_status": "running",
                     "last_error": "",
                     "last_window_from": window["from_timestamp"],
                     "last_window_to": window["to_timestamp"],
+                    "current_total": 0,
+                    "current_counts": {},
+                    "last_results": [],
+                    "last_results_truncated": False,
+                    "last_result_limit": 0,
                 },
             )
+
+            async def update_progress(snapshot: dict[str, Any]) -> None:
+                await asyncio.to_thread(
+                    self._state.update,
+                    tenant_id,
+                    {
+                        "current_total": int(snapshot.get("total") or 0),
+                        "current_counts": dict(snapshot.get("counts") or {}),
+                    },
+                )
+
             result = await self.pull(
                 tenant,
                 {
                     "from_timestamp": window["from_timestamp"],
                     "to_timestamp": window["to_timestamp"],
-                    "max_sessions": schedule["max_sessions"],
                     "defer_evolution_trigger": True,
                 },
+                progress=update_progress,
             )
             counts = dict(result.get("counts") or {})
             status = "partial" if int(counts.get("error") or 0) else "succeeded"
@@ -516,6 +681,13 @@ class DatasourcePullRuntime:
                     "last_error": "",
                     "last_total": int(result.get("total") or 0),
                     "last_counts": counts,
+                    "current_total": int(result.get("total") or 0),
+                    "current_counts": counts,
+                    "last_results": list(result.get("results") or []),
+                    "last_results_truncated": bool(
+                        result.get("results_truncated")
+                    ),
+                    "last_result_limit": int(result.get("result_limit") or 0),
                 },
             )
             self._retry_after.pop(tenant_id, None)

@@ -32,7 +32,6 @@ Examples:
 ```bash
 teamEvolver config llm.api_key sk-xxxxxxxx
 teamEvolver config service.port 52010
-teamEvolver config sharing.enabled true
 teamEvolver config langfuse.tracing_enabled true
 ```
 
@@ -429,7 +428,6 @@ skills:
   dir: "~/.hermes/skills"
 
 sharing:
-  enabled: true
   backend: "viking"
   viking_deployment: "local"
   # Set a reachable URL for a remote self-hosted server; empty uses http://localhost:1933
@@ -498,6 +496,10 @@ langfuse:
   tracing_sample_rate: 0.1
 ```
 
+`sharing.enabled` is deprecated and no longer controls runtime behavior. Old
+configurations remain readable during the compatibility window; new
+configurations do not need this field.
+
 ## Configuration Hot Reload
 
 Most configuration items require service restart after modification. Following configuration items support dynamic modification via Web console without restart:
@@ -513,3 +515,27 @@ Most configuration items require service restart after modification. Following c
 - Prompt overrides (via Prompt Studio)
 
 Restart the service after changing other settings through `teamEvolver config <key> <value>`.
+
+## Console self-registration
+
+Configure this service-wide policy (tenant overrides are ignored):
+
+```yaml
+service:
+  self_registration_enabled: false
+```
+
+The code, local and SIT defaults are `true`; the PRD template uses `false`.
+`TEAMEVOLVER_SELF_REGISTRATION_ENABLED` overrides YAML and accepts `true/false` or `1/0`.
+Restart TE after changing the deployed configuration or environment.
+
+When disabled, the console hides the registration tab and anonymous calls to
+`POST /api/auth/register` receive `403 SELF_REGISTRATION_DISABLED`. Login, initial
+administrator bootstrap and administrator user management retain their existing rules.
+
+Backend callers can register ordinary users regardless of this switch by providing
+`Authorization: Bearer <TEAMEVOLVER_ROOT_API_KEY>`. This is the TE service Root Key,
+not an OV or tenant Agent credential. Keep it on the backend. Empty or incorrect keys,
+admin cookies and caller-supplied role headers cannot bypass this policy. Required fields,
+duplicate checks and the initial bootstrap prerequisite still apply.
+See [the API overview](../api/01-overview.md#console-account-registration).

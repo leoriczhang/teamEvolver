@@ -8,21 +8,25 @@ const state = vi.hoisted(() => ({
   openVikingConfigured: true,
   tenantId: "default",
   role: "admin" as "admin" | "user",
+  platform: true,
+  membership: true,
 }));
 vi.mock("@/api/client", () => ({
   api: vi.fn(async (path: string) => {
     if (path === "/api/sharing-config") {
       return {
-        enabled: state.openVikingConfigured,
         endpoint: "http://openviking.test",
-        service_api_key_present: state.openVikingConfigured,
+        api_key_present: state.openVikingConfigured,
       };
     }
     return {
       authenticated: true,
       needs_setup: false,
       customer_mode: state.customerMode,
-      user: { id: state.role, display_name: state.role === "admin" ? "Admin" : "User", role: state.role },
+      active_tenant_id: state.membership ? state.tenantId : null,
+      available_tenants: state.membership ? [{ tenant_id: state.tenantId, display_name: state.tenantId, status: "active" }] : [],
+      user: { id: state.role, display_name: state.role === "admin" ? "Admin" : "User", role: state.role,
+        platform_role: state.platform ? "platform_admin" : "user", tenant_role: state.role === "admin" ? "tenant_admin" : "member" },
     };
   }),
   getActiveTenantId: () => state.tenantId,
@@ -34,6 +38,7 @@ vi.mock("@/api/client", () => ({
 }));
 vi.mock("@/views/DashboardView", () => ({ default: () => <div>dashboard-body</div> }));
 vi.mock("@/views/UsersView", () => ({ default: () => <div>users-body</div> }));
+vi.mock("@/views/MembersView", () => ({ default: () => <div>members-body</div> }));
 vi.mock("@/views/ModelSettingsView", () => ({ default: () => <div>model-body</div> }));
 vi.mock("@/views/CandidateReviewView", () => ({ default: () => <div>review-body</div> }));
 vi.mock("@/views/HealthView", () => ({
@@ -41,21 +46,22 @@ vi.mock("@/views/HealthView", () => ({
     onSharingConfigChange,
   }: {
     onSharingConfigChange?: (config: {
-      enabled: boolean;
       endpoint: string;
-      service_api_key_present: boolean;
+      api_key_present: boolean;
     }) => void;
   }) => (
-    <button
-      type="button"
-      onClick={() => onSharingConfigChange?.({
-        enabled: true,
-        endpoint: "http://openviking.test",
-        service_api_key_present: true,
-      })}
-    >
-      configure-openviking
-    </button>
+    <>
+      <div>health-body</div>
+      <button
+        type="button"
+        onClick={() => onSharingConfigChange?.({
+          endpoint: "http://openviking.test",
+          api_key_present: true,
+        })}
+      >
+        configure-openviking
+      </button>
+    </>
   ),
 }));
 vi.mock("@/views/AuditView", () => ({ default: () => <div>audit-body</div> }));
@@ -68,8 +74,6 @@ vi.mock("@/views/EvolutionWorkspaceView", () => ({
     <div>evolution-body-{String(openVikingConfigured)}</div>
   ),
 }));
-vi.mock("@miner/MiningView", () => ({ default: ({ page }: { page: string }) => <div>mining-{page}</div> }));
-vi.mock("@miner/KnowledgeBaseMiningView", () => ({ default: () => <div>knowledge-base-mining-body</div> }));
 vi.mock("@/views/OpenVikingWorkspaceShell", () => ({
   default: () => <div>agent-assets-body</div>,
 }));
@@ -79,9 +83,7 @@ vi.mock("@/views/PlatformAssetsView", () => ({
 vi.mock("@/views/SkillWorkbenchView", () => ({
   default: () => <div>skill-workbench-body</div>,
 }));
-vi.mock("@/views/DocsView", () => ({ default: () => <div>docs-body</div> }));
 vi.mock("@/views/TenantsView", () => ({ default: () => <div>tenants-body</div> }));
-vi.mock("@/views/SkillsView", () => ({ default: () => <div>team-only-replacement</div> }));
 import App from "@/App";
 import { api } from "@/api/client";
 
@@ -90,6 +92,8 @@ beforeEach(() => {
   state.openVikingConfigured = true;
   state.tenantId = "default";
   state.role = "admin";
+  state.platform = true;
+  state.membership = true;
   window.history.replaceState(null, "", "/");
 });
 afterEach(() => {
@@ -98,6 +102,31 @@ afterEach(() => {
 });
 
 describe("login restoration", () => {
+  it.each([false, undefined])("hides public registration when not explicitly enabled: %s", async (enabled) => {
+    vi.mocked(api).mockResolvedValueOnce({
+      authenticated: false, needs_setup: false, self_registration_enabled: enabled,
+    });
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "登录" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "新用户注册" })).not.toBeInTheDocument();
+    expect(screen.getByText("当前不开放自主注册，请联系管理员开通账号。")).toBeVisible();
+    fireEvent.change(screen.getByPlaceholderText("admin"), { target: { value: "alice" } });
+    fireEvent.change(screen.getByPlaceholderText("请输入密码"), { target: { value: "test-password" } });
+    fireEvent.click(screen.getByRole("button", { name: "登录" }));
+    expect(await screen.findByRole("navigation", { name: "主导航" })).toBeVisible();
+    expect(api).toHaveBeenCalledWith("/api/auth/login", expect.objectContaining({ method: "POST" }));
+  });
+
+  it("shows the registration form when enabled", async () => {
+    vi.mocked(api).mockResolvedValueOnce({
+      authenticated: false, needs_setup: false, self_registration_enabled: true,
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "新用户注册" }));
+    expect(screen.getByRole("button", { name: "注册并登录" })).toBeVisible();
+    expect(screen.getByPlaceholderText("请再次输入密码")).toBeVisible();
+  });
+
   it.each([
     new Error("请求超时（60s），稍后自动重试"),
     Object.assign(new Error("service busy"), { status: 503 }),
@@ -134,8 +163,8 @@ describe("original console functionality", () => {
     render(<App />);
     const navigation = await screen.findByRole("navigation", { name: "主导航" });
     await within(navigation).findByRole("button", { name: "实验工作台" });
-    for (const name of ["挖掘总览", "知识源", "Skill 挖掘", "运行总览", "经验库", "数据源接入", "进化链路",
-      "实验工作台", "个人与团队资产", "平台资产", "模型配置", "用户与权限", "租户管理", "运行状态", "使用文档"]) {
+    for (const name of ["运行总览", "经验库", "数据源接入", "进化链路",
+      "实验工作台", "个人与团队资产", "平台资产", "模型配置", "平台用户", "租户管理", "运行状态"]) {
       expect(within(navigation).getByRole("button", { name })).toBeVisible();
     }
     await screen.findByRole("button", { name: /租户切换/ });
@@ -146,8 +175,6 @@ describe("original console functionality", () => {
   it("keeps the workbench focused and opens OpenViking assets from the sidebar", async () => {
     render(<App />);
     const navigation = await screen.findByRole("navigation", { name: "主导航" });
-    fireEvent.click(within(navigation).getByRole("button", { name: "挖掘总览" }));
-    expect(screen.getByText("mining-overview")).toBeVisible();
     fireEvent.click(within(navigation).getByRole("button", { name: "实验工作台" }));
     expect(await screen.findByText("skill-workbench-body")).toBeVisible();
     expect(screen.queryByText("skill-lab-body")).toBeNull();
@@ -167,10 +194,22 @@ describe("original console functionality", () => {
     expect(screen.queryByRole("tab", { name: "经验库" })).not.toBeInTheDocument();
   });
 
-  it("keeps legacy dashboard experience links working", async () => {
-    window.history.replaceState(null, "", "/?view=dashboard&tab=experiences");
+  it("keeps every project configuration page active after navigation", async () => {
     render(<App />);
-    expect(await screen.findByText("experience-library-body")).toBeVisible();
+    const navigation = await screen.findByRole("navigation", { name: "主导航" });
+    for (const [label, body] of [
+      ["成员与接入", "members-body"],
+      ["模型配置", "model-body"],
+      ["进化链路", "evolution-body-true"],
+      ["数据源接入", "datasource-body"],
+      ["运行状态", "health-body"],
+    ]) {
+      const item = within(navigation).getByRole("button", { name: label });
+      fireEvent.click(item);
+      expect(await screen.findByText(body)).toBeVisible();
+      expect(item).toHaveAttribute("aria-current", "page");
+      expect(screen.queryByText("dashboard-body")).not.toBeInTheDocument();
+    }
   });
 
   it("keeps platform assets available without OpenViking", async () => {
@@ -190,17 +229,6 @@ describe("original console functionality", () => {
     expect(await screen.findByText("evolution-body-false")).toBeVisible();
   });
 
-  it("marks OpenViking-backed entries as unconfigured instead of hiding them", async () => {
-    state.openVikingConfigured = false;
-    render(<App />);
-    const navigation = await screen.findByRole("navigation", { name: "主导航" });
-    expect(
-      await within(navigation).findByRole("button", { name: "知识库挖掘（未配置 OpenViking）" }),
-    ).toBeVisible();
-    expect(within(navigation).getAllByText("未配置")).toHaveLength(1);
-    expect(within(navigation).getByRole("button", { name: "运行状态" })).toBeVisible();
-  });
-
   it("opens the code workspace directly without requiring OpenViking", async () => {
     state.openVikingConfigured = false;
     window.history.replaceState(null, "", "/?view=workspace");
@@ -209,28 +237,6 @@ describe("original console functionality", () => {
     expect(window.location.search).toContain("view=workspace");
     const navigation = screen.getByRole("navigation", { name: "主导航" });
     expect(within(navigation).getByRole("button", { name: "实验工作台" })).toBeVisible();
-  });
-
-  it("keeps the selected page in the URL so a browser refresh restores it", async () => {
-    render(<App />);
-    const navigation = await screen.findByRole("navigation", { name: "主导航" });
-
-    fireEvent.click(within(navigation).getByRole("button", { name: "知识库挖掘" }));
-
-    expect(await screen.findByText("knowledge-base-mining-body")).toBeVisible();
-    expect(new URLSearchParams(window.location.search).get("view")).toBe("mine-knowledge-base");
-  });
-
-  it("keeps a direct OpenViking knowledge-base link on the page and explains how to enable it", async () => {
-    state.openVikingConfigured = false;
-    window.history.replaceState(null, "", "/?view=mine-knowledge-base");
-    render(<App />);
-    expect(await screen.findByText("该功能需要先连接 OpenViking")).toBeVisible();
-    // No silent redirect: the user stays on the requested page.
-    expect(window.location.search).toContain("view=mine-knowledge-base");
-    expect(screen.queryByText("knowledge-base-mining-body")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "前往运行状态配置" }));
-    expect(await screen.findByRole("button", { name: "configure-openviking" })).toBeVisible();
   });
 
   it("keeps platform assets independent when OpenViking is configured later", async () => {
@@ -249,29 +255,13 @@ describe("original console functionality", () => {
     expect(within(navigation).queryByText("未配置")).toBeNull();
   });
 
-  it("clears the unconfigured badge immediately after configuration", async () => {
-    state.openVikingConfigured = false;
-    render(<App />);
-    const navigation = await screen.findByRole("navigation", { name: "主导航" });
-    await within(navigation).findByRole("button", { name: "知识库挖掘（未配置 OpenViking）" });
-
-    fireEvent.click(within(navigation).getByRole("button", { name: "运行状态" }));
-    fireEvent.click(await screen.findByRole("button", { name: "configure-openviking" }));
-
-    expect(
-      await within(navigation).findByRole("button", { name: "实验工作台" }),
-    ).toBeVisible();
-    expect(within(navigation).getByRole("button", { name: "平台资产" })).toBeVisible();
-    expect(within(navigation).queryByText("未配置")).toBeNull();
-  });
-
   it("keeps every admin entry visible outside the default tenant", async () => {
     state.tenantId = "account-a";
     render(<App />);
     const navigation = await screen.findByRole("navigation", { name: "主导航" });
     for (const name of [
       "链路观测",
-      "用户与权限",
+      "平台用户",
       "租户管理",
       "模型配置",
       "进化链路",
@@ -282,15 +272,44 @@ describe("original console functionality", () => {
     }
   });
 
-  it("uses only the user role to hide admin entries", async () => {
+  it("retains member tools and hides both platform and tenant governance", async () => {
     state.tenantId = "account-a";
     state.role = "user";
+    state.platform = false;
     render(<App />);
     const navigation = await screen.findByRole("navigation", { name: "主导航" });
     expect(within(navigation).getByRole("button", { name: "运行总览" })).toBeVisible();
     expect(within(navigation).getByRole("button", { name: "个人与团队资产" })).toBeVisible();
-    for (const name of ["链路观测", "用户与权限", "租户管理", "模型配置", "进化链路", "数据源接入", "运行状态"]) {
+    for (const name of ["链路观测", "平台用户", "租户管理", "模型配置", "进化链路", "数据源接入", "运行状态"]) {
       expect(within(navigation).queryByRole("button", { name })).not.toBeInTheDocument();
     }
+  });
+
+  it("shows platform controls without granting tenant governance", async () => {
+    state.role = "user";
+    render(<App />);
+    const navigation = await screen.findByRole("navigation", { name: "主导航" });
+    expect(within(navigation).getByRole("button", { name: "平台用户" })).toBeVisible();
+    expect(within(navigation).queryByRole("button", { name: "成员与接入" })).not.toBeInTheDocument();
+    expect(screen.queryByText("支持模式")).not.toBeInTheDocument();
+  });
+
+  it("shows tenant governance without granting platform controls", async () => {
+    state.platform = false;
+    render(<App />);
+    const navigation = await screen.findByRole("navigation", { name: "主导航" });
+    expect(within(navigation).getByRole("button", { name: "成员与接入" })).toBeVisible();
+    expect(within(navigation).queryByRole("button", { name: "平台用户" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("支持原因")).not.toBeInTheDocument();
+  });
+
+  it("does not mount business views without membership", async () => {
+    state.membership = false;
+    state.platform = false;
+    state.role = "user";
+    render(<App />);
+    expect(await screen.findByText("尚未进入可访问的租户")).toBeVisible();
+    expect(screen.queryByText("dashboard-body")).not.toBeInTheDocument();
+    expect(screen.queryByText("skill-workbench-body")).not.toBeInTheDocument();
   });
 });

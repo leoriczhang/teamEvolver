@@ -1,8 +1,7 @@
-"""Skill loading, injection, statistics, and shared-hub synchronization."""
+"""Durable team Skill storage and synchronization."""
 
 from __future__ import annotations
 
 from team_skills.library.hub import SkillHub
-from team_skills.library.manager import SkillManager
 
-__all__ = ["SkillManager", "SkillHub"]
+__all__ = ["SkillHub"]

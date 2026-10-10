@@ -19,7 +19,7 @@ fi
 # 否则以配置文件中的 service.port 为准（如挂载的 SIT 配置已写好 1080）。
 port="${APP_PORT:-${TEAMEVOLVER_PORT:-}}"
 
-# 服务主进程 HOME（.hermes/skills 等运行目录）。
+# 服务主进程 HOME。
 export HOME="${TEAMEVOLVER_HOME:-/app/deploy/runtime}"
 mkdir -p "$HOME"
 
@@ -67,19 +67,12 @@ else
 fi
 export TEAMEVOLVER_CONFIG_DIR="$CONFIG_DIR"
 
-# 优先加载 /app/deploy 下的源码而非 pip 安装的 wheel 副本：
-# 使挂载的 SkillMiner 数据目录生效，并保证主服务与内嵌子进程版本一致。
+# 优先加载 /app/deploy 下的源码而非 pip 安装的 wheel 副本。
 export PYTHONPATH="/app/deploy${PYTHONPATH:+:$PYTHONPATH}"
 
 # OpenViking 服务通过控制台配置远程 endpoint 访问，无本地依赖。
 # 如需控制台内嵌的 OpenViking CLI 面板，可挂载 ov 二进制并通过
 # OPENVIKING_CLI_BIN 指向它。
-
-# SkillMiner 的 find_hermes_bin 只认 TEAMEVOLVER_HERMES_BIN，不回退 PATH。
-if [ -z "${TEAMEVOLVER_HERMES_BIN:-}" ] && command -v hermes >/dev/null 2>&1; then
-  TEAMEVOLVER_HERMES_BIN="$(command -v hermes)"
-  export TEAMEVOLVER_HERMES_BIN
-fi
 
 # Fail fast when the mounted config enables storage_pg but no PG credentials
 # are reachable: an unset var would otherwise surface much later as a pool
@@ -115,23 +108,6 @@ if missing:
     sys.exit(1)
 PY
 fi
-
-# Bind mounts start empty on a fresh host. Create the layout expected by the
-# embedded SkillMiner service before teamEvolver starts.
-skillminer_root="/app/deploy/team_miner"
-for relative_path in \
-  "data/input" \
-  ".knowledge_originals" \
-  "mining_jobs" \
-  "sample_packages" \
-  "semantic_reports" \
-  "compiled_skill" \
-  "benchmark_results" \
-  "reflection_rounds" \
-  "run_history" \
-  "lift_datasets"; do
-  mkdir -p "${skillminer_root}/${relative_path}"
-done
 
 # CLI 需要显式配置文件存在；种子阶段未生成时兜底创建。
 # 服务在容器内必须监听 0.0.0.0。

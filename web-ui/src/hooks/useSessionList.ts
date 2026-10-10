@@ -41,7 +41,7 @@ export interface SessionListState {
   reload: () => void;
 }
 
-export interface SessionListStats {
+interface SessionListStats {
   total: number;
   good: number;
   bad: number;

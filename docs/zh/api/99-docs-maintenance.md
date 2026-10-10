@@ -8,7 +8,7 @@
 
 | 场景 | 需要更新的文档 |
 |------|--------------|
-| API 接口变更（新增、修改、删除端点，参数变化） | `docs/zh/api/` 对应文件，以及 `docs/zh/agent-integrations/02-protocol-v1.md` |
+| API 接口变更（新增、修改、删除端点，参数变化） | `docs/zh/api/` 对应文件，以及 `docs/zh/agent-integrations/06-protocol-v2.md` |
 | 新增功能或能力（新的 capability、新的接入方式） | `docs/zh/agent-integrations/` 相关文件，必要时新增 API 文档 |
 | 配置项变更（新增/修改/废弃环境变量、配置参数） | 相关指南文档和 API 文档中的参数说明 |
 | 概念变更（术语、架构、流程调整） | `docs/zh/concepts/` 和相关文档中的术语使用 |
@@ -40,7 +40,7 @@ docs/
 
 ### 文件命名约定
 
-- 使用**数字前缀**控制排序：`01-overview.md`、`02-protocol-v1.md`、`99-docs-maintenance.md`
+- 使用**数字前缀**控制排序：`01-overview.md`、`02-agent-register.md`、`99-docs-maintenance.md`
 - 数字前缀与标题之间用连字符 `-` 连接
 - 使用英文小写文件名，单词间用连字符
 - 概览文件统一命名为 `01-overview.md`
@@ -72,7 +72,7 @@ teamEvolver/<模块>/<文件>.py:<符号名>
 - `teamEvolver/integrations/agent_principal.py:resolve_agent_principal` -- 模块级函数
 - `teamEvolver/proxy/agent_context.py:119` -- 具体行号（必要时使用）
 - `team_replay/adapters.py:82` -- HttpReplayAdapter 类
-- `teamEvolver/integrations/agent_protocol.py` -- 整个文件（无具体符号时）
+- `session_ingestion/push/protocol.py` -- 整个文件（无具体符号时）
 
 注意事项：
 

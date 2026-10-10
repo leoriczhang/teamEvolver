@@ -5,9 +5,6 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
-import json
-import shutil
-from pathlib import Path
 from typing import Any, Mapping
 
 from ._util import normalize_artifact_rel_path
@@ -67,9 +64,9 @@ def artifact_tree_sha256(files: Mapping[str, bytes]) -> str:
 
 
 def decode_bundle_payload(payload: Mapping[str, Any]) -> dict[str, bytes]:
-    """Decode and verify the shared ``bundle_v1`` wire representation."""
+    """Decode and verify the shared Skill Bundle wire representation."""
 
-    if str(payload.get("format") or "") != "bundle_v1":
+    if str(payload.get("format") or "") != "skill-bundle":
         raise ReplayArtifactError("Unsupported bundle payload format")
     raw_files = payload.get("files")
     if not isinstance(raw_files, list):
@@ -115,38 +112,14 @@ def decode_bundle_payload(payload: Mapping[str, Any]) -> dict[str, bytes]:
 
 
 def skill_treatment_files(skill: Mapping[str, Any]) -> dict[str, bytes]:
-    """Materialize either a canonical bundle or a legacy inline Skill."""
+    """Decode a canonical Skill bundle."""
 
     raw_bundle = skill.get("bundle")
-    if isinstance(raw_bundle, Mapping):
-        files = decode_bundle_payload(raw_bundle)
-    else:
-        raw_files = (
-            skill.get("bundle_files")
-            if isinstance(skill.get("bundle_files"), Mapping)
-            else {}
-        )
-        files = {
-            normalize_artifact_rel_path(str(path)): (
-                bytes(content)
-                if isinstance(content, (bytes, bytearray))
-                else str(content).encode("utf-8")
-            )
-            for path, content in raw_files.items()
-        }
+    if not isinstance(raw_bundle, Mapping):
+        raise ReplayArtifactError("Skill treatment requires a canonical bundle")
+    files = decode_bundle_payload(raw_bundle)
     if "SKILL.md" not in files:
-        name = str(skill.get("name") or "candidate-skill").strip()
-        description = str(skill.get("description") or "").strip()
-        category = str(skill.get("category") or "general").strip()
-        content = str(skill.get("content") or "").strip()
-        files["SKILL.md"] = (
-            "---\n"
-            f"name: {json.dumps(name, ensure_ascii=False)}\n"
-            f"description: {json.dumps(description, ensure_ascii=False)}\n"
-            f"category: {json.dumps(category, ensure_ascii=False)}\n"
-            "---\n\n"
-            f"{content}\n"
-        ).encode("utf-8")
+        raise ReplayArtifactError("Skill bundle is missing required entrypoint SKILL.md")
     return files
 
 
@@ -185,18 +158,3 @@ def validate_skill_treatment(skill: Mapping[str, Any]) -> dict[str, Any]:
         "errors": errors,
         "tree_sha256": artifact_tree_sha256(files),
     }
-
-
-def materialize_skill_treatment(
-    skill: Mapping[str, Any],
-    target: Path,
-) -> str:
-    files = skill_treatment_files(skill)
-    if target.exists():
-        shutil.rmtree(target)
-    target.mkdir(parents=True, exist_ok=True)
-    for rel_path, data in sorted(files.items()):
-        path = target / Path(rel_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-    return artifact_tree_sha256(files)

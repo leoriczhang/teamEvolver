@@ -22,7 +22,6 @@ from typing import Any, Callable, Optional
 from team_skills.evolution.kernel.enums import DecisionAction
 from team_skills.evolution.agent.cards import build_merge_card, build_round1_user_msg, render_observation_message
 from team_skills.evolution.agent.contract import (
-    legacy_suppress,
     normalize_classification,
     parse_turn,
     validate_final,
@@ -95,7 +94,6 @@ def _prevalidate_file_changes(skill: dict, ctx: ToolContext) -> str:
 def _accept_final(
     normalized: dict,
     ctx: ToolContext,
-    skill_name: str,
     stage: str,
 ) -> tuple[Optional[dict], list[str]]:
     """Turn a validated decision into the final stage result (or errors)."""
@@ -139,11 +137,9 @@ def _best_effort(
     skill_name: str,
     ctx: ToolContext,
     plan_record: Optional[dict],
-    last_final: Optional[dict],
 ) -> Optional[dict]:
     """Close the loop from staged state when rounds ran out without a final."""
     if stage == "merge":
-        # Old semantics: a failed merge keeps the incoming version.
         return None
 
     classification = normalize_classification(
@@ -168,15 +164,6 @@ def _best_effort(
             "evidence_classification": classification,
         }
 
-    if plan_record is not None and str(plan_record.get("action_candidate")) == DecisionAction.SKIP:
-        return {
-            "action": DecisionAction.SKIP,
-            "rationale": str(plan_record.get("rationale") or ""),
-            "evidence_classification": classification,
-        }
-
-    if last_final is not None:
-        return legacy_suppress(last_final, skill_name)
     return None
 
 
@@ -267,7 +254,6 @@ async def run_skill_agent(
     plan_record: Optional[dict] = None
     plan_action: Optional[str] = None
     plan_corrected = False
-    last_final: Optional[dict] = None
 
     def log_round(round_no: int, kind: str, **extra: Any) -> None:
         if round_log is not None:
@@ -379,10 +365,9 @@ async def run_skill_agent(
 
         # final
         decision = turn["decision"]
-        last_final = decision
-        normalized, errors = validate_final(decision, skill_name, stage=stage)
+        normalized, errors = validate_final(decision, stage=stage)
         if not errors:
-            finalized, errors = _accept_final(normalized, ctx, skill_name, stage)
+            finalized, errors = _accept_final(normalized, ctx, stage)
             if finalized is not None:
                 log_round(round_no, "final", action=str(finalized.get("action") or "merge"))
                 return finalized
@@ -401,4 +386,4 @@ async def run_skill_agent(
             continue
         break
 
-    return _best_effort(stage, skill_name, ctx, plan_record, last_final)
+    return _best_effort(stage, skill_name, ctx, plan_record)

@@ -191,7 +191,7 @@ Delete a candidate record.
 |-----------|------|----------|-------------|
 | `job_id` | string | Yes | Job ID |
 
-Code entry point: `teamEvolver/proxy/routes.py:api_validation_candidate_delete`
+Code entry point: `teamEvolver/proxy/routes.py`
 
 ---
 

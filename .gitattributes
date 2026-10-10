@@ -1,0 +1,4 @@
+# Preserve exact generated artifacts and sanitized test-output whitespace.
+docs/kee-r6/results/** -whitespace
+docs/kee-r6/knowledge-base/** -whitespace
+teamEvolver/web/dist/assets/** -whitespace

@@ -21,7 +21,7 @@ def run_branch(
 ) -> dict[str, Any]:
     """Only open(context), send(message) and close() touch the customer runtime."""
     started = time.monotonic()
-    query = str(case.get("query") or case.get("instruction") or "")
+    query = str(case.get("query") or "")
     checklist = normalize_case_checklist(case)
     result: dict[str, Any] = {
         "branch": context.treatment.branch, "runtime": context.runtime_type,

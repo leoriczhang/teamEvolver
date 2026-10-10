@@ -30,11 +30,10 @@ from typing import Any, Iterable
 
 import httpx
 
+from ..admin.identity_store import IdentityStore
 from .users_admin import (
-    _load_registry,
     _openviking_endpoint,
     _openviking_root_key,
-    _registry_path,
 )
 
 _LOG = logging.getLogger(__name__)
@@ -81,7 +80,7 @@ def registered_personal_users(config) -> list[tuple[str, str]]:
     blocking the bootstrap.
     """
     try:
-        data = _load_registry(_registry_path(config), config)
+        data = IdentityStore(config).load_registry()
     except Exception as exc:  # noqa: BLE001 - registry issues must not block bootstrap
         _LOG.warning("[openviking-dirs] cannot read the users registry: %s", exc)
         return []
@@ -186,7 +185,7 @@ def _headers(config, account_id: str, api_key: str, uri: str) -> dict[str, str]:
 
     ``viking://user/<user>/...`` is a per-user namespace, so the identity
     header follows the path owner; everything else uses the configured team
-    user. Trusted deployments reach both with the service key (the same
+    user. Trusted deployments reach both with the Root Key (the same
     contract the aggregation pipeline relies on).
     """
     parts = uri.split("/")

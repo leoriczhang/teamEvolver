@@ -24,7 +24,7 @@ def main():
     if args.status:
         print(json.dumps(service.list_runs(), ensure_ascii=False, indent=2))
         return
-    key = config.sharing_viking_team_api_key or config.sharing_viking_api_key
+    key = config.sharing_viking_api_key
     if not key:
         parser.error("Configure the OpenViking service credential first")
     try:

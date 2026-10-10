@@ -1,7 +1,7 @@
 # API overview
 
 The Agent data plane uses `tevt_ + user_id`; see [v2 identity](../agent-integrations/06-protocol-v2.md).
-Administrators use console sessions or the service Root Key. Tenant Keys cannot call admin APIs.
+The console separates platform administrators, tenant administrators and members; see [Console Identity and Tenant Authorization](./20-console-rbac.md). Tenant Keys cannot call console management APIs.
 
 | Capability | API |
 | --- | --- |
@@ -16,7 +16,6 @@ Administrators use console sessions or the service Root Key. Tenant Keys cannot 
 
 Missing/invalid user IDs return `400 USER_ID_REQUIRED` / `400 USER_ID_INVALID`.
 Invalid tenant credentials return 401. Context resources additionally validate tenant/user and expiry.
-See [the upgrade guide](../guides/11-agent-deregistration.md) for legacy retirement.
 
 | Item | Value |
 |------|-------|
@@ -32,16 +31,16 @@ teamEvolver API uses three authentication mechanisms, plus a small set of unauth
 
 | Authentication Method | Applicable Scenarios | Header Format |
 |----------------------|---------------------|---------------|
-| Control Plane Key | Agent registration (`/internal/agents/register`) | `Authorization: Bearer <EVOLVE_INGEST_API_KEY>` |
+| Legacy ingest key | Non-V1 Session ingest compatibility path | `Authorization: Bearer <EVOLVE_INGEST_API_KEY>` |
 | Tenant Machine Credential | Agent data plane and protocol APIs (Session ingest, Context Workspace, datasource pull, status queries) | `Authorization: Bearer <tenant_agent_token>` |
 | Console Session Cookie | Console management APIs (`/api/*`) | Cookie: `teamEvolver_console_session=<token>` |
 | No Authentication | Health checks, status queries | No authentication required |
 
 ### Control Plane Key
 
-The key configured via the `EVOLVE_INGEST_API_KEY` environment variable, used for registering new Agents (registration control plane) and the legacy (non-V1) Session ingest channel. This has the highest privilege level and must be kept secure. When this variable is unset, the V1 registration endpoint performs no authentication and registration requests proceed unauthenticated (always configure it in production); when the provided key does not match the configured one, 401 is returned.
+The key configured through `EVOLVE_INGEST_API_KEY` is used only by the legacy non-V1 Session ingest compatibility path. New integrations use tenant machine credentials.
 
-Code entry point: `teamEvolver/proxy/routes.py:_check_ingest_api_key`
+Code entry point: `teamEvolver/proxy/routes.py`
 
 ### Tenant Machine Credential
 
@@ -60,13 +59,13 @@ The credential is not narrowed by capability → scope mapping (full privilege),
 - Multi-tenant deployments: issued by the console when a tenant is created, displayed in full exactly once; the server only stores its SHA-256 hash. Rotate it via `POST /api/tenants/{tenant_id}/rotate-token`; the previous credential stops working immediately.
 - Single-tenant deployments (`storage_pg` disabled): the console does not issue credentials; the operator configures **one** credential via the `TEAMEVOLVER_TENANT_TOKEN` environment variable (or `tenant.machine_token` in config.yaml). It must start with `tevt_`, and the server resolves it to the `default` tenant. Generate it with: `TEAMEVOLVER_TENANT_TOKEN="tevt_$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')"`. Rotation means changing the value and restarting the process. The console's tenant page shows whether it is configured (and the generation command when it is not). On single-tenant deployments this credential is administrator-equivalent on the machine paths.
 
-Management APIs (`/api/*`) and the Agent registration endpoint (`/internal/agents/register`) **do not accept** this credential. The `default` tenant never carries a console-issued credential: `POST /api/tenants/default/rotate-token` is rejected (400 `default is reserved`), and the console hides the rotate action for it.
+Management APIs (`/api/*`) **do not accept** this credential. The `default` tenant never carries a console-issued credential: `POST /api/tenants/default/rotate-token` is rejected (400 `default is reserved`), and the console hides the rotate action for it.
 
 Code entry point: `teamEvolver/tenants/registry.py:resolve_by_agent_token`
 
 ### Console Session
 
-An HttpOnly Cookie obtained after logging in via `/api/auth/login`, valid for 24 hours. Management interfaces under the `/api/*` path require this authentication, with additional permission checks for admin users.
+An HttpOnly Cookie obtained after logging in via `/api/auth/login`, valid for 24 hours. The browser must explicitly select a tenant, and membership is revalidated on every request. Platform administrators must start a 30-minute, Session-bound support mode before performing tenant governance.
 
 Code entry point: `teamEvolver/proxy/routes.py:require_console_auth` middleware
 
@@ -117,7 +116,7 @@ Some Agent Protocol interfaces return structured error codes (string constants),
 
 | Document | Description |
 |---------|-------------|
-| [Agent Registration](./02-agent-register.md) | Register Agent runtime identity (no token is issued) |
+| [Agent registration retirement](./02-agent-register.md) | Current tenant Key and user identity model |
 | [Session Ingest](./03-session-ingest.md) | Submit Agent session trajectory data |
 | [Context Workspace](./04-context-workspace.md) | Context resolution, reading, Memory read/write |
 | [Replay Branch Execution](./05-replay-branch.md) | teamEvolver callback to Agent for True Replay execution |
@@ -132,6 +131,7 @@ Some Agent Protocol interfaces return structured error codes (string constants),
 | [Skill Management](./09-skills-admin.md) | Team/personal Skill CRUD, publish requests, rollback, and versions |
 | [Validation and Candidates](./10-validation.md) | Candidate queries, Replay evaluation, release decisions, and deletion |
 | [Team Memory Aggregation](./11-team-memory-aggregation.md) | Cross-user aggregation, run recovery, aggregation Skill, and output settings |
+| [Console Identity and Tenant Authorization](./20-console-rbac.md) | Platform identity, memberships, support mode, authorization audit, and migration |
 
 ### Console-internal interfaces
 
@@ -139,7 +139,7 @@ The following `/api/*` endpoints serve the built-in console and require a consol
 
 | Prefix | Purpose | Main documentation |
 |--------|---------|--------------------|
-| `/api/auth/*`, `/api/users/*`, `/api/team-settings` | Login, administrator bootstrap, users, and identity mapping | [Web Console](../guides/03-console.md) |
+| `/api/auth/*`, `/api/identity/*`, `/api/users/*`, `/api/tenants/*` | Login, platform identity, tenant membership, support mode, and authorization audit | [Console Identity and Tenant Authorization](./20-console-rbac.md) |
 | `/api/openviking/workspace/*` | Workspace browsing, L0/L1, conditional batch writes, and CLI | [Storage Layout](../concepts/09-storage-layout.md) |
 | `/api/replay-lab/*`, `/api/openviking/memory/*` | Skill/Memory experiments and True Replay | [Web Console](../guides/03-console.md) |
 | `/api/mining/*` | Knowledge sources, mining jobs, artifacts, and LIFT | [Skill Miner Guide](../guides/07-skill-miner.md) |
@@ -157,3 +157,29 @@ The following `/api/*` endpoints serve the built-in console and require a consol
 | Document | Description |
 |---------|-------------|
 | [Documentation Maintenance Guide](./99-docs-maintenance.md) | Documentation writing standards and maintenance processes |
+
+## Console account registration
+
+`GET /api/auth/status` includes the boolean `self_registration_enabled` alongside
+the existing session status. No credentials are returned.
+
+`POST /api/auth/register` accepts `username`, `password`, and optional `display_name`
+and `email`. It always creates an ordinary user; a supplied `role` cannot grant admin rights.
+
+- With `service.self_registration_enabled=true`, anonymous registration remains available.
+- With `false`, registration requires a TE service Root Key verified by the authentication
+  middleware. Otherwise it returns `403` with `{"detail":"SELF_REGISTRATION_DISABLED"}`.
+- Initial admin bootstrap is still required; setup-required and duplicate usernames return
+  `409`. Missing username/password returns `400` after registration authorization succeeds.
+- Existing administrator user-management APIs remain available. Tenant Agent keys cannot register users.
+
+Backend example (`TE_ROOT_KEY` must hold the TE service Root Key, never browser code):
+
+```bash
+curl -X POST 'http://localhost:52010/api/auth/register' \
+  -H "Authorization: Bearer ${TE_ROOT_KEY}" \
+  -H 'Content-Type: application/json' \
+  --data '{"username":"new-user","password":"replace-with-a-strong-password"}'
+```
+
+See [configuration](../guides/01-configuration.md#console-self-registration) for precedence and restart requirements.

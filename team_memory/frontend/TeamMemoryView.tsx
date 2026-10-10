@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CheckSquare, Copy, Play, RefreshCw, Save, Users } from "lucide-react";
-import { api, type AggregationSettings, type UserProfile } from "@/api/client";
+import { api, type UserProfile } from "@/api/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toastErr, toastOk } from "@/lib/toast";
+import type { AggregationSettings } from "./types";
 
 type Pipeline = "both" | "aggregate" | "maintain";
 type SkillStage = "aggregation" | "maintenance";
@@ -17,7 +18,7 @@ type Run = {
 };
 const STAGES: Record<string, string> = {
   pending: "排队中", preparing: "准备 Skill", staging: "采集快照",
-  aggregation: "聚合", snapshot: "备份", maintenance: "DreamCycle 维护", completed: "已完成",
+  aggregation: "聚合", snapshot: "备份", maintenance: "OV Compile 维护", completed: "已完成",
 };
 const STATUS: Record<string, string> = {
   pending: "排队中", running: "运行中", completed: "已完成", failed: "失败",
@@ -32,7 +33,7 @@ function SkillEditor({ stage, account, active, onSaved }: {
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [refresh, setRefresh] = useState(0);
-  const title = stage === "aggregation" ? "聚合 Skill" : "DreamCycle Skill";
+  const title = stage === "aggregation" ? "聚合 Skill" : "维护 Skill";
   const endpoint = `/api/aggregation/okf-skill?stage=${stage}&account_id=${encodeURIComponent(account)}`;
   useEffect(() => {
     if (!active) return;
@@ -187,7 +188,7 @@ export default function TeamMemoryView({ active, user }: { active: boolean; user
       </div>
       <div className="flex flex-wrap items-center gap-3">
         <div role="group" aria-label="运行阶段" className="flex flex-wrap gap-1">
-          {([["both", "聚合 + DreamCycle"], ["aggregate", "仅聚合"], ["maintain", "仅 DreamCycle"]] as const).map(([key, title]) =>
+          {([["both", "聚合 + 维护"], ["aggregate", "仅聚合"], ["maintain", "仅维护"]] as const).map(([key, title]) =>
             <Button key={key} size="sm" variant={pipeline === key ? "default" : "outline"}
               aria-pressed={pipeline === key} disabled={running || busy} onClick={() => setPipeline(key)}>{title}</Button>)}
         </div>
@@ -238,7 +239,7 @@ export default function TeamMemoryView({ active, user }: { active: boolean; user
           (aggregationSkill === settings.okf_skill_uri && maintenanceSkill === settings.maintenance_skill_uri)} onClick={saveSettings}><Save className="size-4" />保存配置</Button></div>
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="text-xs">聚合 Skill URI<Input className="mt-1 font-mono" value={aggregationSkill} disabled={running || busy} onChange={e => setAggregationSkill(e.target.value)} /></label>
-        <label className="text-xs">DreamCycle Skill URI<Input className="mt-1 font-mono" value={maintenanceSkill} disabled={running || busy} onChange={e => setMaintenanceSkill(e.target.value)} /></label>
+        <label className="text-xs">维护 Skill URI<Input className="mt-1 font-mono" value={maintenanceSkill} disabled={running || busy} onChange={e => setMaintenanceSkill(e.target.value)} /></label>
       </div>
       <div className="grid gap-3 lg:grid-cols-2">
         {(["aggregation", "maintenance"] as const).map(stage => <SkillEditor key={`${stage}-${skillVersion}`} stage={stage}

@@ -61,7 +61,7 @@ Agent 使用其受限 OV 凭证读取或检索该目录；这些文件是成功�
 
 在服务日志中查找 `experience_sync.started`、`experience_sync.delivery`、`experience_sync.source_rejected`、`experience_sync.blocked`、`experience_sync.recovered`。日志关联租户、源 key、经验 ID、摘要和 OV 路径，不输出经验正文。
 
-常见错误：`PG_REQUIRED`、`SHARING_DISABLED`、`OV_IDENTITY_OR_KEY_MISSING` 为配置问题；`UNAUTHENTICATED`／`FORBIDDEN` 为 OV 鉴权问题；`OV_TIMEOUT`／`OV_NETWORK_ERROR` 为连通性问题；`OV_INDEX_NOT_READY` 表示文件可能已写入，但检索处理尚未确认。
+常见错误：`PG_REQUIRED`、`OV_IDENTITY_OR_KEY_MISSING` 为配置问题；`UNAUTHENTICATED`／`FORBIDDEN` 为 OV 鉴权问题；`OV_TIMEOUT`／`OV_NETWORK_ERROR` 为连通性问题；`OV_INDEX_NOT_READY` 表示文件可能已写入，但检索处理尚未确认。
 
 关闭 `experience_sync.enabled` 并重启会停止新上传，PG 状态和 OV 文件保留，重新开启后继续核对。此变更不会自动部署或启用 PRD。
 

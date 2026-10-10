@@ -1,0 +1,56 @@
+{
+  "versions": {
+    "TE": "0d4b8689a6e6bde1fdada1778c6d9f367449c325",
+    "OV": "8f10a04108c6bc8a0d9de045e31cbea1e96397ec"
+  },
+  "operations": [
+    {
+      "file": "09_KEE_R6简化实施_源码基线与功能矩阵_20261008.md",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/09_KEE_R6简化实施_源码基线与功能矩阵_20261008.md",
+      "mode": "create",
+      "sha256": "0be38732fcfba787037dc6572175a93c2253d29c7d24ef217ad6feaebfeb2063",
+      "expected_sha256": null,
+      "idempotency_key": "kee-r6-20261008-09-0be38732fcfba787037d"
+    },
+    {
+      "file": "10_KEE_R6契约接口与迁移部署恢复_20261008.md",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/10_KEE_R6契约接口与迁移部署恢复_20261008.md",
+      "mode": "create",
+      "sha256": "a06e78ea3248bbea51c529e2e8d24362fad4c3e80ebc8f54999d5c7751460377",
+      "expected_sha256": null,
+      "idempotency_key": "kee-r6-20261008-10-a06e78ea3248bbea51c5"
+    },
+    {
+      "file": "11_KEE_R6本地验收与待办_20261008.md",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/11_KEE_R6本地验收与待办_20261008.md",
+      "mode": "create",
+      "sha256": "518fbe98dc9334d4599bd7cecbf94788f9b7b5f4adc6c0cd9e204553aad3ad9e",
+      "expected_sha256": null,
+      "idempotency_key": "kee-r6-20261008-11-518fbe98dc9334d4599b"
+    },
+    {
+      "file": "revision-00_平台总览与阅读导航.md",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/00_平台总览与阅读导航.md",
+      "mode": "propose_update",
+      "sha256": "4654948b2c2b8f8e37fb76e114c7518183b7e3ad3f93d9ce007719343a9fe230",
+      "expected_sha256": "bdb1044211292f5f464dbd4790e787c2d43431005b57b18cef0423bac9c75f6b",
+      "idempotency_key": "kee-r6-20261008-00-4654948b2c2b8f8e37fb"
+    },
+    {
+      "file": "revision-02_架构演进与决策记录_20260922.md",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/02_架构演进与决策记录_20260922.md",
+      "mode": "propose_update",
+      "sha256": "c18eb66a33666ecfc87ee329a5e2bdc43f12978356c80286bbc431d99db5ef91",
+      "expected_sha256": "da4e8eb5b7476b5469c7d0538524703391774cba571b01db8fbf1a065abc256f",
+      "idempotency_key": "kee-r6-20261008-02-c18eb66a33666ecfc87e"
+    },
+    {
+      "file": "revision-08_知识进化系统_统一KEE平台与三类用户蓝图_R6_20261008.md",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/08_知识进化系统_统一KEE平台与三类用户蓝图_R6_20261008.md",
+      "mode": "propose_update",
+      "sha256": "bbc226615d0852c57965567a5f3886ba44953c247efb668a03eb4a6906479757",
+      "expected_sha256": "d4d693dd105c3d338823896ade525ce5b135e67517d515b1a4273d2509d33514",
+      "idempotency_key": "kee-r6-20261008-08-bbc226615d0852c57965"
+    }
+  ]
+}

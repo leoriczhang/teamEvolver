@@ -14,6 +14,14 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Any
 
+from .config import (
+    DEFAULT_LLM_API_BASE,
+    DEFAULT_LLM_MAX_CONCURRENCY,
+    DEFAULT_LLM_MAX_TOKENS,
+    DEFAULT_LLM_MODEL_ID,
+    DEFAULT_LLM_QUEUE_CAPACITY,
+    DEFAULT_LLM_TEMPERATURE,
+)
 from .observability import (
     langfuse_observation,
     update_langfuse_observation,
@@ -32,13 +40,16 @@ def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
 
 _DEFAULT_LLM_CONCURRENCY = _env_int(
     "TEAMEVOLVER_LLM_CONCURRENCY",
-    8,
+    DEFAULT_LLM_MAX_CONCURRENCY,
     minimum=1,
-    maximum=64,
+    maximum=8,
 )
+_GLOBAL_MODEL_SLOTS = threading.BoundedSemaphore(8)
+
+
 _DEFAULT_LLM_QUEUE_CAPACITY = _env_int(
     "TEAMEVOLVER_LLM_QUEUE_CAPACITY",
-    64,
+    DEFAULT_LLM_QUEUE_CAPACITY,
     minimum=1,
     maximum=10000,
 )
@@ -53,7 +64,7 @@ class _TenantLLMDispatcher:
 
     def __init__(self, tenant_id: str, concurrency: int, queue_capacity: int) -> None:
         self.tenant_id = tenant_id
-        self.concurrency = max(1, min(64, int(concurrency or 1)))
+        self.concurrency = max(1, min(8, int(concurrency or 1)))
         self.queue_capacity = max(
             self.concurrency,
             min(10000, int(queue_capacity or self.concurrency)),
@@ -94,11 +105,10 @@ class _TenantLLMDispatcher:
         loop = asyncio.get_running_loop()
         try:
             context = contextvars.copy_context()
-            future = loop.run_in_executor(
-                self._executor,
-                context.run,
-                partial(func, **kwargs),
-            )
+            def invoke():
+                with _GLOBAL_MODEL_SLOTS:
+                    return context.run(partial(func, **kwargs))
+            future = loop.run_in_executor(self._executor, invoke)
         except BaseException:
             self.release(slots)
             raise
@@ -133,7 +143,7 @@ def _dispatcher_for(
     queue_capacity: int,
 ) -> _TenantLLMDispatcher:
     scope = str(tenant_id or "default").strip() or "default"
-    normalized_concurrency = max(1, min(64, int(concurrency or 1)))
+    normalized_concurrency = max(1, min(8, int(concurrency or 1)))
     normalized_capacity = max(
         normalized_concurrency,
         min(10000, int(queue_capacity or normalized_concurrency)),
@@ -213,10 +223,10 @@ class AsyncLLMClient:
     def __init__(
         self,
         api_key: str = "",
-        base_url: str = "https://api.openai.com/v1",
-        model: str = "gpt-4o",
-        max_tokens: int = 100000,
-        temperature: float = 0.4,
+        base_url: str = DEFAULT_LLM_API_BASE,
+        model: str = DEFAULT_LLM_MODEL_ID,
+        max_tokens: int = DEFAULT_LLM_MAX_TOKENS,
+        temperature: float = DEFAULT_LLM_TEMPERATURE,
         timeout_seconds: float = 600.0,
         connect_timeout_seconds: float = 30.0,
         max_retries: int = 6,
@@ -230,7 +240,9 @@ class AsyncLLMClient:
         resolved_api_key = (api_key or os.environ.get("OPENAI_API_KEY", "")).strip()
         if resolved_api_key.lower().startswith("bearer "):
             resolved_api_key = resolved_api_key[7:].strip()
-        resolved_base = (base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")).rstrip("/")
+        resolved_base = (
+            base_url or os.environ.get("OPENAI_BASE_URL", DEFAULT_LLM_API_BASE)
+        ).rstrip("/")
         if resolved_base.endswith("/chat/completions"):
             resolved_base = resolved_base[:-len("/chat/completions")]
         self._api_key = resolved_api_key
@@ -252,7 +264,7 @@ class AsyncLLMClient:
             (resolved_base, resolved_api_key): self._client
         }
         self._client_cache_lock = threading.Lock()
-        self.model = model or os.environ.get("EVOLVE_MODEL", "gpt-4o")
+        self.model = model or os.environ.get("EVOLVE_MODEL", DEFAULT_LLM_MODEL_ID)
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.timeout_seconds = max(1.0, float(timeout_seconds))
@@ -302,9 +314,6 @@ class AsyncLLMClient:
         """Send a chat completion request and return the assistant content."""
         requested_api_key = str(kwargs.pop("api_key", self._api_key) or "").strip()
         requested_base_url = str(kwargs.pop("base_url", self._base_url) or "").strip()
-        # Providers are currently OpenAI-wire-compatible; retain this field in
-        # persisted settings for UI clarity without forwarding it upstream.
-        kwargs.pop("provider", None)
         client = self._client_for(
             api_key=requested_api_key,
             base_url=requested_base_url,

@@ -192,14 +192,18 @@ class ControlStore:
                 return None
             row = await c.fetchrow(
                 f"SELECT j.* FROM {self.jobs} j JOIN {self.outbox} o ON o.job_id=j.id "
-                "WHERE o.pending AND ((j.state='queued' AND (j.updated<now()-interval '1 seconds' "
+                "WHERE o.pending AND (CASE WHEN j.request->>'contract'='kee.method-build.v1' "
+                "THEN COALESCE((j.result->>'retry_at')::float,0) ELSE 0 END)<=extract(epoch from now()) "
+                "AND ((j.state='queued' AND (j.updated<now()-interval '1 seconds' "
                 "OR COALESCE(j.request->>'contract','') NOT LIKE 'sf.te.ontology.%')) "
                 "OR (j.state='running' AND j.lease_until<now())) "
                 "ORDER BY j.updated FOR UPDATE OF j SKIP LOCKED LIMIT 1"
             )
             if not row:
                 return None
-            if row["attempt"] >= 3 and not row_value(row)["request"].get("contract", "").startswith("sf.te.ontology."):
+            if row["attempt"] >= 3 and not row_value(row)["request"].get("contract", "").startswith(
+                ("sf.te.ontology.", "kee.")
+            ):
                 await c.execute(f"UPDATE {self.jobs} SET state='failed',error='RETRY_EXHAUSTED' WHERE id=$1", row["id"])
                 await c.execute(f"UPDATE {self.outbox} SET pending=false WHERE job_id=$1", row["id"])
                 return None
@@ -225,7 +229,9 @@ class ControlStore:
             )
             if not row:
                 raise HTTPException(409, "JOB_STATE_CHANGED")
-            await c.execute(f"UPDATE {self.outbox} SET pending=$2 WHERE job_id=$1", job["id"], state == "queued")
+            await c.execute(
+                f"UPDATE {self.outbox} SET pending=$2 WHERE job_id=$1", job["id"], state in {"queued", "running"}
+            )
             return row_value(row)
 
     async def resume(self, principal, job_id, allowed, result):

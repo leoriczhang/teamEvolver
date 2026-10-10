@@ -16,3 +16,20 @@ it.each([
   expect(error.message).not.toContain("secret source");
   expect(error.message).not.toContain("[object Object]");
 });
+
+it("rechecks authentication without reloading the current view on login-required responses", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(
+    JSON.stringify({ detail: "login required" }),
+    { status: 401 },
+  )));
+  const authChanged = vi.fn();
+  window.addEventListener("console-auth-changed", authChanged);
+
+  await expect(api("/api/model-settings")).rejects.toMatchObject({
+    message: "login required",
+    status: 401,
+  });
+  expect(authChanged).toHaveBeenCalledOnce();
+
+  window.removeEventListener("console-auth-changed", authChanged);
+});

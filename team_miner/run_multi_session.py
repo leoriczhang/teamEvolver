@@ -97,24 +97,13 @@ def _find_skill_dir():
 
 
 def _load_snapshot_questions(path):
-    """读取 canonical JSON 快照，并兼容历史 JSONL 快照。"""
-    if not path.exists():
+    """Read a snapshot using the shared Test Dataset contract."""
+    if not path.is_file() or path.suffix != ".json":
         return None
-    if path.suffix == ".json":
-        payload, errors = rb.bf.read_document(path)
-        if payload is None or errors:
-            return None
-        return rb.normalize_questions(rb.bf.to_runner_questions(payload))
-    rows = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rows.append(json.loads(line))
-        except Exception:
-            continue
-    return rb.normalize_questions(rows)
+    payload, errors = rb.bf.read_document(path)
+    if payload is None or errors:
+        return None
+    return rb.normalize_questions(rb.bf.to_runner_questions(payload))
 
 
 def _snapshot_slots():
@@ -122,7 +111,7 @@ def _snapshot_slots():
     if not SNAP_DIR.exists():
         return []
     slots = []
-    for p in [*SNAP_DIR.glob("build-*.json"), *SNAP_DIR.glob("build-*.jsonl")]:
+    for p in SNAP_DIR.glob("build-*.json"):
         try:
             slots.append(int(p.stem.split("-", 1)[1]))
         except Exception:
@@ -131,16 +120,13 @@ def _snapshot_slots():
 
 
 def _snapshot_path(slot):
-    canonical = SNAP_DIR / f"build-{slot}.json"
-    return canonical if canonical.exists() else SNAP_DIR / f"build-{slot}.jsonl"
+    return SNAP_DIR / f"build-{slot}.json"
 
 
 def cmd_snapshot(args):
     """把当前 canonical Test Dataset 存为一个 build 快照。"""
     skill_dir = _find_skill_dir()
     src = Path(args.from_file) if args.from_file else (skill_dir / "benchmark.json")
-    if not src.exists() and not args.from_file:
-        src = skill_dir / "benchmark.jsonl"
     if not src.exists():
         print(f"✗ 找不到题库文件：{src}")
         print("  提示：请先跑 `python3 run_benchmark.py --build-only` 生成 benchmark.json")

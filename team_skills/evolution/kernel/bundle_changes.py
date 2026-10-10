@@ -8,7 +8,6 @@ from typing import Iterable, Mapping
 from team_skills.library.bundle import (
     SkillBundleError,
     attach_bundle_payload,
-    candidate_skill_bundle,
     diff_skill_bundles,
     is_ignored_bundle_rel_path,
     normalize_bundle_rel_path,
@@ -158,7 +157,9 @@ def materialize_bundle_changes(
     seed.pop("bundle", None)
     seed.pop("bundle_files", None)
     seed.pop("_editable_bundle_files", None)
-    final_bundle.update(candidate_skill_bundle(seed))
+    from team_skills.library.render import build_skill_md
+
+    final_bundle["SKILL.md"] = build_skill_md(seed).encode("utf-8")
     candidate = attach_bundle_payload(
         seed,
         final_bundle,

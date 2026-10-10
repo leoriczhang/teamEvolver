@@ -7,8 +7,10 @@ from urllib.parse import quote
 import asyncpg
 import pytest
 import pytest_asyncio
+from pydantic import ValidationError
 
 from team_ontology.control import ControlStore
+from team_ontology.wire import Assertion
 
 ADMIN_DSN = os.environ.get("ONTOLOGY_SCHEMA_TEST_ADMIN_DSN")
 
@@ -166,3 +168,19 @@ async def test_partial_migration_failure_rolls_back_all_table_moves(restricted_d
     assert await owner.fetchval("SELECT to_regclass('teamevolver.ontology_migrations')") is None
     assert await owner.fetchval("SELECT to_regclass('te_ontology.migrations')") is not None
     assert await owner.fetchval("SELECT id FROM te_ontology.jobs WHERE tenant=$1", p['tenant']) == job['id']
+
+
+def test_standing_assertion_allows_null_valid_from():
+    fact = Assertion.model_validate({
+        "assertion_id": "ast_1", "subject": "e1", "predicate": "status", "value": "signed",
+        "valid_from": None, "support_sets": [["v1"]],
+    })
+    assert fact.valid_from is None and fact.valid_to is None
+
+
+def test_assertion_timezone_required_when_valid_from_present():
+    with pytest.raises(ValidationError):
+        Assertion.model_validate({
+            "assertion_id": "ast_1", "subject": "e1", "predicate": "status", "value": "signed",
+            "valid_from": "2026-09-01T00:00:00", "support_sets": [["v1"]],
+        })

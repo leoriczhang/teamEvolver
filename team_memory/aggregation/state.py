@@ -17,9 +17,12 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+_STATE_LOCK = threading.RLock()
 
 
 @dataclass
@@ -229,6 +232,17 @@ class AggregationState:
             os.close(fd)
 
     def save(self, *, skill_fingerprint: str) -> None:
+        with _STATE_LOCK:
+            # Compile checkpoints may have been updated while the pipeline retained
+            # its group snapshot. Preserve only this owned namespace, not stale groups.
+            current = self.load(self.path, self.account_id)
+            self.metadata["internal_compile"] = {
+                **self.metadata.get("internal_compile", {}),
+                **current.metadata.get("internal_compile", {}),
+            }
+            self._save(skill_fingerprint=skill_fingerprint)
+
+    def _save(self, *, skill_fingerprint: str) -> None:
         self.skill_fingerprint = skill_fingerprint
         payload = {
             "account": self.account_id,

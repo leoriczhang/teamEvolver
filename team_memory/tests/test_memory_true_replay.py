@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-from types import SimpleNamespace
 
 from team_replay.memory import MemoryTrueReplayRunner
 
@@ -49,8 +48,8 @@ class _Sessions:
     session = {
         "session_id": "session-1",
         "runtime": {
-            "type": "agentshub",
-            "integration_id": "agentshub:tenant-a",
+            "type": "pi",
+            "integration_id": "pi:tenant-a",
             "replay_endpoint": "http://127.0.0.1:9999/replay",
         },
         "runtime_context": {
@@ -92,7 +91,7 @@ def _branch_runner(
     assert content == ("new memory" if candidate else "old memory")
     return {
         "branch": branch,
-        "runtime": "agentshub",
+        "runtime": "pi",
         "ok": True,
         "final_response": "done",
         "messages": [],
@@ -117,7 +116,6 @@ def test_memory_true_replay_runs_before_and_after_as_only_treatment() -> None:
     ledger = _Ledger()
     runner = MemoryTrueReplayRunner(
         ledger=ledger,
-        app_config=SimpleNamespace(),
         branch_runner=_branch_runner,
         session_store=_Sessions(),
     )
@@ -157,7 +155,7 @@ def test_archive_replay_removes_memory_from_candidate_context() -> None:
         captured[branch] = list(case["context_snapshot"].get("items") or [])
         return {
             "branch": branch,
-            "runtime": "agentshub",
+            "runtime": "pi",
             "ok": True,
             "messages": [],
             "interaction_turns": 1,
@@ -173,7 +171,6 @@ def test_archive_replay_removes_memory_from_candidate_context() -> None:
 
     runner = MemoryTrueReplayRunner(
         ledger=_Ledger(action="archive"),
-        app_config=SimpleNamespace(),
         branch_runner=branch_runner,
         session_store=_Sessions(),
     )

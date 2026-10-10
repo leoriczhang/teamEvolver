@@ -9,4 +9,3 @@
 4. 需要 True Replay 时，由管理员选择预装 [Replay adapter](../api/05-replay-branch.md)。
 
 Hermes 使用 [安装指南](./03-hermes.md)。其他运行时使用 [自定义接入](./05-custom-agent.md)。
-已有部署按 [分阶段升级](../guides/11-agent-deregistration.md) 迁移。

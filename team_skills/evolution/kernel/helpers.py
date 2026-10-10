@@ -4,37 +4,8 @@ Shared parsing and formatting helpers used across pipeline stages.
 
 from __future__ import annotations
 
-import json
 import re
-from typing import Any, Optional
-
-# ------------------------------------------------------------------ #
-#  LLM output parsing                                                  #
-# ------------------------------------------------------------------ #
-
-
-def parse_single_skill(text: str) -> Optional[dict]:
-    """Extract a single skill JSON object from LLM output."""
-    clean = re.sub(r"```(?:json)?\s*", "", text.strip()).strip().rstrip("`")
-
-    try:
-        obj = json.loads(clean)
-        if isinstance(obj, dict) and obj.get("name"):
-            return obj
-    except (json.JSONDecodeError, ValueError):
-        pass
-
-    start = clean.find("{")
-    end = clean.rfind("}")
-    if start != -1 and end > start:
-        try:
-            obj = json.loads(clean[start : end + 1])
-            if isinstance(obj, dict) and obj.get("name"):
-                return obj
-        except (json.JSONDecodeError, ValueError):
-            pass
-    return None
-
+from typing import Any
 
 # ------------------------------------------------------------------ #
 #  Tool snippet compaction                                             #
@@ -63,9 +34,8 @@ def compact_tool_calls(tool_calls: Any, max_items: int = _TOOL_SNIPPET_MAX_ITEMS
         out.append(
             {
                 "id": str(tc.get("id") or ""),
-                # Accept the legacy mapper shape {name, input} as well.
-                "name": str(func.get("name") or tc.get("name") or "unknown"),
-                "arguments": _clip_text(func.get("arguments") or tc.get("input") or ""),
+                "name": str(func.get("name") or "unknown"),
+                "arguments": _clip_text(func.get("arguments") or ""),
             }
         )
     return out

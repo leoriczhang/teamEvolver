@@ -36,8 +36,6 @@ from urllib.parse import unquote, urlsplit
 
 import yaml
 
-from team_memory.compile_client import CompileClient, normalize_last_compile_time
-from team_memory.maintenance.maintenance_skill import DEFAULT_MAINTENANCE_SKILL_BODY, DEFAULT_MAINTENANCE_SKILL_NAME
 from team_memory.aggregation.okf_skill import DEFAULT_OKF_SKILL_BODY, skill_fingerprint
 from team_memory.aggregation.sources import (
     DEFAULT_MEMORY_KINDS,
@@ -47,6 +45,8 @@ from team_memory.aggregation.sources import (
 )
 from team_memory.aggregation.staging import DeterministicStagingClient, StagingError
 from team_memory.aggregation.state import AggregationState
+from team_memory.compile_client import CompileClient, normalize_last_compile_time
+from team_memory.maintenance.maintenance_skill import DEFAULT_MAINTENANCE_SKILL_BODY, DEFAULT_MAINTENANCE_SKILL_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -458,31 +458,14 @@ class MemoryAggregationService:
     ) -> Path:
         base = str(getattr(self.config, "aggregation_state_dir", "") or "").strip()
         root = Path(base).expanduser() if base else Path.home() / ".teamEvolver" / "aggregation"
-        configured_account = str(
-            getattr(self.config, "sharing_viking_account", "") or "default"
-        )
         resolved_target = self.resolve_target_uri(target_uri)
         resolved_endpoint = self.resolve_endpoint(endpoint)
-        configured_endpoint = (
-            self.normalize_endpoint(self._endpoint()) if self._endpoint() else ""
-        )
-        legacy_target = "viking://resources/shared-knowledge"
         safe_account = re.sub(r"[^A-Za-z0-9._-]+", "-", account_id).strip("-")
-        if (
-            account_id == configured_account
-            and resolved_target == legacy_target
-            and resolved_endpoint == configured_endpoint
-            and auth_mode == "trusted"
-        ):
-            return root / f"state-{safe_account or 'default'}.json"
         identity = (
             f"{resolved_endpoint}\0{account_id}\0{resolved_target}\0{auth_mode}"
         )
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:10]
         return root / f"state-{safe_account or 'account'}-{digest}.json"
-
-    def _max_users_per_batch(self) -> int:
-        return int(getattr(self.config, "aggregation_max_users_per_batch", 12) or 12)
 
     def _account_user_limit(self) -> int:
         return max(
@@ -607,7 +590,6 @@ class MemoryAggregationService:
     def _staging_source_fingerprints(
         self,
         *,
-        run: "AggregationRun",
         state: "AggregationState",
         staged_roots: list[str],
     ) -> dict[str, str]:
@@ -816,8 +798,6 @@ class MemoryAggregationService:
             endpoint=self.resolve_endpoint(endpoint),
             api_key=str(api_key or "").strip(),
             account_id=account_id,
-            shared_knowledge_prefix=self._prefix(),
-            max_users_per_batch=self._max_users_per_batch(),
             account_user_limit=self._account_user_limit(),
             account_user_page_size=self._account_user_page_size(),
             excluded_user_ids=frozenset({self._team_user()}),
@@ -855,13 +835,6 @@ class MemoryAggregationService:
                 self._active_targets.pop(key, None)
         self._save_runs()
 
-    def target_is_active(self, run: "AggregationRun") -> bool:
-        """Whether another run currently holds this run's target lock."""
-        key = self._target_lock_key(run)
-        with self._lock:
-            holder = self._active_targets.get(key)
-            return holder is not None and holder != run.task_id
-
     def _track_task(self, run: AggregationRun, task_id: str, status: str) -> None:
         with self._lock:
             if status in {"completed", "failed", "cancelled"}:
@@ -880,9 +853,16 @@ class MemoryAggregationService:
             tasks = dict(prior.upstream_tasks)
         client = CompileClient(endpoint=prior.endpoint, account_id=prior.account_id,
                                user_id=prior.merge_user_id, api_key=api_key)
+        if (getattr(self.config, "compile", {}) or {}).get("executor") == "internal":
+            from team_memory.internal_compile import MemoryCompilePort
+            client.internal_port = MemoryCompilePort(
+                self.config, self._state_path(prior.account_id, prior.target_uri, prior.endpoint, prior.auth_mode)
+            )
         for task_id in tasks:
             if task_id == "submission_unknown":
-                raise RunConflictError("Compile submission outcome is unknown; verify OpenViking tasks before releasing the reservation")
+                raise RunConflictError(
+                    "Compile submission outcome is unknown; verify OpenViking tasks before releasing the reservation"
+                )
             status = await client.task_status(task_id)
             self._track_task(prior, task_id, str(status.get("status") or "unknown"))
         self._release_target(prior)
@@ -968,10 +948,6 @@ class MemoryAggregationService:
             endpoint=endpoint,
             api_key=api_key,
             account_id=run.account_id,
-            shared_knowledge_prefix=run.target_uri.removeprefix(
-                "viking://resources/"
-            ),
-            max_users_per_batch=self._max_users_per_batch(),
             account_user_limit=self._account_user_limit(),
             account_user_page_size=self._account_user_page_size(),
             excluded_user_ids=frozenset({self._team_user()}),
@@ -1005,6 +981,7 @@ class MemoryAggregationService:
             agent_id=agent_id,
             timeout_seconds=self._runtime_timeout(),
         )
+        team_client.compile_state_path = self._state_path(run.account_id, run.target_uri, run.endpoint, run.auth_mode)
         team_client.task_callback = lambda task_id, status: self._track_task(run, task_id, status)
         if run.pipeline != "maintain":
             run.skill_uri, run.skill_revision = asyncio.run(freeze_skill(self, run, team_client, "aggregation"))
@@ -1356,6 +1333,10 @@ class MemoryAggregationService:
         while not self._compile_slots.acquire(blocking=False):
             await asyncio.sleep(0.1)
         try:
+            if (getattr(self.config, "compile", {}) or {}).get("executor") == "internal":
+                from team_memory.internal_compile import MemoryCompilePort
+                client.internal_port = MemoryCompilePort(self.config,
+                    client.compile_state_path or self._state_path(client.account_id, self.resolve_target_uri()))
             return await client.run_batch(**kwargs)
         finally:
             self._compile_slots.release()
@@ -1864,7 +1845,6 @@ class MemoryAggregationService:
         run.estimated_merge_tasks = len(batches)
 
         staging_fingerprints = self._staging_source_fingerprints(
-            run=run,
             state=state,
             staged_roots=ordered,
         )
@@ -1914,7 +1894,6 @@ class MemoryAggregationService:
                 batch=batch,
                 client=client,
                 skill_uri=skill_uri,
-                skill_revision=skill_revision,
                 group_key=group_key,
             )
             if not ok:
@@ -1952,7 +1931,6 @@ class MemoryAggregationService:
         batch: list[str],
         client: "CompileClient",
         skill_uri: str,
-        skill_revision: str,
         group_key: str,
     ) -> bool:
         """Compile one batch onto the target, auto-bisecting on a 128 overflow."""
@@ -1963,12 +1941,10 @@ class MemoryAggregationService:
             source_uris=batch,
             target_uri=run.target_uri,
             skill_uri=skill_uri,
-            skill_revision=skill_revision,
             reason=(
                 "Incremental merge of staged memory onto the existing team "
                 f"memory. {_SNAPSHOT_MERGE_INSTRUCTION}"
             ),
-            runtime_timeout_seconds=self._runtime_timeout(),
             last_compile_time=run.last_compile_time or None,
         )
         if res.get("ok"):
@@ -1985,14 +1961,14 @@ class MemoryAggregationService:
             mid = len(batch) // 2
             left_ok = await self._compile_batch_onto_target(
                 run=run, batch=batch[:mid], client=client,
-                skill_uri=skill_uri, skill_revision=skill_revision,
+                skill_uri=skill_uri,
                 group_key=f"{group_key}.l",
             )
             if not left_ok:
                 return False
             return await self._compile_batch_onto_target(
                 run=run, batch=batch[mid:], client=client,
-                skill_uri=skill_uri, skill_revision=skill_revision,
+                skill_uri=skill_uri,
                 group_key=f"{group_key}.r",
             )
 
@@ -2046,7 +2022,6 @@ class MemoryAggregationService:
         )
         staging_fingerprints = source_fingerprints or (
             self._staging_source_fingerprints(
-                run=run,
                 state=state,
                 staged_roots=staged_roots,
             )
@@ -2119,12 +2094,10 @@ class MemoryAggregationService:
                     source_uris=[uri for uri, _fingerprint in group],
                     target_uri=inter_uri,
                     skill_uri=skill_uri,
-                    skill_revision=skill_revision,
                     reason=(
                         f"Tree-reduce merge L{level} group {gi} "
                         f"({len(group)} sources). {_SNAPSHOT_MERGE_INSTRUCTION}"
                     ),
-                    runtime_timeout_seconds=self._runtime_timeout(),
                     last_compile_time=run.last_compile_time or None,
                 )
                 if res.get("ok"):
@@ -2252,12 +2225,10 @@ class MemoryAggregationService:
             source_uris=[uri for uri, _fingerprint in current],
             target_uri=target_root,
             skill_uri=skill_uri,
-            skill_revision=skill_revision,
             reason=(
                 "Final merge of staged/intermediate memory into the team shared "
                 f"memory. {_SNAPSHOT_MERGE_INSTRUCTION}"
             ),
-            runtime_timeout_seconds=self._runtime_timeout(),
             last_compile_time=run.last_compile_time or None,
         )
         if res.get("ok"):

@@ -2,7 +2,11 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, type SkillExperienceListResp } from "@/api/client";
+import {
+  api,
+  type SkillExperienceListResp,
+  type SkillExperiencePatternListResp,
+} from "@/api/client";
 import ExperienceLibraryView from "./ExperienceLibraryView";
 
 vi.mock("@/api/client", () => ({ api: vi.fn() }));
@@ -59,5 +63,55 @@ describe("ExperienceLibraryView", () => {
     fireEvent.click(screen.getByRole("button", { name: "刷新" }));
     expect(await screen.findByText(/包含 used_skills 的 Session/)).toBeVisible();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("loads grounded OV patterns only after switching tabs", async () => {
+    const patterns: SkillExperiencePatternListResp = {
+      items: [{
+        pattern_id: "pat-1",
+        pattern_key: "always_run_regression_tests",
+        skill_name: "code-review",
+        title: "修改后执行回归测试",
+        kind: "defect",
+        problem: "修改完成后直接给出结论。",
+        root_cause: "缺少验证步骤。",
+        guidance: "执行相关回归测试并记录结果。",
+        evidence_count: 2,
+        occurrence_count: 3,
+        session_count: 2,
+        user_count: 2,
+        team_ready: true,
+        status: "ready",
+      }],
+      stats: {
+        total_patterns: 1,
+        ready_patterns: 1,
+        observing_patterns: 0,
+        source_experiences: 2,
+      },
+      skill_counts: { "code-review": 1 },
+      available_skills: ["code-review"],
+      location: "viking://resources/agent_knowledge_workspace/input/proven_experiences/patterns",
+      total: 1,
+      limit: 50,
+      offset: 0,
+      has_more: false,
+    };
+    mockedApi.mockImplementation(async (url) => (
+      String(url).includes("skill-experience-patterns") ? patterns : empty
+    ));
+
+    render(<ExperienceLibraryView active />);
+    expect(await screen.findByText(/包含 used_skills 的 Session/)).toBeVisible();
+    expect(mockedApi).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("tab", { name: /归纳模式/ }));
+
+    expect(await screen.findByText("修改后执行回归测试")).toBeVisible();
+    expect(screen.getAllByText("团队可用").length).toBeGreaterThan(0);
+    expect(screen.getByText(/proven_experiences\/patterns/)).toBeVisible();
+    expect(mockedApi).toHaveBeenCalledWith(
+      expect.stringContaining("/api/skill-experience-patterns?"),
+    );
   });
 });

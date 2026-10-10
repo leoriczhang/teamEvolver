@@ -6,12 +6,12 @@ from .bridge import ConfigStore
 from .defaults import (
     CONFIG_DIR,
     CONFIG_FILE,
-    resolve_skills_dir,
+    resolve_skill_runtime_cache_dir,
 )
 
 __all__ = [
     "ConfigStore",
     "CONFIG_DIR",
     "CONFIG_FILE",
-    "resolve_skills_dir",
+    "resolve_skill_runtime_cache_dir",
 ]

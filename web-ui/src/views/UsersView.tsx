@@ -27,9 +27,9 @@ import { fmtTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { Download, Plus, RefreshCw } from "lucide-react";
 
-type UserRole = "user" | "admin";
+type UserRole = "user" | "platform_admin";
 type FormUser = UserProfile & {
-  role: UserRole;
+  platform_role: UserRole;
   personal_space: SkillSpaceConfig;
   team_space: SkillSpaceConfig;
 };
@@ -39,7 +39,8 @@ const emptyUser = (): FormUser => ({
   id: "",
   display_name: "",
   email: "",
-  role: "user",
+  platform_role: "user",
+  status: "active",
   password: "",
   personal_space: emptySpace(),
   team_space: emptySpace(),
@@ -51,7 +52,8 @@ function toForm(user?: UserProfile | null): FormUser {
     id: user.id || "",
     display_name: user.display_name || "",
     email: user.email || "",
-    role: user.role === "admin" ? "admin" : "user",
+    platform_role: user.platform_role || "user",
+    status: user.status || "active",
     password: "",
     personal_space: { ...(user.personal_space || emptySpace()) },
     team_space: { ...(user.team_space || emptySpace()) },
@@ -84,13 +86,13 @@ export default function UsersView({
   const loaded = useRef(false);
 
   const users = resp?.users || [];
-  const isAdmin = user?.role === "admin";
+  const isAdmin = user?.platform_role === "platform_admin";
   const userPager = usePagedItems(users);
   const selectedUser = useMemo(() => users.find((u) => u.id === selectedId) || null, [users, selectedId]);
   // The team-resource name is fixed at registration; Account and Root Key are
   // tenant-level settings.
   const teamBound = !!selectedUser?.team_space?.bound;
-  const adminCount = users.filter((u) => u.role === "admin").length;
+  const adminCount = users.filter((u) => u.platform_role === "platform_admin").length;
   const workspaceBindings = users.reduce((n, u) => {
     return n + (u.personal_space?.viking_user ? 1 : 0) + (u.team_space?.viking_user ? 1 : 0);
   }, 0);
@@ -98,15 +100,18 @@ export default function UsersView({
   const refresh = useCallback(async (notify = false) => {
     setLoading(true);
     try {
-      const [data, teamData] = await Promise.all([
-        api<UsersListResp>("/api/users"),
-        api<TeamSettings>("/api/team-settings"),
-      ]);
+      const data = await api<UsersListResp>("/api/users");
       setResp(data);
       setOpenVikingAccount(data.openviking_account || "default");
       setDefaultTeamUser(data.default_team_user || "team");
-      setTeamSettings(teamData);
-      setTeamNameDraft(teamData.configured_display_name || teamData.display_name || "Team");
+      if (user?.tenant_id) {
+        const teamData = await api<TeamSettings>("/api/team-settings");
+        setTeamSettings(teamData);
+        setTeamNameDraft(teamData.configured_display_name || teamData.display_name || "Team");
+      } else {
+        setTeamSettings(null);
+        setTeamNameDraft("");
+      }
       // Account browsing is an admin-only Root Key operation.
       if (isAdmin) {
         try {
@@ -131,7 +136,7 @@ export default function UsersView({
     } finally {
       setLoading(false);
     }
-  }, [isAdmin, selectedId]);
+  }, [isAdmin, selectedId, user?.tenant_id]);
 
   const loadAccountUsers = useCallback(
     async (account: string, notify = false) => {
@@ -238,12 +243,19 @@ export default function UsersView({
       const saved = await api<UserProfile>(target, {
         method: isAdmin ? "POST" : "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ ...payload, role: "user", platform_role: undefined, status: undefined }),
       });
+      const access = isAdmin
+        ? await api<UserProfile>(`/api/identity/users/${encodeURIComponent(saved.id)}/access`, {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ platform_role: form.platform_role, status: form.status }),
+          })
+        : saved;
       toastOk("已保存用户", saved.id);
       setSelectedId(saved.id);
-      setForm(toForm(saved));
+      setForm(toForm({ ...saved, ...access }));
       await refresh(false);
+      window.dispatchEvent(new Event("console-auth-changed"));
     } catch (e: any) {
       toastErr("保存失败", e.message);
     } finally {
@@ -304,7 +316,7 @@ export default function UsersView({
         )}
       </div>
 
-      <div className="mb-5">
+      {user?.tenant_id && <div className="mb-5">
         <Panel
           title="团队身份"
           count={teamSettings?.display_name || "Team"}
@@ -346,7 +358,7 @@ export default function UsersView({
             </div>
           )}
         </Panel>
-      </div>
+      </div>}
 
       {isAdmin && (
         <div className="mb-5">
@@ -385,7 +397,7 @@ export default function UsersView({
 
       <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">
         <StatCard label="注册用户" value={users.length} />
-        <StatCard label="管理员" value={adminCount} />
+        <StatCard label="平台超级管理员" value={adminCount} />
         <StatCard label="资产空间绑定" value={workspaceBindings} />
         <StatCard label="当前选择" value={selectedId || "新用户"} />
       </div>
@@ -430,7 +442,8 @@ export default function UsersView({
                           <div className="mt-1 text-xs text-muted-foreground">{u.display_name || "—"}</div>
                         </td>
                         <td className="border-b border-line px-4 py-2.5 align-top">
-                          <Pill tone={u.role === "admin" ? "amber" : "gray"}>{u.role === "admin" ? "管理员" : "一般用户"}</Pill>
+                          <Pill tone={u.platform_role === "platform_admin" ? "amber" : "gray"}>{u.platform_role === "platform_admin" ? "平台超级管理员" : "普通账号"}</Pill>
+                          {u.status === "disabled" && <Pill tone="red">已停用</Pill>}
                         </td>
                         <td className="border-b border-line px-4 py-2.5 align-top"><SpacePill space={u.personal_space} /></td>
                         <td className="border-b border-line px-4 py-2.5 align-top"><SpacePill space={u.team_space} /></td>
@@ -460,18 +473,27 @@ export default function UsersView({
               <Field label="邮箱">
                 <Input value={form.email || ""} placeholder="name@example.com" onChange={(e) => setForm({ ...form, email: e.target.value })} />
               </Field>
-              <Field label="角色">
+              <Field label="平台身份">
                 <select
-                  value={form.role}
+                  value={form.platform_role}
                   disabled={!isAdmin}
-                  onChange={(e) => setForm({ ...form, role: e.target.value as UserRole })}
+                  onChange={(e) => setForm({ ...form, platform_role: e.target.value as UserRole })}
                   className="h-8 w-full rounded-lg border border-border bg-background px-2 text-xs font-semibold outline-none"
                 >
-                  <option value="user">一般用户</option>
-                  <option value="admin">管理员</option>
+                  <option value="user">普通账号（租户角色单独分配）</option>
+                  <option value="platform_admin">平台超级管理员</option>
                 </select>
               </Field>
             </div>
+            <Field label="账号状态">
+              <select
+                value={form.status}
+                disabled={!isAdmin}
+                onChange={e => setForm({ ...form, status: e.target.value as "active" | "disabled" })}
+              >
+                <option value="active">正常</option><option value="disabled">停用</option>
+              </select>
+            </Field>
 
             <Field label={selectedId ? "重置密码（留空不变）" : "登录密码 *"}>
               <Input
@@ -489,6 +511,7 @@ export default function UsersView({
                 value={form.personal_space.viking_user || form.id.trim()}
                 placeholder="默认与用户 ID 一致"
                 status="Trusted"
+                disabled={!isAdmin}
                 hint="服务端使用租户 Root Key；Name 用于 X-OpenViking-User。"
                 onChange={(name) =>
                   setForm({
@@ -656,8 +679,8 @@ function AccountUsersPanel({
                       <div className="mono text-xs font-semibold">{u.user_id}</div>
                     </td>
                     <td className="border-b border-line px-4 py-2.5 align-top">
-                      <Pill tone={u.role === "admin" ? "amber" : "gray"}>
-                        {u.role === "admin" ? "管理员" : "一般用户"}
+                      <Pill tone={u.role === "tenant_admin" ? "amber" : "gray"}>
+                        {u.role === "tenant_admin" ? "租户管理员" : "普通成员"}
                       </Pill>
                     </td>
                     <td className="border-b border-line px-4 py-2.5 align-top">

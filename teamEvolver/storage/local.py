@@ -9,8 +9,8 @@ unavailable.
 
 It intentionally does NOT define ``native_batch_write`` / ``batch_write``:
 every batch caller already degrades to per-object writes when the attribute is
-absent (see ``evolve/kernel/registry.py``, ``evolve/runtime/orchestrator.py``,
-``validation/store.py``, ``dreamcycle/memory_changes.py``).
+absent (see ``team_skills/evolution/runtime/orchestrator.py``,
+``team_skills/candidates/store.py``, and ``team_memory/memory_changes.py``).
 
 Data written here as an OpenViking fallback stays local; fallback data is not
 automatically synchronized when the remote returns.

@@ -257,22 +257,15 @@ def _compiled_skill_details():
         if not skill_dir.is_dir() or not (skill_dir / "SKILL.md").is_file():
             continue
         benchmark = skill_dir / "benchmark.json"
-        legacy_benchmark = skill_dir / "benchmark.jsonl"
         question_count = 0
         if benchmark.is_file():
             payload, errors = rb.bf.read_document(benchmark)
             if payload is not None and not errors:
                 question_count = len(payload.get("cases") or [])
-        elif legacy_benchmark.is_file():
-            question_count = sum(
-                1 for line in legacy_benchmark.read_text(
-                    encoding="utf-8", errors="ignore"
-                ).splitlines() if line.strip()
-            )
         rows.append({
             "name": skill_dir.name,
             "has_evaluation": (skill_dir / "EVALUATION.md").is_file(),
-            "has_benchmark": benchmark.is_file() or legacy_benchmark.is_file(),
+            "has_benchmark": benchmark.is_file(),
             "question_count": question_count,
         })
     return rows
@@ -283,7 +276,6 @@ _HISTORY_ARTIFACT_NAMES = {
     "EVALUATION.md": "evaluation",
     "BENCHMARK.md": "benchmark",
     "benchmark.json": "benchmark",
-    "benchmark.jsonl": "benchmark",
     "benchmark_bank.json": "benchmark",
 }
 
@@ -342,12 +334,6 @@ def _skill_summaries(artifacts):
             payload, errors = rb.bf.read_document(target)
             if payload is not None and not errors:
                 row["question_count"] = len(payload.get("cases") or [])
-        elif name == "benchmark.jsonl":
-            target = (PROJECT_ROOT / artifact["path"]).resolve()
-            row["question_count"] = sum(
-                1 for line in target.read_text(encoding="utf-8", errors="ignore").splitlines()
-                if line.strip()
-            )
     return sorted(grouped.values(), key=lambda item: item["name"])
 
 

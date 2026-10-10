@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+from types import SimpleNamespace
 
 from teamEvolver.storage import InMemoryObjectStore
+from team_skills.evolution.kernel.registry import (
+    SkillIDRegistry as CompatibilitySkillIDRegistry,
+)
 from team_skills.library.hub import SkillHub
 from team_skills.library.mutations import SkillMutationService
+from team_skills.library.registry import SkillIDRegistry
 
 
 class TransactionalMemoryStore(InMemoryObjectStore):
@@ -49,6 +54,10 @@ def _bundle(body: str) -> dict[str, bytes]:
     }
 
 
+def test_evolution_registry_import_uses_canonical_library_registry() -> None:
+    assert CompatibilitySkillIDRegistry is SkillIDRegistry
+
+
 def test_publish_bundle_is_atomic_and_idempotent() -> None:
     bucket = TransactionalMemoryStore()
     hub = SkillHub.from_bucket(bucket)
@@ -67,7 +76,10 @@ def test_publish_bundle_is_atomic_and_idempotent() -> None:
 
 def test_mutation_publish_bundle_creates_one_commit_and_event() -> None:
     bucket = TransactionalMemoryStore()
-    service = SkillMutationService.from_hub(SkillHub.from_bucket(bucket))
+    service = SkillMutationService.from_hub(
+        SkillHub.from_bucket(bucket),
+        config=SimpleNamespace(skillopt_rollout_enabled=True),
+    )
 
     first = service.publish_bundle(
         action="publish",
@@ -87,6 +99,6 @@ def test_mutation_publish_bundle_creates_one_commit_and_event() -> None:
     assert first == repeated
     assert first["expected"]["version"] == 1
     assert first["event_id"]
-    events = list(service.iter_outbox_events())
+    events = list(service.iter_rollout_events())
     assert len(events) == 1
     assert events[0][1]["skills"][0]["name"] == "alpha"

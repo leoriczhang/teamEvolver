@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..local_state import control_state_dir
 from ..storage.admin_kv import read_kv, write_kv
 from ..tenants.registry import current_tenant_id
 from .agent_principal import AgentPrincipal
@@ -33,18 +34,16 @@ def stable_hash(value: Any) -> str:
 
 
 def _state_dir(config: Any) -> Path:
-    path = str(getattr(config, "users_registry_path", "") or getattr(config, "_config_file", "") or "")
-    return Path(path).expanduser().parent if path else Path.home() / ".teamEvolver"
+    return control_state_dir(config)
 
 
 class ContextStateStore:
     """Every state operation checks both tenant and user, including mutations."""
 
     def __init__(
-        self, config: Any, *, tenant_id: str | None = None, legacy_agent_id: str = "",
+        self, config: Any, *, tenant_id: str | None = None,
     ) -> None:
         self._config = config
-        self._legacy_agent_id = legacy_agent_id if getattr(config, "agent_protocol_identity_mode", "dual") == "dual" else ""
         self.tenant_id = tenant_id or current_tenant_id()
         root = _state_dir(config)
         if self.tenant_id != "default":
@@ -69,21 +68,13 @@ class ContextStateStore:
     def _subject(self, principal: AgentPrincipal) -> dict[str, str]:
         if principal.tenant_id != self.tenant_id or not principal.user_id:
             raise ValueError("context tenant binding conflict")
-        return {
-            "tenant_id": principal.tenant_id, "user_id": principal.user_id,
-            **({"agent_id": self._legacy_agent_id} if self._legacy_agent_id else {}),
-        }
+        return {"tenant_id": principal.tenant_id, "user_id": principal.user_id}
 
     def _owns(self, record: Any, principal: AgentPrincipal) -> bool:
         self._subject(principal)
         if not isinstance(record, dict) or record.get("user_id") != principal.user_id:
             return False
-        tenant_id = record.get("tenant_id")
-        if tenant_id is None:
-            # Read-only compatibility. PG row scope or the default file proves
-            # tenancy; migration later persists the actual tenant on each record.
-            return True  # The explicit store scope proves tenancy across the strict-mode cutover.
-        return tenant_id == principal.tenant_id
+        return record.get("tenant_id") == principal.tenant_id
 
     def _session(self, data: dict, session_id: str, principal: AgentPrincipal) -> dict:
         session = data["sessions"].get(session_id)
@@ -207,13 +198,6 @@ class ContextStateStore:
             existing = data["sessions"].get(context_session_id)
             if existing is not None:
                 return copy.deepcopy(self._session(data, context_session_id, principal)), False
-            # Preserve existing IDs after migration, even in strict mode.
-            for session in data["sessions"].values():
-                if (
-                    self._owns(session, principal)
-                    and session.get("external_session_id_hash") == stable_hash(external_session_id)
-                ):
-                    return copy.deepcopy(session), False
             record = {
                 **subject, "context_session_id": context_session_id, "openviking_session_id": f"agent-{digest}",
                 "external_session_id_hash": stable_hash(external_session_id), "last_sequence": 0,

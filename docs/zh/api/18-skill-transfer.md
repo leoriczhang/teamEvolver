@@ -25,6 +25,8 @@ HTTP 入口：`teamEvolver/proxy/skill_transfer.py:register_skill_transfer_route
 
 导出请求为 `{"channel":"zip|marketplace|git","names":["demo"],"options":{...}}`。`names` 必填，不会默认导出整个团队。每次最多 256 个 Skill、4096 个文件，内容总计不超过 128 MiB，ZIP 不超过 64 MiB。路径穿越、重复名称、符号链接、加密 ZIP 在导入前拒绝。
 
+所有 POST 端点使用 JSON 请求。直接发送 multipart 或二进制 ZIP 返回 415；ZIP 内容应编码到 `zip_b64`，不要使用表单文件上传。
+
 ### ZIP options
 
 | 参数 | 方向 | 说明 |
@@ -97,6 +99,7 @@ curl -b console.cookies http://localhost:52010/api/skills/export \
 | 404 | 选中的 Skill 不存在 |
 | 409 | 同名冲突，或目标 Git 分支已存在 |
 | 413 | 文件数量或大小超限 |
+| 415 | 请求媒体类型不受支持；使用 JSON 与 `zip_b64` |
 | 429 | 服务端两个传输槽位均被占用 |
 | 502 / 503 / 504 | 远端/存储错误、缺少 Git、Git 超时 |
 

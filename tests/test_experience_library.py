@@ -7,13 +7,20 @@ from fastapi.testclient import TestClient
 from session_ingestion.service import _classify_session
 from team_skills.evolution.experience_library import ExperienceLibraryStore, session_experiences
 from team_skills.evolution.session_filter import SessionValueClassifier
-from team_skills.evolution.session_judge_queue import AsyncSessionJudgeQueue
 from team_skills.evolution.stages.analyze import _compose_system
 from team_skills.evolution.stages.judge import _parse_scores
 from teamEvolver.config import TeamEvolverConfig
 from teamEvolver.proxy import ProxyServer, routes
 from teamEvolver.session_store import SessionStore
 from teamEvolver.storage import InMemoryObjectStore
+
+
+def _bootstrap_tenant_admin(client):
+    assert client.post(
+        "/api/auth/bootstrap",
+        json={"username": "admin", "password": "test-password"},
+    ).status_code == 200
+    client.headers["X-Tenant-Id"] = "default"
 
 
 def _session(session_id, kind, key, description, *, user="u1", score=0.8):
@@ -81,7 +88,8 @@ def test_custom_analysis_prompt_receives_experience_contract():
 
 def test_experience_library_aggregates_unique_session_occurrences():
     bucket = InMemoryObjectStore()
-    store = ExperienceLibraryStore(bucket)
+    session_store = SessionStore(bucket)
+    store = ExperienceLibraryStore(session_store)
     sessions = [
         _session(
             "session-01",
@@ -105,8 +113,9 @@ def test_experience_library_aggregates_unique_session_occurrences():
         ),
     ]
 
-    store.record_sessions("code-review", sessions)
-    store.record_sessions("code-review", [sessions[0]])
+    for session in sessions:
+        session_store.save_skipped(session)
+    session_store.save_skipped(sessions[0])
     result = store.list_experiences()
 
     assert result["stats"] == {
@@ -127,24 +136,23 @@ def test_experience_library_aggregates_unique_session_occurrences():
 
 def test_experience_library_supports_kind_skill_and_text_filters():
     bucket = InMemoryObjectStore()
-    store = ExperienceLibraryStore(bucket)
-    store.record_sessions(
-        "code-review",
-        [
-            _session(
-                "session-01",
-                "defect",
-                "missed_test_regression",
-                "Agent 未运行回归测试。",
-            ),
-            _session(
-                "session-02",
-                "exemplary",
-                "evidence_first_review",
-                "Agent 先核对证据再判断。",
-            ),
-        ],
-    )
+    session_store = SessionStore(bucket)
+    store = ExperienceLibraryStore(session_store)
+    for session in [
+        _session(
+            "session-01",
+            "defect",
+            "missed_test_regression",
+            "Agent 未运行回归测试。",
+        ),
+        _session(
+            "session-02",
+            "exemplary",
+            "evidence_first_review",
+            "Agent 先核对证据再判断。",
+        ),
+    ]:
+        session_store.save_skipped(session)
 
     result = store.list_experiences(
         kind="exemplary",
@@ -156,49 +164,17 @@ def test_experience_library_supports_kind_skill_and_text_filters():
     assert result["items"][0]["experience_key"] == "evidence_first_review"
 
 
-def test_experience_library_backfills_existing_skill_evidence_once():
-    bucket = InMemoryObjectStore()
-    bucket.put_object(
-        "skill_evidence/code-review.json",
-        json.dumps(
-            {
-                "skill_name": "code-review",
-                "evidence": [
-                    {
-                        "session_id": "legacy-01",
-                        "user_alias": "u1",
-                        "observed_at": "2026-09-18T09:00:00+00:00",
-                        "judge_overall_score": 0.3,
-                        "evolution_evidence": "defect",
-                        "evidence_reason": "Agent 跳过测试，导致回归没有被发现。",
-                    }
-                ],
-            },
-            ensure_ascii=False,
-        ),
-    )
-    store = ExperienceLibraryStore(bucket)
-
-    assert store.backfill_legacy_evidence() == 1
-    assert store.backfill_legacy_evidence() == 0
-    result = store.list_experiences()
-    assert result["stats"]["defect_occurrences"] == 1
-    assert result["items"][0]["session_ids"] == ["legacy-01"]
-
-
 def test_experience_library_api_returns_filtered_page(tmp_path, monkeypatch):
     bucket = InMemoryObjectStore()
-    store = ExperienceLibraryStore(bucket)
-    store.record_sessions(
-        "code-review",
-        [
-            _session(
-                "session-01",
-                "defect",
-                "missed_test_regression",
-                "Agent 未运行回归测试。",
-            )
-        ],
+    session_store = SessionStore(bucket)
+    store = ExperienceLibraryStore(session_store)
+    session_store.save_skipped(
+        _session(
+            "session-01",
+            "defect",
+            "missed_test_regression",
+            "Agent 未运行回归测试。",
+        )
     )
     monkeypatch.setattr(
         routes,
@@ -207,17 +183,13 @@ def test_experience_library_api_returns_filtered_page(tmp_path, monkeypatch):
     )
     server = ProxyServer(
         TeamEvolverConfig(
-            users_registry_path=str(tmp_path / "users.json"),
-            skills_dir=str(tmp_path / "skills"),
-            sharing_enabled=False,
+            _config_file=str(tmp_path / "config.yaml"),
+            skills_runtime_cache_dir=str(tmp_path / "skills"),
             sharing_skill_mirror_enabled=False,
         )
     )
     client = TestClient(server.app)
-    client.post(
-        "/api/auth/bootstrap",
-        json={"username": "admin", "password": "test-password"},
-    )
+    _bootstrap_tenant_admin(client)
 
     response = client.get(
         "/api/skill-experiences?kind=defect&search=回归&refresh=true"
@@ -283,9 +255,7 @@ def test_analysis_keeps_experience_for_used_skill_not_uploaded_to_library():
         "experience_key": "verify_review_findings",
         "description": "提出审查结论前执行相关验证，确保结论有运行结果支持。",
     }]
-    assert AsyncSessionJudgeQueue._judge_payload(session["_judge_scores"])["skill_experiences"] == (
-        session["judge"]["skill_experiences"]
-    )
+    assert session["judge"]["skill_experiences"] == session["_judge_scores"]["skill_experiences"]
 
 
 def test_custom_prompt_requires_experience_even_when_skill_is_not_uploaded():
@@ -306,7 +276,7 @@ def test_session_experiences_reads_only_explicit_named_skill_lessons():
 def test_indexed_experiences_include_queued_skipped_and_unuploaded_skills():
     bucket = InMemoryObjectStore()
     sessions = SessionStore(bucket)
-    store = ExperienceLibraryStore(bucket, session_store=sessions)
+    store = ExperienceLibraryStore(sessions)
     sessions.save_queued(_unuploaded_skill_session())
     sessions.save_skipped(_unuploaded_skill_session("local-skill-02"))
     result = store.list_experiences()
@@ -325,7 +295,7 @@ def test_indexed_experiences_include_queued_skipped_and_unuploaded_skills():
     assert store.list_experiences()["stats"]["total_occurrences"] == 1
 
 
-def test_legacy_archive_index_is_backfilled_once(monkeypatch):
+def test_incomplete_index_is_not_backfilled_from_archives(monkeypatch):
     bucket = InMemoryObjectStore()
     sessions = SessionStore(bucket)
     session = _unuploaded_skill_session()
@@ -333,8 +303,7 @@ def test_legacy_archive_index_is_backfilled_once(monkeypatch):
     rows = sessions.load_index_rows()
     rows[0].pop("experiences")
     bucket.put_object(sessions.session_index_key(), json.dumps(rows).encode())
-    store = ExperienceLibraryStore(bucket, session_store=sessions)
-    assert store.list_experiences()["stats"]["total_experiences"] == 1
+    store = ExperienceLibraryStore(sessions)
     original_get = bucket.get_object
 
     def no_archive_reads(key):
@@ -342,7 +311,7 @@ def test_legacy_archive_index_is_backfilled_once(monkeypatch):
         return original_get(key)
 
     monkeypatch.setattr(bucket, "get_object", no_archive_reads)
-    assert store.list_experiences()["stats"]["total_experiences"] == 1
+    assert store.list_experiences()["stats"]["total_experiences"] == 0
 
 
 def test_experience_store_preserves_tenant_prefixes():
@@ -350,28 +319,27 @@ def test_experience_store_preserves_tenant_prefixes():
     tenant_a = SessionStore(bucket, "tenants/a/")
     tenant_b = SessionStore(bucket, "tenants/b/")
     tenant_a.save_skipped(_unuploaded_skill_session())
-    store_a = ExperienceLibraryStore(bucket, "tenants/a/", session_store=tenant_a)
-    store_b = ExperienceLibraryStore(bucket, "tenants/b/", session_store=tenant_b)
+    store_a = ExperienceLibraryStore(tenant_a)
+    store_b = ExperienceLibraryStore(tenant_b)
     assert store_a.list_experiences()["stats"]["total_experiences"] == 1
     assert store_b.list_experiences()["stats"]["total_experiences"] == 0
 
 
 def test_experience_api_works_without_skill_upload_or_runtime(tmp_path):
     config = TeamEvolverConfig(
-        users_registry_path=str(tmp_path / "users.json"),
-        skills_dir=str(tmp_path / "empty-skills"),
+        _config_file=str(tmp_path / "config.yaml"),
+        skills_runtime_cache_dir=str(tmp_path / "empty-skills"),
         sharing_local_root=str(tmp_path / "session-state"),
         sharing_skill_local_root=str(tmp_path / "skill-state"),
         sharing_session_backend="local",
         sharing_skill_backend="local",
-        sharing_enabled=False,
         sharing_skill_mirror_enabled=False,
     )
     sessions = SessionStore.from_config(config)
     sessions.save_skipped(_unuploaded_skill_session())
     server = ProxyServer(config)
     client = TestClient(server.app)
-    client.post("/api/auth/bootstrap", json={"username": "admin", "password": "test-password"})
+    _bootstrap_tenant_admin(client)
     response = client.get("/api/skill-experiences?refresh=true")
     assert response.status_code == 200
     assert response.json()["total"] == 1
@@ -388,48 +356,12 @@ def test_experience_api_reports_storage_failure(tmp_path, monkeypatch):
 
     monkeypatch.setattr(routes, "_build_experience_library_store", broken_store)
     server = ProxyServer(TeamEvolverConfig(
-        users_registry_path=str(tmp_path / "users.json"),
-        skills_dir=str(tmp_path / "skills"),
-        sharing_enabled=False,
+        _config_file=str(tmp_path / "config.yaml"),
+        skills_runtime_cache_dir=str(tmp_path / "skills"),
         sharing_skill_mirror_enabled=False,
     ))
     client = TestClient(server.app)
-    client.post("/api/auth/bootstrap", json={"username": "admin", "password": "test-password"})
+    _bootstrap_tenant_admin(client)
     response = client.get("/api/skill-experiences?refresh=true")
     assert response.status_code == 503
     assert "storage unavailable" in response.json()["detail"]
-
-
-def test_historical_judge_backfill_keeps_experiences_without_an_evolution_engine(monkeypatch):
-    bucket = InMemoryObjectStore()
-    store = SessionStore(bucket)
-    archived = _unuploaded_skill_session()
-    archived.pop("_judge_scores")
-    store.save_skipped(archived)
-    expected = _unuploaded_skill_session()["_judge_scores"]
-    # Exercise the backfill worker and persistence with no Skill engine. The
-    # model itself is replaced at its boundary; no external LLM is called.
-    async def analyze(llm, session):
-        assert llm is model
-        session["_judge_scores"] = expected
-
-    model = object()
-    from team_skills.evolution.stages import analyze as analyze_module
-
-    monkeypatch.setattr(analyze_module, "analyze_session", analyze)
-    monkeypatch.setattr(SessionStore, "from_config", lambda *args: store)
-    monkeypatch.setattr(
-        SessionValueClassifier, "from_config",
-        lambda _config: SimpleNamespace(client=model),
-    )
-    owner = SimpleNamespace(
-        config=SimpleNamespace(storage_pg_enabled=False),
-        _get_embedded_evolve_server=lambda tenant_id: None,
-    )
-    queue = AsyncSessionJudgeQueue(owner)
-    monkeypatch.setattr(queue, "_tenant_context", lambda tenant_id: None)
-    asyncio.run(queue._review_one("default", archived["session_id"]))
-    result = ExperienceLibraryStore(bucket, session_store=store).list_experiences()
-    assert result["stats"]["total_experiences"] == 1
-    assert result["items"][0]["skill_name"] == "local-only-review"
-    assert result["items"][0]["latest_score"] == 0.9

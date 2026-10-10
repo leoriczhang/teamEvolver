@@ -1153,8 +1153,15 @@
             "default": "document_fact"
           },
           "valid_from": {
-            "type": "string",
-            "format": "date-time",
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Valid From"
           },
           "valid_to": {
@@ -1197,7 +1204,6 @@
           "subject",
           "predicate",
           "value",
-          "valid_from",
           "support_sets"
         ],
         "title": "Assertion"

@@ -143,7 +143,7 @@ Session 存储使用内容指纹实现幂等写入：
 | Session 价值分类器 | [session_filter.py](../../../teamEvolver/session_filter.py) |
 | Session 材料收集 | [session_materials.py](../../../teamEvolver/session_materials.py) |
 | Session Schema 定义 | [docs/schemas/agent-session-v1.schema.json](../../schemas/agent-session-v1.schema.json) |
-| Agent 接入协议（Session Ingest 部分） | [Protocol V1 规范](../agent-integrations/02-protocol-v1) |
+| Agent 接入协议（Session Ingest 部分） | [Protocol V2 规范](../agent-integrations/06-protocol-v2.md) |
 
 ## 相关文档
 

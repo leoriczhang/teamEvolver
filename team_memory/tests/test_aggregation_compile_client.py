@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import json
-import zipfile
 
 import httpx
 
@@ -110,8 +108,6 @@ def test_http_transport_uploads_inline_skill_and_runs_compile_without_host_cli(
             source_uris=["viking://user/alice/memories/events"],
             target_uri="viking://resources/team-memory",
             skill_uri="viking://user/alice/skills/team-memory-okf",
-            skill_revision="revision-1",
-            runtime_timeout_seconds=123,
         )
         return installed, compiled
 
@@ -250,149 +246,6 @@ def test_publish_shared_skill_updates_once_and_returns_revision(monkeypatch) -> 
         {"data", "temp_file_id", "wait", "timeout", "source_metadata", "telemetry", "target_uri"}
     )
     assert update[2]["source_metadata"]["version_message"] == "Update aggregation rules"
-
-
-def test_publish_shared_skill_restores_missing_auxiliary_files_from_bundle(monkeypatch) -> None:
-    calls = []
-    reads = 0
-
-    class FakeAsyncClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return None
-
-        async def get(self, url, *, params, headers):
-            nonlocal reads
-            reads += 1
-            files = [{"path": "SKILL.md"}]
-            if reads > 1:
-                files.extend([{"path": "README.md"}, {"path": "templates/README.md"}])
-            return _FakeResponse(
-                200,
-                {
-                    "status": "ok",
-                    "result": {
-                        "root_uri": "viking://agent/skills/llm-wiki",
-                        "content": "wiki-skill",
-                        "files": files,
-                        "revision": f"rev-{reads}",
-                    },
-                },
-            )
-
-        async def post(self, url, *, headers, files=None, json=None):
-            calls.append((url, headers, files, json))
-            if url.endswith("/api/v1/resources/temp_upload"):
-                return _FakeResponse(200, {"status": "ok", "result": {"temp_file_id": "upload_skill.zip"}})
-            assert url.endswith("/api/v1/skills")
-            assert json["temp_file_id"] == "upload_skill.zip"
-            assert "temp_path" not in json
-            return _FakeResponse(200, {"status": "ok", "result": {"uri": "viking://agent/skills/llm-wiki"}})
-
-    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
-    client = CompileClient(
-        endpoint="http://openviking.example",
-        account_id="default",
-        user_id="admin",
-        api_key="admin-secret",
-        timeout_seconds=5,
-    )
-
-    result = asyncio.run(
-        client.publish_shared_skill(
-            skill_name="llm-wiki",
-            skill_body="wiki-skill",
-            version_message="Restore runtime files",
-            auxiliary_files={
-                "README.md": "compiler help",
-                "templates/README.md": "template help",
-            },
-        )
-    )
-
-    assert result["ok"] is True
-    assert result["result"]["revision"] == "rev-2"
-    upload = calls[0]
-    assert upload[0].endswith("/api/v1/resources/temp_upload")
-    assert "Content-Type" not in upload[1]
-    archive_bytes = upload[2]["file"][1]
-    with zipfile.ZipFile(io.BytesIO(archive_bytes)) as bundle:
-        assert set(bundle.namelist()) == {"SKILL.md", "README.md", "templates/README.md"}
-        assert bundle.read("README.md") == b"compiler help"
-    install = calls[1]
-    assert install[0].endswith("/api/v1/skills")
-    assert install[3]["source_metadata"]["source"] == "uploaded_bundle"
-
-
-def test_publish_shared_skill_treats_trimmed_final_newline_as_unchanged(monkeypatch) -> None:
-    calls = []
-
-    class FakeAsyncClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return None
-
-        async def get(self, url, *, params, headers):
-            calls.append(("GET", url))
-            return _FakeResponse(
-                200,
-                {
-                    "status": "ok",
-                    "result": {
-                        "root_uri": "viking://agent/skills/llm-wiki",
-                        "content": "wiki-skill",
-                        "files": [
-                            {"path": "SKILL.md"},
-                            {"path": "README.md"},
-                            {"path": "templates/README.md"},
-                        ],
-                        "revision": "rev-stable",
-                    },
-                },
-            )
-
-        async def post(self, *args, **kwargs):
-            calls.append(("POST", args[0]))
-            raise AssertionError("unchanged Skill must not be reinstalled")
-
-        async def put(self, *args, **kwargs):
-            calls.append(("PUT", args[0]))
-            raise AssertionError("unchanged Skill must not be updated")
-
-    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
-    client = CompileClient(
-        endpoint="http://openviking.example",
-        account_id="default",
-        user_id="admin",
-        api_key="admin-secret",
-        timeout_seconds=5,
-    )
-
-    result = asyncio.run(
-        client.publish_shared_skill(
-            skill_name="llm-wiki",
-            skill_body="wiki-skill\n",
-            version_message="No-op provision",
-            auxiliary_files={
-                "README.md": "compiler help",
-                "templates/README.md": "template help",
-            },
-        )
-    )
-
-    assert result["ok"] is True
-    assert result["result"]["revision"] == "rev-stable"
-    assert [call[0] for call in calls] == ["GET", "GET"]
 
 
 def test_publish_shared_skill_does_not_accept_user_skill_fallback(monkeypatch) -> None:

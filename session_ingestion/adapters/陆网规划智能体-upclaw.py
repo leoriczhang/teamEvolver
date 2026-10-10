@@ -18,8 +18,12 @@
 # 内置转换（langfuse_convert.convert_trace_to_turn）负责 prompt/response/tokens；
 # 本文件 map_trace 只补充内置拿不到的字段（deep-merge 覆盖同名键）。
 
-import json
 import re
+
+from session_ingestion.adapters._shared.sf_agent_adapter import (
+    iter_json_objects as _iter_json_objects,
+    tool_spans as _tool_spans,
+)
 
 SOURCE = {
     "label": "陆网规划智能体-upclaw",
@@ -43,72 +47,6 @@ def build_adapter():
         session_mapper=map_session,
         meta_mapper=extract_meta,
     )
-
-
-def _obs_text(value):
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, dict):
-        content = value.get("content")
-        if isinstance(content, list):
-            parts = []
-            for item in content:
-                if isinstance(item, dict) and isinstance(item.get("text"), str):
-                    parts.append(item["text"])
-                else:
-                    parts.append(json.dumps(item, ensure_ascii=False))
-            return "\n".join(p for p in parts if p)
-        if isinstance(content, str):
-            return content
-        return json.dumps(value, ensure_ascii=False)
-    if isinstance(value, (list, int, float, bool)):
-        return json.dumps(value, ensure_ascii=False)
-    return str(value)
-
-
-def _tool_spans(observations):
-    """ "tool: <name>" SPAN 观测 → (tool_calls, tool_results, used_skills)。"""
-    tool_calls = []
-    tool_results = []
-    used_skills = []
-    for obs in observations or []:
-        if not isinstance(obs, dict):
-            continue
-        name = str(obs.get("name") or "")
-        if not name.startswith("tool:"):
-            continue
-        tool = name.split(":", 1)[1].strip()
-        obs_id = str(obs.get("id") or "")
-        raw_in = obs.get("input")
-        if isinstance(raw_in, (dict, list)):
-            cmd_src = json.dumps(raw_in, ensure_ascii=False)
-        else:
-            cmd_src = str(raw_in or "")
-        tool_calls.append(
-            {
-                "id": obs_id,
-                "type": "function",
-                "function": {"name": tool, "arguments": cmd_src},
-            }
-        )
-        text = _obs_text(obs.get("output"))
-        level = str(obs.get("level") or "").upper()
-        lowered = text.lower()
-        has_error = level == "ERROR" or "error" in lowered or "exception" in lowered or "traceback" in lowered
-        tool_results.append(
-            {
-                "tool_call_id": obs_id,
-                "tool_name": tool,
-                "content": text,
-                "has_error": has_error,
-            }
-        )
-        for m in re.findall(r"skills/([A-Za-z0-9_.-]+)", cmd_src):
-            if m not in used_skills:
-                used_skills.append(m)
-    return tool_calls, tool_results, used_skills
 
 
 def _injected_skills(trace):
@@ -154,49 +92,6 @@ def map_trace(trace, observations, turn_num=0, defaults=None):
     if used_skills:
         out["used_skills"] = used_skills
     return out or None
-
-
-def _iter_json_objects(raw_input):
-    """从多行文本里按花括号配平切出完整 JSON 对象。
-
-    陆网规划的 input 是 FENCED_JSON 信封：```json``` 围栏包裹、跨多行
-    pretty-print，不能按“单行以 { 开头”扫描。
-    """
-    if isinstance(raw_input, dict):
-        yield raw_input
-        return
-    if not isinstance(raw_input, str) or not raw_input.strip():
-        return
-    text = raw_input
-    depth = 0
-    start = None
-    in_str = False
-    escape = False
-    for i, ch in enumerate(text):
-        if in_str:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-        elif ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}" and depth > 0:
-            depth -= 1
-            if depth == 0 and start is not None:
-                try:
-                    obj = json.loads(text[start : i + 1])
-                    if isinstance(obj, dict):
-                        yield obj
-                except (ValueError, TypeError):
-                    pass
-                start = None
 
 
 def _first_user_line(prompt):

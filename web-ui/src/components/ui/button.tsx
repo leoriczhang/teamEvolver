@@ -65,4 +65,4 @@ const Button = React.forwardRef<
   )
 })
 
-export { Button, buttonVariants }
+export { Button }

@@ -6,7 +6,8 @@ DEFAULT_MAINTENANCE_SKILL_BODY = """---
 name: team-memory-maintenance
 description: >-
   Maintain shared Team Memory. Invoke after aggregation or for a periodic
-  DreamCycle to consolidate facts, update summaries, and mark superseded pages.
+  maintenance compile to consolidate facts, update summaries, and mark
+  superseded pages.
 ---
 
 # Team Memory Maintenance

@@ -1,6 +1,10 @@
-"""Bounded ingestion of standard Sessions produced by a tenant adapter."""
+"""Streaming ingestion of standard Sessions produced by a tenant adapter."""
 
 import asyncio
+import inspect
+import os
+from collections.abc import Iterator
+from typing import Any
 
 from session_ingestion.adapters._runtime import (
     AdapterError,
@@ -12,24 +16,84 @@ from session_ingestion.adapters._runtime import (
 from session_ingestion.identifiers import InvalidSessionId, sanitize_session_id
 
 
-async def pull_sessions(config, tenant, ingest, body: dict) -> dict:
+def _positive_env(name: str, default: int, *, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        value = default
+    return max(1, min(maximum, value))
+
+
+def _next_batch(iterator: Iterator) -> Any:
+    try:
+        return next(iterator)
+    except StopIteration:
+        return None
+
+
+async def _session_id_batches(adapter, filters: dict, batch_size: int):
+    iterator = await asyncio.to_thread(
+        lambda: iter(
+            adapter.iter_session_id_batches(
+                filters,
+                batch_size=batch_size,
+            )
+        )
+    )
+    while True:
+        batch = await asyncio.to_thread(_next_batch, iterator)
+        if batch is None:
+            return
+        if (
+            isinstance(batch, (str, bytes))
+            or not isinstance(batch, (list, tuple))
+        ):
+            raise AdapterError(
+                "iter_session_id_batches() must yield lists of Session IDs"
+            )
+        if batch:
+            yield list(batch)
+
+
+async def pull_sessions(
+    config,
+    tenant,
+    ingest,
+    body: dict,
+    *,
+    progress=None,
+) -> dict:
     descriptor = describe(config, tenant)
-    filters, cap = filters_for(descriptor, body)
+    request = dict(body)
+    request.pop("max_sessions", None)
+    filters, _preview_limit = filters_for(descriptor, request)
     adapter = await asyncio.to_thread(
         load, config, tenant, revision=descriptor.get("revision"),
     )
-    semaphore = asyncio.Semaphore(8)
+    concurrency = _positive_env(
+        "TEAMEVOLVER_DATASOURCE_PULL_CONCURRENCY",
+        8,
+        maximum=64,
+    )
+    batch_size = _positive_env(
+        "TEAMEVOLVER_DATASOURCE_PULL_BATCH_SIZE",
+        100,
+        maximum=1000,
+    )
+    result_limit = _positive_env(
+        "TEAMEVOLVER_DATASOURCE_PULL_RESULT_LIMIT",
+        200,
+        maximum=5000,
+    )
+    semaphore = asyncio.Semaphore(concurrency)
+    counts = {
+        key: 0
+        for key in ("queued", "skipped", "duplicate", "empty", "error", "filtered")
+    }
+    results: list[dict[str, Any]] = []
+    total = 0
+    retry_count = 0
     try:
-        ids = await asyncio.to_thread(adapter.list_session_ids, filters, max_sessions=cap)
-        if not isinstance(ids, list) or len(ids) > cap:
-            raise AdapterError("Adapter exceeded the session limit")
-        ids = list(dict.fromkeys(ids))
-        included_ids, excluded = apply_session_id_exclusions(
-            descriptor,
-            filters,
-            ids,
-        )
-
         async def process(sid):
             async with semaphore:
                 try:
@@ -69,25 +133,59 @@ async def pull_sessions(config, tenant, ingest, body: dict) -> dict:
                 except Exception as exc:
                     return {"session_id": sid, "status": "error", "reason": str(exc)}
 
-        processed = await asyncio.gather(*(process(sid) for sid in included_ids))
-        processed_by_id = dict(zip(included_ids, processed))
-        excluded_by_id = {item["session_id"]: item for item in excluded}
-        results = [
-            excluded_by_id.get(sid) or processed_by_id[sid]
-            for sid in ids
-        ]
+        async for raw_batch in _session_id_batches(
+            adapter,
+            filters,
+            batch_size,
+        ):
+            ids = list(
+                dict.fromkeys(
+                    str(value or "").strip()
+                    for value in raw_batch
+                    if str(value or "").strip()
+                )
+            )
+            if not ids:
+                continue
+
+            included_ids, excluded = apply_session_id_exclusions(
+                descriptor,
+                filters,
+                ids,
+            )
+            processed = await asyncio.gather(
+                *(process(sid) for sid in included_ids)
+            )
+            processed_by_id = dict(zip(included_ids, processed))
+            excluded_by_id = {item["session_id"]: item for item in excluded}
+            for sid in ids:
+                item = excluded_by_id.get(sid) or processed_by_id[sid]
+                total += 1
+                status = str(item.get("status") or "unknown")
+                counts[status] = counts.get(status, 0) + 1
+                if len(results) < result_limit:
+                    results.append(item)
+            if progress is not None:
+                update = progress(
+                    {
+                        "total": total,
+                        "counts": dict(counts),
+                    }
+                )
+                if inspect.isawaitable(update):
+                    await update
+
         retry_count = getattr(adapter, "retry_count", 0)
         if callable(retry_count):
             retry_count = retry_count()
     finally:
         await asyncio.to_thread(adapter.close)
-    counts = {key: 0 for key in ("queued", "skipped", "duplicate", "empty", "error", "filtered")}
-    for item in results:
-        counts[item["status"]] = counts.get(item["status"], 0) + 1
     return {
         "filters": filters,
-        "total": len(ids),
+        "total": total,
         "counts": counts,
         "retry_count": int(retry_count or 0),
         "results": results,
+        "results_truncated": total > len(results),
+        "result_limit": result_limit,
     }

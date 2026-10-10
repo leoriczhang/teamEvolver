@@ -1,4 +1,3 @@
-export type { MemoryReplayBranch, MemoryTrueReplay, MemoryChangeRecord, MemoryChangeList, MemoryTrueReplayList, AggregationSettings, AggregationSettingsUpdate } from "@memory/types";
 // API client for the teamEvolver unified console.
 //
 // All requests are same-origin: the 52010 evolve server hosts this SPA and
@@ -16,24 +15,18 @@ export class ApiError extends Error {
 }
 
 // ---- Tenant context (multi-tenancy plan §4.1) ----------------------------- //
-// The console admin selects a tenant; the choice survives reloads via
+// The console member selects a tenant; the choice survives reloads via
 // localStorage and the ?tenant= URL param (URL wins so shared links are
 // exact). The header is only a selector — the backend still authenticates
 // the session and re-validates the tenant against its registry.
 
 const TENANT_STORAGE_KEY = "teamEvolver.activeTenantId";
 
-// Header injection is gated on the session being an admin console user —
-// the backend rejects X-Tenant-Id for non-admins, and a stale selection
-// left by a previous admin login would otherwise 403 every request.
+// Business requests start only after auth/status resolves the membership.
 let tenantHeaderAllowed = false;
 
 export function setTenantHeaderAllowed(allowed: boolean): void {
   tenantHeaderAllowed = allowed;
-  if (!allowed) {
-    // Keep the stored selection (the user may re-login as admin) but stop
-    // sending it until an admin session is confirmed again.
-  }
 }
 
 export function getActiveTenantId(): string {
@@ -59,14 +52,10 @@ export function setActiveTenantId(tenantId: string): void {
   }
 }
 
-// Clear an invalid selection (e.g. tenant was disabled or deleted while
-// the console was open) so subsequent requests fall back to default.
-export function clearInvalidTenantSelection(message: string): void {
-  const current = getActiveTenantId();
-  if (current && current !== "default") {
-    setActiveTenantId("");
-  }
-  toastErr("租户不可用，已切回默认租户", message);
+// Keep a rejected selector visible until the user chooses an allowed tenant.
+function clearInvalidTenantSelection(message: string): void {
+  toastErr("当前租户不可用，请重新选择", message);
+  window.dispatchEvent(new Event("console-auth-changed"));
 }
 
 /**
@@ -74,10 +63,10 @@ export function clearInvalidTenantSelection(message: string): void {
  *
  * The header is only a selector — the backend still authenticates the
  * session and re-validates the tenant against its registry.  Injection is
- * gated on the session being an admin console user (see
+ * gated on the authenticated console session (see
  * {@link setTenantHeaderAllowed}).  Covers every non-`/v1/` endpoint so that
  * dashboard endpoints (`/status`, `/conversations`, `/storage/status`, …)
- * are also tenant-scoped, not just `/api/` and `/langfuse/`.
+ * are also tenant-scoped, not just `/api/`.
  *
  * Returns a `Headers` (or the passed-in headers mutated) so callers that use
  * raw `fetch()` instead of {@link api} can still attach the header.
@@ -87,7 +76,7 @@ export function tenantHeaders(path: string, init?: HeadersInit): Headers {
   const tenantId = getActiveTenantId();
   if (
     tenantId &&
-    tenantHeaderAllowed &&
+    (tenantHeaderAllowed || path === "/api/auth/status") &&
     !path.startsWith("/v1/") &&
     !headers.has("X-Tenant-Id")
   ) {
@@ -159,8 +148,7 @@ export async function api<T = any>(path: string, opts?: RequestInit): Promise<T>
     : timeoutSignal;
   let res: Response;
   try {
-    // Tenant selector header (console admin only — the server rejects it for
-    // non-admin sessions and derives the tenant from the token otherwise).
+    // The server validates the selected tenant against current membership.
     // Covers every non-/v1/ endpoint so dashboard endpoints (/status,
     // /conversations, /storage/status, …) are also tenant-scoped.
     const headers = tenantHeaders(path, opts?.headers);
@@ -179,28 +167,29 @@ export async function api<T = any>(path: string, opts?: RequestInit): Promise<T>
     data = { raw: text };
   }
   if (!res.ok) {
-    // A tenant selection the backend rejects (disabled/deleted tenant, or a
-    // tampered ?tenant= param) is auto-cleared once so the console recovers.
+    // Recheck authority without silently changing the selected tenant.
     if (res.status === 403 || res.status === 401) {
       const detail = String(data?.detail || "");
       if (
         detail === "tenant mismatch" ||
+        detail === "TENANT_MISMATCH" ||
         detail.startsWith("unknown tenant:") ||
-        detail === "admin required for tenant switch" ||
-        detail === "login required"
+        detail === "TENANT_ACCESS_DENIED" ||
+        detail === "TENANT_MEMBERSHIP_REQUIRED"
       ) {
         clearInvalidTenantSelection(detail);
       }
-      // Session expired in PG mode — reload so /api/auth/status re-checks
-      // and the LoginGate renders. Guard against reload loops by only
-      // triggering when not already on the login surface.
+      if (["TENANT_ADMIN_REQUIRED", "PLATFORM_ADMIN_REQUIRED"].includes(detail)) {
+        window.dispatchEvent(new Event("console-auth-changed"));
+      }
+      // Recheck the session in App without reloading the SPA. A full reload
+      // loses the current in-memory view and makes an isolated/transient 401
+      // look like a navigation back to the dashboard.
       if (
         res.status === 401 &&
-        (detail === "login or tenant token required" || detail === "login required") &&
-        !window.location.pathname.startsWith("/api/auth/")
+        (detail === "login or tenant token required" || detail === "login required")
       ) {
-        window.location.reload();
-        return new Promise(() => {}); // never resolves — page is reloading
+        window.dispatchEvent(new Event("console-auth-changed"));
       }
     }
     throw new ApiError(
@@ -276,8 +265,6 @@ export interface VikingDirsReport {
 }
 
 export interface SharingConfig {
-  enabled?: boolean;
-  backend?: string;
   deployment?: VikingDeployment;
   endpoint?: string;
   endpoint_override?: string;
@@ -286,8 +273,7 @@ export interface SharingConfig {
   account?: string;
   team_user?: string;
   root_prefix?: string;
-  service_api_key_present?: boolean;
-  team_api_key_present?: boolean;
+  api_key_present?: boolean;
 }
 
 export interface TeamSettings {
@@ -295,13 +281,6 @@ export interface TeamSettings {
   configured_display_name: string;
   environment_override?: string;
   override_source?: string;
-}
-
-export interface QueueSession {
-  user_alias?: string;
-  session_id: string;
-  num_turns?: number;
-  timestamp?: string;
 }
 
 export interface PageResponse<T> {
@@ -314,7 +293,7 @@ export interface PageResponse<T> {
   candidates?: T[];
 }
 
-export interface SessionMeta {
+interface SessionMeta {
   user_id?: string;
   session_id?: string;
   trace_id?: string;
@@ -349,7 +328,7 @@ export interface LedgerRow {
   };
 }
 
-export interface BundleFileDiff {
+interface BundleFileDiff {
   path: string;
   status: "added" | "modified" | "deleted" | "unchanged";
   old_sha256?: string;
@@ -360,14 +339,14 @@ export interface BundleFileDiff {
   diff?: string;
 }
 
-export interface BundleDiff {
+interface BundleDiff {
   before_tree_sha256?: string;
   after_tree_sha256?: string;
   changed_count?: number;
   files?: BundleFileDiff[];
 }
 
-export interface StaticValidation {
+interface StaticValidation {
   passed?: boolean;
   enabled?: boolean;
   changed_files?: string[];
@@ -413,7 +392,6 @@ export interface Candidate {
     kind?: string;
     skill_name?: string;
     artifact_sha256?: string;
-    dataset_format?: string;
     question_count?: number;
     submitted_by?: string;
   };
@@ -452,7 +430,7 @@ export interface Candidate {
   decision_accepted?: boolean | null;
 }
 
-export interface CandidateDecision {
+interface CandidateDecision {
   status?: string;
   accepted?: boolean;
   reason?: string;
@@ -501,7 +479,7 @@ export interface EvalResult {
   static_validation?: StaticValidation;
 }
 
-export interface ReplayDecisionPolicy {
+interface ReplayDecisionPolicy {
   accepted?: boolean;
   policy?: string;
   verdict?: "accept" | "reject" | "inconclusive";
@@ -539,7 +517,7 @@ export interface ReplaySide {
   interactions?: Array<Record<string, any>>;
   checklist_report?: SkillLabChecklistReport;
 }
-export interface ReplayCase {
+interface ReplayCase {
   baseline?: ReplaySide;
   candidate?: ReplaySide;
 }
@@ -733,7 +711,68 @@ export interface SkillExperienceListResp {
   reason?: string;
 }
 
-export interface SessionFilterAuditItem {
+interface SkillExperiencePatternOutcome {
+  job_id: string;
+  status: string;
+  recorded_at?: string;
+  candidate_revision?: number;
+  version?: number;
+  reason?: string;
+}
+
+export interface SkillExperiencePattern {
+  pattern_id: string;
+  pattern_key: string;
+  skill_name: string;
+  title: string;
+  kind: "defect" | "exemplary";
+  problem?: string;
+  root_cause?: string;
+  guidance: string;
+  experience_ids?: string[];
+  session_ids?: string[];
+  user_aliases?: string[];
+  evidence_count: number;
+  occurrence_count: number;
+  session_count: number;
+  user_count: number;
+  team_ready: boolean;
+  status: "ready" | "observing";
+  candidate_outcomes?: SkillExperiencePatternOutcome[];
+  compiled_at?: string;
+  updated_at?: string;
+}
+
+export interface SkillExperiencePatternListResp {
+  items: SkillExperiencePattern[];
+  stats: {
+    total_patterns?: number;
+    ready_patterns?: number;
+    observing_patterns?: number;
+    defect_patterns?: number;
+    exemplary_patterns?: number;
+    source_experiences?: number;
+    skills?: number;
+  };
+  skill_counts?: Record<string, number>;
+  available_skills?: string[];
+  location: string;
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+
+export interface SkillExperiencePatternCompileResp {
+  compiled: boolean;
+  skill_name: string;
+  patterns: SkillExperiencePattern[];
+  pattern_count: number;
+  compiled_at?: string;
+  location: string;
+}
+
+interface SessionFilterAuditItem {
   session_id: string;
   title?: string;
   user_alias?: string;
@@ -775,7 +814,6 @@ export interface SessionFilterAuditResp {
 export interface EvolveModelSettings {
   tenant_id?: string;
   scope?: "global" | "tenant";
-  provider?: string;
   base_url: string;
   model: string;
   max_tokens: number;
@@ -798,9 +836,7 @@ export interface EvolveProcessSettings {
   evolve: {
     use_session_judge: boolean;
     publish_mode: "direct" | "validated";
-    validation_max_rejections: number;
     human_review_enabled: boolean;
-    human_review_timeout_seconds: number;
     interval_seconds: number;
     evidence_enabled: boolean;
     evidence_max_entries: number;
@@ -827,32 +863,21 @@ export interface EvolveProcessSettings {
     poll_interval_seconds: number;
     max_jobs_per_day: number;
     max_concurrency: number;
-    required_results: number;
-    required_approvals: number;
   };
   memory_maintenance?: {
     enabled: boolean;
     auto_start: boolean;
+    interval_seconds?: number;
     engine?: string;
     full_capabilities?: boolean;
-    agent_id?: string;
-    customer_id?: string;
     maintained_space?: string;
-    embed_model?: string;
-    embed_base_url?: string;
-    embed_api_key?: string;
-    clear_embed_api_key?: boolean;
-    embed_api_key_present?: boolean;
-    semantic_dedup_enabled?: boolean;
-    dedup_merge_threshold?: number;
-    dedup_warn_threshold?: number;
     tools?: string[];
   };
 }
 
 // ---- Skills management --------------------------------------------------- //
 
-export interface SkillListItem {
+interface SkillListItem {
   name: string;
   category?: string;
   description?: string;
@@ -861,7 +886,8 @@ export interface SkillListItem {
 }
 
 export interface SkillListResp {
-  sharing_enabled?: boolean;
+  skill_backend?: "postgres" | "viking" | "local" | string;
+  delivery_mode?: "pull";
   skills: SkillListItem[];
 }
 
@@ -884,27 +910,53 @@ export interface SkillLabMaterial {
 }
 
 export interface SkillLabDataset {
+  schema_version: "team-replay.dataset";
   dataset_id: string;
-  skill_name: string;
-  skills?: Array<{
+  skills: Array<{
     skill_id: string;
     revision?: string | number;
     content_hash?: string;
   }>;
-  skill_ids?: string[];
-  task_count?: number;
   name: string;
-  query: string;
-  requirements?: string;
-  trajectory_requirements?: string;
-  progressive_disclosure?: {
-    enabled?: boolean;
-    initial_visibility?: string;
-    batch_size?: number;
-    stop_when?: string;
+  description: string;
+  cases: Array<{
+    case_id: string;
+    query: string;
+    skill_ids: string[];
+    checks: Array<{
+      id: string;
+      kind: "output" | "trajectory";
+      text: string;
+      polarity?: "must_not";
+    }>;
+    materials: SkillLabMaterial[];
+    provenance: {
+      session_id?: string;
+      session_ids?: string[];
+      job_id?: string;
+      evidence_window?: string;
+      [key: string]: any;
+    };
+    replay: {
+      progressive_disclosure: {
+        enabled?: boolean;
+        initial_visibility?: string;
+        batch_size?: number;
+        stop_when?: string;
+      };
+    };
+    metadata: {
+      name?: string;
+      read_only?: boolean;
+      enabled_for_evolution?: boolean;
+      [key: string]: any;
+    };
+  }>;
+  metadata: {
+    read_only?: boolean;
+    enabled_for_evolution?: boolean;
+    [key: string]: any;
   };
-  materials?: SkillLabMaterial[];
-  enabled_for_evolution?: boolean;
   material_integrity?: {
     status?: "complete" | "missing" | "not_required";
     mode?: "none" | "inline" | "uploaded" | "mixed" | "external";
@@ -918,13 +970,8 @@ export interface SkillLabDataset {
   source?: {
     kind?: string;
     job_id?: string;
-    session_id?: string;
-    source_session_ids?: string[];
-    turn_num?: number;
-    evidence_window?: string;
     [key: string]: any;
   };
-  read_only?: boolean;
   dataset_markdown?: string;
   created_at?: string;
   updated_at?: string;
@@ -981,7 +1028,7 @@ export interface SkillLabChecklistReport {
   }>;
 }
 
-export interface SkillLabResult {
+interface SkillLabResult {
   status?: string;
   verdict?: "accept" | "reject" | "inconclusive";
   accepted?: boolean;
@@ -1044,7 +1091,6 @@ export interface CloudResult {
 
 export function cloudNote(cloud?: CloudResult): string {
   if (!cloud || !cloud.synced) {
-    if (cloud && cloud.reason === "sharing_disabled") return "未开启云端同步";
     if (cloud && cloud.reason) return "云端同步失败: " + cloud.reason;
     return "";
   }
@@ -1055,7 +1101,7 @@ export function cloudNote(cloud?: CloudResult): string {
 
 // ---- User management ----------------------------------------------------- //
 
-export type SkillSpaceBackend = "" | "viking";
+type SkillSpaceBackend = "" | "viking";
 
 export interface SkillSpaceConfig {
   backend?: SkillSpaceBackend;
@@ -1071,9 +1117,9 @@ export interface OpenVikingAccountsResp {
   error?: string;
 }
 
-export interface OpenVikingAccountUser {
+interface OpenVikingAccountUser {
   user_id: string;
-  role: "user" | "admin";
+  role: "member" | "tenant_admin";
   openviking_role?: string;
   imported?: boolean;
 }
@@ -1098,6 +1144,11 @@ export interface UserProfile {
   display_name?: string;
   email?: string;
   role?: "user" | "admin";
+  platform_role?: "user" | "platform_admin";
+  tenant_role?: "member" | "tenant_admin" | null;
+  tenant_id?: string | null;
+  status?: "active" | "disabled";
+  capabilities?: string[];
   password?: string;
   password_set?: boolean;
   personal_space?: SkillSpaceConfig;
@@ -1117,61 +1168,6 @@ export interface ReplayAdapterInfo {
   available: Array<{ file: string; label?: string; enabled: boolean; error?: string }>;
 }
 
-export interface AgentIntegration {
-  agent_id: string;
-  runtime_type: string;
-  display_name?: string;
-  protocol_version?: string;
-  runtime_version?: string;
-  compatibility?: "compatible" | "legacy" | string;
-  status?: string;
-  capabilities?: string[];
-  capability_ids?: string[];
-  capability_details?: Record<string, Record<string, unknown>>;
-  endpoints?: Record<string, string>;
-  updated_at?: string;
-}
-
-export interface AgentIntegrationsResp {
-  agents: AgentIntegration[];
-  storage_authority?: string;
-  storage_deployment?: string;
-  default_team_user?: string;
-}
-
-export interface RegisterAgentPayload {
-  agent_id: string;
-  runtime_type: string;
-  runtime_version?: string;
-  display_name?: string;
-  replay_url: string;
-  /** "server_driven"（teamEvolver 逐轮调 Agent）或 "branch_delegate"（旧单次调用） */
-  orchestration?: string;
-  max_interactions?: number;
-  /** 留空 = 回放调用不带 Bearer 密钥（内网可信部署） */
-  auth_profile?: string;
-  session_ingest?: boolean;
-  /** 零感知模式：按此模板渲染每轮请求体（占位符 {{prompt}}/{{request_id}}/{{history}} 等） */
-  request_template?: Record<string, unknown>;
-  /** 零感知模式：从 Agent 自身响应提取字段的点路径映射 */
-  response_mapping?: Record<string, string>;
-}
-
-export interface AgentRegistrationResp {
-  agent: AgentIntegration;
-  subject_sync?: unknown;
-}
-
-export async function registerAgentIntegration(
-  payload: RegisterAgentPayload,
-): Promise<AgentRegistrationResp> {
-  return api<AgentRegistrationResp>("/api/agent-integrations", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-}
-
 export interface UsersListResp {
   storage_deployment?: string;
   openviking_account?: string;
@@ -1179,43 +1175,16 @@ export interface UsersListResp {
   users: UserProfile[];
 }
 
-export interface ShareResult {
-  direction?: "personal_to_team" | "team_to_personal";
-  uploaded?: number;
-  skipped?: number;
-  filtered?: number;
-  total_local?: number;
-  shared_names?: string[];
-  missing_names?: string[];
-}
-
-export interface PublishRequest {
-  request_id: string;
-  requester_id: string;
-  requester_name?: string;
-  skill_names: string[];
-  note?: string;
-  status: "pending" | "approved" | "rejected";
-  created_at?: string;
-  updated_at?: string;
-  decided_by?: string;
-  decided_at?: string;
-  decision_note?: string;
-  result?: ShareResult;
-}
-
-export interface PublishRequestListResp {
-  requests: PublishRequest[];
-  pending_count: number;
-}
-
 // ---- Console auth -------------------------------------------------------- //
 
 export interface AuthStatus {
   customer_mode?: boolean;
+  self_registration_enabled?: boolean;
   authenticated: boolean;
   needs_setup?: boolean;
   user?: UserProfile | null;
+  available_tenants?: TenantInfo[];
+  active_tenant_id?: string | null;
 }
 
 // ---- Tenant management (multi-tenancy plan §4) ---------------------------- //
@@ -1237,7 +1206,7 @@ export interface TenantsResp {
   tenants: TenantInfo[];
 }
 
-export interface OpenvikingAccountBinding {
+interface OpenvikingAccountBinding {
   account_id: string;
   action: "created" | "bound" | "failed";
   error?: string;
@@ -1313,7 +1282,7 @@ export async function updateTenantConfig(
 
 // ---- Service-wide outbound observability ------------------------------- //
 
-export interface LangfuseTracingStatus {
+interface LangfuseTracingStatus {
   enabled: boolean;
   sdk_available?: boolean;
   initialized?: boolean;
@@ -1355,7 +1324,7 @@ export interface PipelineNode {
   overridden?: boolean;
 }
 
-export interface PipelineEdge {
+interface PipelineEdge {
   from: string;
   to: string;
 }
@@ -1374,7 +1343,6 @@ export interface PromptSummary {
   temperature?: number;
   max_tokens?: number;
   model?: string;
-  provider?: string;
   base_url?: string;
   api_key_present?: boolean;
   settings_overridden?: boolean;

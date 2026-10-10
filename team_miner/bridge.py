@@ -26,6 +26,7 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Optional
@@ -36,9 +37,8 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from team_memory.compile_client import CompileClient
 from teamEvolver.config_store import CONFIG_DIR, ConfigStore
-from teamEvolver.proxy.knowledge_document_converter import convert_knowledge_upload
-from teamEvolver.proxy.knowledge_mining import _content_editable, _content_text
 
+from .document_converter import convert_knowledge_upload
 from .ov_compile_mining import (
     ACTIVE_JOB_STATES,
     RUNS_ROOT,
@@ -53,6 +53,7 @@ from .ov_compile_mining import (
     validate_descendant,
     validate_resource_uri,
 )
+from .routes import _content_editable, _content_text
 from .settings import (
     reset_prompt,
     settings_payload,
@@ -161,6 +162,62 @@ class SkillMinerBridgeMixin:
 
         task.add_done_callback(forget)
 
+    def _start_ov_skill_monitor(self) -> None:
+        """Track deadlines and cancellation even when no browser is polling."""
+        existing = getattr(self, "_ov_skill_monitor_task", None)
+        if existing is not None and not existing.done():
+            return
+
+        async def monitor() -> None:
+            while True:
+                try:
+                    jobs = await asyncio.to_thread(self._ov_skill_mining_repository().list_jobs)
+                    for job in jobs:
+                        self._schedule_ov_skill_job_refresh(job)
+                except Exception:
+                    logger.exception("OV Skill mining monitor failed")
+                await asyncio.sleep(5)
+
+        self._ov_skill_monitor_task = asyncio.create_task(monitor())
+
+    async def _stop_ov_skill_monitor(self) -> None:
+        tasks = [getattr(self, "_ov_skill_monitor_task", None)]
+        tasks.extend(list(getattr(self, "_ov_skill_refresh_tasks", {}).values()))
+        tasks = [task for task in tasks if task is not None and not task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _ov_enforce_deadline(self, repository, job: dict, status: str) -> dict:
+        # Observe completion first: a deadline must never discard a completed result.
+        if status not in {"accepted", "pending", "queued", "running", "committing", "cancelling"}:
+            return job
+        elapsed = self._elapsed_seconds(str(job.get("started_at") or ""), utc_now())
+        expired = elapsed is not None and elapsed >= int(job.get("runtime_timeout_seconds") or 3600)
+        reason = str(job.get("ov_cancel_reason") or "")
+        if not reason and expired:
+            reason = f"达到运行期限 {int(job.get('runtime_timeout_seconds') or 3600)} 秒"
+            job = await asyncio.to_thread(
+                repository.update_job, job["job_id"], ov_cancel_reason=reason,
+                ov_cancel_requested_at=utc_now(), stop_reason=reason, status="stopping",
+            )
+            await asyncio.to_thread(repository.append_log, job["job_id"], reason + "；请求取消并等待远端终态")
+        if not reason or status == "cancelling" or job.get("ov_cancel_sent_at"):
+            return job
+        try:
+            await self._knowledge_request(
+                str(job.get("account") or ""), "POST",
+                f"/api/v1/tasks/{job['ov_task_id']}/cancel", timeout=10.0,
+            )
+        except Exception as exc:
+            return await asyncio.to_thread(
+                repository.update_job, job["job_id"], ov_cancel_error=str(exc)[:1000], status="stopping",
+            )
+        return await asyncio.to_thread(
+            repository.update_job, job["job_id"], ov_cancel_sent_at=utc_now(), ov_cancel_error="", status="stopping",
+        )
+
     @staticmethod
     def _ov_task_observability(job: dict, task: dict, stage: str, observed_at: str) -> dict:
         """Build a bounded, payload-free timeline from OV task observations."""
@@ -181,9 +238,9 @@ class SkillMinerBridgeMixin:
         history = history[-64:]
 
         timeline = [dict(item) for item in job.get("ov_event_timeline") or [] if isinstance(item, dict)]
-        raw_events = task.get("events") or []
+        raw_events = task.get("events") or task.get("execution_events") or []
         if isinstance(raw_events, dict):
-            raw_events = list(raw_events.values())
+            raw_events = raw_events.get("items") or list(raw_events.values())
         for raw in raw_events if isinstance(raw_events, list) else []:
             if not isinstance(raw, dict):
                 continue
@@ -197,6 +254,7 @@ class SkillMinerBridgeMixin:
             ).strip()
             at = str(
                 raw.get("timestamp")
+                or raw.get("recorded_at")
                 or raw.get("created_at")
                 or raw.get("updated_at")
                 or raw.get("at")
@@ -211,9 +269,13 @@ class SkillMinerBridgeMixin:
         return {
             "ov_stage_history": history,
             "ov_event_timeline": timeline[-200:],
-            "ov_task_created_at": str(task.get("created_at") or job.get("ov_task_created_at") or ""),
+            "ov_task_created_at": str(
+                task.get("created_at_iso") or task.get("created_at") or job.get("ov_task_created_at") or ""
+            ),
             "ov_task_started_at": str(task.get("started_at") or job.get("ov_task_started_at") or ""),
-            "ov_task_updated_at": str(task.get("updated_at") or job.get("ov_task_updated_at") or ""),
+            "ov_task_updated_at": str(
+                task.get("updated_at_iso") or task.get("updated_at") or job.get("ov_task_updated_at") or ""
+            ),
         }
 
     @staticmethod
@@ -347,6 +409,7 @@ class SkillMinerBridgeMixin:
                 return await asyncio.to_thread(repository.public_job, job, detail=detail)
             status = str((task or {}).get("status") or "").lower() if isinstance(task, dict) else ""
             stage = str((task or {}).get("stage") or status) if isinstance(task, dict) else status
+            job = await self._ov_enforce_deadline(repository, job, status)
             observed_at = utc_now()
             previous_stage = str(job.get("ov_stage") or "")
             if status in {"accepted", "pending", "queued"}:
@@ -367,14 +430,21 @@ class SkillMinerBridgeMixin:
             else:
                 public_status = str(job.get("status") or "running")
                 phase = job.get("phase") or {"step1": "done", "step2": "active", "step3": "idle"}
+            if job.get("ov_cancel_reason") and public_status in {"queued", "running"}:
+                public_status = "stopping"
             error = ""
             if public_status == "failed":
                 raw_error = (task or {}).get("error") if isinstance(task, dict) else None
                 error = raw_error if isinstance(raw_error, str) else json.dumps(raw_error or {}, ensure_ascii=False)
+            awaiting_materialization = public_status == "succeeded" and not job.get("materialized")
             changes = {
-                "status": public_status,
+                # A remote completed task can contain partial output. Publish success only
+                # after the local artifact contract has accepted the complete bundle.
+                "status": "running" if awaiting_materialization else public_status,
                 "phase": phase,
                 "ov_status": status,
+                "ov_processing_seconds": (task or {}).get("processing_seconds"),
+                "ov_pipeline": (task or {}).get("meta", {}).get("pipeline", {}),
                 "ov_stage": stage,
                 "error": error,
                 "ov_last_synced_at": utc_now(),
@@ -386,8 +456,10 @@ class SkillMinerBridgeMixin:
             elapsed = self._elapsed_seconds(str(job.get("started_at") or ""), observed_at)
             if elapsed is not None:
                 changes["compile_observed_seconds"] = elapsed
-            if public_status in {"succeeded", "failed", "stopped"}:
-                changes["finished_at"] = str((task or {}).get("updated_at") or utc_now())
+            if public_status in {"succeeded", "failed", "stopped"} and not awaiting_materialization:
+                changes["finished_at"] = str(
+                    (task or {}).get("updated_at_iso") or (task or {}).get("updated_at") or utc_now()
+                )
             job = await asyncio.to_thread(repository.update_job, job["job_id"], **changes)
             if stage and stage != previous_stage:
                 repository.append_log(
@@ -708,6 +780,22 @@ class SkillMinerBridgeMixin:
             logger.warning("[SkillMiner] proxy request failed", exc_info=True)
             return JSONResponse(status_code=502, content={"detail": "SkillMiner upstream error"})
 
+        if upstream_path == "/api/config" and upstream.status_code == 200:
+            try:
+                await upstream.aread()
+                payload = upstream.json()
+                payload.update(
+                    engine="ov_compile", max_rounds_range=[1, 5],
+                    max_rounds_default=max(1, min(5, int(payload.get("max_rounds_default") or 3))),
+                    rounds_mode="instruction_hint", human_checkpoints_supported=False,
+                    runtime_timeout_seconds_default=3600, runtime_timeout_seconds_range=[60, 7200],
+                    compile_model={"configuration_source": "openviking_server", "editable_here": False},
+                )
+                return JSONResponse(payload)
+            finally:
+                await upstream.aclose()
+                await client.aclose()
+
         resp_headers = {
             key: value
             for key, value in upstream.headers.items()
@@ -733,6 +821,19 @@ class SkillMinerBridgeMixin:
         """Register a catch-all route for ``/api/mining/*``."""
         owner = self
 
+        original_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def mining_lifespan(application):
+            async with original_lifespan(application) as state:
+                owner._start_ov_skill_monitor()
+                try:
+                    yield state
+                finally:
+                    await owner._stop_ov_skill_monitor()
+
+        app.router.lifespan_context = mining_lifespan
+
         def _store() -> ConfigStore:
             config_file = str(
                 getattr(owner.config, "_config_file", "") or ""
@@ -756,7 +857,7 @@ class SkillMinerBridgeMixin:
         async def mining_model_get():
             return JSONResponse(
                 status_code=410,
-                content={"detail": "挖掘模型已复用全局模型，请在“全局模型”中查看和配置"},
+                content={"detail": "OV Compile 使用 OpenViking 服务端模型，本页不能覆盖该模型"},
             )
 
         @app.post("/api/mining/model")
@@ -764,7 +865,7 @@ class SkillMinerBridgeMixin:
             del request
             return JSONResponse(
                 status_code=410,
-                content={"detail": "挖掘模型已复用全局模型，请在“全局模型”中统一配置"},
+                content={"detail": "OV Compile 使用 OpenViking 服务端模型，本页不能覆盖该模型"},
             )
 
         @app.post("/api/mining/model/test")
@@ -772,7 +873,7 @@ class SkillMinerBridgeMixin:
             del request
             return JSONResponse(
                 status_code=410,
-                content={"detail": "请在“全局模型”中测试并保存模型配置"},
+                content={"detail": "请通过已有 OpenViking 管理入口检查编译模型配置"},
             )
 
         @app.get("/api/mining/settings")
@@ -1208,6 +1309,12 @@ class SkillMinerBridgeMixin:
             if len(name) > 120:
                 raise HTTPException(status_code=400, detail="任务名称不能超过 120 个字符")
             try:
+                rounds_hint = int(body.get("max_rounds", 3))
+                if not 1 <= rounds_hint <= 5:
+                    raise ValueError("内部复核次数提示必须在 1 到 5 之间")
+                timeout_seconds = int(body.get("runtime_timeout_seconds", 3600))
+                if not 60 <= timeout_seconds <= 7200:
+                    raise ValueError("运行期限必须在 60 到 7200 秒之间")
                 job = await asyncio.to_thread(
                     repository.create_job,
                     name=name,
@@ -1216,8 +1323,12 @@ class SkillMinerBridgeMixin:
                     source_snapshot_uri=f"{RUNS_ROOT}/pending/source",
                     output_uri=f"{RUNS_ROOT}/pending/output",
                     document_count=int(source.get("document_count") or 0),
-                    max_rounds=int(body.get("max_rounds") or 3),
+                    max_rounds=rounds_hint,
+                    runtime_timeout_seconds=timeout_seconds,
+                    human_checkpoints=bool(body.get("human_checkpoints", True)),
                 )
+            except (ValueError, TypeError) as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             except RuntimeError as exc:
                 raise HTTPException(status_code=429, detail=str(exc)) from exc
             run_root = f"{RUNS_ROOT}/{job['job_id']}"
@@ -1321,6 +1432,7 @@ class SkillMinerBridgeMixin:
                 )
                 repository.append_log(job["job_id"], f"知识源快照已冻结：{snapshot_uri}")
                 repository.append_log(job["job_id"], f"OV Compile 已受理：{task_id}")
+                owner._start_ov_skill_monitor()
             except Exception as exc:
                 submission_seconds = round(time.perf_counter() - setup_started, 3)
                 repository.append_log(job["job_id"], f"启动失败：{exc}")
@@ -1367,15 +1479,14 @@ class SkillMinerBridgeMixin:
                 return await owner._dispatch_skillminer_request(request)
             if job.get("status") not in ACTIVE_JOB_STATES:
                 raise HTTPException(status_code=409, detail="该挖掘任务当前不可停止")
-            task_id = str(job.get("ov_task_id") or "")
-            if task_id:
-                await owner._knowledge_request(
-                    str(job.get("account") or ""),
-                    "POST",
-                    f"/api/v1/tasks/{task_id}/cancel",
-                    timeout=10.0,
-                )
-            job = await asyncio.to_thread(repository.update_job, job_id, status="stopping", stop_reason="用户手动停止")
+            job = await asyncio.to_thread(
+                repository.update_job, job_id, status="stopping",
+                stop_reason=job.get("stop_reason") or "用户手动停止",
+                ov_cancel_reason=job.get("ov_cancel_reason") or "用户手动停止",
+                ov_cancel_requested_at=job.get("ov_cancel_requested_at") or utc_now(),
+            )
+            owner._start_ov_skill_monitor()
+            owner._schedule_ov_skill_job_refresh(job, force=True)
             return JSONResponse({"ok": True, "job": repository.public_job(job, detail=True)})
 
         @app.delete("/api/mining/jobs/{job_id}")

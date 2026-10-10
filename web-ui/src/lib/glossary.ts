@@ -62,8 +62,8 @@ export const GLOSSARY: Record<string, { label: string; desc: string }> = {
     label: "Bundle（技能包）",
     desc: "一次技能发布对应的完整文件集合，通常包含 SKILL.md、files/ 与 manifest.json 等。",
   },
-  dreamcycle: {
-    label: "DreamCycle（团队记忆维护）",
+  "memory-maintenance": {
+    label: "团队 Memory 维护",
     desc: "团队 Memory 的自动维护周期：跨用户聚合、增量编译，以及 Memory 回放校验。",
   },
   "valuable-chitchat": {

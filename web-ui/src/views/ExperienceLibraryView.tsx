@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertTriangle, CheckCircle2, RefreshCw, Search } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Layers3,
+  Library,
+  RefreshCw,
+  Search,
+} from "lucide-react";
 import {
   Empty,
   ListViewport,
@@ -10,6 +17,7 @@ import {
 } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   api,
   type SkillExperience,
@@ -18,10 +26,44 @@ import {
 import { fmtTime } from "@/lib/format";
 import { toastErr } from "@/lib/toast";
 import ExperienceSyncPanel from "./ExperienceSyncPanel";
+import ExperiencePatternPanel from "./ExperiencePatternPanel";
 
 const PAGE_SIZE = 50;
 
 export default function ExperienceLibraryView({ active, canManageSync = false }: {
+  active: boolean; canManageSync?: boolean;
+}) {
+  const [tab, setTab] = useState("sessions");
+
+  return (
+    <>
+      <div className="mx-auto max-w-[1200px] px-[22px] pt-[18px]">
+        <Tabs value={tab} onValueChange={setTab}>
+          <TabsList aria-label="经验库视图">
+            <TabsTrigger value="sessions" onClick={() => setTab("sessions")}>
+              <Library className="size-3.5" />
+              Session 经验
+            </TabsTrigger>
+            <TabsTrigger value="patterns" onClick={() => setTab("patterns")}>
+              <Layers3 className="size-3.5" />
+              归纳模式
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
+      </div>
+      {tab === "sessions" ? (
+        <SessionExperienceList active={active} canManageSync={canManageSync} />
+      ) : (
+        <ExperiencePatternPanel
+          active={active}
+          canCompile={canManageSync}
+        />
+      )}
+    </>
+  );
+}
+
+function SessionExperienceList({ active, canManageSync = false }: {
   active: boolean; canManageSync?: boolean;
 }) {
   const [data, setData] = useState<SkillExperienceListResp | null>(null);

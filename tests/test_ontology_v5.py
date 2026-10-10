@@ -593,3 +593,19 @@ async def test_source_withdrawal_after_approval_blocks_publication(domain):
     with pytest.raises(HTTPException, match="POLICY_CHANGED"):
         await ops.commit(p, job["id"], "revoked-source")
     assert await svc.store.pool.fetchval("SELECT count(*) FROM public.ov_ontology_commits WHERE tenant=$1", p["tenant"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_temporal_quarantine_requires_explicit_gap_approval(domain):
+    ops, _, p = domain
+    job = await build(ops, p, "temporal-gap")
+    result = job["result"]
+    result["gaps"] = [{"code": "ASSERTION_VALID_FROM_REQUIRED", "assertion_id": "undated"}]
+    await ops.store.change(p, job["id"], ["review_ready"], "review_ready", result)
+    await ops.prepare(p, job["id"])
+    with pytest.raises(HTTPException, match="COVERAGE_ACKNOWLEDGEMENT_REQUIRED"):
+        await ops.approve(p, job["id"], "reviewed")
+    unchanged = await ops.store.get(p, job["id"])
+    assert unchanged["state"] == "prepared"
+    approved = await ops.approve(p, job["id"], "reviewed missing date; publish valid facts only", True)
+    assert approved["result"]["coverage_acknowledgement"]["accepted"] is True

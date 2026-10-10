@@ -20,7 +20,6 @@ import socket
 import threading
 import time
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -50,7 +49,6 @@ from team_skills.library.bundle import (
     bundle_tree_sha256,
     candidate_skill_bundle,
     read_skill_bundle,
-    write_skill_bundle,
 )
 from team_skills.library.hub import SkillHub
 from team_skills.library.mutations import SkillMutationService
@@ -63,17 +61,26 @@ except ModuleNotFoundError as exc:
         raise
     EvolveEngineMixin = None
 
+from ..admin.authorization import (
+    available_tenants,
+    bind_console_user,
+    enforce_platform_routes,
+    is_platform_admin,
+    public_path,
+    require_platform_admin,
+    require_tenant_admin,
+)
+from ..admin.identity_store import IdentityStore
+from ..admin.tenant_settings import save_settings, settings_data
 from ..config import (
+    DEFAULT_LLM_MAX_CONCURRENCY,
+    DEFAULT_LLM_MAX_TOKENS,
+    DEFAULT_LLM_QUEUE_CAPACITY,
+    DEFAULT_LLM_TEMPERATURE,
     LOCAL_OPENVIKING_ENDPOINT,
     VOLCENGINE_OPENVIKING_ENDPOINT,
 )
 from ..config_store import ConfigStore
-from ..integrations.agent_protocol import is_v1_payload
-from ..integrations.agent_registry import (
-    list_agents,
-    public_agent_record,
-    register_agent,
-)
 from ..session_store import SessionStore, session_display_meta
 from ..storage import (
     LocalObjectStore,
@@ -84,7 +91,6 @@ from ..storage import (
 from ..tenants.registry import (
     AGENT_TOKEN_PREFIX,
     DEFAULT_TENANT_ID,
-    RETIRED_AGENT_TOKEN_PREFIX,
     current_tenant_id,
     effective_config,
     get_current_tenant,
@@ -94,14 +100,9 @@ from ..tenants.registry import (
 from .tenant_routes import get_tenant_registry, register_tenant_routes
 from .users_admin import (
     _find_user,
-    _load_registry,
     _public_user,
-    _registry_path,
-    _save_registry,
     _upsert_user,
     _verify_password,
-    sync_agent_subject_mappings,
-    sync_openviking_user,
 )
 from .viking_dirs import ensure_openviking_dirs
 
@@ -114,15 +115,6 @@ _INSTANCE_ID = (
 _SESSION_COOKIE = "teamEvolver_console_session"
 _SESSION_TTL_SECONDS = 24 * 60 * 60
 _SESSION_RENEW_INTERVAL_SECONDS = 5 * 60
-# Console sessions are cached per process while the authoritative store is
-# shared (PG objects in PG mode, the registry directory otherwise), so a login
-# handled by one instance is unknown to its peers. A cache miss re-reads the
-# store instead of rejecting the caller — throttled per token so a stale or
-# forged cookie cannot hammer it.
-_SESSION_MISS_REFRESH_SECONDS = 2.0
-_SESSION_MISS_CACHE_LIMIT = 4096
-_console_session_miss_lock = threading.Lock()
-_console_session_misses: dict[str, float] = {}
 _DASHBOARD_CACHE: dict[str, tuple[float, Any]] = {}
 
 
@@ -143,7 +135,7 @@ def _tenant_effective_config(owner, config=None):
     Merges the current tenant's config overrides over the passed config
     (default: the server's global config) so request-context stores
     (SessionStore / SkillHub) honor per-tenant backend selection. Returns the
-    input unchanged for the default tenant or when no registry is available.
+    input unchanged only when no tenant context is available.
     """
     base = config if config is not None else owner.config
     try:
@@ -179,7 +171,7 @@ def _pg_config_get(owner, key: str):
     if not bool(getattr(owner.config, "storage_pg_enabled", False)):
         return None
     try:
-        from ..storage.pg_pool import get_pg_runtime, dsn_from_env
+        from ..storage.pg_pool import dsn_from_env, get_pg_runtime
         dsn = str(getattr(owner.config, "storage_pg_dsn", "") or "")
         if not dsn:
             dsn = dsn_from_env()
@@ -204,7 +196,7 @@ def _pg_config_put(owner, key: str, value) -> bool:
     if not bool(getattr(owner.config, "storage_pg_enabled", False)):
         return False
     try:
-        from ..storage.pg_pool import get_pg_runtime, dsn_from_env
+        from ..storage.pg_pool import dsn_from_env, get_pg_runtime
         dsn = str(getattr(owner.config, "storage_pg_dsn", "") or "")
         if not dsn:
             dsn = dsn_from_env()
@@ -236,20 +228,23 @@ def _model_settings_payload(config, store_data: dict[str, Any]) -> dict[str, Any
     return {
         "tenant_id": tenant_id,
         "scope": "global" if tenant_id == DEFAULT_TENANT_ID else "tenant",
-        "provider": str(getattr(config, "llm_provider", "") or llm.get("provider") or "custom"),
         "base_url": str(getattr(config, "llm_api_base", "") or llm.get("api_base") or ""),
         "model": str(getattr(config, "llm_model_id", "") or llm.get("model_id") or ""),
-        "max_tokens": int(getattr(config, "llm_max_tokens", 0) or llm.get("max_tokens") or 100000),
+        "max_tokens": int(
+            getattr(config, "llm_max_tokens", 0)
+            or llm.get("max_tokens")
+            or DEFAULT_LLM_MAX_TOKENS
+        ),
         "temperature": float(temperature),
         "max_concurrency": int(
             getattr(config, "llm_max_concurrency", 0)
             or llm.get("max_concurrency")
-            or 8
+            or DEFAULT_LLM_MAX_CONCURRENCY
         ),
         "queue_capacity": int(
             getattr(config, "llm_queue_capacity", 0)
             or llm.get("queue_capacity")
-            or 64
+            or DEFAULT_LLM_QUEUE_CAPACITY
         ),
         "api_key_present": bool(api_key),
     }
@@ -294,9 +289,14 @@ def _evolve_settings_payload(config, store_data: dict[str, Any]) -> dict[str, An
         if isinstance(store_data.get("validation"), dict)
         else {}
     )
-    dreamcycle = (
-        store_data.get("dreamcycle")
-        if isinstance(store_data.get("dreamcycle"), dict)
+    memory = (
+        store_data.get("memory")
+        if isinstance(store_data.get("memory"), dict)
+        else {}
+    )
+    maintenance = (
+        memory.get("maintenance")
+        if isinstance(memory.get("maintenance"), dict)
         else {}
     )
     environment_overrides = {
@@ -308,9 +308,7 @@ def _evolve_settings_payload(config, store_data: dict[str, Any]) -> dict[str, An
             "EVOLVE_LLM_TEMPERATURE",
             "EVOLVE_USE_SESSION_JUDGE",
             "EVOLVE_PUBLISH_MODE",
-            "EVOLVE_VALIDATION_MAX_REJECTIONS",
             "EVOLVE_HUMAN_REVIEW_ENABLED",
-            "EVOLVE_HUMAN_REVIEW_TIMEOUT_SECONDS",
             "EVOLVE_INTERVAL",
             "EVOLVE_EVIDENCE_ENABLED",
             "EVOLVE_EVIDENCE_MAX_ENTRIES",
@@ -341,29 +339,11 @@ def _evolve_settings_payload(config, store_data: dict[str, Any]) -> dict[str, An
                 or getattr(config, "evolve_publish_mode", "validated")
                 or "validated"
             ),
-            "validation_max_rejections": int(
-                evolve.get("validation_max_rejections")
-                or getattr(
-                    config,
-                    "evolve_validation_max_rejections",
-                    1,
-                )
-                or 1
-            ),
             "human_review_enabled": bool(
                 evolve.get(
                     "human_review_enabled",
                     getattr(config, "evolve_human_review_enabled", True),
                 )
-            ),
-            "human_review_timeout_seconds": int(
-                evolve.get("human_review_timeout_seconds")
-                or getattr(
-                    config,
-                    "evolve_human_review_timeout_seconds",
-                    86400,
-                )
-                or 86400
             ),
             "interval_seconds": int(
                 evolve.get("interval_seconds")
@@ -520,77 +500,39 @@ def _evolve_settings_payload(config, store_data: dict[str, Any]) -> dict[str, An
                 or getattr(config, "validation_max_concurrency", 1)
                 or 1
             ),
-            "required_results": int(
-                validation.get("required_results")
-                or getattr(config, "validation_required_results", 3)
-                or 3
-            ),
-            "required_approvals": int(
-                validation.get("required_approvals")
-                or getattr(config, "validation_required_approvals", 2)
-                or 2
-            ),
         },
         "memory_maintenance": {
             "enabled": bool(
-                dreamcycle.get(
+                maintenance.get(
                     "enabled",
-                    getattr(config, "dreamcycle_enabled", False),
+                    getattr(config, "memory_maintenance_enabled", False),
                 )
             ),
             "auto_start": bool(
-                dreamcycle.get(
+                maintenance.get(
                     "auto_start",
-                    getattr(config, "dreamcycle_auto_start", False),
+                    getattr(config, "memory_maintenance_auto_start", False),
                 )
             ),
-            "engine": "teamEvolver-native-dreamcycle",
-            "full_capabilities": True,
-            "agent_id": str(
-                getattr(config, "sharing_viking_user", "") or ""
+            "interval_seconds": int(
+                maintenance.get("interval_seconds")
+                or getattr(config, "memory_maintenance_interval_seconds", 86400)
+                or 86400
             ),
-            "customer_id": str(
-                dreamcycle.get("customer_id")
-                or dreamcycle.get("peer_id")
-                or ""
-            ),
+            "engine": "team-memory-compile",
+            "full_capabilities": False,
             "maintained_space": (
-                (
-                    "viking://user/peers/"
-                    f"{dreamcycle.get('customer_id') or dreamcycle.get('peer_id')}/"
-                    "memories/"
-                )
-                if dreamcycle.get("customer_id") or dreamcycle.get("peer_id")
-                else "viking://user/memories/"
+                "viking://resources/"
+                + str(
+                    getattr(
+                        config,
+                        "aggregation_shared_knowledge_prefix",
+                        "shared-knowledge",
+                    )
+                    or "shared-knowledge"
+                ).strip("/")
             ),
-            "embed_model": "",
-            "embed_base_url": "",
-            "embed_api_key_present": False,
-            "semantic_dedup_enabled": False,
-            "dedup_merge_threshold": float(
-                dreamcycle.get("dedup_merge_threshold", 0.86)
-                if dreamcycle.get("dedup_merge_threshold") is not None
-                else 0.86
-            ),
-            "dedup_warn_threshold": float(
-                dreamcycle.get("dedup_warn_threshold", 0.72)
-                if dreamcycle.get("dedup_warn_threshold") is not None
-                else 0.72
-            ),
-            "tools": [
-                "viking_search",
-                "viking_read",
-                "viking_read_many",
-                "viking_browse",
-                "viking_remember",
-                "viking_forget",
-                "viking_merge",
-                "list_customers",
-                "memory_audit",
-                "memory_sanitize",
-                "save_report",
-                "shared_notes",
-            ],
+            "tools": ["ov_cp", "ov_compile"],
         },
     }
 
@@ -671,6 +613,12 @@ def _langfuse_tracing_settings_payload(
                 ),
             )
         ),
+        "timeout_seconds": int(
+            langfuse.get(
+                "tracing_timeout_seconds",
+                getattr(config, "langfuse_tracing_timeout_seconds", 30),
+            )
+        ),
         "status": langfuse_status(),
     }
 
@@ -678,29 +626,35 @@ def _langfuse_tracing_settings_payload(
 
 
 def _require_admin_user(user: dict | None) -> None:
-    if not user or str(user.get("role") or "user") != "admin":
-        raise HTTPException(status_code=403, detail="only admin users can perform this operation")
+    require_tenant_admin(user)
 
 
 
 def _console_cookie_name(request: Request) -> str:
-    # Cookie scope ignores ports. Include the public authority (from Host)
-    # so two deployments on one machine do not overwrite each other's login.
+    host = request.url.hostname or "localhost"
     port = request.url.port or (443 if request.url.scheme == "https" else 80)
-    scope = f"{request.url.hostname}:{port}/{request.scope.get('root_path', '')}"
+    root_path = str(request.scope.get("root_path") or "/")
+    if not root_path.startswith("/"):
+        root_path = f"/{root_path}"
+    scope = f"{host}:{port}{root_path}"
     suffix = hashlib.sha256(scope.encode("utf-8")).hexdigest()[:12]
     return f"{_SESSION_COOKIE}_{suffix}"
 
 
 def _console_session_token(request: Request) -> str:
-    # Accept an existing installation's cookie until it can be migrated after
-    # successful server-side validation. Never fall back from a scoped cookie.
-    return request.cookies.get(_console_cookie_name(request), request.cookies.get(_SESSION_COOKIE, ""))
+    scoped = request.cookies.get(_console_cookie_name(request), "")
+    if scoped:
+        return scoped
+    legacy = request.cookies.get(_SESSION_COOKIE, "")
+    if legacy:
+        request.state.migrate_console_session = legacy
+    return legacy
 
 
 def _set_console_cookie(response: Response, request: Request, token: str) -> None:
+    cookie_name = _console_cookie_name(request)
     response.set_cookie(
-        _console_cookie_name(request),
+        cookie_name,
         token,
         httponly=True,
         secure=request.url.scheme == "https",
@@ -708,122 +662,12 @@ def _set_console_cookie(response: Response, request: Request, token: str) -> Non
         max_age=_SESSION_TTL_SECONDS,
         path="/",
     )
-    if request.cookies.get(_SESSION_COOKIE) == token:
-        response.delete_cookie(_SESSION_COOKIE, path="/")
-
-
-def _console_sessions_path(config) -> Path:
-    """Persist console login sessions next to the users registry so a service
-    restart does not force every logged-in operator back to the login page."""
-    return _registry_path(config).parent / "console_sessions.json"
-
-
-def _load_console_sessions(config) -> dict[str, dict]:
-    path = _console_sessions_path(config)
-    if getattr(config, "storage_pg_enabled", False):
-        from ..storage.admin_kv import read_kv
-
-        return read_kv(config, "console_sessions.json", path, tenant_id="default")
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8") or "{}")
-    except Exception:  # noqa: BLE001 - corrupt/partial local file must not crash startup
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    now = time.time()
-    sessions: dict[str, dict] = {}
-    for token, session in data.items():
-        if not isinstance(token, str) or not isinstance(session, dict):
-            continue
-        if float(session.get("expires_at", 0) or 0) < now:
-            continue
-        sessions[token] = session
-    return sessions
-
-
-def _save_console_sessions(config, sessions: dict[str, dict]) -> None:
-    path = _console_sessions_path(config)
-    if getattr(config, "storage_pg_enabled", False):
-        from ..storage.admin_kv import write_kv
-
-        write_kv(config, "console_sessions.json", path, sessions, tenant_id="default")
-        return
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(
-            json.dumps(sessions, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+    if cookie_name != _SESSION_COOKIE and request.cookies.get(_SESSION_COOKIE):
+        response.delete_cookie(
+            _SESSION_COOKIE,
+            path="/",
+            secure=request.url.scheme == "https",
         )
-        tmp.replace(path)
-    except Exception:  # noqa: BLE001 - persistence is best-effort, never break auth
-        logger.debug("[console-auth] failed to persist console sessions", exc_info=True)
-
-
-def _merge_console_sessions(target: dict[str, dict], snapshot: dict[str, dict]) -> None:
-    """Merge a shared-store snapshot into the in-process session cache.
-
-    Multi-instance deployments: each process only knows the sessions it loaded
-    at startup plus the ones it issued itself. Later ``expires_at`` wins so a
-    peer's sliding renewal is not undone, and expired entries are dropped so
-    the cache (and the next write-back) stays bounded. Callers hold the owning
-    server's ``_console_sessions_lock``.
-    """
-    now = time.time()
-    for token, session in snapshot.items():
-        if not isinstance(token, str) or not isinstance(session, dict):
-            continue
-        expires = float(session.get("expires_at", 0) or 0)
-        if expires <= now:
-            continue
-        current = target.get(token)
-        if not isinstance(current, dict) or float(
-            current.get("expires_at", 0) or 0
-        ) < expires:
-            target[token] = session
-    for token in [
-        token
-        for token, session in target.items()
-        if not isinstance(session, dict)
-        or float(session.get("expires_at", 0) or 0) <= now
-    ]:
-        target.pop(token, None)
-
-
-def _refresh_console_sessions(owner, token: str) -> dict | None:
-    """Re-read the shared console-session store after a cache miss.
-
-    A session created by another instance (or another worker) is unknown to
-    this process until the shared store is re-read; without this the console
-    bounces between instances with ``401 login or tenant token required``.
-    Returns the session when the snapshot contains a live one. The per-token
-    throttle keeps a stale or forged cookie from hammering the store.
-    """
-    now = time.time()
-    with _console_session_miss_lock:
-        last = float(_console_session_misses.get(token, 0.0) or 0.0)
-        if now - last < _SESSION_MISS_REFRESH_SECONDS:
-            return None
-        _console_session_misses[token] = now
-        if len(_console_session_misses) > _SESSION_MISS_CACHE_LIMIT:
-            cutoff = now - _SESSION_MISS_REFRESH_SECONDS
-            for stale in [
-                seen
-                for seen, at in _console_session_misses.items()
-                if at < cutoff
-            ]:
-                _console_session_misses.pop(stale, None)
-    try:
-        snapshot = _load_console_sessions(owner.config)
-    except Exception:  # noqa: BLE001 - a store hiccup must not turn 401 into 500
-        logger.warning("[console-auth] console session refresh failed", exc_info=True)
-        return None
-    with owner._console_sessions_lock:
-        _merge_console_sessions(owner._console_sessions, snapshot)
-        session = owner._console_sessions.get(token)
-    return session if isinstance(session, dict) else None
 
 
 def _utc_now_iso() -> str:
@@ -837,30 +681,33 @@ def _safe_session_id(value: Any) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", raw).strip(".-/")[:160] or "session"
 
 
-def _check_ingest_api_key(request: Request) -> None:
-    expected = str(os.environ.get("EVOLVE_INGEST_API_KEY") or "").strip()
-    if not expected:
-        return
-    header = str(request.headers.get("authorization") or "").strip()
-    token = header[7:].strip() if header.lower().startswith("bearer ") else header
-    if not secrets.compare_digest(token, expected):
-        raise HTTPException(status_code=401, detail="invalid ingest api key")
+def _max_session_body_bytes() -> int:
+    try:
+        value = int(os.environ.get("TEAMEVOLVER_MAX_SESSION_BODY_BYTES", str(32 * 1024 * 1024)) or 0)
+    except ValueError:
+        value = 32 * 1024 * 1024
+    return max(1024, value)
+
+
+async def _read_limited_json_body(request: Request) -> dict[str, Any]:
+    limit = _max_session_body_bytes()
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > limit:
+            raise HTTPException(status_code=413, detail=f"session body exceeds {limit} bytes")
+        raw.extend(chunk)
+    try:
+        parsed = json.loads(raw.decode("utf-8")) if raw else {}
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="session body must be valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=400, detail="session body must be an object")
+    return parsed
 
 
 def _bearer_token(request: Request) -> str:
     header = str(request.headers.get("authorization") or "").strip()
     return header[7:].strip() if header.lower().startswith("bearer ") else header
-
-
-def _check_v1_control_plane_key(request: Request) -> None:
-    expected = str(os.environ.get("EVOLVE_INGEST_API_KEY") or "").strip()
-    if not expected:
-        raise HTTPException(
-            status_code=503,
-            detail="EVOLVE_INGEST_API_KEY is required for Agent Protocol V1 registration",
-        )
-    if not secrets.compare_digest(_bearer_token(request), expected):
-        raise HTTPException(status_code=401, detail="invalid Agent control-plane key")
 
 
 def _check_model_proxy_api_key(request: Request) -> None:
@@ -909,24 +756,23 @@ def _model_proxy_payload(config, body: Any) -> dict[str, Any]:
 
 
 def _is_embedded_evolve_path(path: str) -> bool:
-    if path == "/trigger-dreamcycle" or path.startswith("/trigger-dreamcycle/"):
+    if path == "/api/memory/maintenance" or path.startswith(
+        "/api/memory/maintenance/"
+    ):
         return False
-    if path == "/validation/candidates" or path.startswith("/validation/candidates/"):
-        return True
     if path.startswith("/validation/skills/"):
         return False
     if path in {"/status", "/sessions", "/conversations", "/storage/status"}:
         return False
     if path.startswith("/conversations/"):
         return False
-    if path in {"/trigger", "/trigger-dreamcycle"}:
+    if path == "/trigger":
         return True
     return path.startswith(
         (
             "/storage/",
             "/validation/",
             "/skills/",
-            "/trigger-dreamcycle/",
         )
     )
 
@@ -935,31 +781,17 @@ def _is_reusable_aggregation_path(path: str) -> bool:
     return path in {
         "/api/aggregation/users",
         "/api/aggregation/run",
+        # Dashboard endpoints that must not 401 on page reload (causes a
+        # reload loop when the session cookie is absent). Return empty data
+        # instead so the SPA can render LoginGate gracefully.
+        "/status",
+        "/sessions",
+        "/conversations",
+        "/storage/status",
+        "/api/sharing-config",
+        "/api/model-settings",
+        "/api/skill-candidates",
     } or path.startswith("/api/aggregation/status/")
-
-
-def _max_session_body_bytes() -> int:
-    try:
-        value = int(os.environ.get("TEAMEVOLVER_MAX_SESSION_BODY_BYTES", str(32 * 1024 * 1024)) or 0)
-    except ValueError:
-        value = 32 * 1024 * 1024
-    return max(1024, value)
-
-
-async def _read_limited_json_body(request: Request) -> dict[str, Any]:
-    limit = _max_session_body_bytes()
-    raw = bytearray()
-    async for chunk in request.stream():
-        if len(raw) + len(chunk) > limit:
-            raise HTTPException(status_code=413, detail=f"session body exceeds {limit} bytes")
-        raw.extend(chunk)
-    try:
-        parsed = json.loads(raw.decode("utf-8")) if raw else {}
-    except (UnicodeDecodeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail="session body must be valid JSON") from exc
-    if not isinstance(parsed, dict):
-        raise HTTPException(status_code=400, detail="session body must be an object")
-    return parsed
 
 
 def _session_queue_snapshot(config, *, limit: int = 100) -> dict[str, Any]:
@@ -1058,18 +890,11 @@ def _history_from_archived_sessions(config, *, limit: int = 50, session_id: str 
 
 
 def _build_history_bucket(config) -> Any | None:
-    """Build a per-tenant object store for reading evolve history.
-
-    Returns None when the backend would be local (the file-based fallback
-    is faster and sufficient for single-tenant / local-backend deployments).
-    For postgres and viking backends, the bucket enforces per-tenant RLS /
-    account scoping so history records are isolated.
-    """
+    """Build the tenant-scoped object store used for evolution history."""
     from team_skills.evolution.kernel.settings import EvolveServerConfig
 
     engine_config = EvolveServerConfig.from_teamEvolver_config(config)
-    backend = str(engine_config.storage_backend or "").strip().lower()
-    if backend not in ("postgres", "viking") or EvolveEngineMixin is None:
+    if EvolveEngineMixin is None:
         return None
     try:
         return EvolveEngineMixin._build_bucket(engine_config)
@@ -1078,38 +903,10 @@ def _build_history_bucket(config) -> Any | None:
 
 
 def _build_experience_library_store(config) -> Any:
-    """Read Session lessons and legacy Evidence without starting an engine."""
+    """Read indexed Session lessons without starting an engine."""
     tenant_id = current_tenant_id()
-    hub = SkillHub.team_from_config(config, tenant_id=tenant_id)
     sessions = SessionStore.from_config(config, tenant_id=tenant_id)
-    return ExperienceLibraryStore(hub._bucket, hub._prefix(), session_store=sessions)
-
-
-def _evolve_history_path_candidates(config) -> list[str]:
-    raw_paths = [
-        os.environ.get("EVOLVE_HISTORY_PATH", ""),
-        os.environ.get("TEAMEVOLVER_EVOLVE_HISTORY_PATH", ""),
-        getattr(config, "evolve_history_path", ""),
-        "evolve_history.jsonl",
-        os.path.join(os.getcwd(), "evolve_history.jsonl"),
-    ]
-    paths: list[str] = []
-    for raw in raw_paths:
-        value = str(raw or "").strip()
-        if value and value not in paths:
-            paths.append(value)
-    return paths
-
-
-def _cycle_matches_session(record: dict[str, Any], session_id: str) -> bool:
-    wanted = str(session_id or "").strip()
-    if not wanted:
-        return True
-    ids = set(str(item) for item in (record.get("session_ids") or []))
-    for evo in record.get("evolutions") or []:
-        if isinstance(evo, dict):
-            ids.update(str(item) for item in (evo.get("session_ids") or []))
-    return wanted in ids
+    return ExperienceLibraryStore(sessions)
 
 
 def _filter_cycle_for_session(record: dict[str, Any], session_id: str) -> dict[str, Any]:
@@ -1342,10 +1139,8 @@ def _clean_judge_reasons(raw: Any) -> dict[str, list[str]]:
 def _session_judge_score_index(config) -> dict[str, dict[str, Any]]:
     """Latest per-session judge scores from evolve history ``session_judge_details``.
 
-    Reads from the per-tenant object store first (RLS-isolated), falling back
-    to the file-based ``evolve_history.jsonl`` for local-backend deployments.
-    History records are chronological (oldest first), so the last occurrence of
-    a session wins. Read-only and best-effort.
+    Reads from the tenant-scoped object store. History records are newest
+    first, and the timestamp guard keeps the newest score for each session.
     """
     index: dict[str, dict[str, Any]] = {}
 
@@ -1378,7 +1173,6 @@ def _session_judge_score_index(config) -> dict[str, dict[str, Any]]:
                 if isinstance(raw_dim, (int, float)) and not isinstance(raw_dim, bool):
                     index[sid][dim] = float(raw_dim)
 
-    # Primary: read from the per-tenant bucket (RLS / account-scoped).
     bucket = _build_history_bucket(config)
     if bucket is not None:
         try:
@@ -1388,89 +1182,34 @@ def _session_judge_score_index(config) -> dict[str, dict[str, Any]]:
                 _process_record(record)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[History] bucket judge score read failed: %s", exc)
-
-    # Also read from the legacy JSONL file(s) to merge historical records
-    # that predate the bucket-based write path.
-    for path in _evolve_history_path_candidates(config):
-        try:
-            with open(path, "r", encoding="utf-8") as handle:
-                for line in handle:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                    except Exception:
-                        continue
-                    if not isinstance(record, dict):
-                        continue
-                    _process_record(record)
-        except FileNotFoundError:
-            continue
-        except Exception as exc:  # noqa: BLE001 - ledger enrichment is best-effort
-            logger.warning("[History] failed to read judge scores from %s: %s", path, exc)
-            continue
     return index
 
 
-def _history_from_evolve_file(config, *, limit: int = 50, session_id: str = "") -> list[dict[str, Any]]:
+def _history_from_object_store(
+    config,
+    *,
+    limit: int = 50,
+    session_id: str = "",
+) -> list[dict[str, Any]]:
     capped = max(1, int(limit or 50))
-
-    # Merge bucket records (per-tenant isolated) with legacy file records
-    # so historical data isn't lost after upgrading to the bucket path.
-    bucket_records: list[dict[str, Any]] = []
     bucket = _build_history_bucket(config)
-    if bucket is not None:
-        try:
-            from team_skills.evolution.store.object_store import load_history_records
+    if bucket is None:
+        return []
+    try:
+        from team_skills.evolution.store.object_store import load_history_records
 
-            bucket_records = load_history_records(bucket, session_id=session_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[History] bucket history read failed: %s", exc)
-
-    file_records: list[dict[str, Any]] = []
-    # The legacy evolve_history.jsonl is a process-global single-tenant file
-    # (CWD-relative) belonging to the default tenant. A switched tenant is
-    # isolated by its bucket (PG RLS / per-tenant Viking account), so never
-    # merge the global file into its evolution audit view.
-    if current_tenant_id() == DEFAULT_TENANT_ID:
-        for path in _evolve_history_path_candidates(config):
-            rows: list[dict[str, Any]] = []
-            try:
-                with open(path, "r", encoding="utf-8") as handle:
-                    for line in handle:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            record = json.loads(line)
-                        except Exception:
-                            continue
-                        if not isinstance(record, dict) or not _cycle_matches_session(record, session_id):
-                            continue
-                        rows.append(record)
-            except FileNotFoundError:
-                continue
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[History] failed to read evolve history %s: %s", path, exc)
-                continue
-            file_records.extend(rows)
-
-    # Dedup by timestamp + cycle_id, bucket wins on conflict.
-    seen: set[str] = set()
-    merged: list[dict[str, Any]] = []
-    for record in bucket_records + file_records:
-        key = str(record.get("timestamp") or "") + str(record.get("cycle_id") or "")
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(record)
-    merged.sort(key=lambda r: str(r.get("timestamp") or ""), reverse=True)
-    return [_filter_cycle_for_session(r, session_id) for r in merged[:capped]]
+        records = load_history_records(bucket, session_id=session_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[History] object-store history read failed: %s", exc)
+        return []
+    return [
+        _filter_cycle_for_session(record, session_id)
+        for record in records[:capped]
+    ]
 
 
 def _history_cycles(config, *, limit: int = 50, session_id: str = "") -> list[dict[str, Any]]:
-    cycles = _history_from_evolve_file(config, limit=limit, session_id=session_id)
+    cycles = _history_from_object_store(config, limit=limit, session_id=session_id)
     if cycles:
         return cycles
     return _history_from_archived_sessions(config, limit=limit, session_id=session_id)
@@ -1486,14 +1225,6 @@ def _candidate_skill_name(job: dict[str, Any]) -> str:
     )
 
 
-def _scrub_legacy_reward_text(text: Any) -> str:
-    value = str(text or "")
-    legacy_marker = "P" + "RM"
-    value = re.sub(rf"\s*\({legacy_marker}\s+[-+]?\d+(?:\.\d+)?\)", "", value, flags=re.IGNORECASE)
-    value = re.sub(rf"\b{legacy_marker}\b", "session quality score", value, flags=re.IGNORECASE)
-    return value
-
-
 def _candidate_payload(
     job: dict[str, Any],
     evaluation: dict[str, Any] | None = None,
@@ -1505,8 +1236,6 @@ def _candidate_payload(
         payload["skill_name"] = name
         payload.setdefault("candidate_skill_name", name)
     payload["proposed_action"] = str(payload.get("proposed_action") or payload.get("action") or "")
-    if payload.get("rationale"):
-        payload["rationale"] = _scrub_legacy_reward_text(payload.get("rationale"))
     if decision:
         status = str(decision.get("status") or "").strip()
         if not status:
@@ -1541,7 +1270,7 @@ def _candidate_payload(
     ]
     payload["test_dataset_count"] = len(test_datasets)
     payload["test_dataset_ids"] = [
-        str(item.get("dataset_id") or "") for item in test_datasets
+        str(item.get("case_id") or "") for item in test_datasets
     ]
     if evaluation:
         eval_payload = _evaluation_payload(job, evaluation, cached=True)
@@ -1573,7 +1302,6 @@ def _candidate_list_payloads(
     store: ValidationStore,
     *,
     scope: str = "open",
-    user_alias: str = "",
 ) -> list[dict[str, Any]]:
     normalized = str(scope or "open").strip().lower()
     if normalized in {"history", "processed", "closed", "decided"}:
@@ -1716,8 +1444,6 @@ def _normalize_efficiency(replay_summary: dict[str, Any]) -> dict[str, Any]:
     The dashboard reads only the flat shape, so recover it from whichever
     shape is available. Returns ``{}`` when no efficiency data was captured.
     """
-    if not isinstance(replay_summary, dict):
-        return {}
     efficiency = replay_summary.get("efficiency") if isinstance(replay_summary.get("efficiency"), dict) else {}
     if isinstance(efficiency.get("dimensions"), dict) and efficiency.get("dimensions"):
         dimensions = efficiency.get("dimensions") or {}
@@ -1843,7 +1569,7 @@ def _evaluation_payload(job: dict[str, Any], result: dict[str, Any], *, cached: 
     }
 
 
-async def _evaluate_candidate_job(config, owner, job: dict[str, Any]) -> dict[str, Any]:
+async def _evaluate_candidate_job(config, job: dict[str, Any]) -> dict[str, Any]:
     job_id = str(job.get("job_id") or "")
     try:
         from team_replay.contracts import skill_replay_spec
@@ -1926,27 +1652,39 @@ async def _evaluate_candidate_job(config, owner, job: dict[str, Any]) -> dict[st
     }
 
 
-def _load_current_skill_md_for_display(config, skill_name: str) -> str:
-    """Fetch the published baseline SKILL.md for candidate diff display.
+def _load_current_skill(config, skill_name: str) -> dict[str, Any] | None:
+    """Fetch one published Skill from the tenant's durable registry.
 
-    Always reads from the configured durable team Skill store (local/NAS or
-    OpenViking), which is the same store the evolve server publishes to.
-    Working Skill directories are deliberately not consulted because they can
-    drift from the published baseline.
+    Runtime-cache directories are deliberately not consulted because they are
+    rebuildable and may lag the authoritative SkillHub backend.
     """
     name = str(skill_name or "").strip()
     if not name:
-        return ""
+        return None
     try:
         hub = SkillHub.team_from_config(config, tenant_id=current_tenant_id())
-        for record in hub.list_remote():
+        for record in hub.list_skills():
             if str(record.get("name") or "") != name:
                 continue
-            bundle = hub._download_skill_bundle(name, record)
-            return bundle.get("SKILL.md", b"").decode("utf-8", errors="replace")
+            version = int(record.get("version") or 0)
+            if version <= 0:
+                return None
+            detail = hub.get_version_detail(name, version)
+            return {
+                "name": name,
+                "description": str(detail.get("description") or ""),
+                "category": str(detail.get("category") or "general"),
+                "content": str(detail.get("content") or ""),
+                "skill_md": str(detail.get("raw_md") or ""),
+            }
     except Exception:
         pass
-    return ""
+    return None
+
+
+def _load_current_skill_md_for_display(config, skill_name: str) -> str:
+    current = _load_current_skill(config, skill_name)
+    return str((current or {}).get("skill_md") or "")
 
 
 def _skill_diff_payload(job: dict[str, Any], config=None) -> dict[str, Any]:
@@ -1992,7 +1730,7 @@ def _skill_set_generation(values: dict[str, str]) -> str:
 def _skill_cache_status(owner, hub: SkillHub) -> dict[str, Any]:
     manifest = {
         str(item.get("name") or ""): dict(item)
-        for item in hub.list_remote()
+        for item in hub.list_skills()
         if str(item.get("name") or "")
     }
     try:
@@ -2008,9 +1746,9 @@ def _skill_cache_status(owner, hub: SkillHub) -> dict[str, Any]:
             record.get("tree_sha256") or record.get("sha256") or ""
         )
 
-    skills_dir = owner._skills_dir()
+    skills_dir = owner._skill_runtime_cache_dir()
     local: dict[str, str] = {}
-    for name, paths in hub._list_local_skill_dirs(skills_dir).items():
+    for name, paths in hub._list_cached_skill_dirs(skills_dir).items():
         if not paths:
             continue
         bundle = read_skill_bundle(paths[-1])
@@ -2055,20 +1793,16 @@ def _storage_status(config, owner=None) -> dict[str, Any]:
         "sharing_session_backend",
     )
     tenant_id = current_tenant_id()
-    endpoint = str(getattr(config, "sharing_viking_endpoint", "") or getattr(config, "sharing_endpoint", "") or "")
+    endpoint = str(getattr(config, "sharing_viking_endpoint", "") or "")
     deployment = str(getattr(config, "sharing_viking_deployment", "") or "cloud")
     namespace = "resources" if configured_skill_backend == "viking" else configured_skill_backend
-    api_key_present = bool(
-        str(getattr(config, "sharing_viking_team_api_key", "") or "")
-        or str(getattr(config, "sharing_viking_api_key", "") or "")
-    )
+    api_key_present = bool(str(getattr(config, "sharing_viking_api_key", "") or ""))
     payload: dict[str, Any] = {
         "backend": configured_skill_backend,
         "deployment": deployment,
         "endpoint": endpoint,
         "namespace": namespace,
         "api_key_present": api_key_present,
-        "sharing_enabled": bool(getattr(config, "sharing_enabled", False)),
         "fallback_enabled": bool(getattr(config, "sharing_local_fallback_enabled", True)),
         "effective_backend": configured_skill_backend,
         "fallback_active": False,
@@ -2114,10 +1848,20 @@ def _storage_status(config, owner=None) -> dict[str, Any]:
         session_effective_backend = "none"
         session_reachable = False
         if session_hub is not None:
-            session_source = session_hub.describe_source()
+            describe_source = getattr(session_hub, "describe_source", None)
+            session_source = (
+                describe_source()
+                if callable(describe_source)
+                else {
+                    "backend": configured_session_backend,
+                    "fallback": False,
+                }
+            )
             session_effective_backend = str(session_source.get("backend") or "")
             try:
-                session_hub._bucket.get_object("__storage_status_probe__")
+                get_object = getattr(session_hub._bucket, "get_object", None)
+                if callable(get_object):
+                    get_object("__storage_status_probe__")
             except Exception as exc:  # noqa: BLE001
                 if not is_not_found_error(exc):
                     raise
@@ -2243,23 +1987,15 @@ class RoutesMixin:
                     logger.warning("[Startup] main pool pre-warm failed", exc_info=True)
             owner._start_skill_reload_polling()
             owner._start_embedded_evolve()
+            if bool(
+                getattr(owner.config, "memory_maintenance_enabled", False)
+            ) and bool(
+                getattr(owner.config, "memory_maintenance_auto_start", False)
+            ):
+                owner._start_memory_maintenance()
             datasource_runtime = getattr(owner, "_datasource_pull_runtime", None)
             if datasource_runtime is not None:
                 datasource_runtime.start()
-            judge_queue = getattr(owner, "_session_judge_queue", None)
-            if judge_queue is not None:
-                try:
-                    judge_queue.start()
-                except Exception:  # noqa: BLE001 - post-ingest judging is best-effort
-                    logger.warning("[SessionJudge] queue start failed", exc_info=True)
-            # DreamCycle is superseded by the ov compile-based cross-user memory
-            # aggregation in team_memory. It no longer auto-starts;
-            # team memory is now maintained under viking://resources/shared-knowledge/.
-            if os.environ.get("TEAMEVOLVER_SKILLMINER_ENABLED", "1") == "1":
-                try:
-                    await asyncio.to_thread(owner._start_skillminer)
-                except Exception:
-                    logger.debug("[SkillMiner] eager start failed", exc_info=True)
             owner._ready_event.set()
             try:
                 yield
@@ -2271,7 +2007,7 @@ class RoutesMixin:
         app.state.owner = self
         self._console_sessions = getattr(self, "_console_sessions", None)
         if self._console_sessions is None:
-            self._console_sessions = _load_console_sessions(self.config)
+            self._console_sessions = {}
         self._console_sessions_lock = threading.RLock()
         dist_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "web", "dist"))
         dist_index = os.path.join(dist_dir, "index.html")
@@ -2291,41 +2027,52 @@ class RoutesMixin:
                     "created_at": now,
                     "expires_at": now + _SESSION_TTL_SECONDS,
                 }
-                _save_console_sessions(owner.config, owner._console_sessions)
+                IdentityStore(owner.config).session(token, value=owner._console_sessions[token])
             return token
 
         def _revoke_console_session(token: str) -> bool:
             with owner._console_sessions_lock:
-                if owner._console_sessions.pop(token, None) is not None:
-                    _save_console_sessions(owner.config, owner._console_sessions)
-                    return True
-            return False
+                owner._console_sessions.pop(token, None)
+                return IdentityStore(owner.config).session(token, delete=True)
 
         def _session_user(request: Request) -> dict | None:
             token = _console_session_token(request)
             if not token:
                 return None
-            with owner._console_sessions_lock:
-                session = owner._console_sessions.get(token)
+            session = IdentityStore(owner.config).session(token)
             if not isinstance(session, dict):
-                # Cache miss: the session may have been issued by another
-                # instance/worker, so re-read the shared store once before
-                # rejecting the caller (otherwise the console 401s whenever a
-                # request lands on a peer).
-                session = _refresh_console_sessions(owner, token)
-                if not isinstance(session, dict):
-                    return None
+                with owner._console_sessions_lock:
+                    owner._console_sessions.pop(token, None)
+                return None
             with owner._console_sessions_lock:
+                cached_session = owner._console_sessions.get(token)
+                if cached_session is None:
+                    owner._console_sessions[token] = session
+                else:
+                    # Each shared-store read returns a fresh dict. Replacing the
+                    # cached object made concurrent requests invalidate each
+                    # other at the identity check below. Keep one canonical
+                    # object per token while refreshing its persisted values.
+                    expires_at = max(
+                        float(cached_session.get("expires_at", 0) or 0),
+                        float(session.get("expires_at", 0) or 0),
+                    )
+                    cached_session.update(session)
+                    cached_session["expires_at"] = expires_at
+                    session = cached_session
                 if float(session.get("expires_at", 0) or 0) <= time.time():
                     _revoke_console_session(token)
                     return None
             user_id = str(session.get("user_id") or "")
             if not user_id:
                 return None
-            data = _load_registry(_registry_path(owner.config), owner.config)
+            data = IdentityStore(owner.config).load_registry()
             try:
                 _idx, user = _find_user(data, user_id)
             except HTTPException:
+                _revoke_console_session(token)
+                return None
+            if user.get("status", "active") != "active":
                 _revoke_console_session(token)
                 return None
             with owner._console_sessions_lock:
@@ -2333,15 +2080,15 @@ class RoutesMixin:
                     return None  # A concurrent logout must not resurrect it.
                 now = time.time()
                 last_renewed = float(session.get("expires_at", 0)) - _SESSION_TTL_SECONDS
-                legacy_cookie = _console_cookie_name(request) not in request.cookies
-                if legacy_cookie or now - last_renewed >= _SESSION_RENEW_INTERVAL_SECONDS:
+                if now - last_renewed >= _SESSION_RENEW_INTERVAL_SECONDS:
                     session["expires_at"] = now + _SESSION_TTL_SECONDS
-                    _save_console_sessions(owner.config, owner._console_sessions)
+                    if IdentityStore(owner.config).session(token, value=session, renew=True) is None:
+                        return None
                     request.state.renew_console_session = token
             return _public_user(user, owner.config)
 
         def _users_empty() -> bool:
-            data = _load_registry(_registry_path(owner.config), owner.config)
+            data = IdentityStore(owner.config).load_registry()
             return not bool(data.get("users"))
 
         @app.middleware("http")
@@ -2359,8 +2106,8 @@ class RoutesMixin:
             ``tevt_`` machine credentials map to tenants server-side — in
             multi-tenant deployments via the tenant's issued credential, in
             single-tenant deployments via the operator-configured default
-            credential. Console admins may switch via ``X-Tenant-Id``;
-            everything else stays on the implicit default tenant.
+            credential. Console users enter a tenant only through an explicit
+            ``X-Tenant-Id`` selector that is revalidated on every request.
             Registered between the embedded-dispatch and console-auth
             middlewares, so ``request.state.console_user`` is already set here.
             """
@@ -2377,11 +2124,10 @@ class RoutesMixin:
                         if ctx is None or ctx.status != "active":
                             return JSONResponse(status_code=401, content={"detail": "invalid tenant token"})
                         machine_paths = (
-                            "/ingest_session", "/langfuse/pull", "/api/datasource/pull", "/trigger", "/status",
+                            "/ingest_session", "/api/datasource/pull", "/trigger", "/status",
                             "/history", "/sessions", "/conversations", "/storage/status",
                             # Context uses the caller-declared user within the token's tenant.
-                            # Keep this entry scoped to /context — never widen it to
-                            # /internal/agents (that would expose /internal/agents/register).
+                            # Keep this entry scoped to /context.
                             "/internal/agents/context",
                         )
                         if path != "/sync/skills" and not any(
@@ -2396,48 +2142,49 @@ class RoutesMixin:
                                 return JSONResponse(
                                     status_code=403, content={"detail": "tenant mismatch"}
                                 )
-                    elif (
-                        claimed
-                        and registry.mode == "postgres"
-                        and not path.startswith("/v1/")
-                    ):
-                        # Accept the console-admin tenant selector on every
-                        # non-/v1/ endpoint (dashboard endpoints such as
-                        # /status, /conversations, /storage/status live
-                        # outside /api/ and must be tenant-scoped too).
+                    else:
                         user = getattr(request.state, "console_user", None)
-                        if user is None:
-                            return JSONResponse(
-                                status_code=401, content={"detail": "login required"}
-                            )
-                        if str(user.get("role") or "user") != "admin":
-                            return JSONResponse(
-                                status_code=403,
-                                content={"detail": "admin required for tenant switch"},
-                            )
-                        target = await asyncio.to_thread(registry.get, claimed)
-                        if target is None or target.status != "active":
-                            return JSONResponse(
-                                status_code=403,
-                                content={"detail": f"unknown tenant: {claimed}"},
-                            )
-                        ctx = target
-                        source = "console"
+                        if user is not None:
+                            try:
+                                ctx = await asyncio.to_thread(
+                                    bind_console_user, owner, request, user, claimed, _console_session_token(request),
+                                )
+                                enforce_platform_routes(request)
+                            except HTTPException as exc:
+                                return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+                            source = "console"
+                        elif claimed and not public_path(path) and not _is_reusable_aggregation_path(path):
+                            return JSONResponse(status_code=401, content={"detail": "login required"})
                 if ctx is None:
-                    ctx = registry.default_context()
+                    if source != "console":
+                        ctx = registry.default_context()
                 request.state.tenant = ctx
-                request.state.tenant_id = ctx.tenant_id
+                request.state.tenant_id = ctx.tenant_id if ctx else None
                 request.state.tenant_source = source
                 tenant_token = set_current_tenant(ctx)
                 try:
                     from ..logging_runtime import log_context
-                    with log_context(tenant=ctx.tenant_id,
+                    with log_context(tenant=ctx.tenant_id if ctx else "",
                                      user=(getattr(request.state, "console_user", None) or {}).get("id", "")):
+                        user = getattr(request.state, "console_user", None) or {}
+                        audited = source == "console" and not public_path(path) and (
+                            is_platform_admin(user) or request.method not in {"GET", "HEAD", "OPTIONS"}
+                        )
+                        if audited:
+                            # Persist before dispatch; an audit outage must not
+                            # silently enable unrecorded support operations.
+                            await asyncio.to_thread(
+                                IdentityStore(owner.config).audit, user["id"], "console.access",
+                                ctx.tenant_id if ctx else "", method=request.method, path=path,
+                                support_id=(user.get("support") or {}).get("id", ""),
+                            )
                         response = await call_next(request)
-                    if getattr(request.state, "agent_legacy_identity", False):
-                        response.headers["Deprecation"] = "@1789603200"
-                        response.headers["Sunset"] = "Thu, 17 Dec 2026 00:00:00 GMT"
-                        response.headers["Link"] = '</docs/agent-integration-protocol-v2.md>; rel="successor-version"'
+                        if audited:
+                            await asyncio.to_thread(
+                                IdentityStore(owner.config).audit, user["id"], "console.result",
+                                ctx.tenant_id if ctx else "", method=request.method, path=path,
+                                status=response.status_code, support_id=(user.get("support") or {}).get("id", ""),
+                            )
                     return response
                 finally:
                     reset_current_tenant(tenant_token)
@@ -2448,6 +2195,25 @@ class RoutesMixin:
                 raise
 
         @app.middleware("http")
+        async def redirect_zero_host(request: Request, call_next):
+            # Browsers treat 0.0.0.0 as a special address and scope cookies per
+            # host: a login on localhost is invisible to 0.0.0.0 (and some
+            # Chrome versions refuse to store cookies for 0.0.0.0 at all).
+            # Canonicalize to 127.0.0.1 so the console session cookie always
+            # matches the address bar.
+            host = (request.headers.get("host") or "").split(":")[0]
+            if host in {"0.0.0.0", "[::]"}:
+                from fastapi.responses import RedirectResponse
+
+                original_host = request.headers["host"]
+                port = original_host.split(":", 1)[1] if ":" in original_host else ""
+                target = str(request.url).replace(
+                    f"//{original_host}", f"//127.0.0.1{':' + port if port else ''}", 1
+                )
+                return RedirectResponse(target, status_code=308)
+            return await call_next(request)
+
+        @app.middleware("http")
         async def require_console_auth(request: Request, call_next):
             path = request.url.path
             import hmac
@@ -2456,64 +2222,72 @@ class RoutesMixin:
             bearer = _bearer_token(request)
             if root_key and bearer and hmac.compare_digest(bearer, root_key):
                 request.state.service_root_authenticated = True
-                request.state.console_user = {"id": "admin", "role": "admin"}
+                request.state.console_user = {
+                    "id": "service-root", "role": "user",
+                    "platform_role": "platform_admin", "service_root": True,
+                }
                 return await call_next(request)
-            if bearer.startswith(RETIRED_AGENT_TOKEN_PREFIX):
-                # Per-Agent access tokens are retired: agents must present the
-                # tenant machine credential. Answer with an actionable reason so
-                # credentials cached in agent configs are diagnosable.
-                return JSONResponse(
-                    status_code=401,
-                    content={"detail": "AGENT_ACCESS_TOKEN_RETIRED"},
-                )
-            if bool(getattr(owner.config, "storage_pg_enabled", False)):
-                if path.startswith("/v1/"):
+            if path.startswith("/v1/"):
+                if getattr(owner.config, "storage_pg_enabled", False):
                     return JSONResponse(status_code=401, content={"detail": "service root key required"})
-                public = path in {"/", "/console", "/health", "/healthz", "/readyz", "/favicon.ico"} or path.startswith(
-                    ("/assets/", "/docs-assets/", "/api/auth/")
-                )
-                if not public and not path.startswith("/v1/"):
-                    user = await asyncio.to_thread(_session_user, request)
-                    if user is not None:
-                        request.state.console_user = user
-                    elif not bearer.startswith(AGENT_TOKEN_PREFIX):
-                        return JSONResponse(status_code=401, content={"detail": "login or tenant token required"})
-                    # Tenant tokens are authenticated by the inner middleware;
-                    # admin-only handlers still require an admin console user.
-                    return await call_next(request)
-            reusable_aggregation = _is_reusable_aggregation_path(path)
-            requires_auth = (
-                path.startswith("/api/")
-                and not path.startswith("/api/auth/")
-                and not reusable_aggregation
-            )
-            if reusable_aggregation:
-                user = await asyncio.to_thread(_session_user, request)
-                if user is not None:
-                    request.state.console_user = user
-            elif requires_auth:
-                if await asyncio.to_thread(_users_empty):
-                    return JSONResponse(status_code=401, content={"detail": "setup required", "needs_setup": True})
-                user = await asyncio.to_thread(_session_user, request)
-                if user is None:
-                    return JSONResponse(status_code=401, content={"detail": "login required"})
+                return await call_next(request)  # Model proxy checks its own credential.
+            if bearer.startswith(AGENT_TOKEN_PREFIX):
+                return await call_next(request)  # Tenant middleware validates machine path and tenant.
+            user = await asyncio.to_thread(_session_user, request)
+            if user is not None:
                 request.state.console_user = user
-            elif not path.startswith("/v1/"):
-                # Non-/v1/ dashboard endpoints (e.g. /conversations, /status,
-                # /storage/status) are not auth-gated, but the tenant_context
-                # middleware still needs console_user to validate an admin's
-                # X-Tenant-Id selector. Set it opportunistically when a valid
-                # session cookie is present; absent a session the request
-                # proceeds as an anonymous (default-tenant) view.
-                user = await asyncio.to_thread(_session_user, request)
-                if user is not None:
-                    request.state.console_user = user
+            elif not public_path(path) and not _is_reusable_aggregation_path(path):
+                # Debug: log which cookies arrived so a missing/misnamed
+                # session cookie is visible instead of a bare 401.
+                import hashlib as _hashlib
+
+                _tok = _console_session_token(request)
+                _fp = _hashlib.sha256(_tok.encode()).hexdigest()[:16] if _tok else "(empty)"
+                _store = IdentityStore(owner.config)
+                _dbg = (
+                    f"pg={_store.pg} prefix={_store.prefix!r} "
+                    f"dsn={str(getattr(_store.runtime, '_dsn', ''))[:40]!r}"
+                    if _store.pg else "pg=False(sqlite)"
+                )
+                _recheck = None
+                if _store.pg and _tok:
+                    try:
+                        import asyncpg as _asyncpg
+
+                        from ..storage.pg_pool import dsn_from_env as _dsn_env
+
+                        async def _probe():
+                            conn = await _asyncpg.connect(_dsn_env())
+                            row = await conn.fetchrow(
+                                "SELECT id FROM teamevolver.console_login_sessions WHERE id=$1", _fp_full,
+                            )
+                            await conn.close()
+                            return row
+
+                        _fp_full = _hashlib.sha256(_tok.encode()).hexdigest()
+                        _recheck = _store.runtime.run(_probe(), timeout=10) is not None
+                    except Exception as _exc:  # noqa: BLE001
+                        _recheck = f"probe error: {_exc}"
+                logger.warning(
+                    "[Auth] 401 for %s — cookies: %s, token fp=%s, store: %s, independent probe hit=%s",
+                    path, sorted(request.cookies.keys()) or "(none)", _fp, _dbg, _recheck,
+                )
+                # Browser business endpoints require a session in both modes.
+                machine_path = path in {
+                    "/ingest_session",
+                    "/internal/reload-skills",
+                }
+                if not machine_path:
+                    return JSONResponse(status_code=401, content={"detail": "login required"})
             return await call_next(request)
 
         @app.middleware("http")
         async def renew_console_cookie(request: Request, call_next):
             response = await call_next(request)
-            token = getattr(request.state, "renew_console_session", "")
+            token = (
+                getattr(request.state, "renew_console_session", "")
+                or getattr(request.state, "migrate_console_session", "")
+            )
             # Login/register/bootstrap issue a new token; logout deletes it.
             # Never overwrite those responses with the previous session.
             if token and request.url.path not in {
@@ -2561,12 +2335,13 @@ class RoutesMixin:
         self._register_platform_assets_routes(app)
         self._register_openviking_workspace_routes(app)
         self._register_knowledge_mining_routes(app)
+        self._register_skillminer_routes(app)
         self._register_memory_debug_routes(app)
         self._register_agent_context_routes(app)
-        self._register_skillminer_routes(app)
-        self._register_docs_routes(app)
         self._register_aggregation_routes(app)
         register_tenant_routes(self, app)
+        from .identity_routes import register_identity_routes
+        register_identity_routes(self, app)
         from .replay_routes import register_replay_adapter_routes
         register_replay_adapter_routes(self, app)
         from session_ingestion import register_routes as register_ingestion_routes
@@ -2588,7 +2363,7 @@ class RoutesMixin:
         async def model_proxy_models(request: Request):
             _check_model_proxy_api_key(request)
             config = _tenant_effective_config(owner)
-            model = str(config.llm_model_id or config.model_name or "")
+            model = str(config.llm_model_id or "")
             return {
                 "object": "list",
                 "data": [
@@ -2612,8 +2387,22 @@ class RoutesMixin:
             headers = _upstream_chat_headers(config)
             dispatcher = _dispatcher_for(
                 current_tenant_id(),
-                int(getattr(config, "llm_max_concurrency", 8) or 8),
-                int(getattr(config, "llm_queue_capacity", 64) or 64),
+                int(
+                    getattr(
+                        config,
+                        "llm_max_concurrency",
+                        DEFAULT_LLM_MAX_CONCURRENCY,
+                    )
+                    or DEFAULT_LLM_MAX_CONCURRENCY
+                ),
+                int(
+                    getattr(
+                        config,
+                        "llm_queue_capacity",
+                        DEFAULT_LLM_QUEUE_CAPACITY,
+                    )
+                    or DEFAULT_LLM_QUEUE_CAPACITY
+                ),
             )
             timeout = httpx.Timeout(connect=30.0, read=600.0, write=60.0, pool=30.0)
             if payload.get("stream"):
@@ -2677,13 +2466,16 @@ class RoutesMixin:
                 "customer_mode": os.environ.get("TEAMEVOLVER_CUSTOMER_MODE") == "1",
                 "authenticated": bool(user),
                 "needs_setup": await asyncio.to_thread(_users_empty),
+                "self_registration_enabled": owner.config.self_registration_enabled,
                 "user": user,
+                "available_tenants": await asyncio.to_thread(available_tenants, owner, user) if user else [],
+                "active_tenant_id": (user or {}).get("tenant_id"),
             }
 
         @app.post("/api/auth/bootstrap")
         async def auth_bootstrap(request: Request):
             if getattr(owner.config, "storage_pg_enabled", False) and not _users_empty():
-                _require_admin_user(getattr(request.state, "console_user", None))
+                require_platform_admin(getattr(request.state, "console_user", None))
             if not _users_empty():
                 raise HTTPException(status_code=409, detail="users already exist")
             body = await request.json()
@@ -2699,11 +2491,15 @@ class RoutesMixin:
                 "role": "admin",
                 "password": password,
             }
-            path = _registry_path(owner.config)
-            data = _load_registry(path, owner.config)
-            user = _upsert_user(data, payload, config=owner.config)
-            _save_registry(path, data, owner.config)
-            sync_openviking_user(owner.config, str(user.get("id") or ""))
+            def bootstrap(data):
+                if data["users"]:
+                    raise HTTPException(409, "users already exist")
+                result = _upsert_user(data, payload, config=owner.config)
+                result["platform_role"] = "platform_admin"
+                return result
+            user = await asyncio.to_thread(
+                IdentityStore(owner.config).edit_users, bootstrap, actor="bootstrap", action="user.bootstrap",
+            )
             token = await asyncio.to_thread(_issue_console_session, str(user.get("id") or ""))
             resp = JSONResponse(
                 content={
@@ -2724,13 +2520,15 @@ class RoutesMixin:
             password = str(body.get("password") or "")
             if not username or not password:
                 raise HTTPException(status_code=400, detail="username and password are required")
-            data = _load_registry(_registry_path(owner.config), owner.config)
+            data = IdentityStore(owner.config).load_registry()
             try:
                 _idx, user = _find_user(data, username)
             except HTTPException as exc:
                 raise HTTPException(status_code=401, detail="invalid username or password") from exc
             if not user.get("password_hash") or not _verify_password(password, str(user.get("password_hash") or "")):
                 raise HTTPException(status_code=401, detail="invalid username or password")
+            if user.get("status", "active") != "active":
+                raise HTTPException(status_code=403, detail="USER_DISABLED")
             token = await asyncio.to_thread(_issue_console_session, str(user.get("id") or ""))
             resp = JSONResponse(
                 content={
@@ -2744,6 +2542,12 @@ class RoutesMixin:
 
         @app.post("/api/auth/register")
         async def auth_register(request: Request):
+            # Only the authentication middleware can grant this bypass. Neither
+            # an admin cookie nor a supplied (but unverified) key is sufficient.
+            if not owner.config.self_registration_enabled and not getattr(
+                request.state, "service_root_authenticated", False
+            ):
+                raise HTTPException(status_code=403, detail="SELF_REGISTRATION_DISABLED")
             if _users_empty():
                 raise HTTPException(status_code=409, detail="setup required; initialize the admin account first")
             body = await request.json()
@@ -2753,8 +2557,7 @@ class RoutesMixin:
             password = str(body.get("password") or "")
             if not username or not password:
                 raise HTTPException(status_code=400, detail="username and password are required")
-            path = _registry_path(owner.config)
-            data = _load_registry(path, owner.config)
+            data = IdentityStore(owner.config).load_registry()
             if any(str(user.get("id") or "") == username for user in data.get("users") or []):
                 raise HTTPException(status_code=409, detail="user already exists")
             payload = {
@@ -2764,9 +2567,14 @@ class RoutesMixin:
                 "role": "user",
                 "password": password,
             }
-            user = _upsert_user(data, payload, config=owner.config)
-            _save_registry(path, data, owner.config)
-            sync_openviking_user(owner.config, str(user.get("id") or ""))
+            def register(data):
+                from .users_admin import _slug
+                if any(u["id"] == _slug(username) for u in data["users"]):
+                    raise HTTPException(409, "user already exists")
+                return _upsert_user(data, payload, config=owner.config)
+            user = await asyncio.to_thread(
+                IdentityStore(owner.config).edit_users, register, actor=username, action="user.register",
+            )
             token = await asyncio.to_thread(_issue_console_session, str(user.get("id") or ""))
             resp = JSONResponse(
                 content={
@@ -2785,11 +2593,7 @@ class RoutesMixin:
                 await asyncio.to_thread(_revoke_console_session, token)
             resp = JSONResponse(content={"authenticated": False})
             resp.delete_cookie(_console_cookie_name(request), path="/", secure=request.url.scheme == "https")
-            legacy_token = request.cookies.get(_SESSION_COOKIE, "")
-            if legacy_token and (
-                legacy_token == token or await asyncio.to_thread(_revoke_console_session, legacy_token)
-            ):
-                resp.delete_cookie(_SESSION_COOKIE, path="/")
+            resp.delete_cookie(_SESSION_COOKIE, path="/", secure=request.url.scheme == "https")
             return resp
 
         @app.get("/api/team-settings")
@@ -2808,7 +2612,7 @@ class RoutesMixin:
 
         @app.post("/api/team-settings")
         async def api_save_team_settings(request: Request):
-            _require_admin_user(getattr(request.state, "console_user", None) or _session_user(request))
+            require_platform_admin(getattr(request.state, "console_user", None))
             body = await request.json()
             if not isinstance(body, dict):
                 raise HTTPException(
@@ -2841,12 +2645,6 @@ class RoutesMixin:
             data.setdefault("team", {})["display_name"] = display_name
             store.save(data)
             config = store.to_config()
-            config = replace(
-                config,
-                users_registry_path=str(
-                    getattr(owner.config, "users_registry_path", "") or ""
-                ),
-            )
             await owner._reload_openviking_integrations(config)
             return JSONResponse(
                 content=_team_settings_payload(config, data)
@@ -2885,14 +2683,20 @@ class RoutesMixin:
 
             model = str(body.get("model") or "").strip()
             base_url = str(body.get("base_url") or "").strip()
-            provider = str(body.get("provider") or "custom").strip() or "custom"
             if not model:
                 raise HTTPException(status_code=400, detail="model is required")
             if not base_url:
                 raise HTTPException(status_code=400, detail="base_url is required")
             current_config = _tenant_effective_config(owner)
             try:
-                max_tokens = max(1, int(body.get("max_tokens") or current_config.llm_max_tokens or 100000))
+                max_tokens = max(
+                    1,
+                    int(
+                        body.get("max_tokens")
+                        or current_config.llm_max_tokens
+                        or DEFAULT_LLM_MAX_TOKENS
+                    ),
+                )
                 temperature = float(
                     body.get("temperature")
                     if body.get("temperature") is not None
@@ -2905,7 +2709,7 @@ class RoutesMixin:
                         int(
                             body.get("max_concurrency")
                             or current_config.llm_max_concurrency
-                            or 8
+                            or DEFAULT_LLM_MAX_CONCURRENCY
                         ),
                     ),
                 )
@@ -2916,7 +2720,7 @@ class RoutesMixin:
                         int(
                             body.get("queue_capacity")
                             or current_config.llm_queue_capacity
-                            or 64
+                            or DEFAULT_LLM_QUEUE_CAPACITY
                         ),
                     ),
                 )
@@ -2944,10 +2748,9 @@ class RoutesMixin:
             if raw_key is not None and str(raw_key).strip():
                 api_key = str(raw_key).strip()
             ctx = get_current_tenant()
-            if ctx is not None and not ctx.is_default():
+            if ctx is not None and get_tenant_registry(owner).mode == "postgres":
                 registry = get_tenant_registry(owner)
                 overrides = {
-                    "llm_provider": provider,
                     "llm_api_base": base_url,
                     "llm_model_id": model,
                     "llm_api_key": api_key,
@@ -2973,14 +2776,13 @@ class RoutesMixin:
                         ctx.tenant_id,
                         reason="tenant model config updated",
                     )
+                await asyncio.to_thread(owner._stop_skillminer)
                 effective = effective_config(registry, updated, owner.config)
-                owner._stop_skillminer()
                 return JSONResponse(
                     content=_model_settings_payload(effective, data)
                 )
             llm.update(
                 {
-                    "provider": provider,
                     "api_base": base_url,
                     "model_id": model,
                     "api_key": api_key,
@@ -2997,7 +2799,6 @@ class RoutesMixin:
                 owner,
                 "llm",
                 {
-                    "provider": provider,
                     "api_base": base_url,
                     "model_id": model,
                     "api_key": api_key,
@@ -3008,7 +2809,7 @@ class RoutesMixin:
                 },
             )
             await owner._reload_openviking_integrations(store.to_config())
-            owner._stop_skillminer()
+            await asyncio.to_thread(owner._stop_skillminer)
             return JSONResponse(content=_model_settings_payload(owner.config, data))
 
         @app.get("/api/skill-evolution/settings")
@@ -3021,13 +2822,15 @@ class RoutesMixin:
                 if config_file
                 else ConfigStore()
             )
-            data = store.load()
-            # PG config_kv takes priority over YAML for dreamcycle section
-            pg_dreamcycle = _pg_config_get(owner, "dreamcycle")
-            if pg_dreamcycle and isinstance(pg_dreamcycle, dict):
-                merged = dict(data.get("dreamcycle", {}))
-                merged.update(pg_dreamcycle)
-                data["dreamcycle"] = merged
+            data = settings_data(store.load())
+            pg_memory = _pg_config_get(owner, "memory")
+            if pg_memory and isinstance(pg_memory, dict):
+                memory = data.setdefault("memory", {})
+                for section in ("maintenance", "aggregation"):
+                    if isinstance(pg_memory.get(section), dict):
+                        merged = dict(memory.get(section, {}))
+                        merged.update(pg_memory[section])
+                        memory[section] = merged
             return JSONResponse(
                 content=_evolve_settings_payload(owner.config, data)
             )
@@ -3059,10 +2862,11 @@ class RoutesMixin:
                 if config_file
                 else ConfigStore()
             )
-            data = store.load()
+            data = settings_data(store.load())
             evolve = data.setdefault("evolve", {})
             validation = data.setdefault("validation", {})
-            dreamcycle = data.setdefault("dreamcycle", {})
+            memory = data.setdefault("memory", {})
+            maintenance = memory.setdefault("maintenance", {})
 
             def _bounded_int(
                 source: dict[str, Any],
@@ -3104,20 +2908,6 @@ class RoutesMixin:
                     detail="publish_mode must be direct or validated",
                 )
             evolve["publish_mode"] = publish_mode
-            evolve["validation_max_rejections"] = _bounded_int(
-                evolve_in,
-                "validation_max_rejections",
-                evolve.get("validation_max_rejections", 1),
-                minimum=1,
-                maximum=100,
-            )
-            evolve["human_review_timeout_seconds"] = _bounded_int(
-                evolve_in,
-                "human_review_timeout_seconds",
-                evolve.get("human_review_timeout_seconds", 86400),
-                minimum=1,
-                maximum=365 * 86400,
-            )
             evolve["interval_seconds"] = _bounded_int(
                 evolve_in,
                 "interval_seconds",
@@ -3238,8 +3028,6 @@ class RoutesMixin:
                 ("poll_interval_seconds", 1, 86400, 60),
                 ("max_jobs_per_day", 0, 10000, 5),
                 ("max_concurrency", 1, 100, 1),
-                ("required_results", 1, 100, 3),
-                ("required_approvals", 1, 100, 2),
             ):
                 validation[key] = _bounded_int(
                     validation_in,
@@ -3248,51 +3036,26 @@ class RoutesMixin:
                     minimum=minimum,
                     maximum=maximum,
                 )
-            if validation["required_approvals"] > validation["required_results"]:
-                raise HTTPException(
-                    status_code=400,
-                    detail="required_approvals cannot exceed required_results",
-                )
-
             for key in ("enabled", "auto_start"):
                 if key in memory_in:
-                    dreamcycle[key] = bool(memory_in[key])
-            if "customer_id" in memory_in:
-                dreamcycle["customer_id"] = str(
-                    memory_in.get("customer_id") or ""
-                ).strip()
-                dreamcycle.pop("peer_id", None)
-            for key, fallback in (
-                ("dedup_merge_threshold", 0.86),
-                ("dedup_warn_threshold", 0.72),
-            ):
-                if key not in memory_in:
-                    continue
-                try:
-                    value = float(memory_in[key])
-                except (TypeError, ValueError) as exc:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"DreamCycle {key} must be numeric",
-                    ) from exc
-                dreamcycle[key] = max(-1.0, min(1.0, value))
-            if (
-                float(dreamcycle.get("dedup_warn_threshold", 0.72))
-                > float(dreamcycle.get("dedup_merge_threshold", 0.86))
-            ):
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "DreamCycle dedup_warn_threshold cannot exceed "
-                        "dedup_merge_threshold"
-                    ),
+                    maintenance[key] = bool(memory_in[key])
+            if "interval_seconds" in memory_in:
+                maintenance["interval_seconds"] = _bounded_int(
+                    memory_in,
+                    "interval_seconds",
+                    maintenance.get("interval_seconds", 86400),
+                    minimum=60,
+                    maximum=365 * 86400,
                 )
 
+            if await save_settings(owner, store, data):
+                return JSONResponse(content=_evolve_settings_payload(_tenant_effective_config(owner), data))
             store.save(data)
-            # Persist dreamcycle section to PG config_kv
-            pg_dreamcycle = dict(dreamcycle)
             await asyncio.to_thread(
-                _pg_config_put, owner, "dreamcycle", pg_dreamcycle
+                _pg_config_put,
+                owner,
+                "memory",
+                dict(memory),
             )
             await owner._reload_openviking_integrations(store.to_config())
             return JSONResponse(
@@ -3320,7 +3083,7 @@ class RoutesMixin:
 
         @app.post("/api/langfuse-tracing-config")
         async def api_save_langfuse_tracing_config(request: Request):
-            _require_admin_user(
+            require_platform_admin(
                 getattr(request.state, "console_user", None)
                 or _session_user(request)
             )
@@ -3406,6 +3169,15 @@ class RoutesMixin:
                         )
                     ),
                 )
+                timeout_seconds = max(
+                    1,
+                    int(
+                        body.get(
+                            "timeout_seconds",
+                            langfuse.get("tracing_timeout_seconds", 30),
+                        )
+                    ),
+                )
             except (TypeError, ValueError) as exc:
                 raise HTTPException(
                     status_code=400,
@@ -3450,6 +3222,7 @@ class RoutesMixin:
                     ),
                     "tracing_flush_at": flush_at,
                     "tracing_flush_interval_seconds": flush_interval_seconds,
+                    "tracing_timeout_seconds": timeout_seconds,
                 }
             )
             store.save(data)
@@ -3463,7 +3236,7 @@ class RoutesMixin:
 
         @app.post("/api/langfuse-tracing-config/test")
         async def api_test_langfuse_tracing_config(request: Request):
-            _require_admin_user(
+            require_platform_admin(
                 getattr(request.state, "console_user", None)
                 or _session_user(request)
             )
@@ -3502,7 +3275,9 @@ class RoutesMixin:
                 host=host,
                 public_key=public_key,
                 secret_key=secret_key,
-                timeout=float(owner.config.langfuse_timeout_seconds or 30),
+                timeout=float(
+                    owner.config.langfuse_tracing_timeout_seconds or 30
+                ),
             )
             try:
                 health = await asyncio.to_thread(client.health)
@@ -3542,19 +3317,34 @@ class RoutesMixin:
             config = _tenant_effective_config(owner)
             api_key = str(getattr(config, "llm_api_key", "") or "")
             base_url = str(getattr(config, "llm_api_base", "") or "")
-            model = str(getattr(config, "llm_model_id", "") or getattr(config, "model_name", "") or "")
+            model = str(getattr(config, "llm_model_id", "") or "")
             return AsyncLLMClient(
                 api_key=api_key,
-                base_url=base_url or "https://api.openai.com/v1",
+                base_url=base_url,
                 model=model or "not-configured",
-                max_tokens=int(getattr(config, "llm_max_tokens", 100000) or 100000),
-                temperature=float(getattr(config, "llm_temperature", 0.4) or 0.4),
+                max_tokens=int(
+                    getattr(config, "llm_max_tokens", DEFAULT_LLM_MAX_TOKENS)
+                    or DEFAULT_LLM_MAX_TOKENS
+                ),
+                temperature=float(
+                    getattr(config, "llm_temperature", DEFAULT_LLM_TEMPERATURE)
+                ),
                 tenant_id=current_tenant_id(),
                 max_concurrency=int(
-                    getattr(config, "llm_max_concurrency", 8) or 8
+                    getattr(
+                        config,
+                        "llm_max_concurrency",
+                        DEFAULT_LLM_MAX_CONCURRENCY,
+                    )
+                    or DEFAULT_LLM_MAX_CONCURRENCY
                 ),
                 queue_capacity=int(
-                    getattr(config, "llm_queue_capacity", 64) or 64
+                    getattr(
+                        config,
+                        "llm_queue_capacity",
+                        DEFAULT_LLM_QUEUE_CAPACITY,
+                    )
+                    or DEFAULT_LLM_QUEUE_CAPACITY
                 ),
             )
 
@@ -3698,14 +3488,29 @@ class RoutesMixin:
             if not base_url or not model or not api_key:
                 raise HTTPException(status_code=400, detail="base_url, model and api_key are required for test")
             try:
-                from ..llm import _call_in_pool, _dispatcher_for
                 from openai import OpenAI
+
+                from ..llm import _call_in_pool, _dispatcher_for
 
                 started = time.time()
                 dispatcher = _dispatcher_for(
                     current_tenant_id(),
-                    int(getattr(config, "llm_max_concurrency", 8) or 8),
-                    int(getattr(config, "llm_queue_capacity", 64) or 64),
+                    int(
+                        getattr(
+                            config,
+                            "llm_max_concurrency",
+                            DEFAULT_LLM_MAX_CONCURRENCY,
+                        )
+                        or DEFAULT_LLM_MAX_CONCURRENCY
+                    ),
+                    int(
+                        getattr(
+                            config,
+                            "llm_queue_capacity",
+                            DEFAULT_LLM_QUEUE_CAPACITY,
+                        )
+                        or DEFAULT_LLM_QUEUE_CAPACITY
+                    ),
                 )
 
                 def call_model():
@@ -3761,336 +3566,6 @@ class RoutesMixin:
 
 
 
-
-
-
-
-
-
-        async def _register_agent_runtime(body: dict[str, Any]) -> dict[str, Any]:
-            """Register an Agent and optionally merge cloud OpenViking sources.
-
-            The durable teamEvolver config is authoritative. In local deployment
-            mode an external Agent may register capabilities/endpoints, but it
-            cannot replace the local OpenViking endpoint or credentials.
-            """
-            try:
-                agent = register_agent(owner.config, body)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            registration_fields: dict[str, Any] = {
-                "agent": public_agent_record(agent),
-            }
-            raw_subject_mappings = body.get("subject_mappings")
-            if is_v1_payload(body) and raw_subject_mappings is not None:
-                if not isinstance(raw_subject_mappings, list):
-                    raise HTTPException(
-                        status_code=400,
-                        detail="subject_mappings must be a list",
-                    )
-                try:
-                    registration_fields["subject_sync"] = (
-                        sync_agent_subject_mappings(
-                            owner.config,
-                            integration_id=str(agent.get("agent_id") or ""),
-                            runtime_type=str(agent.get("runtime_type") or ""),
-                            mappings=raw_subject_mappings,
-                            authoritative=bool(
-                                body.get(
-                                    "subject_mappings_authoritative",
-                                    False,
-                                )
-                            ),
-                        )
-                    )
-                except ValueError as exc:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=str(exc),
-                    ) from exc
-
-            storage = body.get("storage") if isinstance(body.get("storage"), dict) else {}
-            config_file = str(
-                getattr(owner.config, "_config_file", "") or ""
-            ).strip()
-            store = (
-                ConfigStore(config_file=Path(config_file))
-                if config_file
-                else ConfigStore()
-            )
-            data = store.load()
-            sharing = data.setdefault("sharing", {})
-            deployment = str(sharing.get("viking_deployment") or "cloud").strip().lower()
-            durable_config = store.to_config()
-            if deployment == "local":
-                current_endpoint = str(
-                    getattr(owner.config, "sharing_viking_endpoint", "") or ""
-                ).rstrip("/")
-                durable_endpoint = str(
-                    durable_config.sharing_viking_endpoint or ""
-                ).rstrip("/")
-                if current_endpoint != durable_endpoint:
-                    await owner._reload_openviking_integrations(durable_config)
-                return {
-                    "ok": True,
-                    **registration_fields,
-                    "storage_authority": "teamEvolver",
-                    "storage_updated": False,
-                    "storage_ignored_reason": "local_deployment_is_authoritative",
-                    "account": durable_config.sharing_viking_account,
-                    "team_user": durable_config.sharing_viking_user,
-                }
-
-            endpoint = str(storage.get("endpoint") or "").strip()
-            account = str(storage.get("account") or "").strip()
-            personal_user = str(storage.get("personal_user") or "").strip()
-            configured_team_user = str(storage.get("team_user") or "").strip()
-            team_key = str(
-                storage.get("service_api_key") or storage.get("team_api_key") or ""
-            ).strip()
-            if not endpoint and not team_key:
-                return {
-                    "ok": True,
-                    **registration_fields,
-                    "storage_authority": "teamEvolver",
-                    "storage_updated": False,
-                }
-            if not endpoint or not team_key:
-                raise HTTPException(
-                    status_code=400,
-                    detail="storage.endpoint and storage.service_api_key must be provided together",
-                )
-
-            from team_memory.maintenance.integrations.dreamcycle import parse_openviking_key
-
-            key_account, encoded_team_user = parse_openviking_key(team_key)
-            team_user = encoded_team_user or configured_team_user
-            if not team_user:
-                raise HTTPException(
-                    status_code=400,
-                    detail="storage.team_user is required when the service key has no encoded user",
-                )
-            sharing.update(
-                {
-                    "enabled": True,
-                    "backend": "viking",
-                    "viking_endpoint": endpoint,
-                    "viking_account": key_account or account,
-                    "viking_personal_user": personal_user,
-                    "viking_user": team_user,
-                    "viking_team_api_key": team_key,
-                }
-            )
-            sharing.pop("viking_personal_api_key", None)
-            sharing.pop("viking_personal_api_keys", None)
-            # DreamCycle is retired in favor of the ov compile-based cross-user
-            # memory aggregation in team_memory, so agent
-            # registration no longer auto-enables or auto-starts it.
-            for key in (
-                "viking_endpoint",
-                "viking_api_key",
-                "viking_account",
-                "viking_team_user",
-            ):
-                data["dreamcycle"].pop(key, None)
-            store.save(data)
-            config = store.to_config()
-            await owner._reload_openviking_integrations(config)
-            return {
-                "ok": True,
-                **registration_fields,
-                "storage_authority": "shared_agent_config",
-                "storage_updated": True,
-                "account": key_account or account,
-                "team_user": team_user,
-            }
-
-        @app.post("/internal/agents/register")
-        async def register_agent_runtime(request: Request):
-            body = await _read_limited_json_body(request)
-            if is_v1_payload(body):
-                _check_v1_control_plane_key(request)
-            else:
-                _check_ingest_api_key(request)
-            return await _register_agent_runtime(body)
-
-        @app.post("/internal/agentshub/openviking-config")
-        async def sync_agentshub_openviking_config(request: Request):
-            """Backward-compatible adapter for older AgentsHub builds."""
-            _check_ingest_api_key(request)
-            body = await _read_limited_json_body(request)
-            return await _register_agent_runtime(
-                {
-                    "agent_id": str(body.get("agent_id") or "agentshub"),
-                    "runtime_type": "agentshub",
-                    "display_name": "AgentsHub",
-                    "capabilities": [
-                        "session_ingest",
-                        "true_replay",
-                        "skill_sync",
-                        "openviking_context",
-                    ],
-                    "endpoints": body.get("endpoints") or {},
-                    "metadata": body.get("metadata") or {},
-                    "storage": {
-                        "endpoint": body.get("endpoint"),
-                        "account": body.get("account"),
-                        "personal_user": body.get("personal_user"),
-                        "team_user": body.get("team_user"),
-                        "team_api_key": body.get("team_api_key"),
-                    },
-                }
-            )
-
-        @app.get("/api/agent-integrations")
-        async def api_agent_integrations():
-            config = _tenant_effective_config(owner)
-            skill_outbox = (
-                await asyncio.to_thread(
-                    SkillMutationService.from_config(config, tenant_id=current_tenant_id()).health
-                )
-                if getattr(config, "sharing_enabled", False)
-                else {
-                    "backlog": 0,
-                    "oldest_age_seconds": 0,
-                    "dead_letter": 0,
-                    "last_error": "",
-                }
-            )
-            return {
-                "agents": [
-                    public_agent_record(agent)
-                    for agent in list_agents(owner.config)
-                ],
-                "skills_delivery_mode": getattr(config, "skills_delivery_mode", "push"),
-                "skill_sync_outbox": skill_outbox,
-                "storage_authority": "teamEvolver",
-                "storage_deployment": str(
-                    getattr(owner.config, "sharing_viking_deployment", "") or "cloud"
-                ),
-                "default_team_user": str(
-                    getattr(owner.config, "sharing_viking_user", "") or "team"
-                ),
-            }
-
-        @app.post("/api/agent-integrations")
-        async def api_register_agent_integration(request: Request):
-            """Console-side Agent registration (admin session auth).
-
-            Builds a V1 registration payload from simple form fields and
-            reuses the same registration path as the control-plane endpoint.
-            ``auth_profile`` left empty means the replay endpoint is called
-            without a Bearer key (trusted-network deployments)."""
-            _require_admin_user(getattr(request.state, "console_user", None))
-            body = await request.json()
-            if not isinstance(body, dict):
-                raise HTTPException(status_code=400, detail="body must be an object")
-            agent_id = str(body.get("agent_id") or "").strip()
-            runtime_type = str(body.get("runtime_type") or "").strip()
-            replay_url = str(body.get("replay_url") or "").strip()
-            if not agent_id or not runtime_type or not replay_url:
-                raise HTTPException(
-                    status_code=400,
-                    detail="agent_id, runtime_type and replay_url are required",
-                )
-            try:
-                max_interactions = max(1, min(20, int(body.get("max_interactions") or 10)))
-            except (TypeError, ValueError) as exc:
-                raise HTTPException(
-                    status_code=400, detail="max_interactions must be an integer"
-                ) from exc
-            capability: dict[str, Any] = {
-                "transport": "http",
-                "orchestration": str(body.get("orchestration") or "server_driven"),
-                "endpoint": replay_url,
-                "max_interactions": max_interactions,
-            }
-            auth_profile = str(body.get("auth_profile") or "").strip()
-            if auth_profile:
-                capability["auth_profile"] = auth_profile
-            # Zero agent-side awareness mode: render turns into the agent's
-            # own request shape and extract results via dotted-path mapping.
-            request_template = body.get("request_template")
-            if isinstance(request_template, dict) and request_template:
-                capability["request_template"] = request_template
-            response_mapping = body.get("response_mapping")
-            if isinstance(response_mapping, dict) and response_mapping:
-                capability["response_mapping"] = response_mapping
-            capabilities: dict[str, Any] = {"replay.branch.v1": capability}
-            if bool(body.get("session_ingest", False)):
-                capabilities["session.ingest.v1"] = {}
-            payload = {
-                "schema_version": "teamevolver.agent-registration.v1",
-                "protocol_version": "1.0",
-                "agent_id": agent_id,
-                "runtime_type": runtime_type,
-                "runtime_version": str(body.get("runtime_version") or "1.0.0"),
-                "display_name": str(body.get("display_name") or agent_id),
-                "capabilities": capabilities,
-                "endpoints": {"replay_url": replay_url},
-            }
-            return await _register_agent_runtime(payload)
-
-        @app.post("/api/agent-integrations/skill-sync/{event_id}/retry")
-        async def api_retry_skill_sync(
-            event_id: str,
-            body: dict[str, Any],
-            request: Request,
-        ):
-            _require_admin_user(getattr(request.state, "console_user", None))
-            config = _tenant_effective_config(owner)
-            if getattr(config, "skills_delivery_mode", "push") == "pull":
-                raise HTTPException(status_code=409, detail="delivery_mode_changed_to_pull")
-            try:
-                event = await asyncio.to_thread(
-                    SkillMutationService.from_config(config, tenant_id=current_tenant_id()).retry,
-                    event_id,
-                    integration_id=str(body.get("integration_id") or ""),
-                )
-            except KeyError as exc:
-                raise HTTPException(status_code=404, detail="event not found") from exc
-            return {
-                "event_id": event_id,
-                "status": event.get("status"),
-            }
-
-        @app.post("/api/agent-integrations/skill-sync/{event_id}/discard")
-        async def api_discard_skill_sync(
-            event_id: str,
-            body: dict[str, Any],
-            request: Request,
-        ):
-            admin = getattr(request.state, "console_user", None)
-            _require_admin_user(admin)
-            try:
-                event = await asyncio.to_thread(
-                    SkillMutationService.from_config(
-                        _tenant_effective_config(owner), tenant_id=current_tenant_id(),
-                    ).discard,
-                    event_id,
-                    integration_id=str(body.get("integration_id") or ""),
-                    actor=str(
-                        (admin or {}).get("username")
-                        or (admin or {}).get("id")
-                        or "admin"
-                    ),
-                    reason=str(body.get("reason") or ""),
-                )
-            except KeyError as exc:
-                raise HTTPException(status_code=404, detail="event not found") from exc
-            return {
-                "event_id": event_id,
-                "status": event.get("status"),
-            }
-
-        @app.get("/api/agent-protocol/metrics")
-        async def agent_protocol_metrics(request: Request):
-            if not getattr(request.state, "service_root_authenticated", False):
-                raise HTTPException(status_code=403, detail="service root key required")
-            from ..integrations.protocol_metrics import render
-
-            return Response(content=render(), media_type="text/plain; version=0.0.4")
-
         @app.get("/healthz")
         async def healthz():
             return {"ok": True}
@@ -4124,14 +3599,9 @@ class RoutesMixin:
             ).strip().lower()
             if deployment not in {"cloud", "local"}:
                 deployment = "cloud"
-            service_api_key_present = bool(
-                getattr(effective, "sharing_viking_team_api_key", "")
-                or getattr(effective, "sharing_viking_api_key", "")
-            )
+            api_key_present = bool(getattr(effective, "sharing_viking_api_key", ""))
             return JSONResponse(
                 content={
-                    "enabled": bool(getattr(effective, "sharing_enabled", True)),
-                    "backend": "viking",
                     "deployment": deployment,
                     "endpoint": str(
                         getattr(effective, "sharing_viking_endpoint", "") or ""
@@ -4153,8 +3623,7 @@ class RoutesMixin:
                         getattr(effective, "sharing_viking_root_prefix", "")
                         or "team-skill-evolver"
                     ),
-                    "service_api_key_present": service_api_key_present,
-                    "team_api_key_present": service_api_key_present,
+                    "api_key_present": api_key_present,
                 }
             )
 
@@ -4182,11 +3651,7 @@ class RoutesMixin:
 
             if is_non_default:
                 registry = get_tenant_registry(owner)
-                overrides: dict[str, Any] = {
-                    "sharing_viking_personal_user": None,
-                    "sharing_viking_personal_api_key": None,
-                    "sharing_viking_personal_api_keys": None,
-                }
+                overrides: dict[str, Any] = {}
                 if "account" in body:
                     overrides["sharing_viking_account"] = str(
                         body.get("account") or "default"
@@ -4195,9 +3660,9 @@ class RoutesMixin:
                     overrides["sharing_viking_endpoint"] = str(
                         body.get("endpoint_override") or ""
                     ).strip()
-                if "service_api_key" in body or "team_api_key" in body:
-                    overrides["sharing_viking_team_api_key"] = str(
-                        body.get("service_api_key") or body.get("team_api_key") or ""
+                if "api_key" in body:
+                    overrides["sharing_viking_api_key"] = str(
+                        body.get("api_key") or ""
                     ).strip()
                 updated_ctx = ctx
                 if overrides:
@@ -4233,20 +3698,13 @@ class RoutesMixin:
             store = ConfigStore()
             data = store.load()
             sharing = data.setdefault("sharing", {})
-            sharing["enabled"] = bool(body.get("enabled", sharing.get("enabled", True)))
-            sharing["backend"] = "viking"
             sharing["viking_deployment"] = deployment
             if "endpoint_override" in body:
                 sharing["viking_endpoint"] = str(body.get("endpoint_override") or "").strip()
             if "account" in body:
                 sharing["viking_account"] = str(body.get("account") or "default").strip()
-            sharing.pop("viking_personal_user", None)
-            sharing.pop("viking_personal_api_key", None)
-            sharing.pop("viking_personal_api_keys", None)
-            if "service_api_key" in body or "team_api_key" in body:
-                sharing["viking_team_api_key"] = str(
-                    body.get("service_api_key") or body.get("team_api_key") or ""
-                ).strip()
+            if "api_key" in body:
+                sharing["viking_api_key"] = str(body.get("api_key") or "").strip()
             store.save(data)
             owner.config = store.to_config()
             await owner._reload_openviking_integrations(owner.config)
@@ -4267,7 +3725,7 @@ class RoutesMixin:
             ``{"account": "..."}`` body overrides the configured account for
             this check only.
             """
-            _require_admin_user(
+            require_platform_admin(
                 getattr(request.state, "console_user", None) or _session_user(request)
             )
             effective = _tenant_effective_config(owner)
@@ -4296,7 +3754,7 @@ class RoutesMixin:
                 skills_error = ""
                 try:
                     hub = SkillHub.team_from_config(effective_cfg, tenant_id=current_tenant_id())
-                    for item in hub.list_remote():
+                    for item in hub.list_skills():
                         name = str(item.get("name") or "")
                         if not name:
                             continue
@@ -4696,55 +4154,6 @@ class RoutesMixin:
             except Exception as exc:  # noqa: BLE001
                 return {"reachable": False, "statuses": {}, "reason": str(exc)}
 
-        @app.post("/conversations/judge-backfill")
-        async def dashboard_conversation_judge_backfill(request: Request):
-            """Sweep archived sessions without a quality score into the async
-            judge queue (admin only). Fills the historical gap for sessions the
-            value filter skipped before post-ingest judging existed."""
-            user = _session_user(request)
-            if user is None or str(user.get("role") or "user") != "admin":
-                raise HTTPException(status_code=403, detail="admin required")
-            judge_queue = getattr(owner, "_session_judge_queue", None)
-            if judge_queue is None or not getattr(judge_queue, "_started", False):
-                raise HTTPException(status_code=503, detail="judge worker unavailable")
-            try:
-                body = await request.json()
-            except Exception:  # noqa: BLE001
-                body = {}
-            body = body if isinstance(body, dict) else {}
-            want_status = str(body.get("status") or "").strip().lower()
-            try:
-                limit = max(1, min(500, int(body.get("limit") or 200)))
-            except (TypeError, ValueError):
-                limit = 200
-            store = SessionStore.from_config(
-                _tenant_effective_config(owner), tenant_id=current_tenant_id()
-            )
-            rows = await asyncio.to_thread(store.list_conversations, limit=100000)
-            tenant_id = current_tenant_id()
-            enqueued: list[str] = []
-            for row in rows:
-                sid = str(row.get("session_id") or "").strip()
-                if not sid:
-                    continue
-                if want_status and str(row.get("status") or "") != want_status:
-                    continue
-                judge = row.get("judge") if isinstance(row.get("judge"), dict) else {}
-                if isinstance(judge.get("overall_score"), (int, float)):
-                    continue
-                if judge_queue.pending(tenant_id, sid):
-                    continue
-                if judge_queue.enqueue(tenant_id, sid):
-                    enqueued.append(sid)
-                if len(enqueued) >= limit:
-                    break
-            return {
-                "reachable": True,
-                "enqueued": len(enqueued),
-                "backlog": judge_queue.backlog(),
-                "session_ids": enqueued[:limit],
-            }
-
         @app.get("/conversations/{session_id}")
         async def dashboard_conversation_detail(session_id: str):
             try:
@@ -4804,7 +4213,6 @@ class RoutesMixin:
                 store = _build_experience_library_store(
                     _tenant_effective_config(owner)
                 )
-                store.backfill_legacy_evidence()
                 return store.list_experiences(
                     kind=wanted_kind,
                     skill=skill,
@@ -4871,163 +4279,88 @@ class RoutesMixin:
                     "reason": str(exc),
                 }
 
+        def _mined_hub():
+            from team_skills.library.hub import SkillHub
+
+            return SkillHub.team_from_config(
+                _tenant_effective_config(owner), tenant_id=current_tenant_id()
+            )
+
         @app.get("/api/mined-skills")
         async def api_mined_skills():
-            try:
+            def load():
                 store = ValidationStore.from_config(
                     _tenant_effective_config(owner), tenant_id=current_tenant_id()
                 )
-                registered = {
-                    str(skill.get("name") or "")
-                    for skill in (
-                        owner.skill_manager.get_all_skills()
-                        if owner.skill_manager is not None
-                        else []
-                    )
-                }
-                skills = list_mined_skill_statuses(
+                return {"external_runtime_required": False, "skills": list_mined_skill_statuses(
                     store,
-                    registered_skill_names=registered,
+                    registered_skill_names=[skill.get("name", "") for skill in _mined_hub().list_skills()],
+                )}
+
+            return await asyncio.to_thread(load)
+
+        async def _submit_mined_artifact(skill_name: str, request: Request, job_id: str = ""):
+            user = _session_user(request) or {}
+            payload = {}
+            if job_id:
+                try:
+                    body = await request.json()
+                    payload = body if isinstance(body, dict) else {}
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+            def submit():
+                from team_replay.lab.service import parse_skill_markdown
+                from team_skills.library.bundle import encode_bundle_payload
+
+                hub = _mined_hub()
+                current_skill = None
+                if any(skill.get("name") == skill_name for skill in hub.list_skills()):
+                    bundle = hub.read_skill_bundle(skill_name)
+                    current_skill = parse_skill_markdown(bundle["SKILL.md"].decode("utf-8"))
+                    current_skill["bundle"] = encode_bundle_payload(bundle)
+                kwargs = {}
+                if job_id:
+                    kwargs = {
+                        "skillminer_root": resolve_mined_job_skill_root(
+                            job_id, skill_name, artifact_path=str(payload.get("artifact_path") or "")
+                        ),
+                        "mining_job_id": job_id,
+                    }
+                store = ValidationStore.from_config(
+                    _tenant_effective_config(owner), tenant_id=current_tenant_id()
                 )
-            except Exception as exc:  # noqa: BLE001
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"候选存储不可用：{exc}",
-                ) from exc
+                return submit_mined_skill(
+                    store, skill_name, current_skill=current_skill,
+                    submitted_by=str(user.get("id") or user.get("username") or ""), **kwargs
+                )
+
+            try:
+                submitted = await asyncio.to_thread(submit)
+            except MiningLifecycleError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail=f"提交候选失败：{exc}") from exc
+            candidate = submitted["job"]
+            decision = submitted.get("decision") or {}
+            source = candidate.get("source") or {}
             return {
-                "skills": skills,
-                "external_runtime_required": False,
+                "created": bool(submitted.get("created")),
+                "job_id": str(candidate.get("job_id") or ""),
+                "skill_name": str(candidate.get("skill_name") or skill_name),
+                "status": str(decision.get("status") or "candidate"),
+                "dataset_format": source.get("dataset_format"),
+                "question_count": source.get("question_count"),
+                **({"mining_job_id": job_id} if job_id else {}),
             }
 
         @app.post("/api/mined-skills/{skill_name}/submit")
         async def api_submit_mined_skill(skill_name: str, request: Request):
-            user = _session_user(request) or {}
-            current_skill = None
-            if owner.skill_manager is not None:
-                current_skill = next(
-                    (
-                        skill
-                        for skill in owner.skill_manager.get_all_skills()
-                        if str(skill.get("name") or "") == skill_name
-                    ),
-                    None,
-                )
-            try:
-                store = ValidationStore.from_config(
-                    _tenant_effective_config(owner), tenant_id=current_tenant_id()
-                )
-                submitted = submit_mined_skill(
-                    store,
-                    skill_name,
-                    current_skill=current_skill,
-                    submitted_by=str(
-                        user.get("id") or user.get("username") or ""
-                    ),
-                )
-            except MiningLifecycleError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            except Exception as exc:  # noqa: BLE001
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"提交候选失败：{exc}",
-                ) from exc
-            job = submitted["job"]
-            decision = (
-                submitted.get("decision")
-                if isinstance(submitted.get("decision"), dict)
-                else None
-            )
-            return {
-                "created": bool(submitted.get("created")),
-                "job_id": str(job.get("job_id") or ""),
-                "skill_name": str(job.get("skill_name") or skill_name),
-                "status": (
-                    str(decision.get("status") or "candidate")
-                    if decision
-                    else "candidate"
-                ),
-                "dataset_format": (job.get("source") or {}).get(
-                    "dataset_format"
-                ),
-                "question_count": (job.get("source") or {}).get(
-                    "question_count"
-                ),
-            }
+            return await _submit_mined_artifact(skill_name, request)
 
         @app.post("/api/mined-jobs/{job_id}/skills/{skill_name}/submit")
-        async def api_submit_mined_job_skill(
-            job_id: str,
-            skill_name: str,
-            request: Request,
-        ):
-            """Send a completed task's edited bundle to the evolution review gate."""
-            user = _session_user(request) or {}
-            current_skill = None
-            if owner.skill_manager is not None:
-                current_skill = next(
-                    (
-                        skill
-                        for skill in owner.skill_manager.get_all_skills()
-                        if str(skill.get("name") or "") == skill_name
-                    ),
-                    None,
-                )
-            try:
-                payload = {}
-                try:
-                    parsed_payload = await request.json()
-                    if isinstance(parsed_payload, dict):
-                        payload = parsed_payload
-                except (json.JSONDecodeError, ValueError):
-                    pass
-                workspace = resolve_mined_job_skill_root(
-                    job_id,
-                    skill_name,
-                    artifact_path=str(payload.get("artifact_path") or ""),
-                )
-                store = ValidationStore.from_config(
-                    _tenant_effective_config(owner), tenant_id=current_tenant_id()
-                )
-                submitted = submit_mined_skill(
-                    store,
-                    skill_name,
-                    current_skill=current_skill,
-                    submitted_by=str(
-                        user.get("id") or user.get("username") or ""
-                    ),
-                    skillminer_root=workspace,
-                    mining_job_id=job_id,
-                )
-            except MiningLifecycleError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            except Exception as exc:  # noqa: BLE001
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"提交候选失败：{exc}",
-                ) from exc
-            candidate = submitted["job"]
-            decision = (
-                submitted.get("decision")
-                if isinstance(submitted.get("decision"), dict)
-                else None
-            )
-            return {
-                "created": bool(submitted.get("created")),
-                "job_id": str(candidate.get("job_id") or ""),
-                "mining_job_id": job_id,
-                "skill_name": str(candidate.get("skill_name") or skill_name),
-                "status": (
-                    str(decision.get("status") or "candidate")
-                    if decision
-                    else "candidate"
-                ),
-                "dataset_format": (candidate.get("source") or {}).get(
-                    "dataset_format"
-                ),
-                "question_count": (candidate.get("source") or {}).get(
-                    "question_count"
-                ),
-            }
+        async def api_submit_mined_job_skill(job_id: str, skill_name: str, request: Request):
+            return await _submit_mined_artifact(skill_name, request, job_id)
 
         def _validation_store() -> ValidationStore:
             return ValidationStore.from_config(
@@ -5045,6 +4378,7 @@ class RoutesMixin:
                     "id": "service-root",
                     "display_name": "Service Root",
                     "role": "admin",
+                    "service_root": True,
                 }
             return (
                 getattr(request.state, "console_user", None)
@@ -5119,7 +4453,6 @@ class RoutesMixin:
                     lambda: _candidate_list_payloads(
                         store,
                         scope=scope,
-                        user_alias=str(owner.config.sharing_user_alias or ""),
                     ),
                 )
             except Exception:
@@ -5183,7 +4516,7 @@ class RoutesMixin:
             cached = None if refresh else store.load_fresh_evaluation(job_id, job)
             if cached:
                 return {**_evaluation_payload(job, cached, cached=True), **_skill_diff_payload(job, owner.config)}
-            result = await _evaluate_candidate_job(owner.config, owner, job)
+            result = await _evaluate_candidate_job(owner.config, job)
             store.save_evaluation(job_id, result)
             _invalidate_dashboard_cache(f"candidates:{id(owner.config)}")
             return {**_evaluation_payload(job, result, cached=False), **_skill_diff_payload(job, owner.config)}
@@ -5225,7 +4558,7 @@ class RoutesMixin:
                 return {**existing_decision, "feedback": feedback}
             evaluation = store.load_fresh_evaluation(job_id, job)
             if not evaluation:
-                evaluation = await _evaluate_candidate_job(owner.config, owner, job)
+                evaluation = await _evaluate_candidate_job(owner.config, job)
                 store.save_evaluation(job_id, evaluation)
             accepted = bool(evaluation.get("accepted"))
             if mode != "force" and not accepted:
@@ -5236,6 +4569,15 @@ class RoutesMixin:
                     "evaluation": evaluation,
                 }
                 store.save_decision(job_id, decision)
+                from .experience_patterns import record_candidate_outcome
+
+                await asyncio.to_thread(
+                    record_candidate_outcome,
+                    _tenant_effective_config(owner),
+                    job,
+                    status="rejected",
+                    reason=str(decision.get("reason") or ""),
+                )
                 _invalidate_dashboard_cache(f"candidates:{id(owner.config)}")
                 return decision
             candidate_skill = job.get("candidate_skill") if isinstance(job.get("candidate_skill"), dict) else None
@@ -5323,29 +4665,13 @@ class RoutesMixin:
                     },
                 ) from exc
 
-            local_cache = {"synced": True, "reason": ""}
-            try:
-                write_skill_bundle(
-                    os.path.join(owner._skills_dir(), name),
-                    bundle,
-                    clean=True,
-                )
-                loaded = owner._reload_skill_manager()
-            except Exception as exc:  # durable PG publication already succeeded
-                loaded = 0
-                local_cache = {"synced": False, "reason": str(exc)}
-                logger.warning(
-                    "[CandidatePublish] local cache refresh failed instance=%s "
-                    "tenant=%s job=%s revision=%s mutation=%s skill=%s: %s",
-                    _INSTANCE_ID,
-                    tenant_id,
-                    job_id,
-                    current_revision,
-                    mutation_id,
-                    name,
-                    exc,
-                )
             expected = dict(commit.get("expected") or {})
+            local_cache = await asyncio.to_thread(
+                owner._materialize_runtime_bundle,
+                name,
+                bundle,
+                category=str(expected.get("category") or "general"),
+            )
             event_id = str(commit.get("event_id") or "")
             cloud = {
                 "synced": True,
@@ -5366,12 +4692,20 @@ class RoutesMixin:
                 "created": created,
                 "version": int(expected.get("version") or 0),
                 "tree_sha256": str(expected.get("tree_sha256") or ""),
-                "loaded_skills": loaded,
                 "local_cache": local_cache,
                 "cloud": cloud,
                 "evaluation": evaluation,
             }
             store.save_decision(job_id, decision)
+            from .experience_patterns import record_candidate_outcome
+
+            await asyncio.to_thread(
+                record_candidate_outcome,
+                _tenant_effective_config(owner),
+                job,
+                status="published",
+                version=int(expected.get("version") or 0),
+            )
             feedback = _record_candidate_action_feedback(
                 job, user, adopted=True, rejected=False
             )
@@ -5446,6 +4780,15 @@ class RoutesMixin:
                 }
                 store.save_decision(job_id, decision)
                 decision = store.load_decision(job_id) or decision
+            from .experience_patterns import record_candidate_outcome
+
+            await asyncio.to_thread(
+                record_candidate_outcome,
+                _tenant_effective_config(owner),
+                job,
+                status="rejected",
+                reason=str(decision.get("reason") or ""),
+            )
             feedback = _record_candidate_action_feedback(
                 job, user, adopted=False, rejected=True
             )
@@ -5456,27 +4799,38 @@ class RoutesMixin:
         async def api_validation_candidate_reject(job_id: str, request: Request):
             return await _reject_validation_candidate(job_id, request)
 
-        @app.delete("/api/skill-candidates/{job_id}")
-        async def api_validation_candidate_delete(job_id: str, request: Request):
-            """Compatibility alias: deleting a candidate now records a rejection."""
-            return await _reject_validation_candidate(job_id, request)
-
         @app.post("/internal/reload-skills")
         async def reload_skills(
             request: Request,
         ):
             owner = request.app.state.owner
-            await owner._pull_skills_from_cloud()
-            skill_count = len(owner.skill_manager.get_all_skills()) if owner.skill_manager else 0
+            await owner._refresh_skill_runtime_cache()
+            config = _tenant_effective_config(owner)
+            skill_count = await asyncio.to_thread(
+                lambda: len(
+                    SkillHub.team_from_config(
+                        config,
+                        tenant_id=current_tenant_id(),
+                    ).list_skills()
+                )
+            )
             return {"ok": True, "skills": skill_count}
 
         from ..logging_http import RequestLogMiddleware, install_logging_status
         from ..logging_runtime import event
 
-        install_logging_status(app, _require_admin_user)
+        install_logging_status(app, require_platform_admin)
+        from .experience_patterns import install as install_experience_patterns
         from .experience_sync import install as install_experience_sync
 
         install_experience_sync(app, owner, get_tenant_registry, _require_admin_user)
+        install_experience_patterns(
+            app,
+            owner,
+            _tenant_effective_config,
+            _require_admin_user,
+            _candidate_request_user,
+        )
         app.add_middleware(RequestLogMiddleware)
         from team_ontology.config import OntologyConfig
 

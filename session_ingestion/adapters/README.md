@@ -5,8 +5,11 @@ Upstream connection, filtering and conversion belong here. The platform only
 consumes standard Sessions. See `product-agent.py` for a complete example.
 
 Files declare a literal `SOURCE` dictionary and `build_adapter()` returning
-`health`, `list_session_ids`, `fetch_session`, `convert_session` and `close`.
+`health`, `list_session_ids`, `iter_session_id_batches`, `fetch_session`,
+`convert_session` and `close`.
 `SOURCE.supported_filters` and `required_filters` drive the console form.
+`SOURCE.max_sessions` is only the preview-row default; ingestion never uses it
+as a total limit.
 Credentials come from environment variables, never source literals.
 
 Non-default tenants persist `datasource_adapter` in tenant overrides. Default
@@ -23,7 +26,9 @@ contact the project Owner to merge verified changes into
 `session_ingestion/adapters/` and release.
 
 The console also supports binding, saved connection testing, Session preview
-and ingestion. `/api/datasource` exposes GET/PUT; `/code` is GET/PUT;
+and ingestion. Pulls traverse the complete filtered window through bounded
+adapter batches and return `202 Accepted`; progress is exposed by the schedule
+status endpoint. `/api/datasource` exposes GET/PUT; `/code` is GET/PUT;
 `/code/test`, `/test`, `/sessions` and `/pull` are POST. Tenant tokens only access their own
 `/pull`; other operations require admin. Requests cannot select an agent or
 adapter. At most four tenants pull concurrently, one pull per tenant.
@@ -34,12 +39,11 @@ bind existing Account IDs, then probe and preview before pulling a small batch.
 No automatic production binding or data migration is performed.
 The land-network file currently resolves its project name via the mapping table.
 
-Old upstream configuration and mapper/converter endpoints return 410.
-`/langfuse/pull` and `/langfuse/sessions` alias the new tenant-file flow.
 Legacy Python imports and persisted fields remain for offline migration only;
 they do not drive live pulls.
 
 CLI: `teamEvolver datasource --tenant ACCOUNT status`, `bind FILE.py`, `test`,
-`list` or `pull --from-timestamp ... --to-timestamp ... --max-sessions 10`.
+`list --max-sessions 100` or
+`pull --from-timestamp ... --to-timestamp ...`.
 
 Outbound telemetry stays in `teamEvolver/observability/` and has its own page.

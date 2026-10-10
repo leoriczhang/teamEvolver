@@ -50,7 +50,6 @@ def test_progressive_benchmark_matches_skillgene_schema():
     dataset = payload["cases"][0]
     assert set(dataset) == {
         "case_id",
-        "name",
         "query",
         "skill_ids",
         "checks",
@@ -59,7 +58,7 @@ def test_progressive_benchmark_matches_skillgene_schema():
         "replay",
         "metadata",
     }
-    assert payload["schema_version"] == "team-replay.dataset.v2"
+    assert payload["schema_version"] == "team-replay.dataset"
     assert dataset["metadata"]["minimum_requirement_target"] == 12
     assert dataset["replay"]["progressive_disclosure"] == {
         "enabled": True,
@@ -571,7 +570,7 @@ def test_benchmark_builder_limits_hermes_to_file_tools(tmp_path, monkeypatch):
     assert "唯一允许的工具动作" in captured["args"][3]
     assert captured["timeout"] == rp.HERMES_ONESHOT_TIMEOUT
     payload = json.loads((skill_dir / "benchmark.json").read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "team-replay.dataset.v2"
+    assert payload["schema_version"] == "team-replay.dataset"
     assert len([
         item for item in payload["cases"][0]["checks"]
         if item["kind"] == "output"
@@ -579,3 +578,40 @@ def test_benchmark_builder_limits_hermes_to_file_tools(tmp_path, monkeypatch):
     assert payload["cases"][0]["checks"][0]["id"] == "R01"
     assert not (skill_dir / "benchmark.jsonl").exists()
     assert not (skill_dir / "benchmark_bank.json").exists()
+
+
+def test_generated_dataset_is_accepted_unchanged_by_shared_schema(tmp_path):
+    from team_replay.datasets.schema import normalize_document, validate_document
+
+    document = bf.build_document("demo", [{
+        "id": "generated-1", "name": "Display name", "input": "Handle the supplied case",
+        "requirements": [f"Requirement {i}" for i in range(12)],
+        "trajectory_requirements": ["Ask for missing information"],
+        "materials": [{"path": "facts.txt", "content": "verified facts"}],
+        "source_session_ids": ["session-1"],
+    }])
+    assert validate_document(document) == []
+    assert normalize_document(document) == document
+    case = document["cases"][0]
+    assert case["metadata"]["name"] == "Display name"
+    assert "name" not in case and "input" not in case and "requirements" not in case
+    assert case["materials"][0]["content"] == "verified facts"
+    bf.write_document(tmp_path / "benchmark.json", document)
+    loaded, errors = bf.read_document(tmp_path / "benchmark.json")
+    assert errors == [] and loaded == document
+    assert bf.to_runner_questions(loaded)[0]["input"] == case["query"]
+
+
+def test_dataset_reader_and_executor_reject_old_format(tmp_path):
+    import pytest
+
+    old = _progressive_benchmark()
+    old["schema_version"] = "team-replay.dataset.v2"
+    path = tmp_path / "benchmark.json"
+    path.write_text(json.dumps(old), encoding="utf-8")
+    document, errors = bf.read_document(path)
+    assert document is None and errors
+    with pytest.raises(ValueError, match="schema_version"):
+        bf.to_runner_questions(old)
+    with pytest.raises(ValueError, match="schema_version"):
+        bf.write_document(path, old)

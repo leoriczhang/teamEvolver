@@ -1,4 +1,4 @@
-"""SkillMiner serialization for the canonical Test Dataset v2 contract."""
+"""SkillMiner serialization for the canonical Test Dataset contract."""
 
 from __future__ import annotations
 
@@ -7,25 +7,26 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY_ROOT))
 
 from team_replay.datasets.schema import (
-    DATASET_SCHEMA_V2,
+    DATASET_SCHEMA,
     document_skill_ids,
-    legacy_case_view,
     make_document,
     normalize_document,
     output_requirements,
     trajectory_requirements,
+)
+from team_replay.datasets.schema import (
     validate_document as validate_canonical_document,
 )
 
-SCHEMA_VERSION = DATASET_SCHEMA_V2
-DATASET_FORMAT = DATASET_SCHEMA_V2
+SCHEMA_VERSION = DATASET_SCHEMA
+DATASET_FORMAT = DATASET_SCHEMA
 MINIMUM_REQUIREMENT_TARGET = 12
 MAXIMUM_REQUIREMENT_COUNT = 24
 PROGRESSIVE_DISCLOSURE = {
@@ -147,6 +148,60 @@ def _dataset_name(question: dict[str, Any], index: int) -> str:
     return f"{question.get('id') or f'BM-{index:02d}'} · {first_line[:60]}"
 
 
+def question_case(question: dict[str, Any], *, index: int = 1, skill_ids: Iterable[str] = (), case_id: str = "") -> dict[str, Any]:
+    """Serialize a generated mining scenario using the shared case fields."""
+    query = str(question.get("input") or question.get("query") or "").strip()
+    requirements = _requirements(question)
+    trajectory = _trajectory_requirements(question)
+    session_ids = _source_session_ids(question)
+    identity = json.dumps(
+        {"skill_ids": list(skill_ids), "query": query, "requirements": requirements},
+        ensure_ascii=False, sort_keys=True,
+    )
+    dataset_id = case_id or f"synth-{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:20]}"
+    checklist = [
+        {"id": f"R{i:02d}", "text": text, "kind": "output",
+         **({"polarity": "must_not"} if text.startswith(_NEGATIVE_PREFIXES) else {})}
+        for i, text in enumerate(requirements, start=1)
+    ] + [
+        {"id": f"T{i:02d}", "text": text, "kind": "trajectory"}
+        for i, text in enumerate(trajectory, start=1)
+    ]
+    return {
+        "case_id": dataset_id,
+        "skill_ids": list(skill_ids),
+        "query": query,
+        "checks": checklist,
+        "materials": list(question.get("materials") or []),
+        "provenance": {
+            "session_ids": session_ids,
+            "evidence_window": str(question.get("evidence_window") or (
+                "historical" if question.get("in_corpus", True) else "recent"
+            )),
+            "synthesis_mode": str(question.get("synthesis_mode") or "model"),
+        },
+        "replay": {
+            "progressive_disclosure": dict(PROGRESSIVE_DISCLOSURE),
+        },
+        "metadata": {
+            "name": _dataset_name(question, index),
+            "origin": str(question.get("origin") or ""),
+            "split": "test",
+            "minimum_requirement_target": MINIMUM_REQUIREMENT_TARGET,
+            "target_dimensions": list(question.get("target_dimensions") or []),
+            "difficulty": str(question.get("difficulty") or "medium"),
+            "gold": question.get("gold") if isinstance(question.get("gold"), dict) else {},
+            "customer_sim": (
+                question.get("customer_sim")
+                if isinstance(question.get("customer_sim"), dict)
+                else {}
+            ),
+            "in_corpus": bool(question.get("in_corpus", True)),
+            "source_label": str(question.get("source") or ""),
+        },
+    }
+
+
 def build_document(
     skill_name: str,
     questions: list[dict[str, Any]],
@@ -154,66 +209,19 @@ def build_document(
     candidate_revision: int = 1,
     created_at: str | None = None,
 ) -> dict[str, Any]:
-    """Convert SkillMiner's in-memory questions to Test Dataset v2."""
+    """Convert SkillMiner's in-memory questions to the shared Test Dataset contract."""
     timestamp = created_at or datetime.now(timezone.utc).isoformat()
     cases = []
     all_session_ids = []
     seen_session_ids = set()
 
     for index, question in enumerate(questions, start=1):
-        query = str(question.get("input") or question.get("query") or "").strip()
-        requirements = _requirements(question)
-        trajectory = _trajectory_requirements(question)
-        session_ids = _source_session_ids(question)
-        for session_id in session_ids:
+        case = question_case(question, index=index, skill_ids=[skill_name])
+        for session_id in case["provenance"]["session_ids"]:
             if session_id not in seen_session_ids:
                 seen_session_ids.add(session_id)
                 all_session_ids.append(session_id)
-
-        identity = json.dumps(
-            {"skill_name": skill_name, "query": query, "requirements": requirements},
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-        dataset_id = f"synth-{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:20]}"
-        checklist = [
-            {"id": f"R{item_index:02d}", "text": text, "kind": "output"}
-            for item_index, text in enumerate(requirements, start=1)
-        ] + [
-            {"id": f"T{item_index:02d}", "text": text, "kind": "trajectory"}
-            for item_index, text in enumerate(trajectory, start=1)
-        ]
-        cases.append({
-            "case_id": dataset_id,
-            "name": _dataset_name(question, index),
-            "query": query,
-            "checks": checklist,
-            "materials": [],
-            "provenance": {
-                "session_ids": session_ids,
-                "evidence_window": str(question.get("evidence_window") or (
-                    "historical" if question.get("in_corpus", True) else "recent"
-                )),
-                "synthesis_mode": str(question.get("synthesis_mode") or "model"),
-            },
-            "replay": {
-                "progressive_disclosure": dict(PROGRESSIVE_DISCLOSURE),
-            },
-            "metadata": {
-                "split": "test",
-                "minimum_requirement_target": MINIMUM_REQUIREMENT_TARGET,
-                "target_dimensions": list(question.get("target_dimensions") or []),
-                "difficulty": str(question.get("difficulty") or "medium"),
-                "gold": question.get("gold") if isinstance(question.get("gold"), dict) else {},
-                "customer_sim": (
-                    question.get("customer_sim")
-                    if isinstance(question.get("customer_sim"), dict)
-                    else {}
-                ),
-                "in_corpus": bool(question.get("in_corpus", True)),
-                "source_label": str(question.get("source") or ""),
-            },
-        })
+        cases.append(case)
 
     generation_seed = "|".join(case["case_id"] for case in cases)
     generation_digest = hashlib.sha256(generation_seed.encode("utf-8")).hexdigest()[:8]
@@ -281,7 +289,7 @@ def build_document_with_quality(
 
 
 def validate_document(payload: Any, *, expected_skill_name: str | None = None) -> list[str]:
-    """Validate Test Dataset v2 plus SkillMiner's stricter quality rules."""
+    """Validate Test Dataset plus SkillMiner's stricter quality rules."""
     errors = validate_canonical_document(payload)
     if errors or not isinstance(payload, dict):
         return errors
@@ -296,7 +304,12 @@ def validate_document(payload: Any, *, expected_skill_name: str | None = None) -
 
     for index, case in enumerate(payload.get("cases") or []):
         label = f"cases[{index}]"
+        raw_checks = case.get("checks") or []
+        if any(not isinstance(check.get("text"), str) for check in raw_checks):
+            errors.append(f"{label}.checks 的 text 必须为非空字符串")
         requirements = output_requirements(case)
+        if len(set(requirements)) != len(requirements):
+            errors.append(f"{label}.checks 中的 output 文本不能重复")
         trajectory = trajectory_requirements(case)
         if not MINIMUM_REQUIREMENT_TARGET <= len(requirements) <= MAXIMUM_REQUIREMENT_COUNT:
             errors.append(
@@ -320,6 +333,9 @@ def validate_document(payload: Any, *, expected_skill_name: str | None = None) -
 
 
 def write_document(path: Path, payload: dict[str, Any]) -> None:
+    errors = validate_canonical_document(payload)
+    if errors:
+        raise ValueError("; ".join(errors))
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
@@ -328,19 +344,22 @@ def read_document(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
         payload = json.loads(path.read_text(encoding="utf-8", errors="strict"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         return None, [f"不是有效 UTF-8 JSON：{exc}"]
+    errors = validate_document(payload)
+    if errors:
+        return None, errors
     try:
-        document = normalize_document(payload)
+        return normalize_document(payload), []
     except ValueError as exc:
         return None, [str(exc)]
-    errors = validate_document(document)
-    return document, errors
 
 
 def to_runner_questions(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Adapt the canonical document to the legacy in-memory scoring interface."""
+    """Project current cases into internal execution and scoring inputs."""
+    errors = validate_canonical_document(payload)
+    if errors:
+        raise ValueError("; ".join(errors))
     questions = []
     for case in payload.get("cases") or []:
-        view = legacy_case_view(case, document=payload)
         requirements = output_requirements(case)
         must_avoid = [
             item["text"]
@@ -357,7 +376,7 @@ def to_runner_questions(payload: dict[str, Any]) -> list[dict[str, Any]]:
         gold = metadata.get("gold") if isinstance(metadata.get("gold"), dict) else {}
         questions.append({
             "id": case.get("case_id"),
-            "name": case.get("name"),
+            "name": metadata.get("name"),
             "skill_ids": list(case.get("skill_ids") or []),
             "target_dimensions": list(metadata.get("target_dimensions") or []),
             "difficulty": str(metadata.get("difficulty") or "medium"),
@@ -371,9 +390,9 @@ def to_runner_questions(payload: dict[str, Any]) -> list[dict[str, Any]]:
             },
             "customer_sim": metadata.get("customer_sim") or {},
             "source": str(metadata.get("source_label") or ""),
-            "source_session_ids": view["source_session_ids"],
+            "source_session_ids": list(case.get("provenance", {}).get("session_ids") or []),
             "in_corpus": bool(metadata.get("in_corpus", True)),
-            "evidence_window": view.get("evidence_window"),
-            "synthesis_mode": view.get("synthesis_mode"),
+            "evidence_window": case.get("provenance", {}).get("evidence_window"),
+            "synthesis_mode": case.get("provenance", {}).get("synthesis_mode"),
         })
     return questions

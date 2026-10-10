@@ -1,0 +1,50 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "contract": {
+      "const": "kee.capability-binding.v1",
+      "default": "kee.capability-binding.v1",
+      "title": "Contract",
+      "type": "string"
+    },
+    "skill_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Skill Id",
+      "type": "string"
+    },
+    "version": {
+      "maxLength": 100,
+      "minLength": 1,
+      "title": "Version",
+      "type": "string"
+    },
+    "inputs": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Inputs",
+      "type": "object"
+    },
+    "outputs": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Outputs",
+      "type": "object"
+    },
+    "description": {
+      "maxLength": 4000,
+      "minLength": 1,
+      "title": "Description",
+      "type": "string"
+    }
+  },
+  "required": [
+    "skill_id",
+    "version",
+    "description"
+  ],
+  "title": "CapabilityBinding",
+  "type": "object"
+}

@@ -4,32 +4,38 @@ export interface SessionDataset {
   dataset_id: string;
   name: string;
   description: string;
-  item_count: number;
+  case_count: number;
   created_at: string;
   updated_at: string;
   source?: { filters?: Record<string, string> };
 }
-export interface DatasetItem {
-  item_id: string;
-  session_id: string;
-  trace_id: string;
-  title: string;
+export interface DatasetCase {
+  case_id: string;
   query: string;
-  requirements: string[];
-  requirements_source: string;
-  timestamp: string;
-  ingested_at: string;
-  used_skills: string[];
-  user_alias: string;
-  judge?: { overall_score?: number };
-  session?: Record<string, any>;
+  skill_ids: string[];
+  checks: Array<{ id: string; kind: "output" | "trajectory"; text: string; polarity?: "must_not" }>;
+  materials: Array<Record<string, unknown>>;
+  provenance: {
+    session_id?: string;
+    trace_id?: string;
+    timestamp?: string;
+    ingested_at?: string;
+    session_snapshot?: Record<string, any>;
+  };
+  replay: { progressive_disclosure: { batch_size: number } };
+  metadata: {
+    title?: string;
+    used_skills?: string[];
+    user_alias?: string;
+    judge?: { overall_score?: number };
+  };
 }
 export interface DatasetDetail extends SessionDataset {
-  items: DatasetItem[];
+  cases: DatasetCase[];
   total: number;
 }
-export interface BatchItem {
-  item_id: string;
+interface BatchCase {
+  case_id: string;
   session_id: string;
   trace_id: string;
   query: string;
@@ -50,7 +56,7 @@ export interface DatasetRun {
   created_at: string;
   finished_at: string;
   error?: string;
-  items?: BatchItem[];
+  cases?: BatchCase[];
 }
 export const datasetPath = (id: string) => `/api/datasets/${encodeURIComponent(id)}`;
 export const isActiveRun = (status: string) => ["queued", "running", "cancelling"].includes(status);

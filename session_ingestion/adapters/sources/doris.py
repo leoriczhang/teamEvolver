@@ -103,11 +103,6 @@ def _ts_to_iso(v: Any) -> str:
     return s
 
 
-def _synthetic_session_id(trace_id: Any) -> str:
-    value = str(trace_id or "").strip()
-    return f"{_SYNTHETIC_SESSION_PREFIX}{value}" if value else ""
-
-
 def _synthetic_trace_id(session_id: Any) -> str:
     value = str(session_id or "")
     if not value.startswith(_SYNTHETIC_SESSION_PREFIX):
@@ -227,26 +222,64 @@ def resolve_project_id(name_or_id: str) -> str:
 
 
 # =====================================================================
-# trace 元数据 / 详情拉取
+# Session summaries / trace details
 # =====================================================================
-def fetch_traces_meta(
-    pid: str, date_from_str: str, date_to_str: str,
+def fetch_session_groups_page(
+    pid: str,
+    date_from_str: str,
+    date_to_str: str,
     trace_name: Optional[str] = None,
-    limit: Optional[int] = None,
+    *,
     session_id: str = "",
     user_id: str = "",
+    after_timestamp: str = "",
+    after_session_id: str = "",
+    limit: int = 500,
 ) -> list[dict]:
-    name_cond = _trace_name_condition(trace_name)
-    if session_id:
-        name_cond += f" AND session_id = '{_sql_str(session_id)}'"
+    """Return one keyset-paginated page of Session summaries."""
+    source_condition = _trace_name_condition(trace_name)
+    requested_session = str(session_id or "").strip()
+    synthetic_trace_id = _synthetic_trace_id(requested_session)
+    if synthetic_trace_id:
+        source_condition += f" AND id = '{_sql_str(synthetic_trace_id)}'"
+    elif requested_session:
+        source_condition += (
+            f" AND session_id = '{_sql_str(requested_session)}'"
+        )
     if user_id:
-        name_cond += f" AND user_id = '{_sql_str(user_id)}'"
-    lim = limit if limit else 10000
+        source_condition += f" AND user_id = '{_sql_str(user_id)}'"
+
+    cursor_condition = ""
+    if after_timestamp:
+        timestamp = _sql_str(after_timestamp)
+        cursor_condition = f"WHERE (first_timestamp > '{timestamp}'"
+        if after_session_id:
+            cursor_condition += (
+                f" OR (first_timestamp = '{timestamp}' "
+                f"AND session_id > '{_sql_str(after_session_id)}')"
+            )
+        cursor_condition += ")"
+
+    resolved_session = (
+        "IF(session_id IS NULL OR session_id = '', "
+        f"CONCAT('{_SYNTHETIC_SESSION_PREFIX}', id), session_id)"
+    )
     sql = (
-        f"SELECT id, session_id, name, timestamp, input, user_id FROM {T_TRACES} "
-        f"WHERE project_id = '{_sql_str(pid)}' AND is_deleted = 0"
-        f" AND timestamp >= '{_sql_str(date_from_str)}' AND timestamp < '{_sql_str(date_to_str)}'"
-        f"{name_cond} ORDER BY timestamp ASC LIMIT {int(lim)}"
+        "SELECT session_id, first_timestamp AS timestamp, user_id, name, "
+        "trace_count FROM ("
+        "SELECT resolved_session_id AS session_id, "
+        "MIN(timestamp) AS first_timestamp, MIN(user_id) AS user_id, "
+        "MIN(name) AS name, COUNT(*) AS trace_count FROM ("
+        f"SELECT {resolved_session} AS resolved_session_id, "
+        f"timestamp, user_id, name FROM {T_TRACES} "
+        f"WHERE project_id = '{_sql_str(pid)}' AND is_deleted = 0 "
+        f"AND timestamp >= '{_sql_str(date_from_str)}' "
+        f"AND timestamp < '{_sql_str(date_to_str)}'"
+        f"{source_condition}"
+        ") AS matching_traces GROUP BY resolved_session_id"
+        f") AS grouped_sessions {cursor_condition} "
+        "ORDER BY first_timestamp ASC, session_id ASC "
+        f"LIMIT {max(1, min(5000, int(limit)))}"
     )
     return doris_query(sql, timeout=300)
 
@@ -290,25 +323,6 @@ def _build_observation(o: dict) -> dict:
         "costDetails": None,
         "latency": None,
     }
-
-
-def fetch_trace_full(trace_id: str) -> Optional[dict]:
-    tid = _sql_str(trace_id)
-    t_rows = doris_query(
-        f"SELECT {_TRACE_COLS} FROM {T_TRACES} WHERE id = '{tid}' LIMIT 1", timeout=60
-    )
-    if not t_rows:
-        return None
-    t = t_rows[0]
-    trace_data = _build_trace_data(t)
-    o_rows = doris_query(
-        f"SELECT {_OBS_COLS} FROM {T_OBSERVATIONS} "
-        f"WHERE trace_id = '{tid}' AND is_deleted = 0 LIMIT 10000",
-        timeout=180,
-    )
-    o_rows.sort(key=lambda o: o.get("start_time") or "")
-    observations = [_build_observation(o) for o in o_rows]
-    return {"trace": trace_data, "observations": observations}
 
 
 def fetch_traces_full_batch(trace_ids: list[str]) -> list[dict]:
@@ -394,8 +408,6 @@ def build_adapter(config, options):
 
 
 class DorisSourceAdapter:
-    source_type = "doris"
-
     def __init__(self, config, options, mapper=None, session_mapper=None, meta_mapper=None):
         self.config = config
         self.options = options or {}
@@ -406,65 +418,147 @@ class DorisSourceAdapter:
         # extract_meta(converted, session, traces) -> {user_id, session_id, trace_id}
         # 由 per-agent adapter 实现，供“运行总览”会话列表展示。
         self.meta_mapper = meta_mapper
-        self._preview = {}
 
     def list_session_ids(self, filters, *, max_sessions):
-        """按日期范围拉 trace 元数据，按 session_id 分组，返回 session_id 列表。
+        """Return the bounded ID projection of the canonical preview query."""
+        return [
+            str(row["session_id"])
+            for row in self.preview_sessions(filters, max_sessions=max_sessions)
+        ]
 
-        过滤 subagent / heartbeat 噪声会话（与 skill-opt 默认口径一致）。
-        上游没有 session_id 时，用 ``doris-trace:<trace id>`` 合成单 trace
-        会话，避免这类 Agent 的全部数据在预览和拉取阶段被静默丢弃。
-        """
+    def iter_session_id_batches(
+        self,
+        filters,
+        *,
+        batch_size=100,
+    ):
+        """Yield database-aggregated Session IDs using a stable keyset cursor."""
         from_ts = str(filters.get("from_timestamp") or "")
         to_ts = str(filters.get("to_timestamp") or "")
         if not from_ts or not to_ts:
             raise ValueError("from_timestamp / to_timestamp are required")
 
-        # 规范化为 UTC 字符串（Doris 表内 timestamp 存 UTC）
-        df = self._normalize_ts(from_ts)
-        dt = self._normalize_ts(to_ts)
-        if df >= dt:
+        date_from = self._normalize_ts(from_ts)
+        date_to = self._normalize_ts(to_ts)
+        if date_from >= date_to:
             raise ValueError("from_timestamp must precede to_timestamp")
 
         pid = resolve_project_id(self.project_id)
         if not pid:
             raise ValueError("project_id is required in the tenant adapter")
 
-        # 优先用 adapter 配置的 trace_name（datasource.options），filters 里的
-        # 是全局 langfuse_default_trace_name（如 openclaw-turn），可能不适用本项目
-        trace_name = self.trace_name
-        rows = fetch_traces_meta(pid, df, dt, trace_name, limit=10001,
-                                 session_id=str(filters.get("session_id") or ""),
-                                 user_id=str(filters.get("user_id") or ""))
-        if len(rows) > 10000:
-            raise ValueError("Trace scan exceeds 10000; narrow the time window")
+        batch_size = max(1, int(batch_size))
+        page_size = max(100, min(1000, batch_size * 4))
+        batch: list[str] = []
+        after_timestamp = ""
+        after_session_id = ""
 
-        # 按 session 分组，过滤噪声
-        sessions: dict[str, str] = {}  # sid -> 最早 timestamp
-        self._preview.clear()
-        for r in rows:
-            upstream_sid = str(r.get("session_id") or "").strip()
-            sid = upstream_sid or _synthetic_session_id(r.get("id"))
-            if not sid:
-                continue
-            kind = _session_kind(upstream_sid) if upstream_sid else "other"
-            if kind in ("subagent", "heartbeat"):
-                continue
-            if sid not in sessions:
-                sessions[sid] = r.get("timestamp") or ""
-                self._preview[sid] = {
-                    "session_id": sid, "timestamp": _ts_to_iso(r.get("timestamp")),
-                    "user_id": r.get("user_id") or "", "title": str(r.get("name") or ""),
-                    "trace_count": 0,
-                }
-            self._preview[sid]["trace_count"] += 1
+        while True:
+            rows = fetch_session_groups_page(
+                pid,
+                date_from,
+                date_to,
+                self.trace_name,
+                session_id=str(filters.get("session_id") or ""),
+                user_id=str(filters.get("user_id") or ""),
+                after_timestamp=after_timestamp,
+                after_session_id=after_session_id,
+                limit=page_size,
+            )
+            if not rows:
+                break
 
-        # 按时间正序，截断到 max_sessions
-        sorted_sids = sorted(sessions.keys(), key=lambda s: sessions[s])
-        return sorted_sids[:max_sessions]
+            for row in rows:
+                session_id = str(row.get("session_id") or "").strip()
+                if not session_id:
+                    continue
+                upstream_id = (
+                    ""
+                    if _synthetic_trace_id(session_id)
+                    else session_id
+                )
+                if _session_kind(upstream_id) in ("subagent", "heartbeat"):
+                    continue
+
+                batch.append(session_id)
+                if len(batch) >= batch_size:
+                    yield batch
+                    batch = []
+
+            last = rows[-1]
+            after_timestamp = str(last.get("timestamp") or "")
+            after_session_id = str(last.get("session_id") or "")
+            if not after_timestamp or not after_session_id or len(rows) < page_size:
+                break
+
+        if batch:
+            yield batch
 
     def preview_sessions(self, filters, *, max_sessions):
-        return [self._preview[sid] for sid in self.list_session_ids(filters, max_sessions=max_sessions)]
+        from_ts = str(filters.get("from_timestamp") or "")
+        to_ts = str(filters.get("to_timestamp") or "")
+        if not from_ts or not to_ts:
+            raise ValueError("from_timestamp / to_timestamp are required")
+        date_from = self._normalize_ts(from_ts)
+        date_to = self._normalize_ts(to_ts)
+        if date_from >= date_to:
+            raise ValueError("from_timestamp must precede to_timestamp")
+
+        pid = resolve_project_id(self.project_id)
+        if not pid:
+            raise ValueError("project_id is required in the tenant adapter")
+
+        rows: list[dict[str, Any]] = []
+        after_timestamp = ""
+        after_session_id = ""
+        page_size = max(100, min(1000, int(max_sessions) * 2))
+        while len(rows) < max_sessions:
+            page = fetch_session_groups_page(
+                pid,
+                date_from,
+                date_to,
+                self.trace_name,
+                session_id=str(filters.get("session_id") or ""),
+                user_id=str(filters.get("user_id") or ""),
+                after_timestamp=after_timestamp,
+                after_session_id=after_session_id,
+                limit=page_size,
+            )
+            if not page:
+                break
+            for item in page:
+                session_id = str(item.get("session_id") or "").strip()
+                upstream_id = (
+                    ""
+                    if _synthetic_trace_id(session_id)
+                    else session_id
+                )
+                if not session_id or _session_kind(upstream_id) in (
+                    "subagent",
+                    "heartbeat",
+                ):
+                    continue
+                rows.append(
+                    {
+                        "session_id": session_id,
+                        "timestamp": _ts_to_iso(item.get("timestamp")),
+                        "user_id": item.get("user_id") or "",
+                        "title": str(item.get("name") or ""),
+                        "trace_count": int(item.get("trace_count") or 0),
+                    }
+                )
+                if len(rows) >= max_sessions:
+                    break
+            last = page[-1]
+            after_timestamp = str(last.get("timestamp") or "")
+            after_session_id = str(last.get("session_id") or "")
+            if (
+                not after_timestamp
+                or not after_session_id
+                or len(page) < page_size
+            ):
+                break
+        return rows
 
     def fetch_session(self, session_id):
         """拉取一个 session 的所有 trace（含 observations）。
@@ -519,11 +613,11 @@ class DorisSourceAdapter:
         如果 adapter 提供了 session_mapper，在转换后调用以覆盖 title / user_alias 等。
         """
         from session_ingestion.adapters._shared.langfuse_convert import convert_langfuse_session
-        from session_ingestion.adapters._shared.langfuse_mapper import _deep_merge_turn
+        from session_ingestion.adapters._shared.mapping import merge_mapping
 
         def mapped(trace, observations, turn_num, defaults):
             patch = self.mapper(trace, observations, turn_num, defaults) if self.mapper else None
-            return _deep_merge_turn(defaults, patch) if patch else defaults
+            return merge_mapping(defaults, patch) if patch else defaults
 
         flattened = [{**item["trace"], "observations": item.get("observations") or []} for item in traces]
         converted = convert_langfuse_session(session, flattened, mapper=mapped)

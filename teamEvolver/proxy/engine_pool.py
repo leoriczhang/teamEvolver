@@ -179,10 +179,6 @@ class EnginePool:
         logger.info("[EnginePool] engine ready for tenant %s (%d resident)", tid, len(self._engines))
         return engine
 
-    def build_failed(self, tenant_id: str) -> bool:
-        with self._lock:
-            return tenant_id in self._build_failed
-
     def drop(self, tenant_id: str, *, reason: str = "") -> None:
         """Drop one engine so the next use rebuilds it with fresh config.
 

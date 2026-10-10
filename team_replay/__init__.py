@@ -1,8 +1,7 @@
 """Standalone True Replay implementation.
 
 Producer projects submit immutable Test Datasets and Baseline/Candidate
-treatments through the public Replay Interface. Historical imports under
-``teamEvolver.replay`` remain compatibility aliases.
+treatments through the public Replay Interface.
 """
 
 from __future__ import annotations

@@ -238,7 +238,7 @@ if (fs.existsSync(schemasDir)) {
   const schemaRefs = new Set()
   for (const mdFile of mdFiles) {
     const content = fs.readFileSync(mdFile, 'utf8')
-    for (const m of content.matchAll(/(?<![a-z0-9_./-])(?:docs\/schemas\/|(?:\.\.\/)+schemas\/|schemas\/)?([a-z0-9_-]+\.schema\.json)/g)) {
+    for (const m of content.matchAll(/(?<![a-zA-Z0-9_./-])(?:docs\/schemas\/|(?:\.\.\/)+schemas\/|schemas\/)?([a-z0-9_-]+\.schema\.json)/g)) {
       schemaRefs.add(m[1])
     }
   }

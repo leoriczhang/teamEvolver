@@ -18,31 +18,10 @@ from .. import runtime_state
 from ..config_store import ConfigStore
 
 
-def _default_daemon_log_path() -> Path:
-    return Path.home() / ".teamEvolver" / "teamEvolver.log"
-
-
-def _daemon_child_environment(
-    base_env: dict[str, str],
-    *,
-    home: Path | None = None,
-) -> dict[str, str]:
-    from dotenv import dotenv_values
-
-    env = dict(base_env)
-    env_file = (home or Path.home()) / ".teamEvolver" / "agent-protocol.env"
-    if not env_file.is_file():
-        return env
-    for key, value in dotenv_values(env_file).items():
-        if key and value is not None:
-            env.setdefault(str(key), str(value))
-    return env
-
-
 def _effective_service_port(config_store: ConfigStore, override_port: int | None) -> int:
     if override_port:
         return override_port
-    return int(config_store.get("service.port") or config_store.get("proxy.port") or 30000)
+    return int(config_store.get("service.port") or 52010)
 
 
 def _is_process_alive(pid: int) -> bool:
@@ -94,7 +73,7 @@ def _ensure_daemon_not_running():
     )
 
 
-def _wait_for_daemon_ready(proc, port: int, log_path: Path, timeout_s: float = 60.0):
+def _wait_for_daemon_ready(proc, port: int, log_path: Path, timeout_s: float = 15.0):
     import time
 
     deadline = time.monotonic() + timeout_s
@@ -109,11 +88,7 @@ def _wait_for_daemon_ready(proc, port: int, log_path: Path, timeout_s: float = 6
     raise click.ClickException(f"teamEvolver daemon did not become healthy in time. Check logs: {log_path}")
 
 
-def _daemon_ready_timeout_seconds(default: float = 60.0) -> float:
-    # When OpenViking is unreachable, startup deliberately waits for the
-    # remote probes to time out before enabling LocalObjectStore fallback.
-    # Keep the daemon health window longer than those bounded probes so a
-    # healthy fallback startup is not mistaken for a hung process.
+def _daemon_ready_timeout_seconds(default: float = 15.0) -> float:
     raw = str(os.environ.get("TEAMEVOLVER_DAEMON_READY_TIMEOUT_S", "")).strip()
     if not raw:
         return default
@@ -155,7 +130,7 @@ def _spawn_daemon_process(
             for name, source in (env_sources or {}).items():
                 if name in ENV.values() and source.startswith("env_file:"):
                     inherited.pop(name, None)
-            child_env = _daemon_child_environment(inherited)
+            child_env = inherited
             child_env["TEAMEVOLVER_RUNTIME_KIND"] = "daemon"
             child_env["TEAMEVOLVER_RUNTIME_LOG_PATH"] = str(log_path)
             popen_kwargs = {
@@ -233,7 +208,7 @@ def _spawn_daemon_process(
     help="Override the foreground or daemon log file (default: ~/.teamEvolver/teamEvolver.log).",
 )
 def start(port: int | None, daemon: bool, log_file: str | None):
-    """Start the teamEvolver service (console + skill sync + optional validation)."""
+    """Start the teamEvolver service (console + evolution + validation)."""
     import asyncio
 
     from ..log_color import setup_logging
@@ -269,8 +244,8 @@ def start(port: int | None, daemon: bool, log_file: str | None):
     if daemon:
         configured_port = _effective_service_port(cs, None)
         # Do not create a temporary config snapshot when the requested port is
-        # already the durable value. Internal Agent registration and admin
-        # updates must keep writing the real config file in daemon mode.
+        # already the durable value. Runtime admin updates must keep writing
+        # the real config file in daemon mode.
         daemon_port = port if port and port != configured_port else None
         pid, log_path = _spawn_daemon_process(
             daemon_port,
@@ -293,7 +268,13 @@ def start(port: int | None, daemon: bool, log_file: str | None):
 
         data = cs.load()
         data.setdefault("service", {})["port"] = port
-        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8")
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".yaml",
+            delete=False,
+            encoding="utf-8",
+            dir=cs.config_file.parent,
+        )
         try:
             yaml.dump(data, tmp)
         finally:
@@ -306,8 +287,7 @@ def start(port: int | None, daemon: bool, log_file: str | None):
     from ..launcher import Launcher
 
     event(logging.getLogger(__name__), "startup.configuration_loaded", config_file=str(cs.config_file),
-          env_file=str(cs.env_file or ""), ontology_yaml=bool((raw.get("ontology") or {}).get("enabled", False)),
-          ontology_env=os.environ.get("TE_ONTOLOGY_ENABLED", "unset"))
+          env_file=str(cs.env_file or ""), ontology_enabled=bool((raw.get("ontology") or {}).get("enabled", False)))
     launcher = Launcher(cs)
     try:
         asyncio.run(launcher.start())
@@ -360,7 +340,7 @@ def status():
         return
 
     cs = ConfigStore()
-    port = int(cs.get("service.port") or cs.get("proxy.port") or 30000)
+    port = int(cs.get("service.port") or 52010)
 
     healthy = _healthz_ready(port, timeout=2.0)
     if healthy:

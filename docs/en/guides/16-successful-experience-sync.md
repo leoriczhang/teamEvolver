@@ -32,7 +32,7 @@ Automatic aggregate-JSON sources over 1 MiB or 1,000 entries, or malformed docum
 
 ## Operations
 
-Use the tenant-admin [status endpoint](../api/16-experience-sync.md). Logs use `experience_sync.started`, `delivery`, `source_rejected`, `blocked`, `recovered` and `stopped` events with tenant, source key, experience ID, digest and URI; document bodies and credentials are omitted. Check `PG_REQUIRED`, `SHARING_DISABLED`, `OV_IDENTITY_OR_KEY_MISSING`, authentication errors, network errors and `OV_INDEX_NOT_READY` separately.
+Use the tenant-admin [status endpoint](../api/16-experience-sync.md). Logs use `experience_sync.started`, `delivery`, `source_rejected`, `blocked`, `recovered` and `stopped` events with tenant, source key, experience ID, digest and URI; document bodies and credentials are omitted. Check `PG_REQUIRED`, `OV_IDENTITY_OR_KEY_MISSING`, authentication errors, network errors and `OV_INDEX_NOT_READY` separately.
 
 Disabling the setting and restarting stops uploads while retaining both PG state and OV files. Deployment and PRD enablement are separate operator actions.
 

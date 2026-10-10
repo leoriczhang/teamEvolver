@@ -13,6 +13,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from teamEvolver.admin.identity_store import IdentityStore
 from teamEvolver.config import TeamEvolverConfig
 from teamEvolver.proxy.viking_dirs import (
     _dir_uris,
@@ -84,9 +85,8 @@ class _FakeOpenViking:
 
 def _config(tmp_path: Path, **overrides) -> TeamEvolverConfig:
     base = dict(
-        users_registry_path=str(tmp_path / "users.json"),
-        skills_dir=str(tmp_path / "skills"),
-        sharing_enabled=True,
+        _config_file=str(tmp_path / "config.yaml"),
+        skills_runtime_cache_dir=str(tmp_path / "skills"),
         sharing_viking_deployment="local",
         sharing_viking_endpoint="http://ov.test:1933",
         sharing_viking_api_key="root-key",
@@ -98,9 +98,20 @@ def _config(tmp_path: Path, **overrides) -> TeamEvolverConfig:
 
 
 def _write_registry(tmp_path: Path, users: list[dict]) -> None:
-    (tmp_path / "users.json").write_text(
-        json.dumps({"users": users}), encoding="utf-8"
-    )
+    store = IdentityStore(_config(tmp_path))
+
+    def replace(data):
+        seen: set[str] = set()
+        data["users"] = [
+            user
+            for user in users
+            if isinstance(user, dict)
+            and (user_id := str(user.get("id") or ""))
+            and user_id not in seen
+            and not seen.add(user_id)
+        ]
+
+    store.edit_users(replace, actor="test", action="identity.seed")
 
 
 def _uris(report: dict) -> list[str]:
@@ -172,7 +183,7 @@ def test_registered_personal_users_split_peer_and_viking_user(tmp_path):
 
 
 def test_registered_personal_users_is_fail_open(tmp_path):
-    # A directory where the registry file is expected: unreadable as JSON.
+    # A stale users.json path is ignored by the current identity store.
     (tmp_path / "users.json").mkdir()
     assert registered_personal_users(_config(tmp_path)) == []
 
@@ -312,9 +323,8 @@ def _server(tmp_path: Path):
 
     return ProxyServer(
         TeamEvolverConfig(
-            users_registry_path=str(tmp_path / "users.json"),
-            skills_dir=str(tmp_path / "skills"),
-            sharing_enabled=False,
+            _config_file=str(tmp_path / "config.yaml"),
+            skills_runtime_cache_dir=str(tmp_path / "skills"),
             sharing_skill_mirror_enabled=False,
             sharing_viking_deployment="local",
             sharing_viking_endpoint="http://ov.test:1933",

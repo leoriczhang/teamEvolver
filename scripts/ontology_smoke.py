@@ -50,12 +50,12 @@ def publish(domain):
     checks.append({'domain':domain,'status':'passed','generation':packet['semantic_generation'],'receipt':published['result']['receipt']})
     return job,source
 
-first,source=publish('Shipment');second,_=publish('Procurement')
+first,source=publish('Shipment');publish('Procurement')
 rollback=ready(call('POST','/rollback-candidates',{'generation':checks[0]['generation'],'submission_key':'rollback-'+run},status=202))
 call('POST',f"/jobs/{rollback['id']}/prepare");call('POST',f"/jobs/{rollback['id']}/approve",{'note':'Historical version reviewed again'})
 restored=call('POST',f"/jobs/{rollback['id']}/commit",{'commit_key':'rollback-'+run});assert restored['state']=='published'
 checks.append({'name':'rollback-new-generation','status':'passed','receipt':restored['result']['receipt']})
-event=call('POST','/source-events',{'event_id':'withdraw-'+run,'source_id':source['source_id'],'revision':'r1','status':'revoked'})
+call('POST','/source-events',{'event_id':'withdraw-'+run,'source_id':source['source_id'],'revision':'r1','status':'revoked'})
 assert not call('POST','/ontology/query',{'entity_ids':['Shipment:001']},te=False,user='agent')['facts']
 checks.append({'name':'withdrawal-blocks-access','status':'passed'})
 result={'publication_auth':'trusted_root','publication_contract':'sf.ontology.commit.v2','services':2,'separate_runtime':False,'extractor':'fixture','model_calls':0,'checks':checks,'real_model':'not covered'}

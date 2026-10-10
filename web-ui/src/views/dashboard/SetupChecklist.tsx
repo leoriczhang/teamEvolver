@@ -3,7 +3,6 @@ import { Dot, Panel, Pill } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import {
   api,
-  type AgentIntegrationsResp,
   type EvolveModelSettings,
   type SharingConfig,
 } from "@/api/client";
@@ -23,7 +22,7 @@ type SetupStep = {
 
 /**
  * 首跑配置引导：首次部署时把 README 里散落的配置步骤（模型 → OpenViking →
- * Agent 接入 → 会话数据）收敛成运行总览顶部的一张清单，全部完成后自动消失。
+ * 会话数据）收敛成运行总览顶部的一张清单，全部完成后自动消失。
  */
 export default function SetupChecklist({
   active,
@@ -34,21 +33,18 @@ export default function SetupChecklist({
 }) {
   const [model, setModel] = useState<EvolveModelSettings | null>(null);
   const [sharing, setSharing] = useState<SharingConfig | null>(null);
-  const [agentCount, setAgentCount] = useState<number | null>(null);
   const [sessionCount, setSessionCount] = useState<number | null>(null);
   const [loaded, setLoaded] = useState(false);
   const loadedRef = useRef(false);
 
   const refresh = useCallback(async () => {
-    const [m, s, a, sess] = await Promise.allSettled([
+    const [m, s, sess] = await Promise.allSettled([
       api<EvolveModelSettings>("/api/model-settings"),
       api<SharingConfig>("/api/sharing-config"),
-      api<AgentIntegrationsResp>("/api/agent-integrations"),
       api<{ sessions: unknown[]; total?: number }>("/sessions?limit=1&offset=0"),
     ]);
     if (m.status === "fulfilled") setModel(m.value);
     if (s.status === "fulfilled") setSharing(s.value);
-    if (a.status === "fulfilled") setAgentCount((a.value.agents || []).length);
     if (sess.status === "fulfilled") {
       setSessionCount(Number(sess.value.total ?? (sess.value.sessions || []).length));
     }
@@ -85,18 +81,9 @@ export default function SetupChecklist({
       actionLabel: "去配置",
     },
     {
-      key: "agent",
-      title: "注册 Agent 接入",
-      desc: "注册 Runtime 并启用 Session / Context / Replay / Skill Sync 能力。",
-      done: (agentCount ?? 0) > 0,
-      unknown: agentCount === null,
-      target: "health",
-      actionLabel: "去注册",
-    },
-    {
       key: "sessions",
       title: "让会话进入进化队列",
-      desc: "接入 Langfuse 数据源，或由已注册的 Agent 使用租户凭证与用户 ID 上报真实会话。",
+      desc: "接入 Langfuse 数据源，或由 Agent 使用租户凭证与用户 ID 上报真实会话。",
       done: (sessionCount ?? 0) > 0,
       unknown: sessionCount === null,
       target: "datasource",

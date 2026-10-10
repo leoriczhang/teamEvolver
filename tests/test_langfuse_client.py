@@ -7,6 +7,7 @@ from session_ingestion.adapters._shared import langfuse_client
 from session_ingestion.adapters._shared.langfuse_client import (
     LangfuseClient,
     LangfuseError,
+    SessionFilters,
 )
 
 
@@ -127,3 +128,36 @@ def test_invalid_json_is_not_retried(monkeypatch) -> None:
 
     assert len(calls) == 1
     assert delays == []
+
+
+def test_session_id_batches_scan_every_upstream_page() -> None:
+    def handler(request):
+        page = int(request.url.params.get("page", "1"))
+        data = {
+            1: [{"id": "s1"}, {"id": "s2"}],
+            2: [{"id": "s3"}, {"id": "s4"}],
+            3: [{"id": "s5"}],
+        }[page]
+        return httpx.Response(
+            200,
+            json={
+                "data": data,
+                "meta": {"page": page, "totalPages": 3, "limit": 2},
+            },
+        )
+
+    client = _client(handler)
+    try:
+        batches = list(
+            client.iter_session_id_batches(
+                SessionFilters(
+                    from_timestamp="2026-08-01T00:00:00Z",
+                    to_timestamp="2026-09-01T00:00:00Z",
+                ),
+                batch_size=2,
+            )
+        )
+    finally:
+        client.close()
+
+    assert batches == [["s1", "s2"], ["s3", "s4"], ["s5"]]

@@ -31,7 +31,6 @@ const KIND_LABEL: Record<PipelineNode["kind"], string> = {
 };
 
 interface StageRuntimeDraft {
-  provider: string;
   base_url: string;
   model: string;
   api_key: string;
@@ -54,7 +53,6 @@ export default function PromptStudioView({
   const [detail, setDetail] = useState<PromptDetail | null>(null);
   const [draft, setDraft] = useState<string>("");
   const [runtimeDraft, setRuntimeDraft] = useState<StageRuntimeDraft>({
-    provider: "",
     base_url: "",
     model: "",
     api_key: "",
@@ -80,7 +78,6 @@ export default function PromptStudioView({
       setDetail(d);
       setDraft(d.effective_prompt);
       setRuntimeDraft({
-        provider: d.provider || "",
         base_url: d.base_url || "",
         model: d.model || "",
         api_key: "",
@@ -193,7 +190,6 @@ export default function PromptStudioView({
       setDetail(d);
       setDraft(d.effective_prompt);
       setRuntimeDraft({
-        provider: d.provider || "",
         base_url: d.base_url || "",
         model: d.model || "",
         api_key: "",
@@ -224,7 +220,6 @@ export default function PromptStudioView({
       setDetail(d);
       setDraft(d.effective_prompt);
       setRuntimeDraft({
-        provider: d.provider || "",
         base_url: d.base_url || "",
         model: d.model || "",
         api_key: "",
@@ -270,7 +265,6 @@ export default function PromptStudioView({
   const dirty = !!detail && (
     draft !== detail.effective_prompt
     || (!!processSettings && JSON.stringify(processSettings) !== savedProcessSettings)
-    || runtimeDraft.provider !== (detail.provider || "")
     || runtimeDraft.base_url !== (detail.base_url || "")
     || runtimeDraft.model !== (detail.model || "")
     || runtimeDraft.api_key !== ""
@@ -416,20 +410,7 @@ export default function PromptStudioView({
                   )}
 
                   <div className="grid gap-3 rounded-lg border border-border bg-background/60 p-3 md:grid-cols-2">
-                    <div>
-                      <div className="mb-1.5 text-xs font-semibold text-muted-foreground">Provider</div>
-                      <input
-                        value={runtimeDraft.provider}
-                        disabled={!isAdmin}
-                        placeholder="留空继承租户默认 Provider"
-                        onChange={(event) => setRuntimeDraft({
-                          ...runtimeDraft,
-                          provider: event.target.value,
-                        })}
-                        className="mono h-9 w-full rounded-md border border-border bg-background px-3 text-xs outline-none focus:border-sidebar-primary"
-                      />
-                    </div>
-                    <div>
+                    <div className="md:col-span-2">
                       <div className="mb-1.5 text-xs font-semibold text-muted-foreground">阶段模型</div>
                       <input
                         value={runtimeDraft.model}
@@ -806,12 +787,8 @@ const STAGE_PROCESS_PARAMS: Record<string, StageParam[]> = {
     { group: "validation", key: "enabled", label: "启用后台验证", kind: "boolean" },
     { group: "validation", key: "mode", label: "验证模式", kind: "select", options: [{ value: "true_replay", label: "True Replay" }, { value: "replay", label: "Replay" }], tip: "true-replay" },
     { group: "evolve", key: "publish_mode", label: "发布模式", kind: "select", options: [{ value: "validated", label: "验证后发布" }, { value: "direct", label: "直接发布" }], tip: "publish" },
-    { group: "validation", key: "validation_max_rejections", label: "验证拒绝上限", kind: "number" },
     { group: "evolve", key: "human_review_enabled", label: "启用人工复核", kind: "boolean" },
-    { group: "evolve", key: "human_review_timeout_seconds", label: "人工复核超时（秒）", kind: "number" },
     { group: "validation", key: "max_concurrency", label: "最大并发", kind: "number" },
-    { group: "validation", key: "required_results", label: "所需验证结果", kind: "number" },
-    { group: "validation", key: "required_approvals", label: "所需通过数", kind: "number" },
     { group: "validation", key: "idle_after_seconds", label: "空闲后启动（秒）", kind: "number" },
     { group: "validation", key: "poll_interval_seconds", label: "验证轮询周期（秒）", kind: "number" },
     { group: "validation", key: "max_jobs_per_day", label: "每日任务上限", kind: "number" },

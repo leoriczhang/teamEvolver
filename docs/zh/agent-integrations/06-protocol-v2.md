@@ -1,3 +1,7 @@
+# KEE R6 接入范围（2026-10-08）
+
+Agent 沿用既有 OV 认证读取已批准 Wiki，不要求修改 UpClaw。KEE 的结构检查为可选 HTTP 读取，默认关闭、不注册 MCP，不参与工具／Skill 调用授权，也不新增 Session 或 Judge 链路。详见 [R6 方法治理接口](../api/20-kee-r6.md)。以下原协议和 ID 保持兼容。
+
 # Agent 接入协议 v2
 
 Agent 数据面使用 `Authorization: Bearer tevt_...` 和请求中声明的 `user_id`。
@@ -45,8 +49,7 @@ Schema：[Session v2](../../schemas/agent-session-v2.schema.json)、
 [Context 结果 v2](../../schemas/agent-context-result-v2.schema.json)、
 [Context 快照 v2](../../schemas/agent-context-snapshot-v2.schema.json)。
 
-## 迁移边界
+## 边界与约束
 
-兼容发布默认 `identity_mode=dual`、`delivery_mode=push`。
-先升级客户端，再切 `tenant_user/pull`，完成观察期后迁移数据；最终兼容代码清理单独发布。
-存量 v1 Schema 保留原义，仅用于迁移期。详见 [升级与恢复](../guides/11-agent-deregistration.md)。
+`identity_mode` 固定为 `tenant_user`，`delivery_mode` 默认 `pull`。
+Session、Context、Skill 三条链路统一使用租户机器凭证 + `user_id`。

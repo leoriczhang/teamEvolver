@@ -3,7 +3,7 @@
 These functions are intentionally pure (no network, no config) so the mapping
 logic can be unit-tested with fixture payloads. They translate the Langfuse v3
 public-API shapes into the same session dict that ``/ingest_session`` and
-``SessionStore`` already consume from Hermes/AgentsHub:
+``SessionStore`` already consumes from Agent runtimes:
 
     Langfuse session            -> teamEvolver session
     Langfuse trace (chronological) -> one interaction turn
@@ -22,9 +22,8 @@ import json
 from typing import Any, Callable, Optional
 
 # Cap any single text body so ingested payloads stay reasonable, mirroring the
-# Hermes push hook (push_session.MAX_CHARS). Set to None to disable truncation.
+# Match the push-ingestion payload limit. Set to None to disable truncation.
 MAX_CHARS = None  # no truncation: preserve full original IO ([:None] keeps everything)
-MAX_SYSTEM_CHARS = 200_000
 
 # Langfuse core observation types (see commons.yml ObservationType).
 _GENERATION_TYPES = {"GENERATION"}
@@ -293,13 +292,6 @@ def _observation_tokens(obs: dict[str, Any]) -> tuple[int, int, int]:
     return input_tokens, output_tokens, total_tokens
 
 
-def _has_error(obs: dict[str, Any]) -> bool:
-    if str(obs.get("level") or "").upper() == "ERROR":
-        return True
-    status = str(obs.get("statusMessage") or "").lower()
-    return any(token in status for token in ("error", "exception", "failed", "traceback"))
-
-
 def _tool_calls_from_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     calls: list[dict[str, Any]] = []
     for message in messages:
@@ -507,10 +499,9 @@ def convert_langfuse_session(
     ``TraceWithFullDetails`` (each including its ``observations``), which the
     caller has already fetched and may pre-filter/sort.
 
-    ``mapper`` is an optional operator-authored per-trace mapper (see
-    :mod:`~teamEvolver.integrations.langfuse_mapper`). It is applied to every
-    trace; the resulting turns still feed the same session-level aggregation so
-    metrics/titles stay consistent regardless of who produced the turn.
+    ``mapper`` is an optional adapter-owned per-trace mapper. It is applied to
+    every trace; the resulting turns still feed the same session-level
+    aggregation so metrics and titles stay consistent.
     """
     session_id = str(session.get("id") or session.get("session_id") or "").strip()
 

@@ -4,9 +4,11 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from fastapi import FastAPI
 
 from session_ingestion.adapters import _runtime
 from session_ingestion.pull import service
+from session_ingestion.pull.routes import register_pull_routes
 
 
 class FakeAdapter:
@@ -18,6 +20,10 @@ class FakeAdapter:
 
     def list_session_ids(self, _filters, *, max_sessions):
         return self.session_ids[:max_sessions]
+
+    def iter_session_id_batches(self, _filters, *, batch_size):
+        for offset in range(0, len(self.session_ids), batch_size):
+            yield self.session_ids[offset : offset + batch_size]
 
     def preview_sessions(self, _filters, *, max_sessions):
         return [
@@ -75,6 +81,43 @@ def build_adapter():
         _runtime.validate_content(invalid, "test.py")
 
 
+def test_adapter_contract_requires_streaming_session_batches() -> None:
+    source = """
+SOURCE = {"supported_filters": [], "required_filters": []}
+class Adapter:
+    def list_session_ids(self, filters, *, max_sessions):
+        return []
+    def fetch_session(self, session_id):
+        return {"id": session_id}, []
+    def convert_session(self, session, traces):
+        return {"session_id": session["id"], "turns": []}
+    def health(self):
+        return {"ok": True}
+    def close(self):
+        pass
+def build_adapter():
+    return Adapter()
+"""
+
+    with pytest.raises(
+        _runtime.AdapterError,
+        match=r"iter_session_id_batches\(\) is required",
+    ):
+        _runtime.load_from_content(source, "test.py")
+
+
+def test_datasource_routes_do_not_register_retired_langfuse_aliases() -> None:
+    app = FastAPI()
+    register_pull_routes(SimpleNamespace(config=SimpleNamespace()), app)
+    paths = {route.path for route in app.routes}
+
+    assert "/api/datasource/sessions" in paths
+    assert "/api/datasource/pull" in paths
+    assert "/langfuse/sessions" not in paths
+    assert "/langfuse/pull" not in paths
+    assert "/langfuse/status" not in paths
+
+
 def test_pull_filters_before_fetch_and_preserves_original_total(monkeypatch) -> None:
     adapter = FakeAdapter(["origin-a", "business-1", "rollout-b"])
     descriptor = _descriptor()
@@ -126,6 +169,33 @@ def test_explicit_session_id_bypasses_exclusion(monkeypatch) -> None:
 
     assert result["counts"]["filtered"] == 0
     assert adapter.fetch_calls == ["origin-debug"]
+
+
+def test_pull_has_no_total_limit_and_bounds_result_details(monkeypatch) -> None:
+    adapter = FakeAdapter([f"business-{index}" for index in range(1005)])
+    descriptor = _descriptor()
+    monkeypatch.setattr(service, "describe", lambda *_args: descriptor)
+    monkeypatch.setattr(service, "load", lambda *_args, **_kwargs: adapter)
+    monkeypatch.setenv("TEAMEVOLVER_DATASOURCE_PULL_BATCH_SIZE", "64")
+    monkeypatch.setenv("TEAMEVOLVER_DATASOURCE_PULL_RESULT_LIMIT", "25")
+
+    async def ingest(_session):
+        return {"status": "queued", "queued": True}
+
+    result = asyncio.run(
+        service.pull_sessions(
+            SimpleNamespace(),
+            SimpleNamespace(tenant_id="tenant-a"),
+            ingest,
+            {"max_sessions": 1},
+        )
+    )
+
+    assert result["total"] == 1005
+    assert result["counts"]["queued"] == 1005
+    assert len(result["results"]) == 25
+    assert result["results_truncated"] is True
+    assert sorted(adapter.fetch_calls) == sorted(adapter.session_ids)
 
 
 def test_preview_uses_the_same_exclusion_rules(monkeypatch) -> None:

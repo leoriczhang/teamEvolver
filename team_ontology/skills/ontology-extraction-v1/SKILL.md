@@ -22,15 +22,76 @@ Only explicitly identifiable things become entities. Concepts can become propose
 schema types, but conceptual relationships are not instance facts. Same labels are
 not sufficient to merge identities. Use authority_namespace plus external_id to
 identify a thing; preserve distinct homonyms. Preserve contradictory assertions,
-negation, time and qualifiers. Unknown time must not be invented: omit an assertion
-whose required validity date cannot be supported, and record a coverage gap instead.
+negation, time and qualifiers. Facts split into two kinds: time-anchored facts carry valid_from; standing facts
+(definitions, rules, attributes without inherent time) omit valid_from entirely.
+Never fabricate date or timezone information the source does not support.
 Use only document_fact or explicitly attributed user_claim, never system_fact or
 derived. Emit no business actions, inference rules or deletion tombstones.
 
+## Temporal contract (validate before submitting)
+
+- Time-anchored facts MUST have `valid_from` as ISO 8601. A date without a
+  timezone is accepted and interpreted as Beijing time (UTC+8); TE normalizes
+  it deterministically. Use only a time supported by that assertion's evidence.
+- Facts without inherent time semantics (definitions, policies, product rules,
+  organizational attributes) are standing assertions: omit `valid_from`
+  entirely. A standing assertion is valid from its source document snapshot
+  until `valid_to` or a later revision supersedes it; it is not a downgrade and
+  requires the same evidence support as any other assertion.
+- Never fabricate precision: if the source only states a year or year-month
+  (for example "founded in 1993"), emit a standing assertion and keep the
+  partial date in the fact value or qualifiers.
+- `valid_to` is optional for both kinds. Use null when the source provides no
+  explicit end. An instantaneous event such as signing at 10:00 has that time
+  as `valid_from` and `valid_to: null`; do not duplicate its timestamp into
+  both fields. A supplied end must be strictly later than the start.
+- Never borrow a date from a different fact, source revision, current time or
+  compilation time.
+- Before writing the final JSONL, validate every temporal field and interval
+  with code, not manual character counting or another full model pass.
+- A repair instruction may contain `repair_issues` with zero-based assertion
+  indexes, field paths and stable codes. Fix those errors from source evidence.
+  Codes include ASSERTION_DATETIME_INVALID and ASSERTION_INTERVAL_EMPTY. If a
+  dated fact cannot carry a supported time, emit it as standing rather than
+  inventing a date; report genuinely unsupported content as a coverage gap.
+
 ## Exact outputs
 
+### Native Compile staging compatibility
+
+Native resource draft registration and merge operate on Markdown knowledge pages.
+JSON files alone do not register a source batch. Each source batch must also write
+one short, non-navigation `ontology-draft.md` beside its JSON artifacts, with this
+exact frontmatter shape (replace the placeholder with the assigned frozen input URI):
+
+```yaml
+---
+type: knowledge
+title: Ontology extraction draft
+description: Evidence-grounded extraction for the assigned frozen source batch.
+sources:
+  - resource: "SOURCE_URI"
+---
+```
+
+Use one `resource` entry per assigned frozen source. A list of strings or objects
+containing only `uri` or `source_id` is not accepted by native merge validation.
+Keep this page concise; summarize the already extracted facts without inventing
+additional assertions. Submit the source draft through the native draft tool.
+The parent must retain the JSON artifacts, merge their structured records and
+place the four contract outputs below in the final output directory. Markdown
+staging pages satisfy native orchestration only; TE never treats them as a
+Candidate Bundle. Do not replace JSON artifacts with the Markdown summary.
+
+Treat the caller's source `digest` and `revision` as opaque receipt identifiers.
+TE verifies them deterministically. Do not guess their hashing algorithm or
+spend model calls comparing alternative digest encodings. Verify quotations and
+Unicode offsets against the supplied frozen text, then finish submission.
+
+### Final contract artifacts
+
 Submit files through the existing Compile file output mechanism. All output is
-UTF-8 JSON/JSONL. Do not submit Markdown pages in place of these files. Native
+UTF-8; the following contract files are JSON/JSONL. Do not submit Markdown pages in place of these files. Native
 Compile may create unrelated navigation files; they are not part of this contract.
 
 `result-manifest.json`:
@@ -67,6 +128,7 @@ facts for failed sources. Partial results must be explicitly marked.
 {"kind":"entities","value":{"entity_id":"shipment-1","authority_namespace":"example","entity_type":"Shipment","external_id":"S1","label":"Shipment S1","aliases":[]}}
 {"kind":"evidence","value":{"evidence_id":"ev-1","source_id":"SOURCE_ID","quote":"exact unchanged quotation","start":0,"end":25}}
 {"kind":"assertions","value":{"assertion_id":"a-1","subject":"shipment-1","predicate":"status","value":"signed","polarity":"positive","qualifiers":{},"epistemic_kind":"document_fact","valid_from":"2026-09-01T00:00:00+08:00","valid_to":null,"support_sets":[["ev-1"]],"premises":[]}}
+{"kind":"assertions","value":{"assertion_id":"a-2","subject":"shipment-1","predicate":"official_website","value":"www.sf-express.com","polarity":"positive","qualifiers":{},"epistemic_kind":"document_fact","valid_from":null,"valid_to":null,"support_sets":[["ev-1"]],"premises":[]}}
 ```
 Use unique IDs consistently across all shards. `support_sets` is an OR of AND
 proof sets; never change it into one unqualified union. Evidence quotes must be

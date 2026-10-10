@@ -1,8 +1,8 @@
-"""Shared storage helpers for distributed client-side validation.
+"""Shared storage helpers for centralized candidate validation.
 
 The validation flow uses the same object store boundary as the rest of
-teamEvolver. Jobs are produced by the evolve server, validated by opted-in
-clients, and later finalized by the evolve server.
+teamEvolver. Jobs are produced by the evolve server, evaluated by its central
+validator, and later finalized by the evolve server.
 """
 
 from __future__ import annotations
@@ -16,10 +16,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from team_skills.library.bundle import candidate_skill_bundle, encode_bundle_payload
-from teamEvolver.storage import build_object_store, is_not_found_error, peer_key_prefix
+from teamEvolver.storage import build_object_store, is_not_found_error
 
 logger = logging.getLogger(__name__)
 _CLAIM_LOCK = threading.RLock()
+CENTRAL_VALIDATOR_ID = "central-validator"
 
 
 def _utc_now_iso() -> str:
@@ -34,7 +35,6 @@ class ValidationStore:
         *,
         backend: str,
         endpoint: str,
-        customer_id: str = "",
         prefix: str = "",
         allow_fallback: bool = False,
         fallback_root: str = "",
@@ -45,7 +45,6 @@ class ValidationStore:
             allow_fallback=allow_fallback,
             fallback_root=fallback_root,
         )
-        self._customer_id = str(customer_id or "").strip("/")
         self._base_prefix = str(prefix or "").strip("/")
 
     @classmethod
@@ -53,13 +52,11 @@ class ValidationStore:
         cls,
         *,
         bucket,
-        customer_id: str = "",
         prefix: str = "",
     ) -> "ValidationStore":
         """Reuse an already-constructed object store."""
         store = cls.__new__(cls)
         store._bucket = bucket
-        store._customer_id = str(customer_id or "").strip("/")
         store._base_prefix = str(prefix or "").strip("/")
         return store
 
@@ -70,7 +67,6 @@ class ValidationStore:
         hub = SkillHub.team_from_config(config, tenant_id=tenant_id)
         store = cls.__new__(cls)
         store._bucket = hub._bucket
-        store._customer_id = str(getattr(config, "sharing_viking_customer_id", "") or "").strip("/")
         store._base_prefix = hub._prefix().strip("/")
         return store
 
@@ -78,7 +74,6 @@ class ValidationStore:
         parts = []
         if self._base_prefix:
             parts.append(f"{self._base_prefix}/")
-        parts.append(peer_key_prefix(self._customer_id))
         return "".join(parts)
 
     def _job_key(self, job_id: str) -> str:
@@ -95,8 +90,8 @@ class ValidationStore:
             return self._candidate_skill_key(job_id)
         return f"{self._candidate_skill_prefix(job_id)}files/{rel_path}"
 
-    def _result_key(self, job_id: str, user_alias: str) -> str:
-        return f"{self._prefix()}validation_results/{job_id}/{user_alias}.json"
+    def _result_key(self, job_id: str, validator_id: str) -> str:
+        return f"{self._prefix()}validation_results/{job_id}/{validator_id}.json"
 
     def _decision_key(self, job_id: str) -> str:
         return f"{self._prefix()}validation_decisions/{job_id}.json"
@@ -104,10 +99,10 @@ class ValidationStore:
     def _evaluation_key(self, job_id: str) -> str:
         return f"{self._prefix()}validation_evaluations/{job_id}.json"
 
-    def _claim_key(self, job_id: str, user_alias: str) -> str:
+    def _claim_key(self, job_id: str, validator_id: str) -> str:
         return (
             f"{self._prefix()}validation_claims/"
-            f"{job_id}/{user_alias}.json"
+            f"{job_id}/{validator_id}.json"
         )
 
     def _decision_index_key(self) -> str:
@@ -203,25 +198,25 @@ class ValidationStore:
         jobs.sort(key=lambda item: str(item.get("created_at", "")))
         return jobs
 
-    def save_result(self, job_id: str, user_alias: str, result: dict[str, Any]) -> None:
+    def save_result(self, job_id: str, validator_id: str, result: dict[str, Any]) -> None:
         payload = dict(result)
         payload["job_id"] = job_id
-        payload["user_alias"] = user_alias
+        payload["validator_id"] = validator_id
         payload.setdefault("created_at", _utc_now_iso())
         self._bucket.put_object(
-            self._result_key(job_id, user_alias),
+            self._result_key(job_id, validator_id),
             json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
         )
 
-    def load_result(self, job_id: str, user_alias: str) -> Optional[dict[str, Any]]:
+    def load_result(self, job_id: str, validator_id: str) -> Optional[dict[str, Any]]:
         try:
-            return json.loads(self._bucket.get_object(self._result_key(job_id, user_alias)).read().decode("utf-8"))
+            return json.loads(self._bucket.get_object(self._result_key(job_id, validator_id)).read().decode("utf-8"))
         except Exception as exc:
             if not is_not_found_error(exc):
                 logger.warning(
                     "[ValidationStore] failed to load result for %s/%s: %s",
                     job_id,
-                    user_alias,
+                    validator_id,
                     exc,
                 )
             return None
@@ -229,13 +224,13 @@ class ValidationStore:
     def claim_job(
         self,
         job_id: str,
-        user_alias: str,
+        validator_id: str,
         *,
         revision: int,
         lease_seconds: int = 1_500,
     ) -> str | None:
         """Atomically lease one job revision to one validator process."""
-        key = self._claim_key(job_id, user_alias)
+        key = self._claim_key(job_id, validator_id)
         now = datetime.now(timezone.utc)
         with _CLAIM_LOCK:
             existing: dict[str, Any] = {}
@@ -272,7 +267,7 @@ class ValidationStore:
             token = uuid.uuid4().hex
             claim = {
                 "job_id": job_id,
-                "user_alias": user_alias,
+                "validator_id": validator_id,
                 "candidate_revision": int(revision),
                 "token": token,
                 "claimed_at": now.isoformat(),
@@ -310,10 +305,10 @@ class ValidationStore:
     def release_job_claim(
         self,
         job_id: str,
-        user_alias: str,
+        validator_id: str,
         token: str,
     ) -> bool:
-        key = self._claim_key(job_id, user_alias)
+        key = self._claim_key(job_id, validator_id)
         with _CLAIM_LOCK:
             try:
                 claim = json.loads(
@@ -328,30 +323,6 @@ class ValidationStore:
             except Exception:
                 return False
             return True
-
-    def list_results(self, job_id: str) -> list[dict[str, Any]]:
-        prefix = f"{self._prefix()}validation_results/{job_id}/"
-        results: list[dict[str, Any]] = []
-        try:
-            objects = list(self._bucket.iter_objects(prefix=prefix))
-        except Exception as exc:
-            if is_not_found_error(exc):
-                return []
-            logger.warning(
-                "[ValidationStore] failed to list results for %s: %s",
-                job_id,
-                exc,
-            )
-            return []
-        for obj in objects:
-            if not obj.key.endswith(".json"):
-                continue
-            try:
-                results.append(json.loads(self._bucket.get_object(obj.key).read().decode("utf-8")))
-            except Exception as exc:
-                logger.warning("[ValidationStore] failed to parse %s: %s", obj.key, exc)
-        results.sort(key=lambda item: (str(item.get("created_at", "")), str(item.get("user_alias", ""))))
-        return results
 
     def save_decision(self, job_id: str, decision: dict[str, Any]) -> None:
         payload = dict(decision)
@@ -643,7 +614,7 @@ class ValidationStore:
     ) -> Optional[dict[str, Any]]:
         """Best evaluation for the job's current revision.
 
-        Prefers the most recent source (cached evaluation or per-user result)
+        Prefers the most recent source (cached evaluation or central result)
         that actually completed a True Replay, so a transient replay failure
         recorded as a newer "skipped" evaluation never blanks out a real prior
         metric comparison. Falls back to the newest source otherwise.
@@ -662,9 +633,8 @@ class ValidationStore:
         if isinstance(cached, dict) and cached:
             if max(1, int(cached.get("candidate_revision") or 1)) == revision:
                 sources.append(cached)
-        for result in self.list_results(job_id):
-            if not isinstance(result, dict) or not result:
-                continue
+        result = self.load_result(job_id, CENTRAL_VALIDATOR_ID)
+        if isinstance(result, dict) and result:
             if max(1, int(result.get("candidate_revision") or 1)) == revision:
                 sources.append(result)
         if not sources:
@@ -677,7 +647,7 @@ class ValidationStore:
         pool = completed or sources
         return max(pool, key=_time)
 
-    def list_open_jobs(self, *, user_alias: str = "") -> list[dict[str, Any]]:
+    def list_open_jobs(self, *, validator_id: str = "") -> list[dict[str, Any]]:
         jobs: list[dict[str, Any]] = []
         indexed_ids = self._load_open_job_ids()
         source_jobs = (
@@ -695,8 +665,8 @@ class ValidationStore:
                 continue
             if self.load_decision(job_id):
                 continue
-            if user_alias:
-                result = self.load_result(job_id, user_alias)
+            if validator_id:
+                result = self.load_result(job_id, validator_id)
                 if result:
                     revision = max(1, int(job.get("candidate_revision") or 1))
                     result_revision = int(result.get("candidate_revision") or 1)
@@ -724,17 +694,6 @@ class ValidationStore:
             if name == wanted:
                 matches.append(job)
         return matches
-
-    def find_open_job_for_skill(self, skill_name: str) -> Optional[dict[str, Any]]:
-        matches = self.list_open_jobs_for_skill(skill_name)
-        if not matches:
-            return None
-        return max(
-            matches,
-            key=lambda item: str(
-                item.get("updated_at") or item.get("created_at") or ""
-            ),
-        )
 
     def reset_job_artifacts(self, job_id: str) -> dict[str, Any]:
         """Clear revision-bound outputs while retaining the validation job."""
@@ -835,41 +794,3 @@ class ValidationStore:
             reverse=True,
         )
         return tasks
-
-    def delete_job(self, job_id: str) -> dict[str, Any]:
-        """Remove a validation job and all its side artifacts.
-
-        Deletes the job record, the rendered candidate SKILL.md, any cached
-        evaluation, the human-review task, and any per-user results. Best-effort
-        per key so a missing artifact never blocks the rest. Returns which keys
-        were actually removed so the caller can report/verify."""
-        removed: list[str] = []
-        keys = [
-            self._job_key(job_id),
-            self._evaluation_key(job_id),
-            self._decision_key(job_id),
-            self._human_review_key(job_id),
-        ]
-        # Per-user result objects live under a job-scoped prefix.
-        try:
-            result_prefix = f"{self._prefix()}validation_results/{job_id}/"
-            for obj in self._bucket.iter_objects(prefix=result_prefix):
-                keys.append(obj.key)
-            for obj in self._bucket.iter_objects(
-                prefix=self._candidate_skill_prefix(job_id)
-            ):
-                keys.append(obj.key)
-        except Exception as exc:
-            if not is_not_found_error(exc):
-                logger.warning("[ValidationStore] failed to list results for %s: %s", job_id, exc)
-        for key in keys:
-            try:
-                self._bucket.delete_object(key)
-                removed.append(key)
-            except Exception as exc:
-                if not is_not_found_error(exc):
-                    logger.warning("[ValidationStore] failed to delete %s: %s", key, exc)
-        open_ids = self._load_open_job_ids()
-        if open_ids is not None and job_id in open_ids:
-            self._save_open_job_ids([item for item in open_ids if item != job_id])
-        return {"job_id": job_id, "removed": removed}

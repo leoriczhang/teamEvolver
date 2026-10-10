@@ -9,18 +9,34 @@ import pytest
 from team_replay.adapter_runtime import AdapterConflict, AdapterError, available, binding, load_factory, save_content
 from team_replay.artifacts import validate_skill_treatment
 from team_replay.execution import run_branch
-from team_replay.factories import DeapReplayFactory, LegacyBranchSession, MappedHttpReplayFactory, TurnBasedReplayFactory
+from team_replay.factories import DeapReplayFactory, MappedHttpReplayFactory, TurnBasedReplayFactory
 from team_replay.hooks import AgentObservation, ReplayContext, ReplayTreatment, ReplayUnsupported
 from team_replay.judging import judge_checklist, render_user_feedback
-from team_replay.local_hermes import build_sandbox
 from team_replay.metrics import compare_efficiency
 from team_replay.policy import progressive_replay_decision
+from team_skills.library.bundle import attach_bundle_payload
 
 
 def context(branch="baseline"):
     return ReplayContext(
         f"request-{branch}", "customer", ReplayTreatment(branch, None), (), {}, 60,
     )
+
+
+def canonical_skill(name: str, description: str, content: str):
+    return attach_bundle_payload(
+        {"name": name, "description": description, "content": content},
+        {},
+    )
+
+
+def test_inline_skill_treatment_is_rejected():
+    result = validate_skill_treatment(
+        {"name": "old", "description": "Old", "content": "inline"}
+    )
+
+    assert result["passed"] is False
+    assert result["errors"] == ["Skill treatment requires a canonical bundle"]
 
 
 def test_runtime_binding_is_explicit_and_read_save_do_not_execute(tmp_path):
@@ -55,9 +71,9 @@ def build_replay_adapter(config):
 def test_progressive_loop_only_sends_query_then_selected_natural_feedback():
     sent, received_contexts, closed = [], [], []
     checklist = [
-        {"id": "R01", "text": "deliver the file"},
-        {"id": "R02", "text": "include costs"},
-        {"id": "R03", "text": "hidden audit appendix"},
+        {"id": "R01", "kind": "output", "text": "deliver the file"},
+        {"id": "R02", "kind": "output", "text": "include costs"},
+        {"id": "R03", "kind": "output", "text": "hidden audit appendix"},
     ]
 
     class Session:
@@ -94,8 +110,11 @@ def test_progressive_loop_only_sends_query_then_selected_natural_feedback():
         return render_user_feedback(**kwargs, completion=lambda **_: {"message": "The file is ready; please add the costs."})
 
     result = run_branch(
-        Factory(), context(), {"query": "Make the deliverable", "checklist": checklist,
-                              "progressive_disclosure": {"batch_size": 1}},
+        Factory(), context(), {
+            "query": "Make the deliverable",
+            "checks": checklist,
+            "replay": {"progressive_disclosure": {"batch_size": 1}},
+        },
         harness={}, max_interactions=4, judge=judge, feedback=feedback,
     )
     assert sent == ["Make the deliverable", "The file is ready; please add the costs."]
@@ -205,8 +224,8 @@ def test_turn_factory_forwards_peer_skill_set():
     treatment = {
         "kind": "skill_set",
         "skills": [
-            {"name": "skill-a", "description": "A", "content": "Do A"},
-            {"name": "skill-b", "description": "B", "content": "Do B"},
+            canonical_skill("skill-a", "A", "Do A"),
+            canonical_skill("skill-b", "B", "Do B"),
         ],
     }
     replay_context = ReplayContext(
@@ -233,32 +252,6 @@ def test_turn_factory_forwards_peer_skill_set():
     ]
 
 
-def test_local_sandbox_installs_all_peer_skills(tmp_path):
-    sandbox = build_sandbox(
-        tmp_path,
-        "candidate",
-        {
-            "base_url": "http://example.invalid",
-            "api_key": "",
-            "model": "test",
-            "max_tokens": 100,
-            "api_mode": "",
-        },
-        {
-            "kind": "skill_set",
-            "skills": [
-                {"name": "skill-a", "description": "A", "content": "Do A"},
-                {"name": "skill-b", "description": "B", "content": "Do B"},
-            ],
-        },
-    )
-
-    home = tmp_path / "candidate" / ".hermes" / "skills"
-    assert (home / "skill-a" / "SKILL.md").is_file()
-    assert (home / "skill-b" / "SKILL.md").is_file()
-    assert sandbox["skill_tree_sha256"]
-
-
 def test_deap_factory_creates_independent_workspaces_and_rejects_unsupported_materials():
     clients = []
 
@@ -280,6 +273,16 @@ def test_deap_factory_creates_independent_workspaces_and_rejects_unsupported_mat
     c = ReplayContext("req", "deap", ReplayTreatment("baseline", None), ({"content": "material"},), {}, 60)
     with pytest.raises(ReplayUnsupported):
         factory.open(c)
+    inline = ReplayContext(
+        "req",
+        "deap",
+        ReplayTreatment("candidate", {"name": "old", "content": "inline"}),
+        (),
+        {},
+        60,
+    )
+    with pytest.raises(RuntimeError, match="canonical bundle"):
+        factory.open(inline).send("query")
 
 
 def test_deap_factory_maps_replay_trace_and_metrics():
@@ -328,23 +331,6 @@ def test_deap_factory_maps_replay_trace_and_metrics():
     }
     assert observation.metrics_incomplete_reason == ""
     assert observation.messages[0]["tool_calls"][0]["name"] == "read"
-
-
-def test_legacy_bridge_is_single_turn_and_hides_checklist():
-    calls = []
-
-    class Adapter:
-        def execute_branch(self, request):
-            calls.append(request)
-            return {"status": "succeeded", "output": {"final_response": "answer"},
-                    "trace": {}, "metrics": {"interaction_turns": 1}}
-
-    session = LegacyBranchSession(context(), Adapter())
-    assert session.send("query").response == "answer"
-    assert calls[0]["case"] == {"query": "query", "materials": []}
-    with pytest.raises(ReplayUnsupported):
-        session.send("follow-up")
-    session.close()
 
 
 @pytest.mark.parametrize("path", ["/tmp/escape", "../escape", "C:/escape", "a/../../escape"])

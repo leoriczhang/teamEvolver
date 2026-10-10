@@ -149,7 +149,9 @@ interface MiningJob {
   input_dir: string;
   document_count: number | null;
   max_rounds: number;
-  current_round: number;
+  current_round: number | null;
+  runtime_timeout_seconds?: number;
+  ov_cancel_error?: string;
   phase: PhaseState;
   created_at: string;
   started_at: string;
@@ -412,6 +414,7 @@ export default function MiningView({
   const { config } = mining;
 
   const [rounds, setRounds] = useState(3);
+  const [runtimeTimeout, setRuntimeTimeout] = useState(3600);
   const [humanCheckpoints, setHumanCheckpoints] = useState(true);
   const [taskName, setTaskName] = useState("");
   const [starting, setStarting] = useState(false);
@@ -745,6 +748,7 @@ export default function MiningView({
           input_dir: inputDir,
           max_rounds: rounds,
           human_checkpoints: humanCheckpoints,
+          runtime_timeout_seconds: runtimeTimeout,
         }),
       });
       const created = response.jobs?.[0];
@@ -1075,6 +1079,8 @@ export default function MiningView({
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <div className="text-[13px] font-bold">耗时分析</div>
               {job.ov_stage && <span className="mono text-[10.5px] text-muted-foreground">当前阶段：{job.ov_stage}</span>}
+              {job.runtime_timeout_seconds && <span>运行期限：{formatDuration(job.runtime_timeout_seconds)}</span>}
+              {job.ov_cancel_error && <span className="text-destructive">取消请求未确认：{job.ov_cancel_error}，后台继续重试</span>}
             </div>
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
               {job.submission_seconds !== undefined && (
@@ -1295,11 +1301,11 @@ export default function MiningView({
             <div className="grid gap-4 lg:grid-cols-[minmax(360px,0.8fr)_minmax(0,1.2fr)]">
             <div className="rounded-xl border border-border bg-surface p-4">
               <div className="mb-4 flex items-center justify-between text-xs">
-                <span className="font-semibold">挖掘流水线</span>
+                <span className="font-semibold">挖掘流水线{job.engine === "ov_compile" ? "（仅表示阶段位置）" : ""}</span>
                 <span className="text-muted-foreground">
                   {job.status === "queued" || job.status === "preparing"
                     ? "等待调度"
-                    : `第 ${job.current_round || 1} / ${job.max_rounds} 轮`}
+                    : job.engine === "ov_compile" ? (job.ov_stage || "等待远端阶段上报") : `第 ${job.current_round || 1} / ${job.max_rounds} 轮`}
                 </span>
               </div>
               <div className="space-y-3">
@@ -1444,7 +1450,7 @@ export default function MiningView({
                         </button>
                         <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10.5px] text-muted-foreground">
                           <span>{sourceDisplayName(job.input_dir)}</span>
-                          <span>第 {Math.max(1, job.current_round || 1)} / {job.max_rounds} 轮</span>
+                          <span>{job.engine === "ov_compile" ? (job.ov_stage || "等待远端阶段上报") : `第 ${Math.max(1, job.current_round || 1)} / ${job.max_rounds} 轮`}</span>
                         </div>
                       </div>
                       <Pill tone={jobStatusMeta(job.status).tone as any}>{jobStatusMeta(job.status).label}</Pill>
@@ -1685,7 +1691,7 @@ export default function MiningView({
 
                 <label className="block">
                   <span className="mb-1.5 flex items-center justify-between text-xs font-semibold text-muted-foreground">
-                    反思环最大轮数
+                    内部证据复核次数提示
                     <span className="text-accent">{rounds}</span>
                   </span>
                   <input
@@ -1699,6 +1705,14 @@ export default function MiningView({
                   />
                 </label>
 
+                <label className="block text-xs text-muted-foreground">
+                  运行期限（秒，60–7200）
+                  <input type="number" min={60} max={7200} value={runtimeTimeout} disabled={starting}
+                    onChange={(event) => setRuntimeTimeout(Number(event.target.value))}
+                    className="ml-3 rounded border border-border bg-background px-2 py-1" />
+                  <span className="mt-1 block text-[11px]">从远端受理后计时，包含排队；到期请求取消并等待远端确认。内部复核提示不代表已执行轮次。</span>
+                </label>
+
                 <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-border bg-background p-3.5 transition-colors hover:border-accent/50">
                   <input
                     type="checkbox"
@@ -1708,15 +1722,15 @@ export default function MiningView({
                     className="mt-0.5 size-4 accent-[var(--accent)]"
                   />
                   <span>
-                    <span className="block text-[12px] font-semibold">启用知识补充</span>
+                    <span className="block text-[12px] font-semibold">请求知识补充（当前引擎暂不支持暂停问答）</span>
                     <span className="mt-1 block text-[11px] leading-relaxed text-muted-foreground">
-                      发现影响 Skill 编译的关键知识缺口时暂停并以表单提问；关闭后任务会直接完成当前挖掘流程。
+                      该偏好会记录在任务中。当前 OV Compile 仅输出知识缺口报告，不会暂停展示提问表单；需在完成后人工补充并重新挖掘。
                     </span>
                   </span>
                 </label>
 
                 <div className="rounded-lg border border-border bg-background/70 p-3 text-[11px] leading-relaxed text-muted-foreground">
-                  新任务会自动复用“全局模型”配置，并固化知识源快照。最多同时运行 {mining.jobSummary.max_parallel} 个任务，超出后自动排队。
+                  编译使用 OpenViking 服务端的模型配置，并固化知识源快照。本页不会覆盖服务端模型。最多同时运行 {mining.jobSummary.max_parallel} 个任务，超出后拒绝创建，请等待已有任务结束。
                 </div>
 
                 <div className="flex justify-end gap-2 pt-1">
@@ -2088,6 +2102,10 @@ function jobStatusMeta(status: MiningJobStatus) {
 function jobProgress(job: MiningJob) {
   if (job.status === "queued" || job.status === "preparing") return 0;
   if (job.status === "succeeded") return 100;
+  if (job.engine === "ov_compile") {
+    const phases = Object.values(job.phase || {});
+    return Math.round((phases.filter((state) => state === "done").length / 3) * 100);
+  }
   const completedRounds = Math.max(0, (job.current_round || 1) - 1);
   const doneSteps = STEP_META.filter((step) => job.phase?.[step.key] === "done").length;
   const activeStep = STEP_META.some((step) => job.phase?.[step.key] === "active") ? 0.5 : 0;

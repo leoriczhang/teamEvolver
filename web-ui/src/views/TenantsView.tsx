@@ -225,7 +225,8 @@ export default function TenantsView({
   const [configTenant, setConfigTenant] = useState<TenantInfo | null>(null);
   const loaded = useRef(false);
 
-  const isAdmin = user?.role === "admin";
+  const isAdmin = user?.platform_role === "platform_admin";
+  const canManage = (tenantId: string) => user?.tenant_id === tenantId && user?.role === "admin";
 
   const refresh = useCallback(async (notify = false) => {
     setLoading(true);
@@ -250,7 +251,7 @@ export default function TenantsView({
   if (!isAdmin) {
     return (
       <Panel title="租户管理" count="需要管理员权限">
-        <Empty>仅管理员可管理租户；普通用户所在数据由租户 token 在服务端路由。</Empty>
+        <Empty>仅平台超级管理员可创建和禁用租户。</Empty>
       </Panel>
     );
   }
@@ -421,6 +422,7 @@ export default function TenantsView({
           </Button>
         }
       >
+        <p className="p-3 text-xs text-muted-foreground">成员、配置和 Key 管理：先切换到目标租户，再进入「成员与接入」。</p>
         {error ? (
           <Empty>
             加载失败：{error}
@@ -455,12 +457,10 @@ export default function TenantsView({
                         <Button
                           size="sm"
                           variant="outline"
-                          disabled={mode !== "postgres" || t.tenant_id === "default"}
+                          disabled={mode !== "postgres" || !canManage(t.tenant_id)}
                           onClick={() => setConfigTenant(t)}
                           title={
-                            t.tenant_id === "default"
-                              ? "default 租户使用全局配置，无租户配额覆盖"
-                              : "查看数据源接入摘要并设置租户运行配额"
+                            canManage(t.tenant_id) ? "设置租户运行配额" : "请先切换到该租户"
                           }
                         >
                           <Settings2 className="size-3.5" />
@@ -471,6 +471,7 @@ export default function TenantsView({
                           variant="outline"
                           disabled={
                             mode !== "postgres" ||
+                            !canManage(t.tenant_id) ||
                             t.tenant_id === "default" ||
                             busyTenantId === t.tenant_id
                           }

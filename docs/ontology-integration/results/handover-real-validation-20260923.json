@@ -1,0 +1,171 @@
+{
+  "date": "2026-09-23",
+  "status": "blocked_model_stream_completion",
+  "te_head": "ad04bba56b112cf8a7c33dbd36d5e4bce25fdc11",
+  "te_uncommitted_fix": "mkdir409 stat reconciliation; bounded ACL context readiness retry; asynchronous input staging with raw readback; cancellation terminal-receipt reconciliation",
+  "environment": {
+    "te": "local authenticated HTTP harness using actual TE routes, persistent worker and isolated PostgreSQL; not full console login",
+    "te_url": "http://127.0.0.1:52319",
+    "ov": "real SIT OpenViking",
+    "account": "product_agent",
+    "model_stub": false
+  },
+  "source_root": "viking://resources/wiki-0920-3/PROCEDURE/operations/handover/",
+  "collection_id": "ont_49ae598d2b17c04adf86abe4",
+  "source_count": 3,
+  "source_bytes": 6444,
+  "source_refs": [
+    {
+      "digest": "eadb227156807ffafd620c82a1841cc4af781b3d67432425e056840911108857",
+      "revision": "bebad01159e621d98358fdd21d8416da54b3d7317b78bf15b865a6a60727a363",
+      "source_id": "wiki_c4874d175264223268eaec5a06b034dc12b786b4"
+    },
+    {
+      "digest": "6cbe3b1e50af9bbf71f5c7c29bb20d8128edd4cffce6d437d75dc4b8ab5d6e87",
+      "revision": "15f325e84b5d47ff0d172667011272035f44daef59fe387a8c7cd084dc6572b7",
+      "source_id": "wiki_2194746a5ec2a24ab55f0dae9bca67d6a9b5a2d3"
+    },
+    {
+      "digest": "bd3ee5c9f5044cd3f2645fca77ffb740fb29602a765f8b0996d3a815325af428",
+      "revision": "ce4802f5601eb113d7ff95d05658f56a1097945dd80fd4c24697ea5216fa42bc",
+      "source_id": "wiki_cd1b964ee7068bd9fb9f9dd13ea9d43ae3506df3"
+    }
+  ],
+  "job_id": "ont_bf231869378d939463ed5b97",
+  "state": "cancelled",
+  "stage": "native_compile_agent",
+  "error": "MODEL_STREAM_DID_NOT_COMPLETE_OBSERVED",
+  "observations": [
+    {
+      "check": "source directory listing and immutable freeze",
+      "result": "passed"
+    },
+    {
+      "check": "mkdir 409 plus exact stat reconciliation",
+      "result": "passed against real OV"
+    },
+    {
+      "check": "ACL bootstrap with trusted backend identity",
+      "result": "PUT 200 and compiler ACL readback 200"
+    },
+    {
+      "check": "initial ACL PUT400 INVALID_ARGUMENT",
+      "result": "not reproduced by exact subsequent request; cause not established"
+    },
+    {
+      "check": "account ACL enforcement after user change",
+      "result": "passed; ordinary identity denied ls/content/read/search before dispatch"
+    },
+    {
+      "check": "first input content/write wait=true",
+      "result": "failed DEADLINE_EXCEEDED after ~25 seconds; fixed TE staging to wait=false plus raw readback"
+    },
+    {
+      "check": "three frozen inputs staged",
+      "result": "passed exact text readback"
+    },
+    {
+      "check": "TE restart while native Compile running",
+      "result": "passed; same native Compile ID resumed, no duplicate POST"
+    },
+    {
+      "check": "new directory ACL readiness",
+      "result": "reproduced native400: ACL target has no context record; index it first. TE now maps exact error and retries at most6 attempts,11.5 seconds backoff plus I/O"
+    },
+    {
+      "check": "asynchronous native cancel",
+      "result": "second run TE remained cancelling then recover loop confirmed native cancelled and converged to cancelled"
+    },
+    {
+      "check": "model extraction",
+      "result": "blocked twice at source child first model stream; both streams received first chunks but no final response before explicit cancellation; underlying provider/gateway reason unconfirmed"
+    }
+  ],
+  "not_executed": [
+    "Schema confirmation",
+    "candidate semantic review",
+    "Prepare",
+    "Approve",
+    "Commit",
+    "published HTTP/MCP query",
+    "published evidence explanation"
+  ],
+  "generation_before": 0,
+  "generation_changed": false,
+  "publication_authorized_by_user": true,
+  "account_acl_change": "user enabled; readback settings.acl.enabled=true",
+  "private_local_evidence_root": "/tmp/te-ontology-handover-20260923",
+  "ov_code_modified": false,
+  "deployed": false,
+  "committed": false,
+  "pushed": false,
+  "native_compile_id": "cmp_7381a8c0b37e4131b08821d27dff023b",
+  "trace_id": "272cbace319c7a9d84b4b59a9edb5356",
+  "tests": {
+    "full_pytest": {
+      "passed": 859,
+      "skipped": 64,
+      "failed": 5,
+      "failures": "same five preexisting failures recorded in compile-conflict-validation-20260923.json"
+    },
+    "compileall": "passed",
+    "ruff": "passed",
+    "docs_refs": "one preexisting missing reference in docs/en/api/06-skill-sync.md",
+    "focused_ontology_compile_and_logging": {
+      "passed": 76
+    }
+  },
+  "generation_after": 0,
+  "native_runs": [
+    {
+      "te_job": "ont_bf231869378d939463ed5b97",
+      "compile_id": "cmp_7381a8c0b37e4131b08821d27dff023b",
+      "trace_id": "272cbace319c7a9d84b4b59a9edb5356",
+      "final_status": "cancelled",
+      "child_model_start": "2026-09-23T09:35:46.001Z",
+      "child_model_end_on_cancellation": "2026-09-23T09:57:30.916Z",
+      "first_chunk_seconds": 5.613419239001814,
+      "completed_model_usage": {
+        "input": 12058,
+        "output": 863,
+        "total": 12921
+      },
+      "child_usage": "unavailable; not zero"
+    },
+    {
+      "te_job": "ont_ad10735294a47c82a58b9d97",
+      "compile_id": "cmp_0dc621ffa1dd4701aa403765dbb5c15b",
+      "trace_id": "b7b33228ce81213f0e8805c8fc0886e9",
+      "final_status": "cancelled",
+      "child_model_start": "2026-09-23T10:01:37.894Z",
+      "child_model_end_on_cancellation": "2026-09-23T10:07:13.864Z",
+      "first_chunk_seconds": 4.557620556966867,
+      "completed_model_usage": {
+        "input": 11442,
+        "output": 242,
+        "total": 11684
+      },
+      "child_usage": "unavailable; not zero"
+    }
+  ],
+  "unexecuted_due_to_blocker": [
+    "Schema confirmation",
+    "candidate semantic review",
+    "Prepare",
+    "Approve",
+    "Commit",
+    "published HTTP/MCP query",
+    "published evidence explanation"
+  ],
+  "extra_cancelled_local_job": {
+    "job_id": "ont_3c6e8c8b5117c9dd61f15268",
+    "reason": "stopped during staging while predecessor cancellation still pending",
+    "native_compile_submitted": false
+  },
+  "notes": [
+    "Not a successful end-to-end validation. No source Wiki edits. No formal asset publication.",
+    "Trace environment label is production in telemetry configuration; actual tested service is SIT.",
+    "Local private harness auth is not full TE console login validation.",
+    "Preexisting .gitignore and OV .env_sit changes were preserved."
+  ]
+}

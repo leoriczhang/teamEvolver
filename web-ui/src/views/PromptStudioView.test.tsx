@@ -89,9 +89,7 @@ it("loads the skill pipeline and prompts for editing", async () => {
         evolve: {
           use_session_judge: true,
           publish_mode: "validated",
-          validation_max_rejections: 1,
           human_review_enabled: true,
-          human_review_timeout_seconds: 86400,
           interval_seconds: 600,
           evidence_enabled: true,
           evidence_max_entries: 400,
@@ -118,8 +116,6 @@ it("loads the skill pipeline and prompts for editing", async () => {
           poll_interval_seconds: 60,
           max_jobs_per_day: 5,
           max_concurrency: 1,
-          required_results: 3,
-          required_approvals: 2,
         },
       };
     }

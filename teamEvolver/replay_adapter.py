@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, Mapping
 
-from team_replay._util import stable_hash
 from team_replay.artifacts import skill_treatment_members
 from team_replay.host import ReplayHost, configure_host, current_host
 
+from .config import DEFAULT_LLM_MAX_TOKENS
 from .config_store import ConfigStore
 
 
@@ -23,23 +22,38 @@ class TeamEvolverReplayHost(ReplayHost):
 
     def load_candidate_job(self, job_id: str) -> dict[str, Any] | None:
         from team_skills.candidates.store import ValidationStore
+        from .tenants.registry import current_tenant_id
 
         config = self._config()
-        return ValidationStore.from_config(config).load_job(job_id) or None
+        return (
+            ValidationStore.from_config(
+                config,
+                tenant_id=current_tenant_id(),
+            ).load_job(job_id)
+            or None
+        )
 
     def load_source_session(self, session_id: str) -> dict[str, Any] | None:
         from .session_store import SessionStore
+        from .tenants.registry import current_tenant_id
 
         if not str(session_id or "").strip():
             return None
         config = self._config()
-        return SessionStore.from_config(config).load_session(session_id)
+        return SessionStore.from_config(
+            config,
+            tenant_id=current_tenant_id(),
+        ).load_session(session_id)
 
     def list_source_sessions(self, *, limit: int) -> list[dict[str, Any]]:
         from .session_store import SessionStore
+        from .tenants.registry import current_tenant_id
 
         config = self._config()
-        store = SessionStore.from_config(config)
+        store = SessionStore.from_config(
+            config,
+            tenant_id=current_tenant_id(),
+        )
         sessions: list[dict[str, Any]] = []
         for row in store.list_conversations(limit=limit):
             session = store.load_session(str(row.get("session_id") or ""))
@@ -71,8 +85,7 @@ class TeamEvolverReplayHost(ReplayHost):
     def resolve_replay_factory(self, runtime_type: str, source_session: Mapping[str, Any]):
         from team_replay import adapter_runtime
 
-        from .integrations.protocol_metrics import increment
-        from .tenants.registry import current_tenant_id, get_current_tenant
+        from .tenants.registry import get_current_tenant
 
         config = self._config()
         tenant = get_current_tenant()
@@ -80,9 +93,7 @@ class TeamEvolverReplayHost(ReplayHost):
             descriptor = adapter_runtime.describe(config, tenant)
             factory = adapter_runtime.load_factory(config, tenant, descriptor.get("revision"))
         except adapter_runtime.AdapterError:
-            increment("replay_adapter_resolve_total", tenant_id=current_tenant_id(), result="unavailable")
             return None
-        increment("replay_adapter_resolve_total", tenant_id=current_tenant_id(), result="resolved")
         return factory
 
     def checklist_judge_config(
@@ -115,9 +126,9 @@ class TeamEvolverReplayHost(ReplayHost):
         harness = {
             "base_url": str(config.llm_api_base or ""),
             "api_key": str(config.llm_api_key or ""),
-            "model": str(config.llm_model_id or config.model_name or ""),
+            "model": str(config.llm_model_id or ""),
             "api_mode": str(config.llm_api_mode or ""),
-            "max_tokens": int(config.llm_max_tokens or 100000),
+            "max_tokens": int(config.llm_max_tokens or DEFAULT_LLM_MAX_TOKENS),
         }
         from team_replay.judging import JUDGE_SYSTEM
 
@@ -169,32 +180,6 @@ class TeamEvolverReplayHost(ReplayHost):
                 for name, result in results
             ],
         }
-
-    def materialize_skill_treatment(
-        self,
-        skill: Mapping[str, Any],
-        target: Path,
-    ) -> str:
-        from team_skills.library.bundle import (
-            bundle_tree_sha256,
-            candidate_skill_bundle,
-            write_skill_bundle,
-        )
-
-        members = skill_treatment_members(skill)
-        hashes = {}
-        for member in members:
-            name = str(member.get("name") or "")
-            destination = target if len(members) == 1 else target / name
-            bundle = candidate_skill_bundle(member)
-            write_skill_bundle(destination, bundle, clean=True)
-            hashes[name] = bundle_tree_sha256(bundle)
-        return (
-            next(iter(hashes.values()))
-            if len(hashes) == 1
-            else stable_hash(hashes)
-        )
-
 
 def ensure_replay_host() -> ReplayHost:
     """Install the teamEvolver Adapter once and return it."""

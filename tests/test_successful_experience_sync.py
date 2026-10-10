@@ -324,9 +324,15 @@ def test_flat_destination_shares_uri_but_keeps_tenant_and_account_state_separate
 
 
 def test_configurable_directory_routes_uploads_and_resets_checkpoint():
-    config = TeamEvolverConfig(storage_pg_enabled=True, sharing_enabled=True,
-                              sharing_viking_api_key="key", sharing_viking_account="acme",
-                              experience_sync={"enabled": True, "target_directory": "viking://resources/custom/"})
+    config = TeamEvolverConfig(
+        storage_pg_enabled=True,
+        sharing_viking_api_key="key",
+        sharing_viking_account="acme",
+        experience_sync={
+            "enabled": True,
+            "target_directory": "viking://resources/custom/",
+        },
+    )
     settings, target = Settings.from_config(config), Target.from_config(config)
     assert settings.target_directory == target.target_directory == "viking://resources/custom"
     w = worker()
@@ -579,10 +585,15 @@ def test_manual_trigger_http_auth_tenant_and_safe_failures(monkeypatch, route):
     import teamEvolver.proxy.experience_sync as module
 
     app = FastAPI()
-    config = TeamEvolverConfig(experience_sync={"enabled": True}, storage_pg_enabled=True,
-                              sharing_enabled=True, sharing_viking_deployment="local",
-                              sharing_viking_endpoint="http://ov", sharing_viking_account="a",
-                              sharing_viking_user="team", sharing_viking_api_key="private-key")
+    config = TeamEvolverConfig(
+        experience_sync={"enabled": True},
+        storage_pg_enabled=True,
+        sharing_viking_deployment="local",
+        sharing_viking_endpoint="http://ov",
+        sharing_viking_account="a",
+        sharing_viking_user="team",
+        sharing_viking_api_key="private-key",
+    )
     ctx = TenantContext(tenant_id="authenticated")
     owner = SimpleNamespace(config=config)
     registry = SimpleNamespace(get=lambda tid: ctx if tid == ctx.tenant_id else None)
@@ -896,32 +907,6 @@ def test_write_timeout_reconciles_same_uri_without_claiming_indexes_complete(rea
         assert paths[-1] == "/api/v1/content/download"
     finally:
         remote.close()
-
-
-@pytest.mark.parametrize("old_state", ["synced", "retry"])
-def test_legacy_tenant_directory_migrates_existing_records_once_without_deleting(old_state):
-    w = worker()
-    w.store.put_object("experience_library/review.json", canonical(source()))
-    w.run_once()
-    [(key, old)] = [(o.key, w.load(o.key)) for o in w.store.iter_objects(prefix=w.items)]
-    new_uri = old["uri"]
-    old_uri = new_uri.replace(ROOT + "/", ROOT + "/a/", 1)
-    legacy = {**old, "uri": old_uri, "state": old_state, "attempts": 10,
-              "next_attempt": w.store.now + 900, "last_error": "CONFLICT" if old_state == "retry" else None}
-    w.writer.content[old_uri] = w.writer.content.pop(new_uri)
-    w.store.put_object(key, canonical(legacy))
-    doc_before = canonical(legacy["document"])
-    w.run_once()
-    updated = w.load(key)
-    assert updated["uri"] == new_uri and updated["state"] == "synced"
-    assert updated["previous_destination"]["uri"] == old_uri
-    assert updated["previous_destination"]["attempts"] == 10
-    assert canonical(updated["document"]) == doc_before
-    assert old_uri in w.writer.content and new_uri in w.writer.content
-    writes = w.writer.writes
-    w.run_once()
-    assert w.writer.writes == writes
-    assert w.status()["target_directory"] == ROOT
 
 
 def test_new_destination_keeps_tenant_mutex_and_stable_document_ids():

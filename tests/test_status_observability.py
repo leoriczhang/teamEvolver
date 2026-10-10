@@ -20,14 +20,14 @@ def test_skill_cache_status_compares_local_bundle_with_manifest(tmp_path) -> Non
     record = {
         "name": "alpha",
         "version": 3,
-        "format": "bundle_v1",
+        "format": "skill-bundle",
         "tree_sha256": bundle_tree_sha256(bundle),
     }
     bucket = InMemoryObjectStore()
     bucket.put_object("manifest.json", json.dumps(record).encode() + b"\n")
     hub = SkillHub.from_bucket(bucket)
     write_skill_bundle(tmp_path / "alpha", bundle)
-    owner = SimpleNamespace(_skills_dir=lambda: str(tmp_path))
+    owner = SimpleNamespace(_skill_runtime_cache_dir=lambda: str(tmp_path))
 
     status = _skill_cache_status(owner, hub)
 
@@ -66,7 +66,7 @@ def test_pg_cache_poll_refreshes_every_tenant(monkeypatch) -> None:
 
     owner = SimpleNamespace(
         config=SimpleNamespace(storage_pg_enabled=True),
-        _pull_skills_from_cloud=fake_pull,
+        _refresh_skill_runtime_cache=fake_pull,
     )
     monkeypatch.setattr(registry, "TenantRegistry", FakeRegistry)
 

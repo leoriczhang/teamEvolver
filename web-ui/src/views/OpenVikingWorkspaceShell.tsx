@@ -169,7 +169,7 @@ function initialSpace(): SpaceConfig {
 }
 
 const DIRECTORY_PURPOSES: Record<string, string> = {
-  skills: "团队正式技能库，Pi Agent / Hermes 读取源",
+  skills: "团队正式技能库，Agent 读取源",
   "manifest.json": "技能清单索引：名称 → 版本/哈希",
   "evolve_skill_registry.json": "技能 ID 登记表，保证 ID 跨节点稳定",
   skill_lab: "技能实验室：datasets 数据集 / runs 实验结果",
@@ -183,12 +183,12 @@ const DIRECTORY_PURPOSES: Record<string, string> = {
   session_ledger: "会话总账：queued→consumed 状态流转",
   "session_index.json": "会话元信息索引，供控制台快速浏览",
   skill_mutation_commits: "技能变更提交存档（publish/delete）",
-  skill_sync_outbox: "技能同步发件箱，待下发各运行时",
+  skill_rollout_outbox: "Skillopt Rollout 发件箱",
   candidate_skills: "候选技能暂存区，尚未进入正式 skills/",
   validation_jobs: "验证任务，由进化服务产出",
   validation_claims: "任务认领锁，防止重复验证",
-  validation_results: "各客户端独立验证结果",
-  validation_evaluations: "多方结果聚合评估",
+  validation_results: "验证执行结果，自动发布只读取 central-validator",
+  validation_evaluations: "Candidate True Replay 评估",
   validation_decisions: "最终发布/拒绝裁决",
   "validation_decision_index.json": "裁决总索引，供快速检索",
   human_review: "人工复核任务队列（自动裁决拿不准时）",

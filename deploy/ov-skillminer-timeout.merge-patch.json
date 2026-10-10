@@ -1,0 +1,13 @@
+{
+  "vlm": {
+    "timeout": 300,
+    "max_retries": 0,
+    "max_tokens": 16384
+  },
+  "bot": {
+    "agents": {
+      "timeout": 300,
+      "maxTokens": 16384
+    }
+  }
+}

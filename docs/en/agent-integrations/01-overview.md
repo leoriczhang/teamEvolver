@@ -9,5 +9,4 @@ The tenant configuration determines the Account.
 3. Refresh team Skills before model calls through [Skill pull](../api/06-skill-sync.md).
 4. For True Replay, an administrator binds a preinstalled [adapter](../api/05-replay-branch.md).
 
-See [Hermes setup](./03-hermes.md), [custom integration](./05-custom-agent.md), and
-[staged upgrades](../guides/11-agent-deregistration.md).
+See [Hermes setup](./03-hermes.md) or [custom integration](./05-custom-agent.md).

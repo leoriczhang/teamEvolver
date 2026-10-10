@@ -153,7 +153,8 @@ def test_generated_questions_are_strictly_normalized_and_persisted(tmp_path: Pat
 
     assert manifest["question_count"] == 1
     assert loaded is not None
-    assert loaded["questions"] == questions
+    for key, value in questions[0].items():
+        assert loaded["questions"][0][key] == value
     assert (run_dir / "benchmark.json").is_file()
     assert not (run_dir / "benchmark.jsonl").exists()
     assert (run_dir / "BENCHMARK.md").is_file()

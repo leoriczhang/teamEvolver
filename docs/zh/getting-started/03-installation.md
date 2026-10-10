@@ -77,7 +77,6 @@ llm:
   api_key: "your-llm-api-key"
 
 sharing:
-  enabled: true
   backend: viking
   viking_deployment: local
   viking_endpoint: http://localhost:1933

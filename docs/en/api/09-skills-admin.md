@@ -26,7 +26,9 @@ List all Skills in the local Skill library.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `sharing_enabled` | boolean | Whether cloud sharing is enabled |
+| `sharing_enabled` | boolean | Deprecated compatibility field; always true |
+| `skill_backend` | string | Authoritative Skill storage backend |
+| `delivery_mode` | string | Agent delivery mode: `push` or `pull` |
 | `skills` | array | Skill summary list |
 
 **Skill Summary Fields:**
@@ -296,6 +298,8 @@ Example response:
 ```json
 {
   "sharing_enabled": true,
+  "skill_backend": "postgres",
+  "delivery_mode": "push",
   "skills": [
     {
       "name": "database-debugging",

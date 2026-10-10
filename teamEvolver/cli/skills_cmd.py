@@ -1,9 +1,6 @@
-"""Skill sharing commands: push / pull / sync / list-remote."""
+"""Skill registry inspection and runtime-cache materialization commands."""
 
 from __future__ import annotations
-
-import os
-import uuid
 
 import click
 
@@ -13,10 +10,9 @@ from ..config_store import ConfigStore
 def _sharing_backend(cfg) -> str:
     from ..storage import normalize_backend
 
-    configured = (
-        str(getattr(cfg, "sharing_skill_backend", "") or "").strip().lower()
-        or str(getattr(cfg, "sharing_backend", "") or "").strip().lower()
-    )
+    configured = str(
+        getattr(cfg, "sharing_skill_backend", "") or ""
+    ).strip().lower()
     backend = normalize_backend(
         configured,
         endpoint=str(getattr(cfg, "sharing_viking_endpoint", "") or ""),
@@ -30,14 +26,10 @@ def _sharing_backend(cfg) -> str:
 
 def _sharing_target(cfg) -> str:
     backend = _sharing_backend(cfg)
-    agent = str(getattr(cfg, "sharing_viking_agent_id", "") or "default")
-    customer = str(getattr(cfg, "sharing_viking_customer_id", "") or "")
-    group = f"{agent}/peers/{customer}" if customer else agent
     if backend == "viking":
         endpoint = getattr(cfg, "sharing_viking_endpoint", "")
         deployment = str(getattr(cfg, "sharing_viking_deployment", "") or "cloud")
-        # Wire constant: OpenViking namespace root, part of the shared data
-        # Shared contract with AgentsHub and the evolve server.
+        # Wire constant: OpenViking namespace root shared with the evolve server.
         root_prefix = (
             getattr(cfg, "sharing_viking_root_prefix", "")
             or "team-skill-evolver"
@@ -53,17 +45,12 @@ def _sharing_target(cfg) -> str:
     if backend == "postgres":
         schema = str(getattr(cfg, "storage_pg_schema", "") or "teamevolver")
         return f"PostgreSQL storage (schema={schema})"
-    return f"{backend} storage ({group})"
+    return f"{backend} storage"
 
 
-def _require_sharing(cs: ConfigStore):
-    """Validate that sharing is enabled and configured. Returns (cfg, SkillHub) or raises."""
+def _build_skill_registry(cs: ConfigStore):
+    """Validate and build the configured Skill registry."""
     cfg = cs.to_config()
-    if not cfg.sharing_enabled:
-        raise click.ClickException(
-            "Skill sharing is not enabled. "
-            "Run 'teamEvolver config sharing.enabled true' to configure."
-        )
     backend = _sharing_backend(cfg)
     if backend == "viking":
         if not cfg.sharing_viking_endpoint:
@@ -88,90 +75,18 @@ def _require_sharing(cs: ConfigStore):
     return cfg, hub
 
 
-def _push_via_mutations(cfg, hub, *, skill_filter=None) -> dict:
-    from team_skills.library import layout
-    from team_skills.library.mutations import SkillMutationCommand, SkillMutationService
-
-    service = SkillMutationService.from_hub(hub, config=cfg)
-    paths = layout.skill_md_paths(cfg.skills_dir)
-    summary = {
-        "uploaded": 0,
-        "skipped": 0,
-        "filtered": 0,
-        "submitted": 0,
-        "total_local": len(paths),
-        "event_ids": [],
-    }
-    operation_id = uuid.uuid4().hex
-    for path in paths:
-        name = os.path.basename(os.path.dirname(path))
-        commit = service.execute(
-            SkillMutationCommand(
-                action="update",
-                name=name,
-                mutation_id=f"cli-push-{operation_id}-{name}",
-                skills_dir=cfg.skills_dir,
-                skill_filter=skill_filter,
-                metadata={"source": "cli"},
-            )
-        )
-        result = dict(commit.get("result") or {})
-        for key in ("uploaded", "skipped", "filtered", "submitted"):
-            summary[key] += int(result.get(key) or 0)
-        if commit.get("event_id"):
-            summary["event_ids"].append(commit["event_id"])
-    return summary
-
-
 @click.group()
 def skills():
     """Skill management commands."""
 
 
-@skills.command(name="push")
-@click.option("--no-filter", is_flag=True, help="Skip effectiveness quality gate.")
-def skills_push(no_filter):
-    """Push local skills to the shared cloud."""
-    cs = ConfigStore()
-    cfg, hub = _require_sharing(cs)
-    click.echo(f"Pushing skills to {_sharing_target(cfg)} ...")
-    skill_filter = None
-    if not no_filter:
-        stats_path = os.path.join(cfg.skills_dir, "skill_stats.json")
-        if os.path.exists(stats_path):
-            import json
-
-            try:
-                with open(stats_path, encoding="utf-8") as f:
-                    stats = json.load(f)
-                skill_filter = {
-                    "stats": stats,
-                    "min_injections": cfg.sharing_push_min_injections,
-                    "min_effectiveness": cfg.sharing_push_min_effectiveness,
-                }
-            except Exception:
-                pass
-    result = _push_via_mutations(
-        cfg,
-        hub,
-        skill_filter=skill_filter,
-    )
-    click.echo(
-        f"Done: {result['uploaded']} uploaded, "
-        f"{result['skipped']} unchanged, "
-        f"{result.get('filtered', 0)} filtered, "
-        f"{result.get('submitted', 0)} submitted, "
-        f"{result['total_local']} total local skills."
-    )
-
-
 @skills.command(name="pull")
 def skills_pull():
-    """Pull shared skills from the cloud."""
+    """Materialize the durable Skill registry into the runtime cache."""
     cs = ConfigStore()
-    cfg, hub = _require_sharing(cs)
-    click.echo(f"Pulling skills from {_sharing_target(cfg)} ...")
-    result = hub.pull_skills(cfg.skills_dir)
+    cfg, hub = _build_skill_registry(cs)
+    click.echo(f"Materializing skills from {_sharing_target(cfg)} ...")
+    result = hub.materialize_runtime_cache(cfg.skills_runtime_cache_dir)
     msg = (
         f"Done: {result['downloaded']} downloaded, "
         f"{result['skipped']} unchanged, "
@@ -186,28 +101,14 @@ def skills_pull():
     click.echo(msg)
 
 
-@skills.command(name="sync")
-def skills_sync():
-    """Bidirectional sync: pull then push."""
+@skills.command(name="list")
+def skills_list():
+    """List Skills in the authoritative tenant registry."""
     cs = ConfigStore()
-    cfg, hub = _require_sharing(cs)
-    click.echo(f"Syncing skills with {_sharing_target(cfg)} ...")
-    pr = hub.pull_skills(cfg.skills_dir, mirror=False)
-    ps = _push_via_mutations(cfg, hub)
-    click.echo(
-        f"Pull: {pr['downloaded']} downloaded, {pr['skipped']} unchanged\n"
-        f"Push: {ps['uploaded']} uploaded, {ps['skipped']} unchanged"
-    )
-
-
-@skills.command(name="list-remote")
-def skills_list_remote():
-    """List skills available in the shared storage backend."""
-    cs = ConfigStore()
-    _cfg, hub = _require_sharing(cs)
-    remote = hub.list_remote()
+    _cfg, hub = _build_skill_registry(cs)
+    remote = hub.list_skills()
     if not remote:
-        click.echo("No skills found on the cloud.")
+        click.echo("No Skills found in the registry.")
         return
     click.echo(f"\n{'=' * 60}")
     click.echo(f"  Shared Skills ({len(remote)} total)")

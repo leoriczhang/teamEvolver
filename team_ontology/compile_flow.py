@@ -5,6 +5,7 @@ import json
 import logging
 import posixpath
 import time
+from datetime import datetime, timezone
 from urllib.parse import unquote, urlencode, urlsplit
 
 from fastapi import HTTPException
@@ -30,6 +31,84 @@ from .wire import Manifest, Schema, digest
 
 log = logging.getLogger(__name__)
 SUFFIXES = {".md", ".markdown", ".txt", ".html", ".htm", ".json", ".jsonl", ".yaml", ".yml", ".csv"}
+
+# OV CompileLimits mirrors: sources pack into batches of at most 80K characters;
+# extraction subagents run 6 per wave and merge children 10 per wave. TE only
+# mirrors these to predict a wall clock; OV remains the source of truth.
+BATCH_CHAR_LIMIT = 80_000
+EXTRACT_CONCURRENCY = 6
+MERGE_CONCURRENCY = 10
+
+
+def estimate_batches(characters):
+    """Estimate OV pack_source_batches' batch count from per-file character counts.
+
+    Greedy fill in input order, mirroring OV: an over-limit file splits into
+    <=BATCH_CHAR_LIMIT chunks (OV prefers heading/paragraph boundaries; chunk
+    boundaries only shift edge cases), empty files keep one range. This sizes a
+    deadline; it is never a correctness contract.
+    """
+    batches, size = 1, 0
+    for count in characters:
+        remaining = max(count, 1)
+        while remaining > 0:
+            chunk = min(BATCH_CHAR_LIMIT, remaining)
+            if size + chunk > BATCH_CHAR_LIMIT:
+                batches, size = batches + 1, 0
+            size += chunk
+            remaining -= chunk
+    return batches
+
+
+def compile_deadline_seconds(batches, config):
+    """Predicted wall clock: fixed cost plus one term per extraction/merge wave."""
+    waves = -(-batches // EXTRACT_CONCURRENCY)
+    merge_waves = -(-batches // MERGE_CONCURRENCY)
+    return int(
+        config.safety_factor
+        * (config.base_seconds + waves * config.wave_seconds + merge_waves * config.merge_wave_seconds)
+    )
+
+
+def predicted_block(batches, total_characters, deadline, estimated):
+    """Assemble the result.predicted payload shared by creation and submit paths."""
+    note = (
+        f"预计编译 ~{deadline // 3600} 小时"
+        if deadline >= 3600
+        else f"预计编译 ~{max(1, deadline // 60)} 分钟"
+    )
+    return {
+        "batches": batches,
+        "total_characters": total_characters,
+        "duration_seconds": deadline,
+        "note": note,
+        "estimated": estimated,
+    }
+
+
+LEGACY_BYTES_PER_CHAR = 2.5  # Measured on the SIT wiki corpus (2.48-2.57); legacy fallback only.
+
+
+def creation_prediction(collection, config):
+    """Predict compile batches/duration from a sources_ready collection.
+
+    New collections persist exact per-file characters (files) and reference
+    characters (reference_characters). Collections created before that field
+    existed fall back to an aggregate-bytes estimate for their references.
+    """
+    result = collection["result"]
+    characters = [f.get("characters") or 0 for f in (result.get("files") or [])]
+    references = collection["request"].get("references") or []
+    estimated = bool(references) and "reference_characters" not in result
+    if references:
+        if "reference_characters" in result:
+            characters.append(result["reference_characters"])
+        else:
+            # Legacy: aggregate bytes cover files and references; subtract the exact
+            # file share (bytes/char estimate) and convert the remainder.
+            characters.append(int(max(0, result.get("bytes", 0) / LEGACY_BYTES_PER_CHAR - sum(characters))))
+    batches = estimate_batches(characters)
+    return predicted_block(batches, sum(characters), compile_deadline_seconds(batches, config), estimated)
 
 
 def uri(value):
@@ -73,6 +152,19 @@ class CompileFlow:
         except HTTPException as exc:
             if exc.detail == "JOB_STATE_CHANGED":
                 return {"state": "fenced"}
+            if exc.detail == "COMPILE_ACL_TARGET_NOT_READY" and result.get("stage") == "stage_inputs":
+                waiting = result.setdefault("acl_wait", {"started_at": time.time(), "failures": 0})
+                waiting["failures"] += 1
+                waiting["target"] = result.get("workspace_target")
+                waiting["retry_at"] = time.time() + min(15, 2 ** min(waiting["failures"], 4))
+                event(log, "ontology.acl_wait", logging.WARNING, job_id=job["id"],
+                      uri=waiting["target"], failures=waiting["failures"], retry_at=waiting["retry_at"])
+                try:
+                    return await self.save(job, result)
+                except HTTPException as fence:
+                    if fence.detail == "JOB_STATE_CHANGED":
+                        return {"state": "fenced"}
+                    raise
             code = safe_code(exc.detail, "COMPILE_FAILED")
         except (ValueError, KeyError, TypeError, ValidationError):
             code = "COMPILE_OUTPUT_INVALID"
@@ -90,7 +182,9 @@ class CompileFlow:
         return await self.store.checkpoint(job, result, "failed", code)
 
     async def save(self, job, result, state="queued"):
-        quiet = result.get("stage") == "poll" and result.get("remote_status") == job["result"].get("remote_status")
+        quiet = (
+            result.get("stage") == "poll" and result.get("remote_status") == job["result"].get("remote_status")
+        ) or bool(result.get("acl_wait") and job["result"].get("acl_wait"))
         event(
             log,
             "ontology.compile_stage",
@@ -129,8 +223,13 @@ class CompileFlow:
                 invalid("SOURCE_FILE_COUNT_LIMIT")
             if len({ref["source_id"] for ref in result["refs"]}) != len(result["refs"]):
                 invalid("SOURCE_REVISION_CONFLICT")
-            for source in await self.frozen(p, result["refs"]) if result["refs"] else []:
-                self.size(result, source["text"])
+            if result["refs"]:
+                references = await self.frozen(p, result["refs"])
+                for source in references:
+                    self.size(result, source["text"])
+                # Reference texts are read here anyway; persist their character count
+                # so build-time duration predictions are exact without extra OV calls.
+                result["reference_characters"] = sum(len(source["text"]) for source in references)
             return await self.save(job, result)
         if result["stage"] == "discover":
             if not result["pending"]:
@@ -262,28 +361,53 @@ class CompileFlow:
         try:
             await self.native(p, "POST", "/fs/mkdir", {"uri": target}, compiler=True)
         except HTTPException as exc:
-            if str(exc.detail) not in {"ALREADY_EXISTS", "DIRECTORY_EXISTS"}:
+            if exc.status_code != 409 or str(exc.detail) not in {"CONFLICT", "ALREADY_EXISTS", "DIRECTORY_EXISTS"}:
                 raise
+            await self.require_type(p, target, directory=True)
+            event(log, "ontology.workspace_reused", uri=target, ov_user=self.cfg.compile_user)
+
+    async def require_type(self, p, target, *, directory):
+        # A conflict may also be a lock race or a same-name file. Check the
+        # exact path with the compiler's current permissions before proceeding.
+        event(log, "ontology.compile_path_check", uri=target, expected_type="directory" if directory else "file",
+              ov_user=self.cfg.compile_user)
+        stat = await self.native(p, "GET", "/fs/stat?" + urlencode({"uri": target}), compiler=True)
+        if not isinstance(stat, dict) or stat.get("uri") != target or type(stat.get("isDir")) is not bool:
+            raise HTTPException(502, "COMPILE_INVALID_STAT")
+        if stat["isDir"] != directory:
+            raise HTTPException(409, "COMPILE_PATH_TYPE_CONFLICT")
 
     async def protect(self, p, target):
-        await self.mkdir(p, target)
-        await self.native(
-            p,
-            "PUT",
-            "/acl",
-            {
-                "uri": target,
-                "acl_mode": "restricted",
-                "entries": [{"principal": "user:" + self.cfg.compile_user, "level": "manage"}],
-            },
-            compiler=True,
-        )
-        acl = await self.native(p, "GET", "/acl?" + urlencode({"uri": target}), compiler=True)
-        # ACL GET wire shape is checked by integration tests; denial probe tests effective access too.
-        if acl.get("acl_mode") != "restricted" or acl.get("effective_entries") != [
-            {"principal": "user:" + self.cfg.compile_user, "level": "manage"}
-        ]:
-            invalid("COMPILE_WORKSPACE_NOT_PRIVATE")
+        # Bootstrap the ACL with the trusted backend identity. The compiler's
+        # user role cannot grant itself manage access on a new resources path.
+        # Readback and all subsequent content/Compile operations stay scoped
+        # to the compiler; the ordinary-user denial probe remains mandatory.
+        expected = [{"principal": "user:" + self.cfg.compile_user, "level": "manage"}]
+        spec = {"acl_mode": "restricted", "entries": expected}
+        try:
+            # OV persists ACLs in the directory's context record: creation and
+            # the ACL commit atomically through the mkdir acl argument. The
+            # restricted mode marker itself lands with asynchronous indexing,
+            # so a fresh creation verifies through the denial probe (the
+            # filesystem grant is effective immediately) instead of a mode
+            # readback that would race the indexing; a separate ACL PUT races
+            # it too and its re-upsert is currently rejected upstream.
+            await self.native(p, "POST", "/fs/mkdir", {"uri": target, "acl": spec})
+        except HTTPException as exc:
+            if exc.status_code != 409 or str(exc.detail) not in {"CONFLICT", "ALREADY_EXISTS", "DIRECTORY_EXISTS"}:
+                raise
+            await self.require_type(p, target, directory=True)
+            event(log, "ontology.workspace_reused", uri=target, ov_user=self.cfg.compile_user)
+            acl = await self.native(p, "GET", "/acl?" + urlencode({"uri": target}), compiler=True)
+            # mode=inherit is the pre-indexing state of a fresh atomic creation,
+            # not drift; only a changed grant set re-applies the ACL.
+            if acl.get("acl_mode") not in {"restricted", "inherit"} or acl.get("effective_entries") != expected:
+                await self.native(p, "PUT", "/acl", {"uri": target, **spec})
+                acl = await self.native(p, "GET", "/acl?" + urlencode({"uri": target}), compiler=True)
+                if acl.get("acl_mode") not in {"restricted", "inherit"} or acl.get("effective_entries") != expected:
+                    invalid("COMPILE_WORKSPACE_NOT_PRIVATE")
+        # The denial probe is the authoritative isolation check; it holds even
+        # while the mode marker is still indexing.
         probe = "te-ontology-probe-" + digest(target)[:12]
         try:
             await self.native(p, "GET", "/fs/ls?" + urlencode({"uri": target}), identity=probe)
@@ -304,24 +428,37 @@ class CompileFlow:
             except HTTPException as exc:
                 if exc.status_code == 403:
                     continue
+                # OV's search endpoint may answer an unauthorized probe with 404
+                # instead of 403; either way the probe cannot discover content,
+                # and fs-level isolation is already proven by the content read.
+                if exc.status_code == 404 and method == "POST":
+                    continue
                 raise
             if method == "GET" or any(result.get(k) for k in ("resources", "memories", "skills")):
                 invalid("COMPILE_WORKSPACE_NOT_PRIVATE")
 
     async def write(self, p, target, text):
-        # Always deterministic replacement. On a lost response, the next step verifies the same bytes.
+        # Create immutable input bytes. Reused files must match; never replace
+        # conflicting content on retry or after a lost response.
         try:
             await self.native(
                 p,
                 "POST",
                 "/content/write",
-                {"uri": target, "content": text, "mode": "create", "wait": True, "timeout": 25},
+                # Compile reads these immutable bytes directly. Semantic/index
+                # completion is not a prerequisite for staging private inputs.
+                {"uri": target, "content": text, "mode": "create", "wait": False},
                 compiler=True,
             )
         except HTTPException as exc:
-            if exc.detail not in {"ALREADY_EXISTS", "FILE_EXISTS"}:
+            conflict = exc.status_code == 409 and exc.detail in {"CONFLICT", "ALREADY_EXISTS", "FILE_EXISTS"}
+            uncertain = exc.status_code in {408, 500, 502, 503, 504}
+            if not conflict and not uncertain:
                 raise
-        actual = await self.native(p, "GET", "/content/read?" + urlencode({"uri": target}), compiler=True)
+            await self.require_type(p, target, directory=False)
+        actual = await self.native(
+            p, "GET", "/content/read?" + urlencode({"uri": target, "raw": "true"}), compiler=True
+        )
         if actual != text:
             invalid("COMPILE_INPUT_CHANGED")
 
@@ -354,6 +491,11 @@ class CompileFlow:
         folder = root + "/" + job["id"] + "/" + str(result["round"])
         input_root, output_root = folder + "/input", folder + "/output"
         if stage == "stage_inputs":
+            waiting = result.get("acl_wait", {})
+            if waiting and time.time() - waiting["started_at"] >= 300:
+                invalid("COMPILE_ACL_WAIT_EXHAUSTED")
+            if time.time() < waiting.get("retry_at", 0):
+                return await self.save(job, result)
             if not result.get("protected"):
                 # Native Skill text is compared with the bundled version, never silently upgraded.
                 from pathlib import Path
@@ -401,6 +543,7 @@ class CompileFlow:
                                 stage="schema_review",
                                 cache_hit=previous["id"],
                                 schema_basis=schema_basis(checked),
+                                assertion_gaps=checked["extraction"]["gaps"],
                             )
                             return await self.save(job, result, "schema_review")
                 if self.cfg.compile_user == (await self.ops.resolve(p)).get("subject", p["subject"]):
@@ -412,11 +555,19 @@ class CompileFlow:
                 for part in parts:
                     parent += "/" + part
                     await self.mkdir(p, parent)
+                result["workspace_target"] = root
                 await self.protect(p, root)
-                for target in [root + "/" + job["id"], folder, input_root, output_root]:
+                # input/output are created by protect() in one atomic mkdir+acl call;
+                # OV persists ACLs in context records, so a bare mkdir followed by a
+                # separate ACL PUT races the directory's async indexing.
+                for target in [root + "/" + job["id"], folder]:
                     await self.mkdir(p, target)
-                await self.protect(p, input_root)
-                await self.protect(p, output_root)
+                for target in (input_root, output_root):
+                    result["workspace_target"] = target
+                    await self.protect(p, target)
+                if result.pop("acl_wait", None):
+                    event(log, "ontology.acl_ready", job_id=job["id"], uri=output_root)
+                result.pop("workspace_target", None)
                 await self.native(p, "GET", "/fs/stat?" + urlencode({"uri": skill_uri}), compiler=True)
                 result["protected"] = True
                 return await self.save(job, result)
@@ -442,11 +593,20 @@ class CompileFlow:
                 ),
                 "schema": result.get("confirmed_schema"),
                 "repair_code": result.get("repair_code"),
+                "repair_issues": result.get("repair_issues", []),
+                "repair_issue_count": result.get("repair_issue_count", 0),
             }
+            characters = [s["characters"] for s in result["source_map"]]
+            batches = estimate_batches(characters)
+            deadline = compile_deadline_seconds(batches, self.cfg.compile_deadline)
+            submitted = time.time()
             result.update(
                 stage="submit",
                 target=output_root,
-                submitted_at=time.time(),
+                submitted_at=submitted,
+                predicted=predicted_block(batches, sum(characters), deadline, False),
+                deadline_seconds=deadline,
+                deadline_at=datetime.fromtimestamp(submitted + deadline, timezone.utc).isoformat(),
                 payload={
                     "from": [canonical_inputs.get("uri", input_root).rstrip("/")],
                     "to": canonical_target.get("uri", output_root).rstrip("/"),
@@ -491,10 +651,31 @@ class CompileFlow:
             result.update(compile_id=matches[0]["task_id"], stage="poll")
             return await self.save(job, result)
         if stage == "poll":
-            if time.time() - result["submitted_at"] > self.cfg.compile_timeout_seconds:
+            # Jobs persisted before the adaptive deadline keep the legacy fixed budget.
+            if time.time() - result["submitted_at"] > result.get("deadline_seconds", 1800):
                 await self.cancel_remote(p, {**job, "result": result})
                 invalid("COMPILE_DEADLINE_EXCEEDED")
-            task = await self.native(p, "GET", "/tasks/" + result["compile_id"], compiler=True)
+            if time.time() < result.get("poll_retry_at", 0):
+                return await self.save(job, result)
+            try:
+                task = await self.native(p, "GET", "/tasks/" + result["compile_id"], compiler=True)
+            except HTTPException as exc:
+                if exc.status_code not in {408, 429} and exc.status_code < 500:
+                    raise
+                failures = result.get("poll_failures", 0) + 1
+                result.update(poll_failures=failures, poll_error=safe_code(exc.detail, "OV_REQUEST_FAILED"))
+                # Keep the accepted task identity across transient read failures.
+                # Both the overall deadline and consecutive retry count bound recovery.
+                if failures >= 8:
+                    invalid("COMPILE_POLL_UNAVAILABLE")
+                delay = min(60, 2 ** failures)
+                result["poll_retry_at"] = time.time() + delay
+                event(log, "ontology.compile_poll_retry", logging.WARNING, job_id=job["id"],
+                      compile_id=result["compile_id"], status=exc.status_code,
+                      code=result["poll_error"], failures=failures, retry_seconds=delay)
+                return await self.save(job, result)
+            for key in ("poll_failures", "poll_error", "poll_retry_at"):
+                result.pop(key, None)
             result["remote_status"] = task.get("status")
             result["remote_stage"] = task.get("stage")
             usage = task.get("meta", {}).get("token_usage")
@@ -509,7 +690,8 @@ class CompileFlow:
             )
             remote_error = task.get("error")
             result["remote_error"] = safe_code(
-                remote_error.get("code") if isinstance(remote_error, dict) else remote_error, ""
+                remote_error.get("code") if isinstance(remote_error, dict)
+                else remote_error.split(":", 1)[0] if isinstance(remote_error, str) else None, ""
             )
             if task.get("status") in {"failed", "cancelled"}:
                 invalid("COMPILE_EXECUTION_FAILED")
@@ -532,14 +714,22 @@ class CompileFlow:
             except (HTTPException, ValueError, KeyError, TypeError) as exc:
                 if isinstance(exc, HTTPException) and exc.status_code in {401, 403, 503}:
                     raise
+                result["repair_code"] = safe_code(getattr(exc, "detail", ""), "COMPILE_OUTPUT_INVALID")
+                result["repair_issues"] = getattr(exc, "repair_issues", [])
+                result["repair_issue_count"] = getattr(exc, "repair_issue_count", 0)
+                event(log, "ontology.output_rejected", logging.WARNING, job_id=job["id"],
+                      code=result["repair_code"], issue_count=result["repair_issue_count"],
+                      issues=result["repair_issues"])
                 if result["round"] >= 2:
                     raise
-                result["repair_code"] = safe_code(getattr(exc, "detail", ""), "COMPILE_OUTPUT_INVALID")
                 return await self.new_round(job, result)
             await self.verify_private_content(p, result["target"] + "/schema-proposal.json", result["target"])
             result.update(
-                output=output, output_digest=digest(output), stage="schema_review", schema_basis=schema_basis(checked)
+                output=output, output_digest=digest(output), stage="schema_review", schema_basis=schema_basis(checked),
+                assertion_gaps=checked["extraction"]["gaps"],
             )
+            event(log, "ontology.drafts_validated", job_id=job["id"],
+                  assertions=len(checked["assertions"]), gaps=len(checked["extraction"]["gaps"]))
             if result.get("confirmed_schema") and schema_semantics(output["schema"]) == schema_semantics(
                 result["confirmed_schema"]
             ):
@@ -550,7 +740,8 @@ class CompileFlow:
             conversion_started = time.monotonic()
             sources = await self.frozen(p, result["refs"])
             schema = result["confirmed_schema"]
-            manifest = self.manifest(job, result, schema)
+            caps = await self.ops.ov(p, "GET", "/ontology/capabilities")
+            manifest = self.manifest(job, result, schema, published_revision=caps.get("schema_revision"))
             bundle = candidate_from_drafts(
                 result["output"],
                 sources,
@@ -579,12 +770,14 @@ class CompileFlow:
             return await self.save(job, result, "review_ready")
         invalid("COMPILE_STAGE_INVALID")
 
-    def manifest(self, job, result, schema):
+    def manifest(self, job, result, schema, published_revision=None):
         return Manifest(
             schema_revision=schema["revision"],
             sources=result["refs"],
             expected_generation=job["request"]["expected_generation"],
-            mode="delta",
+            # OV accepts a delta only over an unchanged published schema; publishing
+            # a changed schema must replace the previous generation wholesale.
+            mode="replace" if published_revision and published_revision != schema["revision"] else "delta",
             max_assertions=10000,
         ).model_dump(mode="json")
 
@@ -648,10 +841,22 @@ class CompileFlow:
                     "submitted_at",
                     "compile_completed_at",
                     "token_usage",
+                    "deadline_seconds",
+                    "predicted",
                 )
             }
         )
-        for key in ("compile_id", "payload", "protected", "source_map", "target", "remote_status"):
+        for key in (
+            "compile_id",
+            "payload",
+            "protected",
+            "source_map",
+            "target",
+            "remote_status",
+            "predicted",
+            "deadline_seconds",
+            "deadline_at",
+        ):
             result.pop(key, None)
         result.update(round=result["round"] + 1, staged=0, stage="stage_inputs")
         return await self.save(job, result)
@@ -687,10 +892,27 @@ class CompileFlow:
             result.setdefault("history", []).append(
                 {
                     k: result.get(k)
-                    for k in ("compile_id", "target", "submitted_at", "compile_completed_at", "token_usage")
+                    for k in (
+                        "compile_id",
+                        "target",
+                        "submitted_at",
+                        "compile_completed_at",
+                        "token_usage",
+                        "deadline_seconds",
+                        "predicted",
+                    )
                 }
             )
-            for key in ("compile_id", "payload", "protected", "source_map", "target"):
+            for key in (
+                "compile_id",
+                "payload",
+                "protected",
+                "source_map",
+                "target",
+                "predicted",
+                "deadline_seconds",
+                "deadline_at",
+            ):
                 result.pop(key, None)
             result.update(
                 round=result["round"] + 1, staged=0, stage="stage_inputs", type_mapping={}, predicate_mapping={}
@@ -721,16 +943,44 @@ class CompileFlow:
             for item in result["files"]:
                 item.pop("tries", None)
         else:
-            if result.get("stage") in {"submit", "reconcile"}:
+            if result.get("stage") == "stage_inputs":
+                # No Compile has been accepted for this round. Resume the same
+                # private workspace; ACL lag must not consume model repair rounds.
+                result.pop("acl_wait", None)
+            elif result.get("stage") in {"submit", "reconcile"}:
                 result["stage"] = "reconcile"
+            elif result.get("stage") == "poll" and result.get("compile_id") and job.get("error") not in {
+                "COMPILE_EXECUTION_FAILED", "COMPILE_DEADLINE_EXCEEDED"
+            }:
+                # A failed status request says nothing about the remote execution.
+                # Reconcile the same task instead of creating a concurrent compile.
+                for key in ("poll_failures", "poll_error", "poll_retry_at"):
+                    result.pop(key, None)
             else:
                 result.setdefault("history", []).append(
                     {
                         k: result.get(k)
-                        for k in ("compile_id", "target", "submitted_at", "compile_completed_at", "token_usage")
+                        for k in (
+                            "compile_id",
+                            "target",
+                            "submitted_at",
+                            "compile_completed_at",
+                            "token_usage",
+                            "deadline_seconds",
+                            "predicted",
+                        )
                     }
                 )
-                for key in ("compile_id", "payload", "protected", "source_map", "target"):
+                for key in (
+                    "compile_id",
+                    "payload",
+                    "protected",
+                    "source_map",
+                    "target",
+                    "predicted",
+                    "deadline_seconds",
+                    "deadline_at",
+                ):
                     result.pop(key, None)
                 result.update(round=result.get("round", 0) + 1, staged=0, stage="stage_inputs")
         return await self.store.resume(p, job_id, ["failed", "compile_unknown", "sources_ready"], result)
@@ -759,7 +1009,13 @@ class CompileFlow:
         if identifier:
             task = await self.native(p, "GET", "/tasks/" + identifier, compiler=True)
             if task.get("status") not in {"completed", "failed", "cancelled"}:
-                await self.native(p, "POST", "/tasks/" + identifier + "/cancel", compiler=True)
+                if task.get("status") != "cancelling":
+                    await self.native(p, "POST", "/tasks/" + identifier + "/cancel", compiler=True)
+                # Native cancellation is asynchronous. A successful POST only
+                # accepts the intent; keep the TE fence until a terminal receipt.
+                task = await self.native(p, "GET", "/tasks/" + identifier, compiler=True)
+                return task.get("status") in {"completed", "failed", "cancelled"}
+        return True
 
 
 def merge_outputs(old, new, selected):

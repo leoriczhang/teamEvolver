@@ -1,0 +1,337 @@
+{
+  "date": "2026-10-08",
+  "versions": {
+    "TE": "0d4b8689a6e6bde1fdada1778c6d9f367449c325",
+    "OV": "8f10a04108c6bc8a0d9de045e31cbea1e96397ec"
+  },
+  "policy": "Connector only; history preserved; no owner approval or automatic publication",
+  "summary": {
+    "new_documents_created": 3,
+    "new_document_sha_readbacks_match": 3,
+    "new_document_index_status": "queued/skipped; completion not confirmed",
+    "revision_proposals_pending_review": 3,
+    "failed_first_attempts_recovered": 2,
+    "formally_published": 0
+  },
+  "operations": [
+    {
+      "file": "09_KEE_R6简化实施_源码基线与功能矩阵_20261008.md",
+      "requested_sha256": "0be38732fcfba787037dc6572175a93c2253d29c7d24ef217ad6feaebfeb2063",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/09_KEE_R6简化实施_源码基线与功能矩阵_20261008.md",
+      "result": {
+        "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/09_KEE_R6简化实施_源码基线与功能矩阵_20261008.md",
+        "kind": "create",
+        "actor": "chatgpt",
+        "state": "saved",
+        "sha256": "0be38732fcfba787037dc6572175a93c2253d29c7d24ef217ad6feaebfeb2063",
+        "attempt": 0,
+        "created_at": "2026-10-08T11:37:27.649178+00:00",
+        "updated_at": "2026-10-08T11:37:27.649196+00:00",
+        "operation_id": "3f44a1dec2b78fea30c21f4c0abd4b9a925851c79813219ecf0f9a86f74be667",
+        "expected_sha256": null,
+        "next_attempt_at": 0
+      }
+    },
+    {
+      "file": "10_KEE_R6契约接口与迁移部署恢复_20261008.md",
+      "requested_sha256": "a06e78ea3248bbea51c529e2e8d24362fad4c3e80ebc8f54999d5c7751460377",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/10_KEE_R6契约接口与迁移部署恢复_20261008.md",
+      "result": {
+        "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/10_KEE_R6契约接口与迁移部署恢复_20261008.md",
+        "kind": "create",
+        "actor": "chatgpt",
+        "state": "saved",
+        "sha256": "a06e78ea3248bbea51c529e2e8d24362fad4c3e80ebc8f54999d5c7751460377",
+        "attempt": 0,
+        "created_at": "2026-10-08T11:39:18.830335+00:00",
+        "updated_at": "2026-10-08T11:39:18.830698+00:00",
+        "operation_id": "52b6daa44c58cac6fd1b9aecc01ec698f666d01c5a1dd400cb6af0f3516ce012",
+        "expected_sha256": null,
+        "next_attempt_at": 0
+      }
+    },
+    {
+      "file": "11_KEE_R6本地验收与待办_20261008.md",
+      "requested_sha256": "518fbe98dc9334d4599bd7cecbf94788f9b7b5f4adc6c0cd9e204553aad3ad9e",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/11_KEE_R6本地验收与待办_20261008.md",
+      "result": {
+        "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/11_KEE_R6本地验收与待办_20261008.md",
+        "kind": "create",
+        "actor": "chatgpt",
+        "state": "saved",
+        "sha256": "518fbe98dc9334d4599bd7cecbf94788f9b7b5f4adc6c0cd9e204553aad3ad9e",
+        "attempt": 0,
+        "created_at": "2026-10-08T11:40:38.604103+00:00",
+        "updated_at": "2026-10-08T11:40:38.604136+00:00",
+        "operation_id": "8e77b08b62d264c21561f1508943d810209666d452d0c02fdc5099caedd53784",
+        "expected_sha256": null,
+        "next_attempt_at": 0
+      }
+    },
+    {
+      "file": "revision-00_平台总览与阅读导航.md",
+      "requested_sha256": "4654948b2c2b8f8e37fb76e114c7518183b7e3ad3f93d9ce007719343a9fe230",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/00_平台总览与阅读导航.md",
+      "result": {
+        "uri": "viking://user/telegramuser8685262224/resources/REFERENCE/来源资料/documents/顺丰工作/知识进化平台/00_平台总览与阅读导航.md",
+        "kind": "update",
+        "actor": "chatgpt",
+        "state": "pending_review",
+        "sha256": "4654948b2c2b8f8e37fb76e114c7518183b7e3ad3f93d9ce007719343a9fe230",
+        "attempt": 0,
+        "created_at": "2026-10-08T11:42:35.235463+00:00",
+        "updated_at": "2026-10-08T11:42:35.235482+00:00",
+        "operation_id": "7aad294f837167f6f5683d6f06d56725ea3b4dbb3b21ae2ac8c8ff0df0933b71",
+        "expected_sha256": "bdb1044211292f5f464dbd4790e787c2d43431005b57b18cef0423bac9c75f6b",
+        "next_attempt_at": 0
+      }
+    },
+    {
+      "file": "revision-02_架构演进与决策记录_20260922.md",
+      "requested_sha256": "c18eb66a33666ecfc87ee329a5e2bdc43f12978356c80286bbc431d99db5ef91",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/02_架构演进与决策记录_20260922.md",
+      "result": {
+        "isError": true,
+        "errors": [
+          "tool call error: tool call failed for `codex_apps/asdk_app_6aa69948e8a08191baa514c87eaabd1b.documents_propose_update`\n\nCaused by:\n    Mcp error: -32603: MCP request timed out"
+        ]
+      }
+    },
+    {
+      "file": "revision-08_知识进化系统_统一KEE平台与三类用户蓝图_R6_20261008.md",
+      "requested_sha256": "bbc226615d0852c57965567a5f3886ba44953c247efb668a03eb4a6906479757",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/08_知识进化系统_统一KEE平台与三类用户蓝图_R6_20261008.md",
+      "result": {
+        "isError": true,
+        "errors": [
+          "tool call error: tool call failed for `codex_apps/asdk_app_6aa69948e8a08191baa514c87eaabd1b.documents_propose_update`\n\nCaused by:\n    Mcp error: -32603: Internal error"
+        ]
+      }
+    },
+    {
+      "file": "revision-02_架构演进与决策记录_20260922.md",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/02_架构演进与决策记录_20260922.md",
+      "requested_sha256": "c18eb66a33666ecfc87ee329a5e2bdc43f12978356c80286bbc431d99db5ef91",
+      "result": {
+        "uri": "viking://user/telegramuser8685262224/resources/REFERENCE/来源资料/documents/顺丰工作/知识进化平台/02_架构演进与决策记录_20260922.md",
+        "kind": "update",
+        "actor": "chatgpt",
+        "state": "pending_review",
+        "sha256": "c18eb66a33666ecfc87ee329a5e2bdc43f12978356c80286bbc431d99db5ef91",
+        "attempt": 0,
+        "created_at": "2026-10-08T11:49:35.559383+00:00",
+        "updated_at": "2026-10-08T11:49:35.559402+00:00",
+        "operation_id": "870ab4fcf55bf30d9763323bfc90fd03fd2abbbb641a2d4cd33f9ef00d58540c",
+        "expected_sha256": "da4e8eb5b7476b5469c7d0538524703391774cba571b01db8fbf1a065abc256f",
+        "next_attempt_at": 0
+      },
+      "retry": true
+    },
+    {
+      "file": "revision-08_知识进化系统_统一KEE平台与三类用户蓝图_R6_20261008.md",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/08_知识进化系统_统一KEE平台与三类用户蓝图_R6_20261008.md",
+      "requested_sha256": "bbc226615d0852c57965567a5f3886ba44953c247efb668a03eb4a6906479757",
+      "result": {
+        "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/08_知识进化系统_统一KEE平台与三类用户蓝图_R6_20261008.md",
+        "kind": "update",
+        "actor": "chatgpt",
+        "state": "pending_review",
+        "sha256": "bbc226615d0852c57965567a5f3886ba44953c247efb668a03eb4a6906479757",
+        "attempt": 0,
+        "created_at": "2026-10-08T11:49:56.454532+00:00",
+        "updated_at": "2026-10-08T11:49:56.454549+00:00",
+        "operation_id": "b5fbf76529d293eb87d2fa266b97fa5746b802e8cf5d118d5437bf1344b41462",
+        "expected_sha256": "d4d693dd105c3d338823896ade525ce5b135e67517d515b1a4273d2509d33514",
+        "next_attempt_at": 0
+      },
+      "retry": true
+    }
+  ],
+  "status_checks": [
+    {
+      "file": "10_KEE_R6契约接口与迁移部署恢复_20261008.md",
+      "operation_id": "52b6daa44c58cac6fd1b9aecc01ec698f666d01c5a1dd400cb6af0f3516ce012",
+      "result": {
+        "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/10_KEE_R6契约接口与迁移部署恢复_20261008.md",
+        "kind": "create",
+        "actor": "chatgpt",
+        "error": null,
+        "state": "created",
+        "sha256": "a06e78ea3248bbea51c529e2e8d24362fad4c3e80ebc8f54999d5c7751460377",
+        "attempt": 2,
+        "applied_at": "2026-10-08T11:39:31.959723+00:00",
+        "created_at": "2026-10-08T11:39:18.830335+00:00",
+        "updated_at": "2026-10-08T11:42:15.556409+00:00",
+        "operation_id": "52b6daa44c58cac6fd1b9aecc01ec698f666d01c5a1dd400cb6af0f3516ce012",
+        "vector_status": "queued",
+        "expected_sha256": null,
+        "next_attempt_at": 0,
+        "refresh_pending": false,
+        "semantic_status": "skipped"
+      }
+    },
+    {
+      "file": "revision-00_平台总览与阅读导航.md",
+      "operation_id": "7aad294f837167f6f5683d6f06d56725ea3b4dbb3b21ae2ac8c8ff0df0933b71",
+      "result": {
+        "uri": "viking://user/telegramuser8685262224/resources/REFERENCE/来源资料/documents/顺丰工作/知识进化平台/00_平台总览与阅读导航.md",
+        "kind": "update",
+        "actor": "chatgpt",
+        "state": "pending_review",
+        "sha256": "4654948b2c2b8f8e37fb76e114c7518183b7e3ad3f93d9ce007719343a9fe230",
+        "attempt": 0,
+        "created_at": "2026-10-08T11:42:35.235463+00:00",
+        "updated_at": "2026-10-08T11:42:35.235482+00:00",
+        "operation_id": "7aad294f837167f6f5683d6f06d56725ea3b4dbb3b21ae2ac8c8ff0df0933b71",
+        "expected_sha256": "bdb1044211292f5f464dbd4790e787c2d43431005b57b18cef0423bac9c75f6b",
+        "next_attempt_at": 0
+      }
+    },
+    {
+      "file": "09_KEE_R6简化实施_源码基线与功能矩阵_20261008.md",
+      "operation_id": "3f44a1dec2b78fea30c21f4c0abd4b9a925851c79813219ecf0f9a86f74be667",
+      "result": {
+        "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/09_KEE_R6简化实施_源码基线与功能矩阵_20261008.md",
+        "kind": "create",
+        "actor": "chatgpt",
+        "error": null,
+        "state": "created",
+        "sha256": "0be38732fcfba787037dc6572175a93c2253d29c7d24ef217ad6feaebfeb2063",
+        "attempt": 2,
+        "applied_at": "2026-10-08T11:37:34.649243+00:00",
+        "created_at": "2026-10-08T11:37:27.649178+00:00",
+        "updated_at": "2026-10-08T11:38:42.067198+00:00",
+        "operation_id": "3f44a1dec2b78fea30c21f4c0abd4b9a925851c79813219ecf0f9a86f74be667",
+        "vector_status": "queued",
+        "expected_sha256": null,
+        "next_attempt_at": 0,
+        "refresh_pending": false,
+        "semantic_status": "queued"
+      }
+    },
+    {
+      "file": "11_KEE_R6本地验收与待办_20261008.md",
+      "operation_id": "8e77b08b62d264c21561f1508943d810209666d452d0c02fdc5099caedd53784",
+      "result": {
+        "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/11_KEE_R6本地验收与待办_20261008.md",
+        "kind": "create",
+        "actor": "chatgpt",
+        "error": null,
+        "state": "created",
+        "sha256": "518fbe98dc9334d4599bd7cecbf94788f9b7b5f4adc6c0cd9e204553aad3ad9e",
+        "attempt": 4,
+        "applied_at": "2026-10-08T11:40:54.977042+00:00",
+        "created_at": "2026-10-08T11:40:38.604103+00:00",
+        "updated_at": "2026-10-08T11:45:25.165990+00:00",
+        "operation_id": "8e77b08b62d264c21561f1508943d810209666d452d0c02fdc5099caedd53784",
+        "vector_status": "queued",
+        "expected_sha256": null,
+        "next_attempt_at": 1791459717.742905,
+        "refresh_pending": false,
+        "semantic_status": "queued"
+      }
+    },
+    {
+      "file": "revision-02_架构演进与决策记录_20260922.md",
+      "operation_id": "870ab4fcf55bf30d9763323bfc90fd03fd2abbbb641a2d4cd33f9ef00d58540c",
+      "result": {
+        "uri": "viking://user/telegramuser8685262224/resources/REFERENCE/来源资料/documents/顺丰工作/知识进化平台/02_架构演进与决策记录_20260922.md",
+        "kind": "update",
+        "actor": "chatgpt",
+        "state": "pending_review",
+        "sha256": "c18eb66a33666ecfc87ee329a5e2bdc43f12978356c80286bbc431d99db5ef91",
+        "attempt": 0,
+        "created_at": "2026-10-08T11:49:35.559383+00:00",
+        "updated_at": "2026-10-08T11:49:35.559402+00:00",
+        "operation_id": "870ab4fcf55bf30d9763323bfc90fd03fd2abbbb641a2d4cd33f9ef00d58540c",
+        "expected_sha256": "da4e8eb5b7476b5469c7d0538524703391774cba571b01db8fbf1a065abc256f",
+        "next_attempt_at": 0
+      }
+    },
+    {
+      "file": "revision-08_知识进化系统_统一KEE平台与三类用户蓝图_R6_20261008.md",
+      "operation_id": "b5fbf76529d293eb87d2fa266b97fa5746b802e8cf5d118d5437bf1344b41462",
+      "result": {
+        "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/08_知识进化系统_统一KEE平台与三类用户蓝图_R6_20261008.md",
+        "kind": "update",
+        "actor": "chatgpt",
+        "state": "pending_review",
+        "sha256": "bbc226615d0852c57965567a5f3886ba44953c247efb668a03eb4a6906479757",
+        "attempt": 0,
+        "created_at": "2026-10-08T11:49:56.454532+00:00",
+        "updated_at": "2026-10-08T11:49:56.454549+00:00",
+        "operation_id": "b5fbf76529d293eb87d2fa266b97fa5746b802e8cf5d118d5437bf1344b41462",
+        "expected_sha256": "d4d693dd105c3d338823896ade525ce5b135e67517d515b1a4273d2509d33514",
+        "next_attempt_at": 0
+      }
+    }
+  ],
+  "readbacks": [
+    {
+      "file": "09_KEE_R6简化实施_源码基线与功能矩阵_20261008.md",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/09_KEE_R6简化实施_源码基线与功能矩阵_20261008.md",
+      "expected_sha256": "0be38732fcfba787037dc6572175a93c2253d29c7d24ef217ad6feaebfeb2063",
+      "actual_sha256": "0be38732fcfba787037dc6572175a93c2253d29c7d24ef217ad6feaebfeb2063",
+      "sha_matches": true,
+      "total_lines": 102,
+      "complete": true,
+      "isError": false
+    },
+    {
+      "file": "10_KEE_R6契约接口与迁移部署恢复_20261008.md",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/10_KEE_R6契约接口与迁移部署恢复_20261008.md",
+      "expected_sha256": "a06e78ea3248bbea51c529e2e8d24362fad4c3e80ebc8f54999d5c7751460377",
+      "actual_sha256": "a06e78ea3248bbea51c529e2e8d24362fad4c3e80ebc8f54999d5c7751460377",
+      "sha_matches": true,
+      "total_lines": 154,
+      "complete": true,
+      "isError": false
+    },
+    {
+      "file": "11_KEE_R6本地验收与待办_20261008.md",
+      "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/11_KEE_R6本地验收与待办_20261008.md",
+      "expected_sha256": "518fbe98dc9334d4599bd7cecbf94788f9b7b5f4adc6c0cd9e204553aad3ad9e",
+      "actual_sha256": "518fbe98dc9334d4599bd7cecbf94788f9b7b5f4adc6c0cd9e204553aad3ad9e",
+      "sha_matches": true,
+      "total_lines": 74,
+      "complete": true,
+      "isError": false
+    }
+  ],
+  "original_document_checks": [
+    {
+      "file": "revision-02_架构演进与决策记录_20260922.md",
+      "expected_sha256": "da4e8eb5b7476b5469c7d0538524703391774cba571b01db8fbf1a065abc256f",
+      "result": {
+        "size": 5127,
+        "isDir": false,
+        "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/02_架构演进与决策记录_20260922.md",
+        "checked_at": "2026-10-08T11:50:47.425880+00:00",
+        "sha256": "da4e8eb5b7476b5469c7d0538524703391774cba571b01db8fbf1a065abc256f"
+      }
+    },
+    {
+      "file": "revision-00_平台总览与阅读导航.md",
+      "expected_sha256": "bdb1044211292f5f464dbd4790e787c2d43431005b57b18cef0423bac9c75f6b",
+      "result": {
+        "size": 11351,
+        "isDir": false,
+        "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/00_平台总览与阅读导航.md",
+        "checked_at": "2026-10-08T11:50:50.126373+00:00",
+        "sha256": "bdb1044211292f5f464dbd4790e787c2d43431005b57b18cef0423bac9c75f6b"
+      }
+    },
+    {
+      "file": "revision-08_知识进化系统_统一KEE平台与三类用户蓝图_R6_20261008.md",
+      "expected_sha256": "d4d693dd105c3d338823896ade525ce5b135e67517d515b1a4273d2509d33514",
+      "result": {
+        "size": 35082,
+        "isDir": false,
+        "uri": "viking://user/telegramuser8685262224/resources/documents/顺丰工作/知识进化平台/08_知识进化系统_统一KEE平台与三类用户蓝图_R6_20261008.md",
+        "checked_at": "2026-10-08T11:50:50.223347+00:00",
+        "sha256": "d4d693dd105c3d338823896ade525ce5b135e67517d515b1a4273d2509d33514"
+      }
+    }
+  ]
+}
+

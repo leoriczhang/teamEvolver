@@ -1,12 +1,13 @@
 """Deterministic, model-independent conversion of Compile drafts to ontology candidates."""
 
 import copy
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 from urllib.parse import unquote, urlsplit
 
 import yaml
 from fastapi import HTTPException
-from pydantic import Field, field_validator
+from pydantic import Field, TypeAdapter, ValidationError, field_validator
 
 from .wire import Assertion, CandidateBundle, Entity, Evidence, Schema, SourceRef, Wire, digest
 
@@ -138,6 +139,50 @@ def check_coverage(rows, sources):
     return gaps
 
 
+class DraftValidationError(HTTPException):
+    """Safe, bounded repair feedback; never include input values or exception messages."""
+
+    def __init__(self, code, issues):
+        super().__init__(422, code)
+        self.repair_issues = issues[:20]
+        self.repair_issue_count = len(issues)
+
+
+_DATE = TypeAdapter(datetime)
+# Business corpus dates are Beijing time; timezone-free values normalize here, not in the model.
+DEFAULT_TZ = timezone(timedelta(hours=8))
+
+
+def temporal_issues(raw, index):
+    """Validate and normalize assertion validity fields in place.
+
+    A missing valid_from marks a standing assertion (no issue). A timezone-free
+    date is normalized to DEFAULT_TZ instead of rejected. Unparseable values and
+    inverted intervals (both bounds present) still produce bounded repair issues.
+    """
+    issues, dates = [], {}
+    for field in ("valid_from", "valid_to"):
+        value = raw.get(field)
+        if value is None:
+            continue
+        try:
+            parsed = _DATE.validate_python(value)
+        except ValidationError:
+            issues.append({"path": ["assertions", index, field], "code": "ASSERTION_DATETIME_INVALID"})
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=DEFAULT_TZ)
+            raw[field] = parsed.isoformat()
+        dates[field] = parsed
+    if (
+        dates.get("valid_from") is not None
+        and dates.get("valid_to") is not None
+        and dates["valid_to"] <= dates["valid_from"]
+    ):
+        issues.append({"path": ["assertions", index, "valid_to"], "code": "ASSERTION_INTERVAL_EMPTY"})
+    return issues
+
+
 def candidate_from_drafts(output, sources, manifest, schema, *, types=None, predicates=None):
     types, predicates = types or {}, predicates or {}
     schema = Schema.model_validate(schema)
@@ -195,8 +240,8 @@ def candidate_from_drafts(output, sources, manifest, schema, *, types=None, pred
             entities[canonical_id]["aliases"] = list(dict.fromkeys(aliases))[:20]
         else:
             entities[canonical_id] = data
-    assertions = {}
-    for raw in output["assertions"]:
+    assertions, date_issues = {}, []
+    for index, raw in enumerate(output["assertions"]):
         data = copy.deepcopy(raw)
         data["predicate"] = predicates.get(data["predicate"], data["predicate"])
         pred = schema.predicates.get(data["predicate"])
@@ -225,12 +270,27 @@ def candidate_from_drafts(output, sources, manifest, schema, *, types=None, pred
             data["support_sets"] = [[evidence_ids[e] for e in proof] for proof in data["support_sets"]]
         except KeyError:
             invalid("PROOF_INCOMPLETE")
+        issues = temporal_issues(data, index)
+        if issues:
+            # Quarantine invalid temporal claims, never invent dates or weaken the
+            # authoritative Assertion contract. Evidence and references above still validate.
+            date_issues.extend(issues)
+            gaps.append({
+                "code": issues[0]["code"], "assertion_id": str(raw.get("assertion_id", ""))[:200],
+                "source_ids": sorted({evidence[e]["source_id"] for proof in data["support_sets"] for e in proof}),
+                "fields": [issue["path"][-1] for issue in issues],
+                "subject": data["subject"], "predicate": data["predicate"],
+                "support_sets": data["support_sets"],
+            })
+            continue
         data["assertion_id"] = "ast_" + digest({k: v for k, v in data.items() if k != "assertion_id"})[:32]
         item = Assertion.model_validate(data).model_dump(mode="json")
         assertions[item["assertion_id"]] = item
     if len(assertions) > manifest["max_assertions"]:
         invalid("ASSERTION_BUDGET_EXCEEDED")
     if not assertions:
+        if date_issues:
+            raise DraftValidationError("COMPILE_ASSERTION_DATES_INVALID", date_issues)
         invalid("NO_VALID_FACTS")
     return CandidateBundle(
         manifest_digest=digest(manifest),

@@ -11,7 +11,7 @@ async def ingest(
     *,
     invalidate_cache: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
-    """Compatibility-friendly facade over the shared ingestion module."""
+    """Ingest one normalized Session through the shared service."""
     from .service import ingest as ingest_session
 
     return await ingest_session(

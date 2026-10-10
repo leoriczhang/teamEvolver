@@ -1,0 +1,11 @@
+{
+  "baseline": "7a3aff4",
+  "scope": "local-only; TE code and bundled Skill; no SIT deployment",
+  "sha256": {
+    "team_ontology/compile_contract.py": "241ce23e1d608b164f89bb0fb8aef10a2288b37aa020d548a78c096572e84c46",
+    "team_ontology/compile_flow.py": "67227effb9188d76b6ad3b95525f82af1adbc9d4477952586ac7b9240bd90b06",
+    "team_ontology/skills/ontology-extraction-v1/SKILL.md": "2a1c5aeb77e93a70525dac09a2b13bcf4177f3da981e4736ecae6e21f62ec24f",
+    "tests/test_ontology_compile.py": "43984fb0442bcc52c6eb5d4d25e0bf7e891157c2cf1537789354ed663a6ad04e",
+    "tests/test_ontology_v5.py": "777be63b3e81bd1140b8bb75b7c4ab7fd765dd46bc9e867868c327858b98ee7e"
+  }
+}

@@ -234,7 +234,6 @@ teamEvolver skills list-remote
 使用技能同步命令前必须正确配置 `sharing` 节：
 
 ```bash
-teamEvolver config sharing.enabled true
 teamEvolver config sharing.viking_deployment cloud
 teamEvolver config sharing.viking_api_key "your-root-key"
 ```

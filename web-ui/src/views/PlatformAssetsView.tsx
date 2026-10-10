@@ -35,7 +35,7 @@ type AssetFamily = {
   object_count: number;
 };
 
-export type PlatformAssetSource = {
+type PlatformAssetSource = {
   id: SourceId;
   label: string;
   description: string;

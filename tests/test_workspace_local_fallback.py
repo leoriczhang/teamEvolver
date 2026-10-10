@@ -23,10 +23,8 @@ from teamEvolver.storage import _effective_fallback_root
 
 def _config(tmp_path, **kwargs):
     return TeamEvolverConfig(
-        users_registry_path=str(tmp_path / "users.json"),
-        skills_dir=str(tmp_path / "skills"),
-        sharing_enabled=True,
-        sharing_backend="viking",
+        _config_file=str(tmp_path / "config.yaml"),
+        skills_runtime_cache_dir=str(tmp_path / "skills"),
         sharing_viking_endpoint="http://ov.invalid:1933",
         sharing_viking_account="acct-x",
         sharing_local_root=str(tmp_path / "nas"),
@@ -87,8 +85,6 @@ def test_workspace_uses_only_trusted_root_key_and_user_name(tmp_path):
     config = _config(
         tmp_path,
         sharing_viking_api_key="root-key",
-        sharing_viking_team_api_key="legacy-root-key",
-        sharing_viking_personal_api_key="legacy-personal-key",
     )
     scope = _scope_map(
         config,
@@ -198,7 +194,6 @@ def test_team_skill_fallback_shares_backend_root(tmp_path):
         account=config.sharing_viking_account,
         user=config.sharing_viking_user,  # "team"
         root_prefix=config.sharing_viking_root_prefix,
-        group_id="",
         namespace="resources",
     )
     assert root == expected_root
@@ -222,7 +217,6 @@ def test_skill_scope_prefers_dedicated_skill_root(tmp_path):
         account=config.sharing_viking_account,
         user=config.sharing_viking_user,
         root_prefix=config.sharing_viking_root_prefix,
-        group_id="",
         namespace="resources",
     )
     assert root == expected

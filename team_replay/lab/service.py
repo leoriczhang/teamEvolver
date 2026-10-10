@@ -6,9 +6,8 @@ The skill lab keeps three concerns separate:
 * read-only datasets projected from evolution replay cases
 * durable experiment runs with full branch traces and objective efficiency data
 
-Dataset and run artifacts use the same object-storage boundary as sessions and
-validation jobs. When no OpenViking backend is configured, an ephemeral
-in-memory fallback keeps the lab usable within a single process run.
+Dataset and run artifacts use the same durable object-storage boundary as
+sessions and validation jobs.
 """
 
 from __future__ import annotations
@@ -31,13 +30,16 @@ from team_replay.datasets.store import (
     dataset_material_integrity,
 )
 from team_replay.datasets.schema import (
-    DATASET_SCHEMA_V2,
-    legacy_case_view,
+    DATASET_SCHEMA,
+    make_document,
     normalize_case,
+    normalize_document,
     normalize_skill_refs,
+    output_requirements,
+    trajectory_requirements,
 )
 from team_replay.datasets.synthesis import checklist_items, flatten_requirements
-from teamEvolver.storage import InMemoryObjectStore, is_not_found_error
+from teamEvolver.storage import is_not_found_error
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +110,7 @@ def _section_body(markdown: str, heading: str) -> str:
     return match.group(1).strip() if match else ""
 
 
-def parse_dataset_markdown(markdown: str) -> dict[str, str]:
+def parse_dataset_markdown(markdown: str) -> dict[str, Any]:
     """Parse the dataset format used by agent_evolve_evaluation."""
     raw = str(markdown or "").strip()
     query = _section_body(raw, "query")
@@ -118,16 +120,23 @@ def parse_dataset_markdown(markdown: str) -> dict[str, str]:
         raise SkillLabError("数据集 Markdown 缺少 `### query` 或 query 内容为空")
     return {
         "query": query,
-        "requirements": requirements,
-        "trajectory_requirements": trajectory_requirements,
+        "checks": checklist_items(
+            flatten_requirements(requirements),
+            flatten_requirements(trajectory_requirements),
+        ),
     }
 
 
 def render_dataset_markdown(dataset: Mapping[str, Any]) -> str:
     """Render one dataset in the portable Markdown contract."""
-    parts = ["### query", "", _text_block(dataset.get("query"))]
-    requirements = _text_block(dataset.get("requirements"))
-    trajectory = _text_block(dataset.get("trajectory_requirements"))
+    case = (
+        next(iter(dataset.get("cases") or []), {})
+        if isinstance(dataset.get("cases"), list)
+        else dataset
+    )
+    parts = ["### query", "", _text_block(case.get("query"))]
+    requirements = "\n".join(output_requirements(case))
+    trajectory = "\n".join(trajectory_requirements(case))
     if requirements:
         parts.extend(["", "### 要求", "", requirements])
     if trajectory:
@@ -137,7 +146,12 @@ def render_dataset_markdown(dataset: Mapping[str, Any]) -> str:
 
 def compose_experiment_instruction(dataset: Mapping[str, Any]) -> str:
     """Return only the initial query; requirements stay hidden until disclosed."""
-    return _text_block(dataset.get("query"))
+    case = (
+        next(iter(dataset.get("cases") or []), {})
+        if isinstance(dataset.get("cases"), list)
+        else dataset
+    )
+    return _text_block(case.get("query"))
 
 
 def _normalize_material_path(value: Any) -> str:
@@ -178,34 +192,21 @@ class SkillLabStore:
         self._tenant_id: str = "default"
         self._datasets = SkillDatasetStore(bucket, prefix=self._dataset_store_prefix())
 
-    # Process-lifetime fallback store shared across from_config() calls, used
-    # only when no OpenViking backend is configured. Data is ephemeral (in
-    # memory) — configure cloud or local OpenViking to persist skill-lab state.
-    _fallback_bucket: "InMemoryObjectStore | None" = None
-
     @classmethod
     def from_config(cls, config, tenant_id: str = "default") -> "SkillLabStore":
         from team_skills.library.hub import SkillHub
 
         hub = SkillHub.object_storage_from_config(config, tenant_id=tenant_id)
-        bucket = hub._bucket if hub is not None else cls._get_fallback_bucket()
-        store = cls.__new__(cls)
-        store._bucket = bucket
-        store._tenant_id = str(tenant_id or "default")
-        store._datasets = SkillDatasetStore(bucket, prefix=store._dataset_store_prefix())
         if hub is None:
-            logger.warning(
-                "[SkillLabStore] no OpenViking backend configured; using an "
-                "in-memory fallback store. Skill-lab data will not persist across "
-                "restarts. Configure cloud or local OpenViking to persist."
-            )
+            raise SkillLabError("Skill Lab requires a configured object-storage backend")
+        store = cls.__new__(cls)
+        store._bucket = hub._bucket
+        store._tenant_id = str(tenant_id or "default")
+        store._datasets = SkillDatasetStore(
+            store._bucket,
+            prefix=store._dataset_store_prefix(),
+        )
         return store
-
-    @classmethod
-    def _get_fallback_bucket(cls):
-        if cls._fallback_bucket is None:
-            cls._fallback_bucket = InMemoryObjectStore("skill_lab")
-        return cls._fallback_bucket
 
     @staticmethod
     def make_run_id() -> str:
@@ -222,18 +223,6 @@ class SkillLabStore:
         if self._tenant_id and self._tenant_id != "default":
             return f"tenants/{self._tenant_id}/skill_lab/"
         return "skill_lab/"
-
-    def _legacy_dataset_key(self, dataset_id: str) -> str:
-        return f"{self._tenant_prefix()}datasets/{_normalize_dataset_id(dataset_id)}/metadata.json"
-
-    def _legacy_dataset_prefix(self, dataset_id: str) -> str:
-        return f"{self._tenant_prefix()}datasets/{_normalize_dataset_id(dataset_id)}/"
-
-    def _legacy_material_key(self, dataset_id: str, rel_path: str) -> str:
-        return (
-            f"{self._legacy_dataset_prefix(dataset_id)}materials/"
-            f"{_normalize_material_path(rel_path)}"
-        )
 
     def _run_key(self, run_id: str) -> str:
         return f"{self._tenant_prefix()}runs/{_normalize_dataset_id(run_id)}/metadata.json"
@@ -260,48 +249,25 @@ class SkillLabStore:
         self,
         dataset: Mapping[str, Any],
     ) -> list[str]:
-        skill_name = str(dataset.get("skill_name") or "")
         dataset_id = str(dataset.get("dataset_id") or "")
         canonical = self._datasets.load_document(
-            skill_name=skill_name,
+            skill_name="",
             dataset_id=dataset_id,
         )
-        if canonical:
-            return self._datasets.available_material_paths(canonical)
-        paths: list[str] = []
-        for item in dataset.get("materials") or []:
-            if not isinstance(item, Mapping) or not item.get("path"):
-                continue
-            rel_path = _normalize_material_path(item.get("path"))
-            try:
-                self._bucket.get_object(
-                    self._legacy_material_key(dataset_id, rel_path)
-                )
-            except Exception as exc:
-                if is_not_found_error(exc):
-                    continue
-                raise
-            paths.append(rel_path)
-        return paths
+        return self._datasets.available_material_paths(canonical) if canonical else []
 
     def _present_dataset(
         self,
         dataset: Mapping[str, Any],
     ) -> dict[str, Any]:
-        item = {
-            **dict(dataset),
-            "requirements": _text_block(dataset.get("requirements")),
-            "trajectory_requirements": _text_block(
-                dataset.get("trajectory_requirements")
-            ),
-        }
+        document = normalize_document(dataset)
         return {
-            **item,
+            **document,
             "material_integrity": dataset_material_integrity(
-                item,
-                available_paths=self._available_material_paths(item),
+                document,
+                available_paths=self._available_material_paths(document),
             ),
-            "dataset_markdown": render_dataset_markdown(item),
+            "dataset_markdown": render_dataset_markdown(document),
         }
 
     def save_dataset(
@@ -310,62 +276,30 @@ class SkillLabStore:
         *,
         files: Optional[list[Mapping[str, Any]]] = None,
     ) -> dict[str, Any]:
-        context_skill = str(payload.get("skill_name") or "").strip()
-        if context_skill:
-            context_skill = editor.validate_skill_name(context_skill)
-        query = _text_block(payload.get("query"))
-        if not query:
-            raise SkillLabError("query 不能为空")
         dataset_id = (
             _normalize_dataset_id(payload.get("dataset_id"))
             if payload.get("dataset_id")
             else _dataset_id()
         )
-        canonical_existing = self._datasets.load_dataset(
-            skill_name=context_skill,
+        existing = self._datasets.load_dataset(
+            skill_name="",
             dataset_id=dataset_id,
         )
-        existing = (
-            canonical_existing
-            or self._datasets.find_dataset(dataset_id)
-            or self.load_dataset(
-                dataset_id,
-                skill_name=context_skill,
-            )
+        document = normalize_document(
+            {
+                **dict(payload),
+                "schema_version": DATASET_SCHEMA,
+                "dataset_id": dataset_id,
+                "created_at": str(payload.get("created_at") or (existing or {}).get("created_at") or _utc_now_iso()),
+                "updated_at": _utc_now_iso(),
+            }
         )
-        explicit_bindings = "skills" in payload or "skill_ids" in payload
-        raw_bindings = (
-            payload.get("skills")
-            if "skills" in payload
-            else payload.get("skill_ids")
-            if "skill_ids" in payload
-            else (existing or {}).get("skills")
-            or (existing or {}).get("skill_ids")
-            or ([context_skill] if context_skill else [])
-        )
-        skill_refs = normalize_skill_refs(raw_bindings)
+        skill_refs = normalize_skill_refs(document.get("skills"))
         for item in skill_refs:
             item["skill_id"] = editor.validate_skill_name(item["skill_id"])
-        skill_ids = [item["skill_id"] for item in skill_refs]
-        if not skill_ids:
+        if not skill_refs:
             raise SkillLabError("数据集至少需要关联一个 Skill")
-        if not explicit_bindings and context_skill and context_skill not in skill_ids:
-            skill_ids.append(context_skill)
-            skill_refs.append({"skill_id": context_skill})
-        requirements = _text_block(
-            payload.get("requirements")
-            if "requirements" in payload
-            else (existing or {}).get("requirements")
-        )
-        trajectory_requirements = _text_block(
-            payload.get("trajectory_requirements")
-            if "trajectory_requirements" in payload
-            else (existing or {}).get("trajectory_requirements")
-        )
-        if not requirements and not trajectory_requirements:
-            raise SkillLabError("至少需要一条 Checklist")
 
-        materials = list(existing.get("materials") or []) if existing else []
         decoded: list[tuple[str, bytes]] | None = None
         if files is not None:
             decoded = []
@@ -391,78 +325,14 @@ class SkillLabStore:
                         f"单个数据集材料合计不能超过 {_MAX_DATASET_BYTES // (1024 * 1024)} MB"
                     )
                 decoded.append((rel_path, data))
-        elif existing and not canonical_existing and materials:
-            decoded = []
-            for item in materials:
-                if not isinstance(item, Mapping):
-                    continue
-                rel_path = _normalize_material_path(item.get("path"))
-                data = self._bucket.get_object(
-                    self._legacy_material_key(dataset_id, rel_path)
-                ).read()
-                decoded.append((rel_path, data))
-
-        now = _utc_now_iso()
-        source = (
-            payload.get("source")
-            if isinstance(payload.get("source"), dict)
-            else (existing or {}).get("source")
-            if isinstance((existing or {}).get("source"), dict)
-            else {}
-        )
-        if str(source.get("kind") or "") == "evolution":
-            source = {
-                **source,
-                "user_edited": True,
-                "edited_at": now,
-            }
-        progressive = (
-            payload.get("progressive_disclosure")
-            if isinstance(payload.get("progressive_disclosure"), dict)
-            else (existing or {}).get("progressive_disclosure")
-            if isinstance((existing or {}).get("progressive_disclosure"), dict)
-            else {}
-        )
-        dataset = {
-            "dataset_id": dataset_id,
-            "dataset_format": str(
-                payload.get("dataset_format")
-                or (existing or {}).get("dataset_format")
-                or DATASET_SCHEMA_V2
-            ),
-            "skills": skill_refs,
-            "skill_ids": skill_ids,
-            "name": str(payload.get("name") or "").strip() or query.splitlines()[0][:80],
-            "query": query,
-            "requirements": requirements,
-            "trajectory_requirements": trajectory_requirements,
-            "progressive_disclosure": {
-                "enabled": True,
-                "initial_visibility": "query_only",
-                "batch_size": max(
-                    1,
-                    int(progressive.get("batch_size") or 4),
-                ),
-                "stop_when": "all_checklist_items_satisfied",
-            },
-            "materials": materials,
-            "source": source or {"kind": "manual"},
-            "read_only": False,
-            "enabled_for_evolution": bool(
-                payload.get("enabled_for_evolution")
-                if "enabled_for_evolution" in payload
-                else (existing or {}).get("enabled_for_evolution", False)
-            ),
-            "created_at": str((existing or {}).get("created_at") or now),
-            "updated_at": now,
-        }
+        document["skills"] = skill_refs
         available_paths = (
             [rel_path for rel_path, _data in decoded]
             if decoded is not None
-            else self._available_material_paths(existing or dataset)
+            else self._available_material_paths(existing or document)
         )
         integrity = dataset_material_integrity(
-            dataset,
+            document,
             available_paths=available_paths,
         )
         if not integrity["complete"]:
@@ -472,21 +342,14 @@ class SkillLabStore:
                 "或把必要内容直接内嵌到 Query 的“材料：”段落。"
             )
         if decoded is not None:
-            dataset["materials"] = self._datasets.replace_materials(
-                skill_name=context_skill or skill_ids[0],
+            materials = self._datasets.replace_materials(
+                skill_name="",
                 dataset_id=dataset_id,
                 files=decoded,
             )
-        saved = self._datasets.save_dataset(dataset)
-        if existing and not canonical_existing:
-            for obj in list(
-                self._bucket.iter_objects(
-                    prefix=self._legacy_dataset_prefix(dataset_id)
-                )
-            ):
-                self._bucket.delete_object(obj.key)
-        if context_skill and context_skill in saved.get("skill_ids", []):
-            saved["skill_name"] = context_skill
+            for case in document["cases"]:
+                case["materials"] = list(materials)
+        saved = self._datasets.save_dataset(document)
         return self._present_dataset(saved)
 
     def load_dataset(
@@ -505,12 +368,7 @@ class SkillLabStore:
         )
         if dataset:
             return self._present_dataset(dataset)
-        dataset = self._read_json(self._legacy_dataset_key(dataset_id))
-        if not dataset:
-            return None
-        if skill_name and str(dataset.get("skill_name") or "") != skill_name:
-            return None
-        return self._present_dataset(dataset)
+        return None
 
     def list_datasets(self, *, skill_name: str = "") -> list[dict[str, Any]]:
         wanted = str(skill_name or "").strip()
@@ -518,59 +376,17 @@ class SkillLabStore:
             self._present_dataset(item)
             for item in self._datasets.list_datasets(skill_name=wanted)
         ]
-        seen = {
-            (
-                str(item.get("skill_name") or ""),
-                str(item.get("dataset_id") or ""),
-            )
-            for item in rows
-        }
-        for obj in self._bucket.iter_objects(prefix=f"{self._tenant_prefix()}datasets/"):
-            if not obj.key.endswith("/metadata.json"):
-                continue
-            item = self._read_json(obj.key)
-            if not item or (wanted and str(item.get("skill_name") or "") != wanted):
-                continue
-            key = (
-                str(item.get("skill_name") or ""),
-                str(item.get("dataset_id") or ""),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            rows.append(self._present_dataset(item))
         rows.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
         return rows
 
     def material_payloads(self, dataset: Mapping[str, Any]) -> list[dict[str, Any]]:
         dataset_id = _normalize_dataset_id(dataset.get("dataset_id"))
-        skill_name = str(
-            dataset.get("skill_name")
-            or next(iter(dataset.get("skill_ids") or []), "")
-        )
-        skill_name = editor.validate_skill_name(skill_name) if skill_name else ""
         canonical = self._datasets.load_document(
-            skill_name=skill_name,
+            skill_name="",
             dataset_id=dataset_id,
         )
         payloads: list[dict[str, Any]] = []
-        files = (
-            self._datasets.read_materials(canonical)
-            if canonical
-            else [
-                (
-                    _normalize_material_path(item.get("path")),
-                    self._bucket.get_object(
-                        self._legacy_material_key(
-                            dataset_id,
-                            _normalize_material_path(item.get("path")),
-                        )
-                    ).read(),
-                )
-                for item in dataset.get("materials") or []
-                if isinstance(item, Mapping) and item.get("path")
-            ]
-        )
+        files = self._datasets.read_materials(canonical) if canonical else []
         for rel_path, data in files:
             payloads.append(
                 {
@@ -584,21 +400,12 @@ class SkillLabStore:
 
     def delete_dataset(self, dataset_id: str, *, skill_name: str = "") -> bool:
         dataset = self.load_dataset(dataset_id, skill_name=skill_name)
-        if not dataset or bool(dataset.get("read_only")):
+        if not dataset or bool((dataset.get("metadata") or {}).get("read_only")):
             return False
-        owner = str(dataset.get("skill_name") or "")
-        deleted = self._datasets.delete_dataset(
-            skill_name=owner,
+        return self._datasets.delete_dataset(
+            skill_name="",
             dataset_id=dataset_id,
         )
-        legacy_objects = list(
-            self._bucket.iter_objects(
-                prefix=self._legacy_dataset_prefix(dataset_id)
-            )
-        )
-        for obj in legacy_objects:
-            self._bucket.delete_object(obj.key)
-        return deleted or bool(legacy_objects)
 
     def create_run(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         run_id = _normalize_dataset_id(payload.get("run_id") or _run_id())
@@ -677,7 +484,7 @@ def _job_skill_name(job: Mapping[str, Any]) -> str:
 
 
 def evolution_datasets(config, *, skill_name: str) -> list[dict[str, Any]]:
-    """Project historical evolution replay cases into read-only datasets."""
+    """Expose canonical evolution cases as read-only Dataset documents."""
     wanted = editor.validate_skill_name(skill_name)
     try:
         from team_skills.candidates.store import ValidationStore
@@ -692,164 +499,51 @@ def evolution_datasets(config, *, skill_name: str) -> list[dict[str, Any]]:
         if _job_skill_name(job) != wanted:
             continue
         job_id = str(job.get("job_id") or "")
-        synthesized = [
-            item
-            for item in job.get("test_datasets") or []
-            if isinstance(item, Mapping)
-            and (
-                bool(item.get("checks"))
-                or bool(flatten_requirements(item.get("requirements")))
-                or bool(
-                    flatten_requirements(
-                        item.get("trajectory_requirements")
-                    )
-                )
-            )
-        ]
-        source_rows = synthesized or [
+        source_rows = [
             case
             for case in job.get("replay_cases") or []
-            if isinstance(case, Mapping)
-            and (
-                bool(case.get("checklist"))
-                or bool(flatten_requirements(case.get("requirements")))
-            )
+            if isinstance(case, Mapping) and bool(case.get("checks"))
         ]
         for index, case in enumerate(source_rows):
-            if not isinstance(case, Mapping):
-                continue
             try:
                 canonical = normalize_case(
                     case,
-                    default_case_id=str(
-                        case.get("dataset_id")
-                        or case.get("case_id")
-                        or f"evolution-{index + 1}"
-                    ),
+                    default_case_id=str(case.get("case_id") or f"evolution-{index + 1}"),
                 )
             except ValueError:
                 continue
-            view = legacy_case_view(canonical, text_requirements=True)
-            instruction = canonical["query"]
-            if not instruction:
-                continue
             provenance = canonical.get("provenance") or {}
-            source_session_ids = list(provenance.get("session_ids") or [])
-            session_id = str(
-                provenance.get("session_id")
-                or (source_session_ids[0] if source_session_ids else "")
-                or ""
-            )
-            requirements = flatten_requirements(view.get("requirements"))
-            trajectory_requirements = flatten_requirements(view.get("trajectory_requirements"))
-            dedup_key = canonical["case_id"] or "\0".join(
-                [
-                    session_id,
-                    instruction,
-                    *requirements,
-                    *trajectory_requirements,
-                ]
-            )
-            fingerprint = hashlib.sha256(dedup_key.encode("utf-8")).hexdigest()
+            fingerprint = hashlib.sha256(canonical["case_id"].encode("utf-8")).hexdigest()
             if fingerprint in seen:
                 continue
             seen.add(fingerprint)
-            dataset_id = f"evo-{fingerprint[:20]}"
-            if synthesized or requirements or trajectory_requirements:
-                sections = {
-                    "query": instruction,
-                    "requirements": "\n".join(
-                        f"{number}. {item}"
-                        for number, item in enumerate(
-                            requirements,
-                            start=1,
-                        )
-                    ),
-                    "trajectory_requirements": "\n".join(
-                        f"{number}. {item}"
-                        for number, item in enumerate(
-                            trajectory_requirements,
-                            start=1,
-                        )
-                    ),
-                }
-            else:
-                try:
-                    sections = parse_dataset_markdown(instruction)
-                except SkillLabError:
-                    sections = {
-                        "query": instruction,
-                        "requirements": (
-                            json.dumps(
-                                case.get("gold"),
-                                ensure_ascii=False,
-                                indent=2,
-                            )
-                            if isinstance(case.get("gold"), Mapping)
-                            and case.get("gold")
-                            else ""
-                        ),
-                        "trajectory_requirements": "\n".join(
-                            f"- {item}"
-                            for item in case.get("target_dimensions") or []
-                        ),
-                    }
-            window = str(provenance.get("evidence_window") or "historical")
-            materials = [
-                {
-                    key: item.get(key)
-                    for key in ("path", "size", "sha256")
-                    if item.get(key) is not None
-                }
-                for item in canonical.get("materials") or []
-                if isinstance(item, Mapping) and item.get("path")
-            ]
-            replay = canonical.get("replay") if isinstance(canonical.get("replay"), Mapping) else {}
             bound_skill_ids = list(canonical.get("skill_ids") or [wanted])
-            dataset = {
-                "dataset_id": canonical["case_id"] or dataset_id,
-                "dataset_format": DATASET_SCHEMA_V2,
-                "skill_name": wanted,
-                "skills": [
-                    {"skill_id": skill_id}
-                    for skill_id in bound_skill_ids
-                ],
-                "skill_ids": bound_skill_ids,
-                "name": str(
-                    canonical.get("name")
-                    or case.get("case_id")
-                    or session_id
-                    or f"{window}-{index + 1}"
-                ),
-                **sections,
-                "materials": materials,
-                "progressive_disclosure": (
-                    dict(replay.get("progressive_disclosure"))
-                    if isinstance(
-                        replay.get("progressive_disclosure"),
-                        Mapping,
-                    )
-                    else {
-                        "enabled": True,
-                        "initial_visibility": "query_only",
-                        "batch_size": 4,
-                        "stop_when": "all_checklist_items_satisfied",
-                    }
-                ),
-                "source": {
-                    "kind": "evolution",
-                    "job_id": job_id,
-                    "session_id": session_id,
-                    "source_session_ids": source_session_ids
-                    or ([session_id] if session_id else []),
-                    "turn_num": provenance.get("turn_num"),
-                    "evidence_window": window,
-                },
+            canonical["provenance"] = {
+                **provenance,
+                "kind": "evolution",
+                "job_id": job_id,
+            }
+            canonical["metadata"] = {
+                **canonical.get("metadata", {}),
                 "read_only": True,
                 "enabled_for_evolution": False,
-                "created_at": str(job.get("created_at") or ""),
-                "updated_at": str(job.get("updated_at") or job.get("created_at") or ""),
             }
+            dataset = make_document(
+                dataset_id=canonical["case_id"],
+                name=str(
+                    (canonical.get("metadata") or {}).get("name")
+                    or canonical["case_id"]
+                ),
+                skills=bound_skill_ids,
+                source={
+                    "kind": "evolution",
+                    "job_id": job_id,
+                },
+                cases=[canonical],
+                metadata={"read_only": True, "enabled_for_evolution": False},
+                created_at=str(job.get("created_at") or ""),
+                updated_at=str(job.get("updated_at") or job.get("created_at") or ""),
+            )
             dataset["material_integrity"] = dataset_material_integrity(
                 dataset,
                 available_paths=[],
@@ -957,11 +651,8 @@ def prepare_experiment_job(
             candidate_bundle[path] = data
     candidate_bundle["SKILL.md"] = candidate_skill_md.encode("utf-8")
     candidate_skill = attach_bundle_payload(candidate_payload, candidate_bundle)
-    skill_refs = normalize_skill_refs(
-        dataset.get("skills")
-        or dataset.get("skill_ids")
-        or [name]
-    )
+    document = normalize_document(dataset)
+    skill_refs = normalize_skill_refs(document.get("skills"))
     skill_ids = [
         editor.validate_skill_name(item["skill_id"])
         for item in skill_refs
@@ -993,29 +684,17 @@ def prepare_experiment_job(
         if len(candidate_skills) == 1
         else {"kind": "skill_set", "skills": candidate_skills}
     )
-    has_nested_tasks = isinstance(dataset.get("cases"), list)
-    raw_tasks = (
-        [
-            task
-            for task in dataset.get("cases") or []
-            if isinstance(task, Mapping)
-        ]
-        if isinstance(dataset.get("cases"), list)
-        else []
-    ) or [dataset]
+    raw_tasks = [
+        task
+        for task in document.get("cases") or []
+        if isinstance(task, Mapping)
+    ]
     replay_cases = []
     replay_session_ids: list[str] = []
     for raw_task in raw_tasks:
-        task = legacy_case_view(
-            normalize_case(
-                raw_task,
-                default_case_id=str(
-                    raw_task.get("case_id")
-                    or raw_task.get("dataset_id")
-                    or dataset.get("dataset_id")
-                    or ""
-                ),
-            )
+        task = normalize_case(
+            raw_task,
+            default_case_id=str(raw_task.get("case_id") or ""),
         )
         task_skill_ids = [
             editor.validate_skill_name(item)
@@ -1026,14 +705,10 @@ def prepare_experiment_job(
         ]
         if name not in task_skill_ids:
             continue
-        source = task.get("source") if isinstance(task.get("source"), Mapping) else {}
+        source = task.get("provenance") if isinstance(task.get("provenance"), Mapping) else {}
         source_session_ids = [
             str(item or "").strip()
-            for item in (
-                source.get("source_session_ids")
-                or source.get("session_ids")
-                or []
-            )
+            for item in source.get("session_ids") or []
             if str(item or "").strip()
         ]
         session_id = str(
@@ -1043,10 +718,6 @@ def prepare_experiment_job(
         )
         if session_id and session_id not in replay_session_ids:
             replay_session_ids.append(session_id)
-        requirements = flatten_requirements(task.get("requirements"))
-        task_trajectory = flatten_requirements(
-            task.get("trajectory_requirements")
-        )
         task_material_paths = {
             str(item.get("path") or "")
             for item in task.get("materials") or []
@@ -1055,42 +726,17 @@ def prepare_experiment_job(
         task_materials = [
             dict(item)
             for item in materials
-            if (not has_nested_tasks and not task_material_paths)
-            or str(item.get("path") or "") in task_material_paths
+            if str(item.get("path") or "") in task_material_paths
         ]
-        disclosure = (
-            task.get("progressive_disclosure")
-            if isinstance(task.get("progressive_disclosure"), Mapping)
-            else {}
-        )
         replay_cases.append({
-            "case_id": str(
-                task.get("case_id")
-                or task.get("dataset_id")
-                or dataset.get("dataset_id")
-                or ""
-            ),
-            "dataset_id": str(dataset.get("dataset_id") or ""),
+            **task,
             "skill_ids": task_skill_ids,
-            "session_id": session_id,
-            "turn_num": source.get("turn_num") or 1,
-            "instruction": compose_experiment_instruction(task),
-            "query": compose_experiment_instruction(task),
-            "requirements": requirements,
-            "trajectory_requirements": task_trajectory,
-            "checklist": checklist_items(requirements, task_trajectory),
-            "progressive_disclosure": {
-                "enabled": True,
-                "initial_visibility": "query_only",
-                "batch_size": max(
-                    1,
-                    int(disclosure.get("batch_size") or 4),
-                ),
-                "stop_when": "all_checklist_items_satisfied",
-            },
             "materials": task_materials,
-            "evidence_window": str(source.get("evidence_window") or "lab"),
-            "dataset_format": DATASET_SCHEMA_V2,
+            "provenance": {
+                **source,
+                "session_id": session_id,
+                "session_ids": source_session_ids,
+            },
         })
     if not replay_cases:
         raise SkillLabError("数据集中没有引用当前实验 Skill 的任务")
@@ -1109,8 +755,8 @@ def prepare_experiment_job(
         "include_full_trace": True,
         "source": {
             "kind": "skill_lab",
-            "dataset_id": str(dataset.get("dataset_id") or ""),
-            "dataset_source": dict(source),
+            "dataset_id": str(document.get("dataset_id") or ""),
+            "dataset_source": dict(document.get("source") or {}),
             "skill_ids": skill_ids,
             "changed_skill_ids": [name],
         },

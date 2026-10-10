@@ -24,13 +24,10 @@ def _resolve_config_dir() -> Path:
 
 CONFIG_DIR = _resolve_config_dir()
 CONFIG_FILE = CONFIG_DIR / "config.yaml"
-_DEFAULT_SKILLS_DIR = CONFIG_DIR / "skills"
-_DEFAULT_HERMES_SKILLS_DIR = Path.home() / ".hermes" / "skills"
-_FALLBACK_LLM_API_MODE = "chat"
-_SKILL_RELOAD_MODES = {"off", "poll", "callback"}
-_MIN_SKILL_RELOAD_INTERVAL_SECONDS = 5
+_DEFAULT_SKILL_RUNTIME_CACHE_DIR = CONFIG_DIR / "runtime" / "skills"
 
 _DEFAULTS: dict = {
+    "compile": {"executor": "internal"},
     "experience_sync": {
         "enabled": False,
         "target_directory": "viking://resources/agent_knowledge_workspace/input/proven_experiences",
@@ -44,6 +41,7 @@ _DEFAULTS: dict = {
     },
     "llm": {
         "provider": "custom",
+        "api_mode": "chat",
         "model_id": "volcengine/glm-5.2-aicc",
         "api_base": "https://ark.cn-beijing.volces.com/api/v3",
         "api_key": "",
@@ -55,13 +53,11 @@ _DEFAULTS: dict = {
     "service": {
         "port": 52010,
         "host": "0.0.0.0",
+        "self_registration_enabled": True,
     },
     "skills": {
-        "enabled": True,
-        "dir": str(_DEFAULT_SKILLS_DIR),
-        "delivery_mode": "push",
+        "runtime_cache_dir": str(_DEFAULT_SKILL_RUNTIME_CACHE_DIR),
     },
-    "agent_protocol": {"identity_mode": "dual"},
     "replay": {"adapter": "", "adapters_dir": ""},
     # DEAP /skillopt/update rollout consumer (see integrations/skillopt_rollout.py).
     "skillopt_rollout": {
@@ -69,21 +65,13 @@ _DEFAULTS: dict = {
         "endpoint": "",
         "workspace_prefix": "rollout-",
     },
-    "openrouter": {
-        "app_name": "teamEvolver",
-        "app_url": "",
-        "route": "fallback",
-        "fallback_models": "",
-        "data_policy": "",
-    },
     "sharing": {
+        # Deprecated no-op accepted only while old configuration files migrate.
         "enabled": True,
-        "backend": "viking",
         # Deployment target for OpenViking: ``cloud`` (Volcengine-hosted) or
         # ``local`` (self-hosted openviking-server). Drives the endpoint when
         # ``viking_endpoint`` is left empty.
         "viking_deployment": "cloud",
-        "endpoint": "",
         # Empty values resolve to PostgreSQL when storage_pg is enabled,
         # otherwise to the built-in local store.
         "skill_backend": "",
@@ -107,30 +95,13 @@ _DEFAULTS: dict = {
         # Empty means "derive from viking_deployment"; set a value only to
         # override the cloud/local default endpoint.
         "viking_endpoint": "",
-        # Backward-compatible fallback. Prefer the scoped keys when the caller
-        # has separate personal and service OpenViking credentials.
+        # Single Trusted Root Key for all tenant OpenViking operations.
         "viking_api_key": "",
-        "viking_personal_api_key": "",
-        "viking_personal_api_keys": [],
-        # Service/admin OpenViking key used for team resources, skill sync, and
-        # aggregation. The field name is kept for existing config files.
-        "viking_team_api_key": "",
         "viking_account": "default",
-        "viking_personal_user": "",
         "viking_user": "team",
         # wire constant: OpenViking agent namespace, do not rename
         "viking_agent": TEAM_SKILL_ROOT_PREFIX,
-        "viking_agent_id": "",
-        "viking_customer_id": "",
         "viking_root_prefix": TEAM_SKILL_ROOT_PREFIX,
-        "viking_group_id": "",
-        "user_alias": "",
-        "auto_pull_on_start": True,
-        "push_min_injections": 5,
-        "push_min_effectiveness": 0.3,
-        "session_upload_interval": 0,
-        "skill_reload_mode": "poll",
-        "skill_reload_interval_seconds": 30,
     },
     # PostgreSQL local-state storage (multi-tenancy plan §2.4): shares the
     # OpenViking PG instance; empty dsn derives from OV_PG_* env vars.
@@ -155,9 +126,7 @@ _DEFAULTS: dict = {
         "server_url": "http://127.0.0.1:52010",
         "use_session_judge": True,
         "publish_mode": "validated",
-        "validation_max_rejections": 1,
         "human_review_enabled": True,
-        "human_review_timeout_seconds": 86400,
         "interval_seconds": 600,
         "evidence_enabled": True,
         "evidence_max_entries": 400,
@@ -200,17 +169,12 @@ _DEFAULTS: dict = {
     "validation": {
         "enabled": True,
         "mode": "true_replay",
-        "runtimes": ["hermes", "deap", "agentshub", "langfuse", "doris"],
+        "runtimes": ["deap", "langfuse", "doris"],
         "idle_after_seconds": 300,
         "poll_interval_seconds": 60,
         "max_jobs_per_day": 5,
         "max_concurrency": 1,
-        "required_results": 3,
-        "required_approvals": 2,
-        "agentshub_url": "",
-        "agentshub_api_key": "",
     },
-    # Live source selection uses adapter only. type/options are migration-only.
     "datasource": {
         "adapter": "",
         "schedule": {
@@ -218,19 +182,12 @@ _DEFAULTS: dict = {
             "time": "00:00",
             "timezone": "Asia/Shanghai",
             "window": "previous_day",
-            "max_sessions": 1000,
         },
-        "type": "langfuse",
         "adapters_dir": "",
-        "options": {},
     },
     "langfuse": {
-        "enabled": False,
-        "host": "https://cloud.langfuse.com",
-        "public_key": "",
-        "secret_key": "",
-        # Outbound observability is independent from inbound session pulls.
-        # Tracing target is separate from the pull host/keys above.
+        # Inbound Session sources live in tenant adapter files. This section is
+        # exclusively for outbound observability.
         "tracing_enabled": False,
         "tracing_host": "",
         "tracing_public_key": "",
@@ -241,24 +198,42 @@ _DEFAULTS: dict = {
         "tracing_capture_content": True,
         "tracing_flush_at": 1,
         "tracing_flush_interval_seconds": 1.0,
-        "timeout_seconds": 30,
-        "page_limit": 50,
-        "max_sessions": 100,
-        # Default session-attribute filters. ``environment`` and ``tags``
-        # accept multiple values (list or comma-separated string).
-        "default_environment": [],
-        "default_user_id": "",
-        "default_tags": [],
-        "default_release": "",
-        "default_version": "",
-        "default_trace_name": "",
-        # Deprecated single trace mapper (migrated into ``mappers`` on first
-        # read; see integrations.langfuse_mapper.normalize_mapper_entries).
-        # NOTE: do NOT add a default ``mappers`` key here — defaults are
-        # deep-merged under the user's YAML, so a default would make the
-        # never-written-key check in the migration logic always see [].
-        "mapper_enabled": False,
-        "mapper_code": "",
+        "tracing_timeout_seconds": 30,
+    },
+    "ontology": {
+        "enabled": False,
+        "state_dir": "",
+        "queue_limit": 32,
+        "allow_fixture": False,
+        "model": {"model": "", "base_url": "", "api_key": ""},
+        "kee_query_enabled": False,
+        "kee_max_model_calls": 64,
+        "kee_compile_deadline_seconds": 480,
+        "compile_skill_uri": "viking://agent/skills/ontology-extraction-v1",
+        "compile_workspace_uri": "viking://resources/te_ontology_compile",
+        "compile_user": "te-ontology-compiler",
+        "compile_timeout_seconds": 1800,
+        "compile_deadline": {
+            "base_seconds": 1800,
+            "wave_seconds": 4500,
+            "merge_wave_seconds": 1800,
+            "safety_factor": 1.5,
+        },
+        "compile_model_revision": "",
+        "source_max_files": 1000,
+        "source_max_depth": 20,
+        "source_max_entries": 10000,
+        "source_max_bytes": 20 * 1024 * 1024,
+        "source_max_file_bytes": 2 * 1024 * 1024,
+    },
+    "logging": {
+        "level": "INFO",
+        "console_enabled": True,
+        "file_enabled": True,
+        "directory": "~/.teamEvolver",
+        "max_file_mb": 100,
+        "retention_days": 14,
+        "max_total_mb": 2048,
     },
     # Semantic topic segmentation before value classification (see
     # session_ingestion/split.py): one LLM boundary call per session; no
@@ -301,54 +276,6 @@ def _coerce(value: Any) -> Any:
     return value
 
 
-def _first_non_empty(mapping: dict[str, Any], *keys: str, default: str = "") -> str:
-    for key in keys:
-        value = mapping.get(key)
-        if value not in (None, ""):
-            return str(value)
-    return default
-
-
-def _infer_sharing_backend(sharing: dict[str, Any]) -> str:
-    """Resolve the sharing backend.
-
-    ``local`` selects the built-in filesystem store (which may point at a NAS)
-    and ``viking`` selects OpenViking. Unknown legacy values retain the
-    historical OpenViking interpretation.
-    """
-    backend = (
-        str(sharing.get("backend", "") or "")
-        .strip()
-        .lower()
-        .replace("_", "-")
-    )
-    if backend in {
-        "local",
-        "localfs",
-        "local-fs",
-        "filesystem",
-        "fs",
-        "builtin",
-        "built-in",
-    }:
-        return "local"
-    if backend:
-        return "viking"
-    has_viking_key = any(
-        sharing.get(key)
-        for key in (
-            "viking_api_key",
-            "viking_personal_api_key",
-            "viking_team_api_key",
-            "viking_user_api_key",
-            "viking_resources_api_key",
-        )
-    )
-    if sharing.get("enabled") or has_viking_key or sharing.get("viking_endpoint"):
-        return "viking"
-    return ""
-
-
 def _normalize_viking_deployment(value: Any, default: str = "cloud") -> str:
     """Normalize the OpenViking deployment mode to ``cloud`` or ``local``."""
     normalized = str(value or "").strip().lower()
@@ -363,13 +290,6 @@ def _normalize_validation_mode(value: Any) -> str:
 def _normalize_choice(value: Any, allowed: set[str], default: str) -> str:
     normalized = str(value or "").strip().lower()
     return normalized if normalized in allowed else default
-
-
-def _normalize_non_negative_int(value: Any, default: int = 0) -> int:
-    try:
-        return max(0, int(value or 0))
-    except (TypeError, ValueError):
-        return default
 
 
 def _normalize_string_list(value: Any) -> list[str]:
@@ -400,23 +320,7 @@ def _normalize_extensions(value: Any) -> list[str]:
     return extensions or [".py", ".sh"]
 
 
-def _normalize_reload_interval(value: Any) -> int:
-    try:
-        interval = int(value or 30)
-    except (TypeError, ValueError):
-        interval = 30
-    return max(_MIN_SKILL_RELOAD_INTERVAL_SECONDS, interval)
-
-
-def resolve_skills_dir(skills_dir: Any) -> str:
-    """Normalize a configured skills dir, applying Hermes-native defaults."""
-    raw = str(skills_dir or "").strip()
-    generic_default = _DEFAULT_SKILLS_DIR.expanduser()
-
-    if raw:
-        expanded = Path(raw).expanduser()
-        if expanded == generic_default:
-            return str(_DEFAULT_HERMES_SKILLS_DIR)
-        return str(expanded)
-
-    return str(_DEFAULT_HERMES_SKILLS_DIR)
+def resolve_skill_runtime_cache_dir(value: Any) -> str:
+    """Return the deployment-owned, rebuildable Skill runtime cache path."""
+    raw = str(value or "").strip()
+    return str(Path(raw).expanduser()) if raw else str(_DEFAULT_SKILL_RUNTIME_CACHE_DIR)

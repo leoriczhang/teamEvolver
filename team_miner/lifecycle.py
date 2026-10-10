@@ -5,8 +5,8 @@ The mining pipeline writes a self-contained skill bundle below
 files directly: this module turns them into an idempotent validation candidate
 so A/B evaluation and the existing human publish gate remain mandatory.
 
-``benchmark.json`` uses the canonical Test Dataset v2 contract for this
-hand-off. Historical ``benchmark.jsonl`` files remain read-only inputs.
+``benchmark.json`` uses the canonical Test Dataset contract for this
+hand-off. Only the shared Test Dataset contract is accepted.
 """
 
 from __future__ import annotations
@@ -15,9 +15,9 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from team_replay.datasets.schema import legacy_case_view, normalize_case
+from team_replay.datasets.schema import normalize_case
 from team_skills.candidates.store import ValidationStore
-from team_skills.library.bundle import bundle_tree_sha256, read_skill_bundle
+from team_skills.library.bundle import bundle_tree_sha256, encode_bundle_payload, read_skill_bundle
 from team_skills.library.frontmatter import parse_skill_md
 
 from . import benchmark_format as progressive_benchmark
@@ -133,83 +133,19 @@ def resolve_mined_skill_dir(
 
 
 def load_internal_benchmark(skill_dir: Path | str) -> list[dict[str, Any]]:
-    """Load the current progressive JSON format or the legacy JSONL dataset."""
-    root = Path(skill_dir)
-    progressive_path = root / "benchmark.json"
-    if progressive_path.is_file():
-        payload, errors = progressive_benchmark.read_document(progressive_path)
-        if payload is None or errors:
-            detail = "；".join(errors) if errors else "无法读取题库"
-            raise MiningLifecycleError(f"benchmark.json 不可用：{detail}")
-        rows = progressive_benchmark.to_runner_questions(payload)
-        if not rows:
-            raise MiningLifecycleError("benchmark.json 没有可用题目")
-        return rows
-
-    path = root / "benchmark.jsonl"
+    """Load canonical cases directly for Candidate Review and True Replay."""
+    path = Path(skill_dir) / "benchmark.json"
     if not path.is_file():
-        raise MiningLifecycleError("缺少 benchmark.json 或 benchmark.jsonl，请先生成 Benchmark")
-    rows: list[dict[str, Any]] = []
-    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        if not line.strip():
-            continue
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise MiningLifecycleError(f"benchmark.jsonl 第 {line_no} 行不是有效 JSON") from exc
-        if not isinstance(item, dict):
-            raise MiningLifecycleError(f"benchmark.jsonl 第 {line_no} 行必须是对象")
-        instruction = str(item.get("input") or "").strip()
-        if not instruction:
-            raise MiningLifecycleError(f"benchmark.jsonl 第 {line_no} 行缺少 input")
-        rows.append(item)
-    if not rows:
-        raise MiningLifecycleError("benchmark.jsonl 没有可用题目")
-    return rows
+        raise MiningLifecycleError("缺少 benchmark.json，请先生成 Test Dataset")
+    payload, errors = progressive_benchmark.read_document(path)
+    if payload is None or errors:
+        raise MiningLifecycleError("benchmark.json 不可用：" + "；".join(errors))
+    return payload["cases"]
 
 
-def benchmark_replay_cases(
-    skill_name: str,
-    questions: Iterable[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Map the internal benchmark rows to teamEvolver replay cases.
-
-    The complete gold rubric stays attached to each case.  True Replay uses it
-    when judging answers; other validators can safely ignore the extra fields.
-    """
-    cases: list[dict[str, Any]] = []
-    for index, question in enumerate(questions, start=1):
-        case_id = str(question.get("id") or f"BM-{index:02d}")
-        canonical = normalize_case(
-            {**question, "case_id": case_id, "skill_ids": [skill_name]},
-        )
-        view = legacy_case_view(canonical)
-        cases.append(
-            {
-                "case_id": case_id,
-                "dataset_id": case_id,
-                "skill_ids": [skill_name],
-                "session_id": f"skillminer:{skill_name}:{case_id}",
-                "turn_num": 1,
-                "instruction": str(question.get("input") or "").strip(),
-                "query": str(question.get("input") or "").strip(),
-                "requirements": view["requirements"],
-                "trajectory_requirements": view["trajectory_requirements"],
-                "checklist": view["checklist"],
-                "progressive_disclosure": view["progressive_disclosure"],
-                "gold": question.get("gold") if isinstance(question.get("gold"), dict) else {},
-                "target_dimensions": question.get("target_dimensions") or [],
-                "difficulty": str(question.get("difficulty") or ""),
-                "customer_sim": (
-                    question.get("customer_sim")
-                    if isinstance(question.get("customer_sim"), dict)
-                    else {}
-                ),
-                "source": str(question.get("source") or ""),
-                "dataset_format": INTERNAL_BENCHMARK_FORMAT,
-            }
-        )
-    return cases
+def benchmark_replay_cases(skill_name: str, cases: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Preserve the generated case identity and all shared contract fields."""
+    return [normalize_case({**case, "skill_ids": [skill_name]}) for case in cases]
 
 
 def _candidate_skill_payload(parsed: dict[str, Any], bundle: dict[str, bytes]) -> dict[str, Any]:
@@ -226,7 +162,7 @@ def _candidate_skill_payload(parsed: dict[str, Any], bundle: dict[str, bytes]) -
         "description": str(parsed.get("description") or ""),
         "category": str(parsed.get("category") or "general"),
         "content": str(parsed.get("content") or ""),
-        "bundle_files": bundle_files,
+        "bundle": encode_bundle_payload(bundle),
     }
     extra = parsed.get("_extra_frontmatter")
     if isinstance(extra, dict) and extra:
@@ -246,6 +182,8 @@ def _current_skill_payload(current_skill: Optional[dict[str, Any]]) -> Optional[
     extra = current_skill.get("_extra_frontmatter") or current_skill.get("extra_frontmatter")
     if isinstance(extra, dict) and extra:
         payload["extra_frontmatter"] = extra
+    if isinstance(current_skill.get("bundle"), dict):
+        payload["bundle"] = current_skill["bundle"]
     return payload
 
 

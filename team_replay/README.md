@@ -1,7 +1,7 @@
 # Team Replay
 
 `team_replay` 是统一的 True Replay 执行模块，与 `teamEvolver/`、
-`team_memory/`、`team_miner/` 同级。它消费 Test Dataset 和不可变的
+`team_memory/` 同级。它消费 Test Dataset 和不可变的
 Baseline/Candidate treatment，负责真实 Agent Runtime 执行、Checklist
 完成门禁、效率比较和结果聚合。
 
@@ -38,25 +38,22 @@ team_replay/
   aggregation.py     # 多 Case/窗口聚合
   adapters.py        # HTTP/映射/本地 Runtime Adapter
   deap.py            # DEAP Runtime Adapter
-  model_broker.py    # 隔离执行的模型代理
   turn_server.py     # Agent 侧逐轮执行端点
 ```
 
 下列业务逻辑不属于 Replay：
 
-- Test Dataset 的挖掘与编译归 `team_miner`。
+- Test Dataset 的生成与管理归宿主应用。
 - Memory Change 账本、前后快照和 HTTP 路由归 `team_memory`。
 - Skill Candidate、静态检查、Candidate Review 与 Publish 归
   `teamEvolver`。
 
 ## Dependency Rule
 
-`team_replay` 不得导入 `teamEvolver`、`team_memory` 或 `team_miner`。
+`team_replay` 不得导入 `teamEvolver` 或 `team_memory`。
 宿主配置、Session、Context Snapshot、Skill materialization 和
-Agent Registry 通过 `ReplayHost` Adapter 注入。上游可以依赖
+Runtime Adapter 解析通过 `ReplayHost` Adapter 注入。上游可以依赖
 `team_replay` 的轻量 contract，但 Replay 不反向发现或读取上游目录。
-
-`teamEvolver.replay.*` 与 `team_memory.replay.*` 在兼容期内仅由虚拟兼容模块提供，不保留重复目录。
 
 ## Validation
 

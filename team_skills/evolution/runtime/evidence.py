@@ -46,15 +46,9 @@ def _unique_strings(values: list[Any]) -> list[str]:
 
 
 def is_candidate_audit_session(session: dict[str, Any]) -> bool:
-    runtime_context = (
-        session.get("runtime_context")
-        if isinstance(session.get("runtime_context"), dict)
-        else {}
-    )
-    return (
-        str(session.get("source") or "").strip()
-        == "managed_agent_candidate_audit"
-        or bool(str(runtime_context.get("candidate_job_id") or "").strip())
+    runtime_context = session.get("runtime_context") if isinstance(session.get("runtime_context"), dict) else {}
+    return str(session.get("source") or "").strip() == "managed_agent_candidate_audit" or bool(
+        str(runtime_context.get("candidate_job_id") or "").strip()
     )
 
 
@@ -73,21 +67,9 @@ _RUNTIME_CONTEXT_KEYS = {
 
 
 def _runtime_projection(session: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    runtime = (
-        dict(session.get("runtime"))
-        if isinstance(session.get("runtime"), dict)
-        else {}
-    )
-    context = (
-        session.get("runtime_context")
-        if isinstance(session.get("runtime_context"), dict)
-        else {}
-    )
-    projected = {
-        key: context.get(key)
-        for key in _RUNTIME_CONTEXT_KEYS
-        if context.get(key) not in (None, "")
-    }
+    runtime = dict(session.get("runtime")) if isinstance(session.get("runtime"), dict) else {}
+    context = session.get("runtime_context") if isinstance(session.get("runtime_context"), dict) else {}
+    projected = {key: context.get(key) for key in _RUNTIME_CONTEXT_KEYS if context.get(key) not in (None, "")}
     return runtime, projected
 
 
@@ -97,14 +79,8 @@ def _extract_replay_cases(session: dict[str, Any], *, limit: int = 2) -> list[di
     preferred: list[dict[str, Any]] = []
     fallback: list[dict[str, Any]] = []
     session_id = str(session.get("session_id") or "")
-    runtime_context = (
-        session.get("runtime_context")
-        if isinstance(session.get("runtime_context"), dict)
-        else {}
-    )
-    evaluation_profile = str(
-        runtime_context.get("evaluation_profile") or ""
-    ).strip()
+    runtime_context = session.get("runtime_context") if isinstance(session.get("runtime_context"), dict) else {}
+    evaluation_profile = str(runtime_context.get("evaluation_profile") or "").strip()
     source_runtime, source_runtime_context = _runtime_projection(session)
     turns = session.get("turns") if isinstance(session.get("turns"), list) else []
     for turn in turns:
@@ -120,17 +96,13 @@ def _extract_replay_cases(session: dict[str, Any], *, limit: int = 2) -> list[di
             "instruction": _clip(instruction, 12_000),
             "reference_response": _clip(response, _RESPONSE_LIMIT),
             "had_tool_calls": bool(turn.get("tool_calls")),
-            "had_tool_results": bool(
-                turn.get("tool_results") or turn.get("tool_observations")
-            ),
+            "had_tool_results": bool(turn.get("tool_results") or turn.get("tool_observations")),
             "source_runtime": source_runtime,
             "source_runtime_context": source_runtime_context,
             "context_snapshot_id": str(
-                (
-                    turn.get("context_usage")
-                    if isinstance(turn.get("context_usage"), dict)
-                    else {}
-                ).get("context_snapshot_id")
+                (turn.get("context_usage") if isinstance(turn.get("context_usage"), dict) else {}).get(
+                    "context_snapshot_id"
+                )
                 or ""
             ),
         }
@@ -142,16 +114,8 @@ def _extract_replay_cases(session: dict[str, Any], *, limit: int = 2) -> list[di
 
 
 def _entry_from_session(session: dict[str, Any]) -> dict[str, Any]:
-    runtime_context = (
-        session.get("runtime_context")
-        if isinstance(session.get("runtime_context"), dict)
-        else {}
-    )
-    judge_scores = (
-        session.get("_judge_scores")
-        if isinstance(session.get("_judge_scores"), dict)
-        else {}
-    )
+    runtime_context = session.get("runtime_context") if isinstance(session.get("runtime_context"), dict) else {}
+    judge_scores = session.get("_judge_scores") if isinstance(session.get("_judge_scores"), dict) else {}
     overall = judge_scores.get("overall_score")
     if not isinstance(overall, (int, float)) or isinstance(overall, bool):
         overall = None
@@ -162,10 +126,7 @@ def _entry_from_session(session: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(avg_prm, (int, float)) or isinstance(avg_prm, bool):
         avg_prm = None
     observed_at = str(
-        session.get("ingested_at")
-        or session.get("timestamp")
-        or session.get("started_at")
-        or _utc_now_iso()
+        session.get("ingested_at") or session.get("timestamp") or session.get("started_at") or _utc_now_iso()
     )
     runtime, projected_context = _runtime_projection(session)
     return {
@@ -181,16 +142,15 @@ def _entry_from_session(session: dict[str, Any]) -> dict[str, Any]:
         "avg_prm": avg_prm,
         "has_tool_errors": bool(session.get("_has_tool_errors")),
         "verified_skill_feedback": [
-            dict(item)
-            for item in session.get("_verified_skill_feedback") or []
-            if isinstance(item, dict)
+            dict(item) for item in session.get("_verified_skill_feedback") or [] if isinstance(item, dict)
         ],
         "source": str(session.get("source") or ""),
         "runtime": runtime,
         "runtime_context": projected_context,
-        "evaluation_profile": str(
-            runtime_context.get("evaluation_profile") or ""
-        ).strip(),
+        "evaluation_profile": str(runtime_context.get("evaluation_profile") or "").strip(),
+        "skill_experiences": [
+            dict(item) for item in judge_scores.get("skill_experiences") or [] if isinstance(item, dict)
+        ],
         "replay_cases": _extract_replay_cases(session),
     }
 
@@ -218,10 +178,7 @@ def _stratified_history(entries: list[dict[str, Any]], limit: int) -> list[dict[
         item
         for item in entries
         if item.get("has_tool_errors")
-        or (
-            isinstance(item.get("judge_overall_score"), (int, float))
-            and float(item["judge_overall_score"]) < 0.6
-        )
+        or (isinstance(item.get("judge_overall_score"), (int, float)) and float(item["judge_overall_score"]) < 0.6)
     ]
     _take(failures[-max(1, limit // 2) :])
     if len(selected) >= limit:
@@ -230,11 +187,7 @@ def _stratified_history(entries: list[dict[str, Any]], limit: int) -> list[dict[
     # Exemplary goodcases get their own reserved quota so positive evidence
     # (correct skill routing, high-quality output) reaches the evolution
     # prompt alongside the failure evidence.
-    exemplaries = [
-        item
-        for item in entries
-        if str(item.get("evolution_evidence") or "") == "exemplary"
-    ]
+    exemplaries = [item for item in entries if str(item.get("evolution_evidence") or "") == "exemplary"]
     _take(exemplaries[-max(1, limit // 4) :])
     if len(selected) >= limit:
         return sorted(selected, key=lambda row: str(row.get("observed_at") or ""))
@@ -245,10 +198,7 @@ def _stratified_history(entries: list[dict[str, Any]], limit: int) -> list[dict[
         if slots == 1:
             indices = [len(remaining) // 2]
         else:
-            indices = [
-                round(index * (len(remaining) - 1) / (slots - 1))
-                for index in range(slots)
-            ]
+            indices = [round(index * (len(remaining) - 1) / (slots - 1)) for index in range(slots)]
         for index in indices:
             item = remaining[index]
             session_id = str(item.get("session_id") or "")
@@ -304,9 +254,7 @@ class SkillEvidenceStore:
 
     def load(self, skill_name: str) -> dict[str, Any]:
         try:
-            payload = json.loads(
-                self._bucket.get_object(self._key(skill_name)).read().decode("utf-8")
-            )
+            payload = json.loads(self._bucket.get_object(self._key(skill_name)).read().decode("utf-8"))
         except Exception as exc:
             if not is_not_found_error(exc):
                 raise
@@ -351,9 +299,7 @@ class SkillEvidenceStore:
             previous = entries.get(session_id)
             if previous:
                 entry["first_captured_at"] = str(
-                    previous.get("first_captured_at")
-                    or previous.get("captured_at")
-                    or entry["captured_at"]
+                    previous.get("first_captured_at") or previous.get("captured_at") or entry["captured_at"]
                 )
             else:
                 entry["first_captured_at"] = entry["captured_at"]
@@ -376,28 +322,17 @@ class SkillEvidenceStore:
         rationale: str,
     ) -> dict[str, Any]:
         state = self.record_sessions(skill_name, sessions)
-        debt = (
-            dict(state.get("change_debt") or {})
-            if isinstance(state.get("change_debt"), dict)
-            else {}
-        )
+        debt = dict(state.get("change_debt") or {}) if isinstance(state.get("change_debt"), dict) else {}
         pending = _unique_strings(
-            list(debt.get("pending_session_ids") or [])
-            + [session.get("session_id") for session in sessions]
+            list(debt.get("pending_session_ids") or []) + [session.get("session_id") for session in sessions]
         )
-        rationales = [
-            item
-            for item in debt.get("rationales") or []
-            if isinstance(item, dict)
-        ]
+        rationales = [item for item in debt.get("rationales") or [] if isinstance(item, dict)]
         if str(rationale or "").strip():
             rationales.append(
                 {
                     "at": _utc_now_iso(),
                     "reason": _clip(rationale, 1_000),
-                    "session_ids": _unique_strings(
-                        [session.get("session_id") for session in sessions]
-                    ),
+                    "session_ids": _unique_strings([session.get("session_id") for session in sessions]),
                 }
             )
         debt.update(
@@ -429,11 +364,7 @@ class SkillEvidenceStore:
         state["last_published_at"] = _utc_now_iso()
         state["last_published_job_id"] = str(job_id or "")
         state["published_evidence_session_ids"] = _unique_strings(
-            [
-                item.get("session_id")
-                for item in state.get("evidence") or []
-                if isinstance(item, dict)
-            ]
+            [item.get("session_id") for item in state.get("evidence") or [] if isinstance(item, dict)]
         )
         return self._save(state)
 
@@ -441,31 +372,17 @@ class SkillEvidenceStore:
         self,
         state: dict[str, Any],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        entries = [
-            item
-            for item in state.get("evidence") or []
-            if isinstance(item, dict)
-        ]
+        entries = [item for item in state.get("evidence") or [] if isinstance(item, dict)]
         published_ids = {
-            str(item or "")
-            for item in state.get("published_evidence_session_ids") or []
-            if str(item or "")
+            str(item or "") for item in state.get("published_evidence_session_ids") or [] if str(item or "")
         }
         if published_ids:
-            unresolved = [
-                item
-                for item in entries
-                if str(item.get("session_id") or "") not in published_ids
-            ]
+            unresolved = [item for item in entries if str(item.get("session_id") or "") not in published_ids]
             recent = unresolved[-self.recent_limit :]
         else:
             recent = entries[-self.recent_limit :]
         recent_ids = {str(item.get("session_id") or "") for item in recent}
-        historical_pool = [
-            item
-            for item in entries
-            if str(item.get("session_id") or "") not in recent_ids
-        ]
+        historical_pool = [item for item in entries if str(item.get("session_id") or "") not in recent_ids]
         historical = _stratified_history(historical_pool, self.historical_limit)
         return recent, historical
 
@@ -482,38 +399,26 @@ class SkillEvidenceStore:
             "_avg_prm": entry.get("avg_prm"),
             "_has_tool_errors": bool(entry.get("has_tool_errors")),
             "_verified_skill_feedback": [
-                dict(item)
-                for item in entry.get("verified_skill_feedback") or []
-                if isinstance(item, dict)
+                dict(item) for item in entry.get("verified_skill_feedback") or [] if isinstance(item, dict)
             ],
             "_evidence_window": window,
             "timestamp": str(entry.get("observed_at") or ""),
             "source": str(entry.get("source") or ""),
-            "runtime": (
-                dict(entry.get("runtime"))
-                if isinstance(entry.get("runtime"), dict)
-                else {}
-            ),
+            "runtime": (dict(entry.get("runtime")) if isinstance(entry.get("runtime"), dict) else {}),
             "runtime_context": (
-                dict(entry.get("runtime_context"))
-                if isinstance(entry.get("runtime_context"), dict)
-                else {}
+                dict(entry.get("runtime_context")) if isinstance(entry.get("runtime_context"), dict) else {}
             ),
         }
         replay_profiles = [
             str(item.get("evaluation_profile") or "").strip()
             for item in entry.get("replay_cases") or []
-            if isinstance(item, dict)
-            and str(item.get("evaluation_profile") or "").strip()
+            if isinstance(item, dict) and str(item.get("evaluation_profile") or "").strip()
         ]
         evaluation_profile = str(
-            entry.get("evaluation_profile")
-            or (replay_profiles[0] if replay_profiles else "")
+            entry.get("evaluation_profile") or (replay_profiles[0] if replay_profiles else "")
         ).strip()
         if evaluation_profile:
-            result.setdefault("runtime_context", {})[
-                "evaluation_profile"
-            ] = evaluation_profile
+            result.setdefault("runtime_context", {})["evaluation_profile"] = evaluation_profile
         overall = entry.get("judge_overall_score")
         if isinstance(overall, (int, float)) and not isinstance(overall, bool):
             judge_scores: dict[str, Any] = {"overall_score": float(overall)}
@@ -523,6 +428,7 @@ class SkillEvidenceStore:
             evidence_reason = str(entry.get("evidence_reason") or "")
             if evidence_reason:
                 judge_scores["evidence_reason"] = evidence_reason
+            judge_scores["skill_experiences"] = list(entry.get("skill_experiences") or [])
             result["_judge_scores"] = judge_scores
         return result
 
@@ -534,9 +440,7 @@ class SkillEvidenceStore:
         state = self.load(skill_name)
         recent, historical = self._windows(state)
         current_ids = {
-            str(session.get("session_id") or "")
-            for session in current_sessions
-            if str(session.get("session_id") or "")
+            str(session.get("session_id") or "") for session in current_sessions if str(session.get("session_id") or "")
         }
         planning_sessions = list(current_sessions)
         for window, entries in (("recent", recent), ("historical", historical)):
@@ -545,11 +449,7 @@ class SkillEvidenceStore:
                     continue
                 planning_sessions.append(self._synthetic_session(entry, window))
 
-        all_entries = [
-            item
-            for item in state.get("evidence") or []
-            if isinstance(item, dict)
-        ]
+        all_entries = [item for item in state.get("evidence") or [] if isinstance(item, dict)]
         scores = [
             float(item["judge_overall_score"])
             for item in all_entries
@@ -561,28 +461,16 @@ class SkillEvidenceStore:
             "skill_name": skill_name,
             "total_evidence_sessions": len(all_entries),
             "current_session_count": len(current_sessions),
-            "recent_session_ids": [
-                str(item.get("session_id") or "") for item in recent
-            ],
-            "historical_session_ids": [
-                str(item.get("session_id") or "") for item in historical
-            ],
-            "tool_error_sessions": sum(
-                1 for item in all_entries if item.get("has_tool_errors")
-            ),
-            "defect_evidence_sessions": sum(
-                1 for item in all_entries if item.get("evolution_evidence") == "defect"
-            ),
+            "recent_session_ids": [str(item.get("session_id") or "") for item in recent],
+            "historical_session_ids": [str(item.get("session_id") or "") for item in historical],
+            "tool_error_sessions": sum(1 for item in all_entries if item.get("has_tool_errors")),
+            "defect_evidence_sessions": sum(1 for item in all_entries if item.get("evolution_evidence") == "defect"),
             "exemplary_evidence_sessions": sum(
                 1 for item in all_entries if item.get("evolution_evidence") == "exemplary"
             ),
-            "mean_judge_score": (
-                round(sum(scores) / len(scores), 3) if scores else None
-            ),
+            "mean_judge_score": (round(sum(scores) / len(scores), 3) if scores else None),
             "change_debt": debt,
-            "active_candidate_job_id": str(
-                state.get("active_candidate_job_id") or ""
-            ),
+            "active_candidate_job_id": str(state.get("active_candidate_job_id") or ""),
         }
         return planning_sessions, context
 

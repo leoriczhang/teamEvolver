@@ -138,7 +138,8 @@ def test_ov_task_observability_keeps_bounded_stage_and_event_timeline():
     ]
 
 
-def test_materialized_compile_bundle_keeps_existing_candidate_contract(tmp_path):
+@pytest.mark.parametrize("benchmark_body", ["# Benchmark\n\nTwelve reviewed support scenarios.\n", None, " \n"])
+def test_materialized_compile_bundle_keeps_existing_candidate_contract(tmp_path, benchmark_body):
     repository = _repository(tmp_path)
     job = repository.create_job(
         name="Support Skill",
@@ -168,12 +169,22 @@ def test_materialized_compile_bundle_keeps_existing_candidate_contract(tmp_path)
             "source_session_ids": ["viking://resources/team/runbooks/billing.md"],
         }
     ]
-    repository.write_output(
-        job["job_id"],
-        "compiled_skill/support-triage/benchmark_cases.json",
-        json.dumps(cases),
-    )
+    from team_miner import benchmark_format
 
+    cases = [{**cases[0], "input": f"Support scenario {index}: " + cases[0]["input"]} for index in range(12)]
+    document = benchmark_format.build_document("support-triage", cases)
+    repository.write_output(job["job_id"], "compiled_skill/support-triage/benchmark.json", json.dumps(document))
+    repository.write_output(job["job_id"], "analysis/evidence-map.md", "# Evidence\nGrounded in billing.md.\n")
+    repository.write_output(job["job_id"], "analysis/gaps.md", "# Gaps\nNo unresolved gaps in this fixture.\n")
+    if benchmark_body is not None:
+        repository.write_output(job["job_id"], "compiled_skill/support-triage/BENCHMARK.md", benchmark_body)
+    if benchmark_body is None or not benchmark_body.strip():
+        with pytest.raises(ValueError, match="BENCHMARK.md"):
+            repository.finalize_materialized(job["job_id"])
+        assert repository.get_job(job["job_id"])["materialized"] is False
+        if benchmark_body is None:
+            assert not (repository.workspace(job) / "compiled_skill/support-triage/BENCHMARK.md").exists()
+        return
     finalized = repository.finalize_materialized(job["job_id"])
     public = repository.public_job(finalized, detail=True)
 
@@ -185,14 +196,14 @@ def test_materialized_compile_bundle_keeps_existing_candidate_contract(tmp_path)
             "has_skill": True,
             "has_evaluation": True,
             "has_benchmark": True,
-            "question_count": 1,
+            "question_count": 12,
         }
     ]
     workspace = repository.workspace(finalized)
     assert (workspace / "compiled_skill/support-triage/benchmark.json").is_file()
     assert (workspace / "compiled_skill/support-triage/BENCHMARK.md").is_file()
     descriptor = mined_artifact_descriptor("support-triage", skillminer_root=workspace)
-    assert descriptor["question_count"] == 1
+    assert descriptor["question_count"] == 12
     assert descriptor["has_evaluation"] is True
 
 

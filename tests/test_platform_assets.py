@@ -14,17 +14,32 @@ class _Host(PlatformAssetsMixin):
         self.config = config
 
 
-def _client(config: TeamEvolverConfig) -> TestClient:
+def _client(config: TeamEvolverConfig, role: str = "admin") -> TestClient:
     host = _Host(config)
     app = FastAPI()
 
     @app.middleware("http")
     async def authenticate(request: Request, call_next):
-        request.state.console_user = {"id": "admin", "role": "admin"}
+        request.state.console_user = {
+            "id": role,
+            "role": role,
+            "tenant_id": "default",
+            "capabilities": ["tenant.manage"] if role == "admin" else [],
+        }
         return await call_next(request)
 
     host._register_platform_assets_routes(app)
     return TestClient(app)
+
+
+def test_platform_assets_require_tenant_administrator(tmp_path):
+    config = TeamEvolverConfig(
+        sharing_session_backend="local",
+        sharing_skill_backend="local",
+        sharing_local_root=str(tmp_path / "session"),
+        sharing_skill_local_root=str(tmp_path / "skill"),
+    )
+    assert _client(config, role="user").get("/api/platform-assets/tree").status_code == 403
 
 
 def test_platform_assets_read_pg_or_nas_only():
@@ -61,7 +76,6 @@ def test_platform_assets_merge_session_and_skill_stores(tmp_path):
         "# Published skill",
     )
     config = TeamEvolverConfig(
-        sharing_enabled=False,
         sharing_session_backend="local",
         sharing_skill_backend="local",
         sharing_local_root=str(session_root),
@@ -98,7 +112,6 @@ def test_platform_asset_content_rejects_unexposed_keys(tmp_path):
     root = tmp_path / "store"
     LocalObjectStore(root).put_object("skills/demo/SKILL.md", "# Hidden")
     config = TeamEvolverConfig(
-        sharing_enabled=False,
         sharing_session_backend="local",
         sharing_skill_backend="local",
         sharing_local_root=str(root),

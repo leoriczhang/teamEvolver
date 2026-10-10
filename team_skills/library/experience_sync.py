@@ -107,8 +107,6 @@ class Target:
     def from_config(cls, config):
         if not getattr(config, "storage_pg_enabled", False):
             raise SyncError("PG_REQUIRED")
-        if not getattr(config, "sharing_enabled", False):
-            raise SyncError("SHARING_DISABLED")
         endpoint = resolve_viking_endpoint(config.sharing_viking_deployment, config.sharing_viking_endpoint).rstrip("/")
         try:
             url = urlsplit(endpoint)
@@ -119,7 +117,7 @@ class Target:
             raise SyncError("INVALID_OV_ENDPOINT")
         account = str(config.sharing_viking_account or "").strip()
         user = str(config.sharing_viking_user or "").strip()
-        key = config.sharing_viking_team_api_key or config.sharing_viking_api_key
+        key = config.sharing_viking_api_key
         if not account or not user or not key:
             raise SyncError("OV_IDENTITY_OR_KEY_MISSING")
         return cls(endpoint, account, user, key, Settings.from_config(config).target_directory)
@@ -363,28 +361,6 @@ class ExperienceSync:
         self.save(key, value)
         return True
 
-    def migrate_destination(self, key, value):
-        """Move legacy tenant-prefixed delivery state without deleting remote files."""
-        path = key.removeprefix(self.items)
-        legacy = f"{self.target.target_directory}/{segment(self.store.tenant_id)}/{path}"
-        if value.get("uri") != legacy:
-            return value
-        previous = {name: value.get(name) for name in (
-            "uri", "state", "attempts", "next_attempt", "synced_digest", "last_error", "last_attempt_at",
-        )}
-        moved = {**value, "uri": f"{self.target.target_directory}/{path}", "previous_destination": previous,
-                 "state": "pending", "attempts": 0, "next_attempt": 0, "last_error": None,
-                 "last_failure": None, "last_attempt_at": None, "synced_digest": None,
-                 "content_written": False, "semantic_status": "unknown", "vector_status": "unknown",
-                 "verify_only": True}
-        self.store.check_background_lock(LOCK)
-        self.store.batch_write({key: canonical(moved)}, preconditions={key: {
-            "kind": "replace_if_hash", "base_hash": "sha256:" + digest(canonical(value)),
-        }})
-        event(LOG, "experience_sync.destination_migrated", tenant=self.store.tenant_id,
-              previous_uri=legacy, uri=moved["uri"], experience_id=value["document"]["experience_id"])
-        return moved
-
     def scan(self, meta):
         scan = meta.get("scan")
         if not scan:
@@ -548,7 +524,7 @@ class ExperienceSync:
                 if self.stop.is_set() or time.monotonic() >= deadline:
                     self.delivery_pass(meta, summary)
                     return True
-                value = self.migrate_destination(row["key"], json.loads(row["content"]))
+                value = json.loads(row["content"])
                 summary["examined"] += 1
                 if value["state"] != "synced":
                     if value["next_attempt"] <= self.clock():

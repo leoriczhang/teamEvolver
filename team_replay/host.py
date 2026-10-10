@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from .hooks import ReplayAdapterFactory
@@ -44,13 +43,6 @@ class ReplayHost(Protocol):
         self,
         skill: Mapping[str, Any],
     ) -> dict[str, Any]: ...
-
-    def materialize_skill_treatment(
-        self,
-        skill: Mapping[str, Any],
-        target: Path,
-    ) -> str: ...
-
 
 _host: ReplayHost | None = None
 

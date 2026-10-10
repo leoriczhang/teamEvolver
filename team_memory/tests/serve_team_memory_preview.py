@@ -19,7 +19,7 @@ def main():
     parser.add_argument("--port", type=int, default=52016)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
-    with tempfile.TemporaryDirectory(prefix="te-memory-preview-") as temp:
+    with tempfile.TemporaryDirectory(prefix="te-memory-preview-"):
         app = FastAPI()
         settings = {
             "enabled": True,
@@ -37,7 +37,7 @@ def main():
 
         @app.get("/api/sharing-config")
         async def sharing():
-            return {"enabled": True, "endpoint": "https://preview.invalid", "service_api_key_present": True}
+            return {"endpoint": "https://preview.invalid", "api_key_present": True}
 
         @app.get("/api/aggregation/settings")
         async def get_settings():

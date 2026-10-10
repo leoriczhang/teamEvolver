@@ -25,7 +25,6 @@ teamEvolver config service.port 52010
 teamEvolver config service.host 0.0.0.0
 
 # 配置 OpenViking 后端
-teamEvolver config sharing.enabled true
 teamEvolver config sharing.backend viking
 teamEvolver config sharing.viking_deployment local
 teamEvolver config sharing.viking_endpoint "http://localhost:1933"

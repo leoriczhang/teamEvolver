@@ -745,8 +745,8 @@ role    · 只是通知</p>
                   <span class="station__col-label station__col-label--verify">B · 验证 · 客户端轮询</span>
                   <span class="station__mode station__mode--poll">客户端轮询 · 空闲时跑</span>
                   <p class="station__narrative">候选入队后, 各机器上的 <code>ValidationWorker</code> 空闲时轮询, 每天最多 5 单, 起真沙盒 A/B 判决。</p>
-                  <p class="station__note"><strong>开关 · <code>validation.enabled</code></strong>决定这台机器是否加入验证矿工池。三条件同时满足才派工:<br>
-                  ① <code>validation.enabled=true</code> · ② <code>sharing.enabled=true</code> · ③ Hermes idle ≥ <code>idle_after_seconds</code> (默认 5 分钟)。<br>
+                  <p class="station__note"><strong>开关 · <code>validation.enabled</code></strong>决定这台机器是否加入验证矿工池。两个条件同时满足才派工:<br>
+                  ① <code>validation.enabled=true</code> · ② Hermes idle ≥ <code>idle_after_seconds</code> (默认 5 分钟)。<br>
                   默认关, 由每台机器主人自愿加入。</p>
                   <p class="station__evidence">// 一次典型判决:
 Δ turns · −38%
@@ -1313,4 +1313,3 @@ _require_admin_request()</p>
 
 </body>
 </html>
-

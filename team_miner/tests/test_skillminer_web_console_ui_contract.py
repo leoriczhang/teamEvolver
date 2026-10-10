@@ -285,7 +285,9 @@ def test_config_schema_reports_real_source_and_artifact_readiness(tmp_path, monk
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("# Skill", encoding="utf-8")
     (skill_dir / "EVALUATION.md").write_text("# Evaluation", encoding="utf-8")
-    (skill_dir / "benchmark.jsonl").write_text('{"id":"q1"}\n{"id":"q2"}\n', encoding="utf-8")
+    server.rb.bf.write_document(skill_dir / "benchmark.json", server.rb.bf.build_document_with_quality(
+        "support-skill", [{"id": "q1", "input": "Task one"}, {"id": "q2", "input": "Task two"}]
+    )[0])
 
     monkeypatch.setattr(server, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(server.li, "PROJECT_ROOT", tmp_path)
@@ -363,7 +365,9 @@ def test_mining_history_merges_rounds_with_next_run_preexisting_snapshot(tmp_pat
     final_skill.mkdir(parents=True)
     (final_skill / "SKILL.md").write_text("# Final Skill", encoding="utf-8")
     (final_skill / "EVALUATION.md").write_text("# Final Evaluation", encoding="utf-8")
-    (final_skill / "benchmark.jsonl").write_text('{"id":"q1"}\n{"id":"q2"}\n', encoding="utf-8")
+    server.rb.bf.write_document(final_skill / "benchmark.json", server.rb.bf.build_document_with_quality(
+        "support-skill", [{"id": "q1", "input": "Task one"}, {"id": "q2", "input": "Task two"}]
+    )[0])
     report = tmp_path / "run_history" / "20260809_223901_916214" / "preexisting" / "semantic_reports" / "report.md"
     report.parent.mkdir(parents=True)
     report.write_text("# Report", encoding="utf-8")
@@ -1078,7 +1082,7 @@ def test_skillminer_ui_omits_redundant_microcopy():
     # Non-obvious safeguards and destructive-action consequences remain visible.
     assert "不会覆盖同名文件" in mining_view
     assert "个文档会一并删除" in mining_view
-    assert "超出后自动排队" in mining_view
+    assert "超出后拒绝创建" in mining_view
 
 
 def test_mining_task_deletion_contract_is_available_in_api_and_ui():
@@ -1100,7 +1104,7 @@ def test_new_mining_task_preserves_round_selection_and_sends_checkpoint_choice()
     assert "const [humanCheckpoints, setHumanCheckpoints] = useState(true);" in mining_view
     assert "defaultRoundsInitialized" in mining_view
     assert "human_checkpoints: humanCheckpoints" in mining_view
-    assert "启用知识补充" in mining_view
+    assert "当前引擎暂不支持暂停问答" in mining_view
 
 
 def test_deleting_legacy_mining_job_removes_its_archived_outputs(tmp_path, monkeypatch):

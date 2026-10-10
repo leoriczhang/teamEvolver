@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
 from typing import Any, Iterable
 
 
@@ -70,22 +69,23 @@ def _runtime_declaration(skill: dict[str, Any]) -> dict[str, Any]:
             if supported
             else "portable"
             if portable
-            else "legacy_source_only"
+            else "source_runtime_only"
         ),
     }
 
 
 def runtime_type_for_case(case: dict[str, Any]) -> str:
-    runtime = (
-        case.get("source_runtime")
-        if isinstance(case.get("source_runtime"), dict)
+    provenance = (
+        case.get("provenance")
+        if isinstance(case.get("provenance"), dict)
         else {}
     )
-    return _runtime(
-        runtime.get("type")
-        or case.get("runtime_type")
-        or case.get("source")
+    runtime = (
+        provenance.get("source_runtime")
+        if isinstance(provenance.get("source_runtime"), dict)
+        else {}
     )
+    return _runtime(runtime.get("type"))
 
 
 def _source_runtimes(
@@ -127,16 +127,17 @@ def prepare_runtime_validation(
     cases: list[dict[str, Any]] = []
     for raw_case in replay_cases:
         case = dict(raw_case)
-        source = sessions_by_id.get(str(case.get("session_id") or ""))
-        if source and not isinstance(case.get("source_runtime"), dict):
+        provenance = dict(case.get("provenance") or {})
+        source = sessions_by_id.get(str(provenance.get("session_id") or ""))
+        if source and not isinstance(provenance.get("source_runtime"), dict):
             runtime = (
                 source.get("runtime")
                 if isinstance(source.get("runtime"), dict)
                 else {}
             )
-            case["source_runtime"] = dict(runtime)
+            provenance["source_runtime"] = dict(runtime)
         if source and not isinstance(
-            case.get("source_runtime_context"),
+            provenance.get("source_runtime_context"),
             dict,
         ):
             context = (
@@ -144,7 +145,7 @@ def prepare_runtime_validation(
                 if isinstance(source.get("runtime_context"), dict)
                 else {}
             )
-            case["source_runtime_context"] = {
+            provenance["source_runtime_context"] = {
                 key: context.get(key)
                 for key in (
                     "tenant_id",
@@ -155,6 +156,7 @@ def prepare_runtime_validation(
                 )
                 if context.get(key) not in (None, "")
             }
+        case["provenance"] = provenance
         cases.append(case)
     source_runtimes = _source_runtimes(sessions, cases)
     if declaration["supported_runtimes"]:
@@ -177,7 +179,7 @@ def prepare_runtime_validation(
         (
             dict(case)
             for case in cases
-            if str(case.get("instruction") or case.get("query") or "").strip()
+            if str(case.get("query") or "").strip()
         ),
         None,
     )
@@ -201,20 +203,23 @@ def prepare_runtime_validation(
         neutral = {
             **seed,
             "case_id": f"compat-{runtime}-{digest}",
-            "dataset_id": f"compat-{runtime}-{digest}",
-            "session_id": f"compat-{runtime}-{digest}",
-            "source_session_ids": [],
-            "source_runtime": {"type": runtime},
-            "source_runtime_context": {},
-            "context_snapshot": {},
-            "context_snapshot_id": "",
-            "context_policy": {
-                "mode": "neutral",
-                "team_only": True,
-                "personal_context": False,
+            "provenance": {
+                "session_id": f"compat-{runtime}-{digest}",
+                "session_ids": [],
+                "source_runtime": {"type": runtime},
+                "source_runtime_context": {},
+                "context_snapshot": {},
+                "context_snapshot_id": "",
             },
-            "evidence_window": "compatibility",
-            "compatibility_runtime": runtime,
+            "metadata": {
+                **dict(seed.get("metadata") or {}),
+                "context_policy": {
+                    "mode": "neutral",
+                    "team_only": True,
+                    "personal_context": False,
+                },
+                "compatibility_runtime": runtime,
+            },
         }
         cases.append(neutral)
         represented.add(runtime)
@@ -246,10 +251,10 @@ def evaluate_runtime_compatibility(
     )
     if not required:
         return {
-            "status": "passed",
+            "status": "blocked",
             "required_runtimes": [],
             "matrix": {},
-            "reason": "legacy job has no runtime matrix",
+            "reason": "runtime validation matrix is required",
         }
 
     matrix: dict[str, dict[str, Any]] = {

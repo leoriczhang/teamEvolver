@@ -456,9 +456,8 @@ def test_ingest_fires_trace_hook_for_every_session(
     owner = SimpleNamespace(
         config=SimpleNamespace(
             session_split_enabled=True,
-            llm_api_key="", llm_api_base="", llm_model_id="", model_name="",
+            llm_api_key="", llm_api_base="", llm_model_id="",
         ),
-        _session_judge_queue=None,
     )
     owner._schedule_evolve_trigger = lambda: True
 

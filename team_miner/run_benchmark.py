@@ -10,7 +10,7 @@ Benchmark 构建 + 阅卷脚本（Hermes 版）
     读被测 skill 的 SKILL.md + EVALUATION.md，用 `hermes -z` 生成一套结构化题库。
     题目直接脱胎于 EVALUATION.md 里各维度的正例/负例 + 边界/例外/降级考核，
     并补充 hard-negative 陷阱题。产出两种格式（都写进 compiled_skill/<skill>/）：
-      - benchmark.json   —— team-replay.dataset.v2 机器题库
+      - benchmark.json   —— team-replay.dataset 机器题库
       - BENCHMARK.md     —— 人读友好的视图
     每道题不是"标准范文"，而是可判定的锚点：
       gold.expected_label（分类项期望标签）+ gold.must_hit（必须命中）+ gold.must_avoid（绝不能出现）
@@ -563,7 +563,6 @@ def build_phase(skill_dir, skill_name, hermes_env, difficulty_counts=None):
     bf.write_document(json_path, benchmark_payload)
     raw_json_path.unlink(missing_ok=True)
     # 新挖掘产物只保留规范 JSON，避免同一 Skill 同时出现两份相互冲突的机器题库。
-    (skill_dir / "benchmark.jsonl").unlink(missing_ok=True)
     md_path = skill_dir / "BENCHMARK.md"
     md_path.write_text(render_benchmark_md(questions, skill_name), encoding="utf-8")
     quality_path = _write_quality_report(
@@ -578,13 +577,13 @@ def build_phase(skill_dir, skill_name, hermes_env, difficulty_counts=None):
         for d in q["target_dimensions"]:
             covered[d] = covered.get(d, 0) + 1
     print(f"  ✓ 生成 {len(questions)} 道题")
-    print(f"    - {json_path.relative_to(PROJECT_ROOT)}（team-replay.dataset.v2）")
+    print(f"    - {json_path.relative_to(PROJECT_ROOT)}（team-replay.dataset）")
     print(f"    - {md_path.relative_to(PROJECT_ROOT)}（人读视图）")
     if quality_warnings:
         print(f"    ⚠️ 质量标记：{quality_path.relative_to(PROJECT_ROOT)}（{len(quality_warnings)} 项，需谨慎提交）")
     print(f"    维度覆盖：{len(covered)} 个维度被触及")
 
-    # benchmark.json 是 SkillMiner 生成的 canonical Test Dataset v2。
+    # benchmark.json 是 SkillMiner 生成的 canonical Test Dataset。
     # 外部 LIFT 仅保留为显式兼容出口，默认不创建草稿、不参与主生命周期。
     if os.environ.get("SKILLMINER_LIFT_AUTO_DRAFT", "0").strip().lower() not in {"0", "false", "no", "off"}:
         try:
@@ -610,20 +609,7 @@ def load_existing_benchmark(skill_dir):
             return None
         return normalize_questions(bf.to_runner_questions(payload))
 
-    # 只读兼容历史挖掘产物；新的 build_phase 不再生成 JSONL。
-    jsonl_path = skill_dir / "benchmark.jsonl"
-    if not jsonl_path.exists():
-        return None
-    questions = []
-    for line in jsonl_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            questions.append(json.loads(line))
-        except Exception:
-            continue
-    return normalize_questions(questions)
+    return None
 
 
 # ============================================================
@@ -1464,8 +1450,6 @@ def main():
             print("✗ --skip-build 但未找到可用的 benchmark.json，请先生成")
             sys.exit(1)
         benchmark_path = skill_dir / "benchmark.json"
-        if not benchmark_path.is_file():
-            benchmark_path = skill_dir / "benchmark.jsonl"
         print(f"\n[载入已有题库] {len(questions)} 道题（{benchmark_path.relative_to(PROJECT_ROOT)}）")
     else:
         questions = build_phase(skill_dir, skill_name, hermes_env,

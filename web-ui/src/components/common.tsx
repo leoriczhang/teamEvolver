@@ -1,12 +1,11 @@
 import * as React from "react";
 import { Info } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { fmtScore, scoreClass } from "@/lib/format";
 import { GLOSSARY } from "@/lib/glossary";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
-export const DEFAULT_PAGE_SIZE = 50;
-export const MAX_VISIBLE_PAGES = 50;
+const DEFAULT_PAGE_SIZE = 50;
+const MAX_VISIBLE_PAGES = 50;
 
 // ---- Term / jargon help -------------------------------------------------- //
 // Renders a term with a hover/focus explanation from the shared glossary, so
@@ -138,26 +137,6 @@ export function PageHeader({
       </div>
       {actions && <div className="shrink-0">{actions}</div>}
     </header>
-  );
-}
-
-// ---- Score text ---------------------------------------------------------- //
-export function ScoreText({
-  value,
-  threshold,
-  pending,
-}: {
-  value?: number | null;
-  threshold?: number | null;
-  pending?: string;
-}) {
-  if (value == null || isNaN(Number(value))) {
-    return <span className="score pending">{pending || "—"}</span>;
-  }
-  return (
-    <span className={cn("score", scoreClass(value, threshold))}>
-      {fmtScore(value)}
-    </span>
   );
 }
 

@@ -1,9 +1,7 @@
-"""Skill synchronization helpers for the teamEvolver service.
+"""Skill runtime-cache helpers for the teamEvolver service.
 
-The service does not upload model-session traffic into evolution. Evolution
-input is accepted only through the evolve server's
-``/ingest_session`` endpoint (username + session payload). This mixin keeps
-skill pull/reload and background-task drain behavior for service runtime use.
+Session ingestion is owned by ``session_ingestion``. This mixin keeps local
+Skill cache refresh and background-task drain behavior for service runtime use.
 """
 
 from __future__ import annotations
@@ -12,13 +10,14 @@ import asyncio
 import logging
 import os
 import random
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+_SKILL_RELOAD_INTERVAL_SECONDS = 30
+
 
 class UploadsMixin:
-    """Session upload, evolve trigger, and skill pull/reload state machine."""
+    """Evolution trigger and Skill runtime-cache refresh state machine."""
 
     async def _await_background_tasks(self, timeout_seconds: float) -> None:
         pending = [t for t in list(self._background_tasks) if not t.done()]
@@ -37,21 +36,13 @@ class UploadsMixin:
             logger.info("[Proxy] background drain complete (%d task(s))", len(done))
 
     def _start_skill_reload_polling(self) -> None:
-        if not (
-            self.config.sharing_enabled
-            or bool(getattr(self.config, "storage_pg_enabled", False))
-        ):
-            return
-        mode = str(getattr(self.config, "sharing_skill_reload_mode", "") or "poll").strip().lower()
-        if mode != "poll":
-            return
         if self._skill_reload_task is not None and not self._skill_reload_task.done():
             return
         self._skill_reload_task = asyncio.create_task(self._skill_reload_poll_loop())
         self._skill_reload_task.add_done_callback(self._task_done_cb)
         logger.info(
             "[SkillHub] skill reload polling enabled interval=%ds",
-            self._skill_reload_interval_seconds,
+            _SKILL_RELOAD_INTERVAL_SECONDS,
         )
 
     async def _skill_reload_poll_loop(self) -> None:
@@ -62,9 +53,9 @@ class UploadsMixin:
                 if first_pull:
                     first_pull = False
                 else:
-                    jitter = random.uniform(0, self._skill_reload_interval_seconds * 0.1)
+                    jitter = random.uniform(0, _SKILL_RELOAD_INTERVAL_SECONDS * 0.1)
                     backoff = min(consecutive_failures * 5.0, 60.0)
-                    await asyncio.sleep(self._skill_reload_interval_seconds + jitter + backoff)
+                    await asyncio.sleep(_SKILL_RELOAD_INTERVAL_SECONDS + jitter + backoff)
                 try:
                     await self._pull_all_tenant_skill_caches()
                     consecutive_failures = 0
@@ -80,30 +71,8 @@ class UploadsMixin:
             raise
 
     # ------------------------------------------------------------------ #
-    # Session data upload (cloud)                                          #
+    # Evolution trigger                                                    #
     # ------------------------------------------------------------------ #
-
-    async def _upload_session_data(
-        self,
-        session_id: str,
-        turns: list[dict],
-    ) -> bool:
-        """Deprecated no-op.
-
-        Proxy-originated sessions must not enter evolution. Submit sessions to
-        the evolve server's ``/ingest_session`` endpoint instead.
-        """
-        logger.info("[Proxy] session upload disabled; use /ingest_session (session=%s)", session_id)
-        return False
-
-    def _maybe_upload_session_snapshot(self, session_id: str, user_turn_num: int) -> None:
-        """Deprecated no-op: proxy sessions no longer participate in evolution."""
-        return
-
-    async def _upload_session_snapshot_and_trigger(self, session_id: str, turns: list[dict]) -> None:
-        """Deprecated no-op: snapshot uploads from proxy are disabled."""
-        logger.info("[Proxy] session snapshot upload disabled; use /ingest_session (session=%s)", session_id)
-        return
 
     def _evolve_trigger_debounce_seconds(self) -> float:
         raw = os.environ.get("TEAMEVOLVER_EVOLVE_TRIGGER_DEBOUNCE_S", "15")
@@ -151,7 +120,7 @@ class UploadsMixin:
                     result = resp.json()
                 logger.info("[SkillHub] triggered evolve server: %s", url)
                 if isinstance(result, dict) and int(result.get("uploaded_skills") or 0) > 0:
-                    await self._pull_skills_from_cloud()
+                    await self._refresh_skill_runtime_cache()
                 return
             except Exception as e:
                 if attempt < 2:
@@ -165,7 +134,7 @@ class UploadsMixin:
 
     async def _pull_all_tenant_skill_caches(self) -> None:
         if not bool(getattr(self.config, "storage_pg_enabled", False)):
-            await self._pull_skills_from_cloud()
+            await self._refresh_skill_runtime_cache()
             return
 
         from ..tenants.registry import (
@@ -179,15 +148,15 @@ class UploadsMixin:
         for tenant in tenants:
             token = set_current_tenant(tenant)
             try:
-                await self._pull_skills_from_cloud()
+                await self._refresh_skill_runtime_cache()
             finally:
                 reset_current_tenant(token)
 
-    async def _pull_skills_from_cloud(self, skip_names: Optional[set[str]] = None) -> None:
-        """Pull latest skills from cloud storage and reload the skill manager.
+    async def _refresh_skill_runtime_cache(self) -> None:
+        """Materialize the latest stored Skills into the tenant runtime cache.
 
-        This is a *read-only* operation — local skills are never pushed
-        automatically.  Use ``teamEvolver skills push`` for explicit uploads.
+        This is a read-only operation. The cache is rebuildable and is never
+        treated as a publication source.
         """
         try:
             from team_skills.library.hub import SkillHub
@@ -201,10 +170,8 @@ class UploadsMixin:
             tenant_id = current_tenant_id()
             config = effective_config(None, tenant, self.config)
             team_hub = SkillHub.team_from_config(config, tenant_id=tenant_id)
-            team_result = team_hub.pull_skills(
-                self._skills_dir(),
-                mirror=bool(getattr(config, "storage_pg_enabled", False)),
-                skip_names=skip_names,
+            team_result = team_hub.materialize_runtime_cache(
+                self._skill_runtime_cache_dir(),
             )
             logger.info(
                 "[SkillHub] skill pull: tenant=%s team=%d downloaded, team=%d total remote",
@@ -214,11 +181,5 @@ class UploadsMixin:
             )
             if team_result.get("failed_names"):
                 logger.warning("[SkillHub] skill pull failed names: %s", ", ".join(team_result["failed_names"]))
-            if self.skill_manager and (
-                team_result.get("downloaded", 0) > 0
-                or team_result.get("deleted", 0) > 0
-                or team_result.get("restored_from_backup", False)
-            ):
-                self.skill_manager.reload()
         except Exception as e:
             logger.warning("[SkillHub] skill pull failed: %s", e)

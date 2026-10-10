@@ -1,5 +1,5 @@
 """team_skills: Session/Trace analysis, Evidence, Skill Candidate, Skill Library,
-Publish/Rollback and Agent Skill Sync — the Skill self-evolution domain.
+Publish/Rollback and Skill pull state — the Skill self-evolution domain.
 
 Sibling top-level package to teamEvolver/team_replay/team_memory; ships in the
 same distribution and FastAPI process.
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from team_skills.candidates.worker import ValidationRunSummary, ValidationWorker
     from team_skills.evolution.kernel.settings import EvolveServerConfig
     from team_skills.evolution.runtime.orchestrator import EvolveServer
-    from team_skills.library import SkillHub, SkillManager
+    from team_skills.library import SkillHub
     from team_skills.library.mutations import (
         SkillMutationCommand,
         SkillMutationService,
@@ -25,7 +25,6 @@ __all__ = [
     "EvolveServer",
     "EvolveServerConfig",
     "SkillHub",
-    "SkillManager",
     "SkillMutationCommand",
     "SkillMutationService",
     "ValidationStore",
@@ -37,7 +36,6 @@ _EXPORTS = {
     "EvolveServer": ("team_skills.evolution.runtime.orchestrator", "EvolveServer"),
     "EvolveServerConfig": ("team_skills.evolution.kernel.settings", "EvolveServerConfig"),
     "SkillHub": ("team_skills.library", "SkillHub"),
-    "SkillManager": ("team_skills.library", "SkillManager"),
     "SkillMutationCommand": ("team_skills.library.mutations", "SkillMutationCommand"),
     "SkillMutationService": ("team_skills.library.mutations", "SkillMutationService"),
     "ValidationStore": ("team_skills.candidates.store", "ValidationStore"),

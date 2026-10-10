@@ -99,12 +99,7 @@ Typically caused by abnormal process crash (OOM, kill -9) not cleaning PID file.
 
 **Troubleshooting steps**:
 
-1. Check sharing enabled:
-   ```bash
-   teamEvolver config sharing.enabled
-   ```
-
-2. Check deployment mode configuration:
+1. Check deployment mode configuration:
    ```bash
    teamEvolver config sharing.viking_deployment
    ```
@@ -210,12 +205,11 @@ Typically caused by abnormal process crash (OOM, kill -9) not cleaning PID file.
 **Troubleshooting steps**:
 
 1. Check skill sync outbox: View if any unsuccessfully uploaded change events
-2. Confirm `sharing.enabled` is `true`
-3. Check `skill_reload_mode` configuration:
+2. Check `skill_reload_mode` configuration:
    - `off`: No auto-reload, manual trigger needed
    - `poll`: Polling per `skill_reload_interval_seconds` (default 30 seconds)
    - `callback`: Callback mode (requires OpenViking webhook support)
-4. Manually trigger sync:
+3. Manually trigger sync:
    ```bash
    teamEvolver skills sync
    ```

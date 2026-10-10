@@ -92,7 +92,6 @@ def _effective_fallback_root(
     account: str,
     user: str,
     root_prefix: str,
-    group_id: str,
     namespace: str,
 ) -> str:
     """Derive the local directory used when a viking store falls back.
@@ -108,7 +107,7 @@ def _effective_fallback_root(
             str(account or ""),
             str(user or ""),
             str(root_prefix or ""),
-            str(group_id or ""),
+            "",  # Preserve hashes created when the removed group slot was empty.
             str(namespace or ""),
         ]
     )
@@ -126,9 +125,7 @@ def build_object_store(
     viking_user: str = "",
     viking_agent: str = "",
     viking_api_key: str = "",
-    viking_agent_id: str = "",
     viking_root_prefix: str = "",
-    viking_group_id: str = "",
     viking_namespace: str = "resources",
     allow_fallback: bool = False,
     fallback_root: str = "",
@@ -172,7 +169,7 @@ def build_object_store(
     :class:`~teamEvolver.storage.memory.InMemoryObjectStore` directly or use a
     ``memory://`` endpoint.
     """
-    resolved = normalize_backend(backend, endpoint=endpoint, local_root=local_root)
+    resolved = normalize_backend(backend, endpoint=endpoint)
     if resolved == "local":
         root = str(local_root or fallback_root or "").strip() or _default_local_root()
         return LocalObjectStore(root)
@@ -200,9 +197,7 @@ def build_object_store(
             account=viking_account or "default",
             user=viking_user or "default",
             agent=viking_agent or _VIKING_ROOT_PREFIX,
-            agent_id=viking_agent_id or "",
             root_prefix=viking_root_prefix or _VIKING_ROOT_PREFIX,
-            group_id=viking_group_id or "",
             namespace=viking_namespace or "resources",
         )
         if allow_fallback:
@@ -240,7 +235,6 @@ def build_object_store(
                     account=viking_account or "default",
                     user=viking_user or "default",
                     root_prefix=viking_root_prefix or _VIKING_ROOT_PREFIX,
-                    group_id=viking_group_id or "",
                     namespace=viking_namespace or "resources",
                 )
                 logger.warning(

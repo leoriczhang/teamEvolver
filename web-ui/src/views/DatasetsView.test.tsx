@@ -8,18 +8,32 @@ import { api } from "@/api/client";
 
 vi.mock("@/api/client", () => ({ api: vi.fn(), tenantHeaders: () => new Headers() }));
 vi.mock("@/lib/toast", () => ({ toastOk: vi.fn(), toastErr: vi.fn() }));
-const dataset = { dataset_id: "ds_test", name: "测试数据集", description: "失败案例", item_count: 1, created_at: "2026-09-18T10:00:00Z" };
-const item = { item_id: "item_test", session_id: "session_test", trace_id: "trace_original", query: "整理客户报告", requirements: ["生成报告"], used_skills: [], timestamp: "2026-09-15T01:00:00Z", ingested_at: "2026-09-18T01:00:00Z" };
-const batch = { run_id: "batch_test", dataset_id: "ds_test", status: "completed", total: 1, completed: 1, succeeded: 0, failed: 1, skipped: 0, created_at: "2026-09-18T10:00:00Z", items: [{ ...item, status: "completed", success: false, replay_trace_id: "replay_test" }] };
+const dataset = { dataset_id: "ds_test", name: "测试数据集", description: "失败案例", case_count: 1, created_at: "2026-09-18T10:00:00Z" };
+const datasetCase = {
+  case_id: "case_test",
+  query: "整理客户报告",
+  skill_ids: [],
+  checks: [{ id: "R01", kind: "output", text: "生成报告" }],
+  materials: [],
+  provenance: {
+    session_id: "session_test",
+    trace_id: "trace_original",
+    timestamp: "2026-09-15T01:00:00Z",
+    ingested_at: "2026-09-18T01:00:00Z",
+  },
+  replay: { progressive_disclosure: { batch_size: 4 } },
+  metadata: {},
+};
+const batch = { run_id: "batch_test", dataset_id: "ds_test", status: "completed", total: 1, completed: 1, succeeded: 0, failed: 1, skipped: 0, created_at: "2026-09-18T10:00:00Z", cases: [{ case_id: datasetCase.case_id, session_id: "session_test", trace_id: "trace_original", query: datasetCase.query, status: "completed", success: false, replay_trace_id: "replay_test" }] };
 
 beforeEach(() => {
   vi.clearAllMocks();
   window.history.replaceState({}, "", "/");
   vi.mocked(api).mockImplementation(async (path: string) => {
-    if (path === "/api/datasets/ds_test/runs/batch_test/results/item_test") return { ok: true, completed: false, final_response: "未能生成报告", checklist_report: { judge: "model", all_satisfied: false } };
+    if (path === "/api/datasets/ds_test/runs/batch_test/results/case_test") return { ok: true, completed: false, final_response: "未能生成报告", checklist_report: { judge: "model", all_satisfied: false } };
     if (path.startsWith("/api/datasets/ds_test/runs/batch_test")) return batch;
     if (path.startsWith("/api/datasets/ds_test/runs?")) return { runs: [batch], total: 1 };
-    if (path.startsWith("/api/datasets/ds_test?")) return { ...dataset, items: [item], total: 1 };
+    if (path.startsWith("/api/datasets/ds_test?")) return { ...dataset, cases: [datasetCase], total: 1 };
     if (path.startsWith("/api/datasets?")) return { datasets: [dataset], total: 1 };
     return {};
   });

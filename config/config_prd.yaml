@@ -1,32 +1,27 @@
 # teamEvolver PRD 环境配置（生产）
 # 用途：部署到生产环境时由平台挂载为服务的唯一真源配置。
 # 密钥分离：敏感凭证（API Key、Secret Key）已移至 .env_prd，由 ConfigStore 启动时注入。
+# 容器挂载 /app/deploy/.env；本地检查显式指定 TEAMEVOLVER_ENV_FILE 的绝对路径。
+# 修改仓库文件不会刷新运行实例，部署时同步挂载文件并重启服务。
 
 team:
   display_name: "inc-aiagent"
 
 llm:
-  provider: "openai"
-  api_mode: "chat"
-  model_id: "volcengine/glm-5.2-aicc"
   api_base: "http://llm-model-hub-apis.sf-express.com/v1"
-  # 必填凭证由 .env_prd 的 TEAMEVOLVER_LLM_API_KEY 注入；缺失会使 Skill Evolution 失败。
-  # 容器挂载 /app/deploy/.env；直接运行指定 TEAMEVOLVER_ENV_FILE 的绝对路径。
-  max_tokens: 100000
-  temperature: 0.4
+  # api_key 由 .env_prd 中 TEAMEVOLVER_LLM_API_KEY 注入
 
 service:
   host: 0.0.0.0
   port: 1080
-
+  # 禁止页面自由注册；持有有效服务 Key 的后端注册接口仍可使用。
+  self_registration_enabled: false
 
 sharing:
-  enabled: true
-  backend: viking
   viking_deployment: local
   viking_endpoint: "http://openviking.int.sfcloud.local:1080"
-  # .env_prd 同时配置 TEAMEVOLVER_OV_API_KEY（通用）和 TEAMEVOLVER_OV_ROOT_KEY（团队）。
-  # 后者为历史变量名，映射 viking_team_api_key；trusted 模式未加载 Key 会返回 401。
+  # viking_api_key 由 .env_prd 中 TEAMEVOLVER_OV_API_KEY 注入。
+  # trusted 模式使用生产 OV 的 Root Key；TE 自身 Root Key 不代表 OV 的 Root Key。
   viking_account: "product_agent"
   viking_user: "product_agent"
 
@@ -45,26 +40,39 @@ langfuse:
   tracing_host: "https://ai-langfuse.sf-express.com"
   # tracing_public_key / tracing_secret_key 由 .env_prd 中 TEAMEVOLVER_LANGFUSE_TRACING_PUBLIC_KEY / TEAMEVOLVER_LANGFUSE_TRACING_SECRET_KEY 注入
 
-# Ontology 由 TE 运营与后处理，实际抽取调用 OV 原生 Compile。
-# 显式安装版本化 Skill；模型使用 OV Compile 配置，不再继承 TE llm。
+# KEE R6：结构与方法治理由 TE 承载，OV 仅提供通用内容、ACL、检索和索引。
+# 模型继承 TE 租户有效 llm；无需在 OV 安装 Ontology 编译 Skill。
+# 升级前须排空旧任务、迁移干跑并核验账户 ACL；不在部署中自动迁移历史。
+compile:
+  executor: internal
 ontology:
   enabled: true
-  state_dir: ""
+  state_dir: "/app/deploy/logs/ontology"
   queue_limit: 32
   allow_fixture: false
-  model: {}  # 旧配置兼容；新构建使用 OV Compile 模型
+  # 旧 OV Compile 任务的查询与恢复配置；新 KEE 任务使用内部 Worker。
   compile_skill_uri: "viking://agent/skills/ontology-extraction-v1"
   compile_workspace_uri: "viking://resources/te_ontology_compile"
   compile_user: "te-ontology-compiler"
-  compile_timeout_seconds: 1800
-  compile_model_revision: ""  # OV 模型配置修订号；留空禁用跨任务缓存
+  compile_deadline:
+    base_seconds: 1800        # 固定成本：抽取地板(~1000s) + 父流程(~500s) + 零头
+    wave_seconds: 4500        # 每个抽取波次（6 批并行，单满批实测 ~4100s）
+    merge_wave_seconds: 1800  # 每个合并波次（10 并发）
+    safety_factor: 1.5        # 吞吐波动余量（实测 50-60 tok/s）
+  # 留空禁用跨任务结果缓存；配置 OV 模型版本后，模型变更时需同步更新。
+  compile_model_revision: ""
+  model: {}  # 可选覆盖，否则继承 TE llm
+  kee_query_enabled: false # 不注册 MCP；不参与业务执行授权
+  kee_max_model_calls: 64
+  kee_compile_deadline_seconds: 480
   source_max_files: 1000
   source_max_depth: 20
   source_max_entries: 10000
   source_max_bytes: 20971520
   source_max_file_bytes: 2097152
 
-# 服务级日志：目录自动创建；配置更改需重启。任务制品仍由 ontology.state_dir 管理。
+# 目录自动创建；teamEvolver.log 按日期和大小轮转。配置变更重启生效。
+# 多实例部署须设置 TEAMEVOLVER_MULTI_REPLICA=1 及唯一 TEAMEVOLVER_INSTANCE_ID。
 logging:
   level: INFO
   console_enabled: true
@@ -74,10 +82,11 @@ logging:
   retention_days: 14
   max_total_mb: 2048
 
-# SIT 验收后再启用；成功经验同步复用 storage_pg 与 sharing 配置。
+# PRD 保持关闭，完成生产接入验收后再启用；连接与身份复用 sharing。
+# 目标目录不追加租户子目录；访问权限由 OV Account 和 ACL 决定。
 experience_sync:
   enabled: false
-  target_directory: viking://resources/agent_knowledge_workspace/input/proven_experiences
+  target_directory: "viking://resources/agent_knowledge_workspace/input/proven_experiences"
   interval_seconds: 30
   batch_size: 100
   full_scan_interval_seconds: 86400

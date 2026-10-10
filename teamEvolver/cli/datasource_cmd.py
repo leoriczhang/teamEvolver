@@ -22,7 +22,7 @@ def datasource(ctx, tenant, url):
 
 
 def request(ctx, method, suffix="", body=None):
-    key = os.environ.get("TEAMEVOLVER_ROOT_API_KEY") or os.environ.get("EVOLVE_INGEST_API_KEY", "")
+    key = os.environ.get("TEAMEVOLVER_ROOT_API_KEY", "")
     headers = {"Authorization": f"Bearer {key}", "X-Tenant-Id": ctx.obj["tenant"]}
     try:
         response = httpx.request(method, ctx.obj["url"] + "/api/datasource" + suffix,
@@ -55,11 +55,12 @@ def bind(ctx, filename):
 def filter_options(fn):
     for name in ("from_timestamp", "to_timestamp", "session_id", "user_id"):
         fn = click.option("--" + name.replace("_", "-"), default="")(fn)
-    return click.option("--max-sessions", default=100, type=click.IntRange(1, 1000))(fn)
+    return fn
 
 
 @datasource.command(name="list")
 @filter_options
+@click.option("--max-sessions", default=100, type=click.IntRange(1, 1000))
 @click.pass_context
 def list_sessions(ctx, **filters):
     request(ctx, "POST", "/sessions", {k: v for k, v in filters.items() if v != ""})

@@ -211,7 +211,6 @@ def test_pg_full_import_paginates_more_than_ui_limit_and_excludes_other_tenants(
         seen.extend(row["session_id"] for row in rows)
         cursor = rows[-1]["key"], rows[-1]["session_id"]
     assert len(seen) == 10005 and len(set(seen)) == 10005 and "b-only" not in seen
-    assert len(other.session_experience_page(until=other.database_time())) == 1
 
 
 def test_pg_import_session_history_resume_and_content_updates(pg_stores):
@@ -247,7 +246,7 @@ def test_pg_large_archive_projects_only_lessons_without_truncating_description(p
 
     store = pg_stores()
     text = "中文成功经验" * 1000
-    body = {"session_id": "large", "timestamp": "2026-09-22", "_judge_scores": {
+    body = {"session_id": "large", "timestamp": "2026-09-22", "judge": {
         "skill_experiences": [lesson(text)]}, "messages": [{"content": "private-trajectory" * 150000}]}
     store.put_object("session_archive/large.json", canonical(body))
     source = store.experience_import_sources(phase="objects", pattern=HISTORY_PATTERN,
@@ -271,10 +270,12 @@ def test_pg_projection_array_and_byte_budgets_and_per_record_gaps(pg_stores):
     from team_skills.library.experience_import import HISTORY_PATTERN
 
     store = pg_stores()
-    entries = [{"session_id": str(n), "evolution_evidence": "exemplary", "evidence_reason": f"经验{n}"}
-               for n in range(1005)]
-    entries.insert(3, {"session_id": "huge", "evolution_evidence": "exemplary", "evidence_reason": "x" * 300000})
-    store.put_object("skill_evidence/large.json", canonical({"skill_name": "review", "evidence": entries}))
+    entries = [lesson(f"经验{n}", experience_key=str(n)) for n in range(1005)]
+    entries.insert(3, lesson("x" * 300000, experience_key="huge"))
+    store.put_object("session_archive/large.json", canonical({
+        "session_id": "large",
+        "judge": {"skill_experiences": entries},
+    }))
     source = store.experience_import_sources(phase="objects", pattern=HISTORY_PATTERN,
                                             until=store.database_time())[0]
     offset, ordinals, gaps = 0, [], []

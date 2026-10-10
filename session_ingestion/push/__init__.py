@@ -1,17 +1,15 @@
 """Agent-initiated Session ingestion."""
 
 from .protocol import (
-    CAP_SESSION_INGEST,
-    SESSION_SCHEMA_V1,
+    SESSION_SCHEMA,
     AgentProtocolError,
-    is_session_v1_payload,
+    is_current_session_payload,
     normalize_session_envelope,
 )
 
 __all__ = [
     "AgentProtocolError",
-    "CAP_SESSION_INGEST",
-    "SESSION_SCHEMA_V1",
-    "is_session_v1_payload",
+    "SESSION_SCHEMA",
+    "is_current_session_payload",
     "normalize_session_envelope",
 ]

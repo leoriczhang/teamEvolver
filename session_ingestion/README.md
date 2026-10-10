@@ -27,12 +27,15 @@ require a database migration.
 
 Admins can configure one daily pull per tenant through
 `PUT /api/datasource/schedule`. A schedule contains an IANA timezone, local
-trigger time, and Session limit. At each trigger, the service computes the
-previous calendar day in that timezone, converts the half-open
+trigger time. At each trigger, the service computes the previous calendar day
+in that timezone, converts the half-open
 `[00:00, next 00:00)` window to UTC, and passes it to the tenant's bound
 Adapter as `from_timestamp` and `to_timestamp`.
 
-The imported Sessions use the normal ingestion queue with
+Every matching Session in the window is imported. Discovery uses upstream
+pagination and bounded processing batches, so the pull has no total-count
+limit and does not materialize the complete time range in memory. The imported
+Sessions use the normal ingestion queue with
 `defer_evolution_trigger=true`, so the pull does not block on analysis.
 `POST /api/datasource/schedule/run` starts the same previous-day job
 immediately and returns `202 Accepted`. Current and previous run details are
@@ -42,3 +45,6 @@ date/window and the actual system start/finish timestamps.
 Schedules are tenant-scoped and require an enabled Adapter that supports both
 timestamp filters. Manual and scheduled pulls share per-tenant exclusion and a
 process-wide concurrency limit.
+
+Manual `POST /api/datasource/pull` also returns `202 Accepted`. Poll
+`GET /api/datasource/schedule` for batch progress and the final counts.

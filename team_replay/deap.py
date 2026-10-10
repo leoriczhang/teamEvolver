@@ -10,9 +10,9 @@ import httpx
 
 from ._util import normalize_artifact_rel_path
 from .adapters import resolve_replay_api_key
-from .artifacts import decode_bundle_payload, skill_treatment_members
+from .artifacts import skill_treatment_files, skill_treatment_members
 from .hooks import RUNTIME_METRICS
-from .protocol import REPLAY_TURN_RESULT_SCHEMA_V1
+from .protocol import REPLAY_TURN_RESULT_SCHEMA
 
 
 class DeapReplayAdapter:
@@ -66,8 +66,7 @@ class DeapReplayAdapter:
         name = str(skill.get("name") or "")
         if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
             raise ValueError("invalid DEAP skill name")
-        bundle = skill.get("bundle")
-        files = decode_bundle_payload(bundle) if isinstance(bundle, dict) else {"SKILL.md": skill.get("content", "")}
+        files = skill_treatment_files(skill)
         texts = {
             normalize_artifact_rel_path(path): content.decode("utf-8") if isinstance(content, bytes) else str(content)
             for path, content in files.items()
@@ -76,22 +75,21 @@ class DeapReplayAdapter:
             raise ValueError("DEAP replay requires a nonempty SKILL.md")
         # The first update initializes the isolated overlay from the original.
         self._update(name + "/SKILL.md", texts["SKILL.md"])
-        if isinstance(bundle, dict):
-            result = self._post(
-                "/skillopt/delete",
-                {
-                    "workspace": self.workspace,
-                    "fileName": "skills/" + name,
-                },
-            )
-            if not result.get("success"):
-                raise RuntimeError("DEAP could not reset the isolated skill bundle")
+        result = self._post(
+            "/skillopt/delete",
+            {
+                "workspace": self.workspace,
+                "fileName": "skills/" + name,
+            },
+        )
+        if not result.get("success"):
+            raise RuntimeError("DEAP could not reset the isolated skill bundle")
         for path, content in texts.items():
             self._update(name + "/" + path, content)
 
     def call_turn(self, request):
         result = {
-            "schema_version": REPLAY_TURN_RESULT_SCHEMA_V1,
+            "schema_version": REPLAY_TURN_RESULT_SCHEMA,
             "protocol_version": "1.0",
             "request_id": request["request_id"],
             "turn_num": request["turn_num"],

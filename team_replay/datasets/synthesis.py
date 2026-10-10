@@ -18,20 +18,16 @@ from typing import Any, Iterable, Mapping, Optional
 
 from team_replay.datasets.materials import collect_session_materials
 from team_replay.datasets.schema import (
-    DATASET_SCHEMA_V2,
-    legacy_case_view,
     make_document,
     normalize_case,
-    normalize_document,
+    normalize_checks,
     validate_document,
 )
 from team_replay.datasets.store import (
     SkillDatasetStore,
     dataset_material_integrity,
 )
-from teamEvolver.storage import is_not_found_error
 
-DATASET_FORMAT = DATASET_SCHEMA_V2
 _LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)、]|[（(]\d+[)）])\s*")
 _FENCE_RE = re.compile(r"```(?:json)?\s*|\s*```", re.IGNORECASE)
 
@@ -43,10 +39,9 @@ _SYNTHESIZE_SYSTEM = """\
 
 对每个测试用例：
 1. query：一个自包含的初始用户请求。绝不能枚举或透露 checklist。
-2. requirements：{min_requirements}-{max_requirements} 条扁平的、可独立验证的\
-输出/内容要求。不要嵌套条目。每条要求都必须有会话或团队 SOP 证据支撑。
-3. trajectory_requirements：对任务执行方式的扁平检查，包括资料读取、工具操作、\
-计算、校验和产物写入（以证据支持为限）。
+2. checks：{min_requirements}-{max_requirements} 条扁平、可独立验证的检查项。\
+输出/内容要求使用 kind=output；资料读取、工具操作、计算、校验和产物写入使用\
+kind=trajectory。每条检查都必须有会话或团队 SOP 证据支撑。
 4. source_session_ids：支撑该用例的会话 ID。
 5. evidence_window："recent" 或 "historical"。
 6. name：简洁、人类可读的测试名称。
@@ -68,8 +63,10 @@ _SYNTHESIZE_SYSTEM = """\
     {
       "name": "...",
       "query": "...",
-      "requirements": ["..."],
-      "trajectory_requirements": ["..."],
+      "checks": [
+        {"id": "R01", "kind": "output", "text": "..."},
+        {"id": "T01", "kind": "trajectory", "text": "..."}
+      ],
       "source_session_ids": ["..."],
       "evidence_window": "recent"
     }
@@ -279,14 +276,17 @@ def _normalize_dataset(
     synthesis_mode: str,
     materials: Optional[list[dict[str, Any]]] = None,
 ) -> Optional[dict[str, Any]]:
-    query = str(raw.get("query") or raw.get("instruction") or "").strip()
+    query = str(raw.get("query") or "").strip()
     if not query:
         return None
-    requirements = flatten_requirements(raw.get("requirements"))[:max_requirements]
-    trajectory = flatten_requirements(raw.get("trajectory_requirements"))
-    if not requirements and not trajectory:
+    try:
+        checks = normalize_checks(raw.get("checks"))
+    except ValueError:
         return None
-    if synthesis_mode == "model" and len(requirements) < min_requirements:
+    output_checks = [item for item in checks if item["kind"] == "output"][:max_requirements]
+    checks = [*output_checks, *(item for item in checks if item["kind"] == "trajectory")]
+    output_count = sum(1 for item in checks if item["kind"] == "output")
+    if synthesis_mode == "model" and output_count < min_requirements:
         return None
     source_ids = list(
         dict.fromkeys(
@@ -298,7 +298,6 @@ def _normalize_dataset(
     window = str(raw.get("evidence_window") or default_window).strip().lower()
     if window not in {"recent", "historical"}:
         window = default_window
-    checklist = checklist_items(requirements, trajectory)
     dataset_id = _dataset_id(
         skill_name=skill_name,
         query=query,
@@ -317,10 +316,9 @@ def _normalize_dataset(
     ]
     dataset = normalize_case({
         "case_id": dataset_id,
-        "name": str(raw.get("name") or "").strip() or query.splitlines()[0][:80],
         "query": query,
         "skill_ids": [skill_name],
-        "checks": checklist,
+        "checks": checks,
         "materials": dataset_materials,
         "provenance": {
             "session_ids": source_ids,
@@ -338,7 +336,7 @@ def _normalize_dataset(
         "metadata": {
             "split": "test",
             "minimum_requirement_target": min_requirements,
-            "skill_name": skill_name,
+            "name": str(raw.get("name") or "").strip() or query.splitlines()[0][:80],
         },
     })
     if not dataset_material_integrity(
@@ -408,8 +406,7 @@ def _fallback_datasets(
             {
                 "name": f"{skill_name} test {index + 1}",
                 "query": seed.get("instruction"),
-                "requirements": grounded_requirements,
-                "trajectory_requirements": [],
+                "checks": checklist_items(grounded_requirements),
                 "source_session_ids": [seed.get("session_id")],
                 "evidence_window": seed.get("evidence_window"),
             },
@@ -533,15 +530,12 @@ async def synthesize_evolution_datasets(
 
 
 def dataset_to_replay_case(dataset: Mapping[str, Any]) -> dict[str, Any]:
-    """Project a synthesized dataset into the True Replay job contract."""
+    """Return one canonical Dataset Case for True Replay."""
     canonical = normalize_case(
         dataset,
-        default_case_id=str(dataset.get("dataset_id") or ""),
+        default_case_id=str(dataset.get("case_id") or ""),
     )
-    view = legacy_case_view(canonical)
     source = canonical.get("provenance") or {}
-    metadata = canonical.get("metadata") or {}
-    checklist = [dict(item) for item in canonical["checks"]]
     source_ids = [
         str(item or "")
         for item in source.get("session_ids") or []
@@ -552,30 +546,12 @@ def dataset_to_replay_case(dataset: Mapping[str, Any]) -> dict[str, Any]:
         or (source_ids[0] if source_ids else "")
         or ""
     )
-    return {
-        "case_id": canonical["case_id"],
-        "dataset_id": canonical["case_id"],
-        "dataset_format": DATASET_FORMAT,
-        "skill_ids": list(canonical.get("skill_ids") or []),
-        "skill_name": (
-            str(dataset.get("skill_name") or metadata.get("skill_name") or "")
-            if len(canonical.get("skill_ids") or []) <= 1
-            else ""
-        ),
+    canonical["provenance"] = {
+        **source,
         "session_id": session_id,
-        "source_session_ids": source_ids,
-        "turn_num": int(source.get("turn_num") or 1),
-        "instruction": canonical["query"],
-        "query": canonical["query"],
-        "requirements": view["requirements"],
-        "trajectory_requirements": view["trajectory_requirements"],
-        "checklist": checklist,
-        "progressive_disclosure": dict(canonical["replay"]["progressive_disclosure"]),
-        "materials": [dict(item) for item in canonical["materials"]],
-        "evidence_window": str(
-            source.get("evidence_window") or "recent"
-        ),
+        "session_ids": source_ids,
     }
+    return canonical
 
 
 class SynthesizedDatasetStore:
@@ -610,7 +586,7 @@ class SynthesizedDatasetStore:
         for raw in datasets:
             item = normalize_case(
                 raw,
-                default_case_id=str(raw.get("dataset_id") or ""),
+                default_case_id=str(raw.get("case_id") or ""),
             )
             canonical_cases.append(item)
             stored_item = copy.deepcopy(item)
@@ -668,7 +644,7 @@ class SynthesizedDatasetStore:
             # generation audit references them but must not make them read-only.
             if existing and (
                 str(existing_source.get("kind") or "") != "evolution"
-                or not bool(existing.get("read_only", True))
+                or not bool((existing.get("metadata") or {}).get("read_only", True))
                 or bool(existing_source.get("user_edited"))
             ):
                 continue
@@ -755,7 +731,7 @@ class SynthesizedDatasetStore:
             repository.save_dataset(
                 make_document(
                     dataset_id=dataset_id,
-                    name=str(raw.get("name") or ""),
+                    name=str((raw.get("metadata") or {}).get("name") or raw.get("case_id") or ""),
                     skills=[skill_name],
                     source=dict(dataset_payload["provenance"]),
                     cases=[dataset_payload],
@@ -768,28 +744,3 @@ class SynthesizedDatasetStore:
                 )
             )
         return payload
-
-    def load_generation(
-        self,
-        *,
-        skill_name: str,
-        generation_id: str,
-    ) -> Optional[dict[str, Any]]:
-        try:
-            payload = json.loads(
-                self._bucket.get_object(
-                    self._key(skill_name, generation_id)
-                ).read().decode("utf-8")
-            )
-        except Exception as exc:
-            if is_not_found_error(exc):
-                return None
-            raise
-        if not isinstance(payload, dict):
-            return None
-        return normalize_document(
-            payload,
-            default_dataset_id=generation_id,
-            default_name=f"{skill_name} Test Dataset",
-            default_subject={"kind": "skill", "id": skill_name},
-        )

@@ -1,7 +1,6 @@
 """Hub-backed Skill workbench: path safety, optimistic concurrency, experiment baselines."""
 
 import hashlib
-from pathlib import Path
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -19,25 +18,25 @@ from teamEvolver.proxy.skill_workspace import (
 from teamEvolver.storage.memory import InMemoryObjectStore
 
 
-def _seed_skill(hub: SkillHub, root: Path, name: str, skill_md: str, files: dict[str, bytes] | None = None) -> None:
-    """Push a skill into the hub the way the library does (bundle on disk → hub)."""
-    folder = root / name
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "SKILL.md").write_text(skill_md)
-    for rel_path, data in (files or {}).items():
-        target = folder / rel_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
-    hub.push_skills(str(root), include_names=[name])
+def _seed_skill(
+    hub: SkillHub,
+    name: str,
+    skill_md: str,
+    files: dict[str, bytes] | None = None,
+) -> None:
+    """Publish a complete bundle directly into the tenant registry."""
+    hub.publish_bundle(
+        name,
+        {"SKILL.md": skill_md.encode(), **dict(files or {})},
+    )
 
 
 @pytest.fixture
-def hub(tmp_path):
+def hub():
     store = InMemoryObjectStore("memory://workbench-tests")
     hub = SkillHub.from_bucket(store, tenant_id="default")
     _seed_skill(
         hub,
-        tmp_path,
         "demo",
         "---\nname: demo\ndescription: Example\n---\nOriginal\n",
         {"scripts/run.py": b"print('original')\n"},
@@ -55,6 +54,31 @@ def _loader(*bundles: tuple[str, str]):
         return table[name]
 
     return load
+
+
+def _dataset(*, dataset_id="test", skills=None, cases=None):
+    skills = skills or ["demo"]
+    return {
+        "schema_version": "team-replay.dataset",
+        "dataset_id": dataset_id,
+        "name": "Test Dataset",
+        "description": "",
+        "skills": [{"skill_id": name} for name in skills],
+        "source": {"kind": "manual"},
+        "cases": cases or [{
+            "case_id": "case-1",
+            "query": "Run demo",
+            "skill_ids": skills,
+            "checks": [{"id": "R01", "kind": "output", "text": "Complete"}],
+            "materials": [],
+            "provenance": {},
+            "replay": {"progressive_disclosure": {"batch_size": 4}},
+            "metadata": {},
+        }],
+        "created_at": "2026-09-30T00:00:00+00:00",
+        "updated_at": "2026-09-30T00:00:00+00:00",
+        "metadata": {},
+    }
 
 
 def test_save_detects_conflict_and_bumps_version(hub):
@@ -101,7 +125,7 @@ def test_index_lists_hub_versions_once(hub, monkeypatch):
     index = list_workspace(_Owner(hub))
     assert index["source"]["backend"] == "memory"
     assert index["skills"][0]["name"] == "demo"
-    assert index["skills"][0]["version"] == hub.list_remote()[0]["version"]
+    assert index["skills"][0]["version"] == hub.list_skills()[0]["version"]
     assert index["skills"][0]["files"] == ["SKILL.md", "scripts/run.py"]
 
 
@@ -111,7 +135,7 @@ def test_candidate_contains_unsaved_scripts_without_changing_baseline(hub):
         skill_name="demo",
         candidate_skill_md="---\nname: demo\ndescription: Example\n---\nCandidate\n",
         candidate_files={"scripts/run.py": "print('candidate')", "references/new.md": "New reference"},
-        dataset={"dataset_id": "test", "query": "Run demo", "requirements": "1. Complete"},
+        dataset=_dataset(),
         materials=[], run_id="run-test",
     )
     baseline = candidate_skill_bundle(job["current_skill"])
@@ -131,24 +155,30 @@ def test_experiment_loads_peer_skills_for_both_branches(hub):
         ),
         skill_name="demo",
         candidate_skill_md="---\nname: demo\ndescription: Example\n---\nCandidate\n",
-        dataset={
-            "dataset_id": "shared",
-            "skill_ids": ["helper", "demo"],
-            "cases": [
+        dataset=_dataset(
+            dataset_id="shared",
+            skills=["helper", "demo"],
+            cases=[
                 {
                     "case_id": "task-both",
-                    "skill_ids": ["helper", "demo"],
                     "query": "Run both skills",
-                    "requirements": "Complete",
+                    "skill_ids": ["helper", "demo"],
+                    "checks": [{"id": "R01", "kind": "output", "text": "Complete"}],
+                    "materials": [], "provenance": {},
+                    "replay": {"progressive_disclosure": {"batch_size": 4}},
+                    "metadata": {},
                 },
                 {
                     "case_id": "task-helper",
-                    "skill_ids": ["helper"],
                     "query": "Run helper only",
-                    "requirements": "Complete helper task",
+                    "skill_ids": ["helper"],
+                    "checks": [{"id": "R01", "kind": "output", "text": "Complete helper task"}],
+                    "materials": [], "provenance": {},
+                    "replay": {"progressive_disclosure": {"batch_size": 4}},
+                    "metadata": {},
                 },
             ],
-        },
+        ),
         materials=[],
         run_id="run-shared",
     )
@@ -168,7 +198,7 @@ def test_experiment_rejects_unknown_baseline_skill(hub):
             load_bundle=hub.read_skill_bundle,
             skill_name="missing",
             candidate_skill_md="---\nname: missing\ndescription: X\n---\nBody",
-            dataset={"query": "Run"}, materials=[], run_id="bad",
+            dataset=_dataset(), materials=[], run_id="bad",
         )
 
 
@@ -179,7 +209,7 @@ def test_candidate_rejects_invalid_file_overrides(hub, files):
             load_bundle=hub.read_skill_bundle,
             skill_name="demo",
             candidate_skill_md="---\nname: demo\ndescription: Example\n---\nCandidate\n",
-            candidate_files=files, dataset={"query": "Run"}, materials=[], run_id="bad",
+            candidate_files=files, dataset=_dataset(), materials=[], run_id="bad",
         )
 
 

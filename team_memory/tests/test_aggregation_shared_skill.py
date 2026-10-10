@@ -15,7 +15,6 @@ from team_memory.aggregation.state import AggregationState
 def _service() -> MemoryAggregationService:
     return MemoryAggregationService(
         SimpleNamespace(
-            aggregation_max_users_per_batch=12,
             aggregation_phase1_concurrency=1,
             aggregation_merge_concurrency=1,
             aggregation_staging_dir="staging",

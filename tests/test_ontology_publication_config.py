@@ -19,6 +19,7 @@ def test_old_yaml_keys_are_accepted_but_environment_signing_keys_are_unused(monk
 @pytest.mark.asyncio
 async def test_native_resolver_uses_backend_root_not_personal_credentials(monkeypatch):
     import team_ontology.api as api
+    from teamEvolver.admin.identity_store import IdentityStore
     import teamEvolver.proxy.tenant_routes as routes
     import teamEvolver.proxy.users_admin as users
     import teamEvolver.tenants.registry as tenants
@@ -29,7 +30,6 @@ async def test_native_resolver_uses_backend_root_not_personal_credentials(monkey
         storage_pg_dsn="postgresql://unused",
         storage_pg_schema="custom_te",
         sharing_viking_api_key="backend-root",
-        sharing_viking_team_api_key="team-key",
         sharing_viking_endpoint="http://ov",
         sharing_viking_account="mapped-account",
         llm_model_id="model",
@@ -41,7 +41,6 @@ async def test_native_resolver_uses_backend_root_not_personal_credentials(monkey
     registry = SimpleNamespace(get=lambda tenant: SimpleNamespace(status="active"))
     monkeypatch.setattr(routes, "get_tenant_registry", lambda owner: registry)
     monkeypatch.setattr(tenants, "effective_config", lambda *args: cfg)
-    monkeypatch.setattr(users, "_registry_path", lambda config: "unused")
     monkeypatch.setattr(
         users,
         "_load_registry",
@@ -49,11 +48,17 @@ async def test_native_resolver_uses_backend_root_not_personal_credentials(monkey
             "users": [
                 {
                     "id": "frank",
-                    "role": "admin",
+                    "platform_role": "user",
+                    "status": "active",
                     "team_space": {"viking_api_key": "personal-key", "viking_user": "mapped-frank"},
                 }
             ]
         },
+    )
+    monkeypatch.setattr(
+        IdentityStore,
+        "memberships",
+        lambda _self, **_kwargs: [{"role": "tenant_admin", "status": "active"}],
     )
     captured = {}
     monkeypatch.setattr(api, "install", lambda app, principal, **kwargs: captured.update(kwargs))

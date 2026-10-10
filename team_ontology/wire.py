@@ -119,7 +119,9 @@ class Assertion(Wire):
     epistemic_kind: Literal["document_fact", "user_claim", "system_fact", "derived"] = (
         "document_fact"
     )
-    valid_from: datetime
+    # None marks a standing assertion: valid from the source document snapshot until
+    # valid_to or a later revision supersedes it; dated assertions keep as-of semantics.
+    valid_from: datetime | None = None
     valid_to: datetime | None = None
     # One proof is an AND of evidence IDs. Multiple independently checked proofs are OR.
     support_sets: list[list[str]] = Field(min_length=1, max_length=20)
@@ -127,9 +129,11 @@ class Assertion(Wire):
 
     @model_validator(mode="after")
     def interval(self):
-        if self.valid_from.tzinfo is None or (self.valid_to and self.valid_to.tzinfo is None):
+        if self.valid_from is not None and self.valid_from.tzinfo is None:
             raise ValueError("timezone required")
-        if self.valid_to and self.valid_to <= self.valid_from:
+        if self.valid_to is not None and self.valid_to.tzinfo is None:
+            raise ValueError("timezone required")
+        if self.valid_from is not None and self.valid_to is not None and self.valid_to <= self.valid_from:
             raise ValueError("empty validity interval")
         return self
 

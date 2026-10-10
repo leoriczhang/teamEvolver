@@ -20,7 +20,11 @@ ontology:
   compile_skill_uri: viking://agent/skills/ontology-extraction-v1
   compile_workspace_uri: viking://resources/te_ontology_compile
   compile_user: te-ontology-compiler
-  compile_timeout_seconds: 1800
+  compile_deadline:
+    base_seconds: 1800        # 固定成本：抽取地板(~1000s) + 父流程(~500s) + 零头
+    wave_seconds: 4500        # 每个抽取波次（6 批并行，单满批实测 ~4100s）
+    merge_wave_seconds: 1800  # 每个合并波次（10 并发）
+    safety_factor: 1.5        # 吞吐波动余量（实测 50-60 tok/s）
   compile_model_revision: ""
   source_max_files: 1000
   source_max_depth: 20
@@ -29,7 +33,7 @@ ontology:
   source_max_file_bytes: 2097152
 ```
 
-模型使用 OV 原生 Compile 配置；TE ontology.model 保留兼容读取但不再驱动新任务。compile_model_revision 是运维维护的 OV 模型／Provider 配置修订号，留空禁用跨任务缓存；模型配置改变必须更换该值。缓存仍绑定来源摘要、Skill 内容摘要、输出契约和连接账户，复用前重新校验来源权限和草稿。不是模型自动发现功能。
+模型使用 OV 原生 Compile 配置；TE ontology.model 保留兼容读取但不再驱动新任务。固定超时已由按批次数自适应的墙钟替代，见 docs/superpowers/specs/2026-09-28-adaptive-compile-deadline-design.md。compile_model_revision 是运维维护的 OV 模型／Provider 配置修订号，留空禁用跨任务缓存；模型配置改变必须更换该值。缓存仍绑定来源摘要、Skill 内容摘要、输出契约和连接账户，复用前重新校验来源权限和草稿。不是模型自动发现功能。
 
 专用 Skill 随 TE 发布在 `team_ontology/skills/ontology-extraction-v1/`，不会启动时自动安装或覆盖 OV Skill。使用目标 OV 账户的已配置运维 CLI 显式安装：
 
@@ -88,6 +92,68 @@ TE 的 queued/running 是运营步骤，不等于 OV 执行状态；页面另列
 预算不包含对 OV 内部模型策略的覆盖：子 Agent 并发、轮数、模型 Token 上限沿用部署的原生 Compile 配置。TE 限制来源规模、输出 30 MiB、每次远程 HTTP 30 秒、单个运营步骤 600 秒及整体 Compile 等待期限。输出过大／校验不通过不会被当作完整成功。
 
 工作区和失败产物保留用于审计，不自动删除业务来源。清理时按明确任务 URI 操作，不递归删除整个资源根。普通 Compile 仍可索引其输出；隔离依据是原生 ACL，不是“不创建索引”。
+
+### stage_inputs 阶段 PUT /acl 返回 403
+
+如果日志显示 `stage=stage_inputs`、`PUT /api/v1/acl`、`PERMISSION_DENIED`，且 OV 用户是
+`te-ontology-compiler`，任务尚未进入 Compile 或候选评审。旧 TE 调用以编译用户的 `user` 角色
+设置新资源目录 ACL，但创建目录不保证获得 ACL 的 `manage` 权限，因此首次授权会被拒绝。
+
+2026-09-23 修复仅让 ACL 设置使用已配置的可信 TE 后端身份（Root Key 与映射后的 `admin` 角色）；
+授权条目仍仅包含编译用户。ACL 回读、正文处理和 Compile 继续使用编译用户的 `user` 角色，
+普通用户读取／检索拒绝探测仍须通过后才能推进；授权失败不会写入来源正文或提交 Compile。
+无需把编译用户设成管理员、关闭 ACL 或修改 OV Compile。部署修复并重启 TE 后，对失败构建点击
+“重试”；TE 会使用新的执行目录重新准备输入。若后端身份仍被拒绝，应核对有效 Root Key、
+账户映射及工作区权限，不绕过隔离检查。
+
+### stage_inputs 阶段 CONFLICT
+
+工作区根目录会被多个任务复用，输入／输出目录也会在设置 ACL 前再次确认。OV 原生 mkdir 对
+已存在路径可能返回 `409 CONFLICT`；旧 TE 仅识别 ALREADY_EXISTS／DIRECTORY_EXISTS，因此首次
+准备或重试也可能失败。这与发布版本的 CAS 冲突不同，重基准不能解决工作区目录冲突。
+
+TE 现在对明确的 409 已存在／冲突响应，以同一编译身份调用 stat，确认返回的 URI 与目标一致、
+isDir 为布尔值且确为目录后继续。日志 `ontology.compile_path_check` 记录目标及预期类型，
+`ontology.workspace_reused` 表示目录复用核验通过。遇到同名文件返回 COMPILE_PATH_TYPE_CONFLICT；
+stat 响应不合法返回 COMPILE_INVALID_STAT；403、404、超时等仍保留为失败，不跳过 ACL 检查。
+
+输入文件创建遇到同类 409 时，必须确认是同路径普通文件并回读原文；仅完全相同内容可以复用，
+不同内容返回 COMPILE_INPUT_CHANGED，不覆盖既有文件。部署并重启 TE 后重试失败的构建即可，
+无需清空工作区或修改 OV。回归覆盖目录重复创建、多任务复用、同名文件、stat 失败及输入正文变化；
+HTTP 桩验证不替代 SIT 实际验收。
+
+### stage_inputs 阶段写入超时
+
+冻结输入使用原生 content/write 的 `mode=create, wait=false`，随后以编译身份读取 `raw=true`
+的正文并逐字核对。原生 Compile 直接读取这些文件，不必等待输入副本的语义和向量处理完成。
+这只表示输入正文已核验，不表示索引已就绪。写响应丢失或 5xx 时同样先 stat 和回读核对，
+只有文件类型及原文完全一致才能继续；不重复覆盖或把超时无条件当成成功。
+
+### 新目录 ACL 返回 INVALID_ARGUMENT
+
+真实联调中，mkdir 成功后立即 PUT /acl 可能返回
+`ACL target has no context record; index it first`。这是目录上下文记录尚未就绪，
+TE 将这一精确响应映射为 COMPILE_ACL_TARGET_NOT_READY，最多尝试 6 次，等待合计不超过
+11.5 秒（不含接口耗时）。其他参数错误和权限错误不重试。耗尽后保留失败，不写来源正文。
+
+### 原生 Compile 取消与模型等待
+
+原生取消接口可能先返回 cancelling。TE 保持持久化取消围栏，由恢复循环查询终态后再显示
+cancelled，不以 POST 成功代替远端已结束。排查模型等待时，以 Compile ID 对照 vikingbot
+日志的 agent_id、LLM_START／LLM_END 和追踪记录；主任务 wait_subagents 可能是在等待子任务的
+模型调用，不能仅凭 running 判断队列卡死或构建成功。取消确认前不要重复提交同一批构建。
+
+### restricted 已保存但 COMPILE_WORKSPACE_NOT_PRIVATE
+
+目录 ACL 写入成功，不等于账户已开启 ACL enforcement。用管理身份读取
+`GET /api/v1/admin/accounts/{account_id}/settings`，检查 `settings.acl.enabled`。
+2026-09-23 对 product_agent 的真实联调中，此值为 false：编译目录 ACL 回读为 restricted，
+但普通身份仍能 ls，TE 因隔离探测失败停在 stage_inputs，尚未写入冻结原文或提交 Compile。
+
+开启账户级 ACL 使用 OV 原生 `PATCH /api/v1/admin/accounts/{account_id}/settings`，请求体为
+`{"acl":{"enabled":true}}`。这会使账户已有权限规则一并生效，需由账户运维确认影响范围；
+TE 不自动改变共享账户的开关。开启后重试构建并再次验证普通身份的读取与检索被拒绝，
+不能通过删除隔离探测或把编译身份设为管理员继续执行。
 
 每轮保存提交与完成时间及原生任务提供的 Token 用量；未提供的用量保留未知，不记为零。确定性后处理单列 postprocess_ms 与 postprocess_compile_calls=0；这不能替代真实模型的成本测量。
 

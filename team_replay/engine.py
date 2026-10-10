@@ -10,13 +10,12 @@ from contextvars import copy_context
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from ._util import stable_hash
 from .adapter_runtime import AdapterError
 from .artifacts import skill_treatment_members, validate_skill_treatment
 from .execution import run_branch
 from .hooks import ReplayAdapterFactory, ReplayContext, ReplayTreatment, ReplayUnsupported
 from .host import current_host
-from .metrics import branch_efficiency, compare_efficiency
+from .metrics import compare_efficiency
 from .policy import initial_query, normalize_case_checklist, normalize_checklist_report, progressive_config, progressive_replay_decision
 
 
@@ -61,11 +60,12 @@ def read_team_evolver_harness() -> dict[str, Any]:
 
 
 def _snapshot(case: Mapping[str, Any], source: Mapping[str, Any]) -> dict[str, Any]:
-    if isinstance(case.get("context_snapshot"), dict):
-        return copy.deepcopy(case["context_snapshot"])
-    snapshot_id = str(case.get("context_snapshot_id") or "")
+    provenance = case.get("provenance") if isinstance(case.get("provenance"), Mapping) else {}
+    if isinstance(provenance.get("context_snapshot"), dict):
+        return copy.deepcopy(provenance["context_snapshot"])
+    snapshot_id = str(provenance.get("context_snapshot_id") or "")
     if not snapshot_id:
-        turn_num = int(case.get("turn_num") or 0)
+        turn_num = int(provenance.get("turn_num") or 0)
         turn = next((turn for turn in source.get("turns") or [] if turn.get("turn_num") == turn_num), {})
         snapshot_id = str((turn.get("context_usage") or {}).get("context_snapshot_id") or "")
     if not snapshot_id:
@@ -161,7 +161,7 @@ def spawn_native_agent_branch(
     case: dict[str, Any], source_session: dict[str, Any], timeout: int, max_interactions: int = 4,
     *, factory: ReplayAdapterFactory | None = None,
 ) -> dict[str, Any]:
-    """Compatibility entry point; all execution goes through the factory contract."""
+    """Execute one Replay branch through the tenant-bound factory contract."""
     del job
     case = {**case, "query": instruction}
     context = make_context(branch, skill, case, source_session, timeout)
@@ -244,6 +244,8 @@ def annotate_cases(job: dict[str, Any], search_roots: list[Path]) -> list[dict[s
         instr = initial_query(case)
         checklist = normalize_case_checklist(case)
         disclosure = progressive_config(case)
+        provenance = case.get("provenance") if isinstance(case.get("provenance"), dict) else {}
+        metadata = case.get("metadata") if isinstance(case.get("metadata"), dict) else {}
         materials = [
             dict(item)
             for item in (case.get("materials") or [])
@@ -268,40 +270,28 @@ def annotate_cases(job: dict[str, Any], search_roots: list[Path]) -> list[dict[s
             {
                 **case,
                 "index": idx,
-                "session_id": case.get("session_id"),
-                "turn_num": case.get("turn_num"),
-                "instruction": instr,
                 "query": instr,
-                "evidence_window": str(
-                    case.get("evidence_window") or "recent"
-                ),
+                "checks": checklist,
+                "provenance": provenance,
+                "replay": {"progressive_disclosure": disclosure},
                 "evaluation_profile": str(
-                    case.get("evaluation_profile") or ""
+                    metadata.get("evaluation_profile") or ""
                 ),
                 "source_runtime": (
-                    dict(case.get("source_runtime"))
-                    if isinstance(case.get("source_runtime"), dict)
+                    dict(provenance.get("source_runtime"))
+                    if isinstance(provenance.get("source_runtime"), dict)
                     else {}
                 ),
                 "source_runtime_context": (
-                    dict(case.get("source_runtime_context"))
-                    if isinstance(case.get("source_runtime_context"), dict)
+                    dict(provenance.get("source_runtime_context"))
+                    if isinstance(provenance.get("source_runtime_context"), dict)
                     else {}
                 ),
                 "context_snapshot_id": str(
-                    case.get("context_snapshot_id") or ""
+                    provenance.get("context_snapshot_id") or ""
                 ),
-                "had_tool_calls": bool(case.get("had_tool_calls")),
-                "gold": case.get("gold") if isinstance(case.get("gold"), dict) else {},
-                "requirements": case.get("requirements") or [],
-                "trajectory_requirements": (
-                    case.get("trajectory_requirements") or []
-                ),
-                "checklist": checklist,
-                "progressive_disclosure": disclosure,
+                "had_tool_calls": bool(metadata.get("had_tool_calls")),
                 "materials": materials,
-                "target_dimensions": case.get("target_dimensions") or [],
-                "difficulty": str(case.get("difficulty") or ""),
                 "referenced_paths": referenced,
                 "missing_paths": missing,
                 "grounded": bool(referenced) and runnable,
@@ -355,7 +345,7 @@ def _evaluate_case(job_id, job, case, source, factory, timeout, max_interactions
         for branch in ("baseline", "candidate")
     }
     results = execute_pair(factory, contexts, case, harness=read_team_evolver_harness(), max_interactions=max_interactions)
-    checklists = {branch: normalize_checklist_report(result, expected_checklist=case["checklist"])
+    checklists = {branch: normalize_checklist_report(result, expected_checklist=case["checks"])
                   for branch, result in results.items()}
     efficiency = compare_efficiency(results["baseline"], results["candidate"])
     policy = progressive_replay_decision(efficiency=efficiency, baseline_checklist=checklists["baseline"],
@@ -365,7 +355,8 @@ def _evaluate_case(job_id, job, case, source, factory, timeout, max_interactions
         policy.update(accepted=False, verdict="inconclusive", no_regression=False, decision_basis="branch_failure")
     branches = {
         branch: {**result, "checklist_report": checklists[branch], "instruction": case["query"],
-                 "session_id": case.get("session_id"), "turn_num": case.get("turn_num"),
+                 "session_id": (case.get("provenance") or {}).get("session_id"),
+                 "turn_num": (case.get("provenance") or {}).get("turn_num"),
                  "trajectory": render_trajectory(result.get("messages") or [])}
         for branch, result in results.items()
     }
@@ -376,7 +367,8 @@ def _evaluate_case(job_id, job, case, source, factory, timeout, max_interactions
         "reason": "; ".join(failures) or policy.get("decision_basis", ""),
         "adapter_revision": getattr(factory, "revision", ""),
         "runtime_type": source_runtime_type(source), "case_count": 1, "case": {"index": case["index"]},
-        "max_interactions": max_interactions, "progressive_disclosure": case["progressive_disclosure"],
+        "max_interactions": max_interactions,
+        "progressive_disclosure": case["replay"]["progressive_disclosure"],
         "cases": [branches],
     }
 
@@ -405,8 +397,9 @@ def evaluate_job(
     factory = None
     for case in cases:
         try:
-            source = copy.deepcopy(load_source_session(str(case.get("session_id") or "")) or {})
-            source.setdefault("session_id", case.get("session_id"))
+            provenance = case.get("provenance") or {}
+            source = copy.deepcopy(load_source_session(str(provenance.get("session_id") or "")) or {})
+            source.setdefault("session_id", provenance.get("session_id"))
             source["runtime"] = {**case.get("source_runtime", {}), **source.get("runtime", {})}
             source["runtime_context"] = {**case.get("source_runtime_context", {}), **source.get("runtime_context", {})}
             if source.get("source") == "managed_agent_candidate_audit" or source["runtime_context"].get("candidate_job_id"):
@@ -450,9 +443,9 @@ def main() -> None:
         factory = build_from_content(path.read_text(), path.name, SimpleNamespace(**config), tenant_id="standalone")
 
         class StandaloneHost:
-            def resolve_replay_factory(self, runtime_type, source_session): return factory
-            def load_source_session(self, session_id): return None
-            def load_context_snapshot(self, snapshot_id, source_session): return None
+            def resolve_replay_factory(self, _runtime_type, _source_session): return factory
+            def load_source_session(self, _session_id): return None
+            def load_context_snapshot(self, _snapshot_id, _source_session): return None
             def validate_skill_treatment(self, skill): return validate_skill_treatment(skill)
             def judge_harness(self): return dict(config.get("judge") or {})
         configure_host(StandaloneHost())

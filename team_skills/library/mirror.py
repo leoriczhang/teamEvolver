@@ -22,7 +22,7 @@ import threading
 from pathlib import Path
 from typing import Any, Optional
 
-from teamEvolver.integrations.hermes_delivery import HermesDeliverySpool
+from teamEvolver.integrations.delivery_spool import DeliverySpool
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ class VikingSkillMirror:
         sequence_bucket: Any = None,
     ) -> None:
         path = Path(spool_dir).expanduser() if spool_dir else default_spool_dir()
-        self._spool = HermesDeliverySpool(path, producer_id=_PRODUCER_ID)
+        self._spool = DeliverySpool(path, producer_id=_PRODUCER_ID)
         self._viking_hub = viking_hub
         # Bucket used only for the monotonic per-skill delivery sequence. The
         # evolve server passes its skill bucket; hub-based callers pass the
@@ -65,8 +65,6 @@ class VikingSkillMirror:
         mirror to).
         """
         if not bool(getattr(config, "sharing_skill_mirror_enabled", True)):
-            return None
-        if not bool(getattr(config, "sharing_enabled", False)):
             return None
         from team_skills.library.hub import SkillHub
 

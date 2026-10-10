@@ -1,0 +1,2 @@
+# Version the sanitized acceptance evidence, not application runtime logs.
+!*.log

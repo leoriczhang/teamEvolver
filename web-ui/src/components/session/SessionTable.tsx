@@ -5,16 +5,16 @@ import type { LedgerRow } from "@/api/client";
 
 export type SessTab = "detail" | "process";
 
-export const GOOD_CASE_THRESHOLD = 0.6;
+const GOOD_CASE_THRESHOLD = 0.6;
 
-export function StatusBadge({ status }: { status?: string }) {
+function StatusBadge({ status }: { status?: string }) {
   if (status === "consumed") return <Pill tone="green">已消费</Pill>;
   if (status === "queued") return <Pill tone="amber">排队中</Pill>;
   if (status === "skipped") return <Pill tone="gray">已跳过</Pill>;
   return <Pill tone="gray">{status || "-"}</Pill>;
 }
 
-export function CaseBadge({ score }: { score?: number | null }) {
+function CaseBadge({ score }: { score?: number | null }) {
   if (score == null || typeof score !== "number") {
     return <span className="text-xs text-muted-foreground">—</span>;
   }
@@ -25,7 +25,7 @@ export function CaseBadge({ score }: { score?: number | null }) {
   );
 }
 
-export function DecisionBadge({ value }: { value?: LedgerRow["value_judge"] }) {
+function DecisionBadge({ value }: { value?: LedgerRow["value_judge"] }) {
   const decision = value?.decision;
   if (!decision) return <span className="text-xs text-muted-foreground">—</span>;
   const tone =
@@ -52,7 +52,7 @@ const JUDGE_REASON_LABELS: Record<string, string> = {
   tool_usage: "工具使用",
 };
 
-export function judgeTooltip(judge?: LedgerRow["judge"]): string | undefined {
+function judgeTooltip(judge?: LedgerRow["judge"]): string | undefined {
   if (!judge) return undefined;
   const parts: string[] = [];
   if (judge.rationale) parts.push(judge.rationale);

@@ -21,6 +21,9 @@ def test_team_memory_has_one_package_owner():
         "teamEvolver/proxy/aggregation_routes.py",
         "teamEvolver/proxy/memory_debug.py",
         "team_memory/_compat.py",
+        "team_memory/maintenance/dreamcycle",
+        "team_memory/maintenance/integrations",
+        "team_memory/maintenance/legacy",
     ]
 
     assert not [path for path in removed_paths if (repo_root / path).exists()]
@@ -39,7 +42,11 @@ def test_config_fields_are_owned_by_memory_package():
     from teamEvolver.config import TeamEvolverConfig
 
     inherited = {item.name for item in fields(TeamMemoryConfig)}
-    actual = {item.name for item in fields(TeamEvolverConfig) if item.name.startswith(("aggregation_", "dreamcycle_"))}
+    actual = {
+        item.name
+        for item in fields(TeamEvolverConfig)
+        if item.name.startswith(("aggregation_", "memory_maintenance_"))
+    }
     assert inherited == actual
     config = replace(TeamEvolverConfig(), aggregation_maintenance_skill_uri="viking://agent/skills/custom")
     assert config.aggregation_maintenance_skill_uri.endswith("/custom")
@@ -63,11 +70,9 @@ def test_packaging_and_build_inputs_include_sibling_package():
     assert "team_replay*" in project["tool"]["setuptools"]["packages"]["find"]["include"]
     assert "team_memory/tests" in project["tool"]["pytest"]["ini_options"]["testpaths"]
     assert "team_replay/tests" in project["tool"]["pytest"]["ini_options"]["testpaths"]
-    assert project["project"]["scripts"]["teamEvolver-dreamcycle"] == "team_memory.__main__:main"
+    assert project["project"]["scripts"]["teamEvolver-memory"] == "team_memory.__main__:main"
     assert "COPY team_memory/" in (root / "Dockerfile").read_text()
     assert "COPY team_replay/" in (root / "Dockerfile").read_text()
-    assert "COPY team_memory " in (root / "docker/Dockerfile.customer").read_text()
-    assert "COPY team_replay " in (root / "docker/Dockerfile.customer").read_text()
     assert 'copy_dir  "team_memory"' in (root / "cicd_scripts/build.sh").read_text()
     assert 'copy_dir  "team_replay"' in (root / "cicd_scripts/build.sh").read_text()
 
@@ -80,6 +85,7 @@ def test_team_replay_is_the_only_replay_directory():
         for path in root.rglob("*")
         if path.is_dir()
         and path.name.lower() in {"replay", "team_replay"}
+        and "team-evolver-extracted" not in path.parts
         and ".git" not in path.parts
         and "build" not in path.parts
         and "runtime" not in path.parts
@@ -87,12 +93,8 @@ def test_team_replay_is_the_only_replay_directory():
     )
 
     assert replay_dirs == ["team_replay"]
-    assert import_module("teamEvolver.replay.engine") is import_module(
-        "team_replay.engine"
-    )
-    assert import_module("team_memory.replay.memory_changes") is import_module(
-        "team_memory.memory_changes"
-    )
+    assert import_module("team_replay.engine") is not None
+    assert import_module("team_memory.memory_changes") is not None
 
 
 @pytest.mark.parametrize(

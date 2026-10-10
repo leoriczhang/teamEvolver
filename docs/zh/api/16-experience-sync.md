@@ -53,7 +53,7 @@
 | 409 | `SYNC_ALREADY_RUNNING` | 当前后台执行持有锁，稍后查询状态或重试 |
 | 429 | `SYNC_BUSY` | 触发受理并发已满（2）或本实例待唤醒租户已满（32） |
 | 503 | `SYNC_NOT_RUNNING` / `SYNC_STOPPING` | 检查 PG 配置、服务生命周期及日志 |
-| 503 | `PG_REQUIRED` / `SHARING_DISABLED` / `OV_IDENTITY_OR_KEY_MISSING` / `INVALID_SYNC_CONFIG` / `INVALID_SYNC_TARGET_DIRECTORY` / `INVALID_OV_ENDPOINT` | 修复相应配置 |
+| 503 | `PG_REQUIRED` / `OV_IDENTITY_OR_KEY_MISSING` / `INVALID_SYNC_CONFIG` / `INVALID_SYNC_TARGET_DIRECTORY` / `INVALID_OV_ENDPOINT` | 修复相应配置 |
 | 503 | `SYNC_STORAGE_FAILURE` | 检查状态存储；响应不暴露底层异常正文 |
 
 只处理 `experience_library/{skill_slug}.json` 中的 `exemplary` 记录。经验库列表来自 Session 分析，未进入该 JSON 链路的条目不会因点击按钮被上传。

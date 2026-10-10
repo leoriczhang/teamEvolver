@@ -159,7 +159,6 @@ def test_same_target_concurrent_run_is_rejected(tmp_path) -> None:
 
     service._acquire_target(r1)
     try:
-        assert service.target_is_active(r2) is True
         try:
             service._acquire_target(r2)
             assert False, "expected RunConflictError"
@@ -169,7 +168,8 @@ def test_same_target_concurrent_run_is_rejected(tmp_path) -> None:
         service._release_target(r1)
 
     # After release, the target is free again.
-    assert service.target_is_active(r2) is False
+    service._acquire_target(r2)
+    service._release_target(r2)
 
 
 def test_different_targets_run_in_parallel(tmp_path) -> None:
@@ -181,14 +181,13 @@ def test_different_targets_run_in_parallel(tmp_path) -> None:
     service._acquire_target(r1)
     try:
         # Different target -> not blocked, acquire succeeds.
-        assert service.target_is_active(r2) is False
         service._acquire_target(r2)
         service._release_target(r2)
     finally:
         service._release_target(r1)
 
 
-def test_run_route_returns_409_when_target_is_active(tmp_path, monkeypatch) -> None:
+def test_run_route_returns_409_for_an_active_target(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("TEAMEVOLVER_EMBEDDED_EVOLVE_ENABLED", "0")
     from fastapi.testclient import TestClient
 
@@ -196,11 +195,9 @@ def test_run_route_returns_409_when_target_is_active(tmp_path, monkeypatch) -> N
     from teamEvolver.proxy import ProxyServer
 
     config = TeamEvolverConfig(
-        users_registry_path=str(tmp_path / "users.json"),
-        sharing_enabled=False,
-        sharing_skill_reload_mode="off",
+        _config_file=str(tmp_path / "config.yaml"),
         sharing_viking_endpoint="http://127.0.0.1:1933",
-        sharing_viking_team_api_key="configured-root-secret",
+        sharing_viking_api_key="configured-root-secret",
         sharing_viking_account="default",
         sharing_viking_user="team",
         aggregation_state_dir=str(tmp_path),
@@ -294,4 +291,3 @@ def test_new_run_without_last_compile_time_stays_full(tmp_path) -> None:
     )
     # Default keeps the full compile; nothing is forwarded to ov compile args.
     assert run.last_compile_time == ""
-

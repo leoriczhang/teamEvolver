@@ -189,17 +189,6 @@ class OpenVikingSnapshotClient:
             raise self._protocol_error("Snapshot log returned a non-list")
         return [dict(item) for item in result if isinstance(item, dict)]
 
-    def show_metadata(self, target_ref: str | None = None) -> dict[str, Any]:
-        result = self._request_json(
-            "GET",
-            "/api/v1/snapshot/show",
-            params={"target_ref": str(target_ref or self._branch)},
-        )
-        if not isinstance(result, dict):
-            raise self._protocol_error("Snapshot show returned a non-object")
-        self._require_response_oid(result.get("oid"), "oid")
-        return dict(result)
-
     def show_blob(
         self,
         target_ref: str,
@@ -253,30 +242,6 @@ class OpenVikingSnapshotClient:
         )
         if not isinstance(result, dict):
             raise self._protocol_error("Snapshot diff returned a non-object")
-        return dict(result)
-
-    def restore_dry_run(
-        self,
-        *,
-        source_commit: str,
-        project_dir: str | None = None,
-    ) -> dict[str, Any]:
-        self._require_oid(source_commit, "source_commit")
-        body: dict[str, Any] = {
-            "source_commit": source_commit,
-            "branch": self._branch,
-            "dry_run": True,
-        }
-        if project_dir:
-            self._require_uri(project_dir)
-            body["project_dir"] = project_dir
-        result = self._request_json(
-            "POST",
-            "/api/v1/snapshot/restore",
-            json=body,
-        )
-        if not isinstance(result, dict):
-            raise self._protocol_error("Snapshot restore dry-run returned a non-object")
         return dict(result)
 
     def _request_json(self, method: str, path: str, **kwargs: Any) -> Any:

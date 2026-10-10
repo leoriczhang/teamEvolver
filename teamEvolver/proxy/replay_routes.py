@@ -20,9 +20,9 @@ def register_replay_adapter_routes(owner, app):
     binding_lock = asyncio.Lock()
 
     def admin(request):
+        from ..admin.authorization import require_tenant_admin
         user = getattr(request.state, "console_user", None)
-        if not user or user.get("role") != "admin":
-            raise HTTPException(403, "console admin required")
+        require_tenant_admin(user)
 
     def root(request):
         if not getattr(request.state, "service_root_authenticated", False):
@@ -54,7 +54,7 @@ def register_replay_adapter_routes(owner, app):
                     metadata = adapters.validate_content(source["code"], filename)
                     if not metadata["enabled"]:
                         raise adapters.AdapterError("Replay adapter is disabled")
-                if tenant is None or tenant.is_default():
+                if tenant is None or get_tenant_registry(owner).mode != "postgres":
                     config_file = getattr(owner.config, "_config_file", "")
                     store = ConfigStore(Path(config_file)) if config_file else ConfigStore()
                     data = await asyncio.to_thread(store.load)

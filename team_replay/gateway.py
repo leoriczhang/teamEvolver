@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
 from .contracts import (
-    REPLAY_RUN_RESULT_SCHEMA_V1,
+    REPLAY_RUN_RESULT_SCHEMA,
     ReplaySpec,
     skill_job_from_spec,
 )
@@ -66,7 +66,7 @@ class EmbeddedReplayGateway:
             max_interactions=interactions,
         )
         return {
-            "schema_version": REPLAY_RUN_RESULT_SCHEMA_V1,
+            "schema_version": REPLAY_RUN_RESULT_SCHEMA,
             "run_id": spec.run_id,
             "account_id": spec.account_id,
             "subject": _subject(spec),
@@ -91,7 +91,7 @@ class DisabledReplayGateway:
     ) -> dict[str, Any]:
         del case_index, timeout_seconds, max_interactions
         return {
-            "schema_version": REPLAY_RUN_RESULT_SCHEMA_V1,
+            "schema_version": REPLAY_RUN_RESULT_SCHEMA,
             "run_id": spec.run_id,
             "account_id": spec.account_id,
             "subject": _subject(spec),

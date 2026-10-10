@@ -11,11 +11,11 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping
 
-from .datasets.schema import DATASET_SCHEMA_V2
+from .datasets.schema import DATASET_SCHEMA
 
-REPLAY_SPEC_SCHEMA_V1 = "team-replay.spec.v1"
-REPLAY_RUN_RESULT_SCHEMA_V1 = "team-replay.run-result.v1"
-CHECKLIST_FIRST_POLICY_V1 = "checklist-first-efficiency-v1"
+REPLAY_SPEC_SCHEMA = "team-replay.spec"
+REPLAY_RUN_RESULT_SCHEMA = "team-replay.run-result"
+CHECKLIST_FIRST_POLICY = "checklist-first-efficiency"
 
 SubjectKind = Literal["skill", "skill_set", "memory"]
 
@@ -53,7 +53,7 @@ class ReplaySpec:
     candidate: ReplayTreatment
     subject_ids: tuple[str, ...] = ()
     account_id: str = "default"
-    policy_id: str = CHECKLIST_FIRST_POLICY_V1
+    policy_id: str = CHECKLIST_FIRST_POLICY
     runtime: Mapping[str, Any] = field(default_factory=dict)
     limits: Mapping[str, Any] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -69,14 +69,14 @@ class ReplaySpec:
             raise ReplayContractError("subject_id is required")
         if not self.cases:
             raise ReplayContractError("Test Dataset must contain at least one case")
-        if self.policy_id != CHECKLIST_FIRST_POLICY_V1:
+        if self.policy_id != CHECKLIST_FIRST_POLICY:
             raise ReplayContractError(
                 f"unsupported Replay policy: {self.policy_id}"
             )
 
     def as_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": REPLAY_SPEC_SCHEMA_V1,
+            "schema_version": REPLAY_SPEC_SCHEMA,
             "run_id": self.run_id,
             "account_id": self.account_id,
             "subject": {
@@ -133,14 +133,6 @@ def skill_replay_spec(
         for case in job.get("replay_cases") or []
         if isinstance(case, Mapping)
     )
-    dataset_format = next(
-        (
-            str(case.get("dataset_format") or "")
-            for case in cases
-            if str(case.get("dataset_format") or "").strip()
-        ),
-        DATASET_SCHEMA_V2,
-    )
     revision = str(
         job.get("candidate_revision")
         or candidate.get("tree_sha256")
@@ -162,7 +154,7 @@ def skill_replay_spec(
         subject_kind="skill_set" if len(subject_ids) > 1 else "skill",
         subject_id=subject_id,
         subject_ids=subject_ids,
-        dataset_format=dataset_format,
+        dataset_format=DATASET_SCHEMA,
         cases=cases,
         baseline=ReplayTreatment(
             kind=treatment_kind,
@@ -184,21 +176,16 @@ def skill_replay_spec(
         },
         metadata={
             "source": deepcopy(job.get("source") or {}),
-            # Transitional compatibility data. The common fields above remain
-            # authoritative while callers migrate off the legacy job shape.
-            "legacy_job": deepcopy(dict(job)),
         },
     )
 
 
 def skill_job_from_spec(spec: ReplaySpec) -> dict[str, Any]:
-    """Project a Skill Replay specification onto the legacy engine payload."""
+    """Project a Skill Replay specification onto the engine input."""
 
     if spec.subject_kind not in {"skill", "skill_set"}:
         raise ReplayContractError("Skill Replay engine requires a Skill subject")
-    legacy = spec.metadata.get("legacy_job")
-    job = deepcopy(dict(legacy)) if isinstance(legacy, Mapping) else {}
-    job.update({
+    return {
         "job_id": spec.run_id,
         "skill_name": spec.subject_id,
         "candidate_skill_name": spec.subject_id,
@@ -217,5 +204,4 @@ def skill_job_from_spec(spec: ReplaySpec) -> dict[str, Any]:
             int(spec.limits.get("max_interactions") or 4),
         ),
         "source": deepcopy(spec.metadata.get("source") or {}),
-    })
-    return job
+    }

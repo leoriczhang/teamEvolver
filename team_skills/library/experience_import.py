@@ -15,42 +15,23 @@ from team_skills.library.experience_sync import LOCK, SyncError, canonical, dige
 from teamEvolver.logging_runtime import event
 
 LOG = logging.getLogger(__name__)
-HISTORY_PATTERN = (
-    r"(^|/)(experience_library/sessions|skill_evidence|session_archive|sessions)/[^./][^/]*[.]json$"
-)
+HISTORY_PATTERN = r"(^|/)session_archive/[^./][^/]*[.]json$"
 
 
-def history_rows(key, payload, *, index=False):
+def history_rows(_key, payload, *, index=False):
     if not isinstance(payload, dict):
         raise SyncError("INVALID_IMPORT_SOURCE")
-    if "/skill_evidence/" in "/" + key:
-        evidence = payload.get("evidence") or []
-        if not isinstance(evidence, list) or len(evidence) > 1000:
-            raise SyncError("INVALID_IMPORT_SOURCE")
-        for row in evidence:
-            if not isinstance(row, dict):
-                raise SyncError("INVALID_IMPORT_SOURCE")
-            reason = str(row.get("evidence_reason") or "").strip()
-            kind = str(row.get("evolution_evidence") or "").strip().lower()
-            if kind == "exemplary" and reason:
-                yield {**row, "experiences": [{
-                    "skill_name": str(payload.get("skill_name") or "").strip(), "kind": kind,
-                    "experience_key": f"legacy_{_digest(reason)}", "description": reason,
-                }]}
-    elif index or "/experience_library/sessions/" in "/" + key:
+    if index:
         if "experiences" not in payload:
-            # Raw archives are scanned separately; do not claim missing index
-            # fields are empty successful results.
             raise SyncError("IMPORT_INDEX_EXPERIENCES_MISSING")
         yield payload
     else:
-        for name in ("_judge_scores", "judge"):
-            scores = payload.get(name)
-            if scores is not None and (not isinstance(scores, dict) or (
-                "skill_experiences" in scores and not isinstance(scores["skill_experiences"], list)
-            )):
-                raise SyncError("INVALID_IMPORT_SOURCE")
-        yield {**payload, "experiences": session_experiences(payload)}
+        judge = payload.get("judge")
+        if not isinstance(judge, dict) or (
+            "skill_experiences" in judge and not isinstance(judge["skill_experiences"], list)
+        ):
+            raise SyncError("INVALID_IMPORT_SOURCE")
+        yield {**payload, "experiences": session_experiences({"judge": judge})}
 
 
 def staged_documents(key, payload, *, index=False, projected=False):
@@ -116,15 +97,7 @@ def _gap(worker, meta, pending, code, *, ordinal=0, record_bytes=None, limit_byt
 
 def _projected_proposals(source, record):
     key = source["key"]
-    if "/skill_evidence/" in "/" + key:
-        return staged_documents(key, {"skill_name": record.get("skill_name"), "evidence": [record]})
     lesson = {field: record.get(field) for field in ("skill_name", "kind", "experience_key", "description")}
-    if source["phase"] == "objects" and "/experience_library/sessions/" not in "/" + key:
-        # Match Judge identity normalization, but never truncate the lesson body.
-        lesson = {"skill_name": str(lesson["skill_name"] or "").strip()[:200],
-                  "kind": str(lesson["kind"] or "").strip().lower(),
-                  "experience_key": str(lesson["experience_key"] or "").strip()[:160].lower(),
-                  "description": str(lesson["description"] or "").strip()}
     row = {**record, "experiences": [lesson]}
     return staged_documents(key, row, index=source["phase"] == "index", projected=True)
 
@@ -246,8 +219,6 @@ def advance_import(worker, meta):
                   rejected_sources=progress["rejected_sources"])
         return True
 
-    # Metadata pages preserve the legacy outer cursors. Existing jobs are not
-    # reset; new per-source checkpoints start at the next unprocessed source.
     remaining = worker.settings.batch_size
     while remaining and not worker.stop.is_set() and time.monotonic() < deadline:
         if progress.get("source"):

@@ -27,6 +27,9 @@ def upstream_error(response, path):
     detail_code = detail.get("code") if isinstance(detail, dict) else detail
     code = safe_code(detail_code, safe_code(native.get("code"), fallback))
     message = native.get("message")
+    if (path == "/acl" and response.status_code == 400 and code == "INVALID_ARGUMENT"
+            and message == "ACL target has no context record; index it first"):
+        return "COMPILE_ACL_TARGET_NOT_READY", code
     if (path == "/snapshots/freeze" and response.status_code == 400 and code == "INVALID_ARGUMENT"
             and isinstance(message, str) and message.startswith("Directory URI is not readable as a file:")):
         return "SOURCE_URI_IS_DIRECTORY", code

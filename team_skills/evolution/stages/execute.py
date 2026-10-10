@@ -16,14 +16,10 @@ per-stage call options and tracing.
 from __future__ import annotations
 
 import json
-import logging
 import os
-from pathlib import Path
 from typing import Any, Optional
 
-from team_skills.evolution.kernel.llm import AsyncLLMClient
-
-logger = logging.getLogger(__name__)
+from teamEvolver.llm import AsyncLLMClient
 
 # Shared prompt blocks. These are injected into the create/evolve system
 # prompts via sentinel replacement at module load (see the bottom of the file).
@@ -397,8 +393,6 @@ _CREATE_FROM_SESSIONS_SYSTEM = _inject_shared_blocks(_CREATE_FROM_SESSIONS_SYSTE
 
 from contextvars import ContextVar
 
-_EVOLVE_DEBUG_DIR: ContextVar[str] = ContextVar("evolve_debug_dir", default="")
-
 
 def _effective_system(stage_id: str, fallback: str) -> str:
     """Return a stage's system prompt, honoring any Prompt Studio override.
@@ -427,15 +421,6 @@ def _stage_call_options(
         return stage_call_options(stage_id)
     except Exception:  # noqa: BLE001 - retain stable stage defaults
         return {"max_tokens": max_tokens, "temperature": temperature}
-
-
-def set_evolve_debug_dir(path: str) -> None:
-    """Set the debug dump directory used by session-level evolution calls."""
-    _EVOLVE_DEBUG_DIR.set(str(path or "").strip())
-
-
-def _get_evolve_debug_dir() -> str:
-    return _EVOLVE_DEBUG_DIR.get()
 
 
 # Loop budgets for the agent stages. Overridable by the orchestrator (which
@@ -512,90 +497,6 @@ async def execute_merge(
     )
 
 
-def _build_session_evidence(sessions: list[dict], max_sessions: int = 60) -> str:
-    """Format session evidence (trajectory + summary) for LLM prompts."""
-    blocks: list[str] = []
-    for session in sessions[:max_sessions]:
-        session_id = session.get("session_id", "?")
-        avg_prm = session.get("_avg_prm")
-        prm_str = f", avg PRM: {avg_prm}" if avg_prm is not None else ""
-        has_errors = session.get("_has_tool_errors", False)
-        err_str = ", has tool errors" if has_errors else ""
-        skills = session.get("_skills_referenced") or set()
-        skill_str = f", skills: {sorted(skills)}" if skills else ""
-        runtime_context = (
-            session.get("runtime_context")
-            if isinstance(session.get("runtime_context"), dict)
-            else {}
-        )
-        evaluation_profile = str(
-            runtime_context.get("evaluation_profile")
-            or session.get("_evaluation_profile")
-            or ""
-        ).strip()
-        profile_str = (
-            f", evaluation_profile: {evaluation_profile}"
-            if evaluation_profile
-            else ""
-        )
-
-        aggregate = session.get("aggregate") or {}
-        aggregate_str = ""
-        if aggregate:
-            parts: list[str] = []
-            rollout_count = aggregate.get("rollout_count", 0)
-            mean_score = aggregate.get("mean_score")
-            stability = aggregate.get("stability", "")
-            success_count = aggregate.get("success_count", 0)
-            fail_count = aggregate.get("fail_count", 0)
-            if rollout_count:
-                parts.append(f"{rollout_count} rollouts")
-            if mean_score is not None:
-                parts.append(f"mean ORM={mean_score:.3f}")
-            if success_count or fail_count:
-                parts.append(f"success={success_count} fail={fail_count}")
-            if stability:
-                parts.append(f"stability={stability}")
-            if parts:
-                aggregate_str = f", {', '.join(parts)}"
-
-        trajectory = session.get("_trajectory", "")
-        summary = session.get("_summary", "")
-
-        # Evolution evidence flag: tells the model whether this session is a
-        # badcase to fix (defect) or a goodcase to reinforce (exemplary).
-        judge_scores = (
-            session.get("_judge_scores")
-            if isinstance(session.get("_judge_scores"), dict)
-            else {}
-        )
-        evidence_kind = str(judge_scores.get("evolution_evidence") or "").strip().lower()
-        evidence_str = ""
-        if evidence_kind in {"defect", "exemplary"}:
-            evidence_reason = str(judge_scores.get("evidence_reason") or "").strip()
-            evidence_str = (
-                f", evolution evidence: {evidence_kind}"
-                + (f" — {evidence_reason}" if evidence_reason else "")
-            )
-
-        parts = [
-            f"### Session {session_id}{prm_str}{aggregate_str}{err_str}"
-            f"{skill_str}{profile_str}{evidence_str}"
-        ]
-        if trajectory:
-            parts.append(f"**Trajectory**:\n{trajectory}")
-        if summary:
-            parts.append(f"**Analysis**:\n{summary}")
-        if not trajectory and not summary:
-            parts.append("(no data)")
-        blocks.append("\n\n".join(parts))
-
-    if len(sessions) > max_sessions:
-        blocks.append(f"\n... and {len(sessions) - max_sessions} more sessions")
-
-    return "\n\n---\n\n".join(blocks)
-
-
 def _build_cross_cycle_context(context: Optional[dict]) -> str:
     if not isinstance(context, dict) or not context:
         return ""
@@ -627,11 +528,38 @@ def _build_cross_cycle_context(context: Optional[dict]) -> str:
             if isinstance(context.get("active_candidate_feedback"), dict)
             else {}
         ),
+        "experience_patterns": [
+            {
+                key: item.get(key)
+                for key in (
+                    "pattern_id",
+                    "pattern_key",
+                    "title",
+                    "kind",
+                    "problem",
+                    "root_cause",
+                    "guidance",
+                    "evidence_count",
+                    "occurrence_count",
+                    "session_count",
+                    "user_count",
+                    "experience_ids",
+                    "session_ids",
+                )
+            }
+            for item in context.get("experience_patterns") or []
+            if isinstance(item, dict)
+        ],
+        "pattern_store": str(context.get("pattern_store") or ""),
     }
     return (
         "## Cross-cycle evidence state\n\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n\n"
-        f"Evolution guidance: {guidance}\n\n"
+        f"Evolution guidance: {guidance} Experience patterns are semantic "
+        "summaries grounded in the listed Experience and Session IDs. Use "
+        "their guidance as a candidate edit signal, preserve their evidence "
+        "references, and let True Replay decide whether the edit is publishable."
+        "\n\n"
     )
 
 
@@ -665,20 +593,6 @@ def _build_evaluation_cohort_context(sessions: list[dict]) -> str:
         "team method. Preserve those rules concretely in the candidate Skill; "
         "only per-user and per-task details should be generalized away.\n\n"
     )
-
-
-def _write_debug_dump(stem: str, system: str, user_msg: str, raw: str | None = None) -> None:
-    debug_dir = _get_evolve_debug_dir()
-    if not debug_dir:
-        return
-
-    dump_dir = Path(debug_dir)
-    dump_dir.mkdir(parents=True, exist_ok=True)
-    (dump_dir / f"{stem}_system.txt").write_text(system, encoding="utf-8")
-    (dump_dir / f"{stem}_user.txt").write_text(user_msg, encoding="utf-8")
-    if raw is not None:
-        (dump_dir / f"{stem}_raw_output.txt").write_text(raw, encoding="utf-8")
-    logger.info("[DebugDump] wrote %s prompt artifacts to %s", stem, dump_dir)
 
 
 def _llm_trace_kwargs(operation: str, *, skill_name: str = "", sessions: list[dict] | None = None) -> dict:
@@ -782,15 +696,3 @@ async def create_skill_from_sessions(
         trace_kwargs=_llm_trace_kwargs("create_skill", sessions=sessions),
         debug_stem="no_skill",
     )
-
-
-def _parse_evolve_result(raw: str, skill_name: str) -> Optional[dict]:
-    """Back-compat shim: one-shot parse + legacy suppression via the contract."""
-    from team_skills.evolution.agent.contract import legacy_suppress, parse_turn
-
-    turn = parse_turn(raw, allow_repair=True)
-    if not turn.get("ok"):
-        logger.warning("[SessionExec] failed to parse evolve result for '%s'", skill_name)
-        return None
-    decision = turn.get("decision") if turn.get("type") == "final" else None
-    return legacy_suppress(decision, skill_name)

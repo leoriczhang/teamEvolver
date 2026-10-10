@@ -167,20 +167,6 @@ def bundle_has_only_entrypoint(
     return set(bundle.keys()) == {normalize_bundle_rel_path(entrypoint)}
 
 
-def bundle_paths(bundle_files: Mapping[str, bytes | bytearray | str] | Iterable[str]) -> list[str]:
-    if isinstance(bundle_files, Mapping):
-        paths = bundle_files.keys()
-    else:
-        paths = bundle_files
-    out: list[str] = []
-    for rel_path in paths:
-        clean = normalize_bundle_rel_path(str(rel_path))
-        if is_ignored_bundle_rel_path(clean):
-            continue
-        out.append(clean)
-    return sorted(set(out))
-
-
 def encode_bundle_payload(
     bundle_files: Mapping[str, bytes | bytearray | str],
 ) -> dict[str, object]:
@@ -204,7 +190,7 @@ def encode_bundle_payload(
             }
         )
     return {
-        "format": "bundle_v1",
+        "format": "skill-bundle",
         "entrypoint": _BUNDLE_ENTRYPOINT,
         "tree_sha256": bundle_tree_sha256(bundle),
         "files": files,
@@ -212,8 +198,8 @@ def encode_bundle_payload(
 
 
 def decode_bundle_payload(payload: Mapping[str, object]) -> dict[str, bytes]:
-    """Decode and verify a ``bundle_v1`` payload."""
-    if str(payload.get("format") or "") != "bundle_v1":
+    """Decode and verify a canonical Skill Bundle payload."""
+    if str(payload.get("format") or "") != "skill-bundle":
         raise SkillBundleError("Unsupported bundle payload format")
     raw_files = payload.get("files")
     if not isinstance(raw_files, list):
@@ -260,22 +246,13 @@ def decode_bundle_payload(payload: Mapping[str, object]) -> dict[str, bytes]:
 
 
 def candidate_skill_bundle(skill: Mapping[str, object]) -> dict[str, bytes]:
-    """Return a candidate's full bundle, accepting canonical and legacy jobs."""
+    """Decode a candidate's canonical, complete bundle."""
     raw_bundle = skill.get("bundle")
-    if isinstance(raw_bundle, Mapping):
-        bundle = decode_bundle_payload(raw_bundle)
-    else:
-        legacy = skill.get("bundle_files")
-        bundle = (
-            coerce_skill_bundle(legacy)
-            if isinstance(legacy, Mapping)
-            else {}
-        )
-
-    from team_skills.library.render import build_skill_md
-
-    bundle[_BUNDLE_ENTRYPOINT] = build_skill_md(dict(skill)).encode("utf-8")
-    return coerce_skill_bundle(bundle)
+    if not isinstance(raw_bundle, Mapping):
+        raise SkillBundleError("Skill candidate requires a canonical bundle")
+    bundle = decode_bundle_payload(raw_bundle)
+    bundle_entrypoint_bytes(bundle)
+    return bundle
 
 
 def attach_bundle_payload(

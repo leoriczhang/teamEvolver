@@ -8,7 +8,12 @@ vi.mock("@/api/client", () => ({ api: mocks.api }));
 vi.mock("@/lib/toast", () => ({ toastErr: vi.fn(), toastOk: vi.fn() }));
 import DataSourcesView from "./DataSourcesView";
 
-const admin = { id: "admin", display_name: "Admin", role: "admin" as const };
+const admin = {
+  id: "admin",
+  display_name: "Admin",
+  role: "admin" as const,
+  platform_role: "platform_admin" as const,
+};
 const code = `SOURCE = {"label": "A", "provider": "test", "supported_filters": ["from_timestamp", "to_timestamp"]}
 def build_adapter():
     return Adapter()
@@ -30,7 +35,6 @@ const source = {
     time: "00:00",
     timezone: "Asia/Shanghai",
     window: "previous_day",
-    max_sessions: 1000,
   },
   schedule_status: {
     running: false,
@@ -60,6 +64,21 @@ beforeEach(() => {
     }
     if (path === "/api/datasource/test") return { ok: true };
     if (path === "/api/datasource/sessions") return { sessions: [{ session_id: "s1" }] };
+    if (path === "/api/datasource/pull") {
+      return {
+        accepted: true,
+        pull_status: {
+          running: false,
+          job_id: "manual-1",
+          job_type: "manual",
+          last_status: "succeeded",
+          last_total: 1,
+          last_counts: { queued: 1 },
+          last_results: [{ session_id: "s1", status: "queued" }],
+          last_results_truncated: false,
+        },
+      };
+    }
     if (path === "/api/datasource/schedule" && options?.method === "PUT") {
       return {
         schedule: JSON.parse(String(options.body)),
@@ -160,9 +179,6 @@ it("saves the daily pull schedule", async () => {
   fireEvent.change(screen.getByLabelText("每日触发时间"), {
     target: { value: "01:30" },
   });
-  fireEvent.change(screen.getByLabelText("定时拉取最大 Session 数"), {
-    target: { value: "250" },
-  });
   fireEvent.click(screen.getByRole("button", { name: "保存定时配置" }));
 
   await waitFor(() => expect(mocks.api).toHaveBeenCalledWith(
@@ -174,7 +190,6 @@ it("saves the daily pull schedule", async () => {
         time: "01:30",
         timezone: "Asia/Shanghai",
         window: "previous_day",
-        max_sessions: 250,
       }),
     }),
   ));
@@ -195,6 +210,27 @@ it("starts an enabled scheduled pull asynchronously", async () => {
     { method: "POST" },
   ));
   expect(await screen.findByText("拉取中")).toBeVisible();
+});
+
+it("pulls the complete filtered window without a session limit", async () => {
+  render(<DataSourcesView active user={admin} />);
+  await screen.findByLabelText("适配器文件");
+  fireEvent.change(screen.getByLabelText("起始时间"), {
+    target: { value: "2026-09-01T00:00" },
+  });
+  fireEvent.change(screen.getByLabelText("结束时间"), {
+    target: { value: "2026-09-02T00:00" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "拉取入库" }));
+
+  await waitFor(() => {
+    const call = mocks.api.mock.calls.find(
+      ([path]) => path === "/api/datasource/pull",
+    );
+    const body = JSON.parse(String(call?.[1]?.body));
+    expect(body.max_sessions).toBeUndefined();
+  });
+  expect(await screen.findByText(/已处理完整时间窗口内的 1 个 Session/)).toBeVisible();
 });
 
 it("does not request adapter data for non-admins", () => {

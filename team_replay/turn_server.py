@@ -3,24 +3,15 @@
 Usage:
     python scripts/replay_turn_server.py --port 8010 --api-key <secret>
 
-This is the Agent-side half of teamEvolver's server-driven True Replay
-(``replay.branch.v1`` capability with ``orchestration: server_driven``).
+This is the Agent-side half of teamEvolver's server-driven, per-turn True Replay.
 teamEvolver calls this endpoint once per interaction turn and owns the
 checklist judge, progressive disclosure, turn counting, and metric
 aggregation. This script only executes ONE turn per call and reports the
 single-turn trace and usage.
 
-To onboard YOUR agents, edit ``AGENT_HANDLERS`` below — one handler per
-runtime_type (the key must match the ``runtime_type`` registered with
-teamEvolver). Register one agent per handler:
-
-    POST /internal/agents/register
-    "capabilities": {"replay.branch.v1": {
-        "transport": "http", "orchestration": "server_driven",
-        "endpoint": "http://<this-host>:8010/turn/<runtime_type>",
-        "auth_profile": "<profile>"}}
-    # export TEAMEVOLVER_AGENT_<PROFILE>_REPLAY_API_KEY=<secret> on the
-    # teamEvolver side; pass the same secret here via --api-key.
+To adapt an Agent, edit ``AGENT_HANDLERS`` below, then point the tenant's
+Replay adapter at ``http://<this-host>:8010/turn/<runtime_type>``. The adapter
+owns endpoint and authentication settings; Agent registration is not required.
 
 Per-turn contract (teamevolver.replay-turn-request.v1 / -result.v1):
 
@@ -64,8 +55,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
 from .protocol import (  # noqa: E402
-    REPLAY_TURN_RESULT_SCHEMA_V1,
-    AgentProtocolError,
+    REPLAY_TURN_RESULT_SCHEMA,
+    ReplayProtocolError,
     normalize_replay_turn_request,
     normalize_replay_turn_result,
 )
@@ -143,7 +134,7 @@ def _failed_turn(
     message: str,
 ) -> dict[str, Any]:
     return {
-        "schema_version": REPLAY_TURN_RESULT_SCHEMA_V1,
+        "schema_version": REPLAY_TURN_RESULT_SCHEMA,
         "protocol_version": "1.0",
         "request_id": str(request.get("request_id") or ""),
         "turn_num": request.get("turn_num") or 0,
@@ -175,7 +166,7 @@ def handle_turn_request(
 
     try:
         request = normalize_replay_turn_request(payload)
-    except AgentProtocolError as exc:
+    except ReplayProtocolError as exc:
         return _failed_turn(payload or {}, code="INVALID_RESPONSE", message=str(exc))
 
     request_id = request["request_id"]
@@ -204,7 +195,7 @@ def handle_turn_request(
             raise ValueError("handler must return an object")
         result = normalize_replay_turn_result(
             {
-                "schema_version": REPLAY_TURN_RESULT_SCHEMA_V1,
+                "schema_version": REPLAY_TURN_RESULT_SCHEMA,
                 "protocol_version": "1.0",
                 "request_id": request_id,
                 "turn_num": turn_num,
@@ -225,7 +216,7 @@ def handle_turn_request(
             message=str(exc),
         )
         result["status"] = "unsupported"
-    except AgentProtocolError as exc:
+    except ReplayProtocolError as exc:
         # Fail-closed: missing tool_call_count/total_tokens invalidates the turn.
         result = _failed_turn(request, code="INVALID_RESPONSE", message=str(exc))
     except Exception as exc:  # noqa: BLE001 - surface handler failure to the caller

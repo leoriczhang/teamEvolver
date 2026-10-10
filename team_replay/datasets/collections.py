@@ -12,8 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .schema import (
-    DATASET_SCHEMA_V2,
-    legacy_document_view,
+    DATASET_SCHEMA,
     normalize_document,
     validate_document,
 )
@@ -46,8 +45,10 @@ def encode(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8")
 
 
-def item_summary(item: dict) -> dict:
-    return {key: value for key, value in item.items() if key != "session"}
+def case_summary(case: dict) -> dict:
+    summary = copy.deepcopy(case)
+    summary.get("provenance", {}).pop("session_snapshot", None)
+    return summary
 
 
 def snapshot_ref(case: dict) -> str:
@@ -61,7 +62,7 @@ def snapshot_ref(case: dict) -> str:
     return value
 
 
-def snapshot_item(session: dict, row: dict) -> dict:
+def snapshot_case(session: dict, row: dict) -> dict:
     """Consume canonical adapter output, never re-parse upstream traces."""
     turns = [turn for turn in session.get("turns") or [] if isinstance(turn, dict)]
     first = next((turn for turn in turns if str(turn.get("prompt_text") or "").strip()), {})
@@ -79,22 +80,36 @@ def snapshot_item(session: dict, row: dict) -> dict:
         for item in row.get("used_skills") or session.get("used_skills") or []
         if str(item or "").strip()
     ))
+    session_id = safe_id(str(session.get("session_id") or row.get("session_id") or ""))
     return {
-        "item_id": "item_" + uuid.uuid4().hex,
-        "session_id": safe_id(str(session.get("session_id") or row.get("session_id") or "")),
-        "trace_id": str(meta.get("trace_id") or ""),
-        "title": str(row.get("title") or session.get("title") or query),
+        "case_id": "case_" + uuid.uuid4().hex,
         "query": query,
         "skill_ids": used_skills,
-        # Use the explicit user request as a completion criterion until edited.
-        "requirements": [query] if query else [], "requirements_source": "initial_query",
-        "turn_num": first.get("turn_num") or 1,
-        "timestamp": row.get("timestamp") or session.get("timestamp") or "",
-        "ingested_at": row.get("ingested_at") or session.get("ingested_at") or "",
-        "used_skills": used_skills,
-        "user_alias": row.get("user_alias") or session.get("user_alias") or "",
-        "judge": copy.deepcopy(row.get("judge") or session.get("judge") or {}),
-        "session": copy.deepcopy(session),
+        "checks": [{"id": "R01", "kind": "output", "text": query}],
+        "materials": [],
+        "provenance": {
+            "session_id": session_id,
+            "session_ids": [session_id],
+            "trace_id": str(meta.get("trace_id") or ""),
+            "turn_num": first.get("turn_num") or 1,
+            "timestamp": row.get("timestamp") or session.get("timestamp") or "",
+            "ingested_at": row.get("ingested_at") or session.get("ingested_at") or "",
+            "session_snapshot": copy.deepcopy(session),
+        },
+        "replay": {
+            "progressive_disclosure": {
+                "enabled": True,
+                "initial_visibility": "query_only",
+                "batch_size": 4,
+                "stop_when": "all_checklist_items_satisfied",
+            },
+        },
+        "metadata": {
+            "title": str(row.get("title") or session.get("title") or query),
+            "used_skills": used_skills,
+            "user_alias": row.get("user_alias") or session.get("user_alias") or "",
+            "judge": copy.deepcopy(row.get("judge") or session.get("judge") or {}),
+        },
     }
 
 
@@ -123,7 +138,7 @@ class DatasetCollectionStore:
         return normalize_document(
             self.read(self.key(dataset_id, "dataset.json")),
             default_dataset_id=dataset_id,
-            default_subject={"kind": "session"},
+            allow_empty=True,
         )
 
     def present_document(
@@ -136,7 +151,7 @@ class DatasetCollectionStore:
         hydrated = copy.deepcopy(normalize_document(
             document,
             default_dataset_id=dataset_id,
-            default_subject={"kind": "session"},
+            allow_empty=True,
         ))
         for case in hydrated["cases"]:
             provenance = case.get("provenance") or {}
@@ -150,7 +165,7 @@ class DatasetCollectionStore:
                 provenance["session_snapshot"] = self.read(
                     snapshot_key
                 )
-        return legacy_document_view(hydrated, item_key="items")
+        return hydrated
 
     def load(self, dataset_id: str) -> dict:
         return self.present_document(dataset_id, self.load_document(dataset_id))
@@ -168,9 +183,9 @@ class DatasetCollectionStore:
             dataset,
             default_dataset_id=str(dataset.get("dataset_id") or ""),
             default_name=str(dataset.get("name") or ""),
-            default_subject={"kind": "session"},
+            allow_empty=True,
         )
-        errors = validate_document(document)
+        errors = validate_document(document, allow_empty=True)
         if errors:
             raise ValueError("数据集格式无效：" + "；".join(errors))
         snapshots: list[tuple[str, dict[str, Any]]] = []
@@ -190,7 +205,7 @@ class DatasetCollectionStore:
         if len(document["cases"]) > MAX_ITEMS:
             raise ValueError(f"每个数据集最多 {MAX_ITEMS} 条 Session")
         metadata = {key: value for key, value in document.items() if key != "cases"}
-        metadata["item_count"] = len(document["cases"])
+        metadata["case_count"] = len(document["cases"])
         for ref, snapshot in snapshots:
             self.write(self.key(document["dataset_id"], ref), snapshot)
         self.bucket.put_object(self.key(document["dataset_id"], "dataset.json"), body)
@@ -209,25 +224,25 @@ class DatasetCollectionStore:
                 self.bucket.delete_object(obj.key)
         return metadata
 
-    def create(self, name: str, description: str, items: list[dict], source: dict) -> dict:
+    def create(self, name: str, description: str, cases: list[dict], source: dict) -> dict:
         name = name.strip()
         if not name or len(name) > 120 or len(description) > 2000:
             raise ValueError("名称需为 1–120 字，描述不能超过 2000 字")
-        if not items:
+        if not cases:
             raise ValueError("请选择至少一条有正文的 Session")
         skill_ids = sorted({
             str(skill_id)
-            for item in items
-            for skill_id in item.get("skill_ids") or []
+            for case in cases
+            for skill_id in case.get("skill_ids") or []
             if str(skill_id)
         })
         with self.lock:
             return self.save({
-                "schema_version": DATASET_SCHEMA_V2,
+                "schema_version": DATASET_SCHEMA,
                 "dataset_id": "ds_" + uuid.uuid4().hex,
                 "name": name, "description": description.strip(),
                 "created_at": now(), "updated_at": now(), "source": source,
-                "skills": skill_ids, "cases": items,
+                "skills": skill_ids, "cases": cases, "metadata": {},
             })
 
     def assert_idle(self, dataset_id: str) -> None:
@@ -244,36 +259,35 @@ class DatasetCollectionStore:
             if not name or len(name) > 120 or len(description) > 2000:
                 raise ValueError("名称需为 1–120 字，描述不能超过 2000 字")
             dataset.update(name=name, description=description, updated_at=now())
-            existing = {item["session_id"] for item in dataset["items"]}
-            for item in additions or []:
-                if item["session_id"] not in existing:
-                    dataset["items"].append(item)
-                    existing.add(item["session_id"])
+            existing = {
+                str((case.get("provenance") or {}).get("session_id") or "")
+                for case in dataset["cases"]
+            }
+            for case in additions or []:
+                session_id = str((case.get("provenance") or {}).get("session_id") or "")
+                if session_id not in existing:
+                    dataset["cases"].append(case)
+                    existing.add(session_id)
             return self.save(dataset)
 
-    def change_item(self, dataset_id: str, item_id: str, changes: dict | None) -> dict:
+    def change_case(self, dataset_id: str, case_id: str, changes: dict | None) -> dict:
         with self.lock:
             self.assert_idle(dataset_id)
             dataset = self.load(dataset_id)
-            item = next((item for item in dataset["items"] if item["item_id"] == item_id), None)
-            if item is None:
-                raise DatasetNotFound("数据集条目不存在")
+            case = next((case for case in dataset["cases"] if case["case_id"] == case_id), None)
+            if case is None:
+                raise DatasetNotFound("数据集 Case 不存在")
             if changes is None:
-                dataset["items"].remove(item)
+                dataset["cases"].remove(case)
             else:
-                query = str(changes.get("query", item["query"])).strip()
-                requirements = changes.get("requirements", item["requirements"])
+                query = str(changes.get("query", case["query"])).strip()
+                checks = changes.get("checks", case["checks"])
                 if (
-                    not query or len(query) > 100000 or not isinstance(requirements, list)
-                    or not 1 <= len(requirements) <= 100
-                    or any(not isinstance(text, str) or not text.strip() or len(text) > 100000
-                           for text in requirements)
+                    not query or len(query) > 100000 or not isinstance(checks, list)
+                    or not 1 <= len(checks) <= 100
                 ):
-                    raise ValueError("请填写 Query 和 1–100 条非空 Checklist")
-                item.update(query=query, requirements=[text.strip() for text in requirements],
-                            requirements_source="manual")
-                item.pop("checks", None)
-                item.pop("checklist", None)
+                    raise ValueError("请填写 Query 和 1–100 条 Checklist")
+                case.update(query=query, checks=copy.deepcopy(checks))
             dataset["updated_at"] = now()
             return self.save(dataset)
 
@@ -305,20 +319,22 @@ class DatasetCollectionStore:
             self.assert_idle(dataset_id)
             document = self.load_document(dataset_id)
             dataset = self.present_document(dataset_id, document)
-            if not dataset["items"]:
+            if not dataset["cases"]:
                 raise ValueError("空数据集无法重回放")
-            if any(not item["query"].strip() or not item["requirements"] for item in dataset["items"]):
+            if any(not case["query"].strip() or not case["checks"] for case in dataset["cases"]):
                 raise ValueError("部分条目缺少 Query 或 Checklist，请先编辑补齐")
             run_id = "batch_" + uuid.uuid4().hex
             run = {
                 "run_id": run_id, "dataset_id": dataset_id, "dataset_name": dataset["name"],
                 "status": "queued", "owner_id": owner_id, "created_at": now(), "finished_at": "",
-                "options": options, "total": len(dataset["items"]), "completed": 0,
+                "options": options, "total": len(dataset["cases"]), "completed": 0,
                 "succeeded": 0, "failed": 0, "skipped": 0,
-                "items": [{
-                    "item_id": item["item_id"], "session_id": item["session_id"], "trace_id": item["trace_id"],
-                    "query": item["query"], "status": "queued", "success": None,
-                } for item in dataset["items"]],
+                "cases": [{
+                    "case_id": case["case_id"],
+                    "session_id": str((case.get("provenance") or {}).get("session_id") or ""),
+                    "trace_id": str((case.get("provenance") or {}).get("trace_id") or ""),
+                    "query": case["query"], "status": "queued", "success": None,
+                } for case in dataset["cases"]],
             }
             run_document = copy.deepcopy(document)
             for case in run_document["cases"]:
@@ -334,7 +350,7 @@ class DatasetCollectionStore:
                 )
             self.write(self.run_key(dataset_id, run_id, "input.json"), run_document)
             self.save_run(run)
-            return run, dataset["items"]
+            return run, dataset["cases"]
 
     def request_cancel(self, dataset_id: str, run_id: str) -> dict:
         with self.lock:
@@ -344,21 +360,21 @@ class DatasetCollectionStore:
                 self.save_run(run)
             return run
 
-    def item_running(self, dataset_id: str, run_id: str, item_id: str) -> bool:
+    def case_running(self, dataset_id: str, run_id: str, case_id: str) -> bool:
         with self.lock:
             run = self.run(dataset_id, run_id)
             if run["status"] not in {"queued", "running"}:
                 return False
             run["status"] = "running"
             run.setdefault("started_at", now())
-            next(item for item in run["items"] if item["item_id"] == item_id)["status"] = "running"
+            next(case for case in run["cases"] if case["case_id"] == case_id)["status"] = "running"
             self.save_run(run)
             return True
 
-    def finish_item(self, dataset_id: str, run_id: str, item_id: str, result: dict) -> None:
+    def finish_case(self, dataset_id: str, run_id: str, case_id: str, result: dict) -> None:
         with self.lock:
             run = self.run(dataset_id, run_id)
-            row = next(item for item in run["items"] if item["item_id"] == item_id)
+            row = next(case for case in run["cases"] if case["case_id"] == case_id)
             if row["status"] not in {"running", "queued"}:
                 return
             status = "completed" if result.get("ok") else (
@@ -369,7 +385,7 @@ class DatasetCollectionStore:
                 replay_trace_id=result.get("request_id") or "", error=result.get("error") or "",
                 finished_at=now(),
             )
-            self.write(self.run_key(dataset_id, run_id, f"results/{safe_id(item_id)}.json"), result)
+            self.write(self.run_key(dataset_id, run_id, f"results/{safe_id(case_id)}.json"), result)
             run["completed"] += 1
             run["succeeded"] += int(row["success"] is True)
             run["failed"] += int(status == "failed" or row["success"] is False)
@@ -379,12 +395,12 @@ class DatasetCollectionStore:
     def finish_run(self, dataset_id: str, run_id: str, *, interrupted: bool = False, error: str = "") -> None:
         with self.lock:
             run = self.run(dataset_id, run_id)
-            unfinished = [item for item in run["items"] if item["status"] in {"queued", "running"}]
+            unfinished = [case for case in run["cases"] if case["status"] in {"queued", "running"}]
             status = "interrupted" if interrupted else (
                 "cancelled" if run["status"] == "cancelling" else "completed"
             )
-            for item in unfinished:
-                item.update(status="interrupted" if interrupted else "cancelled", success=None)
+            for case in unfinished:
+                case.update(status="interrupted" if interrupted else "cancelled", success=None)
             run.update(status=status, finished_at=now())
             if error:
                 run["error"] = error
@@ -406,7 +422,7 @@ class DatasetCollectionStore:
                 exported_document = copy.deepcopy(document)
                 exported_document["metadata"] = {
                     **exported_document.get("metadata", {}),
-                    "item_count": len(document["cases"]),
+                    "case_count": len(document["cases"]),
                 }
                 archive.writestr("dataset.json", encode(exported_document))
                 archive.writestr("cases.jsonl", "".join(

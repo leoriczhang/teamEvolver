@@ -5,7 +5,6 @@ COPY web-ui/package.json web-ui/package-lock.json ./
 RUN npm ci
 COPY web-ui/ ./
 COPY team_memory/frontend/ /build/team_memory/frontend/
-# The vite build aliases @miner to ../team_miner/frontend.
 COPY team_miner/frontend/ /build/team_miner/frontend/
 RUN npm run build
 
@@ -47,7 +46,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     VIRTUAL_ENV=/opt/teamEvolver-venv \
     PATH=/opt/teamEvolver-venv/bin:$PATH \
     PYTHONPATH=/app \
-    TEAMEVOLVER_HERMES_BIN=/opt/teamEvolver-venv/bin/hermes \
     OPENVIKING_CLI_BIN=/usr/local/bin/ov
 
 WORKDIR /app
@@ -56,12 +54,9 @@ COPY pyproject.toml README.md README.en.md LICENSE ./
 COPY teamEvolver/ ./teamEvolver/
 COPY team_skills/ ./team_skills/
 COPY team_memory/ ./team_memory/
+COPY team_miner/ ./team_miner/
 COPY team_replay/ ./team_replay/
 COPY team_ontology/ ./team_ontology/
-# The docs browser resolves its Markdown tree from /app/docs.  Keep the
-# repository documentation inside the runtime image so the console behaves
-# the same in Docker as it does when run from the source checkout.
-COPY docs/ ./docs/
 COPY session_ingestion/ ./session_ingestion/
 COPY --from=web-builder /build/teamEvolver/web/dist ./teamEvolver/web/dist/
 COPY --from=openviking-cli /usr/local/bin/ov /usr/local/bin/ov
@@ -73,7 +68,6 @@ RUN apt-get update \
     && python -m venv "$VIRTUAL_ENV" \
     && "$VIRTUAL_ENV/bin/python" -m pip install --no-cache-dir --upgrade pip \
     && "$VIRTUAL_ENV/bin/python" -m pip install --no-cache-dir ".[all]" \
-    && "$TEAMEVOLVER_HERMES_BIN" --version >/dev/null \
     && "$OPENVIKING_CLI_BIN" --version >/dev/null \
     && chmod +x /usr/local/bin/teamEvolver-entrypoint \
     && mkdir -p "$HOME/.teamEvolver"

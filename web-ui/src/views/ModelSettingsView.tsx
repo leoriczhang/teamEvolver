@@ -19,14 +19,10 @@ const PRESET_MODELS = [
   { id: "volcengine/Doubao-Seed-2.0-lite", label: "Doubao Seed 2.0 Lite" },
 ];
 
-const DEFAULT_MODEL = "volcengine/glm-5.2-aicc";
-const DEFAULT_BASE_URL = "http://llm-model-hub-apis.sf-express.com/v1";
-
 const emptySettings = (): EvolveModelSettings => ({
-  provider: "custom",
   base_url: "",
   model: "",
-  max_tokens: 32768,
+  max_tokens: 0,
   temperature: 0.4,
   api_key: "",
 });
@@ -35,9 +31,7 @@ const emptyProcessSettings = (): EvolveProcessSettings => ({
   evolve: {
     use_session_judge: true,
     publish_mode: "validated",
-    validation_max_rejections: 1,
     human_review_enabled: true,
-    human_review_timeout_seconds: 86400,
     interval_seconds: 600,
     evidence_enabled: true,
     evidence_max_entries: 400,
@@ -64,8 +58,6 @@ const emptyProcessSettings = (): EvolveProcessSettings => ({
     poll_interval_seconds: 60,
     max_jobs_per_day: 5,
     max_concurrency: 1,
-    required_results: 3,
-    required_approvals: 2,
   },
 });
 
@@ -147,9 +139,9 @@ export default function ModelSettingsView({
   async function saveDefaultModel() {
     const payload: EvolveModelSettings = {
       ...settings,
-      model: settings.model || DEFAULT_MODEL,
-      base_url: settings.base_url?.trim() || DEFAULT_BASE_URL,
-      max_tokens: Number(settings.max_tokens || 32768),
+      model: settings.model.trim(),
+      base_url: settings.base_url.trim(),
+      max_tokens: Number(settings.max_tokens),
       temperature: Number(settings.temperature ?? 0.4),
       clear_api_key: clearKey,
     };
@@ -173,7 +165,6 @@ export default function ModelSettingsView({
         clear_api_key: draft.clear_api_key,
         temperature: draft.temperature,
         max_tokens: draft.max_tokens,
-        provider: "",
       },
     };
     const result = await api<PromptSummary>(
@@ -225,9 +216,9 @@ export default function ModelSettingsView({
     try {
       const payload: EvolveModelSettings = {
         ...settings,
-        model: settings.model || DEFAULT_MODEL,
-        base_url: settings.base_url?.trim() || DEFAULT_BASE_URL,
-        max_tokens: Number(settings.max_tokens || 32768),
+        model: settings.model.trim(),
+        base_url: settings.base_url.trim(),
+        max_tokens: Number(settings.max_tokens),
         temperature: Number(settings.temperature ?? 0.4),
         clear_api_key: clearKey,
       };
@@ -314,36 +305,31 @@ export default function ModelSettingsView({
             </div>
           )}
 
-          <div className="grid gap-3.5 md:grid-cols-2">
-            <Field label="模型选择 *">
-              <Input
-                disabled={!isAdmin}
-                list="evolve-model-presets"
-                value={settings.model || ""}
-                placeholder={DEFAULT_MODEL}
-                onChange={(e) => setSettings({ ...settings, model: e.target.value })}
-              />
-              <datalist id="evolve-model-presets">
-                {PRESET_MODELS.map((m) => (
-                  <option key={m.id} value={m.id}>{m.label}</option>
-                ))}
-              </datalist>
-            </Field>
-            <Field label="Provider">
-              <Input disabled value="custom" />
-            </Field>
-          </div>
+          <Field label="模型选择 *">
+            <Input
+              disabled={!isAdmin}
+              list="evolve-model-presets"
+              value={settings.model || ""}
+              placeholder="请输入模型 ID"
+              onChange={(e) => setSettings({ ...settings, model: e.target.value })}
+            />
+            <datalist id="evolve-model-presets">
+              {PRESET_MODELS.map((m) => (
+                <option key={m.id} value={m.id}>{m.label}</option>
+              ))}
+            </datalist>
+          </Field>
 
           <Field label="Base URL *">
             <Input
               disabled={!isAdmin}
               value={settings.base_url || ""}
-              placeholder={DEFAULT_BASE_URL}
+              placeholder="https://example.com/v1"
               onChange={(e) => setSettings({ ...settings, base_url: e.target.value })}
             />
           </Field>
           <div className="text-xs text-muted-foreground -mt-2">
-            默认 <code className="text-foreground">{DEFAULT_BASE_URL}</code>，仅在公司内网可达。留空则使用默认值。
+            填写 OpenAI-compatible API 的 Base URL。
           </div>
 
           <Field label={`API Key${settings.api_key_present ? "（已配置，留空保留）" : ""}`}>
@@ -361,17 +347,13 @@ export default function ModelSettingsView({
 
           <div className="grid gap-3.5 md:grid-cols-2">
             <Field label="最大输出 Token">
-              <select
+              <Input
                 disabled={!isAdmin}
-                value={[8192, 16384, 32768, 131072].includes(settings.max_tokens) ? settings.max_tokens : 32768}
+                type="number"
+                min="1"
+                value={settings.max_tokens || ""}
                 onChange={(e) => setSettings({ ...settings, max_tokens: Number(e.target.value) })}
-                className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm"
-              >
-                <option value={8192}>8K</option>
-                <option value={16384}>16K</option>
-                <option value={32768}>32K</option>
-                <option value={131072}>128K</option>
-              </select>
+              />
             </Field>
             <Field label="Temperature">
               <Input
@@ -465,7 +447,7 @@ export default function ModelSettingsView({
                       disabled={!isAdmin}
                       list="evolve-model-presets"
                       value={draft.model}
-                      placeholder={settings.model || DEFAULT_MODEL}
+                      placeholder={settings.model || "继承默认模型"}
                       onChange={(e) => updateStageDraft(stage.id, { model: e.target.value })}
                     />
                   </Field>
@@ -473,7 +455,7 @@ export default function ModelSettingsView({
                     <Input
                       disabled={!isAdmin}
                       value={draft.base_url}
-                      placeholder={settings.base_url || DEFAULT_BASE_URL}
+                      placeholder={settings.base_url || "继承默认 Base URL"}
                       onChange={(e) => updateStageDraft(stage.id, { base_url: e.target.value })}
                     />
                   </Field>

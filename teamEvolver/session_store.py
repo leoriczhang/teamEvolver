@@ -75,7 +75,7 @@ def _first_user_text(session: dict[str, Any]) -> str:
     for turn in session.get("turns") or []:
         if not isinstance(turn, dict):
             continue
-        text = str(turn.get("prompt_text") or turn.get("instruction") or "").strip()
+        text = str(turn.get("prompt_text") or "").strip()
         if text:
             return text
     for message in session.get("messages") or []:
@@ -118,8 +118,8 @@ def _session_fingerprint(session: dict[str, Any]) -> str:
     for turn in session.get("turns") or []:
         if not isinstance(turn, dict):
             continue
-        parts.append(str(turn.get("prompt_text") or turn.get("instruction") or ""))
-        parts.append(str(turn.get("response_text") or turn.get("response") or ""))
+        parts.append(str(turn.get("prompt_text") or ""))
+        parts.append(str(turn.get("response_text") or ""))
     if not parts:
         for message in session.get("messages") or []:
             if isinstance(message, dict):
@@ -134,7 +134,6 @@ def _session_fingerprint(session: dict[str, Any]) -> str:
         [
             str(runtime.get("type") or session.get("source") or ""),
             str(runtime.get("integration_id") or ""),
-            json.dumps(session.get("legacy_converter") or {}, sort_keys=True),
         ]
     )
     for turn in session.get("turns") or []:
@@ -415,16 +414,6 @@ class SessionStore:
         """Load one archived session payload (queued or skipped)."""
         return _load_json(self._bucket, self.archive_key(session_id))
 
-    def has_judge_score(self, session_id: str) -> bool:
-        """True when the archived session already carries a numeric judge score."""
-        session = self.load_archived(session_id)
-        if not isinstance(session, dict):
-            return False
-        judge = session.get("judge")
-        return isinstance(judge, dict) and isinstance(
-            judge.get("overall_score"), (int, float)
-        ) and not isinstance(judge.get("overall_score"), bool)
-
     def save_session_judge(self, session_id: str, judge: dict[str, Any]) -> bool:
         """Persist a session-level quality review onto archive + index.
 
@@ -514,77 +503,14 @@ class SessionStore:
 
     def list_conversations(self, *, limit: int = 100) -> list[dict[str, Any]]:
         queue_keys = self._queue_keys()
-        # The cold-start rebuild and the backfill persist a full index
-        # overwrite; hold the same RMW lock as ingest merges so a concurrent
-        # save_queued is not clobbered by a stale rebuild snapshot.
-        with _index_lock_for(self._bucket):
-            rows = self._load_session_index()
-            if not rows:
-                for key in _safe_list(self._bucket, self._key("session_archive/")):
-                    session = _load_json(self._bucket, key)
-                    if not session:
-                        continue
-                    session_id = str(session.get("session_id") or os.path.basename(key)[:-5])
-                    rows.append(
-                        {
-                            **_session_meta(
-                                session,
-                                status=str(session.get("status") or "queued"),
-                            ),
-                            "key": key,
-                        }
-                    )
-                if rows:
-                    rows.sort(
-                        key=lambda item: str(
-                            item.get("timestamp") or item.get("ingested_at") or ""
-                        ),
-                        reverse=True,
-                    )
-                    self._bucket.put_object(
-                        self.session_index_key(),
-                        json.dumps(rows[:10000], ensure_ascii=False, indent=2).encode("utf-8"),
-                    )
-            for row in rows:
-                session_id = str(row.get("session_id") or "")
-                if (
-                    str(row.get("status") or "") == "queued"
-                    and self.queue_key(session_id) not in queue_keys
-                ):
-                    row["status"] = "consumed"
-            # Repair fields introduced after the original Session index. Each
-            # archive is read at most once, then the enriched row is persisted.
-            stale_rows = [
-                row for row in rows
-                if "used_skills" not in row or "meta" not in row or "experiences" not in row
-            ]
-            if stale_rows:
-                for row in stale_rows:
-                    needs_skills = "used_skills" not in row
-                    needs_meta = "meta" not in row
-                    needs_experiences = "experiences" not in row
-                    session = (
-                        _load_json(self._bucket, self.archive_key(str(row.get("session_id") or "")))
-                        if needs_skills or needs_meta or needs_experiences
-                        else None
-                    )
-                    if needs_skills:
-                        row["used_skills"] = _session_used_skills(session) if session else []
-                    if needs_meta:
-                        row["meta"] = session_display_meta(session) if session else {}
-                    if needs_experiences:
-                        row["experiences"] = session_experiences(session) if session else []
-                rows.sort(
-                    key=lambda item: str(item.get("timestamp") or item.get("ingested_at") or ""),
-                    reverse=True,
-                )
-                if hasattr(self._bucket, "backfill_session_index_fields"):
-                    self._bucket.backfill_session_index_fields(self.session_index_key(), stale_rows)
-                else:
-                    self._bucket.put_object(
-                        self.session_index_key(),
-                        json.dumps(rows[:10000], ensure_ascii=False, indent=2).encode("utf-8"),
-                    )
+        rows = self._load_session_index()
+        for row in rows:
+            session_id = str(row.get("session_id") or "")
+            if (
+                str(row.get("status") or "") == "queued"
+                and self.queue_key(session_id) not in queue_keys
+            ):
+                row["status"] = "consumed"
         rows.sort(key=lambda item: str(item.get("timestamp") or item.get("ingested_at") or ""), reverse=True)
         return rows[: max(0, int(limit))]
 

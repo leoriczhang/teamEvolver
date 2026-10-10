@@ -10,11 +10,15 @@ import os
 import re
 from typing import Any
 
-from teamEvolver.storage import InMemoryObjectStore, LocalObjectStore, build_object_store
-
 from team_skills.evolution.kernel.enums import SLUG_RE
 from team_skills.evolution.kernel.settings import EvolveServerConfig
-from team_skills.evolution.store.object_store import append_history_record, list_session_keys, load_manifest, read_json_object
+from team_skills.evolution.store.object_store import (
+    append_history_record,
+    list_session_keys,
+    load_manifest,
+    read_json_object,
+)
+from teamEvolver.storage import InMemoryObjectStore, LocalObjectStore, build_object_store
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +53,9 @@ class EvolveEngineMixin:
                 viking_user=getattr(config, "viking_user", "") or "team",
                 viking_agent=getattr(config, "viking_agent", "") or "team-skill-evolver",
                 viking_api_key=getattr(config, "viking_api_key", "") or "",
-                viking_agent_id=getattr(config, "viking_agent_id", "") or "",
+
                 viking_root_prefix=getattr(config, "viking_root_prefix", "") or "team-skill-evolver",
-                viking_group_id=getattr(config, "viking_group_id", "") or "",
+
                 allow_fallback=bool(getattr(config, "storage_fallback_enabled", True)),
                 fallback_root=str(getattr(config, "storage_local_root", "") or ""),
             )
@@ -62,9 +66,7 @@ class EvolveEngineMixin:
                 pg_schema=str(getattr(config, "pg_schema", "") or "teamevolver"),
                 pg_pool_min=max(1, int(getattr(config, "pg_pool_min", 2) or 2)),
                 pg_pool_max=max(2, int(getattr(config, "pg_pool_max", 20) or 20)),
-                pg_command_timeout=max(
-                    1.0, float(getattr(config, "pg_command_timeout_seconds", 30.0) or 30.0)
-                ),
+                pg_command_timeout=max(1.0, float(getattr(config, "pg_command_timeout_seconds", 30.0) or 30.0)),
                 tenant_id=str(getattr(config, "pg_tenant_id", "default") or "default"),
             )
         return build_object_store(
@@ -112,7 +114,9 @@ class EvolveEngineMixin:
         # deployments where the bucket IS the local filesystem).
         if self.config.storage_backend == "postgres":
             return
-        path = self.config.history_path
+        path = str(getattr(self.config, "history_path", "") or "")
+        if not path:
+            return
         try:
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
             with open(path, "a", encoding="utf-8") as handle:
@@ -129,9 +133,7 @@ class EvolveEngineMixin:
         """
         keys = await self._call_storage(list_session_keys, self._bucket, self._session_prefix)
         cap = int(
-            getattr(self.config, "drain_max_per_cycle", 0)
-            or getattr(self.config, "evolve_drain_max_per_cycle", 0)
-            or 0
+            getattr(self.config, "drain_max_per_cycle", 0) or getattr(self.config, "evolve_drain_max_per_cycle", 0) or 0
         )
         if cap > 0 and len(keys) > cap:
             logger.info(

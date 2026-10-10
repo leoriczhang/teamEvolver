@@ -179,7 +179,7 @@ def objective_replay_decision(
     return {
         "accepted": accepted,
         "verdict": verdict,
-        "policy": "true_replay_turn_priority_v2",
+        "policy": "true-replay-turn-priority",
         "decision_basis": decision_basis,
         "primary_metric": "interaction_turns",
         "secondary_metrics": list(secondary_metrics),

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from teamEvolver.local_state import control_state_dir
 from teamEvolver.storage import LocalObjectStore
 from teamEvolver.storage.admin_kv import _pg_store
 from teamEvolver.storage.pg_store import validate_tenant_id
@@ -42,8 +43,7 @@ class CandidateFeedbackStore:
                 or ""
             )
             if not root:
-                registry = str(getattr(config, "users_registry_path", "") or "")
-                root = str(Path(registry).expanduser().parent if registry else Path.home() / ".teamEvolver")
+                root = str(control_state_dir(config))
             bucket = LocalObjectStore(Path(root) / "tenants" / tenant_id)
         return cls(bucket)
 

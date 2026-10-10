@@ -7,16 +7,12 @@ calls, or a final decision. This module owns:
 * ``parse_turn`` — lenient extraction of that JSON object from raw model
   output (reasoning-block strip, outer-fence strip, bracket-balanced
   extraction, optional json_repair for the last round only) plus turn-type
-  detection (explicit ``type`` field, structural fields, or legacy
-  one-shot shapes kept for migration compatibility).
+  detection from the current protocol fields.
 * ``normalize_classification`` — the five evidence buckets shared by plan
   and final turns.
 * ``validate_final`` — decision validation returning per-field errors so
   the runner can feed them back as a correction round instead of silently
   degrading.
-* ``legacy_suppress`` — the old one-shot normalization semantics, used as
-  the exhaustion fallback (no team-skill evidence suppresses to skip, a
-  create reusing the current name is coerced to improve, ...).
 """
 
 from __future__ import annotations
@@ -114,8 +110,7 @@ def parse_turn(raw: str, *, allow_repair: bool = False) -> dict[str, Any]:
     Returns ``{"ok": True, "type": ..., ...}`` with one of ``plan`` /
     ``calls`` / ``decision`` depending on the detected type, or
     ``{"ok": False, "error": ...}``. Detection order: explicit ``type``
-    field, then structural fields, then legacy one-shot shapes (an
-    evolve/create decision object, or a bare merge skill object).
+    field, then the current structural fields.
     """
     text = _strip_outer_fences(_strip_reasoning(raw))
     if not text:
@@ -132,14 +127,8 @@ def parse_turn(raw: str, *, allow_repair: bool = False) -> dict[str, Any]:
             turn_type = "tool_calls"
         elif isinstance(obj.get("final"), (dict, str)) or isinstance(obj.get("decision"), dict):
             turn_type = "final"
-        elif isinstance(obj.get("action"), str):
-            # Legacy one-shot decision shape (evolve/create).
-            turn_type = "final"
         elif isinstance(obj.get("action_candidate"), str) or isinstance(obj.get("plan"), list):
             turn_type = "plan"
-        elif obj.get("name") and obj.get("content"):
-            # Legacy merge output: a bare skill object.
-            turn_type = "final"
         else:
             return {"ok": False, "error": "unrecognized turn shape"}
 
@@ -177,7 +166,6 @@ def normalize_classification(raw: Any) -> dict[str, list]:
 
 def validate_final(
     decision: dict,
-    skill_name: str,
     *,
     stage: str,
 ) -> tuple[Optional[dict], list[str]]:
@@ -243,44 +231,3 @@ def validate_final(
         "skill": skill_data,
         "evidence_classification": classification,
     }, []
-
-
-def legacy_suppress(decision: Any, skill_name: str) -> Optional[dict]:
-    """Old one-shot normalization semantics, used at round exhaustion."""
-    if not isinstance(decision, dict):
-        return None
-    action = str(decision.get("action") or DecisionAction.SKIP)
-    classification = normalize_classification(decision.get("evidence_classification"))
-    if action == DecisionAction.SKIP:
-        return {
-            "action": DecisionAction.SKIP,
-            "rationale": str(decision.get("rationale") or ""),
-            "evidence_classification": classification,
-        }
-    if not classification["team_skill"]:
-        return {
-            "action": DecisionAction.SKIP,
-            "rationale": (
-                "Candidate suppressed because its evidence classification contains "
-                "no reusable team-skill evidence. "
-                + str(decision.get("rationale") or "")
-            ).strip(),
-            "evidence_classification": classification,
-        }
-
-    skill_data = decision.get("skill")
-    if not isinstance(skill_data, dict):
-        return None
-    if action == DecisionAction.CREATE:
-        if not skill_data.get("name"):
-            return None
-        if skill_name and skill_data["name"] == skill_name:
-            action = DecisionAction.IMPROVE
-    elif skill_name and not skill_data.get("name"):
-        skill_data["name"] = skill_name
-    return {
-        "action": action,
-        "rationale": str(decision.get("rationale") or ""),
-        "skill": skill_data,
-        "evidence_classification": classification,
-    }

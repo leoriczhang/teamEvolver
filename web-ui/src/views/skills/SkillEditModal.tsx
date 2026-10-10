@@ -11,7 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { toastOk, toastErr } from "@/lib/toast";
-import { api, cloudNote, type SkillDetail } from "@/api/client";
+import { api, type SkillDetail } from "@/api/client";
 import DropZone from "./DropZone";
 import { fileToB64 } from "@/lib/file";
 import { ListViewport, PaginationControls, usePagedItems } from "@/components/common";
@@ -86,7 +86,7 @@ export default function SkillEditModal({
     }
     setSaving(true);
     try {
-      const r = await api<{ created?: boolean; cloud?: any }>("/api/skills", {
+      const r = await api<{ created?: boolean; version?: number }>("/api/skills", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -97,7 +97,7 @@ export default function SkillEditModal({
           skill_md: fRaw.trim(),
         }),
       });
-      toastOk(r.created ? "已创建技能" : "已保存技能", cloudNote(r.cloud));
+      toastOk(r.created ? "已创建技能" : "已保存技能", `版本 ${r.version || 0}`);
       onClose();
       onSaved();
     } catch (e: any) {
@@ -112,11 +112,11 @@ export default function SkillEditModal({
     if (!window.confirm(`确认删除文件「${rel}」？`)) return;
     try {
       const encoded = rel.split("/").map(encodeURIComponent).join("/");
-      const r = await api<{ cloud?: any }>(
+      await api(
         `/api/skills/${encodeURIComponent(currentName.current)}/files/${encoded}`,
         { method: "DELETE" }
       );
-      toastOk("已删除文件", cloudNote(r.cloud));
+      toastOk("已删除文件");
       reloadFiles();
     } catch (e: any) {
       toastErr("删除失败", e.message);
@@ -133,7 +133,7 @@ export default function SkillEditModal({
       for (const f of Array.from(list)) {
         payload.push({ path: f.name, content_b64: await fileToB64(f) });
       }
-      const r = await api<{ written: string[]; cloud?: any }>(
+      const r = await api<{ written: string[] }>(
         `/api/skills/${encodeURIComponent(currentName.current)}/files`,
         {
           method: "POST",
@@ -141,7 +141,7 @@ export default function SkillEditModal({
           body: JSON.stringify({ files: payload }),
         }
       );
-      toastOk(`已上传 ${r.written.length} 个文件`, cloudNote(r.cloud));
+      toastOk(`已上传 ${r.written.length} 个文件`);
       reloadFiles();
     } catch (e: any) {
       toastErr("上传失败", e.message);

@@ -12,6 +12,7 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,8 +27,8 @@ from team_skills.library.bundle import write_skill_bundle
 from team_skills.library.hub import SkillHub
 
 from ..config import VOLCENGINE_OPENVIKING_ENDPOINT, resolve_viking_endpoint
-from ..config_store import ConfigStore
-from ..storage.admin_kv import read_kv, write_kv
+from ..admin.authorization import is_platform_admin, is_tenant_admin, require_platform_admin, require_tenant_admin
+from ..admin.identity_store import IdentityStore
 from ..tenants.registry import current_tenant_id
 
 _LOG = logging.getLogger(__name__)
@@ -77,18 +78,21 @@ def _request_user(request: Request) -> dict[str, Any]:
 
 
 def _is_admin_request(request: Request) -> bool:
-    return str(_request_user(request).get("role") or "user") == "admin"
+    return is_tenant_admin(_request_user(request))
 
 
 def _require_admin_request(request: Request) -> None:
-    if not _is_admin_request(request):
-        raise HTTPException(status_code=403, detail="only admin users can perform this operation")
+    require_tenant_admin(_request_user(request))
 
 
 def _require_self_or_admin(request: Request, user_id: str) -> None:
     current = _request_user(request)
-    if str(current.get("role") or "user") == "admin":
-        return
+    if is_tenant_admin(current):
+        store = getattr(request.state, "identity_store", None)
+        if store is None or any(m["status"] == "active" for m in store.memberships(
+            user_id=user_id, tenant_id=current_tenant_id()
+        )):
+            return
     if str(current.get("id") or "") != str(user_id or ""):
         raise HTTPException(status_code=403, detail="users can only access their own resources")
 
@@ -111,20 +115,9 @@ def _registry_path(config) -> Path:
 
 
 def _load_registry(path: Path, config: Any = None) -> dict[str, Any]:
-    """Load the users registry from PG (primary) or file (fallback)."""
-    if config is not None and getattr(config, "storage_pg_enabled", False):
-        data = read_kv(config, "users.json", path, tenant_id="default")
-        data.setdefault("users", [])
-        return data
+    """Read console identities from the independent control plane."""
     if config is not None:
-        try:
-            data = read_kv(config, "users.json", path)
-            if data:
-                if not isinstance(data.get("users"), list):
-                    data["users"] = []
-                return data
-        except Exception as exc:  # noqa: BLE001
-            _LOG.warning("[users_admin] PG read failed, falling back to file: %s", exc)
+        return IdentityStore(config).load_registry()
     if not path.exists():
         return {"users": []}
     try:
@@ -139,16 +132,10 @@ def _load_registry(path: Path, config: Any = None) -> dict[str, Any]:
 
 
 def _save_registry(path: Path, data: dict[str, Any], config: Any = None) -> None:
-    """Save the users registry to PG (primary) and file (always)."""
-    if config is not None and getattr(config, "storage_pg_enabled", False):
-        write_kv(config, "users.json", path, data, tenant_id="default")
-        return
+    """Compatibility writer; HTTP mutations use transactional edit_users."""
     if config is not None:
-        try:
-            write_kv(config, "users.json", path, data)
-            return
-        except Exception as exc:  # noqa: BLE001
-            _LOG.warning("[users_admin] PG write failed, falling back to file: %s", exc)
+        IdentityStore(config).edit_users(lambda target: target.update(users=data.get("users", [])))
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -259,10 +246,7 @@ def _public_space(space: dict[str, Any]) -> dict[str, Any]:
 def _effective_team_key(config, data: dict[str, Any] | None = None) -> str:
     """Return the tenant-level Trusted Root Key."""
     del data
-    return (
-        str(getattr(config, "sharing_viking_api_key", "") or "")
-        or str(getattr(config, "sharing_viking_team_api_key", "") or "")
-    )
+    return str(getattr(config, "sharing_viking_api_key", "") or "")
 
 
 def _effective_public_space(config, user: dict[str, Any], *, space: str) -> dict[str, Any]:
@@ -283,6 +267,8 @@ def _public_user(user: dict[str, Any], config=None) -> dict[str, Any]:
         "display_name": user.get("display_name", ""),
         "email": user.get("email", ""),
         "role": user.get("role", "user"),
+        "platform_role": user.get("platform_role", "user"),
+        "status": user.get("status", "active"),
         "agent_identities": dict(user.get("agent_identities") or {}),
         "agent_subjects": [
             dict(item)
@@ -607,24 +593,7 @@ def sync_agent_subject_mappings(
 
 
 def _default_agent_subjects(config, user_id: str) -> list[dict[str, str]]:
-    if config is None:
-        return []
-    from ..integrations.agent_registry import list_agents
-
-    subjects: list[dict[str, str]] = []
-    for integration in list_agents(config):
-        integration_id = str(integration.get("agent_id") or "").strip()
-        runtime_type = str(integration.get("runtime_type") or "").strip().lower()
-        if not integration_id or not runtime_type:
-            continue
-        subjects.append(
-            {
-                "integration_id": integration_id,
-                "runtime_type": runtime_type,
-                "external_subject": user_id,
-            }
-        )
-    return subjects
+    return []
 
 
 def _upsert_user(
@@ -652,6 +621,9 @@ def _upsert_user(
         "display_name": str(body.get("display_name", (existing or {}).get("display_name", user_id)) or user_id),
         "email": str(body.get("email", (existing or {}).get("email", "")) or ""),
         "role": _normalize_role(body.get("role"), str((existing or {}).get("role") or "user")),
+        "platform_role": (existing or {}).get("platform_role", "user"),
+        "status": (existing or {}).get("status", "active"),
+        "external_identity": (existing or {}).get("external_identity"),
         "agent_identities": _normalize_agent_identities(
             body.get("agent_identities"),
             (existing or {}).get("agent_identities"),
@@ -703,6 +675,8 @@ def _upsert_user(
 
 
 def _hub_from_user(config, user: dict[str, Any], *, space: str) -> SkillHub:
+    from ..tenants.registry import effective_config, get_current_tenant
+    config = effective_config(None, get_current_tenant(), config)
     if space not in _SPACES:
         raise HTTPException(status_code=400, detail=f"unsupported skill space: {space}")
     is_team = space == "team"
@@ -717,9 +691,7 @@ def _hub_from_user(config, user: dict[str, Any], *, space: str) -> SkillHub:
         viking_account=str(getattr(config, "sharing_viking_account", "") or _DEFAULT_ACCOUNT),
         viking_user=str(getattr(config, "sharing_viking_user", "") or _DEFAULT_USER),
         viking_agent=str(getattr(config, "sharing_viking_agent", "") or _DEFAULT_AGENT),
-        viking_agent_id=str(getattr(config, "sharing_viking_agent_id", "") or ""),
         viking_root_prefix=str(getattr(config, "sharing_viking_root_prefix", "") or _DEFAULT_ROOT_PREFIX),
-        viking_group_id=str(getattr(config, "sharing_viking_group_id", "") or ""),
         viking_namespace="resources",
     )
 
@@ -897,10 +869,7 @@ def _openviking_endpoint(config) -> str:
 
 
 def _openviking_root_key(config) -> str:
-    return (
-        str(getattr(config, "sharing_viking_api_key", "") or "").strip()
-        or str(getattr(config, "sharing_viking_team_api_key", "") or "").strip()
-    )
+    return str(getattr(config, "sharing_viking_api_key", "") or "").strip()
 
 
 def list_openviking_accounts(config) -> dict[str, Any]:
@@ -1119,16 +1088,9 @@ def _ensure_account_admin_user(
 
 
 def _map_openviking_role(value: Any) -> str:
-    """Map an OpenViking account role onto teamEvolver's two-level role model.
-
-    OpenViking uses ROOT / ADMIN / USER; teamEvolver only distinguishes admin
-    from user. An OpenViking account ``admin`` (or ``root``) becomes the
-    teamEvolver admin for that tenant, which is exactly the "each account has
-    its own admin" ownership model — teamEvolver reflects OpenViking, it does
-    not invent a parallel identity source.
-    """
+    """External account roles never grant platform authority."""
     role = str(value or "user").strip().lower()
-    return "admin" if role in {"admin", "root"} else "user"
+    return "tenant_admin" if role == "admin" else "member"
 
 
 def list_openviking_account_users(config, account: str) -> dict[str, Any]:
@@ -1201,14 +1163,7 @@ def import_openviking_account_users(
     account: str,
     user_ids: list[str],
 ) -> dict[str, Any]:
-    """Materialize selected OpenViking account users into the local registry.
-
-    Import is additive and idempotent: users that already exist in the
-    teamEvolver registry are left untouched (so their roles, spaces and
-    passwords are never reset), and only genuinely new identities are created.
-    The imported role follows OpenViking's account role, keeping the account's
-    own admin as the teamEvolver admin for that tenant.
-    """
+    """Import account identities without merging unrelated same-name users."""
     account_id = str(account or "").strip() or str(
         getattr(config, "sharing_viking_account", "") or "default"
     ).strip() or "default"
@@ -1218,33 +1173,37 @@ def import_openviking_account_users(
     }
     requested = [str(uid or "").strip() for uid in (user_ids or []) if str(uid or "").strip()]
 
-    path = _registry_path(config)
-    data = _load_registry(path, config)
-    existing_ids = {str(user.get("id") or "") for user in data.get("users") or []}
-
     imported: list[str] = []
     skipped_existing: list[str] = []
     missing: list[str] = []
-    dirty = False
-    for raw_id in requested:
-        row = available.get(raw_id)
-        if row is None:
-            missing.append(raw_id)
-            continue
-        user_id = _slug(raw_id)
-        if user_id in existing_ids:
-            skipped_existing.append(user_id)
-            continue
-        _upsert_user(
-            data,
-            {"id": user_id, "role": row.get("role") or "user"},
-            config=config,
-        )
-        existing_ids.add(user_id)
-        imported.append(user_id)
-        dirty = True
-    if dirty:
-        _save_registry(path, data, config)
+    store = IdentityStore(config)
+    tenant = current_tenant_id()
+    membership_updates = []
+    def edit(data):
+        existing = {u["id"]: u for u in data["users"]}
+        for raw_id in requested:
+            row = available.get(raw_id)
+            if row is None:
+                missing.append(raw_id)
+                continue
+            user_id = f"{tenant}.{_slug(raw_id)}"
+            identity = {"provider": "openviking", "account": account_id, "user_id": raw_id}
+            if user_id in existing:
+                if existing[user_id].get("external_identity") != identity:
+                    raise HTTPException(409, f"IMPORT_ID_COLLISION: {user_id}")
+                skipped_existing.append(user_id)
+                continue
+            created = _upsert_user(data, {"id": user_id, "display_name": raw_id,
+                                         "personal_space": {"viking_user": raw_id}}, config=config)
+            created["external_identity"] = identity
+            created["personal_space"]["viking_user"] = raw_id
+            existing[user_id] = created
+            membership_updates.append({
+                "tenant_id": tenant, "user_id": user_id, "role": row["role"], "status": "active",
+                "created_at": time.time(), "created_by": "openviking-import",
+            })
+            imported.append(user_id)
+    store.edit_users(edit, actor="openviking-import", action="user.import", membership_updates=membership_updates)
     return {
         "account": account_id,
         "imported": sorted(imported),
@@ -1318,7 +1277,15 @@ class UsersAdminMixin:
             data = await asyncio.to_thread(_load_registry, _registry_path(owner.config), owner.config)
             users = data.get("users") or []
             config = owner._workspace_config()
-            if not _is_admin_request(request):
+            if is_platform_admin(_request_user(request)):
+                pass
+            elif _is_admin_request(request):
+                members = await asyncio.to_thread(
+                    IdentityStore(owner.config).memberships, tenant_id=current_tenant_id(),
+                )
+                ids = {m["user_id"] for m in members if m["status"] == "active"}
+                users = [u for u in users if u["id"] in ids]
+            else:
                 current_id = str(_request_user(request).get("id") or "")
                 users = [user for user in users if str(user.get("id") or "") == current_id]
             return JSONResponse(content={
@@ -1331,8 +1298,8 @@ class UsersAdminMixin:
         @app.get("/api/openviking-accounts")
         async def api_list_openviking_accounts(request: Request):
             """List OpenViking accounts with the tenant Root Key (admin)."""
-            _require_admin_request(request)
-            return JSONResponse(content=list_openviking_accounts(owner._workspace_config()))
+            require_platform_admin(_request_user(request))
+            return JSONResponse(content=await asyncio.to_thread(list_openviking_accounts, owner._workspace_config()))
 
         @app.get("/api/openviking-accounts/{account}/users")
         async def api_list_openviking_account_users(account: str, request: Request):
@@ -1343,13 +1310,13 @@ class UsersAdminMixin:
             teamEvolver registry. Each row is annotated with whether it has
             already been imported locally.
             """
-            _require_admin_request(request)
+            require_platform_admin(_request_user(request))
             config = owner._workspace_config()
-            payload = list_openviking_account_users(config, account)
-            registry = _load_registry(_registry_path(owner.config), owner.config)
-            local_ids = {str(user.get("id") or "") for user in registry.get("users") or []}
+            payload = await asyncio.to_thread(list_openviking_account_users, config, account)
+            registry = await asyncio.to_thread(_load_registry, _registry_path(owner.config), owner.config)
+            identities = [u.get("external_identity") for u in registry.get("users") or []]
             for row in payload.get("users") or []:
-                row["imported"] = _slug(row["user_id"]) in local_ids
+                row["imported"] = {"provider": "openviking", "account": account, "user_id": row["user_id"]} in identities
             return JSONResponse(content=payload)
 
         @app.post("/api/openviking-accounts/{account}/import-users")
@@ -1369,29 +1336,31 @@ class UsersAdminMixin:
             if not isinstance(raw_ids, list):
                 raise HTTPException(status_code=400, detail="user_ids must be a list")
             config = owner._workspace_config()
-            report = import_openviking_account_users(config, account, raw_ids)
-            for user_id in report.get("imported") or []:
-                sync_openviking_user(config, user_id)
+            if account != config.sharing_viking_account:
+                raise HTTPException(403, "TENANT_ACCOUNT_MISMATCH")
+            report = await asyncio.to_thread(import_openviking_account_users, config, account, raw_ids)
             return JSONResponse(content=report)
 
         @app.get("/api/users/{user_id}")
         async def api_get_user(user_id: str, request: Request):
-            _require_self_or_admin(request, user_id)
+            if _request_user(request).get("id") != user_id:
+                require_platform_admin(_request_user(request))
             data = _load_registry(_registry_path(owner.config), owner.config)
             _idx, user = _find_user(data, user_id)
             return JSONResponse(content=_public_user(user, owner.config))
 
         @app.post("/api/users")
         async def api_upsert_user(body: dict[str, Any], request: Request):
-            _require_admin_request(request)
-            path = _registry_path(owner.config)
-            data = _load_registry(path, owner.config)
+            require_platform_admin(_request_user(request))
+            if body.get("role", "user") != "user" or "platform_role" in body:
+                raise HTTPException(400, "Use the platform access or tenant membership endpoint to assign roles")
             config = owner._workspace_config()
-            user = _upsert_user(data, body, config=config)
-            _save_registry(path, data, owner.config)
-            sync_report = sync_openviking_user(config, str(user.get("id") or ""))
+            user = await asyncio.to_thread(
+                IdentityStore(owner.config).edit_users,
+                lambda data: _upsert_user(data, body, config=config),
+                actor=_request_user(request)["id"],
+            )
             payload = _public_user(user, config)
-            payload["openviking_sync"] = sync_report
             return JSONResponse(content=payload)
 
         @app.put("/api/users/{user_id}/profile")
@@ -1400,40 +1369,33 @@ class UsersAdminMixin:
             body: dict[str, Any],
             request: Request,
         ):
-            _require_self_or_admin(request, user_id)
-            path = _registry_path(owner.config)
-            data = _load_registry(path, owner.config)
-            _idx, existing = _find_user(data, user_id)
-            payload = {
-                "id": user_id,
-                "display_name": body.get(
-                    "display_name", existing.get("display_name", user_id)
-                ),
-                "email": body.get("email", existing.get("email", "")),
-                "role": existing.get("role", "user"),
-                "password": body.get("password", ""),
-                "personal_space": body.get(
-                    "personal_space", existing.get("personal_space", {})
-                ),
-                "team_space": existing.get("team_space", {}),
-                "agent_identities": body.get(
-                    "agent_identities", existing.get("agent_identities", {})
-                ),
-                "agent_subjects": existing.get("agent_subjects", []),
-            }
+            actor = _request_user(request)
+            if actor.get("id") != user_id:
+                require_platform_admin(actor)
             config = owner._workspace_config()
-            user = _upsert_user(data, payload, config=config)
-            _save_registry(path, data, owner.config)
+            def edit(data):
+                _idx, existing = _find_user(data, user_id)
+                allowed = {"display_name", "email", "password"}
+                if is_platform_admin(actor):
+                    allowed |= {"personal_space", "agent_identities"}
+                payload = {k: v for k, v in body.items() if k in allowed}
+                payload["id"] = user_id
+                return _upsert_user(data, payload, config=config)
+            user = await asyncio.to_thread(
+                IdentityStore(owner.config).edit_users, edit, actor=actor["id"], action="user.profile",
+            )
             return JSONResponse(content=_public_user(user, config))
 
         @app.delete("/api/users/{user_id}")
         async def api_delete_user(user_id: str, request: Request):
-            _require_admin_request(request)
-            path = _registry_path(owner.config)
-            data = _load_registry(path, owner.config)
-            idx, user = _find_user(data, user_id)
-            data["users"].pop(idx)
-            _save_registry(path, data, owner.config)
+            require_platform_admin(_request_user(request))
+            def remove(data):
+                idx, user = _find_user(data, user_id)
+                data["users"].pop(idx)
+                return user
+            user = await asyncio.to_thread(
+                IdentityStore(owner.config).edit_users, remove, actor=_request_user(request)["id"], action="user.delete",
+            )
             return JSONResponse(content={"deleted": True, "id": user.get("id")})
 
         @app.get("/api/users/{user_id}/skills")
@@ -1462,7 +1424,7 @@ class UsersAdminMixin:
             }
             data = _load_registry(_registry_path(owner.config), owner.config)
             _idx, user = _find_user(data, user_id)
-            if direction == "personal_to_team" and str(user.get("role") or "user") != "admin":
+            if direction == "personal_to_team" and not _is_admin_request(request):
                 raise HTTPException(
                     status_code=403,
                     detail="only admin users can publish personal skills to team space",

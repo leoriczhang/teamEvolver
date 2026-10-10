@@ -1,0 +1,7 @@
+{
+  "classification": "real model small synthetic sample; not stress or production data",
+  "model": "volcengine/glm-5.2-aicc",
+  "status": "blocked",
+  "code": "MODEL_CREDENTIAL_MISSING",
+  "duration_seconds": 0.0
+}

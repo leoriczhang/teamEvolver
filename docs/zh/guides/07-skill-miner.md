@@ -216,7 +216,7 @@ GET /api/mining/trajectory-benchmarks/<run_id>
 ```
 
 完成后产物位于 `trajectory_benchmarks/<run_id>/`：
-- `benchmark.json`：`team-replay.dataset.v2` 格式 Test Dataset
+- `benchmark.json`：`team-replay.dataset` 格式 Test Dataset
 - `BENCHMARK.md`：人工可读版
 - `manifest.json`：来源摘要、难度和维度统计
 
@@ -271,7 +271,7 @@ python3 run_multi_session.py run --sessions 3 --only EVAL-01
 ```
 
 产物位于 `benchmark_sessions/`：
-- `snapshots/build-N.json`：每次构建的 `team-replay.dataset.v2` 快照；兼容读取历史 JSONL
+- `snapshots/build-N.json`：每次构建的 `team-replay.dataset` 快照；只接受统一 Test Dataset 格式
 - `intersection.md`：交集清单
 - `DIM_*/session-N.md`：每个 session 的完整对话与阅卷
 - `SESSIONS_REPORT.md`：逐维稳定性汇总
@@ -328,7 +328,7 @@ python3 web_console/server.py
 
 ## LIFT 集成
 
-Skill Miner 优先读取 `benchmark.json`（兼容旧 `benchmark.jsonl`）并生成 LIFT 待审核草稿，写入 `lift_datasets/drafts/`。如需禁用：
+Skill Miner 只读取统一格式的 `benchmark.json`，显式启用后可生成 LIFT 待审核草稿，写入 `lift_datasets/drafts/`。如需禁用：
 
 ```bash
 export SKILLMINER_LIFT_AUTO_DRAFT=0
@@ -519,3 +519,9 @@ bash clean_artifacts.sh
 - 不要提交 `.env`、`.hermes_home/`、模型响应、运行日志或生成产物到版本控制
 - 生成的 Skill 与 Benchmark 应经过领域专家审核后再用于生产环境
 - 轨迹 Benchmark 挖掘会自动脱敏密钥、手机号、邮箱和本机用户路径；源轨迹原文不落盘，`manifest.json` 只保留 ID、数量和 SHA-256 摘要
+
+## 与当前控制面集成
+
+知识库挖掘路由、文档转换和 Wiki 图分别位于 `team_miner/routes.py`、`team_miner/document_converter.py` 和 `team_miner/wiki_graph.py`。控制台同时保留挖掘总览、知识源、Skill 挖掘和知识库挖掘入口，并使用当前租户权限。
+
+挖掘产物直接使用 `team_replay/datasets/schema.py` 定义的统一 Test Dataset 格式，不支持历史格式。提交 Skill Candidate 时携带完整、可校验的 Bundle；Baseline 从当前租户 SkillHub 读取完整已发布 Bundle，候选评审与发布继续使用公共流程。

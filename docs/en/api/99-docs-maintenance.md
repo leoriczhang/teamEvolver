@@ -8,7 +8,7 @@ Documentation must be updated synchronously in the following situations:
 
 | Scenario | Documents Requiring Update |
 |---------|---------------------------|
-| API interface changes (adding, modifying, deleting endpoints, parameter changes) | Corresponding files in `docs/en/api/`, and `docs/en/agent-integrations/02-protocol-v1.md` |
+| API interface changes (adding, modifying, deleting endpoints, parameter changes) | Corresponding files in `docs/en/api/`, and `docs/en/agent-integrations/06-protocol-v2.md` |
 | New features or capabilities (new capabilities, new integration methods) | Related files in `docs/en/agent-integrations/`, new API documentation when necessary |
 | Configuration changes (adding/modifying/deprecating environment variables, config parameters) | Related guide documents and parameter descriptions in API documentation |
 | Concept changes (terminology, architecture, process adjustments) | Terminology usage in `docs/en/concepts/` and related documents |
@@ -40,7 +40,7 @@ docs/
 
 ### File Naming Conventions
 
-- Use **numeric prefixes** to control ordering: `01-overview.md`, `02-protocol-v1.md`, `99-docs-maintenance.md`
+- Use **numeric prefixes** to control ordering: `01-overview.md`, `02-agent-register.md`, `99-docs-maintenance.md`
 - Numeric prefix and title are connected by a hyphen `-`
 - Use lowercase English filenames, words separated by hyphens
 - Overview files are uniformly named `01-overview.md`
@@ -72,7 +72,7 @@ Examples:
 - `teamEvolver/integrations/agent_principal.py:resolve_agent_principal` -- Module-level function
 - `teamEvolver/proxy/agent_context.py:119` -- Specific line number (used when necessary)
 - `team_replay/adapters.py:82` -- HttpReplayAdapter class
-- `teamEvolver/integrations/agent_protocol.py` -- Entire file (when no specific symbol)
+- `session_ingestion/push/protocol.py` -- Entire file (when no specific symbol)
 
 Notes:
 

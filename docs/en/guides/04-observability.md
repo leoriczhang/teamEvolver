@@ -12,9 +12,9 @@ teamEvolver deeply integrates Langfuse to provide LLM application observability.
 
 Related code at:
 - `teamEvolver/observability/langfuse.py`: Tracing runtime and configuration management
-- `teamEvolver/integrations/langfuse_client.py`: Langfuse v3 public API HTTP client
-- `teamEvolver/integrations/langfuse_pull.py`: Session pull orchestration layer
-- `teamEvolver/integrations/langfuse_convert.py`: Langfuse session format to teamEvolver format conversion
+- `session_ingestion/adapters/_shared/langfuse_client.py`: Langfuse v3 public API HTTP client
+- `session_ingestion/adapters/_shared/langfuse_pull.py`: Session pull orchestration layer
+- `session_ingestion/adapters/_shared/langfuse_convert.py`: Langfuse Session format to teamEvolver format conversion
 
 ## Two Mode Comparison
 

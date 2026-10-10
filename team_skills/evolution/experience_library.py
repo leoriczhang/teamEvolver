@@ -8,7 +8,6 @@ from collections import Counter
 from typing import Any
 
 from team_skills.evolution.stages.judge import _parse_skill_experiences
-from teamEvolver.storage import is_not_found_error
 
 
 def _digest(*parts: str) -> str:
@@ -27,92 +26,18 @@ def session_experiences(session: dict[str, Any]) -> list[dict[str, str]]:
 
 
 class ExperienceLibraryStore:
-    """Aggregate indexed Session lessons and historical Skill Evidence.
+    """Aggregate lessons from the current Session index.
 
     The Session index is updated atomically with ingestion on PostgreSQL and
     under its existing per-store lock on NAS. No Skill upload, engine startup,
     extra model call or successful evolution cycle is required to read it.
     """
 
-    def __init__(self, bucket, prefix: str = "", *, session_store=None) -> None:
-        self._bucket = bucket
-        self._prefix = prefix
+    def __init__(self, session_store) -> None:
         self._sessions = session_store
 
-    def _load(self, key: str) -> dict[str, Any] | None:
-        try:
-            return json.loads(self._bucket.get_object(key).read())
-        except Exception as exc:
-            if is_not_found_error(exc):
-                return None
-            raise
-
-    def record_sessions(self, skill_name: str, sessions: list[dict[str, Any]]) -> None:
-        """Compatibility writer for per-Skill Evidence, deduped by Session."""
-        for session in sessions:
-            sid = str(session.get("session_id") or "").strip()
-            if not sid:
-                continue
-            experiences = [
-                item for item in session_experiences(session)
-                if item["skill_name"] == skill_name
-            ]
-            scores = session.get("_judge_scores") or session.get("judge") or {}
-            row = {
-                "session_id": sid,
-                "user_alias": session.get("user_alias") or "",
-                "timestamp": session.get("timestamp") or session.get("observed_at") or "",
-                "ingested_at": session.get("ingested_at") or "",
-                "judge": {"overall_score": scores.get("overall_score")},
-                "experiences": experiences,
-            }
-            key = f"{self._prefix}experience_library/sessions/{_digest(skill_name, sid)}.json"
-            self._bucket.put_object(key, json.dumps(row, ensure_ascii=False).encode())
-
-    def backfill_legacy_evidence(self) -> int:
-        """Import legacy per-Skill model evidence without loading Skill files."""
-        count = 0
-        for obj in self._bucket.iter_objects(prefix=f"{self._prefix}skill_evidence/"):
-            if not obj.key.endswith(".json"):
-                continue
-            payload = self._load(obj.key) or {}
-            skill_name = str(payload.get("skill_name") or "").strip()
-            if not skill_name:
-                continue
-            for evidence in payload.get("evidence") or []:
-                sid = str(evidence.get("session_id") or "").strip()
-                kind = str(evidence.get("evolution_evidence") or "").strip().lower()
-                reason = str(evidence.get("evidence_reason") or "").strip()
-                if not sid or kind not in {"defect", "exemplary"} or not reason:
-                    continue
-                key = f"{self._prefix}experience_library/sessions/{_digest(skill_name, sid)}.json"
-                if self._load(key) is not None:
-                    continue
-                self.record_sessions(skill_name, [{
-                    **evidence,
-                    "_judge_scores": {
-                        "overall_score": evidence.get("judge_overall_score"),
-                        "skill_experiences": [{
-                            "skill_name": skill_name,
-                            "kind": kind,
-                            "experience_key": f"legacy_{_digest(reason)}",
-                            "description": reason,
-                        }],
-                    },
-                }])
-                count += 1
-        return count
-
     def list_experiences(self, *, kind: str = "", skill: str = "", search: str = "") -> dict[str, Any]:
-        rows = [
-            self._load(obj.key) or {}
-            for obj in self._bucket.iter_objects(prefix=f"{self._prefix}experience_library/sessions/")
-            if obj.key.endswith(".json")
-        ]
-        if self._sessions is not None:
-            # Existing archives are repaired into the index once; subsequent
-            # requests read only lightweight metadata, never full trajectories.
-            rows.extend(self._sessions.list_conversations(limit=10000))
+        rows = self._sessions.list_conversations(limit=10000)
         groups: dict[str, dict[str, Any]] = {}
         for row in rows:
             sid = str(row.get("session_id") or "")

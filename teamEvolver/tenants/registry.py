@@ -48,8 +48,9 @@ AGENT_TOKEN_PREFIX = "tevt_"
 RETIRED_AGENT_TOKEN_PREFIX = "tev1_"
 _COLS = "tenant_id, display_name, status, config"
 
-# Token lifetime for the registry caches; short enough for rotations/disables
-# to take effect quickly, long enough to skip PG on the hot path.
+# Retained for constructor compatibility. Authorization lookups deliberately do
+# not use process-local caches: token rotation and tenant disable must take
+# effect on every replica immediately.
 _CACHE_TTL_SECONDS = 60.0
 
 
@@ -125,10 +126,10 @@ QUOTA_KEYS = frozenset({QUOTA_MAX_CONCURRENT_SESSIONS, QUOTA_MAX_EVOLVE_PER_DAY}
 SERVICE_WIDE_CONFIG_KEYS = frozenset(
     {
         "logging",
+        "compile",
+        "self_registration_enabled",
         "tenant_machine_token",
-        "agent_protocol_identity_mode",
         "skills_delivery_mode",
-        "sharing_backend",
         "sharing_skill_backend",
         "sharing_session_backend",
         "sharing_local_root",
@@ -186,7 +187,7 @@ def apply_tenant_config_overrides(base: Any, overrides: dict[str, Any] | None) -
             )
         elif key in valid:
             kwargs[key] = value
-        elif key in QUOTA_KEYS:
+        elif key in QUOTA_KEYS or key == "console_settings":
             continue  # scheduler-level quota, not a TeamEvolverConfig field
         else:
             logger.warning(
@@ -199,7 +200,7 @@ def apply_tenant_config_overrides(base: Any, overrides: dict[str, Any] | None) -
 
 def effective_config(registry: "TenantRegistry", ctx: TenantContext | None, base: Any) -> Any:
     """Convenience: base config merged with the tenant's overrides."""
-    config = base if ctx is None or ctx.is_default() else apply_tenant_config_overrides(base, ctx.config_overrides)
+    config = base if ctx is None else apply_tenant_config_overrides(base, ctx.config_overrides)
     if bool(getattr(base, "storage_pg_enabled", False)):
         skill_backend = str(
             getattr(base, "sharing_skill_backend", "") or "postgres"
@@ -308,17 +309,11 @@ class TenantRegistry:
             return None
         if not self._pg_enabled:
             return self.default_context() if tid == DEFAULT_TENANT_ID else None
-        cached = self._cache_get(self._by_id, tid)
-        if cached is not None or tid in self._by_id:
-            return cached
         row = self._run(self._fetch_tenant(tid))
-        ctx = self._row_to_ctx(row)
-        with self._lock:
-            self._by_id[tid] = (time.time() + self._ttl, ctx)
-        return ctx
+        return self._row_to_ctx(row)
 
     def resolve_by_agent_token(self, token: str) -> TenantContext | None:
-        """Map a ``tevt_`` machine credential to its tenant (cached, incl. negatives)."""
+        """Map a ``tevt_`` credential to its current active tenant."""
         token = str(token or "").strip()
         if not token.startswith(AGENT_TOKEN_PREFIX):
             return None
@@ -331,29 +326,15 @@ class TenantRegistry:
             ):
                 return None
             return self.default_context()
-        token_hash = hash_agent_token(token)
-        cached = self._cache_get(self._by_token, token_hash)
-        if cached is not None or token_hash in self._by_token:
-            return cached
-        row = self._run(self._fetch_by_token(token_hash))
-        ctx = self._row_to_ctx(row)
-        with self._lock:
-            self._by_token[token_hash] = (time.time() + self._ttl, ctx)
-            if ctx is not None:
-                self._by_id[ctx.tenant_id] = (time.time() + self._ttl, ctx)
-        return ctx
+        row = self._run(self._fetch_by_token(hash_agent_token(token)))
+        return self._row_to_ctx(row)
 
     def list_tenants(self) -> list[TenantContext]:
         if not self._pg_enabled:
             return [self.default_context()]
         rows = self._run(self._fetch_all())
         ctxs = [self._row_to_ctx(row) for row in rows]
-        ctxs = [ctx for ctx in ctxs if ctx is not None]
-        with self._lock:
-            now = time.time() + self._ttl
-            for ctx in ctxs:
-                self._by_id[ctx.tenant_id] = (now, ctx)
-        return ctxs
+        return [ctx for ctx in ctxs if ctx is not None]
 
     # -- admin mutations ------------------------------------------------------ #
 

@@ -28,6 +28,8 @@ class Operations:
         self.config, self.resolve, self.transport = config, resolver, transport
         self.store = ControlStore(dsn, config.queue_limit, schema=schema)
         self.worker = None
+        from .kee.service import Governance
+        self.kee = Governance(self)
 
     @diagnostic("initialize")
     async def start(self):
@@ -181,6 +183,9 @@ class Operations:
             p = {"tenant": job["tenant"], "subject": job["subject"]}
             event(logger, "ontology.reconciling", job_id=job["id"], state=job["state"], tenant=job["tenant"])
             try:
+                if job["request"].get("contract") == "kee.method-build.v1":
+                    await self.store.resume(p, job["id"], [job["state"]], job["result"])
+                    continue
                 if job["state"] in {"publishing", "commit_unknown"}:
                     await self.commit(p, job["id"], job["result"]["commit_key"])
                 elif job["state"] == "approved":
@@ -197,6 +202,10 @@ class Operations:
 
     @diagnostic("execute")
     async def execute(self, job):
+        if job.get("request", {}).get("contract") == "kee.method-build.v1":
+            if time.time() < job["result"].get("retry_at", 0):
+                return await self.store.checkpoint(job, job["result"], "queued")
+            return await self.kee.step(job)
         if job.get("request", {}).get("contract", "").startswith("sf.te.ontology."):
             from .compile_flow import CompileFlow
 
@@ -441,7 +450,8 @@ class Operations:
         if job.get("request", {}).get("contract", "").startswith("sf.te.ontology."):
             from .compile_flow import CompileFlow
 
-            await CompileFlow(self).cancel_remote(p, job)
+            if await CompileFlow(self).cancel_remote(p, job) is False:
+                return job  # recover() reconciles the durable cancelling fence.
             if job["request"]["contract"] == "sf.te.ontology.compile.v1":
                 await self.ov(p, "POST", "/artifacts/cancel", {"job_id": job_id, "attempt": max(1, job["attempt"])})
             return await self.store.change(p, job_id, ["cancelling"], "cancelled")

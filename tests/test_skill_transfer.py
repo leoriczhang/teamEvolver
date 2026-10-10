@@ -6,7 +6,6 @@ import io
 import json
 import subprocess
 import zipfile
-from pathlib import Path
 
 import httpx
 import pytest
@@ -33,15 +32,20 @@ def encoded(*items):
 
 
 def config(tmp_path):
-    return TeamEvolverConfig(skills_dir=str(tmp_path / "working"), sharing_enabled=True,
-                             sharing_skill_backend="local", sharing_skill_local_root=str(tmp_path / "store"),
-                             sharing_skill_mirror_enabled=False, skills_delivery_mode="pull")
+    return TeamEvolverConfig(
+        skills_runtime_cache_dir=str(tmp_path / "working"),
+        sharing_skill_backend="local",
+        sharing_skill_local_root=str(tmp_path / "store"),
+        sharing_skill_mirror_enabled=False,
+    )
 
 
 def service(tmp_path, tenant="default", adapters=None):
     cfg = config(tmp_path)
-    return SkillTransferService(str(tmp_path / "working" / tenant),
-                                SkillMutationService.from_config(cfg, tenant_id=tenant), adapters)
+    return SkillTransferService(
+        SkillMutationService.from_config(cfg, tenant_id=tenant),
+        adapters,
+    )
 
 
 def test_zip_round_trip_complete_bundle_and_version_noop(tmp_path):
@@ -50,13 +54,11 @@ def test_zip_round_trip_complete_bundle_and_version_noop(tmp_path):
     repeat = svc.import_skills("zip", encoded(bundle()))["imported"][0]
     assert repeat["version"] == 1 and repeat["status"] == "unchanged"
     assert svc.import_skills("zip", encoded(bundle(body="two")))["imported"][0]["version"] == 2
-    # Export the versioned source even if a stale working copy exists.
-    Path(svc.skills_dir, "demo", "SKILL.md").write_text("stale")
     exported = svc.export_skills("zip", ["demo"], {})
     restored = discover(read_zip(exported.content))[0]
     assert restored.files == bundle(body="two").files
     assert svc.hub._read_version_bundle("demo", 1) == bundle().files
-    assert not list((tmp_path / "store").glob("skill_sync_outbox/*"))
+    assert not list((tmp_path / "store").glob("skill_rollout_outbox/*"))
 
 
 def test_conflicts_and_same_name_across_tenants(tmp_path):
@@ -100,15 +102,15 @@ def test_archive_duplicate_names_invalid_skill_and_symlink_are_rejected(tmp_path
         discover({"a/SKILL.md": b"---\nname: a\n---\nno description"})
 
 
-def test_storage_failure_does_not_replace_working_bundle(tmp_path, monkeypatch):
+def test_storage_failure_keeps_published_bundle(tmp_path, monkeypatch):
     svc = service(tmp_path)
     svc.import_skills("zip", encoded(bundle()))
-    def fail(command):
+    def fail(**_kwargs):
         raise RuntimeError("token-must-not-leak")
-    monkeypatch.setattr(svc.mutations, "execute", fail)
+    monkeypatch.setattr(svc.mutations, "publish_bundle", fail)
     result = svc.import_skills("zip", encoded(bundle(body="replacement")))
     assert result["errors"] and "token-must-not-leak" not in json.dumps(result)
-    assert Path(svc.skills_dir, "demo", "SKILL.md").read_bytes() == bundle().files["SKILL.md"]
+    assert svc.hub.read_skill_bundle("demo") == bundle().files
 
 
 def git(repo, *args):
@@ -197,13 +199,19 @@ def test_http_routes_auth_legacy_and_tenant_scope(tmp_path, monkeypatch):
     from teamEvolver.proxy import routes
     cfg = config(tmp_path)
     owner = type("Owner", (SkillsAdminMixin,), {} )()
-    owner.config, owner.skill_manager = cfg, None
+    owner.config = cfg
     monkeypatch.setattr(routes, "_tenant_effective_config", lambda owner: cfg)
     app = FastAPI()
     @app.middleware("http")
     async def identity(request, call_next):
-        request.state.console_user = {"role": request.headers.get("role", "user")}
-        token = set_current_tenant(TenantContext(tenant_id=request.headers.get("tenant", "default")))
+        tenant_id = request.headers.get("tenant", "default")
+        role = request.headers.get("role", "user")
+        request.state.console_user = {
+            "role": role,
+            "tenant_id": tenant_id,
+            "capabilities": ["tenant.manage"] if role == "admin" else [],
+        }
+        token = set_current_tenant(TenantContext(tenant_id=tenant_id))
         try:
             return await call_next(request)
         finally:
@@ -213,18 +221,50 @@ def test_http_routes_auth_legacy_and_tenant_scope(tmp_path, monkeypatch):
         denied = client.post("/api/skills/import", json={"channel": "zip", "options": encoded(bundle())})
         assert denied.status_code == 403
         headers = {"role": "admin", "tenant": "alpha"}
-        result = client.post("/api/skills/import-zip", json=encoded(bundle()), headers=headers)
+        for route in ("import", "export"):
+            invalid = client.post(
+                f"/api/skills/{route}", files={"file": ("skills.zip", b"PK\xff\xfe", "application/zip")},
+                headers=headers,
+            )
+            assert invalid.status_code == 415, invalid.text
+            assert "zip_b64" in invalid.json()["detail"]
+            assert "PK" not in invalid.text
+        result = client.post(
+            "/api/skills/import",
+            json={"channel": "zip", "options": encoded(bundle())},
+            headers=headers,
+        )
         assert result.status_code == 200, result.text
-        assert result.json()["version"] == 1
+        assert result.json()["imported"][0]["version"] == 1
+        cache_file = tmp_path / "working" / "tenants" / "alpha" / "demo" / "SKILL.md"
+        assert cache_file.is_file()
+        cache_file.unlink()
+        detail = client.get("/api/skills/demo", headers=headers)
+        assert detail.status_code == 200
+        assert detail.json()["body"].strip() == "one"
+        listed = client.get("/api/skills", headers=headers).json()["skills"]
+        assert [item["name"] for item in listed] == ["demo"]
         assert client.get("/api/skills/transfer/channels", headers=headers).status_code == 200
         assert client.get("/api/skills/transfer/skills", headers={**headers, "tenant": "beta"}).json()["skills"] == []
         result = client.post("/api/skills/export", json={"channel": "zip", "names": ["demo"]}, headers=headers)
         assert result.status_code == 200 and "application/zip" in result.headers["content-type"]
         assert discover(read_zip(result.content))[0].files == bundle().files
-        # Single compatibility route rejects a batch before any write.
-        result = client.post("/api/skills/import-zip", json=encoded(bundle("one"), bundle("two")), headers=headers)
-        assert result.status_code == 400
-        assert len(client.get("/api/skills/transfer/skills", headers=headers).json()["skills"]) == 1
+        saved = client.post(
+            "/api/skills",
+            json={
+                "name": "demo",
+                "description": "Demo",
+                "category": "general",
+                "body": "updated",
+            },
+            headers=headers,
+        )
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["version"] == 2
+        assert cache_file.read_text().endswith("updated\n")
+        deleted = client.delete("/api/skills/demo", headers=headers)
+        assert deleted.status_code == 200, deleted.text
+        assert client.get("/api/skills", headers=headers).json()["skills"] == []
 
 
 @pytest.mark.parametrize("provider", ["github", "gitlab"])

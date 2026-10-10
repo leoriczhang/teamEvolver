@@ -10,6 +10,10 @@ from teamEvolver.config_store import ConfigStore
 from teamEvolver.proxy import ProxyServer
 
 
+def _select_default_tenant(client: TestClient) -> None:
+    client.headers["X-Tenant-Id"] = "default"
+
+
 def _service(tmp_path) -> MemoryAggregationService:
     return MemoryAggregationService(
         TeamEvolverConfig(
@@ -160,23 +164,6 @@ def test_custom_endpoint_does_not_require_a_configured_default(tmp_path) -> None
     ).parent == tmp_path
 
 
-def test_config_store_removes_deprecated_aggregation_root_key(tmp_path) -> None:
-    config_path = tmp_path / "config.yaml"
-    store = ConfigStore(config_path)
-
-    store.save(
-        {
-            "aggregation": {
-                "root_api_key": "legacy-secret",
-                "shared_knowledge_prefix": "shared-knowledge",
-            }
-        }
-    )
-
-    assert store.get("aggregation.root_api_key") is None
-    assert "legacy-secret" not in config_path.read_text(encoding="utf-8")
-
-
 def test_service_uses_api_key_without_exposing_it(tmp_path, monkeypatch) -> None:
     service = _service(tmp_path)
     run = service.new_run("default")
@@ -203,11 +190,9 @@ def test_service_uses_api_key_without_exposing_it(tmp_path, monkeypatch) -> None
 def test_run_route_accepts_an_independent_target_uri(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("TEAMEVOLVER_EMBEDDED_EVOLVE_ENABLED", "0")
     config = TeamEvolverConfig(
-        users_registry_path=str(tmp_path / "users.json"),
-        sharing_enabled=False,
-        sharing_skill_reload_mode="off",
+        _config_file=str(tmp_path / "config.yaml"),
         sharing_viking_endpoint="http://127.0.0.1:1933",
-        sharing_viking_team_api_key="configured-root-secret",
+        sharing_viking_api_key="configured-root-secret",
         sharing_viking_account="default",
         sharing_viking_user="team",
         aggregation_state_dir=str(tmp_path),
@@ -356,6 +341,7 @@ def test_run_route_accepts_an_independent_target_uri(tmp_path, monkeypatch) -> N
         "/api/auth/bootstrap",
         json={"username": "admin", "display_name": "Admin", "password": "secret"},
     ).status_code == 200
+    _select_default_tenant(client)
     console = client.post("/api/aggregation/users", json={})
     assert console.status_code == 200
     assert console.json()["auth_mode"] == "trusted"

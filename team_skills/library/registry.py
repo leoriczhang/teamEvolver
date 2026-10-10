@@ -53,6 +53,22 @@ class SkillIDRegistry:
     def to_bytes(self) -> bytes:
         return json.dumps(self._map, ensure_ascii=False, indent=2).encode("utf-8")
 
+    def snapshot(self) -> dict[str, dict[str, Any]]:
+        return deepcopy(self._map)
+
+    def restore(
+        self,
+        snapshot: dict[str, dict[str, Any]],
+        *,
+        dirty: bool = True,
+    ) -> None:
+        self._map = deepcopy(snapshot)
+        self._dirty = dirty
+
+    @property
+    def dirty(self) -> bool:
+        return self._dirty
+
     def merge_from_oss_snapshot(
         self,
         bucket,
@@ -66,20 +82,43 @@ class SkillIDRegistry:
         value = json.loads(raw.decode("utf-8"))
         if not isinstance(value, dict):
             raise ValueError("skill registry must be a JSON object")
-        changed = 0
-        for name, incoming in self._normalise(value).items():
-            current = self._map.get(name)
-            if current is None or int(incoming.get("version") or 0) > int(
-                current.get("version") or 0
-            ):
-                self._map[name] = incoming
-                changed += 1
-        if changed:
-            self._dirty = True
+        changed = self._merge_raw(value)
         return changed, {
             "kind": "replace_if_hash",
             "base_hash": "sha256:" + hashlib.sha256(raw).hexdigest(),
         }
+
+    def merge_from_oss(self, bucket, prefix: str) -> int:
+        """Merge externally published entries without lowering local versions."""
+        key = f"{prefix}evolve_skill_registry.json"
+        try:
+            raw = json.loads(bucket.get_object(key).read().decode("utf-8"))
+        except Exception:
+            return 0
+        if not isinstance(raw, dict):
+            return 0
+        return self._merge_raw(raw)
+
+    def _merge_raw(self, raw: dict[str, Any]) -> int:
+        changed = 0
+        for name, incoming in self._normalise(raw).items():
+            current = self._map.get(name)
+            if current is None:
+                self._map[name] = incoming
+                changed += 1
+                continue
+            try:
+                if int(incoming.get("version") or 0) > int(
+                    current.get("version") or 0
+                ):
+                    self._map[name] = incoming
+                    changed += 1
+            except (TypeError, ValueError):
+                continue
+        if changed:
+            self._dirty = True
+            logger.info("[SkillIDRegistry] merged %d seeded entries from storage", changed)
+        return changed
 
     def mark_persisted(self) -> None:
         self._dirty = False
@@ -114,6 +153,18 @@ class SkillIDRegistry:
         }
         self._dirty = True
         return sid
+
+    def get(self, skill_name: str) -> Optional[str]:
+        entry = self._map.get(skill_name)
+        return str(entry["skill_id"]) if entry else None
+
+    def get_version(self, skill_name: str) -> int:
+        entry = self._map.get(skill_name)
+        return int(entry.get("version") or 0) if entry else 0
+
+    def get_content_sha(self, skill_name: str) -> str:
+        entry = self._map.get(skill_name)
+        return str(entry.get("content_sha") or "") if entry else ""
 
     def record_update(
         self,
@@ -159,5 +210,28 @@ class SkillIDRegistry:
         self._dirty = True
         return new_version
 
+    def record_rollback(
+        self,
+        skill_name: str,
+        content_sha: str,
+        rolled_back_to: int,
+        *,
+        bundle_record: Optional[dict[str, Any]] = None,
+    ) -> int:
+        """Record a rollback as a new monotonic version."""
+        version = self.record_update(
+            skill_name,
+            content_sha,
+            action="rollback",
+            bundle_record=bundle_record,
+        )
+        history = self._map[skill_name].setdefault("history", [])
+        if history:
+            history[-1]["rolled_back_to"] = int(rolled_back_to)
+        return version
+
     def all_ids(self) -> dict[str, str]:
         return {name: str(entry["skill_id"]) for name, entry in self._map.items()}
+
+    def all_entries(self) -> dict[str, dict[str, Any]]:
+        return dict(self._map)

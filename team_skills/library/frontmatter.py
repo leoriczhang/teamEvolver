@@ -180,17 +180,6 @@ def render_skill_md(
     return rendered
 
 
-def _load_frontmatter(path: str) -> Optional[dict[str, Any]]:
-    """Read *path* and return its parsed frontmatter dict (or ``None``)."""
-    try:
-        with open(path, encoding="utf-8") as f:
-            raw = f.read()
-    except OSError as e:
-        logger.warning("[frontmatter] could not read %s: %s", path, e)
-        return None
-    return _load_frontmatter_from_raw(raw, path)
-
-
 def _load_frontmatter_from_raw(raw: str, path: str = "") -> Optional[dict[str, Any]]:
     split = _split_frontmatter(raw)
     if split is None:
@@ -329,15 +318,6 @@ def apply_frontmatter_to_manifest_entry(entry: dict[str, Any], fm: Optional[dict
                 if str(item).strip()
             ],
         }
-
-
-def enrich_manifest_entry(entry: dict[str, Any], skill_path: str) -> None:
-    """Fill ``description``/``category`` in a manifest *entry* from ``SKILL.md``.
-
-    Mutates *entry* in place; silently no-ops when the file cannot be read or
-    has no frontmatter.
-    """
-    apply_frontmatter_to_manifest_entry(entry, _load_frontmatter(skill_path))
 
 
 def enrich_manifest_entry_from_raw(

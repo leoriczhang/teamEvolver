@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from datetime import datetime, timezone
@@ -11,9 +12,8 @@ from typing import Any, Mapping, Optional
 from teamEvolver.storage import is_not_found_error
 
 from .schema import (
-    DATASET_SCHEMA_V2,
+    DATASET_SCHEMA,
     document_skill_ids,
-    legacy_case_view,
     make_document,
     normalize_document,
     normalize_skill_refs,
@@ -121,12 +121,6 @@ def normalize_skill_name(value: Any) -> str:
 
 def dataset_skill_refs(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     refs = normalize_skill_refs(payload.get("skills"))
-    if not refs:
-        refs = normalize_skill_refs(payload.get("skill_ids"))
-    if not refs and payload.get("skill_name"):
-        refs = normalize_skill_refs([payload.get("skill_name")])
-    if not refs and isinstance(payload.get("subject"), Mapping):
-        refs = normalize_skill_refs([payload["subject"]])
     return refs
 
 
@@ -205,7 +199,7 @@ def dataset_material_requirements(
 ) -> dict[str, Any]:
     """Identify inline material and external input paths in a dataset."""
     if (
-        dataset.get("schema_version") == DATASET_SCHEMA_V2
+        dataset.get("schema_version") == DATASET_SCHEMA
         and isinstance(dataset.get("cases"), list)
         and dataset["cases"]
     ):
@@ -264,7 +258,7 @@ def dataset_material_integrity(
     """Return a deterministic material-completeness report."""
     material_source = dataset
     if (
-        dataset.get("schema_version") == DATASET_SCHEMA_V2
+        dataset.get("schema_version") == DATASET_SCHEMA
         and isinstance(dataset.get("cases"), list)
         and dataset["cases"]
     ):
@@ -339,17 +333,8 @@ class SkillDatasetStore:
             f"{normalize_dataset_id(dataset_id)}/"
         )
 
-    def legacy_dataset_prefix(self, skill_name: str, dataset_id: str) -> str:
-        return (
-            f"{self.root_prefix()}{normalize_skill_name(skill_name)}/"
-            f"{normalize_dataset_id(dataset_id)}/"
-        )
-
     def dataset_key(self, skill_name: str, dataset_id: str) -> str:
         return f"{self.dataset_prefix(skill_name, dataset_id)}metadata.json"
-
-    def legacy_dataset_key(self, skill_name: str, dataset_id: str) -> str:
-        return f"{self.legacy_dataset_prefix(skill_name, dataset_id)}metadata.json"
 
     def material_key(
         self,
@@ -359,17 +344,6 @@ class SkillDatasetStore:
     ) -> str:
         return (
             f"{self.dataset_prefix(skill_name, dataset_id)}materials/"
-            f"{normalize_material_path(rel_path)}"
-        )
-
-    def legacy_material_key(
-        self,
-        skill_name: str,
-        dataset_id: str,
-        rel_path: str,
-    ) -> str:
-        return (
-            f"{self.legacy_dataset_prefix(skill_name, dataset_id)}materials/"
             f"{normalize_material_path(rel_path)}"
         )
 
@@ -390,57 +364,32 @@ class SkillDatasetStore:
         *,
         selected_skill_id: str = "",
     ) -> dict[str, Any]:
-        cases = [
-            legacy_case_view(case, document=document)
-            for case in document.get("cases") or []
-            if isinstance(case, Mapping)
-        ]
-        result = cases[0] if cases else {}
-        result["dataset_id"] = str(document.get("dataset_id") or "")
-        result["name"] = str(document.get("name") or result.get("name") or "")
-        result["description"] = str(document.get("description") or "")
-        result["created_at"] = str(document.get("created_at") or "")
-        result["updated_at"] = str(document.get("updated_at") or "")
-        if document.get("source"):
-            result["source"] = dict(document["source"])
-        result["cases"] = cases
-        result["task_count"] = len(cases)
-        result["skill_ids"] = document_skill_ids(document)
-        result["skills"] = normalize_skill_refs(document.get("skills"))
-        if selected_skill_id:
-            result["skill_name"] = selected_skill_id
+        result = copy.deepcopy(dict(document))
+        if selected_skill_id and selected_skill_id not in document_skill_ids(document):
+            raise SkillDatasetStoreError("dataset is not bound to the selected Skill")
         return result
 
     def save_dataset(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         dataset_id = normalize_dataset_id(payload.get("dataset_id"))
-        refs = dataset_skill_refs(payload)
-        lookup_skill = refs[0]["skill_id"] if refs else ""
         existing_document = self.load_document(
             skill_name="",
             dataset_id=dataset_id,
         )
-        if existing_document is None and lookup_skill:
-            existing_document = self.load_document(
-                skill_name=lookup_skill,
-                dataset_id=dataset_id,
-            )
-        if not refs and existing_document:
-            refs = normalize_skill_refs(existing_document.get("skills"))
+        normalized = normalize_document(
+            payload,
+            default_dataset_id=dataset_id,
+            default_name=str(payload.get("name") or ""),
+        )
+        refs = dataset_skill_refs(normalized)
         if not refs:
             raise SkillDatasetStoreError("at least one skill_id is required")
         for ref in refs:
             ref["skill_id"] = normalize_skill_name(ref["skill_id"])
         now = utc_now_iso()
-        normalized = normalize_document(
-            payload,
-            default_dataset_id=dataset_id,
-            default_name=str(payload.get("name") or ""),
-            default_subject={"kind": "skill", "id": refs[0]["skill_id"]},
-        )
         cases = normalized["cases"]
         document = make_document(
             dataset_id=dataset_id,
-            name=str(normalized.get("name") or cases[0].get("name") or ""),
+            name=str(normalized.get("name") or ""),
             description=str(normalized.get("description") or ""),
             skills=refs,
             source=normalized.get("source") or {},
@@ -471,15 +420,12 @@ class SkillDatasetStore:
     ) -> Optional[dict[str, Any]]:
         wanted = normalize_skill_name(skill_name) if skill_name else ""
         raw = self._read_json(self.dataset_key("", dataset_id))
-        if raw is None and wanted:
-            raw = self._read_json(self.legacy_dataset_key(wanted, dataset_id))
         if raw is None:
             return None
         document = normalize_document(
             raw,
             default_dataset_id=dataset_id,
             default_name=str(raw.get("name") or ""),
-            default_subject={"kind": "skill", "id": wanted} if wanted else None,
         )
         if wanted and wanted not in document_skill_ids(document):
             return None
@@ -515,46 +461,24 @@ class SkillDatasetStore:
 
     def list_datasets(self, *, skill_name: str = "") -> list[dict[str, Any]]:
         wanted = normalize_skill_name(skill_name) if skill_name else ""
-        prefixes = [f"{self.root_prefix()}by-id/"]
-        if wanted:
-            prefixes.append(f"{self.root_prefix()}{wanted}/")
-        else:
-            prefixes.append(self.root_prefix())
         rows: list[dict[str, Any]] = []
-        seen_keys: set[str] = set()
-        seen_ids: set[str] = set()
-        for prefix in prefixes:
-            for obj in self._bucket.iter_objects(prefix=prefix):
-                if obj.key in seen_keys or not obj.key.endswith("/metadata.json"):
-                    continue
-                seen_keys.add(obj.key)
-                item = self._read_json(obj.key)
-                if not item:
-                    continue
-                try:
-                    document = normalize_document(
-                        item,
-                        default_dataset_id=str(item.get("dataset_id") or ""),
-                        default_name=str(item.get("name") or ""),
-                        default_subject=(
-                            {"kind": "skill", "id": wanted}
-                            if wanted and "/by-id/" not in obj.key
-                            else None
-                        ),
-                    )
-                except ValueError:
-                    continue
-                if wanted and wanted not in document_skill_ids(document):
-                    continue
-                dataset_id = str(document.get("dataset_id") or "")
-                if dataset_id in seen_ids:
-                    continue
-                seen_ids.add(dataset_id)
-                view = self._document_view(
-                    document,
-                    selected_skill_id=wanted,
+        for obj in self._bucket.iter_objects(prefix=f"{self.root_prefix()}by-id/"):
+            if not obj.key.endswith("/metadata.json"):
+                continue
+            item = self._read_json(obj.key)
+            if not item:
+                continue
+            try:
+                document = normalize_document(
+                    item,
+                    default_dataset_id=str(item.get("dataset_id") or ""),
+                    default_name=str(item.get("name") or ""),
                 )
-                rows.append(view)
+            except ValueError:
+                continue
+            if wanted and wanted not in document_skill_ids(document):
+                continue
+            rows.append(self._document_view(document, selected_skill_id=wanted))
         rows.sort(
             key=lambda item: str(
                 item.get("updated_at") or item.get("created_at") or ""
@@ -575,16 +499,7 @@ class SkillDatasetStore:
         materials_prefix = (
             f"{self.dataset_prefix(skill_name, dataset_id)}materials/"
         )
-        prefixes = [materials_prefix]
-        if skill_name:
-            prefixes.append(
-                f"{self.legacy_dataset_prefix(skill_name, dataset_id)}materials/"
-            )
-        for obj in [
-            item
-            for prefix in prefixes
-            for item in self._bucket.iter_objects(prefix=prefix)
-        ]:
+        for obj in self._bucket.iter_objects(prefix=materials_prefix):
             self._bucket.delete_object(obj.key)
         materials: list[dict[str, Any]] = []
         for raw_path, data in files:
@@ -606,12 +521,6 @@ class SkillDatasetStore:
         self,
         dataset: Mapping[str, Any],
     ) -> list[tuple[str, bytes]]:
-        skill_ids = [
-            str(item or "")
-            for item in dataset.get("skill_ids") or []
-            if str(item or "")
-        ]
-        skill_name = str(dataset.get("skill_name") or next(iter(skill_ids), ""))
         dataset_id = normalize_dataset_id(dataset.get("dataset_id"))
         files: list[tuple[str, bytes]] = []
         for item in dataset_material_entries(dataset):
@@ -620,14 +529,10 @@ class SkillDatasetStore:
             rel_path = normalize_material_path(item.get("path"))
             try:
                 data = self._bucket.get_object(
-                    self.material_key(skill_name, dataset_id, rel_path)
+                    self.material_key("", dataset_id, rel_path)
                 ).read()
-            except Exception as exc:
-                if not skill_name or not is_not_found_error(exc):
-                    raise
-                data = self._bucket.get_object(
-                    self.legacy_material_key(skill_name, dataset_id, rel_path)
-                ).read()
+            except Exception:
+                raise
             files.append((rel_path, data))
         return files
 
@@ -636,12 +541,6 @@ class SkillDatasetStore:
         dataset: Mapping[str, Any],
     ) -> list[str]:
         """List only material entries whose object bytes actually exist."""
-        skill_ids = [
-            str(item or "")
-            for item in dataset.get("skill_ids") or []
-            if str(item or "")
-        ]
-        skill_name = str(dataset.get("skill_name") or next(iter(skill_ids), ""))
         dataset_id = normalize_dataset_id(dataset.get("dataset_id"))
         paths: list[str] = []
         for item in dataset_material_entries(dataset):
@@ -650,37 +549,20 @@ class SkillDatasetStore:
             rel_path = normalize_material_path(item.get("path"))
             try:
                 self._bucket.get_object(
-                    self.material_key(skill_name, dataset_id, rel_path)
+                    self.material_key("", dataset_id, rel_path)
                 )
             except Exception as exc:
                 if not is_not_found_error(exc):
                     raise
-                if not skill_name:
-                    continue
-                try:
-                    self._bucket.get_object(
-                        self.legacy_material_key(
-                            skill_name,
-                            dataset_id,
-                            rel_path,
-                        )
-                    )
-                except Exception as legacy_exc:
-                    if is_not_found_error(legacy_exc):
-                        continue
-                    raise
+                continue
             paths.append(rel_path)
         return paths
 
     def delete_dataset(self, *, skill_name: str, dataset_id: str) -> bool:
-        prefixes = [self.dataset_prefix("", dataset_id)]
-        if skill_name:
-            prefixes.append(self.legacy_dataset_prefix(skill_name, dataset_id))
-        objects = [
-            item
-            for prefix in prefixes
-            for item in self._bucket.iter_objects(prefix=prefix)
-        ]
+        del skill_name
+        objects = list(
+            self._bucket.iter_objects(prefix=self.dataset_prefix("", dataset_id))
+        )
         for obj in objects:
             self._bucket.delete_object(obj.key)
         return bool(objects)

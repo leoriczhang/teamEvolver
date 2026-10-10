@@ -18,10 +18,10 @@ from team_replay.datasets.collections import (
     DatasetCollectionStore,
     DatasetConflict,
     DatasetNotFound,
+    case_summary,
     encode,
-    item_summary,
     safe_id,
-    snapshot_item,
+    snapshot_case,
 )
 
 from ..session_store import SessionStore
@@ -45,10 +45,10 @@ class DatasetUpdate(BaseModel):
     description: str | None = Field(default=None, max_length=2000)
 
 
-class ItemUpdate(BaseModel):
+class CaseUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     query: str = Field(min_length=1, max_length=100000)
-    requirements: list[str] = Field(min_length=1, max_length=100)
+    checks: list[dict[str, Any]] = Field(min_length=1, max_length=100)
 
 
 class BatchOptions(BaseModel):
@@ -61,14 +61,14 @@ class BatchOptions(BaseModel):
 def register_dataset_routes(owner: Any, app: FastAPI) -> None:
     from .routes import _tenant_effective_config
 
-    def evaluate(item: dict, options: dict) -> dict:
+    def evaluate(case: dict, options: dict) -> dict:
         from team_replay.hooks import ReplayUnsupported
 
         from ..replay_adapter import ensure_replay_host
 
         ensure_replay_host()
         try:
-            return replay_snapshot(item, options)
+            return replay_snapshot(case, options)
         except ReplayUnsupported as exc:
             return {"ok": False, "status": "unsupported", "error": str(exc)}
 
@@ -104,7 +104,7 @@ def register_dataset_routes(owner: Any, app: FastAPI) -> None:
                 stores[tenant_id] = await call(build)
             return stores[tenant_id]
 
-    def selected_items(selection: Selection) -> list[dict]:
+    def selected_cases(selection: Selection) -> list[dict]:
         from .routes import _filter_conversation_rows, _session_judge_score_index, _sort_conversation_rows
 
         if (selection.session_ids is None) == (selection.filters is None):
@@ -136,17 +136,17 @@ def register_dataset_routes(owner: Any, app: FastAPI) -> None:
             raise ValueError("当前筛选没有 Session")
         if len(rows) > MAX_ITEMS:
             raise ValueError(f"当前选择有 {len(rows)} 条，每个数据集最多 {MAX_ITEMS} 条，请缩小筛选范围")
-        items, size = [], 0
+        cases, size = [], 0
         for row in rows:
             session = sessions.load_session(safe_id(row["session_id"]))
             if not session or not (session.get("turns") or session.get("messages")):
                 raise ValueError(f"Session {row['session_id']} 正文不可用，未创建数据集")
-            item = snapshot_item(session, row)
-            size += len(encode(item))
+            case = snapshot_case(session, row)
+            size += len(encode(case))
             if size > MAX_DATASET_BYTES:
                 raise ValueError("所选 Session 超过 64 MiB，请缩小范围")
-            items.append(item)
-        return items
+            cases.append(case)
+        return cases
 
     @app.get("/api/datasets")
     async def list_datasets(search: str = "", limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0)):
@@ -159,53 +159,55 @@ def register_dataset_routes(owner: Any, app: FastAPI) -> None:
     @app.post("/api/datasets", status_code=201)
     async def create_dataset(body: CreateDataset):
         repo = await store()
-        items = await call(selected_items, body)
+        cases = await call(selected_cases, body)
         source = {
             "kind": "sessions", "filters": body.filters or {},
             "selection": "selected" if body.session_ids else "filtered",
         }
-        return await call(repo.create, body.name, body.description, items, source)
+        return await call(repo.create, body.name, body.description, cases, source)
 
     @app.get("/api/datasets/{dataset_id}")
     async def dataset_detail(dataset_id: str, search: str = "", limit: int = Query(20, ge=1, le=100),
                              offset: int = Query(0, ge=0)):
         repo = await store()
         dataset = await call(repo.load, dataset_id)
-        rows = dataset.pop("items")
-        dataset["item_count"] = len(rows)
+        rows = dataset.pop("cases")
+        dataset["case_count"] = len(rows)
         wanted = search.strip().casefold()
-        rows = [item_summary(item) for item in rows if wanted in (
-            f"{item['query']} {item['trace_id']} {item['session_id']} {item['title']}"
+        rows = [case_summary(case) for case in rows if wanted in (
+            f"{case['query']} {(case.get('provenance') or {}).get('trace_id', '')} "
+            f"{(case.get('provenance') or {}).get('session_id', '')} "
+            f"{(case.get('metadata') or {}).get('title', '')}"
         ).casefold()]
-        return {**dataset, "items": rows[offset:offset + limit], "total": len(rows), "offset": offset, "limit": limit}
+        return {**dataset, "cases": rows[offset:offset + limit], "total": len(rows), "offset": offset, "limit": limit}
 
     @app.patch("/api/datasets/{dataset_id}")
     async def update_dataset(dataset_id: str, body: DatasetUpdate):
         return await call((await store()).update, dataset_id, body.model_dump(exclude_none=True))
 
-    @app.post("/api/datasets/{dataset_id}/items")
-    async def add_items(dataset_id: str, body: Selection):
+    @app.post("/api/datasets/{dataset_id}/cases")
+    async def add_cases(dataset_id: str, body: Selection):
         repo = await store()
         await call(repo.metadata, dataset_id)
         await call(repo.assert_idle, dataset_id)
-        items = await call(selected_items, body)
-        return await call(repo.update, dataset_id, {}, items)
+        cases = await call(selected_cases, body)
+        return await call(repo.update, dataset_id, {}, cases)
 
-    @app.get("/api/datasets/{dataset_id}/items/{item_id}")
-    async def item_detail(dataset_id: str, item_id: str):
+    @app.get("/api/datasets/{dataset_id}/cases/{case_id}")
+    async def case_detail(dataset_id: str, case_id: str):
         dataset = await call((await store()).load, dataset_id)
-        item = next((item for item in dataset["items"] if item["item_id"] == item_id), None)
-        if item is None:
-            raise HTTPException(404, "数据集条目不存在")
-        return item
+        case = next((case for case in dataset["cases"] if case["case_id"] == case_id), None)
+        if case is None:
+            raise HTTPException(404, "数据集 Case 不存在")
+        return case
 
-    @app.patch("/api/datasets/{dataset_id}/items/{item_id}")
-    async def update_item(dataset_id: str, item_id: str, body: ItemUpdate):
-        return await call((await store()).change_item, dataset_id, item_id, body.model_dump())
+    @app.patch("/api/datasets/{dataset_id}/cases/{case_id}")
+    async def update_case(dataset_id: str, case_id: str, body: CaseUpdate):
+        return await call((await store()).change_case, dataset_id, case_id, body.model_dump())
 
-    @app.delete("/api/datasets/{dataset_id}/items/{item_id}")
-    async def delete_item(dataset_id: str, item_id: str):
-        return await call((await store()).change_item, dataset_id, item_id, None)
+    @app.delete("/api/datasets/{dataset_id}/cases/{case_id}")
+    async def delete_case(dataset_id: str, case_id: str):
+        return await call((await store()).change_case, dataset_id, case_id, None)
 
     @app.delete("/api/datasets/{dataset_id}")
     async def delete_dataset(dataset_id: str):
@@ -229,7 +231,7 @@ def register_dataset_routes(owner: Any, app: FastAPI) -> None:
             "Content-Disposition": (
                 f"attachment; filename=dataset.zip; filename*=UTF-8''{quote(metadata['name'], safe='')}.zip"
             ),
-            "X-Export-Count": str(metadata["item_count"]),
+            "X-Export-Count": str(metadata["case_count"]),
         })
 
     @app.get("/api/datasets/{dataset_id}/runs")
@@ -237,7 +239,7 @@ def register_dataset_routes(owner: Any, app: FastAPI) -> None:
         repo = await store()
         await call(repo.metadata, dataset_id)
         runs = await call(repo.runs, dataset_id)
-        return {"runs": [{k: v for k, v in run.items() if k not in {"items", "owner_id"}}
+        return {"runs": [{k: v for k, v in run.items() if k not in {"cases", "owner_id"}}
                          for run in runs[offset:offset + limit]], "total": len(runs)}
 
     @app.post("/api/datasets/{dataset_id}/runs", status_code=202)
@@ -248,8 +250,8 @@ def register_dataset_routes(owner: Any, app: FastAPI) -> None:
         except BatchCapacityError as exc:
             raise HTTPException(429, str(exc), headers={"Retry-After": "5"}) from exc
         try:
-            run, items = await call(repo.create_run, dataset_id, body.model_dump(), runner.owner_id)
-            owner._safe_create_task(runner.execute(repo, copy.deepcopy(run), items))
+            run, cases = await call(repo.create_run, dataset_id, body.model_dump(), runner.owner_id)
+            owner._safe_create_task(runner.execute(repo, copy.deepcopy(run), cases))
         except BaseException:
             runner.release()
             raise
@@ -260,11 +262,11 @@ def register_dataset_routes(owner: Any, app: FastAPI) -> None:
                          offset: int = Query(0, ge=0)):
         run = await call((await store()).run, dataset_id, run_id)
         run.pop("owner_id", None)
-        run["items"] = run["items"][offset:offset + limit]
+        run["cases"] = run["cases"][offset:offset + limit]
         return run
 
-    @app.get("/api/datasets/{dataset_id}/runs/{run_id}/items/{item_id}")
-    async def run_source_item(dataset_id: str, run_id: str, item_id: str):
+    @app.get("/api/datasets/{dataset_id}/runs/{run_id}/cases/{case_id}")
+    async def run_source_case(dataset_id: str, run_id: str, case_id: str):
         repo = await store()
         try:
             key = repo.run_key(dataset_id, run_id, "input.json")
@@ -277,28 +279,28 @@ def register_dataset_routes(owner: Any, app: FastAPI) -> None:
             snapshot,
             run_id=run_id,
         )
-        item = next(
+        case = next(
             (
-                item
-                for item in presented["items"]
-                if item["item_id"] == item_id
+                case
+                for case in presented["cases"]
+                if case["case_id"] == case_id
             ),
             None,
         )
-        if item is None:
-            raise HTTPException(404, "重回放来源条目不存在")
-        return item
+        if case is None:
+            raise HTTPException(404, "重回放来源 Case 不存在")
+        return case
 
     @app.post("/api/datasets/{dataset_id}/runs/{run_id}/cancel")
     async def cancel_run(dataset_id: str, run_id: str):
         run = await call((await store()).request_cancel, dataset_id, run_id)
         return {k: v for k, v in run.items() if k != "owner_id"}
 
-    @app.get("/api/datasets/{dataset_id}/runs/{run_id}/results/{item_id}")
-    async def result_detail(dataset_id: str, run_id: str, item_id: str):
+    @app.get("/api/datasets/{dataset_id}/runs/{run_id}/results/{case_id}")
+    async def result_detail(dataset_id: str, run_id: str, case_id: str):
         repo = await store()
         try:
-            key = repo.run_key(dataset_id, run_id, f"results/{safe_id(item_id)}.json")
+            key = repo.run_key(dataset_id, run_id, f"results/{safe_id(case_id)}.json")
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         return await call(repo.read, key)

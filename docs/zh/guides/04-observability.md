@@ -11,9 +11,9 @@ teamEvolver 深度集成 Langfuse 提供 LLM 应用可观测能力。Langfuse �
 
 相关代码位于：
 - `teamEvolver/observability/langfuse.py`：追踪运行时和配置管理
-- `teamEvolver/integrations/langfuse_client.py`：Langfuse v3 公共 API HTTP 客户端
-- `teamEvolver/integrations/langfuse_pull.py`：会话拉取编排层
-- `teamEvolver/integrations/langfuse_convert.py`：Langfuse 会话格式到 teamEvolver 格式的转换
+- `session_ingestion/adapters/_shared/langfuse_client.py`：Langfuse v3 公共 API HTTP 客户端
+- `session_ingestion/adapters/_shared/langfuse_pull.py`：Session 拉取编排层
+- `session_ingestion/adapters/_shared/langfuse_convert.py`：Langfuse Session 格式到 teamEvolver 格式的转换
 
 ## 两种模式对比
 
@@ -172,7 +172,7 @@ export LANGFUSE_SAMPLE_RATE="0.1"
 - 源会话 ID 最多 20 个作为标签追加，Metadata 中最多保留 50 个；设置 `EVOBENCH_RUN_ID` 时，被合并/改进的 Skill 名称不存在于库中时 Trace Name 省略 `:{skill_name}` 后缀。
 
 DreamCycle 启用后，其 Job 的 LLM 调用也会被追踪（Trace Name 形如
-`team_memory.maintenance.legacy.round`、`team_memory.maintenance.legacy.{job_name}`）。
+`team_memory.maintenance.dreamcycle.round`、`team_memory.maintenance.dreamcycle.{job_name}`）。
 
 ### 每条 Trace 包含的数据
 

@@ -49,11 +49,7 @@ def _experience_candidates(
     session: dict[str, Any],
     skill_name: str,
 ) -> list[dict[str, str]]:
-    scores = (
-        session.get("_judge_scores")
-        if isinstance(session.get("_judge_scores"), dict)
-        else {}
-    )
+    scores = session.get("_judge_scores") if isinstance(session.get("_judge_scores"), dict) else {}
     candidates: list[dict[str, str]] = []
     for raw in scores.get("skill_experiences") or []:
         if not isinstance(raw, dict):
@@ -67,9 +63,7 @@ def _experience_candidates(
         candidates.append(
             {
                 "kind": kind,
-                "experience_key": key or hashlib.sha256(
-                    description.encode("utf-8")
-                ).hexdigest()[:24],
+                "experience_key": key or hashlib.sha256(description.encode("utf-8")).hexdigest()[:24],
                 "description": description,
             }
         )
@@ -83,9 +77,7 @@ def _experience_candidates(
             candidates.append(
                 {
                     "kind": kind,
-                    "experience_key": hashlib.sha256(
-                        description.encode("utf-8")
-                    ).hexdigest()[:24],
+                    "experience_key": hashlib.sha256(description.encode("utf-8")).hexdigest()[:24],
                     "description": description,
                 }
             )
@@ -114,9 +106,7 @@ class ExperienceLibraryStore:
 
     def load(self, skill_name: str) -> dict[str, Any]:
         try:
-            payload = json.loads(
-                self._bucket.get_object(self._key(skill_name)).read().decode("utf-8")
-            )
+            payload = json.loads(self._bucket.get_object(self._key(skill_name)).read().decode("utf-8"))
         except Exception as exc:
             if not is_not_found_error(exc):
                 raise
@@ -156,27 +146,14 @@ class ExperienceLibraryStore:
             if not session_id:
                 continue
             observed_at = str(
-                session.get("ingested_at")
-                or session.get("timestamp")
-                or session.get("started_at")
-                or _utc_now_iso()
+                session.get("ingested_at") or session.get("timestamp") or session.get("started_at") or _utc_now_iso()
             )
             user_alias = str(session.get("user_alias") or "").strip()
-            scores = (
-                session.get("_judge_scores")
-                if isinstance(session.get("_judge_scores"), dict)
-                else {}
-            )
+            scores = session.get("_judge_scores") if isinstance(session.get("_judge_scores"), dict) else {}
             score = scores.get("overall_score")
-            score = (
-                float(score)
-                if isinstance(score, (int, float)) and not isinstance(score, bool)
-                else None
-            )
+            score = float(score) if isinstance(score, (int, float)) and not isinstance(score, bool) else None
             for candidate in _experience_candidates(session, skill_name):
-                identity = "|".join(
-                    [skill_name, candidate["kind"], candidate["experience_key"]]
-                )
+                identity = "|".join([skill_name, candidate["kind"], candidate["experience_key"]])
                 record_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
                 record = records.get(record_id) or {
                     "id": record_id,
@@ -191,11 +168,7 @@ class ExperienceLibraryStore:
                     "last_observed_at": observed_at,
                     "latest_score": score,
                 }
-                session_ids = [
-                    str(item)
-                    for item in record.get("session_ids") or []
-                    if str(item)
-                ]
+                session_ids = [str(item) for item in record.get("session_ids") or [] if str(item)]
                 is_new_occurrence = session_id not in session_ids
                 if is_new_occurrence:
                     session_ids.append(session_id)
@@ -204,14 +177,8 @@ class ExperienceLibraryStore:
                     int(record.get("occurrence_count") or 0),
                     len(session_ids) - (1 if is_new_occurrence else 0),
                 )
-                record["occurrence_count"] = (
-                    previous_count + 1 if is_new_occurrence else previous_count
-                )
-                users = [
-                    str(item)
-                    for item in record.get("user_aliases") or []
-                    if str(item)
-                ]
+                record["occurrence_count"] = previous_count + 1 if is_new_occurrence else previous_count
+                users = [str(item) for item in record.get("user_aliases") or [] if str(item)]
                 if user_alias and user_alias not in users:
                     users.append(user_alias)
                 record["user_aliases"] = users[-50:]
@@ -248,8 +215,7 @@ class ExperienceLibraryStore:
             raw_values = payloads.values()
         else:
             raw_values = (
-                self._bucket.get_object(item.key).read()
-                for item in self._bucket.iter_objects(prefix=evidence_prefix)
+                self._bucket.get_object(item.key).read() for item in self._bucket.iter_objects(prefix=evidence_prefix)
             )
         imported = 0
         found_states = 0
@@ -309,10 +275,7 @@ class ExperienceLibraryStore:
             payloads = self._bucket.iter_objects_bulk(prefix=prefix)
             raw_values = payloads.values()
         else:
-            raw_values = (
-                self._bucket.get_object(item.key).read()
-                for item in self._bucket.iter_objects(prefix=prefix)
-            )
+            raw_values = (self._bucket.get_object(item.key).read() for item in self._bucket.iter_objects(prefix=prefix))
         for raw in raw_values:
             try:
                 state = json.loads(bytes(raw).decode("utf-8"))
@@ -339,15 +302,11 @@ class ExperienceLibraryStore:
             "total_occurrences": sum(int(item.get("occurrence_count") or 0) for item in rows),
             "defect_experiences": sum(item.get("kind") == "defect" for item in rows),
             "defect_occurrences": sum(
-                int(item.get("occurrence_count") or 0)
-                for item in rows
-                if item.get("kind") == "defect"
+                int(item.get("occurrence_count") or 0) for item in rows if item.get("kind") == "defect"
             ),
             "exemplary_experiences": sum(item.get("kind") == "exemplary" for item in rows),
             "exemplary_occurrences": sum(
-                int(item.get("occurrence_count") or 0)
-                for item in rows
-                if item.get("kind") == "exemplary"
+                int(item.get("occurrence_count") or 0) for item in rows if item.get("kind") == "exemplary"
             ),
             "skills": len(skill_counts),
         }

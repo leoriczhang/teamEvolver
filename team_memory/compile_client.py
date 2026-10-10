@@ -25,13 +25,10 @@ supplied; teamEvolver never records or advances it automatically.
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 import time
-import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import PurePosixPath
 from typing import Any, Callable
 
 import httpx
@@ -92,6 +89,8 @@ class CompileClient:
     agent_id: str = "team-skill-evolver"
     timeout_seconds: float = 3000.0
     task_callback: Callable[[str, str], None] | None = None
+    internal_port: Any = None
+    compile_state_path: Any = None
 
     def _headers(self, *, shared_skill: bool = False) -> dict[str, str]:
         headers = {
@@ -240,94 +239,6 @@ class CompileClient:
             return self._failure(operation, response, payload)
         return self._success(operation, payload)
 
-    async def install_skill_bundle(
-        self,
-        *,
-        skill_name: str,
-        skill_body: str,
-        auxiliary_files: dict[str, str | bytes],
-        parent_uri: str = "viking://agent/skills",
-        version_message: str = "",
-    ) -> dict[str, Any]:
-        """Install a Skill zip so runtime references to auxiliary files remain valid."""
-        archive = io.BytesIO()
-        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
-            bundle.writestr("SKILL.md", skill_body)
-            for raw_path, raw_content in sorted(auxiliary_files.items()):
-                path = PurePosixPath(str(raw_path).strip("/"))
-                if not path.parts or any(part in {"", ".", ".."} for part in path.parts):
-                    raise ValueError(f"invalid Skill auxiliary path: {raw_path!r}")
-                if path.as_posix() == "SKILL.md":
-                    raise ValueError("Skill auxiliary files cannot replace SKILL.md")
-                content = raw_content.encode("utf-8") if isinstance(raw_content, str) else raw_content
-                bundle.writestr(path.as_posix(), content)
-
-        upload_operation = "POST /api/v1/resources/temp_upload"
-        upload_headers = self._headers(shared_skill=parent_uri.rstrip("/") == "viking://agent/skills")
-        upload_headers.pop("Content-Type", None)
-        try:
-            async with self._client() as client:
-                uploaded = await self._request_with_retry(
-                    client,
-                    "POST",
-                    f"{self.endpoint.rstrip('/')}/api/v1/resources/temp_upload",
-                    files={"file": (f"{skill_name}.zip", archive.getvalue(), "application/zip")},
-                    headers=upload_headers,
-                    retry_all_transport_errors=True,
-                )
-                upload_payload = self._payload(uploaded)
-                if not uploaded.is_success:
-                    return self._failure(upload_operation, uploaded, upload_payload)
-                temp_path = str((upload_payload or {}).get("temp_path") or "")
-                temp_file_id = str((upload_payload or {}).get("temp_file_id") or "")
-                if not temp_path and not temp_file_id:
-                    return {
-                        "ok": False,
-                        "exit_code": -1,
-                        "command": ["http", upload_operation, skill_name],
-                        "stdout": "",
-                        "stderr": "OpenViking Skill bundle upload did not return temp_path or temp_file_id",
-                        "result": upload_payload,
-                    }
-
-                operation = "POST /api/v1/skills"
-                body: dict[str, Any] = {
-                    "wait": True,
-                    "timeout": self.timeout_seconds,
-                    "target_uri": parent_uri,
-                }
-                if temp_file_id:
-                    body["temp_file_id"] = temp_file_id
-                else:
-                    body["temp_path"] = temp_path
-                if version_message.strip():
-                    body["source_metadata"] = {
-                        "type": "api",
-                        "source": "uploaded_bundle",
-                        "operation": "install",
-                        "version_message": version_message.strip(),
-                    }
-                installed = await self._request_with_retry(
-                    client,
-                    "POST",
-                    f"{self.endpoint.rstrip('/')}/api/v1/skills",
-                    json=body,
-                    headers=self._headers(shared_skill=parent_uri.rstrip("/") == "viking://agent/skills"),
-                )
-        except httpx.HTTPError as exc:
-            return {
-                "ok": False,
-                "exit_code": -1,
-                "command": ["http", "POST /api/v1/skills", skill_name],
-                "stdout": "",
-                "stderr": f"OpenViking Skill bundle upload failed: {exc}",
-                "result": None,
-            }
-        payload = self._payload(installed)
-        if not installed.is_success:
-            return self._failure(operation, installed, payload)
-        return self._success(operation, payload)
-
     async def get_skill(self, *, skill_name: str) -> dict[str, Any]:
         """Read the account-shared Skill with a content-addressed revision."""
         operation = f"GET /api/v1/skills/{skill_name}"
@@ -376,34 +287,12 @@ class CompileClient:
         skill_name: str,
         skill_body: str,
         version_message: str,
-        auxiliary_files: dict[str, str | bytes] | None = None,
     ) -> dict[str, Any]:
         """Create or replace one shared Skill, then return its exact revision."""
         current = await self.get_skill(skill_name=skill_name)
         if current.get("ok"):
             detail = current.get("result") or {}
-            # OpenViking canonicalizes inline Skill content by trimming the
-            # final newline.  Treat that representation as equivalent so an
-            # idempotent provision does not reinstall the bundle and discard
-            # auxiliary files on every Compile submission.
-            content_matches = str(detail.get("content") or "").rstrip("\r\n") == skill_body.rstrip("\r\n")
-            existing_files = {
-                str(item.get("path") or item.get("name") or "")
-                for item in detail.get("files") or []
-                if isinstance(item, dict)
-            }
-            missing_auxiliary = bool(auxiliary_files) and not set(auxiliary_files or {}).issubset(existing_files)
-            if auxiliary_files and (not content_matches or missing_auxiliary):
-                bundled = await self.install_skill_bundle(
-                    skill_name=skill_name,
-                    skill_body=skill_body,
-                    auxiliary_files=auxiliary_files,
-                    parent_uri="viking://agent/skills",
-                    version_message=version_message,
-                )
-                if not bundled.get("ok"):
-                    return bundled
-            elif not content_matches:
+            if str(detail.get("content") or "") != skill_body:
                 operation = f"PUT /api/v1/skills/{skill_name}"
                 # OpenViking's update endpoint forbids unknown body fields, so
                 # only send what UpdateSkillRequest accepts. version_message is
@@ -444,21 +333,11 @@ class CompileClient:
                 if not response.is_success:
                     return self._failure(operation, response, payload)
         elif int(current.get("exit_code") or 0) == 404:
-            created = (
-                await self.install_skill_bundle(
-                    skill_name=skill_name,
-                    skill_body=skill_body,
-                    auxiliary_files=auxiliary_files,
-                    parent_uri="viking://agent/skills",
-                    version_message=version_message,
-                )
-                if auxiliary_files
-                else await self.install_skill(
-                    skill_name=skill_name,
-                    skill_body=skill_body,
-                    parent_uri="viking://agent/skills",
-                    version_message=version_message,
-                )
+            created = await self.install_skill(
+                skill_name=skill_name,
+                skill_body=skill_body,
+                parent_uri="viking://agent/skills",
+                version_message=version_message,
             )
             if not created.get("ok"):
                 return created
@@ -541,6 +420,8 @@ class CompileClient:
         return payload
 
     async def task_status(self, task_id: str) -> dict[str, Any]:
+        if task_id.startswith("kee-memory-") and self.internal_port is not None:
+            return await self.internal_port.status(self, task_id)
         if not task_id.replace("_", "").replace("-", "").isalnum():
             raise ValueError("Invalid OpenViking task ID")
         async with self._client() as client:
@@ -575,9 +456,7 @@ class CompileClient:
         source_uris: tuple[str, ...] | list[str],
         target_uri: str,
         skill_uri: str,
-        skill_revision: str = "",
         reason: str = "",
-        runtime_timeout_seconds: float | None = None,
         last_compile_time: Any = None,
     ) -> dict[str, Any]:
         """Create and poll one OpenViking compile task over HTTP.
@@ -590,14 +469,16 @@ class CompileClient:
         if not source_uris:
             return {"ok": True, "skipped": True, "reason": "no sources"}
 
+        if self.internal_port is not None:
+            return await self.internal_port.run_batch(self, source_uris=source_uris, target_uri=target_uri,
+                skill_uri=skill_uri, skill_revision=skill_revision, reason=reason,
+                runtime_timeout_seconds=runtime_timeout_seconds, last_compile_time=last_compile_time)
         operation = "POST /api/v1/compile"
         body: dict[str, Any] = {
             "from": list(source_uris),
             "to": target_uri,
             "skill": skill_uri,
         }
-        # Revision is local provenance only; the new strict schema rejects it.
-        # The orchestrator supplies a run-private Skill URI to freeze execution.
         if reason.strip():
             body["instruction"] = reason.strip()
         if last_compile_time is not None:

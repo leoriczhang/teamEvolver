@@ -66,10 +66,19 @@ def replay_host(monkeypatch):
 
 def job():
     return {"candidate_skill": {"name": "candidate"}, "current_skill": {"name": "published"}, "replay_cases": [{
-        "query": "Produce the report", "checklist": [{"id": "R01", "text": "Hidden evaluation goal"}],
-        "source_runtime": {"type": "unregistered"}, "source_runtime_context": {"user_id": "alice"},
-        "context_snapshot": {"items": [{"content": "same context"}]},
+        "case_id": "case-1",
+        "query": "Produce the report",
+        "skill_ids": [],
+        "checks": [{"id": "R01", "kind": "output", "text": "Hidden evaluation goal"}],
         "materials": [{"path": "report.txt", "content_b64": "YQ=="}],
+        "provenance": {
+            "session_id": "session-1",
+            "source_runtime": {"type": "unregistered"},
+            "source_runtime_context": {"user_id": "alice"},
+            "context_snapshot": {"items": [{"content": "same context"}]},
+        },
+        "replay": {"progressive_disclosure": {"batch_size": 4}},
+        "metadata": {},
     }]}
 
 
@@ -110,8 +119,9 @@ def test_runtime_matrix_uses_configured_names_and_neutral_context():
                                            validation_runtimes=["unregistered", "another"])
     assert prepared["policy"]["available_replay_runtimes"] == ["another", "unregistered"]
     neutral = prepared["replay_cases"][1]
-    assert neutral["source_runtime"] == {"type": "another"}
-    assert neutral["context_snapshot"] == {} and neutral["source_runtime_context"] == {}
+    assert neutral["provenance"]["source_runtime"] == {"type": "another"}
+    assert neutral["provenance"]["context_snapshot"] == {}
+    assert neutral["provenance"]["source_runtime_context"] == {}
 
 
 def test_case_selects_an_explicit_subset_from_peer_skills():

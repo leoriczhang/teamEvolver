@@ -1,50 +1,32 @@
 """Browser login persistence across reloads, deployments and service restarts."""
 
-from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
 from http.cookiejar import CookieJar
-from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+import threading
 
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 
 from teamEvolver.config import TeamEvolverConfig
 from teamEvolver.proxy import ProxyServer, routes
-from teamEvolver.storage import admin_kv
+from teamEvolver.admin.identity_store import IdentityStore
 
 
-@pytest.fixture(params=["file", "postgres"])
-def session_backend(request, monkeypatch):
-    if request.param == "file":
-        return
-    # Exercise the production PG persistence path, with only the object
-    # transport replaced. User registries stay in isolated local files.
-    objects = {}
-
-    def get_object(key):
-        if key not in objects:
-            raise FileNotFoundError(key)
-        return BytesIO(objects[key])
-
-    store = SimpleNamespace(get_object=get_object, put_object=lambda key, payload: objects.update({key: payload}))
-    monkeypatch.setattr(
-        admin_kv, "_pg_store", lambda config, tenant_id: store if config.storage_pg_enabled else None,
-    )
-    load, save = routes._load_console_sessions, routes._save_console_sessions
-    monkeypatch.setattr(routes, "_load_console_sessions", lambda config: load(replace(config, storage_pg_enabled=True)))
-    monkeypatch.setattr(
-        routes, "_save_console_sessions",
-        lambda config, sessions: save(replace(config, storage_pg_enabled=True), sessions),
-    )
+@pytest.fixture
+def session_backend():
+    # SQLite exercises transactional authority and shared-worker semantics.
+    # PostgreSQL is covered by test_console_identity_pg with a real isolated schema.
+    return "sqlite"
 
 
 def _server(path: Path) -> ProxyServer:
     return ProxyServer(
         TeamEvolverConfig(
-            users_registry_path=str(path / "users.json"),
-            skills_dir=str(path / "skills"),
-            sharing_enabled=False,
+            _config_file=str(path / "config.yaml"),
+            skills_runtime_cache_dir=str(path / "skills"),
             sharing_skill_mirror_enabled=False,
         )
     )
@@ -101,6 +83,38 @@ def test_session_created_by_a_peer_instance_is_recognised(tmp_path, session_back
     _assert_user(peer)
 
 
+def test_parallel_business_requests_share_one_authenticated_session(tmp_path, monkeypatch):
+    server = _server(tmp_path)
+
+    @server.app.get("/api/session-probe")
+    async def session_probe(request: Request):
+        return {"user_id": request.state.console_user["id"]}
+
+    browser = TestClient(server.app)
+    _bootstrap(browser)
+    clients = [TestClient(server.app, cookies=browser.cookies) for _ in range(3)]
+    barrier = threading.Barrier(len(clients))
+    load_registry = IdentityStore.load_registry
+
+    def synchronized_load_registry(store):
+        data = load_registry(store)
+        barrier.wait(timeout=5)
+        return data
+
+    monkeypatch.setattr(IdentityStore, "load_registry", synchronized_load_registry)
+    with ThreadPoolExecutor(max_workers=len(clients)) as pool:
+        responses = list(pool.map(
+            lambda client: client.get(
+                "/api/session-probe",
+                headers={"X-Tenant-Id": "default"},
+            ),
+            clients,
+        ))
+
+    assert [response.status_code for response in responses] == [200, 200, 200]
+    assert [response.json()["user_id"] for response in responses] == ["admin"] * 3
+
+
 def test_login_on_another_port_does_not_replace_existing_login(tmp_path):
     first = TestClient(_server(tmp_path / "first").app, base_url="http://192.0.2.10:1080")
     second = TestClient(_server(tmp_path / "second").app, base_url="http://192.0.2.10:1081")
@@ -116,6 +130,36 @@ def test_login_on_another_port_does_not_replace_existing_login(tmp_path):
     assert second.post("/api/auth/logout").status_code == 200
     _assert_user(first, "first-admin")
     assert second.get("/api/auth/status").json()["authenticated"] is False
+
+
+def test_legacy_cookie_is_migrated_to_the_scoped_name(tmp_path):
+    server = _server(tmp_path)
+    client = TestClient(server.app, base_url="http://192.0.2.10:1080")
+    token = "legacy-browser-session"
+    IdentityStore(server.config).edit_users(
+        lambda data: data["users"].append({
+            "id": "admin",
+            "display_name": "Admin",
+            "platform_role": "platform_admin",
+            "status": "active",
+        }),
+        actor="test",
+    )
+    IdentityStore(server.config).session(
+        token,
+        value={"user_id": "admin", "expires_at": routes.time.time() + 3600},
+    )
+    client.cookies.set(
+        routes._SESSION_COOKIE,
+        token,
+        domain="192.0.2.10",
+        path="/",
+    )
+
+    assert client.get("/api/auth/status").json()["authenticated"] is True
+    cookie_names = {cookie.name for cookie in client.cookies.jar}
+    assert routes._SESSION_COOKIE not in cookie_names
+    assert any(name.startswith(f"{routes._SESSION_COOKIE}_") for name in cookie_names)
 
 
 def test_active_login_renews_cookie_and_survives_restart(tmp_path, monkeypatch, session_backend):
@@ -135,25 +179,6 @@ def test_active_login_renews_cookie_and_survives_restart(tmp_path, monkeypatch, 
     _assert_user(restarted)
 
 
-def test_legacy_cookie_migrates_and_logout_stays_logged_out(tmp_path, session_backend):
-    server = _server(tmp_path)
-    client = TestClient(server.app, base_url="http://192.0.2.10:1080")
-    _bootstrap(client)
-    cookie = next(iter(client.cookies.jar))
-    token = cookie.value
-    client.cookies.clear()
-    client.cookies.set(routes._SESSION_COOKIE, token, domain=cookie.domain, path="/")
-    _assert_user(client)
-    assert routes._SESSION_COOKIE not in client.cookies
-    assert len(client.cookies) == 1
-
-    assert client.post("/api/auth/logout").status_code == 200
-    assert client.get("/api/auth/status").json()["authenticated"] is False
-    restarted = TestClient(_server(tmp_path).app, base_url=str(client.base_url))
-    restarted.cookies.set(cookie.name, token, domain=cookie.domain, path="/")
-    assert restarted.get("/api/auth/status").json()["authenticated"] is False
-
-
 def test_login_and_register_issue_persistent_cookies(tmp_path):
     server = _server(tmp_path)
     client = TestClient(server.app, base_url="http://192.0.2.10:1080")
@@ -171,19 +196,61 @@ def test_login_and_register_issue_persistent_cookies(tmp_path):
     _assert_user(restarted, "alice")
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_root_key_registration_bypasses_policy_but_keeps_user_validation(tmp_path, monkeypatch, enabled):
+    monkeypatch.setenv("TEAMEVOLVER_ROOT_API_KEY", "test-service-root")
+    server = _server(tmp_path)
+    server.config.self_registration_enabled = enabled
+    client = TestClient(server.app)
+    _bootstrap(client)
+    client.cookies.clear()
+    assert client.get("/api/auth/status").json()["self_registration_enabled"] is enabled
+    headers = {"Authorization": "Bearer test-service-root"}
+    payload = {"username": "backend-user", "password": "test-password", "role": "admin"}
+    response = client.post("/api/auth/register", headers=headers, json=payload)
+    assert response.status_code == 200
+    assert response.json()["user"]["role"] == "user"
+    assert client.post("/api/auth/register", headers=headers, json=payload).status_code == 409
+    assert client.post("/api/auth/register", headers=headers, json={}).status_code == 400
+    client.cookies.clear()
+    assert client.post("/api/auth/login", json=payload).status_code == 200
+
+
+@pytest.mark.parametrize("root_key", ["", "test-service-root"])
+@pytest.mark.parametrize("admin_cookie", [False, True])
+@pytest.mark.parametrize("bearer", ["", "invalid-key"])
+def test_disabled_registration_requires_verified_root_key(tmp_path, monkeypatch, root_key, admin_cookie, bearer):
+    monkeypatch.setenv("TEAMEVOLVER_ROOT_API_KEY", root_key)
+    server = _server(tmp_path)
+    server.config.self_registration_enabled = False
+    client = TestClient(server.app)
+    _bootstrap(client)
+    if not admin_cookie:
+        client.cookies.clear()
+    before = IdentityStore(server.config).load_registry()
+    response = client.post(
+        "/api/auth/register", json={"username": "blocked-user", "password": "test-password"},
+        headers={"Authorization": f"Bearer {bearer}", "X-Role": "admin", "X-Service-Root-Authenticated": "true"},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "SELF_REGISTRATION_DISABLED"
+    assert IdentityStore(server.config).load_registry() == before
+
+
 def test_idle_session_expires_and_frequent_requests_do_not_rewrite_storage(tmp_path, monkeypatch):
     server = _server(tmp_path)
     client = TestClient(server.app, base_url="http://192.0.2.10:1080")
     _bootstrap(client)
     expires_at = next(iter(server._console_sessions.values()))["expires_at"]
     writes = []
-    save = routes._save_console_sessions
+    save = IdentityStore.session
 
-    def track_save(config, sessions):
-        writes.append(True)
-        save(config, sessions)
+    def track_save(store, token, **kwargs):
+        if kwargs.get("value") is not None:
+            writes.append(True)
+        return save(store, token, **kwargs)
 
-    monkeypatch.setattr(routes, "_save_console_sessions", track_save)
+    monkeypatch.setattr(IdentityStore, "session", track_save)
     for _ in range(3):
         _assert_user(client)
     assert not writes
@@ -191,7 +258,7 @@ def test_idle_session_expires_and_frequent_requests_do_not_rewrite_storage(tmp_p
     monkeypatch.setattr(routes, "time", SimpleNamespace(time=lambda: expires_at + 1))
     assert client.get("/api/auth/status").json()["authenticated"] is False
     assert not server._console_sessions
-    assert routes._load_console_sessions(server.config) == {}
+    assert IdentityStore(server.config).sessions() == {}
 
 
 def test_logout_during_renewal_does_not_set_the_cookie_again(tmp_path, monkeypatch):

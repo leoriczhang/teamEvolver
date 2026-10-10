@@ -252,36 +252,6 @@ async def test_internal_error_has_request_id(caplog):
     assert "a private business paragraph" not in rendered
 
 
-def test_child_output_bounded_and_never_leaks_payload(caplog):
-    import subprocess
-    import sys
-
-    from teamEvolver.logging_subprocess import capture_subprocess
-
-    caplog.set_level(logging.DEBUG)
-    child = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            "print('x'*20000);print('Authorization: Bearer SECRET');"
-            "print('ERROR private business');print('Application startup complete')",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    thread = capture_subprocess(child, {})
-    child.wait(timeout=5)
-    thread.join(timeout=2)
-    assert not thread.is_alive()
-    records = [r for r in caplog.records if r.name == "team_miner.subprocess"]
-    assert any(r.fields["truncated"] for r in records)
-    assert any(r.fields["kind"] == "ready" for r in records)
-    assert all(
-        "private business" not in SafeFormatter().format(r) and "SECRET" not in SafeFormatter().format(r)
-        for r in records
-    )
-
-
 def test_config_env_file_sources_and_process_precedence(tmp_path, monkeypatch):
     from teamEvolver.config_store import ConfigStore
 

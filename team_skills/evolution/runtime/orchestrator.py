@@ -27,53 +27,31 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from team_replay.datasets.schema import normalize_case
 from team_replay.datasets.store import (
     SkillDatasetStore,
     dataset_material_integrity,
 )
 from team_replay.datasets.synthesis import (
-    DATASET_FORMAT,
     SynthesizedDatasetStore,
-    checklist_items,
     dataset_to_replay_case,
     flatten_requirements,
     synthesize_evolution_datasets,
 )
 from team_replay.metrics import UNAVAILABLE, metric_number
-from teamEvolver.observability import (
-    langfuse_observation,
-    update_langfuse_observation,
-)
-from teamEvolver.progressive_replay import (
+from team_replay.policy import (
     aggregate_case_checklists,
     progressive_replay_decision,
     select_replay_cases,
 )
-from team_skills.library.bundle import (
-    attach_bundle_payload,
-    bundle_entrypoint_text,
-    bundle_file_records,
-    bundle_tree_sha256,
-    candidate_skill_bundle,
-)
-from team_skills.library.publication import (
-    build_bundle_record,
-    load_manifest_snapshot,
-    publish_skill_bundle_batch,
-)
-from teamEvolver.storage import (
-    InMemoryObjectStore,
-    LocalObjectStore,
-    build_object_store,
-    is_not_found_error,
-)
-from team_skills.candidates import ValidationStore
-from team_skills.candidates.static_checks import validate_candidate_bundle
 from team_replay.runtime_matrix import (
     evaluate_runtime_compatibility,
     prepare_runtime_validation,
     runtime_type_for_case,
 )
+from team_skills.candidates import ValidationStore
+from team_skills.candidates.static_checks import validate_candidate_bundle
+from team_skills.candidates.store import CENTRAL_VALIDATOR_ID
 from team_skills.evolution.kernel.bundle_changes import (
     BundleChangeError,
     materialize_bundle_changes,
@@ -81,9 +59,9 @@ from team_skills.evolution.kernel.bundle_changes import (
 )
 from team_skills.evolution.kernel.enums import NO_SKILL_KEY, DecisionAction
 from team_skills.evolution.kernel.helpers import build_skill_md, parse_skill_content
-from team_skills.evolution.kernel.llm import AsyncLLMClient
-from team_skills.evolution.kernel.registry import SkillIDRegistry
 from team_skills.evolution.kernel.settings import EvolveServerConfig
+from team_skills.evolution.runtime.evidence import SkillEvidenceStore, is_candidate_audit_session
+from team_skills.evolution.runtime.mixins import EvolveEngineMixin
 from team_skills.evolution.stages.aggregate import aggregate_sessions_by_skill
 from team_skills.evolution.stages.execute import (
     create_skill_from_sessions,
@@ -91,7 +69,6 @@ from team_skills.evolution.stages.execute import (
     execute_merge,
     set_evolve_agent_limits,
     set_evolve_bundle_contract,
-    set_evolve_debug_dir,
 )
 from team_skills.evolution.stages.summarize import (
     _extract_session_metadata,
@@ -112,8 +89,30 @@ from team_skills.evolution.store.object_store import (
     save_manifest,
     save_version_bundle,
 )
-from team_skills.evolution.runtime.evidence import SkillEvidenceStore, is_candidate_audit_session
-from team_skills.evolution.runtime.mixins import EvolveEngineMixin
+from team_skills.library.bundle import (
+    attach_bundle_payload,
+    bundle_entrypoint_text,
+    bundle_file_records,
+    bundle_tree_sha256,
+    candidate_skill_bundle,
+)
+from team_skills.library.publication import (
+    build_bundle_record,
+    load_manifest_snapshot,
+    publish_skill_bundle_batch,
+)
+from team_skills.library.registry import SkillIDRegistry
+from teamEvolver.llm import AsyncLLMClient
+from teamEvolver.observability import (
+    langfuse_observation,
+    update_langfuse_observation,
+)
+from teamEvolver.storage import (
+    InMemoryObjectStore,
+    LocalObjectStore,
+    build_object_store,
+    is_not_found_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +158,6 @@ class EvolveServer(EvolveEngineMixin):
         )
         self._validation_store = ValidationStore.from_bucket(
             bucket=self._skill_bucket,
-            customer_id=self.config.viking_customer_id,
             prefix=self._skill_prefix,
         )
         self._id_registry = SkillIDRegistry()
@@ -226,9 +224,7 @@ class EvolveServer(EvolveEngineMixin):
                 pg_schema=str(getattr(config, "pg_schema", "") or "teamevolver"),
                 pg_pool_min=int(getattr(config, "pg_pool_min", 2) or 2),
                 pg_pool_max=int(getattr(config, "pg_pool_max", 20) or 20),
-                pg_command_timeout=float(
-                    getattr(config, "pg_command_timeout_seconds", 30.0) or 30.0
-                ),
+                pg_command_timeout=float(getattr(config, "pg_command_timeout_seconds", 30.0) or 30.0),
                 tenant_id=str(getattr(config, "pg_tenant_id", "") or "default"),
             )
         if backend_normalized == "viking":
@@ -239,9 +235,9 @@ class EvolveServer(EvolveEngineMixin):
                 viking_user=getattr(config, "viking_user", "") or "team",
                 viking_agent=getattr(config, "viking_agent", "") or "team-skill-evolver",
                 viking_api_key=getattr(config, "viking_api_key", "") or "",
-                viking_agent_id=getattr(config, "viking_agent_id", "") or "",
+
                 viking_root_prefix=getattr(config, "viking_root_prefix", "") or "team-skill-evolver",
-                viking_group_id=getattr(config, "viking_group_id", "") or "",
+
                 viking_namespace="resources",
                 allow_fallback=bool(getattr(config, "storage_fallback_enabled", True)),
                 fallback_root=str(getattr(config, "storage_local_root", "") or ""),
@@ -286,9 +282,7 @@ class EvolveServer(EvolveEngineMixin):
             store.build_replay_windows,
             evidence_key,
         )
-        active_job_id = str(
-            context.get("active_candidate_job_id") or ""
-        ).strip()
+        active_job_id = str(context.get("active_candidate_job_id") or "").strip()
         if active_job_id:
             context["active_candidate_feedback"] = await self._call_storage(
                 self._candidate_validation_feedback,
@@ -316,11 +310,7 @@ class EvolveServer(EvolveEngineMixin):
             return managed
         synthesis_skill = {
             **candidate_skill,
-            "_evidence_classification": (
-                evidence_classification
-                if isinstance(evidence_classification, dict)
-                else {}
-            ),
+            "_evidence_classification": (evidence_classification if isinstance(evidence_classification, dict) else {}),
         }
         datasets = await synthesize_evolution_datasets(
             self._llm,
@@ -337,7 +327,7 @@ class EvolveServer(EvolveEngineMixin):
         merged: list[dict[str, Any]] = []
         seen: set[str] = set()
         for dataset in [*managed, *datasets]:
-            dataset_id = str(dataset.get("dataset_id") or "")
+            dataset_id = str(dataset.get("case_id") or "")
             if not dataset_id or dataset_id in seen:
                 continue
             seen.add(dataset_id)
@@ -351,82 +341,58 @@ class EvolveServer(EvolveEngineMixin):
         )
         return merged[:target_count]
 
-    def _managed_evolution_datasets(
-        self,
-        skill_name: str,
-        limit: int,
-    ) -> list[dict[str, Any]]:
-        """Load explicitly pinned Skill datasets for candidate replay."""
-        store = SkillDatasetStore(
-            self._skill_bucket,
-            prefix=self._skill_prefix,
-        )
+    @staticmethod
+    def _canonical_replay_case(raw: dict[str, Any]) -> dict[str, Any]:
+        """Adapt evidence windows to the current Dataset Case contract."""
+        query = str(raw.get("query") or raw.get("instruction") or "").strip()
+        provenance = dict(raw.get("provenance") or {})
+        for key in ("session_id", "source_runtime", "source_runtime_context", "evidence_window", "turn_num"):
+            if key in raw:
+                provenance.setdefault(key, raw[key])
+        checks = raw.get("checks") or raw.get("checklist")
+        if not checks:
+            requirements = flatten_requirements(raw.get("requirements")) or [query]
+            checks = [{"id": f"R{i:02d}", "kind": "output", "text": text}
+                      for i, text in enumerate(requirements, start=1)]
+        replay = dict(raw.get("replay") or {})
+        if isinstance(raw.get("progressive_disclosure"), dict):
+            replay.setdefault("progressive_disclosure", raw["progressive_disclosure"])
+        identity = json.dumps([query, provenance.get("session_id"), provenance.get("turn_num")], ensure_ascii=False)
+        return normalize_case({
+            "case_id": str(raw.get("case_id") or raw.get("dataset_id")
+                           or "evidence-" + hashlib.sha256(identity.encode()).hexdigest()[:20]),
+            "query": query,
+            "skill_ids": list(raw.get("skill_ids") or []),
+            "checks": checks,
+            "materials": list(raw.get("materials") or []),
+            "provenance": provenance,
+            "replay": replay,
+            "metadata": dict(raw.get("metadata") or {}),
+        })
+
+    def _managed_evolution_datasets(self, skill_name: str, limit: int) -> list[dict[str, Any]]:
+        """Load pinned Dataset Cases from canonical multi-case documents."""
+        store = SkillDatasetStore(self._skill_bucket, prefix=self._skill_prefix)
         selected: list[dict[str, Any]] = []
-        for raw in store.list_datasets(skill_name=skill_name):
-            if not bool(raw.get("enabled_for_evolution")):
+        for document in store.list_datasets(skill_name=skill_name):
+            if not bool((document.get("metadata") or {}).get("enabled_for_evolution")):
                 continue
-            available_paths = store.available_material_paths(raw)
-            integrity = dataset_material_integrity(
-                raw,
-                available_paths=available_paths,
-            )
+            integrity = dataset_material_integrity(document, available_paths=store.available_material_paths(document))
             if not integrity["complete"]:
-                logger.warning(
-                    "[DatasetStore] skip incomplete fixed regression "
-                    "skill=%s dataset=%s missing=%s",
-                    skill_name,
-                    raw.get("dataset_id"),
-                    integrity["missing_paths"],
-                )
+                logger.warning("[DatasetStore] skip incomplete fixed regression skill=%s dataset=%s missing=%s",
+                               skill_name, document.get("dataset_id"), integrity["missing_paths"])
                 continue
-            requirements = flatten_requirements(raw.get("requirements"))
-            trajectory = flatten_requirements(
-                raw.get("trajectory_requirements")
-            )
-            if not requirements and not trajectory:
-                continue
-            source = (
-                raw.get("source")
-                if isinstance(raw.get("source"), dict)
-                else {}
-            )
-            source_session_ids = [
-                str(item or "")
-                for item in source.get("source_session_ids") or []
-                if str(item or "")
-            ]
-            session_id = str(source.get("session_id") or "")
-            if session_id and session_id not in source_session_ids:
-                source_session_ids.insert(0, session_id)
-            materials = []
-            for rel_path, data in store.read_materials(raw):
-                materials.append(
-                    {
-                        "path": rel_path,
-                        "size": len(data),
-                        "content_b64": base64.b64encode(data).decode("ascii"),
-                    }
-                )
-            selected.append(
-                {
-                    **raw,
-                    "dataset_format": str(
-                        raw.get("dataset_format") or DATASET_FORMAT
-                    ),
-                    "requirements": requirements,
-                    "trajectory_requirements": trajectory,
-                    "checklist": checklist_items(requirements, trajectory),
-                    "source_session_ids": source_session_ids,
-                    "evidence_window": str(
-                        raw.get("evidence_window")
-                        or source.get("evidence_window")
-                        or "historical"
-                    ),
-                    "materials": materials,
-                }
-            )
-            if len(selected) >= max(1, int(limit or 1)):
-                break
+            materials = {path: data for path, data in store.read_materials(document)}
+            for raw in document.get("cases") or []:
+                case = self._canonical_replay_case(raw)
+                case["provenance"].setdefault("evidence_window", "historical")
+                for material in case["materials"]:
+                    data = materials.get(str(material.get("path") or ""))
+                    if data is not None:
+                        material.update(size=len(data), content_b64=base64.b64encode(data).decode("ascii"))
+                selected.append(case)
+                if len(selected) >= max(1, int(limit or 1)):
+                    return selected
         return selected
 
     def _candidate_validation_feedback(
@@ -436,40 +402,24 @@ class EvolveServer(EvolveEngineMixin):
         """Compact validator evidence for the next candidate revision."""
         job = self._validation_store.load_job(job_id) or {}
         decision = self._validation_store.load_decision(job_id) or {}
-        results = self._validation_store.list_results(job_id)
+        results = self._validation_results(job_id)
         compact_results: list[dict[str, Any]] = []
         for result in results[-3:]:
-            replay = (
-                result.get("replay_summary")
-                if isinstance(result.get("replay_summary"), dict)
-                else {}
-            )
-            policy = (
-                replay.get("decision_policy")
-                if isinstance(replay.get("decision_policy"), dict)
-                else {}
-            )
+            replay = result.get("replay_summary") if isinstance(result.get("replay_summary"), dict) else {}
+            policy = replay.get("decision_policy") if isinstance(replay.get("decision_policy"), dict) else {}
             compact_results.append(
                 {
                     "validator": str(result.get("user_alias") or ""),
-                    "decision": str(
-                        result.get("decision") or "inconclusive"
-                    ),
+                    "decision": str(result.get("decision") or "inconclusive"),
                     "metric_changes": policy.get("metric_changes") or {},
-                    "improved_metrics": list(
-                        policy.get("improved_metrics") or []
-                    ),
-                    "regressed_metrics": list(
-                        policy.get("regressed_metrics") or []
-                    ),
+                    "improved_metrics": list(policy.get("improved_metrics") or []),
+                    "regressed_metrics": list(policy.get("regressed_metrics") or []),
                     "reason": str(result.get("reason") or "")[:1_000],
                 }
             )
         return {
             "job_id": job_id,
-            "candidate_revision": int(
-                job.get("candidate_revision") or 1
-            ),
+            "candidate_revision": int(job.get("candidate_revision") or 1),
             "job_status": str(job.get("status") or ""),
             "decision_status": str(decision.get("status") or ""),
             "candidate_edit_summary": (
@@ -542,44 +492,21 @@ class EvolveServer(EvolveEngineMixin):
         )
         if not context:
             for job in reversed(self._validation_store.list_jobs()):
-                candidate = (
-                    job.get("candidate_skill")
-                    if isinstance(job.get("candidate_skill"), dict)
-                    else {}
-                )
-                if str(
-                    candidate.get("name")
-                    or job.get("candidate_skill_name")
-                    or ""
-                ) != skill_name:
+                candidate = job.get("candidate_skill") if isinstance(job.get("candidate_skill"), dict) else {}
+                if str(candidate.get("name") or job.get("candidate_skill_name") or "") != skill_name:
                     continue
                 job_id = str(job.get("job_id") or "")
                 decision = self._validation_store.load_decision(job_id) or {}
-                if (
-                    decision.get("status") == "published"
-                    and int(decision.get("version") or 0) == version
-                ):
+                if decision.get("status") == "published" and int(decision.get("version") or 0) == version:
                     context = {
                         "job_id": job_id,
                         "job": job,
                         "decision": decision,
-                        "evaluation": self._validation_store.load_evaluation(
-                            job_id
-                        )
-                        or {},
+                        "evaluation": self._validation_store.load_evaluation(job_id) or {},
                     }
                     break
-        job = (
-            context.get("job")
-            if isinstance(context, dict)
-            and isinstance(context.get("job"), dict)
-            else {}
-        )
-        replay_cases = [
-            dict(case)
-            for case in job.get("replay_cases") or []
-            if isinstance(case, dict)
-        ]
+        job = context.get("job") if isinstance(context, dict) and isinstance(context.get("job"), dict) else {}
+        replay_cases = [dict(case) for case in job.get("replay_cases") or [] if isinstance(case, dict)]
         if not replay_cases:
             return None
         return {
@@ -633,11 +560,7 @@ class EvolveServer(EvolveEngineMixin):
                     continue
                 for field in ("read_skills", "modified_skills"):
                     for item in turn.get(field) or []:
-                        path = (
-                            str(item.get("path") or "")
-                            if isinstance(item, dict)
-                            else ""
-                        ).strip()
+                        path = (str(item.get("path") or "") if isinstance(item, dict) else "").strip()
                         if path and path not in paths:
                             paths.append(path)
         return paths
@@ -671,18 +594,21 @@ class EvolveServer(EvolveEngineMixin):
         from team_skills.library.hub import SkillHub
         from team_skills.library.mutations import SkillMutationService
 
-        mutation_id = "evolve-" + hashlib.sha256(
-            json.dumps(
-                {
-                    "action": action,
-                    "name": expected.get("name"),
-                    "version": expected.get("version"),
-                    "sha256": expected.get("sha256"),
-                    "tree_sha256": expected.get("tree_sha256"),
-                },
-                sort_keys=True,
-            ).encode("utf-8")
-        ).hexdigest()[:32]
+        mutation_id = (
+            "evolve-"
+            + hashlib.sha256(
+                json.dumps(
+                    {
+                        "action": action,
+                        "name": expected.get("name"),
+                        "version": expected.get("version"),
+                        "sha256": expected.get("sha256"),
+                        "tree_sha256": expected.get("tree_sha256"),
+                    },
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()[:32]
+        )
         service = SkillMutationService.from_hub(
             SkillHub.from_bucket(
                 self._skill_bucket,
@@ -707,15 +633,11 @@ class EvolveServer(EvolveEngineMixin):
         native_batch = bool(getattr(self._skill_bucket, "native_batch_write", False))
         fixed_preconditions: dict[str, dict[str, str]] = {}
         if native_batch:
-            _merged, registry_precondition = (
-                self._id_registry.merge_from_oss_snapshot(
-                    self._skill_bucket,
-                    self._skill_prefix,
-                )
+            _merged, registry_precondition = self._id_registry.merge_from_oss_snapshot(
+                self._skill_bucket,
+                self._skill_prefix,
             )
-            fixed_preconditions[
-                f"{self._skill_prefix}evolve_skill_registry.json"
-            ] = registry_precondition
+            fixed_preconditions[f"{self._skill_prefix}evolve_skill_registry.json"] = registry_precondition
         registry_snapshot = self._id_registry.snapshot()
         registry_was_dirty = self._id_registry.dirty
         if native_batch:
@@ -723,20 +645,14 @@ class EvolveServer(EvolveEngineMixin):
                 self._skill_bucket,
                 self._skill_prefix,
             )
-            fixed_preconditions[f"{self._skill_prefix}manifest.json"] = (
-                manifest_precondition
-            )
+            fixed_preconditions[f"{self._skill_prefix}manifest.json"] = manifest_precondition
         else:
             manifest = self._load_remote_skills()
         existed = name in manifest
 
         skill_id = self._id_registry.get_or_create(name)
         bundle = candidate_skill_bundle(skill)
-        runtime_policy = (
-            skill.get("runtime_policy")
-            if isinstance(skill.get("runtime_policy"), dict)
-            else {}
-        )
+        runtime_policy = skill.get("runtime_policy") if isinstance(skill.get("runtime_policy"), dict) else {}
         committed = manifest.get(name) or {}
         if (
             committed.get("format") == "bundle_v1"
@@ -748,9 +664,7 @@ class EvolveServer(EvolveEngineMixin):
             and int(committed["version"]) == self._id_registry.get_version(name)
         ):
             try:
-                active_bundle = fetch_skill_bundle(
-                    self._skill_bucket, self._skill_prefix, name, committed
-                )
+                active_bundle = fetch_skill_bundle(self._skill_bucket, self._skill_prefix, name, committed)
             except Exception as exc:
                 if not is_not_found_error(exc):
                     raise
@@ -878,13 +792,11 @@ class EvolveServer(EvolveEngineMixin):
         cached = self.__dict__.get("_mirror_hub")
         if cached is not None:
             return cached
-        endpoint = str(
-            getattr(self.config, "viking_endpoint", "") or self.config.storage_endpoint or ""
-        )
+        endpoint = str(getattr(self.config, "viking_endpoint", "") or self.config.storage_endpoint or "")
         if not endpoint:
             return None
-        from teamEvolver.storage import build_object_store
         from team_skills.library.hub import SkillHub
+        from teamEvolver.storage import build_object_store
 
         bucket = build_object_store(
             backend="viking",
@@ -893,15 +805,15 @@ class EvolveServer(EvolveEngineMixin):
             viking_user=str(getattr(self.config, "viking_user", "") or "team"),
             viking_agent=str(getattr(self.config, "viking_agent", "") or "team-skill-evolver"),
             viking_api_key=str(getattr(self.config, "viking_api_key", "") or ""),
-            viking_agent_id=str(getattr(self.config, "viking_agent_id", "") or ""),
+
             viking_root_prefix=str(getattr(self.config, "viking_root_prefix", "") or "team-skill-evolver"),
-            viking_group_id=str(getattr(self.config, "viking_group_id", "") or ""),
+
             viking_namespace="resources",
             allow_fallback=False,
         )
         hub = SkillHub.from_bucket(
             bucket,
-            customer_id=str(getattr(self.config, "viking_customer_id", "") or ""),
+            tenant_id=self.tenant_id,
         )
         self.__dict__["_mirror_hub"] = hub
         return hub
@@ -943,22 +855,16 @@ class EvolveServer(EvolveEngineMixin):
         native_batch = bool(getattr(self._skill_bucket, "native_batch_write", False))
         fixed_preconditions: dict[str, dict[str, str]] = {}
         if native_batch:
-            _merged, registry_precondition = (
-                self._id_registry.merge_from_oss_snapshot(
-                    self._skill_bucket,
-                    self._skill_prefix,
-                )
+            _merged, registry_precondition = self._id_registry.merge_from_oss_snapshot(
+                self._skill_bucket,
+                self._skill_prefix,
             )
-            fixed_preconditions[
-                f"{self._skill_prefix}evolve_skill_registry.json"
-            ] = registry_precondition
+            fixed_preconditions[f"{self._skill_prefix}evolve_skill_registry.json"] = registry_precondition
             manifest, manifest_precondition = load_manifest_snapshot(
                 self._skill_bucket,
                 self._skill_prefix,
             )
-            fixed_preconditions[f"{self._skill_prefix}manifest.json"] = (
-                manifest_precondition
-            )
+            fixed_preconditions[f"{self._skill_prefix}manifest.json"] = manifest_precondition
         else:
             manifest = self._load_remote_skills()
         registry_snapshot = self._id_registry.snapshot()
@@ -1001,9 +907,7 @@ class EvolveServer(EvolveEngineMixin):
             "category": parsed.get("category") or existing.get("category", "general"),
         }
         if isinstance(existing.get("runtime_policy"), dict):
-            manifest[name]["runtime_policy"] = dict(
-                existing["runtime_policy"]
-            )
+            manifest[name]["runtime_policy"] = dict(existing["runtime_policy"])
         try:
             if native_batch:
                 publish_skill_bundle_batch(
@@ -1116,9 +1020,7 @@ class EvolveServer(EvolveEngineMixin):
 
     async def get_skill_version(self, name: str, version: int) -> dict[str, Any]:
         """Fetch one skill version's content + metadata for the dashboard."""
-        return await self._call_storage(
-            self._get_skill_version, self._sanitise_name(name), int(version)
-        )
+        return await self._call_storage(self._get_skill_version, self._sanitise_name(name), int(version))
 
     async def rollback_skill(self, name: str, target_version: int) -> dict[str, Any]:
         """Roll a skill back to an archived version."""
@@ -1131,9 +1033,7 @@ class EvolveServer(EvolveEngineMixin):
         record = self._load_remote_skill_record(name) or {}
         existing_tree = str(record.get("tree_sha256") or "")
         if existing_tree:
-            return existing_tree != bundle_tree_sha256(
-                candidate_skill_bundle(incoming_skill)
-            )
+            return existing_tree != bundle_tree_sha256(candidate_skill_bundle(incoming_skill))
         existing_sha = self._id_registry.get_content_sha(name)
         if not existing_sha:
             return False
@@ -1186,11 +1086,7 @@ class EvolveServer(EvolveEngineMixin):
         if merged and merged.get("name"):
             merged["name"] = name
             incoming_bundle = candidate_skill_bundle(skill)
-            changes = [
-                item
-                for item in (skill.get("file_changes") or [])
-                if isinstance(item, dict)
-            ]
+            changes = [item for item in (skill.get("file_changes") or []) if isinstance(item, dict)]
             if changes:
                 merged_bundle = dict(existing_bundle)
                 for change in changes:
@@ -1237,17 +1133,17 @@ class EvolveServer(EvolveEngineMixin):
         }
 
     async def _prepare_sessions(self, sessions: list[dict]) -> int:
-        """Reuse complete ingest analysis and backfill legacy Sessions before evolution."""
+        """Reuse mandatory ingest analysis without a second Judge call."""
         judged = 0
         if not sessions:
             return judged
 
-        from team_skills.evolution.stages.analyze import analyze_session, session_has_merged_outputs
+        from team_skills.evolution.stages.analyze import session_has_merged_outputs
 
         judge_enabled = bool(self.config.use_session_judge)
         for session in sessions:
             if not session_has_merged_outputs(session):
-                await analyze_session(self._llm, session)
+                raise ValueError("Session requires mandatory ingest analysis before Skill Evolution")
             _extract_session_metadata(session)
             session["_trajectory"] = build_session_trajectory(session)
             # A session already analysed at ingest carries its judge overall in
@@ -1413,14 +1309,8 @@ class EvolveServer(EvolveEngineMixin):
                 "summary": str(session.get("_summary", "")),
                 "user_alias": str(session.get("user_alias", "") or ""),
             }
-            runtime_context = (
-                session.get("runtime_context")
-                if isinstance(session.get("runtime_context"), dict)
-                else {}
-            )
-            evaluation_profile = str(
-                runtime_context.get("evaluation_profile") or ""
-            ).strip()
+            runtime_context = session.get("runtime_context") if isinstance(session.get("runtime_context"), dict) else {}
+            evaluation_profile = str(runtime_context.get("evaluation_profile") or "").strip()
             if evaluation_profile:
                 item["evaluation_profile"] = evaluation_profile
             skills = session.get("_skills_referenced")
@@ -1447,32 +1337,29 @@ class EvolveServer(EvolveEngineMixin):
                 "_summary": str(raw.get("summary") or ""),
                 "turns": [],
             }
-            evaluation_profile = str(
-                raw.get("evaluation_profile") or ""
-            ).strip()
+            evaluation_profile = str(raw.get("evaluation_profile") or "").strip()
             if evaluation_profile:
                 item["runtime_context"] = {
                     "evaluation_profile": evaluation_profile,
                 }
             if isinstance(raw.get("judge_overall_score"), (int, float)):
-                item["_judge_scores"] = {
-                    "overall_score": float(raw["judge_overall_score"])
-                }
+                item["_judge_scores"] = {"overall_score": float(raw["judge_overall_score"])}
             if isinstance(raw.get("avg_prm"), (int, float)):
                 item["_avg_prm"] = float(raw["avg_prm"])
             sessions[session_id] = item
         for raw in job.get("replay_cases") or []:
             if not isinstance(raw, dict):
                 continue
-            session_id = str(raw.get("session_id") or "")
+            provenance = raw.get("provenance") or {}
+            session_id = str(provenance.get("session_id") or raw.get("session_id") or "")
             item = sessions.setdefault(
                 session_id,
                 {"session_id": session_id, "_summary": "", "turns": []},
             )
             item["turns"].append(
                 {
-                    "turn_num": int(raw.get("turn_num") or 0),
-                    "prompt_text": str(raw.get("instruction") or ""),
+                    "turn_num": int(provenance.get("turn_num") or raw.get("turn_num") or 0),
+                    "prompt_text": str(raw.get("query") or raw.get("instruction") or ""),
                     "response_text": str(raw.get("reference_response") or ""),
                 }
             )
@@ -1486,14 +1373,8 @@ class EvolveServer(EvolveEngineMixin):
             if is_candidate_audit_session(session):
                 continue
             session_id = str(session.get("session_id", "") or "")
-            runtime_context = (
-                session.get("runtime_context")
-                if isinstance(session.get("runtime_context"), dict)
-                else {}
-            )
-            evaluation_profile = str(
-                runtime_context.get("evaluation_profile") or ""
-            ).strip()
+            runtime_context = session.get("runtime_context") if isinstance(session.get("runtime_context"), dict) else {}
+            evaluation_profile = str(runtime_context.get("evaluation_profile") or "").strip()
             turns = session.get("turns") or []
             if not isinstance(turns, list):
                 continue
@@ -1543,16 +1424,12 @@ class EvolveServer(EvolveEngineMixin):
         name = str(skill.get("name", "") or "")
         skill_id = self._id_registry.get_or_create(name)
         open_jobs = (
-            self._validation_store.list_open_jobs_for_skill(name)
-            if self.config.candidate_coalesce_enabled
-            else []
+            self._validation_store.list_open_jobs_for_skill(name) if self.config.candidate_coalesce_enabled else []
         )
         existing = (
             max(
                 open_jobs,
-                key=lambda item: str(
-                    item.get("updated_at") or item.get("created_at") or ""
-                ),
+                key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""),
             )
             if open_jobs
             else None
@@ -1595,42 +1472,32 @@ class EvolveServer(EvolveEngineMixin):
             return merged
 
         current_session_ids = [
-            str(session.get("session_id") or "")
-            for session in sessions
-            if str(session.get("session_id") or "").strip()
+            str(session.get("session_id") or "") for session in sessions if str(session.get("session_id") or "").strip()
         ]
         source_sessions = {
             str(session.get("session_id") or ""): session
             for session in sessions
-            if isinstance(session, dict)
-            and str(session.get("session_id") or "").strip()
+            if isinstance(session, dict) and str(session.get("session_id") or "").strip()
         }
         current_evidence = self._build_validation_evidence(sessions)
         normalized_windows: dict[str, list[dict[str, Any]]] = {}
-        synthesized = [
-            dict(item)
-            for item in (test_datasets or [])
-            if isinstance(item, dict) and item.get("query")
-        ]
+        synthesized = [dict(item) for item in (test_datasets or []) if isinstance(item, dict) and item.get("query")]
         if synthesized:
             normalized_windows = {"recent": [], "historical": []}
             for dataset in synthesized:
                 case = dataset_to_replay_case(dataset)
-                source_session = source_sessions.get(
-                    str(case.get("session_id") or "")
-                )
+                provenance = case["provenance"]
+                source_session = source_sessions.get(str(provenance.get("session_id") or ""))
                 if isinstance(source_session, dict):
-                    case["source_runtime"] = (
-                        dict(source_session.get("runtime"))
-                        if isinstance(source_session.get("runtime"), dict)
-                        else {}
+                    provenance["source_runtime"] = (
+                        dict(source_session.get("runtime")) if isinstance(source_session.get("runtime"), dict) else {}
                     )
                     runtime_context = (
                         source_session.get("runtime_context")
                         if isinstance(source_session.get("runtime_context"), dict)
                         else {}
                     )
-                    case["source_runtime_context"] = {
+                    provenance["source_runtime_context"] = {
                         key: runtime_context.get(key)
                         for key in (
                             "tenant_id",
@@ -1646,15 +1513,12 @@ class EvolveServer(EvolveEngineMixin):
                         )
                         if runtime_context.get(key) not in (None, "")
                     }
-                window = str(case.get("evidence_window") or "recent")
+                window = str(provenance.get("evidence_window") or "recent")
                 if window not in normalized_windows:
                     window = "recent"
-                    case["evidence_window"] = window
+                    case["provenance"]["evidence_window"] = window
                 normalized_windows[window].append(case)
-            replay_cases = (
-                normalized_windows["recent"]
-                + normalized_windows["historical"]
-            )
+            replay_cases = normalized_windows["recent"] + normalized_windows["historical"]
         else:
             windows = replay_windows or {
                 "recent": self._build_replay_cases(sessions),
@@ -1665,18 +1529,16 @@ class EvolveServer(EvolveEngineMixin):
                 for raw in windows.get(window) or []:
                     if not isinstance(raw, dict):
                         continue
-                    case = dict(raw)
-                    case["evidence_window"] = window
+                    case = self._canonical_replay_case(raw)
+                    case["provenance"]["evidence_window"] = window
                     cases.append(case)
                 normalized_windows[window] = cases
-            replay_cases = (
-                normalized_windows["recent"]
-                + normalized_windows["historical"]
-            )
+            replay_cases = normalized_windows["recent"] + normalized_windows["historical"]
+        replay_cases = [self._canonical_replay_case(case) for case in replay_cases]
         if not replay_cases:
-            replay_cases = self._build_replay_cases(sessions)
+            replay_cases = [self._canonical_replay_case(case) for case in self._build_replay_cases(sessions)]
             for case in replay_cases:
-                case["evidence_window"] = "recent"
+                case["provenance"]["evidence_window"] = "recent"
             normalized_windows["recent"] = replay_cases
         runtime_preparation = prepare_runtime_validation(
             skill=skill,
@@ -1687,9 +1549,8 @@ class EvolveServer(EvolveEngineMixin):
         replay_cases = list(runtime_preparation["replay_cases"])
         runtime_policy = dict(runtime_preparation["policy"])
         compatibility_cases = [
-            case
-            for case in replay_cases
-            if str(case.get("evidence_window") or "") == "compatibility"
+            case for case in replay_cases
+            if str((case.get("provenance") or {}).get("evidence_window") or "") == "compatibility"
         ]
         if compatibility_cases:
             normalized_windows["compatibility"] = compatibility_cases
@@ -1704,23 +1565,21 @@ class EvolveServer(EvolveEngineMixin):
         session_evidence = merge_unique(
             list(previous.get("session_evidence") or []),
             current_evidence,
-            lambda item: str(item.get("session_id") or "")
-            if isinstance(item, dict)
-            else str(item),
+            lambda item: str(item.get("session_id") or "") if isinstance(item, dict) else str(item),
         )
         revision = int(previous.get("candidate_revision") or 0) + 1
         now = datetime.now(timezone.utc).isoformat()
         progressive_max_interactions = max(
             [
                 (
-                    len(dataset.get("checklist") or [])
+                    len(dataset.get("checks") or [])
                     + max(
                         1,
                         int(
                             (
-                                dataset.get("progressive_disclosure")
+                                (dataset.get("replay") or {}).get("progressive_disclosure")
                                 if isinstance(
-                                    dataset.get("progressive_disclosure"),
+                                    (dataset.get("replay") or {}).get("progressive_disclosure"),
                                     dict,
                                 )
                                 else {}
@@ -1734,9 +1593,9 @@ class EvolveServer(EvolveEngineMixin):
                     1,
                     int(
                         (
-                            dataset.get("progressive_disclosure")
+                            (dataset.get("replay") or {}).get("progressive_disclosure")
                             if isinstance(
-                                dataset.get("progressive_disclosure"),
+                                (dataset.get("replay") or {}).get("progressive_disclosure"),
                                 dict,
                             )
                             else {}
@@ -1762,11 +1621,7 @@ class EvolveServer(EvolveEngineMixin):
             "proposed_action": action_type,
             "source": source,
             "rationale": rationale,
-            "evidence_classification": (
-                evidence_classification
-                if isinstance(evidence_classification, dict)
-                else {}
-            ),
+            "evidence_classification": (evidence_classification if isinstance(evidence_classification, dict) else {}),
             "session_ids": session_ids,
             "session_evidence": session_evidence,
             "test_datasets": synthesized,
@@ -1779,18 +1634,16 @@ class EvolveServer(EvolveEngineMixin):
             "runtime_validation_policy": runtime_policy,
             "evidence_key": str(evidence_key or name),
             "evolution_context": evolution_context or {},
-            "coalesced_count": int(previous.get("coalesced_count") or 0)
-            + (1 if previous else 0),
-            "min_results": self.config.validation_required_results,
-            "min_approvals": self.config.validation_required_approvals,
-            "max_rejections": self.config.validation_max_rejections,
+            "coalesced_count": int(previous.get("coalesced_count") or 0) + (1 if previous else 0),
         }
+        # Historical single-file candidates may predate mandatory Skill front matter.
+        if not skill.get("description"):
+            skill["description"] = str(skill.get("content") or skill.get("name") or "").strip().split("\n", 1)[0][:1000]
+        job["pattern_refs"] = list((evolution_context or {}).get("pattern_refs") or [])
         candidate_bundle = candidate_skill_bundle(skill)
         if set(candidate_bundle) != {"SKILL.md"}:
             job["candidate_protocol_version"] = 2
-            job["candidate_bundle_tree_sha256"] = bundle_tree_sha256(
-                candidate_bundle
-            )
+            job["candidate_bundle_tree_sha256"] = bundle_tree_sha256(candidate_bundle)
             job["required_validator_capabilities"] = [
                 "bundle_v1",
                 "bundle_static_v1",
@@ -1818,11 +1671,7 @@ class EvolveServer(EvolveEngineMixin):
             revision,
         )
         return {
-            "action": (
-                "updated_validation_candidate"
-                if previous
-                else "queued_for_validation"
-            ),
+            "action": ("updated_validation_candidate" if previous else "queued_for_validation"),
             "proposed_action": action_type,
             "skill_name": name,
             "skill_id": skill_id,
@@ -1830,6 +1679,7 @@ class EvolveServer(EvolveEngineMixin):
             "session_ids": job["session_ids"],
             "rationale": rationale,
             "evidence_classification": job["evidence_classification"],
+            "pattern_refs": job["pattern_refs"],
             "source": source,
             "edit_summary": skill.get("edit_summary"),
             "file_changes": skill.get("file_changes") or [],
@@ -1838,271 +1688,105 @@ class EvolveServer(EvolveEngineMixin):
             "candidate_revision": revision,
             "coalesced": bool(previous),
             "test_dataset_count": len(synthesized),
-            "test_dataset_ids": [
-                str(item.get("dataset_id") or "") for item in synthesized
-            ],
+            "test_dataset_ids": [str(item.get("case_id") or "") for item in synthesized],
         }
+
+    def _validation_results(self, job_id: str) -> list[dict[str, Any]]:
+        """Read only the authoritative central validator result."""
+        result = self._validation_store.load_result(job_id, CENTRAL_VALIDATOR_ID)
+        return [result] if result else []
 
     async def _finalize_validation_jobs(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         summary = self._empty_validation_publish_summary()
         if self.config.publish_mode != "validated":
             return [], summary
-
         records: list[dict[str, Any]] = []
         for job in self._validation_store.list_jobs():
             summary["jobs_scanned"] += 1
-            job_id = str(job.get("job_id", "") or "")
-            if not job_id:
+            job_id = str(job.get("job_id") or "")
+            if not job_id or self._validation_store.load_decision(job_id):
                 continue
-            if self._validation_store.load_decision(job_id):
-                continue
-
+            result = self._validation_store.load_result(job_id, CENTRAL_VALIDATOR_ID)
             revision = max(1, int(job.get("candidate_revision") or 1))
-            required_capabilities = {
-                str(item)
-                for item in (job.get("required_validator_capabilities") or [])
-                if str(item)
-            }
-            expected_tree = str(
-                job.get("candidate_bundle_tree_sha256") or ""
-            )
-            results = [
-                result
-                for result in self._validation_store.list_results(job_id)
-                if (
-                    int(result.get("candidate_revision") or 1) == revision
-                    and (
-                        result.get("candidate_revision") is not None
-                        or revision == 1
-                    )
-                    and required_capabilities.issubset(
-                        {
-                            str(item)
-                            for item in (
-                                result.get("validator_capabilities") or []
-                            )
-                        }
-                    )
-                    and (
-                        not expected_tree
-                        or str(
-                            result.get("candidate_bundle_tree_sha256") or ""
-                        )
-                        == expected_tree
-                    )
-                )
-            ]
-            if not results:
+            required = set(job.get("required_validator_capabilities") or [])
+            expected_tree = str(job.get("candidate_bundle_tree_sha256") or "")
+            if (
+                not result
+                or int(result.get("candidate_revision") or 1) != revision
+                or (revision > 1 and result.get("candidate_revision") is None)
+                or not required.issubset(set(result.get("validator_capabilities") or []))
+                or (expected_tree and result.get("candidate_bundle_tree_sha256") != expected_tree)
+            ):
                 summary["pending"] += 1
                 continue
-
-            accepted = 0
-            rejected = 0
-            inconclusive = 0
-            for result in results:
-                result_decision = str(result.get("decision") or "").lower()
-                if result_decision == "reject" or result.get("rejected") is True:
-                    rejected += 1
-                elif result.get("accepted") is True or result_decision == "accept":
-                    accepted += 1
-                else:
-                    inconclusive += 1
-
-            runtime_gate = evaluate_runtime_compatibility(
-                (
-                    job.get("runtime_validation_policy")
-                    if isinstance(job.get("runtime_validation_policy"), dict)
-                    else {}
-                ),
-                results,
-            )
-            publish_ready = (
-                len(results) >= self.config.validation_required_results
-                and accepted >= self.config.validation_required_approvals
-                and runtime_gate["status"] == "passed"
-            )
-            reject_ready = (
-                rejected >= self.config.validation_max_rejections
-                or runtime_gate["status"] == "rejected"
-            )
-
-            if publish_ready and not reject_ready:
-                candidate_skill = job.get("candidate_skill")
-                if not isinstance(candidate_skill, dict) or not candidate_skill.get("name"):
-                    self._validation_store.save_decision(
-                        job_id,
-                        {
-                            "status": "rejected",
-                            "reason": "candidate skill payload missing",
-                            "result_count": len(results),
-                            "accepted_count": accepted,
-                            "rejected_count": rejected,
-                            "inconclusive_count": inconclusive,
-                        },
-                    )
-                    summary["rejected"] += 1
-                    continue
-                action_type = str(job.get("proposed_action", DecisionAction.CREATE) or DecisionAction.CREATE)
-                actual_action, uploaded = await self._resolve_and_upload(candidate_skill, action_type)
-                skill_name = str(candidate_skill.get("name", ""))
-                published_version = self._id_registry.get_version(skill_name)
-                best_result = max(
-                    results,
-                    key=lambda item: str(
-                        item.get("created_at")
-                        or item.get("evaluated_at")
-                        or ""
-                    ),
-                )
-                self._validation_store.save_decision(
-                    job_id,
-                    {
-                        "status": "published" if uploaded else "skipped",
-                        "published_action": actual_action,
-                        "skill_name": skill_name,
-                        "version": published_version if uploaded else None,
-                        "result_count": len(results),
-                        "accepted_count": accepted,
-                        "rejected_count": rejected,
-                        "inconclusive_count": inconclusive,
-                        "runtime_gate": runtime_gate,
-                        "evaluation": best_result,
-                    },
-                )
-                if uploaded:
-                    summary["published"] += 1
-                    await self._mark_evidence_published(
-                        str(job.get("evidence_key") or candidate_skill.get("name") or ""),
-                        job_id,
-                    )
-                else:
-                    summary["skipped"] += 1
-                records.append(
-                    {
-                        "action": "published_after_validation" if uploaded else actual_action,
-                        "published_action": actual_action,
-                        "skill_name": skill_name,
-                        "skill_id": self._id_registry.get_or_create(skill_name),
-                        "version": published_version,
-                        "session_ids": list(job.get("session_ids") or []),
-                        "rationale": str(job.get("rationale", "") or ""),
-                        "evidence_classification": job.get("evidence_classification") or {},
-                        "source": "validation_publish",
-                        "uploaded": uploaded,
-                        "validation_job_id": job_id,
-                        "validation_results": {
-                            "result_count": len(results),
-                            "accepted_count": accepted,
-                            "rejected_count": rejected,
-                            "inconclusive_count": inconclusive,
-                            "runtime_gate": runtime_gate,
-                        },
-                    }
-                )
-                continue
-
-            if reject_ready:
-                self._validation_store.save_decision(
-                    job_id,
-                    {
-                        "status": "rejected",
-                        "reason": "client validation rejected candidate",
-                        "result_count": len(results),
-                        "accepted_count": accepted,
-                        "rejected_count": rejected,
-                        "inconclusive_count": inconclusive,
-                        "runtime_gate": runtime_gate,
-                    },
-                )
-                summary["rejected"] += 1
-                records.append(
-                    {
-                        "action": "validation_rejected",
-                        "proposed_action": str(job.get("proposed_action", "")),
-                        "skill_name": str(job.get("candidate_skill_name", "")),
-                        "skill_id": str(job.get("candidate_skill_id", "")),
-                        "version": None,
-                        "session_ids": list(job.get("session_ids") or []),
-                        "rationale": str(job.get("rationale", "") or ""),
-                        "evidence_classification": job.get("evidence_classification") or {},
-                        "source": "validation_publish",
-                        "uploaded": False,
-                        "validation_job_id": job_id,
-                        "validation_results": {
-                            "result_count": len(results),
-                            "accepted_count": accepted,
-                            "rejected_count": rejected,
-                        },
-                    }
-                )
-                continue
-
-            # Gray zone: client replay/AB results are in but cross neither the
-            # publish nor the reject bar, OR the job has been pending too long
-            # without enough results. Escalate to a human review queue instead
-            # of leaving it pending forever. This does NOT block: the job stays
-            # open and keeps being re-evaluated next cycle until a human (or
-            # more client results) resolves it.
-            stats = {
-                "result_count": len(results),
-                "accepted_count": accepted,
-                "rejected_count": rejected,
-                "inconclusive_count": inconclusive,
-                "required_results": self.config.validation_required_results,
-                "required_approvals": self.config.validation_required_approvals,
+            runtime_gate = evaluate_runtime_compatibility(job.get("runtime_validation_policy") or {}, [result])
+            verdict = str(result.get("decision") or "inconclusive").lower()
+            record = {
+                "validation_job_id": job_id,
+                "skill_name": str(job.get("candidate_skill_name") or ""),
+                "session_ids": list(job.get("session_ids") or []),
+                "source": "validation_publish",
+                "uploaded": False,
+                "validation_result": result,
                 "runtime_gate": runtime_gate,
             }
-            escalation_reason = ""
-            if runtime_gate["status"] in {
-                "blocked",
-                "pending",
-                "inconclusive",
-            }:
-                escalation_reason = runtime_gate["reason"]
-            elif len(results) >= self.config.validation_required_results:
-                escalation_reason = (
-                    "client validation inconclusive: enough results collected but "
-                    "candidate is neither clearly better nor clearly worse than baseline"
-                )
-            else:
-                age = self._job_age_seconds(job)
-                if age is not None and age >= self.config.human_review_pending_timeout_seconds:
-                    escalation_reason = (
-                        f"validation job pending {int(age)}s without enough results "
-                        f"(timeout={self.config.human_review_pending_timeout_seconds}s)"
-                    )
-
-            if self.config.human_review_enabled and escalation_reason:
-                summary["inconclusive"] += inconclusive
-                created_new = self._escalate_to_human_review(job, escalation_reason, stats)
-                if created_new:
-                    summary["escalated_to_human"] += 1
-                    records.append(
-                        {
-                            "action": "escalated_to_human_review",
-                            "proposed_action": str(job.get("proposed_action", "")),
-                            "skill_name": str(job.get("candidate_skill_name", "")),
-                            "skill_id": str(job.get("candidate_skill_id", "")),
-                            "version": None,
-                            "session_ids": list(job.get("session_ids") or []),
-                            "rationale": str(job.get("rationale", "") or ""),
-                            "source": "human_review",
-                            "uploaded": False,
-                            "validation_job_id": job_id,
-                            "human_review_reason": escalation_reason,
-                            "validation_results": stats,
-                        }
-                    )
-
+            if verdict == "reject" or runtime_gate["status"] == "rejected":
+                self._validation_store.save_decision(job_id, {
+                    "status": "rejected",
+                    "reason": str(result.get("reason") or runtime_gate.get("reason") or "central validation rejected"),
+                    "validation_result": result,
+                    "runtime_gate": runtime_gate,
+                })
+                summary["rejected"] += 1
+                records.append({**record, "action": "validation_rejected"})
+                continue
+            if verdict == "accept" and result.get("accepted") is True and runtime_gate["status"] == "passed":
+                candidate = job.get("candidate_skill")
+                if not isinstance(candidate, dict) or not candidate.get("name"):
+                    self._validation_store.save_decision(job_id, {
+                        "status": "rejected", "reason": "candidate skill payload missing", "validation_result": result,
+                    })
+                    summary["rejected"] += 1
+                    continue
+                action = str(job.get("proposed_action") or DecisionAction.CREATE)
+                actual_action, uploaded = await self._resolve_and_upload(candidate, action)
+                name = str(candidate["name"])
+                version = self._id_registry.get_version(name)
+                self._validation_store.save_decision(job_id, {
+                    "status": "published" if uploaded else "skipped",
+                    "published_action": actual_action,
+                    "skill_name": name,
+                    "version": version if uploaded else None,
+                    "validation_result": result,
+                    "runtime_gate": runtime_gate,
+                })
+                summary["published" if uploaded else "skipped"] += 1
+                if uploaded:
+                    await self._mark_evidence_published(str(job.get("evidence_key") or name), job_id)
+                records.append({**record,
+                    "action": "published_after_validation" if uploaded else actual_action,
+                    "published_action": actual_action,
+                    "skill_name": name,
+                    "skill_id": self._id_registry.get_or_create(name),
+                    "version": version,
+                    "uploaded": uploaded,
+                })
+                continue
             summary["pending"] += 1
-
+            summary["inconclusive"] += 1
+            if self.config.human_review_enabled:
+                reason = str(result.get("reason") or runtime_gate.get("reason") or "central validation inconclusive")
+                stats = {"validation_result": result, "runtime_gate": runtime_gate}
+                if self._escalate_to_human_review(job, reason, stats):
+                    summary["escalated_to_human"] += 1
+                    records.append({**record, "action": "escalated_to_human_review", "human_review_reason": reason})
         return records, summary
 
     # ------------------------------------------------------------------ #
     # Reviewer-triggered replay validation + publish.                     #
     #                                                                     #
-    # The scheduled path (``_finalize_validation_jobs``) waits for N      #
-    # distributed client votes. StaffDeck instead exposes a "验证并发布"   #
+    # The scheduled path consumes one central validation result.       #
+    # StaffDeck instead exposes a "验证并发布"   #
     # button: a human injects the candidate skill, replays the *same*     #
     # sessions the skill was evolved from, and — if the replay passes —   #
     # publishes immediately. One authoritative reviewer decision, no      #
@@ -2118,21 +1802,11 @@ class EvolveServer(EvolveEngineMixin):
     ) -> dict[str, Any]:
         """Project a validation job, result, and decision for read APIs."""
         job_id = str(job.get("job_id", "") or "")
-        candidate = (
-            job.get("candidate_skill")
-            if isinstance(job.get("candidate_skill"), dict)
-            else {}
-        )
-        decision = (
-            self._validation_store.load_decision(job_id) or {}
-            if decision is None
-            else decision
-        )
+        candidate = job.get("candidate_skill") if isinstance(job.get("candidate_skill"), dict) else {}
+        decision = self._validation_store.load_decision(job_id) or {} if decision is None else decision
         should_load_latest_result = evaluation is None
         if should_load_latest_result:
-            evaluation = (
-                self._validation_store.load_best_evaluation(job_id, job) or {}
-            )
+            evaluation = self._validation_store.load_best_evaluation(job_id, job) or {}
         replay = (
             evaluation.get("replay")
             if isinstance(evaluation.get("replay"), dict)
@@ -2140,16 +1814,8 @@ class EvolveServer(EvolveEngineMixin):
             if isinstance(evaluation.get("replay_summary"), dict)
             else {}
         )
-        raw_efficiency = (
-            replay.get("efficiency")
-            if isinstance(replay.get("efficiency"), dict)
-            else {}
-        )
-        raw_dimensions = (
-            raw_efficiency.get("dimensions")
-            if isinstance(raw_efficiency.get("dimensions"), dict)
-            else {}
-        )
+        raw_efficiency = replay.get("efficiency") if isinstance(replay.get("efficiency"), dict) else {}
+        raw_dimensions = raw_efficiency.get("dimensions") if isinstance(raw_efficiency.get("dimensions"), dict) else {}
         metric_names = (
             "interaction_turns",
             "tool_call_count",
@@ -2175,11 +1841,7 @@ class EvolveServer(EvolveEngineMixin):
             return int(number) if number is not None else fallback
 
         for name in metric_names:
-            raw_metric = (
-                raw_dimensions.get(name)
-                if isinstance(raw_dimensions.get(name), dict)
-                else {}
-            )
+            raw_metric = raw_dimensions.get(name) if isinstance(raw_dimensions.get(name), dict) else {}
             baseline_value = metric_int(
                 raw_metric.get("baseline")
                 if raw_metric.get("baseline") is not None
@@ -2210,13 +1872,7 @@ class EvolveServer(EvolveEngineMixin):
                     max(-1.0, min(1.0, delta / max(1, baseline_value))),
                     4,
                 ),
-                "winner": (
-                    "candidate"
-                    if delta > 0
-                    else "baseline"
-                    if delta < 0
-                    else "tie"
-                ),
+                "winner": ("candidate" if delta > 0 else "baseline" if delta < 0 else "tie"),
             }
         sanitized_efficiency = {
             "baseline": baseline_metrics,
@@ -2229,11 +1885,7 @@ class EvolveServer(EvolveEngineMixin):
                 continue
             normalized_case: dict[str, Any] = {}
             for branch_name in ("baseline", "candidate"):
-                branch = (
-                    raw_case.get(branch_name)
-                    if isinstance(raw_case.get(branch_name), dict)
-                    else {}
-                )
+                branch = raw_case.get(branch_name) if isinstance(raw_case.get(branch_name), dict) else {}
                 normalized_case[branch_name] = {
                     "session_id": str(branch.get("session_id") or ""),
                     "turn_num": int(branch.get("turn_num") or 0),
@@ -2248,13 +1900,16 @@ class EvolveServer(EvolveEngineMixin):
                     ),
                     "error": str(branch.get("error") or ""),
                     "interaction_turns": metric_int(
-                        branch.get("interaction_turns"), fallback=None,
+                        branch.get("interaction_turns"),
+                        fallback=None,
                     ),
                     "tool_call_count": metric_int(
-                        branch.get("tool_call_count"), fallback=None,
+                        branch.get("tool_call_count"),
+                        fallback=None,
                     ),
                     "total_tokens": metric_int(
-                        branch.get("total_tokens"), fallback=None,
+                        branch.get("total_tokens"),
+                        fallback=None,
                     ),
                     "interactions": branch.get("interactions") or [],
                     "checklist_report": branch.get("checklist_report") or {},
@@ -2282,9 +1937,7 @@ class EvolveServer(EvolveEngineMixin):
             "accepted": bool(metric_policy.get("accepted")),
             "verdict": str(metric_policy.get("verdict") or "inconclusive"),
             "no_regression": bool(metric_policy.get("no_regression")),
-            "case_count": int(
-                replay.get("case_count") or len(normalized_cases)
-            ),
+            "case_count": int(replay.get("case_count") or len(normalized_cases)),
             "cases": normalized_cases,
             "efficiency": sanitized_efficiency,
             "checklist": branch_checklists,
@@ -2292,29 +1945,25 @@ class EvolveServer(EvolveEngineMixin):
             "reason": str(metric_policy.get("verdict") or "inconclusive"),
             "error": replay.get("error"),
         }
-        evaluation_payload = {
-            "validator_mode": str(
-                evaluation.get("validator_mode") or "true_replay"
-            ),
-            "decision": sanitized_replay["verdict"],
-            "accepted": sanitized_replay["accepted"],
-            "reason": sanitized_replay["reason"],
-            "created_at": str(evaluation.get("created_at") or ""),
-            "replay": sanitized_replay,
-        } if replay else {}
+        evaluation_payload = (
+            {
+                "validator_mode": str(evaluation.get("validator_mode") or "true_replay"),
+                "decision": sanitized_replay["verdict"],
+                "accepted": sanitized_replay["accepted"],
+                "reason": sanitized_replay["reason"],
+                "created_at": str(evaluation.get("created_at") or ""),
+                "replay": sanitized_replay,
+            }
+            if replay
+            else {}
+        )
         review_status = str(decision.get("status") or "").strip()
         if not review_status:
             review_status = sanitized_replay["verdict"] if replay else "open"
-        replay_cases = [
-            case
-            for case in (job.get("replay_cases") or [])
-            if isinstance(case, dict)
-        ]
-        test_datasets = [
-            dataset
-            for dataset in (job.get("test_datasets") or [])
-            if isinstance(dataset, dict)
-        ]
+        replay_cases = [self._canonical_replay_case(case) for case in (job.get("replay_cases") or [])
+                        if isinstance(case, dict)]
+        job = {**job, "replay_cases": replay_cases}
+        test_datasets = [dataset for dataset in (job.get("test_datasets") or []) if isinstance(dataset, dict)]
         sanitized_decision = {
             key: decision.get(key)
             for key in (
@@ -2333,29 +1982,15 @@ class EvolveServer(EvolveEngineMixin):
         payload = {
             **job,
             "job_id": job_id,
-            "skill_name": str(
-                candidate.get("name")
-                or job.get("candidate_skill_name")
-                or ""
-            ),
-            "skill_id": str(
-                candidate.get("skill_id")
-                or job.get("candidate_skill_id")
-                or ""
-            ),
+            "skill_name": str(candidate.get("name") or job.get("candidate_skill_name") or ""),
+            "skill_id": str(candidate.get("skill_id") or job.get("candidate_skill_id") or ""),
             "description": str(candidate.get("description") or ""),
-            "proposed_action": str(
-                job.get("proposed_action") or DecisionAction.CREATE
-            ),
+            "proposed_action": str(job.get("proposed_action") or DecisionAction.CREATE),
             "rationale": str(job.get("rationale") or ""),
             "session_ids": list(job.get("session_ids") or []),
-            "replay_case_count": int(
-                replay.get("case_count") or len(replay_cases)
-            ),
+            "replay_case_count": int(replay.get("case_count") or len(replay_cases)),
             "test_dataset_count": len(test_datasets),
-            "test_dataset_ids": [
-                str(item.get("dataset_id") or "") for item in test_datasets
-            ],
+            "test_dataset_ids": [str(item.get("dataset_id") or "") for item in test_datasets],
             "created_at": str(job.get("created_at") or ""),
             "content_preview": str(candidate.get("content") or "")[:600],
             "review_status": review_status,
@@ -2398,30 +2033,16 @@ class EvolveServer(EvolveEngineMixin):
             for record in self._validation_store.list_decision_records(
                 reconcile=False,
             ):
-                job = (
-                    record.get("job")
-                    if isinstance(record.get("job"), dict)
-                    else {}
-                )
-                job_id = str(
-                    job.get("job_id") or record.get("job_id") or ""
-                )
+                job = record.get("job") if isinstance(record.get("job"), dict) else {}
+                job_id = str(job.get("job_id") or record.get("job_id") or "")
                 if not job_id:
                     continue
                 job = {**job, "job_id": job_id}
                 candidates.append(
                     self._validation_candidate_payload(
                         job,
-                        evaluation=(
-                            record.get("evaluation")
-                            if isinstance(record.get("evaluation"), dict)
-                            else {}
-                        ),
-                        decision=(
-                            record.get("decision")
-                            if isinstance(record.get("decision"), dict)
-                            else {}
-                        ),
+                        evaluation=(record.get("evaluation") if isinstance(record.get("evaluation"), dict) else {}),
+                        decision=(record.get("decision") if isinstance(record.get("decision"), dict) else {}),
                     )
                 )
                 seen.add(job_id)
@@ -2444,9 +2065,7 @@ class EvolveServer(EvolveEngineMixin):
                     )
                     results = [
                         result
-                        for result in self._validation_store.list_results(
-                            job_id
-                        )
+                        for result in self._validation_results(job_id)
                         if max(
                             1,
                             int(result.get("candidate_revision") or 1),
@@ -2481,9 +2100,7 @@ class EvolveServer(EvolveEngineMixin):
             verdict = dict(window_results[0][1])
             verdict.setdefault("no_regression", False)
             verdict.setdefault("accepted", False)
-            verdict["window_results"] = {
-                window: result for window, result in window_results
-            }
+            verdict["window_results"] = {window: result for window, result in window_results}
             return verdict
 
         from team_replay.aggregation import aggregate_true_replay_windows
@@ -2512,11 +2129,9 @@ class EvolveServer(EvolveEngineMixin):
         job_id = str(job.get("job_id") or job.get("id") or "").strip()
         if not job_id:
             raise ValueError("validation job missing job_id for true replay")
-        replay_cases = [
-            case
-            for case in (job.get("replay_cases") or [])
-            if isinstance(case, dict)
-        ]
+        replay_cases = [self._canonical_replay_case(case) for case in (job.get("replay_cases") or [])
+                        if isinstance(case, dict)]
+        job = {**job, "replay_cases": replay_cases}
         if not replay_cases:
             raise ValueError("validation job has no replay_cases to replay")
 
@@ -2527,10 +2142,16 @@ class EvolveServer(EvolveEngineMixin):
             or sys.executable
         )
         base_cmd = [
-            worker_python, "-m", "teamEvolver.true_replay",
-            "--job-id", job_id, "--json",
-            "--timeout", str(self.TRUE_REPLAY_TIMEOUT),
-            "--max-interactions", str(max_interactions),
+            worker_python,
+            "-m",
+            "teamEvolver.true_replay",
+            "--job-id",
+            job_id,
+            "--json",
+            "--timeout",
+            str(self.TRUE_REPLAY_TIMEOUT),
+            "--max-interactions",
+            str(max_interactions),
         ]
 
         def _invoke(case_index: int) -> dict[str, Any]:
@@ -2550,17 +2171,19 @@ class EvolveServer(EvolveEngineMixin):
                     str(case_index),
                 ]
                 proc = subprocess.run(
-                    cmd, cwd=str(_REPO_ROOT), capture_output=True, text=True,
+                    cmd,
+                    cwd=str(_REPO_ROOT),
+                    capture_output=True,
+                    text=True,
                     timeout=self.TRUE_REPLAY_TIMEOUT * 2 + 120,
                 )
             out = proc.stdout or ""
             begin, end = out.find("TRUE_REPLAY_JSON_BEGIN"), out.rfind("TRUE_REPLAY_JSON_END")
             if begin < 0 or end < 0:
                 raise ValueError(
-                    "true replay produced no verdict "
-                    f"(rc={proc.returncode}); stderr tail: {(proc.stderr or '')[-500:]}"
+                    f"true replay produced no verdict (rc={proc.returncode}); stderr tail: {(proc.stderr or '')[-500:]}"
                 )
-            payload = out[begin + len("TRUE_REPLAY_JSON_BEGIN"): end].strip()
+            payload = out[begin + len("TRUE_REPLAY_JSON_BEGIN") : end].strip()
             return json.loads(payload)
 
         selected = select_replay_cases(replay_cases)
@@ -2573,17 +2196,10 @@ class EvolveServer(EvolveEngineMixin):
             try:
                 verdict = await asyncio.to_thread(_invoke, case_index)
             except subprocess.TimeoutExpired as exc:
-                raise ValueError(
-                    f"true replay timed out after {exc.timeout}s for {window} window"
-                ) from exc
+                raise ValueError(f"true replay timed out after {exc.timeout}s for {window} window") from exc
             window_results.append((window, verdict))
-            runtime_type = (
-                runtime_type_for_case(replay_cases[case_index])
-                or "unknown"
-            )
-            results_by_runtime.setdefault(runtime_type, []).append(
-                (window, verdict)
-            )
+            runtime_type = runtime_type_for_case(replay_cases[case_index]) or "unknown"
+            results_by_runtime.setdefault(runtime_type, []).append((window, verdict))
         aggregate = self._aggregate_replay_windows(
             window_results,
             max_interactions=max_interactions,
@@ -2596,22 +2212,14 @@ class EvolveServer(EvolveEngineMixin):
             for runtime_type, runtime_results in results_by_runtime.items()
         }
         runtime_gate = evaluate_runtime_compatibility(
-            (
-                job.get("runtime_validation_policy")
-                if isinstance(job.get("runtime_validation_policy"), dict)
-                else {}
-            ),
+            (job.get("runtime_validation_policy") if isinstance(job.get("runtime_validation_policy"), dict) else {}),
             [{"runtime_validation": runtime_validation}],
         )
         aggregate["runtime_validation"] = runtime_validation
         aggregate["runtime_gate"] = runtime_gate
         if runtime_gate["status"] != "passed":
             aggregate["accepted"] = False
-            aggregate["verdict"] = (
-                "reject"
-                if runtime_gate["status"] == "rejected"
-                else "inconclusive"
-            )
+            aggregate["verdict"] = "reject" if runtime_gate["status"] == "rejected" else "inconclusive"
             aggregate["reason"] = runtime_gate["reason"]
         return aggregate
 
@@ -2664,43 +2272,28 @@ class EvolveServer(EvolveEngineMixin):
                     [],
                 )
             )
-            publish = (
-                True if mode == "force" else bool(replay.get("accepted"))
-            ) and runtime_gate.get("status") == "passed"
+            publish = (True if mode == "force" else bool(replay.get("accepted"))) and runtime_gate.get(
+                "status"
+            ) == "passed"
             candidate_revision = max(1, int(job.get("candidate_revision") or 1))
-            policy = (
-                replay.get("decision_policy")
-                if isinstance(replay.get("decision_policy"), dict)
-                else {}
-            )
-            metric_changes = (
-                policy.get("metric_changes")
-                if isinstance(policy.get("metric_changes"), dict)
-                else {}
-            )
+            policy = replay.get("decision_policy") if isinstance(replay.get("decision_policy"), dict) else {}
+            metric_changes = policy.get("metric_changes") if isinstance(policy.get("metric_changes"), dict) else {}
 
             result_record = {
                 "validator_mode": f"reviewer_replay:{mode}",
                 "candidate_revision": candidate_revision,
                 "accepted": publish,
-                "decision": "accept" if publish else str(
-                    replay.get("verdict") or "inconclusive"
-                ),
+                "decision": "accept" if publish else str(replay.get("verdict") or "inconclusive"),
                 "reason": ", ".join(
-                    f"{name}: {item.get('baseline', 0)} -> "
-                    f"{item.get('candidate', 0)}"
+                    f"{name}: {item.get('baseline', 0)} -> {item.get('candidate', 0)}"
                     for name, item in metric_changes.items()
                     if isinstance(item, dict)
                 ),
                 "replay_summary": replay,
-                "runtime_validation": dict(
-                    replay.get("runtime_validation") or {}
-                ),
+                "runtime_validation": dict(replay.get("runtime_validation") or {}),
                 "runtime_gate": runtime_gate,
             }
-            await self._call_storage(
-                self._validation_store.save_result, job_id, reviewer, result_record
-            )
+            await self._call_storage(self._validation_store.save_result, job_id, reviewer, result_record)
 
             if not publish:
                 verdict = str(replay.get("verdict") or "inconclusive")
@@ -2713,10 +2306,7 @@ class EvolveServer(EvolveEngineMixin):
                     }
                 decision = {
                     "status": "rejected",
-                    "reason": str(
-                        policy.get("decision_basis")
-                        or "True Replay metrics rejected the candidate"
-                    ),
+                    "reason": str(policy.get("decision_basis") or "True Replay metrics rejected the candidate"),
                     "result_count": 1,
                     "accepted_count": 0,
                     "rejected_count": 1,
@@ -2739,9 +2329,7 @@ class EvolveServer(EvolveEngineMixin):
             actual_action, uploaded = await self._resolve_and_upload(candidate_skill, action_type)
             # Persist the registry immediately so the freshly published version
             # survives independent of the next evolution cycle.
-            await self._call_storage(
-                self._id_registry.save_to_oss, self._skill_bucket, self._skill_prefix
-            )
+            await self._call_storage(self._id_registry.save_to_oss, self._skill_bucket, self._skill_prefix)
             skill_name = str(candidate_skill.get("name", ""))
             decision = {
                 "status": "published" if uploaded else "skipped",
@@ -2805,8 +2393,7 @@ class EvolveServer(EvolveEngineMixin):
                     logger.info("[EvolveServer] auto true-replay evaluation started for %s", job_id)
                     result = await self.evaluate_candidate(job_id, refresh=True)
                     logger.info(
-                        "[EvolveServer] auto true-replay evaluation done for %s: "
-                        "status=%s verdict=%s",
+                        "[EvolveServer] auto true-replay evaluation done for %s: status=%s verdict=%s",
                         job_id,
                         result.get("status"),
                         (result.get("replay") or {}).get("verdict"),
@@ -2824,9 +2411,7 @@ class EvolveServer(EvolveEngineMixin):
         self._eval_tasks.add(task)
         task.add_done_callback(self._eval_tasks.discard)
 
-    async def evaluate_candidate(
-        self, job_id: str, *, refresh: bool = False
-    ) -> dict[str, Any]:
+    async def evaluate_candidate(self, job_id: str, *, refresh: bool = False) -> dict[str, Any]:
         """Compare a candidate using True Replay execution metrics only.
 
         Returns the cached evaluation when one exists (unless ``refresh`` is
@@ -2857,11 +2442,7 @@ class EvolveServer(EvolveEngineMixin):
 
         replay_ok = bool(isinstance(replay, dict) and replay.get("accepted"))
         latest = await self._call_storage(self._validation_store.load_job, job_id)
-        latest_revision = (
-            max(1, int(latest.get("candidate_revision") or 1))
-            if isinstance(latest, dict)
-            else 0
-        )
+        latest_revision = max(1, int(latest.get("candidate_revision") or 1)) if isinstance(latest, dict) else 0
         if latest_revision != candidate_revision:
             return {
                 "status": "stale",
@@ -2908,9 +2489,7 @@ class EvolveServer(EvolveEngineMixin):
         list against the skill root.
         """
         backend = str(self.config.storage_backend or "").strip().lower() or "unknown"
-        endpoint = str(
-            getattr(self.config, "viking_endpoint", "") or self.config.storage_endpoint or ""
-        )
+        endpoint = str(getattr(self.config, "viking_endpoint", "") or self.config.storage_endpoint or "")
         root_prefix = str(getattr(self.config, "viking_root_prefix", "") or "")
         group_id = str(getattr(self.config, "viking_group_id", "") or "")
         if backend == "viking":
@@ -2993,11 +2572,7 @@ class EvolveServer(EvolveEngineMixin):
         raw_changes = evolved_skill.get("file_changes")
         file_changes = raw_changes if isinstance(raw_changes, list) else []
         try:
-            base_bundle = (
-                candidate_skill_bundle(current_skill)
-                if current_skill
-                else {}
-            )
+            base_bundle = candidate_skill_bundle(current_skill) if current_skill else {}
             evolved_skill, bundle_diff = materialize_bundle_changes(
                 evolved_skill,
                 current_bundle=base_bundle,
@@ -3029,10 +2604,7 @@ class EvolveServer(EvolveEngineMixin):
             enabled=self.config.bundle_static_checks_enabled,
         )
         evolved_skill["static_validation"] = static_validation
-        if (
-            not static_validation.get("passed")
-            and self.config.publish_mode != "validated"
-        ):
+        if not static_validation.get("passed") and self.config.publish_mode != "validated":
             return {
                 "action": "static_validation_rejected",
                 "proposed_action": action_type,
@@ -3051,11 +2623,7 @@ class EvolveServer(EvolveEngineMixin):
         }
         if action_type == DecisionAction.MERGE:
             inherited_names = list(
-                dict.fromkeys(
-                    value
-                    for value in (name, candidate_name)
-                    if value and value != "candidate_evidence"
-                )
+                dict.fromkeys(value for value in (name, candidate_name) if value and value != "candidate_evidence")
             )
             for inherited_name in inherited_names:
                 context = await self._call_storage(
@@ -3095,9 +2663,7 @@ class EvolveServer(EvolveEngineMixin):
                             "skill_name": context.get("skill_name"),
                             "version": context.get("version"),
                             "job_id": context.get("job_id"),
-                            "replay_case_count": len(
-                                context.get("replay_cases") or []
-                            ),
+                            "replay_case_count": len(context.get("replay_cases") or []),
                         }
                         for context in inherited_replay_contexts
                     ],
@@ -3168,11 +2734,7 @@ class EvolveServer(EvolveEngineMixin):
 
     @staticmethod
     def _is_candidate_audit_session(session: dict[str, Any]) -> bool:
-        runtime_context = (
-            session.get("runtime_context")
-            if isinstance(session.get("runtime_context"), dict)
-            else {}
-        )
+        runtime_context = session.get("runtime_context") if isinstance(session.get("runtime_context"), dict) else {}
         return bool(
             str(runtime_context.get("candidate_job_id") or "").strip()
             and str(runtime_context.get("candidate_sha256") or "").strip()
@@ -3195,11 +2757,7 @@ class EvolveServer(EvolveEngineMixin):
         min_users = int(getattr(self.config, "min_group_users", 0) or 0)
         if min_sessions <= 0 and min_users <= 0:
             return None
-        valid = [
-            session
-            for session in planning_sessions or []
-            if isinstance(session, dict)
-        ]
+        valid = [session for session in planning_sessions or [] if isinstance(session, dict)]
         if any(self._is_candidate_audit_session(session) for session in valid):
             return None
         session_ids = {
@@ -3207,20 +2765,11 @@ class EvolveServer(EvolveEngineMixin):
             for session in valid
             if str(session.get("session_id") or "").strip()
         }
-        users = {
-            str(session.get("user_alias") or "").strip() or "(unknown)"
-            for session in valid
-        }
+        users = {str(session.get("user_alias") or "").strip() or "(unknown)" for session in valid}
         if min_sessions > 0 and len(session_ids) < min_sessions:
-            return (
-                f"insufficient team evidence: {len(session_ids)} session(s) "
-                f"below minimum {min_sessions}"
-            )
+            return f"insufficient team evidence: {len(session_ids)} session(s) below minimum {min_sessions}"
         if min_users > 0 and len(users) < min_users:
-            return (
-                f"insufficient team evidence: {len(users)} distinct user(s) "
-                f"below minimum {min_users}"
-            )
+            return f"insufficient team evidence: {len(users)} distinct user(s) below minimum {min_users}"
         return None
 
     async def _evolve_skill_group(
@@ -3229,24 +2778,18 @@ class EvolveServer(EvolveEngineMixin):
         sessions: list[dict],
         existing_skill_names: list[str],
     ) -> Optional[dict]:
-        planning_sessions, evolution_context, replay_windows = (
-            await self._prepare_evolution_evidence(skill_name, sessions)
+        planning_sessions, evolution_context, replay_windows = await self._prepare_evolution_evidence(
+            skill_name, sessions
         )
         gap = self._team_evidence_gap(planning_sessions)
         if gap:
-            logger.info(
-                "[EvolveServer] skill '%s': %s; skipping evolution", skill_name, gap
-            )
+            logger.info("[EvolveServer] skill '%s': %s; skipping evolution", skill_name, gap)
             evidence_state = await self._record_evolution_skip(
                 skill_name,
                 sessions,
                 gap,
             )
-            debt = (
-                evidence_state.get("change_debt")
-                if isinstance(evidence_state.get("change_debt"), dict)
-                else {}
-            )
+            debt = evidence_state.get("change_debt") if isinstance(evidence_state.get("change_debt"), dict) else {}
             return {
                 "action": "skip",
                 "skill_name": skill_name,
@@ -3265,11 +2808,7 @@ class EvolveServer(EvolveEngineMixin):
             self._fetch_skill_bundle,
             skill_name,
         )
-        current_md = (
-            bundle_entrypoint_text(current_bundle)
-            if current_bundle
-            else None
-        )
+        current_md = bundle_entrypoint_text(current_bundle) if current_bundle else None
         current_skill = parse_skill_content(skill_name, current_md) if current_md else None
         current_skill = self._overlay_manifest_metadata(
             current_skill,
@@ -3306,11 +2845,7 @@ class EvolveServer(EvolveEngineMixin):
                 rationale,
             )
             logger.info("[EvolveServer] skill '%s': LLM decided to skip", skill_name)
-            debt = (
-                evidence_state.get("change_debt")
-                if isinstance(evidence_state.get("change_debt"), dict)
-                else {}
-            )
+            debt = evidence_state.get("change_debt") if isinstance(evidence_state.get("change_debt"), dict) else {}
             return {
                 "action": "skip",
                 "skill_name": skill_name,
@@ -3320,11 +2855,7 @@ class EvolveServer(EvolveEngineMixin):
                     if str(session.get("session_id") or "").strip()
                 ],
                 "rationale": rationale,
-                "evidence_classification": (
-                    result.get("evidence_classification")
-                    if isinstance(result, dict)
-                    else {}
-                ),
+                "evidence_classification": (result.get("evidence_classification") if isinstance(result, dict) else {}),
                 "source": "skill_group",
                 "uploaded": False,
                 "change_debt": debt,
@@ -3369,15 +2900,9 @@ class EvolveServer(EvolveEngineMixin):
             return published_skill
         latest = max(
             open_jobs,
-            key=lambda item: str(
-                item.get("updated_at") or item.get("created_at") or ""
-            ),
+            key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""),
         )
-        candidate = (
-            latest.get("candidate_skill")
-            if isinstance(latest.get("candidate_skill"), dict)
-            else None
-        )
+        candidate = latest.get("candidate_skill") if isinstance(latest.get("candidate_skill"), dict) else None
         if not candidate or str(candidate.get("name") or "") != skill_name:
             return published_skill
         working = dict(candidate)
@@ -3386,9 +2911,7 @@ class EvolveServer(EvolveEngineMixin):
                 if key in published_skill:
                     working.setdefault(key, published_skill[key])
         working["_candidate_job_id"] = str(latest.get("job_id") or "")
-        working["_candidate_revision"] = int(
-            latest.get("candidate_revision") or 1
-        )
+        working["_candidate_revision"] = int(latest.get("candidate_revision") or 1)
         return working
 
     async def _handle_no_skill_sessions(
@@ -3396,24 +2919,18 @@ class EvolveServer(EvolveEngineMixin):
         sessions: list[dict],
         existing_skill_names: list[str],
     ) -> list[dict]:
-        planning_sessions, evolution_context, replay_windows = (
-            await self._prepare_evolution_evidence(NO_SKILL_KEY, sessions)
+        planning_sessions, evolution_context, replay_windows = await self._prepare_evolution_evidence(
+            NO_SKILL_KEY, sessions
         )
         gap = self._team_evidence_gap(planning_sessions)
         if gap:
-            logger.info(
-                "[EvolveServer] no-skill sessions: %s; skipping create", gap
-            )
+            logger.info("[EvolveServer] no-skill sessions: %s; skipping create", gap)
             evidence_state = await self._record_evolution_skip(
                 NO_SKILL_KEY,
                 sessions,
                 gap,
             )
-            debt = (
-                evidence_state.get("change_debt")
-                if isinstance(evidence_state.get("change_debt"), dict)
-                else {}
-            )
+            debt = evidence_state.get("change_debt") if isinstance(evidence_state.get("change_debt"), dict) else {}
             return [
                 {
                     "action": "skip",
@@ -3461,11 +2978,7 @@ class EvolveServer(EvolveEngineMixin):
                 rationale,
             )
             logger.info("[EvolveServer] no-skill sessions: LLM decided to skip")
-            debt = (
-                evidence_state.get("change_debt")
-                if isinstance(evidence_state.get("change_debt"), dict)
-                else {}
-            )
+            debt = evidence_state.get("change_debt") if isinstance(evidence_state.get("change_debt"), dict) else {}
             return [
                 {
                     "action": "skip",
@@ -3477,9 +2990,7 @@ class EvolveServer(EvolveEngineMixin):
                     ],
                     "rationale": rationale,
                     "evidence_classification": (
-                        result.get("evidence_classification")
-                        if isinstance(result, dict)
-                        else {}
+                        result.get("evidence_classification") if isinstance(result, dict) else {}
                     ),
                     "source": "no_skill",
                     "uploaded": False,
@@ -3537,16 +3048,9 @@ class EvolveServer(EvolveEngineMixin):
         if not session_id:
             raise ValueError("session payload requires a non-empty 'session_id'")
 
-        user_alias = str(
-            payload.get("user_alias")
-            or payload.get("user")
-            or payload.get("username")
-            or ""
-        ).strip()
+        user_alias = str(payload.get("user_alias") or payload.get("user") or payload.get("username") or "").strip()
         if not user_alias:
-            raise ValueError(
-                "session payload requires a non-empty 'user_alias' (the sender's username)"
-            )
+            raise ValueError("session payload requires a non-empty 'user_alias' (the sender's username)")
 
         raw_turns = payload.get("turns")
         if not isinstance(raw_turns, list) or not raw_turns:
@@ -3559,9 +3063,7 @@ class EvolveServer(EvolveEngineMixin):
             prompt_text = str(turn.get("prompt_text") or "").strip()
             response_text = str(turn.get("response_text") or "").strip()
             if not prompt_text and not response_text:
-                raise ValueError(
-                    f"turn #{idx} needs at least 'prompt_text' or 'response_text'"
-                )
+                raise ValueError(f"turn #{idx} needs at least 'prompt_text' or 'response_text'")
 
             def _skill_list(value: Any) -> list[dict[str, str]]:
                 out: list[dict[str, str]] = []
@@ -3581,9 +3083,7 @@ class EvolveServer(EvolveEngineMixin):
                     "tool_calls": turn.get("tool_calls") or [],
                     "read_skills": _skill_list(turn.get("read_skills")),
                     "used_skills": [
-                        str(item or "").strip()
-                        for item in (turn.get("used_skills") or [])
-                        if str(item or "").strip()
+                        str(item or "").strip() for item in (turn.get("used_skills") or []) if str(item or "").strip()
                     ],
                     "injected_skills": [
                         (
@@ -3605,9 +3105,7 @@ class EvolveServer(EvolveEngineMixin):
                     "metrics": turn.get("metrics") or {},
                     "prm_score": turn.get("prm_score"),
                     "context_usage": (
-                        dict(turn.get("context_usage"))
-                        if isinstance(turn.get("context_usage"), dict)
-                        else {}
+                        dict(turn.get("context_usage")) if isinstance(turn.get("context_usage"), dict) else {}
                     ),
                 }
             )
@@ -3626,27 +3124,17 @@ class EvolveServer(EvolveEngineMixin):
             "messages": payload.get("messages") or [],
             "system_prompt": str(payload.get("system_prompt") or ""),
             "injected_skills": [
-                str(item or "").strip()
-                for item in (payload.get("injected_skills") or [])
-                if str(item or "").strip()
+                str(item or "").strip() for item in (payload.get("injected_skills") or []) if str(item or "").strip()
             ],
             "used_skills": [
-                str(item or "").strip()
-                for item in (payload.get("used_skills") or [])
-                if str(item or "").strip()
+                str(item or "").strip() for item in (payload.get("used_skills") or []) if str(item or "").strip()
             ],
             "metrics": payload.get("metrics") or {},
             "source": str(payload.get("source") or ""),
             "model": str(payload.get("model") or ""),
-            "runtime": (
-                dict(payload.get("runtime"))
-                if isinstance(payload.get("runtime"), dict)
-                else {}
-            ),
+            "runtime": (dict(payload.get("runtime")) if isinstance(payload.get("runtime"), dict) else {}),
             "runtime_context": (
-                dict(payload.get("runtime_context"))
-                if isinstance(payload.get("runtime_context"), dict)
-                else {}
+                dict(payload.get("runtime_context")) if isinstance(payload.get("runtime_context"), dict) else {}
             ),
             "source_materials": [
                 dict(item)
@@ -3778,11 +3266,11 @@ class EvolveServer(EvolveEngineMixin):
         entry = {
             "session_id": session_id,
             "title": existing.get("title") or self._session_title(session),
-            "user_alias": str(session.get("user_alias") or existing.get("user_alias") or "").strip()
-            or "unknown",
+            "user_alias": str(session.get("user_alias") or existing.get("user_alias") or "").strip() or "unknown",
             "timestamp": str(session.get("timestamp") or existing.get("timestamp") or ""),
-            "num_turns": int(session.get("num_turns") or len(session.get("turns") or [])
-                             or existing.get("num_turns") or 0),
+            "num_turns": int(
+                session.get("num_turns") or len(session.get("turns") or []) or existing.get("num_turns") or 0
+            ),
             "status": status,
             "ingested_at": existing.get("ingested_at") or now,
             "consumed_at": existing.get("consumed_at") or "",
@@ -3847,27 +3335,27 @@ class EvolveServer(EvolveEngineMixin):
             for turn in session.get("turns") or []:
                 if not isinstance(turn, dict):
                     continue
-                turns.append({
-                    **{key: value for key, value in turn.items() if not key.startswith("_")},
-                    "turn_num": turn.get("turn_num"),
-                    "prompt_text": turn.get("prompt_text") or "",
-                    "response_text": turn.get("response_text") or "",
-                    "messages": turn.get("messages") or [],
-                    "tool_calls": turn.get("tool_calls") or [],
-                    "tool_results": turn.get("tool_results") or [],
-                    "tool_observations": turn.get("tool_observations") or [],
-                    "tool_errors": turn.get("tool_errors") or [],
-                    "read_skills": turn.get("read_skills") or [],
-                    "used_skills": turn.get("used_skills") or [],
-                    "injected_skills": turn.get("injected_skills") or [],
-                    "modified_skills": turn.get("modified_skills") or [],
-                    "metrics": turn.get("metrics") or {},
-                    "context_usage": (
-                        dict(turn.get("context_usage"))
-                        if isinstance(turn.get("context_usage"), dict)
-                        else {}
-                    ),
-                })
+                turns.append(
+                    {
+                        **{key: value for key, value in turn.items() if not key.startswith("_")},
+                        "turn_num": turn.get("turn_num"),
+                        "prompt_text": turn.get("prompt_text") or "",
+                        "response_text": turn.get("response_text") or "",
+                        "messages": turn.get("messages") or [],
+                        "tool_calls": turn.get("tool_calls") or [],
+                        "tool_results": turn.get("tool_results") or [],
+                        "tool_observations": turn.get("tool_observations") or [],
+                        "tool_errors": turn.get("tool_errors") or [],
+                        "read_skills": turn.get("read_skills") or [],
+                        "used_skills": turn.get("used_skills") or [],
+                        "injected_skills": turn.get("injected_skills") or [],
+                        "modified_skills": turn.get("modified_skills") or [],
+                        "metrics": turn.get("metrics") or {},
+                        "context_usage": (
+                            dict(turn.get("context_usage")) if isinstance(turn.get("context_usage"), dict) else {}
+                        ),
+                    }
+                )
             archived = {
                 **{key: value for key, value in session.items() if not key.startswith("_")},
                 "_summary": session.get("_summary") or "",
@@ -3887,15 +3375,9 @@ class EvolveServer(EvolveEngineMixin):
                 "metrics": session.get("metrics") or {},
                 "source": session.get("source") or "",
                 "model": session.get("model") or "",
-                "runtime": (
-                    dict(session.get("runtime"))
-                    if isinstance(session.get("runtime"), dict)
-                    else {}
-                ),
+                "runtime": (dict(session.get("runtime")) if isinstance(session.get("runtime"), dict) else {}),
                 "runtime_context": (
-                    dict(session.get("runtime_context"))
-                    if isinstance(session.get("runtime_context"), dict)
-                    else {}
+                    dict(session.get("runtime_context")) if isinstance(session.get("runtime_context"), dict) else {}
                 ),
                 "source_materials": [
                     dict(item)
@@ -3907,23 +3389,16 @@ class EvolveServer(EvolveEngineMixin):
                 # the conversation-detail endpoint reads after consumption —
                 # dropping these left consumed sessions without a visible
                 # judge conclusion in the console.
-                "value_judge": (
-                    dict(session["value_judge"])
-                    if isinstance(session.get("value_judge"), dict)
-                    else {}
-                ),
-                "judge": (
-                    dict(session["judge"])
-                    if isinstance(session.get("judge"), dict)
-                    else {}
-                ),
+                "value_judge": (dict(session["value_judge"]) if isinstance(session.get("value_judge"), dict) else {}),
+                "judge": (dict(session["judge"]) if isinstance(session.get("judge"), dict) else {}),
             }
             try:
                 if hasattr(self._bucket, "consume_session"):
                     if not self._bucket.consume_session(
                         f"{self._session_prefix}sessions/{sid}.json",
                         session.get("_queue_sha256", ""),
-                        self._archive_key(sid), {**archived, "status": "consumed"},
+                        self._archive_key(sid),
+                        {**archived, "status": "consumed"},
                     ):
                         continue
                 else:
@@ -3965,21 +3440,23 @@ class EvolveServer(EvolveEngineMixin):
         turns: list[dict[str, Any]] = []
         for turn in (content or {}).get("turns") or []:
             if isinstance(turn, dict):
-                turns.append({
-                    "turn_num": turn.get("turn_num"),
-                    "prompt_text": str(turn.get("prompt_text") or ""),
-                    "response_text": str(turn.get("response_text") or ""),
-                    "messages": turn.get("messages") or [],
-                    "tool_calls": turn.get("tool_calls") or [],
-                    "tool_results": turn.get("tool_results") or [],
-                    "tool_observations": turn.get("tool_observations") or [],
-                    "tool_errors": turn.get("tool_errors") or [],
-                    "read_skills": turn.get("read_skills") or [],
-                    "used_skills": turn.get("used_skills") or [],
-                    "injected_skills": turn.get("injected_skills") or [],
-                    "modified_skills": turn.get("modified_skills") or [],
-                    "metrics": turn.get("metrics") or {},
-                })
+                turns.append(
+                    {
+                        "turn_num": turn.get("turn_num"),
+                        "prompt_text": str(turn.get("prompt_text") or ""),
+                        "response_text": str(turn.get("response_text") or ""),
+                        "messages": turn.get("messages") or [],
+                        "tool_calls": turn.get("tool_calls") or [],
+                        "tool_results": turn.get("tool_results") or [],
+                        "tool_observations": turn.get("tool_observations") or [],
+                        "tool_errors": turn.get("tool_errors") or [],
+                        "read_skills": turn.get("read_skills") or [],
+                        "used_skills": turn.get("used_skills") or [],
+                        "injected_skills": turn.get("injected_skills") or [],
+                        "modified_skills": turn.get("modified_skills") or [],
+                        "metrics": turn.get("metrics") or {},
+                    }
+                )
         meta = {
             "session_id": sid,
             "title": ledger.get("title") or (content or {}).get("title") or "",
@@ -4046,33 +3523,37 @@ class EvolveServer(EvolveEngineMixin):
             evolutions: list[dict[str, Any]] = []
             for evo in record.get("evolutions") or []:
                 if isinstance(evo, dict) and sid in set(evo.get("session_ids") or []):
-                    evolutions.append({
-                        "skill_name": evo.get("skill_name"),
-                        "action": evo.get("action"),
-                        "reason": evo.get("reason"),
-                        "rationale": evo.get("rationale"),
-                        "evidence_classification": evo.get("evidence_classification") or {},
-                        "uploaded": evo.get("uploaded"),
-                        "version": evo.get("version"),
-                        "job_id": evo.get("job_id"),
-                    })
-            cycles.append({
-                "timestamp": record.get("timestamp"),
-                "elapsed_seconds": record.get("elapsed_seconds"),
-                "sessions": record.get("sessions"),
-                "skill_groups": record.get("skill_groups"),
-                "uploaded_skills": record.get("uploaded_skills"),
-                "candidates_queued": record.get("candidates_queued"),
-                "judge": judge,
-                "evolutions": evolutions,
-            })
+                    evolutions.append(
+                        {
+                            "skill_name": evo.get("skill_name"),
+                            "action": evo.get("action"),
+                            "reason": evo.get("reason"),
+                            "rationale": evo.get("rationale"),
+                            "evidence_classification": evo.get("evidence_classification") or {},
+                            "uploaded": evo.get("uploaded"),
+                            "version": evo.get("version"),
+                            "job_id": evo.get("job_id"),
+                        }
+                    )
+            cycles.append(
+                {
+                    "timestamp": record.get("timestamp"),
+                    "elapsed_seconds": record.get("elapsed_seconds"),
+                    "sessions": record.get("sessions"),
+                    "skill_groups": record.get("skill_groups"),
+                    "uploaded_skills": record.get("uploaded_skills"),
+                    "candidates_queued": record.get("candidates_queued"),
+                    "judge": judge,
+                    "evolutions": evolutions,
+                }
+            )
         # load_history_records returns newest first; reverse for chronological.
         cycles.reverse()
         return {"status": "ok", "session_id": sid, "cycles": cycles}
 
     def _read_history_file(self, *, session_id: str = "") -> list[dict[str, Any]]:
         """Read history records from the legacy ``evolve_history.jsonl`` file."""
-        if self.config.storage_backend == "postgres":
+        if not getattr(self.config, "history_path", ""):
             return []
         wanted = str(session_id or "").strip()
         records: list[dict[str, Any]] = []
@@ -4124,7 +3605,6 @@ class EvolveServer(EvolveEngineMixin):
         debug_dir = self.config.debug_dump_dir
         if debug_dir and self.config.storage_backend == "postgres":
             debug_dir = str(Path(debug_dir) / self.tenant_id)
-        set_evolve_debug_dir(debug_dir)
         set_summarizer_debug_dir(debug_dir)
         set_evolve_agent_limits(self.config.agent_max_rounds, self.config.agent_max_tool_calls_per_round)
         set_evolve_bundle_contract(
@@ -4203,8 +3683,7 @@ class EvolveServer(EvolveEngineMixin):
             branch_count = skill_group_count + (1 if no_skill_sessions else 0)
             if branch_count:
                 logger.info(
-                    "[EvolveServer] evolving %d skill group(s) + %d no-skill branch "
-                    "(max parallel=%d)",
+                    "[EvolveServer] evolving %d skill group(s) + %d no-skill branch (max parallel=%d)",
                     skill_group_count,
                     1 if no_skill_sessions else 0,
                     self.config.max_parallel_groups,
@@ -4214,9 +3693,7 @@ class EvolveServer(EvolveEngineMixin):
             async def _run_skill_group(name: str, group: list[dict]) -> list[dict]:
                 async with semaphore:
                     try:
-                        record = await self._evolve_skill_group(
-                            name, group, existing_skill_names
-                        )
+                        record = await self._evolve_skill_group(name, group, existing_skill_names)
                     except Exception as exc:
                         logger.error(
                             "[EvolveServer] skill '%s' evolve failed: %s",
@@ -4229,12 +3706,8 @@ class EvolveServer(EvolveEngineMixin):
 
             async def _run_no_skill(group: list[dict]) -> list[dict]:
                 async with semaphore:
-                    logger.info(
-                        "[EvolveServer] processing %d no-skill sessions", len(group)
-                    )
-                    return await self._handle_no_skill_sessions(
-                        group, existing_skill_names
-                    )
+                    logger.info("[EvolveServer] processing %d no-skill sessions", len(group))
+                    return await self._handle_no_skill_sessions(group, existing_skill_names)
 
             branches: list[tuple[str, Any]] = [
                 (skill_name, _run_skill_group(skill_name, skill_sessions))
@@ -4251,13 +3724,9 @@ class EvolveServer(EvolveEngineMixin):
                 for (branch_name, _), result in zip(branches, results):
                     if isinstance(result, Exception):
                         if branch_name == NO_SKILL_KEY:
-                            logger.error(
-                                "[EvolveServer] no-skill evolve failed: %s", result
-                            )
+                            logger.error("[EvolveServer] no-skill evolve failed: %s", result)
                         failed_group = (
-                            no_skill_sessions
-                            if branch_name == NO_SKILL_KEY
-                            else grouped_sessions.get(branch_name, [])
+                            no_skill_sessions if branch_name == NO_SKILL_KEY else grouped_sessions.get(branch_name, [])
                         )
                         for failed_session in failed_group:
                             failed_sid = failed_session.get("session_id")
@@ -4285,13 +3754,9 @@ class EvolveServer(EvolveEngineMixin):
                 # succeeded; retain sessions touched by a failed branch
                 # (a session referencing multiple skills survives if ANY
                 # of its groups failed).
-                doomed_sessions = [
-                    s for s in sessions
-                    if s.get("session_id") not in failed_session_ids
-                ]
+                doomed_sessions = [s for s in sessions if s.get("session_id") not in failed_session_ids]
                 doomed_keys = [
-                    k for s, k in zip(sessions, session_keys)
-                    if s.get("session_id") not in failed_session_ids
+                    k for s, k in zip(sessions, session_keys) if s.get("session_id") not in failed_session_ids
                 ]
                 logger.warning(
                     "[EvolveServer] partial commit: consuming %d session(s), "
@@ -4321,8 +3786,7 @@ class EvolveServer(EvolveEngineMixin):
         queued_candidates = sum(
             1
             for record in all_records
-            if record.get("action")
-            in {"queued_for_validation", "updated_validation_candidate"}
+            if record.get("action") in {"queued_for_validation", "updated_validation_candidate"}
         )
         published_after_validation = sum(
             1 for record in all_records if record.get("action") == "published_after_validation"
@@ -4375,8 +3839,7 @@ class EvolveServer(EvolveEngineMixin):
                 "(inconclusive validation). Resolve via dashboard review: %s",
                 open_reviews,
                 ", ".join(
-                    f"{t.get('skill_name', '?')}({t.get('job_id', '')})"
-                    for t in human_review_summary.get("tasks", [])
+                    f"{t.get('skill_name', '?')}({t.get('job_id', '')})" for t in human_review_summary.get("tasks", [])
                 ),
             )
         return summary
@@ -4405,16 +3868,12 @@ class EvolveServer(EvolveEngineMixin):
                 has_backlog = drained >= cap
             else:
                 try:
-                    remaining = await self._call_storage(
-                        list_session_keys, self._bucket, self._session_prefix
-                    )
+                    remaining = await self._call_storage(list_session_keys, self._bucket, self._session_prefix)
                     has_backlog = bool(remaining)
                 except Exception:
                     has_backlog = False
             if has_backlog:
-                logger.info(
-                    "[EvolveServer] session backlog detected — starting next cycle immediately"
-                )
+                logger.info("[EvolveServer] session backlog detected — starting next cycle immediately")
                 await asyncio.sleep(1.0)
             else:
                 await asyncio.sleep(self.config.interval_seconds)
@@ -4436,7 +3895,6 @@ class EvolveServer(EvolveEngineMixin):
 
     def create_http_app(self):
         from dataclasses import replace
-        from pathlib import Path
 
         from fastapi import Body, FastAPI, Header
         from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -4444,7 +3902,7 @@ class EvolveServer(EvolveEngineMixin):
 
         app = FastAPI(title="teamEvolver Evolve Server")
 
-        _web_dir = Path(__file__).resolve().parent.parent / "web"
+        _web_dir = _REPO_ROOT / "teamEvolver" / "web"
         _dist_dir = _web_dir / "dist"
         _dist_index = _dist_dir / "index.html"
         _dist_assets = _dist_dir / "assets"
@@ -4453,9 +3911,7 @@ class EvolveServer(EvolveEngineMixin):
         # Hashed build assets (JS/CSS/fonts) live under dist/assets. Mount them
         # first so they take precedence over any catch-all routes below.
         if _dist_assets.is_dir():
-            app.mount(
-                "/assets", StaticFiles(directory=str(_dist_assets)), name="assets"
-            )
+            app.mount("/assets", StaticFiles(directory=str(_dist_assets)), name="assets")
 
         @app.get("/", response_class=HTMLResponse)
         @app.get("/console", response_class=HTMLResponse)
@@ -4496,74 +3952,57 @@ class EvolveServer(EvolveEngineMixin):
             # write. Without this, two concurrent /trigger calls interleave and
             # lose each other's uploaded skills.
             async with self._get_run_lock():
-                  eval_run_id = str(body.get("eval_run_id") or "").strip()
-                  saved_evobench_run_id = None
-                  if eval_run_id:
-                      import os
+                eval_run_id = str(body.get("eval_run_id") or "").strip()
+                saved_evobench_run_id = None
+                if eval_run_id:
+                    import os
 
-                      saved_evobench_run_id = os.environ.get("EVOBENCH_RUN_ID")
-                      os.environ["EVOBENCH_RUN_ID"] = eval_run_id
-                  try:
-                      if any(
-                          [
-                              body.get("viking_account"),
-                              body.get("viking_user"),
-                              body.get("viking_agent_id"),
-                              body.get("viking_customer_id"),
-                              body.get("group_id"),
-                              body.get("viking_group_id"),
-                              body.get("viking_root_prefix"),
-                          ]
-                      ):
-                          override_group_id = (
-                              str(body.get("group_id") or body.get("viking_group_id") or "")
-                              .split(",")[0]
-                              .strip()
-                              .strip("/")
-                          )
-                          override_config = replace(
-                              self.config,
-                              viking_account=str(body.get("viking_account") or self.config.viking_account),
-                              viking_user=str(body.get("viking_user") or self.config.viking_user),
-                              viking_agent_id=str(body.get("viking_agent_id") or self.config.viking_agent_id),
-                              viking_customer_id=str(body.get("viking_customer_id") or self.config.viking_customer_id),
-                              viking_group_id=override_group_id or self.config.viking_group_id,
-                              viking_root_prefix=str(body.get("viking_root_prefix") or self.config.viking_root_prefix),
-                          )
-                          saved_bucket = self._bucket
-                          saved_skill_bucket = self._skill_bucket
-                          saved_skill_prefix = self._skill_prefix
-                          saved_session_prefix = self._session_prefix
-                          saved_registry = self._id_registry
-                          try:
-                              self._bucket = self._build_bucket(override_config)
-                              self._skill_bucket = self._build_skill_bucket(override_config)
-                              self._skill_prefix = self._skill_prefix_for_config(override_config)
-                              # Keep the session queue pooled at the team root even when a
-                              # caller overrides the peer/customer identity: evolution reads
-                              # all peers' sessions together (see __init__).
-                              self._session_prefix = ""
-                              # Load the registry from the overridden group's namespace so we
-                              # never persist the default group's registry into another group.
-                              self._id_registry = SkillIDRegistry()
-                              self._id_registry.load_from_oss(self._skill_bucket, self._skill_prefix)
-                              result = await self.run_once()
-                          finally:
-                              self._bucket = saved_bucket
-                              self._skill_bucket = saved_skill_bucket
-                              self._skill_prefix = saved_skill_prefix
-                              self._session_prefix = saved_session_prefix
-                              self._id_registry = saved_registry
-                          return JSONResponse(content=result)
-                      return JSONResponse(content=await self.run_once())
-                  finally:
-                      if eval_run_id:
-                          import os
+                    saved_evobench_run_id = os.environ.get("EVOBENCH_RUN_ID")
+                    os.environ["EVOBENCH_RUN_ID"] = eval_run_id
+                try:
+                    identity_keys = ("viking_account", "viking_user", "viking_agent", "viking_root_prefix")
+                    if any(body.get(key) for key in identity_keys):
+                        override_config = replace(
+                            self.config,
+                            viking_account=str(body.get("viking_account") or self.config.viking_account),
+                            viking_user=str(body.get("viking_user") or self.config.viking_user),
+                            viking_agent=str(body.get("viking_agent") or self.config.viking_agent),
+                            viking_root_prefix=str(body.get("viking_root_prefix") or self.config.viking_root_prefix),
+                        )
+                        saved_bucket = self._bucket
+                        saved_skill_bucket = self._skill_bucket
+                        saved_skill_prefix = self._skill_prefix
+                        saved_session_prefix = self._session_prefix
+                        saved_registry = self._id_registry
+                        try:
+                            self._bucket = self._build_bucket(override_config)
+                            self._skill_bucket = self._build_skill_bucket(override_config)
+                            self._skill_prefix = self._skill_prefix_for_config(override_config)
+                            # Keep the session queue pooled at the team root even when a
+                            # caller overrides the peer/customer identity: evolution reads
+                            # all peers' sessions together (see __init__).
+                            self._session_prefix = ""
+                            # Load the registry from the overridden group's namespace so we
+                            # never persist the default group's registry into another group.
+                            self._id_registry = SkillIDRegistry()
+                            self._id_registry.load_from_oss(self._skill_bucket, self._skill_prefix)
+                            result = await self.run_once()
+                        finally:
+                            self._bucket = saved_bucket
+                            self._skill_bucket = saved_skill_bucket
+                            self._skill_prefix = saved_skill_prefix
+                            self._session_prefix = saved_session_prefix
+                            self._id_registry = saved_registry
+                        return JSONResponse(content=result)
+                    return JSONResponse(content=await self.run_once())
+                finally:
+                    if eval_run_id:
+                        import os
 
-                          if saved_evobench_run_id is None:
-                              os.environ.pop("EVOBENCH_RUN_ID", None)
-                          else:
-                              os.environ["EVOBENCH_RUN_ID"] = saved_evobench_run_id
+                        if saved_evobench_run_id is None:
+                            os.environ.pop("EVOBENCH_RUN_ID", None)
+                        else:
+                            os.environ["EVOBENCH_RUN_ID"] = saved_evobench_run_id
 
         @app.get("/status")
         async def status():
@@ -4574,9 +4013,7 @@ class EvolveServer(EvolveEngineMixin):
             if now - self._status_seed_merge_ts >= 5.0:
                 self._status_seed_merge_ts = now
                 try:
-                    await self._call_storage(
-                        self._id_registry.merge_from_oss, self._skill_bucket, self._skill_prefix
-                    )
+                    await self._call_storage(self._id_registry.merge_from_oss, self._skill_bucket, self._skill_prefix)
                 except Exception:  # noqa: BLE001 - status must never 5xx on a soft read.
                     logger.debug("status seed merge failed", exc_info=True)
             entries = self._id_registry.all_entries()
@@ -4741,11 +4178,7 @@ class EvolveServer(EvolveEngineMixin):
             page = candidates[safe_offset : safe_offset + safe_limit]
             if compact:
                 page = [
-                    {
-                        key: value
-                        for key, value in item.items()
-                        if key not in {"candidate_skill", "current_skill"}
-                    }
+                    {key: value for key, value in item.items() if key not in {"candidate_skill", "current_skill"}}
                     for item in page
                 ]
             return JSONResponse(

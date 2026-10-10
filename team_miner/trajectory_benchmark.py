@@ -22,16 +22,15 @@ from typing import Any, Callable, Iterable
 
 import run_benchmark as rb
 import run_pipeline as rp
+
 from team_replay.datasets.schema import (
-    DATASET_SCHEMA_V2,
-    legacy_case_view,
+    DATASET_SCHEMA,
     make_document,
-    normalize_case,
     normalize_document,
     validate_document,
 )
 
-DATASET_FORMAT = DATASET_SCHEMA_V2
+DATASET_FORMAT = DATASET_SCHEMA
 ORIGIN = "trajectory-mining"
 DEFAULT_TARGET_TOTAL = 18
 MAX_TARGET_TOTAL = 100
@@ -523,20 +522,9 @@ def _artifact_root(project_root: Path | str | None = None) -> Path:
     return Path(project_root or PROJECT_ROOT).resolve() / "trajectory_benchmarks"
 
 
-def _load_jsonl(path: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        item = json.loads(line)
-        if isinstance(item, dict):
-            rows.append(item)
-    return rows
-
-
 def _write_artifacts(stage: Path, request: dict[str, Any], questions: list[dict[str, Any]]) -> dict[str, Any]:
     cases = [
-        normalize_case(question, default_case_id=str(question.get("id") or ""))
+        rb.bf.question_case(question, case_id=str(question.get("id") or ""))
         for question in questions
     ]
     document = make_document(
@@ -677,35 +665,15 @@ def get_run(run_id: str, *, project_root: Path | str | None = None) -> dict[str,
         raise TrajectoryBenchmarkError("invalid run_id")
     manifest_path = run_dir / "manifest.json"
     benchmark_path = run_dir / "benchmark.json"
-    legacy_path = run_dir / "benchmark.jsonl"
-    if not manifest_path.is_file() or not (benchmark_path.is_file() or legacy_path.is_file()):
+    if not manifest_path.is_file() or not benchmark_path.is_file():
         return None
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if legacy_path.is_file() and not benchmark_path.is_file():
-        return {**manifest, "questions": _load_jsonl(legacy_path)}
     document = normalize_document(
         json.loads(benchmark_path.read_text(encoding="utf-8")),
         default_dataset_id=run_id,
     )
-    questions = []
-    for case in document["cases"]:
-        view = legacy_case_view(case, document=document)
-        metadata = case.get("metadata") if isinstance(case.get("metadata"), dict) else {}
-        gold = metadata.get("gold") if isinstance(metadata.get("gold"), dict) else {}
-        questions.append({
-            "id": case["case_id"],
-            "target_dimensions": list(metadata.get("target_dimensions") or []),
-            "difficulty": str(metadata.get("difficulty") or "medium"),
-            "input": case["query"],
-            "gold": {
-                "expected_label": gold.get("expected_label") or {},
-                "must_hit": gold.get("must_hit") or view["requirements"],
-                "must_avoid": gold.get("must_avoid") or [],
-            },
-            "customer_sim": metadata.get("customer_sim") or {},
-            "source": str(metadata.get("source_label") or ""),
-            "in_corpus": bool(metadata.get("in_corpus", False)),
-            "dataset_format": DATASET_FORMAT,
-            "origin": str(metadata.get("origin") or ORIGIN),
-        })
+    questions = rb.bf.to_runner_questions(document)
+    for question in questions:
+        question["dataset_format"] = DATASET_FORMAT
+        question["origin"] = ORIGIN
     return {**manifest, "questions": questions}

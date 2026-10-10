@@ -61,7 +61,7 @@ function shortTime(value?: string): string {
   return value.slice(0, 19).replace("T", " ");
 }
 
-export default function CandidateReviewView({ active }: { active: boolean }) {
+export default function CandidateReviewView({ active, canManage = false }: { active: boolean; canManage?: boolean }) {
   const [cands, setCands] = useState<Candidate[]>([]);
   const [evalCache, setEvalCache] = useState<Record<string, EvalResult>>({});
   const [evaluating, setEvaluating] = useState<Record<string, boolean>>({});
@@ -120,7 +120,7 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
   const evaluate = useCallback(async (jobId: string, force: boolean) => {
     if (evaluatingRef.current[jobId]) return;
     setEvaluating((m) => ({ ...m, [jobId]: true }));
-    if (force) toastOk("已开始重新评估", "真实回放需拉起 Hermes A/B 分支，可能耗时数分钟，请勿离开或重复点击");
+    if (force) toastOk("已开始重新评估", "真实回放需运行隔离的 A/B 分支，可能耗时数分钟，请勿离开或重复点击");
     try {
       const r = await api<EvalResult & { status?: string }>(
         `/api/skill-candidates/${encodeURIComponent(jobId)}/evaluate${force ? "?refresh=true" : ""}`,
@@ -168,7 +168,7 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
         setEvalCache((m) => ({ ...m, ...serverEvaluations }));
       }
       setCands(next);
-      if (scope === "open") {
+      if (scope === "open" && canManage) {
         for (const c of next) {
           if (!mergedCache[c.job_id] && !evaluatingRef.current[c.job_id]) {
             evaluate(c.job_id, false);
@@ -180,7 +180,7 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
     } finally {
       setLoading(false);
     }
-  }, [cands.length, evaluate, scope]);
+  }, [cands.length, evaluate, scope, canManage]);
 
   useEffect(() => {
     if (active) {
@@ -355,13 +355,13 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
                         <CandidateFeedbackControls
                           jobId={c.job_id}
                           feedback={c.feedback}
-                          readOnly={processed}
+                          readOnly={processed || !canManage}
                           onSaved={handleFeedbackSaved}
                         />
                       </Td>
                       <Td>
                         <div className="flex flex-wrap gap-1.5">
-                          {processed ? (
+                          {processed || !canManage ? (
                             <Button variant="outline" size="sm" onClick={() => openCandidate(c.job_id)}>
                               查看详情
                             </Button>
@@ -394,7 +394,7 @@ export default function CandidateReviewView({ active }: { active: boolean }) {
         ev={openJobId ? evalCache[openJobId] ?? openCand?.evaluation ?? null : null}
         evaluating={openJobId ? !!evaluating[openJobId] : false}
         open={!!openJobId}
-        readOnly={isProcessedCandidate(openCand)}
+        readOnly={isProcessedCandidate(openCand) || !canManage}
         onClose={() => setOpenJobId(null)}
         onEvaluate={(force) => {
           if (!openJobId || isProcessedCandidate(openCand)) return;
