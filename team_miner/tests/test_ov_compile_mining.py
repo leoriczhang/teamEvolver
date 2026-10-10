@@ -176,6 +176,9 @@ def test_materialized_compile_bundle_keeps_existing_candidate_contract(tmp_path,
     repository.write_output(job["job_id"], "compiled_skill/support-triage/benchmark.json", json.dumps(document))
     repository.write_output(job["job_id"], "analysis/evidence-map.md", "# Evidence\nGrounded in billing.md.\n")
     repository.write_output(job["job_id"], "analysis/gaps.md", "# Gaps\nNo unresolved gaps in this fixture.\n")
+    repository.write_output(job["job_id"], "analysis/review.json", json.dumps({
+        "schema_version": "skill-miner.review.v1", "questions": [],
+    }))
     if benchmark_body is not None:
         repository.write_output(job["job_id"], "compiled_skill/support-triage/BENCHMARK.md", benchmark_body)
     if benchmark_body is None or not benchmark_body.strip():
@@ -189,7 +192,7 @@ def test_materialized_compile_bundle_keeps_existing_candidate_contract(tmp_path,
     public = repository.public_job(finalized, detail=True)
 
     assert finalized["materialized"] is True
-    assert finalized["artifact_quality"]["can_submit"] is True
+    assert finalized["artifact_quality"]["can_submit"] is False
     assert public["skills"] == [
         {
             "name": "support-triage",

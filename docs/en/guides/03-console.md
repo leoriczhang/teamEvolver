@@ -12,7 +12,7 @@ The console uses an HttpOnly Session Cookie. Regular users can view and edit onl
 
 | Area | Pages | Purpose |
 |------|-------|---------|
-| Skill Mining | Overview, Knowledge Sources, Mining Jobs | Manage document sources, run the three-stage SkillMiner pipeline, review and submit artifacts |
+| Skill Mining | Overview, Knowledge Sources, Mining Jobs | Manage document sources, run multiple Compile rounds, supplement Evidence and review artifacts |
 | Evolution Loop | Operations, Langfuse Integration, Evolution Pipeline | Follow Session → Candidate → Replay → Publish and configure Skill/Memory evolution |
 | Asset Center | Experiment Workbench, Personal and Team Assets, Platform Assets | Edit and validate Skills, manage Agent-referable assets, or inspect internal storage read-only |
 | Governance | Global Model, Users & Permissions, Runtime Status | Manage models, identities, OpenViking deployment, and system health |
@@ -37,14 +37,14 @@ The source page supports:
 
 ### Mining Jobs
 
-Each job runs these stages:
+Console mining jobs run these stages:
 
-1. Sample package construction
-2. Semantic discovery
-3. Skill and `EVALUATION.md` compilation
-4. Optional reflection rounds and Benchmark execution
+1. Freeze the source snapshot and submit this round's OpenViking Compile.
+2. Materialize and validate the round's Skill Candidate and Test Dataset.
+3. If human checkpoints are enabled, wait for review, answers and supplementary documents.
+4. Continue to another round or finish mining before True Replay and Candidate Review.
 
-Jobs support parallel execution, stop, delete, copyable diagnostics, human evidence supplements, and resume. Completed Markdown artifacts can be previewed or edited, then submitted to the Candidate validation pipeline.
+Jobs support parallel execution, stop, delete, copyable diagnostics, round inspection, human Evidence supplements and continuation. With checkpoints disabled, the configured rounds run automatically. Completed Markdown artifacts can be previewed or edited, and the Skill Candidate can enter validation. See [Multi-round Skill Mining and Human Evidence Supplements](./17-multi-round-skill-mining.md).
 
 ## Evolution Loop
 

@@ -4,6 +4,8 @@ Skill Miner 是 teamEvolver 内置的文档到技能挖掘子系统，可以将�
 
 Skill Miner 是顶层深模块，代码统一位于 `team_miner/`。主服务通过 `team_miner/bridge.py` 接入 HTTP 路由，白盒配置和候选提交分别由 `team_miner/settings.py`、`team_miner/lifecycle.py` 管理；统一控制台视图位于 `team_miner/frontend/`，独立 Web 控制台位于 `team_miner/web_console/`。
 
+统一控制台当前使用 OpenViking Compile 编排真实轮次，操作见 [多轮 Skill 挖掘与人工补证](./17-multi-round-skill-mining.md)，接口见 [Skill 挖掘 API](../api/17-skill-mining.md)。本文下面的三阶段流水线、Hermes 配置和命令行示例描述独立 CLI 链路。
+
 ## 核心能力
 
 1. **样本包构建**：按证据视角和上下文容量将输入文档组织成若干样本包。产物经过程序化切分质量校验（切片深度、跨包去重、覆盖率、common/ 一致性等硬指标），有硬伤时自动携带违规明细重跑一次，仍不通过则中止本轮。

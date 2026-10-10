@@ -12,7 +12,7 @@ teamEvolver 控制台与 API 共用一个 FastAPI 服务，默认地址为 `http
 
 | 一级区域 | 页面 | 用途 |
 |----------|------|------|
-| 技能挖掘 | 挖掘总览、知识源、挖掘任务 | 管理文档知识源，运行三阶段 SkillMiner，审核和提交产物 |
+| 技能挖掘 | 挖掘总览、知识源、挖掘任务 | 管理文档知识源，运行多轮 Compile，补证、审核和提交产物 |
 | 进化闭环 | 运行总览、Langfuse 接入、进化链路 | 查看 Session → Candidate → Replay → Publish 状态，配置 Skill 与 Memory 进化 |
 | 资产中心 | 实验工作台、个人与团队资产、平台资产 | 编辑和验证 Skill，管理 Agent 可引用资产，或只读检查平台内部存储 |
 | 平台治理 | 全局模型、用户与权限、运行状态 | 管理模型、身份、OpenViking 部署和系统健康 |
@@ -37,14 +37,14 @@ teamEvolver 控制台与 API 共用一个 FastAPI 服务，默认地址为 `http
 
 ### 挖掘任务
 
-每个任务按以下阶段运行：
+控制台挖掘任务按以下阶段运行：
 
-1. 样本包构建
-2. 语义发现
-3. Skill 与 `EVALUATION.md` 编译
-4. 可选反思轮次与 Benchmark
+1. 冻结知识源快照，提交本轮 OpenViking Compile。
+2. 物化并校验本轮 Skill Candidate 和 Test Dataset。
+3. 启用人工补证时，等待人工复核、回答问题和上传补充文档。
+4. 继续下一轮或结束挖掘，再进入 True Replay 和 Candidate Review。
 
-任务支持并行执行、停止、删除、失败诊断复制、人工补证和继续运行。完成后可以预览或编辑 Markdown 产物，并将 Skill 提交到 Candidate 验证链路。
+任务支持并行执行、停止、删除、失败诊断复制、轮次查看、人工补证和继续运行。关闭人工补证时自动执行设置的轮数。完成后可以预览或编辑 Markdown 产物，并将 Skill Candidate 提交到验证链路。详见 [多轮 Skill 挖掘与人工补证](./17-multi-round-skill-mining.md)。
 
 ## 进化闭环
 

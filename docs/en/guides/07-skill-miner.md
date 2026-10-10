@@ -4,6 +4,8 @@ Skill Miner is teamEvolver's built-in document-to-skill mining subsystem that ca
 
 Skill Miner is a top-level deep module under `team_miner/`. The main service uses `team_miner/bridge.py` for HTTP integration, while `team_miner/settings.py` and `team_miner/lifecycle.py` own white-box settings and candidate submission. The unified-console views live under `team_miner/frontend/`, and the standalone Web console lives under `team_miner/web_console/`.
 
+The unified console now uses OpenViking Compile to orchestrate real rounds. See [Multi-round Skill Mining and Human Evidence Supplements](./17-multi-round-skill-mining.md) and [Skill Mining API](../api/17-skill-mining.md). The three-stage pipeline, Hermes configuration and command-line examples below describe the standalone CLI workflow.
+
 ## Core Capabilities
 
 1. **Sample Package Construction**: Organizes input documents into sample packages by evidence perspective and context capacity. Artifacts undergo programmatic segmentation quality validation (hard metrics like slice depth, cross-package deduplication, coverage, common/ consistency); automatically reruns once with violation details when hard flaws exist; aborts round if still failing.

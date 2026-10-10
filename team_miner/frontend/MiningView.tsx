@@ -6,10 +6,11 @@ import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { api, type UserProfile } from "@/api/client";
 import { fileToB64 } from "@/lib/file";
+import { createRequestId } from "@/lib/requestId";
 import { toastErr, toastOk } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import DropZone from "@/views/skills/DropZone";
-import MarkdownWorkspace, { MarkdownDocument } from "@/components/MarkdownWorkspace";
+import { MarkdownDocument } from "@/components/MarkdownWorkspace";
 import MiningWhiteboxPanel from "@miner/MiningWhiteboxPanel";
 import SkillSourceWorkspace from "@miner/SkillSourceWorkspace";
 import {
@@ -111,6 +112,12 @@ interface MiningRound {
   round: number;
   artifacts: MiningArtifact[];
   skills?: CompiledSkillDetail[];
+  status?: string;
+  started_at?: string;
+  finished_at?: string;
+  task_id?: string;
+  ov_task_id?: string;
+  remote_warnings?: string[];
 }
 
 interface MiningArtifactQualityItem {
@@ -136,6 +143,7 @@ type MiningJobStatus =
   | "queued"
   | "running"
   | "waiting"
+  | "waiting_human"
   | "stopping"
   | "stopped"
   | "succeeded"
@@ -150,6 +158,8 @@ interface MiningJob {
   document_count: number | null;
   max_rounds: number;
   current_round: number | null;
+  rounds_mode?: string;
+  human_checkpoints_supported?: boolean;
   runtime_timeout_seconds?: number;
   ov_cancel_error?: string;
   phase: PhaseState;
@@ -177,6 +187,7 @@ interface MiningJob {
   ov_last_synced_at?: string;
   ov_last_sync_attempt_at?: string;
   ov_sync_error?: string;
+  remote_warnings?: string[];
   ov_sync_failures?: number;
   ov_next_retry_at?: string;
   remote_state_stale?: boolean;
@@ -220,6 +231,12 @@ interface HumanCheckpoint {
   intro: string;
   questions: HumanCheckpointQuestion[];
   allow_stop?: boolean;
+  attachments?: EvidenceAttachment[];
+}
+
+interface EvidenceAttachment {
+  name: string;
+  uri: string;
 }
 
 interface KnowledgeSupplementRound {
@@ -229,6 +246,10 @@ interface KnowledgeSupplementRound {
   intro?: string;
   questions: HumanCheckpointQuestion[];
   answers?: Record<string, string>;
+  unresolved?: string[];
+  references?: Record<string, string[]>;
+  feedback?: string;
+  attachments?: EvidenceAttachment[];
   submitted_at?: string;
   source: "checkpoint" | "semantic_report";
 }
@@ -449,11 +470,20 @@ export default function MiningView({
   const [deleteJob, setDeleteJob] = useState<MiningJob | null>(null);
   const [jobDeleting, setJobDeleting] = useState(false);
   const [checkpointAnswers, setCheckpointAnswers] = useState<Record<string, string>>({});
+  const [checkpointUnresolved, setCheckpointUnresolved] = useState<Record<string, boolean>>({});
+  const [checkpointReferences, setCheckpointReferences] = useState<Record<string, string>>({});
+  const [checkpointFeedback, setCheckpointFeedback] = useState("");
+  const [checkpointAttachments, setCheckpointAttachments] = useState<EvidenceAttachment[]>([]);
+  const [checkpointUploading, setCheckpointUploading] = useState(false);
   const [checkpointSubmitting, setCheckpointSubmitting] = useState(false);
+  const checkpointRequest = useRef<{ signature: string; id: string } | null>(null);
+  const activeCheckpoint = useRef({ jobId: selectedJobId, checkpointId: selectedJob?.pending_checkpoint?.id });
+  activeCheckpoint.current = { jobId: selectedJobId, checkpointId: selectedJob?.pending_checkpoint?.id };
   const [knowledgeSupplementExpanded, setKnowledgeSupplementExpanded] = useState(false);
   const [artifactPreview, setArtifactPreview] = useState<ArtifactContent | null>(null);
   const [artifactDraft, setArtifactDraft] = useState("");
   const [artifactEditing, setArtifactEditing] = useState(false);
+  const [artifactEditorMode, setArtifactEditorMode] = useState<"edit" | "preview">("edit");
   const [artifactEditable, setArtifactEditable] = useState(false);
   const [artifactSaving, setArtifactSaving] = useState(false);
   const [loadingArtifact, setLoadingArtifact] = useState("");
@@ -513,10 +543,15 @@ export default function MiningView({
 
   useEffect(() => {
     setCheckpointAnswers({});
+    setCheckpointUnresolved({});
+    setCheckpointReferences({});
+    setCheckpointFeedback("");
+    setCheckpointAttachments([]);
+    checkpointRequest.current = null;
   }, [selectedJob?.pending_checkpoint?.id]);
 
   useEffect(() => {
-    setKnowledgeSupplementExpanded(false);
+    setKnowledgeSupplementExpanded(Boolean(selectedJob?.pending_checkpoint));
   }, [selectedJobId, selectedJob?.pending_checkpoint?.id]);
 
   if (!active) return null;
@@ -533,20 +568,22 @@ export default function MiningView({
   const uploadTargetIngestion = uploadTargetSource ? sourceIngestion(uploadTargetSource) : null;
   const jobCounts = {
     total: mining.jobs.length,
-    running: mining.jobs.filter((job) => isActiveJob(job.status) && job.status !== "queued" && job.status !== "preparing").length,
+    running: mining.jobs.filter((job) => job.status === "running" || job.status === "stopping").length,
+    waiting: mining.jobs.filter((job) => isWaitingForEvidence(job)).length,
     queued: mining.jobs.filter((job) => job.status === "queued" || job.status === "preparing").length,
     completed: mining.jobs.filter((job) => job.status === "succeeded").length,
     failed: mining.jobs.filter((job) => job.status === "failed" || job.status === "interrupted" || job.status === "stopped").length,
   };
   const sourceDocumentTotal = inputSources.reduce((sum, source) => sum + source.document_count, 0);
   const pipelineJobs = mining.jobs.filter(
-    (job) => job.status === "running" || job.status === "waiting" || job.status === "stopping"
+    (job) => job.status === "running" || isWaitingForEvidence(job) || job.status === "stopping"
   );
   const recentTaskCount = Math.min(5, jobCounts.total);
   const running = jobCounts.running > 0 || jobCounts.queued > 0;
   const stateLabel = [
     jobCounts.running ? `${jobCounts.running} 个运行中` : "",
     jobCounts.queued ? `${jobCounts.queued} 个排队中` : "",
+    jobCounts.waiting ? `${jobCounts.waiting} 个等待补证` : "",
   ].filter(Boolean).join(" · ") || "当前无运行任务";
   const stateTone = jobCounts.running ? "blue" : jobCounts.queued ? "amber" : "gray";
   const filteredJobs = mining.jobs.filter((job) => {
@@ -903,17 +940,75 @@ export default function MiningView({
     }
   }
 
-  async function submitCheckpointAnswers(job: MiningJob) {
+  async function uploadCheckpointEvidence(job: MiningJob, files: File[]) {
     const checkpoint = job.pending_checkpoint;
-    if (!checkpoint) return;
-    setCheckpointSubmitting(true);
+    if (!checkpoint || !files.length) return;
+    setCheckpointUploading(true);
     try {
-      const response = await api<{ job: MiningJob }>(
-        `/api/mining/jobs/${encodeURIComponent(job.job_id)}/answer`,
+      const prepared = await Promise.all(files.map(async (file) => ({ name: file.name, content_base64: await fileToB64(file) })));
+      const response = await api<{ saved: EvidenceAttachment[]; job: MiningJob }>(
+        `/api/mining/jobs/${encodeURIComponent(job.job_id)}/supplements`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
+          body: JSON.stringify({ checkpoint_id: checkpoint.id, files: prepared }),
+        }
+      );
+      if (activeCheckpoint.current.jobId !== job.job_id || activeCheckpoint.current.checkpointId !== checkpoint.id) return;
+      setCheckpointAttachments((current) => [...current, ...(response.saved || [])]);
+      if (response.job) setSelectedJob(response.job);
+      toastOk("已准备补充 Evidence", "继续下一轮时会固化到本轮输入；结束挖掘时保留在补证记录中。");
+    } catch (e: any) {
+      toastErr("上传补充 Evidence 失败", e.message);
+    } finally {
+      setCheckpointUploading(false);
+    }
+  }
+
+  async function submitCheckpointAnswers(job: MiningJob, action: "continue" | "finish" = "continue") {
+    const checkpoint = job.pending_checkpoint;
+    if (!checkpoint || checkpointSubmitting || checkpointUploading) return;
+    const orchestrated = job.rounds_mode === "orchestrated";
+    if (orchestrated && action === "continue" && checkpoint.round >= job.max_rounds) return;
+    if (orchestrated) {
+      const missing = checkpoint.questions.find((question) => (
+        question.required && !checkpointUnresolved[question.qid] && !checkpointAnswers[question.qid]?.trim()
+      ));
+      if (missing) {
+        toastErr("请确认必填 Evidence 问题", `请回答“${missing.question}”，或明确勾选暂时无法确认；来源引用不能代替回答。`);
+        return;
+      }
+    }
+    setCheckpointSubmitting(true);
+    try {
+      const references = Object.fromEntries(checkpoint.questions.map((question) => [
+        question.qid,
+        Array.from(new Set((checkpointReferences[question.qid] || "").split("\n").map((uri) => uri.trim()).filter(Boolean))),
+      ]));
+      const unresolved = checkpoint.questions.filter((question) => (
+        checkpointUnresolved[question.qid] || (!question.required && !checkpointAnswers[question.qid]?.trim())
+      )).map((question) => question.qid);
+      const answers = Object.fromEntries(Object.entries(checkpointAnswers).filter(([qid, answer]) => !unresolved.includes(qid) && answer.trim()));
+      const payload = {
+        checkpoint_id: checkpoint.id,
+        answers,
+        unresolved,
+        references,
+        feedback: checkpointFeedback,
+      };
+      const signature = JSON.stringify({ job_id: job.job_id, action, ...payload });
+      if (checkpointRequest.current?.signature !== signature) {
+        checkpointRequest.current = { signature, id: createRequestId() };
+      }
+      const response = await api<{ job: MiningJob }>(
+        `/api/mining/jobs/${encodeURIComponent(job.job_id)}/${orchestrated ? action : "answer"}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(orchestrated ? {
+            ...payload,
+            request_id: checkpointRequest.current.id,
+          } : {
             question_id: checkpoint.id,
             answers: checkpointAnswers,
           }),
@@ -922,7 +1017,9 @@ export default function MiningView({
       setSelectedJob(response.job);
       setCheckpointAnswers({});
       await mining.refreshJobs(false);
-      toastOk("补证信息已提交", "挖掘任务将带着你的答案继续运行");
+      toastOk(action === "finish" ? "挖掘已结束" : "补证信息已提交", action === "finish"
+        ? "最终产物和未解决的证据缺口已保留，可继续审核。"
+        : "下一轮将使用累计补充的 Evidence 和复核意见。");
     } catch (e: any) {
       toastErr("提交知识补证失败", e.message);
     } finally {
@@ -939,6 +1036,7 @@ export default function MiningView({
       setArtifactPreview(result);
       setArtifactDraft(result.content);
       setArtifactEditing(false);
+      setArtifactEditorMode("edit");
       setArtifactEditable(editable);
     } catch (e: any) {
       toastErr("读取历史产物失败", e.message);
@@ -962,7 +1060,7 @@ export default function MiningView({
       setArtifactPreview(saved);
       setArtifactDraft(saved.content);
       setArtifactEditing(isMarkdownArtifact(saved));
-      toastOk("产物修改已保存", "提交到进化时将使用当前版本");
+      toastOk("产物修改已保存", "继续挖掘或提交到进化时将使用当前版本");
     } catch (e: any) {
       toastErr("保存产物失败", e.message);
     } finally {
@@ -1023,7 +1121,21 @@ export default function MiningView({
     const durableGaps = job.knowledge_gaps?.questions || [];
     const supplementRounds = job.knowledge_supplements || [];
     const supplementQuestions = job.pending_checkpoint?.questions || durableGaps;
-    const hasKnowledgeSupplement = supplementQuestions.length > 0 || supplementRounds.length > 0;
+    const hasKnowledgeSupplement = Boolean(job.pending_checkpoint) || supplementQuestions.length > 0 || supplementRounds.length > 0;
+    const orchestrated = job.rounds_mode === "orchestrated";
+    const checkpointBusy = checkpointSubmitting || checkpointUploading;
+    const currentRemoteWarnings = distinctWarnings([
+      ...(job.remote_warnings || []),
+      ...((job.rounds || []).find((round) => round.round === job.current_round)?.remote_warnings || []),
+    ]);
+    const roundWarningMessages = (job.rounds || []).flatMap((round) => distinctWarnings(round.remote_warnings));
+    const finalRemoteWarnings = distinctWarnings([
+      ...currentRemoteWarnings.filter((warning) => !roundWarningMessages.includes(warning)),
+      ...(job.rounds || []).flatMap((round) => distinctWarnings(round.remote_warnings).map((warning) => `第 ${round.round} 轮：${warning}`)),
+    ]);
+    const checkpointFiles = Array.from(new Map([
+      ...(job.pending_checkpoint?.attachments || []), ...checkpointAttachments,
+    ].map((file) => [file.uri, file])).values());
     const setupTimingRows = [
       ["Skill 编译器发布", job.setup_timings?.publish_skill],
       ["运行目录创建", job.setup_timings?.mkdir_run_root],
@@ -1044,11 +1156,13 @@ export default function MiningView({
               <Pill tone={jobStatusMeta(job.status).tone as any}>{jobStatusMeta(job.status).label}</Pill>
               {job.input_dir && <span className="mono select-text">{sourceDisplayName(job.input_dir)}</span>}
               {job.document_count !== null && <span>{job.document_count} 个文档</span>}
+              {orchestrated && <span>第 {job.current_round || 1} / {job.max_rounds} 轮</span>}
+              {currentRemoteWarnings.length > 0 && <Pill tone="amber">来源处理需复核</Pill>}
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {isActiveJob(job.status) && !job.legacy && (
-              <Button size="sm" variant="outline" disabled={jobActionPending || job.status === "stopping"} onClick={() => stopJob(job)}>
+              <Button size="sm" variant="outline" disabled={jobActionPending || checkpointBusy || job.status === "stopping"} onClick={() => stopJob(job)}>
                 <CircleStop className="size-3.5" /> {job.status === "stopping" ? "停止中" : "停止"}
               </Button>
             )}
@@ -1059,6 +1173,10 @@ export default function MiningView({
             )}
           </div>
         </div>
+
+        {!job.pending_checkpoint && finalRemoteWarnings.length > 0 && (
+          <RemoteCompileWarnings warnings={finalRemoteWarnings} label="任务 Compile 来源处理警告" historical />
+        )}
 
         {job.remote_state_stale && (
           <div className="flex items-start gap-2.5 rounded-xl border border-amber-300/70 bg-amber-50/80 px-4 py-3 text-[12px] text-amber-900">
@@ -1126,9 +1244,9 @@ export default function MiningView({
                 <ListChecks className="size-4 shrink-0 text-amber-700" />
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-[14px] font-bold">知识补充</span>
+                    <span className="text-[14px] font-bold">Evidence 补充与复核</span>
                     {job.pending_checkpoint
-                      ? <Pill tone="amber">等待填写</Pill>
+                      ? <Pill tone="amber">等待人工补证</Pill>
                       : supplementRounds.length > 0
                         ? <Pill tone="amber">{supplementRounds.length} 轮记录</Pill>
                         : <Pill tone="amber">{job.knowledge_gaps?.total || durableGaps.length} 项缺口</Pill>}
@@ -1155,6 +1273,9 @@ export default function MiningView({
               <div className="p-4">
                 {job.pending_checkpoint ? (
                   <>
+                    {currentRemoteWarnings.length > 0 && (
+                      <RemoteCompileWarnings warnings={currentRemoteWarnings} label="本轮 Compile 来源处理警告" />
+                    )}
                     <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
                       <div>
                         <div className="text-[14px] font-bold text-foreground">{job.pending_checkpoint.title}</div>
@@ -1176,6 +1297,7 @@ export default function MiningView({
                             {question.dimension && <span className="text-[10.5px] text-muted-foreground">{question.dimension}</span>}
                           </div>
                           <div className="text-[13px] font-semibold leading-relaxed">{question.question}</div>
+                          {question.required && <span className="mt-1 block text-[10px] font-semibold text-amber-800">必填：回答或明确标记暂时无法确认</span>}
                           {question.context && (
                             <div className="mt-2 rounded-lg border-l-2 border-accent/40 bg-accent-soft px-2.5 py-2 text-[10.5px] leading-relaxed text-muted-foreground">
                               {question.context}
@@ -1188,13 +1310,17 @@ export default function MiningView({
                             </span>
                             {question.answer_type === "short_text" ? (
                               <Input
+                                aria-label={`问题 ${index + 1} 的回答`}
                                 value={checkpointAnswers[question.qid] || ""}
+                                disabled={checkpointBusy}
                                 placeholder={question.placeholder || "请输入具体答案"}
                                 onChange={(event) => setCheckpointAnswers((current) => ({ ...current, [question.qid]: event.target.value }))}
                               />
                             ) : (
                               <textarea
+                                aria-label={`问题 ${index + 1} 的回答`}
                                 rows={3}
+                                disabled={checkpointBusy}
                                 value={checkpointAnswers[question.qid] || ""}
                                 placeholder={question.placeholder || "请输入具体答案"}
                                 onChange={(event) => setCheckpointAnswers((current) => ({ ...current, [question.qid]: event.target.value }))}
@@ -1202,16 +1328,93 @@ export default function MiningView({
                               />
                             )}
                           </label>
+                          {orchestrated && (
+                            <>
+                              <label className="mt-3 block">
+                                <span className="mb-1.5 block text-[11px] font-semibold text-muted-foreground">Evidence 来源 URI（每行一个）</span>
+                                <textarea
+                                  aria-label={`问题 ${index + 1} 的 Evidence 来源`}
+                                  rows={2}
+                                  disabled={checkpointBusy}
+                                  value={checkpointReferences[question.qid] || ""}
+                                  placeholder="viking://resources/..."
+                                  onChange={(event) => setCheckpointReferences((current) => ({ ...current, [question.qid]: event.target.value }))}
+                                  className="mono w-full resize-y rounded-lg border border-border bg-background px-3 py-2 text-[11px] outline-none focus:border-accent"
+                                />
+                              </label>
+                              <label className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
+                                <input
+                                  type="checkbox"
+                                  aria-label={`问题 ${index + 1} 暂时无法确认`}
+                                  disabled={checkpointBusy}
+                                  checked={Boolean(checkpointUnresolved[question.qid])}
+                                  onChange={(event) => setCheckpointUnresolved((current) => ({ ...current, [question.qid]: event.target.checked }))}
+                                />
+                                暂时无法确认，保留此证据缺口
+                              </label>
+                            </>
+                          )}
                         </div>
                       ))}
                     </div>
 
-                    <div className="mt-4 flex items-center justify-between gap-3 border-t border-amber-200 pt-3">
-                      <span className="text-[10.5px] text-muted-foreground">不确定的问题可以留空，系统会继续保留为知识缺口。</span>
-                      <Button disabled={checkpointSubmitting} onClick={() => submitCheckpointAnswers(job)}>
-                        {checkpointSubmitting ? "提交中…" : "提交答案并继续挖掘"}
-                        <ArrowRight className="size-3.5" />
-                      </Button>
+                    {orchestrated && (
+                      <div className="mt-4 space-y-3 rounded-xl border border-amber-200/80 bg-background p-3.5">
+                        <label className="block">
+                          <span className="mb-1.5 block text-[11px] font-semibold text-muted-foreground">本轮复核意见</span>
+                          <textarea
+                            aria-label="本轮复核意见"
+                            rows={3}
+                            value={checkpointFeedback}
+                            disabled={checkpointBusy}
+                            onChange={(event) => setCheckpointFeedback(event.target.value)}
+                            placeholder="说明需要修订的内容、原文冲突或补充 Evidence 的用途。"
+                            className="w-full resize-y rounded-lg border border-border bg-background px-3 py-2 text-[12px] outline-none focus:border-accent"
+                          />
+                        </label>
+                        <label className="block text-[11px] font-semibold text-muted-foreground">
+                          补充 Evidence 文件
+                          <input
+                            aria-label="补充 Evidence 文件"
+                            type="file"
+                            multiple
+                            disabled={checkpointBusy}
+                            className="mt-2 block w-full text-[11px] font-normal"
+                            onChange={(event) => {
+                              const files = Array.from(event.target.files || []);
+                              event.target.value = "";
+                              void uploadCheckpointEvidence(job, files);
+                            }}
+                          />
+                        </label>
+                        {checkpointUploading && <p role="status" className="text-[11px] text-muted-foreground">正在准备补充 Evidence…</p>}
+                        {checkpointFiles.length > 0 && (
+                          <ul aria-label="已准备补充 Evidence" className="space-y-1 text-[11px]">
+                            {checkpointFiles.map((file) => <li key={file.uri} className="break-all select-text">{file.name} · {file.uri}</li>)}
+                          </ul>
+                        )}
+                      </div>
+                    )}
+
+                    <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-amber-200 pt-3">
+                      <span className="text-[10.5px] text-muted-foreground">
+                        {orchestrated && job.pending_checkpoint.round >= job.max_rounds
+                          ? "已达到轮数上限。结束后保留最终产物及所有未解决缺口。"
+                          : "人工等待不占运行并发，也不计入单轮运行期限；未填写的问题会保留为证据缺口。"}
+                      </span>
+                      <div className="flex flex-wrap gap-2">
+                        {orchestrated && (
+                          <Button variant="outline" disabled={checkpointBusy} onClick={() => submitCheckpointAnswers(job, "finish")}>
+                            {checkpointSubmitting ? "提交中…" : "结束挖掘并保留最终产物"}
+                          </Button>
+                        )}
+                        {(!orchestrated || job.pending_checkpoint.round < job.max_rounds) && (
+                          <Button disabled={checkpointBusy} onClick={() => submitCheckpointAnswers(job)}>
+                            {checkpointSubmitting ? "提交中…" : orchestrated ? `提交补证并开始第 ${job.pending_checkpoint.round + 1} 轮` : "提交答案并继续挖掘"}
+                            <ArrowRight className="size-3.5" />
+                          </Button>
+                        )}
+                      </div>
                     </div>
                     {supplementRounds.length > 0 && (
                       <div className="mt-5 border-t border-amber-200 pt-4">
@@ -1296,7 +1499,7 @@ export default function MiningView({
           </div>
         )}
 
-        {isActiveJob(job.status) ? (
+        {isExecutingJob(job.status) ? (
           <div className="space-y-4">
             <div className="grid gap-4 lg:grid-cols-[minmax(360px,0.8fr)_minmax(0,1.2fr)]">
             <div className="rounded-xl border border-border bg-surface p-4">
@@ -1305,6 +1508,7 @@ export default function MiningView({
                 <span className="text-muted-foreground">
                   {job.status === "queued" || job.status === "preparing"
                     ? "等待调度"
+                    : orchestrated ? `第 ${job.current_round || 1} / ${job.max_rounds} 轮 · ${job.ov_stage || "等待远端阶段上报"}`
                     : job.engine === "ov_compile" ? (job.ov_stage || "等待远端阶段上报") : `第 ${job.current_round || 1} / ${job.max_rounds} 轮`}
                 </span>
               </div>
@@ -1353,7 +1557,7 @@ export default function MiningView({
         ) : (
           <div className="rounded-xl border border-border bg-surface p-4">
             <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
-              <div className="text-[13px] font-bold">任务产物</div>
+              <div className="text-[13px] font-bold">{orchestrated ? `第 ${job.current_round || 1} 轮产物` : "任务产物"}</div>
               <div className="flex items-center gap-2">
                 {job.finished_at && <span className="text-[10px] text-muted-soft">完成于 {formatDateTime(job.finished_at)}</span>}
                 {job.status === "succeeded" && (
@@ -1375,7 +1579,7 @@ export default function MiningView({
                     key={artifact.path}
                     type="button"
                     disabled={loadingArtifact === artifact.path}
-                    onClick={() => previewArtifact(artifact, job.status === "succeeded")}
+                    onClick={() => previewArtifact(artifact, job.status === "succeeded" || isWaitingForEvidence(job))}
                     className="flex w-full items-center gap-2 rounded-lg border border-border bg-background px-3 py-2.5 text-left transition-colors hover:border-accent"
                   >
                     <FileText className="size-4 shrink-0 text-accent" />
@@ -1386,7 +1590,7 @@ export default function MiningView({
                       <span className="mono block truncate text-[9.5px] text-muted-soft select-text">{artifact.path}</span>
                     </span>
                     <Pill tone={artifactTone(artifact.kind) as any}>{artifactLabel(artifact.kind)}</Pill>
-                    {job.status === "succeeded"
+                    {job.status === "succeeded" || isWaitingForEvidence(job)
                       ? <Pencil className="size-3.5 text-muted-foreground" />
                       : <Eye className="size-3.5 text-muted-foreground" />}
                   </button>
@@ -1398,6 +1602,44 @@ export default function MiningView({
               </div>
             )}
           </div>
+        )}
+
+        {orchestrated && Boolean(job.rounds?.length) && (
+          <section className="rounded-xl border border-border bg-background p-4" aria-label="挖掘轮次记录">
+            <div className="mb-3 text-[13px] font-bold">轮次记录</div>
+            <div className="space-y-3">
+              {job.rounds!.map((round) => (
+                <details key={round.round} className="rounded-lg border border-border p-3">
+                  <summary className="cursor-pointer text-[12px] font-semibold">
+                    第 {round.round} 轮 · {round.artifacts?.length || 0} 个产物
+                    {round.round === job.current_round ? " · 当前轮次" : " · 已归档"}
+                    {distinctWarnings(round.remote_warnings).length > 0 ? " · 来源处理有警告" : ""}
+                  </summary>
+                  <div className="mt-2 space-y-2 text-[11px] text-muted-foreground">
+                    {distinctWarnings(round.remote_warnings).length > 0 && (
+                      <RemoteCompileWarnings warnings={distinctWarnings(round.remote_warnings)} label={`第 ${round.round} 轮 Compile 来源处理警告`} />
+                    )}
+                    {(round.ov_task_id || round.task_id) && <div className="mono break-all select-text">Compile：{round.ov_task_id || round.task_id}</div>}
+                    {round.started_at && <div>开始于 {formatDateTime(round.started_at)}{round.finished_at ? ` · 完成于 ${formatDateTime(round.finished_at)}` : ""}</div>}
+                    {round.round !== job.current_round && (round.artifacts || []).map((artifact) => (
+                      <button
+                        key={artifact.path}
+                        type="button"
+                        disabled={loadingArtifact === artifact.path}
+                        onClick={() => previewArtifact(artifact, false)}
+                        className="flex w-full items-center gap-2 rounded-lg border border-border px-3 py-2 text-left hover:border-accent"
+                      >
+                        <FileText className="size-3.5 shrink-0" />
+                        <span className="min-w-0 flex-1 truncate">{artifact.name}</span>
+                        <span>只读</span>
+                      </button>
+                    ))}
+                    {round.round === job.current_round && <p>当前产物可在上方审核；等待人工补证或任务结束时可编辑。</p>}
+                  </div>
+                </details>
+              ))}
+            </div>
+          </section>
         )}
       </div>
     );
@@ -1450,7 +1692,7 @@ export default function MiningView({
                         </button>
                         <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10.5px] text-muted-foreground">
                           <span>{sourceDisplayName(job.input_dir)}</span>
-                          <span>{job.engine === "ov_compile" ? (job.ov_stage || "等待远端阶段上报") : `第 ${Math.max(1, job.current_round || 1)} / ${job.max_rounds} 轮`}</span>
+                          <span>{job.rounds_mode === "orchestrated" ? `第 ${Math.max(1, job.current_round || 1)} / ${job.max_rounds} 轮` : job.engine === "ov_compile" ? (job.ov_stage || "等待远端阶段上报") : `第 ${Math.max(1, job.current_round || 1)} / ${job.max_rounds} 轮`}</span>
                         </div>
                       </div>
                       <Pill tone={jobStatusMeta(job.status).tone as any}>{jobStatusMeta(job.status).label}</Pill>
@@ -1543,10 +1785,11 @@ export default function MiningView({
       {/* ---- 挖掘任务 ---- */}
       {page === "jobs" && (
         <div className="space-y-[18px] px-[22px] py-[22px]">
-          <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-6">
             <StatCard label="全部任务" value={String(jobCounts.total)} />
             <StatCard label="运行中" value={String(jobCounts.running)} />
             <StatCard label="排队中" value={String(jobCounts.queued)} />
+            <StatCard label="等待补证" value={String(jobCounts.waiting)} />
             <StatCard label="已完成" value={String(jobCounts.completed)} />
             <StatCard label="异常 / 停止" value={String(jobCounts.failed)} />
           </div>
@@ -1691,7 +1934,7 @@ export default function MiningView({
 
                 <label className="block">
                   <span className="mb-1.5 flex items-center justify-between text-xs font-semibold text-muted-foreground">
-                    内部证据复核次数提示
+                    挖掘轮数上限
                     <span className="text-accent">{rounds}</span>
                   </span>
                   <input
@@ -1706,11 +1949,11 @@ export default function MiningView({
                 </label>
 
                 <label className="block text-xs text-muted-foreground">
-                  运行期限（秒，60–7200）
+                  单轮运行期限（秒，60–7200）
                   <input type="number" min={60} max={7200} value={runtimeTimeout} disabled={starting}
                     onChange={(event) => setRuntimeTimeout(Number(event.target.value))}
                     className="ml-3 rounded border border-border bg-background px-2 py-1" />
-                  <span className="mt-1 block text-[11px]">从远端受理后计时，包含排队；到期请求取消并等待远端确认。内部复核提示不代表已执行轮次。</span>
+                  <span className="mt-1 block text-[11px]">每轮从远端受理后独立计时，包含远端排队；人工补证等待不计时。到期请求取消并等待远端确认。</span>
                 </label>
 
                 <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-border bg-background p-3.5 transition-colors hover:border-accent/50">
@@ -1722,15 +1965,15 @@ export default function MiningView({
                     className="mt-0.5 size-4 accent-[var(--accent)]"
                   />
                   <span>
-                    <span className="block text-[12px] font-semibold">请求知识补充（当前引擎暂不支持暂停问答）</span>
+                    <span className="block text-[12px] font-semibold">每轮完成后等待人工补充 Evidence</span>
                     <span className="mt-1 block text-[11px] leading-relaxed text-muted-foreground">
-                      该偏好会记录在任务中。当前 OV Compile 仅输出知识缺口报告，不会暂停展示提问表单；需在完成后人工补充并重新挖掘。
+                      审核本轮产物后可补充回答、引用和文档，再继续下一轮或提前结束。关闭后自动执行至轮数上限。
                     </span>
                   </span>
                 </label>
 
                 <div className="rounded-lg border border-border bg-background/70 p-3 text-[11px] leading-relaxed text-muted-foreground">
-                  编译使用 OpenViking 服务端的模型配置，并固化知识源快照。本页不会覆盖服务端模型。最多同时运行 {mining.jobSummary.max_parallel} 个任务，超出后拒绝创建，请等待已有任务结束。
+                  每轮编译使用 OpenViking 服务端的模型配置，并固化本轮输入。最多同时运行 {mining.jobSummary.max_parallel} 个任务；等待人工补证的任务不占运行并发，继续时需有可用名额。
                 </div>
 
                 <div className="flex justify-end gap-2 pt-1">
@@ -1766,14 +2009,14 @@ export default function MiningView({
 
                 <div className="mt-4 flex items-center gap-2 rounded-lg border border-dashed border-border bg-surface-subtle px-3.5 py-2.5 text-[12px] font-semibold text-muted-foreground">
                   <RotateCcw className="size-4 text-accent" />
-                  反思环 · 携带缺口回跳补证（置信未收敛且有补充素材时）
+                  每轮产物复核 → 补充 Evidence → 下一轮修订，最多 {rounds} 轮
                 </div>
 
                 <div className="mt-4 flex items-center gap-3 rounded-lg border border-accent/30 bg-accent-soft px-4 py-3">
                   <Upload className="size-4 shrink-0 text-accent" />
                   <div className="text-[12.5px]">
                     <span className="font-bold text-accent">编译产物交付</span>
-                    <span className="text-muted-foreground"> — 完成后生成 Skill、语义报告与内部 Benchmark</span>
+                    <span className="text-muted-foreground"> — 完成后生成 Skill Candidate、语义报告与 Test Dataset</span>
                   </div>
                 </div>
               </div>
@@ -1894,7 +2137,7 @@ export default function MiningView({
           <div className="space-y-4">
             <p className="text-sm leading-relaxed text-muted-foreground">
               确定删除任务 <span className="font-semibold text-foreground">{deleteJob?.name || ""}</span>？
-              此操作会永久删除该任务的输入快照、运行日志、知识补充记录以及全部 Skill、语义报告和 Benchmark 产物，不能恢复。
+              此操作会永久删除该任务的输入快照、运行日志、Evidence 补充记录以及全部 Skill、语义报告和 Test Dataset 产物，不能恢复。
             </p>
             <p className="rounded-lg border border-amber-300/70 bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-900">
               已提交到进化候选区的内容不会被删除；它们由进化模块独立管理。
@@ -1967,12 +2210,17 @@ export default function MiningView({
         }}
       >
         <DialogContent
+          onKeyDown={(event) => {
+            if (!artifactEditing || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "s") return;
+            event.preventDefault();
+            if (!artifactSaving && artifactDraft !== artifactPreview?.content) void saveArtifactRevision();
+          }}
           className={cn(
             "flex w-full flex-col overflow-hidden p-0",
             artifactIsMarkdown ? "h-[92vh] !max-w-[1240px] gap-0" : "max-h-[88vh] !max-w-[980px] gap-4 p-4"
           )}
         >
-          <DialogHeader className={cn(artifactIsMarkdown && "border-b border-border bg-surface px-5 py-3.5") }>
+          <DialogHeader className={cn("shrink-0", artifactIsMarkdown && "border-b border-border bg-surface px-5 py-3.5") }>
             <div className="flex items-center justify-between gap-3 pr-8">
               <div className="min-w-0">
                 <DialogTitle className="truncate">
@@ -1984,7 +2232,10 @@ export default function MiningView({
                 </div>
               </div>
               {artifactEditable && !artifactEditing && (
-                <Button size="sm" variant="outline" onClick={() => setArtifactEditing(true)}>
+                <Button size="sm" variant="outline" onClick={() => {
+                  setArtifactEditorMode("edit");
+                  setArtifactEditing(true);
+                }}>
                   <Pencil className="size-3.5" /> 编辑产物
                 </Button>
               )}
@@ -1992,20 +2243,63 @@ export default function MiningView({
           </DialogHeader>
           {artifactEditing ? (
             artifactIsMarkdown ? (
-              <div className="min-h-0 flex-1">
-                <MarkdownWorkspace
-                  value={artifactDraft}
-                  onChange={setArtifactDraft}
-                  onSave={saveArtifactRevision}
-                  saving={artifactSaving}
-                  dirty={artifactDraft !== artifactPreview?.content}
-                  fileName={artifactPreview?.name}
-                />
+              <div className="flex min-h-0 flex-1 flex-col">
+                <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-surface-subtle px-4 py-2">
+                  <div className="flex rounded-lg border border-border bg-surface-subtle p-0.5" role="tablist" aria-label="Markdown 产物编辑模式">
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={artifactEditorMode === "edit"}
+                      className={cn("flex h-7 items-center gap-1 rounded-md px-2 text-[11px] font-semibold", artifactEditorMode === "edit" && "bg-white shadow-sm")}
+                      onClick={() => setArtifactEditorMode("edit")}
+                    >
+                      <Pencil className="size-3" /> 编辑
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={artifactEditorMode === "preview"}
+                      className={cn("flex h-7 items-center gap-1 rounded-md px-2 text-[11px] font-semibold", artifactEditorMode === "preview" && "bg-white shadow-sm")}
+                      onClick={() => setArtifactEditorMode("preview")}
+                    >
+                      <Eye className="size-3" /> 预览
+                    </button>
+                  </div>
+                  <span className="text-[11px] text-muted-foreground" role="status">
+                    {artifactDraft !== artifactPreview?.content ? "未保存" : "已保存"}
+                  </span>
+                  <div className="ml-auto flex items-center gap-2">
+                    <Button size="sm" variant="outline" disabled={artifactSaving} onClick={() => {
+                      setArtifactDraft(artifactPreview?.content || "");
+                      setArtifactEditing(false);
+                    }}>
+                      取消修改
+                    </Button>
+                    <Button size="sm" disabled={artifactSaving || artifactDraft === artifactPreview?.content} onClick={saveArtifactRevision} title="保存（⌘/Ctrl + S）">
+                      <Save className="size-3.5" /> {artifactSaving ? "保存中…" : "保存修改"}
+                    </Button>
+                  </div>
+                </div>
+                {artifactEditorMode === "edit" ? (
+                  <textarea
+                    autoFocus
+                    spellCheck={false}
+                    disabled={artifactSaving}
+                    value={artifactDraft}
+                    aria-label="Markdown 正文编辑器"
+                    onChange={(event) => setArtifactDraft(event.target.value)}
+                    className="min-h-0 w-full flex-1 resize-none overflow-auto overscroll-contain border-0 bg-[#fbfcfe] p-5 font-mono text-xs leading-6 outline-none"
+                  />
+                ) : (
+                  <div tabIndex={0} role="region" aria-label="Markdown 编辑预览" className="min-h-0 flex-1 overflow-auto overscroll-contain bg-white px-7 py-6">
+                    <MarkdownDocument content={artifactDraft} />
+                  </div>
+                )}
               </div>
             ) : (
               <div className="flex min-h-0 flex-1 flex-col gap-3">
                 <div className="rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-800">
-                  该产物使用结构化源码格式。请保留 Benchmark JSON 等文件的语法，提交进化时会再次执行完整性校验。
+                  该产物使用结构化源码格式。请保留 Test Dataset JSON 等文件的语法，提交进化时会再次执行完整性校验。
                 </div>
                 <textarea
                   autoFocus
@@ -2037,13 +2331,13 @@ export default function MiningView({
             )
           ) : (
             artifactIsMarkdown ? (
-              <div className="min-h-0 flex-1 overflow-auto bg-[#f6f7f9] px-5 py-8">
+              <div tabIndex={0} role="region" aria-label="Markdown 产物内容" className="min-h-0 flex-1 overflow-auto overscroll-contain bg-[#f6f7f9] px-5 py-8">
                 <div className="mx-auto min-h-full max-w-[820px] bg-white px-12 py-10 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_14px_40px_rgba(15,23,42,0.06)]">
                   <MarkdownDocument content={artifactPreview?.content || ""} />
                 </div>
               </div>
             ) : (
-              <pre className="mono min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-[#0f172a] p-4 text-[12px] leading-relaxed text-[#dbe4f0]">
+              <pre tabIndex={0} role="region" aria-label="产物源码内容" className="mono min-h-0 flex-1 overflow-auto overscroll-contain whitespace-pre-wrap break-words rounded-lg bg-[#0f172a] p-4 text-[12px] leading-relaxed text-[#dbe4f0]">
                 {artifactPreview?.content}
               </pre>
             )
@@ -2081,7 +2375,15 @@ function formatDuration(seconds: number) {
 }
 
 function isActiveJob(status: MiningJobStatus) {
-  return status === "preparing" || status === "queued" || status === "running" || status === "waiting" || status === "stopping";
+  return isExecutingJob(status) || status === "waiting" || status === "waiting_human";
+}
+
+function isExecutingJob(status: MiningJobStatus) {
+  return status === "preparing" || status === "queued" || status === "running" || status === "stopping";
+}
+
+function isWaitingForEvidence(job: MiningJob) {
+  return job.status === "waiting_human" || job.status === "waiting";
 }
 
 function jobStatusMeta(status: MiningJobStatus) {
@@ -2090,6 +2392,7 @@ function jobStatusMeta(status: MiningJobStatus) {
     queued: { label: "排队中", tone: "blue" },
     running: { label: "运行中", tone: "blue" },
     waiting: { label: "待知识补证", tone: "amber" },
+    waiting_human: { label: "等待人工补证", tone: "amber" },
     stopping: { label: "停止中", tone: "amber" },
     stopped: { label: "已停止", tone: "gray" },
     succeeded: { label: "已完成", tone: "green" },
@@ -2102,7 +2405,7 @@ function jobStatusMeta(status: MiningJobStatus) {
 function jobProgress(job: MiningJob) {
   if (job.status === "queued" || job.status === "preparing") return 0;
   if (job.status === "succeeded") return 100;
-  if (job.engine === "ov_compile") {
+  if (job.engine === "ov_compile" && job.rounds_mode !== "orchestrated") {
     const phases = Object.values(job.phase || {});
     return Math.round((phases.filter((state) => state === "done").length / 3) * 100);
   }
@@ -2159,7 +2462,9 @@ function ingestionStageLabel(stage: SourceIngestionStatus["stage"]) {
 function jobArtifacts(job: MiningJob) {
   const source = job.artifacts?.length
     ? job.artifacts
-    : (job.rounds || []).flatMap((round) => round.artifacts || []);
+    : job.rounds_mode === "orchestrated"
+      ? (job.rounds || []).find((round) => round.round === job.current_round)?.artifacts || []
+      : (job.rounds || []).flatMap((round) => round.artifacts || []);
   const seen = new Set<string>();
   return source.filter((artifact) => {
     if (seen.has(artifact.path)) return false;
@@ -2190,10 +2495,30 @@ function artifactQualityTone(state: MiningArtifactQuality["level"] | MiningArtif
 }
 
 function artifactLabel(kind: MiningArtifact["kind"]) {
-  if (kind === "benchmark") return "Benchmark";
+  if (kind === "benchmark") return "Test Dataset";
   if (kind === "skill") return "Skill";
   if (kind === "semantic") return "语义报告";
   return "评测定义";
+}
+
+function distinctWarnings(warnings?: string[]) {
+  return Array.from(new Set((warnings || []).filter((warning) => typeof warning === "string" && warning.trim())));
+}
+
+function RemoteCompileWarnings({ warnings, label, historical = false }: { warnings: string[]; label: string; historical?: boolean }) {
+  return (
+    <section aria-label={label} className="mb-4 rounded-xl border border-amber-300/70 bg-amber-50 px-4 py-3 text-amber-900">
+      <div className="flex items-center gap-2 text-[12px] font-bold"><ShieldAlert className="size-4 shrink-0" />{label}</div>
+      <p className="mt-1 text-[11px] leading-relaxed">
+        {historical
+          ? "挖掘期间部分来源曾未完整处理。请核对已有产物与各轮 Evidence 的覆盖情况。"
+          : "部分来源未完整处理；请核对已有产物和缺失的 Evidence 后再决定继续或结束。"}
+      </p>
+      <ul className="mt-2 space-y-1 text-[11px] leading-relaxed">
+        {warnings.map((warning, index) => <li key={`${index}-${warning}`} className="select-text whitespace-pre-wrap break-words">{warning}</li>)}
+      </ul>
+    </section>
+  );
 }
 
 function KnowledgeSupplementHistory({ rounds }: { rounds: KnowledgeSupplementRound[] }) {
@@ -2204,12 +2529,12 @@ function KnowledgeSupplementHistory({ rounds }: { rounds: KnowledgeSupplementRou
           <div className="flex flex-wrap items-start justify-between gap-2 border-b border-amber-100 bg-amber-50/70 px-3.5 py-3">
             <div>
               <div className="flex flex-wrap items-center gap-2">
-                <span className="text-[13px] font-bold">第 {record.round || 1} 轮知识补充</span>
+                <span className="text-[13px] font-bold">第 {record.round || 1} 轮 Evidence 补充</span>
                 <Pill tone={record.source === "checkpoint" ? "green" : "amber"}>
                   {record.source === "checkpoint" ? "已提交" : "历史恢复"}
                 </Pill>
                 <span className="text-[10.5px] text-muted-foreground">
-                  {record.checkpoint === "after_semantic" ? "Skill 生成前" : record.checkpoint}
+                  {record.checkpoint === "after_compile" ? "本轮 Compile 后" : record.checkpoint === "after_semantic" ? "Skill 生成前" : record.checkpoint}
                 </span>
               </div>
               <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{record.title}</p>
@@ -2217,6 +2542,8 @@ function KnowledgeSupplementHistory({ rounds }: { rounds: KnowledgeSupplementRou
             </div>
             {record.submitted_at && <span className="text-[10px] text-muted-soft">{formatDateTime(record.submitted_at)}</span>}
           </div>
+          {record.feedback && <p className="mx-3.5 mt-3 select-text whitespace-pre-wrap text-[11px]">复核意见：{record.feedback}</p>}
+          {Boolean(record.attachments?.length) && <ul className="mx-3.5 mt-2 space-y-1 text-[10px] text-muted-foreground">{record.attachments!.map((file) => <li key={file.uri} className="break-all select-text">补充文件：{file.name} · {file.uri}</li>)}</ul>}
           <div className="grid gap-3 p-3.5 lg:grid-cols-2">
             {record.questions.map((question, index) => {
               const answer = record.answers?.[question.qid]?.trim();
@@ -2237,6 +2564,8 @@ function KnowledgeSupplementHistory({ rounds }: { rounds: KnowledgeSupplementRou
                   ) : (
                     <div className="mt-2 text-[10px] text-muted-soft">未填写答案；该缺口仍需人工核对。</div>
                   )}
+                  {record.unresolved?.includes(question.qid) && <div className="mt-2 text-[10px] font-semibold text-amber-800">未解决：保留证据缺口</div>}
+                  {(record.references?.[question.qid] || []).map((uri) => <div key={uri} className="mono mt-1 break-all text-[10px] text-muted-foreground select-text">Evidence：{uri}</div>)}
                 </div>
               );
             })}

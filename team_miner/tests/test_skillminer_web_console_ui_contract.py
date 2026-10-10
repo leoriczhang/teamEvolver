@@ -1082,7 +1082,7 @@ def test_skillminer_ui_omits_redundant_microcopy():
     # Non-obvious safeguards and destructive-action consequences remain visible.
     assert "不会覆盖同名文件" in mining_view
     assert "个文档会一并删除" in mining_view
-    assert "超出后拒绝创建" in mining_view
+    assert "继续时需有可用名额" in mining_view
 
 
 def test_mining_task_deletion_contract_is_available_in_api_and_ui():
@@ -1092,7 +1092,7 @@ def test_mining_task_deletion_contract_is_available_in_api_and_ui():
 
     assert 'method: "DELETE"' in mining_view
     assert "删除挖掘任务" in mining_view
-    assert "全部 Skill、语义报告和 Benchmark 产物" in mining_view
+    assert "全部 Skill、语义报告和 Test Dataset 产物" in mining_view
     assert "def delete_mining_job(job_id):" in server_source
     assert 'path.startswith("/api/jobs/")' in server_source
 
@@ -1104,7 +1104,9 @@ def test_new_mining_task_preserves_round_selection_and_sends_checkpoint_choice()
     assert "const [humanCheckpoints, setHumanCheckpoints] = useState(true);" in mining_view
     assert "defaultRoundsInitialized" in mining_view
     assert "human_checkpoints: humanCheckpoints" in mining_view
-    assert "当前引擎暂不支持暂停问答" in mining_view
+    assert "rounds_mode" in mining_view
+    assert "waiting_human" in mining_view
+    assert "挖掘轮数上限" in mining_view
 
 
 def test_deleting_legacy_mining_job_removes_its_archived_outputs(tmp_path, monkeypatch):

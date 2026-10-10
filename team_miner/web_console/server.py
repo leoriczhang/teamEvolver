@@ -485,8 +485,10 @@ def save_history_artifact(relative_path, content):
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError("无法确认挖掘任务状态") from exc
-        if str(metadata.get("status") or "") != "succeeded":
-            raise ValueError("只有已完成任务的产物可以人工修改")
+        if str(metadata.get("status") or "") not in {"succeeded", "waiting_human"}:
+            raise ValueError("只有已完成轮次或已完成任务的产物可以人工修改")
+        if target.relative_to(jobs_root / relative.parts[0]).parts[0] != "workspace":
+            raise ValueError("历史轮次产物为只读，请编辑本轮工作区")
 
     temp = target.with_name(f".{target.name}.editing-{os.getpid()}-{threading.get_ident()}")
     try:

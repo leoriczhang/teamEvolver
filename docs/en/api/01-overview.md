@@ -143,6 +143,7 @@ The following `/api/*` endpoints serve the built-in console and require a consol
 | `/api/openviking/workspace/*` | Workspace browsing, L0/L1, conditional batch writes, and CLI | [Storage Layout](../concepts/09-storage-layout.md) |
 | `/api/replay-lab/*`, `/api/openviking/memory/*` | Skill/Memory experiments and True Replay | [Web Console](../guides/03-console.md) |
 | `/api/mining/*` | Knowledge sources, mining jobs, artifacts, and LIFT | [Skill Miner Guide](../guides/07-skill-miner.md) |
+| `/api/mining/jobs/*` | Real Compile rounds, human checkpoints and Evidence supplements | [Skill Mining API](./17-skill-mining.md) |
 | `/api/langfuse-config`, `/api/langfuse-tracing-config`, `/langfuse/*` | Tenant sources, global tracing, pull, mapping, and status | [Observability Guide](../guides/04-observability.md) |
 | `/api/docs/*` | Built-in document tree, page reads, and search | [Documentation Maintenance](./99-docs-maintenance.md) |
 | `/api/sharing-config`, `/api/model-settings`, `/api/model-settings/test`, `/api/skill-evolution/settings` | Sharing/local-fallback storage config, evolution model config (with connectivity test), and evolution settings | [Web Console](../guides/03-console.md) |

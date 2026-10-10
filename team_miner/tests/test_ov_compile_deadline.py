@@ -111,7 +111,8 @@ async def test_monitor_single_instance_shutdown(tmp_path):
 
 def test_options_truthful_and_timeout_range(tmp_path):
     r, j = job_repo(tmp_path)
-    assert j["current_round"] is None and j["human_checkpoints_requested"] and not j["human_checkpoints_effective"]
+    assert j["current_round"] == 1 and j["human_checkpoints_requested"] and j["human_checkpoints_effective"]
+    assert j["rounds_mode"] == "orchestrated"
     with pytest.raises(ValueError):
         r.create_job(
             name="bad",
@@ -253,7 +254,8 @@ async def test_native_config_capabilities_override_legacy_console(monkeypatch):
     assert result["engine"] == "ov_compile"
     assert result["max_rounds_range"] == [1, 5]
     assert result["max_rounds_default"] == 5
-    assert result["human_checkpoints_supported"] is False
+    assert result["human_checkpoints_supported"] is True
+    assert result["rounds_mode"] == "orchestrated"
     assert result["compile_model"]["configuration_source"] == "openviking_server"
     assert upstream.closed and client.closed
 
