@@ -70,32 +70,9 @@ Visit [http://localhost:52010/](http://localhost:52010/). The first visit opens 
 
 ![Console Dashboard](/assets/teamEvolver-console-dashboard.png)
 
-## 5. Connect Hermes Agent (Optional)
+## 5. Connect an Agent (Optional)
 
-If you have a Hermes Coding Agent, you can install synchronization and feedback hooks:
-
-```bash
-export TEAMEVOLVER_URL="http://localhost:52010"
-export TEAMEVOLVER_USER="your-name"
-export HERMES_HOME="$HOME/.hermes"
-
-# Install team skill sync hook
-python teamEvolver/integrations/hermes_skill_sync/install.py \
-  --hermes-home "$HERMES_HOME" \
-  --python python3 \
-  --backend service \
-  --url "$TEAMEVOLVER_URL" \
-  --user "$TEAMEVOLVER_USER"
-
-# Install session ingest hook
-python session_ingestion/push/hermes/install.py \
-  --hermes-home "$HERMES_HOME" \
-  --python python3 \
-  --user "$TEAMEVOLVER_USER" \
-  --url "$TEAMEVOLVER_URL"
-```
-
-After installation, restart Hermes; new sessions will automatically be reported to teamEvolver upon completion. See [Hermes Integration Guide](../agent-integrations/03-hermes) for detailed instructions.
+Configure the service URL, tenant Key and user_id using [Agent Protocol v2](../agent-integrations/06-protocol-v2.md). Follow [Custom Agent Integration](../agent-integrations/05-custom-agent.md) to send Sessions, read Context and pull Skills. Configure a ReplayAdapterFactory when using True Replay.
 
 ## 6. Manually Trigger Evolution
 
@@ -113,7 +90,7 @@ teamEvolver stop
 
 ## Docker Compose
 
-Use the repository image when you do not want to prepare a local Python/Hermes environment. The image builds the console, installs all dependencies, and bundles the OpenViking CLI:
+Use the repository image when you do not want to prepare a local Python environment. The image builds the console, installs all dependencies, and bundles the OpenViking CLI:
 
 ```bash
 docker compose up -d --build

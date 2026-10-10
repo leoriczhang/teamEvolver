@@ -1,15 +1,4 @@
-"""SkillMiner bridge: run the vendored SkillMiner web console as a local
-subprocess and reverse-proxy ``/api/mining/*`` (including its SSE stream)
-to it.
-
-SkillMiner (``team_miner``) ships its own zero-dependency console
-built on the stdlib ``http.server`` with a hand-rolled SSE event bus, and it
-drives the mining pipeline by importing ``run_pipeline`` in-process while
-shelling out to the ``hermes`` CLI. Rather than re-implement any of that, we
-launch it verbatim on an internal loopback port and expose it through the
-teamEvolver FastAPI app under a ``/api/mining`` prefix so the unified console can
-talk to a single origin.
-"""
+"""Native Skill mining routes and durable OpenViking Compile orchestration."""
 
 from __future__ import annotations
 
@@ -18,25 +7,18 @@ import base64
 import binascii
 import json
 import logging
-import os
-import shutil
-import socket
-import subprocess
-import sys
-import tempfile
-import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Optional
 
-import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse
 
 from teamEvolver.config_store import CONFIG_DIR, ConfigStore
 
+from .artifacts import artifact_job_id, read_artifact, save_artifact
 from .document_converter import convert_knowledge_upload
 from .ov_compile_mining import (
     ACTIVE_JOB_STATES,
@@ -53,6 +35,8 @@ from .ov_compile_mining import (
 from .ov_round_orchestration import OvRoundOrchestrationMixin
 from .routes import _content_editable, _content_text
 from .settings import (
+    compiler_prompt,
+    pipeline_settings,
     reset_prompt,
     settings_payload,
     update_settings,
@@ -62,40 +46,17 @@ logger = logging.getLogger(__name__)
 
 # Path to the SkillMiner project root.
 _SKILLMINER_ROOT = Path(__file__).resolve().parent
-_CONSOLE_SERVER = _SKILLMINER_ROOT / "web_console" / "server.py"
-
-# Internal prefix the unified console uses; stripped before proxying upstream.
-_MINING_PREFIX = "/api/mining"
-
-
-def _is_mining_path(path: str) -> bool:
-    return path == _MINING_PREFIX or path.startswith(_MINING_PREFIX + "/")
-
-
-def _pick_free_port(preferred: int) -> int:
-    """Return ``preferred`` if free, otherwise an OS-assigned free port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        try:
-            sock.bind(("127.0.0.1", preferred))
-            return preferred
-        except OSError:
-            pass
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
-    """Mixin adding SkillMiner subprocess lifecycle + reverse-proxy routes.
+    """Expose Skill mining inside the main service without a local execution subprocess."""
 
-    Expected to be composed into :class:`ProxyServer`, which provides
-    ``self.config``. Enabled unless ``TEAMEVOLVER_SKILLMINER_ENABLED`` is falsy.
-    """
+    def _mining_store(self) -> ConfigStore:
+        config_file = str(getattr(getattr(self, "config", None), "_config_file", "") or "").strip()
+        return ConfigStore(config_file=Path(config_file)) if config_file else ConfigStore()
 
-    _skillminer_proc: Optional[subprocess.Popen] = None
-    _skillminer_port: Optional[int] = None
-    _skillminer_ready: bool = False
-    _skillminer_lock = threading.Lock()
+    def _ov_skill_compiler_body(self) -> str:
+        return compiler_prompt(self._mining_store().load())
 
     def _ov_skill_mining_repository(self) -> OvSkillMiningRepository:
         repository = getattr(self, "_ov_skill_mining_repo", None)
@@ -565,313 +526,14 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
     # Enablement / lifecycle                                             #
     # ------------------------------------------------------------------ #
 
-    def _skillminer_enabled(self) -> bool:
-        raw = os.environ.get("TEAMEVOLVER_SKILLMINER_ENABLED", "1").strip().lower()
-        if raw in {"0", "false", "no", "off"}:
-            return False
-        return _CONSOLE_SERVER.is_file()
-
-    def _skillminer_runtime_root(self) -> Path:
-        if os.environ.get("TEAMEVOLVER_CUSTOMER_MODE") != "1" or not getattr(self.config, "storage_pg_enabled", False):
-            return _SKILLMINER_ROOT
-        # Refresh implementation files while retaining uploaded inputs/jobs on
-        # the persistent volume. Never copy one deployment's generated data.
-        root = Path.home() / ".teamEvolver" / "skillminer"
-        shutil.copytree(_SKILLMINER_ROOT, root, dirs_exist_ok=True, ignore=shutil.ignore_patterns(
-            "__pycache__", "*.pyc", ".hermes_home", ".env", "data",
-            ".knowledge_originals", ".knowledge_locks", "mining_jobs",
-            "sample_packages", "semantic_reports", "compiled_skill", "benchmark_results",
-            "benchmark_sessions", "trajectory_benchmarks", "coverage_reports",
-            "reflection_rounds", "run_history", "lift_datasets", "skill_test_results",
-        ))
-        (root / "data" / "input").mkdir(parents=True, exist_ok=True)
-        return root
-
-    def _start_skillminer(self) -> None:
-        if not self._skillminer_enabled():
-            return
-        with self._skillminer_lock:
-            if self._skillminer_proc is not None and self._skillminer_proc.poll() is None:
-                return
-            self._skillminer_ready = False
-            port = _pick_free_port(int(os.environ.get("TEAMEVOLVER_SKILLMINER_PORT", "8765") or 8765))
-            env = dict(os.environ)
-            env["PORT"] = str(port)
-            config_file = str(
-                getattr(self.config, "_config_file", "") or ""
-            ).strip()
-            store = (
-                ConfigStore(config_file=Path(config_file))
-                if config_file
-                else ConfigStore()
-            )
-            data = store.load()
-            llm = data.get("llm") if isinstance(data.get("llm"), dict) else {}
-            effective = settings_payload(data)
-            effective_model = effective["model"]
-            effective_pipeline = effective["pipeline"]
-            env["TEAMEVOLVER_CONFIG_FILE"] = str(store.config_file)
-            env["SKILLMINER_USE_UNIFIED_MODEL_CONFIG"] = "1"
-            env["SKILLMINER_MODEL_PROVIDER"] = str(
-                effective_model.get("provider") or "custom"
-            )
-            env["SKILLMINER_MODEL_ID"] = str(
-                effective_model.get("model") or ""
-            )
-            env["SKILLMINER_MODEL_BASE_URL"] = str(
-                effective_model.get("base_url") or ""
-            )
-            env["SKILLMINER_MODEL_MAX_TOKENS"] = str(
-                effective_model.get("max_tokens") or 100000
-            )
-            env["SKILLMINER_MODEL_CONTEXT_LENGTH"] = str(
-                effective_model.get("context_length") or 240000
-            )
-            api_key = str(
-                llm.get("api_key")
-                or getattr(self.config, "llm_api_key", "")
-                or ""
-            ).strip()
-            if api_key:
-                env["ARK_API_KEY"] = api_key
-                env["SKILLMINER_MODEL_API_KEY"] = api_key
-            env["SKILLMINER_MAX_ROUNDS"] = str(
-                effective_pipeline["max_rounds"]
-            )
-            env["SKILLMINER_HERMES_RETRIES"] = str(
-                effective_pipeline["max_retries"]
-            )
-            env["SKILLMINER_HERMES_BACKOFF"] = str(
-                effective_pipeline["retry_backoff_seconds"]
-            )
-            env["SKILLMINER_ONESHOT_TIMEOUT"] = str(
-                effective_pipeline["oneshot_timeout_seconds"]
-            )
-            env["SKILLMINER_STEP1_VALIDATION_RETRIES"] = str(
-                effective_pipeline["step1_validation_retries"]
-            )
-            env["SKILLMINER_STRICT_STEP1"] = (
-                "1" if effective_pipeline["strict_step1"] else "0"
-            )
-            env["SKILLMINER_BENCHMARK_TARGET_TOTAL"] = str(
-                effective_pipeline["benchmark_target_total"]
-            )
-            env["SKILLMINER_BENCHMARK_DIFFICULTY_DIST"] = str(
-                effective_pipeline["benchmark_difficulty_dist"]
-            )
-            env["SKILLMINER_BENCHMARK_MAX_TURNS"] = str(
-                effective_pipeline["benchmark_max_turns"]
-            )
-            try:
-                runtime_root = self._skillminer_runtime_root()
-                env["PYTHONUNBUFFERED"] = "1"
-                self._skillminer_proc = subprocess.Popen(
-                    [sys.executable, str(runtime_root / "web_console" / "server.py")],
-                    cwd=str(runtime_root),
-                    env=env,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    stdin=subprocess.DEVNULL,
-                )
-                def capture_output(process):
-                    if process.stdout is None:
-                        return
-                    for line in iter(process.stdout.readline, b""):
-                        logger.info("[SkillMiner] %s", line.decode("utf-8", errors="replace").rstrip())
-
-                self._skillminer_log_thread = threading.Thread(
-                    target=capture_output, args=(self._skillminer_proc,),
-                    name="skillminer-console-log", daemon=True,
-                )
-                self._skillminer_log_thread.start()
-                self._skillminer_port = port
-                pid = getattr(self._skillminer_proc, "pid", None)
-                if pid:
-                    (Path(tempfile.gettempdir()) / f"te_skillminer_{pid}.pid").write_text(str(pid))
-                logger.info("[SkillMiner] console subprocess started on 127.0.0.1:%s", port)
-            except Exception:
-                self._skillminer_proc = None
-                self._skillminer_port = None
-                logger.warning("[SkillMiner] failed to start console subprocess", exc_info=True)
-
-    def _stop_skillminer(self) -> None:
-        with self._skillminer_lock:
-            proc = self._skillminer_proc
-            if proc is None:
-                return
-            try:
-                if proc.poll() is None:
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                        proc.wait(timeout=5)
-            except Exception:
-                logger.debug("[SkillMiner] stop failed", exc_info=True)
-            finally:
-                reader = getattr(self, "_skillminer_log_thread", None)
-                if reader:
-                    reader.join(timeout=1)
-                self._skillminer_ready = False
-                pid = getattr(proc, "pid", None)
-                if pid:
-                    (Path(tempfile.gettempdir()) / f"te_skillminer_{pid}.pid").unlink(missing_ok=True)
-                self._skillminer_proc = None
-                self._skillminer_port = None
-                logger.info("[SkillMiner] console subprocess stopped")
-
-    def _skillminer_base_url(self) -> Optional[str]:
-        if self._skillminer_port is None:
-            return None
-        return f"http://127.0.0.1:{self._skillminer_port}"
-
-    def _wait_skillminer_ready(self, timeout_s: float = 8.0) -> bool:
-        base = self._skillminer_base_url()
-        if base is None:
-            return False
-        deadline = time.time() + timeout_s
-        while time.time() < deadline:
-            proc = self._skillminer_proc
-            if proc is not None and proc.poll() is not None:
-                return False  # subprocess died
-            try:
-                with httpx.Client(timeout=1.0) as client:
-                    resp = client.get(f"{base}/api/config")
-                if resp.status_code < 500:
-                    return True
-            except Exception:
-                pass
-            time.sleep(0.25)
-        return False
-
-    async def _await_skillminer_ready(self, timeout_s: float = 8.0) -> bool:
-        """Async readiness probe so we never block the uvicorn event loop."""
-        import asyncio
-
-        base = self._skillminer_base_url()
-        if base is None:
-            return False
-        deadline = time.time() + timeout_s
-        while time.time() < deadline:
-            proc = self._skillminer_proc
-            if proc is not None and proc.poll() is not None:
-                return False  # subprocess died
-            try:
-                async with httpx.AsyncClient(timeout=1.0) as client:
-                    resp = await client.get(f"{base}/api/config")
-                if resp.status_code < 500:
-                    return True
-            except Exception:
-                pass
-            await asyncio.sleep(0.25)
-        return False
 
     # ------------------------------------------------------------------ #
     # Reverse proxy                                                       #
     # ------------------------------------------------------------------ #
 
-    async def _dispatch_skillminer_request(self, request: Request) -> Optional[Response]:
-        """Proxy a ``/api/mining/*`` request to the SkillMiner subprocess.
-
-        Streams the response so the SSE endpoint (``/api/mining/events``)
-        forwards events as they arrive.
-        """
-        # Lazily (re)start the subprocess on first use.
-        if self._skillminer_proc is None or self._skillminer_proc.poll() is not None:
-            await asyncio.to_thread(self._start_skillminer)
-        if not self._skillminer_ready:
-            if not await self._await_skillminer_ready():
-                logger.warning("[SkillMiner] console did not become ready within the startup timeout")
-                return JSONResponse(
-                    status_code=503,
-                    content={"detail": "SkillMiner console failed to start or did not become ready"},
-                )
-            self._skillminer_ready = True
-
-        base = self._skillminer_base_url()
-        if base is None:
-            return JSONResponse(
-                status_code=503,
-                content={"detail": "SkillMiner console is not available"},
-            )
-
-        # Map the unified-console prefix onto SkillMiner's own API surface:
-        #   /api/mining/config  -> /api/config
-        #   /api/mining/events  -> /api/events   (SSE)
-        #   /api/mining         -> /api
-        rest = request.url.path[len(_MINING_PREFIX):]  # e.g. "/config" or ""
-        upstream_path = "/api" + rest if rest else "/api"
-        target = upstream_path
-        if request.url.query:
-            target = f"{upstream_path}?{request.url.query}"
-
-        headers = {
-            key.decode("latin-1"): value.decode("latin-1")
-            for key, value in request.scope.get("headers", [])
-            if key.lower() not in {b"host", b"content-length", b"connection"}
-        }
-        console_user = getattr(request.state, "console_user", None)
-        if isinstance(console_user, dict):
-            reviewer = str(
-                console_user.get("username")
-                or console_user.get("name")
-                or console_user.get("id")
-                or "authenticated-user"
-            ).strip()
-            reviewer = "".join(ch for ch in reviewer if ch.isprintable() and ch not in "\r\n")
-            headers["X-teamEvolver-Reviewer"] = reviewer[:120]
-        body = await request.body()
-
-        is_sse = upstream_path.rstrip("/").endswith("/events")
-        client = httpx.AsyncClient(base_url=base, timeout=None if is_sse else 120.0)
-        try:
-            req = client.build_request(request.method, target, content=body, headers=headers)
-            upstream = await client.send(req, stream=True)
-        except Exception:
-            await client.aclose()
-            logger.warning("[SkillMiner] proxy request failed", exc_info=True)
-            return JSONResponse(status_code=502, content={"detail": "SkillMiner upstream error"})
-
-        if upstream_path == "/api/config" and upstream.status_code == 200:
-            try:
-                await upstream.aread()
-                payload = upstream.json()
-                payload.update(
-                    engine="ov_compile", max_rounds_range=[1, 5],
-                    max_rounds_default=max(1, min(5, int(payload.get("max_rounds_default") or 3))),
-                    rounds_mode="orchestrated", human_checkpoints_supported=True,
-                    runtime_timeout_seconds_default=3600, runtime_timeout_seconds_range=[60, 7200],
-                    compile_model={"configuration_source": "openviking_server", "editable_here": False},
-                )
-                return JSONResponse(payload)
-            finally:
-                await upstream.aclose()
-                await client.aclose()
-
-        resp_headers = {
-            key: value
-            for key, value in upstream.headers.items()
-            if key.lower() not in {"content-length", "connection", "transfer-encoding", "content-encoding"}
-        }
-
-        async def _body_iter():
-            try:
-                async for chunk in upstream.aiter_raw():
-                    yield chunk
-            finally:
-                await upstream.aclose()
-                await client.aclose()
-
-        return StreamingResponse(
-            _body_iter(),
-            status_code=upstream.status_code,
-            headers=resp_headers,
-            media_type=upstream.headers.get("content-type"),
-        )
 
     def _register_skillminer_routes(self, app: FastAPI) -> None:
-        """Register a catch-all route for ``/api/mining/*``."""
+        """Register the current OV mining API and its local artifact workspace."""
         owner = self
 
         original_lifespan = app.router.lifespan_context
@@ -888,14 +550,7 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
         app.router.lifespan_context = mining_lifespan
 
         def _store() -> ConfigStore:
-            config_file = str(
-                getattr(owner.config, "_config_file", "") or ""
-            ).strip()
-            return (
-                ConfigStore(config_file=Path(config_file))
-                if config_file
-                else ConfigStore()
-            )
+            return owner._mining_store()
 
         def _require_admin(request: Request) -> Optional[JSONResponse]:
             user = getattr(request.state, "console_user", None)
@@ -906,28 +561,53 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
                 )
             return None
 
-        @app.get("/api/mining/model")
-        async def mining_model_get():
-            return JSONResponse(
-                status_code=410,
-                content={"detail": "OV Compile 使用 OpenViking 服务端模型，本页不能覆盖该模型"},
-            )
+        @app.get("/api/mining/config")
+        async def mining_config_get():
+            settings = pipeline_settings(_store().load())
+            return JSONResponse({
+                "engine": "ov_compile",
+                "max_rounds_default": settings["max_rounds"], "max_rounds_range": [1, 5],
+                "runtime_timeout_seconds_default": settings["runtime_timeout_seconds"],
+                "runtime_timeout_seconds_range": [60, 7200],
+                "rounds_mode": "orchestrated", "human_checkpoints_supported": True,
+                "compile_model": {"configuration_source": "openviking_server", "editable_here": False},
+            })
 
-        @app.post("/api/mining/model")
-        async def mining_model_save(request: Request):
-            del request
-            return JSONResponse(
-                status_code=410,
-                content={"detail": "OV Compile 使用 OpenViking 服务端模型，本页不能覆盖该模型"},
-            )
+        @app.get("/api/mining/artifacts/content")
+        async def mining_artifact_get(request: Request, path: str = Query(...)):
+            denied = _require_admin(request)
+            if denied is not None:
+                return denied
+            try:
+                result = await asyncio.to_thread(read_artifact, owner._ov_skill_mining_repository().project_root, path)
+            except FileNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return JSONResponse(result)
 
-        @app.post("/api/mining/model/test")
-        async def mining_model_test(request: Request):
-            del request
-            return JSONResponse(
-                status_code=410,
-                content={"detail": "请通过已有 OpenViking 管理入口检查编译模型配置"},
-            )
+        @app.post("/api/mining/artifacts/content")
+        async def mining_artifact_save(request: Request):
+            denied = _require_admin(request)
+            if denied is not None:
+                return denied
+            if len(await request.body()) > 3 * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="产物编辑请求超过 3 MB")
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise HTTPException(status_code=400, detail="产物编辑请求必须为对象")
+            path = str(body.get("path") or "")
+            try:
+                job_id = artifact_job_id(path)
+                async with owner._ov_skill_mining_lock(job_id):
+                    result = await asyncio.to_thread(
+                        save_artifact, owner._ov_skill_mining_repository().project_root, path, body.get("content"),
+                    )
+            except FileNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return JSONResponse(result)
 
         @app.get("/api/mining/settings")
         async def mining_settings_get():
@@ -950,7 +630,6 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
                     status_code=400,
                     content={"detail": str(exc)},
                 )
-            owner._stop_skillminer()
             return JSONResponse(content=payload)
 
         @app.post("/api/mining/prompts/{stage_id}/reset")
@@ -968,7 +647,6 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
                     status_code=404,
                     content={"detail": str(exc)},
                 )
-            owner._stop_skillminer()
             return JSONResponse(content=payload)
 
         @app.get("/api/mining/ov-sources")
@@ -1362,10 +1040,11 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
             if len(name) > 120:
                 raise HTTPException(status_code=400, detail="任务名称不能超过 120 个字符")
             try:
-                rounds_hint = int(body.get("max_rounds", 3))
+                defaults = pipeline_settings(_store().load())
+                rounds_hint = int(body.get("max_rounds", defaults["max_rounds"]))
                 if not 1 <= rounds_hint <= 5:
                     raise ValueError("最大挖掘轮数必须在 1 到 5 之间")
-                timeout_seconds = int(body.get("runtime_timeout_seconds", 3600))
+                timeout_seconds = int(body.get("runtime_timeout_seconds", defaults["runtime_timeout_seconds"]))
                 if not 60 <= timeout_seconds <= 7200:
                     raise ValueError("运行期限必须在 60 到 7200 秒之间")
                 job = await asyncio.to_thread(
@@ -1496,7 +1175,7 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
             except KeyError as exc:
                 raise HTTPException(status_code=404, detail="挖掘任务不存在") from exc
             if job.get("engine") != "ov_compile":
-                return await owner._dispatch_skillminer_request(request)
+                raise HTTPException(status_code=400, detail="任务不是 OpenViking 挖掘任务")
             async with owner._ov_skill_mining_lock(job_id):
                 job = await asyncio.to_thread(repository.get_job, job_id)
                 if job.get("status") == "waiting_human":
@@ -1535,21 +1214,9 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
             except KeyError as exc:
                 raise HTTPException(status_code=404, detail="挖掘任务不存在") from exc
             if job.get("engine") != "ov_compile":
-                return await owner._dispatch_skillminer_request(request)
+                raise HTTPException(status_code=400, detail="任务不是 OpenViking 挖掘任务")
             try:
                 result = await asyncio.to_thread(repository.delete_job, job_id)
             except RuntimeError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             return JSONResponse(result)
-
-        async def _mining_proxy(request: Request):
-            response = await owner._dispatch_skillminer_request(request)
-            if response is None:
-                return JSONResponse(status_code=502, content={"detail": "SkillMiner upstream error"})
-            return response
-
-        app.add_api_route(
-            "/api/mining/{path:path}",
-            _mining_proxy,
-            methods=["GET", "POST", "DELETE"],
-        )

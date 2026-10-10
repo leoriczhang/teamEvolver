@@ -142,7 +142,7 @@ Agent 协议 API 使用 `protocol_version` 字段进行版本控制。当前版�
 | `/api/auth/*`、`/api/identity/*`、`/api/users/*`、`/api/tenants/*` | 登录、平台身份、租户成员、支持模式与权限审计 | [控制台身份与租户权限](./20-console-rbac.md) |
 | `/api/openviking/workspace/*` | Workspace 浏览、L0/L1、条件批量写、CLI | [存储空间与目录布局](../concepts/09-storage-layout.md) |
 | `/api/replay-lab/*`、`/api/openviking/memory/*` | Skill / Memory 实验与 True Replay | [Web 控制台](../guides/03-console.md) |
-| `/api/mining/*` | 知识源、挖掘任务、产物与 LIFT | [Skill Miner 指南](../guides/07-skill-miner.md) |
+| `/api/mining/*` | 知识源、OV 多轮挖掘、人工 Evidence 补证与产物预览编辑 | [Skill 挖掘指南](../guides/07-skill-miner.md) |
 | `/api/mining/jobs/*` | 真实 Compile 轮次、人工复核与补证 | [Skill 挖掘 API](./17-skill-mining.md) |
 | `/api/langfuse-config`、`/api/langfuse-tracing-config`、`/langfuse/*` | 租户数据源、全局链路观测、拉取、映射和状态 | [可观测性指南](../guides/04-observability.md) |
 | `/api/docs/*` | 内置文档目录、页面读取和搜索 | [文档维护指南](./99-docs-maintenance.md) |

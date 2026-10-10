@@ -5,26 +5,27 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 VENV_DIR="${TEAMEVOLVER_VENV_DIR:-$ROOT_DIR/.venv}"
 INSTALL_EXTRAS="${TEAMEVOLVER_INSTALL_EXTRAS:-all}"
-RUN_SETUP=0
 RUN_START=0
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--venv-dir PATH] [--python BIN] [--extras LIST] [--run-setup] [--run-start]
+Usage: $(basename "$0") [--venv-dir PATH] [--python BIN] [--extras LIST] [--run-start]
 
 Installs teamEvolver from the current repository checkout into a local virtualenv.
 
 Examples:
   bash scripts/install_teamEvolver.sh
-  bash scripts/install_teamEvolver.sh --venv-dir ~/.venvs/teamEvolver --run-setup
-  bash scripts/install_teamEvolver.sh --extras all --run-setup --run-start
+  bash scripts/install_teamEvolver.sh --venv-dir ~/.venvs/teamEvolver
+  bash scripts/install_teamEvolver.sh --extras all --run-start
 
 Default project install command:
   python -m pip install -e ".[all]"
 
 After install you can run:
-  teamEvolver setup
+  teamEvolver config show
   teamEvolver start
+
+Open http://127.0.0.1:52010/ to initialize the administrator and configure the service.
 EOF
 }
 
@@ -43,8 +44,8 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --run-setup)
-      RUN_SETUP=1
-      shift
+      echo "--run-setup has been removed. Start teamEvolver and complete setup in the console." >&2
+      exit 2
       ;;
     --run-start)
       RUN_START=1
@@ -89,14 +90,9 @@ echo "[install_teamEvolver] install complete"
 echo "[install_teamEvolver] activate with:"
 echo "  source \"$VENV_DIR/bin/activate\""
 echo "[install_teamEvolver] next steps:"
-echo "  teamEvolver setup"
+echo "  teamEvolver config show"
 echo "  teamEvolver start"
-
-if [[ "$RUN_SETUP" -eq 1 ]]; then
-  echo
-  echo "[install_teamEvolver] running: teamEvolver setup"
-  teamEvolver setup
-fi
+echo "  Open http://127.0.0.1:52010/ to initialize the administrator and configure the service."
 
 if [[ "$RUN_START" -eq 1 ]]; then
   echo

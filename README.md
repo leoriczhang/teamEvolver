@@ -58,13 +58,14 @@ Checklist 是完成门禁，不是加权分数。通过门禁后，True Replay �
 
 | 模块 | 当前能力 |
 | --- | --- |
-| Session 与 Evidence | V1 Session ingest、Langfuse 拉取、价值分类、近期/历史 Evidence 窗口、过滤审计 |
+| Session 与 Evidence | agent-session.v2 ingest、Langfuse 拉取、价值分类、近期/历史 Evidence 窗口、过滤审计 |
 | Skill Evolution | 总结、裁判、分组、改进/新建/冲突合并、同源 Test Dataset 生成 |
 | True Replay | 在真实 Agent Runtime 中并行运行 Baseline/Candidate，校验 Checklist、轨迹、产物和效率 |
 | Candidate Governance | 候选评审、强制/按回放发布、版本详情、完整 Bundle Diff、回滚与审计 |
 | Memory Evolution | Memory maintenance 维护、跨 User 团队记忆聚合、可编辑聚合 Skill、增量编译及 Memory Replay |
 | 实验工作台 | 编辑 Skill Bundle，并用数据集对未保存的多文件 Candidate 执行 True Replay |
 | 个人与团队资产 | 分别从 `viking://user` 和 `viking://resources` 浏览、编辑 OpenViking 资产 |
+| Skill 挖掘 | OpenViking Compile 多轮挖掘、人工 Evidence 补证、产物编辑与候选提交 |
 | 知识库编译 | 将上传文档规范化后提交给 OpenViking 异步编译 |
 | Agent Protocol v2 | 租户主体、Context、Session ingest、ReplayAdapterFactory、Skill pull |
 | Observability | Langfuse Session 导入，以及模型、工具、Skill Evolution、Memory maintenance 全链路追踪 |
@@ -172,7 +173,6 @@ teamEvolver status
 
 ```bash
 teamEvolver status
-teamEvolver doctor
 teamEvolver config show
 teamEvolver stop
 ```

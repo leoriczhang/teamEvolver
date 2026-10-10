@@ -15,6 +15,7 @@ from team_miner.lifecycle import (
     resolve_mined_skill_dir,
     submit_mined_skill,
 )
+from team_miner.tests.dataset_fixtures import build_document
 from team_skills.candidates.store import ValidationStore
 from teamEvolver.storage import InMemoryObjectStore
 
@@ -47,7 +48,7 @@ def _write_mined_skill(root: Path, name: str = "demo-skill") -> Path:
             "must_avoid": ["invent evidence"],
         },
     }
-    document, _ = progressive_benchmark.build_document_with_quality(name, [question])
+    document = build_document(name, [question])
     progressive_benchmark.write_document(skill_dir / "benchmark.json", document)
     (skill_dir / "BENCHMARK.md").write_text("# Benchmark\n", encoding="utf-8")
     return skill_dir
@@ -122,7 +123,7 @@ def test_submit_mined_skill_accepts_progressive_benchmark_json(tmp_path: Path) -
     miner_root = tmp_path / "skillminer"
     skill_dir = _write_mined_skill(miner_root)
     (skill_dir / "benchmark.json").unlink()
-    benchmark = progressive_benchmark.build_document(
+    benchmark = build_document(
         "demo-skill",
         [{
             "id": "BM-01",
@@ -186,7 +187,7 @@ def test_completed_job_workspace_submits_current_benchmark_json(tmp_path: Path) 
     (skill_dir / "benchmark.json").unlink()
     progressive_benchmark.write_document(
         skill_dir / "benchmark.json",
-        progressive_benchmark.build_document(
+        build_document(
             "demo-skill",
             [{
                 "id": "BM-01",
@@ -235,31 +236,6 @@ def test_non_completed_job_cannot_enter_evolution(tmp_path: Path) -> None:
         resolve_mined_job_workspace("../mine-running", skillminer_root=miner_root)
 
 
-def test_legacy_job_skill_root_is_resolved_from_its_archived_artifact(tmp_path: Path) -> None:
-    miner_root = tmp_path / "skillminer"
-    older = "20260805_150618_777997"
-    newer = "20260809_223901_916214"
-    (miner_root / "reflection_rounds" / older).mkdir(parents=True)
-    (miner_root / "reflection_rounds" / newer).mkdir(parents=True)
-    snapshot = miner_root / "run_history" / newer / "preexisting"
-    skill_dir = _write_mined_skill(snapshot)
-    artifact_path = skill_dir.joinpath("SKILL.md").relative_to(miner_root).as_posix()
-
-    resolved = resolve_mined_job_skill_root(
-        f"legacy:{older}",
-        "demo-skill",
-        artifact_path=artifact_path,
-        skillminer_root=miner_root,
-    )
-
-    assert resolved == snapshot
-    with pytest.raises(MiningLifecycleError, match="不匹配"):
-        resolve_mined_job_skill_root(
-            f"legacy:{newer}",
-            "demo-skill",
-            artifact_path=artifact_path,
-            skillminer_root=miner_root,
-        )
 
 
 def test_console_mined_submission_uses_tenant_hub_and_complete_bundles(tmp_path, monkeypatch):
@@ -301,7 +277,8 @@ def test_console_mined_submission_uses_tenant_hub_and_complete_bundles(tmp_path,
     ))
     client = TestClient(server.app)
     assert client.get("/api/mined-skills").status_code == 401
-    assert client.post("/api/auth/bootstrap", json={"username": "admin", "password": "test-password"}).status_code == 200
+    response = client.post("/api/auth/bootstrap", json={"username": "admin", "password": "test-password"})
+    assert response.status_code == 200
     from teamEvolver.admin.identity_store import IdentityStore
 
     IdentityStore(server.config).set_member("default", "admin", "tenant_admin", "active", "admin")
@@ -309,7 +286,10 @@ def test_console_mined_submission_uses_tenant_hub_and_complete_bundles(tmp_path,
     assert response.status_code == 200, response.text
     job = store.load_job(response.json()["job_id"])
     assert candidate_skill_bundle(job["current_skill"]) == published_bundle
-    assert candidate_skill_bundle(job["candidate_skill"])["benchmark.json"] == (skill_dir / "benchmark.json").read_bytes()
+    assert (
+        candidate_skill_bundle(job["candidate_skill"])["benchmark.json"]
+        == (skill_dir / "benchmark.json").read_bytes()
+    )
     assert job["replay_cases"][0]["checks"]
     assert captured and set(captured) == {"default"}
 

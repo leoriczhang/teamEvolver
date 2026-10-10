@@ -185,79 +185,6 @@ def test_actual_execution_events_keep_server_timestamps():
     assert observed["ov_task_created_at"] == "2026-10-08T07:48:08+00:00"
 
 
-@pytest.mark.asyncio
-async def test_native_config_capabilities_override_legacy_console(monkeypatch):
-    import json
-    from types import SimpleNamespace
-
-    from starlette.requests import Request
-
-    import team_miner.bridge as bridge
-
-    class Upstream:
-        status_code = 200
-        closed = False
-
-        async def aread(self):
-            return b"{}"
-
-        def json(self):
-            return {"max_rounds_default": 20, "max_rounds_range": [1, 20]}
-
-        async def aclose(self):
-            self.closed = True
-
-    upstream = Upstream()
-
-    class Client:
-        closed = False
-
-        def __init__(self, **kwargs):
-            pass
-
-        def build_request(self, *args, **kwargs):
-            return None
-
-        async def send(self, *args, **kwargs):
-            return upstream
-
-        async def aclose(self):
-            self.closed = True
-
-    client = Client()
-    monkeypatch.setattr(bridge.httpx, "AsyncClient", lambda **kwargs: client)
-
-    class Owner(SkillMinerBridgeMixin):
-        _skillminer_proc = SimpleNamespace(poll=lambda: None)
-        _skillminer_ready = True
-
-        def _skillminer_base_url(self):
-            return "http://127.0.0.1:1"
-
-    async def receive():
-        return {"type": "http.request", "body": b"", "more_body": False}
-
-    request = Request(
-        {
-            "type": "http",
-            "method": "GET",
-            "path": "/api/mining/config",
-            "query_string": b"",
-            "headers": [],
-            "scheme": "http",
-            "server": ("127.0.0.1", 52010),
-        },
-        receive,
-    )
-    response = await Owner()._dispatch_skillminer_request(request)
-    result = json.loads(response.body)
-    assert result["engine"] == "ov_compile"
-    assert result["max_rounds_range"] == [1, 5]
-    assert result["max_rounds_default"] == 5
-    assert result["human_checkpoints_supported"] is True
-    assert result["rounds_mode"] == "orchestrated"
-    assert result["compile_model"]["configuration_source"] == "openviking_server"
-    assert upstream.closed and client.closed
 
 
 @pytest.mark.parametrize("bad_field", ["checks", "session_ids"])
@@ -281,9 +208,9 @@ def test_actual_output_contract_rejects_numeric_rubric_or_missing_sources(tmp_pa
         }
         for n in range(12)
     ]
-    from team_miner import benchmark_format
+    from team_miner.tests.dataset_fixtures import build_document
 
-    document = benchmark_format.build_document("test-skill", cases)
+    document = build_document("test-skill", cases)
     if bad_field == "checks":
         for check in document["cases"][0]["checks"]:
             check["text"] = 123

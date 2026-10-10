@@ -31,7 +31,6 @@ pip install -e ".[all]"
 | extra | 包含内容 |
 |-------|---------|
 | `sharing` | OpenViking 共享存储支持（boto3） |
-| `mining` | Skill Miner 文档挖掘（hermes-agent） |
 | `validation` | True Replay 验证（openai SDK） |
 | `truereplay` | 完整 True Replay 能力 |
 | `dev` | 开发依赖（pytest、anyio） |
@@ -102,7 +101,7 @@ aggregation:
 | 路径 | 说明 |
 |------|------|
 | `~/.teamEvolver/config.yaml` | 主配置文件 |
-| `~/.hermes/skills/` | 默认本地 Skill 目录 |
+| `~/.teamEvolver/runtime/skills/` | Skill 运行缓存目录 |
 | `~/.team_memory/` | 团队记忆聚合 Skill、指纹与增量状态 |
 | `~/.teamEvolver/teamEvolver.pid` | Daemon PID 文件 |
 | `~/.teamEvolver/teamEvolver.log` | 默认 Daemon 日志 |

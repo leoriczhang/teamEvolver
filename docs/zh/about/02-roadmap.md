@@ -11,7 +11,7 @@
 - 可选 DreamCycle Memory 维护与变更账本
 - Skill 版本管理、审计链、tombstone、durable outbox
 - 个人 Skill 编辑、团队发布申请与管理员审批
-- Hermes Coding Agent 集成和 Pi Agent 接入参考
+- 通用 Agent Protocol v2 接入和 Pi Agent 接入参考
 - Langfuse 入站拉取、出站追踪与自定义 Trace 映射
 - 实验工作台（多文件 Skill Candidate 编辑、Diff 与 True Replay）
 - 个人记忆、团队资源与只读平台资产视图

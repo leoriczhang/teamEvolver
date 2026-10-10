@@ -405,16 +405,6 @@ curl -s http://POD_A:52010/storage/status
 
 ## Diagnostic Tools
 
-### teamEvolver doctor hermes
-
-Run integration diagnostics, automatically checking common configuration issues:
-
-```bash
-teamEvolver doctor hermes
-```
-
-Output includes detected issues, notes, and suggested next_steps.
-
 ### Health Check Endpoints
 
 ```bash

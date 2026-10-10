@@ -5,7 +5,7 @@
 ## 控制台保持原版
 
 本版以原 teamEvolver 控制台为基础，保留核心导航及页面。租户搜索位于侧栏；数据源、converter 配置及预检是增量功能。
-技能挖掘默认启用控制台，输入和任务产物保存在 `DATA_ROOT/.teamEvolver/skillminer`；真实挖掘需另行配置模型与 Hermes。全局模型、用户管理写入、运行状态和 SkillMiner 仍在 default 账号使用，其他账号的拒绝访问不代表模块被删除。
+技能挖掘由主服务管理 OV Compile 真实轮次，需配置可访问的 OpenViking 服务。来源注册、人工 Evidence 补证、产物编辑和候选提交见 [Skill 挖掘指南](./07-skill-miner.md)。
 实验工作台仅负责 Skill Bundle 编辑和 True Replay 调试。个人记忆 `viking://user` 与团队资源 `viking://resources` 已拆为侧栏独立资产页；Skill Lab、Memory Lab 以及 Skill 导入/导出不再提供控制台入口。资产文件树需要连接 OpenViking，终端需 OpenViking CLI。平台资产直接可视化 PostgreSQL 与 NAS 中的平台内部对象，不依赖 OpenViking，也不显示 OV CLI。
 
 ## 先确认四件事
@@ -38,7 +38,7 @@ export TEAMEVOLVER_SKILL_STORAGE_BACKEND='postgres'
 密码包含 `#/@/:` 时必须 URL 编码。也可不用 DSN，改用 `OV_PG_HOST`、`OV_PG_PORT`、`OV_PG_DATABASE`、`OV_PG_USERNAME`、`OV_PG_PASSWORD` 分字段注入。
 如果所有项目共用模型，可同时设置 `TEAMEVOLVER_LLM_BASE_URL/API_KEY/MODEL`；旧 YAML 中各项目已有的模型配置会随项目迁移。
 
-离线部署：在联网构建机准备基础镜像和锁文件中的 wheel，或者构建客户镜像后 `docker save/load`。原 Dockerfile 的 Hermes/OpenViking CLI 构建链不用于本次交付。
+离线部署：在联网构建机准备基础镜像和锁文件中的 wheel，或者构建客户镜像后 `docker save/load`。原 Dockerfile 的 OpenViking CLI 构建链不用于本次交付。
 
 ## 第二步：预检，不导入业务数据
 

@@ -5,7 +5,7 @@ The operational runbook is maintained in [Chinese](../../zh/guides/09-customer-m
 ## Original Console
 
 The console retains the core teamEvolver navigation and views, including mining, the Experiment Workbench, personal/team assets, platform assets, and governance. Tenant search stays in the sidebar; converter configuration and preflight are incremental additions.
-The SkillMiner console is enabled by default, with persistent input and job files under `DATA_ROOT/.teamEvolver/skillminer`. Running mining jobs still requires a configured model and Hermes, which is not installed in the minimal customer image. Service-wide settings and SkillMiner remain restricted to the default account without hiding their navigation entries.
+Skill Mining is managed by the main service through OV Compile rounds and requires a reachable OpenViking service. See [Skill Mining](./07-skill-miner.md) for source registration, human Evidence supplements, artifact editing and candidate submission.
 The Experiment Workbench owns Skill bundle editing and True Replay debugging. Personal Memory at `viking://user` and Team Resources at `viking://resources` are available from a standalone sidebar page; standalone Skill Lab, Memory Lab, and Skill import/export actions are removed. Asset browsing requires OpenViking, and the terminal requires its CLI. Platform Assets visualizes service-owned PostgreSQL and NAS objects directly and does not depend on OpenViking.
 
 ## Procedure

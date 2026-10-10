@@ -154,16 +154,9 @@ _DEFAULTS: dict = {
     "mining": {
         "pipeline": {
             "max_rounds": 3,
-            "max_retries": 2,
-            "retry_backoff_seconds": 0.8,
-            "oneshot_timeout_seconds": 1800,
-            "step1_validation_retries": 1,
-            "strict_step1": True,
-            "benchmark_target_total": 16,
-            "benchmark_difficulty_dist": "easy:4,medium:7,hard:5",
-            "benchmark_max_turns": 5,
+            "runtime_timeout_seconds": 3600,
         },
-        "prompts": {},
+        "prompts": {"ov_compile": ""},
     },
     **MEMORY_DEFAULTS,
     "validation": {

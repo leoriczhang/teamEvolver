@@ -1,6 +1,6 @@
 # Introduction
 
-teamEvolver is a **control plane for Agent team capability evolution**. It is not another Agent Runtime, but a capability evolution layer that sits on top of existing Agent Runtimes (such as Hermes, Pi, Codex, etc.), converting experience generated from real work into reusable, verifiable, and governable team Skills and team Memory.
+teamEvolver is a **control plane for Agent team capability evolution**. It is not another Agent Runtime, but a capability evolution layer that sits on top of existing Agent Runtimes (such as Pi, Codex, etc.), converting experience generated from real work into reusable, verifiable, and governable team Skills and team Memory.
 
 ## Core Positioning
 
@@ -33,8 +33,8 @@ The console exposes these assets through three distinct entries:
 
 ## Use Cases
 
-- **Team Coding Agents**: Multiple Hermes machines share team Skills, automatically distilling new skills from completed tasks
-- **Multi-Runtime Integration**: Pi, Hermes and other Coding Agent Runtimes unified evolution and capability distribution
+- **Team Coding Agents**: Multiple Agent instances share team Skills, automatically distilling new skills from completed tasks
+- **Multi-Runtime Integration**: Pi, Codex and other Coding Agent Runtimes unified evolution and capability distribution
 - **Enterprise Internal Agents**: Private deployment, accumulating domain Memory and Skills from business conversations
 - **Evaluation and Evolution Research**: Using True Replay for rigorous Baseline vs Candidate comparison experiments
 

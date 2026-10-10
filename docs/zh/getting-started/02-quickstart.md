@@ -70,32 +70,9 @@ curl http://localhost:52010/status
 
 ![控制台总览](/assets/teamEvolver-console-dashboard.png)
 
-## 5. 接入 Hermes Agent（可选）
+## 5. 接入 Agent（可选）
 
-如果你有 Hermes Coding Agent，可以安装同步和回流 Hook：
-
-```bash
-export TEAMEVOLVER_URL="http://localhost:52010"
-export TEAMEVOLVER_USER="your-name"
-export HERMES_HOME="$HOME/.hermes"
-
-# 安装团队技能同步 hook
-python teamEvolver/integrations/hermes_skill_sync/install.py \
-  --hermes-home "$HERMES_HOME" \
-  --python python3 \
-  --backend service \
-  --url "$TEAMEVOLVER_URL" \
-  --user "$TEAMEVOLVER_USER"
-
-# 安装会话回流 hook
-python session_ingestion/push/hermes/install.py \
-  --hermes-home "$HERMES_HOME" \
-  --python python3 \
-  --user "$TEAMEVOLVER_USER" \
-  --url "$TEAMEVOLVER_URL"
-```
-
-安装后重启 Hermes，新会话结束时会自动上报到 teamEvolver。详细说明见 [Hermes 接入指南](../agent-integrations/03-hermes)。
+按 [Agent Protocol v2](../agent-integrations/06-protocol-v2.md) 配置服务 URL、租户 Key 和 user_id。使用 [自定义 Agent 接入](../agent-integrations/05-custom-agent.md) 发送 Session、读取 Context 并拉取 Skill；需要 True Replay 时配置 ReplayAdapterFactory。
 
 ## 6. 手动触发进化
 
@@ -113,7 +90,7 @@ teamEvolver stop
 
 ## Docker Compose
 
-不需要本机 Python/Hermes 环境时，可使用仓库自带镜像。镜像会构建控制台、安装完整依赖并捆绑 OpenViking CLI：
+不需要本机 Python 环境时，可使用仓库自带镜像。镜像会构建控制台、安装完整依赖并捆绑 OpenViking CLI：
 
 ```bash
 docker compose up -d --build

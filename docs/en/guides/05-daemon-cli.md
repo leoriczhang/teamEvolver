@@ -329,41 +329,6 @@ teamEvolver langfuse pull --in-process --max-sessions 200 --force
 
 `teamEvolver diag` related command groups for integration diagnostics and maintenance.
 
-### teamEvolver doctor hermes
-
-Checks local Hermes integration status.
-
-```bash
-teamEvolver doctor hermes
-```
-
-Diagnostics include:
-
-- Configuration file existence
-- Model configuration matches expectations
-- Base URL configuration
-- Provider configuration
-- Proxy matching status
-- Skills directory existence and permissions
-- Legacy skills directory status
-- Latest backup information
-- Session boundary mode
-- Discovered issues and fix recommendations
-
-### teamEvolver restore hermes
-
-Restores Hermes configuration from backup.
-
-```bash
-teamEvolver restore hermes [--backup PATH]
-```
-
-| Option | Description |
-|--------|-------------|
-| `--backup PATH` | Specify backup file path; defaults to latest Hermes backup |
-
-teamEvolver automatically creates backups before modifying Hermes configuration; this command rolls back when configuration anomalies occur.
-
 ### teamEvolver validation status
 
 Views background validation Worker configuration and current status.
@@ -446,7 +411,6 @@ Besides configuration file, following environment variables affect CLI and Daemo
 | `TEAMEVOLVER_PROMPT_OVERRIDES_PATH` | Custom Prompt override file path |
 | `TEAMEVOLVER_STAGE_SETTINGS_PATH` | Custom stage settings file path |
 | `ARK_API_KEY` | Volcengine Ark API Key (used by Skill Miner) |
-| `SKILLMINER_LIFT_AUTO_DRAFT` | Set to `0` to disable auto-generating LIFT drafts |
 | `LANGFUSE_*` | Various Langfuse configuration environment variables; see observability guide |
 
 ## Exit Codes

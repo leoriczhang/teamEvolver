@@ -2,14 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { PageHeader, Panel, StatCard, Pill, type PillTone } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { api, type UserProfile } from "@/api/client";
 import { fileToB64 } from "@/lib/file";
 import { createRequestId } from "@/lib/requestId";
 import { toastErr, toastOk } from "@/lib/toast";
 import { cn } from "@/lib/utils";
-import DropZone from "@/views/skills/DropZone";
 import { MarkdownDocument } from "@/components/MarkdownWorkspace";
 import MiningWhiteboxPanel from "@miner/MiningWhiteboxPanel";
 import SkillSourceWorkspace from "@miner/SkillSourceWorkspace";
@@ -25,7 +23,6 @@ import {
   FileText,
   Eye,
   FolderPlus,
-  FolderInput,
   Trash2,
   ListChecks,
   Clock3,
@@ -44,9 +41,8 @@ import {
  * 3 个独立菜单项（总览 / 知识源 / 挖掘任务），本组件
  * 按 `page` 渲染对应页面。
  *
- * 后端已接入：teamEvolver 服务把内嵌的 SkillMiner 控制台（子进程）反向代理到
- * ``/api/mining/*``。本视图通过 ``/api/mining/config`` 管理知识源，并通过
- * ``/api/mining/jobs`` 创建、调度和跟踪持久化挖掘任务。
+ * TE 原生 API 管理 OpenViking 知识源、持久化挖掘任务和每轮人工 Evidence 补充。
+ * OpenViking Compile 负责候选编译，任务完成后通过 Skill Evolution 提交候选。
  */
 
 export type MinePage = "overview" | "sources" | "jobs";
@@ -57,25 +53,7 @@ const PAGE_META: Record<MinePage, { title: string; description: string }> = {
   jobs: { title: "Skill 挖掘", description: "从标记为 Skill 知识源的目录创建和跟踪挖掘任务；完成后可审核、编辑产物并提交进化。" },
 };
 
-// ---- Backend types (subset of SkillMiner /api/config & SSE events) -------- //
-
-type SourceIngestionStatusValue = "empty" | "processing" | "ready" | "failed";
-
-interface SourceIngestionStatus {
-  schema_version: number;
-  source_path: string;
-  batch_id: string;
-  status: SourceIngestionStatusValue;
-  stage: "idle" | "validating" | "converting" | "writing" | "merging" | "complete" | "failed" | string;
-  progress: number;
-  processed_files: number;
-  total_files: number;
-  current_file: string;
-  error: string;
-  started_at: string;
-  updated_at: string;
-  finished_at: string;
-}
+// ---- Native OpenViking mining API types ---------------------------------- //
 
 interface InputSource {
   source_id?: string;
@@ -89,15 +67,6 @@ interface InputSource {
   error?: string;
   tags?: Array<"skill" | "knowledge" | string>;
   default?: boolean;
-  ingestion?: SourceIngestionStatus;
-}
-
-interface CompiledSkillDetail {
-  name: string;
-  has_skill: boolean;
-  has_evaluation: boolean;
-  has_benchmark: boolean;
-  question_count: number;
 }
 
 interface MiningArtifact {
@@ -111,7 +80,6 @@ interface MiningArtifact {
 interface MiningRound {
   round: number;
   artifacts: MiningArtifact[];
-  skills?: CompiledSkillDetail[];
   status?: string;
   started_at?: string;
   finished_at?: string;
@@ -142,7 +110,6 @@ type MiningJobStatus =
   | "preparing"
   | "queued"
   | "running"
-  | "waiting"
   | "waiting_human"
   | "stopping"
   | "stopped"
@@ -158,8 +125,6 @@ interface MiningJob {
   document_count: number | null;
   max_rounds: number;
   current_round: number | null;
-  rounds_mode?: string;
-  human_checkpoints_supported?: boolean;
   runtime_timeout_seconds?: number;
   ov_cancel_error?: string;
   phase: PhaseState;
@@ -169,11 +134,9 @@ interface MiningJob {
   updated_at: string;
   error: string;
   stop_reason: string;
-  legacy?: boolean;
   artifacts?: MiningArtifact[];
   rounds?: MiningRound[];
   logs?: string[];
-  skills?: CompiledSkillDetail[];
   pending_checkpoint?: HumanCheckpoint | null;
   knowledge_gaps?: {
     total: number;
@@ -181,7 +144,6 @@ interface MiningJob {
   } | null;
   knowledge_supplements?: KnowledgeSupplementRound[];
   artifact_quality?: MiningArtifactQuality | null;
-  engine?: string;
   ov_status?: string;
   ov_stage?: string;
   ov_last_synced_at?: string;
@@ -191,12 +153,6 @@ interface MiningJob {
   ov_sync_failures?: number;
   ov_next_retry_at?: string;
   remote_state_stale?: boolean;
-  setup_timings?: Record<string, {
-    started_at: string;
-    finished_at: string;
-    duration_seconds: number;
-    status: "succeeded" | "failed" | string;
-  }>;
   submission_seconds?: number;
   compile_observed_seconds?: number;
   materialize_seconds?: number;
@@ -251,7 +207,6 @@ interface KnowledgeSupplementRound {
   feedback?: string;
   attachments?: EvidenceAttachment[];
   submitted_at?: string;
-  source: "checkpoint" | "semantic_report";
 }
 
 interface MiningJobSummary {
@@ -270,54 +225,17 @@ interface ArtifactContent {
   size_bytes: number;
 }
 
-interface KnowledgeSourceFile {
-  relative_path: string;
-  name: string;
-  size_bytes: number;
-  updated_at: string;
+interface MiningDefaults {
+  max_rounds_default: number;
+  max_rounds_range: [number, number];
+  runtime_timeout_seconds_default: number;
+  runtime_timeout_seconds_range: [number, number];
 }
 
-interface KnowledgeSourceFileContent {
-  source_path: string;
-  relative_path: string;
-  name: string;
-  size_bytes: number;
-  preview_available: boolean;
-  truncated: boolean;
-  content: string;
-  message: string;
-}
-
-interface MiningConfig {
+interface MiningConfig extends MiningDefaults {
   input_dirs: string[];
   input_sources: InputSource[];
   default_input_dir: string;
-  max_rounds_default: number;
-  max_rounds_range: [number, number];
-  compiled_skills: string[];
-  compiled_skill_details: CompiledSkillDetail[];
-  benchmark: {
-    default_dist: string;
-    default_total: number;
-  };
-  checkpoints: { key: string; label: string; desc: string }[];
-}
-
-interface KnowledgeUploadResult {
-  ok: boolean;
-  batch_id: string;
-  written: Array<{
-    name: string;
-    path: string;
-    original_name: string;
-    size_bytes: number;
-    normalized_size_bytes: number;
-    renamed: boolean;
-    converted: boolean;
-    source_format: string;
-    source_encoding: string;
-  }>;
-  source: InputSource;
 }
 
 interface PhaseState {
@@ -327,9 +245,9 @@ interface PhaseState {
 }
 
 const STEP_META = [
-  { key: "step1" as const, n: 1, title: "样本包构建", sub: "输入文档 → sample_packages", icon: Boxes },
-  { key: "step2" as const, n: 2, title: "语义发现", sub: "决策单元 + 知识缺口", icon: ScanSearch },
-  { key: "step3" as const, n: 3, title: "Skill 编译", sub: "SKILL.md + EVALUATION.md", icon: FileCode2 },
+  { key: "step1" as const, n: 1, title: "输入与提交", sub: "冻结 Evidence 并提交 Compile", icon: Boxes },
+  { key: "step2" as const, n: 2, title: "OV Compile", sub: "来源解析与候选编译", icon: ScanSearch },
+  { key: "step3" as const, n: 3, title: "产物复核", sub: "结构校验与 Evidence 补充", icon: FileCode2 },
 ];
 
 /**
@@ -372,7 +290,7 @@ function useMining(active: boolean) {
     const request = (async () => {
       try {
         const [base, ovSources] = await Promise.all([
-          api<MiningConfig>("/api/mining/config"),
+          api<MiningDefaults>("/api/mining/config"),
           api<{ sources: InputSource[] }>("/api/mining/ov-sources"),
         ]);
         const sources = ovSources.sources || [];
@@ -439,30 +357,7 @@ export default function MiningView({
   const [humanCheckpoints, setHumanCheckpoints] = useState(true);
   const [taskName, setTaskName] = useState("");
   const [starting, setStarting] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState<SourceIngestionStatus | null>(null);
   const [selectedInputDir, setSelectedInputDir] = useState("");
-  const [uploadTarget, setUploadTarget] = useState("");
-  const [newUploadSourceName, setNewUploadSourceName] = useState("");
-  const [createSourceOpen, setCreateSourceOpen] = useState(false);
-  const [createSourceName, setCreateSourceName] = useState("");
-  const [mergeSourceOpen, setMergeSourceOpen] = useState(false);
-  const [mergeSourcePaths, setMergeSourcePaths] = useState<string[]>([]);
-  const [mergeTargetName, setMergeTargetName] = useState("");
-  const [deleteSource, setDeleteSource] = useState<InputSource | null>(null);
-  const [sourceMutating, setSourceMutating] = useState(false);
-  const [renamingSourcePath, setRenamingSourcePath] = useState("");
-  const [renameSourceName, setRenameSourceName] = useState("");
-  const [renameSourceError, setRenameSourceError] = useState("");
-  const [renamePendingPath, setRenamePendingPath] = useState("");
-  const [sourcePreview, setSourcePreview] = useState<InputSource | null>(null);
-  const [sourceFiles, setSourceFiles] = useState<KnowledgeSourceFile[]>([]);
-  const [sourceFilesTruncated, setSourceFilesTruncated] = useState(false);
-  const [sourcePreviewLoading, setSourcePreviewLoading] = useState(false);
-  const [selectedSourceFile, setSelectedSourceFile] = useState<KnowledgeSourceFile | null>(null);
-  const [sourceFileContent, setSourceFileContent] = useState<KnowledgeSourceFileContent | null>(null);
-  const [sourceFileLoading, setSourceFileLoading] = useState("");
-  const cancelledRenamePath = useRef("");
   const [jobFilter, setJobFilter] = useState<"all" | "active" | "completed" | "failed">("all");
   const [selectedJobId, setSelectedJobId] = useState("");
   const [selectedJob, setSelectedJob] = useState<MiningJob | null>(null);
@@ -490,15 +385,15 @@ export default function MiningView({
   const [submittingJobId, setSubmittingJobId] = useState("");
   const [createJobOpen, setCreateJobOpen] = useState(false);
   const artifactIsMarkdown = isMarkdownArtifact(artifactPreview);
-  const defaultRoundsInitialized = useRef(false);
+  const defaultsInitialized = useRef(false);
 
-  // Config refreshes every two seconds.  Apply its default only once, so a
-  // user's in-progress slider choice is never overwritten by that polling.
+  // Refresh defaults while the form is closed; preserve choices during editing.
   useEffect(() => {
     if (!config) return;
-    if (!defaultRoundsInitialized.current && config.max_rounds_default) {
+    if ((!defaultsInitialized.current || !createJobOpen) && config.max_rounds_default) {
       setRounds(config.max_rounds_default);
-      defaultRoundsInitialized.current = true;
+      setRuntimeTimeout(config.runtime_timeout_seconds_default || 3600);
+      defaultsInitialized.current = true;
     }
     const next = preferredInputDir && config.input_dirs.includes(preferredInputDir)
       ? preferredInputDir
@@ -506,11 +401,8 @@ export default function MiningView({
         ? selectedInputDir
         : config.default_input_dir || config.input_dirs[0] || "";
     setSelectedInputDir(next);
-    if (!uploadTarget || (!config.input_dirs.includes(uploadTarget) && uploadTarget !== "__new__")) {
-      setUploadTarget(next);
-    }
     onInputDirChange?.(next);
-  }, [config, preferredInputDir]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [config, preferredInputDir, createJobOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!active || page !== "jobs" || !selectedJobId) return;
@@ -563,9 +455,6 @@ export default function MiningView({
   const inputSources = config?.input_sources ?? [];
   const skillSources = inputSources.filter((source) => source.tags?.includes("skill"));
   const selectedSource = skillSources.find((source) => source.path === inputDir);
-  const uploadTargetSource = inputSources.find((source) => source.path === uploadTarget);
-  const selectedIngestion = selectedSource ? sourceIngestion(selectedSource) : null;
-  const uploadTargetIngestion = uploadTargetSource ? sourceIngestion(uploadTargetSource) : null;
   const jobCounts = {
     total: mining.jobs.length,
     running: mining.jobs.filter((job) => job.status === "running" || job.status === "stopping").length,
@@ -598,181 +487,6 @@ export default function MiningView({
     onInputDirChange?.(path);
   }
 
-  function validateSourceRename(source: InputSource, value: string) {
-    const name = value.trim();
-    if (!name) return "知识源名称不能为空";
-    if (name.startsWith(".") || name.length > 80 || name.includes("/") || name.includes("\\")) {
-      return "名称不能以 . 开头、超过 80 个字符或包含 /、\\";
-    }
-    const normalized = name.toLocaleLowerCase();
-    const duplicate = inputSources.find((item) => (
-      item.path !== source.path && sourceDisplayName(item.path).toLocaleLowerCase() === normalized
-    ));
-    return duplicate ? `已存在同名知识源：${sourceDisplayName(duplicate.path)}` : "";
-  }
-
-  function beginSourceRename(source: InputSource) {
-    if (renamePendingPath) return;
-    cancelledRenamePath.current = "";
-    setRenamingSourcePath(source.path);
-    setRenameSourceName(sourceDisplayName(source.path));
-    setRenameSourceError("");
-  }
-
-  function cancelSourceRename(source: InputSource, input: HTMLInputElement) {
-    cancelledRenamePath.current = source.path;
-    setRenamingSourcePath("");
-    setRenameSourceName("");
-    setRenameSourceError("");
-    input.blur();
-  }
-
-  async function commitSourceRename(source: InputSource) {
-    if (cancelledRenamePath.current === source.path) {
-      cancelledRenamePath.current = "";
-      return;
-    }
-    if (renamingSourcePath !== source.path || renamePendingPath) return;
-
-    const name = renameSourceName.trim();
-    const validationError = validateSourceRename(source, name);
-    if (validationError) {
-      setRenameSourceError(validationError);
-      return;
-    }
-    if (name === sourceDisplayName(source.path)) {
-      setRenamingSourcePath("");
-      setRenameSourceName("");
-      setRenameSourceError("");
-      return;
-    }
-
-    setRenamePendingPath(source.path);
-    setRenameSourceError("");
-    try {
-      const response = await api<{ source: InputSource; previous_path: string }>(
-        `/api/mining/sources/${encodeURIComponent(sourceDisplayName(source.path))}/rename`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name }),
-        }
-      );
-      if (selectedInputDir === source.path) {
-        setSelectedInputDir(response.source.path);
-        onInputDirChange?.(response.source.path);
-      }
-      if (uploadTarget === source.path) setUploadTarget(response.source.path);
-      await mining.refreshConfig();
-      setRenamingSourcePath("");
-      setRenameSourceName("");
-      toastOk(
-        "知识源已重命名",
-        `${sourceDisplayName(source.path)} → ${sourceDisplayName(response.source.path)}`
-      );
-    } catch (e: any) {
-      setRenameSourceError(e.message);
-      toastErr("重命名知识源失败", e.message);
-    } finally {
-      setRenamePendingPath("");
-    }
-  }
-
-  async function uploadKnowledgeFiles(list: FileList) {
-    // FileList belongs to the hidden <input>. DropZone clears that input as
-    // soon as this callback returns, so keep a stable snapshot before any
-    // await (notably before a new source would otherwise be created).
-    const selectedFiles = Array.from(list);
-    if (!selectedFiles.length) return;
-    setUploading(true);
-    let progressTimer: number | undefined;
-    try {
-      let target = uploadTarget || inputDir;
-      let createSource = false;
-      if (target === "__new__") {
-        const name = newUploadSourceName.trim();
-        if (!name) throw new Error("请输入新知识源名称");
-        const duplicate = inputSources.some(
-          (source) => sourceDisplayName(source.path).toLocaleLowerCase() === name.toLocaleLowerCase()
-        );
-        if (duplicate) throw new Error(`知识源已存在：${name}`);
-        target = `data/${name}`;
-        createSource = true;
-      }
-      const batchId = globalThis.crypto?.randomUUID?.() || `upload-${Date.now()}`;
-      setUploadProgress({
-        schema_version: 1,
-        source_path: target,
-        batch_id: batchId,
-        status: "processing",
-        stage: "validating",
-        progress: 0,
-        processed_files: 0,
-        total_files: selectedFiles.length,
-        current_file: "",
-        error: "",
-        started_at: "",
-        updated_at: "",
-        finished_at: "",
-      });
-      const files = await Promise.all(selectedFiles.map(async (file) => ({
-        name: file.name,
-        content_b64: await fileToB64(file),
-      })));
-      let pollInFlight = false;
-      const pollProgress = async () => {
-        if (pollInFlight) return;
-        pollInFlight = true;
-        try {
-          const response = await api<{ source: InputSource }>(
-            `/api/mining/sources/status?source_path=${encodeURIComponent(target)}`
-          );
-          const ingestion = response.source.ingestion;
-          if (ingestion?.batch_id === batchId) {
-            setUploadProgress(ingestion);
-          }
-        } catch {
-          // The upload request remains authoritative; a transient polling
-          // failure should not turn a successful conversion into an error.
-        } finally {
-          pollInFlight = false;
-        }
-      };
-      progressTimer = window.setInterval(pollProgress, 400);
-      const result = await api<KnowledgeUploadResult>("/api/mining/sources/upload", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          source_path: target,
-          batch_id: batchId,
-          create_source: createSource,
-          files,
-        }),
-      });
-      if (result.source.ingestion) setUploadProgress(result.source.ingestion);
-      const renamed = result.written.filter((file) => file.renamed).length;
-      const converted = result.written.filter((file) => file.converted).length;
-      const details = [
-        converted ? `${converted} 个文件已转为 Markdown` : "",
-        renamed ? `${renamed} 个重名文件已保留为新副本` : "",
-      ].filter(Boolean).join("；");
-      toastOk(
-        `已上传 ${result.written.length} 个文档`,
-        details || `已写入 ${sourceDisplayName(result.source.path)}`
-      );
-      await mining.refreshConfig();
-      setUploadTarget(result.source.path);
-      setNewUploadSourceName("");
-    } catch (e: any) {
-      await mining.refreshConfig(false);
-      toastErr("上传知识文档失败", e.message);
-    } finally {
-      if (progressTimer) window.clearInterval(progressTimer);
-      setUploading(false);
-      setUploadProgress(null);
-    }
-  }
-
   async function startRun() {
     setStarting(true);
     try {
@@ -793,7 +507,7 @@ export default function MiningView({
       await mining.refreshJobs(false);
       setTaskName("");
       setCreateJobOpen(false);
-      toastOk("挖掘任务已创建", `输入 ${sourceDisplayName(inputDir)} · 最多 ${rounds} 轮`);
+      toastOk("挖掘任务已创建", `输入 ${inputDir} · 最多 ${rounds} 轮`);
       onNavigate?.("jobs");
     } catch (e: any) {
       toastErr("启动挖掘失败", e.message);
@@ -802,106 +516,7 @@ export default function MiningView({
     }
   }
 
-  async function createSource() {
-    const name = createSourceName.trim();
-    if (!name) return;
-    setSourceMutating(true);
-    try {
-      const response = await api<{ source: InputSource }>("/api/mining/sources", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
-      });
-      await mining.refreshConfig();
-      setUploadTarget(response.source.path);
-      setCreateSourceOpen(false);
-      setCreateSourceName("");
-      toastOk("知识源已创建", sourceDisplayName(response.source.path));
-    } catch (e: any) {
-      toastErr("创建知识源失败", e.message);
-    } finally {
-      setSourceMutating(false);
-    }
-  }
-
-  async function deleteKnowledgeSource() {
-    if (!deleteSource) return;
-    setSourceMutating(true);
-    try {
-      const name = deleteSource.path.split("/").pop() || "";
-      await api(`/api/mining/sources/${encodeURIComponent(name)}`, { method: "DELETE" });
-      setDeleteSource(null);
-      await mining.refreshConfig();
-      toastOk("知识源已删除", sourceDisplayName(deleteSource.path));
-    } catch (e: any) {
-      toastErr("删除知识源失败", e.message);
-    } finally {
-      setSourceMutating(false);
-    }
-  }
-
-  async function mergeSources() {
-    if (mergeSourcePaths.length < 2 || !mergeTargetName.trim()) return;
-    setSourceMutating(true);
-    try {
-      const response = await api<{ source: InputSource; copied: unknown[] }>("/api/mining/sources/merge", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source_paths: mergeSourcePaths, target_name: mergeTargetName.trim() }),
-      });
-      await mining.refreshConfig();
-      setUploadTarget(response.source.path);
-      setMergeSourceOpen(false);
-      setMergeSourcePaths([]);
-      setMergeTargetName("");
-      toastOk("知识源已合并", `${sourceDisplayName(response.source.path)} · ${response.copied.length} 个文件`);
-    } catch (e: any) {
-      toastErr("合并知识源失败", e.message);
-    } finally {
-      setSourceMutating(false);
-    }
-  }
-
-  async function loadKnowledgeSourceFile(source: InputSource, file: KnowledgeSourceFile) {
-    setSelectedSourceFile(file);
-    setSourceFileLoading(file.relative_path);
-    setSourceFileContent(null);
-    try {
-      const result = await api<KnowledgeSourceFileContent>(
-        `/api/mining/sources/content?source_path=${encodeURIComponent(source.path)}&relative_path=${encodeURIComponent(file.relative_path)}`
-      );
-      setSourceFileContent(result);
-    } catch (e: any) {
-      toastErr("读取知识文件失败", e.message);
-    } finally {
-      setSourceFileLoading("");
-    }
-  }
-
-  async function openKnowledgeSourcePreview(source: InputSource) {
-    setSourcePreview(source);
-    setSourceFiles([]);
-    setSourceFilesTruncated(false);
-    setSelectedSourceFile(null);
-    setSourceFileContent(null);
-    setSourcePreviewLoading(true);
-    try {
-      const result = await api<{ files: KnowledgeSourceFile[]; truncated: boolean }>(
-        `/api/mining/sources/files?source_path=${encodeURIComponent(source.path)}`
-      );
-      const files = result.files || [];
-      setSourceFiles(files);
-      setSourceFilesTruncated(Boolean(result.truncated));
-      if (files[0]) await loadKnowledgeSourceFile(source, files[0]);
-    } catch (e: any) {
-      toastErr("加载知识源内容失败", e.message);
-    } finally {
-      setSourcePreviewLoading(false);
-    }
-  }
-
   async function stopJob(job: MiningJob) {
-    if (job.legacy) return;
     setJobActionPending(true);
     try {
       const response = await api<{ job: MiningJob }>(
@@ -968,16 +583,13 @@ export default function MiningView({
   async function submitCheckpointAnswers(job: MiningJob, action: "continue" | "finish" = "continue") {
     const checkpoint = job.pending_checkpoint;
     if (!checkpoint || checkpointSubmitting || checkpointUploading) return;
-    const orchestrated = job.rounds_mode === "orchestrated";
-    if (orchestrated && action === "continue" && checkpoint.round >= job.max_rounds) return;
-    if (orchestrated) {
-      const missing = checkpoint.questions.find((question) => (
-        question.required && !checkpointUnresolved[question.qid] && !checkpointAnswers[question.qid]?.trim()
-      ));
-      if (missing) {
-        toastErr("请确认必填 Evidence 问题", `请回答“${missing.question}”，或明确勾选暂时无法确认；来源引用不能代替回答。`);
-        return;
-      }
+    if (action === "continue" && checkpoint.round >= job.max_rounds) return;
+    const missing = checkpoint.questions.find((question) => (
+      question.required && !checkpointUnresolved[question.qid] && !checkpointAnswers[question.qid]?.trim()
+    ));
+    if (missing) {
+      toastErr("请确认必填 Evidence 问题", `请回答“${missing.question}”，或明确勾选暂时无法确认；来源引用不能代替回答。`);
+      return;
     }
     setCheckpointSubmitting(true);
     try {
@@ -1001,16 +613,13 @@ export default function MiningView({
         checkpointRequest.current = { signature, id: createRequestId() };
       }
       const response = await api<{ job: MiningJob }>(
-        `/api/mining/jobs/${encodeURIComponent(job.job_id)}/${orchestrated ? action : "answer"}`,
+        `/api/mining/jobs/${encodeURIComponent(job.job_id)}/${action}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(orchestrated ? {
+          body: JSON.stringify({
             ...payload,
             request_id: checkpointRequest.current.id,
-          } : {
-            question_id: checkpoint.id,
-            answers: checkpointAnswers,
           }),
         }
       );
@@ -1122,7 +731,6 @@ export default function MiningView({
     const supplementRounds = job.knowledge_supplements || [];
     const supplementQuestions = job.pending_checkpoint?.questions || durableGaps;
     const hasKnowledgeSupplement = Boolean(job.pending_checkpoint) || supplementQuestions.length > 0 || supplementRounds.length > 0;
-    const orchestrated = job.rounds_mode === "orchestrated";
     const checkpointBusy = checkpointSubmitting || checkpointUploading;
     const currentRemoteWarnings = distinctWarnings([
       ...(job.remote_warnings || []),
@@ -1136,16 +744,9 @@ export default function MiningView({
     const checkpointFiles = Array.from(new Map([
       ...(job.pending_checkpoint?.attachments || []), ...checkpointAttachments,
     ].map((file) => [file.uri, file])).values());
-    const setupTimingRows = [
-      ["Skill 编译器发布", job.setup_timings?.publish_skill],
-      ["运行目录创建", job.setup_timings?.mkdir_run_root],
-      ["知识源快照复制", job.setup_timings?.copy_source_snapshot],
-      ["Compile 提交", job.setup_timings?.submit_compile],
-    ] as const;
     const compileSeconds = job.compile_observed_seconds ?? elapsedSeconds(job.started_at, job.finished_at);
     const hasTimingData = Boolean(
-      job.engine === "ov_compile"
-      && (job.started_at || job.submission_seconds !== undefined || job.materialize_seconds !== undefined)
+      job.started_at || job.submission_seconds !== undefined || job.materialize_seconds !== undefined
     );
     return (
       <div className="space-y-4 border-t border-accent/20 bg-accent-soft/35 px-5 py-5">
@@ -1154,14 +755,14 @@ export default function MiningView({
             <div className="select-text truncate text-[15px] font-bold">{job.name}</div>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
               <Pill tone={jobStatusMeta(job.status).tone as any}>{jobStatusMeta(job.status).label}</Pill>
-              {job.input_dir && <span className="mono select-text">{sourceDisplayName(job.input_dir)}</span>}
+              {job.input_dir && <span className="mono select-text">{job.input_dir}</span>}
               {job.document_count !== null && <span>{job.document_count} 个文档</span>}
-              {orchestrated && <span>第 {job.current_round || 1} / {job.max_rounds} 轮</span>}
+              <span>第 {job.current_round || 1} / {job.max_rounds} 轮</span>
               {currentRemoteWarnings.length > 0 && <Pill tone="amber">来源处理需复核</Pill>}
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            {isActiveJob(job.status) && !job.legacy && (
+            {isActiveJob(job.status) && (
               <Button size="sm" variant="outline" disabled={jobActionPending || checkpointBusy || job.status === "stopping"} onClick={() => stopJob(job)}>
                 <CircleStop className="size-3.5" /> {job.status === "stopping" ? "停止中" : "停止"}
               </Button>
@@ -1204,14 +805,6 @@ export default function MiningView({
               {job.submission_seconds !== undefined && (
                 <TimingCard label="启动准备合计" seconds={job.submission_seconds} />
               )}
-              {setupTimingRows.map(([label, timing]) => timing && (
-                <TimingCard
-                  key={label}
-                  label={label}
-                  seconds={timing.duration_seconds}
-                  failed={timing.status === "failed"}
-                />
-              ))}
               {compileSeconds !== null && (
                 <TimingCard label={job.finished_at ? "OV Compile" : "OV Compile（累计）"} seconds={compileSeconds} />
               )}
@@ -1328,89 +921,81 @@ export default function MiningView({
                               />
                             )}
                           </label>
-                          {orchestrated && (
-                            <>
-                              <label className="mt-3 block">
-                                <span className="mb-1.5 block text-[11px] font-semibold text-muted-foreground">Evidence 来源 URI（每行一个）</span>
-                                <textarea
-                                  aria-label={`问题 ${index + 1} 的 Evidence 来源`}
-                                  rows={2}
-                                  disabled={checkpointBusy}
-                                  value={checkpointReferences[question.qid] || ""}
-                                  placeholder="viking://resources/..."
-                                  onChange={(event) => setCheckpointReferences((current) => ({ ...current, [question.qid]: event.target.value }))}
-                                  className="mono w-full resize-y rounded-lg border border-border bg-background px-3 py-2 text-[11px] outline-none focus:border-accent"
-                                />
-                              </label>
-                              <label className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
-                                <input
-                                  type="checkbox"
-                                  aria-label={`问题 ${index + 1} 暂时无法确认`}
-                                  disabled={checkpointBusy}
-                                  checked={Boolean(checkpointUnresolved[question.qid])}
-                                  onChange={(event) => setCheckpointUnresolved((current) => ({ ...current, [question.qid]: event.target.checked }))}
-                                />
-                                暂时无法确认，保留此证据缺口
-                              </label>
-                            </>
-                          )}
+                          <label className="mt-3 block">
+                            <span className="mb-1.5 block text-[11px] font-semibold text-muted-foreground">Evidence 来源 URI（每行一个）</span>
+                            <textarea
+                              aria-label={`问题 ${index + 1} 的 Evidence 来源`}
+                              rows={2}
+                              disabled={checkpointBusy}
+                              value={checkpointReferences[question.qid] || ""}
+                              placeholder="viking://resources/..."
+                              onChange={(event) => setCheckpointReferences((current) => ({ ...current, [question.qid]: event.target.value }))}
+                              className="mono w-full resize-y rounded-lg border border-border bg-background px-3 py-2 text-[11px] outline-none focus:border-accent"
+                            />
+                          </label>
+                          <label className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
+                            <input
+                              type="checkbox"
+                              aria-label={`问题 ${index + 1} 暂时无法确认`}
+                              disabled={checkpointBusy}
+                              checked={Boolean(checkpointUnresolved[question.qid])}
+                              onChange={(event) => setCheckpointUnresolved((current) => ({ ...current, [question.qid]: event.target.checked }))}
+                            />
+                            暂时无法确认，保留此证据缺口
+                          </label>
                         </div>
                       ))}
                     </div>
 
-                    {orchestrated && (
-                      <div className="mt-4 space-y-3 rounded-xl border border-amber-200/80 bg-background p-3.5">
-                        <label className="block">
-                          <span className="mb-1.5 block text-[11px] font-semibold text-muted-foreground">本轮复核意见</span>
-                          <textarea
-                            aria-label="本轮复核意见"
-                            rows={3}
-                            value={checkpointFeedback}
-                            disabled={checkpointBusy}
-                            onChange={(event) => setCheckpointFeedback(event.target.value)}
-                            placeholder="说明需要修订的内容、原文冲突或补充 Evidence 的用途。"
-                            className="w-full resize-y rounded-lg border border-border bg-background px-3 py-2 text-[12px] outline-none focus:border-accent"
-                          />
-                        </label>
-                        <label className="block text-[11px] font-semibold text-muted-foreground">
-                          补充 Evidence 文件
-                          <input
-                            aria-label="补充 Evidence 文件"
-                            type="file"
-                            multiple
-                            disabled={checkpointBusy}
-                            className="mt-2 block w-full text-[11px] font-normal"
-                            onChange={(event) => {
-                              const files = Array.from(event.target.files || []);
-                              event.target.value = "";
-                              void uploadCheckpointEvidence(job, files);
-                            }}
-                          />
-                        </label>
-                        {checkpointUploading && <p role="status" className="text-[11px] text-muted-foreground">正在准备补充 Evidence…</p>}
-                        {checkpointFiles.length > 0 && (
-                          <ul aria-label="已准备补充 Evidence" className="space-y-1 text-[11px]">
-                            {checkpointFiles.map((file) => <li key={file.uri} className="break-all select-text">{file.name} · {file.uri}</li>)}
-                          </ul>
-                        )}
-                      </div>
-                    )}
+                    <div className="mt-4 space-y-3 rounded-xl border border-amber-200/80 bg-background p-3.5">
+                      <label className="block">
+                        <span className="mb-1.5 block text-[11px] font-semibold text-muted-foreground">本轮复核意见</span>
+                        <textarea
+                          aria-label="本轮复核意见"
+                          rows={3}
+                          value={checkpointFeedback}
+                          disabled={checkpointBusy}
+                          onChange={(event) => setCheckpointFeedback(event.target.value)}
+                          placeholder="说明需要修订的内容、原文冲突或补充 Evidence 的用途。"
+                          className="w-full resize-y rounded-lg border border-border bg-background px-3 py-2 text-[12px] outline-none focus:border-accent"
+                        />
+                      </label>
+                      <label className="block text-[11px] font-semibold text-muted-foreground">
+                        补充 Evidence 文件
+                        <input
+                          aria-label="补充 Evidence 文件"
+                          type="file"
+                          multiple
+                          disabled={checkpointBusy}
+                          className="mt-2 block w-full text-[11px] font-normal"
+                          onChange={(event) => {
+                            const files = Array.from(event.target.files || []);
+                            event.target.value = "";
+                            void uploadCheckpointEvidence(job, files);
+                          }}
+                        />
+                      </label>
+                      {checkpointUploading && <p role="status" className="text-[11px] text-muted-foreground">正在准备补充 Evidence…</p>}
+                      {checkpointFiles.length > 0 && (
+                        <ul aria-label="已准备补充 Evidence" className="space-y-1 text-[11px]">
+                          {checkpointFiles.map((file) => <li key={file.uri} className="break-all select-text">{file.name} · {file.uri}</li>)}
+                        </ul>
+                      )}
+                    </div>
 
                     <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-amber-200 pt-3">
                       <span className="text-[10.5px] text-muted-foreground">
-                        {orchestrated && job.pending_checkpoint.round >= job.max_rounds
+                        {job.pending_checkpoint.round >= job.max_rounds
                           ? "已达到轮数上限。结束后保留最终产物及所有未解决缺口。"
                           : "人工等待不占运行并发，也不计入单轮运行期限；未填写的问题会保留为证据缺口。"}
                       </span>
                       <div className="flex flex-wrap gap-2">
-                        {orchestrated && (
-                          <Button variant="outline" disabled={checkpointBusy} onClick={() => submitCheckpointAnswers(job, "finish")}>
-                            {checkpointSubmitting ? "提交中…" : "结束挖掘并保留最终产物"}
-                          </Button>
-                        )}
-                        {(!orchestrated || job.pending_checkpoint.round < job.max_rounds) && (
+                        <Button variant="outline" disabled={checkpointBusy} onClick={() => submitCheckpointAnswers(job, "finish")}>
+                          {checkpointSubmitting ? "提交中…" : "结束挖掘并保留最终产物"}
+                        </Button>
+                        {job.pending_checkpoint.round < job.max_rounds && (
                           <Button disabled={checkpointBusy} onClick={() => submitCheckpointAnswers(job)}>
-                            {checkpointSubmitting ? "提交中…" : orchestrated ? `提交补证并开始第 ${job.pending_checkpoint.round + 1} 轮` : "提交答案并继续挖掘"}
+                            {checkpointSubmitting ? "提交中…" : `提交补证并开始第 ${job.pending_checkpoint.round + 1} 轮`}
                             <ArrowRight className="size-3.5" />
                           </Button>
                         )}
@@ -1504,12 +1089,11 @@ export default function MiningView({
             <div className="grid gap-4 lg:grid-cols-[minmax(360px,0.8fr)_minmax(0,1.2fr)]">
             <div className="rounded-xl border border-border bg-surface p-4">
               <div className="mb-4 flex items-center justify-between text-xs">
-                <span className="font-semibold">挖掘流水线{job.engine === "ov_compile" ? "（仅表示阶段位置）" : ""}</span>
+                <span className="font-semibold">挖掘流水线（仅表示阶段位置）</span>
                 <span className="text-muted-foreground">
                   {job.status === "queued" || job.status === "preparing"
                     ? "等待调度"
-                    : orchestrated ? `第 ${job.current_round || 1} / ${job.max_rounds} 轮 · ${job.ov_stage || "等待远端阶段上报"}`
-                    : job.engine === "ov_compile" ? (job.ov_stage || "等待远端阶段上报") : `第 ${job.current_round || 1} / ${job.max_rounds} 轮`}
+                    : `第 ${job.current_round || 1} / ${job.max_rounds} 轮 · ${job.ov_stage || "等待远端阶段上报"}`}
                 </span>
               </div>
               <div className="space-y-3">
@@ -1548,7 +1132,7 @@ export default function MiningView({
               </div>
               <div className="mono max-h-64 min-h-40 overflow-auto whitespace-pre-wrap break-words text-[10.5px] leading-relaxed text-[#cbd5e1] select-text">
                 {job.logs?.length
-                  ? job.logs.map((line, index) => <div key={index}>{formatRuntimeLog(line)}</div>)
+                  ? job.logs.map((line, index) => <div key={index}>{line}</div>)
                   : <span className="text-muted-soft">任务正在准备，暂无日志。</span>}
               </div>
             </div>
@@ -1557,7 +1141,7 @@ export default function MiningView({
         ) : (
           <div className="rounded-xl border border-border bg-surface p-4">
             <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
-              <div className="text-[13px] font-bold">{orchestrated ? `第 ${job.current_round || 1} 轮产物` : "任务产物"}</div>
+              <div className="text-[13px] font-bold">第 {job.current_round || 1} 轮产物</div>
               <div className="flex items-center gap-2">
                 {job.finished_at && <span className="text-[10px] text-muted-soft">完成于 {formatDateTime(job.finished_at)}</span>}
                 {job.status === "succeeded" && (
@@ -1604,7 +1188,7 @@ export default function MiningView({
           </div>
         )}
 
-        {orchestrated && Boolean(job.rounds?.length) && (
+        {Boolean(job.rounds?.length) && (
           <section className="rounded-xl border border-border bg-background p-4" aria-label="挖掘轮次记录">
             <div className="mb-3 text-[13px] font-bold">轮次记录</div>
             <div className="space-y-3">
@@ -1691,8 +1275,8 @@ export default function MiningView({
                           {job.name}
                         </button>
                         <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10.5px] text-muted-foreground">
-                          <span>{sourceDisplayName(job.input_dir)}</span>
-                          <span>{job.rounds_mode === "orchestrated" ? `第 ${Math.max(1, job.current_round || 1)} / ${job.max_rounds} 轮` : job.engine === "ov_compile" ? (job.ov_stage || "等待远端阶段上报") : `第 ${Math.max(1, job.current_round || 1)} / ${job.max_rounds} 轮`}</span>
+                          <span>{job.input_dir}</span>
+                          <span>第 {Math.max(1, job.current_round || 1)} / {job.max_rounds} 轮</span>
                         </div>
                       </div>
                       <Pill tone={jobStatusMeta(job.status).tone as any}>{jobStatusMeta(job.status).label}</Pill>
@@ -1759,7 +1343,7 @@ export default function MiningView({
                       {job.name}
                     </button>
                     <span className="hidden shrink-0 text-[11px] text-muted-foreground sm:block">
-                      {sourceDisplayName(job.input_dir)}
+                      {job.input_dir}
                     </span>
                     <Pill tone={jobStatusMeta(job.status).tone as any}>{jobStatusMeta(job.status).label}</Pill>
                   </li>
@@ -1859,7 +1443,7 @@ export default function MiningView({
                           <span className="mono mt-0.5 block truncate text-[10px] text-muted-soft select-text">{job.job_id}</span>
                         </span>
                         <span className="mono truncate pr-3 text-[11px] text-muted-foreground select-text">
-                          {job.input_dir ? sourceDisplayName(job.input_dir) : "历史归档"}
+                          {job.input_dir ? job.input_dir : "历史归档"}
                         </span>
                         <span className="text-[11px] text-muted-foreground">{formatDateTime(job.created_at)}</span>
                         <ChevronDown className={cn("size-4 text-muted-foreground transition-transform", expanded && "rotate-180 text-accent")} />
@@ -1918,17 +1502,17 @@ export default function MiningView({
                   </select>
                   <div className={cn(
                     "mt-1.5 text-[11px]",
-                    selectedSource?.ready ? "text-muted-foreground" : selectedIngestion?.status === "failed" ? "text-destructive" : "text-amber-700"
+                    selectedSource?.ready ? "text-muted-foreground" : selectedSource?.error ? "text-destructive" : "text-amber-700"
                   )}>
                     {!config
                       ? "正在检查目录…"
                       : selectedSource?.ready
                         ? `${selectedSource.path} · ${selectedSource.document_count} 个文档 · ${formatBytes(selectedSource.total_bytes)}`
-                        : selectedIngestion?.status === "processing"
-                          ? `知识源正在后处理（${selectedIngestion.progress}%），完成前不可用于挖掘。`
-                          : selectedIngestion?.status === "failed"
-                            ? `知识源后处理失败：${selectedIngestion.error || "请重新上传文件"}`
-                            : "该目录没有非隐藏文档，请先上传素材。"}
+                        : selectedSource?.error
+                          ? `知识源暂不可用：${selectedSource.error}`
+                          : selectedSource?.status === "missing"
+                            ? "OpenViking 中的目录已被删除，请重新选择知识源。"
+                            : "该目录没有可挖掘文档，请先上传素材。"}
                   </div>
                 </label>
 
@@ -2025,110 +1609,6 @@ export default function MiningView({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={createSourceOpen} onOpenChange={setCreateSourceOpen}>
-        <DialogContent className="w-full !max-w-[460px]">
-          <DialogHeader>
-            <DialogTitle>新建知识源</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div>
-              <Label htmlFor="create-source-name" className="mb-1.5 block text-xs font-semibold">知识源名称</Label>
-              <Input
-                id="create-source-name"
-                autoFocus
-                value={createSourceName}
-                maxLength={80}
-                placeholder="例如：abc"
-                onChange={(event) => setCreateSourceName(event.target.value)}
-                onKeyDown={(event) => event.key === "Enter" && createSource()}
-              />
-            </div>
-            <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setCreateSourceOpen(false)}>取消</Button>
-              <Button disabled={!createSourceName.trim() || sourceMutating} onClick={createSource}>
-                {sourceMutating ? "创建中…" : "创建"}
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={mergeSourceOpen} onOpenChange={setMergeSourceOpen}>
-        <DialogContent className="w-full !max-w-[540px]">
-          <DialogHeader>
-            <DialogTitle>合并知识源</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div>
-              <Label className="mb-2 block text-xs font-semibold">选择来源（至少 2 个）</Label>
-              <div className="max-h-56 space-y-2 overflow-auto rounded-lg border border-border p-2">
-                {inputSources.map((source) => (
-                  <label key={source.path} className={cn(
-                    "flex items-center gap-3 rounded-lg px-2.5 py-2",
-                    source.ready ? "cursor-pointer hover:bg-surface-subtle" : "cursor-not-allowed opacity-55"
-                  )}>
-                    <input
-                      type="checkbox"
-                      disabled={!source.ready}
-                      checked={mergeSourcePaths.includes(source.path)}
-                      onChange={(event) => setMergeSourcePaths((current) => event.target.checked
-                        ? [...current, source.path]
-                        : current.filter((path) => path !== source.path))}
-                      className="size-4 accent-[var(--accent)]"
-                    />
-                    <span className="mono min-w-0 flex-1 truncate text-[12px] font-semibold">
-                      {sourceDisplayName(source.path)}
-                    </span>
-                    <span className="text-[11px] text-muted-foreground">{source.document_count} 个文档</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-            <div>
-              <Label htmlFor="merge-target-name" className="mb-1.5 block text-xs font-semibold">合并后的知识源</Label>
-              <Input
-                id="merge-target-name"
-                value={mergeTargetName}
-                maxLength={80}
-                placeholder="例如：all-customer-service"
-                onChange={(event) => setMergeTargetName(event.target.value)}
-              />
-              <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
-                合并会复制文件到目标目录，不删除原知识源；同名文件自动添加序号保留。
-              </p>
-            </div>
-            <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setMergeSourceOpen(false)}>取消</Button>
-              <Button disabled={mergeSourcePaths.length < 2 || !mergeTargetName.trim() || sourceMutating} onClick={mergeSources}>
-                {sourceMutating ? "合并中…" : `合并 ${mergeSourcePaths.length} 个知识源`}
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={!!deleteSource} onOpenChange={(open) => !open && setDeleteSource(null)}>
-        <DialogContent className="w-full !max-w-[460px]">
-          <DialogHeader>
-            <DialogTitle>删除知识源</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <p className="text-sm leading-relaxed text-muted-foreground">
-              确定删除 <span className="mono font-semibold text-foreground">
-                {deleteSource ? sourceDisplayName(deleteSource.path) : ""}
-              </span>
-              ？目录内 {deleteSource?.document_count ?? 0} 个文档会一并删除。已创建任务使用独立快照，不受影响。
-            </p>
-            <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setDeleteSource(null)}>取消</Button>
-              <Button disabled={sourceMutating} onClick={deleteKnowledgeSource} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
-                <Trash2 className="size-3.5" /> {sourceMutating ? "删除中…" : "确认删除"}
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
-
       <Dialog open={!!deleteJob} onOpenChange={(open) => !open && !jobDeleting && setDeleteJob(null)}>
         <DialogContent className="w-full !max-w-[480px]">
           <DialogHeader>
@@ -2148,48 +1628,6 @@ export default function MiningView({
                 <Trash2 className="size-3.5" /> {jobDeleting ? "删除中…" : "确认删除任务"}
               </Button>
             </div>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
-        open={!!sourcePreview}
-        onOpenChange={(open) => {
-          if (!open) {
-            setSourcePreview(null);
-            setSourceFiles([]);
-            setSelectedSourceFile(null);
-            setSourceFileContent(null);
-            setSourceFileLoading("");
-          }
-        }}
-      >
-        <DialogContent className="flex h-[82vh] w-[calc(100vw-32px)] flex-col overflow-hidden gap-0 p-0 !max-w-[1160px]">
-          <DialogHeader className="border-b border-border bg-surface px-5 py-4">
-            <DialogTitle>知识源内容 · {sourcePreview ? sourceDisplayName(sourcePreview.path) : ""}</DialogTitle>
-          </DialogHeader>
-          <div className="grid min-h-0 flex-1 md:grid-cols-[300px_minmax(0,1fr)]">
-            <aside className="min-h-0 overflow-auto border-b border-border bg-surface-subtle p-2 md:border-b-0 md:border-r">
-              {sourcePreviewLoading ? <div className="p-3 text-xs text-muted-foreground">正在加载文件…</div> : sourceFiles.length === 0 ? (
-                <div className="p-3 text-xs text-muted-foreground">该知识源暂无可查看文档。</div>
-              ) : sourceFiles.map((file) => (
-                <button key={file.relative_path} type="button" onClick={() => sourcePreview && loadKnowledgeSourceFile(sourcePreview, file)} className={cn("mb-1 w-full rounded-md px-3 py-2 text-left", selectedSourceFile?.relative_path === file.relative_path ? "bg-accent-soft text-accent" : "hover:bg-background")}>
-                  <div className="flex min-w-0 items-center gap-2"><FileText className="size-3.5 shrink-0" /><span className="mono truncate text-[12px] font-semibold">{file.relative_path}</span></div>
-                  <div className="mt-1 pl-5 text-[10.5px] text-muted-foreground">{formatBytes(file.size_bytes)} · {formatDateTime(file.updated_at)}</div>
-                </button>
-              ))}
-              {sourceFilesTruncated && <div className="px-3 py-2 text-[10.5px] text-muted-foreground">仅显示前 1000 个文件。</div>}
-            </aside>
-            <section className="flex min-h-0 flex-col bg-background">
-              {sourceFileLoading ? <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">正在读取文档…</div> : !selectedSourceFile ? (
-                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">从左侧选择一个文档查看内容。</div>
-              ) : !sourceFileContent?.preview_available ? (
-                <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground">{sourceFileContent?.message || "该文件暂不支持在线预览。"}</div>
-              ) : <>
-                <div className="flex items-center justify-between border-b border-border px-5 py-3"><span className="mono truncate text-[12px] font-semibold">{sourceFileContent.name}</span>{sourceFileContent.truncated && <Pill tone="amber">仅显示前 1 MB</Pill>}</div>
-                <pre className="mono min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words bg-[#0f172a] p-5 text-[12px] leading-relaxed text-[#dbe4f0]">{sourceFileContent.content}</pre>
-              </>}
-            </section>
           </div>
         </DialogContent>
       </Dialog>
@@ -2375,7 +1813,7 @@ function formatDuration(seconds: number) {
 }
 
 function isActiveJob(status: MiningJobStatus) {
-  return isExecutingJob(status) || status === "waiting" || status === "waiting_human";
+  return isExecutingJob(status) || status === "waiting_human";
 }
 
 function isExecutingJob(status: MiningJobStatus) {
@@ -2383,7 +1821,7 @@ function isExecutingJob(status: MiningJobStatus) {
 }
 
 function isWaitingForEvidence(job: MiningJob) {
-  return job.status === "waiting_human" || job.status === "waiting";
+  return job.status === "waiting_human";
 }
 
 function jobStatusMeta(status: MiningJobStatus) {
@@ -2391,7 +1829,6 @@ function jobStatusMeta(status: MiningJobStatus) {
     preparing: { label: "准备中", tone: "gray" },
     queued: { label: "排队中", tone: "blue" },
     running: { label: "运行中", tone: "blue" },
-    waiting: { label: "待知识补证", tone: "amber" },
     waiting_human: { label: "等待人工补证", tone: "amber" },
     stopping: { label: "停止中", tone: "amber" },
     stopped: { label: "已停止", tone: "gray" },
@@ -2405,10 +1842,6 @@ function jobStatusMeta(status: MiningJobStatus) {
 function jobProgress(job: MiningJob) {
   if (job.status === "queued" || job.status === "preparing") return 0;
   if (job.status === "succeeded") return 100;
-  if (job.engine === "ov_compile" && job.rounds_mode !== "orchestrated") {
-    const phases = Object.values(job.phase || {});
-    return Math.round((phases.filter((state) => state === "done").length / 3) * 100);
-  }
   const completedRounds = Math.max(0, (job.current_round || 1) - 1);
   const doneSteps = STEP_META.filter((step) => job.phase?.[step.key] === "done").length;
   const activeStep = STEP_META.some((step) => job.phase?.[step.key] === "active") ? 0.5 : 0;
@@ -2424,47 +1857,14 @@ function pipelineStepLabel(state: PhaseState[keyof PhaseState]) {
 function sourceStatusMeta(source: InputSource): { label: string; tone: PillTone } {
   if (source.status === "missing") return { label: "路径已删除", tone: "red" };
   if (source.status === "unavailable") return { label: "暂不可用", tone: "amber" };
-  const ingestion = sourceIngestion(source);
-  if (ingestion.status === "processing") return { label: "后处理中", tone: "blue" };
-  if (ingestion.status === "failed") return { label: "处理失败", tone: "red" };
   if (source.ready) return { label: "可挖掘", tone: "green" };
   return { label: "空目录", tone: "amber" };
-}
-
-function sourceIngestion(source: InputSource): SourceIngestionStatus {
-  return source.ingestion || {
-    schema_version: 1,
-    source_path: source.path,
-    batch_id: "",
-    status: source.ready ? "ready" : "empty",
-    stage: source.ready ? "complete" : "idle",
-    progress: source.ready ? 100 : 0,
-    processed_files: 0,
-    total_files: 0,
-    current_file: "",
-    error: "",
-    started_at: "",
-    updated_at: "",
-    finished_at: "",
-  };
-}
-
-function ingestionStageLabel(stage: SourceIngestionStatus["stage"]) {
-  if (stage === "validating") return "校验上传文件";
-  if (stage === "converting") return "转换为 Markdown";
-  if (stage === "writing") return "写入知识源";
-  if (stage === "merging") return "合并知识源";
-  if (stage === "complete") return "处理完成";
-  if (stage === "failed") return "处理失败";
-  return "准备处理";
 }
 
 function jobArtifacts(job: MiningJob) {
   const source = job.artifacts?.length
     ? job.artifacts
-    : job.rounds_mode === "orchestrated"
-      ? (job.rounds || []).find((round) => round.round === job.current_round)?.artifacts || []
-      : (job.rounds || []).flatMap((round) => round.artifacts || []);
+    : (job.rounds || []).find((round) => round.round === job.current_round)?.artifacts || [];
   const seen = new Set<string>();
   return source.filter((artifact) => {
     if (seen.has(artifact.path)) return false;
@@ -2530,11 +1930,9 @@ function KnowledgeSupplementHistory({ rounds }: { rounds: KnowledgeSupplementRou
             <div>
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-[13px] font-bold">第 {record.round || 1} 轮 Evidence 补充</span>
-                <Pill tone={record.source === "checkpoint" ? "green" : "amber"}>
-                  {record.source === "checkpoint" ? "已提交" : "历史恢复"}
-                </Pill>
+                <Pill tone="green">已提交</Pill>
                 <span className="text-[10.5px] text-muted-foreground">
-                  {record.checkpoint === "after_compile" ? "本轮 Compile 后" : record.checkpoint === "after_semantic" ? "Skill 生成前" : record.checkpoint}
+                  本轮 Compile 后
                 </span>
               </div>
               <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{record.title}</p>
@@ -2586,18 +1984,6 @@ function formatDateTime(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString("zh-CN", { hour12: false });
-}
-
-function sourceDisplayName(path: string) {
-  return path.replace(/^data[\\/]+/, "");
-}
-
-function formatRuntimeLog(line: string) {
-  return line
-    .replace(/HERMES_HOME/g, "模型运行配置")
-    .replace(/HERMES_OK/g, "MODEL_OK")
-    .replace(/\.hermes_home/g, ".model_runtime")
-    .replace(/hermes/gi, "模型运行时");
 }
 
 function formatBytes(value: number) {

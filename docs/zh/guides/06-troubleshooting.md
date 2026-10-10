@@ -405,16 +405,6 @@ curl -s http://POD_A:52010/storage/status
 
 ## 诊断工具
 
-### teamEvolver doctor hermes
-
-运行集成诊断，自动检查常见配置问题：
-
-```bash
-teamEvolver doctor hermes
-```
-
-输出包括检测到的 issues、notes 和建议的 next_steps。
-
 ### 健康检查端点
 
 ```bash

@@ -26,7 +26,7 @@ ruff check teamEvolver team_skills team_memory team_miner team_replay session_in
 
 # 服务
 teamEvolver start --daemon
-teamEvolver status / doctor / config show / stop
+teamEvolver status / config show / stop
 
 # 前端构建（仅改动 web-ui/ 时需要；仓库已含构建产物）
 npm --prefix web-ui run build
@@ -50,7 +50,7 @@ teamEvolver/          # Python 包（FastAPI 单服务承载全部模块）
 └── web/              # 控制台静态产物
 session_ingestion/    # Session 接入：Agent Push、数据源 Pull 与租户 Adapter
 team_skills/          # Skill 库（library/）、候选校验发布（candidates/）与 Skill Evolution 流水线（evolution/）
-team_miner/           # Skill 挖掘、Benchmark、任务编排、前端、测试与主服务桥接
+team_miner/           # OV Skill 挖掘、知识库挖掘、任务编排、前端、测试与主服务桥接
 team_memory/          # Memory 专属后端、配置、路由、frontend/ 和 tests/
 team_replay/          # True Replay Interface、执行引擎、策略与 Runtime Adapter
 web-ui/               # React + TypeScript 控制台外壳与公共 UI

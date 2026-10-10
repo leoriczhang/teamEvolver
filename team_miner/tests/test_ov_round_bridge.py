@@ -13,9 +13,10 @@ import httpx
 import pytest
 from fastapi import FastAPI, HTTPException
 
-from team_miner import benchmark_format, ov_round_orchestration
+from team_miner import ov_round_orchestration
 from team_miner.bridge import SkillMinerBridgeMixin
 from team_miner.ov_compile_mining import REVIEW_SCHEMA_VERSION, RUNS_ROOT, SKILL_NAME, OvSkillMiningRepository
+from team_miner.tests.dataset_fixtures import build_document
 
 SOURCE = "viking://resources/team/source"
 APPROVED = "viking://resources/team/approved/policy.md"
@@ -90,7 +91,7 @@ class FakeOV:
 
     def complete(self, job, *, questions=True):
         source = job["source_snapshot"] + "/original/policy.md"
-        document = benchmark_format.build_document(
+        document = build_document(
             "policy-review",
             [
                 {
@@ -172,11 +173,16 @@ class Owner(SkillMinerBridgeMixin):
     def __init__(self, repository, remote):
         self.repository = repository
         self.remote = remote
+        self.config = SimpleNamespace(_config_file=str(repository.state_root / "test-config.yaml"))
         self.submissions = []
         self.refreshes = []
+        self.compiler_body = ov_round_orchestration.SKILL_BODY
 
     def _ov_skill_mining_repository(self):
         return self.repository
+
+    def _ov_skill_compiler_body(self):
+        return self.compiler_body
 
     def _knowledge_endpoint(self):
         return "http://fake-ov.test"
@@ -273,13 +279,10 @@ async def test_lost_acceptance_restarts_with_same_payload_key_and_frozen_content
     assert pending["status"] == "preparing" and pending["compile_request"] and not pending["ov_task_id"]
     assert pending["ov_sync_failures"] == 1 and pending["ov_next_retry_at"]
     rig.remote.content[f"{SOURCE}/policy.md"] = "Changed live policy must not enter the retry."
-    monkeypatch.setattr(
-        ov_round_orchestration,
-        "SKILL_BODY",
-        ov_round_orchestration.SKILL_BODY + "\nChanged compiler must not enter the retry.\n",
-    )
+    rig.compiler_body += "\nChanged compiler must not enter the retry.\n"
     restarted_repo = OvSkillMiningRepository(rig.repository.state_root, rig.repository.project_root)
     restarted = Owner(restarted_repo, rig.remote)
+    restarted.compiler_body = rig.compiler_body
     resumed = await restarted._submit_ov_skill_round(restarted_repo.get_job(initial["job_id"]))
     assert resumed["status"] == "queued" and resumed["ov_task_id"] == "compile-1"
     assert len(rig.remote.accepted) == 1 and rig.remote.compile_calls[0] == rig.remote.compile_calls[1]
@@ -589,7 +592,7 @@ async def test_remote_partial_output_warns_with_complete_bundle_and_next_round_f
     assert "compiler_path" not in public
 
     compiler_v2 = compiler_v1 + "\n# Improved second-round compiler guidance\n"
-    monkeypatch.setattr(ov_round_orchestration, "SKILL_BODY", compiler_v2)
+    rig.compiler_body = compiler_v2
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_for(rig)), base_url="http://test") as client:
         response = await client.post(
             f"/api/mining/jobs/{waiting['job_id']}/continue",
@@ -637,7 +640,7 @@ async def test_before_acceptance_network_failure_retries_with_frozen_round_compi
     pending = await rig._submit_ov_skill_round(initial)
     assert pending["status"] == "preparing" and not pending.get("compile_request") and not rig.remote.compile_calls
     assert rig.remote.published[0]["skill_body"] == ov_round_orchestration._compiler_package(frozen_body)[1]
-    monkeypatch.setattr(ov_round_orchestration, "SKILL_BODY", frozen_body + "\nChanged during failed submission\n")
+    rig.compiler_body = frozen_body + "\nChanged during failed submission\n"
     monkeypatch.setattr(rig, "_round_write_immutable", write_immutable)
     accepted = await rig._submit_ov_skill_round(pending)
     assert accepted["status"] == "queued" and len(rig.remote.accepted) == 1
@@ -747,7 +750,7 @@ async def test_other_job_compiler_update_cannot_change_unknown_acceptance_retry_
     assert rig.remote.compiler_skills[name_v1] == body_v1
 
     source_v2 = source_v1 + "\nImproved compiler guidance for another job.\n"
-    monkeypatch.setattr(ov_round_orchestration, "SKILL_BODY", source_v2)
+    rig.compiler_body = source_v2
     other = await rig._submit_ov_skill_round(create(rig, name="Different immutable pin"))
     assert other["compiler_uri"] != uri_v1 and other["compiler_source_sha256"] != hash_v1
     assert rig.remote.compiler_skills[name_v1] == body_v1
@@ -811,7 +814,7 @@ async def test_unknown_acceptance_retry_restores_missing_original_pin_from_froze
     rig.remote.lose_next_acceptance = True
     pending = await rig._submit_ov_skill_round(create(rig))
     del rig.remote.compiler_skills[name]
-    monkeypatch.setattr(ov_round_orchestration, "SKILL_BODY", source_body + "\nChanged future compiler.\n")
+    rig.compiler_body = source_body + "\nChanged future compiler.\n"
     recovered = await rig._submit_ov_skill_round(rig.repository.get_job(pending["job_id"]))
     assert recovered["status"] == "queued" and recovered["ov_task_id"] == "compile-1"
     assert recovered["compile_request"] == pending["compile_request"]

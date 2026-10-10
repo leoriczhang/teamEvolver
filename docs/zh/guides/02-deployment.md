@@ -88,7 +88,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/home/teamevolver/.teamEvolver
-ReadWritePaths=/home/teamevolver/.hermes
+ReadWritePaths=/home/teamevolver/.teamEvolver
 
 # 资源限制
 LimitNOFILE=65536
@@ -268,7 +268,7 @@ WatchdogSec=60
 
 ## 存储与本地回退
 
-teamEvolver 将 Session 与 Skill 控制面分开配置。启用 `storage_pg.enabled=true` 后，未显式设置的 Skill 后端与 Session 后端都解析为 PostgreSQL；租户不能覆盖这些服务级存储参数。多副本部署必须让二者的 effective backend 都为 `postgres`，Pod 本地 `skills.dir` 仅作为可重建缓存。
+teamEvolver 将 Session 与 Skill 控制面分开配置。启用 `storage_pg.enabled=true` 后，未显式设置的 Skill 后端与 Session 后端都解析为 PostgreSQL；租户不能覆盖这些服务级存储参数。多副本部署必须让二者的 effective backend 都为 `postgres`，Pod 本地 `skills.runtime_cache_dir` 仅作为可重建缓存。
 
 | 配置 | 默认 | 说明 |
 |------|------|------|
@@ -303,7 +303,7 @@ teamEvolver 的持久化数据存储在以下位置：
 | 日志 | `~/.teamEvolver/teamEvolver.log` | 无需长期备份 |
 | Prompt 覆盖 | `~/.teamEvolver/prompt_overrides.json` | 每日 |
 | 阶段设置 | `~/.teamEvolver/stage_settings.json` | 每日 |
-| 本地技能库 | `~/.hermes/skills/` 或配置的 `skills.dir` | 每日 |
+| Skill 运行缓存 | `~/.teamEvolver/runtime/skills/` 或配置的 `skills.runtime_cache_dir` | 每日 |
 | 会话存储 | OpenViking 云端（若使用 sharing） | 云端负责 |
 | OpenViking 数据 | OpenViking 数据目录（local 模式） | 每日 |
 | 控制台会话 | `~/.teamEvolver/console_sessions.json` | 无需备份 |
@@ -326,7 +326,7 @@ set -euo pipefail
 BACKUP_DIR="/var/backups/teamevolver"
 DATE=$(date +%Y%m%d_%H%M%S)
 TEAMEVOLVER_HOME="/home/teamevolver/.teamEvolver"
-SKILLS_DIR="/home/teamevolver/.hermes/skills"
+SKILLS_DIR="/home/teamevolver/.teamEvolver/runtime/skills"
 
 mkdir -p "$BACKUP_DIR"
 
@@ -459,7 +459,7 @@ chmod 700 /home/teamevolver/.teamEvolver
 chmod 600 /home/teamevolver/.teamEvolver/config.yaml
 
 # 技能目录权限
-chmod 700 /home/teamevolver/.hermes/skills
+chmod 700 /home/teamevolver/.teamEvolver/runtime/skills
 ```
 
 ## 资源需求

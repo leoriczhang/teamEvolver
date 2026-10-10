@@ -1,6 +1,6 @@
 # 产品简介
 
-teamEvolver 是 **Agent 团队能力进化控制面**。它不是另一个 Agent Runtime，而是架设在现有 Agent Runtime（如 Hermes、Pi、Codex 等）之上的能力进化层，把真实工作中产生的经验转化为可复用、可验证、可治理的团队 Skill 与团队 Memory。
+teamEvolver 是 **Agent 团队能力进化控制面**。它不是另一个 Agent Runtime，而是架设在现有 Agent Runtime（如 Pi、Codex 等）之上的能力进化层，把真实工作中产生的经验转化为可复用、可验证、可治理的团队 Skill 与团队 Memory。
 
 ## 核心定位
 
@@ -33,8 +33,8 @@ teamEvolver 使用 OpenViking 作为共享资产与进化产物的持久化后�
 
 ## 适用场景
 
-- **团队 Coding Agent**：多台 Hermes 机器共享团队 Skill，自动从完成任务中提炼新技能
-- **多 Runtime 接入**：Pi、Hermes 等多种 Coding Agent Runtime 统一进化和能力分发
+- **团队 Coding Agent**：多个 Agent 实例共享团队 Skill，自动从完成任务中提炼新技能
+- **多 Runtime 接入**：Pi、Codex 等多种 Coding Agent Runtime 统一进化和能力分发
 - **企业内部 Agent**：私有化部署，从业务对话中沉淀领域 Memory 和 Skill
 - **评测与进化研究**：使用 True Replay 做严谨的 Baseline vs Candidate 对比实验
 

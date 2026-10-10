@@ -16,7 +16,6 @@ if str(MINER_ROOT.parent) not in sys.path:
 
 from team_miner.bridge import SkillMinerBridgeMixin  # noqa: E402
 from team_miner.lifecycle import mined_artifact_descriptor  # noqa: E402
-from team_miner.mining_jobs import MiningJobManager  # noqa: E402
 from team_miner.ov_compile_mining import (  # noqa: E402
     DEFAULT_KNOWLEDGE_SOURCE_URI,
     SKILL_BODY,
@@ -169,10 +168,10 @@ def test_materialized_compile_bundle_keeps_existing_candidate_contract(tmp_path,
             "source_session_ids": ["viking://resources/team/runbooks/billing.md"],
         }
     ]
-    from team_miner import benchmark_format
+    from team_miner.tests.dataset_fixtures import build_document
 
     cases = [{**cases[0], "input": f"Support scenario {index}: " + cases[0]["input"]} for index in range(12)]
-    document = benchmark_format.build_document("support-triage", cases)
+    document = build_document("support-triage", cases)
     repository.write_output(job["job_id"], "compiled_skill/support-triage/benchmark.json", json.dumps(document))
     repository.write_output(job["job_id"], "analysis/evidence-map.md", "# Evidence\nGrounded in billing.md.\n")
     repository.write_output(job["job_id"], "analysis/gaps.md", "# Gaps\nNo unresolved gaps in this fixture.\n")
@@ -304,23 +303,3 @@ async def test_remote_refresh_failure_keeps_last_status_and_sets_backoff(tmp_pat
     assert public["remote_state_stale"] is True
     assert public["ov_sync_failures"] == 1
     assert public["ov_next_retry_at"]
-
-
-def test_legacy_job_manager_does_not_take_over_ov_compile_jobs(tmp_path):
-    repository = OvSkillMiningRepository(tmp_path / "state", tmp_path)
-    job = repository.create_job(
-        name="OV task",
-        account="account-a",
-        source_uri="viking://resources/team/source",
-        source_snapshot_uri="viking://resources/agent_skill_workspace/runs/test/source",
-        output_uri="viking://resources/agent_skill_workspace/runs/test/output",
-        document_count=1,
-        max_rounds=1,
-    )
-    repository.update_job(job["job_id"], status="queued", ov_task_id="task-1")
-
-    manager = MiningJobManager(tmp_path, start_immediately=False)
-    manager.start()
-
-    assert manager.get_job(job["job_id"])["status"] == "queued"
-    assert manager._processes == {}

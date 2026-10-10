@@ -11,7 +11,7 @@ Implemented:
 - Optional DreamCycle Memory maintenance and change ledger
 - Skill versioning, audit chain, tombstones, and durable outbox
 - Personal-Skill editing, team publish requests, and administrator approval
-- Hermes Coding Agent integration and Pi Agent reference integration
+- Generic Agent Protocol v2 integration and Pi Agent reference integration
 - Langfuse inbound pull, outbound tracing, and custom Trace mapping
 - Experiment Workbench (multi-file Skill Candidate editing, Diff, and True Replay)
 - Personal Memory, Team Resources, and read-only Platform Assets

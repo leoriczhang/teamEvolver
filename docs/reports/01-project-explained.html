@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light">
-<meta name="description" content="基于 teamEvolver 当前源码的中文工程解读：架构、数据流、Skill Evolution、True Replay、Memory Evolution、SkillMiner、创新与局限。">
+<meta name="description" content="基于 teamEvolver 当前源码的中文工程解读：架构、数据流、Skill Evolution、True Replay、Memory Evolution、Skill 挖掘、创新与局限。">
 <title>teamEvolver · 从个人经验到团队能力｜工程解读</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23115e59'/%3E%3Cpath d='M8 10h16M16 10v14M9 17h14' stroke='%23ffffff' stroke-width='3' fill='none'/%3E%3C/svg%3E">
 <style>
@@ -28,7 +28,7 @@
     <a href="#flow"><span>03</span>Session 如何变成 Skill</a>
     <a href="#replay"><span>04</span>True Replay 如何判定</a>
     <a href="#memory"><span>05</span>团队 Memory 如何进化</a>
-    <a href="#miner"><span>06</span>SkillMiner 文档挖掘</a>
+    <a href="#miner"><span>06</span>Skill 挖掘 文档挖掘</a>
     <a href="#modules"><span>07</span>核心模块实现索引</a>
     <a href="#storage"><span>08</span>存储、发布与一致性</a>
     <a href="#innovation"><span>09</span>创新点与工程长处</a>
@@ -73,7 +73,7 @@
   <figure class="architecture">
     <svg viewBox="0 0 1040 596" role="img" aria-labelledby="arch-title arch-desc">
       <title id="arch-title">teamEvolver 工程架构与存储边界</title>
-      <desc id="arch-desc">外部 Agent、Langfuse 和领域文档进入 FastAPI 控制面。控制面运行 Skill Evolution、True Replay、DreamCycle、跨用户聚合与 SkillMiner。高频账本和团队 Skill 主存储位于本地，Skill 子树异步镜像到 OpenViking。真实 Agent 分支在独立运行时执行。</desc>
+      <desc id="arch-desc">外部 Agent、Langfuse 和领域文档进入 FastAPI 控制面。控制面运行 Skill Evolution、True Replay、DreamCycle、跨用户聚合与 Skill 挖掘。高频账本和团队 Skill 主存储位于本地，Skill 子树异步镜像到 OpenViking。真实 Agent 分支在独立运行时执行。</desc>
       <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0L6 3L0 6" fill="none" stroke="#5d8178" stroke-width="1.3"/></marker></defs>
       <g font-family="-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif">
       <g fill="#f2f5ef" stroke="#d3ddd5"><rect x="20" y="18" width="299" height="65" rx="8"/><rect x="338" y="18" width="214" height="65" rx="8"/><rect x="571" y="18" width="199" height="65" rx="8"/><rect x="789" y="18" width="230" height="65" rx="8"/></g>
@@ -85,14 +85,14 @@
       <text x="59" y="173" fill="#fff" font-size="16" font-weight="600">FastAPI :52010</text><text x="254" y="173" fill="#d4e8df" font-size="13">鉴权 / 协议校验 / 路由 Mixin / 内嵌 EvolveServer / 生命周期管理</text>
       <g stroke="#5d8178" fill="none" marker-end="url(#arrow)"><path d="M209 192V218"/><path d="M523 192V218"/><path d="M838 192V218"/></g>
       <g fill="#fff" stroke="#c9d9cd"><rect x="40" y="219" width="306" height="97" rx="8"/><rect x="366" y="219" width="308" height="97" rx="8"/><rect x="694" y="219" width="307" height="97" rx="8"/></g>
-      <g fill="#153d37" font-size="16" font-weight="600"><text x="58" y="247">Skill Evolution</text><text x="383" y="247">Memory Evolution</text><text x="712" y="247">SkillMiner</text></g>
-      <g fill="#526b63" font-size="12"><text x="58" y="271">过滤 → 摘要 / Judge → 分组 → Candidate</text><text x="58" y="294">同源 Test Dataset · 近期 / 历史 Evidence</text><text x="383" y="271">DreamCycle：持续维护与变更账本</text><text x="383" y="294">Aggregation：确定性快照 + 分层编译</text><text x="712" y="271">样本包 → 语义发现 → Skill 与评测编译</text><text x="712" y="294">补证反思 · 产物检查 · Candidate 提交</text></g>
+      <g fill="#153d37" font-size="16" font-weight="600"><text x="58" y="247">Skill Evolution</text><text x="383" y="247">Memory Evolution</text><text x="712" y="247">Skill 挖掘</text></g>
+      <g fill="#526b63" font-size="12"><text x="58" y="271">过滤 → 摘要 / Judge → 分组 → Candidate</text><text x="58" y="294">同源 Test Dataset · 近期 / 历史 Evidence</text><text x="383" y="271">DreamCycle：持续维护与变更账本</text><text x="383" y="294">Aggregation：确定性快照 + 分层编译</text><text x="712" y="271">来源冻结 → OV Compile → Skill / Test Dataset</text><text x="712" y="294">人工 Evidence 补证 · 轮次归档 · Candidate 提交</text></g>
       <rect x="40" y="337" width="461" height="63" rx="8" fill="#fff" stroke="#c9d9cd"/><rect x="520" y="337" width="481" height="63" rx="8" fill="#fff" stroke="#c9d9cd"/>
       <text x="57" y="361" fill="#153d37" font-size="14" font-weight="600">True Replay / 验证结果 / Candidate Review</text><text x="57" y="383" fill="#526b63" font-size="12">服务端评估 + 可选空闲验证 Worker；Memory 前后验证</text><text x="536" y="361" fill="#153d37" font-size="14" font-weight="600">SkillMutationService / Commit / Outbox</text><text x="536" y="383" fill="#526b63" font-size="12">统一记录变更 · 版本 / 删除标记 · Agent 分发重试</text>
       <g stroke="#5d8178" fill="none" marker-end="url(#arrow)"><path d="M209 316V337"/><path d="M672 316V337"/><path d="M501 368H520"/><path d="M168 421V462"/><path d="M517 421V462"/><path d="M839 421V462"/></g>
       <g fill="#fff" stroke="#c9d9cd"><rect x="20" y="463" width="319" height="109" rx="8"/><rect x="359" y="463" width="335" height="109" rx="8"/><rect x="714" y="463" width="305" height="109" rx="8"/></g>
       <g fill="#153d37" font-size="15" font-weight="600"><text x="38" y="492">本地持久化</text><text x="377" y="492">OpenViking</text><text x="732" y="492">隔离的真实 Agent 分支</text></g>
-      <g fill="#526b63" font-size="12"><text x="38" y="517">Session / Evidence / Candidate / 版本账本</text><text x="38" y="539">团队 Skill 主存储 / Outbox / YAML 配置</text><text x="377" y="517">Memory / Resources / Snapshot</text><text x="377" y="539">团队 Skill 子树的异步镜像</text><text x="732" y="517">Baseline 与 Candidate 并行执行</text><text x="732" y="539">HTTP Runtime Adapter / 本地 Hermes</text></g>
+      <g fill="#526b63" font-size="12"><text x="38" y="517">Session / Evidence / Candidate / 版本账本</text><text x="38" y="539">团队 Skill 主存储 / Outbox / YAML 配置</text><text x="377" y="517">Memory / Resources / Snapshot</text><text x="377" y="539">团队 Skill 子树的异步镜像</text><text x="732" y="517">Baseline 与 Candidate 并行执行</text><text x="732" y="539">HTTP ReplayAdapterFactory</text></g>
       <path d="M339 550H359" stroke="#5d8178" fill="none" marker-end="url(#arrow)"/>
       </g>
     </svg>
@@ -159,7 +159,7 @@
     <noscript><p>交互演示需要 JavaScript。上表已经完整列出判断规则；正文阅读不受影响。</p></noscript>
   </div>
   <div class="callout warn"><strong>验证能力有三条重要边界</strong><p>① Checklist 的满足情况仍可由 LLM 判定，具有误判可能；真实执行不等于评估完全客观。② 空 Checklist 在底层策略中可能退化为效率比较，不能当成完整完成性证明。③ 同源 Test Dataset 与候选来自相近 Evidence，有相关性偏差；还需要独立保留的任务、重复运行和人工抽查。</p></div>
-  <p>本地 Hermes 分支使用 Linux <code>systemd-run</code>、私有网络、只读路径和最小环境等约束，并通过模型 Broker 保留服务端密钥。外部 Agent 的 HTTP Replay 依赖其适配器和运行环境履约。当前代码不能支撑“在任何操作系统、任何 Agent 上都无需适配即可安全 True Replay”的结论。</p>
+  <p>True Replay 通过配置的 ReplayAdapterFactory 在独立 Agent 会话中执行 Baseline 与 Candidate。适配器负责真实工具执行、Context 与指标；应按具体运行环境验证隔离和连续交互能力。</p>
   <p class="sources">依据：<a href="#s09">[09] 完成性与效率策略</a><a href="#s10">[10] 运行隔离</a><a href="#s08">[08] 验证新鲜度</a><a href="#s20">[20] 对应测试</a></p>
 </section>
 
@@ -188,16 +188,16 @@
 </section>
 
 <section class="section" id="miner">
-  <div class="section-head"><span class="num">06</span><h2>SkillMiner：没有足够 Session 时，从文档开始</h2></div>
+  <div class="section-head"><span class="num">06</span><h2>Skill 挖掘：没有足够 Session 时，从文档开始</h2></div>
   <p class="intro">团队已有成熟领域资料、但 Agent 使用历史还少时，可以先从文档提取可执行方法，建立初始 Skill，再用真实 Session 持续修订。</p>
-  <div class="flow"><div class="flow-item"><b>领域资料</b><span>输入与知识补证<br>保留来源关系</span></div><div class="flow-item"><b>样本包构建</b><span>组织主题与切片<br>检查覆盖 / 重复</span></div><div class="flow-item"><b>语义发现</b><span>提取决策单元<br>流程、边界与 GAP</span></div><div class="flow-item"><b>Skill 与评测编译</b><span>SKILL.md<br>EVALUATION.md / 评测产物</span></div><div class="flow-item"><b>检查与接入治理</b><span>产物质量 / 人工检查<br>再提交 Skill Candidate</span></div></div>
-  <p>前三个核心步骤由对应的内置 Agent Skill 与 Prompt 驱动；<code>run_pipeline.py</code> 组织实际运行、重试、反思与产物处理。发现知识缺口后，可携带 GAP 和补充资料继续下一轮，默认最多 3 轮。挖掘任务有独立状态、停止 / 恢复及白盒配置入口。</p>
+  <div class="flow"><div class="flow-item"><b>领域 Evidence</b><span>注册来源与冻结快照</span></div><div class="flow-item"><b>OV Compile</b><span>独立轮次与七个产物</span></div><div class="flow-item"><b>人工复核</b><span>回答问题、引用来源、补充附件</span></div><div class="flow-item"><b>继续或完成</b><span>累计补证与候选修订</span></div><div class="flow-item"><b>候选治理</b><span>True Replay 与 Candidate Review</span></div></div>
+  <p>teamEvolver 编排 1–5 个真实轮次，每轮调用 OpenViking Compile，冻结来源、编译 Skill、请求和产物。启用人工补证后，每轮结束都等待复核。原始来源和累计补证是 Evidence，上一轮候选只作为修订上下文。</p>
   <div class="grid g2">
-    <article class="card"><h3>“挖掘成功”与“可发布”不同</h3><p>生成唯一可识别的 <code>SKILL.md</code> 后，挖掘任务可能带 warning 完成；提交 Skill Candidate 前仍要补齐所需评测材料。文档产出的内部 Benchmark 也不能直接充当已完成 True Replay 的证明。</p></article>
-    <article class="card"><h3>还提供两条评测旁路</h3><p>轨迹 Benchmark 挖掘可直接从交互轨迹构造独立评测产物；LIFT 桥接把评测材料转成可检查、批准和发布的外部格式。这些路径有独立用途，不能混同于主 Skill Evolution 发布链路。</p></article>
+    <article class="card"><h3>“挖掘成功”与“可发布”不同</h3><p>生成唯一可识别的 <code>SKILL.md</code> 后，挖掘任务可能带 warning 完成；提交 Skill Candidate 前仍要补齐所需评测材料。同源 Test Dataset 的结构校验也不能充当已完成 True Replay 的证明。</p></article>
+    <article class="card"><h3>每轮输入与编译器固定</h3><p>输入、编译 Skill 和请求在每轮首次准备时冻结。网络重试复用同一轮的幂等提交，服务更新不会改写已绑定的编译器版本。</p></article>
   </div>
-  <div class="callout"><strong>适合补齐冷启动，不能替代领域专家。</strong>文档本身可能过期、冲突或缺少执行细节。语义发现与反思环能把缺口显式化，但不会自动证明提取的方法有效；生成的 Skill 和评测定义仍需要领域校验与真实任务验证。</div>
-  <p class="sources">依据：<a href="#s17">[17] SkillMiner 流水线与生命周期</a><a href="#s20">[20] SkillMiner 契约测试</a></p>
+  <div class="callout"><strong>适合补齐冷启动，不能替代领域专家。</strong>文档本身可能过期、冲突或缺少执行细节。结构化复核与补证能把缺口显式化，但不会自动证明提取的方法有效；生成的 Skill 和评测定义仍需要领域校验与真实任务验证。</div>
+  <p class="sources">依据：<a href="#s17">[17] Skill 挖掘 流水线与生命周期</a><a href="#s20">[20] Skill 挖掘 契约测试</a></p>
 </section>
 
 <section class="section" id="modules">
@@ -210,7 +210,7 @@
   <details class="module"><summary><span>04 · Candidate、Dataset 与 True Replay<small>dataset_synthesizer.py · validation/ · true_replay.py</small></span></summary><div class="module-body"><div class="grid g2"><div><h4>输入与入口</h4><p>Candidate Bundle、来源 Evidence、Replay Cases、Context 材料、运行时信息。Dataset Synthesizer 负责产生结构化任务；ValidationStore 管理验证工单、结果与决策。</p></div><div><h4>关键机制与输出</h4><p>候选更新递增 revision，验证绑定 Bundle Tree Hash。静态检查先过滤明显资源语法问题；Baseline / Candidate 并行执行，完成门禁与效率策略合成结论。</p></div></div><p>近期与历史窗口需要完整可评估；缺窗口不能假定通过。运行时兼容性策略约束验证覆盖的执行环境。ValidationWorker 还受每日任务配额和空闲条件约束；是否运行以配置和启动路径为准。</p><p class="sources"><a href="#s07">[07] Dataset</a><a href="#s08">[08] 验证治理</a><a href="#s09">[09] 策略</a></p></div></details>
   <details class="module"><summary><span>05 · Skill Bundle、版本与交付<small>skills/bundle.py · hub.py · mutations.py · mirror.py</small></span></summary><div class="module-body"><div class="grid g2"><div><h4>输入与入口</h4><p>经过决策的团队 Skill 变化，包括 Publish、Update、Rollback 和 Delete。Bundle 表示完整文件集合，文件清单与树 Hash 用于一致性校验。</p></div><div><h4>关键机制与输出</h4><p>SkillMutationService 的 <code>execute</code> 或 <code>record_committed</code> 统一生成 commit 与 outbox；删除用 tombstone 表达；drain 负责分发，reconcile 补齐部分缺失事件。</p></div></div><p>部分进化路径先完成底层上传，再调用 <code>record_committed</code>。这是统一治理记录与最终交付恢复机制，不能描述成单一数据库 ACID 事务。OpenViking Skill 镜像有独立 spool 与 flusher。</p><p class="sources"><a href="#s15">[15] 变更与交付</a><a href="#s14">[14] 存储与镜像</a></p></div></details>
   <details class="module"><summary><span>06 · DreamCycle 与跨用户聚合<small>dreamcycle/ · aggregation/</small></span></summary><div class="module-body"><div class="grid g2"><div><h4>输入与入口</h4><p>个人 / 团队 Memory、任务配置、共享规则及管理员选择的来源。DreamCycle 通过工具循环维护，Aggregation 通过快照与 compile 生成团队输出。</p></div><div><h4>关键机制与输出</h4><p>前者保留变更前后快照与账本；后者用来源和规则指纹增量复用，限制 compile 并发，保存中间树合并状态。同目标并发聚合有冲突保护。</p></div></div><p>两者都涉及长期事实治理，但并未统一成和 Skill Candidate 完全相同的发布状态机。Snapshot 缺失或不完整，会限制 Memory True Replay 能提供的证据。</p><p class="sources"><a href="#s11">[11] 维护循环</a><a href="#s12">[12] 变更账本</a><a href="#s13">[13] 增量编译</a></p></div></details>
-  <details class="module"><summary><span>07 · SkillMiner、控制台与可观测性<small>skillminer/ · mining_lifecycle.py · web-ui/src/ · observability/</small></span></summary><div class="module-body"><div class="grid g2"><div><h4>输入与入口</h4><p>领域文档、补充材料、模型与 Prompt 配置。控制台组织挖掘、进化、资产、治理和文档入口，支持多文件 Diff 与 Skill / Memory Lab。</p></div><div><h4>关键机制与输出</h4><p>挖掘任务包装真实流水线，保存步骤产物和状态。Langfuse 入站负责拉取与映射 Session；出站追踪模型调用及进化 / DreamCycle 过程，异常时尽量不阻塞业务。</p></div></div><p>白盒配置使规划、合成和判定逻辑可调整，也意味着一次 Prompt 或模型变化可能影响后续验证结果。排查问题时，应把配置版本与候选版本一起看。</p><p class="sources"><a href="#s17">[17] 挖掘</a><a href="#s18">[18] 观测</a><a href="#s03">[03] 前端</a></p></div></details>
+  <details class="module"><summary><span>07 · Skill 挖掘、控制台与可观测性<small>team_miner/ · lifecycle.py · web-ui/src/ · observability/</small></span></summary><div class="module-body"><div class="grid g2"><div><h4>输入与入口</h4><p>领域文档、补充材料、模型与 Prompt 配置。控制台组织挖掘、进化、资产、治理和文档入口，支持多文件 Diff 与 Skill / Memory Lab。</p></div><div><h4>关键机制与输出</h4><p>挖掘任务编排 OV Compile，保存每轮输入、产物与状态。Langfuse 入站负责拉取与映射 Session；出站追踪模型调用及进化 / DreamCycle 过程，异常时尽量不阻塞业务。</p></div></div><p>白盒配置使规划、合成和判定逻辑可调整，也意味着一次 Prompt 或模型变化可能影响后续验证结果。排查问题时，应把配置版本与候选版本一起看。</p><p class="sources"><a href="#s17">[17] 挖掘</a><a href="#s18">[18] 观测</a><a href="#s03">[03] 前端</a></p></div></details>
 </section>
 
 <section class="section" id="storage">
@@ -254,7 +254,7 @@
   <p class="intro">以下是基于架构的适配性判断，而非客户案例或已验证收益。判断是否值得接入，先看是否存在可持续积累的团队任务经验。</p>
   <div class="table-wrap"><table><thead><tr><th>场景</th><th>最有价值的能力</th><th>适配判断与前提</th></tr></thead><tbody>
     <tr><td>研发、报告、分析等重复交付</td><td>Session → Skill Evolution → True Replay</td><td><span class="badge fact">较适合</span>任务可重做、产物可检查，重复纠正能反映方法缺陷。需要稳定执行环境和测试材料。</td></tr>
-    <tr><td>客服、运营等领域流程沉淀</td><td>SkillMiner + 后续真实 Session 反馈</td><td><span class="badge fact">较适合</span>已有可靠领域资料，且能把边界条件转为可验证任务。需要专家核查规则与结果。</td></tr>
+    <tr><td>客服、运营等领域流程沉淀</td><td>Skill 挖掘 + 后续真实 Session 反馈</td><td><span class="badge fact">较适合</span>已有可靠领域资料，且能把边界条件转为可验证任务。需要专家核查规则与结果。</td></tr>
     <tr><td>多用户长期协作与新人上手</td><td>跨用户聚合 + DreamCycle + Context Workspace</td><td><span class="badge fact">较适合</span>团队事实分散、重复、过时，且有明确共享范围与负责人。</td></tr>
     <tr><td>多种 Agent 统一管理团队能力</td><td>Agent Protocol V1 + Bundle 分发 + 运行时兼容性</td><td><span class="badge limit">有条件适合</span>各 Runtime 需要提供真实的 ingest、Context、Replay 与 Sync 能力；声明兼容不能替代运行验证。</td></tr>
     <tr><td>只有一次性任务，或来源极少</td><td>可用 Lab / 文档挖掘做探索</td><td><span class="badge limit">完整平台收益有限</span>重复任务和多用户 Evidence 不足，难形成持续 Evolution 闭环。</td></tr>
@@ -292,7 +292,7 @@
     <tr><td>多对象一致性与扩展<br><span class="badge inference">架构推断</span></td><td>多处进程内锁和 JSON 账本适合单实例运行，但不能直接推导多副本安全。中心提交、分发和镜像之间存在短暂差异。</td><td>扩大部署前定义唯一写入者、幂等键、事务边界和失败恢复协议，并做故障注入验证。</td></tr>
     <tr><td>验证成本与统计可信度<br><span class="badge inference">架构推断</span></td><td>每个 Case 至少执行两条分支，再加 Dataset 合成和多轮判定。默认少量同源任务可能对特定 Evidence 过拟合，单次效率差异也可能来自模型随机性。</td><td>保留独立任务，重复运行，报告分布与不确定性；把真实耗时与经济成本作为补充观察。</td></tr>
     <tr><td>Memory 治理闭环<br><span class="badge fact">代码事实</span></td><td>Memory Change 的风险字段仍可为 unclassified，Memory Replay 可发生在应用后；快照失败会减少可验证性。去个人化主要由聚合规则指导。</td><td>定义风险分级、需要人工处理的变化、快照缺失策略与可验证的共享检查。</td></tr>
-    <tr><td>运行时与平台依赖<br><span class="badge fact">代码事实</span></td><td>本地 Hermes Replay 需要 Linux systemd 隔离设施；外部 Replay 需要适配器提供真实执行、Context 与指标。安装 FastAPI 成功并不能证明 Replay 可用。</td><td>给不同 Runtime 建立能力矩阵、隔离自检和端到端接入用例。</td></tr>
+    <tr><td>运行时与平台依赖<br><span class="badge fact">代码事实</span></td><td>True Replay 需要配置的适配器提供真实执行、Context 与指标。主服务启动成功不证明 Replay 环境可用。</td><td>给不同 Runtime 建立能力矩阵、隔离自检和端到端接入用例。</td></tr>
     <tr><td>大型编排模块与文档漂移<br><span class="badge fact">代码事实</span></td><td>当前 <code>orchestrator.py</code> 4,806 行，<code>routes.py</code> 5,158 行；多个模块和文档同时描述发布、验证与状态，容易产生不一致。</td><td>按生命周期拆分编排职责；从策略与契约生成说明，持续校验文档和默认配置。</td></tr>
   </tbody></table></div>
   <h3>建议优先级</h3>
@@ -311,7 +311,7 @@
     <div><dt>Memory</dt><dd>可检索的长期事实、背景、偏好或团队共识，不直接规定完整任务流程。</dd></div>
     <div><dt>Skill Candidate</dt><dd>基于 Evidence 提议的新建或修订版本，验证与发布前不改变已发布团队 Skill。</dd></div>
     <div><dt>Memory Change</dt><dd>对团队 Memory 的新增、合并、修订、去重或归档提议；当前代码也用它记录已执行变化。</dd></div>
-    <div><dt>Test Dataset</dt><dd>与 Skill Candidate 同源生成的任务集合，用于对比真实执行。本文将其与 SkillMiner 的内部评测产物分开描述。</dd></div>
+    <div><dt>Test Dataset</dt><dd>与 Skill Candidate 同源生成的任务集合，用于对比真实执行。挖掘产物 benchmark.json 与候选流程共用 team-replay.dataset 契约。</dd></div>
     <div><dt>Checklist</dt><dd>单个 Replay Case 必须满足的扁平完成条件集合；是完成门禁，不参与加权效果评分。</dd></div>
     <div><dt>Baseline</dt><dd>不加载 Skill Candidate 时执行同一 Replay Case 的对照分支，可能保留当前已发布 Skill。</dd></div>
     <div><dt>True Replay</dt><dd>在隔离的真实运行时中执行 Baseline 与 Candidate，按渐进披露协议检验完成性与效率。</dd></div>
@@ -345,10 +345,10 @@
     <li id="s14"><b>[14] 存储选择、本地回退与 Skill 镜像</b><a href="../../teamEvolver/storage/__init__.py">teamEvolver/storage/__init__.py:build_object_store</a><a href="../../teamEvolver/storage/local.py">teamEvolver/storage/local.py:LocalObjectStore</a><a href="../../teamEvolver/skills/hub.py">teamEvolver/skills/hub.py:SkillHub</a><a href="../../teamEvolver/skills/mirror.py">teamEvolver/skills/mirror.py:VikingSkillMirror</a><small>默认本地账本、按身份区分回退目录、单文件原子替换、通用 fallback 无自动回写。</small></li>
     <li id="s15"><b>[15] Bundle、mutation 与可靠分发</b><a href="../../teamEvolver/skills/bundle.py">teamEvolver/skills/bundle.py</a><a href="../../teamEvolver/skills/mutations.py">teamEvolver/skills/mutations.py:SkillMutationService</a><a href="../../teamEvolver/integrations/skill_sync_adapters.py">teamEvolver/integrations/skill_sync_adapters.py</a><small>execute / record_committed / reconcile / drain；commit、tombstone、outbox 与交付状态。</small></li>
     <li id="s16"><b>[16] Agent Protocol 与受控 Context</b><a href="../../teamEvolver/integrations/agent_protocol.py">teamEvolver/integrations/agent_protocol.py</a><a href="../../teamEvolver/integrations/agent_registry.py">teamEvolver/integrations/agent_registry.py</a><a href="../../teamEvolver/integrations/context_workspace.py">teamEvolver/integrations/context_workspace.py:ContextStateStore</a><a href="../../teamEvolver/proxy/agent_context.py">teamEvolver/proxy/agent_context.py</a><small>Integration 能力、主体映射、引用约束、Context 使用归属与 Snapshot。</small></li>
-    <li id="s17"><b>[17] SkillMiner 流水线、任务与评测桥接</b><a href="../../teamEvolver/skillminer/run_pipeline.py">teamEvolver/skillminer/run_pipeline.py</a><a href="../../teamEvolver/skillminer/mining_jobs.py">teamEvolver/skillminer/mining_jobs.py</a><a href="../../teamEvolver/mining_lifecycle.py">teamEvolver/mining_lifecycle.py</a><a href="../../teamEvolver/skillminer/human_checkpoints.py">teamEvolver/skillminer/human_checkpoints.py</a><a href="../../teamEvolver/skillminer/lift_integration.py">teamEvolver/skillminer/lift_integration.py</a><a href="../zh/guides/07-skill-miner.md">docs/zh/guides/07-skill-miner.md</a><small>文档 → 样本包 → 语义发现 → Skill / 评测编译；产物完整性与治理入口。</small></li>
+    <li id="s17"><b>[17] Skill 挖掘与候选生命周期</b><a href="../../team_miner/bridge.py">team_miner/bridge.py</a><a href="../../team_miner/ov_round_orchestration.py">team_miner/ov_round_orchestration.py</a><a href="../../team_miner/ov_compile_mining.py">team_miner/ov_compile_mining.py</a><a href="../../team_miner/lifecycle.py">team_miner/lifecycle.py</a><a href="../zh/guides/07-skill-miner.md">Skill 挖掘指南</a><small>来源冻结、OV 编译、人工 Evidence 补证、独立归档与候选提交。</small></li>
     <li id="s18"><b>[18] Langfuse 与白盒操作</b><a href="../../teamEvolver/integrations/langfuse_pull.py">teamEvolver/integrations/langfuse_pull.py</a><a href="../../teamEvolver/integrations/langfuse_mapper.py">teamEvolver/integrations/langfuse_mapper.py</a><a href="../../teamEvolver/observability/langfuse.py">teamEvolver/observability/langfuse.py</a><a href="../../teamEvolver/evolve/prompt_studio.py">teamEvolver/evolve/prompt_studio.py</a><small>入站拉取 / 映射，出站追踪；模型与过程参数可观测、可配置。</small></li>
     <li id="s19"><b>[19] 工程硬约束与当前实现差距</b><a href="../../AGENTS.md">AGENTS.md</a><a href="../../teamEvolver/llm.py">teamEvolver/llm.py:AsyncLLMClient</a><a href="../../teamEvolver/session_store.py">teamEvolver/session_store.py:SessionStore</a><a href="../../teamEvolver/proxy/routes.py">teamEvolver/proxy/routes.py:_ingest_session_dict</a><small>专用池 / 全局 Semaphore 要求；索引单写者要求；同步 I/O 调用路径。</small></li>
-    <li id="s20"><b>[20] 对应测试入口</b><a href="../../tests/test_true_replay_efficiency.py">tests/test_true_replay_efficiency.py</a><a href="../../tests/test_validation_store_freshness.py">tests/test_validation_store_freshness.py</a><a href="../../tests/test_skill_sync_outbox.py">tests/test_skill_sync_outbox.py</a><a href="../../tests/test_memory_true_replay.py">tests/test_memory_true_replay.py</a><a href="../../tests/test_aggregation_merge_resume.py">tests/test_aggregation_merge_resume.py</a><a href="../../tests/test_skillminer_pipeline_artifacts.py">tests/test_skillminer_pipeline_artifacts.py</a><a href="../../tests/test_bundle_static_checks.py">tests/test_bundle_static_checks.py</a><small>测试文件表达了预期契约；存在测试文件，不代表本次环境已经通过整个测试集。</small></li>
+    <li id="s20"><b>[20] 对应测试入口</b><a href="../../tests/test_true_replay_efficiency.py">tests/test_true_replay_efficiency.py</a><a href="../../tests/test_validation_store_freshness.py">tests/test_validation_store_freshness.py</a><a href="../../tests/test_skill_sync_outbox.py">tests/test_skill_sync_outbox.py</a><a href="../../tests/test_memory_true_replay.py">tests/test_memory_true_replay.py</a><a href="../../tests/test_aggregation_merge_resume.py">tests/test_aggregation_merge_resume.py</a><a href="../../team_miner/tests/test_ov_round_bridge.py">team_miner/tests/test_ov_round_bridge.py</a><a href="../../tests/test_bundle_static_checks.py">tests/test_bundle_static_checks.py</a><small>测试文件表达了预期契约；存在测试文件，不代表本次环境已经通过整个测试集。</small></li>
   </ul>
   <h3>本次分析与验证范围</h3>
   <p>本次进行源码与文档交叉阅读、关键配置核对及 HTML 内容 / 链接 / 交互检查。13 个章节、76 个相对来源链接及内部锚点已检查；桌面与 390px 手机视口无页面级横向溢出，Replay 示例、输入校验和模块展开 / 收起通过浏览器检查。没有连接生产 Agent、OpenViking 或模型执行真实 Evolution，因此不报告真实任务成功率、性能提升或生产隔离验证结果。</p>

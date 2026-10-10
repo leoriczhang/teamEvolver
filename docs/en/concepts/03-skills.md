@@ -88,16 +88,9 @@ Returns currently published team Skill Bundle manifest and content.
 
 After Skill publication, `SkillMutationService` sends update notifications to push-capable Agents via outbox mechanism. Push adapters are registered in [skill_sync_adapters.py](../../../teamEvolver/integrations/skill_sync_adapters.py).
 
-### Hermes Integration
+### Agent Skill Pull
 
-Hermes implements automatic pull via `pre_llm_call` hook:
-
-```
-User initiates task → Hermes pre_llm_call hook → teamEvolver-sync → 
-Pull latest Skill Bundle → Update external_dirs → Hermes native skill discovery
-```
-
-Installation script at [hermes_skill_sync/install.py](../../../teamEvolver/integrations/hermes_skill_sync/install.py).
+Agents pull Skill Bundles using their tenant Key and declared user_id and preserve versions and tombstones. See [Skill Sync API](../api/06-skill-sync.md) and [Custom Agent Integration](../agent-integrations/05-custom-agent.md).
 
 ## Boundary Between Skill and Memory
 

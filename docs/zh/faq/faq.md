@@ -8,7 +8,7 @@ teamEvolver 是构建在 OpenViking 之上的 Agent 能力进化控制面。Open
 
 ### teamEvolver 是 Agent Runtime 吗？
 
-不是。teamEvolver 不作为面向用户任务的 Agent Runtime，也不接管接入 Agent 的工具循环。它会为 Evidence 提取、进化和验证调用已配置模型。它是架设在现有 Agent Runtime（Hermes、Pi、Codex 等）之上的控制层，负责让团队能力持续进化。
+不是。teamEvolver 不作为面向用户任务的 Agent Runtime，也不接管接入 Agent 的工具循环。它会为 Evidence 提取、进化和验证调用已配置模型。它是架设在现有 Agent Runtime（Pi、Codex 等）之上的控制层，负责让团队能力持续进化。
 
 ### teamEvolver 和 Langfuse 是什么关系？
 

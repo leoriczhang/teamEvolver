@@ -178,7 +178,6 @@ class ProxyServer(
                 await datasource_runtime.stop()
             except Exception:  # noqa: BLE001 - shutdown must proceed
                 logger.debug("[DatasourceSchedule] shutdown failed", exc_info=True)
-        await asyncio.to_thread(self._stop_skillminer)
         self._memory_maintenance.stop()
         await self._stop_embedded_evolve()
         await self._await_background_tasks(self._shutdown_drain_timeout_seconds)

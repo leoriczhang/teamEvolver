@@ -88,7 +88,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/home/teamevolver/.teamEvolver
-ReadWritePaths=/home/teamevolver/.hermes
+ReadWritePaths=/home/teamevolver/.teamEvolver
 
 # Resource limits
 LimitNOFILE=65536
@@ -268,7 +268,7 @@ If using Prometheus, monitor `/healthz` endpoint via blackbox-exporter.
 
 ## Storage and Local Fallback
 
-teamEvolver configures Session and Skill control-plane storage independently. When `storage_pg.enabled=true`, unspecified Skill and Session backends both resolve to PostgreSQL; tenants cannot override these service-wide storage settings. Multi-replica deployments require both effective backends to be `postgres`. Each Pod's `skills.dir` is only a rebuildable cache.
+teamEvolver configures Session and Skill control-plane storage independently. When `storage_pg.enabled=true`, unspecified Skill and Session backends both resolve to PostgreSQL; tenants cannot override these service-wide storage settings. Multi-replica deployments require both effective backends to be `postgres`. Each Pod's `skills.runtime_cache_dir` is only a rebuildable cache.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -303,7 +303,7 @@ teamEvolver persistent data stored at following locations:
 | Logs | `~/.teamEvolver/teamEvolver.log` | No long-term backup needed |
 | Prompt overrides | `~/.teamEvolver/prompt_overrides.json` | Daily |
 | Stage settings | `~/.teamEvolver/stage_settings.json` | Daily |
-| Local skill library | `~/.hermes/skills/` or configured `skills.dir` | Daily |
+| Skill runtime cache | `~/.teamEvolver/runtime/skills/` or configured `skills.runtime_cache_dir` | Daily |
 | Session storage | OpenViking cloud (if sharing used) | Cloud responsibility |
 | OpenViking data | OpenViking data directory (local mode) | Daily |
 | Console sessions | `~/.teamEvolver/console_sessions.json` | No backup needed |
@@ -326,7 +326,7 @@ set -euo pipefail
 BACKUP_DIR="/var/backups/teamevolver"
 DATE=$(date +%Y%m%d_%H%M%S)
 TEAMEVOLVER_HOME="/home/teamevolver/.teamEvolver"
-SKILLS_DIR="/home/teamevolver/.hermes/skills"
+SKILLS_DIR="/home/teamevolver/.teamEvolver/runtime/skills"
 
 mkdir -p "$BACKUP_DIR"
 
@@ -459,7 +459,7 @@ chmod 700 /home/teamevolver/.teamEvolver
 chmod 600 /home/teamevolver/.teamEvolver/config.yaml
 
 # Skills directory permissions
-chmod 700 /home/teamevolver/.hermes/skills
+chmod 700 /home/teamevolver/.teamEvolver/runtime/skills
 ```
 
 ## Resource Requirements

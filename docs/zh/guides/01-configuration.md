@@ -78,7 +78,7 @@ HTTP 服务监听配置。
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `enabled` | boolean | `true` | 是否启用技能管理功能。 |
-| `dir` | string | `"~/.hermes/skills"` | 本地技能目录路径。默认指向 Hermes 的技能目录以便无缝集成。 |
+| `runtime_cache_dir` | string | `"~/.teamEvolver/runtime/skills"` | Skill 运行缓存目录。 |
 
 ### sharing 节
 
@@ -320,27 +320,15 @@ def map_trace(trace, observations):
 
 ### mining 节
 
-Skill Miner（文档到技能挖掘）配置。
+控制台 OV Skill 挖掘的默认选项。OpenViking 使用其配置的模型和执行环境。
 
 | 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `model.provider` | string | 继承全局 llm | 挖掘专用模型提供商。 |
-| `model.model_id` | string | 继承全局 llm | 挖掘专用模型 ID。 |
-| `model.base_url` | string | 继承全局 llm | 挖掘专用 API Base URL。 |
-| `model.api_key` | string | 继承全局 llm | 挖掘专用 API Key。 |
-| `model.max_tokens` | integer | 继承全局 llm | 挖掘模型最大输出 token。 |
-| `model.context_length` | integer | `240000` | 模型上下文窗口大小。 |
-| `model.temperature` | float | `0.2` | 挖掘模型采样温度。 |
-| `pipeline.max_rounds` | integer | `3` | 反思环最大轮次。 |
-| `pipeline.max_retries` | integer | `2` | 单步最大重试次数。 |
-| `pipeline.retry_backoff_seconds` | float | `0.8` | 重试退避时间（秒）。 |
-| `pipeline.oneshot_timeout_seconds` | integer | `1800` | 单次挖掘超时（秒），默认 30 分钟。 |
-| `pipeline.step1_validation_retries` | integer | `1` | Step1 样本包校验失败后的重试次数。 |
-| `pipeline.strict_step1` | boolean | `true` | Step1 校验失败是否中止本轮。 |
-| `pipeline.benchmark_target_total` | integer | `16` | Benchmark 目标题目总数。 |
-| `pipeline.benchmark_difficulty_dist` | string | `"easy:4,medium:7,hard:5"` | Benchmark 难度分布。 |
-| `pipeline.benchmark_max_turns` | integer | `5` | 多轮 Benchmark 最大对话轮次。 |
-| `prompts` | dict | `{}` | 各挖掘阶段的 Prompt 覆盖。 |
+| --- | --- | --- | --- |
+| `pipeline.max_rounds` | integer | `3` | 默认真实挖掘轮数，范围 1–5。 |
+| `pipeline.runtime_timeout_seconds` | integer | `3600` | 默认每轮执行期限，范围 60–7200 秒。 |
+| `prompts.ov_compile` | string | 内置编译 Skill | 覆盖 OV 编译 Skill 正文；每轮冻结内容与版本 URI。 |
+
+详见 [多轮 Skill 挖掘与人工补证](./17-multi-round-skill-mining.md)。
 
 ### openrouter 节
 
@@ -424,7 +412,7 @@ service:
 
 skills:
   enabled: true
-  dir: "~/.hermes/skills"
+  runtime_cache_dir: "~/.teamEvolver/runtime/skills"
 
 sharing:
   backend: "viking"

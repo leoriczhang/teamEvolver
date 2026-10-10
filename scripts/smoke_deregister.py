@@ -18,7 +18,7 @@ def main():
             if key.startswith(("TEAMEVOLVER_", "EVOLVE_", "LANGFUSE_", "OPENAI_")):
                 os.environ.pop(key)
         os.environ.update(TEAMEVOLVER_CONFIG_DIR=str(root), TEAMEVOLVER_EMBEDDED_EVOLVE_ENABLED="0",
-                          TEAMEVOLVER_SKILLMINER_ENABLED="0", TEAMEVOLVER_ROOT_API_KEY="smoke-root")
+                          TEAMEVOLVER_ROOT_API_KEY="smoke-root")
         from teamEvolver.config import TeamEvolverConfig
         from teamEvolver.proxy import ProxyServer
         from teamEvolver.session_store import SessionStore

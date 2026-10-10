@@ -2111,18 +2111,12 @@ class EvolveServer(EvolveEngineMixin):
         return result
 
     async def _run_candidate_replay(self, job: dict[str, Any]) -> dict[str, Any]:
-        """Replay a job's originating case(s) with vs. without the candidate skill.
+        """Compare Baseline and Candidate using the tenant-bound True Replay adapter.
 
-        This is a **true replay**: it spins up two real Hermes agents in isolated,
-        disposable sandboxes (both ``HOME`` and ``HERMES_HOME`` redirected into a
-        throwaway temp dir) that differ only in whether the candidate skill is
-        injected, and lets each run the full tool loop for real. The verdict
-        uses only interaction turns, tool calls, and total tokens.
-
-        The heavy lifting runs in a subprocess because Hermes caches
-        ``HERMES_HOME`` at import time, so it must be set before the interpreter
-        imports the agent. We shell out to ``teamEvolver.true_replay
-        --json`` and parse its framed metric verdict."""
+        A subprocess initializes the host services and runs the shared Replay
+        engine. Each branch opens its own isolated Agent session through the
+        configured adapter; objective metrics determine the result.
+        """
         candidate_skill = job.get("candidate_skill")
         if not isinstance(candidate_skill, dict) or not candidate_skill.get("name"):
             raise ValueError("validation job missing candidate_skill")

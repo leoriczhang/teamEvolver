@@ -8,7 +8,7 @@ teamEvolver is an Agent capability evolution control plane built on top of OpenV
 
 ### Is teamEvolver an Agent Runtime?
 
-No. teamEvolver is not the Agent Runtime for user tasks and does not take over an integrated Agent's tool loop. It does call the configured model for Evidence extraction, evolution, and validation. It is a control layer sitting on top of existing Agent Runtimes (Hermes, Pi, Codex, etc.), responsible for enabling continuous evolution of team capabilities.
+No. teamEvolver is not the Agent Runtime for user tasks and does not take over an integrated Agent's tool loop. It does call the configured model for Evidence extraction, evolution, and validation. It is a control layer sitting on top of existing Agent Runtimes (Pi, Codex, etc.), responsible for enabling continuous evolution of team capabilities.
 
 ### What is the relationship between teamEvolver and Langfuse?
 

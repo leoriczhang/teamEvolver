@@ -8,4 +8,4 @@
 3. 用 [Skill pull](../api/06-skill-sync.md) 在模型调用前更新团队 Skill。
 4. 需要 True Replay 时，由管理员选择预装 [Replay adapter](../api/05-replay-branch.md)。
 
-Hermes 使用 [安装指南](./03-hermes.md)。其他运行时使用 [自定义接入](./05-custom-agent.md)。
+使用 [自定义接入](./05-custom-agent.md) 与 [Agent Protocol v2](./06-protocol-v2.md) 连接外部 Agent。

@@ -10,7 +10,7 @@ When OpenViking is unavailable, storage automatically falls back to the local `L
 ┌─────────────────────────────────────────────────────────────┐
 │                    External Agent Runtimes                   │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐ │
-│  │ Hermes   │  │ Pi (AH)  │  │ Codex    │  │ Custom Agent │ │
+│  │ Agent    │  │ Pi (AH)  │  │ Codex    │  │ Custom Agent │ │
 │  └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────┬───────┘ │
 │       │     Hook/SDK│     SDK    │     Protocol V1         │
 └───────┼─────────────┼────────────┼──────────────┼───────────┘

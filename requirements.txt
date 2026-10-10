@@ -24,9 +24,3 @@ jieba>=0.42
 beautifulsoup4>=4.12
 tomli-w>=1.0
 tomli>=2; python_version < "3.11"
-
-# Retained SkillMiner runtime dependencies
-pydantic-settings>=2.0
-tiktoken>=0.5
-markdown>=3.6
-rank-bm25>=0.2

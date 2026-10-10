@@ -329,41 +329,6 @@ teamEvolver langfuse pull --in-process --max-sessions 200 --force
 
 `teamEvolver diag` 相关命令组用于集成诊断和维护。
 
-### teamEvolver doctor hermes
-
-检查本地 Hermes 集成状态。
-
-```bash
-teamEvolver doctor hermes
-```
-
-诊断内容包括：
-
-- 配置文件是否存在
-- 模型配置是否符合预期
-- Base URL 配置
-- Provider 配置
-- 代理匹配状态
-- 技能目录是否存在及权限
-- 遗留技能目录状态
-- 最新备份信息
-- 会话边界模式
-- 发现的问题和修复建议
-
-### teamEvolver restore hermes
-
-从备份恢复 Hermes 配置。
-
-```bash
-teamEvolver restore hermes [--backup PATH]
-```
-
-| 选项 | 说明 |
-|------|------|
-| `--backup PATH` | 指定备份文件路径，默认使用最新的 Hermes 备份 |
-
-teamEvolver 在修改 Hermes 配置前会自动创建备份，此命令可在配置异常时回滚。
-
 ### teamEvolver validation status
 
 查看后台校验 Worker 配置和当前状态。
@@ -446,7 +411,6 @@ Daemon 模式下 stdout 和 stderr 都重定向到日志文件（append 模式�
 | `TEAMEVOLVER_PROMPT_OVERRIDES_PATH` | 自定义 Prompt 覆盖文件路径 |
 | `TEAMEVOLVER_STAGE_SETTINGS_PATH` | 自定义阶段设置文件路径 |
 | `ARK_API_KEY` | 火山方舟 API Key（Skill Miner 使用） |
-| `SKILLMINER_LIFT_AUTO_DRAFT` | 设为 `0` 禁用自动生成 LIFT 草稿 |
 | `LANGFUSE_*` | 各种 Langfuse 配置环境变量，见可观测性指南 |
 
 ## 退出码

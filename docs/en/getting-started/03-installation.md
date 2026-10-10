@@ -31,7 +31,6 @@ Optional dependency groups:
 | extra | Contents |
 |-------|----------|
 | `sharing` | OpenViking shared storage support (boto3) |
-| `mining` | Skill Miner document mining (hermes-agent) |
 | `validation` | True Replay validation (openai SDK) |
 | `truereplay` | Full True Replay capability |
 | `dev` | Development dependencies (pytest, anyio) |
@@ -102,7 +101,7 @@ aggregation:
 | Path | Description |
 |------|-------------|
 | `~/.teamEvolver/config.yaml` | Main configuration file |
-| `~/.hermes/skills/` | Default local Skill directory |
+| `~/.teamEvolver/runtime/skills/` | Skill runtime cache directory |
 | `~/.team_memory/` | Team-memory aggregation Skill, fingerprints, and incremental state |
 | `~/.teamEvolver/teamEvolver.pid` | Daemon PID file |
 | `~/.teamEvolver/teamEvolver.log` | Default daemon log |

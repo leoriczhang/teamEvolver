@@ -23,7 +23,7 @@ A queue holds at most 8192 records. Overflow is counted; ERROR and higher also u
 
 Validated `X-Request-ID` values correlate HTTP requests, OV calls and thread-pool work. Background jobs use task ID and attempt. `TE_ROUTE_NOT_REGISTERED` identifies an unmatched TE route; `OV_NOT_FOUND`, `ONTOLOGY_DISABLED`, `FORBIDDEN`, `OV_TIMEOUT` and identity mismatch events identify upstream failures. Successful GET polling uses DEBUG. Repeated ontology failures are summarized; first failure, changed error and recovery are logged immediately.
 
-Credentials, query parameters and business payloads are excluded from diagnostic events. Tracebacks retain frame locations and exception types, not arbitrary exception values or code lines. Legacy SkillMiner output is drained with bounded reads and reduced to safe metadata. Adding diagnostics does not change permissions, publication semantics, schemas or feature flags and does not itself resolve existing Not Found errors. Actual SIT mounts and permissions still require deployment acceptance.
+Credentials, query parameters and business payloads are excluded from diagnostic events. Tracebacks retain frame locations and exception types, not arbitrary exception values or code lines. Skill mining observes remote OV task status, round progress and safe diagnostic metadata. Adding diagnostics does not change permissions, publication semantics, schemas or feature flags and does not itself resolve existing Not Found errors. Actual SIT mounts and permissions still require deployment acceptance.
 
 ## Access save displays `[object Object]`
 

@@ -78,7 +78,7 @@ Local skill library configuration.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `enabled` | boolean | `true` | Whether to enable skill management. |
-| `dir` | string | `"~/.hermes/skills"` | Local skills directory path. Default points to Hermes skills directory for seamless integration. |
+| `runtime_cache_dir` | string | `"~/.teamEvolver/runtime/skills"` | Skill runtime cache directory. |
 
 ### sharing Section
 
@@ -321,27 +321,15 @@ def map_trace(trace, observations):
 
 ### mining Section
 
-Skill Miner (document-to-skill mining) configuration.
+Default options for console OV Skill Mining. OpenViking uses its configured model and execution environment.
 
 | Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `model.provider` | string | inherits global llm | Mining-dedicated model provider. |
-| `model.model_id` | string | inherits global llm | Mining-dedicated model ID. |
-| `model.base_url` | string | inherits global llm | Mining-dedicated API Base URL. |
-| `model.api_key` | string | inherits global llm | Mining-dedicated API Key. |
-| `model.max_tokens` | integer | inherits global llm | Mining model max output tokens. |
-| `model.context_length` | integer | `240000` | Model context window size. |
-| `model.temperature` | float | `0.2` | Mining model sampling temperature. |
-| `pipeline.max_rounds` | integer | `3` | Reflection loop maximum rounds. |
-| `pipeline.max_retries` | integer | `2` | Single-step maximum retries. |
-| `pipeline.retry_backoff_seconds` | float | `0.8` | Retry backoff time in seconds. |
-| `pipeline.oneshot_timeout_seconds` | integer | `1800` | Single mining timeout in seconds; default 30 minutes. |
-| `pipeline.step1_validation_retries` | integer | `1` | Step1 sample package validation failure retries. |
-| `pipeline.strict_step1` | boolean | `true` | Whether Step1 validation failure aborts current round. |
-| `pipeline.benchmark_target_total` | integer | `16` | Benchmark target total questions. |
-| `pipeline.benchmark_difficulty_dist` | string | `"easy:4,medium:7,hard:5"` | Benchmark difficulty distribution. |
-| `pipeline.benchmark_max_turns` | integer | `5` | Multi-turn Benchmark maximum conversation turns. |
-| `prompts` | dict | `{}` | Per-mining-stage Prompt overrides. |
+| --- | --- | --- | --- |
+| `pipeline.max_rounds` | integer | `3` | Default number of real rounds, from 1 to 5. |
+| `pipeline.runtime_timeout_seconds` | integer | `3600` | Default per-round deadline, from 60 to 7200 seconds. |
+| `prompts.ov_compile` | string | Built-in compiler Skill | Override the OV compiler Skill body; each round freezes its content and version URI. |
+
+See [Multi-round Skill Mining](./17-multi-round-skill-mining.md).
 
 ### openrouter Section
 
@@ -425,7 +413,7 @@ service:
 
 skills:
   enabled: true
-  dir: "~/.hermes/skills"
+  runtime_cache_dir: "~/.teamEvolver/runtime/skills"
 
 sharing:
   backend: "viking"

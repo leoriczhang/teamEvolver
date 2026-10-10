@@ -71,49 +71,9 @@ def resolve_mined_job_skill_root(
     artifact_path: str = "",
     skillminer_root: Path | str = SKILLMINER_ROOT,
 ) -> Path:
-    """Resolve the root containing ``compiled_skill`` for modern or legacy jobs."""
-    raw_job_id = str(job_id or "").strip()
-    if not raw_job_id.startswith("legacy:"):
-        return resolve_mined_job_workspace(raw_job_id, skillminer_root=skillminer_root)
-
-    run_id = raw_job_id.removeprefix("legacy:")
-    root = Path(skillminer_root).resolve()
-    raw_path = str(artifact_path or "").strip().replace("\\", "/")
-    target = (root / raw_path).resolve()
-    if (
-        not raw_path
-        or root not in target.parents
-        or target.name != "SKILL.md"
-        or target.parent.name != str(skill_name or "").strip()
-        or target.parent.parent.name != "compiled_skill"
-        or not target.is_file()
-    ):
-        raise MiningLifecycleError("旧版挖掘任务的 Skill 产物路径无效")
-
-    relative = target.relative_to(root)
-    if relative.parts[0] == "compiled_skill":
-        if run_id != "current":
-            raise MiningLifecycleError("旧版挖掘任务与 Skill 产物不匹配")
-        return root
-    if relative.parts[0] == "reflection_rounds":
-        if len(relative.parts) < 3 or relative.parts[1] != run_id:
-            raise MiningLifecycleError("旧版挖掘任务与 Skill 产物不匹配")
-        return target.parent.parent.parent
-    if relative.parts[0] == "run_history":
-        if len(relative.parts) < 4:
-            raise MiningLifecycleError("旧版挖掘任务的归档路径无效")
-        container_id = relative.parts[1]
-        rounds_root = root / "reflection_rounds"
-        session_ids = sorted(
-            (path.name for path in rounds_root.iterdir() if path.is_dir()),
-            reverse=True,
-        ) if rounds_root.is_dir() else []
-        preceding = next((session_id for session_id in session_ids if session_id < container_id), None)
-        expected_run_id = preceding or f"legacy_before_{container_id}"
-        if run_id != expected_run_id:
-            raise MiningLifecycleError("旧版挖掘任务与归档 Skill 不匹配")
-        return target.parent.parent.parent
-    raise MiningLifecycleError("旧版挖掘任务的 Skill 不在允许的产物目录中")
+    """Resolve a completed OV job for candidate submission."""
+    del skill_name, artifact_path
+    return resolve_mined_job_workspace(job_id, skillminer_root=skillminer_root)
 
 
 def resolve_mined_skill_dir(

@@ -687,7 +687,7 @@ accepted = (
         <p>Loop Engineering 的价值来自真实边界，而不是架构图的完整。当前系统已经具备外层循环骨架，但仍有四个重要缺口。</p>
 
         <h3>AgentsHub 原生回放仍是单轮</h3>
-        <p>回放请求暴露了 <code>max_interactions</code>，Hermes 路径也支持根据 Judge feedback 继续交互；但 AgentsHub 原生 worker 当前只执行一次 <code>handle_turn</code>。两种运行时的完成语义需要统一。</p>
+        <p>回放请求暴露了 <code>max_interactions</code>。不同 ReplayAdapterFactory 应明确真实会话的连续交互能力，并使用相同的 Checklist 与 Judge 契约确认完成性。</p>
 
         <h3>工具 cassette 的匹配粒度不足</h3>
         <p>当前主要按工具名和顺序消费记录。同名工具多次调用、但参数不同的会话可能错误配对。更可靠的键应包含工具名、规范化参数、资源 ID 和 occurrence index。</p>

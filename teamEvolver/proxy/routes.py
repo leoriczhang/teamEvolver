@@ -2776,7 +2776,6 @@ class RoutesMixin:
                         ctx.tenant_id,
                         reason="tenant model config updated",
                     )
-                await asyncio.to_thread(owner._stop_skillminer)
                 effective = effective_config(registry, updated, owner.config)
                 return JSONResponse(
                     content=_model_settings_payload(effective, data)
@@ -2809,7 +2808,6 @@ class RoutesMixin:
                 },
             )
             await owner._reload_openviking_integrations(store.to_config())
-            await asyncio.to_thread(owner._stop_skillminer)
             return JSONResponse(content=_model_settings_payload(owner.config, data))
 
         @app.get("/api/skill-evolution/settings")

@@ -12,20 +12,10 @@ if TYPE_CHECKING:
 __all__ = [
     "TeamEvolverConfig",
     "ConfigStore",
-    "mine_benchmark_from_trajectories",
-    "amine_benchmark_from_trajectories",
-    "list_trajectory_benchmark_runs",
-    "get_trajectory_benchmark_run",
-
 ]
 
 
 _EXPORT_MAP = {
-    "mine_benchmark_from_trajectories": ("team_miner.api", "mine_benchmark_from_trajectories"),
-    "amine_benchmark_from_trajectories": ("team_miner.api", "amine_benchmark_from_trajectories"),
-    "list_trajectory_benchmark_runs": ("team_miner.api", "list_trajectory_benchmark_runs"),
-    "get_trajectory_benchmark_run": ("team_miner.api", "get_trajectory_benchmark_run"),
-
     "TeamEvolverConfig": ("teamEvolver.config", "TeamEvolverConfig"),
     "ConfigStore": ("teamEvolver.config_store", "ConfigStore"),
 }

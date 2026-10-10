@@ -1,420 +1,112 @@
-"""White-box settings for the SkillMiner module."""
+"""Settings that directly control OpenViking Skill mining."""
 
 from __future__ import annotations
 
-import ast
-import importlib
-import json
-import os
-import sys
-import threading
-from pathlib import Path
+import copy
 from typing import Any
 
-_SKILLMINER_ROOT = Path(__file__).resolve().parent
+from .ov_compile_mining import SKILL_BODY
 
-_PROMPTS: dict[str, dict[str, Any]] = {
-    "sample_package": {
-        "label": "样本包构建",
-        "description": "把原始知识文档切分为可追溯、可校验的样本包。",
-        "file": "sample_package_constructor_agent_prompt.py",
-        "symbol": "SAMPLE_PACKAGE_CONSTRUCTOR_AGENT_PROMPT",
-    },
-    "semantic_discovery": {
-        "label": "语义发现",
-        "description": "从单个样本包挖掘决策单元、边界、冲突和知识缺口。",
-        "file": "semantic_discovery_agent_prompt.py",
-        "symbol": "SEMANTIC_DISCOVERY_AGENT_PROMPT",
-    },
-    "evaluation_compiler": {
-        "label": "Skill 与评测编译",
-        "description": "把语义报告编译为配套的 SKILL.md 与 EVALUATION.md。",
-        "file": "evaluation_compiler_agent_prompt.py",
-        "symbol": "EVALUATION_COMPILER_AGENT_PROMPT",
-    },
-    "benchmark_generation": {
-        "label": "Benchmark 出题",
-        "description": "根据 SKILL.md 与 EVALUATION.md 生成结构化内部题库。",
-        "dynamic": "benchmark_generation",
-    },
-    "benchmark_usage": {
-        "label": "Benchmark 单轮作答",
-        "description": "单轮模式下交给被测 Skill 的业务情境 Prompt。",
-        "dynamic": "benchmark_usage",
-    },
-    "benchmark_participant": {
-        "label": "Benchmark 模拟参与者",
-        "description": "多轮模式下控制模拟参与者逐步披露事实并施压。",
-        "dynamic": "benchmark_participant",
-    },
-    "benchmark_skill_reply": {
-        "label": "Benchmark 被测 Skill 回复",
-        "description": "多轮模式下交给被测 Skill 的当前对话 Prompt。",
-        "dynamic": "benchmark_skill_reply",
-    },
-    "benchmark_judge_single": {
-        "label": "Benchmark 单轮裁判",
-        "description": "依据 EVALUATION 与 gold 对单轮答案给出机器可读裁决。",
-        "dynamic": "benchmark_judge_single",
-    },
-    "benchmark_judge_dialogue": {
-        "label": "Benchmark 多轮裁判",
-        "description": "对完整多轮对话、主动追问与情绪应对进行裁决。",
-        "dynamic": "benchmark_judge_dialogue",
-    },
-    "trajectory_benchmark_generation": {
-        "label": "轨迹 Benchmark 挖掘",
-        "description": "从脱敏成功/失败轨迹挖掘 held-out Benchmark。",
-        "dynamic": "trajectory_benchmark_generation",
-    },
-}
-
-_PIPELINE_DEFAULTS: dict[str, Any] = {
-    "max_rounds": 3,
-    "max_retries": 2,
-    "retry_backoff_seconds": 0.8,
-    "oneshot_timeout_seconds": 1800,
-    "step1_validation_retries": 1,
-    "strict_step1": True,
-    "benchmark_target_total": 16,
-    "benchmark_difficulty_dist": "easy:4,medium:7,hard:5",
-    "benchmark_max_turns": 5,
-}
+PIPELINE_DEFAULTS = {"max_rounds": 3, "runtime_timeout_seconds": 3600}
+PIPELINE_RANGES = {"max_rounds": (1, 5), "runtime_timeout_seconds": (60, 7200)}
+COMPILER_PROMPT_ID = "ov_compile"
+MAX_COMPILER_BYTES = 256 * 1024
 
 
-_DYNAMIC_PROMPT_LOCK = threading.Lock()
-
-
-def _skillminer_module(name: str):
-    root = str(_SKILLMINER_ROOT)
-    if root not in sys.path:
-        sys.path.insert(0, root)
-    return importlib.import_module(name)
-
-
-def _dynamic_default(kind: str) -> str:
-    with _DYNAMIC_PROMPT_LOCK:
-        previous = os.environ.get("SKILLMINER_DISABLE_PROMPT_OVERRIDES")
-        os.environ["SKILLMINER_DISABLE_PROMPT_OVERRIDES"] = "1"
+def pipeline_settings(store_data: dict[str, Any]) -> dict[str, int]:
+    mining = store_data.get("mining") or {}
+    raw = (mining.get("pipeline") or {}) if isinstance(mining, dict) else {}
+    result = dict(PIPELINE_DEFAULTS)
+    for key, default in PIPELINE_DEFAULTS.items():
+        value = raw.get(key, default) if isinstance(raw, dict) else default
         try:
-            rb = _skillminer_module("run_benchmark")
-            question = {
-                "input": "{{question_input}}",
-                "target_dimensions": ["{{dimensions}}"],
-                "gold": {
-                    "expected_label": {"label": "{{expected_labels}}"},
-                    "must_hit": ["{{must_hit}}"],
-                    "must_avoid": ["{{must_avoid}}"],
-                },
-                "customer_sim": {
-                    "persona": "{{persona}}",
-                    "goal": "{{goal}}",
-                    "hidden_facts": ["{{hidden_facts}}"],
-                    "reveal_rules": "{{reveal_rules}}",
-                    "pressure_tactics": ["{{pressure_tactics}}"],
-                    "opening_line": "",
-                    "stop_when": "{{stop_when}}",
-                },
-            }
-            if kind == "benchmark_generation":
-                prompt = rb.build_benchmark_prompt(
-                    "{{skill_text}}",
-                    "{{evaluation_text}}",
-                    "{{output_path}}",
-                    difficulty_counts=None,
-                )
-                return prompt.replace(
-                    "【构建要求】\n",
-                    "【构建要求】\n{{difficulty_instruction}}",
-                    1,
-                )
-            if kind == "benchmark_usage":
-                return rb.usage_prompt_for(question)
-            if kind == "benchmark_participant":
-                prompt = rb.customer_turn_prompt(question, [])
-                return prompt.replace(
-                    "（对话尚未开始）",
-                    "{{transcript}}",
-                    1,
-                ).replace(
-                    "    - {{hidden_facts}}",
-                    "{{hidden_facts}}",
-                    1,
-                ).replace(
-                    "    - {{pressure_tactics}}",
-                    "{{pressure_tactics}}",
-                    1,
-                )
-            if kind == "benchmark_skill_reply":
-                prompt = rb.skill_reply_prompt(question, [])
-                return prompt.replace(
-                    "（对话尚未开始）",
-                    "{{transcript}}",
-                    1,
-                ).replace(
-                    "\n  - 这是你的开场，请先做好接待与初步响应。",
-                    "{{first_turn_instruction}}",
-                    1,
-                )
-            if kind == "benchmark_judge_single":
-                return rb.judge_prompt_for(
-                    question,
-                    "{{answer}}",
-                    "{{evaluation_text}}",
-                ).replace(
-                    "label={{expected_labels}}",
-                    "{{expected_labels}}",
-                ).replace(
-                    "['{{must_hit}}']",
-                    "{{must_hit}}",
-                ).replace(
-                    "['{{must_avoid}}']",
-                    "{{must_avoid}}",
-                )
-            if kind == "benchmark_judge_dialogue":
-                prompt = rb.judge_prompt_dialogue(
-                    question,
-                    [],
-                    {"ended_by_customer": False},
-                    "{{evaluation_text}}",
-                )
-                return prompt.replace(
-                    "（对话尚未开始）",
-                    "{{transcript}}",
-                    1,
-                ).replace(
-                    "对话跑满上限仍未达成收尾条件（可能是被测 skill 迟迟未解决目标）",
-                    "{{ending}}",
-                    1,
-                ).replace(
-                    "label={{expected_labels}}",
-                    "{{expected_labels}}",
-                ).replace(
-                    "['{{must_hit}}']",
-                    "{{must_hit}}",
-                ).replace(
-                    "['{{must_avoid}}']",
-                    "{{must_avoid}}",
-                )
-            if kind == "trajectory_benchmark_generation":
-                tb = _skillminer_module("trajectory_benchmark")
-                fake_evidence = [{"marker": "{{evidence_json}}"}]
-                prompt = tb.build_prompt(
-                    {
-                        "dataset_name": "{{dataset_name}}",
-                        "target_total": "{{target_total}}",
-                        "difficulty_counts": None,
-                        "evidence": fake_evidence,
-                    },
-                    Path("{{output_path}}"),
-                )
-                return prompt.replace(
-                    tb._difficulty_instruction({"difficulty_counts": None}),
-                    "{{difficulty_instruction}}",
-                    1,
-                ).replace(
-                    json.dumps(fake_evidence, ensure_ascii=False, indent=2),
-                    "{{evidence_json}}",
-                    1,
-                )
-            raise KeyError(f"unknown dynamic mining prompt: {kind}")
-        finally:
-            if previous is None:
-                os.environ.pop("SKILLMINER_DISABLE_PROMPT_OVERRIDES", None)
-            else:
-                os.environ["SKILLMINER_DISABLE_PROMPT_OVERRIDES"] = previous
+            value = int(value) if not isinstance(value, bool) else default
+        except (TypeError, ValueError):
+            value = default
+        minimum, maximum = PIPELINE_RANGES[key]
+        result[key] = max(minimum, min(maximum, value))
+    return result
 
 
-def _default_prompt(stage_id: str) -> str:
-    entry = _PROMPTS.get(stage_id)
-    if not entry:
-        raise KeyError(f"unknown mining prompt: {stage_id}")
-    if entry.get("dynamic"):
-        return _dynamic_default(str(entry["dynamic"]))
-    path = _SKILLMINER_ROOT / entry["file"]
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    for node in tree.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        if not any(
-            isinstance(target, ast.Name) and target.id == entry["symbol"]
-            for target in node.targets
-        ):
-            continue
-        value = ast.literal_eval(node.value)
-        return str(value or "")
-    raise ValueError(f"prompt symbol {entry['symbol']} not found in {path.name}")
+def compiler_prompt(store_data: dict[str, Any]) -> str:
+    mining = store_data.get("mining") or {}
+    prompts = (mining.get("prompts") or {}) if isinstance(mining, dict) else {}
+    body = prompts.get(COMPILER_PROMPT_ID) if isinstance(prompts, dict) else None
+    return body if isinstance(body, str) and body.strip() else SKILL_BODY
 
 
 def settings_payload(store_data: dict[str, Any]) -> dict[str, Any]:
-    mining = (
-        store_data.get("mining")
-        if isinstance(store_data.get("mining"), dict)
-        else {}
-    )
-    llm = (
-        store_data.get("llm")
-        if isinstance(store_data.get("llm"), dict)
-        else {}
-    )
-    pipeline = (
-        mining.get("pipeline")
-        if isinstance(mining.get("pipeline"), dict)
-        else {}
-    )
-    overrides = (
-        mining.get("prompts")
-        if isinstance(mining.get("prompts"), dict)
-        else {}
-    )
-    raw_temperature = llm.get("temperature", 0.2)
-    try:
-        temperature = float(raw_temperature)
-    except (TypeError, ValueError):
-        temperature = 0.2
-    prompts = []
-    for stage_id, entry in _PROMPTS.items():
-        default = _default_prompt(stage_id)
-        raw_override = overrides.get(stage_id)
-        overridden = isinstance(raw_override, str) and bool(raw_override.strip())
-        effective = str(raw_override) if overridden else default
-        prompts.append(
-            {
-                "id": stage_id,
-                "label": entry["label"],
-                "description": entry["description"],
-                "symbol": entry.get("symbol") or entry.get("dynamic") or "",
-                "default_prompt": default,
-                "effective_prompt": effective,
-                "overridden": overridden,
-                "char_count": len(effective),
-            }
-        )
+    body = compiler_prompt(store_data)
     return {
-        "model": {
-            "provider": str(llm.get("provider") or "custom"),
-            "model": str(llm.get("model_id") or ""),
-            "base_url": str(llm.get("api_base") or ""),
-            "max_tokens": int(llm.get("max_tokens") or 100000),
-            "context_length": int(llm.get("context_length") or 240000),
-            "temperature": max(0.0, min(2.0, temperature)),
-            "api_key_present": bool(llm.get("api_key")),
-            "inherits_global": True,
-        },
-        "pipeline": {
-            key: pipeline.get(key, default)
-            for key, default in _PIPELINE_DEFAULTS.items()
-        },
-        "prompts": prompts,
+        "engine": "ov_compile",
+        "model": {"configuration_source": "openviking_server", "editable_here": False},
+        "pipeline": pipeline_settings(store_data),
+        "prompts": [{
+            "id": COMPILER_PROMPT_ID,
+            "label": "Skill 挖掘编译",
+            "description": "OpenViking 每轮使用的编译 Skill；每轮受理前冻结，已有轮次不受后续修改影响。",
+            "default_prompt": SKILL_BODY,
+            "effective_prompt": body,
+            "overridden": body != SKILL_BODY,
+            "char_count": len(body),
+        }],
     }
 
 
-def update_settings(
-    store_data: dict[str, Any],
-    body: dict[str, Any],
-) -> dict[str, Any]:
+def update_settings(store_data: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(body, dict):
-        raise ValueError("mining settings body must be an object")
-    mining = store_data.setdefault("mining", {})
-    pipeline = mining.setdefault("pipeline", {})
-    prompts = mining.setdefault("prompts", {})
-    pipeline_in = (
-        body.get("pipeline")
-        if isinstance(body.get("pipeline"), dict)
-        else {}
-    )
-
-    # Mining always consumes the global ``llm`` settings.  Drop a legacy
-    # per-mining override on any save so it cannot be revived accidentally.
-    mining.pop("model", None)
-
-    integer_fields = {
-        "max_rounds": (1, 20),
-        "max_retries": (0, 20),
-        "oneshot_timeout_seconds": (30, 86400),
-        "step1_validation_retries": (0, 10),
-        "benchmark_target_total": (1, 500),
-        "benchmark_max_turns": (1, 50),
+        raise ValueError("挖掘设置必须为对象")
+    mining = {
+        "pipeline": pipeline_settings(store_data),
+        "prompts": {},
     }
-    for key, (minimum, maximum) in integer_fields.items():
-        if key not in pipeline_in:
-            continue
-        try:
-            value = int(pipeline_in[key])
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"{key} must be an integer") from exc
-        pipeline[key] = max(minimum, min(maximum, value))
-    if "retry_backoff_seconds" in pipeline_in:
-        try:
-            backoff = float(pipeline_in["retry_backoff_seconds"])
-        except (TypeError, ValueError) as exc:
-            raise ValueError("retry_backoff_seconds must be numeric") from exc
-        pipeline["retry_backoff_seconds"] = max(0.0, min(300.0, backoff))
-    if "strict_step1" in pipeline_in:
-        pipeline["strict_step1"] = bool(pipeline_in["strict_step1"])
-    if "benchmark_difficulty_dist" in pipeline_in:
-        pipeline["benchmark_difficulty_dist"] = str(
-            pipeline_in["benchmark_difficulty_dist"] or ""
-        ).strip()
-
-    prompts_in = body.get("prompts")
-    if isinstance(prompts_in, list):
-        prompt_items = {
-            str(item.get("id") or ""): item
-            for item in prompts_in
-            if isinstance(item, dict)
-        }
-    elif isinstance(prompts_in, dict):
-        prompt_items = {
-            str(stage_id): {"prompt": prompt}
-            for stage_id, prompt in prompts_in.items()
-        }
-    else:
-        prompt_items = {}
-    for stage_id, item in prompt_items.items():
-        if stage_id not in _PROMPTS:
-            raise ValueError(f"unknown mining prompt: {stage_id}")
-        prompt = str(item.get("prompt") or item.get("effective_prompt") or "")
-        if not prompt.strip():
-            raise ValueError(f"prompt {stage_id} must not be empty")
-        default = _default_prompt(stage_id)
-        if prompt == default:
-            prompts.pop(stage_id, None)
+    current = compiler_prompt(store_data)
+    if current != SKILL_BODY:
+        mining["prompts"][COMPILER_PROMPT_ID] = current
+    incoming = body.get("pipeline", {})
+    if not isinstance(incoming, dict):
+        raise ValueError("pipeline 必须为对象")
+    unknown = set(incoming) - set(PIPELINE_DEFAULTS)
+    if unknown:
+        raise ValueError("不支持的挖掘参数：" + ", ".join(sorted(unknown)))
+    for key, value in incoming.items():
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{key} 必须为整数")
+        minimum, maximum = PIPELINE_RANGES[key]
+        if not minimum <= value <= maximum:
+            raise ValueError(f"{key} 必须在 {minimum} 到 {maximum} 之间")
+        mining["pipeline"][key] = value
+    prompts = body.get("prompts", [])
+    if not isinstance(prompts, list):
+        raise ValueError("prompts 必须为数组")
+    for entry in prompts:
+        if not isinstance(entry, dict) or entry.get("id") != COMPILER_PROMPT_ID:
+            raise ValueError("仅支持当前 OpenViking 编译 Skill")
+        prompt = entry.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("编译 Skill 不能为空")
+        if len(prompt.encode("utf-8")) > MAX_COMPILER_BYTES:
+            raise ValueError("编译 Skill 超过 256 KB")
+        # Use exactly the validator used when provisioning the immutable OV package.
+        from .ov_round_orchestration import _compiler_package
+        _compiler_package(prompt)
+        if prompt == SKILL_BODY:
+            mining["prompts"].pop(COMPILER_PROMPT_ID, None)
         else:
-            prompts[stage_id] = prompt
-
-    return settings_payload(store_data)
-
-
-def mining_model_form_payload(store_data: dict[str, Any]) -> dict[str, Any]:
-    """Return the global model as a read-only legacy compatibility payload."""
-    model = settings_payload(store_data)["model"]
-    model_id = str(model.get("model") or "").strip()
-    base_url = str(model.get("base_url") or "").strip()
-    return {
-        "provider": str(model.get("provider") or "custom"),
-        "id": model_id,
-        "model": model_id,
-        "base_url": base_url,
-        "max_tokens": int(model.get("max_tokens") or 100000),
-        "temperature": float(model.get("temperature") or 0.2),
-        "api_key_present": bool(model.get("api_key_present")),
-        "configured": bool(model_id and base_url),
-    }
-
-
-def update_mining_model_form(
-    store_data: dict[str, Any], body: dict[str, Any]
-) -> dict[str, Any]:
-    """Reject retired mining model writes instead of creating a second key."""
-    del store_data, body
-    raise ValueError("挖掘模型已复用全局模型，请在“全局模型”中统一配置")
+            mining["prompts"][COMPILER_PROMPT_ID] = prompt
+    updated = copy.deepcopy(store_data)
+    updated["mining"] = mining
+    payload = settings_payload(updated)
+    store_data["mining"] = mining
+    return payload
 
 
 def reset_prompt(store_data: dict[str, Any], stage_id: str) -> dict[str, Any]:
-    if stage_id not in _PROMPTS:
-        raise KeyError(f"unknown mining prompt: {stage_id}")
-    mining = store_data.setdefault("mining", {})
-    prompts = mining.setdefault("prompts", {})
-    prompts.pop(stage_id, None)
+    if stage_id != COMPILER_PROMPT_ID:
+        raise KeyError("仅支持当前 OpenViking 编译 Skill")
+    mining = {
+        "pipeline": pipeline_settings(store_data),
+        "prompts": {},
+    }
+    store_data["mining"] = mining
     return settings_payload(store_data)

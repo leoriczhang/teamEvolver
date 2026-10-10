@@ -488,7 +488,10 @@ class OvRoundOrchestrationMixin:
                     # Freeze the compiler separately for each round. An accepted submission
                     # always retries its saved request; a new round may use improved guidance.
                     first_compiler = job_dir / "compiler-skill.md"
-                    compiler_body = SKILL_BODY
+                    compiler_body = (
+                        await asyncio.to_thread(self._ov_skill_compiler_body)
+                        if hasattr(self, "_ov_skill_compiler_body") else SKILL_BODY
+                    )
                     if int(job["current_round"]) == 1 and await asyncio.to_thread(first_compiler.is_file):
                         compiler_body = await asyncio.to_thread(first_compiler.read_text, encoding="utf-8")
                     await asyncio.to_thread(compiler_path.write_text, compiler_body, encoding="utf-8")

@@ -88,16 +88,9 @@ Authorization: Bearer <tevt_租户机器凭证>
 
 Skill 发布后，`SkillMutationService` 通过 outbox 机制向支持推送的 Agent 发送更新通知。推送适配器在 [skill_sync_adapters.py](../../../teamEvolver/integrations/skill_sync_adapters.py) 中注册。
 
-### Hermes 集成
+### Agent 拉取
 
-Hermes 通过 `pre_llm_call` hook 实现自动拉取：
-
-```
-用户发起任务 → Hermes pre_llm_call hook → teamEvolver-sync → 
-拉取最新 Skill Bundle → 更新 external_dirs → Hermes 原生 skill discovery
-```
-
-安装脚本见 [hermes_skill_sync/install.py](../../../teamEvolver/integrations/hermes_skill_sync/install.py)。
+Agent 使用租户 Key 和声明的 user_id 拉取 Skill Bundle，保留版本和 tombstone。具体调用契约见 [Skill 同步 API](../api/06-skill-sync.md) 和 [自定义 Agent 接入](../agent-integrations/05-custom-agent.md)。
 
 ## Skill 与 Memory 的边界
 

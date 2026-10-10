@@ -55,13 +55,14 @@ A Checklist is a completion gate, not a weighted score. Once the gate passes, Tr
 
 | Module | Current capability |
 | --- | --- |
-| Sessions and Evidence | V1 Session ingest, Langfuse pull, value classification, recent/historical Evidence windows, filter audit |
+| Sessions and Evidence | agent-session.v2 ingest, Langfuse pull, value classification, recent/historical Evidence windows, filter audit |
 | Skill Evolution | Summarize, judge, group, improve/create/merge, and same-source Test Dataset synthesis |
 | True Replay | Run Baseline and Candidate in the real Agent Runtime; inspect Checklist completion, traces, artifacts, and efficiency |
 | Candidate Governance | Review, replay-gated or forced publish, version detail, full Bundle diff, rollback, and audit |
 | Memory Evolution | Memory maintenance, cross-user team-memory aggregation, editable aggregation Skill, incremental compilation, and Memory Replay |
 | Experiment Workbench | Edit Skill bundles and run True Replay against unsaved multi-file Candidates |
 | Personal and Team Assets | Browse and edit OpenViking assets from `viking://user` and `viking://resources` |
+| Skill Mining | OpenViking Compile rounds, human Evidence supplements, artifact editing and candidate submission |
 | Knowledge Compilation | Normalize uploaded documents and submit asynchronous OpenViking compile jobs |
 | Agent Protocol v2 | Tenant principals, Context, Session ingest, ReplayAdapterFactory, and Skill pull |
 | Observability | Langfuse Session import plus model, tool, Skill Evolution, and Memory maintenance tracing |
@@ -169,7 +170,6 @@ Common commands:
 
 ```bash
 teamEvolver status
-teamEvolver doctor
 teamEvolver config show
 teamEvolver stop
 ```

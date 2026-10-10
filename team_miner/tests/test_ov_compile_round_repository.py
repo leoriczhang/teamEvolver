@@ -6,8 +6,8 @@ import json
 
 import pytest
 
-from team_miner import benchmark_format
 from team_miner.ov_compile_mining import MAX_PARALLEL_JOBS, REVIEW_SCHEMA_VERSION, OvSkillMiningRepository
+from team_miner.tests.dataset_fixtures import build_document
 
 
 def create_job(repository, *, rounds=3, human=True):
@@ -58,7 +58,7 @@ def populate(repository, job, *, questions=None, review=True):
     )
     repository.write_output(identity, "compiled_skill/policy-review/EVALUATION.md", "# Evaluation")
     repository.write_output(identity, "compiled_skill/policy-review/BENCHMARK.md", "# Dataset")
-    document = benchmark_format.build_document(
+    document = build_document(
         "policy-review",
         [
             {

@@ -34,10 +34,6 @@ dependencies = [
     "openai>=1.0,<3",
     "openpyxl>=3.1",
     "pypdf>=5.0",
-    "pydantic-settings>=2.0",
-    "tiktoken>=0.5",
-    "markdown>=3.6",
-    "rank-bm25>=0.2",
     "python-docx>=1.1",
     "cryptography>=42",
     "jsonschema[format]>=4.18",
@@ -48,7 +44,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-mining = ["hermes-agent==0.19.0"]
 pg = [
     "asyncpg>=0.29.0",
 ]
@@ -58,7 +53,7 @@ dev = [
     "anyio>=4.0",
 ]
 all = [
-    "teamEvolver[mining,pg]",
+    "teamEvolver[pg]",
 ]
 
 [project.urls]
@@ -89,18 +84,7 @@ teamEvolver = [
 ]
 
 team_miner = [
-    "*.md",
-    ".env.example",
-    "*.sh",
-    "hermes/*",
-    "data/input/.gitkeep",
-    "data/中文金融客服测试/*.md",
-    "web_console/*.py",
-    "web_console/static/*",
-    "*-agent-skill/*.md",
-    "*-agent-skill/assets/*",
-    "*-agent-skill/references/*",
-    "*-agent-skill/scripts/*",
+    "README.md",
 ]
 
 [tool.pytest.ini_options]
