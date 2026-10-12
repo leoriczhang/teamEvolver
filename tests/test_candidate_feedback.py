@@ -237,8 +237,18 @@ def test_reject_keeps_candidate_and_marks_it_rejected(candidate_api):
 
 @pytest.mark.parametrize("mode", ["auto", "force"])
 def test_publish_marks_candidate_adopted(candidate_api, mode):
+    from team_replay.metrics import compare_efficiency
+
     client, store, _, _ = candidate_api
-    store.save_evaluation("job", {"accepted": True})
+    pair = {
+        branch: {"ok": True, "final_response": "Done", "interaction_turns": turns,
+                 "tool_call_count": 0, "total_tokens": turns * 10}
+        for branch, turns in (("baseline", 2), ("candidate", 1))
+    }
+    store.save_evaluation("job", {"accepted": True, "replay_summary": {
+        "status": "evaluated", "cases": [pair],
+        "efficiency": compare_efficiency(pair["baseline"], pair["candidate"]),
+    }})
 
     response = client.post(
         "/api/skill-candidates/job/validate",

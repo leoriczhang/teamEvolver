@@ -68,3 +68,26 @@ def build_document(
         created_at=created_at,
         updated_at=created_at,
     )
+
+
+def build_capability_plan(skill_names: list[str], source_uri: str) -> dict[str, Any]:
+    """Explicit task-boundary fixture for multi-candidate output validation."""
+    return {
+        "schema_version": "skill-miner.plan.v1",
+        "skills": [
+            {
+                "name": name,
+                "task": f"Complete the {name} task",
+                "trigger": f"A user requests {name}",
+                "inputs": ["Task request and Evidence"],
+                "outputs": [f"Verified {name} result"],
+                "boundary": f"Only the independent {name} workflow",
+                "rationale": "Distinct independently executable task and validation boundary",
+                "source_refs": [source_uri],
+            }
+            for name in skill_names
+        ],
+        "deferred": [] if skill_names else [
+            {"reason": "Facts do not establish an executable method", "source_refs": [source_uri]}
+        ],
+    }

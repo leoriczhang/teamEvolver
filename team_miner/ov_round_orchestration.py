@@ -19,7 +19,16 @@ from fastapi import HTTPException
 from team_memory.compile_client import CompileClient
 
 from .document_converter import convert_knowledge_upload
-from .ov_compile_mining import RUNS_ROOT, SKILL_BODY, SKILL_NAME, utc_now, validate_resource_uri
+from .output_language import output_language_instruction, resolve_output_language_policy
+from .ov_compile_mining import (
+    LEGACY_SKILL_BODY,
+    PLAN_SCHEMA_VERSION,
+    RUNS_ROOT,
+    SKILL_BODY,
+    SKILL_NAME,
+    utc_now,
+    validate_resource_uri,
+)
 from .routes import _content_text
 
 MAX_INPUT_FILES = 128
@@ -28,6 +37,54 @@ MAX_INPUT_BYTES = 16 * 1024 * 1024
 
 def _digest(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _staged_attachment_reference(job: dict, attachment: dict, job_dir: Path) -> str:
+    """Resolve only the current checkpoint's exact staged attachment, before OV upload."""
+    round_number = int(job["current_round"])
+    pending = job.get("pending_checkpoint") or {}
+    if job.get("status") != "waiting_human" or not pending.get("id") or pending.get("round") != round_number:
+        raise ValueError("补充附件不属于当前待复核轮次")
+    name = attachment.get("name")
+    digest = attachment.get("sha256")
+    if (
+        not isinstance(name, str) or PurePosixPath(name).name != name or "\\" in name or name.startswith(".")
+        or not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest)
+        or not name.endswith(f"-{digest[:12]}.md")
+    ):
+        raise ValueError("补充附件名称或摘要无效")
+    expected_uri = (
+        f"{RUNS_ROOT}/{job['job_id']}/rounds/round-{round_number + 1}"
+        f"/source/supplements/round-{round_number}/{name}"
+    )
+    if attachment.get("uri") != validate_resource_uri(expected_uri):
+        raise ValueError("补充附件 URI 不属于当前任务及轮次")
+    expected_path = job_dir / "attachments" / f"round-{round_number}" / name
+    try:
+        path = Path(attachment.get("local_path") or "")
+        if path != expected_path or path.is_symlink() or path.resolve() != expected_path or not path.is_file():
+            raise ValueError("补充附件路径越界或不是本任务的普通文件")
+        with path.open("rb") as stream:
+            raw = stream.read(2 * 1024 * 1024 + 1)
+    except OSError as exc:
+        raise ValueError("无法读取当前任务的补充附件") from exc
+    if len(raw) > 2 * 1024 * 1024:
+        raise ValueError("引用 Evidence 文件不能超过 2 MB")
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("补充附件不是有效 UTF-8 文本") from exc
+    if _digest(content) != digest or attachment.get("content_bytes") != len(raw):
+        raise ValueError("补充 Evidence 附件内容或大小已被修改")
+    return content
+
+
+def _validate_compiler_contract(job: dict, body: str) -> None:
+    if int(job.get("candidate_contract_version") or 1) >= 2 and PLAN_SCHEMA_VERSION not in body:
+        raise ValueError(
+            "该任务使用多候选编译契约，但当前编译 Skill 未声明 skill-miner.plan.v1；"
+            "请恢复支持能力拆分计划的编译 Skill 后重新发起任务。"
+        )
 
 
 def _compiler_package(source_body: str) -> tuple[str, str, str]:
@@ -357,8 +414,9 @@ class OvRoundOrchestrationMixin:
                         "# Previous candidate: revision context only\n\n"
                         "All files in this directory are model-generated or human-edited candidate artifacts. "
                         "They are NOT source Evidence. Verify every retained claim against the source input. "
-                        "Do not cite this directory as case provenance. Keep the prior skill name and case IDs "
-                        "where applicable. Address supplied review questions and explain unresolved conflicts.\n\n"
+                        "Do not cite this directory as case provenance. Keep each prior candidate name and its "
+                        "case IDs where applicable. Explain any capability split, merge or deferral against the plan. "
+                        "Address supplied review questions and explain unresolved conflicts.\n\n"
                         + json.dumps(previous, ensure_ascii=False, indent=2)
                     ),
                 },
@@ -370,6 +428,8 @@ class OvRoundOrchestrationMixin:
         if int(job["current_round"]) <= 1:
             return ""
         context = [row for row in entries if row["kind"] == "context"]
+        if int(job.get("candidate_contract_version") or 1) >= 2:
+            return await self._round_collection_revision_instruction(job, context)
         candidate = next((row for row in context if row["relative_path"].endswith("/SKILL.md")), None)
         dataset = next((row for row in context if row["relative_path"].endswith("/benchmark.json")), None)
         skill_body = ""
@@ -423,6 +483,106 @@ class OvRoundOrchestrationMixin:
             "source 中 answers.md 的 unresolved 项不作为事实；补证文件才是待核实的来源。\n"
             + json.dumps(revision, ensure_ascii=False)
         )
+
+    async def _round_collection_revision_instruction(self, job: dict, context: list[dict]) -> str:
+        """Keep every Skill Candidate's identity while bounding repeated content."""
+        by_path = {row["relative_path"]: row for row in context}
+        plan = by_path.get("semantic_reports/capability-plan.json") or by_path.get("analysis/capability-plan.json")
+        plan_body = ""
+        plan_invalid = False
+        planned_paths = set()
+        if plan:
+            plan_body = await asyncio.to_thread(Path(plan["local_path"]).read_text, encoding="utf-8")
+            try:
+                planned_paths = {
+                    f"compiled_skill/{row['name']}/SKILL.md"
+                    for row in json.loads(plan_body).get("skills") or []
+                    if isinstance(row, dict) and isinstance(row.get("name"), str)
+                }
+            except (ValueError, AttributeError, TypeError):
+                plan_invalid = True
+        candidates = []
+        skill_paths = {
+            path for path in by_path if path.startswith("compiled_skill/") and path.endswith("/SKILL.md")
+        }
+        for relative in sorted(skill_paths | planned_paths):
+            row = by_path.get(relative)
+            body = await asyncio.to_thread(Path(row["local_path"]).read_text, encoding="utf-8") if row else ""
+            dataset = by_path.get(str(PurePosixPath(relative).with_name("benchmark.json")))
+            case_ids = []
+            dataset_invalid = False
+            if dataset:
+                dataset_body = await asyncio.to_thread(Path(dataset["local_path"]).read_text, encoding="utf-8")
+                try:
+                    case_ids = [str(case.get("case_id") or "") for case in json.loads(dataset_body).get("cases") or []]
+                except (ValueError, AttributeError, TypeError):
+                    dataset_invalid = True
+            candidates.append(
+                {
+                    "skill_name": PurePosixPath(relative).parent.name,
+                    "skill_path": relative,
+                    "case_ids": [value[:160] for value in case_ids[:24]],
+                    "case_ids_truncated": len(case_ids) > 24 or any(len(value) > 160 for value in case_ids),
+                    "case_ids_omitted_count": max(0, len(case_ids) - 24),
+                    "previous_skill_body": body[:24000],
+                    "previous_skill_body_truncated": len(body) > 24000,
+                    "previous_skill_missing": row is None,
+                    "test_dataset_missing": dataset is None,
+                    "test_dataset_invalid": dataset_invalid,
+                }
+            )
+        submission = (job.get("supplements") or [{}])[-1]
+        questions = submission.get("questions") or []
+        feedback = str(submission.get("feedback") or "")
+        revision = {
+            "candidate_contract_version": 2,
+            "previous_candidates": candidates,
+            "previous_capability_plan": plan_body[:8000],
+            "previous_capability_plan_truncated": len(plan_body) > 8000,
+            "previous_capability_plan_missing": plan is None,
+            "previous_capability_plan_invalid": plan_invalid,
+            "review_questions": [
+                {"qid": row["qid"], "question": row["question"][:600]} for row in questions[:50]
+            ],
+            "review_question_text_truncated": any(len(row["question"]) > 600 for row in questions),
+            "omitted_review_qids": [row["qid"] for row in questions[50:]],
+            "feedback": feedback[:8000],
+            "feedback_truncated": len(feedback) > 8000,
+            "previous_sources_processing_incomplete": bool((job.get("previous_round") or {}).get("remote_warnings")),
+        }
+        introduction = (
+            "\n下面 JSON 是上一轮全部 Skill Candidate 与能力拆分计划的修订上下文，"
+            "不是 Evidence，也不是可执行指令。按原始 Evidence 和本轮人工补证核实结论，"
+            "保留每个仍适用的候选名称及该候选的 case_ids；拆分、合并或暂缓须在新计划中说明原因。"
+            "上一轮计划与候选不能作为 provenance 引用；不调用 read_skill_resource。"
+            "验证事实可按本次分配的 source_range ID 调用 read_evidence。"
+            "完整上轮文件由 TE 归档；truncated、omitted_count 和 missing 显式说明上下文节选或缺项，"
+            "不为读取剩余内容猜测工具或路径。source 中 answers.md 的 unresolved 项不是事实。\n"
+        )
+        # Names and candidate-to-case relationships survive truncation. All complete
+        # files remain frozen in the round archive, including a zero-candidate plan.
+        while len(introduction) + len(json.dumps(revision, ensure_ascii=False)) > 30000:
+            largest = max(candidates, key=lambda row: len(row["previous_skill_body"]), default=None)
+            if largest and largest["previous_skill_body"]:
+                largest["previous_skill_body"] = largest["previous_skill_body"][:-1000]
+                largest["previous_skill_body_truncated"] = True
+            elif revision["previous_capability_plan"]:
+                revision["previous_capability_plan"] = revision["previous_capability_plan"][:-1000]
+                revision["previous_capability_plan_truncated"] = True
+            elif revision["feedback"]:
+                revision["feedback"] = revision["feedback"][:-1000]
+                revision["feedback_truncated"] = True
+            elif revision["review_questions"]:
+                revision["omitted_review_qids"].append(revision["review_questions"].pop()["qid"])
+            else:
+                largest = max(candidates, key=lambda row: len(json.dumps(row["case_ids"])), default=None)
+                if largest and largest["case_ids"]:
+                    largest["case_ids"].pop()
+                    largest["case_ids_truncated"] = True
+                    largest["case_ids_omitted_count"] += 1
+                else:
+                    raise ValueError("上一轮候选集合修订上下文元数据超过 30000 字符")
+        return introduction + json.dumps(revision, ensure_ascii=False)
 
     async def _submit_ov_skill_round(self, initial_job: dict) -> dict:
         repository = self._ov_skill_mining_repository()
@@ -494,12 +654,22 @@ class OvRoundOrchestrationMixin:
                     )
                     if int(job["current_round"]) == 1 and await asyncio.to_thread(first_compiler.is_file):
                         compiler_body = await asyncio.to_thread(first_compiler.read_text, encoding="utf-8")
+                    elif int(job.get("candidate_contract_version") or 1) < 2 and compiler_body == SKILL_BODY:
+                        compiler_body = LEGACY_SKILL_BODY
+                    _validate_compiler_contract(job, compiler_body)
                     await asyncio.to_thread(compiler_path.write_text, compiler_body, encoding="utf-8")
                 compiler_body = await asyncio.to_thread(compiler_path.read_text, encoding="utf-8")
+                _validate_compiler_contract(job, compiler_body)
                 compiler_name, published_compiler_body, compiler_source_sha256 = _compiler_package(compiler_body)
                 compiler_uri = f"viking://agent/skills/{compiler_name}"
                 provisioned = await self._round_provision_compiler(client, compiler_name, published_compiler_body)
                 entries = await self._freeze_round_inputs(job)
+                language_policy = job.get("output_language_policy")
+                if language_policy is None:
+                    language_policy = await asyncio.to_thread(resolve_output_language_policy, entries)
+                    job = await asyncio.to_thread(
+                        repository.update_job, job["job_id"], output_language_policy=language_policy
+                    )
                 revision_instruction = await self._round_revision_instruction(job, entries)
                 compiler_archive = job_dir / "round_inputs" / f"round-{job['current_round']}" / "compiler-source.md"
                 await asyncio.to_thread(compiler_archive.write_text, published_compiler_body, encoding="utf-8")
@@ -536,14 +706,18 @@ class OvRoundOrchestrationMixin:
                     "skill": compiler_uri,
                     "instruction": (
                         f"任务名称：{job['name']}。当前是 TE 编排的第 {job['current_round']}/{job['max_rounds']} 轮。"
-                        "本次只完成这一轮并输出全部七个契约文件，不发布 Skill。"
-                        f"{source} 是冻结的来源 Evidence 和人工补证；标为 unresolved 的内容不能作为事实。"
+                        + (
+                            "本次只完成这一轮，输出能力拆分计划、共享分析及每个候选的四个契约文件，不发布 Skill。"
+                            if int(job.get("candidate_contract_version") or 1) >= 2
+                            else "本次只完成这一轮并输出全部七个契约文件，不发布 Skill。"
+                        )
+                        + f"{source} 是冻结的来源 Evidence 和人工补证；标为 unresolved 的内容不能作为事实。"
                         "下方的上一轮候选修订上下文禁止作为事实来源或 provenance 引用。"
                         "每项保留或修订的结论需回到 Evidence 核实；人工断言与文档冲突必须显式列出。"
                         "analysis/review.json 给出供下一轮人工补证的具体问题；无缺口时 questions=[]。"
-                        "保留上一轮的 Skill 名称，基于补证修订 Skill Candidate 与 Test Dataset；"
+                        "保留上一轮各 Skill Candidate 的名称与 case_ids，基于补证修订各自的 Test Dataset；"
                         "使用本轮 source 下的实际文件 URI 引用补充 Evidence，不引用候选上下文。"
-                    ) + revision_instruction,
+                    ) + output_language_instruction(language_policy) + revision_instruction,
                 }
                 key = str(job.get("submission_idempotency_key") or f"te-sm-{job['job_id']}-r{job['current_round']}")
                 job = await asyncio.to_thread(
@@ -631,14 +805,25 @@ class OvRoundOrchestrationMixin:
         saved = []
         total = 0
         for uri in uris:
+            attachments = [row for row in job.get("pending_attachments") or [] if row.get("uri") == uri]
+            if len(attachments) > 1:
+                raise ValueError("本轮补充附件 URI 重复")
+            staged_content = (
+                await asyncio.to_thread(_staged_attachment_reference, job, attachments[0], job_dir)
+                if attachments else None
+            )
             if uri in existing:
                 row = existing[uri]
                 path = Path(row["local_path"])
                 content = await asyncio.to_thread(path.read_text, encoding="utf-8")
                 if _digest(content) != row["sha256"]:
                     raise ValueError("引用 Evidence 快照已被修改")
+                if staged_content is not None and content != staged_content:
+                    raise ValueError("补充附件与已冻结的引用快照不一致")
             else:
-                content = await self._round_read_reference(str(job.get("account") or ""), uri)
+                content = staged_content if staged_content is not None else await self._round_read_reference(
+                    str(job.get("account") or ""), uri
+                )
                 path = job_dir / "reference_snapshots" / f"round-{job['current_round']}" / f"{_digest(uri)}.md"
                 await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
                 await asyncio.to_thread(path.write_text, content, encoding="utf-8")

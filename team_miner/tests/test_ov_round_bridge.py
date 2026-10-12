@@ -16,7 +16,7 @@ from fastapi import FastAPI, HTTPException
 from team_miner import ov_round_orchestration
 from team_miner.bridge import SkillMinerBridgeMixin
 from team_miner.ov_compile_mining import REVIEW_SCHEMA_VERSION, RUNS_ROOT, SKILL_NAME, OvSkillMiningRepository
-from team_miner.tests.dataset_fixtures import build_document
+from team_miner.tests.dataset_fixtures import build_capability_plan, build_document
 
 SOURCE = "viking://resources/team/source"
 APPROVED = "viking://resources/team/approved/policy.md"
@@ -89,19 +89,9 @@ class FakeOV:
             return self.tasks[task_id]
         raise AssertionError((method, path, kwargs))
 
-    def complete(self, job, *, questions=True):
+    def complete(self, job, *, questions=True, skill_names=None):
         source = job["source_snapshot"] + "/original/policy.md"
-        document = build_document(
-            "policy-review",
-            [
-                {
-                    "input": f"Apply policy in scenario {case}",
-                    "requirements": [f"Condition {n}" for n in range(12)],
-                    "source_session_ids": [source],
-                }
-                for case in range(12)
-            ],
-        )
+        names = ["policy-review"] if skill_names is None else skill_names
         review = {
             "schema_version": REVIEW_SCHEMA_VERSION,
             "questions": [
@@ -120,13 +110,32 @@ class FakeOV:
             "analysis/evidence-map.md": f"# Evidence\n{source}",
             "analysis/gaps.md": "# Gaps\nReview regional scope.",
             "analysis/review.json": json.dumps(review),
-            "compiled_skill/policy-review/SKILL.md": (
-                "---\nname: policy-review\ndescription: Apply sourced policy.\n---\n# Policy"
-            ),
-            "compiled_skill/policy-review/EVALUATION.md": "# Evaluation",
-            "compiled_skill/policy-review/BENCHMARK.md": "# Test Dataset",
-            "compiled_skill/policy-review/benchmark.json": json.dumps(document),
         }
+        if int(job.get("candidate_contract_version") or 1) >= 2:
+            files["analysis/capability-plan.json"] = json.dumps(build_capability_plan(names, source))
+        for name in names:
+            document = build_document(
+                name,
+                [
+                    {
+                        "case_id": f"{name}-{case:03d}",
+                        "input": f"Apply policy in scenario {case}",
+                        "requirements": [f"Condition {n}" for n in range(12)],
+                        "source_session_ids": [source],
+                    }
+                    for case in range(12)
+                ],
+            )
+            files.update(
+                {
+                    f"compiled_skill/{name}/SKILL.md": (
+                        f"---\nname: {name}\ndescription: Apply sourced policy.\n---\n# {name}"
+                    ),
+                    f"compiled_skill/{name}/EVALUATION.md": "# Evaluation",
+                    f"compiled_skill/{name}/BENCHMARK.md": "# Test Dataset",
+                    f"compiled_skill/{name}/benchmark.json": json.dumps(document),
+                }
+            )
         self.content.update({job["output_uri"] + "/" + name: content for name, content in files.items()})
         self.tasks[job["ov_task_id"]] = {"status": "completed", "stage": "compile: completed"}
 
@@ -257,12 +266,12 @@ def app_for(owner, *, admin=True):
 
 
 @pytest.mark.asyncio
-async def test_first_round_freezes_sources_and_accepts_exact_seven_file_contract(rig):
+async def test_first_round_freezes_sources_and_accepts_candidate_collection_contract(rig):
     job = create(rig)
     waiting = await complete(rig, job)
     assert waiting["status"] == "waiting_human" and waiting["current_round"] == 1
     assert waiting["compile_request"]["from"] == [waiting["source_snapshot"]]
-    assert len(rig.repository.public_job(waiting, detail=True)["rounds"][0]["artifacts"]) == 7
+    assert len(rig.repository.public_job(waiting, detail=True)["rounds"][0]["artifacts"]) == 8
     assert not waiting["finished_at"] and not waiting["artifact_quality"]["can_submit"]
     assert Path(waiting["input_manifest"]).is_file()
     assert "analysis/review.json" in rig.remote.published[0]["skill_body"]
@@ -385,6 +394,157 @@ async def test_without_human_wait_bridge_runs_two_distinct_compile_rounds(rig):
     assert rig.remote.compile_calls[1][1]["from"] == [final["source_snapshot"]]
     assert final["round_context_uri"] not in rig.remote.compile_calls[1][1]["from"]
     assert not final["supplements"] and not final["pending_checkpoint"]
+
+
+@pytest.mark.asyncio
+async def test_second_round_receives_every_candidate_plan_and_matching_case_ids(rig):
+    names = ["policy-review", "regional-assessment"]
+    second = await complete(rig, create(rig, rounds=2, human=False), questions=False, skill_names=names)
+    first_archive = rig.repository.jobs_root / second["job_id"] / "rounds/round-1/reviewed_output"
+    previous_plan = (first_archive / "semantic_reports/capability-plan.json").read_text()
+    submitted = await rig._submit_ov_skill_round(second)
+    instruction = submitted["compile_request"]["instruction"]
+    revision = json.loads(instruction.rsplit("\n", 1)[-1])
+    assert revision["candidate_contract_version"] == 2
+    assert json.loads(revision["previous_capability_plan"]) == json.loads(previous_plan)
+    assert not revision["previous_capability_plan_truncated"] and not revision["previous_capability_plan_missing"]
+    assert {row["skill_name"] for row in revision["previous_candidates"]} == set(names)
+    for row in revision["previous_candidates"]:
+        name = row["skill_name"]
+        assert row["case_ids"] == [f"{name}-{number:03d}" for number in range(12)]
+        assert f"name: {name}" in row["previous_skill_body"]
+        assert not row["previous_skill_body_truncated"] and not row["case_ids_truncated"]
+        assert not row["test_dataset_missing"] and not row["test_dataset_invalid"]
+    assert submitted["compile_request"]["from"] == [submitted["source_snapshot"]]
+    assert "拆分、合并或暂缓" in instruction
+    archived_plan_uri = submitted["round_context_uri"] + "/semantic_reports/capability-plan.json"
+    assert rig.remote.content[archived_plan_uri] == previous_plan
+
+
+@pytest.mark.asyncio
+async def test_zero_candidate_round_retains_deferred_capability_plan_for_revision(rig):
+    second = await complete(rig, create(rig, rounds=2, human=False), questions=False, skill_names=[])
+    assert second["current_round"] == 2 and second["status"] == "preparing"
+    submitted = await rig._submit_ov_skill_round(second)
+    revision = json.loads(submitted["compile_request"]["instruction"].rsplit("\n", 1)[-1])
+    assert revision["previous_candidates"] == []
+    plan = json.loads(revision["previous_capability_plan"])
+    assert plan["skills"] == [] and plan["deferred"][0]["reason"]
+    assert not revision["previous_capability_plan_missing"]
+
+
+@pytest.mark.asyncio
+async def test_collection_revision_bounds_all_eight_candidate_bodies_without_losing_identity(rig, tmp_path):
+    names = [f"task-{number}" for number in range(8)]
+    entries = []
+
+    def add(relative, content):
+        local = tmp_path / "context" / relative
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.write_text(content)
+        entries.append({"kind": "context", "relative_path": relative, "local_path": str(local)})
+
+    for name in names:
+        add(f"compiled_skill/{name}/SKILL.md", f"name: {name}\n" + '"Claim with escaping" ' * 10_000)
+        add(
+            f"compiled_skill/{name}/benchmark.json",
+            json.dumps({"cases": [{"case_id": f"{name}-{number:03d}"} for number in range(24)]}),
+        )
+    plan = build_capability_plan(names, f"{SOURCE}/policy.md")
+    plan["skills"][0]["rationale"] = "Detailed method rationale. " * 2000
+    add("semantic_reports/capability-plan.json", json.dumps(plan))
+    instruction = await rig._round_revision_instruction({"current_round": 2, "candidate_contract_version": 2}, entries)
+    assert len(instruction) <= 30_000
+    revision = json.loads(instruction.rsplit("\n", 1)[-1])
+    assert revision["previous_capability_plan_truncated"]
+    assert {row["skill_name"] for row in revision["previous_candidates"]} == set(names)
+    for row in revision["previous_candidates"]:
+        assert row["previous_skill_body_truncated"]
+        assert row["case_ids"] == [f"{row['skill_name']}-{number:03d}" for number in range(24)]
+        assert not row["case_ids_truncated"] and row["case_ids_omitted_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_revision_retains_invalid_candidate_identity_without_breaking_other_candidates(rig):
+    names = ["policy-review", "regional-assessment"]
+    submitted = await rig._submit_ov_skill_round(create(rig, rounds=2, human=False))
+    rig.remote.complete(submitted, questions=False, skill_names=names)
+    rig.remote.content[submitted["output_uri"] + "/compiled_skill/regional-assessment/benchmark.json"] = "invalid JSON"
+    await rig._refresh_ov_skill_job(submitted)
+    second = rig.repository.get_job(submitted["job_id"])
+    assert second["current_round"] == 2
+    accepted = await rig._submit_ov_skill_round(second)
+    assert accepted["status"] == "queued"
+    revision = json.loads(accepted["compile_request"]["instruction"].rsplit("\n", 1)[-1])
+    candidates = {row["skill_name"]: row for row in revision["previous_candidates"]}
+    assert candidates["regional-assessment"]["test_dataset_invalid"]
+    assert candidates["regional-assessment"]["case_ids"] == []
+    assert not candidates["policy-review"]["test_dataset_invalid"]
+    assert len(candidates["policy-review"]["case_ids"]) == 12
+
+
+@pytest.mark.asyncio
+async def test_revision_keeps_planned_candidate_with_missing_skill_body(rig):
+    names = ["policy-review", "regional-assessment"]
+    submitted = await rig._submit_ov_skill_round(create(rig, rounds=2, human=False))
+    rig.remote.complete(submitted, questions=False, skill_names=names)
+    del rig.remote.content[submitted["output_uri"] + "/compiled_skill/regional-assessment/SKILL.md"]
+    await rig._refresh_ov_skill_job(submitted)
+    second = rig.repository.get_job(submitted["job_id"])
+    assert second["current_round"] == 2
+    accepted = await rig._submit_ov_skill_round(second)
+    revision = json.loads(accepted["compile_request"]["instruction"].rsplit("\n", 1)[-1])
+    candidates = {row["skill_name"]: row for row in revision["previous_candidates"]}
+    assert set(candidates) == set(names)
+    assert candidates["regional-assessment"]["previous_skill_missing"]
+    assert candidates["regional-assessment"]["previous_skill_body"] == ""
+    assert len(candidates["regional-assessment"]["case_ids"]) == 12
+    assert not candidates["policy-review"]["previous_skill_missing"]
+
+
+@pytest.mark.asyncio
+async def test_collection_job_rejects_later_single_candidate_compiler_before_remote_submission(rig):
+    second = await complete(rig, create(rig, rounds=2, human=False), questions=False)
+    rig.compiler_body = ov_round_orchestration.LEGACY_SKILL_BODY
+    failed = await rig._submit_ov_skill_round(second)
+    assert failed["status"] == "failed" and "skill-miner.plan.v1" in failed["error"]
+    assert len(rig.remote.compile_calls) == 1 and len(rig.remote.published) == 1
+    assert not (rig.repository.jobs_root / second["job_id"] / "compiler-round-2.md").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("contract_version", [None, 1])
+async def test_legacy_job_uses_legacy_compiler_and_single_candidate_revision(rig, contract_version):
+    initial = create(rig, rounds=2, human=False)
+    initial = rig.repository.update_job(initial["job_id"], candidate_contract_version=contract_version)
+    second = await complete(rig, initial, questions=False)
+    assert rig.remote.published[0]["skill_body"] == ov_round_orchestration._compiler_package(
+        ov_round_orchestration.LEGACY_SKILL_BODY
+    )[1]
+    assert len(rig.repository.public_job(second, detail=True)["rounds"][0]["artifacts"]) == 7
+    accepted = await rig._submit_ov_skill_round(second)
+    legacy_hash = ov_round_orchestration._digest(ov_round_orchestration.LEGACY_SKILL_BODY)
+    assert accepted["compiler_source_sha256"] == legacy_hash
+    revision = json.loads(accepted["compile_request"]["instruction"].rsplit("\n", 1)[-1])
+    assert revision["previous_skill_name"] == "policy-review" and len(revision["case_ids"]) == 12
+    assert "previous_candidates" not in revision
+
+
+@pytest.mark.asyncio
+async def test_legacy_job_preserves_custom_and_previously_frozen_compiler_sources(rig):
+    custom = ov_round_orchestration.LEGACY_SKILL_BODY + "\nCustom compiler instruction.\n"
+    rig.compiler_body = custom
+    first = create(rig, rounds=1)
+    first = rig.repository.update_job(first["job_id"], candidate_contract_version=1)
+    accepted = await rig._submit_ov_skill_round(first)
+    assert accepted["compiler_source_sha256"] == ov_round_orchestration._digest(custom)
+
+    second = create(rig, rounds=1)
+    second = rig.repository.update_job(second["job_id"], candidate_contract_version=1)
+    frozen = ov_round_orchestration.SKILL_BODY
+    (rig.repository.jobs_root / second["job_id"] / "compiler-round-1.md").write_text(frozen)
+    accepted_second = await rig._submit_ov_skill_round(second)
+    assert accepted_second["compiler_source_sha256"] == ov_round_orchestration._digest(frozen)
 
 
 @pytest.mark.asyncio
@@ -577,7 +737,7 @@ async def test_remote_partial_output_warns_with_complete_bundle_and_next_round_f
     assert waiting["remote_warnings"] == expected
     assert waiting["artifact_quality"]["warnings"] == expected and waiting["artifact_quality"]["level"] == "caution"
     public = rig.repository.public_job(waiting, detail=True)
-    assert len(public["rounds"][0]["artifacts"]) == 7
+    assert len(public["rounds"][0]["artifacts"]) == 8
     assert public["rounds"][0]["remote_warnings"] == expected
     assert public["rounds"][0]["compiler_source_sha256"] == ov_round_orchestration._digest(compiler_v1)
     assert public["rounds"][0]["compiler_sha256"] == ov_round_orchestration._digest(
@@ -717,13 +877,13 @@ async def test_large_revision_context_is_bounded_explicitly_partial_and_fully_ar
     instruction = payload["instruction"]
     assert len(instruction) <= 32_000
     revision = json.loads(instruction.rsplit("\n", 1)[-1])
-    assert revision["previous_skill_body_truncated"]
+    assert revision["previous_candidates"][0]["previous_skill_body_truncated"]
     assert revision["review_question_text_truncated"]
     assert revision["feedback_truncated"]
     assert {row["qid"] for row in revision["review_questions"]} | set(revision["omitted_review_qids"]) == {
         row["qid"] for row in review_questions
     }
-    assert len(revision["case_ids"]) == 12
+    assert len(revision["previous_candidates"][0]["case_ids"]) == 12
     assert "FULL_CANDIDATE_TAIL" not in instruction
     archive = rig.repository.jobs_root / waiting["job_id"] / "rounds" / "round-1"
     assert (archive / "output/compiled_skill/policy-review/SKILL.md").read_text() == huge_skill
@@ -839,3 +999,98 @@ async def test_unknown_acceptance_retry_rejects_tampered_pin_before_reposting_co
     assert len(rig.remote.compile_calls) == 1 and len(rig.remote.published) == 1
     assert rig.remote.compiler_skills[name] == tampered
     assert rig.remote.submission_lookups[-1] == pending["submission_idempotency_key"]
+
+
+@pytest.mark.asyncio
+async def test_chinese_original_language_survives_english_prior_review_and_live_source_changes(rig):
+    original = "包裹受理应先核对原订单与付款凭证，再检查重量和尺寸；材料缺失时暂停并转人工。"
+    rig.remote.content[f"{SOURCE}/policy.md"] = original
+    waiting = await complete(rig, create(rig, rounds=2))
+    policy = {"version": 1, "basis": "frozen_original_source", "language": "zh-CN"}
+    assert waiting["output_language_policy"] == policy
+    assert "所有轮次新生成的面向人文字必须使用简体中文" in waiting["compile_request"]["instruction"]
+    archive = rig.repository.jobs_root / waiting["job_id"] / "rounds/round-1"
+    prior = (archive / "output/compiled_skill/policy-review/SKILL.md").read_text()
+    assert "description: Apply sourced policy." in prior
+    assert json.loads((archive / "input.json").read_text())["output_language_policy"] == policy
+    assert json.loads((archive / "meta.json").read_text())["output_language_policy"] == policy
+    rig.remote.content[f"{SOURCE}/policy.md"] = "The changed live source must not replace the original Evidence."
+    second = rig.repository.prepare_next_round(
+        waiting["job_id"], waiting["pending_checkpoint"]["id"],
+        answers={"scope": "Only use approved regions."}, unresolved=[], references={},
+        feedback="Keep the previous candidate's scope and check the supplied answer.",
+    )
+    submitted = await rig._submit_ov_skill_round(second)
+    assert submitted["output_language_policy"] == policy
+    instruction = submitted["compile_request"]["instruction"]
+    assert "必须使用简体中文" in instruction
+    assert instruction.index("TE output_language_policy:") < instruction.index("下面 JSON 是上一轮")
+    revision = json.loads(instruction.rsplit("\n", 1)[-1])
+    assert revision["previous_candidates"][0]["previous_skill_body"] == prior
+    assert revision["previous_candidates"][0]["skill_name"] == "policy-review"
+    assert revision["previous_candidates"][0]["case_ids"] == [f"policy-review-{i:03d}" for i in range(12)]
+    assert rig.remote.content[submitted["source_snapshot"] + "/original/policy.md"] == original
+    assert "Only use approved regions." in rig.remote.content[
+        submitted["source_snapshot"] + "/supplements/round-1/answers.md"
+    ]
+    assert submitted["compile_request"]["from"] == [submitted["source_snapshot"]]
+    assert submitted["round_context_uri"] not in submitted["compile_request"]["from"]
+
+
+@pytest.mark.asyncio
+async def test_language_policy_and_request_survive_lost_acceptance_and_restart(rig):
+    rig.remote.content[f"{SOURCE}/policy.md"] = (
+        "退货申请应核对订单和付款凭证，未拆封状态须明确；异常情况暂停处理并转人工。"
+    )
+    rig.remote.lose_next_acceptance = True
+    pending = await rig._submit_ov_skill_round(create(rig))
+    assert pending["output_language_policy"]["language"] == "zh-CN"
+    rig.remote.content[f"{SOURCE}/policy.md"] = "The user must verify the policy before accepting the parcel."
+    restarted = Owner(OvSkillMiningRepository(rig.repository.state_root, rig.repository.project_root), rig.remote)
+    restarted.compiler_body += "\nDifferent language guidance must not change a frozen retry.\n"
+    resumed = await restarted._submit_ov_skill_round(restarted.repository.get_job(pending["job_id"]))
+    assert resumed["status"] == "queued"
+    assert resumed["output_language_policy"] == pending["output_language_policy"]
+    assert resumed["compile_request"] == pending["compile_request"]
+    assert resumed["compiler_uri"] == pending["compiler_uri"]
+    assert resumed["submission_idempotency_key"] == pending["submission_idempotency_key"]
+    assert len(rig.remote.compile_calls) == 2 and rig.remote.compile_calls[0] == rig.remote.compile_calls[1]
+
+
+@pytest.mark.asyncio
+async def test_existing_frozen_request_without_language_policy_is_reposted_unchanged(rig, monkeypatch):
+    job = create(rig)
+    frozen = {
+        "from": [job["source_snapshot"]], "to": job["output_uri"], "skill": job["skill_uri"],
+        "instruction": "Frozen request from before output language selection.",
+    }
+    job = rig.repository.update_job(job["job_id"], compile_request=frozen)
+
+    async def no_refreeze(_job):
+        raise AssertionError("A frozen request must not read source text or choose a new language")
+
+    monkeypatch.setattr(rig, "_freeze_round_inputs", no_refreeze)
+    accepted = await rig._submit_ov_skill_round(job)
+    assert accepted["status"] == "queued" and not accepted.get("output_language_policy")
+    assert accepted["compile_request"] == frozen
+    assert rig.remote.compile_calls == [(job["submission_idempotency_key"], frozen)]
+
+
+@pytest.mark.asyncio
+async def test_old_job_without_policy_chooses_next_round_language_from_frozen_original_source(rig):
+    rig.remote.content[f"{SOURCE}/policy.md"] = (
+        "包裹需要核对订单号、尺寸和付款凭证，异常必须转人工，不得承诺未证实的运费。"
+    )
+    waiting = await complete(rig, create(rig, rounds=2), questions=False)
+    # Represent a pre-policy job, retaining its previously frozen source and output.
+    path = rig.repository.jobs_root / waiting["job_id"] / "job.json"
+    old = json.loads(path.read_text())
+    old.pop("output_language_policy")
+    path.write_text(json.dumps(old), encoding="utf-8")
+    rig.remote.content[f"{SOURCE}/policy.md"] = "The user must check the newer live policy before shipping."
+    second = rig.repository.prepare_next_round(
+        waiting["job_id"], waiting["pending_checkpoint"]["id"], answers={}, unresolved=[], references={},
+    )
+    submitted = await rig._submit_ov_skill_round(second)
+    assert submitted["output_language_policy"]["language"] == "zh-CN"
+    assert "必须使用简体中文" in submitted["compile_request"]["instruction"]

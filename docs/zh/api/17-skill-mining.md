@@ -30,7 +30,60 @@
 
 第一轮从原始知识源冻结快照。后续轮次使用原始快照、累计人工补证和上一轮修订上下文。任务返回 `rounds_mode: "orchestrated"`；`current_round` 表示真实轮次。
 
-远端 Compile 请求的 `from` 仅包含本轮 Evidence 来源目录。上轮候选的修订上下文通过 `instruction` 直接提供，不作为来源参与提取。修订上下文 JSON 上限为 30000 字符，包含上轮 Skill 正文、案例标识和本轮复核信息；节选或省略有明确标记。完整上轮产物始终保留在轮次归档中。
+首轮从冻结的原始来源确定并保存主要语言，中文主导时使用简体中文。后续轮次沿用该语言，不由旧英文产物或补证语言重新决定。任务语言规则由运行时加入新的 Compile 请求，面向人的正文、说明、案例 Query、Checklist 自然语言、共享分析和复核问题按该语言生成；字段名、ID、文件路径、来源 URI、代码、固定枚举、原文直接引用及 `Checklist`、`Evidence`、`Materials` 等结构标签保持原样。当前接口与控制台均无独立的输出语言选择项。
+
+保存的自定义业务编译指令保持原样，无需为语言更新而重置。已受理的请求继续使用其冻结版本；已完成产物不自动翻译或重新 Compile。
+
+使用默认编译 Skill 的新任务采用 `candidate_contract_version: 2`：模型先规划可独立执行的任务方法，再为每个方法编译独立的 Skill Candidate。数量由触发场景、输入输出、任务边界以及独立执行与 True Replay 验证能力决定，不按文档篇数或章节拆分。每轮最多 8 个候选，这是执行上限，不是要求模型填满的数量；无法支持可执行方法时允许 0 个候选，并记录暂缓原因。纯事实及 Evidence 不足的内容进入 `deferred`。
+
+此前保存的自定义编译 Skill 若仍采用单候选契约，新任务保留 `candidate_contract_version: 1` 并提示兼容性警告。重置为当前默认编译 Skill 后创建的新任务才启用多候选；已有任务仍保留其冻结契约。
+
+远端 Compile 请求的 `from` 仅包含本轮 Evidence 来源目录。上轮候选集合的修订上下文通过 `instruction` 直接提供，不作为来源参与提取。修订上下文 JSON 上限为 30000 字符，包含上轮各 Skill 正文、案例标识和本轮复核信息；节选或省略有明确标记。完整上轮产物始终保留在轮次归档中。
+
+## 能力拆分与产物契约
+
+每轮生成四个共享分析文件，以及每个候选独立的四个文件：
+
+```text
+analysis/evidence-map.md
+analysis/gaps.md
+analysis/review.json
+analysis/capability-plan.json
+compiled_skill/<skill-name>/SKILL.md
+compiled_skill/<skill-name>/EVALUATION.md
+compiled_skill/<skill-name>/benchmark.json
+compiled_skill/<skill-name>/BENCHMARK.md
+```
+
+`analysis/capability-plan.json` 固定候选名称、任务边界和来源引用；后续写入阶段遵守这份计划。产物不能包含计划外的候选，候选名称唯一，并与目录名和 `SKILL.md` frontmatter 的 `name` 一致。计划中的某个候选缺失 `SKILL.md` 或其他必需文件时，该候选标记为 `incomplete`，不阻止其他结构合格的候选进入后续流程。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `schema_version` | string | 固定为 `skill-miner.plan.v1` |
+| `skills` | object[] | 0–8 个候选的方法规划 |
+| `deferred` | object[] | 暂不形成 Skill 的内容及原因；零候选时不能为空 |
+
+每个 `skills` 条目包含：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `name` | string | 唯一的小写 kebab-case 名称 |
+| `task` | string | 可独立完成的任务 |
+| `trigger` | string | 适用场景 |
+| `inputs` / `outputs` | string[] | 任务输入与预期输出，均不能为空 |
+| `boundary` | string | 方法覆盖的范围和约束 |
+| `rationale` | string | 拆分或合并该方法的理由 |
+| `source_refs` | string[] | 支持该方法的原始来源或人工补证 URI，不能为空 |
+
+每个 `deferred` 条目包含非空的 `reason` 和 `source_refs`。来源引用必须属于本任务知识源或补证范围，不能引用上一轮模型产物。候选间可共享 Evidence，但重叠方法应合并，单个完整流程的步骤不应被拆成无法独立使用的候选。
+
+各候选的 `benchmark.json` 分别使用 `team-replay.dataset` 格式并包含 12–24 个案例，只引用本候选。初次产物同步时，系统从结构校验通过的 `benchmark.json` 确定性地规范化已生成的 `BENCHMARK.md`，使案例、Checklist 和来源保持一致，不增加案例或业务事实。缺失必需文件仍会阻止该候选提交，不以规范化补齐缺失产物。
+
+每个候选有自己的 Test Dataset、True Replay、Candidate Review 和 Publish 结果；编译完成的集合不会直接成为已发布 Skill 库。零候选结果仅保留分析与暂缓原因，不能提交候选。已有任务保留单候选及三个分析文件、四个包文件的旧契约，恢复或继续时不会自动切换契约。
+
+提交候选时，服务为文档案例设置 `replay.execution`：`kind: "document"`、`runtime_type: "document"`、`binding: "tenant_replay_adapter"`。执行器由当前租户的 ReplayAdapterFactory 配置决定，不由模型选择。原文档 URI 保留为 Evidence 引用，不作为可恢复的 Session。Baseline 与 Candidate 分别开启独立 Agent 会话；新建 Skill 的 Baseline 不加载候选，修订 Skill 的 Baseline 使用已发布版本。执行时不向 Agent 提供包中的评测定义或完整 Checklist，完成条件只通过渐进反馈披露。
+
+候选评估响应的 `status` 和 `replay.status` 区分 `completed`、`skipped`、`not_run`、`failed`，并保留 `replay.reason` 与实际双分支案例数量 `replay.case_count`。未绑定执行器时显示跳过及原因；未观测的指标不计为零或持平。只有真实完成且通过发布门禁的结果可按回放 Publish；未完成时调用自动发布返回 HTTP 409 `replay_incomplete`，候选保持待评审，可配置执行器后重新评估。管理员显式强制发布沿用原有权限与确认流程。
 
 ## 保存补证附件
 
@@ -84,9 +137,20 @@ curl -X POST 'http://localhost:52010/api/mining/jobs/<job_id>/continue' \
 
 ## 响应状态与恢复
 
-任务详情包含当前状态、真实轮次 `current_round`、轮次列表 `rounds`、当前 `pending_checkpoint`、产物以及质量信息。`pending_checkpoint` 包含 `id`、`round`、`questions` 和 `attachments`。每个问题包含 `qid`、`question`、`reason`、`source_refs` 和 `required`。
+任务详情包含当前状态、真实轮次 `current_round`、轮次列表 `rounds`、当前 `pending_checkpoint`、产物以及质量信息。新任务还记录 `candidate_contract_version`；多候选产物同步后提供以下字段：
 
-`remote_warnings` 保留 OpenViking 的部分产物和来源处理失败警告，并合入 `artifact_quality.warnings`；存在警告时质量为 `caution`（需复核）。各轮记录保留自身的警告和 `compiler_sha256`。远端 `completed` 及七个产物格式通过，不代表 Evidence 覆盖完整。
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `capability_plan` | object | 已校验的能力拆分计划 |
+| `candidate_count` | integer | 本轮候选数量 |
+| `valid_candidate_count` | integer | 通过各自包与 Test Dataset 结构校验的候选数量 |
+| `candidate_quality` | object | 以候选名称为键的质量结果；包含 `level`、`warnings` 和 `can_submit` |
+
+`candidate_quality` 的 `ready` / `incomplete` 与 `can_submit` 反映候选结构是否合格；任务仍需完成当前人工复核或执行轮次，之后才能提交合格候选。结构合格不代表已通过 True Replay 或 Candidate Review。
+
+`pending_checkpoint` 包含 `id`、`round`、`questions` 和 `attachments`。每个问题包含 `qid`、`question`、`reason`、`source_refs` 和 `required`。
+
+`remote_warnings` 保留 OpenViking 的部分产物和来源处理失败警告，并合入 `artifact_quality.warnings`；存在警告时质量为 `caution`（需复核）。各轮记录保留自身的警告和 `compiler_sha256`。远端 `completed` 及所有必需产物格式通过，不代表 Evidence 覆盖完整。
 
 `compiler_source_sha256` 标识冻结的编译器来源正文，`compiler_sha256` 标识经过包名替换和原生格式规范化后实际安装的正文。`compiler_uri` 与 `skill_uri` 指向该正文对应的独立包；轮次归档保留这些字段。已存在包的正文不一致时拒绝执行，不将它覆盖为另一版本。
 

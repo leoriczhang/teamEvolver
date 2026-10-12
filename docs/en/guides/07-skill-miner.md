@@ -12,6 +12,8 @@ Start teamEvolver and configure a reachable OpenViking endpoint, account and ser
 
 The source is frozen when the job starts. Later changes to the original directory do not change its Evidence. Every round has separate inputs and outputs and a local archive.
 
+The first round determines and saves the primary language of the frozen original sources. Predominantly Chinese materials use Simplified Chinese. Later rounds retain that language regardless of earlier English artifacts or the language of supplements. Human-readable prose, explanations, case Queries, Checklist text, shared analysis and review questions use that language. Field names, IDs, file paths, source URIs, code, fixed enum values and direct source quotations remain unchanged. Structural labels such as `Checklist`, `Evidence` and `Materials` remain unchanged. The console has no separate output-language selector.
+
 ## Round artifacts
 
 | Path | Purpose |
@@ -43,5 +45,7 @@ After mining, submit the Skill Candidate and Test Dataset to the existing candid
 ## Configuration and API
 
 `mining.pipeline.max_rounds` sets the default round limit and `mining.pipeline.runtime_timeout_seconds` the default per-round deadline. `mining.prompts.ov_compile` can override the compiler Skill body. Each round freezes its compiler, inputs and Compile request and binds a separate compiler URI derived from its content hash.
+
+The runtime adds the job's language rules to new Compile requests while preserving saved custom business instructions verbatim; a language update does not require resetting them. Accepted requests and completed artifacts are not changed retroactively, automatically translated or recompiled.
 
 See [Skill Mining API](../api/17-skill-mining.md) for parameters, states and errors. See [Console Guide](./03-console.md) for knowledge uploads, Wiki compilation and browsing.

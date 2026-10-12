@@ -443,11 +443,15 @@ interface CandidateDecision {
 }
 
 export interface EvalResult {
+  status?: "completed" | "skipped" | "not_run" | "failed" | "evaluated" | "not_found";
   skill_name?: string;
   proposed_action?: string;
   recommended_publish?: boolean;
   cached?: boolean;
   replay?: {
+    status?: "completed" | "skipped" | "not_run" | "failed";
+    reason?: string;
+    case_count?: number;
     verdict?: "accept" | "reject" | "inconclusive";
     no_regression?: boolean;
     error?: string;
@@ -457,11 +461,11 @@ export interface EvalResult {
       regressed_dimensions?: string[];
       unchanged_dimensions?: string[];
       dimensions?: Record<string, {
-        baseline: number;
-        candidate: number;
-        delta: number;
-        reduction_ratio: number;
-        winner: "candidate" | "baseline" | "tie";
+        baseline: number | "unavailable" | null;
+        candidate: number | "unavailable" | null;
+        delta: number | "unavailable" | null;
+        reduction_ratio: number | "unavailable" | null;
+        winner: "candidate" | "baseline" | "tie" | "unavailable";
       }>;
     };
     decision_policy?: ReplayDecisionPolicy;
@@ -501,6 +505,10 @@ interface ReplayDecisionPolicy {
 }
 
 export interface ReplaySide {
+  ok?: boolean;
+  status?: string;
+  reason?: string;
+  error_code?: string;
   response?: string;
   final_response?: string;
   response_text?: string;

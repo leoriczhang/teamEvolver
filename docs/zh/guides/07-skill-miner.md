@@ -12,6 +12,8 @@ Skill 挖掘把领域文档及人工补充的 Evidence 转成可审核的 Skill 
 
 来源在任务开始时冻结。后续修改原目录不会改变该任务的 Evidence。每轮使用独立输入与输出，并保存本地归档。
 
+首轮按冻结的原始来源确定并保存主要语言，中文主导的材料使用简体中文。后续轮次沿用该语言，不因旧英文产物或补证语言改变。面向人的正文、说明、案例 Query、Checklist 自然语言、共享分析和复核问题使用该语言；字段名、ID、文件路径、来源 URI、代码、固定枚举和原文直接引用保持原样。`Checklist`、`Evidence`、`Materials` 等结构标签保留原样。控制台没有独立的输出语言选择器。
+
 ## 每轮产物
 
 | 路径 | 用途 |
@@ -43,5 +45,7 @@ Skill 挖掘把领域文档及人工补充的 Evidence 转成可审核的 Skill 
 ## 配置与接口
 
 `mining.pipeline.max_rounds` 设置默认轮数，`mining.pipeline.runtime_timeout_seconds` 设置默认每轮期限。`mining.prompts.ov_compile` 可覆盖编译 Skill 正文；每轮冻结正文、输入和 Compile 请求，并绑定内容摘要对应的独立编译器 URI。
+
+运行时将任务语言规则加入新的 Compile 请求，自定义业务编译指令原样保存，无需为语言更新而重置。已受理的请求与已完成的产物不追溯修改，不会自动翻译或重新 Compile。
 
 接口参数、状态与错误见 [Skill 挖掘 API](../api/17-skill-mining.md)。知识库上传、Wiki 编译与浏览说明见 [控制台](./03-console.md)。

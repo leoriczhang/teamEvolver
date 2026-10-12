@@ -106,6 +106,29 @@ interface MiningArtifactQuality {
   can_submit: boolean;
 }
 
+interface MiningCapability {
+  name: string;
+  task: string;
+  trigger: string;
+  inputs: string[];
+  outputs: string[];
+  boundary: string;
+  rationale: string;
+  source_refs: string[];
+}
+
+interface MiningCapabilityPlan {
+  schema_version: string;
+  skills: MiningCapability[];
+  deferred: Array<{ reason: string; source_refs: string[] }>;
+}
+
+interface CandidateSubmissionResult {
+  skillName: string;
+  state: "created" | "existing" | "failed";
+  error?: string;
+}
+
 type MiningJobStatus =
   | "preparing"
   | "queued"
@@ -144,6 +167,10 @@ interface MiningJob {
   } | null;
   knowledge_supplements?: KnowledgeSupplementRound[];
   artifact_quality?: MiningArtifactQuality | null;
+  candidate_contract_version?: number;
+  capability_plan?: MiningCapabilityPlan | null;
+  candidate_count?: number;
+  candidate_quality?: Record<string, MiningArtifactQuality>;
   ov_status?: string;
   ov_stage?: string;
   ov_last_synced_at?: string;
@@ -376,6 +403,7 @@ export default function MiningView({
   activeCheckpoint.current = { jobId: selectedJobId, checkpointId: selectedJob?.pending_checkpoint?.id };
   const [knowledgeSupplementExpanded, setKnowledgeSupplementExpanded] = useState(false);
   const [artifactPreview, setArtifactPreview] = useState<ArtifactContent | null>(null);
+  const [artifactJobId, setArtifactJobId] = useState("");
   const [artifactDraft, setArtifactDraft] = useState("");
   const [artifactEditing, setArtifactEditing] = useState(false);
   const [artifactEditorMode, setArtifactEditorMode] = useState<"edit" | "preview">("edit");
@@ -383,6 +411,9 @@ export default function MiningView({
   const [artifactSaving, setArtifactSaving] = useState(false);
   const [loadingArtifact, setLoadingArtifact] = useState("");
   const [submittingJobId, setSubmittingJobId] = useState("");
+  const submissionPending = useRef(false);
+  const [candidateSelections, setCandidateSelections] = useState<Record<string, string[]>>({});
+  const [submissionReports, setSubmissionReports] = useState<Record<string, CandidateSubmissionResult[]>>({});
   const [createJobOpen, setCreateJobOpen] = useState(false);
   const artifactIsMarkdown = isMarkdownArtifact(artifactPreview);
   const defaultsInitialized = useRef(false);
@@ -643,6 +674,7 @@ export default function MiningView({
         `/api/mining/artifacts/content?path=${encodeURIComponent(artifact.path)}`
       );
       setArtifactPreview(result);
+      setArtifactJobId(selectedJobId);
       setArtifactDraft(result.content);
       setArtifactEditing(false);
       setArtifactEditorMode("edit");
@@ -656,6 +688,8 @@ export default function MiningView({
 
   async function saveArtifactRevision() {
     if (!artifactPreview) return;
+    const editedJobId = artifactJobId;
+    const editedPath = artifactPreview.path;
     setArtifactSaving(true);
     try {
       const saved = await api<ArtifactContent & { edited: boolean }>(
@@ -669,7 +703,22 @@ export default function MiningView({
       setArtifactPreview(saved);
       setArtifactDraft(saved.content);
       setArtifactEditing(isMarkdownArtifact(saved));
+      const pathParts = editedPath.split("/");
+      const skillIndex = pathParts.indexOf("compiled_skill");
+      const editedSkillName = skillIndex >= 0 ? pathParts[skillIndex + 1] : "";
+      setSubmissionReports((previous) => ({
+        ...previous,
+        [editedJobId]: editedSkillName
+          ? (previous[editedJobId] || []).filter((item) => item.skillName !== editedSkillName)
+          : [],
+      }));
       toastOk("产物修改已保存", "继续挖掘或提交到进化时将使用当前版本");
+      try {
+        const response = await api<{ job: MiningJob }>(`/api/mining/jobs/${encodeURIComponent(editedJobId)}`);
+        if (activeCheckpoint.current.jobId === editedJobId) setSelectedJob(response.job);
+      } catch (error: any) {
+        toastErr("产物已保存，刷新候选状态失败", error.message);
+      }
     } catch (e: any) {
       toastErr("保存产物失败", e.message);
     } finally {
@@ -677,51 +726,70 @@ export default function MiningView({
     }
   }
 
-  async function submitJobToEvolution(job: MiningJob) {
-    if (job.status !== "succeeded") return;
+  async function submitJobToEvolution(job: MiningJob, requestedNames = jobSkillNames(job)) {
+    if (job.status !== "succeeded" || submissionPending.current) return;
     const quality = job.artifact_quality;
     if (quality && !quality.can_submit) {
       toastErr("当前产物尚不能提交", quality.warnings[0] || "请先补齐评测定义后再提交到进化。");
       return;
     }
-    const skillNames = jobSkillNames(job);
+    const skillNames = jobSkillNames(job).filter((name) => requestedNames.includes(name) && candidateCanSubmit(job, name));
     if (!skillNames.length) {
-      toastErr("无法提交到进化", "任务中没有完整的 Skill 产物");
+      toastErr("无法提交到进化", "请先选择可提交的 Skill Candidate");
       return;
     }
-    if (quality && quality.level !== "ready") {
-      const warning = quality.warnings.slice(0, 3).join("\n") || quality.summary;
-      if (!window.confirm(`该任务的产物标记为“${quality.label}”。\n\n${warning}\n\n仍要提交到进化候选区吗？`)) {
+    const selectedQualities = skillNames.flatMap((name) => job.candidate_quality?.[name] ? [job.candidate_quality[name]] : []);
+    const cautiousQuality = [...selectedQualities, ...(quality ? [quality] : [])].find((item) => item.level !== "ready");
+    if (cautiousQuality) {
+      const warning = distinctWarnings([
+        ...(quality?.warnings || []),
+        ...selectedQualities.flatMap((item) => item.warnings),
+      ]).slice(0, 3).join("\n") || cautiousQuality.summary;
+      if (!window.confirm(`所选产物标记为“${cautiousQuality.label}”。\n\n${warning}\n\n仍要提交到进化候选区吗？`)) {
         return;
       }
     }
+    submissionPending.current = true;
     setSubmittingJobId(job.job_id);
     try {
-      const results = [];
+      const results: CandidateSubmissionResult[] = [];
       for (const skillName of skillNames) {
         const skillArtifact = jobArtifacts(job).find(
           (artifact) => artifact.kind === "skill" && artifact.skill_name === skillName
         );
-        results.push(await api<{ created: boolean; job_id: string; skill_name: string }>(
-          `/api/mined-jobs/${encodeURIComponent(job.job_id)}/skills/${encodeURIComponent(skillName)}/submit`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ artifact_path: skillArtifact?.path || "" }),
-          }
-        ));
+        try {
+          const result = await api<{ created: boolean; job_id: string; skill_name: string }>(
+            `/api/mined-jobs/${encodeURIComponent(job.job_id)}/skills/${encodeURIComponent(skillName)}/submit`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ artifact_path: skillArtifact?.path || "" }),
+            }
+          );
+          results.push({ skillName, state: result.created ? "created" : "existing" });
+        } catch (error: any) {
+          results.push({ skillName, state: "failed", error: error.message || "提交失败" });
+        }
       }
-      const created = results.filter((result) => result.created).length;
-      toastOk(
-        "已提交到进化候选区",
-        created
-          ? `${created} 个 Skill 已生成候选，等待评测与人工审核`
-          : "当前产物版本已在候选区中"
-      );
-      onNavigate?.("candidates");
-    } catch (e: any) {
-      toastErr("提交到进化失败", e.message);
+      setSubmissionReports((previous) => ({
+        ...previous,
+        [job.job_id]: [
+          ...(previous[job.job_id] || []).filter((item) => !skillNames.includes(item.skillName)),
+          ...results,
+        ],
+      }));
+      const created = results.filter((result) => result.state === "created").length;
+      const existing = results.filter((result) => result.state === "existing").length;
+      const failed = results.filter((result) => result.state === "failed").length;
+      const summary = `${created} 个新建，${existing} 个当前版本已在候选区，${failed} 个失败`;
+      if (failed) {
+        toastErr(created + existing ? "部分 Skill Candidate 提交成功" : "提交到进化失败", summary);
+      } else {
+        toastOk("已提交到进化候选区", summary);
+        if (job.candidate_contract_version !== 2 && jobSkillNames(job).length === 1) onNavigate?.("candidates");
+      }
     } finally {
+      submissionPending.current = false;
       setSubmittingJobId("");
     }
   }
@@ -748,6 +816,14 @@ export default function MiningView({
     const hasTimingData = Boolean(
       job.started_at || job.submission_seconds !== undefined || job.materialize_seconds !== undefined
     );
+    const skillNames = jobSkillNames(job);
+    const eligibleNames = skillNames.filter((name) => candidateCanSubmit(job, name));
+    const selectedNames = (candidateSelections[job.job_id] || eligibleNames).filter((name) => eligibleNames.includes(name));
+    const candidateReport = submissionReports[job.job_id] || [];
+    const failedNames = candidateReport.filter((item) => item.state === "failed" && eligibleNames.includes(item.skillName)).map((item) => item.skillName);
+    const showCandidateGroups = job.candidate_contract_version === 2 || skillNames.length > 1;
+    const artifactGroups = groupMiningArtifacts(jobArtifacts(job), skillNames);
+    const editableArtifacts = job.status === "succeeded" || isWaitingForEvidence(job);
     return (
       <div className="space-y-4 border-t border-accent/20 bg-accent-soft/35 px-5 py-5">
         <div className="flex items-start justify-between gap-3">
@@ -1038,7 +1114,7 @@ export default function MiningView({
         )}
 
         {job.artifact_quality && (
-          <div className={cn(
+          <section aria-label="本轮复核提示" className={cn(
             "rounded-xl border p-4",
             job.artifact_quality.level === "ready"
               ? "border-success/35 bg-success/5"
@@ -1054,9 +1130,9 @@ export default function MiningView({
                 )} />
                 <div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-[13px] font-bold">产物质量</span>
-                    <Pill tone={artifactQualityTone(job.artifact_quality.level)}>{job.artifact_quality.label}</Pill>
-                    <span className="text-[11px] text-muted-foreground">Skill 置信档：{job.artifact_quality.confidence === "unknown" ? "未声明" : job.artifact_quality.confidence}</span>
+                    <span className="text-[13px] font-bold">产物质量 · 本轮复核提示</span>
+                    <Pill tone={artifactQualityTone(job.artifact_quality.level)}>{qualityLabel(job.artifact_quality)}</Pill>
+                    <span className="text-[11px] text-muted-foreground">{job.artifact_quality.warnings.length} 条提示 · 产物阶段：{job.artifact_quality.confidence === "unknown" ? "未声明" : job.artifact_quality.confidence}</span>
                   </div>
                   <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{job.artifact_quality.summary}</p>
                 </div>
@@ -1065,23 +1141,17 @@ export default function MiningView({
                 <span className="text-[10.5px] font-medium text-amber-800">提交进化前会再次确认</span>
               )}
             </div>
-            <div className="mt-3 grid gap-2 md:grid-cols-3">
-              {job.artifact_quality.artifacts.map((artifact) => (
-                <div key={artifact.kind} className="rounded-lg border border-border/80 bg-background/80 px-3 py-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-[11px] font-semibold">{artifactLabel(artifact.kind)}</span>
-                    <Pill tone={artifactQualityTone(artifact.state)}>{artifact.label}</Pill>
-                  </div>
-                  <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">{artifact.detail}</p>
-                </div>
-              ))}
-            </div>
+            <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">“需复核”表示仍有内容需要人工核对。结构校验通过仅确认产物格式，业务正确性还需 True Replay 和 Candidate Review 验证。</p>
             {job.artifact_quality.warnings.length > 0 && (
-              <ul className="mt-3 space-y-1 border-t border-current/10 pt-3 text-[10.5px] leading-relaxed text-muted-foreground">
-                {job.artifact_quality.warnings.map((warning, index) => <li key={`${warning}-${index}`} className="select-text">• {warning}</li>)}
-              </ul>
+              <details className="mt-2 border-t border-current/10 pt-2">
+                <summary className="cursor-pointer text-[11px] font-semibold">查看本轮复核提示（{job.artifact_quality.warnings.length} 条）</summary>
+                <p className="mt-2 text-[11px] text-muted-foreground">以下是本轮整体提示，请结合各个 Skill 的产物核对。</p>
+                <ul className="mt-2 space-y-1 text-[11px] leading-relaxed text-muted-foreground">
+                  {job.artifact_quality.warnings.map((warning, index) => <li key={`${warning}-${index}`} className="select-text whitespace-pre-wrap break-words">• {warning}</li>)}
+                </ul>
+              </details>
             )}
-          </div>
+          </section>
         )}
 
         {isExecutingJob(job.status) ? (
@@ -1147,45 +1217,123 @@ export default function MiningView({
                 {job.status === "succeeded" && (
                   <Button
                     size="sm"
-                    disabled={submittingJobId === job.job_id || !jobSkillNames(job).length || job.artifact_quality?.can_submit === false}
-                    onClick={() => submitJobToEvolution(job)}
+                    disabled={Boolean(submittingJobId) || !selectedNames.length}
+                    onClick={() => submitJobToEvolution(job, selectedNames)}
                   >
                     <Send className="size-3.5" />
-                    {submittingJobId === job.job_id ? "提交中…" : job.artifact_quality && job.artifact_quality.level !== "ready" ? "谨慎提交到进化" : "提交到进化"}
+                    {submittingJobId === job.job_id ? "提交中…" : showCandidateGroups ? `提交所选候选（${selectedNames.length}）` : job.artifact_quality && job.artifact_quality.level !== "ready" ? "谨慎提交到进化" : "提交到进化"}
                   </Button>
                 )}
               </div>
             </div>
-            {jobArtifacts(job).length ? (
-              <div className="grid gap-2 md:grid-cols-2">
-                {jobArtifacts(job).map((artifact) => (
-                  <button
-                    key={artifact.path}
-                    type="button"
-                    disabled={loadingArtifact === artifact.path}
-                    onClick={() => previewArtifact(artifact, job.status === "succeeded" || isWaitingForEvidence(job))}
-                    className="flex w-full items-center gap-2 rounded-lg border border-border bg-background px-3 py-2.5 text-left transition-colors hover:border-accent"
-                  >
-                    <FileText className="size-4 shrink-0 text-accent" />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[12px] font-semibold select-text">
-                        {artifact.skill_name ? `${artifact.skill_name} / ${artifact.name}` : artifact.name}
-                      </span>
-                      <span className="mono block truncate text-[9.5px] text-muted-soft select-text">{artifact.path}</span>
-                    </span>
-                    <Pill tone={artifactTone(artifact.kind) as any}>{artifactLabel(artifact.kind)}</Pill>
-                    {job.status === "succeeded" || isWaitingForEvidence(job)
-                      ? <Pencil className="size-3.5 text-muted-foreground" />
-                      : <Eye className="size-3.5 text-muted-foreground" />}
-                  </button>
-                ))}
-              </div>
-            ) : (
+            {artifactGroups.candidates.length > 0 && (
+              <section aria-label="Skill Candidate 独立提交" className="mb-3 space-y-2">
+                {artifactGroups.candidates.map(({ skillName, artifacts }) => {
+                  const quality = job.candidate_quality?.[skillName];
+                  const capability = job.capability_plan?.skills.find((item) => item.name === skillName);
+                  // Display orphan files without extending the submission whitelist.
+                  const canSubmit = eligibleNames.includes(skillName);
+                  return (
+                    <section key={skillName} aria-label={`Skill Candidate ${skillName}`} className="rounded-xl border border-border bg-background p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <label className="flex items-center gap-2 text-[12px] font-semibold">
+                          {job.status === "succeeded" && (
+                            <input
+                              type="checkbox"
+                              aria-label={`选择 ${skillName}`}
+                              checked={selectedNames.includes(skillName)}
+                              disabled={Boolean(submittingJobId) || !canSubmit}
+                              onChange={(event) => setCandidateSelections((previous) => ({
+                                ...previous,
+                                [job.job_id]: event.target.checked
+                                  ? [...selectedNames, skillName]
+                                  : selectedNames.filter((name) => name !== skillName),
+                              }))}
+                            />
+                          )}
+                          <span className="select-text">{skillName}</span>
+                          {quality && <Pill tone={artifactQualityTone(quality.level)}>{qualityLabel(quality)}</Pill>}
+                        </label>
+                        {job.status === "succeeded" && (
+                          <Button size="sm" variant="outline" disabled={Boolean(submittingJobId) || !canSubmit} onClick={() => submitJobToEvolution(job, [skillName])} aria-label={`提交 ${skillName} 到进化`}>
+                            <Send className="size-3.5" /> 单独提交
+                          </Button>
+                        )}
+                      </div>
+                      {capability && <p className="mt-1 text-[12px] text-muted-foreground select-text">{capability.task}</p>}
+                      {quality && <p className="mt-1 text-[11px] text-muted-foreground select-text">{quality.summary}</p>}
+                      {job.artifact_quality?.warnings.length ? <p className="mt-1 text-[11px] text-amber-700">本轮有 {job.artifact_quality.warnings.length} 条公共提示，请查看“本轮复核提示”。</p> : null}
+                      {quality?.warnings.length ? (
+                        <details className="mt-2 text-[11px]">
+                          <summary className="cursor-pointer font-semibold text-amber-700">查看该候选的问题（{quality.warnings.length} 条）</summary>
+                          <ul className="mt-1 space-y-1 text-muted-foreground">{quality.warnings.map((warning, index) => <li key={index} className="select-text whitespace-pre-wrap break-words">{warning}</li>)}</ul>
+                        </details>
+                      ) : null}
+                      {capability && <CapabilityDetails capability={capability} />}
+                      <div className="mt-3 border-t border-border pt-3">
+                        <MiningArtifactFiles artifacts={artifacts} editable={editableArtifacts} loadingPath={loadingArtifact} onPreview={previewArtifact} />
+                        {!artifacts.length && <p className="text-[11px] text-muted-foreground">该候选尚无可预览的配套文件，请补齐产物后再提交。</p>}
+                      </div>
+                    </section>
+                  );
+                })}
+              </section>
+            )}
+            {candidateReport.length > 0 && (
+              <section aria-label="Skill Candidate 提交结果" aria-live="polite" className="mb-3 rounded-lg border border-border bg-background p-3">
+                <p className="text-[12px] font-semibold">提交结果：{candidateReport.filter((item) => item.state !== "failed").length} 个成功，{candidateReport.filter((item) => item.state === "failed").length} 个失败</p>
+                <ul className="mt-2 space-y-1 text-[11px]">
+                  {candidateReport.map((item) => <li key={item.skillName} className={cn("select-text", item.state === "failed" && "text-destructive")}>{item.skillName}：{item.state === "created" ? "已生成 Skill Candidate" : item.state === "existing" ? "当前产物版本已在候选区中" : `提交失败 · ${item.error}`}</li>)}
+                </ul>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {failedNames.length > 0 && <Button size="sm" variant="outline" disabled={Boolean(submittingJobId)} onClick={() => submitJobToEvolution(job, failedNames)}>重试失败候选（{failedNames.length}）</Button>}
+                  {candidateReport.some((item) => item.state !== "failed") && onNavigate && <Button size="sm" variant="outline" onClick={() => onNavigate("candidates")}>查看候选区 <ArrowRight className="size-3.5" /></Button>}
+                </div>
+              </section>
+            )}
+            {!jobArtifacts(job).length && (
               <div className="select-text whitespace-pre-wrap break-words rounded-lg border border-dashed border-border p-6 text-center text-xs text-muted-soft">
                 {job.error || job.stop_reason || "该任务没有产生可预览产物。"}
               </div>
             )}
           </div>
+        )}
+
+        {(job.capability_plan || artifactGroups.shared.length > 0) && (
+          <section aria-label="本轮共享资料" className="rounded-xl border border-border bg-background p-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[13px] font-bold">本轮共享资料</span>
+              <Pill tone="gray">{artifactGroups.shared.length} 个文件</Pill>
+            </div>
+            <p className="mt-1 text-[11px] text-muted-foreground">这里汇总本轮的来源、Evidence 缺口和拆分说明，供所有候选共同参考。</p>
+            {job.capability_plan && (
+              <section aria-label="能力拆分计划" className="mt-3 rounded-lg border border-border p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[12px] font-semibold">能力拆分计划</span>
+                  <Pill tone="purple">{job.capability_plan.skills.length} 个 Skill Candidate</Pill>
+                </div>
+                <p className="mt-1 text-[11px] text-muted-foreground">将来源中的流程按可独立完成的任务整理成候选；每个候选的说明与配套文件展示在同一组，分别验证和评审。</p>
+                {job.capability_plan.skills.length === 0 && <p className="mt-2 text-[12px] text-muted-foreground">本轮没有形成 Skill Candidate，可查看暂缓内容并补充 Evidence。</p>}
+                {job.capability_plan.deferred.length > 0 && (
+                  <details className="mt-2 border-t border-border pt-2">
+                    <summary className="cursor-pointer text-[12px] font-semibold">暂缓形成 Skill Candidate 的内容（{job.capability_plan.deferred.length} 项）</summary>
+                    <p className="mt-2 text-[11px] text-muted-foreground">这些内容还缺少能支持完整任务的 Evidence，暂未形成候选；补充依据后可再挖掘。</p>
+                    <ul className="mt-2 space-y-2 text-[11px] text-muted-foreground">
+                      {job.capability_plan.deferred.map((item, index) => (
+                        <li key={index} className="select-text whitespace-pre-wrap break-words">
+                          <p>{item.reason}</p>
+                          {item.source_refs.length > 0 && <p className="mono mt-1 text-[10px]">{item.source_refs.join("\n")}</p>}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </section>
+            )}
+            <div className="mt-3">
+              <MiningArtifactFiles artifacts={artifactGroups.shared} editable={editableArtifacts} loadingPath={loadingArtifact} onPreview={previewArtifact} />
+            </div>
+          </section>
         )}
 
         {Boolean(job.rounds?.length) && (
@@ -1205,19 +1353,7 @@ export default function MiningView({
                     )}
                     {(round.ov_task_id || round.task_id) && <div className="mono break-all select-text">Compile：{round.ov_task_id || round.task_id}</div>}
                     {round.started_at && <div>开始于 {formatDateTime(round.started_at)}{round.finished_at ? ` · 完成于 ${formatDateTime(round.finished_at)}` : ""}</div>}
-                    {round.round !== job.current_round && (round.artifacts || []).map((artifact) => (
-                      <button
-                        key={artifact.path}
-                        type="button"
-                        disabled={loadingArtifact === artifact.path}
-                        onClick={() => previewArtifact(artifact, false)}
-                        className="flex w-full items-center gap-2 rounded-lg border border-border px-3 py-2 text-left hover:border-accent"
-                      >
-                        <FileText className="size-3.5 shrink-0" />
-                        <span className="min-w-0 flex-1 truncate">{artifact.name}</span>
-                        <span>只读</span>
-                      </button>
-                    ))}
+                    {round.round !== job.current_round && <ArchivedArtifactGroups artifacts={round.artifacts || []} round={round.round} loadingPath={loadingArtifact} onPreview={previewArtifact} />}
                     {round.round === job.current_round && <p>当前产物可在上方审核；等待人工补证或任务结束时可编辑。</p>}
                   </div>
                 </details>
@@ -1558,6 +1694,7 @@ export default function MiningView({
 
                 <div className="rounded-lg border border-border bg-background/70 p-3 text-[11px] leading-relaxed text-muted-foreground">
                   每轮编译使用 OpenViking 服务端的模型配置，并固化本轮输入。最多同时运行 {mining.jobSummary.max_parallel} 个任务；等待人工补证的任务不占运行并发，继续时需有可用名额。
+                  <p className="mt-1">首轮按原始来源的主要语言冻结产物语言，中文主导用简体中文，后续轮沿用；字段名、ID、文件路径和来源 URI 保持原样。</p>
                 </div>
 
                 <div className="flex justify-end gap-2 pt-1">
@@ -1862,9 +1999,9 @@ function sourceStatusMeta(source: InputSource): { label: string; tone: PillTone 
 }
 
 function jobArtifacts(job: MiningJob) {
-  const source = job.artifacts?.length
-    ? job.artifacts
-    : (job.rounds || []).find((round) => round.round === job.current_round)?.artifacts || [];
+  const source = job.artifacts
+    ?? (job.rounds || []).find((round) => round.round === job.current_round)?.artifacts
+    ?? [];
   const seen = new Set<string>();
   return source.filter((artifact) => {
     if (seen.has(artifact.path)) return false;
@@ -1873,12 +2010,134 @@ function jobArtifacts(job: MiningJob) {
   });
 }
 
+function groupMiningArtifacts(artifacts: MiningArtifact[], preferredNames: string[] = []) {
+  const candidates = new Map<string, MiningArtifact[]>(preferredNames.map((name) => [name, []]));
+  const shared: MiningArtifact[] = [];
+  const seen = new Set<string>();
+  for (const artifact of artifacts) {
+    if (seen.has(artifact.path)) continue;
+    seen.add(artifact.path);
+    if (artifact.skill_name) {
+      if (!candidates.has(artifact.skill_name)) candidates.set(artifact.skill_name, []);
+      candidates.get(artifact.skill_name)!.push(artifact);
+    } else {
+      shared.push(artifact);
+    }
+  }
+  const order = ["SKILL.md", "EVALUATION.md", "benchmark.json", "BENCHMARK.md"];
+  const rank = (artifact: MiningArtifact) => {
+    const index = order.indexOf(artifact.name);
+    return index === -1 ? order.length : index;
+  };
+  return {
+    candidates: Array.from(candidates, ([skillName, files]) => ({ skillName, artifacts: files.sort((a, b) => rank(a) - rank(b)) })),
+    shared,
+  };
+}
+
+function qualityLabel(quality: MiningArtifactQuality) {
+  return quality.level === "ready" ? "结构校验通过" : quality.label;
+}
+
+function CapabilityDetails({ capability }: { capability: MiningCapability }) {
+  return (
+    <details className="mt-2 text-[11px]">
+      <summary className="cursor-pointer font-semibold text-muted-foreground">任务边界与拆分依据</summary>
+      <dl className="mt-2 grid gap-x-3 gap-y-1 sm:grid-cols-[5rem_1fr]">
+        {([
+          ["触发场景", capability.trigger],
+          ["输入", capability.inputs.join("；")],
+          ["输出", capability.outputs.join("；")],
+          ["能力边界", capability.boundary],
+          ["拆分依据", capability.rationale],
+          ["Evidence 来源", capability.source_refs.join("\n")],
+        ] as const).map(([label, value]) => (
+          <div key={label} className="contents">
+            <dt className="font-medium text-muted-foreground">{label}</dt>
+            <dd className="select-text whitespace-pre-wrap break-words">{value || "未声明"}</dd>
+          </div>
+        ))}
+      </dl>
+    </details>
+  );
+}
+
+function MiningArtifactFiles({ artifacts, editable, historical = false, loadingPath, onPreview }: {
+  artifacts: MiningArtifact[];
+  editable: boolean;
+  historical?: boolean;
+  loadingPath: string;
+  onPreview: (artifact: MiningArtifact, editable: boolean) => void;
+}) {
+  return (
+    <div className="grid gap-2 md:grid-cols-2">
+      {artifacts.map((artifact) => (
+        <button
+          key={artifact.path}
+          type="button"
+          aria-label={`${artifact.skill_name ? `${artifact.skill_name} / ` : ""}${artifact.name}${historical ? " 只读" : ""}`}
+          disabled={loadingPath === artifact.path}
+          onClick={() => onPreview(artifact, editable)}
+          className="flex w-full items-center gap-2 rounded-lg border border-border bg-background px-3 py-2.5 text-left transition-colors hover:border-accent"
+        >
+          <FileText className="size-4 shrink-0 text-accent" />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-[12px] font-semibold select-text">{artifact.name}</span>
+            <span className="mono block truncate text-[9.5px] text-muted-soft select-text">{artifact.path}</span>
+          </span>
+          <Pill tone={artifactTone(artifact.kind)}>{artifactLabel(artifact.kind)}</Pill>
+          {historical && <span className="text-[10px]">只读</span>}
+          {editable ? <Pencil className="size-3.5 text-muted-foreground" /> : <Eye className="size-3.5 text-muted-foreground" />}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ArchivedArtifactGroups({ artifacts, round, loadingPath, onPreview }: {
+  artifacts: MiningArtifact[];
+  round: number;
+  loadingPath: string;
+  onPreview: (artifact: MiningArtifact, editable: boolean) => void;
+}) {
+  const groups = groupMiningArtifacts(artifacts);
+  return (
+    <div className="space-y-3">
+      {groups.candidates.map(({ skillName, artifacts: files }) => (
+        <section key={skillName} aria-label={`第 ${round} 轮 Skill Candidate ${skillName}`} className="rounded-lg border border-border p-3">
+          <div className="mb-2 text-[12px] font-semibold select-text">{skillName} · 配套文件</div>
+          <MiningArtifactFiles artifacts={files} editable={false} historical loadingPath={loadingPath} onPreview={onPreview} />
+        </section>
+      ))}
+      {groups.shared.length > 0 && (
+        <section aria-label={`第 ${round} 轮共享资料`} className="rounded-lg border border-border p-3">
+          <div className="mb-2 text-[12px] font-semibold">本轮共享资料</div>
+          <MiningArtifactFiles artifacts={groups.shared} editable={false} historical loadingPath={loadingPath} onPreview={onPreview} />
+        </section>
+      )}
+    </div>
+  );
+}
+
 function jobSkillNames(job: MiningJob) {
   return Array.from(new Set(
-    jobArtifacts(job)
-      .filter((artifact) => artifact.kind === "skill" && artifact.skill_name)
-      .map((artifact) => artifact.skill_name)
+    [
+      ...jobArtifacts(job)
+        .filter((artifact) => artifact.kind === "skill" && artifact.skill_name)
+        .map((artifact) => artifact.skill_name),
+      ...(job.candidate_contract_version === 2 ? job.capability_plan?.skills.map((skill) => skill.name) || [] : []),
+    ]
   ));
+}
+
+function candidateCanSubmit(job: MiningJob, skillName: string) {
+  const quality = job.candidate_quality?.[skillName];
+  const candidateReady = job.candidate_contract_version === 2
+    ? quality?.can_submit === true && quality.has_skill
+    : quality?.can_submit !== false;
+  return job.status === "succeeded"
+    && job.artifact_quality?.can_submit !== false
+    && candidateReady;
 }
 
 function artifactTone(kind: MiningArtifact["kind"]) {
@@ -1898,7 +2157,8 @@ function artifactLabel(kind: MiningArtifact["kind"]) {
   if (kind === "benchmark") return "Test Dataset";
   if (kind === "skill") return "Skill";
   if (kind === "semantic") return "语义报告";
-  return "评测定义";
+  if (kind === "evaluation") return "评测定义";
+  return "文件";
 }
 
 function distinctWarnings(warnings?: string[]) {

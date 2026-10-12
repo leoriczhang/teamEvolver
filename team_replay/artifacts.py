@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 import hashlib
 from typing import Any, Mapping
 
@@ -12,6 +13,40 @@ from ._util import normalize_artifact_rel_path
 
 class ReplayArtifactError(ValueError):
     """Raised when a Replay artifact payload is malformed."""
+
+
+def document_execution_treatment(
+    treatment: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Keep assessment assets in the audit bundle, outside the Agent's input."""
+    if treatment is None:
+        return None
+    result = copy.deepcopy(dict(treatment))
+    if isinstance(result.get("skills"), list):
+        result["skills"] = [document_execution_treatment(member) for member in skill_treatment_members(result)]
+        return result
+    bundle = result.get("bundle")
+    if not isinstance(bundle, Mapping):
+        return result
+    files = decode_bundle_payload(bundle)
+    assessment_paths = {"benchmark.json", "BENCHMARK.md", "EVALUATION.md"}
+    if not assessment_paths.intersection(files):
+        return result
+    files = {path: content for path, content in files.items() if path not in assessment_paths}
+    execution_bundle = copy.deepcopy(dict(bundle))
+    execution_bundle["files"] = [
+        {
+            "path": path,
+            "encoding": "base64",
+            "content": base64.b64encode(content).decode("ascii"),
+            "size": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+        for path, content in sorted(files.items())
+    ]
+    execution_bundle["tree_sha256"] = artifact_tree_sha256(files)
+    result["bundle"] = execution_bundle
+    return result
 
 
 def skill_treatment_members(

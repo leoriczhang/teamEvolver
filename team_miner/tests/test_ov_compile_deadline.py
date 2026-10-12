@@ -208,8 +208,11 @@ def test_actual_output_contract_rejects_numeric_rubric_or_missing_sources(tmp_pa
         }
         for n in range(12)
     ]
-    from team_miner.tests.dataset_fixtures import build_document
+    from team_miner.tests.dataset_fixtures import build_capability_plan, build_document
 
+    repository.write_output(job["job_id"], "analysis/capability-plan.json", json.dumps(
+        build_capability_plan(["test-skill"], job["source_uri"] + "/document.md")
+    ))
     document = build_document("test-skill", cases)
     if bad_field == "checks":
         for check in document["cases"][0]["checks"]:

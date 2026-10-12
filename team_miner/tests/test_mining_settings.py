@@ -4,8 +4,15 @@ from copy import deepcopy
 
 import pytest
 
-from team_miner.ov_compile_mining import SKILL_BODY
-from team_miner.settings import compiler_prompt, reset_prompt, settings_payload, update_settings
+from team_miner.ov_compile_mining import LEGACY_SKILL_BODY, SKILL_BODY
+from team_miner.settings import (
+    LEGACY_COMPILER_WARNING,
+    compiler_contract_version,
+    compiler_prompt,
+    reset_prompt,
+    settings_payload,
+    update_settings,
+)
 
 
 def test_settings_expose_only_effective_compile_controls():
@@ -15,6 +22,8 @@ def test_settings_expose_only_effective_compile_controls():
     assert result["model"] == {"configuration_source": "openviking_server", "editable_here": False}
     assert result["pipeline"] == {"max_rounds": 3, "runtime_timeout_seconds": 3600}
     assert [entry["id"] for entry in result["prompts"]] == ["ov_compile"]
+    assert result["candidate_contract_version"] == 2 and result["candidate_mode"] == "collection"
+    assert not result["options_warnings"] and not result["candidate_mode_warning"]
     assert "secret" not in str(result)
 
 
@@ -34,6 +43,38 @@ def test_saved_compiler_is_the_body_used_by_future_rounds():
     reset_prompt(data, "ov_compile")
     assert compiler_prompt(data) == SKILL_BODY
     assert settings_payload(data)["pipeline"]["max_rounds"] == 2
+
+
+@pytest.mark.parametrize(
+    "custom", [LEGACY_SKILL_BODY, LEGACY_SKILL_BODY + "\nPreserve custom task boundaries.\n"],
+    ids=["legacy-default", "custom-single"],
+)
+def test_saved_legacy_compiler_keeps_exact_content_and_reports_single_candidate_mode(custom):
+    data = {"mining": {"prompts": {"ov_compile": custom}}}
+    original = deepcopy(data)
+    result = settings_payload(data)
+    assert compiler_prompt(data) == custom and data == original
+    assert compiler_contract_version(custom) == 1
+    assert result["candidate_contract_version"] == 1 and result["candidate_mode"] == "single"
+    assert result["candidate_mode_warning"] == LEGACY_COMPILER_WARNING
+    assert result["options_warnings"] == [LEGACY_COMPILER_WARNING]
+    assert result["prompts"][0]["effective_prompt"] == custom
+    assert LEGACY_COMPILER_WARNING in result["prompts"][0]["description"]
+
+    updated = update_settings(data, {"pipeline": {"max_rounds": 2}})
+    assert compiler_prompt(data) == custom and updated["candidate_contract_version"] == 1
+    reset = reset_prompt(data, "ov_compile")
+    assert reset["candidate_contract_version"] == 2 and not reset["options_warnings"]
+    assert compiler_prompt(data) == SKILL_BODY
+
+
+def test_saving_custom_single_candidate_compiler_preserves_bytes_and_surfaces_mode():
+    custom = "---\nname: custom-compiler\ndescription: Custom method compiler.\n---\nProduce one Skill Candidate.\n"
+    data = {}
+    result = update_settings(data, {"prompts": [{"id": "ov_compile", "prompt": custom}]})
+    assert compiler_prompt(data) == custom
+    assert data["mining"]["prompts"]["ov_compile"] == custom
+    assert result["candidate_contract_version"] == 1 and result["options_warnings"] == [LEGACY_COMPILER_WARNING]
 
 
 @pytest.mark.parametrize("body", [

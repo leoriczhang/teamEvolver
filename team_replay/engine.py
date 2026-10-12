@@ -11,12 +11,19 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from .adapter_runtime import AdapterError
-from .artifacts import skill_treatment_members, validate_skill_treatment
+from .artifacts import document_execution_treatment, skill_treatment_members, validate_skill_treatment
+from .contracts import DOCUMENT_REPLAY_RUNTIME, ReplayContractError, document_runtime_type
 from .execution import run_branch
 from .hooks import ReplayAdapterFactory, ReplayContext, ReplayTreatment, ReplayUnsupported
 from .host import current_host
 from .metrics import compare_efficiency
-from .policy import initial_query, normalize_case_checklist, normalize_checklist_report, progressive_config, progressive_replay_decision
+from .policy import (
+    initial_query,
+    normalize_case_checklist,
+    normalize_checklist_report,
+    progressive_config,
+    progressive_replay_decision,
+)
 
 
 def load_candidate_job(job_id: str) -> dict[str, Any] | None:
@@ -60,6 +67,8 @@ def read_team_evolver_harness() -> dict[str, Any]:
 
 
 def _snapshot(case: Mapping[str, Any], source: Mapping[str, Any]) -> dict[str, Any]:
+    if document_runtime_type(case):
+        return {}
     provenance = case.get("provenance") if isinstance(case.get("provenance"), Mapping) else {}
     if isinstance(provenance.get("context_snapshot"), dict):
         return copy.deepcopy(provenance["context_snapshot"])
@@ -80,6 +89,9 @@ def make_context(
     branch: str, skill: Mapping[str, Any] | None, case: Mapping[str, Any],
     source: Mapping[str, Any], timeout: int, *, snapshot: Mapping[str, Any] | None = None,
 ) -> ReplayContext:
+    if document_runtime_type(case):
+        skill = document_execution_treatment(skill)
+        snapshot = {}
     return ReplayContext(
         request_id="replay_" + uuid.uuid4().hex,
         runtime_type=source_runtime_type(source),
@@ -246,6 +258,7 @@ def annotate_cases(job: dict[str, Any], search_roots: list[Path]) -> list[dict[s
         disclosure = progressive_config(case)
         provenance = case.get("provenance") if isinstance(case.get("provenance"), dict) else {}
         metadata = case.get("metadata") if isinstance(case.get("metadata"), dict) else {}
+        document = document_runtime_type(case)
         materials = [
             dict(item)
             for item in (case.get("materials") or [])
@@ -273,16 +286,22 @@ def annotate_cases(job: dict[str, Any], search_roots: list[Path]) -> list[dict[s
                 "query": instr,
                 "checks": checklist,
                 "provenance": provenance,
-                "replay": {"progressive_disclosure": disclosure},
+                "replay": {**copy.deepcopy(case.get("replay") or {}), "progressive_disclosure": disclosure},
                 "evaluation_profile": str(
                     metadata.get("evaluation_profile") or ""
                 ),
                 "source_runtime": (
+                    {"type": document}
+                    if document
+                    else
                     dict(provenance.get("source_runtime"))
                     if isinstance(provenance.get("source_runtime"), dict)
                     else {}
                 ),
                 "source_runtime_context": (
+                    {}
+                    if document
+                    else
                     dict(provenance.get("source_runtime_context"))
                     if isinstance(provenance.get("source_runtime_context"), dict)
                     else {}
@@ -344,19 +363,26 @@ def _evaluate_case(job_id, job, case, source, factory, timeout, max_interactions
         )
         for branch in ("baseline", "candidate")
     }
-    results = execute_pair(factory, contexts, case, harness=read_team_evolver_harness(), max_interactions=max_interactions)
+    results = execute_pair(
+        factory, contexts, case, harness=read_team_evolver_harness(), max_interactions=max_interactions,
+    )
     checklists = {branch: normalize_checklist_report(result, expected_checklist=case["checks"])
                   for branch, result in results.items()}
     efficiency = compare_efficiency(results["baseline"], results["candidate"])
     policy = progressive_replay_decision(efficiency=efficiency, baseline_checklist=checklists["baseline"],
                                          candidate_checklist=checklists["candidate"])
-    failures = [f"{branch}: {result.get('error', 'branch failed')}" for branch, result in results.items() if not result.get("ok")]
+    failures = [
+        f"{branch}: {result.get('error', 'branch failed')}"
+        for branch, result in results.items() if not result.get("ok")
+    ]
     if failures:
         policy.update(accepted=False, verdict="inconclusive", no_regression=False, decision_basis="branch_failure")
     branches = {
         branch: {**result, "checklist_report": checklists[branch], "instruction": case["query"],
-                 "session_id": (case.get("provenance") or {}).get("session_id"),
-                 "turn_num": (case.get("provenance") or {}).get("turn_num"),
+                 "session_id": (
+                     None if document_runtime_type(case) else (case.get("provenance") or {}).get("session_id")
+                 ),
+                 "turn_num": None if document_runtime_type(case) else (case.get("provenance") or {}).get("turn_num"),
                  "trajectory": render_trajectory(result.get("messages") or [])}
         for branch, result in results.items()
     }
@@ -389,7 +415,12 @@ def evaluate_job(
                 "verdict": "reject", "no_regression": False, "static_validation": validation,
                 "reason": "candidate bundle failed deterministic static checks", "cases": []}
     # Files belong to the dataset or downstream runtime. Never infer availability from the server HOME.
-    cases = [case for case in annotate_cases(job, []) if case["query"] and (case_index is None or case["index"] == case_index)]
+    try:
+        cases = [case for case in annotate_cases(job, [])
+                 if case["query"] and (case_index is None or case["index"] == case_index)]
+    except ReplayContractError as exc:
+        return {"status": "skipped", "mode": "true_replay", "job_id": job_id, "accepted": False,
+                "verdict": "inconclusive", "reason": str(exc), "cases": []}
     if not cases:
         return {"status": "skipped", "mode": "true_replay", "job_id": job_id, "accepted": False,
                 "verdict": "inconclusive", "reason": "no matching Test Dataset", "cases": []}
@@ -398,14 +429,22 @@ def evaluate_job(
     for case in cases:
         try:
             provenance = case.get("provenance") or {}
-            source = copy.deepcopy(load_source_session(str(provenance.get("session_id") or "")) or {})
-            source.setdefault("session_id", provenance.get("session_id"))
-            source["runtime"] = {**case.get("source_runtime", {}), **source.get("runtime", {})}
-            source["runtime_context"] = {**case.get("source_runtime_context", {}), **source.get("runtime_context", {})}
-            if source.get("source") == "managed_agent_candidate_audit" or source["runtime_context"].get("candidate_job_id"):
+            if document_runtime_type(case):
+                source = {"runtime": dict(case["source_runtime"]), "runtime_context": {}}
+            else:
+                source = copy.deepcopy(load_source_session(str(provenance.get("session_id") or "")) or {})
+                source.setdefault("session_id", provenance.get("session_id"))
+                source["runtime"] = {**case.get("source_runtime", {}), **source.get("runtime", {})}
+                source["runtime_context"] = {
+                    **case.get("source_runtime_context", {}), **source.get("runtime_context", {}),
+                }
+            if (source.get("source") == "managed_agent_candidate_audit"
+                    or source["runtime_context"].get("candidate_job_id")):
                 raise ReplayUnsupported("candidate-audit sessions cannot be Replay sources")
             if not source_runtime_type(source):
                 raise ReplayUnsupported("Test Dataset must specify source_runtime.type")
+            if source_runtime_type(source) == DOCUMENT_REPLAY_RUNTIME and not document_runtime_type(case):
+                raise ReplayUnsupported("Document Replay requires an explicit Case execution binding")
             if factory is None:
                 factory = resolve_factory(source)
             output = _evaluate_case(job_id, job, case, source, factory, timeout, max(1, min(20, int(max_interactions))))
@@ -436,6 +475,7 @@ def main() -> None:
         parser.error("--job-id or --job-file is required")
     if args.adapter_file:
         from types import SimpleNamespace
+
         from .adapter_runtime import build_from_content
         from .host import configure_host
         config = json.loads(Path(args.adapter_config).read_text()) if args.adapter_config else {}

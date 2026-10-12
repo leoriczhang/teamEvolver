@@ -142,6 +142,7 @@ def test_materialized_compile_bundle_keeps_existing_candidate_contract(tmp_path,
     repository = _repository(tmp_path)
     job = repository.create_job(
         name="Support Skill",
+        candidate_contract_version=1,
         account="account-a",
         source_uri="viking://resources/team/runbooks",
         source_snapshot_uri="viking://resources/agent_skill_workspace/runs/test/source",
@@ -168,9 +169,12 @@ def test_materialized_compile_bundle_keeps_existing_candidate_contract(tmp_path,
             "source_session_ids": ["viking://resources/team/runbooks/billing.md"],
         }
     ]
-    from team_miner.tests.dataset_fixtures import build_document
+    from team_miner.tests.dataset_fixtures import build_capability_plan, build_document
 
     cases = [{**cases[0], "input": f"Support scenario {index}: " + cases[0]["input"]} for index in range(12)]
+    repository.write_output(job["job_id"], "analysis/capability-plan.json", json.dumps(
+        build_capability_plan(["support-triage"], job["source_uri"] + "/billing.md")
+    ))
     document = build_document("support-triage", cases)
     repository.write_output(job["job_id"], "compiled_skill/support-triage/benchmark.json", json.dumps(document))
     repository.write_output(job["job_id"], "analysis/evidence-map.md", "# Evidence\nGrounded in billing.md.\n")

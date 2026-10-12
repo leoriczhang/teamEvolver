@@ -30,7 +30,60 @@ The main fields of `POST /api/mining/jobs` are:
 
 The first round freezes the original source. Subsequent rounds use that snapshot, accumulated human supplements and previous revision context. Jobs return `rounds_mode: "orchestrated"`; `current_round` represents an actual round.
 
-The remote Compile request's `from` contains only this round's Evidence source directory. Previous candidate revision context is delivered directly through `instruction` rather than extracted as another source. Its JSON is limited to 30000 characters and contains the previous Skill body, case identifiers and current review information, with explicit excerpt or omission flags. The full previous artifacts remain in the round archive.
+The first round determines and saves the primary language of the frozen original sources, using Simplified Chinese when Chinese predominates. Later rounds retain that language rather than deriving it from earlier English artifacts or supplements. The runtime adds the job's language rules to new Compile requests. Human-readable prose, explanations, case Queries, Checklist text, shared analysis and review questions use that language. Field names, IDs, file paths, source URIs, code, fixed enum values, direct source quotations and structural labels such as `Checklist`, `Evidence` and `Materials` remain unchanged. Neither the current API nor the console offers a separate output-language option.
+
+Saved custom business instructions remain unchanged and do not require a reset for a language update. Accepted requests retain their frozen version; completed artifacts are not automatically translated or recompiled.
+
+New jobs using the default compiler Skill use `candidate_contract_version: 2`: the model plans independently executable task methods before compiling a separate Skill Candidate for each method. Candidate count follows triggers, inputs, outputs, task boundaries, and the ability to execute and validate each method through True Replay independently. It does not follow document or chapter count. Each round allows at most 8 candidates as an execution bound, not a target to fill. Zero candidates is valid when no executable method is supported; pure facts and insufficient Evidence are recorded in `deferred` with reasons.
+
+When a previously saved custom compiler Skill still uses the single-candidate contract, new jobs retain `candidate_contract_version: 1` with a compatibility warning. Reset to the current default compiler Skill to enable multiple candidates in subsequently created jobs. Existing jobs retain their frozen contracts.
+
+The remote Compile request's `from` contains only this round's Evidence source directory. Revision context for the previous candidate collection is delivered directly through `instruction` rather than extracted as another source. Its JSON is limited to 30000 characters and contains each previous Skill body, case identifiers and current review information, with explicit excerpt or omission flags. The full previous artifacts remain in the round archive.
+
+## Capability plan and artifact contract
+
+Each round produces four shared analysis files and four separate files for each candidate:
+
+```text
+analysis/evidence-map.md
+analysis/gaps.md
+analysis/review.json
+analysis/capability-plan.json
+compiled_skill/<skill-name>/SKILL.md
+compiled_skill/<skill-name>/EVALUATION.md
+compiled_skill/<skill-name>/benchmark.json
+compiled_skill/<skill-name>/BENCHMARK.md
+```
+
+`analysis/capability-plan.json` fixes candidate names, task boundaries and source references before writing. Artifacts cannot contain unplanned candidates. Names must be unique and match both the directory and the `name` in `SKILL.md` frontmatter. A planned candidate missing `SKILL.md` or another mandatory file is marked `incomplete` without blocking other candidates that pass structural validation.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `schema_version` | string | Fixed value `skill-miner.plan.v1` |
+| `skills` | object[] | Method plans for 0–8 candidates |
+| `deferred` | object[] | Content that does not yet form a Skill, with reasons; required to be nonempty when there are zero candidates |
+
+Each entry in `skills` contains:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `name` | string | Unique lowercase kebab-case name |
+| `task` | string | Independently completable task |
+| `trigger` | string | Applicable scenario |
+| `inputs` / `outputs` | string[] | Task inputs and expected outputs; both must be nonempty |
+| `boundary` | string | Method scope and constraints |
+| `rationale` | string | Reason for splitting or merging this method |
+| `source_refs` | string[] | Original-source or human-supplement URIs supporting this method; must be nonempty |
+
+Each `deferred` entry contains nonempty `reason` and `source_refs`. References must belong to this job's source or supplement scope; previous model output cannot serve as Evidence. Candidates may share Evidence, but overlapping methods should be merged. Steps of a complete workflow should stay together when they cannot be used independently.
+
+Each candidate's `benchmark.json` uses `team-replay.dataset`, contains 12–24 cases and references only that candidate. During initial artifact synchronization, the system deterministically normalizes the generated `BENCHMARK.md` from the structurally validated `benchmark.json`, preserving matching cases, Checklists and sources without adding cases or business facts. Missing mandatory files still prevent that candidate from being submitted; normalization does not supply missing artifacts.
+
+Every candidate has its own Test Dataset, True Replay, Candidate Review and Publish result. A compiled collection does not directly become a published Skill library. A zero-candidate result retains analysis and deferral reasons without a candidate eligible for submission. Existing jobs retain their single-candidate contract with three analysis files and four package files; recovery or continuation does not automatically switch contracts.
+
+On candidate submission, the service binds document cases with `replay.execution`: `kind: "document"`, `runtime_type: "document"`, and `binding: "tenant_replay_adapter"`. The current tenant's configured ReplayAdapterFactory selects the executor; the model does not select it. Original document URIs remain Evidence references, not recoverable Sessions. Baseline and Candidate open independent Agent sessions. A new Skill has no candidate in Baseline; an updated Skill uses the published version in Baseline. Assessment files and the full Checklist are excluded from the Agent's execution bundle, and requirements are disclosed through progressive feedback.
+
+Candidate evaluation responses expose `completed`, `skipped`, `not_run`, or `failed` in both `status` and `replay.status`, along with `replay.reason` and the observed paired-case count `replay.case_count`. A missing adapter produces a skip with a reason. Unobserved metrics are not treated as zero or ties. Replay-based Publish requires a genuinely completed result that passes its release gates. Automatic publication of an unfinished evaluation returns HTTP 409 `replay_incomplete`, leaving the candidate open for reevaluation after configuration. Explicit administrator force-publish retains its existing permission and confirmation flow.
 
 ## Stage attachments
 
@@ -84,9 +137,20 @@ curl -X POST 'http://localhost:52010/api/mining/jobs/<job_id>/continue' \
 
 ## Response state and recovery
 
-Job details include status, `current_round`, a `rounds` list, the current `pending_checkpoint`, artifacts and quality information. A checkpoint contains `id`, `round`, `questions` and `attachments`. Questions contain `qid`, `question`, `reason`, `source_refs` and `required`.
+Job details include status, `current_round`, a `rounds` list, the current `pending_checkpoint`, artifacts and quality information. New jobs also record `candidate_contract_version`. After synchronization, multiple-candidate results expose these fields:
 
-`remote_warnings` preserves OpenViking partial-output and source-processing warnings, which are also included in `artifact_quality.warnings`. Warning-bearing results have quality `caution`. Each round retains its warnings and `compiler_sha256`. Remote `completed` and seven structurally valid artifacts do not prove complete Evidence coverage.
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `capability_plan` | object | Validated capability plan |
+| `candidate_count` | integer | Number of candidates in this round |
+| `valid_candidate_count` | integer | Candidates passing their own package and Test Dataset structural validation |
+| `candidate_quality` | object | Quality results keyed by candidate name, including `level`, `warnings` and `can_submit` |
+
+The `ready` / `incomplete` levels and `can_submit` in `candidate_quality` reflect structural validity. The job must still finish its current human review or execution rounds before eligible candidates can be submitted. Structural validity does not mean True Replay or Candidate Review has passed.
+
+A checkpoint contains `id`, `round`, `questions` and `attachments`. Questions contain `qid`, `question`, `reason`, `source_refs` and `required`.
+
+`remote_warnings` preserves OpenViking partial-output and source-processing warnings, which are also included in `artifact_quality.warnings`. Warning-bearing results have quality `caution`. Each round retains its warnings and `compiler_sha256`. Remote `completed` and structurally valid required artifacts do not prove complete Evidence coverage.
 
 `compiler_source_sha256` identifies the frozen compiler source body. `compiler_sha256` identifies the actual installed body after package-name substitution and native formatting normalization. `compiler_uri` and `skill_uri` point to its separate package, and round archives retain these fields. An existing package with different contents is rejected rather than overwritten with another version.
 

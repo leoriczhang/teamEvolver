@@ -118,6 +118,7 @@ export default function MiningWhiteboxPanel({ active, user }: { active: boolean;
                 <div className="font-bold">{prompt.label}</div>
                 <p className="mt-1 text-xs text-muted-foreground">{prompt.description}</p>
                 <p className="mt-1 text-xs text-muted-foreground">每轮受理前冻结编译指令；已受理的轮次沿用冻结版本。</p>
+                <p className="mt-1 text-xs text-muted-foreground">产物语言按首轮原始来源冻结，中文主导用简体中文，后续轮不随旧产物或补证语言改变。自定义业务指令原样保存；语言规则加入新的 Compile 请求，不改写已受理请求或已完成产物。</p>
               </div>
               {prompt.overridden && <Button variant="outline" size="sm" disabled={disabled} onClick={resetPrompt}>恢复默认</Button>}
             </div>

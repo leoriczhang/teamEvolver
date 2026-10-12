@@ -11,6 +11,7 @@ import {
 } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { toastOk, toastErr } from "@/lib/toast";
+import { canPublishFromReplay, isReplayCompleted, replayConclusion, replayIssue, replayStateLabel } from "@/lib/replay-evaluation";
 import {
   api,
   hydrateCandidates,
@@ -160,6 +161,16 @@ export default function DashboardView({
     void loadCandidateDetail(jobId);
   }, [loadCandidateDetail]);
 
+  const handleCandidateUpdated = useCallback((detail: Candidate) => {
+    candDetailRef.current[detail.job_id] = detail;
+    setCands((items) => mergeCandidateDetail(items, detail));
+    setEvalCache((cache) => {
+      const next = { ...cache };
+      delete next[detail.job_id];
+      return next;
+    });
+  }, []);
+
   const handleFeedbackSaved = useCallback((jobId: string, feedback: CandidateFeedback) => {
     candDetailRef.current[jobId] = mergeCandidateFeedback(candDetailRef.current[jobId] ?? { job_id: jobId }, feedback);
     setCands((items) => items.map((item) => item.job_id === jobId ? mergeCandidateFeedback(item, feedback) : item));
@@ -285,6 +296,11 @@ export default function DashboardView({
 
   // ---- actions ---- //
   async function validate(jobId: string, mode: "auto" | "force") {
+    const ev = evalCacheRef.current[jobId] || cands.find((c) => c.job_id === jobId)?.evaluation;
+    if (mode === "auto" && (evaluatingRef.current[jobId] || !canPublishFromReplay(ev))) {
+      toastErr("无法按回放发布", "需要完成 True Replay 并获得发布建议，请重新评估或查看详情。");
+      return;
+    }
     const msg =
       mode === "force"
         ? "确认强制发布该候选技能？（仍保留 True Replay 三项指标）"
@@ -521,7 +537,7 @@ export default function DashboardView({
                 ]}
               >
                 {cands.map((c) => {
-              const ev = evalCache[c.job_id];
+              const ev = evalCache[c.job_id] || c.evaluation;
               const busy = evaluating[c.job_id];
               const open = () => openCandidate(c.job_id);
               return (
@@ -533,24 +549,13 @@ export default function DashboardView({
                     <Pill tone="blue">{c.proposed_action || "-"}</Pill>
                   </Td>
                   <td className="link border-b border-line px-4 py-2.5 align-top" onClick={open}>
-                    {busy && !ev ? (
-                      <Pill tone="amber">评估中…</Pill>
-                    ) : ev ? (
-                      <Pill tone="blue">已完成</Pill>
-                    ) : (
-                      <Pill tone="gray">待评估</Pill>
-                    )}
+                    <Pill tone={busy ? "amber" : isReplayCompleted(ev) ? "blue" : "gray"}>
+                      {busy ? "评估中…" : replayStateLabel(ev)}
+                    </Pill>
+                    {!busy && replayIssue(ev) && <div className="mt-1 max-w-[220px] truncate text-[11px] text-destructive" title={replayIssue(ev)}>{replayIssue(ev)}</div>}
                   </td>
                   <td className="link border-b border-line px-4 py-2.5 align-top" onClick={open}>
-                    {ev ? (
-                      ev.recommended_publish ? (
-                        <Pill tone="green">指标改善</Pill>
-                      ) : (
-                        <Pill tone="amber">持平 / 有增加</Pill>
-                      )
-                    ) : (
-                      <span className="text-xs text-muted-foreground">—</span>
-                    )}
+                    <Pill tone={canPublishFromReplay(ev) ? "green" : "gray"}>{replayConclusion(ev)}</Pill>
                   </td>
                   <Td>
                     <CandidateFeedbackControls jobId={c.job_id} feedback={c.feedback} onSaved={handleFeedbackSaved} />
@@ -565,7 +570,7 @@ export default function DashboardView({
                       >
                         重新评估
                       </Button>
-                      <Button size="sm" onClick={() => validate(c.job_id, "auto")}>
+                      <Button size="sm" disabled={busy || !canPublishFromReplay(ev)} onClick={() => validate(c.job_id, "auto")}>
                         按回放发布
                       </Button>
                       <Button variant="outline" size="sm" onClick={() => validate(c.job_id, "force")}>
@@ -696,11 +701,12 @@ export default function DashboardView({
         onFeedbackSaved={handleFeedbackSaved}
         jobId={candJobId}
         cand={openCand}
-        ev={candJobId ? evalCache[candJobId] ?? null : null}
+        ev={candJobId ? evalCache[candJobId] ?? openCand?.evaluation ?? null : null}
         evaluating={candJobId ? !!evaluating[candJobId] : false}
         open={!!candJobId}
         onClose={() => setCandJobId(null)}
         onEvaluate={(force) => candJobId && evaluate(candJobId, force)}
+        onUpdated={handleCandidateUpdated}
       />
     </div>
   );

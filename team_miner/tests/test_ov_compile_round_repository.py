@@ -7,7 +7,7 @@ import json
 import pytest
 
 from team_miner.ov_compile_mining import MAX_PARALLEL_JOBS, REVIEW_SCHEMA_VERSION, OvSkillMiningRepository
-from team_miner.tests.dataset_fixtures import build_document
+from team_miner.tests.dataset_fixtures import build_capability_plan, build_document
 
 
 def create_job(repository, *, rounds=3, human=True):
@@ -38,6 +38,10 @@ def question(source="viking://resources/team/source/policy.md"):
 
 def populate(repository, job, *, questions=None, review=True):
     identity = job["job_id"]
+    if int(job.get("candidate_contract_version") or 1) >= 2:
+        repository.write_output(identity, "analysis/capability-plan.json", json.dumps(
+            build_capability_plan(["policy-review"], f"{job['source_snapshot']}/policy.md")
+        ))
     repository.write_output(identity, "analysis/evidence-map.md", "# Evidence\nSource policy.")
     repository.write_output(identity, "analysis/gaps.md", "# Gaps\nReview applicability.")
     if review:
@@ -97,7 +101,7 @@ def test_human_round_waits_restarts_and_preserves_both_original_and_reviewed_out
     waiting = restarted.get_job(initial["job_id"])
     detail = restarted.public_job(waiting, detail=True)
     assert detail["pending_checkpoint"]["questions"][0]["source_refs"] == question()["source_refs"]
-    assert len(detail["rounds"][0]["artifacts"]) == 7
+    assert len(detail["rounds"][0]["artifacts"]) == 8
     archive = repository.project_root / waiting["rounds_history"][0]["path"]
     manifest = json.loads((archive / "input.json").read_text())
     assert manifest["input_manifest"] == "round_inputs/round-1/manifest.json"

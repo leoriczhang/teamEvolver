@@ -9,7 +9,8 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from team_miner.bridge import SkillMinerBridgeMixin
-from team_miner.ov_compile_mining import OvSkillMiningRepository
+from team_miner.ov_compile_mining import LEGACY_SKILL_BODY, SKILL_BODY, OvSkillMiningRepository
+from team_miner.settings import LEGACY_COMPILER_WARNING
 from teamEvolver.config_store import ConfigStore
 
 
@@ -19,12 +20,20 @@ def native_api(tmp_path):
         def _start_ov_skill_monitor(self):
             pass
 
+        def _schedule_ov_skill_round_submission(self, job):
+            frozen = self._ov_skill_mining_repository().jobs_root / job["job_id"] / "compiler-skill.md"
+            self.submissions.append({**job, "frozen_compiler": frozen.read_text()})
+
+        async def _ov_source_detail(self, record):
+            return {**record, "ready": True, "status": "ready", "document_count": 1}
+
     config_file = tmp_path / "config.yaml"
     store = ConfigStore(config_file=config_file)
     data = store.load()
     data["mining"] = {"pipeline": {"max_rounds": 2, "runtime_timeout_seconds": 600}}
     store.save(data)
     owner = Owner()
+    owner.submissions = []
     owner.config = SimpleNamespace(_config_file=str(config_file))
     owner._ov_skill_mining_repo = OvSkillMiningRepository(tmp_path / "state", tmp_path / "project")
     app = FastAPI()
@@ -91,3 +100,53 @@ def test_compiler_settings_persist_for_new_rounds(native_api):
     assert persisted == {"pipeline": {"max_rounds": 4, "runtime_timeout_seconds": 900},
                          "prompts": {"ov_compile": prompt}}
     assert "api_key" not in json.dumps(response.json())
+
+
+@pytest.mark.parametrize(
+    ("compiler_body", "expected_version"),
+    [
+        (SKILL_BODY, 2),
+        (SKILL_BODY + "\nPreserve regional boundaries.\n", 2),
+        (LEGACY_SKILL_BODY, 1),
+        (LEGACY_SKILL_BODY + "\nPreserve historical task rules.\n", 1),
+    ],
+    ids=["default", "custom-collection", "legacy", "custom-single"],
+)
+def test_new_job_freezes_selected_compiler_contract_before_scheduling(native_api, compiler_body, expected_version):
+    client, owner = native_api
+    response = client.post("/api/mining/settings", json={"prompts": [{"id": "ov_compile", "prompt": compiler_body}]})
+    assert response.status_code == 200, response.text
+    repository = owner._ov_skill_mining_repository()
+    source = repository.save_source(
+        account="default", uri="viking://resources/policy", name="Policy", tags=["skill"]
+    )
+    response = client.post("/api/mining/jobs", json={"input_dir": source["uri"], "source_id": source["source_id"]})
+    assert response.status_code == 201, response.text
+    public = response.json()["jobs"][0]
+    job = repository.get_job(public["job_id"])
+    assert job["candidate_contract_version"] == public["candidate_contract_version"] == expected_version
+    warnings = [LEGACY_COMPILER_WARNING] if expected_version == 1 else []
+    assert job["options_warnings"] == public["options_warnings"] == warnings
+    assert (repository.jobs_root / job["job_id"] / "compiler-skill.md").read_text() == compiler_body
+    assert owner.submissions[0]["frozen_compiler"] == compiler_body
+    assert owner._ov_skill_compiler_body() == compiler_body
+
+    reset = client.post("/api/mining/prompts/ov_compile/reset")
+    assert reset.status_code == 200, reset.text
+    assert owner._ov_skill_compiler_body() == SKILL_BODY
+    assert repository.get_job(job["job_id"])["candidate_contract_version"] == expected_version
+    assert (repository.jobs_root / job["job_id"] / "compiler-skill.md").read_text() == compiler_body
+
+
+def test_invalid_saved_compiler_does_not_create_or_schedule_job(native_api):
+    client, owner = native_api
+    data = owner._mining_store().load()
+    data["mining"]["prompts"] = {"ov_compile": "Invalid stored compiler"}
+    owner._mining_store().save(data)
+    repository = owner._ov_skill_mining_repository()
+    source = repository.save_source(
+        account="default", uri="viking://resources/policy", name="Policy", tags=["skill"]
+    )
+    response = client.post("/api/mining/jobs", json={"input_dir": source["uri"], "source_id": source["source_id"]})
+    assert response.status_code == 400 and "frontmatter" in response.json()["detail"]
+    assert not owner.submissions and repository.list_jobs() == []

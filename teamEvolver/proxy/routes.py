@@ -41,6 +41,7 @@ from team_replay.policy import (
     progressive_replay_decision,
     select_replay_cases,
 )
+from team_replay.results import replay_execution_summary
 from team_skills.candidates.feedback import CandidateFeedbackStore, FeedbackConflictError
 from team_skills.candidates.store import ValidationStore
 from team_skills.evolution.experience_library import ExperienceLibraryStore
@@ -1545,16 +1546,20 @@ def _evaluation_payload(job: dict[str, Any], result: dict[str, Any], *, cached: 
         baseline_checklist=branch_checklists.get("baseline") or {},
         candidate_checklist=branch_checklists.get("candidate") or {},
     )
-    accepted = bool(policy.get("accepted"))
-    no_regression = bool(policy.get("no_regression"))
-    verdict = str(policy.get("verdict") or "inconclusive")
+    execution = replay_execution_summary(replay_summary)
+    completed = execution["status"] == "completed"
+    accepted = completed and bool(policy.get("accepted")) and result.get("accepted") is not False
+    no_regression = completed and bool(policy.get("no_regression"))
+    verdict = str(policy.get("verdict") or "inconclusive") if completed else "inconclusive"
+    policy = {**policy, "accepted": accepted, "no_regression": no_regression, "verdict": verdict}
     return {
-        "status": "evaluated",
+        "status": execution["status"],
         "skill_name": skill_name,
         "proposed_action": str(job.get("proposed_action") or job.get("action") or ""),
         "recommended_publish": bool(accepted),
         "cached": cached,
         "replay": {
+            **execution,
             "verdict": verdict,
             "no_regression": bool(no_regression),
             "cases": normalized_cases,
@@ -1617,7 +1622,7 @@ async def _evaluate_candidate_job(config, job: dict[str, Any]) -> dict[str, Any]
         replay = aggregate_true_replay_windows(
             window_results,
         )
-        if replay.get("status") == "evaluated":
+        if replay_execution_summary(replay)["status"] == "completed":
             replay_decision = str(
                 replay.get("verdict")
                 or (
@@ -1633,8 +1638,18 @@ async def _evaluate_candidate_job(config, job: dict[str, Any]) -> dict[str, Any]
                 "reason": replay_decision,
                 "replay_summary": replay,
             }
-        logger.info("[Validation] true replay skipped for %s: %s", job_id, replay.get("reason"))
+        logger.info(
+            "[Validation] true replay %s for %s: %s",
+            replay_execution_summary(replay)["status"], job_id, replay.get("reason"),
+        )
         fallback_reason = replay.get("reason") or replay.get("status") or "true replay skipped"
+        return {
+            "validator_mode": "true_replay",
+            "decision": "inconclusive",
+            "accepted": False,
+            "reason": fallback_reason,
+            "replay_summary": replay,
+        }
     except Exception as exc:  # noqa: BLE001
         logger.warning("[Validation] true replay failed for %s: %s", job_id, exc)
         fallback_reason = f"true replay failed: {type(exc).__name__}: {exc}"
@@ -1645,7 +1660,7 @@ async def _evaluate_candidate_job(config, job: dict[str, Any]) -> dict[str, Any]
         "accepted": False,
         "reason": fallback_reason,
         "replay_summary": {
-            "status": "skipped",
+            "status": "failed",
             "reason": fallback_reason,
             "cases": [],
         },
@@ -4558,7 +4573,16 @@ class RoutesMixin:
             if not evaluation:
                 evaluation = await _evaluate_candidate_job(owner.config, job)
                 store.save_evaluation(job_id, evaluation)
-            accepted = bool(evaluation.get("accepted"))
+            observed_evaluation = _evaluation_payload(job, evaluation)
+            accepted = bool(evaluation.get("accepted")) and observed_evaluation["recommended_publish"]
+            if mode != "force" and observed_evaluation["status"] != "completed":
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "status": "replay_incomplete",
+                        "reason": evaluation.get("reason") or "True Replay 尚未完成，不能按回放发布",
+                    },
+                )
             if mode != "force" and not accepted:
                 decision = {
                     "status": "rejected",

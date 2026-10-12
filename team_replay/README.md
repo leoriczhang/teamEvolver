@@ -24,6 +24,12 @@ from team_replay.gateway import DisabledReplayGateway, EmbeddedReplayGateway
 Checklist，再在完成门禁通过后比较交互轮次、工具调用和 Token。Skill 与
 Memory 暂时共用该策略。
 
+文档挖掘案例由提交服务绑定 `replay.execution.kind=document`，使用租户明确配置的
+ReplayAdapterFactory，无需来源 Session 或历史 Context Snapshot。Evidence URI 仅用于追溯。
+执行 Bundle 排除评测定义与完整 Checklist，Baseline/Candidate 分别创建独立会话。
+评估对象存在不代表执行完成；只有实际双分支结果支持 `completed`。未绑定执行器、跳过或
+失败均保留状态及原因，未观测指标保持不可用，并阻止按回放 Publish。
+
 ## Ownership
 
 ```text

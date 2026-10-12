@@ -570,13 +570,7 @@ class ValidationStore:
 
     @staticmethod
     def _replay_has_completed_metrics(source: dict[str, Any]) -> bool:
-        """True when a result/evaluation carries a genuinely completed replay.
-
-        A skipped or failed True Replay leaves every efficiency dimension at
-        zero; a completed one has at least one non-zero baseline or candidate
-        metric. Used to prefer a real prior comparison over a newer "skipped"
-        auto-evaluation.
-        """
+        """Prefer observed completed Replay over a newer unavailable attempt."""
         if not isinstance(source, dict):
             return False
         summary = (
@@ -586,28 +580,9 @@ class ValidationStore:
             if isinstance(source.get("replay_summary"), dict)
             else {}
         )
-        efficiency = (
-            summary.get("efficiency")
-            if isinstance(summary.get("efficiency"), dict)
-            else {}
-        )
-        dimensions = efficiency.get("dimensions")
-        if not isinstance(dimensions, dict) or not dimensions:
-            return False
-        # DEAP cannot observe every metric, so True Replay records those as the
-        # ``UNAVAILABLE`` sentinel string; ``int()`` on it raises and would 500
-        # the candidate list (and blank the review queue) for an otherwise
-        # perfectly good evaluation.
-        from team_replay.metrics import metric_number
+        from team_replay.results import replay_execution_summary
 
-        return any(
-            isinstance(metric, dict)
-            and (
-                bool(metric_number(metric.get("baseline")))
-                or bool(metric_number(metric.get("candidate")))
-            )
-            for metric in dimensions.values()
-        )
+        return replay_execution_summary(summary)["status"] == "completed"
 
     def load_best_evaluation(
         self, job_id: str, job: Optional[dict[str, Any]] = None

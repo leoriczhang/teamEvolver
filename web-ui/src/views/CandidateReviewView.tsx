@@ -11,6 +11,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { api, hydrateCandidates, mergeCandidateFeedback, type Candidate, type CandidateFeedback, type EvalResult } from "@/api/client";
 import { toastErr, toastOk } from "@/lib/toast";
+import { canPublishFromReplay, isReplayCompleted, replayConclusion, replayIssue, replayStateLabel } from "@/lib/replay-evaluation";
 import CandidateModal from "./dashboard/CandidateModal";
 import CandidateFeedbackControls from "./dashboard/CandidateFeedback";
 
@@ -24,16 +25,6 @@ function mergeCandidateDetail(items: Candidate[], detail: Candidate): Candidate[
   return items.map((item) => (
     item.job_id === detail.job_id ? { ...item, ...detail } : item
   ));
-}
-
-function replayIssue(ev?: EvalResult): string {
-  if (!ev) return "";
-  if (ev.replay?.error) return ev.replay.error;
-  for (const item of ev.replay?.cases || []) {
-    const err = item.baseline?.error || item.candidate?.error;
-    if (err) return err;
-  }
-  return "";
 }
 
 type CandidateScope = "open" | "processed";
@@ -130,14 +121,8 @@ export default function CandidateReviewView({ active, canManage = false }: { act
         setEvalCache((m) => ({ ...m, [jobId]: r }));
         if (force) {
           const issue = replayIssue(r);
-          toastOk(
-            "重新评估完成",
-            issue
-              ? `回放存在问题：${issue}`
-              : r.recommended_publish
-                ? "客观指标改善"
-                : "客观指标持平或增加"
-          );
+          if (isReplayCompleted(r)) toastOk("重新评估完成", replayConclusion(r));
+          else toastErr("回放未完成", issue || replayStateLabel(r));
         }
       }
     } catch (e: any) {
@@ -189,6 +174,11 @@ export default function CandidateReviewView({ active, canManage = false }: { act
   }, [active, refresh]);
 
   async function validate(jobId: string, mode: "auto" | "force") {
+    const ev = evalCacheRef.current[jobId] || cands.find((c) => c.job_id === jobId)?.evaluation;
+    if (mode === "auto" && (evaluatingRef.current[jobId] || !canPublishFromReplay(ev))) {
+      toastErr("无法按回放发布", "需要完成 True Replay 并获得发布建议，请重新评估或查看详情。");
+      return;
+    }
     const msg =
       mode === "force"
         ? "确认强制发布该候选技能？仍会保留 True Replay 三项指标。"
@@ -239,11 +229,11 @@ export default function CandidateReviewView({ active, canManage = false }: { act
   }
 
   const isHistory = scope === "processed";
-  const evaluated = cands.filter((c) => evalCache[c.job_id] || c.evaluation).length;
-  const recommended = cands.filter((c) => (evalCache[c.job_id] || c.evaluation)?.recommended_publish).length;
+  const evaluated = cands.filter((c) => isReplayCompleted(evalCache[c.job_id] || c.evaluation)).length;
+  const recommended = cands.filter((c) => canPublishFromReplay(evalCache[c.job_id] || c.evaluation)).length;
   const risky = cands.filter((c) => {
     const ev = evalCache[c.job_id] || c.evaluation;
-    return ev && !ev.recommended_publish;
+    return replayConclusion(ev) === "持平 / 有增加";
   }).length;
   const published = cands.filter((c) => candidateReviewStatus(c) === "published").length;
   const rejected = cands.filter((c) => candidateReviewStatus(c) === "rejected").length;
@@ -280,7 +270,7 @@ export default function CandidateReviewView({ active, canManage = false }: { act
       <div className="mb-[18px] grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">
         <StatCard label={isHistory ? "历史候选" : "待评审候选"} value={cands.length} />
         <StatCard label={isHistory ? "已发布" : "已完成评估"} value={isHistory ? published : evaluated} />
-        <StatCard label={isHistory ? "已驳回" : "指标改善"} value={isHistory ? rejected : recommended} />
+        <StatCard label={isHistory ? "已驳回" : "建议发布"} value={isHistory ? rejected : recommended} />
         <StatCard label={isHistory ? "带回放证据" : "持平或增加"} value={isHistory ? evaluated : risky} />
       </div>
 
@@ -334,7 +324,9 @@ export default function CandidateReviewView({ active, canManage = false }: { act
                         </div>
                       </Td>
                       <Td>
-                        {busy ? <Pill tone="amber">评估中…</Pill> : ev ? <Pill tone="blue">已完成</Pill> : <Pill tone="gray">待评估</Pill>}
+                        <Pill tone={busy ? "amber" : isReplayCompleted(ev) ? "blue" : "gray"}>
+                          {busy ? "评估中…" : replayStateLabel(ev)}
+                        </Pill>
                         {(ev?.static_validation || c.static_validation) && (
                           <div className="mt-1">
                             <Pill tone={(ev?.static_validation || c.static_validation)?.passed ? "green" : "red"}>
@@ -345,11 +337,7 @@ export default function CandidateReviewView({ active, canManage = false }: { act
                         {!busy && issue && <div className="mt-1 max-w-[220px] truncate text-[11px] text-destructive" title={issue}>{issue}</div>}
                       </Td>
                       <Td>
-                        {ev ? (
-                          ev.recommended_publish ? <Pill tone="green">指标改善</Pill> : <Pill tone="amber">持平 / 有增加</Pill>
-                        ) : (
-                          <span className="text-xs text-muted-foreground">—</span>
-                        )}
+                        <Pill tone={canPublishFromReplay(ev) ? "green" : "gray"}>{replayConclusion(ev)}</Pill>
                       </Td>
                       <Td>
                         <CandidateFeedbackControls
@@ -370,7 +358,7 @@ export default function CandidateReviewView({ active, canManage = false }: { act
                               <Button variant="outline" size="sm" disabled={busy} onClick={() => evaluate(c.job_id, true)}>
                                 {busy ? "评估中…" : "重新评估"}
                               </Button>
-                              <Button size="sm" onClick={() => validate(c.job_id, "auto")}>按回放发布</Button>
+                              <Button size="sm" disabled={busy || !canPublishFromReplay(ev)} onClick={() => validate(c.job_id, "auto")}>按回放发布</Button>
                               <Button variant="outline" size="sm" onClick={() => validate(c.job_id, "force")}>强制发布</Button>
                               <Button variant="destructive" size="sm" onClick={() => rejectCandidate(c.job_id)}>驳回</Button>
                             </>

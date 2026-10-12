@@ -32,9 +32,11 @@ from .ov_compile_mining import (
     validate_descendant,
     validate_resource_uri,
 )
-from .ov_round_orchestration import OvRoundOrchestrationMixin
+from .ov_round_orchestration import OvRoundOrchestrationMixin, _compiler_package
 from .routes import _content_editable, _content_text
 from .settings import (
+    LEGACY_COMPILER_WARNING,
+    compiler_contract_version,
     compiler_prompt,
     pipeline_settings,
     reset_prompt,
@@ -600,9 +602,9 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
             try:
                 job_id = artifact_job_id(path)
                 async with owner._ov_skill_mining_lock(job_id):
-                    result = await asyncio.to_thread(
-                        save_artifact, owner._ov_skill_mining_repository().project_root, path, body.get("content"),
-                    )
+                    repository = owner._ov_skill_mining_repository()
+                    result = await asyncio.to_thread(save_artifact, repository.project_root, path, body.get("content"))
+                    await asyncio.to_thread(repository.refresh_edited_quality, job_id, path)
             except FileNotFoundError as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
             except ValueError as exc:
@@ -1047,6 +1049,9 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
                 timeout_seconds = int(body.get("runtime_timeout_seconds", defaults["runtime_timeout_seconds"]))
                 if not 60 <= timeout_seconds <= 7200:
                     raise ValueError("运行期限必须在 60 到 7200 秒之间")
+                compiler_body = await asyncio.to_thread(owner._ov_skill_compiler_body)
+                await asyncio.to_thread(_compiler_package, compiler_body)
+                contract_version = compiler_contract_version(compiler_body)
                 job = await asyncio.to_thread(
                     repository.create_job,
                     name=name,
@@ -1058,6 +1063,8 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
                     max_rounds=rounds_hint,
                     runtime_timeout_seconds=timeout_seconds,
                     human_checkpoints=bool(body.get("human_checkpoints", True)),
+                    candidate_contract_version=contract_version,
+                    compiler_body=compiler_body,
                 )
             except (ValueError, TypeError) as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1068,6 +1075,7 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
             job = await asyncio.to_thread(
                 repository.update_job, job["job_id"], source_snapshot=snapshot_uri,
                 original_source_snapshot=snapshot_uri, output_uri=f"{run_root}/rounds/round-1/output",
+                options_warnings=[LEGACY_COMPILER_WARNING] if contract_version == 1 else [],
             )
             owner._start_ov_skill_monitor()
             owner._schedule_ov_skill_round_submission(job)

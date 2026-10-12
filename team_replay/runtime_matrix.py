@@ -6,6 +6,7 @@ import hashlib
 import json
 from typing import Any, Iterable
 
+from .contracts import document_runtime_type
 
 
 def _runtime(value: Any) -> str:
@@ -75,6 +76,9 @@ def _runtime_declaration(skill: dict[str, Any]) -> dict[str, Any]:
 
 
 def runtime_type_for_case(case: dict[str, Any]) -> str:
+    document = document_runtime_type(case)
+    if document:
+        return document
     provenance = (
         case.get("provenance")
         if isinstance(case.get("provenance"), dict)
@@ -128,6 +132,10 @@ def prepare_runtime_validation(
     for raw_case in replay_cases:
         case = dict(raw_case)
         provenance = dict(case.get("provenance") or {})
+        if document_runtime_type(case):
+            # Evidence references are not historical Session execution inputs.
+            cases.append(case)
+            continue
         source = sessions_by_id.get(str(provenance.get("session_id") or ""))
         if source and not isinstance(provenance.get("source_runtime"), dict):
             runtime = (
@@ -221,6 +229,9 @@ def prepare_runtime_validation(
                 "compatibility_runtime": runtime,
             },
         }
+        if document_runtime_type(seed):
+            neutral["replay"] = dict(seed.get("replay") or {})
+            neutral["replay"].pop("execution", None)
         cases.append(neutral)
         represented.add(runtime)
 

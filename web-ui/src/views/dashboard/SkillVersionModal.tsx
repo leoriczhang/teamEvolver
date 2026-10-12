@@ -11,6 +11,7 @@ import UnifiedDiffView from "@/components/UnifiedDiffView";
 import { cn } from "@/lib/utils";
 import { api, type SkillVersionResp } from "@/api/client";
 import { toastOk, toastErr } from "@/lib/toast";
+import { formatReplayMetric, observedMetric } from "@/lib/replay-evaluation";
 
 const EFFICIENCY_LABELS: Record<string, string> = {
   interaction_turns: "交互轮次",
@@ -209,38 +210,40 @@ export default function SkillVersionModal({
                           </tr>
                         </thead>
                         <tbody>
-                          {Object.entries(efficiencyDimensions).map(([key, metric]) => (
+                          {Object.entries(efficiencyDimensions).map(([key, metric]) => {
+                            const delta = observedMetric(metric.delta);
+                            const observed = observedMetric(metric.baseline) !== null && observedMetric(metric.candidate) !== null && delta !== null;
+                            return (
                             <tr key={key} className="border-t border-border">
                               <td className="px-3 py-2 font-semibold">
                                 {EFFICIENCY_LABELS[key] || key}
                               </td>
                               <td className="px-3 py-2">
-                                {Number(metric.baseline || 0).toLocaleString()}
+                                {formatReplayMetric(metric.baseline)}
                               </td>
                               <td className="px-3 py-2">
-                                {Number(metric.candidate || 0).toLocaleString()}
+                                {formatReplayMetric(metric.candidate)}
                               </td>
                               <td
                                 className={cn(
                                   "px-3 py-2 font-bold",
-                                  metric.delta > 0 && "text-success",
-                                  metric.delta < 0 && "text-destructive"
+                                  observed && delta > 0 && "text-success",
+                                  observed && delta < 0 && "text-destructive"
                                 )}
                               >
-                                {metric.delta > 0 ? "-" : metric.delta < 0 ? "+" : ""}
-                                {Math.abs(Number(metric.delta || 0)).toLocaleString()}
+                                {observed ? `${delta > 0 ? "-" : delta < 0 ? "+" : ""}${formatReplayMetric(Math.abs(delta))}` : "未观测"}
                               </td>
                               <td className="px-3 py-2">
                                 <Pill
                                   tone={
-                                    metric.winner === "candidate"
+                                    observed && metric.winner === "candidate"
                                       ? "green"
-                                      : metric.winner === "baseline"
+                                      : observed && metric.winner === "baseline"
                                         ? "red"
                                         : "gray"
                                   }
                                 >
-                                  {metric.winner === "candidate"
+                                  {!observed || metric.winner === "unavailable" ? "未观测" : metric.winner === "candidate"
                                     ? "本版本更优"
                                     : metric.winner === "baseline"
                                       ? "上一版本更优"
@@ -248,7 +251,7 @@ export default function SkillVersionModal({
                                 </Pill>
                               </td>
                             </tr>
-                          ))}
+                          ); })}
                         </tbody>
                       </table>
                     </div>

@@ -15,15 +15,18 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from team_replay.contracts import DOCUMENT_REPLAY_RUNTIME, document_replay_execution
 from team_replay.datasets.schema import normalize_case
 from team_skills.candidates.store import ValidationStore
 from team_skills.library.bundle import bundle_tree_sha256, encode_bundle_payload, read_skill_bundle
 from team_skills.library.frontmatter import parse_skill_md
+from team_skills.library.render import build_skill_md
 
 from . import benchmark_format as progressive_benchmark
 
 SKILLMINER_ROOT = Path(__file__).resolve().parent
 INTERNAL_BENCHMARK_FORMAT = progressive_benchmark.DATASET_FORMAT
+MINED_REPLAY_BINDING_VERSION = 1
 
 
 class MiningLifecycleError(ValueError):
@@ -72,8 +75,23 @@ def resolve_mined_job_skill_root(
     skillminer_root: Path | str = SKILLMINER_ROOT,
 ) -> Path:
     """Resolve a completed OV job for candidate submission."""
-    del skill_name, artifact_path
-    return resolve_mined_job_workspace(job_id, skillminer_root=skillminer_root)
+    del artifact_path
+    workspace = resolve_mined_job_workspace(job_id, skillminer_root=skillminer_root)
+    metadata = json.loads((workspace.parent / "job.json").read_text(encoding="utf-8"))
+    if int(metadata.get("candidate_contract_version") or 1) >= 2:
+        from .ov_compile_mining import OvSkillMiningRepository
+
+        # Revalidate the selected current bundle after human edits. Sibling candidates
+        # have independent validation outcomes and never block this submission.
+        repository = OvSkillMiningRepository(workspace.parent / "submission_state", skillminer_root)
+        try:
+            plan = repository._read_capability_plan(metadata)
+            if skill_name not in {row["name"] for row in plan["skills"]}:
+                raise ValueError("该 Skill Candidate 不在能力拆分计划中")
+            repository._validate_candidate(metadata, resolve_mined_skill_dir(skill_name, skillminer_root=workspace))
+        except ValueError as exc:
+            raise MiningLifecycleError(str(exc)) from exc
+    return workspace
 
 
 def resolve_mined_skill_dir(
@@ -104,8 +122,23 @@ def load_internal_benchmark(skill_dir: Path | str) -> list[dict[str, Any]]:
 
 
 def benchmark_replay_cases(skill_name: str, cases: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Preserve the generated case identity and all shared contract fields."""
-    return [normalize_case({**case, "skill_ids": [skill_name]}) for case in cases]
+    """Bind document cases to tenant execution without inventing source Sessions."""
+    result = []
+    for raw in cases:
+        case = normalize_case({**raw, "skill_ids": [skill_name]})
+        # Evidence URI references are not recorded Sessions. Neither a compiler
+        # nor an edited Dataset can supply an execution identity or private Context.
+        for key in (
+            "session_id", "session_snapshot", "source_runtime", "source_runtime_context",
+            "context_snapshot", "context_snapshot_id",
+        ):
+            case["provenance"].pop(key, None)
+        case["replay"] = {
+            "progressive_disclosure": case["replay"]["progressive_disclosure"],
+            "execution": document_replay_execution(),
+        }
+        result.append(case)
+    return result
 
 
 def _candidate_skill_payload(parsed: dict[str, Any], bundle: dict[str, bytes]) -> dict[str, Any]:
@@ -122,11 +155,21 @@ def _candidate_skill_payload(parsed: dict[str, Any], bundle: dict[str, bytes]) -
         "description": str(parsed.get("description") or ""),
         "category": str(parsed.get("category") or "general"),
         "content": str(parsed.get("content") or ""),
-        "bundle": encode_bundle_payload(bundle),
     }
     extra = parsed.get("_extra_frontmatter")
     if isinstance(extra, dict) and extra:
         candidate["extra_frontmatter"] = extra
+    metadata = parsed.get("metadata")
+    if isinstance(metadata, dict) and metadata:
+        candidate["metadata"] = metadata
+    # OV accepts folded YAML descriptions; Agent execution requires the canonical
+    # single-line representation. Normalize only the candidate entrypoint, keeping
+    # the raw mined bundle and its source artifact hash intact for audit.
+    try:
+        entrypoint = build_skill_md(candidate).encode("utf-8")
+    except ValueError as exc:
+        raise MiningLifecycleError(f"SKILL.md 无法规范化为执行格式：{exc}") from exc
+    candidate["bundle"] = encode_bundle_payload({**bundle, "SKILL.md": entrypoint})
     return candidate
 
 
@@ -187,6 +230,7 @@ def _matching_job(
             source.get("kind") == "skillminer"
             and str(source.get("skill_name") or "") == skill_name
             and str(source.get("artifact_sha256") or "") == artifact_sha256
+            and source.get("replay_binding_version") == MINED_REPLAY_BINDING_VERSION
         ):
             return job
     return None
@@ -223,12 +267,18 @@ def submit_mined_skill(
         "candidate_skill_name": artifact["name"],
         "proposed_action": "update" if current else "create",
         "rationale": (
-            f"由 SkillMiner 编译并通过 {artifact['question_count']} 道内部 Benchmark 完整性检查；"
-            "等待 A/B 验证与人工发布。"
+            f"由 SkillMiner 编译并通过 {artifact['question_count']} 条 Test Dataset 案例完整性检查；"
+            "等待 True Replay 与 Candidate Review。"
         ),
         "candidate_skill": _candidate_skill_payload(artifact["parsed"], artifact["bundle"]),
         "current_skill": current,
         "replay_cases": benchmark_replay_cases(artifact["name"], artifact["questions"]),
+        "runtime_validation_policy": {
+            "declaration": "document_case",
+            "execution": document_replay_execution(),
+            "required_runtimes": [DOCUMENT_REPLAY_RUNTIME],
+            "distribution_runtimes": [],
+        },
         "min_score": 0.75,
         "source": {
             "kind": "skillminer",
@@ -237,6 +287,7 @@ def submit_mined_skill(
             "dataset_format": INTERNAL_BENCHMARK_FORMAT,
             "question_count": artifact["question_count"],
             "submitted_by": str(submitted_by or ""),
+            "replay_binding_version": MINED_REPLAY_BINDING_VERSION,
         },
     }
     if mining_job_id:

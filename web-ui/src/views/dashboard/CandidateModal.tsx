@@ -12,6 +12,7 @@ import { InfoTip, Pill, Empty, ListViewport, PaginationControls, usePagedItems }
 import UnifiedDiffView, { InlineDiffView } from "@/components/UnifiedDiffView";
 import { cn } from "@/lib/utils";
 import { toastErr, toastOk } from "@/lib/toast";
+import { canPublishFromReplay, formatReplayMetric, isReplayCompleted, observedMetric, replayConclusion, replayIssue, replayStateLabel } from "@/lib/replay-evaluation";
 import { api } from "@/api/client";
 import CandidateFeedbackControls from "./CandidateFeedback";
 import type {
@@ -101,6 +102,8 @@ export default function CandidateModal({
   const activeEv = override ? (override.evaluation ?? null) : ev;
 
   const rep = activeEv?.replay || {};
+  const replayCompleted = isReplayCompleted(activeEv);
+  const issue = replayIssue(activeEv);
   const replayCases = rep.cases || [];
   const efficiencyDimensions = rep.efficiency?.dimensions || {};
   const decisionPolicy = rep.decision_policy || {};
@@ -187,13 +190,13 @@ export default function CandidateModal({
   } else {
     // Replay detail
     let replayHtml: ReactNode;
-    if (rep.error) {
-      replayHtml = <div className="text-xs text-destructive">回放失败：{rep.error}</div>;
+    if (!replayCompleted) {
+      replayHtml = <div className="text-xs text-muted-foreground">{replayStateLabel(activeEv)}：{issue || "尚无已完成的 True Replay 案例，请重新评估。"}</div>;
     } else {
       if (!replayCases.length) {
         replayHtml = (
           <div className="text-xs text-muted-foreground">
-            无可回放的案例（该候选未采样到可复现的会话轮次）。
+            该评估记录未附回放明细。
           </div>
         );
       } else {
@@ -287,16 +290,15 @@ export default function CandidateModal({
             True Replay 客观结论
             <InfoTip term="true-replay" />
           </div>
+          <div className="mb-2 flex items-center gap-2">
+            <Pill tone={replayCompleted ? "blue" : "gray"}>{evaluating ? "评估中…" : replayStateLabel(activeEv)}</Pill>
+            {issue && <span>{issue}</span>}
+          </div>
           <Pill
-            tone={
-              decisionPolicy.verdict === "accept"
-                ? "green"
-                : decisionPolicy.verdict === "reject"
-                ? "red"
-                : "amber"
-            }
+            tone={canPublishFromReplay(activeEv) ? "green" : "gray"}
           >
-            {decisionPolicy.decision_basis === "interaction_turns_decreased"
+            {!replayCompleted ? replayConclusion(activeEv)
+              : decisionPolicy.decision_basis === "interaction_turns_decreased"
               ? "轮次下降，直接判定正向"
               : decisionPolicy.decision_basis === "interaction_turns_increased"
               ? "轮次上升，判定负向"
@@ -304,7 +306,7 @@ export default function CandidateModal({
               ? "轮次持平，工具调用 / Token 改善"
               : decisionPolicy.decision_basis === "secondary_metrics_increased"
               ? "轮次持平，工具调用 / Token 有增加"
-              : "三项持平 / 数据不完整"}
+              : replayConclusion(activeEv)}
           </Pill>
         </div>
 
@@ -312,7 +314,7 @@ export default function CandidateModal({
           ✅ Checklist 门禁
           <InfoTip term="checklist" />
         </SecTitle>
-        <ChecklistEvidence
+        {replayCompleted ? <ChecklistEvidence
           candidate={rep.checklist?.candidate}
           baseline={rep.checklist?.baseline}
           cases={
@@ -320,7 +322,9 @@ export default function CandidateModal({
               .map((cc) => cc.candidate?.checklist_report)
               .filter(Boolean) as SkillLabChecklistReport[]
           }
-        />
+        /> : <div className="rounded-lg border border-border bg-surface-subtle p-3 text-xs text-muted-foreground">
+          True Replay 尚未完成，暂无 Checklist 判定。
+        </div>}
 
         {Object.keys(efficiencyDimensions).length > 0 && (
           <>
@@ -330,7 +334,7 @@ export default function CandidateModal({
             </SecTitle>
             <div
               role="region"
-              aria-label={`A/B 效率对比：轮次 基线 ${Number(efficiencyDimensions.interaction_turns?.baseline || 0).toLocaleString()} / 候选 ${Number(efficiencyDimensions.interaction_turns?.candidate || 0).toLocaleString()}，工具 基线 ${Number(efficiencyDimensions.tool_call_count?.baseline || 0).toLocaleString()} / 候选 ${Number(efficiencyDimensions.tool_call_count?.candidate || 0).toLocaleString()}，Token 基线 ${Number(efficiencyDimensions.total_tokens?.baseline || 0).toLocaleString()} / 候选 ${Number(efficiencyDimensions.total_tokens?.candidate || 0).toLocaleString()}`}
+              aria-label={`A/B 效率对比：轮次 基线 ${formatReplayMetric(efficiencyDimensions.interaction_turns?.baseline)} / 候选 ${formatReplayMetric(efficiencyDimensions.interaction_turns?.candidate)}，工具 基线 ${formatReplayMetric(efficiencyDimensions.tool_call_count?.baseline)} / 候选 ${formatReplayMetric(efficiencyDimensions.tool_call_count?.candidate)}，Token 基线 ${formatReplayMetric(efficiencyDimensions.total_tokens?.baseline)} / 候选 ${formatReplayMetric(efficiencyDimensions.total_tokens?.candidate)}`}
               className="overflow-hidden rounded-lg border border-border"
             >
               <table className="w-full border-collapse text-xs">
@@ -342,25 +346,30 @@ export default function CandidateModal({
                   </tr>
                 </thead>
                 <tbody>
-                  {Object.entries(efficiencyDimensions).map(([key, metric]) => (
+                  {Object.entries(efficiencyDimensions).map(([key, metric]) => {
+                    const baseline = observedMetric(metric.baseline);
+                    const candidate = observedMetric(metric.candidate);
+                    const delta = observedMetric(metric.delta);
+                    const observed = replayCompleted && baseline !== null && candidate !== null && delta !== null;
+                    return (
                     <tr key={key} className="border-t border-border">
                       <td className="px-3 py-2 font-semibold">{EFFICIENCY_LABELS[key] || key}</td>
-                      <td className="px-3 py-2">{Number(metric.baseline || 0).toLocaleString()}</td>
-                      <td className="px-3 py-2">{Number(metric.candidate || 0).toLocaleString()}</td>
-                      <td className={cn("px-3 py-2 font-bold", metric.delta > 0 && "text-success", metric.delta < 0 && "text-destructive")}>
-                        {metric.delta > 0
-                          ? `减少 ${Number(metric.delta).toLocaleString()}`
-                          : metric.delta < 0
-                          ? `增加 ${Math.abs(Number(metric.delta)).toLocaleString()}`
+                      <td className="px-3 py-2">{formatReplayMetric(metric.baseline)}</td>
+                      <td className="px-3 py-2">{formatReplayMetric(metric.candidate)}</td>
+                      <td className={cn("px-3 py-2 font-bold", observed && delta > 0 && "text-success", observed && delta < 0 && "text-destructive")}>
+                        {!observed ? "未观测" : delta > 0
+                          ? `减少 ${formatReplayMetric(delta)}`
+                          : delta < 0
+                          ? `增加 ${formatReplayMetric(Math.abs(delta))}`
                           : "持平"}
                       </td>
                       <td className="px-3 py-2">
-                        <Pill tone={metric.winner === "candidate" ? "green" : metric.winner === "baseline" ? "red" : "gray"}>
-                          {metric.winner === "candidate" ? "减少" : metric.winner === "baseline" ? "增加" : "持平"}
+                        <Pill tone={observed && metric.winner === "candidate" ? "green" : observed && metric.winner === "baseline" ? "red" : "gray"}>
+                          {!observed || metric.winner === "unavailable" ? "未观测" : metric.winner === "candidate" ? "减少" : metric.winner === "baseline" ? "增加" : "持平"}
                         </Pill>
                       </td>
                     </tr>
-                  ))}
+                  ); })}
                 </tbody>
               </table>
             </div>
@@ -555,9 +564,9 @@ function AbCol({
         {head}
       </div>
       <div className="mb-2 flex flex-wrap gap-2 text-[11px] text-muted-foreground">
-        <span>轮次 {Number(branch.interaction_turns || 0).toLocaleString()}</span>
-        <span>工具 {Number(branch.tool_call_count || 0).toLocaleString()}</span>
-        <span>Token {Number(branch.total_tokens || 0).toLocaleString()}</span>
+        <span>轮次 {formatReplayMetric(branch.interaction_turns)}</span>
+        <span>工具 {formatReplayMetric(branch.tool_call_count)}</span>
+        <span>Token {formatReplayMetric(branch.total_tokens)}</span>
       </div>
       <div className="max-h-[200px] overflow-auto text-xs leading-normal whitespace-pre-wrap break-words">
         {body || <span className="text-muted-foreground">（无输出）</span>}
@@ -593,7 +602,7 @@ function ChecklistEvidence({
   if (!reports.length) {
     return (
       <div className="rounded-lg border border-border bg-surface-subtle p-3 text-xs text-muted-foreground">
-        本次评估未包含 Checklist 判定（测试集未生成完成条件），发布门禁仅参考三项效率指标。
+        本次回放未提供 Checklist 判定，无法据此确认完成条件。
       </div>
     );
   }

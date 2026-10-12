@@ -153,7 +153,7 @@ def test_replay_aggregation_preserves_unavailable_deap_metrics(candidate_turns, 
                 {"interaction_turns": 2, "tool_call_count": tools, "total_tokens": "unavailable"},
                 {"interaction_turns": candidate_turns, "tool_call_count": tools, "total_tokens": "unavailable"},
             ),
-            "cases": [{branch: {"checklist_report": {
+            "cases": [{branch: {"final_response": "response observed", "checklist_report": {
                 "all_satisfied": True, "items": [{
                     "id": "R1", "text": "Respond", "satisfied": True, "evidence": "response observed",
                 }],
