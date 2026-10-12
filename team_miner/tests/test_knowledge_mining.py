@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import io
+import json
 import zipfile
+from email.parser import BytesParser
 from types import SimpleNamespace
 
 import httpx
@@ -11,6 +14,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
+from team_memory.compile_client import CompileClient
 from team_miner.ov_compile_mining import OvSkillMiningRepository
 from teamEvolver.proxy import knowledge_mining as knowledge_mining_module
 from teamEvolver.proxy.knowledge_document_converter import convert_knowledge_upload
@@ -574,10 +578,10 @@ def test_knowledge_compile_passes_only_the_last_successful_compile_time(tmp_path
     compile_requests: list[dict] = []
 
     class FakeCompileClient:
-        def __init__(self, **_kwargs):
+        def __init__(self, *, endpoint, account_id, user_id, api_key, agent_id):
             pass
 
-        async def publish_shared_skill(self, **_kwargs):
+        async def publish_shared_skill(self, *, skill_name, skill_body, version_message, auxiliary_files=None):
             return {"ok": True}
 
     class Owner(KnowledgeMiningMixin):
@@ -705,6 +709,203 @@ def test_knowledge_compile_accepts_only_registered_knowledge_sources(tmp_path, m
             "skill": "viking://agent/skills/custom-wiki",
         }
     ]
+
+
+class _WikiCompilerHTTP:
+    """Model the public OV API while exercising the real CompileClient methods."""
+
+    skill_uri = "viking://agent/skills/llm-wiki"
+
+    @staticmethod
+    def _stored_skill(body: str) -> str:
+        # OV parses and reserializes SKILL.md rather than retaining the exact
+        # uploaded bytes. Its rendered body has no caller's final newline.
+        return body.rstrip("\n")
+
+    def __init__(self, existing: str, *, failure: str = "") -> None:
+        self.skill_body = (
+            None if existing == "missing"
+            else self._stored_skill(knowledge_mining_module._DEFAULT_WIKI_SKILL) if existing in {"current", "complete"}
+            else "---\nname: llm-wiki\ndescription: Previous compiler.\n---\n# Previous contract\n"
+        )
+        self.files = (
+            dict(knowledge_mining_module._DEFAULT_WIKI_SKILL_AUXILIARY_FILES) if existing == "complete"
+            else {} if existing == "missing" else {"README.md": "Previous attachment"}
+        )
+        self.failure = failure
+        self.calls: list[tuple[str, str, dict]] = []
+        self.compile_requests: list[dict] = []
+        self.uploaded_packages: dict[str, dict[str, str]] = {}
+
+    @staticmethod
+    def _ok(result: dict, *, status: int = 200) -> httpx.Response:
+        return httpx.Response(status, json={"status": "ok", "result": result})
+
+    @staticmethod
+    def _failed(message: str, *, status: int = 403) -> httpx.Response:
+        return httpx.Response(status, json={"error": {"message": message}})
+
+    def respond(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        payload = json.loads(request.content) if request.content and "application/json" in (
+            request.headers.get("Content-Type", "")
+        ) else {}
+        self.calls.append((request.method, path, payload))
+        assert request.headers["X-OpenViking-Account"] == "demo"
+        if path == "/api/v1/fs/tree":
+            assert request.method == "GET" and request.url.params["uri"] == _SOURCE_ROOT
+            return self._ok({"entries": [{"uri": f"{_SOURCE_ROOT}/policy.md", "is_dir": False}]})
+        if path == "/api/v1/compile/capabilities":
+            return self._ok({"can_create": True, "configured": True})
+        if path == "/api/v1/resources/temp_upload":
+            assert request.method == "POST"
+            assert request.headers["X-OpenViking-Role"] == "admin"
+            assert "X-OpenViking-Actor-Peer" not in request.headers
+            content_type = request.headers["Content-Type"]
+            assert content_type.startswith("multipart/form-data;")
+            message = BytesParser().parsebytes(
+                f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode() + request.content
+            )
+            parts = [part for part in message.walk() if part.get_filename()]
+            assert len(parts) == 1 and parts[0].get_filename() == "llm-wiki.zip"
+            with zipfile.ZipFile(io.BytesIO(parts[0].get_payload(decode=True))) as archive:
+                bundle = {name: archive.read(name).decode("utf-8") for name in archive.namelist()}
+            assert bundle == {
+                "SKILL.md": knowledge_mining_module._DEFAULT_WIKI_SKILL,
+                **knowledge_mining_module._DEFAULT_WIKI_SKILL_AUXILIARY_FILES,
+            }
+            if self.failure == "upload":
+                return self._failed("compiler bundle upload denied")
+            identifier = f"temp-package-{len(self.uploaded_packages) + 1}"
+            self.uploaded_packages[identifier] = bundle
+            return self._ok({"temp_file_id": identifier})
+        if path.startswith("/api/v1/skills"):
+            assert request.headers["X-OpenViking-Role"] == "admin"
+            assert "X-OpenViking-Actor-Peer" not in request.headers
+            if request.method == "GET":
+                if self.skill_body is None:
+                    return self._failed("Skill missing", status=404)
+                files = [
+                    {"path": name, "is_dir": False, "sha256": hashlib.sha256(content.encode()).hexdigest()}
+                    for name, content in self.files.items()
+                ]
+                if self.failure == "verification":
+                    for item in files:
+                        if item["path"] == "templates/okf-frontmatter.md":
+                            item["sha256"] = hashlib.sha256(b"stale attachment").hexdigest()
+                return self._ok({
+                    "root_uri": self.skill_uri,
+                    "content": self.skill_body,
+                    "content_sha256": hashlib.sha256(self.skill_body.encode()).hexdigest(),
+                    "revision": 2,
+                    "files": [
+                        {"path": "SKILL.md", "is_dir": False,
+                         "sha256": hashlib.sha256(self.skill_body.encode()).hexdigest()},
+                        {"path": "templates", "is_dir": True},
+                        {"path": ".abstract.md", "is_dir": False, "sha256": "generated-by-ov"},
+                        *files,
+                    ],
+                })
+            assert request.method in {"POST", "PUT"}
+            assert set(payload) <= {"temp_file_id", "wait", "timeout", "target_uri", "source_metadata"}
+            assert payload["target_uri"] == "viking://agent/skills"
+            assert payload["wait"] is True
+            if self.failure == "skill":
+                return self._failed("compiler body denied")
+            bundle = self.uploaded_packages[payload["temp_file_id"]]
+            self.skill_body = self._stored_skill(bundle["SKILL.md"])
+            self.files = {name: content for name, content in bundle.items() if name != "SKILL.md"}
+            return self._ok({"root_uri": self.skill_uri})
+        if path == "/api/v1/compile":
+            # Successful provisioning means every file the native compiler can
+            # read is present, including replacements of stale attachments.
+            assert self.skill_body == self._stored_skill(knowledge_mining_module._DEFAULT_WIKI_SKILL)
+            assert self.files == knowledge_mining_module._DEFAULT_WIKI_SKILL_AUXILIARY_FILES
+            assert request.headers["Idempotency-Key"].startswith("te-km-")
+            self.compile_requests.append(payload)
+            return self._ok({"task_id": "cmp_wiki_contract", "status": "accepted"}, status=202)
+        raise AssertionError(f"unexpected OV API request: {request.method} {path}")
+
+
+def _real_wiki_compile_app(tmp_path, monkeypatch, remote: _WikiCompilerHTTP):
+    transport = httpx.MockTransport(remote.respond)
+
+    def http_client(_self):
+        return httpx.AsyncClient(transport=transport)
+
+    # Only replace the transport boundary. The constructor and publication
+    # signature remain real, so unsupported keyword arguments cannot be hidden.
+    assert knowledge_mining_module.CompileClient is CompileClient
+    monkeypatch.setattr(CompileClient, "_client", http_client)
+    monkeypatch.setattr(knowledge_mining_module, "_require_admin_request", lambda _request: None)
+
+    class Owner(KnowledgeMiningMixin):
+        def __init__(self) -> None:
+            self.config = SimpleNamespace(
+                sharing_viking_endpoint="https://mock-ov.test",
+                sharing_viking_team_api_key="unit-test-key",
+                sharing_viking_user="team",
+            )
+            self.repository = OvSkillMiningRepository(tmp_path / "sources", tmp_path / "miner")
+            self._knowledge_compile_state_store = LocalObjectStore(tmp_path / "compile-state")
+            self._knowledge_http_pool = httpx.AsyncClient(transport=transport)
+            self.watches: list[tuple[str, str]] = []
+
+        def _ov_skill_mining_repository(self):
+            return self.repository
+
+        def _start_knowledge_compile_watch(self, account, task_id):
+            self.watches.append((account, task_id))
+
+    owner = Owner()
+    app = FastAPI()
+    owner._register_knowledge_mining_routes(app)
+    return owner, app
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("existing", ["missing", "current", "outdated", "complete"])
+async def test_default_wiki_compile_real_client_publishes_complete_bundle_before_submission(
+    tmp_path, monkeypatch, existing,
+) -> None:
+    remote = _WikiCompilerHTTP(existing)
+    owner, app = _real_wiki_compile_app(tmp_path, monkeypatch, remote)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post("/api/knowledge-mining/tasks", json={"account": "demo"})
+    finally:
+        await owner.aclose_knowledge_http()
+    assert response.status_code == 202, response.text
+    assert response.json()["task_id"] == "cmp_wiki_contract"
+    assert remote.compile_requests == [{"from": [_SOURCE_ROOT], "to": _WIKI_ROOT, "skill": remote.skill_uri}]
+    assert len(remote.uploaded_packages) == (0 if existing == "complete" else 1)
+    skill_writes = [(method, path) for method, path, _ in remote.calls if method in {"POST", "PUT"}
+                    and path.startswith("/api/v1/skills")]
+    assert skill_writes == (
+        [("POST", "/api/v1/skills")] if existing == "missing"
+        else [] if existing == "complete" else [("PUT", "/api/v1/skills/llm-wiki")]
+    )
+    assert remote.calls[-1][1] == "/api/v1/compile"
+    assert owner.watches == [("demo", "cmp_wiki_contract")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["upload", "skill", "verification"])
+@pytest.mark.parametrize("existing", ["missing", "outdated"])
+async def test_default_wiki_compile_does_not_start_when_real_publication_fails(
+    tmp_path, monkeypatch, failure, existing,
+) -> None:
+    remote = _WikiCompilerHTTP(existing, failure=failure)
+    owner, app = _real_wiki_compile_app(tmp_path, monkeypatch, remote)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post("/api/knowledge-mining/tasks", json={"account": "demo"})
+    finally:
+        await owner.aclose_knowledge_http()
+    assert response.status_code == 502, response.text
+    assert remote.compile_requests == []
+    assert owner.watches == []
+    assert not any(path == "/api/v1/compile" for _, path, _ in remote.calls)
 
 
 def test_failed_compile_does_not_advance_incremental_watermark(tmp_path) -> None:

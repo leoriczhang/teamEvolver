@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import io
 import json
+import re
+import zipfile
+from email import policy
+from email.parser import BytesParser
 
 import httpx
+import pytest
+import yaml
 
 from team_memory.compile_client import CompileClient
 
@@ -574,3 +582,168 @@ def test_normalize_last_compile_time_rejects_bool_and_empty() -> None:
         normalize_last_compile_time("   ")
     with pytest.raises(ValueError):
         normalize_last_compile_time(None)
+
+
+_PACKAGE_BODY = """---
+name: wiki
+description: 'Compile a Wiki.'
+tags: wiki
+allowed-tools: [Read, 'Bash(git status)']
+metadata: {owner: team}
+---
+
+# Wiki
+
+Keep citations.
+
+"""
+_PACKAGE_AUX = {"README.md": "Wiki 帮助\n", "templates/okf.md": "type: concept\n"}
+
+
+def _native_package_skill(content):
+    """Model OV's persisted YAML and trimmed body, rather than caller bytes."""
+    match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)$", content, re.DOTALL)
+    metadata = yaml.safe_load(match[1])
+    header = {"name": metadata["name"], "description": metadata["description"]}
+    tools = metadata.get("allowed-tools")
+    if tools is not None:
+        header["allowed-tools"] = " ".join(tools) if isinstance(tools, list) else tools
+    if metadata.get("tags"):
+        tags = metadata["tags"]
+        header["tags"] = tags if isinstance(tags, list) else [tags]
+    if "metadata" in metadata:
+        header["metadata"] = metadata["metadata"]
+    return f"---\n{yaml.dump(header, allow_unicode=True, sort_keys=False)}---\n\n{match[2].strip()}"
+
+
+class _SkillPackageServer:
+    def __init__(self, files=None, failure=""):
+        self.files, self.failure, self.calls, self.upload = files, failure, [], None
+
+    def respond(self, request):
+        self.calls.append((request.method, request.url.path))
+        assert request.headers["x-openviking-account"] == "test-account"
+        assert request.headers["x-openviking-role"] == "admin"
+        assert "x-openviking-actor-peer" not in request.headers
+        path = request.url.path
+        if request.method == "GET":
+            assert request.url.params["include_integrity"] == "true"
+            assert request.url.params["include_files"] == "true"
+            if self.files is None:
+                return httpx.Response(404, json={"status": "error", "error": {"message": "not found"}})
+            entries = [
+                {"path": name, "is_dir": False, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+                for name, data in self.files.items()
+            ]
+            entries += [{"path": "templates", "is_dir": True},
+                        {"path": ".abstract.md", "is_dir": False, "sha256": "generated"}]
+            if self.failure == "integrity" and self.upload is not None:
+                entries[1]["sha256"] = "0" * 64
+            return httpx.Response(200, json={"status": "ok", "result": {
+                "root_uri": "viking://agent/skills/wiki", "content": self.files["SKILL.md"].decode(),
+                "files": entries, "revision": "actual-package-revision",
+            }})
+        if path == "/api/v1/resources/temp_upload":
+            assert request.headers["content-type"].startswith("multipart/form-data; boundary=")
+            message = BytesParser(policy=policy.default).parsebytes(
+                b"MIME-Version: 1.0\r\nContent-Type: " + request.headers["content-type"].encode()
+                + b"\r\n\r\n" + request.content
+            )
+            part = next(message.iter_parts())
+            assert part.get_filename() == "wiki.zip"
+            with zipfile.ZipFile(io.BytesIO(part.get_payload(decode=True))) as archive:
+                self.upload = {name: archive.read(name) for name in archive.namelist()}
+            assert self.upload["SKILL.md"] == _PACKAGE_BODY.encode()
+            if self.failure == "upload":
+                return httpx.Response(403, json={"status": "error", "error": {"message": "upload denied"}})
+            result = {} if self.failure == "upload_id" else {"temp_file_id": "uploaded-package"}
+            return httpx.Response(200, json={"status": "ok", "result": result})
+        assert path in {"/api/v1/skills", "/api/v1/skills/wiki"}
+        assert request.method in {"POST", "PUT"}
+        body = json.loads(request.content)
+        assert set(body) <= {"temp_file_id", "wait", "timeout", "target_uri", "source_metadata"}
+        assert body["temp_file_id"] == "uploaded-package"
+        assert body["target_uri"] == "viking://agent/skills"
+        assert body["source_metadata"]["source"] == "temp_upload"
+        if self.failure == "consume":
+            return httpx.Response(403, json={"status": "error", "error": {"message": "publication denied"}})
+        self.files = dict(self.upload)
+        self.files["SKILL.md"] = _native_package_skill(self.files["SKILL.md"].decode()).encode()
+        return httpx.Response(200, json={"status": "ok", "result": {"uri": "viking://agent/skills/wiki"}})
+
+
+def _package_client(server):
+    client = CompileClient("http://ov.test", "test-account", "team", "test-key")
+    client._client = lambda: httpx.AsyncClient(transport=httpx.MockTransport(server.respond))
+    return client
+
+
+def _publish_package(server, auxiliary_files=_PACKAGE_AUX):
+    return asyncio.run(_package_client(server).publish_shared_skill(
+        skill_name="wiki", skill_body=_PACKAGE_BODY, version_message="Publish Wiki package",
+        auxiliary_files=auxiliary_files,
+    ))
+
+
+def test_shared_skill_creates_complete_zip_and_accepts_ov_canonical_body():
+    server = _SkillPackageServer()
+    result = _publish_package(server)
+    assert result["ok"] is True
+    assert result["result"]["revision"] == "actual-package-revision"
+    assert server.upload == {"SKILL.md": _PACKAGE_BODY.encode(),
+                             **{path: body.encode() for path, body in _PACKAGE_AUX.items()}}
+    assert server.files["SKILL.md"] != _PACKAGE_BODY.encode()
+    assert ("POST", "/api/v1/skills") in server.calls
+
+
+@pytest.mark.parametrize("difference", ["missing", "changed", "extra"])
+def test_shared_skill_updates_same_body_when_auxiliary_package_differs(difference):
+    files = {"SKILL.md": _native_package_skill(_PACKAGE_BODY).encode(),
+             **{path: body.encode() for path, body in _PACKAGE_AUX.items()}}
+    if difference == "missing":
+        files.pop("templates/okf.md")
+    elif difference == "changed":
+        files["templates/okf.md"] = b"outdated"
+    else:
+        files["obsolete.md"] = b"obsolete"
+    server = _SkillPackageServer(files)
+    assert _publish_package(server)["ok"] is True
+    assert ("PUT", "/api/v1/skills/wiki") in server.calls
+    assert set(server.files) == {"SKILL.md", *_PACKAGE_AUX}
+
+
+def test_shared_skill_reuses_identical_package_despite_yaml_and_tag_normalization():
+    files = {"SKILL.md": _native_package_skill(_PACKAGE_BODY).encode(),
+             **{path: body.encode() for path, body in _PACKAGE_AUX.items()}}
+    server = _SkillPackageServer(files)
+    assert _publish_package(server)["ok"] is True
+    assert all(method == "GET" for method, _path in server.calls)
+
+
+def test_explicit_empty_auxiliary_package_removes_previous_attachment():
+    server = _SkillPackageServer({"SKILL.md": _native_package_skill(_PACKAGE_BODY).encode(), "old.md": b"old"})
+    assert _publish_package(server, {})["ok"] is True
+    assert set(server.files) == {"SKILL.md"}
+
+
+@pytest.mark.parametrize("failure", ["upload", "upload_id", "consume", "integrity"])
+def test_shared_skill_package_errors_never_report_success(failure):
+    server = _SkillPackageServer(failure=failure)
+    result = _publish_package(server)
+    assert result["ok"] is False
+    if failure in {"upload", "upload_id"}:
+        assert not any(path == "/api/v1/skills" for _method, path in server.calls)
+    if failure == "integrity":
+        assert "integrity mismatch" in result["stderr"]
+
+
+@pytest.mark.parametrize("auxiliary_files", [
+    {"../outside.md": "bad"}, {"/outside.md": "bad"}, {"a\\b.md": "bad"},
+    {"SKILL.md": "replacement"}, {".source.json": "bad"}, {".abstract.md": "bad"},
+    {"a/%2e%2e/b.md": "bad"}, {"a.md": b"not text"}, {"a": "file", "a/b.md": "child"},
+    {"a//b.md": "bad"}, {"README.md": "\ud800"}, ["not a mapping"],
+])
+def test_invalid_skill_package_is_rejected_before_any_network_call(auxiliary_files):
+    server = _SkillPackageServer()
+    assert _publish_package(server, auxiliary_files)["ok"] is False
+    assert server.calls == []

@@ -25,17 +25,128 @@ supplied; teamEvolver never records or advances it automatically.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import io
 import json
+import re
 import time
+import zipfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 from typing import Any, Callable
 
 import httpx
+import yaml
 
 _MAX_HTTP_OUTPUT_CHARS = 512 * 1024
 _HTTP_RETRY_ATTEMPTS = 3
 _HTTP_RETRY_BASE_SECONDS = 0.25
+
+
+def _skill_content_signature(content: str) -> tuple[Any, ...]:
+    """Compare the fields preserved by OV SkillLoader, allowing YAML normalization."""
+    match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)$", content, re.DOTALL)
+    if not match:
+        raise ValueError("Skill package requires SKILL.md YAML frontmatter")
+    try:
+        metadata = yaml.safe_load(match[1])
+    except yaml.YAMLError as exc:
+        raise ValueError("Invalid SKILL.md YAML frontmatter") from exc
+    if not isinstance(metadata, dict) or not all(
+        isinstance(metadata.get(key), str) and metadata[key].strip() for key in ("name", "description")
+    ):
+        raise ValueError("SKILL.md requires a name and description")
+    tools = metadata.get("allowed-tools", [])
+    if isinstance(tools, str):
+        parts, current, depth = [], [], 0
+        for char in tools.strip():
+            depth += (char == "(") - (char == ")")
+            if depth < 0:
+                raise ValueError("Invalid SKILL.md allowed-tools parentheses")
+            if depth == 0 and (char.isspace() or char == ","):
+                if current:
+                    parts.append("".join(current))
+                    current = []
+            else:
+                current.append(char)
+        if depth:
+            raise ValueError("Invalid SKILL.md allowed-tools parentheses")
+        tools = [*parts, *(["".join(current)] if current else [])]
+    if not isinstance(tools, list) or any(not isinstance(tool, str) for tool in tools):
+        raise ValueError("Invalid SKILL.md allowed-tools")
+    tags = metadata.get("tags") or []
+    if not isinstance(tags, list):
+        tags = list(tags) if isinstance(tags, (tuple, set)) else [tags]
+    return (
+        metadata["name"], metadata["description"], tools, "allowed-tools" in metadata, tags,
+        metadata.get("metadata"), match[2].strip(),
+    )
+
+
+def _skill_package_files(skill_name: str, skill_body: str, auxiliary_files: Mapping[str, str]) -> dict[str, bytes]:
+    """Build only safe, bounded paths for OV's ZIP package and integrity limits."""
+    if not isinstance(skill_name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", skill_name):
+        raise ValueError("Invalid Skill package name or body")
+    if not isinstance(skill_body, str):
+        raise ValueError("Invalid Skill package name or body")
+    if _skill_content_signature(skill_body)[0] != skill_name:
+        raise ValueError("SKILL.md name must match the published Skill name")
+    if not isinstance(auxiliary_files, Mapping):
+        raise ValueError("auxiliary_files must map relative paths to UTF-8 text")
+    files = {"SKILL.md": skill_body.encode("utf-8")}
+    reserved = {".abstract.md", ".overview.md", ".source.json"}
+    for path, content in auxiliary_files.items():
+        if (
+            not isinstance(path, str) or not path or not isinstance(content, str)
+            or any(char in path for char in "\\\x00%?#:") or any(ord(char) < 32 for char in path)
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+            or len(path.split("/")) > 10 or path == "SKILL.md" or PurePosixPath(path).is_absolute()
+            or PurePosixPath(path).name in reserved
+        ):
+            raise ValueError("Invalid Skill auxiliary file path or content")
+        files[path] = content.encode("utf-8")
+    directories = {str(parent) for path in files for parent in PurePosixPath(path).parents if str(parent) != "."}
+    if directories.intersection(files):
+        raise ValueError("Skill package file and directory paths conflict")
+    # GET include_integrity uses 512 entries, 16 MiB per file and 64 MiB total.
+    if len(files) + len(directories) + 2 > 512 or any(len(data) > 16 * 1024 * 1024 for data in files.values()):
+        raise ValueError("Skill package exceeds OpenViking integrity limits")
+    if sum(map(len, files.values())) > 64 * 1024 * 1024:
+        raise ValueError("Skill package exceeds OpenViking integrity limits")
+    return files
+
+
+def _skill_package_matches(detail: Any, skill_body: str, files: dict[str, bytes]) -> bool:
+    """Verify a locked OV manifest: file paths and raw UTF-8 SHA-256 values."""
+    if not isinstance(detail, dict) or not isinstance(detail.get("content"), str):
+        return False
+    try:
+        if _skill_content_signature(detail["content"]) != _skill_content_signature(skill_body):
+            return False
+    except ValueError:
+        return False
+    entries = detail.get("files")
+    if not isinstance(entries, list):
+        return False
+    actual = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return False
+        if entry.get("is_dir") is True:
+            continue
+        path = entry.get("path")
+        if not isinstance(path, str) or path in actual:
+            return False
+        if PurePosixPath(path).name in {".abstract.md", ".overview.md"}:
+            continue
+        actual[path] = entry.get("sha256")
+    expected = {path: hashlib.sha256(data).hexdigest() for path, data in files.items()}
+    # OV rewrites SKILL.md through SkillLoader; compare its semantic body above,
+    # then bind the manifest digest to the exact returned canonical content.
+    expected["SKILL.md"] = hashlib.sha256(detail["content"].encode("utf-8")).hexdigest()
+    return actual == expected
 
 
 def normalize_last_compile_time(value: Any) -> str:
@@ -197,6 +308,7 @@ class CompileClient:
         skill_body: str,
         parent_uri: str = "viking://agent/skills",
         version_message: str = "",
+        auxiliary_files: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """Install inline Skill content without exposing a host-local path."""
         operation = "POST /api/v1/skills"
@@ -209,10 +321,19 @@ class CompileClient:
             "timeout": self.timeout_seconds,
             "target_uri": parent_uri,
         }
+        if auxiliary_files is not None:
+            uploaded = await self._upload_skill_package(
+                skill_name=skill_name, skill_body=skill_body, auxiliary_files=auxiliary_files,
+                shared_skill=parent_uri.rstrip("/") == "viking://agent/skills",
+            )
+            if not uploaded.get("ok"):
+                return uploaded
+            body.pop("data")
+            body["temp_file_id"] = uploaded["result"]["temp_file_id"]
         if version_message.strip():
             body["source_metadata"] = {
                 "type": "api",
-                "source": "inline_content",
+                "source": "temp_upload" if auxiliary_files is not None else "inline_content",
                 "operation": "install",
                 "version_message": version_message.strip(),
             }
@@ -238,6 +359,44 @@ class CompileClient:
         if not response.is_success:
             return self._failure(operation, response, payload)
         return self._success(operation, payload)
+
+    async def _upload_skill_package(
+        self, *, skill_name: str, skill_body: str, auxiliary_files: Mapping[str, str], shared_skill: bool,
+    ) -> dict[str, Any]:
+        operation = "POST /api/v1/resources/temp_upload"
+        try:
+            package = _skill_package_files(skill_name, skill_body, auxiliary_files)
+            stream = io.BytesIO()
+            with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for path, content in sorted(package.items()):
+                    archive.writestr(path, content)
+        except (ValueError, UnicodeError) as exc:
+            return self._package_failure(operation, str(exc), 400)
+        headers = self._headers(shared_skill=shared_skill)
+        headers.pop("Content-Type", None)  # httpx owns the multipart boundary.
+        try:
+            async with self._client() as client:
+                response = await self._request_with_retry(
+                    client, "POST", f"{self.endpoint.rstrip('/')}/api/v1/resources/temp_upload",
+                    files={"file": (f"{skill_name}.zip", stream.getvalue(), "application/zip")}, headers=headers,
+                )
+        except httpx.HTTPError:
+            return self._package_failure(operation, "OpenViking Skill package upload failed", -1)
+        payload = self._payload(response)
+        if not response.is_success:
+            return self._failure(operation, response, payload)
+        if not isinstance(payload, dict) or not isinstance(payload.get("temp_file_id"), str):
+            return self._package_failure(operation, "OpenViking did not return a Skill package upload ID", 502)
+        if not payload["temp_file_id"].strip():
+            return self._package_failure(operation, "OpenViking did not return a Skill package upload ID", 502)
+        return self._success(operation, payload)
+
+    @staticmethod
+    def _package_failure(operation: str, message: str, exit_code: int = 502) -> dict[str, Any]:
+        return {
+            "ok": False, "exit_code": exit_code, "command": ["http", operation],
+            "stdout": "", "stderr": message, "result": None,
+        }
 
     async def get_skill(self, *, skill_name: str) -> dict[str, Any]:
         """Read the account-shared Skill with a content-addressed revision."""
@@ -287,12 +446,23 @@ class CompileClient:
         skill_name: str,
         skill_body: str,
         version_message: str,
+        auxiliary_files: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """Create or replace one shared Skill, then return its exact revision."""
+        package = None
+        if auxiliary_files is not None:
+            try:
+                package = _skill_package_files(skill_name, skill_body, auxiliary_files)
+            except (ValueError, UnicodeError) as exc:
+                return self._package_failure("publish shared Skill", str(exc), 400)
         current = await self.get_skill(skill_name=skill_name)
         if current.get("ok"):
             detail = current.get("result") or {}
-            if str(detail.get("content") or "") != skill_body:
+            unchanged = (
+                _skill_package_matches(detail, skill_body, package) if package is not None
+                else str(detail.get("content") or "") == skill_body
+            )
+            if not unchanged:
                 operation = f"PUT /api/v1/skills/{skill_name}"
                 # OpenViking's update endpoint forbids unknown body fields, so
                 # only send what UpdateSkillRequest accepts. version_message is
@@ -311,6 +481,16 @@ class CompileClient:
                         "version_message": version_message,
                     },
                 }
+                if auxiliary_files is not None:
+                    uploaded = await self._upload_skill_package(
+                        skill_name=skill_name, skill_body=skill_body,
+                        auxiliary_files=auxiliary_files, shared_skill=True,
+                    )
+                    if not uploaded.get("ok"):
+                        return uploaded
+                    body.pop("data")
+                    body["temp_file_id"] = uploaded["result"]["temp_file_id"]
+                    body["source_metadata"]["source"] = "temp_upload"
                 try:
                     async with self._client() as client:
                         response = await self._request_with_retry(
@@ -338,12 +518,19 @@ class CompileClient:
                 skill_body=skill_body,
                 parent_uri="viking://agent/skills",
                 version_message=version_message,
+                **({"auxiliary_files": auxiliary_files} if auxiliary_files is not None else {}),
             )
             if not created.get("ok"):
                 return created
         else:
             return current
-        return await self.get_skill(skill_name=skill_name)
+        published = await self.get_skill(skill_name=skill_name)
+        if package is not None and published.get("ok"):
+            if not _skill_package_matches(published.get("result"), skill_body, package):
+                return self._package_failure(
+                    "verify shared Skill package", "OpenViking Skill package integrity mismatch",
+                )
+        return published
 
     async def delete_uri(self, *, uri: str) -> dict[str, Any]:
         """Delete an obsolete resource subtree."""
