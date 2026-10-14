@@ -16,15 +16,21 @@ import re
 import shutil
 import threading
 import uuid
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from team_replay.datasets.schema import document_skill_ids
-from team_skills.library.frontmatter import parse_skill_md
+from team_skills.library.frontmatter import parse_skill_md_text
 
 from . import benchmark_format
-from .compile_strategy import compiler_execution_guidance, multi_compiler_execution_guidance
+from .compile_strategy import (
+    compiler_execution_guidance,
+    mining_policy_block,
+    multi_compiler_execution_guidance,
+    register_owned_compiler_policy,
+)
 from .dataset_view import dataset_markdown
 from .output_language import OUTPUT_LANGUAGE_GUIDANCE
 
@@ -41,6 +47,46 @@ MAX_PARALLEL_JOBS = 8
 REVIEW_SCHEMA_VERSION = "skill-miner.review.v1"
 MAX_REVIEW_QUESTIONS = 50
 MAX_SUPPLEMENT_CHARACTERS = 100_000
+MAX_SKILL_FRONTMATTER_CHARACTERS = 64 * 1024
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(64 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _skill_metadata(path: Path) -> dict | None:
+    """Read bounded frontmatter and verify all UTF-8 bytes without retaining the body."""
+    try:
+        with path.open("r", encoding="utf-8") as stream:
+            first = stream.readline(MAX_SKILL_FRONTMATTER_CHARACTERS + 1)
+            if not re.fullmatch(r"---[ \t]*\n", first):
+                return None
+            header, size = [first], len(first)
+            while True:
+                line = stream.readline(MAX_SKILL_FRONTMATTER_CHARACTERS - size + 1)
+                size += len(line)
+                if size > MAX_SKILL_FRONTMATTER_CHARACTERS:
+                    raise ValueError("SKILL.md frontmatter 不能超过 64K 字符；正文没有此限制")
+                if not line:
+                    return None
+                header.append(line)
+                if re.fullmatch(r"---[ \t]*(?:\n|$)", line):
+                    break
+            metadata = parse_skill_md_text("".join(header))
+            # A valid header alone cannot hide a broken or incomplete UTF-8
+            # sequence later in the body. This read is bounded independently
+            # of the total Skill length.
+            while stream.read(64 * 1024):
+                pass
+            return metadata
+    except OSError:
+        return None
+    except UnicodeError as exc:
+        raise ValueError("SKILL.md 必须为完整有效的 UTF-8 文本") from exc
 
 SKILL_BODY = """---
 name: skill-miner-compile-v1
@@ -107,10 +153,19 @@ SKILL_BODY = (
         "into one evidence-grounded Skill Candidate and its Test Dataset.",
         "into an evidence-grounded Skill Candidate collection with independent Test Datasets.",
     )
-    .replace("produce one\nreviewable Skill Candidate.", "plan and produce zero to eight\nreviewable Skill Candidates.")
+    .replace(
+        "produce one\nreviewable Skill Candidate.",
+        "plan and produce an evidence-grounded\nSkill Candidate collection.",
+    )
     .replace(
         "- Produce exactly one Skill Candidate and use a lowercase kebab-case skill name.",
-        "- Plan independently executable methods before writing; produce 0-8 Skill Candidates. "
+        "- Plan independently executable methods before writing. TE partitions the collection into "
+        "bounded planning assignments; the number of supported methods may increase the number of assignments. "
+        "A per-assignment output limit is never a reason to discard a supported method. "
+        "An executable method performs a reusable decision, calculation or procedure with clear inputs "
+        "and outputs; looking up a name, code, version or description alone is factual information. "
+        "Missing support for one operation restricts that operation, not all methods from its source file. "
+        "Keep each candidate's Skill, evaluation and Checklist within the same planned task boundary. "
         "Use lowercase kebab-case names. Each candidate has its own complete four-file bundle.",
     )
     .replace(
@@ -120,11 +175,18 @@ SKILL_BODY = (
         "- `analysis/capability-plan.json`: schema_version `skill-miner.plan.v1`, skills and deferred arrays. "
         "Each skills entry has name, task, trigger, inputs, outputs, boundary, rationale and source_refs. "
         "Each deferred entry has reason and source_refs. Explain why methods are separate or merged. "
-        "If no executable method is supported, emit skills=[] and explain deferred Evidence; "
+        "If no executable method is supported, emit skills=[] and explain the disposition of the content. "
+        "Pure facts do not require a fabricated Evidence gap or a request for human supplementation; "
         "do not emit a compiled_skill bundle.\n",
     )
 )
 SKILL_BODY += multi_compiler_execution_guidance()
+# Exact owned defaults remain recognizable for fresh auxiliary stages on an
+# already frozen round. Arbitrary custom text is never inferred or stripped.
+register_owned_compiler_policy(LEGACY_SKILL_BODY)
+register_owned_compiler_policy(SKILL_BODY)
+SKILL_BODY += mining_policy_block()
+register_owned_compiler_policy(SKILL_BODY)
 MAX_CANDIDATES = 8
 PLAN_SCHEMA_VERSION = "skill-miner.plan.v1"
 
@@ -392,6 +454,34 @@ class OvSkillMiningRepository:
                 "max_rounds": normalized_rounds,
                 "current_round": 1,
                 "orchestration_version": 2,
+                "staged_execution_protocol": "te-mining-optimized.v1" if candidate_contract_version == 2 else "",
+                "staged_efficiency_protocol": "te-mining-efficient.v2" if candidate_contract_version == 2 else "",
+                "staged_workflow_protocol": "te-direct-workflow-planning.v1" if candidate_contract_version == 2 else "",
+                "staged_workflow_partition_protocol": (
+                    "te-workflow-partition.v2" if candidate_contract_version == 2 else ""
+                ),
+                "staged_source_scope_protocol": "te-source-scope.v3" if candidate_contract_version == 2 else "",
+                "staged_selection_recovery_protocol": (
+                    "te-selection-recovery.v2" if candidate_contract_version == 2 else ""
+                ),
+                "staged_source_fragment_protocol": "te-source-fragments.v1" if candidate_contract_version == 2 else "",
+                "staged_source_input_clarity_protocol": (
+                    "te-source-input-clarity.v1" if candidate_contract_version == 2 else ""
+                ),
+                "staged_planning_alias_protocol": "te-planning-aliases.v1" if candidate_contract_version == 2 else "",
+                "staged_case_group_protocol": "te-case-groups.v1" if candidate_contract_version == 2 else "",
+                "staged_source_unit_protocol": "te-exact-source-units.v1" if candidate_contract_version == 2 else "",
+                "staged_skill_body_protocol": "te-skill-body-patch.v1" if candidate_contract_version == 2 else "",
+                "staged_compact_planning_protocol": "te-compact-planning.v1" if candidate_contract_version == 2 else "",
+                "staged_quote_alias_protocol": (
+                    "te-evidence-quote-aliases.v1" if candidate_contract_version == 2 else ""
+                ),
+                "staged_identity_partition_protocol": (
+                    "te-candidate-identity-partition.v2" if candidate_contract_version == 2 else ""
+                ),
+                "staged_uncertainty_scope_protocol": (
+                    "te-uncertain-context-units.v1" if candidate_contract_version == 2 else ""
+                ),
                 "candidate_contract_version": candidate_contract_version,
                 "original_source_snapshot": source_snapshot_uri,
                 "rounds_history": [],
@@ -478,6 +568,17 @@ class OvSkillMiningRepository:
     def update_job(self, job_id: str, **changes: Any) -> dict[str, Any]:
         with self._lock:
             row = self.get_job(job_id)
+            if row.get("status") in {"stopping", "stopped"} or row.get("ov_cancel_reason"):
+                # A late worker result may record acceptance, but cannot undo a
+                # stop committed while it was reading or awaiting the remote ACK.
+                if changes.get("status") not in {"stopping", "stopped"}:
+                    changes = {
+                        key: value for key, value in changes.items()
+                        if key not in {"status", "finished_at", "error", "stop_reason"}
+                    }
+                for key in ("ov_cancel_reason", "ov_cancel_requested_at", "stop_reason", "ov_task_id"):
+                    if row.get(key) and key in changes and not changes[key]:
+                        changes.pop(key)
             row.update(changes)
             row["updated_at"] = utc_now()
             _atomic_json(self._job_dir(job_id) / "job.json", row)
@@ -508,7 +609,7 @@ class OvSkillMiningRepository:
             raise ValueError("挖掘任务工作区无效")
         return path
 
-    def write_output(self, job_id: str, relative_path: str, content: str) -> Path:
+    def _output_target(self, job_id: str, relative_path: str) -> Path:
         job = self.get_job(job_id)
         workspace = self.workspace(job)
         raw = str(PurePosixPath(relative_path))
@@ -524,7 +625,28 @@ class OvSkillMiningRepository:
         if workspace not in target.parents:
             raise ValueError("OV Compile 产物路径越界")
         target.parent.mkdir(parents=True, exist_ok=True)
+        return target
+
+    def write_output(self, job_id: str, relative_path: str, content: str) -> Path:
+        target = self._output_target(job_id, relative_path)
         target.write_text(content, encoding="utf-8")
+        return target
+
+    def write_output_stream(self, job_id: str, relative_path: str, chunks: Iterable[str]) -> Path:
+        """Commit a complete validated text stream atomically, preserving any previous artifact on error."""
+        target = self._output_target(job_id, relative_path)
+        temporary = target.with_name(f".te-stream-{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary.open("x", encoding="utf-8", newline="") as stream:
+                for chunk in chunks:
+                    if not isinstance(chunk, str):
+                        raise ValueError("OV Compile 产物流必须包含 UTF-8 文本")
+                    stream.write(chunk)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
         return target
 
     def finalize_materialized(self, job_id: str, *, after_edit: bool = False, render_skill: str = "") -> dict[str, Any]:
@@ -660,7 +782,7 @@ class OvSkillMiningRepository:
             return self.update_job(job_id, artifact_quality=quality, candidate_quality=candidates, materialized=False)
 
     def _validate_candidate(self, job: dict[str, Any], skill_dir: Path, *, render_view: bool = False) -> int:
-        parsed = parse_skill_md(str(skill_dir / "SKILL.md"))
+        parsed = _skill_metadata(skill_dir / "SKILL.md")
         if parsed is None:
             raise ValueError("SKILL.md frontmatter 无效：请检查 YAML 语法和必填 name / description 字段")
         if str(parsed.get("name") or "") != skill_dir.name:
@@ -721,9 +843,11 @@ class OvSkillMiningRepository:
         if not isinstance(plan, dict) or plan.get("schema_version") != PLAN_SCHEMA_VERSION:
             raise ValueError("能力拆分计划 schema_version 无效")
         skills, deferred = plan.get("skills"), plan.get("deferred")
-        if not isinstance(skills, list) or not isinstance(deferred, list) or len(skills) > MAX_CANDIDATES:
-            raise ValueError("能力拆分计划必须包含 skills/deferred 数组，最多 8 个候选")
-        if not skills and not deferred:
+        if not isinstance(skills, list) or not isinstance(deferred, list):
+            raise ValueError("能力拆分计划必须包含 skills/deferred 数组")
+        if job.get("staged_protocol") != "te-staged-compile.v1" and len(skills) > MAX_CANDIDATES:
+            raise ValueError("单次 Compile 的能力拆分计划最多包含 8 个候选")
+        if not skills and not deferred and job.get("staged_protocol") != "te-staged-compile.v1":
             raise ValueError("零候选的能力拆分计划必须说明暂缓原因")
         names = set()
         for row in skills + deferred:
@@ -874,7 +998,7 @@ class OvSkillMiningRepository:
                 "output_language_policy": job.get("output_language_policy") or {},
                 "artifact_quality": job.get("artifact_quality"),
                 "output_sha256": {
-                    path.relative_to(temporary / "output").as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+                    path.relative_to(temporary / "output").as_posix(): _file_sha256(path)
                     for path in sorted((temporary / "output").rglob("*"))
                     if path.is_file()
                 },
@@ -1137,6 +1261,9 @@ class OvSkillMiningRepository:
             "artifact_quality": None,
             "round_completed_at": "",
             "compile_request": {},
+            "staged_protocol": "",
+            "staged_state_path": "",
+            "staged_progress": {},
             "input_manifest": "",
             "setup_timings": {},
             "submission_retry_count": 0,
@@ -1391,6 +1518,17 @@ class OvSkillMiningRepository:
             if kind is None and "semantic_reports" in path.parts:
                 kind = "semantic"
             if kind is not None:
+                display_title = ""
+                if kind == "skill" and not path.is_symlink() and path.resolve().is_relative_to(workspace.resolve()):
+                    from team_skills.library.frontmatter import split_skill_md
+
+                    with path.open(encoding="utf-8", errors="replace") as stream:
+                        content = stream.read(16384)
+                    split = split_skill_md(content)
+                    body = split[1] if split else content
+                    first_line = body.strip().splitlines()[0] if body.strip() else ""
+                    if first_line.startswith("# "):
+                        display_title = first_line[2:].strip().rstrip("#").strip()[:200]
                 result.append(
                     {
                         "name": path.name,
@@ -1398,12 +1536,16 @@ class OvSkillMiningRepository:
                         "path": path.relative_to(self.project_root).as_posix(),
                         "size_bytes": path.stat().st_size,
                         "skill_name": path.parent.name if "compiled_skill" in path.parts else "",
+                        "display_title": display_title,
                     }
                 )
         return result
 
     def public_job(self, job: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
-        hidden = {"workspace", "input_manifest", "compile_request", "workspace_reset_pending", "compiler_path"}
+        hidden = {
+            "workspace", "input_manifest", "compile_request", "workspace_reset_pending", "compiler_path",
+            "staged_state_path",
+        }
         result = {key: value for key, value in job.items() if key not in hidden}
         for key in ("pending_attachments", "pending_reference_snapshots"):
             result[key] = [self._public_attachment(row) for row in job.get(key) or []]
@@ -1417,30 +1559,7 @@ class OvSkillMiningRepository:
         if not detail:
             return result
         workspace = self.workspace(job)
-        artifacts: list[dict[str, Any]] = []
-        kinds = {
-            "SKILL.md": "skill",
-            "EVALUATION.md": "evaluation",
-            "BENCHMARK.md": "benchmark",
-            "benchmark.json": "benchmark",
-        }
-        for path in sorted(workspace.rglob("*")):
-            if not path.is_file():
-                continue
-            kind = kinds.get(path.name)
-            if kind is None and "semantic_reports" in path.parts:
-                kind = "semantic"
-            if kind is None:
-                continue
-            artifacts.append(
-                {
-                    "name": path.name,
-                    "kind": kind,
-                    "path": path.relative_to(self.project_root).as_posix(),
-                    "size_bytes": path.stat().st_size,
-                    "skill_name": path.parent.name if "compiled_skill" in path.parts else "",
-                }
-            )
+        artifacts = self._artifact_rows(workspace)
         log_path = self._job_dir(job["job_id"]) / "run.log"
         logs = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-400:] if log_path.is_file() else []
         skills = []

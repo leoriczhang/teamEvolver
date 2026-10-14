@@ -32,6 +32,24 @@ def _repository(tmp_path: Path) -> OvSkillMiningRepository:
     return OvSkillMiningRepository(tmp_path / "state", tmp_path / "miner")
 
 
+def test_partial_skill_artifact_exposes_body_title_without_changing_machine_identity(tmp_path):
+    from team_skills.library.frontmatter import render_skill_md
+
+    repository = _repository(tmp_path)
+    workspace = repository.project_root / "partial"
+    path = workspace / "compiled_skill" / "phone-appointment" / "SKILL.md"
+    path.parent.mkdir(parents=True)
+    content = render_skill_md(
+        name="phone-appointment", description="电话约访训练", content="# 电话约访方法\n\n先征得同意。"
+    )
+    path.write_text(content, encoding="utf-8")
+    artifact = repository._artifact_rows(workspace)[0]
+    assert artifact["display_title"] == "电话约访方法"
+    assert artifact["skill_name"] == "phone-appointment"
+    assert artifact["name"] == "SKILL.md"
+    assert path.read_text(encoding="utf-8") == content
+
+
 def test_source_registry_is_reference_only_and_idempotent(tmp_path):
     repository = _repository(tmp_path)
     uri = "viking://resources/team/runbooks"
@@ -307,3 +325,163 @@ async def test_remote_refresh_failure_keeps_last_status_and_sets_backoff(tmp_pat
     assert public["remote_state_stale"] is True
     assert public["ov_sync_failures"] == 1
     assert public["ov_next_retry_at"]
+
+
+def _streaming_job(repository):
+    return repository.create_job(
+        name="Stream Skill", account="account-a", source_uri="viking://resources/team/runbooks",
+        source_snapshot_uri="viking://resources/agent_skill_workspace/runs/test/source",
+        output_uri="viking://resources/agent_skill_workspace/runs/test/output",
+        document_count=1, max_rounds=1, human_checkpoints=False, candidate_contract_version=1,
+    )
+
+
+@pytest.mark.parametrize("failure", ["coverage", "duplicate", "late-section", "all-skipped"])
+def test_stream_output_preserves_previous_skill_when_late_validation_fails(tmp_path, failure):
+    from team_miner.bounded_compile_plan import iter_skill_chunks
+
+    repository = _repository(tmp_path)
+    job = _streaming_job(repository)
+    relative = "compiled_skill/stream-method/SKILL.md"
+    previous = "---\nname: stream-method\ndescription: Previous method.\n---\n\n原有已保存方法。\n"
+    path = repository.write_output(job["job_id"], relative, previous)
+    proposed = {"name": "stream-method", "task": "核验提供的材料", "boundary": "按来源执行"}
+
+    def sections():
+        for index in range(2):
+            value = {"schema_version": "skill-miner.section.v1", "input_ids": [f"input-{index}"],
+                     "title": f"步骤 {index}", "content": "核对来源条件并记录结果。"}
+            if failure == "all-skipped":
+                value = {"schema_version": "skill-miner.section-skip.v1", "input_ids": [f"input-{index}"],
+                         "reason": "本片段没有可执行规则"}
+            elif index == 1:
+                if failure == "coverage":
+                    value["input_ids"] = ["not-assigned"]
+                elif failure == "duplicate":
+                    value["input_ids"] = ["input-0"]
+                else:
+                    value["content"] = "原" * 10_001
+            yield value
+
+    with pytest.raises(ValueError):
+        repository.write_output_stream(
+            job["job_id"], relative,
+            iter_skill_chunks(proposed, sections(), expected_input_ids=["input-0", "input-1"]),
+        )
+    assert path.read_text() == previous
+    assert not list(path.parent.glob(".te-stream-*"))
+    with pytest.raises(ValueError, match="无效产物路径"):
+        repository.write_output_stream(job["job_id"], "compiled_skill/../outside.md", ["unsafe"])
+
+
+def test_large_skill_stream_keeps_memory_independent_of_total_body(tmp_path):
+    import tracemalloc
+
+    from team_miner.bounded_compile_plan import iter_skill_chunks
+
+    repository = _repository(tmp_path)
+    job = _streaming_job(repository)
+    identities = [f"input-{index}" for index in range(1000)]
+    consumed = []
+
+    def sections():
+        for index, identity in enumerate(identities):
+            consumed.append(index)
+            yield {"schema_version": "skill-miner.section.v1", "input_ids": [identity],
+                   "title": f"分段 {index}", "content": "原文支持的操作步骤。" * 900}
+
+    tracemalloc.start()
+    try:
+        path = repository.write_output_stream(
+            job["job_id"], "compiled_skill/stream-method/SKILL.md",
+            iter_skill_chunks(
+                {"name": "stream-method", "task": "核验提供的材料", "boundary": "按来源执行"},
+                sections(), expected_input_ids=identities,
+            ),
+        )
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert consumed == list(range(1000)) and path.stat().st_size > 20 * 1024 * 1024
+    assert peak < 3 * 1024 * 1024
+
+
+def test_final_candidate_validation_and_archive_stream_body_without_full_reads(tmp_path, monkeypatch):
+    from team_miner.dataset_view import dataset_markdown
+    from team_miner.tests.dataset_fixtures import build_document
+
+    repository = _repository(tmp_path)
+    job = _streaming_job(repository)
+    header = "---\nname: stream-method\ndescription: 核验提供的材料。\n---\n\n# 操作规则\n"
+    skill = repository.write_output_stream(
+        job["job_id"], "compiled_skill/stream-method/SKILL.md",
+        (header if index == 0 else "完整中文规则。" * 1000 for index in range(1001)),
+    )
+    document = build_document(
+        "stream-method", [{"query": f"独立场景 {index}", "source_session_ids": [job["source_uri"] + "/policy.md"]}
+                          for index in range(12)],
+    )
+    for relative, text in {
+        "compiled_skill/stream-method/EVALUATION.md": "# 评测说明",
+        "compiled_skill/stream-method/benchmark.json": json.dumps(document, ensure_ascii=False),
+        "compiled_skill/stream-method/BENCHMARK.md": dataset_markdown(document),
+        "analysis/evidence-map.md": "# 来源映射",
+        "analysis/gaps.md": "# 来源缺口",
+        "analysis/review.json": json.dumps({"schema_version": "skill-miner.review.v1", "questions": []}),
+    }.items():
+        repository.write_output(job["job_id"], relative, text)
+    original_open, original_read_text, original_read_bytes = Path.open, Path.read_text, Path.read_bytes
+    sizes = []
+
+    class BoundedReader:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            self.stream.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+
+        def read(self, size=-1):
+            assert 0 < size <= 64 * 1024, "Candidate validation and SHA must never read the complete body"
+            sizes.append(size)
+            return self.stream.read(size)
+
+        def readline(self, size=-1):
+            assert 0 < size <= 64 * 1024 + 1
+            return self.stream.readline(size)
+
+    def bounded_open(path, mode="r", *args, **kwargs):
+        stream = original_open(path, mode, *args, **kwargs)
+        return BoundedReader(stream) if path.name == "SKILL.md" and "r" in mode else stream
+
+    def no_full_text(path, *args, **kwargs):
+        assert path.name != "SKILL.md"
+        return original_read_text(path, *args, **kwargs)
+
+    def no_full_bytes(path):
+        assert path.name != "SKILL.md"
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "open", bounded_open)
+    monkeypatch.setattr(Path, "read_text", no_full_text)
+    monkeypatch.setattr(Path, "read_bytes", no_full_bytes)
+    finalized = repository.finalize_materialized(job["job_id"])
+    assert finalized["valid_candidate_count"] == 1 and finalized["materialized"]
+    finished = repository.finish_materialized_round(job["job_id"])
+    assert finished["status"] == "succeeded" and sizes
+    archive = repository.jobs_root / job["job_id"] / "rounds/round-1"
+    metadata = json.loads((archive / "meta.json").read_text())
+    assert len(metadata["output_sha256"]["compiled_skill/stream-method/SKILL.md"]) == 64
+    assert skill.stat().st_size == (archive / "output/compiled_skill/stream-method/SKILL.md").stat().st_size
+
+
+def test_candidate_metadata_scan_rejects_invalid_utf8_late_in_body(tmp_path):
+    from team_miner.ov_compile_mining import _skill_metadata
+
+    path = tmp_path / "SKILL.md"
+    path.write_bytes(b"---\nname: method\ndescription: Verify supplied Evidence.\n---\n" + b"rule\n" * 50_000 + b"\xe4")
+    with pytest.raises(ValueError, match="完整有效的 UTF-8"):
+        _skill_metadata(path)

@@ -26,7 +26,7 @@ The main fields of `POST /api/mining/jobs` are:
 | `input_dir` | string | Selected OpenViking Resources directory URI |
 | `max_rounds` | integer | Actual round limit, 1–5, default 3 |
 | `human_checkpoints` | boolean | Wait for human review after each round, default true |
-| `runtime_timeout_seconds` | integer | Runtime limit for each round, 60–7200 seconds, default 3600 |
+| `runtime_timeout_seconds` | integer | Base round deadline, 60–7200 seconds, default 3600; the default compiler scales the effective deadline with input shards and artifact-generation workload |
 
 The first round freezes the original source. Subsequent rounds use that snapshot, accumulated human supplements and previous revision context. Jobs return `rounds_mode: "orchestrated"`; `current_round` represents an actual round.
 
@@ -34,11 +34,23 @@ The first round determines and saves the primary language of the frozen original
 
 Saved custom business instructions remain unchanged and do not require a reset for a language update. Accepted requests retain their frozen version; completed artifacts are not automatically translated or recompiled.
 
-New jobs using the default compiler Skill use `candidate_contract_version: 2`: the model plans independently executable task methods before compiling a separate Skill Candidate for each method. Candidate count follows triggers, inputs, outputs, task boundaries, and the ability to execute and validate each method through True Replay independently. It does not follow document or chapter count. Each round allows at most 8 candidates as an execution bound, not a target to fill. Zero candidates is valid when no executable method is supported; pure facts and insufficient Evidence are recorded in `deferred` with reasons.
+New jobs using the default compiler Skill use `candidate_contract_version: 2`: the model plans independently executable task methods before compiling a separate Skill Candidate for each method. Candidate count follows triggers, inputs, outputs, task boundaries, and the ability to execute and validate each method through True Replay independently. It does not follow document or chapter count. Each bounded planning task allows at most eight candidates; a round uses more tasks for more supported methods rather than filling a count. Zero candidates is valid when no executable method is supported. Pure facts retain their disposition without requiring a fabricated Evidence gap; methods lacking necessary Evidence retain a deferred reason.
 
 When a previously saved custom compiler Skill still uses the single-candidate contract, new jobs retain `candidate_contract_version: 1` with a compatibility warning. Reset to the current default compiler Skill to enable multiple candidates in subsequently created jobs. Existing jobs retain their frozen contracts.
 
-The remote Compile request's `from` contains only this round's Evidence source directory. Revision context for the previous candidate collection is delivered directly through `instruction` rather than extracted as another source. Its JSON is limited to 30000 characters and contains each previous Skill body, case identifiers and current review information, with explicit excerpt or omission flags. The full previous artifacts remain in the round archive.
+The default flow submits staged tasks through the existing public Compile API. Extraction and generation use bounded original Evidence fragments; planning uses a traceable method ledger with a disposition for every proposal without treating summaries as original facts. Revision context for the previous candidate collection is delivered directly through `instruction` rather than extracted as another source. The default staged flow keeps a local revision ledger and gives each task matching context within its assignment budget, with explicit excerpt or omission flags. Custom single-Compile flows retain a collection revision-context limit of 30000 characters. The full previous artifacts remain in the round archive.
+
+Proposed deferrals are checked against the relevant original files in bounded tasks before final supplement questions are generated. An omitted rule in a reference summary or an unspecified runtime input is not sufficient evidence of a gap. Later batches and rounds reuse candidate identities; bounded reviews of similar methods retain merge reasons and complete source lineage. Sharing a source, formula or workflow step does not automatically justify merging, and similarity retrieval does not guarantee exhaustive duplicate detection. Each stage compiler carries only its current output contract, with shared business rules kept separate from the full artifact layout. Frozen requests are never rewritten retroactively.
+
+Newly frozen later rounds distinguish identity reuse from business-field refinement. Reuse retains existing fields; explicit refinement requires the exact candidate identity, previous metadata hash, proposals within the original method scope, and a reason. TE preserves names and existing Case IDs, regenerates prose, evaluation instructions and cases, and records before/after values with source lineage. Subsequent planning and recovery use the accepted business version. Implicit same-name changes or replacing an identity with a method from another source are rejected. Source-scope checks do not prove semantic workflow equivalence, so business review remains necessary. Older frozen requests retain their original protocol.
+
+Custom staged compiler Skills use exactly one `te-mining-policy.v1` fenced JSON block with `schema_version`, `common` and `stages`. `common` holds all shared business rules; `stages` maps stage names to additional rules. Unclassified freeform text is never silently removed or rewritten: it produces a migration error. Existing non-staged custom compilers retain their behavior. TE explicitly recognizes its default templates and known frozen default templates.
+
+New Evidence reviews use contiguous original-text units of at most 768 characters. The model selects exact unit identities from the current assignment; TE restores quotations from frozen source offsets and hashes. Original text appears once, with batches bounded by the complete JSON size rather than truncating material. Frozen text-quotation requests still require an exact contiguous match; formatting differences in Unicode quotes, whitespace or standalone list bullets may only locate a unique span under the exact source URI. Changed numbers, operators, business words or ambiguous matches are rejected. Raw model results and older requests remain unchanged. This validates provenance, not complete business rules or correct reasoning.
+
+Test Dataset case generation uses the existing public Compile file Map and Finalize: `from` submits a private input directory containing at most four independent assignment files, as the public API accepts directories only. Each model task still generates one bounded case. TE checks directory membership; inputs, source scope and output paths are isolated per file. Even when OV reports completion, TE validates each exact case identity, provenance, completeness and duplicate Query. Partial success retains valid cases and repairs only missing or invalid cases within bounded attempts. The candidate Dataset is assembled only after all twelve cases pass; frozen older single-case requests recover with their original request unchanged.
+
+An older batch with file-valued `from` sources gets an audited directory request only after an exact submission-key lookup confirms no accepted task. Original assignment files, Case IDs and repair counts remain intact. The older request is unchanged, and accepted tasks recover their existing task identity; network errors and stop requests do not trigger replacement.
 
 ## Capability plan and artifact contract
 
@@ -60,8 +72,8 @@ compiled_skill/<skill-name>/BENCHMARK.md
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `schema_version` | string | Fixed value `skill-miner.plan.v1` |
-| `skills` | object[] | Method plans for 0–8 candidates |
-| `deferred` | object[] | Content that does not yet form a Skill, with reasons; required to be nonempty when there are zero candidates |
+| `skills` | object[] | Method plans for the round; the default batched flow is not limited by the per-task bound of eight |
+| `deferred` | object[] | Content deferred for insufficient Evidence, with reasons; the default batched flow records facts separately without inventing gaps |
 
 Each entry in `skills` contains:
 
@@ -74,6 +86,8 @@ Each entry in `skills` contains:
 | `boundary` | string | Method scope and constraints |
 | `rationale` | string | Reason for splitting or merging this method |
 | `source_refs` | string[] | Original-source or human-supplement URIs supporting this method; must be nonempty |
+
+The default batched flow also writes `analysis/method-dispositions.md` and pages such as `analysis/dispositions/page-0001.md` with matching JSON. They record each method proposal’s retention, merge, factual-information classification or deferral, including sources and reasons. Facts do not automatically request human Evidence.
 
 Each `deferred` entry contains nonempty `reason` and `source_refs`. References must belong to this job's source or supplement scope; previous model output cannot serve as Evidence. Candidates may share Evidence, but overlapping methods should be merged. Steps of a complete workflow should stay together when they cannot be used independently.
 
@@ -183,3 +197,7 @@ Errors return an HTTP status and a `detail` description. Common cases are:
 Creation and continuation persist local state before preparing remote inputs and submitting Compile in the background. Inspect job `error`, `submission_error` or synchronization information for background failures. A successful HTTP response does not mean remote Compile execution has started.
 
 Shared Test Dataset validation checks structure rather than business facts. Evidence gaps require review even when the format is valid. Final artifacts still require True Replay and Candidate Review.
+
+The new default contract saves `round_work_units` (estimated input-shard and artifact-generation workload) and `round_timeout_seconds` (effective round deadline). Each stage task reserves one eighth of the base deadline, with a minimum of 180 seconds per task; the total remains at least the base deadline. Once planning completes, file and case generation tasks enter the estimate. Within a round, the deadline can only increase and its start time stays unchanged; the next round is estimated independently. Retrying the same accepted request does not add work units. Existing frozen requests are unchanged. Original sources are persisted one file at a time, up to 10000 files and 20 MB per file, without the former aggregate 16 MB limit.
+
+Sources are traversed directory by directory through the existing paginated OV file-list API, without a fixed depth or tree-node cutoff. Truncation signals, permission errors, repeated pages and out-of-scope entries are never treated as a complete source. Skill sections are validated and written atomically as a stream; final identity checks and archive hashes read bounded blocks without truncating the body during assembly.

@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 
 from team_miner import output_language
-from team_miner.output_language import output_language_instruction, resolve_output_language_policy
+from team_miner.output_language import (
+    output_language_instruction,
+    resolve_output_language_policy,
+    validate_artifact_headings,
+)
 
 
 def source(tmp_path, content, name="policy.md", kind="source"):
@@ -97,7 +101,7 @@ def test_instruction_applies_to_all_human_fields_and_preserves_identifiers():
     assert "所有轮次" in instruction and "简体中文" in instruction
     for field in (
         "description", "body", "task", "trigger", "inputs", "outputs", "boundary", "rationale",
-        "deferred.reason", "question", "reason", "query", "check.text", "EVALUATION",
+        "deferred.reason", "question", "reason", "query", "check.text", "EVALUATION", "title", "Markdown heading",
     ):
         assert field in instruction
     assert "takes priority" in instruction and "previous candidates" in instruction
@@ -111,3 +115,51 @@ def test_instruction_applies_to_all_human_fields_and_preserves_identifiers():
 def test_invalid_persisted_policy_is_rejected(policy):
     with pytest.raises(ValueError, match="语言策略无效"):
         output_language_instruction(policy)
+
+
+@pytest.mark.parametrize("title,content", [
+    ("Appointment", "中文正文"),
+    ("电话约访", "## Completion\n完成后记录结果"),
+    ("电话约访", "Completion\n----------\n完成后记录结果"),
+])
+def test_chinese_body_cannot_hide_untranslated_titles(title, content):
+    with pytest.raises(ValueError, match="标题必须使用中文"):
+        validate_artifact_headings(content, {"language": "zh-CN"}, title=title)
+
+
+def test_chinese_headings_preserve_code_and_quoted_originals():
+    original = "## 输入 API 参数\n> # Original Title\n\n```markdown\n# Request Example\n```\n## 完成条件\n记录结果"
+    validate_artifact_headings(original, {"language": "zh-CN"}, title="电话约访方法")
+    validate_artifact_headings("# Completion", {"language": "en"}, title="Appointment")
+
+
+def test_internal_slug_with_chinese_report_suffix_is_not_a_chinese_display_title():
+    with pytest.raises(ValueError, match="内部英文标识"):
+        validate_artifact_headings(
+            "# collect-financial-information 评估报告\n\n正文。", {"language": "zh-CN"},
+            machine_name="collect-financial-information",
+        )
+    validate_artifact_headings(
+        "# 收集客户财务信息评估报告\n\n内部标识：`collect-financial-information`。", {"language": "zh-CN"},
+        machine_name="collect-financial-information",
+    )
+
+
+def test_chinese_dataset_view_keeps_machine_ids_out_of_headings_and_content_unchanged():
+    from copy import deepcopy
+
+    from team_miner.bounded_compile_plan import assemble_dataset
+    from team_miner.dataset_view import dataset_markdown
+
+    case = {"case_id": "call-case-01", "query": "请完成电话约访。", "checks": [
+        {"id": "output-01", "kind": "output", "text": "先征得客户继续通话的同意。"}],
+        "provenance": {"session_ids": ["viking://resources/original.md"]},
+        "materials": [{"content": "> # Original Title"}]}
+    document = assemble_dataset([case], skill_name="call", task="电话约访", identity="test", validate=False)
+    before = deepcopy(document)
+    rendered = dataset_markdown(document)
+    assert document["name"] == "电话约访"
+    assert "## 案例 1\n\n`call-case-01`" in rendered
+    assert "### 案例材料" in rendered and case["query"] in rendered
+    validate_artifact_headings(rendered, {"language": "zh-CN"})
+    assert document == before

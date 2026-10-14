@@ -137,6 +137,34 @@ def test_capability_plan_rejects_ambiguous_or_unproven_boundaries(rig, failure):
     assert not repository.get_job(job["job_id"])["materialized"]
 
 
+@pytest.mark.parametrize("staged", [False, True])
+def test_aggregate_candidate_count_can_exceed_a_single_compile_assignment(rig, staged):
+    repository, job = rig
+    names = [f"independent-task-{number}" for number in range(9)]
+    populate(repository, job, names)
+    if staged:
+        repository.update_job(job["job_id"], staged_protocol="te-staged-compile.v1")
+        result = repository.finalize_materialized(job["job_id"])
+        assert result["candidate_count"] == result["valid_candidate_count"] == 9
+        assert {row["name"] for row in result["capability_plan"]["skills"]} == set(names)
+    else:
+        with pytest.raises(ValueError, match="单次 Compile"):
+            repository.finalize_materialized(job["job_id"])
+
+
+def test_staged_facts_only_plan_does_not_require_a_fabricated_evidence_gap(rig):
+    repository, job = rig
+    repository.update_job(job["job_id"], staged_protocol="te-staged-compile.v1")
+    repository.write_output(
+        job["job_id"], "analysis/capability-plan.json",
+        json.dumps({"schema_version": "skill-miner.plan.v1", "skills": [], "deferred": []}),
+    )
+    result = repository.finalize_materialized(job["job_id"])
+    assert result["materialized"] and result["candidate_count"] == 0
+    assert not result["artifact_quality"]["can_submit"]
+    assert result["capability_plan"]["deferred"] == []
+
+
 def test_legacy_single_candidate_without_plan_keeps_old_contract(rig):
     repository, job = rig
     populate(repository, job, ["supplier-admission"])

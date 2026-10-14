@@ -8,6 +8,7 @@ import { fileToB64 } from "@/lib/file";
 import { createRequestId } from "@/lib/requestId";
 import { toastErr, toastOk } from "@/lib/toast";
 import { cn } from "@/lib/utils";
+import { markdownBodyForPreview } from "@/lib/markdownFrontmatter";
 import { MarkdownDocument } from "@/components/MarkdownWorkspace";
 import MiningWhiteboxPanel from "@miner/MiningWhiteboxPanel";
 import SkillSourceWorkspace from "@miner/SkillSourceWorkspace";
@@ -63,8 +64,9 @@ interface InputSource {
   document_count: number;
   total_bytes: number;
   ready: boolean;
-  status?: "ready" | "empty" | "missing" | string;
+  status?: "ready" | "empty" | "missing" | "over_limit" | string;
   error?: string;
+  ingestion?: { error?: string };
   tags?: Array<"skill" | "knowledge" | string>;
   default?: boolean;
 }
@@ -75,6 +77,7 @@ interface MiningArtifact {
   path: string;
   size_bytes: number;
   skill_name: string;
+  display_title?: string;
 }
 
 interface MiningRound {
@@ -149,6 +152,9 @@ interface MiningJob {
   max_rounds: number;
   current_round: number | null;
   runtime_timeout_seconds?: number;
+  round_timeout_seconds?: number;
+  round_work_units?: number;
+  staged_progress?: { phase: string; label: string; completed: number; total: number; subtask_index?: number };
   ov_cancel_error?: string;
   phase: PhaseState;
   created_at: string;
@@ -177,6 +183,7 @@ interface MiningJob {
   ov_last_sync_attempt_at?: string;
   ov_sync_error?: string;
   remote_warnings?: string[];
+  ov_pipeline?: { errors?: unknown };
   ov_sync_failures?: number;
   ov_next_retry_at?: string;
   remote_state_stale?: boolean;
@@ -318,7 +325,7 @@ function useMining(active: boolean) {
       try {
         const [base, ovSources] = await Promise.all([
           api<MiningDefaults>("/api/mining/config"),
-          api<{ sources: InputSource[] }>("/api/mining/ov-sources"),
+          api<{ sources: InputSource[] }>("/api/mining/input-sources"),
         ]);
         const sources = ovSources.sources || [];
         const skillSources = sources.filter((source) => source.tags?.includes("skill"));
@@ -342,24 +349,31 @@ function useMining(active: boolean) {
     return request;
   }, [refreshJobs]);
 
+  const refreshInputSource = useCallback(async (sourceId: string) => {
+    const response = await api<{ source: InputSource }>(
+      `/api/mining/input-sources/${encodeURIComponent(sourceId)}`
+    );
+    setConfig((current) => current ? {
+      ...current,
+      input_sources: current.input_sources.map((source) =>
+        source.source_id === sourceId ? response.source : source
+      ),
+    } : current);
+    return response.source;
+  }, []);
+
   useEffect(() => {
     if (!active) return;
-    // Job summaries are local control-plane state and must not wait for the
-    // remote source-tree health probe performed by refreshConfig.
+    // Job summaries are local control-plane state and do not wait for OV tree scans.
     refreshJobs(false);
     refreshConfig(true);
     const jobsTimer = window.setInterval(() => refreshJobs(false), 5000);
-    // Source refresh performs an OV tree probe for every registered folder so
-    // a deleted path becomes visible.  Keep that health check periodic without
-    // turning the two-second task poll into an unbounded remote scan.
-    const sourceTimer = window.setInterval(() => refreshConfig(false), 15000);
     return () => {
       window.clearInterval(jobsTimer);
-      window.clearInterval(sourceTimer);
     };
   }, [active, refreshConfig, refreshJobs]);
 
-  return { config, jobs, jobSummary, refreshConfig, refreshJobs };
+  return { config, jobs, jobSummary, refreshConfig, refreshJobs, refreshInputSource };
 }
 export default function MiningView({
   active,
@@ -415,6 +429,8 @@ export default function MiningView({
   const [candidateSelections, setCandidateSelections] = useState<Record<string, string[]>>({});
   const [submissionReports, setSubmissionReports] = useState<Record<string, CandidateSubmissionResult[]>>({});
   const [createJobOpen, setCreateJobOpen] = useState(false);
+  const [checkingInputSource, setCheckingInputSource] = useState(false);
+  const [inputSourceCheckError, setInputSourceCheckError] = useState("");
   const artifactIsMarkdown = isMarkdownArtifact(artifactPreview);
   const defaultsInitialized = useRef(false);
 
@@ -486,6 +502,7 @@ export default function MiningView({
   const inputSources = config?.input_sources ?? [];
   const skillSources = inputSources.filter((source) => source.tags?.includes("skill"));
   const selectedSource = skillSources.find((source) => source.path === inputDir);
+  const selectedSourceError = selectedSource?.ingestion?.error || selectedSource?.error;
   const jobCounts = {
     total: mining.jobs.length,
     running: mining.jobs.filter((job) => job.status === "running" || job.status === "stopping").length,
@@ -495,6 +512,7 @@ export default function MiningView({
     failed: mining.jobs.filter((job) => job.status === "failed" || job.status === "interrupted" || job.status === "stopped").length,
   };
   const sourceDocumentTotal = inputSources.reduce((sum, source) => sum + source.document_count, 0);
+  const hasUnverifiedSources = inputSources.some((source) => source.status === "unverified");
   const pipelineJobs = mining.jobs.filter(
     (job) => job.status === "running" || isWaitingForEvidence(job) || job.status === "stopping"
   );
@@ -515,7 +533,24 @@ export default function MiningView({
 
   function selectInputDir(path: string) {
     setSelectedInputDir(path);
+    setInputSourceCheckError("");
     onInputDirChange?.(path);
+  }
+
+  async function verifySelectedInputSource() {
+    if (!selectedSource?.source_id) return;
+    setCheckingInputSource(true);
+    setInputSourceCheckError("");
+    try {
+      const source = await mining.refreshInputSource(selectedSource.source_id);
+      if (!source.ready) {
+        setInputSourceCheckError(source.ingestion?.error || source.error || "该目录当前没有可挖掘文档");
+      }
+    } catch (e: any) {
+      setInputSourceCheckError(e.message || "来源检查失败");
+    } finally {
+      setCheckingInputSource(false);
+    }
   }
 
   async function startRun() {
@@ -802,6 +837,7 @@ export default function MiningView({
     const checkpointBusy = checkpointSubmitting || checkpointUploading;
     const currentRemoteWarnings = distinctWarnings([
       ...(job.remote_warnings || []),
+      ...pipelineWarningMessages(job.ov_pipeline?.errors),
       ...((job.rounds || []).find((round) => round.round === job.current_round)?.remote_warnings || []),
     ]);
     const roundWarningMessages = (job.rounds || []).flatMap((round) => distinctWarnings(round.remote_warnings));
@@ -813,6 +849,7 @@ export default function MiningView({
       ...(job.pending_checkpoint?.attachments || []), ...checkpointAttachments,
     ].map((file) => [file.uri, file])).values());
     const compileSeconds = job.compile_observed_seconds ?? elapsedSeconds(job.started_at, job.finished_at);
+    const roundTimeoutSeconds = job.round_timeout_seconds || job.runtime_timeout_seconds;
     const hasTimingData = Boolean(
       job.started_at || job.submission_seconds !== undefined || job.materialize_seconds !== undefined
     );
@@ -834,7 +871,7 @@ export default function MiningView({
               {job.input_dir && <span className="mono select-text">{job.input_dir}</span>}
               {job.document_count !== null && <span>{job.document_count} 个文档</span>}
               <span>第 {job.current_round || 1} / {job.max_rounds} 轮</span>
-              {currentRemoteWarnings.length > 0 && <Pill tone="amber">来源处理需复核</Pill>}
+              {currentRemoteWarnings.length > 0 && <Pill tone="amber">Compile 执行需复核</Pill>}
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
@@ -852,7 +889,7 @@ export default function MiningView({
         </div>
 
         {!job.pending_checkpoint && finalRemoteWarnings.length > 0 && (
-          <RemoteCompileWarnings warnings={finalRemoteWarnings} label="任务 Compile 来源处理警告" historical />
+          <RemoteCompileWarnings warnings={finalRemoteWarnings} label="任务 Compile 执行提示" historical />
         )}
 
         {job.remote_state_stale && (
@@ -874,9 +911,14 @@ export default function MiningView({
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <div className="text-[13px] font-bold">耗时分析</div>
               {job.ov_stage && <span className="mono text-[10.5px] text-muted-foreground">当前阶段：{job.ov_stage}</span>}
-              {job.runtime_timeout_seconds && <span>运行期限：{formatDuration(job.runtime_timeout_seconds)}</span>}
+              {roundTimeoutSeconds && <span>运行期限：{formatDuration(roundTimeoutSeconds)}</span>}
               {job.ov_cancel_error && <span className="text-destructive">取消请求未确认：{job.ov_cancel_error}，后台继续重试</span>}
             </div>
+            {job.staged_progress?.label && (
+              <div className="mb-3 text-[12px] text-muted-foreground">
+                {job.staged_progress.label} · 累计已校验 {job.staged_progress.completed} 个小任务
+              </div>
+            )}
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
               {job.submission_seconds !== undefined && (
                 <TimingCard label="启动准备合计" seconds={job.submission_seconds} />
@@ -943,7 +985,7 @@ export default function MiningView({
                 {job.pending_checkpoint ? (
                   <>
                     {currentRemoteWarnings.length > 0 && (
-                      <RemoteCompileWarnings warnings={currentRemoteWarnings} label="本轮 Compile 来源处理警告" />
+                      <RemoteCompileWarnings warnings={currentRemoteWarnings} label="本轮 Compile 执行提示" />
                     )}
                     <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
                       <div>
@@ -1207,13 +1249,34 @@ export default function MiningView({
               </div>
             </div>
             </div>
+            {artifactGroups.candidates.some((group) => group.artifacts.some((file) => file.kind === "skill")) && (
+              <section aria-label="Skill 文件预览（生成中）" className="rounded-xl border border-border bg-surface p-4">
+                <h3 className="text-[13px] font-bold">Skill 文件预览（生成中）</h3>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  已生成的正文可以先查看。配套评测、Test Dataset 和本轮复核完成后，才能提交到进化。
+                </p>
+                <div className="mt-3 space-y-3">
+                  {artifactGroups.candidates.filter((group) => group.artifacts.some((file) => file.kind === "skill"))
+                    .map(({ skillName, artifacts }) => (
+                      <div key={skillName} className="rounded-lg border border-border bg-background p-3">
+                        <div className="mb-2 flex items-center gap-2">
+                          <span className="text-[12px] font-semibold">{artifacts.find((file) => file.kind === "skill")?.display_title || job.capability_plan?.skills.find((skill) => skill.name === skillName)?.task || skillName}</span>
+                          <Pill tone="blue">生成中 · 只读预览</Pill>
+                        </div>
+                        <p className="mb-2 text-[11px] text-muted-foreground select-text">标识：{skillName}</p>
+                        <MiningArtifactFiles artifacts={artifacts} editable={false} loadingPath={loadingArtifact} onPreview={previewArtifact} />
+                      </div>
+                    ))}
+                </div>
+              </section>
+            )}
           </div>
         ) : (
           <div className="rounded-xl border border-border bg-surface p-4">
             <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
-              <div className="text-[13px] font-bold">第 {job.current_round || 1} 轮产物</div>
+              <div className="text-[13px] font-bold">第 {job.current_round || 1} 轮{job.status === "failed" && !jobArtifacts(job).length ? " · 未生成可审核产物" : "产物"}</div>
               <div className="flex items-center gap-2">
-                {job.finished_at && <span className="text-[10px] text-muted-soft">完成于 {formatDateTime(job.finished_at)}</span>}
+                {job.finished_at && <span className="text-[10px] text-muted-soft">{job.status === "succeeded" ? "完成于" : "结束于"} {formatDateTime(job.finished_at)}</span>}
                 {job.status === "succeeded" && (
                   <Button
                     size="sm"
@@ -1226,11 +1289,18 @@ export default function MiningView({
                 )}
               </div>
             </div>
+            {job.status === "failed" && (
+              <section aria-label="本轮 Compile 失败" className="mb-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-[12px] text-destructive">
+                <p className="font-semibold">{compileIssueKinds([...currentRemoteWarnings, job.error]).reduceTruncated ? "能力拆分规划（Reduce）失败：模型输出达到单次长度上限，规划结果被截断。" : "本轮 Compile 执行失败。"}</p>
+                {job.error && <p className="mt-1 select-text whitespace-pre-wrap break-words text-[11px]">{job.error}</p>}
+              </section>
+            )}
             {artifactGroups.candidates.length > 0 && (
               <section aria-label="Skill Candidate 独立提交" className="mb-3 space-y-2">
                 {artifactGroups.candidates.map(({ skillName, artifacts }) => {
                   const quality = job.candidate_quality?.[skillName];
                   const capability = job.capability_plan?.skills.find((item) => item.name === skillName);
+                  const displayTitle = artifacts.find((artifact) => artifact.kind === "skill")?.display_title || capability?.task || skillName;
                   // Display orphan files without extending the submission whitelist.
                   const canSubmit = eligibleNames.includes(skillName);
                   return (
@@ -1251,7 +1321,7 @@ export default function MiningView({
                               }))}
                             />
                           )}
-                          <span className="select-text">{skillName}</span>
+                          <span className="select-text">{displayTitle}</span>
                           {quality && <Pill tone={artifactQualityTone(quality.level)}>{qualityLabel(quality)}</Pill>}
                         </label>
                         {job.status === "succeeded" && (
@@ -1260,7 +1330,7 @@ export default function MiningView({
                           </Button>
                         )}
                       </div>
-                      {capability && <p className="mt-1 text-[12px] text-muted-foreground select-text">{capability.task}</p>}
+                      {displayTitle !== skillName && <p className="mt-1 text-[11px] text-muted-foreground select-text">标识：{skillName}</p>}
                       {quality && <p className="mt-1 text-[11px] text-muted-foreground select-text">{quality.summary}</p>}
                       {job.artifact_quality?.warnings.length ? <p className="mt-1 text-[11px] text-amber-700">本轮有 {job.artifact_quality.warnings.length} 条公共提示，请查看“本轮复核提示”。</p> : null}
                       {quality?.warnings.length ? (
@@ -1293,7 +1363,7 @@ export default function MiningView({
             )}
             {!jobArtifacts(job).length && (
               <div className="select-text whitespace-pre-wrap break-words rounded-lg border border-dashed border-border p-6 text-center text-xs text-muted-soft">
-                {job.error || job.stop_reason || "该任务没有产生可预览产物。"}
+                {job.status === "failed" ? "本轮未生成可审核产物。" : job.error || job.stop_reason || "该任务没有产生可预览产物。"}
               </div>
             )}
           </div>
@@ -1313,7 +1383,7 @@ export default function MiningView({
                   <Pill tone="purple">{job.capability_plan.skills.length} 个 Skill Candidate</Pill>
                 </div>
                 <p className="mt-1 text-[11px] text-muted-foreground">将来源中的流程按可独立完成的任务整理成候选；每个候选的说明与配套文件展示在同一组，分别验证和评审。</p>
-                {job.capability_plan.skills.length === 0 && <p className="mt-2 text-[12px] text-muted-foreground">本轮没有形成 Skill Candidate，可查看暂缓内容并补充 Evidence。</p>}
+                {job.capability_plan.skills.length === 0 && <p className="mt-2 text-[12px] text-muted-foreground">本轮没有形成 Skill Candidate，可查看共享分析了解原因。</p>}
                 {job.capability_plan.deferred.length > 0 && (
                   <details className="mt-2 border-t border-border pt-2">
                     <summary className="cursor-pointer text-[12px] font-semibold">暂缓形成 Skill Candidate 的内容（{job.capability_plan.deferred.length} 项）</summary>
@@ -1345,11 +1415,11 @@ export default function MiningView({
                   <summary className="cursor-pointer text-[12px] font-semibold">
                     第 {round.round} 轮 · {round.artifacts?.length || 0} 个产物
                     {round.round === job.current_round ? " · 当前轮次" : " · 已归档"}
-                    {distinctWarnings(round.remote_warnings).length > 0 ? " · 来源处理有警告" : ""}
+                    {distinctWarnings(round.remote_warnings).length > 0 ? " · Compile 执行有提示" : ""}
                   </summary>
                   <div className="mt-2 space-y-2 text-[11px] text-muted-foreground">
                     {distinctWarnings(round.remote_warnings).length > 0 && (
-                      <RemoteCompileWarnings warnings={distinctWarnings(round.remote_warnings)} label={`第 ${round.round} 轮 Compile 来源处理警告`} />
+                      <RemoteCompileWarnings warnings={distinctWarnings(round.remote_warnings)} label={`第 ${round.round} 轮 Compile 执行提示`} />
                     )}
                     {(round.ov_task_id || round.task_id) && <div className="mono break-all select-text">Compile：{round.ov_task_id || round.task_id}</div>}
                     {round.started_at && <div>开始于 {formatDateTime(round.started_at)}{round.finished_at ? ` · 完成于 ${formatDateTime(round.finished_at)}` : ""}</div>}
@@ -1379,7 +1449,7 @@ export default function MiningView({
         <div className="px-[22px] py-[22px]">
           <div className="mb-[18px] grid grid-cols-2 gap-4 md:grid-cols-4">
             <StatCard label="知识源" value={config ? String(inputSources.length) : "—"} />
-            <StatCard label="文档总数" value={config ? String(sourceDocumentTotal) : "—"} />
+            <StatCard label="文档总数" value={config ? hasUnverifiedSources ? "待检查" : String(sourceDocumentTotal) : "—"} />
             <StatCard label="总任务" value={config ? String(jobCounts.total) : "—"} />
             <StatCard label="任务状态" value={stateLabel} />
           </div>
@@ -1631,21 +1701,40 @@ export default function MiningView({
                   >
                     {!skillSources.length && <option value="">暂无可用的 Skill 知识源</option>}
                     {skillSources.map((source) => (
-                      <option key={source.path} value={source.path} disabled={!source.ready}>
-                        {source.name || source.path.split("/").pop()}{source.ready ? "" : `（${sourceStatusMeta(source).label}）`}
+                      <option key={source.path} value={source.path} disabled={source.status === "missing" || source.status === "over_limit"}>
+                        {source.name || source.path.split("/").pop()}{source.ready ? "" : source.status === "unverified" ? "（待检查）" : `（${sourceStatusMeta(source).label}）`}
                       </option>
                     ))}
                   </select>
+                  <div className="mt-2 flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={starting || checkingInputSource || !selectedSource?.source_id}
+                      onClick={() => void verifySelectedInputSource()}
+                    >
+                      {checkingInputSource ? "检查中…" : "检查选中目录"}
+                    </Button>
+                    {selectedSource?.status === "unverified" && !checkingInputSource && (
+                      <span className="text-[11px] text-muted-foreground">仅检查当前选择的目录</span>
+                    )}
+                  </div>
                   <div className={cn(
                     "mt-1.5 text-[11px]",
-                    selectedSource?.ready ? "text-muted-foreground" : selectedSource?.error ? "text-destructive" : "text-amber-700"
+                    selectedSource?.ready ? "text-muted-foreground" : selectedSourceError || selectedSource?.status === "over_limit" ? "text-destructive" : "text-amber-700"
                   )}>
                     {!config
                       ? "正在检查目录…"
                       : selectedSource?.ready
                         ? `${selectedSource.path} · ${selectedSource.document_count} 个文档 · ${formatBytes(selectedSource.total_bytes)}`
-                        : selectedSource?.error
-                          ? `知识源暂不可用：${selectedSource.error}`
+                        : selectedSource?.status === "unverified" && !checkingInputSource
+                          ? "尚未检查；创建任务前请先验证此来源。"
+                          : checkingInputSource
+                            ? "正在检查所选目录的完整文件清单…"
+                        : selectedSource?.status === "over_limit"
+                          ? `超过挖掘限额：${selectedSourceError || "单个文本文件不超过 20 MB，目录不超过 10000 个文件；大来源分批处理。"}`
+                          : inputSourceCheckError || selectedSourceError
+                          ? `知识源暂不可用：${inputSourceCheckError || selectedSourceError}`
                           : selectedSource?.status === "missing"
                             ? "OpenViking 中的目录已被删除，请重新选择知识源。"
                             : "该目录没有可挖掘文档，请先上传素材。"}
@@ -1673,7 +1762,7 @@ export default function MiningView({
                   <input type="number" min={60} max={7200} value={runtimeTimeout} disabled={starting}
                     onChange={(event) => setRuntimeTimeout(Number(event.target.value))}
                     className="ml-3 rounded border border-border bg-background px-2 py-1" />
-                  <span className="mt-1 block text-[11px]">每轮从远端受理后独立计时，包含远端排队；人工补证等待不计时。到期请求取消并等待远端确认。</span>
+                  <span className="mt-1 block text-[11px]">基础运行期限；按输入分片和产物工作量自动延长，单次调用仍有超时保护。每轮从远端受理后独立计时，包含远端排队；人工补证等待不计时。到期请求取消并等待远端确认。</span>
                 </label>
 
                 <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-border bg-background p-3.5 transition-colors hover:border-accent/50">
@@ -1867,7 +1956,7 @@ export default function MiningView({
                   />
                 ) : (
                   <div tabIndex={0} role="region" aria-label="Markdown 编辑预览" className="min-h-0 flex-1 overflow-auto overscroll-contain bg-white px-7 py-6">
-                    <MarkdownDocument content={artifactDraft} />
+                    <MarkdownDocument content={markdownBodyForPreview(artifactDraft)} />
                   </div>
                 )}
               </div>
@@ -1908,7 +1997,7 @@ export default function MiningView({
             artifactIsMarkdown ? (
               <div tabIndex={0} role="region" aria-label="Markdown 产物内容" className="min-h-0 flex-1 overflow-auto overscroll-contain bg-[#f6f7f9] px-5 py-8">
                 <div className="mx-auto min-h-full max-w-[820px] bg-white px-12 py-10 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_14px_40px_rgba(15,23,42,0.06)]">
-                  <MarkdownDocument content={artifactPreview?.content || ""} />
+                  <MarkdownDocument content={markdownBodyForPreview(artifactPreview?.content || "")} />
                 </div>
               </div>
             ) : (
@@ -1992,6 +2081,7 @@ function pipelineStepLabel(state: PhaseState[keyof PhaseState]) {
 }
 
 function sourceStatusMeta(source: InputSource): { label: string; tone: PillTone } {
+  if (source.status === "over_limit") return { label: "超过挖掘限额", tone: "red" };
   if (source.status === "missing") return { label: "路径已删除", tone: "red" };
   if (source.status === "unavailable") return { label: "暂不可用", tone: "amber" };
   if (source.ready) return { label: "可挖掘", tone: "green" };
@@ -2105,7 +2195,7 @@ function ArchivedArtifactGroups({ artifacts, round, loadingPath, onPreview }: {
     <div className="space-y-3">
       {groups.candidates.map(({ skillName, artifacts: files }) => (
         <section key={skillName} aria-label={`第 ${round} 轮 Skill Candidate ${skillName}`} className="rounded-lg border border-border p-3">
-          <div className="mb-2 text-[12px] font-semibold select-text">{skillName} · 配套文件</div>
+          <div className="mb-2 text-[12px] font-semibold select-text">{files.find((file) => file.kind === "skill")?.display_title || skillName} · 配套文件</div>
           <MiningArtifactFiles artifacts={files} editable={false} historical loadingPath={loadingPath} onPreview={onPreview} />
         </section>
       ))}
@@ -2165,15 +2255,33 @@ function distinctWarnings(warnings?: string[]) {
   return Array.from(new Set((warnings || []).filter((warning) => typeof warning === "string" && warning.trim())));
 }
 
+function pipelineWarningMessages(errors: unknown): string[] {
+  const values = Array.isArray(errors) ? errors.slice(0, 20) : [errors];
+  return distinctWarnings(values.map((value) => {
+    if (typeof value === "string") return value.slice(0, 4000);
+    if (!value || typeof value !== "object") return "";
+    const error = value as Record<string, unknown>;
+    return ["stage", "code", "message", "error"].map((key) => error[key]).filter((part) => typeof part === "string").join(" · ").slice(0, 4000);
+  }));
+}
+
+function compileIssueKinds(messages: string[]) {
+  return {
+    reduceTruncated: messages.some((message) => /\breduce\b[\s\S]{0,300}(?:truncat|output\s+limit\s+reached)/i.test(message)),
+    sourceIncomplete: messages.some((message) => /\bextract\s*(?::|·)|\bextract(?:ion)?(?:\s+(?:worker|job|step|stage))?\s+(?:failed|failure|incomplete)\b|\bsources?\s+(?:(?:processing|reading|extraction)\s+)?(?:failed|incomplete)\b|\bfailed\s+to\s+(?:read|process|extract)\s+(?:the\s+)?source\b|来源(?:读取|处理)?(?:失败|未完整处理)/i.test(message)),
+  };
+}
+
 function RemoteCompileWarnings({ warnings, label, historical = false }: { warnings: string[]; label: string; historical?: boolean }) {
+  const issues = compileIssueKinds(warnings);
   return (
     <section aria-label={label} className="mb-4 rounded-xl border border-amber-300/70 bg-amber-50 px-4 py-3 text-amber-900">
       <div className="flex items-center gap-2 text-[12px] font-bold"><ShieldAlert className="size-4 shrink-0" />{label}</div>
-      <p className="mt-1 text-[11px] leading-relaxed">
-        {historical
-          ? "挖掘期间部分来源曾未完整处理。请核对已有产物与各轮 Evidence 的覆盖情况。"
-          : "部分来源未完整处理；请核对已有产物和缺失的 Evidence 后再决定继续或结束。"}
-      </p>
+      {issues.reduceTruncated && <p className="mt-1 text-[11px] leading-relaxed">能力拆分规划（Reduce）的模型输出达到单次长度上限，规划结果被截断。</p>}
+      {issues.sourceIncomplete && <p className="mt-1 text-[11px] leading-relaxed">{historical
+        ? "挖掘期间部分来源曾未完整处理。请核对已有产物与各轮 Evidence 的覆盖情况。"
+        : "部分来源未完整处理；请核对已有产物和缺失的 Evidence 后再决定继续或结束。"}</p>}
+      {!issues.reduceTruncated && !issues.sourceIncomplete && <p className="mt-1 text-[11px] leading-relaxed">Compile 执行出现提示，请结合任务状态和已有产物核对下方远端详情。</p>}
       <ul className="mt-2 space-y-1 text-[11px] leading-relaxed">
         {warnings.map((warning, index) => <li key={`${index}-${warning}`} className="select-text whitespace-pre-wrap break-words">{warning}</li>)}
       </ul>

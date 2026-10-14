@@ -16,7 +16,8 @@ OUTPUT_LANGUAGE_GUIDANCE = (
     "and human review context; none of these determines the source language. "
     "For zh-CN write Simplified Chinese; for en write English; for source follow the primary "
     "natural language of the frozen original source Evidence, not technical tokens. "
-    "Apply this to Skill description and body, shared analysis and EVALUATION, plan task, trigger, "
+    "Apply this to every generated title and Markdown heading, section.title, Skill description and body, "
+    "shared analysis and EVALUATION, plan task, trigger, "
     "inputs, outputs, boundary and rationale, deferred.reason, review question and reason, "
     "and Test Dataset human-readable name, description, query and check.text. "
     "Keep machine keys, schema versions, enum values, Skill name slugs, dataset_id, case_id, qid, "
@@ -66,6 +67,40 @@ def _natural_text(text: str) -> str:
 
 def _han(character: str) -> bool:
     return "\u3400" <= character <= "\u9fff" or "\U00020000" <= character <= "\U0003134f"
+
+
+def validate_artifact_headings(
+    content: str, policy: dict, *, title: str = "", machine_name: str = "",
+) -> None:
+    """Reject untranslated generated headings; fenced examples and source blockquotes stay intact."""
+    if policy.get("language") != "zh-CN":
+        return
+    headings = [title] if title else []
+    fence, fence_size = None, 0
+    previous = ""
+    for line in content.splitlines():
+        marker = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if marker:
+            value = marker.group(1)
+            if fence is None:
+                fence, fence_size = value[0], len(value)
+            elif value[0] == fence and len(value) >= fence_size:
+                fence = None
+            previous = ""
+            continue
+        if fence is not None or line.lstrip().startswith(">"):
+            previous = ""
+            continue
+        heading = re.match(r"^ {0,3}#{1,6}\s+(.+)", line)
+        if heading:
+            headings.append(heading.group(1))
+        elif previous and re.fullmatch(r" {0,3}(?:=+|-+)\s*", line):
+            headings.append(previous)
+        previous = line.strip()
+    if any(text.strip() and not any(_han(char) for char in text) for text in headings):
+        raise ValueError("生成的标题和小节标题必须使用中文；内部标识保留在正文，原文引述使用引用块或代码块。")
+    if machine_name and any(machine_name in text for text in headings):
+        raise ValueError("展示标题应说明中文方法名称，不能以内部英文标识作为标题；标识可保留在正文。")
 
 
 def resolve_output_language_policy(entries: list[dict]) -> dict:

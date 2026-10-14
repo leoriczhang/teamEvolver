@@ -34,8 +34,9 @@ interface SkillSource {
   document_count: number;
   total_bytes: number;
   ready: boolean;
-  status?: "ready" | "empty" | "missing" | "unavailable" | string;
+  status?: "ready" | "empty" | "missing" | "unavailable" | "over_limit" | string;
   error?: string;
+  ingestion?: { error?: string };
   tags?: Array<"skill" | "knowledge" | string>;
   default?: boolean;
 }
@@ -113,6 +114,7 @@ export default function SkillSourceWorkspace({
   const [pickerTree, setPickerTree] = useState<TreeResponse | null>(null);
   const [pickerUri, setPickerUri] = useState("");
   const [pickerLoading, setPickerLoading] = useState(false);
+  const [pickerError, setPickerError] = useState("");
   const [replaceSourceId, setReplaceSourceId] = useState("");
   const [pickerTags, setPickerTags] = useState<Array<"skill" | "knowledge">>(["skill"]);
   const [tagSaving, setTagSaving] = useState(false);
@@ -296,6 +298,9 @@ export default function SkillSourceWorkspace({
   }
 
   async function openPicker(sourceId = "") {
+    setPickerUri("");
+    setPickerTree(null);
+    setPickerError("");
     setReplaceSourceId(sourceId);
     const replaced = sources.find((source) => source.source_id === sourceId);
     setPickerTags(
@@ -312,8 +317,8 @@ export default function SkillSourceWorkspace({
         `/api/mining/ov-tree?account=${encodeURIComponent(account)}&uri=${encodeURIComponent(config?.root_uri || "viking://resources")}`,
       );
       setPickerTree(next);
-      setPickerUri("");
     } catch (error: any) {
+      setPickerError(error.message || "目录列表不可用");
       toastErr("读取 OpenViking 目录失败", error.message);
     } finally {
       setPickerLoading(false);
@@ -321,6 +326,9 @@ export default function SkillSourceWorkspace({
   }
 
   async function reloadPicker(account: string) {
+    setPickerUri("");
+    setPickerTree(null);
+    setPickerError("");
     setPickerAccount(account);
     if (!account) return;
     setPickerLoading(true);
@@ -329,8 +337,8 @@ export default function SkillSourceWorkspace({
         `/api/mining/ov-tree?account=${encodeURIComponent(account)}&uri=${encodeURIComponent(config?.root_uri || "viking://resources")}`,
       );
       setPickerTree(next);
-      setPickerUri("");
     } catch (error: any) {
+      setPickerError(error.message || "目录列表不可用");
       toastErr("读取 OpenViking 目录失败", error.message);
     } finally {
       setPickerLoading(false);
@@ -415,7 +423,7 @@ export default function SkillSourceWorkspace({
                       <div className="flex items-center gap-2">
                         <Folder className={cn("size-4 shrink-0", active ? "text-emerald-300" : "text-accent")} />
                         <span className="min-w-0 flex-1 truncate text-xs font-semibold" title={source.name || source.path.split("/").pop()}>{source.name || source.path.split("/").pop()}</span>
-                        <span className={cn("shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-bold", source.status === "missing" ? "bg-red-100 text-red-700" : source.ready ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>{source.status === "missing" ? "路径已删除" : source.status === "unavailable" ? "暂不可用" : source.ready ? "可用" : "空目录"}</span>
+                        <span title={source.ingestion?.error || source.error} className={cn("shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-bold", source.status === "missing" || source.status === "over_limit" ? "bg-red-100 text-red-700" : source.ready ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>{source.status === "over_limit" ? "超过挖掘限额" : source.status === "missing" ? "路径已删除" : source.status === "unavailable" ? "暂不可用" : source.ready ? "可用" : "空目录"}</span>
                       </div>
                       <div title={source.path} className={cn("mono mt-1.5 line-clamp-2 break-all text-[9.5px] leading-4", active ? "text-white/60" : "text-muted-foreground")}>{source.path}</div>
                       <div className={cn("mt-1.5 flex items-center justify-between text-[10px]", active ? "text-white/60" : "text-muted-foreground")}><span>{source.document_count} 个文件 · {formatBytes(source.total_bytes)}</span><span>{source.account}</span></div>
@@ -511,6 +519,8 @@ export default function SkillSourceWorkspace({
                       ? "该知识源路径已从 OpenViking 删除，已禁止用于挖掘。"
                       : activeSource?.status === "unavailable"
                         ? "暂时无法检查该知识源，已禁止用于挖掘。请稍后刷新。"
+                        : activeSource?.status === "over_limit"
+                          ? activeSource.ingestion?.error || activeSource.error || "单个文本文件不超过 20 MB，目录不超过 10000 个文件；大来源分批处理。"
                         : "该知识源为空，可上传文件或文件夹。"}
                     selectedUri={selectedEntry?.uri || content?.uri || ""}
                     selectedDirectoryUri={selectedDirectory}
@@ -566,7 +576,7 @@ export default function SkillSourceWorkspace({
         <DialogContent className="flex h-[78vh] w-[calc(100vw-32px)] flex-col overflow-hidden p-0 !max-w-[820px]">
           <DialogHeader className="border-b border-border px-5 py-4"><DialogTitle>{replaceSourceId ? "重新选择知识源路径" : "添加知识源"}</DialogTitle></DialogHeader>
           <div className="space-y-3 border-b border-border p-4">
-            <div className="flex items-center gap-3"><select value={pickerAccount} onChange={(event) => void reloadPicker(event.target.value)} className="rounded-lg border border-border bg-background px-3 py-2 text-xs">{config?.accounts.map((account) => <option key={account} value={account}>{account}</option>)}</select><Input value={pickerUri} title={pickerUri} readOnly placeholder="请从下方选择一个文件夹" className="mono flex-1 text-xs" /></div>
+            <div className="flex items-center gap-3"><select aria-label="知识源账号" value={pickerAccount} onChange={(event) => void reloadPicker(event.target.value)} className="rounded-lg border border-border bg-background px-3 py-2 text-xs">{config?.accounts.map((account) => <option key={account} value={account}>{account}</option>)}</select><Input aria-label="知识源 URI" value={pickerUri} title={pickerUri} onChange={(event) => setPickerUri(event.target.value)} placeholder="填写文件夹 URI，或从下方列表选择" className="mono flex-1 text-xs" /></div>
             <fieldset>
               <legend className="mb-2 text-[11px] font-bold text-muted-foreground">知识源用途（可多选）</legend>
               <div className="flex flex-wrap gap-2">
@@ -586,18 +596,24 @@ export default function SkillSourceWorkspace({
           <div className="min-h-0 flex-1">
             {pickerLoading ? (
               <div className="p-4 text-xs text-muted-foreground">正在读取 OpenViking 目录…</div>
-            ) : (
+            ) : pickerTree ? (
               <KnowledgeWorkspaceTree
-                tree={pickerTree ? { ...pickerTree, entries: pickerTree.entries.filter((entry) => entry.is_dir) } : null}
+                tree={{ ...pickerTree, entries: pickerTree.entries.filter((entry) => entry.is_dir) }}
                 emptyText="OpenViking Resources 中暂无可选择的文件夹。"
                 selectedUri={pickerUri}
                 selectedDirectoryUri={pickerUri}
                 query=""
                 onSelect={(entry) => setPickerUri(entry.uri)}
               />
+            ) : (
+              <div role="status" className="grid h-full min-h-40 place-items-center px-6 text-center text-xs leading-5 text-muted-foreground">
+                {pickerError
+                  ? "目录列表读取失败，可直接填写已知且有权访问的文件夹 URI。登记时会校验该目录。"
+                  : "可直接填写已知且有权访问的文件夹 URI，或选择账号读取目录列表。"}
+              </div>
             )}
           </div>
-          <div className="flex justify-end gap-2 border-t border-border p-4"><Button variant="outline" onClick={() => setPickerOpen(false)}>取消</Button><Button disabled={!pickerUri || !pickerTags.length} onClick={() => void registerSource()}>确认设为知识源</Button></div>
+          <div className="flex justify-end gap-2 border-t border-border p-4"><Button variant="outline" onClick={() => setPickerOpen(false)}>取消</Button><Button disabled={!pickerAccount || !pickerUri || !pickerTags.length} onClick={() => void registerSource()}>确认设为知识源</Button></div>
         </DialogContent>
       </Dialog>
     </div>

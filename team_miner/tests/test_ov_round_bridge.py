@@ -13,9 +13,10 @@ import httpx
 import pytest
 from fastapi import FastAPI, HTTPException
 
-from team_miner import ov_round_orchestration
+from team_miner import compile_admission, ov_round_orchestration
 from team_miner.bridge import SkillMinerBridgeMixin
 from team_miner.ov_compile_mining import REVIEW_SCHEMA_VERSION, RUNS_ROOT, SKILL_NAME, OvSkillMiningRepository
+from team_miner.routes import KnowledgeMiningMixin
 from team_miner.tests.dataset_fixtures import build_capability_plan, build_document
 
 SOURCE = "viking://resources/team/source"
@@ -36,6 +37,9 @@ class FakeOV:
         self.lose_next_acceptance = False
         self.lookup_supported = False
         self.submission_lookups = []
+        self.capabilities = {"configured": True, "can_create": True}
+        self.capability_reads = 0
+        self.content_reads = []
 
     def tree(self, uri):
         entries = [
@@ -47,8 +51,33 @@ class FakeOV:
 
     async def request(self, account, method, path, **kwargs):
         assert account == "default"
+        if path == "/api/v1/fs/ls":
+            assert method == "GET" and kwargs["params"]["recursive"] == "false"
+            parent = kwargs["params"]["uri"].rstrip("/") + "/"
+            entries = {}
+            for uri, content in sorted(self.content.items()):
+                if not uri.startswith(parent):
+                    continue
+                relative = uri[len(parent) :]
+                name = relative.split("/", 1)[0]
+                child = parent + name
+                entries[child] = {
+                    "uri": child,
+                    "name": name,
+                    "isDir": "/" in relative,
+                    "size": 0 if "/" in relative else len(content.encode()),
+                }
+            rows = sorted(entries.values(), key=lambda row: (not row["isDir"], row["name"].lower(), row["name"]))
+            offset = kwargs["params"]["offset"]
+            return rows[offset : offset + kwargs["params"]["node_limit"]]
+        if path == "/api/v1/compile/capabilities":
+            self.capability_reads += 1
+            if self.capabilities is None:
+                raise HTTPException(404, "Capability probe unavailable")
+            return copy.deepcopy(self.capabilities)
         if path == "/api/v1/content/read":
             uri = kwargs["params"]["uri"]
+            self.content_reads.append(uri)
             if uri not in self.content:
                 raise HTTPException(404, "Evidence file missing")
             return {"content": self.content[uri]}
@@ -176,7 +205,7 @@ class FakeCompileClient:
         return {"ok": True}
 
 
-class Owner(SkillMinerBridgeMixin):
+class Owner(SkillMinerBridgeMixin, KnowledgeMiningMixin):
     config = SimpleNamespace()
 
     def __init__(self, repository, remote):
@@ -185,7 +214,9 @@ class Owner(SkillMinerBridgeMixin):
         self.config = SimpleNamespace(_config_file=str(repository.state_root / "test-config.yaml"))
         self.submissions = []
         self.refreshes = []
-        self.compiler_body = ov_round_orchestration.SKILL_BODY
+        # This fixture exercises the existing one-request/custom compiler path.
+        # Public-API staged execution has separate end-to-end transport fixtures.
+        self.compiler_body = ov_round_orchestration.SKILL_BODY.replace("te-staged-compile.v1", "fixture-custom-compile")
 
     def _ov_skill_mining_repository(self):
         return self.repository
@@ -227,6 +258,13 @@ class Owner(SkillMinerBridgeMixin):
 
 @pytest.fixture
 def rig(tmp_path, monkeypatch):
+    # These fixtures model one public Compile request. Keep their frozen compiler
+    # consistent while the staged default is exercised with its own transport.
+    monkeypatch.setattr(
+        ov_round_orchestration,
+        "SKILL_BODY",
+        ov_round_orchestration.SKILL_BODY.replace("te-staged-compile.v1", "fixture-custom-compile"),
+    )
     repository = OvSkillMiningRepository(tmp_path / "state", tmp_path / "miner")
     remote = FakeOV()
     monkeypatch.setattr(ov_round_orchestration, "CompileClient", lambda **kwargs: FakeCompileClient(remote, **kwargs))
@@ -278,6 +316,20 @@ async def test_first_round_freezes_sources_and_accepts_candidate_collection_cont
     assert rig.remote.published[0]["skill_name"].startswith(SKILL_NAME + "-")
     assert waiting["compile_request"]["skill"] == waiting["compiler_uri"]
     assert waiting["compiler_uri"].endswith(rig.remote.published[0]["skill_name"])
+
+
+@pytest.mark.asyncio
+async def test_saved_submission_recovers_without_new_capability_probe(rig):
+    rig.remote.lookup_supported = True
+    rig.remote.lose_next_acceptance = True
+    pending = await rig._submit_ov_skill_round(create(rig))
+    assert pending.get("compile_request") and pending["status"] == "preparing"
+    rig.remote.capabilities = None
+    reads = rig.remote.capability_reads
+    recovered = await rig._submit_ov_skill_round(pending)
+    assert recovered["status"] == "queued"
+    assert rig.remote.capability_reads == reads
+    assert len(rig.remote.compile_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -434,6 +486,358 @@ async def test_zero_candidate_round_retains_deferred_capability_plan_for_revisio
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("human", [False, True])
+async def test_full_source_file_budget_can_continue_with_context_and_supplements(rig, human):
+    for index in range(127):
+        rig.remote.content[f"{SOURCE}/extra-{index:03d}.md"] = f"Sourced fact {index}."
+    first = create(rig, rounds=2, human=human)
+    second = await complete(rig, first, questions=human)
+    if human:
+        second = rig.repository.prepare_next_round(
+            first["job_id"],
+            second["pending_checkpoint"]["id"],
+            answers={"scope": "Consult approved regional scope."},
+            unresolved=[],
+            references={"scope": [APPROVED]},
+            feedback="Retain source coverage.",
+        )
+    assert second["current_round"] == 2
+    submitted = await rig._submit_ov_skill_round(second)
+    assert submitted["status"] == "queued"
+    manifest = json.loads(Path(submitted["input_manifest"]).read_text())
+    source = [row for row in manifest if row["kind"] == "source"]
+    context = [row for row in manifest if row["kind"] == "context"]
+    assert len(source) == 128 and context and len(manifest) > 128
+    assert len([row for row in manifest if row["kind"] == "human"]) == (2 if human else 0)
+    assert submitted["compile_request"]["from"] == [submitted["source_snapshot"]]
+    assert submitted["round_context_uri"] not in submitted["compile_request"]["from"]
+    for row in source:
+        content = Path(row["local_path"]).read_text()
+        assert ov_round_orchestration._digest(content) == row["sha256"]
+        assert rig.remote.content[submitted["source_snapshot"] + "/" + row["relative_path"]] == content
+
+
+async def _large_reviewed_candidate_collection(rig, count=160):
+    """Expand the reviewed archive, preserving a real frozen first-round source."""
+    second = await complete(rig, create(rig, rounds=2, human=False), questions=False)
+    archive = rig.repository.jobs_root / second["job_id"] / "rounds/round-1/reviewed_output"
+    names = [f"task-{index:04d}-" + "a" * 69 for index in range(count)]
+    source = second["original_source_snapshot"] + "/original/policy.md"
+    plan = build_capability_plan(names, source)
+    (archive / "semantic_reports/capability-plan.json").write_text(json.dumps(plan), encoding="utf-8")
+    # The original candidate is replaced by a reviewed collection. Every file
+    # remains in this archive; the second round must not copy them as Evidence.
+    original = archive / "compiled_skill/policy-review"
+    for path in original.iterdir():
+        path.unlink()
+    original.rmdir()
+    for name in names:
+        candidate = archive / "compiled_skill" / name
+        candidate.mkdir()
+        (candidate / "SKILL.md").write_text(f"---\nname: {name}\n---\n" + "方法正文。" * 7000, encoding="utf-8")
+        (candidate / "benchmark.json").write_text(
+            json.dumps({"cases": [{"case_id": f"{name}-{case:03d}"} for case in range(24)]}), encoding="utf-8"
+        )
+        (candidate / "EVALUATION.md").write_text("# Evaluation", encoding="utf-8")
+        (candidate / "BENCHMARK.md").write_text("# Test Dataset", encoding="utf-8")
+    return second, archive, names
+
+
+@pytest.mark.asyncio
+async def test_staged_revision_scales_without_uploading_prior_candidate_collection(rig, monkeypatch):
+    second, archive, names = await _large_reviewed_candidate_collection(rig)
+    assert len(list(archive.rglob("*"))) > 128
+    captured = {}
+
+    async def prepared(job, compiler_body, entries, language_policy, revision):
+        captured.update(job=job, entries=entries, revision=revision)
+        return job
+
+    rig.compiler_body = rig.compiler_body.replace("fixture-custom-compile", "te-staged-compile.v1")
+    monkeypatch.setattr(rig, "_prepare_staged_round", prepared)
+    submitted = await rig._submit_ov_skill_round(second)
+    assert submitted["status"] == "preparing", submitted.get("error")
+    assert captured["entries"] and all(row["kind"] == "source" for row in captured["entries"])
+    revision = json.loads(captured["revision"].rsplit("\n", 1)[-1])
+    assert revision["candidate_count"] == len(names)
+    assert revision["per_assignment_context"] and not revision["revision_context_is_evidence"]
+    assert "previous_candidates" not in revision and len(captured["revision"]) < 30_000
+    catalog_root = rig.repository.jobs_root / second["job_id"] / "round_inputs/round-2/previous-candidates"
+    manifest = json.loads((catalog_root / "manifest.json").read_text())
+    assert {row["name"] for row in manifest} == set(names)
+    metadata_bytes = 0
+    for row in manifest:
+        path = Path(row["local_path"])
+        assert path.parent == catalog_root
+        value = json.loads(path.read_text())
+        assert set(value) == {
+            "name",
+            "case_ids",
+            "task",
+            "boundary",
+            "source_refs",
+            "scope_relative_paths",
+            "skill_body_excerpt",
+            "skill_body_sha256",
+            "skill_body_path",
+        }
+        assert value["case_ids"] == [f"{row['name']}-{number:03d}" for number in range(24)]
+        assert value["scope_relative_paths"] == ["original/policy.md"]
+        assert len(value["skill_body_excerpt"]) == 24_000
+        assert value["skill_body_sha256"] == ov_round_orchestration._digest(Path(value["skill_body_path"]).read_text())
+        metadata_bytes += len(json.dumps({key: item for key, item in value.items() if key != "skill_body_excerpt"}))
+        assert (archive / "compiled_skill" / row["name"] / "EVALUATION.md").is_file()
+        assert (archive / "compiled_skill" / row["name"] / "BENCHMARK.md").is_file()
+    assert metadata_bytes > 30_000
+    round_root = f"{RUNS_ROOT}/{second['job_id']}/rounds/round-2"
+    assert not any(uri.startswith(round_root + "/context/") for uri in rig.remote.content)
+    assert not any(uri.startswith(round_root + "/source/compiled_skill/") for uri in rig.remote.content)
+    assert rig.remote.content[submitted["source_snapshot"] + "/original/policy.md"] == "Original policy: divisor 9000."
+
+
+@pytest.mark.asyncio
+async def test_custom_revision_retains_existing_context_file_limit(rig):
+    second, _archive, _names = await _large_reviewed_candidate_collection(rig, count=32)
+    with pytest.raises(ValueError, match="上一轮修订上下文超过 128 个文件"):
+        await rig._freeze_round_inputs(second)
+
+
+@pytest.mark.asyncio
+async def test_staged_prior_skill_hash_is_streamed_and_full_archive_is_not_read_into_memory(rig, monkeypatch):
+    second = await complete(rig, create(rig, rounds=2, human=False), questions=False)
+    archive = rig.repository.jobs_root / second["job_id"] / "rounds/round-1/reviewed_output"
+    body_path = archive / "compiled_skill/policy-review/SKILL.md"
+    text = "原始方法和边界。" * 1_000_000
+    body_path.write_text(text, encoding="utf-8")
+    assert body_path.stat().st_size > 16 * 1024 * 1024
+    read_text = Path.read_text
+
+    def reject_full_body_read(path, *args, **kwargs):
+        assert path != body_path, "The full previous Skill must stay on disk"
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", reject_full_body_read)
+    entries = await rig._freeze_round_inputs(second, staged=True)
+    assert [row["kind"] for row in entries] == ["source"]
+    root = rig.repository.jobs_root / second["job_id"] / "round_inputs/round-2/previous-candidates"
+    value = json.loads((root / "policy-review.json").read_text())
+    assert value["skill_body_excerpt"] == text[:24_000]
+    assert value["skill_body_sha256"] == ov_round_orchestration._digest(text)
+    assert value["skill_body_path"] == str(body_path)
+
+
+@pytest.mark.asyncio
+async def test_staged_prior_source_scope_uses_exact_manifest_uris_without_filename_guessing(rig):
+    rig.remote.content[f"{SOURCE}/nested/policy.md"] = "A separate, unrelated sourced method."
+    second = await complete(rig, create(rig, rounds=2, human=False), questions=False)
+    archive = rig.repository.jobs_root / second["job_id"] / "rounds/round-1/reviewed_output"
+    plan_path = archive / "semantic_reports/capability-plan.json"
+    plan = json.loads(plan_path.read_text())
+    plan["skills"][0]["source_refs"] = [
+        f"{SOURCE}/nested/policy.md",
+        second["original_source_snapshot"] + "/original/policy.md",
+        SOURCE,
+        "viking://resources/another-job/original/policy.md",
+        second["original_source_snapshot"] + "/missing/policy.md",
+    ]
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    await rig._freeze_round_inputs(second, staged=True)
+    root = rig.repository.jobs_root / second["job_id"] / "round_inputs/round-2/previous-candidates"
+    value = json.loads((root / "policy-review.json").read_text())
+    assert value["source_refs"] == plan["skills"][0]["source_refs"]
+    assert value["scope_relative_paths"] == ["original/nested/policy.md", "original/policy.md"]
+
+
+@pytest.mark.asyncio
+async def test_staged_prior_catalog_tampering_fails_and_does_not_rewrite_frozen_inputs(rig):
+    second = await complete(rig, create(rig, rounds=2, human=False), questions=False)
+    entries = await rig._freeze_round_inputs(second, staged=True)
+    root = rig.repository.jobs_root / second["job_id"] / "round_inputs/round-2"
+    manifest_text = (root / "manifest.json").read_text()
+    candidate = root / "previous-candidates/policy-review.json"
+    candidate.write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="候选目录完整性校验失败"):
+        await rig._freeze_round_inputs(second, staged=True)
+    assert (root / "manifest.json").read_text() == manifest_text
+    assert Path(entries[0]["local_path"]).read_text() == "Original policy: divisor 9000."
+
+
+@pytest.mark.asyncio
+async def test_staged_revision_with_no_prior_candidates_retains_local_deferred_archive(rig):
+    second = await complete(rig, create(rig, rounds=2, human=False), questions=False, skill_names=[])
+    entries = await rig._freeze_round_inputs(second, staged=True)
+    instruction = await rig._round_revision_instruction(second, entries, staged=True)
+    revision = json.loads(instruction.rsplit("\n", 1)[-1])
+    assert revision["candidate_count"] == 0 and revision["per_assignment_context"]
+    archive = rig.repository.jobs_root / second["job_id"] / "rounds/round-1/reviewed_output"
+    plan = json.loads((archive / "semantic_reports/capability-plan.json").read_text())
+    assert plan["skills"] == [] and plan["deferred"][0]["reason"]
+    assert not any(row["kind"] == "context" for row in entries)
+
+
+@pytest.mark.asyncio
+async def test_existing_frozen_context_is_not_migrated_when_staged_protocol_is_selected(rig):
+    second = await complete(rig, create(rig, rounds=2, human=False), questions=False)
+    entries = await rig._freeze_round_inputs(second)
+    root = rig.repository.jobs_root / second["job_id"] / "round_inputs/round-2"
+    original_manifest = (root / "manifest.json").read_text()
+    assert any(row["kind"] == "context" for row in entries)
+    recovered = await rig._freeze_round_inputs(second, staged=True)
+    assert recovered == entries and (root / "manifest.json").read_text() == original_manifest
+    assert not (root / "previous-candidates").exists()
+
+
+@pytest.mark.asyncio
+async def test_staged_revision_keeps_the_cumulative_human_file_bound(rig):
+    second = await complete(rig, create(rig, rounds=2, human=False), questions=False)
+    attachments = []
+    job_dir = rig.repository.jobs_root / second["job_id"]
+    content = "Human assertion requires source verification."
+    digest = ov_round_orchestration._digest(content)
+    for index in range(256):
+        path = job_dir / "attachments" / f"attachment-{index:03d}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        attachments.append({"name": path.name, "local_path": str(path), "sha256": digest})
+    second["supplements"] = [{"round": 1, "attachments": attachments}]
+    # The answer document plus 256 attachments exceeds the independent human
+    # limit even though prior generated output no longer consumes that budget.
+    with pytest.raises(ValueError, match="累积补充 Evidence超过 256 个文件"):
+        await rig._freeze_round_inputs(second, staged=True)
+
+
+@pytest.mark.asyncio
+async def test_staged_revision_retains_prior_identity_when_dataset_needs_repair(rig):
+    names = ["policy-review", "regional-assessment"]
+    second = await complete(rig, create(rig, rounds=2, human=False), questions=False, skill_names=names)
+    archive = rig.repository.jobs_root / second["job_id"] / "rounds/round-1/reviewed_output"
+    invalid = archive / "compiled_skill/regional-assessment/benchmark.json"
+    invalid.write_text("invalid JSON", encoding="utf-8")
+    missing = archive / "compiled_skill/policy-review/SKILL.md"
+    missing.unlink()
+    await rig._freeze_round_inputs(second, staged=True)
+    root = rig.repository.jobs_root / second["job_id"] / "round_inputs/round-2/previous-candidates"
+    regional = json.loads((root / "regional-assessment.json").read_text())
+    policy = json.loads((root / "policy-review.json").read_text())
+    assert regional["name"] == "regional-assessment" and regional["case_ids"] == []
+    assert regional["skill_body_sha256"] and regional["scope_relative_paths"] == ["original/policy.md"]
+    assert policy["name"] == "policy-review" and len(policy["case_ids"]) == 12
+    assert policy["skill_body_path"] == "" and policy["skill_body_excerpt"] == ""
+    assert policy["scope_relative_paths"] == ["original/policy.md"]
+    assert invalid.read_text() == "invalid JSON"
+
+
+@pytest.mark.asyncio
+async def test_staged_revision_preserves_invalid_prior_plan_without_guessing_scope(rig):
+    second = await complete(rig, create(rig, rounds=2, human=False), questions=False)
+    archive = rig.repository.jobs_root / second["job_id"] / "rounds/round-1/reviewed_output"
+    invalid = archive / "semantic_reports/capability-plan.json"
+    invalid.write_text("invalid JSON", encoding="utf-8")
+    await rig._freeze_round_inputs(second, staged=True)
+    root = rig.repository.jobs_root / second["job_id"] / "round_inputs/round-2/previous-candidates"
+    policy = json.loads((root / "policy-review.json").read_text())
+    assert policy["name"] == "policy-review" and len(policy["case_ids"]) == 12
+    assert policy["scope_relative_paths"] == [] and policy["source_refs"] == []
+    assert invalid.read_text() == "invalid JSON"
+
+
+def test_input_budgets_keep_large_sources_separate_from_revision_archives(tmp_path):
+    source = {"kind": "source", "relative_path": "original/large.md", "content": "a" * (16 * 1024 * 1024)}
+    context = {"kind": "context", "relative_path": "compiled_skill/task/benchmark.json", "content": "{}"}
+    cached = ov_round_orchestration._cache_inputs(tmp_path / "round", [source, context])
+    assert len(cached) == 2
+    assert Path(cached[0]["local_path"]).stat().st_size == 16 * 1024 * 1024
+    with pytest.raises(ValueError, match="单个文件不能超过 20 MB"):
+        ov_round_orchestration._append_input(
+            [source],
+            {**source, "relative_path": "original/overflow.md", "content": "x" * (20 * 1024 * 1024 + 1)},
+        )
+    with pytest.raises(ValueError, match="上一轮修订上下文超过"):
+        ov_round_orchestration._append_input(
+            [context],
+            {**context, "relative_path": "large.md", "content": "x" * (16 * 1024 * 1024)},
+        )
+
+
+@pytest.mark.asyncio
+async def test_source_larger_than_reference_limit_freezes_without_truncation(rig):
+    content = "Source grounded method.\n" * 140_000
+    rig.remote.content[f"{SOURCE}/policy.md"] = content
+    assert 2 * 1024 * 1024 < len(content.encode()) < 16 * 1024 * 1024
+    source = await rig._ov_source_detail({"source_id": "source", "uri": SOURCE})
+    assert source["ready"] and source["status"] == "ready"
+    submitted = await rig._submit_ov_skill_round(create(rig))
+    assert submitted["status"] == "queued"
+    assert rig.remote.content[submitted["source_snapshot"] + "/original/policy.md"] == content
+    with pytest.raises(ValueError, match="引用 Evidence 文件不能超过 2 MB"):
+        await rig._round_read_reference("default", f"{SOURCE}/policy.md")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count,size", [(10_001, 1), (1, 20 * 1024 * 1024 + 1)])
+async def test_over_limit_source_is_reported_and_rejected_before_content_read(rig, monkeypatch, count, size):
+    async def large_tree(account, uri):
+        return {
+            "exists": True,
+            "entries": [{"uri": f"{SOURCE}/file-{i}.md", "is_dir": False, "size": size} for i in range(count)],
+        }
+
+    monkeypatch.setattr(rig, "_knowledge_tree", large_tree)
+
+    async def large_entries(account, uri):
+        for entry in (await large_tree(account, uri))["entries"]:
+            yield entry
+
+    monkeypatch.setattr(rig, "_iter_knowledge_entries", large_entries)
+    source = await rig._ov_source_detail({"source_id": "source", "uri": SOURCE})
+    assert not source["ready"] and source["status"] == "over_limit"
+    assert "单文件 20 MB 或目录 10000 个文件" in source["ingestion"]["error"]
+    submitted = await rig._submit_ov_skill_round(create(rig))
+    assert submitted["status"] == "failed"
+    assert not rig.remote.content_reads and not rig.remote.compile_calls
+
+
+@pytest.mark.asyncio
+async def test_source_aggregate_beyond_old_limit_is_streamed_to_local_snapshots(rig):
+    content = "Sourced material.\n" * 330_000
+    for index in range(3):
+        rig.remote.content[f"{SOURCE}/large-{index}.md"] = content
+    assert len(content.encode()) * 3 > 16 * 1024 * 1024
+    submitted = await rig._submit_ov_skill_round(create(rig))
+    assert submitted["status"] == "queued"
+    manifest = json.loads(Path(submitted["input_manifest"]).read_text())
+    assert all("content" not in item and "local_path" in item for item in manifest)
+    assert sum(row["content_bytes"] for row in manifest) > 16 * 1024 * 1024
+    for row in manifest:
+        assert Path(row["local_path"]).stat().st_size == row["content_bytes"]
+
+
+@pytest.mark.parametrize("count,expected", [(1, 3600), (8, 3600), (9, 7200), (120, 54000)])
+def test_round_budget_scales_with_evidence_assignments_not_revision_archive(count, expected):
+    entries = [{"kind": "source", "content_chars": 1000} for _ in range(count)]
+    entries.append({"kind": "context", "content_chars": 50_000_000})
+    budget = ov_round_orchestration._round_execution_budget(
+        {"runtime_timeout_seconds": 3600},
+        entries,
+        ov_round_orchestration.SKILL_BODY,
+    )
+    assert budget == {"round_work_units": count, "round_timeout_seconds": expected}
+
+
+def test_long_file_budget_counts_shards_and_legacy_contract_keeps_base_deadline():
+    entries = [{"kind": "source", "content_chars": 240_000}]
+    job = {"runtime_timeout_seconds": 60}
+    assert ov_round_orchestration._round_execution_budget(job, entries, ov_round_orchestration.SKILL_BODY) == {
+        "round_work_units": 10,
+        "round_timeout_seconds": 120,
+    }
+    assert ov_round_orchestration._round_execution_budget(job, entries, ov_round_orchestration.LEGACY_SKILL_BODY) == {
+        "round_work_units": 1,
+        "round_timeout_seconds": 60,
+    }
+
+
+@pytest.mark.asyncio
 async def test_collection_revision_bounds_all_eight_candidate_bodies_without_losing_identity(rig, tmp_path):
     names = [f"task-{number}" for number in range(8)]
     entries = []
@@ -518,9 +922,10 @@ async def test_legacy_job_uses_legacy_compiler_and_single_candidate_revision(rig
     initial = create(rig, rounds=2, human=False)
     initial = rig.repository.update_job(initial["job_id"], candidate_contract_version=contract_version)
     second = await complete(rig, initial, questions=False)
-    assert rig.remote.published[0]["skill_body"] == ov_round_orchestration._compiler_package(
-        ov_round_orchestration.LEGACY_SKILL_BODY
-    )[1]
+    assert (
+        rig.remote.published[0]["skill_body"]
+        == ov_round_orchestration._compiler_package(ov_round_orchestration.LEGACY_SKILL_BODY)[1]
+    )
     assert len(rig.repository.public_job(second, detail=True)["rounds"][0]["artifacts"]) == 7
     accepted = await rig._submit_ov_skill_round(second)
     legacy_hash = ov_round_orchestration._digest(ov_round_orchestration.LEGACY_SKILL_BODY)
@@ -609,6 +1014,21 @@ async def test_stop_after_lost_acceptance_recovers_idempotently_then_cancels_rem
     assert len(rig.remote.compile_calls) == 1 and len(rig.remote.accepted) == 1
     assert rig.remote.submission_lookups == [pending["submission_idempotency_key"]]
     assert pending["compile_request"] == recovered["compile_request"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native_status", ["cancelled", "failed", "completed"])
+async def test_observed_native_terminal_releases_exact_mining_admission(rig, native_status):
+    submitted = await rig._submit_ov_skill_round(create(rig, rounds=1, human=False))
+    current = {"key": submitted["submission_idempotency_key"]}
+    assert compile_admission.acquire(rig.repository, submitted, current)
+    compile_admission.accepted(rig.repository.jobs_root, current["key"], submitted["ov_task_id"])
+    if native_status == "completed":
+        rig.remote.complete(submitted, questions=False)
+    else:
+        rig.remote.tasks[submitted["ov_task_id"]] = {"status": native_status}
+    await rig._refresh_ov_skill_job(submitted)
+    assert compile_admission.reservations(rig.repository.jobs_root) == []
 
 
 @pytest.mark.asyncio
@@ -1016,8 +1436,11 @@ async def test_chinese_original_language_survives_english_prior_review_and_live_
     assert json.loads((archive / "meta.json").read_text())["output_language_policy"] == policy
     rig.remote.content[f"{SOURCE}/policy.md"] = "The changed live source must not replace the original Evidence."
     second = rig.repository.prepare_next_round(
-        waiting["job_id"], waiting["pending_checkpoint"]["id"],
-        answers={"scope": "Only use approved regions."}, unresolved=[], references={},
+        waiting["job_id"],
+        waiting["pending_checkpoint"]["id"],
+        answers={"scope": "Only use approved regions."},
+        unresolved=[],
+        references={},
         feedback="Keep the previous candidate's scope and check the supplied answer.",
     )
     submitted = await rig._submit_ov_skill_round(second)
@@ -1030,9 +1453,10 @@ async def test_chinese_original_language_survives_english_prior_review_and_live_
     assert revision["previous_candidates"][0]["skill_name"] == "policy-review"
     assert revision["previous_candidates"][0]["case_ids"] == [f"policy-review-{i:03d}" for i in range(12)]
     assert rig.remote.content[submitted["source_snapshot"] + "/original/policy.md"] == original
-    assert "Only use approved regions." in rig.remote.content[
-        submitted["source_snapshot"] + "/supplements/round-1/answers.md"
-    ]
+    assert (
+        "Only use approved regions."
+        in rig.remote.content[submitted["source_snapshot"] + "/supplements/round-1/answers.md"]
+    )
     assert submitted["compile_request"]["from"] == [submitted["source_snapshot"]]
     assert submitted["round_context_uri"] not in submitted["compile_request"]["from"]
 
@@ -1061,7 +1485,9 @@ async def test_language_policy_and_request_survive_lost_acceptance_and_restart(r
 async def test_existing_frozen_request_without_language_policy_is_reposted_unchanged(rig, monkeypatch):
     job = create(rig)
     frozen = {
-        "from": [job["source_snapshot"]], "to": job["output_uri"], "skill": job["skill_uri"],
+        "from": [job["source_snapshot"]],
+        "to": job["output_uri"],
+        "skill": job["skill_uri"],
         "instruction": "Frozen request from before output language selection.",
     }
     job = rig.repository.update_job(job["job_id"], compile_request=frozen)
@@ -1089,8 +1515,45 @@ async def test_old_job_without_policy_chooses_next_round_language_from_frozen_or
     path.write_text(json.dumps(old), encoding="utf-8")
     rig.remote.content[f"{SOURCE}/policy.md"] = "The user must check the newer live policy before shipping."
     second = rig.repository.prepare_next_round(
-        waiting["job_id"], waiting["pending_checkpoint"]["id"], answers={}, unresolved=[], references={},
+        waiting["job_id"],
+        waiting["pending_checkpoint"]["id"],
+        answers={},
+        unresolved=[],
+        references={},
     )
     submitted = await rig._submit_ov_skill_round(second)
     assert submitted["output_language_policy"]["language"] == "zh-CN"
     assert "必须使用简体中文" in submitted["compile_request"]["instruction"]
+
+
+@pytest.mark.asyncio
+async def test_failed_staged_child_keeps_parent_refreshable_until_retry_decision(rig, monkeypatch):
+    submitted = await rig._submit_ov_skill_round(create(rig))
+    submitted = rig.repository.update_job(submitted["job_id"], staged_protocol="te-staged-compile.v1")
+    rig.remote.tasks[submitted["ov_task_id"]] = {
+        "status": "failed",
+        "stage": "compile: failed",
+        "error": {"message": "invalid stage output"},
+    }
+    decisions = []
+
+    async def decide(job, task):
+        decisions.append((job["status"], job.get("finished_at"), task["status"]))
+        if len(decisions) == 1:
+            raise OSError("simulated exit after durable retry state")
+        return rig.repository.update_job(
+            job["job_id"],
+            status="failed",
+            error="stage retry limit reached",
+            finished_at="2026-10-12T12:00:00Z",
+        )
+
+    monkeypatch.setattr(rig, "_advance_staged_round", decide)
+    with pytest.raises(OSError, match="durable retry state"):
+        await rig._refresh_ov_skill_job(submitted)
+    recoverable = rig.repository.get_job(submitted["job_id"])
+    assert recoverable["status"] == "running" and not recoverable.get("finished_at")
+    await rig._refresh_ov_skill_job(recoverable)
+    failed = rig.repository.get_job(submitted["job_id"])
+    assert failed["status"] == "failed" and failed["error"] == "stage retry limit reached"
+    assert failed["finished_at"] and decisions == [("running", "", "failed"), ("running", "", "failed")]

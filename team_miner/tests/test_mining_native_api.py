@@ -25,6 +25,7 @@ def native_api(tmp_path):
             self.submissions.append({**job, "frozen_compiler": frozen.read_text()})
 
         async def _ov_source_detail(self, record):
+            self.probed_sources.append(record["source_id"])
             return {**record, "ready": True, "status": "ready", "document_count": 1}
 
     config_file = tmp_path / "config.yaml"
@@ -34,6 +35,7 @@ def native_api(tmp_path):
     store.save(data)
     owner = Owner()
     owner.submissions = []
+    owner.probed_sources = []
     owner.config = SimpleNamespace(_config_file=str(config_file))
     owner._ov_skill_mining_repo = OvSkillMiningRepository(tmp_path / "state", tmp_path / "project")
     app = FastAPI()
@@ -45,6 +47,27 @@ def native_api(tmp_path):
 
     owner._register_skillminer_routes(app)
     return TestClient(app), owner
+
+
+def test_input_source_inventory_does_not_scan_every_remote_tree(native_api):
+    client, owner = native_api
+    repo = owner._ov_skill_mining_repository()
+    first = repo.save_source("default", "viking://resources/source-a", name="source-a")
+    repo.save_source("default", "viking://resources/source-b", name="source-b")
+
+    response = client.get("/api/mining/input-sources")
+
+    assert response.status_code == 200
+    assert {row["source_id"] for row in response.json()["sources"]} == {
+        row["source_id"] for row in repo.list_source_records()
+    }
+    assert all(row["status"] == "unverified" and not row["ready"] for row in response.json()["sources"])
+    assert owner.probed_sources == []
+
+    detail = client.get(f"/api/mining/input-sources/{first['source_id']}")
+    assert detail.status_code == 200
+    assert detail.json()["source"]["ready"] is True
+    assert owner.probed_sources == [first["source_id"]]
 
 
 def test_config_uses_native_saved_defaults_and_no_execution_subprocess(native_api):

@@ -89,6 +89,7 @@ def complete_round(repository, job, **kwargs):
 
 def test_human_round_waits_restarts_and_preserves_both_original_and_reviewed_outputs(repository):
     initial = create_job(repository)
+    assert initial["staged_execution_protocol"] == "te-mining-optimized.v1"
     initial = repository.update_job(
         initial["job_id"],
         input_manifest="round_inputs/round-1/manifest.json",
@@ -119,6 +120,7 @@ def test_human_round_waits_restarts_and_preserves_both_original_and_reviewed_out
         submitted_by="admin",
     )
     assert continued["status"] == "preparing" and continued["current_round"] == 2
+    assert continued["staged_execution_protocol"] == initial["staged_execution_protocol"]
     assert not continued["materialized"] and not continued["ov_task_id"] and not continued["started_at"]
     assert continued["source_snapshot"].endswith("/rounds/round-2/source")
     assert continued["original_source_snapshot"] == initial["source_snapshot"]

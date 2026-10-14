@@ -51,7 +51,8 @@ function installApi(job: FixtureJob | null, onAction?: (path: string, body: Reco
       max_rounds_default: 3, max_rounds_range: [1, 5],
       runtime_timeout_seconds_default: 3600, runtime_timeout_seconds_range: [60, 7200],
     };
-    if (path === "/api/mining/ov-sources") return { sources: [source] };
+    if (path === "/api/mining/input-sources") return { sources: [source] };
+    if (path === `/api/mining/input-sources/${source.source_id}`) return { source };
     if (path === "/api/mining/jobs" && !init?.method) return {
       jobs: current ? [current] : [], summary: { total: current ? 1 : 0, running: 0, queued: 0, completed: 0, failed: 0, max_parallel: 3 },
     };
@@ -75,12 +76,64 @@ async function openJob() {
   await screen.findByText("本轮 Evidence 复核");
 }
 
+async function openFailedJob() {
+  render(<MiningView active page="jobs" />);
+  fireEvent.click(await screen.findByRole("button", { name: /真实多轮挖掘/ }));
+  return screen.findByRole("region", { name: "本轮 Compile 失败" });
+}
+
 describe("MiningView real mining rounds", () => {
   beforeEach(() => {
     mockedApi.mockReset();
     vi.mocked(toastErr).mockClear();
   });
   afterEach(cleanup);
+
+  it("previews generated Skill files during mining without editing or submitting an incomplete candidate", async () => {
+    installApi({ ...waitingJob(1, 2, false), status: "running", pending_checkpoint: null, rounds: [] });
+    render(<MiningView active page="jobs" />);
+    fireEvent.click(await screen.findByRole("button", { name: /真实多轮挖掘/ }));
+    const preview = await screen.findByRole("region", { name: "Skill 文件预览（生成中）" });
+    expect(within(preview).getByText("生成中 · 只读预览")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /提交.*进化|提交所选候选/ })).not.toBeInTheDocument();
+    fireEvent.click(within(preview).getByRole("button", { name: "example / SKILL.md" }));
+    const dialog = await screen.findByRole("dialog", { name: "产物预览 · SKILL.md" });
+    expect(within(dialog).getByText("# Example")).toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "编辑产物" })).not.toBeInTheDocument();
+    expect(mockedApi).toHaveBeenCalledWith(`/api/mining/artifacts/content?path=${encodeURIComponent(artifact.path)}`);
+  });
+
+  it("does not present an evaluation file alone as an early Skill preview", async () => {
+    installApi({ ...waitingJob(1, 2, false), status: "running", pending_checkpoint: null, rounds: [],
+      artifacts: [{ ...artifact, name: "EVALUATION.md", kind: "evaluation" }],
+    });
+    render(<MiningView active page="jobs" />);
+    fireEvent.click(await screen.findByRole("button", { name: /真实多轮挖掘/ }));
+    await screen.findByText("挖掘流水线（仅表示阶段位置）");
+    expect(screen.queryByRole("region", { name: "Skill 文件预览（生成中）" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /提交.*进化|提交所选候选/ })).not.toBeInTheDocument();
+  });
+
+  it("hides frontmatter only in artifact previews and retains the full editable source", async () => {
+    const raw = "---\nname: phone-appointment\ndescription: 中文说明\ncategory: workflow\n---\n\n# 电话约访\n\n中文步骤。";
+    installApi(waitingJob());
+    const baseApi = mockedApi.getMockImplementation()!;
+    mockedApi.mockImplementation(async (path: string, init?: RequestInit) => path.startsWith("/api/mining/artifacts/content?")
+      ? { path: artifact.path, name: artifact.name, content: raw, size_bytes: raw.length }
+      : baseApi(path, init));
+    await openJob();
+    fireEvent.click(screen.getByRole("button", { name: "example / SKILL.md" }));
+    const preview = await screen.findByRole("region", { name: "Markdown 产物内容" });
+    expect(preview).toHaveTextContent("# 电话约访");
+    expect(preview).not.toHaveTextContent("name: phone-appointment");
+    fireEvent.click(screen.getByRole("button", { name: "编辑产物" }));
+    expect(screen.getByRole("textbox", { name: "Markdown 正文编辑器" })).toHaveValue(raw);
+    fireEvent.click(screen.getByRole("tab", { name: "预览" }));
+    expect(screen.getByRole("region", { name: "Markdown 编辑预览" })).not.toHaveTextContent("name: phone-appointment");
+    fireEvent.click(screen.getByRole("tab", { name: "编辑" }));
+    expect(screen.getByRole("textbox", { name: "Markdown 正文编辑器" })).toHaveValue(raw);
+    expect(screen.getByRole("button", { name: "保存修改" })).toBeDisabled();
+  });
 
   it("creates an actual round cap and enables human Evidence checkpoints", async () => {
     const created = vi.fn(() => ({ jobs: [] }));
@@ -90,6 +143,7 @@ describe("MiningView real mining rounds", () => {
     const slider = await screen.findByRole("slider", { name: /挖掘轮数上限/ });
     fireEvent.change(slider, { target: { value: "2" } });
     expect(screen.getByRole("checkbox", { name: /每轮完成后等待人工补充 Evidence/ })).toBeChecked();
+    expect(screen.getByText(/基础运行期限；按输入分片和产物工作量自动延长，单次调用仍有超时保护/)).toBeInTheDocument();
     expect(screen.queryByText(/内部证据复核次数提示/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "创建任务" }));
     await waitFor(() => expect(created).toHaveBeenCalled());
@@ -110,6 +164,93 @@ describe("MiningView real mining rounds", () => {
     expect(screen.getByRole("combobox", { name: "选择 Skill 知识源" })).toHaveValue(source.path);
     fireEvent.click(screen.getByRole("button", { name: "创建任务" }));
     await waitFor(() => expect(created).toHaveBeenCalledWith("/api/mining/jobs", expect.objectContaining({ max_rounds: 2, runtime_timeout_seconds: 600, input_dir: source.path })));
+  });
+
+  it("loads source references cheaply and verifies only the explicitly selected directory", async () => {
+    const created = vi.fn(() => ({ jobs: [] }));
+    installApi(null, created);
+    const baseApi = mockedApi.getMockImplementation()!;
+    const unverified = { ...source, document_count: 0, total_bytes: 0, ready: false, status: "unverified" };
+    mockedApi.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === "/api/mining/input-sources") return { sources: [unverified] };
+      if (path === `/api/mining/input-sources/${source.source_id}`) return { source };
+      return baseApi(path, init);
+    });
+    render(<MiningView active page="jobs" />);
+    fireEvent.click(await screen.findByRole("button", { name: "新建 Skill 挖掘" }));
+    expect(await screen.findByRole("option", { name: /待检查/ })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "创建任务" })).toBeDisabled();
+    expect(mockedApi).not.toHaveBeenCalledWith(`/api/mining/input-sources/${source.source_id}`);
+
+    fireEvent.click(screen.getByRole("button", { name: "检查选中目录" }));
+    await screen.findByText(`${source.path} · 2 个文档 · 200 B`);
+    expect(mockedApi).toHaveBeenCalledWith(`/api/mining/input-sources/${source.source_id}`);
+    expect(screen.getByRole("button", { name: "创建任务" })).toBeEnabled();
+  });
+
+  it("shows the actual extended round deadline instead of the configured base timeout", async () => {
+    const initial = { ...waitingJob(), round_timeout_seconds: 7200, round_work_units: 12 };
+    installApi(initial);
+    await openJob();
+    expect(screen.getByText("运行期限：2 小时 0 分")).toBeInTheDocument();
+    expect(screen.queryByText("运行期限：1 小时 0 分")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["该来源超过 10000 个文件，请选择更小的目录。", "该来源超过 10000 个文件，请选择更小的目录。"],
+    ["", "单个文本文件不超过 20 MB，目录不超过 10000 个文件；大来源分批处理"],
+  ])("explains and blocks an over-limit source using the registry error or the capacity fallback (%s)", async (error, explanation) => {
+    const created = vi.fn(() => ({ jobs: [] }));
+    installApi(null, created);
+    const baseApi = mockedApi.getMockImplementation()!;
+    mockedApi.mockImplementation(async (path: string, init?: RequestInit) => path === "/api/mining/input-sources" ? {
+      sources: [{ ...source, name: "大型来源", document_count: 10001, ready: false, status: "over_limit", ingestion: { error } }],
+    } : baseApi(path, init));
+    render(<MiningView active page="jobs" />);
+    fireEvent.click(await screen.findByRole("button", { name: "新建 Skill 挖掘" }));
+    expect(await screen.findByRole("option", { name: "大型来源（超过挖掘限额）" })).toBeDisabled();
+    expect(screen.getByText(`超过挖掘限额：${error || "单个文本文件不超过 20 MB，目录不超过 10000 个文件；大来源分批处理。"}`)).toHaveTextContent(explanation);
+    expect(screen.queryByText("该目录没有可挖掘文档，请先上传素材。")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "创建任务" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "创建任务" }));
+    expect(created).not.toHaveBeenCalled();
+  });
+
+  it("leaves an eligible source selectable when another source exceeds the mining limit", async () => {
+    const created = vi.fn(() => ({ jobs: [] }));
+    installApi(null, created);
+    const baseApi = mockedApi.getMockImplementation()!;
+    mockedApi.mockImplementation(async (path: string, init?: RequestInit) => path === "/api/mining/input-sources" ? {
+      sources: [
+        { ...source, source_id: "too-large", path: "viking://resources/mining/too-large", name: "大型来源", document_count: 10001, ready: false, status: "over_limit" },
+        source,
+      ],
+    } : baseApi(path, init));
+    render(<MiningView active page="jobs" />);
+    fireEvent.click(await screen.findByRole("button", { name: "新建 Skill 挖掘" }));
+    expect(await screen.findByRole("option", { name: "大型来源（超过挖掘限额）" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "选择 Skill 知识源" })).toHaveValue(source.path);
+    expect(screen.getByRole("button", { name: "创建任务" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "创建任务" }));
+    await waitFor(() => expect(created).toHaveBeenCalledWith("/api/mining/jobs", expect.objectContaining({ source_id: source.source_id, input_dir: source.path })));
+  });
+
+  it("labels an over-limit source in the actual source workspace without treating its files as an empty directory", async () => {
+    const { default: SkillSourceWorkspace } = await vi.importActual<typeof import("./SkillSourceWorkspace")>("./SkillSourceWorkspace");
+    const error = "该来源超过 Skill 挖掘的 10000 个文件限额，请选择更小的来源目录";
+    const overLimit = { ...source, name: "大型来源", document_count: 10001, ready: false, status: "over_limit", ingestion: { error } };
+    mockedApi.mockImplementation(async (path: string) => {
+      if (path === "/api/mining/ov-sources") return { accounts: ["default"], current: "default", root_uri: "viking://resources", sources: [overLimit] };
+      if (path === "/api/mining/ov-source-tree?source_id=source-1") return {
+        root_uri: source.path, exists: true, entries: [{ uri: `${source.path}/policy.md`, name: "policy.md", is_dir: false, size: 100 }],
+      };
+      throw new Error(`Unexpected API call: ${path}`);
+    });
+    render(<SkillSourceWorkspace sources={[overLimit]} selectedPath={source.path} onSelect={vi.fn()} onRefresh={vi.fn(async () => undefined)} />);
+    expect(screen.getByText("超过挖掘限额")).toHaveAttribute("title", error);
+    expect(screen.queryByText("空目录")).not.toBeInTheDocument();
+    expect(await screen.findByText("policy.md")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "上传文件" })).toBeEnabled();
   });
 
   it("prepares files, submits sourced Evidence and unknown questions, and reuses the request ID after a failed continue", async () => {
@@ -203,21 +344,82 @@ describe("MiningView real mining rounds", () => {
     initial.rounds[0].remote_warnings = [warning];
     installApi(initial, () => ({ job: { ...initial, status: "succeeded", pending_checkpoint: null } }));
     await openJob();
-    const checkpointWarning = screen.getByRole("region", { name: "本轮 Compile 来源处理警告" });
+    const checkpointWarning = screen.getByRole("region", { name: "本轮 Compile 执行提示" });
     expect(checkpointWarning).toHaveTextContent(warning);
     expect(checkpointWarning).toHaveTextContent("部分来源未完整处理");
     expect(checkpointWarning.querySelector("img")).toBeNull();
-    fireEvent.click(screen.getByText("第 1 轮 · 1 个产物 · 当前轮次 · 来源处理有警告"));
-    const roundWarning = screen.getByRole("region", { name: "第 1 轮 Compile 来源处理警告" });
+    fireEvent.click(screen.getByText("第 1 轮 · 1 个产物 · 当前轮次 · Compile 执行有提示"));
+    const roundWarning = screen.getByRole("region", { name: "第 1 轮 Compile 执行提示" });
     expect(roundWarning).toHaveTextContent(warning);
     expect(roundWarning.querySelector("img")).toBeNull();
     fireEvent.click(screen.getByRole("checkbox", { name: "问题 1 暂时无法确认" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "问题 2 暂时无法确认" }));
     fireEvent.click(screen.getByRole("button", { name: "结束挖掘并保留最终产物" }));
-    const summary = await screen.findByRole("region", { name: "任务 Compile 来源处理警告" });
+    const summary = await screen.findByRole("region", { name: "任务 Compile 执行提示" });
     expect(summary).toHaveTextContent(`第 1 轮：${warning}`);
     expect(summary.querySelectorAll("li")).toHaveLength(1);
     expect(summary.querySelector("img")).toBeNull();
+  });
+
+  it("classifies a failed Reduce truncation without claiming source extraction or round artifacts completed", async () => {
+    const warning = "1 pipeline jobs failed: ['reduce: truncated: Output limit reached; reduce result size or use file references for agent files']";
+    const initial = {
+      ...waitingJob(), status: "failed", pending_checkpoint: null, artifacts: [], rounds: [],
+      remote_warnings: [warning], finished_at: "2026-10-10T00:02:00Z",
+      error: "COMPILE_INCOMPLETE: <img src=x onerror=alert(1)> No accepted final artifacts remain after failed jobs",
+    };
+    const action = vi.fn();
+    installApi(initial, action);
+    const failure = await openFailedJob();
+    expect(failure).toHaveTextContent("能力拆分规划（Reduce）失败");
+    expect(failure).toHaveTextContent("模型输出达到单次长度上限，规划结果被截断");
+    expect(failure).toHaveTextContent(initial.error);
+    expect(failure.querySelector("img")).toBeNull();
+    const warningRegion = screen.getByRole("region", { name: "任务 Compile 执行提示" });
+    expect(warningRegion).toHaveTextContent(warning);
+    expect(warningRegion).not.toHaveTextContent("来源曾未完整处理");
+    expect(screen.getByText("第 1 轮 · 未生成可审核产物")).toBeInTheDocument();
+    expect(screen.getByText("本轮未生成可审核产物。")).toBeInTheDocument();
+    expect(screen.getByText(/^结束于 /)).toBeInTheDocument();
+    expect(screen.queryByText(/^完成于 /)).not.toBeInTheDocument();
+    expect(screen.queryByText("来源处理需复核")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /提交.*进化|提交补证|结束挖掘/ })).not.toBeInTheDocument();
+    expect(action).not.toHaveBeenCalled();
+  });
+
+  it("uses structured pipeline errors when remote warnings are absent and preserves successful prior-round files as read-only", async () => {
+    const initial = {
+      ...waitingJob(2, 2, false), status: "failed", pending_checkpoint: null, artifacts: [],
+      rounds: [{ round: 1, artifacts: [artifact], ov_task_id: "compile-1", remote_warnings: [] }],
+      error: "COMPILE_INCOMPLETE: No accepted final artifacts remain after failed jobs",
+      ov_pipeline: { errors: [{ stage: "reduce", code: "truncated", message: "Output limit reached" }] },
+      finished_at: "2026-10-10T00:02:00Z",
+    };
+    installApi(initial);
+    expect(await openFailedJob()).toHaveTextContent("能力拆分规划（Reduce）失败");
+    expect(screen.getByRole("region", { name: "任务 Compile 执行提示" })).toHaveTextContent("reduce · truncated · Output limit reached");
+    expect(screen.queryByText(/部分来源.*未完整处理/)).not.toBeInTheDocument();
+    expect(screen.getByText("第 2 轮 · 未生成可审核产物")).toBeInTheDocument();
+    const history = screen.getByRole("region", { name: "挖掘轮次记录" });
+    fireEvent.click(within(history).getByText("第 1 轮 · 1 个产物 · 已归档"));
+    fireEvent.click(within(history).getByRole("button", { name: "example / SKILL.md 只读" }));
+    await screen.findByRole("dialog", { name: "产物预览 · SKILL.md" });
+    expect(screen.queryByRole("button", { name: "编辑产物" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /提交.*进化/ })).not.toBeInTheDocument();
+  });
+
+  it("keeps unclassified Compile warnings generic rather than inventing a source or Reduce failure", async () => {
+    const initial = {
+      ...waitingJob(), status: "failed", pending_checkpoint: null, artifacts: [], rounds: [],
+      remote_warnings: ["Partial output: source references could not be validated; writer failed."],
+      error: "COMPILE_INCOMPLETE: transform rejected the response",
+    };
+    installApi(initial);
+    expect(await openFailedJob()).toHaveTextContent("本轮 Compile 执行失败。");
+    const warnings = screen.getByRole("region", { name: "任务 Compile 执行提示" });
+    expect(warnings).toHaveTextContent("请结合任务状态和已有产物核对下方远端详情");
+    expect(warnings).not.toHaveTextContent("来源曾未完整处理");
+    expect(warnings).not.toHaveTextContent("能力拆分规划（Reduce）");
   });
 
   it("keeps the selected task and its Evidence clean when an earlier task upload finishes late", async () => {
@@ -305,8 +507,22 @@ describe("MiningView independent Skill Candidates", () => {
   });
   afterEach(cleanup);
 
+  it("shows the generated Chinese title while the complete capability plan is still unavailable", async () => {
+    const initial = {
+      ...completedCandidateJob(["phone-appointment"]), status: "running", capability_plan: null,
+      artifacts: [{ ...candidateFiles("phone-appointment")[0], display_title: "电话约访方法" }],
+    };
+    installApi(initial);
+    render(<MiningView active page="jobs" />);
+    fireEvent.click(await screen.findByRole("button", { name: /真实多轮挖掘/ }));
+    const card = await screen.findByRole("region", { name: "Skill 文件预览（生成中）" });
+    expect(within(card).getByText("电话约访方法")).toBeVisible();
+    expect(within(card).getByText("标识：phone-appointment")).toBeVisible();
+  });
+
   it("keeps each candidate's four files and capability details together, with shared analysis separate", async () => {
     const initial = completedCandidateJob(["returns", "shipping"]);
+    initial.capability_plan.skills[0].task = "退货申请复核";
     initial.artifacts = [...candidateFiles("shipping"), ...sharedFiles(), ...candidateFiles("returns"), candidateFiles("returns")[0]];
     installApi(initial);
     await openCompletedJob();
@@ -317,7 +533,8 @@ describe("MiningView independent Skill Candidates", () => {
       expect(files.map((file) => file.getAttribute("aria-label"))).toEqual([
         `${name} / SKILL.md`, `${name} / EVALUATION.md`, `${name} / benchmark.json`, `${name} / BENCHMARK.md`,
       ]);
-      expect(card).toHaveTextContent(`${name} 的独立任务`);
+      expect(card).toHaveTextContent(name === "returns" ? "退货申请复核" : `${name} 的独立任务`);
+      expect(within(card).getByText(`标识：${name}`)).toBeVisible();
       expect(within(card).getByText("结构校验通过")).toBeVisible();
       expect(within(card).queryByRole("button", { name: /evidence-map/ })).not.toBeInTheDocument();
       expect(within(shared).queryByRole("button", { name: `${name} / SKILL.md` })).not.toBeInTheDocument();
@@ -493,7 +710,7 @@ describe("MiningView independent Skill Candidates", () => {
     installApi(initial, action);
     await openCompletedJob();
     expect(screen.getByRole("region", { name: "能力拆分计划" })).toHaveTextContent("0 个 Skill Candidate");
-    expect(screen.getByText("本轮没有形成 Skill Candidate，可查看暂缓内容并补充 Evidence。")).toBeVisible();
+    expect(screen.getByText("本轮没有形成 Skill Candidate，可查看共享分析了解原因。")).toBeVisible();
     fireEvent.click(screen.getByText(/暂缓形成 Skill Candidate 的内容/));
     expect(screen.getByText("付款流程的 Evidence 尚不完整")).toBeVisible();
     expect(screen.getByRole("button", { name: "提交所选候选（0）" })).toBeDisabled();

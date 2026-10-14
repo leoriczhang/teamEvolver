@@ -56,6 +56,7 @@ _MAX_UPLOAD_FILES = 200
 _MAX_FILE_BYTES = 20 * 1024 * 1024
 _MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 _MAX_TREE_NODES = 10_000
+_LIST_PAGE_SIZE = 1000
 _MAX_CONTENT_BYTES = 2 * 1024 * 1024
 _MAX_GRAPH_PAGES = 1_000
 _MAX_GRAPH_CONTENT_BYTES = 16 * 1024 * 1024
@@ -83,9 +84,7 @@ _COMPILE_STAGE_PROGRESS = {
     "canceled": (100, "任务已停止"),
     "failed": (100, "编译失败"),
 }
-_MARKDOWN_LINK_RE = re.compile(
-    r"(?<!!)\[([^\]\n]+)\]\(\s*(?:<([^>\n]+)>|([^\s)]+))(?:\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)"
-)
+_MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[([^\]\n]+)\]\(\s*(?:<([^>\n]+)>|([^\s)]+))(?:\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)")
 _MARKDOWN_REFERENCE_LINK_RE = re.compile(r"(?<!!)\[([^\]\n]+)\]\[([^\]\n]*)\]")
 _MARKDOWN_REFERENCE_DEFINITION_RE = re.compile(
     r"^[ \t]{0,3}\[([^\]\n]+)\]:[ \t]*(?:<([^>\n]+)>|([^\s]+))",
@@ -361,8 +360,10 @@ def _knowledge_compile_progress(task: Any) -> dict[str, Any]:
 
     fallback_percent, label = _COMPILE_STAGE_PROGRESS.get(
         stage,
-        (8 if status in {"accepted", "pending", "queued"} else 50 if status in {"running", "committing"} else 0,
-         stage or status or "等待任务状态"),
+        (
+            8 if status in {"accepted", "pending", "queued"} else 50 if status in {"running", "committing"} else 0,
+            stage or status or "等待任务状态",
+        ),
     )
     if status in _COMPILE_SUCCESS_STATES:
         fallback_percent, label = 100, "编译完成"
@@ -381,9 +382,7 @@ def _knowledge_compile_target(task: Any) -> str:
     result = task.get("result") if isinstance(task.get("result"), dict) else {}
     meta = task.get("meta") if isinstance(task.get("meta"), dict) else {}
     request = meta.get("request") if isinstance(meta.get("request"), dict) else {}
-    meta_sanitized = (
-        meta.get("sanitized_request") if isinstance(meta.get("sanitized_request"), dict) else {}
-    )
+    meta_sanitized = meta.get("sanitized_request") if isinstance(meta.get("sanitized_request"), dict) else {}
     sanitized = task.get("sanitized_request") if isinstance(task.get("sanitized_request"), dict) else {}
     return str(
         result.get("to")
@@ -590,8 +589,7 @@ class KnowledgeMiningMixin:
             (
                 item
                 for item in repository.list_source_records()
-                if str(item.get("account") or "") == account
-                and str(item.get("uri") or "").rstrip("/") == normalized
+                if str(item.get("account") or "") == account and str(item.get("uri") or "").rstrip("/") == normalized
             ),
             None,
         )
@@ -735,9 +733,7 @@ class KnowledgeMiningMixin:
         wiki_root: str = _WIKI_ROOT,
     ) -> dict[str, Any] | None:
         try:
-            payload = self._knowledge_link_store().get_object(
-                self._knowledge_link_index_key(account, wiki_root)
-            ).read()
+            payload = self._knowledge_link_store().get_object(self._knowledge_link_index_key(account, wiki_root)).read()
             index = json.loads(payload.decode("utf-8"))
         except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError, OSError, ValueError):
             return None
@@ -801,9 +797,7 @@ class KnowledgeMiningMixin:
 
     def _knowledge_headers(self, account: str, *, shared_admin: bool = False) -> dict[str, str]:
         api_key = self._knowledge_api_key()
-        deployment = str(
-            getattr(self._knowledge_config(), "sharing_viking_deployment", "") or "cloud"
-        ).strip().lower()
+        deployment = str(getattr(self._knowledge_config(), "sharing_viking_deployment", "") or "cloud").strip().lower()
         if not api_key and deployment != "local":
             raise HTTPException(status_code=503, detail="OpenViking service key is not configured")
         headers = {
@@ -886,30 +880,109 @@ class KnowledgeMiningMixin:
             raise HTTPException(status_code=502, detail=_error_message(response, payload))
         return payload
 
+    async def _iter_knowledge_entries(self, account: str, root: str, *, exclude_wiki: bool = False):
+        """Walk visible original entries through the public, paginated single-directory API."""
+        root = root.rstrip("/")
+        # Depth-first iteration keeps only the current path and bounded pages;
+        # neither a wide directory queue nor all source bodies live in memory.
+        stack = [{"uri": root, "offset": 0, "page": [], "cursor": 0, "done": False, "last_key": None}]
+        while stack:
+            frame = stack[-1]
+            if frame["cursor"] >= len(frame["page"]):
+                if frame["done"]:
+                    stack.pop()
+                    continue
+                result = await self._knowledge_request(
+                    account,
+                    "GET",
+                    "/api/v1/fs/ls",
+                    params={
+                        "uri": frame["uri"],
+                        "output": "original",
+                        "recursive": "false",
+                        "show_all_hidden": "false",
+                        "node_limit": _LIST_PAGE_SIZE,
+                        "offset": frame["offset"],
+                        "sort_by": "name",
+                        "sort_order": "asc",
+                    },
+                )
+                page = result
+                if isinstance(result, dict):
+                    page = result.get("entries", result.get("items"))
+                    if any(result.get(flag) for flag in ("truncated", "incomplete", "partial")):
+                        raise HTTPException(
+                            502, "OpenViking directory listing is incomplete; no complete source was claimed"
+                        )
+                if not isinstance(page, list) or len(page) > _LIST_PAGE_SIZE:
+                    raise HTTPException(502, "OpenViking directory listing must be a bounded original entry list")
+                normalized = []
+                page_uris = set()
+                for raw in page:
+                    if not isinstance(raw, dict) or raw.get("access") == "denied":
+                        raise HTTPException(403, "OpenViking source enumeration contains an inaccessible entry")
+                    uri = raw.get("uri")
+                    prefix = frame["uri"] + "/"
+                    relative = uri[len(prefix) :] if isinstance(uri, str) and uri.startswith(prefix) else ""
+                    if (
+                        not relative
+                        or "/" in relative.rstrip("/")
+                        or "\\" in relative
+                        or relative.rstrip("/") in {".", ".."}
+                    ):
+                        raise HTTPException(502, "OpenViking directory listing contains a non-child or invalid URI")
+                    uri = uri.rstrip("/")
+                    if uri in page_uris:
+                        raise HTTPException(
+                            502, "OpenViking source pagination repeated entries; enumeration is not complete"
+                        )
+                    page_uris.add(uri)
+                    entries = _normalize_entries([raw])
+                    if len(entries) != 1:
+                        raise HTTPException(502, "OpenViking directory listing contains invalid metadata")
+                    entry = entries[0]
+                    key = (not entry["is_dir"], entry["name"].lower(), entry["name"])
+                    if frame["last_key"] is not None and key <= frame["last_key"]:
+                        raise HTTPException(502, "OpenViking source pagination is unstable or offset is unsupported")
+                    frame["last_key"] = key
+                    # OV hides generated files, while directory visibility can vary
+                    # by backend. Hidden subtrees are outside the original-source contract.
+                    if (
+                        relative.startswith(".")
+                        or exclude_wiki
+                        and (uri == _WIKI_ROOT or uri.startswith(_WIKI_ROOT + "/"))
+                    ):
+                        continue
+                    normalized.append(entry)
+                frame.update(
+                    page=normalized,
+                    cursor=0,
+                    done=len(page) < _LIST_PAGE_SIZE,
+                    offset=frame["offset"] + len(page),
+                )
+                continue
+            entry = frame["page"][frame["cursor"]]
+            frame["cursor"] += 1
+            yield entry
+            if entry["is_dir"]:
+                stack.append(
+                    {"uri": entry["uri"], "offset": 0, "page": [], "cursor": 0, "done": False, "last_key": None}
+                )
+
     async def _knowledge_tree(self, account: str, root: str, *, exclude_wiki: bool = False) -> dict[str, Any]:
+        entries = []
         try:
-            result = await self._knowledge_request(
-                account,
-                "GET",
-                "/api/v1/fs/tree",
-                params={
-                    "uri": root,
-                    "output": "original",
-                    "show_all_hidden": "false",
-                    "level_limit": 24,
-                    "node_limit": _MAX_TREE_NODES,
-                    "sort_by": "name",
-                    "sort_order": "asc",
-                },
-            )
+            async for entry in self._iter_knowledge_entries(account, root, exclude_wiki=exclude_wiki):
+                entries.append(entry)
         except HTTPException as exc:
-            if exc.status_code == 404 or "NOT_FOUND" in str(exc.detail):
+            if not entries and (exc.status_code == 404 or "NOT_FOUND" in str(exc.detail)):
                 return {"root_uri": root, "exists": False, "entries": []}
             raise
         return {
             "root_uri": root,
             "exists": True,
-            "entries": _normalize_entries(result, excluded_root=_WIKI_ROOT if exclude_wiki else ""),
+            "entries": _normalize_entries(entries),
+            "enumeration_complete": True,
         }
 
     async def _knowledge_wiki_roots(self, account: str) -> list[dict[str, Any]]:

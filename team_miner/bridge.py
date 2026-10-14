@@ -32,7 +32,7 @@ from .ov_compile_mining import (
     validate_descendant,
     validate_resource_uri,
 )
-from .ov_round_orchestration import OvRoundOrchestrationMixin, _compiler_package
+from .ov_round_orchestration import MAX_INPUT_FILES, MAX_SOURCE_FILE_BYTES, OvRoundOrchestrationMixin, _compiler_package
 from .routes import _content_editable, _content_text
 from .settings import (
     LEGACY_COMPILER_WARNING,
@@ -161,10 +161,11 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
         if status not in {"accepted", "pending", "queued", "running", "committing", "cancelling"}:
             return job
         elapsed = self._elapsed_seconds(str(job.get("round_started_at") or job.get("started_at") or ""), utc_now())
-        expired = elapsed is not None and elapsed >= int(job.get("runtime_timeout_seconds") or 3600)
+        timeout = int(job.get("round_timeout_seconds") or job.get("runtime_timeout_seconds") or 3600)
+        expired = elapsed is not None and elapsed >= timeout
         reason = str(job.get("ov_cancel_reason") or "")
         if not reason and expired:
-            reason = f"达到运行期限 {int(job.get('runtime_timeout_seconds') or 3600)} 秒"
+            reason = f"达到本轮运行期限 {timeout} 秒"
             job = await asyncio.to_thread(
                 repository.update_job, job["job_id"], ov_cancel_reason=reason,
                 ov_cancel_requested_at=utc_now(), stop_reason=reason, status="stopping",
@@ -285,6 +286,14 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
         files = [entry for entry in entries if not entry.get("is_dir")]
         exists = bool(tree.get("exists"))
         status = "ready" if exists and files else "empty" if exists else "missing"
+        total_bytes = sum(int(entry.get("size") or 0) for entry in files)
+        error = "" if exists else "OpenViking 中的目录已被删除，请重新选择知识源目录"
+        if status == "ready" and (
+            len(files) > MAX_INPUT_FILES
+            or any(int(row.get("size") or 0) > MAX_SOURCE_FILE_BYTES for row in files)
+        ):
+            status = "over_limit"
+            error = "该来源超过 Skill 挖掘的单文件 20 MB 或目录 10000 个文件限额，请拆分超大的单文件或目录"
         return {
             "source_id": record["source_id"],
             "account": account,
@@ -294,7 +303,7 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
             "tags": normalize_source_tags(record.get("tags"), default=(SOURCE_TAG_SKILL,)),
             "default": bool(record.get("default")),
             "document_count": len(files),
-            "total_bytes": sum(int(entry.get("size") or 0) for entry in files),
+            "total_bytes": total_bytes,
             "ready": status == "ready",
             "status": status,
             "created_at": record.get("created_at") or "",
@@ -308,7 +317,7 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
                 "processed_files": len(files),
                 "total_files": len(files),
                 "current_file": "",
-                "error": "" if exists else "OpenViking 中的目录已被删除，请重新选择知识源目录",
+                "error": error,
                 "started_at": "",
                 "updated_at": utc_now(),
                 "finished_at": utc_now(),
@@ -397,6 +406,8 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
                 return await asyncio.to_thread(repository.public_job, job, detail=detail)
             status = str((task or {}).get("status") or "").lower() if isinstance(task, dict) else ""
             stage = str((task or {}).get("stage") or status) if isinstance(task, dict) else status
+            if status in {"completed", "succeeded", "success", "failed", "cancelled", "canceled"}:
+                await self._release_staged_compile_slot(job, task_id)
             job = await self._ov_enforce_deadline(repository, job, status)
             observed_at = utc_now()
             previous_stage = str(job.get("ov_stage") or "")
@@ -426,10 +437,17 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
                 error = raw_error if isinstance(raw_error, str) else json.dumps(raw_error or {}, ensure_ascii=False)
             awaiting_materialization = public_status == "succeeded" and not job.get("materialized")
             round_completion_pending = public_status == "succeeded" and job.get("orchestration_version") == 2
+            staged_failure_pending = (
+                job.get("staged_protocol") == "te-staged-compile.v1" and public_status == "failed"
+            )
             changes = {
                 # A remote completed task can contain partial output. Publish success only
                 # after the local artifact contract has accepted the complete bundle.
-                "status": "running" if awaiting_materialization or round_completion_pending else public_status,
+                "status": (
+                    "running"
+                    if awaiting_materialization or round_completion_pending or staged_failure_pending
+                    else public_status
+                ),
                 "phase": phase,
                 "ov_status": status,
                 "ov_processing_seconds": (task or {}).get("processing_seconds"),
@@ -449,7 +467,7 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
             if elapsed is not None:
                 changes["compile_observed_seconds"] = elapsed
             if (public_status in {"succeeded", "failed", "stopped"}
-                    and not awaiting_materialization and not round_completion_pending):
+                    and not awaiting_materialization and not round_completion_pending and not staged_failure_pending):
                 changes["finished_at"] = str(
                     (task or {}).get("updated_at_iso") or (task or {}).get("updated_at") or utc_now()
                 )
@@ -461,6 +479,10 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
                 )
             if job.get("ov_last_sync_attempt_at") and previous_error:
                 repository.append_log(job["job_id"], "OpenViking 连接已恢复，任务状态同步成功")
+            if (job.get("staged_protocol") == "te-staged-compile.v1"
+                    and status in {"completed", "succeeded", "success", "failed", "cancelled", "canceled"}):
+                job = await self._advance_staged_round(job, task)
+                return await asyncio.to_thread(repository.public_job, job, detail=detail)
             if round_completion_pending and job.get("materialized"):
                 job = await self._complete_ov_skill_round(job)
                 return await asyncio.to_thread(repository.public_job, job, detail=detail)
@@ -719,6 +741,51 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
                     "error": accounts.get("error") or "",
                 }
             )
+
+        @app.get("/api/mining/input-sources")
+        async def mining_input_sources(request: Request):
+            """Return registered source references without recursively probing every OV tree.
+
+            The task form polls this inventory while open. Tree completeness is checked only
+            for the source the operator selects, and again when the job is created.
+            """
+            denied = _require_admin(request)
+            if denied is not None:
+                return denied
+            repository = owner._ov_skill_mining_repository()
+            records = await asyncio.to_thread(repository.list_source_records)
+            sources = []
+            for record in records:
+                uri = str(record.get("uri") or "")
+                sources.append({
+                    "source_id": record.get("source_id"),
+                    "account": record.get("account"),
+                    "path": uri,
+                    "uri": uri,
+                    "name": record.get("name") or uri.rsplit("/", 1)[-1],
+                    "tags": normalize_source_tags(record.get("tags"), default=(SOURCE_TAG_SKILL,)),
+                    "default": bool(record.get("default")),
+                    "created_at": record.get("created_at") or "",
+                    "document_count": 0,
+                    "total_bytes": 0,
+                    "ready": False,
+                    "status": "unverified",
+                })
+            return JSONResponse({"sources": sources})
+
+        @app.get("/api/mining/input-sources/{source_id}")
+        async def mining_input_source_detail(source_id: str, request: Request):
+            """Verify only the selected source's complete original-file tree."""
+            denied = _require_admin(request)
+            if denied is not None:
+                return denied
+            repository = owner._ov_skill_mining_repository()
+            try:
+                record = await asyncio.to_thread(repository.get_source, source_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="知识源引用不存在") from exc
+            source = await owner._ov_source_detail(record)
+            return JSONResponse({"source": source})
 
         @app.get("/api/mining/ov-tree")
         async def mining_ov_tree(

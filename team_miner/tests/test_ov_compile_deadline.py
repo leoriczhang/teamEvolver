@@ -68,6 +68,29 @@ async def test_terminal_wins_over_deadline(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_large_round_uses_scaled_budget_and_keeps_cancel_deadline(tmp_path):
+    r, j = job_repo(tmp_path)
+    j = r.update_job(j["job_id"], round_timeout_seconds=120, round_work_units=16)
+
+    class Owner(SkillMinerBridgeMixin):
+        calls = 0
+
+        async def _knowledge_request(self, *args, **kwargs):
+            self.calls += 1
+            return {"status": "cancelling"}
+
+    owner = Owner()
+    first = await owner._ov_enforce_deadline(r, j, "running")
+    assert first["status"] == "running" and not first["ov_cancel_requested_at"] and owner.calls == 0
+    overdue = r.update_job(
+        j["job_id"], started_at=(datetime.now(timezone.utc) - timedelta(seconds=121)).isoformat(),
+    )
+    stopped = await owner._ov_enforce_deadline(r, overdue, "running")
+    assert stopped["status"] == "stopping" and owner.calls == 1
+    assert "120" in stopped["ov_cancel_reason"]
+
+
+@pytest.mark.asyncio
 async def test_cancel_transport_failure_retry(tmp_path):
     r, j = job_repo(tmp_path)
 

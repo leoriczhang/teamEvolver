@@ -1,6 +1,6 @@
 # Multi-round Skill Mining and Human Evidence Supplements
 
-The console uses teamEvolver to manage real mining rounds, with one OpenViking Compile task per round. New jobs first plan independently executable task methods and compile them into a Skill Candidate collection. When human checkpoints are enabled, a completed round waits for an administrator to review its candidate collection, answer Evidence gaps and add sources before starting the next round.
+The console uses teamEvolver to manage real mining rounds, with bounded batches submitted to the existing OpenViking Compile API. New jobs first plan independently executable task methods and compile them into a Skill Candidate collection. When human checkpoints are enabled, a completed round waits for an administrator to review its candidate collection, answer Evidence gaps and add sources before starting the next round.
 
 This workflow uses the model and execution environment configured in OpenViking. The console's global model settings do not select the model for Compile. The original source is frozen when the mining job starts; later changes to the source directory do not silently change the job's input.
 
@@ -14,9 +14,9 @@ Select a directory tagged for Skill use on the source page, then create a Skill 
 
 | Setting | Behavior |
 | --- | --- |
-| Maximum mining rounds | 1–5, default 3; each round has a separate Compile task |
+| Maximum mining rounds | 1–5, default 3; each round retains separate inputs, artifacts and staged Compile records |
 | Human Evidence supplements | When enabled, every completed round requires human review, including the final round |
-| Runtime limit per round | 60–7200 seconds, default 3600; waiting for human input is excluded |
+| Runtime limit per round | Base deadline 60–7200 seconds, default 3600; the default contract scales it with input shards and artifact-generation workload and excludes human waiting |
 
 With human checkpoints disabled, teamEvolver executes the configured number of rounds automatically. Each round still retains separate inputs, artifacts and execution records. At most 8 Compile mining tasks execute concurrently; jobs waiting for human input do not consume an execution slot.
 
@@ -24,9 +24,11 @@ With human checkpoints disabled, teamEvolver executes the configured number of r
 
 The model determines candidate count from task triggers, inputs, outputs and boundaries. Each candidate must be independently executable and independently verifiable through True Replay. Document, chapter and topic counts do not determine the number of candidates. One document may support multiple methods, and one method may draw on multiple documents. Merge overlapping methods and keep workflow steps together when they cannot be used independently.
 
-Each round allows 0–8 candidates. Eight is an execution bound, not a count to fill. Pure facts or insufficient Evidence may produce zero candidates, with deferral reasons. The result is a collection of Skill Candidates awaiting validation; individual candidates enter the existing Skill library after passing their own gates.
+Each bounded planning task may output at most eight candidates; a round can use more tasks for more supported methods. There is no count to fill. Pure facts or insufficient Evidence may produce zero candidates, with reasons. Every method proposal has a recorded disposition; facts do not automatically become requests for human Evidence. The result is a collection of Skill Candidates awaiting validation; individual candidates enter the existing Skill library after passing their own gates.
 
 Start with the shared `analysis/capability-plan.json` (`schema_version: "skill-miner.plan.v1"`). Its `skills` entries describe `name`, `task`, `trigger`, `inputs`, `outputs`, `boundary`, `rationale` and `source_refs`. The `deferred` entries retain `reason` and `source_refs` for deferred content. The plan explains which methods are separated or merged and which sources do not yet support an executable method.
+
+The default batched flow also writes `analysis/method-dispositions.md` and pages such as `analysis/dispositions/page-0001.md` with matching JSON. They record each method proposal’s retention, merge, factual-information classification or deferral, including sources and reasons. Facts do not automatically request human Evidence.
 
 Each round has four shared analysis files: `evidence-map.md`, `gaps.md`, `review.json` and `capability-plan.json`. Every candidate has its own `SKILL.md`, `EVALUATION.md`, `BENCHMARK.md` and `benchmark.json` under `compiled_skill/<skill-name>/`. The JSON file is that candidate's Test Dataset. A zero-candidate round retains only shared analysis; continue with supplements or finish without submitting a candidate.
 
@@ -57,9 +59,11 @@ Each round receives three inputs with distinct roles:
 - **Human supplements**: accumulated answers, sources and supplementary documents, retaining the submitting identity and time.
 - **Revision context**: each previous Skill body, Test Dataset case identifiers, and current review questions and feedback, used to revise the candidate collection.
 
-Compile `from` contains only the frozen source Evidence and human supplement directory. Revision context is delivered as quoted text in `instruction`; it is not extracted again as source files and cannot be cited as provenance. The complete previous shared analysis and candidate artifacts remain archived locally and remotely. The full Test Dataset and duplicate Markdown representations are not added back to extraction inputs.
+Extraction and generation Compile inputs contain bounded frozen fragments of original Evidence and human supplements. Planning uses a traceable method ledger without treating generated summaries as original facts. Revision context is delivered as quoted text in `instruction`; it is not extracted again as source files and cannot be cited as provenance. The complete previous shared analysis and candidate artifacts remain in the local round archive. The full Test Dataset and duplicate Markdown representations are not added back to extraction inputs.
 
-The revision-context JSON delivered to the model is limited to 30000 characters. If necessary, question text, feedback or the Skill body is shortened with explicit excerpt or omission flags. Complete content remains archived. An excerpt does not instruct the model to use tools to find the remaining files.
+The default staged flow keeps previous candidate identities, case identifiers and source scopes in a local revision ledger. Each model task receives only matching context that fits its assignment budget, with explicit excerpt or omission flags. Complete content remains archived. Custom single-Compile flows retain the 30000-character revision-context limit. An excerpt does not instruct the model to use tools to find the remaining files.
+
+When method scope remains stable, the next round explicitly reuses the existing candidate identity and its case identifiers. The host retains identity fields while expanding the associated source scope. Similar but distinct methods remain separate; similar names or shared sources do not justify merging. Proposed deferrals must be checked against the relevant original text before missing necessary rules become supplement questions. Previous artifacts cannot prove that a rule exists.
 
 Previous model output is not established Evidence. The model must cite original sources or human supplement sources. A human answer that contradicts the original source must retain the conflict rather than silently replace the source's assertion.
 
@@ -79,11 +83,11 @@ When a warning identifies omitted sources, inspect those documents and provide r
 
 ## Recovery and cancellation
 
-teamEvolver persists rounds, checkpoints and submission state locally. After a restart it resumes observing an existing remote task rather than creating another accepted Compile task. If a network interruption leaves acceptance unknown, the same round's idempotency key is used to query or recover its submission.
+teamEvolver persists rounds, checkpoints and submission state locally. After a restart it resumes observing an existing remote task rather than creating another accepted Compile task. If a network interruption leaves acceptance unknown, the same stage's original idempotency key is used to query or recover its submission.
 
 Initial preparation also freezes each round's compiler Skill body and input archive. The compiler is installed at a separate Skill URI whose name contains the source-body digest. Records include `compiler_source_sha256`, the actual installed body's `compiler_sha256`, and `compiler_uri`. Existing versions are reused only when their contents match; conflicts stop submission rather than overwrite that version.
 
-Retries use the same compiler URI, body, inputs and Compile request. If acceptance is unknown and no remote task is recorded, a missing compiler package can be restored from its frozen body. Recorded tasks resume status observation directly. Service updates or other jobs installing new compiler versions do not change the version bound to this round.
+A stage retry uses the same compiler URI, body, inputs and Compile request; the next stage starts only after its predecessor is validated. If acceptance is unknown and no remote task is recorded, a missing compiler package can be restored from its frozen body. Recorded tasks resume status observation directly. Service updates or other jobs installing new compiler versions do not change the version bound to this round.
 
 Stopping an executing task requests cooperative cancellation from OpenViking and waits for its terminal state. A job waiting for human input can finish directly. Stop executing work before deleting its job.
 

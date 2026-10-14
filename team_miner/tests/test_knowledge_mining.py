@@ -190,7 +190,7 @@ def test_knowledge_upload_converts_before_openviking_write(
     assert "关键事实" in write[1]["json"]["content"]
     assert len([call for call in calls if call[0] == "/api/v1/content/write"]) == 1
     assert not any(path.startswith("/api/v1/resources") for path, _kwargs in calls)
-    assert scheduled == ([('demo', _WIKI_ROOT, 0.5)] if kind == "wiki" else [])
+    assert scheduled == ([("demo", _WIKI_ROOT, 0.5)] if kind == "wiki" else [])
 
 
 def test_knowledge_upload_preserves_folder_below_selected_directory(monkeypatch) -> None:
@@ -242,16 +242,22 @@ def test_knowledge_directory_uri_accepts_root_and_rejects_escape() -> None:
 def test_knowledge_source_uri_helpers_support_a_registered_dynamic_root() -> None:
     source_root = "viking://resources/customer-support"
 
-    assert _knowledge_directory_uri(
-        "source",
-        f"{source_root}/docs",
-        source_root=source_root,
-    ) == f"{source_root}/docs"
-    assert _knowledge_file_uri(
-        "source",
-        f"{source_root}/docs/guide.md",
-        source_root=source_root,
-    ) == f"{source_root}/docs/guide.md"
+    assert (
+        _knowledge_directory_uri(
+            "source",
+            f"{source_root}/docs",
+            source_root=source_root,
+        )
+        == f"{source_root}/docs"
+    )
+    assert (
+        _knowledge_file_uri(
+            "source",
+            f"{source_root}/docs/guide.md",
+            source_root=source_root,
+        )
+        == f"{source_root}/docs/guide.md"
+    )
     with pytest.raises(HTTPException):
         _knowledge_file_uri(
             "source",
@@ -724,13 +730,18 @@ class _WikiCompilerHTTP:
 
     def __init__(self, existing: str, *, failure: str = "") -> None:
         self.skill_body = (
-            None if existing == "missing"
-            else self._stored_skill(knowledge_mining_module._DEFAULT_WIKI_SKILL) if existing in {"current", "complete"}
+            None
+            if existing == "missing"
+            else self._stored_skill(knowledge_mining_module._DEFAULT_WIKI_SKILL)
+            if existing in {"current", "complete"}
             else "---\nname: llm-wiki\ndescription: Previous compiler.\n---\n# Previous contract\n"
         )
         self.files = (
-            dict(knowledge_mining_module._DEFAULT_WIKI_SKILL_AUXILIARY_FILES) if existing == "complete"
-            else {} if existing == "missing" else {"README.md": "Previous attachment"}
+            dict(knowledge_mining_module._DEFAULT_WIKI_SKILL_AUXILIARY_FILES)
+            if existing == "complete"
+            else {}
+            if existing == "missing"
+            else {"README.md": "Previous attachment"}
         )
         self.failure = failure
         self.calls: list[tuple[str, str, dict]] = []
@@ -747,14 +758,17 @@ class _WikiCompilerHTTP:
 
     def respond(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        payload = json.loads(request.content) if request.content and "application/json" in (
-            request.headers.get("Content-Type", "")
-        ) else {}
+        payload = (
+            json.loads(request.content)
+            if request.content and "application/json" in (request.headers.get("Content-Type", ""))
+            else {}
+        )
         self.calls.append((request.method, path, payload))
         assert request.headers["X-OpenViking-Account"] == "demo"
-        if path == "/api/v1/fs/tree":
+        if path == "/api/v1/fs/ls":
             assert request.method == "GET" and request.url.params["uri"] == _SOURCE_ROOT
-            return self._ok({"entries": [{"uri": f"{_SOURCE_ROOT}/policy.md", "is_dir": False}]})
+            assert request.url.params["offset"] == "0" and request.url.params["recursive"] == "false"
+            return self._ok([{"uri": f"{_SOURCE_ROOT}/policy.md", "isDir": False}])
         if path == "/api/v1/compile/capabilities":
             return self._ok({"can_create": True, "configured": True})
         if path == "/api/v1/resources/temp_upload":
@@ -793,19 +807,24 @@ class _WikiCompilerHTTP:
                     for item in files:
                         if item["path"] == "templates/okf-frontmatter.md":
                             item["sha256"] = hashlib.sha256(b"stale attachment").hexdigest()
-                return self._ok({
-                    "root_uri": self.skill_uri,
-                    "content": self.skill_body,
-                    "content_sha256": hashlib.sha256(self.skill_body.encode()).hexdigest(),
-                    "revision": 2,
-                    "files": [
-                        {"path": "SKILL.md", "is_dir": False,
-                         "sha256": hashlib.sha256(self.skill_body.encode()).hexdigest()},
-                        {"path": "templates", "is_dir": True},
-                        {"path": ".abstract.md", "is_dir": False, "sha256": "generated-by-ov"},
-                        *files,
-                    ],
-                })
+                return self._ok(
+                    {
+                        "root_uri": self.skill_uri,
+                        "content": self.skill_body,
+                        "content_sha256": hashlib.sha256(self.skill_body.encode()).hexdigest(),
+                        "revision": 2,
+                        "files": [
+                            {
+                                "path": "SKILL.md",
+                                "is_dir": False,
+                                "sha256": hashlib.sha256(self.skill_body.encode()).hexdigest(),
+                            },
+                            {"path": "templates", "is_dir": True},
+                            {"path": ".abstract.md", "is_dir": False, "sha256": "generated-by-ov"},
+                            *files,
+                        ],
+                    }
+                )
             assert request.method in {"POST", "PUT"}
             assert set(payload) <= {"temp_file_id", "wait", "timeout", "target_uri", "source_metadata"}
             assert payload["target_uri"] == "viking://agent/skills"
@@ -866,7 +885,9 @@ def _real_wiki_compile_app(tmp_path, monkeypatch, remote: _WikiCompilerHTTP):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("existing", ["missing", "current", "outdated", "complete"])
 async def test_default_wiki_compile_real_client_publishes_complete_bundle_before_submission(
-    tmp_path, monkeypatch, existing,
+    tmp_path,
+    monkeypatch,
+    existing,
 ) -> None:
     remote = _WikiCompilerHTTP(existing)
     owner, app = _real_wiki_compile_app(tmp_path, monkeypatch, remote)
@@ -879,11 +900,17 @@ async def test_default_wiki_compile_real_client_publishes_complete_bundle_before
     assert response.json()["task_id"] == "cmp_wiki_contract"
     assert remote.compile_requests == [{"from": [_SOURCE_ROOT], "to": _WIKI_ROOT, "skill": remote.skill_uri}]
     assert len(remote.uploaded_packages) == (0 if existing == "complete" else 1)
-    skill_writes = [(method, path) for method, path, _ in remote.calls if method in {"POST", "PUT"}
-                    and path.startswith("/api/v1/skills")]
+    skill_writes = [
+        (method, path)
+        for method, path, _ in remote.calls
+        if method in {"POST", "PUT"} and path.startswith("/api/v1/skills")
+    ]
     assert skill_writes == (
-        [("POST", "/api/v1/skills")] if existing == "missing"
-        else [] if existing == "complete" else [("PUT", "/api/v1/skills/llm-wiki")]
+        [("POST", "/api/v1/skills")]
+        if existing == "missing"
+        else []
+        if existing == "complete"
+        else [("PUT", "/api/v1/skills/llm-wiki")]
     )
     assert remote.calls[-1][1] == "/api/v1/compile"
     assert owner.watches == [("demo", "cmp_wiki_contract")]
@@ -893,7 +920,10 @@ async def test_default_wiki_compile_real_client_publishes_complete_bundle_before
 @pytest.mark.parametrize("failure", ["upload", "skill", "verification"])
 @pytest.mark.parametrize("existing", ["missing", "outdated"])
 async def test_default_wiki_compile_does_not_start_when_real_publication_fails(
-    tmp_path, monkeypatch, failure, existing,
+    tmp_path,
+    monkeypatch,
+    failure,
+    existing,
 ) -> None:
     remote = _WikiCompilerHTTP(existing, failure=failure)
     owner, app = _real_wiki_compile_app(tmp_path, monkeypatch, remote)
@@ -997,10 +1027,7 @@ def test_build_wiki_link_index_calculates_bidirectional_links() -> None:
             "count": 2,
         }
     ]
-    assert [
-        backlink["source_uri"]
-        for backlink in index["pages"][f"{_WIKI_ROOT}/b.md"]["backlinks"]
-    ] == [
+    assert [backlink["source_uri"] for backlink in index["pages"][f"{_WIKI_ROOT}/b.md"]["backlinks"]] == [
         f"{_WIKI_ROOT}/a.md",
         f"{_WIKI_ROOT}/c.md",
     ]
@@ -1008,9 +1035,7 @@ def test_build_wiki_link_index_calculates_bidirectional_links() -> None:
 
 def test_wiki_graph_uses_compiled_pages_and_resolved_link_index() -> None:
     documents = {
-        f"{_WIKI_ROOT}/index.md": (
-            "---\ntype: index\ntitle: 团队知识\n---\n# 团队知识\n[概念 A](concept/a.md)"
-        ),
+        f"{_WIKI_ROOT}/index.md": ("---\ntype: index\ntitle: 团队知识\n---\n# 团队知识\n[概念 A](concept/a.md)"),
         f"{_WIKI_ROOT}/concept/a.md": (
             "---\ntype: concept\ntitle: 概念 A\ndescription: 核心概念。\n---\n# 概念 A\n正文"
         ),
@@ -1261,7 +1286,7 @@ def test_knowledge_file_save_does_not_wait_for_openviking_ingestion(monkeypatch,
     write = next(call for call in calls if call[0] == "POST")
     assert write[1] == "/api/v1/content/write"
     assert write[2]["json"]["wait"] is False
-    assert scheduled == ([('demo', _WIKI_ROOT, 0.5)] if kind == "wiki" else [])
+    assert scheduled == ([("demo", _WIKI_ROOT, 0.5)] if kind == "wiki" else [])
 
 
 def test_compile_watcher_rebuilds_links_after_success(monkeypatch) -> None:
