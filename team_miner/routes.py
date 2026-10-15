@@ -880,6 +880,34 @@ class KnowledgeMiningMixin:
             raise HTTPException(status_code=502, detail=_error_message(response, payload))
         return payload
 
+    async def _ensure_knowledge_output_directory(self, account: str, uri: str) -> None:
+        """Provision missing output parents before Compile validates its target."""
+        async def check() -> None:
+            await self._knowledge_request(
+                account,
+                "GET",
+                "/api/v1/fs/ls",
+                params={"uri": uri, "recursive": "false", "node_limit": 1},
+            )
+
+        try:
+            await check()
+            return
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+
+        if uri != _RESOURCES_ROOT:
+            await self._ensure_knowledge_output_directory(account, uri.rsplit("/", 1)[0])
+        try:
+            await self._knowledge_request(account, "POST", "/api/v1/fs/mkdir", json={"uri": uri})
+        except HTTPException as exc:
+            if exc.status_code != 409 and "ALREADY_EXISTS" not in str(exc.detail).upper():
+                raise
+            # Another request may have created it after our check. Verify the
+            # directory is now accessible instead of hiding an unrelated conflict.
+            await check()
+
     async def _iter_knowledge_entries(self, account: str, root: str, *, exclude_wiki: bool = False):
         """Walk visible original entries through the public, paginated single-directory API."""
         root = root.rstrip("/")
@@ -1760,6 +1788,8 @@ class KnowledgeMiningMixin:
             if not capabilities.get("can_create"):
                 reason = str(capabilities.get("reason_code") or "COMPILE_UNAVAILABLE")
                 raise HTTPException(status_code=409, detail=f"OpenViking Compile is unavailable: {reason}")
+
+            await owner._ensure_knowledge_output_directory(selected, target_uri)
 
             # The default compiler Skill is provisioned idempotently so a new
             # account can run its first mining task without a separate setup step.

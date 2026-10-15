@@ -613,6 +613,8 @@ def test_knowledge_compile_passes_only_the_last_successful_compile_time(tmp_path
             }
 
         async def _knowledge_request(self, _account, _method, path, **kwargs):
+            if path == "/api/v1/fs/ls":
+                return []
             assert path == "/api/v1/compile"
             compile_requests.append(kwargs["json"])
             return {"task_id": f"cmp_{len(compile_requests)}", "status": "accepted"}
@@ -681,6 +683,8 @@ def test_knowledge_compile_accepts_only_registered_knowledge_sources(tmp_path, m
             return {"can_create": True}
 
         async def _knowledge_request(self, _account, _method, path, **kwargs):
+            if path == "/api/v1/fs/ls":
+                return []
             assert path == "/api/v1/compile"
             compile_requests.append(kwargs["json"])
             return {"task_id": "cmp_custom_source", "status": "accepted"}
@@ -744,6 +748,8 @@ class _WikiCompilerHTTP:
             else {"README.md": "Previous attachment"}
         )
         self.failure = failure
+        self.directories = {"viking://resources", knowledge_mining_module._KNOWLEDGE_WORKSPACE_ROOT, _WIKI_ROOT}
+        self.created_directories: list[str] = []
         self.calls: list[tuple[str, str, dict]] = []
         self.compile_requests: list[dict] = []
         self.uploaded_packages: dict[str, dict[str, str]] = {}
@@ -766,9 +772,27 @@ class _WikiCompilerHTTP:
         self.calls.append((request.method, path, payload))
         assert request.headers["X-OpenViking-Account"] == "demo"
         if path == "/api/v1/fs/ls":
-            assert request.method == "GET" and request.url.params["uri"] == _SOURCE_ROOT
+            assert request.method == "GET"
+            uri = request.url.params["uri"]
+            if uri != _SOURCE_ROOT:
+                if self.failure == "directory-check":
+                    return self._failed("directory access denied")
+                if uri not in self.directories:
+                    return self._failed("directory missing", status=404)
+                return self._ok([])
             assert request.url.params["offset"] == "0" and request.url.params["recursive"] == "false"
             return self._ok([{"uri": f"{_SOURCE_ROOT}/policy.md", "isDir": False}])
+        if path == "/api/v1/fs/mkdir":
+            assert request.method == "POST"
+            uri = payload["uri"]
+            assert uri.rsplit("/", 1)[0] in self.directories
+            if self.failure == "directory-create":
+                return self._failed("directory creation denied")
+            self.directories.add(uri)
+            self.created_directories.append(uri)
+            if self.failure == "directory-race":
+                return self._failed("ALREADY_EXISTS", status=409)
+            return self._ok({"uri": uri})
         if path == "/api/v1/compile/capabilities":
             return self._ok({"can_create": True, "configured": True})
         if path == "/api/v1/resources/temp_upload":
@@ -841,6 +865,7 @@ class _WikiCompilerHTTP:
             assert self.skill_body == self._stored_skill(knowledge_mining_module._DEFAULT_WIKI_SKILL)
             assert self.files == knowledge_mining_module._DEFAULT_WIKI_SKILL_AUXILIARY_FILES
             assert request.headers["Idempotency-Key"].startswith("te-km-")
+            assert payload["to"] in self.directories
             self.compile_requests.append(payload)
             return self._ok({"task_id": "cmp_wiki_contract", "status": "accepted"}, status=202)
         raise AssertionError(f"unexpected OV API request: {request.method} {path}")
@@ -880,6 +905,47 @@ def _real_wiki_compile_app(tmp_path, monkeypatch, remote: _WikiCompilerHTTP):
     app = FastAPI()
     owner._register_knowledge_mining_routes(app)
     return owner, app
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("directory_state", ["existing", "missing", "fresh", "race", "check-denied", "create-denied"])
+async def test_knowledge_compile_ensures_output_directory_before_submission(
+    tmp_path, monkeypatch, directory_state,
+) -> None:
+    remote = _WikiCompilerHTTP("complete")
+    output_parent = _WIKI_ROOT.rsplit("/", 1)[0]
+    if directory_state != "existing":
+        remote.directories.discard(_WIKI_ROOT)
+    if directory_state == "fresh":
+        remote.directories = {"viking://resources"}
+    elif directory_state == "race":
+        remote.failure = "directory-race"
+    elif directory_state == "check-denied":
+        remote.failure = "directory-check"
+    elif directory_state == "create-denied":
+        remote.failure = "directory-create"
+    owner, app = _real_wiki_compile_app(tmp_path, monkeypatch, remote)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post("/api/knowledge-mining/tasks", json={"account": "demo"})
+    finally:
+        await owner.aclose_knowledge_http()
+
+    if directory_state.endswith("denied"):
+        assert response.status_code == 403, response.text
+        assert remote.compile_requests == []
+        assert owner.watches == []
+        assert remote.created_directories == []
+        return
+    assert response.status_code == 202, response.text
+    assert len(remote.compile_requests) == 1
+    assert remote.created_directories == (
+        [] if directory_state == "existing"
+        else [knowledge_mining_module._KNOWLEDGE_WORKSPACE_ROOT, output_parent, _WIKI_ROOT]
+        if directory_state == "fresh"
+        else [output_parent, _WIKI_ROOT]
+    )
+    assert remote.calls[-1][1] == "/api/v1/compile"
 
 
 @pytest.mark.asyncio
