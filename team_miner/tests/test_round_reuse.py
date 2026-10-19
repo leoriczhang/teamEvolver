@@ -91,6 +91,8 @@ async def next_inputs(owner, first, *, feedback="", answer=False):
 
 
 def prepared_only(owner, job, entries, *, body=SKILL_BODY, policy=POLICY):
+    from team_miner.case_context import CASE_NARRATIVE_PROTOCOL
+
     root = owner._staged_root(job)
     count = _freeze_chunks(root, entries, job["source_snapshot"])
     (root / "compiler-base.md").write_text(body, encoding="utf-8")
@@ -110,6 +112,7 @@ def prepared_only(owner, job, entries, *, body=SKILL_BODY, policy=POLICY):
         "execution_protocol": OPTIMIZED_EXECUTION_PROTOCOL, "round": job["current_round"],
         "compilers": compilers, "base_sha256": _sha(body), "language_policy": copy.deepcopy(policy),
         "chunk_count": count, "cursor": 0, "unit_count": 0,
+        "case_narrative_protocol": CASE_NARRATIVE_PROTOCOL,
     }
     if job.get("staged_skill_body_protocol"):
         state["skill_body_protocol"] = job["staged_skill_body_protocol"]

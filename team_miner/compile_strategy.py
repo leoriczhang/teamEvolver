@@ -573,6 +573,7 @@ def stage_compiler_body(base_body: str, stage: str) -> str:
 def render_stage_batch_compiler(
     base_body: str, stage: str, max_packets: int = MAX_FILE_MAP_PACKETS, *, integrated_body: bool = False,
     body_patch: bool = False,
+    body_insert: bool = False,
 ) -> str:
     """Batch independent artifacts with the same public file Map and Finalize plan."""
     if not isinstance(stage, str) or stage not in {"skill_section", "evaluation"}:
@@ -585,6 +586,10 @@ def render_stage_batch_compiler(
         from .skill_body import RULE
 
         rules = RULE
+    if body_insert and stage == "skill_section":
+        from .skill_body_insert import RULE
+
+        rules = RULE + "\nOnly for packets WITHOUT body_insert, apply this full-body contract:\n" + rules
     if body_patch and stage == "skill_section":
         from .ov_body_patch_orchestration import RULE
 
@@ -625,11 +630,17 @@ def render_stage_batch_compiler(
     )
 
 
-def render_case_batch_compiler(base_body: str, max_packets: int = MAX_FILE_MAP_PACKETS) -> str:
+def render_case_batch_compiler(base_body: str, max_packets: int = MAX_FILE_MAP_PACKETS, *,
+                               source_bound_context: bool = False) -> str:
     """Keep each original public OV file-Map assignment independent of its siblings."""
     if type(max_packets) is not int or not 1 <= max_packets <= MAX_FILE_MAP_PACKETS:
         raise ValueError("A TE case Compile batch supports one to eight packet files")
     policy = compiler_business_policy(base_body)
+    case_rules = STAGE_RULES["case"]
+    if source_bound_context:
+        from .case_context import source_bound_case_rules
+
+        case_rules = source_bound_case_rules(case_rules)
     contract = multi_compile_contract()
     original_intro = "Each Compile reads one TE-owned bounded packet file."
     batch_intro = (
@@ -649,7 +660,7 @@ def render_case_batch_compiler(base_body: str, max_packets: int = MAX_FILE_MAP_P
     contract["synthesize"]["instructions"] += (
         "\n\nAuthoritative mining business policy (" + MINING_POLICY_SCHEMA + "):\n"
         + policy["common"] + custom
-        + "\n\nCurrent per-file stage: case.\n" + STAGE_RULES["case"]
+        + "\n\nCurrent per-file stage: case.\n" + case_rules
         + " The explicit deferred object has exactly schema_version='skill-miner.deferred.v1', "
         "reason (nonempty text of at most 2000 characters) and source_refs (a nonempty list of "
         "unique exact assigned original URIs). Use it only for unsupported scenarios, never padding."

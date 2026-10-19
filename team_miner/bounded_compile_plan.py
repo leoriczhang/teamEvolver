@@ -274,10 +274,12 @@ def _planning_coverage_error(diagnostic: dict) -> str:
     return "Planning dispositions must cover every exact assigned item ID exactly once; " + "; ".join(fields)
 
 
-def _reference_coverage(rows: list[dict], expected: list[str]) -> None:
+def _reference_coverage(rows: list[dict], expected: list[str], *, retained_structure: tuple[str, ...] = ()) -> None:
     actual = {ref for row in rows for ref in row["source_refs"]}
-    if actual != set(expected):
-        raise ValueError("Every assigned source must remain classified or explicitly deferred")
+    if actual | set(retained_structure) != set(expected):
+        missing = [ref for ref in expected if ref not in actual and ref not in retained_structure]
+        raise ValueError("Every assigned source must remain classified or explicitly deferred; missing="
+                         + _json(missing))
 
 
 def _bounded_output(value: Any, *, _max_output_chars: int = MAX_OUTPUT_CHARS) -> dict:
@@ -288,7 +290,8 @@ def _bounded_output(value: Any, *, _max_output_chars: int = MAX_OUTPUT_CHARS) ->
     return value
 
 
-def validate_index(value: Any, *, input_ids: list[str], source_refs: list[str], routing: bool = False) -> dict:
+def validate_index(value: Any, *, input_ids: list[str], source_refs: list[str], routing: bool = False,
+                   _retained_structure: tuple[str, ...] = ()) -> dict:
     _bounded_output(value)
     fields = {"schema_version", "input_ids", "methods", "facts", "deferred"}
     schema = INDEX_SCHEMA_V2 if routing else INDEX_SCHEMA
@@ -326,9 +329,12 @@ def validate_index(value: Any, *, input_ids: list[str], source_refs: list[str], 
             for field in keys - {"source_refs"}:
                 _text(row[field], 1000, field)
             _refs(row["source_refs"], source_refs)
-    if not any(value[group] for group in ("methods", "facts", "deferred")):
+    if not set(_retained_structure) <= set(source_refs):
+        raise ValueError("Retained structure must use exact assigned source references")
+    if not any(value[group] for group in ("methods", "facts", "deferred")) and not _retained_structure:
         raise ValueError("Index must contain supported methods or facts, or explicit deferred Evidence")
-    _reference_coverage(value["methods"] + value["facts"] + value["deferred"], source_refs)
+    _reference_coverage(value["methods"] + value["facts"] + value["deferred"], source_refs,
+                        retained_structure=_retained_structure)
     return value
 
 

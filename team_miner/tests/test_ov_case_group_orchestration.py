@@ -448,7 +448,7 @@ def test_resume_rejects_frozen_group_tampering_without_new_post(tmp_path, mutati
         elif mutation == "packet":
             (root / locators[0]["local_path"]).write_text("{}")
         elif mutation == "compiler":
-            (root / "aux-compilers/case_group_batch.md").write_text("changed")
+            (root / "aux-compilers" / (current["compiler_stage"] + ".md")).write_text("changed")
         else:
             owner.ov.input_extras[current["input_uri"] + "/.hidden/unassigned.json"] = "{}"
         calls = len(owner.ov.calls)

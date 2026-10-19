@@ -50,6 +50,67 @@ def _method_ids(root: Path, identities) -> set[str]:
             if _read_unit(root, identity)["kind"] not in {"heading", "table_header"}}
 
 
+def accepted_source_classification(root: Path, state: dict) -> tuple[list[dict], set[str], list[set[str]]]:
+    """Primary exact units are unique; structural context and transport chunks may repeat."""
+    from .source_unit_extraction import retained_structural_ids
+
+    read, _ = _io()
+    records, accepted, shared, uncertain = [], set(), set(), []
+    for index in range(state["unit_count"]):
+        unit = read(root / "units/0" / f"{index:08d}.json")
+        bindings = unit.get("source_unit_bindings")
+        if not isinstance(bindings, dict):
+            raise ValueError("Every accepted source index needs exact unit membership")
+        classified = {identity for group in ("methods", "facts", "deferred")
+                      for row in unit["value"][group] for ref in row["source_refs"]
+                      for identity in _ids(bindings[ref], empty=False)}
+        classified.update(retained_structural_ids(root, unit))
+        primary = set(_ids(unit.get("assigned_unit_ids"), empty=False))
+        allowed = primary | {context for identity in primary
+                             for context in _read_unit(root, identity).get("context_unit_ids", [])}
+        if not primary <= classified or not classified <= allowed:
+            raise ValueError("Exact source classification changed its assigned units or structural context")
+        if accepted.intersection(primary):
+            raise ValueError("A frozen source unit was classified in more than one accepted extraction")
+        accepted.update(primary)
+        selected_context = {identity for ref in unit["value"]["context_refs"] for identity in _ids(bindings[ref])}
+        if not selected_context <= allowed:
+            raise ValueError("Exact shared constraints escaped their accepted original assignment")
+        owned = {identity for row in unit["value"]["methods"] for ref in row["source_refs"]
+                 for identity in bindings[ref]}
+        owned_files = {_read_unit(root, identity)["source_uri"] for identity in _method_ids(root, owned)}
+        # One packet may cross a file boundary. A separate rule file without its
+        # own method owner stays global even when this packet also has other methods.
+        shared.update(identity for identity in selected_context
+                      if _read_unit(root, identity)["source_uri"] not in owned_files)
+        if unit["value"]["context_uncertain"]:
+            uncertain.append(classified)
+        records.append(unit)
+    positions = {_read_unit(root, identity)["unit_index"] for identity in accepted}
+    if len(accepted) != state["source_unit_count"] or positions != set(range(state["source_unit_count"])):
+        raise ValueError("Exact source classification does not match the complete frozen unit index")
+    return records, _content_ids(root, shared), uncertain
+
+
+def owned_source_context(root: Path, records: list[dict]) -> list[dict]:
+    """An index's local context follows its own exact methods, never every candidate."""
+    groups = []
+    for unit in records:
+        bindings = unit["source_unit_bindings"]
+        methods = _method_ids(root, {identity for row in unit["value"]["methods"]
+                                    for ref in row["source_refs"] for identity in bindings[ref]})
+        context = _content_ids(root, {identity for ref in unit["value"]["context_refs"]
+                                     for identity in bindings[ref]})
+        files = {_read_unit(root, identity)["source_uri"] for identity in methods}
+        for uri in sorted(files):
+            owned = {identity for identity in methods if _read_unit(root, identity)["source_uri"] == uri}
+            selected = {identity for identity in context if _read_unit(root, identity)["source_uri"] == uri}
+            if selected:
+                groups.append({"method_unit_ids": _ordered(root, owned),
+                               "context_unit_ids": _ordered(root, selected)})
+    return groups
+
+
 def route_exact_source_candidates(root: Path, state: dict, source_prefix: str) -> dict:
     """Bind all final aliases to the exact units selected during the single source scan.
 
@@ -89,34 +150,8 @@ def route_exact_source_candidates(root: Path, state: dict, source_prefix: str) -
         related[name].append({"item_id": record["item"]["item_id"], "task": record["item"]["task"],
                               "boundary": record["item"]["boundary"], "unit_ids": _ordered(root, selected)})
 
-    accepted, shared, uncertain_groups = set(), set(), []
-    for index in range(state["unit_count"]):
-        unit = read(root / "units/0" / f"{index:08d}.json")
-        bindings = unit.get("source_unit_bindings")
-        if not isinstance(bindings, dict):
-            raise ValueError("Every accepted source index needs exact unit membership")
-        classified = {identity for group in ("methods", "facts", "deferred")
-                      for row in unit["value"][group] for ref in row["source_refs"]
-                      for identity in _ids(bindings[ref], empty=False)}
-        primary = set(_ids(unit.get("assigned_unit_ids"), empty=False))
-        allowed = primary | {context for identity in primary
-                             for context in _read_unit(root, identity).get("context_unit_ids", [])}
-        if not primary <= classified or not classified <= allowed:
-            raise ValueError("Exact source classification changed its assigned units or structural context")
-        if accepted.intersection(primary):
-            raise ValueError("A frozen source unit was classified in more than one accepted extraction")
-        accepted.update(primary)
-        shared.update(identity for ref in unit["value"]["context_refs"] for identity in bindings[ref])
-        if unit["value"]["context_uncertain"]:
-            uncertain_groups.append(classified)
-    if len(accepted) != state["source_unit_count"]:
-        raise ValueError("Exact source unit classification is incomplete")
-    # Resolve all identities, rather than inferring completeness from a count alone.
-    positions = {_read_unit(root, identity)["unit_index"] for identity in accepted}
-    if positions != set(range(state["source_unit_count"])):
-        raise ValueError("Exact source classification does not match the complete frozen unit index")
-
-    shared = _content_ids(root, shared)
+    records, shared, uncertain_groups = accepted_source_classification(root, state)
+    owned_context = owned_source_context(root, records)
     assignment_count = 0
     for candidate in plan["skills"]:
         name = candidate["name"]
@@ -127,6 +162,9 @@ def route_exact_source_candidates(root: Path, state: dict, source_prefix: str) -
             method_context = set(shared)
             for identity in method["unit_ids"]:
                 method_context.update(_read_unit(root, identity).get("context_unit_ids", []))
+            for group in owned_context:
+                if set(method["unit_ids"]).intersection(group["method_unit_ids"]):
+                    method_context.update(group["context_unit_ids"])
             for group in uncertain_groups:
                 if group.intersection(method["unit_ids"]):
                     method_context.update(group)
@@ -158,7 +196,7 @@ def route_exact_source_candidates(root: Path, state: dict, source_prefix: str) -
         save(scope_path, scope)
         assignment_count += len(identities)
     audit = {"protocol": PROTOCOL, "candidate_count": len(plan["skills"]),
-             "source_unit_count": len(accepted), "routed_unit_assignments": assignment_count,
+             "source_unit_count": state["source_unit_count"], "routed_unit_assignments": assignment_count,
              "coverage_complete": True, "original_source_preserved": True,
              "semantic_correctness_verified": False}
     save(root / "source-routing/units.json", audit)

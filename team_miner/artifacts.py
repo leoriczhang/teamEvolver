@@ -46,7 +46,12 @@ def _artifact_path(relative_path: str) -> tuple[list[str], list[str], str]:
         raise ValueError("Skill 产物路径无效")
     if Path(parts[-1]).suffix.lower() not in _TEXT_SUFFIXES:
         raise ValueError("产物不是支持预览的文本文件")
-    kind = _ARTIFACT_KINDS.get(parts[-1], "semantic" if output[0] == "semantic_reports" else "resource")
+    if output[0] == "semantic_reports":
+        kind = "semantic"
+    elif len(output) == 3:
+        kind = _ARTIFACT_KINDS.get(parts[-1], "resource")
+    else:
+        kind = "resource"
     return parts, output, kind
 
 
@@ -142,8 +147,8 @@ def save_artifact(project_root: Path | str, relative_path: str, content: str) ->
     parts, output, kind = _artifact_path(relative_path)
     if parts[2] != "workspace":
         raise ValueError("历史轮次产物为只读，请编辑本轮工作区")
-    if parts[-1] not in _ARTIFACT_KINDS and not (
-        output[0] == "semantic_reports" and Path(parts[-1]).suffix.lower() in {".md", ".markdown"}
+    if kind not in _ARTIFACT_KINDS.values() and not (
+        kind == "semantic" and Path(parts[-1]).suffix.lower() in {".md", ".markdown"}
     ):
         raise ValueError("该文件不是可编辑的挖掘产物")
     if not isinstance(content, str):

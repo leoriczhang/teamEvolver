@@ -135,6 +135,9 @@ def _routed_review_scope(descriptor: dict, *, complete: bool = False) -> dict:
     }
     if complete:
         result["all_routed_ranges_reviewed"] = True
+    if descriptor.get("source_unit_review_protocol"):
+        result.update(source_unit_review_protocol=descriptor["source_unit_review_protocol"],
+                      review_scope="exact_original_units", routed_source_unit_count=len(descriptor["source_unit_ids"]))
     return result
 
 
@@ -383,7 +386,11 @@ def _method_descriptor(root: Path, index: int, record: dict, routing: dict | Non
     if len(gaps) != 1:
         raise ValueError("Deferred method must match one exact original plan disposition")
     scope = {"ordinals": full, "method_ordinals": method}
-    if routing is not None:
+    if routing is not None and routing.get("source_unit_protocol") == "te-exact-source-units.v1":
+        from .source_unit_review import method_scope
+
+        scope = method_scope(root, record, routing)
+    elif routing is not None:
         from .source_scope import route_candidate_scope
 
         scope = route_candidate_scope(root, scope, routing)
@@ -393,7 +400,8 @@ def _method_descriptor(root: Path, index: int, record: dict, routing: dict | Non
         "leaf_items": leaves,
         "method_ordinals": method,
         **scope,
-        "ordinals": method + [ordinal for ordinal in scope["ordinals"] if ordinal not in method],
+        "ordinals": (scope["ordinals"] if scope.get("source_unit_review_protocol") else
+                     method + [ordinal for ordinal in scope["ordinals"] if ordinal not in method]),
         "previous_gap": copy.deepcopy(gaps[0]),
     }
 
@@ -402,6 +410,15 @@ def _prepare_review(root: Path, count: int) -> dict:
     manifest = root / "evidence-review" / "manifest.json"
     if manifest.exists():
         return _read(manifest)
+    # No method was deferred: no source rescan, review Compile or Evidence gap is needed.
+    # In particular, do not run a transport-chunk ownership validator on exact row assignments.
+    deferred = [index for index in range(count) if _method_descriptor(
+        root, index, _read(root / "proposals" / f"{index:08d}.json"),
+    ) is not None]
+    if not deferred:
+        result = {"proposal_indexes": [], "maximum_groups": 0}
+        _save_immutable(manifest, result)
+        return result
     routing = None
     state_path = root / "state.json"
     if state_path.is_file():
@@ -409,9 +426,14 @@ def _prepare_review(root: Path, count: int) -> dict:
 
         state = _read(state_path)
         if state.get("efficiency_protocol") == EFFICIENCY_PROTOCOL:
-            routing = prepare_source_routing(root, state)
+            if state.get("source_unit_protocol") == "te-exact-source-units.v1":
+                from .source_unit_review import prepare_routing
+
+                routing = prepare_routing(root, state)
+            else:
+                routing = prepare_source_routing(root, state)
     indexes, groups = [], 0
-    for index in range(count):
+    for index in deferred:
         record = _read(root / "proposals" / f"{index:08d}.json")
         descriptor = _method_descriptor(root, index, record, routing)
         if descriptor is None:
@@ -465,11 +487,36 @@ def _review_assignment(root: Path, descriptor: dict, cursor: int, language_polic
     raise ValueError("Evidence review assignment cannot fit its bounded packet")
 
 
+def _exact_quote_manifest(root: Path, descriptor: dict) -> dict:
+    from .source_unit_review import quote_parent, validate_scope
+
+    validate_scope(root, descriptor)
+    segments, count = [], 0
+    for identity in descriptor["source_unit_ids"]:
+        original = quote_parent(root, identity)
+        size = quote_units.quote_unit_count(original)
+        segments.append({"source_unit_id": identity, "ordinal": original["ordinal"],
+                         "first_unit": count, "unit_count": size})
+        count += size
+    return {"segments": segments, "unit_count": count, "initial_cursor": 0,
+            "source_unit_review_protocol": descriptor["source_unit_review_protocol"],
+            "source_unit_scope_sha256": descriptor["source_unit_scope_sha256"]}
+
+
 def _quote_manifest(root: Path, descriptor: dict, legacy_cursor: int) -> dict:
     path = root / "evidence-review" / "quote-manifests" / f"{descriptor['proposal_index']:08d}.json"
     if path.exists():
-        return _read(path)
+        value = _read(path)
+        if descriptor.get("source_unit_review_protocol") and value != _exact_quote_manifest(root, descriptor):
+            raise ValueError("Frozen exact source quote manifest lost original unit coverage")
+        return value
     segments, count = [], 0
+    if descriptor.get("source_unit_review_protocol"):
+        if legacy_cursor:
+            raise ValueError("Exact source review cannot replace already accepted transport-based fragments")
+        value = _exact_quote_manifest(root, descriptor)
+        _save_immutable(path, value)
+        return value
     for ordinal in descriptor["ordinals"]:
         metadata = _read(root / "chunk-metadata" / f"{ordinal:08d}.json")
         size = quote_units.quote_unit_count(metadata)
@@ -481,7 +528,18 @@ def _quote_manifest(root: Path, descriptor: dict, legacy_cursor: int) -> dict:
     return value
 
 
+def _quote_original(root: Path, segment: dict) -> dict:
+    if segment.get("source_unit_id"):
+        from .source_unit_review import quote_parent
+
+        return quote_parent(root, segment["source_unit_id"])
+    return _read(root / "chunks" / f"{segment['ordinal']:08d}.json")
+
+
 def _quote_assignment(root: Path, descriptor: dict, manifest: dict, cursor: int, policy: dict, max_chars: int = 32000):
+    if descriptor.get("source_unit_review_protocol"):
+        if manifest != _exact_quote_manifest(root, descriptor):
+            raise ValueError("Frozen exact source quote manifest changed its original scope")
     segments = manifest["segments"]
     starts = [row["first_unit"] for row in segments]
     current_ordinal, original, group = None, None, []
@@ -489,9 +547,10 @@ def _quote_assignment(root: Path, descriptor: dict, manifest: dict, cursor: int,
     controls = None
     for position in range(cursor, min(cursor + 32, manifest["unit_count"])):
         segment = segments[bisect.bisect_right(starts, position) - 1]
-        if current_ordinal != segment["ordinal"]:
-            current_ordinal = segment["ordinal"]
-            original = _read(root / "chunks" / f"{current_ordinal:08d}.json")
+        original_key = segment.get("source_unit_id", segment["ordinal"])
+        if current_ordinal != original_key:
+            current_ordinal = original_key
+            original = _quote_original(root, segment)
         unit = quote_units.source_quote_unit(original, position - segment["first_unit"])
         proposed = [*group, unit]
         next_controls = {
@@ -512,6 +571,14 @@ def _quote_assignment(root: Path, descriptor: dict, manifest: dict, cursor: int,
                 "Each ID names one continuous original source unit within the assigned routed method and "
                 "shared-constraint ranges. All units in this scope are reviewed; this packet does not prove "
                 "whole-file or whole-source absence."
+            )
+        if descriptor.get("source_unit_review_protocol"):
+            from .source_unit_review import quote_roles
+
+            next_controls.update(quote_roles(descriptor, proposed))
+            next_controls["scope_rule"] += (
+                " Each quote remains inside one exact original row. method_input_ids support the assigned "
+                "method; context_input_ids retain constraints and cannot create a different task or customer."
             )
         try:
             if len(_json({"evidence": proposed})) > 24000:
@@ -547,7 +614,7 @@ def _selected_source_quotes(evidence: list[dict], audit: list[dict]) -> list[dic
 def _fragment_source_quotes(root: Path, fragment: dict) -> list[dict]:
     evidence = []
     for record in fragment["source_quote_audit"]:
-        original = _read(root / "chunks" / f"{record['original_ordinal']:08d}.json")
+        original = _quote_original(root, {**record, "ordinal": record["original_ordinal"]})
         relative = record["start_char"] - original["start_char"]
         if relative < 0 or relative % quote_units.QUOTE_UNIT_CHARS:
             raise ValueError("Accepted source quote no longer matches its original partition")
@@ -596,7 +663,8 @@ def _finish_method(
             sources.extend(row["source_refs"])
         elif row["outcome"] == "knowledge":
             knowledge = knowledge or row["reason"]
-    expected = [_read(root / "chunk-metadata" / f"{ordinal:08d}.json")["id"] for ordinal in descriptor["ordinals"]]
+    expected = (descriptor["source_unit_ids"] if descriptor.get("source_unit_review_protocol") else
+                [_read(root / "chunk-metadata" / f"{ordinal:08d}.json")["id"] for ordinal in descriptor["ordinals"]])
     if quote_count:
         manifest = _read(root / "evidence-review" / "quote-manifests" / f"{index:08d}.json")
 
@@ -604,7 +672,7 @@ def _finish_method(
             for segment in manifest["segments"]:
                 if segment["first_unit"] < manifest["initial_cursor"]:
                     continue
-                original = _read(root / "chunks" / f"{segment['ordinal']:08d}.json")
+                original = _quote_original(root, segment)
                 for position in range(segment["unit_count"]):
                     yield quote_units.source_quote_unit(original, position)["id"]
 
@@ -614,7 +682,8 @@ def _finish_method(
         for segment in manifest["segments"]:
             if segment["first_unit"] < manifest["initial_cursor"]:
                 continue
-            inputs.append(_read(root / "chunk-metadata" / f"{segment['ordinal']:08d}.json")["id"])
+            inputs.append(segment["source_unit_id"] if segment.get("source_unit_id") else
+                          _read(root / "chunk-metadata" / f"{segment['ordinal']:08d}.json")["id"])
     _exact_ids(inputs, expected, "Completed Evidence review input_ids")
     if terminal is not None:
         row = terminal["review"]
@@ -685,6 +754,10 @@ def _finish_method(
         result["reviewed_quote_unit_count"] = quote_count
         result["quote_coverage_journal"] = str(quote_folder.relative_to(root))
         result["quotation_protocol"] = quote_units.QUOTE_PROTOCOL
+    if descriptor.get("source_unit_review_protocol"):
+        result.update(source_unit_review_protocol=descriptor["source_unit_review_protocol"],
+                      source_unit_ids=descriptor["source_unit_ids"],
+                      operative_source_unit_ids=descriptor["operative_source_unit_ids"])
     return result
 
 
@@ -871,6 +944,10 @@ def _synthesis_assignment(
             )
         controls["support_units"].append(context)
     controls["allowed_source_refs"] = list(dict.fromkeys(chunk["source_uri"] for chunk in evidence))
+    if descriptor.get("source_unit_review_protocol"):
+        from .source_unit_review import quote_roles
+
+        controls.update(quote_roles(descriptor, evidence))
     if evidence:
         for metadata_limit in (None, 128, 64, 0):
             if stage != quote_units.QUOTE_STAGE and metadata_limit is not None:
@@ -925,6 +1002,14 @@ class DeferredEvidenceReviewMixin:
         ) + _review_instructions(state, quote_ids=True)
         if state.get("quote_alias_protocol") == quote_aliases.PROTOCOL:
             rules += QUOTE_ALIAS_INSTRUCTIONS
+        if state.get("source_unit_protocol") == "te-exact-source-units.v1":
+            rules += (
+                "\nThis review uses te-exact-source-review.v1. Quotes partition only the assigned complete "
+                "original rows and their selected context; shared transport chunks do not authorize adjacent "
+                "rows. method_input_ids identify operative quotes; context_input_ids retain scope and "
+                "constraints. A positive candidate needs operative support and cannot acquire another "
+                "customer, amount or task from context. Keep unresolved source contradictions explicit.\n"
+            )
         body = render_single_stage_compiler(base, quote_units.QUOTE_STAGE, rules)
         from .ov_staged_orchestration import _package
 
@@ -1031,6 +1116,9 @@ class DeferredEvidenceReviewMixin:
             return await self._staged_next(job, root, state)
         if not state.get("evidence_review_initialized"):
             state.setdefault("evidence_review_protocol", quote_units.QUOTE_PROTOCOL)
+            if (state.get("source_unit_protocol") == "te-exact-source-units.v1"
+                    and state["evidence_review_protocol"] != quote_units.QUOTE_PROTOCOL):
+                raise ValueError("Exact source review must retain its source-unit quote protocol")
             if state["evidence_review_protocol"] == quote_units.QUOTE_PROTOCOL:
                 await self._ensure_quote_review_compiler(root, state)
             else:
@@ -1300,6 +1388,9 @@ class DeferredEvidenceReviewMixin:
                 checked, source_audit = validate_quote_id_review(
                     value, items=controls["items"], evidence=evidence, _max_output_chars=model_limit
                 )
+                from .source_unit_review import validate_positive_support
+
+                validate_positive_support(descriptor, checked["reviews"][0], source_audit)
             else:
                 checked = validate_evidence_review(
                     value, items=controls["items"], evidence=evidence, restorations=restorations
@@ -1338,11 +1429,14 @@ class DeferredEvidenceReviewMixin:
             if evidence != expected or controls != expected_controls or context["quote_unit_after"] != after:
                 raise ValueError("Frozen source quote assignment changed its complete unit coverage")
             for unit in evidence:
-                original = await asyncio.to_thread(_read, root / "chunks" / f"{unit['ordinal']:08d}.json")
+                original = await asyncio.to_thread(_quote_original, root, unit)
                 quote_units.validate_source_quote_unit(unit, original)
             checked, audit = validate_quote_id_review(
                 value, items=controls["items"], evidence=evidence, _max_output_chars=model_limit
             )
+            from .source_unit_review import validate_positive_support
+
+            validate_positive_support(descriptor, checked["reviews"][0], audit)
             fragment = {
                 "input_ids": context["input_ids"],
                 "ordinals": context["ordinals"],

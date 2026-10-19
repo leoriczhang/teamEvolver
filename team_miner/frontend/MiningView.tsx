@@ -73,7 +73,7 @@ interface InputSource {
 
 interface MiningArtifact {
   name: string;
-  kind: "skill" | "evaluation" | "benchmark" | "semantic";
+  kind: "skill" | "evaluation" | "benchmark" | "semantic" | "resource";
   path: string;
   size_bytes: number;
   skill_name: string;
@@ -146,6 +146,15 @@ type MiningJobStatus =
 interface MiningJob {
   job_id: string;
   name: string;
+  mining_intent?: { mode: "auto" | "single" | "target"; direction: string; target_count: number | null };
+  can_resume?: boolean;
+  can_retry_native?: boolean;
+  native_retry_context?: {
+    expected_task_id: string;
+    budget_seconds: number;
+    format_guidance_sha256: string;
+  } | null;
+  native_explicit_retry?: { attempt_budget: { seconds: number; started_at?: string; deadline_at?: string } } | null;
   status: MiningJobStatus;
   input_dir: string;
   document_count: number | null;
@@ -155,11 +164,15 @@ interface MiningJob {
   round_timeout_seconds?: number;
   round_work_units?: number;
   staged_progress?: { phase: string; label: string; completed: number; total: number; subtask_index?: number };
+  execution_protocol?: string;
+  native_compile_history?: { round: number; task_id: string }[];
+  native_repairs?: { round: number; attempt: number; error: string }[];
   ov_cancel_error?: string;
   phase: PhaseState;
   created_at: string;
   started_at: string;
   finished_at: string;
+  round_completed_at?: string;
   updated_at: string;
   error: string;
   stop_reason: string;
@@ -167,6 +180,7 @@ interface MiningJob {
   rounds?: MiningRound[];
   logs?: string[];
   pending_checkpoint?: HumanCheckpoint | null;
+  skipped_checkpoints?: Array<{ round: number; reason: string }>;
   knowledge_gaps?: {
     total: number;
     questions: HumanCheckpointQuestion[];
@@ -397,12 +411,17 @@ export default function MiningView({
   const [runtimeTimeout, setRuntimeTimeout] = useState(3600);
   const [humanCheckpoints, setHumanCheckpoints] = useState(true);
   const [taskName, setTaskName] = useState("");
+  const [miningMode, setMiningMode] = useState<"auto" | "single" | "target">("auto");
+  const [miningDirection, setMiningDirection] = useState("");
+  const [targetSkillCount, setTargetSkillCount] = useState(3);
   const [starting, setStarting] = useState(false);
   const [selectedInputDir, setSelectedInputDir] = useState("");
   const [jobFilter, setJobFilter] = useState<"all" | "active" | "completed" | "failed">("all");
   const [selectedJobId, setSelectedJobId] = useState("");
   const [selectedJob, setSelectedJob] = useState<MiningJob | null>(null);
   const [jobActionPending, setJobActionPending] = useState(false);
+  const nativeRetryPending = useRef(false);
+  const nativeRetryRequest = useRef<{ signature: string; id: string } | null>(null);
   const [deleteJob, setDeleteJob] = useState<MiningJob | null>(null);
   const [jobDeleting, setJobDeleting] = useState(false);
   const [checkpointAnswers, setCheckpointAnswers] = useState<Record<string, string>>({});
@@ -566,6 +585,9 @@ export default function MiningView({
           max_rounds: rounds,
           human_checkpoints: humanCheckpoints,
           runtime_timeout_seconds: runtimeTimeout,
+          mining_mode: miningMode,
+          mining_direction: miningDirection.trim(),
+          target_skill_count: miningMode === "single" ? 1 : miningMode === "target" ? targetSkillCount : null,
         }),
       });
       const created = response.jobs?.[0];
@@ -579,6 +601,51 @@ export default function MiningView({
       toastErr("启动挖掘失败", e.message);
     } finally {
       setStarting(false);
+    }
+  }
+
+  async function resumeJob(job: MiningJob) {
+    setJobActionPending(true);
+    try {
+      const response = await api<{ job: MiningJob }>(`/api/mining/jobs/${encodeURIComponent(job.job_id)}/resume`,
+        { method: "POST" });
+      setSelectedJob(response.job);
+      await mining.refreshJobs(false);
+      toastOk("已从失败断点恢复", "保留当前轮输入、已完成产物与未解决问题。");
+    } catch (e: any) {
+      toastErr("恢复任务失败", e.message);
+    } finally {
+      setJobActionPending(false);
+    }
+  }
+
+  async function retryNativeJob(job: MiningJob) {
+    const context = nativeRetryContext(job);
+    if (!context || jobActionPending || nativeRetryPending.current) return;
+    nativeRetryPending.current = true;
+    setJobActionPending(true);
+    try {
+      const signature = JSON.stringify([job.job_id, context]);
+      if (nativeRetryRequest.current?.signature !== signature) {
+        nativeRetryRequest.current = { signature, id: createRequestId() };
+      }
+      const response = await api<{ job: MiningJob }>(`/api/mining/jobs/${encodeURIComponent(job.job_id)}/resume`, {
+        method: "POST",
+        body: JSON.stringify({
+          action: "retry_with_new_budget",
+          request_id: nativeRetryRequest.current.id,
+          expected_task_id: context.expected_task_id,
+          budget_seconds: context.budget_seconds,
+        }),
+      });
+      setSelectedJob(response.job);
+      await mining.refreshJobs(false);
+      toastOk("已重新实测本轮", "保留原任务和历史，本次使用单独记录的运行期限。");
+    } catch (e: any) {
+      toastErr("重新实测失败", e.message);
+    } finally {
+      nativeRetryPending.current = false;
+      setJobActionPending(false);
     }
   }
 
@@ -840,6 +907,7 @@ export default function MiningView({
       ...pipelineWarningMessages(job.ov_pipeline?.errors),
       ...((job.rounds || []).find((round) => round.round === job.current_round)?.remote_warnings || []),
     ]);
+    const compileIssues = compileIssueKinds([...currentRemoteWarnings, job.error]);
     const roundWarningMessages = (job.rounds || []).flatMap((round) => distinctWarnings(round.remote_warnings));
     const finalRemoteWarnings = distinctWarnings([
       ...currentRemoteWarnings.filter((warning) => !roundWarningMessages.includes(warning)),
@@ -850,8 +918,13 @@ export default function MiningView({
     ].map((file) => [file.uri, file])).values());
     const compileSeconds = job.compile_observed_seconds ?? elapsedSeconds(job.started_at, job.finished_at);
     const roundTimeoutSeconds = job.round_timeout_seconds || job.runtime_timeout_seconds;
+    const retryContext = nativeRetryContext(job);
+    const nativeRetrySeconds = job.native_explicit_retry
+      ? elapsedSeconds(job.native_explicit_retry.attempt_budget.started_at,
+        isExecutingJob(job.status) ? undefined : job.round_completed_at || job.finished_at)
+      : null;
     const hasTimingData = Boolean(
-      job.started_at || job.submission_seconds !== undefined || job.materialize_seconds !== undefined
+      job.started_at || job.submission_seconds !== undefined || job.materialize_seconds !== undefined || job.native_explicit_retry
     );
     const skillNames = jobSkillNames(job);
     const eligibleNames = skillNames.filter((name) => candidateCanSubmit(job, name));
@@ -871,10 +944,21 @@ export default function MiningView({
               {job.input_dir && <span className="mono select-text">{job.input_dir}</span>}
               {job.document_count !== null && <span>{job.document_count} 个文档</span>}
               <span>第 {job.current_round || 1} / {job.max_rounds} 轮</span>
+              {job.mining_intent && <span>
+                {job.mining_intent.mode === "auto" ? "自由挖掘"
+                  : job.mining_intent.mode === "single" ? "单 Skill 整合"
+                  : `目标 ${job.mining_intent.target_count} 个 Skill`}
+              </span>}
               {currentRemoteWarnings.length > 0 && <Pill tone="amber">Compile 执行需复核</Pill>}
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            {retryContext && <Button size="sm" disabled={jobActionPending} onClick={() => retryNativeJob(job)}>
+              重新实测本轮
+            </Button>}
+            {job.can_resume && <Button size="sm" disabled={jobActionPending} onClick={() => resumeJob(job)}>
+              从断点恢复
+            </Button>}
             {isActiveJob(job.status) && (
               <Button size="sm" variant="outline" disabled={jobActionPending || checkpointBusy || job.status === "stopping"} onClick={() => stopJob(job)}>
                 <CircleStop className="size-3.5" /> {job.status === "stopping" ? "停止中" : "停止"}
@@ -887,6 +971,14 @@ export default function MiningView({
             )}
           </div>
         </div>
+
+        {retryContext && <p className="text-xs text-muted-foreground">
+          保留原任务和历史，新增一次 {Number((retryContext.budget_seconds / 60).toFixed(1))} 分钟运行期限；用于保护预算，不代表预计完成时间。
+        </p>}
+
+        {job.mining_intent?.direction && <div className="rounded-lg border border-border bg-background p-3 text-xs">
+          <span className="font-semibold">本次挖掘方向：</span>{job.mining_intent.direction}
+        </div>}
 
         {!job.pending_checkpoint && finalRemoteWarnings.length > 0 && (
           <RemoteCompileWarnings warnings={finalRemoteWarnings} label="任务 Compile 执行提示" historical />
@@ -911,7 +1003,9 @@ export default function MiningView({
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <div className="text-[13px] font-bold">耗时分析</div>
               {job.ov_stage && <span className="mono text-[10.5px] text-muted-foreground">当前阶段：{job.ov_stage}</span>}
-              {roundTimeoutSeconds && <span>运行期限：{formatDuration(roundTimeoutSeconds)}</span>}
+              {job.native_explicit_retry
+                ? <span>人工重试 · 本次运行期限：{formatDuration(job.native_explicit_retry.attempt_budget.seconds)}</span>
+                : roundTimeoutSeconds && <span>运行期限：{formatDuration(roundTimeoutSeconds)}</span>}
               {job.ov_cancel_error && <span className="text-destructive">取消请求未确认：{job.ov_cancel_error}，后台继续重试</span>}
             </div>
             {job.staged_progress?.label && (
@@ -919,12 +1013,22 @@ export default function MiningView({
                 {job.staged_progress.label} · 累计已校验 {job.staged_progress.completed} 个小任务
               </div>
             )}
+            {job.execution_protocol === "te-native-mining.v1" && (
+              <div className="mb-3 text-[12px] text-muted-foreground">
+                整轮编译 · 累计已受理 {job.native_compile_history?.length ?? 0} 次 Compile
+                {(job.native_repairs?.length ?? 0) > 0 && ` · 其中 ${job.native_repairs?.length} 次修订`}
+              </div>
+            )}
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
               {job.submission_seconds !== undefined && (
                 <TimingCard label="启动准备合计" seconds={job.submission_seconds} />
               )}
               {compileSeconds !== null && (
-                <TimingCard label={job.finished_at ? "OV Compile" : "OV Compile（累计）"} seconds={compileSeconds} />
+                <TimingCard label={job.native_explicit_retry ? "本轮经过时间（含中断等待）"
+                  : job.finished_at ? "OV Compile" : "OV Compile（累计）"} seconds={compileSeconds} />
+              )}
+              {nativeRetrySeconds !== null && (
+                <TimingCard label="本次重试经过时间" seconds={nativeRetrySeconds} />
               )}
               {job.materialize_seconds !== undefined && (
                 <TimingCard label="产物物化" seconds={job.materialize_seconds} />
@@ -945,6 +1049,14 @@ export default function MiningView({
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {(job.skipped_checkpoints?.length || 0) > 0 && (
+          <div className="rounded-lg border border-line bg-surface-subtle px-4 py-3 text-[12px] text-muted-foreground">
+            {job.skipped_checkpoints?.map((entry) => (
+              <p key={entry.round}>第 {entry.round} 轮没有补证问题，已自动跳过人工补证。</p>
+            ))}
           </div>
         )}
 
@@ -1253,7 +1365,7 @@ export default function MiningView({
               <section aria-label="Skill 文件预览（生成中）" className="rounded-xl border border-border bg-surface p-4">
                 <h3 className="text-[13px] font-bold">Skill 文件预览（生成中）</h3>
                 <p className="mt-1 text-[11px] text-muted-foreground">
-                  已生成的正文可以先查看。配套评测、Test Dataset 和本轮复核完成后，才能提交到进化。
+                  已生成的正文可以先查看。交付内容及完成规则由本任务冻结的编译 Skill 决定。
                 </p>
                 <div className="mt-3 space-y-3">
                   {artifactGroups.candidates.filter((group) => group.artifacts.some((file) => file.kind === "skill"))
@@ -1291,7 +1403,11 @@ export default function MiningView({
             </div>
             {job.status === "failed" && (
               <section aria-label="本轮 Compile 失败" className="mb-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-[12px] text-destructive">
-                <p className="font-semibold">{compileIssueKinds([...currentRemoteWarnings, job.error]).reduceTruncated ? "能力拆分规划（Reduce）失败：模型输出达到单次长度上限，规划结果被截断。" : "本轮 Compile 执行失败。"}</p>
+                <p className="font-semibold">{compileIssues.reduceMergeTruncated
+                  ? "文件冲突合并（reduce_merge）输出截断：模型输出达到单次长度上限。"
+                  : compileIssues.reduceTruncated
+                    ? "Reduce 输出截断：模型输出达到单次长度上限。"
+                    : "本轮 Compile 执行失败。"}</p>
                 {job.error && <p className="mt-1 select-text whitespace-pre-wrap break-words text-[11px]">{job.error}</p>}
               </section>
             )}
@@ -1691,6 +1807,47 @@ export default function MiningView({
                 </label>
 
                 <label className="block">
+                  <span className="mb-1.5 block text-xs font-semibold text-muted-foreground">挖掘模式</span>
+                  <select aria-label="挖掘模式" value={miningMode} disabled={starting}
+                    onChange={event => setMiningMode(event.target.value as typeof miningMode)}
+                    className="w-full rounded-lg border border-border bg-background px-3 py-2 text-[13px]">
+                    <option value="auto">自由挖掘</option>
+                    <option value="single">单 Skill 整合</option>
+                    <option value="target">指定数量</option>
+                  </select>
+                  <span className="mt-1 block text-[11px] text-muted-foreground">
+                    {miningMode === "auto" ? "适合大量、主题未知的素材。根据来源决定独立方法及数量。"
+                      : miningMode === "single" ? "适合为一个完整方法准备的知识源。子步骤与情境变体整合到同一 Skill。"
+                      : "先识别完整独立方法，再优先选择目标数量；数量不作为拆分或合并依据。"}
+                  </span>
+                </label>
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-semibold text-muted-foreground">
+                    挖掘方向{miningMode === "single" ? "（必填）" : "（选填）"}
+                  </span>
+                  <textarea aria-label="挖掘方向" value={miningDirection} maxLength={4000} rows={4} disabled={starting}
+                    onChange={event => setMiningDirection(event.target.value)}
+                    placeholder="例如：挖掘从明确客户需求到确认下一步安排的完整客户沟通方法，人物和渠道作为参数。"
+                    className="w-full rounded-lg border border-border bg-background px-3 py-2 text-[13px]" />
+                  <span className="mt-1 block text-[11px] text-muted-foreground">
+                    {miningMode === "single" ? "说明这一个 Skill 要完成的目标和适用边界。"
+                      : "留空可探索全部素材；填写后聚焦指定方法、适用场景或排除范围。"}
+                    方向不替代原文依据，也不允许补造业务事实。
+                  </span>
+                </label>
+                {miningMode === "target" && <label className="block text-xs text-muted-foreground">
+                  目标 Skill 数量
+                  <input aria-label="目标 Skill 数量" type="number" min={1} max={100} step={1}
+                    value={targetSkillCount} disabled={starting}
+                    onChange={event => setTargetSkillCount(Number(event.target.value))}
+                    className="ml-3 w-20 rounded border border-border bg-background px-2 py-1" />
+                </label>}
+                {miningMode !== "auto" && <p className="text-[11px] leading-relaxed text-muted-foreground">
+                  {miningMode === "single" ? "目标为 1 个完整 Skill。" : "可设置 1–100 个。"}
+                  来源不足时明确提示实际数量及缺口，等待复核；不会硬凑数量或强行拼接无关方法。
+                </p>}
+
+                <label className="block">
                   <span className="mb-1.5 block text-xs font-semibold text-muted-foreground">选择知识源</span>
                   <select
                     aria-label="选择 Skill 知识源"
@@ -1762,7 +1919,7 @@ export default function MiningView({
                   <input type="number" min={60} max={7200} value={runtimeTimeout} disabled={starting}
                     onChange={(event) => setRuntimeTimeout(Number(event.target.value))}
                     className="ml-3 rounded border border-border bg-background px-2 py-1" />
-                  <span className="mt-1 block text-[11px]">基础运行期限；按输入分片和产物工作量自动延长，单次调用仍有超时保护。每轮从远端受理后独立计时，包含远端排队；人工补证等待不计时。到期请求取消并等待远端确认。</span>
+                  <span className="mt-1 block text-[11px]">每轮从远端受理后独立计时，包含远端排队；人工补证等待不计时。运行期限用于保护预算，不代表预计完成时间。到期请求取消并等待远端确认。</span>
                 </label>
 
                 <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-border bg-background p-3.5 transition-colors hover:border-accent/50">
@@ -1774,9 +1931,9 @@ export default function MiningView({
                     className="mt-0.5 size-4 accent-[var(--accent)]"
                   />
                   <span>
-                    <span className="block text-[12px] font-semibold">每轮完成后等待人工补充 Evidence</span>
+                    <span className="block text-[12px] font-semibold">有补证问题时等待人工补充 Evidence</span>
                     <span className="mt-1 block text-[11px] leading-relaxed text-muted-foreground">
-                      审核本轮产物后可补充回答、引用和文档，再继续下一轮或提前结束。关闭后自动执行至轮数上限。
+                      默认整轮编译：有问题时可补充回答、引用和文档；问题数为 0 时直接结束。关闭后保留未解决问题，不发起没有新 Evidence 的轮次。
                     </span>
                   </span>
                 </label>
@@ -1788,7 +1945,10 @@ export default function MiningView({
 
                 <div className="flex justify-end gap-2 pt-1">
                   <Button variant="outline" disabled={starting} onClick={() => setCreateJobOpen(false)}>取消</Button>
-                  <Button onClick={startRun} disabled={starting || !selectedSource?.ready}>
+                  <Button onClick={startRun} disabled={starting || !selectedSource?.ready
+                    || (miningMode === "single" && !miningDirection.trim())
+                    || (miningMode === "target" && (!Number.isInteger(targetSkillCount)
+                      || targetSkillCount < 1 || targetSkillCount > 100))}>
                     <Play className="size-4" /> {starting ? "创建中…" : "创建任务"}
                   </Button>
                 </div>
@@ -1819,14 +1979,14 @@ export default function MiningView({
 
                 <div className="mt-4 flex items-center gap-2 rounded-lg border border-dashed border-border bg-surface-subtle px-3.5 py-2.5 text-[12px] font-semibold text-muted-foreground">
                   <RotateCcw className="size-4 text-accent" />
-                  每轮产物复核 → 补充 Evidence → 下一轮修订，最多 {rounds} 轮
+                  每轮一次整轮 Compile；需要补证时再增量修订，最多 {rounds} 轮
                 </div>
 
                 <div className="mt-4 flex items-center gap-3 rounded-lg border border-accent/30 bg-accent-soft px-4 py-3">
                   <Upload className="size-4 shrink-0 text-accent" />
                   <div className="text-[12.5px]">
                     <span className="font-bold text-accent">编译产物交付</span>
-                    <span className="text-muted-foreground"> — 完成后生成 Skill Candidate、语义报告与 Test Dataset</span>
+                    <span className="text-muted-foreground"> — 按编译 Skill 交付任务方法、配套资源与来源说明；新版不要求验证案例</span>
                   </div>
                 </div>
               </div>
@@ -2030,6 +2190,12 @@ function elapsedSeconds(startedAt?: string, finishedAt?: string) {
   return Math.max(0, (finish - start) / 1000);
 }
 
+function nativeRetryContext(job: MiningJob) {
+  const context = job.native_retry_context;
+  return job.can_retry_native && context?.expected_task_id && context.format_guidance_sha256
+    && Number.isFinite(context.budget_seconds) && context.budget_seconds > 0 ? context : null;
+}
+
 function formatDuration(seconds: number) {
   const value = Math.max(0, Number(seconds) || 0);
   if (value < 1) return `${value.toFixed(3)} 秒`;
@@ -2161,25 +2327,29 @@ function MiningArtifactFiles({ artifacts, editable, historical = false, loadingP
 }) {
   return (
     <div className="grid gap-2 md:grid-cols-2">
-      {artifacts.map((artifact) => (
-        <button
-          key={artifact.path}
-          type="button"
-          aria-label={`${artifact.skill_name ? `${artifact.skill_name} / ` : ""}${artifact.name}${historical ? " 只读" : ""}`}
-          disabled={loadingPath === artifact.path}
-          onClick={() => onPreview(artifact, editable)}
-          className="flex w-full items-center gap-2 rounded-lg border border-border bg-background px-3 py-2.5 text-left transition-colors hover:border-accent"
-        >
-          <FileText className="size-4 shrink-0 text-accent" />
-          <span className="min-w-0 flex-1">
-            <span className="block truncate text-[12px] font-semibold select-text">{artifact.name}</span>
-            <span className="mono block truncate text-[9.5px] text-muted-soft select-text">{artifact.path}</span>
-          </span>
-          <Pill tone={artifactTone(artifact.kind)}>{artifactLabel(artifact.kind)}</Pill>
-          {historical && <span className="text-[10px]">只读</span>}
-          {editable ? <Pencil className="size-3.5 text-muted-foreground" /> : <Eye className="size-3.5 text-muted-foreground" />}
-        </button>
-      ))}
+      {artifacts.map((artifact) => {
+        const readOnly = historical || artifact.kind === "resource";
+        const canEdit = editable && !readOnly;
+        return (
+          <button
+            key={artifact.path}
+            type="button"
+            aria-label={`${artifact.skill_name ? `${artifact.skill_name} / ` : ""}${artifact.name}${readOnly ? " 只读" : ""}`}
+            disabled={loadingPath === artifact.path}
+            onClick={() => onPreview(artifact, canEdit)}
+            className="flex w-full items-center gap-2 rounded-lg border border-border bg-background px-3 py-2.5 text-left transition-colors hover:border-accent"
+          >
+            <FileText className="size-4 shrink-0 text-accent" />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[12px] font-semibold select-text">{artifact.name}</span>
+              <span className="mono block truncate text-[9.5px] text-muted-soft select-text">{artifact.path}</span>
+            </span>
+            <Pill tone={artifactTone(artifact.kind)}>{artifactLabel(artifact.kind)}</Pill>
+            {readOnly && <span className="text-[10px]">只读</span>}
+            {canEdit ? <Pencil className="size-3.5 text-muted-foreground" /> : <Eye className="size-3.5 text-muted-foreground" />}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -2248,6 +2418,7 @@ function artifactLabel(kind: MiningArtifact["kind"]) {
   if (kind === "skill") return "Skill";
   if (kind === "semantic") return "语义报告";
   if (kind === "evaluation") return "评测定义";
+  if (kind === "resource") return "配套资源";
   return "文件";
 }
 
@@ -2267,7 +2438,8 @@ function pipelineWarningMessages(errors: unknown): string[] {
 
 function compileIssueKinds(messages: string[]) {
   return {
-    reduceTruncated: messages.some((message) => /\breduce\b[\s\S]{0,300}(?:truncat|output\s+limit\s+reached)/i.test(message)),
+    reduceMergeTruncated: messages.some((message) => /\breduce_merge\b\s*(?::|·)[\s\S]{0,300}(?:truncat|output\s+limit\s+reached)/i.test(message)),
+    reduceTruncated: messages.some((message) => /\breduce\b\s*(?::|·|output\b)[\s\S]{0,300}(?:truncat|output\s+limit\s+reached)/i.test(message)),
     sourceIncomplete: messages.some((message) => /\bextract\s*(?::|·)|\bextract(?:ion)?(?:\s+(?:worker|job|step|stage))?\s+(?:failed|failure|incomplete)\b|\bsources?\s+(?:(?:processing|reading|extraction)\s+)?(?:failed|incomplete)\b|\bfailed\s+to\s+(?:read|process|extract)\s+(?:the\s+)?source\b|来源(?:读取|处理)?(?:失败|未完整处理)/i.test(message)),
   };
 }
@@ -2277,11 +2449,12 @@ function RemoteCompileWarnings({ warnings, label, historical = false }: { warnin
   return (
     <section aria-label={label} className="mb-4 rounded-xl border border-amber-300/70 bg-amber-50 px-4 py-3 text-amber-900">
       <div className="flex items-center gap-2 text-[12px] font-bold"><ShieldAlert className="size-4 shrink-0" />{label}</div>
-      {issues.reduceTruncated && <p className="mt-1 text-[11px] leading-relaxed">能力拆分规划（Reduce）的模型输出达到单次长度上限，规划结果被截断。</p>}
+      {issues.reduceMergeTruncated && <p className="mt-1 text-[11px] leading-relaxed">文件冲突合并（reduce_merge）的输出达到单次长度上限，被截断。</p>}
+      {issues.reduceTruncated && <p className="mt-1 text-[11px] leading-relaxed">Reduce 输出达到单次长度上限，被截断。</p>}
       {issues.sourceIncomplete && <p className="mt-1 text-[11px] leading-relaxed">{historical
         ? "挖掘期间部分来源曾未完整处理。请核对已有产物与各轮 Evidence 的覆盖情况。"
         : "部分来源未完整处理；请核对已有产物和缺失的 Evidence 后再决定继续或结束。"}</p>}
-      {!issues.reduceTruncated && !issues.sourceIncomplete && <p className="mt-1 text-[11px] leading-relaxed">Compile 执行出现提示，请结合任务状态和已有产物核对下方远端详情。</p>}
+      {!issues.reduceMergeTruncated && !issues.reduceTruncated && !issues.sourceIncomplete && <p className="mt-1 text-[11px] leading-relaxed">Compile 执行出现提示，请结合任务状态和已有产物核对下方远端详情。</p>}
       <ul className="mt-2 space-y-1 text-[11px] leading-relaxed">
         {warnings.map((warning, index) => <li key={`${index}-${warning}`} className="select-text whitespace-pre-wrap break-words">{warning}</li>)}
       </ul>

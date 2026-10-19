@@ -50,6 +50,54 @@ def test_partial_skill_artifact_exposes_body_title_without_changing_machine_iden
     assert path.read_text(encoding="utf-8") == content
 
 
+@pytest.mark.parametrize("output", ["workspace", "rounds/round-1/output", "rounds/round-1/reviewed_output"])
+def test_reference_artifacts_are_grouped_with_their_skill_and_keep_relative_paths(tmp_path, output):
+    repository = _repository(tmp_path)
+    workspace = repository.project_root / "mining_jobs" / "job-1" / output
+    paths = {
+        "compiled_skill/returns/SKILL.md": "skill",
+        "compiled_skill/returns/references/configuration.md": "resource",
+        "compiled_skill/returns/references/nested/configuration.json": "resource",
+        "compiled_skill/returns/references/SKILL.md": "resource",
+        "compiled_skill/shipping/references/configuration.md": "resource",
+    }
+    for relative in paths:
+        target = workspace / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("{}" if target.suffix == ".json" else "# 方法资源\n", encoding="utf-8")
+    rows = repository._artifact_rows(workspace)
+    assert len(rows) == len(paths)
+    for row in rows:
+        relative = (repository.project_root / row["path"]).relative_to(workspace).as_posix()
+        assert row["kind"] == paths[relative]
+        assert row["skill_name"] == Path(relative).parts[1]
+        assert row["size_bytes"] == (workspace / relative).stat().st_size
+
+
+def test_reference_artifacts_exclude_hidden_nontext_and_symlink_members(tmp_path):
+    repository = _repository(tmp_path)
+    workspace = repository.project_root / "mining_jobs" / "job-1" / "workspace"
+    root = workspace / "compiled_skill" / "returns" / "references"
+    root.mkdir(parents=True)
+    for relative in ["valid.md", "image.png", "notes.txt", ".hidden.md", ".cache/notes.json"]:
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("资源", encoding="utf-8")
+    (root / "linked.md").symlink_to(root / "valid.md")
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "leaked.md").write_text("不可展示", encoding="utf-8")
+    (root / "external.md").symlink_to(external / "leaked.md")
+    (root / "linked-directory").symlink_to(external, target_is_directory=True)
+    (root / "directory.md").mkdir()
+    unrelated = workspace / "compiled_skill" / "returns" / "private.json"
+    unrelated.write_text("{}", encoding="utf-8")
+    rows = repository._artifact_rows(workspace)
+    assert [(row["name"], row["kind"], row["skill_name"]) for row in rows] == [
+        ("valid.md", "resource", "returns")
+    ]
+
+
 def test_source_registry_is_reference_only_and_idempotent(tmp_path):
     repository = _repository(tmp_path)
     uri = "viking://resources/team/runbooks"

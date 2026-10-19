@@ -48,6 +48,7 @@ REVIEW_SCHEMA_VERSION = "skill-miner.review.v1"
 MAX_REVIEW_QUESTIONS = 50
 MAX_SUPPLEMENT_CHARACTERS = 100_000
 MAX_SKILL_FRONTMATTER_CHARACTERS = 64 * 1024
+RECOVERABLE_IDENTITY_ERROR = "Prior candidate name cannot silently change its canonical workflow; use explicit reuse"
 
 
 def _file_sha256(path: Path) -> str:
@@ -409,9 +410,18 @@ class OvSkillMiningRepository:
         max_rounds: int,
         runtime_timeout_seconds: int = 3600,
         human_checkpoints: bool = True,
+        skip_empty_checkpoints: bool = False,
+        consolidate_reviewed_candidates: bool = False,
         candidate_contract_version: int = 2,
         compiler_body: str | None = None,
+        mining_mode: str = "auto",
+        mining_direction: str = "",
+        target_skill_count: int | None = None,
     ) -> dict[str, Any]:
+        from .mining_intent import normalize_intent
+        intent = normalize_intent(mining_mode, mining_direction, target_skill_count)
+        if intent["active"] and candidate_contract_version != 2:
+            raise ValueError("挖掘方向与数量模式需要当前多候选编译契约，请恢复默认编译 Skill")
         if compiler_body is not None and (not isinstance(compiler_body, str) or not compiler_body.strip()):
             raise ValueError("编译 Skill 必须为非空文本")
         if isinstance(candidate_contract_version, bool) or candidate_contract_version not in (1, 2):
@@ -439,6 +449,7 @@ class OvSkillMiningRepository:
             job = {
                 "job_id": job_id,
                 "name": str(name or f"{source_uri.rsplit('/', 1)[-1]} 挖掘任务")[:120],
+                "mining_intent": intent,
                 "engine": "ov_compile",
                 "status": "preparing",
                 "input_dir": source_uri,
@@ -477,7 +488,8 @@ class OvSkillMiningRepository:
                     "te-evidence-quote-aliases.v1" if candidate_contract_version == 2 else ""
                 ),
                 "staged_identity_partition_protocol": (
-                    "te-candidate-identity-partition.v2" if candidate_contract_version == 2 else ""
+                    ("te-candidate-identity-partition.v3" if consolidate_reviewed_candidates
+                     else "te-candidate-identity-partition.v2") if candidate_contract_version == 2 else ""
                 ),
                 "staged_uncertainty_scope_protocol": (
                     "te-uncertain-context-units.v1" if candidate_contract_version == 2 else ""
@@ -495,6 +507,8 @@ class OvSkillMiningRepository:
                 "runtime_timeout_seconds": runtime_timeout_seconds,
                 "human_checkpoints_requested": bool(human_checkpoints),
                 "human_checkpoints_effective": bool(human_checkpoints),
+                "empty_review_policy": "te-empty-review-skip.v1" if skip_empty_checkpoints else "",
+                "skipped_checkpoints": [],
                 "rounds_mode": "orchestrated",
                 "options_warnings": [],
                 "remote_warnings": [],
@@ -517,12 +531,28 @@ class OvSkillMiningRepository:
                 "ov_sync_failures": 0,
                 "ov_next_retry_at": "",
             }
+            from .mining_completion import POLICY
+            from .native_compiler import PROTOCOL as NATIVE_PROTOCOL
+            if compiler_body and f"completion_policy: {POLICY}" in compiler_body.splitlines():
+                job["completion_policy"] = POLICY
+                job["benchmark_required"] = False
+            if compiler_body and NATIVE_PROTOCOL in compiler_body:
+                job["execution_protocol"] = NATIVE_PROTOCOL
+                job["stable_output_uri"] = f"{RUNS_ROOT}/{job_id}/output"
+                job["output_uri"] = job["stable_output_uri"]
+                job["native_compile_history"] = []
+                # These flags describe the old host pipeline, not native execution.
+                for key in list(job):
+                    if key.startswith("staged_"):
+                        job.pop(key)
             job_dir = self._job_dir(job_id)
             (job_dir / "workspace" / "compiled_skill").mkdir(parents=True, exist_ok=False)
             (job_dir / "workspace" / "semantic_reports").mkdir(parents=True, exist_ok=True)
             job["workspace"] = (job_dir / "workspace").relative_to(self.project_root).as_posix()
             if compiler_body is not None:
                 (job_dir / "compiler-skill.md").write_text(compiler_body, encoding="utf-8")
+                from .native_compiler import freeze_assets
+                freeze_assets(job_dir, compiler_body)
             _atomic_json(job_dir / "job.json", job)
             return dict(job)
 
@@ -571,7 +601,10 @@ class OvSkillMiningRepository:
             if row.get("status") in {"stopping", "stopped"} or row.get("ov_cancel_reason"):
                 # A late worker result may record acceptance, but cannot undo a
                 # stop committed while it was reading or awaiting the remote ACK.
-                if changes.get("status") not in {"stopping", "stopped"}:
+                uncertain_stop = (changes.get("status") == "interrupted" and row.get("ov_cancel_sent_at")
+                                  and (changes.get("remote_terminal_unconfirmed")
+                                       or row.get("remote_terminal_unconfirmed")))
+                if changes.get("status") not in {"stopping", "stopped"} and not uncertain_stop:
                     changes = {
                         key: value for key, value in changes.items()
                         if key not in {"status", "finished_at", "error", "stop_reason"}
@@ -596,7 +629,7 @@ class OvSkillMiningRepository:
     def delete_job(self, job_id: str) -> dict[str, Any]:
         with self._lock:
             row = self.get_job(job_id)
-            if row.get("status") in ACTIVE_JOB_STATES | {"waiting_human"}:
+            if row.get("status") in ACTIVE_JOB_STATES | {"waiting_human"} or row.get("remote_terminal_unconfirmed"):
                 raise RuntimeError("运行中的挖掘任务请先停止")
             job_dir = self._job_dir(job_id)
             count = sum(1 for path in job_dir.rglob("*") if path.is_file())
@@ -651,6 +684,9 @@ class OvSkillMiningRepository:
 
     def finalize_materialized(self, job_id: str, *, after_edit: bool = False, render_skill: str = "") -> dict[str, Any]:
         job = self.get_job(job_id)
+        from .mining_completion import completion_only, finalize_inventory
+        if completion_only(job):
+            return finalize_inventory(self, job)
         workspace = self.workspace(job)
         for name in ("evidence-map.md", "gaps.md"):
             report = workspace / "semantic_reports" / name
@@ -845,7 +881,8 @@ class OvSkillMiningRepository:
         skills, deferred = plan.get("skills"), plan.get("deferred")
         if not isinstance(skills, list) or not isinstance(deferred, list):
             raise ValueError("能力拆分计划必须包含 skills/deferred 数组")
-        if job.get("staged_protocol") != "te-staged-compile.v1" and len(skills) > MAX_CANDIDATES:
+        from .native_compiler import is_native
+        if not is_native(job) and job.get("staged_protocol") != "te-staged-compile.v1" and len(skills) > MAX_CANDIDATES:
             raise ValueError("单次 Compile 的能力拆分计划最多包含 8 个候选")
         if not skills and not deferred and job.get("staged_protocol") != "te-staged-compile.v1":
             raise ValueError("零候选的能力拆分计划必须说明暂缓原因")
@@ -1032,6 +1069,9 @@ class OvSkillMiningRepository:
             job = self.get_job(job_id)
             if job.get("status") in TERMINAL_JOB_STATES | {"waiting_human"}:
                 return job
+            from .mining_completion import complete, completion_only
+            if completion_only(job):
+                return complete(self, job)
             if not job.get("materialized"):
                 raise ValueError("本轮产物尚未通过结构校验")
             if int(job.get("orchestration_version") or 0) < 2:
@@ -1041,29 +1081,29 @@ class OvSkillMiningRepository:
             history.append(metadata)
             if job.get("human_checkpoints_effective"):
                 review = self._read_review(job)
-                pending = {
-                    "id": f"{job_id}-round-{job['current_round']}-review",
-                    "round": job["current_round"],
-                    "checkpoint": "after_compile",
-                    "title": f"第 {job['current_round']} 轮 Evidence 复核与补充",
-                    "intro": "检查本轮 Skill Candidate 和 Test Dataset；补充 Evidence 或明确标记暂时无法确认。",
-                    "questions": [self._question_row(question) for question in review["questions"]],
-                    "allow_stop": True,
-                    "can_continue": int(job["current_round"]) < int(job["max_rounds"]),
-                }
-                quality = dict(job.get("artifact_quality") or {})
-                quality["can_submit"] = False
-                return self.update_job(
-                    job_id,
-                    rounds_history=history,
-                    status="waiting_human",
-                    pending_checkpoint=pending,
-                    round_completed_at=metadata["completed_at"],
-                    finished_at="",
-                    artifact_quality=quality,
-                    phase={"step1": "done", "step2": "done", "step3": "active"},
-                )
-            if int(job["current_round"]) >= int(job["max_rounds"]):
+                if job.get("empty_review_policy") == "te-empty-review-skip.v1" and not review["questions"]:
+                    # A declared empty review is not human approval or new Evidence.
+                    # Keep a separate receipt; never fabricate a checkpoint submission.
+                    record = {
+                        "round": job["current_round"], "checkpoint": "after_compile",
+                        "policy": "te-empty-review-skip.v1", "reason": "本轮无补证问题，自动跳过人工补证",
+                        "question_count": 0, "human_approved": False, "new_evidence": False,
+                        "review_sha256": _file_sha256(self.workspace(job) / "semantic_reports/review.json"),
+                        "recorded_at": metadata["completed_at"],
+                    }
+                    if (record in (job.get("skipped_checkpoints") or [])
+                            and job.get("round_completed_at") == metadata["completed_at"]):
+                        return job
+                    skipped = [row for row in job.get("skipped_checkpoints") or []
+                               if row["round"] != job["current_round"]] + [record]
+                    job = self.update_job(job_id, skipped_checkpoints=skipped, pending_checkpoint=None)
+                else:
+                    return self._wait_for_round_review(job, metadata, history, review)
+            from .native_compiler import is_native
+            no_native_work = is_native(job) and (
+                not job.get("human_checkpoints_effective") or not self._read_review(job)["questions"]
+            )
+            if int(job["current_round"]) >= int(job["max_rounds"]) or no_native_work:
                 quality = dict(job.get("artifact_quality") or {})
                 quality["can_submit"] = bool(quality.get("has_skill"))
                 return self.update_job(
@@ -1076,6 +1116,31 @@ class OvSkillMiningRepository:
                     phase={"step1": "done", "step2": "done", "step3": "done"},
                 )
             return self.update_job(job_id, rounds_history=history, round_completed_at=metadata["completed_at"])
+
+    def _wait_for_round_review(self, job: dict, metadata: dict, history: list, review: dict) -> dict:
+        job_id = job["job_id"]
+        pending = {
+            "id": f"{job_id}-round-{job['current_round']}-review",
+            "round": job["current_round"],
+            "checkpoint": "after_compile",
+            "title": f"第 {job['current_round']} 轮 Evidence 复核与补充",
+            "intro": "检查本轮 Skill Candidate 和 Test Dataset；补充 Evidence 或明确标记暂时无法确认。",
+            "questions": [self._question_row(question) for question in review["questions"]],
+            "allow_stop": True,
+            "can_continue": int(job["current_round"]) < int(job["max_rounds"]),
+        }
+        quality = dict(job.get("artifact_quality") or {})
+        quality["can_submit"] = False
+        return self.update_job(
+            job_id,
+            rounds_history=history,
+            status="waiting_human",
+            pending_checkpoint=pending,
+            round_completed_at=metadata["completed_at"],
+            finished_at="",
+            artifact_quality=quality,
+            phase={"step1": "done", "step2": "done", "step3": "active"},
+        )
 
     def _validate_submission(
         self,
@@ -1307,6 +1372,11 @@ class OvSkillMiningRepository:
             "valid_candidate_count": 0,
             "workspace_reset_pending": True,
         }
+        from .native_compiler import is_native
+        if is_native(job):
+            reset["output_uri"] = job["stable_output_uri"]
+            reset["workspace_reset_pending"] = False
+            reset["native_repair_instruction"] = ""
         self.update_job(job["job_id"], **reset)
         return self.get_job(job["job_id"])
 
@@ -1338,8 +1408,11 @@ class OvSkillMiningRepository:
                 attachments,
             ):
                 return job
+            from .mining_completion import completion_only, revision_submission_job
+            submission_job = (revision_submission_job(job, checkpoint_id, feedback)
+                              if completion_only(job) else job)
             submission = self._validate_submission(
-                job,
+                submission_job,
                 checkpoint_id,
                 answers,
                 unresolved,
@@ -1355,11 +1428,21 @@ class OvSkillMiningRepository:
         with self._lock:
             job = self.get_job(job_id)
             if (
-                job.get("human_checkpoints_effective")
-                or not job.get("materialized")
-                or job.get("status") in TERMINAL_JOB_STATES
+                not job.get("materialized")
+                or job.get("status") in TERMINAL_JOB_STATES | {"waiting_human"}
             ):
                 raise ValueError("该任务当前不能自动开始下一轮")
+            if job.get("human_checkpoints_effective"):
+                records = job.get("skipped_checkpoints") or []
+                receipt = next((row for row in records if row.get("round") == job["current_round"]), {})
+                review_path = self.workspace(job) / "semantic_reports/review.json"
+                if (job.get("empty_review_policy") != "te-empty-review-skip.v1"
+                        or receipt.get("policy") != "te-empty-review-skip.v1"
+                        or receipt.get("question_count") != 0
+                        or receipt.get("human_approved") is not False
+                        or receipt.get("review_sha256") != _file_sha256(review_path)
+                        or self._read_review(job)["questions"]):
+                    raise ValueError("有补证问题或空检查点记录已变化，不能自动开始下一轮")
             return self._prepare_next_round(job)
 
     def finish_job(
@@ -1514,7 +1597,20 @@ class OvSkillMiningRepository:
         for path in sorted(workspace.rglob("*")):
             if not path.is_file():
                 continue
-            kind = kinds.get(path.name)
+            relative = path.relative_to(workspace)
+            parts = relative.parts
+            is_reference = len(parts) >= 4 and parts[0] == "compiled_skill" and parts[2] == "references"
+            if is_reference:
+                if (
+                    path.suffix.lower() not in {".md", ".json"}
+                    or any(part.startswith(".") for part in parts)
+                    or path.is_symlink()
+                    or any((workspace / parent).is_symlink() for parent in relative.parents)
+                ):
+                    continue
+                kind = "resource"
+            else:
+                kind = kinds.get(path.name)
             if kind is None and "semantic_reports" in path.parts:
                 kind = "semantic"
             if kind is not None:
@@ -1535,7 +1631,7 @@ class OvSkillMiningRepository:
                         "kind": kind,
                         "path": path.relative_to(self.project_root).as_posix(),
                         "size_bytes": path.stat().st_size,
-                        "skill_name": path.parent.name if "compiled_skill" in path.parts else "",
+                        "skill_name": parts[1] if len(parts) >= 3 and parts[0] == "compiled_skill" else "",
                         "display_title": display_title,
                     }
                 )
@@ -1544,9 +1640,67 @@ class OvSkillMiningRepository:
     def public_job(self, job: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
         hidden = {
             "workspace", "input_manifest", "compile_request", "workspace_reset_pending", "compiler_path",
-            "staged_state_path",
+            "staged_state_path", "native_allowed_source_uris",
         }
         result = {key: value for key, value in job.items() if key not in hidden}
+        from .mining_completion import revision_checkpoint
+        result["optional_revision"] = revision_checkpoint(job)
+        from .artifact_recovery import ERROR_PREFIX, prepare_recovery
+
+        result["can_resume"] = job.get("status") == "failed" and (
+            job.get("error") == RECOVERABLE_IDENTITY_ERROR
+        )
+        result["can_retry_native"] = False
+        result["native_retry_context"] = None
+        from .native_compiler import is_native
+        if is_native(job) and job.get("status") == "failed":
+            from .native_recovery import prepare_recovery as prepare_native_recovery
+            try:
+                prepare_native_recovery(self._job_dir(job["job_id"]), job)
+                result["can_resume"] = True
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+            from .native_recovery import prepare_explicit_retry
+            try:
+                result["native_retry_context"] = prepare_explicit_retry(self._job_dir(job["job_id"]), job)
+                result["can_retry_native"] = True
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        if job.get("status") == "failed" and str(job.get("error", "")).startswith(ERROR_PREFIX):
+            try:
+                root = self._job_dir(job["job_id"]) / "round_inputs" / f"round-{job['current_round']}" / "staged"
+                prepare_recovery(root, json.loads((root / "state.json").read_text(encoding="utf-8")), job)
+                result["can_resume"] = True
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        from .extract_recovery import ERROR_PREFIX as EXTRACT_ERROR_PREFIX
+        from .extract_recovery import prepare_recovery as prepare_extract_recovery
+        from .intent_recovery import ERROR as INTENT_ERROR
+        from .intent_recovery import prepare_recovery as prepare_intent_recovery
+        from .routing_recovery import ERROR as ROUTING_ERROR
+        from .routing_recovery import prepare_recovery as prepare_routing_recovery
+
+        if job.get("status") == "failed" and str(job.get("error", "")).startswith(EXTRACT_ERROR_PREFIX):
+            try:
+                root = self._job_dir(job["job_id"]) / "round_inputs" / f"round-{job['current_round']}" / "staged"
+                prepare_extract_recovery(root, json.loads((root / "state.json").read_text(encoding="utf-8")), job)
+                result["can_resume"] = True
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        if job.get("status") == "failed" and job.get("error") == ROUTING_ERROR:
+            try:
+                root = self._job_dir(job["job_id"]) / "round_inputs" / f"round-{job['current_round']}" / "staged"
+                prepare_routing_recovery(root, json.loads((root / "state.json").read_text(encoding="utf-8")), job)
+                result["can_resume"] = True
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        if job.get("status") == "failed" and job.get("error") == INTENT_ERROR:
+            try:
+                root = self._job_dir(job["job_id"]) / "round_inputs" / f"round-{job['current_round']}" / "staged"
+                prepare_intent_recovery(root, json.loads((root / "state.json").read_text(encoding="utf-8")), job)
+                result["can_resume"] = True
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
         for key in ("pending_attachments", "pending_reference_snapshots"):
             result[key] = [self._public_attachment(row) for row in job.get(key) or []]
         for key in ("checkpoint_history", "supplements"):
@@ -1587,6 +1741,106 @@ class OvSkillMiningRepository:
             }
         )
         return result
+
+    def resume_native_failure(self, job_id: str, remote_task: dict, *,
+                              authorization: dict | None = None) -> dict[str, Any]:
+        """Apply a bounded request-contract upgrade; accepted requests and retry counts stay immutable."""
+        from .native_recovery import explicit_retry_matches, prepare_explicit_retry, prepare_recovery
+
+        with self._lock:
+            job = self.get_job(job_id)
+            if authorization is not None and explicit_retry_matches(job, authorization):
+                return job
+            if (authorization is None and (job.get("native_resource_recovery") or job.get("native_contract_recoveries"))
+                    and job.get("status") in ACTIVE_JOB_STATES):
+                return job
+            active = sum(row.get("status") in ACTIVE_JOB_STATES for row in self._iter_jobs_unlocked())
+            if active >= MAX_PARALLEL_JOBS:
+                raise RuntimeError("运行并发已满，请稍后恢复")
+            journal = (prepare_recovery(self._job_dir(job_id), job, apply=True, remote_task=remote_task)
+                       if authorization is None else prepare_explicit_retry(self._job_dir(job_id), job,
+                           apply=True, remote_task=remote_task, authorization=authorization))
+            now = utc_now()
+            upgrades = list(job.get("native_contract_recoveries") or [])
+            if authorization is None:
+                upgrades.append({key: journal[key] for key in ("protocol", "submission_key", "round", "task_id",
+                                                              "guidance_sha256", "upgrade_index")})
+            meta = journal if authorization is None else journal["retry"]
+            reason = (journal["reason"] if authorization is None
+                      else "管理员明确授权一次格式修复实测，追加独立尝试预算")
+            history = list(job.get("recovery_history") or [])
+            history.append({"round": job["current_round"], "error": job["error"],
+                            "failed_at": job["finished_at"], "resumed_at": now,
+                            "reason": reason, "recovery_protocol": journal["protocol"],
+                            "guidance_sha256": meta["guidance_sha256"],
+                            **({"explicit_retry": meta} if authorization is not None else {}),
+                            "previous_round_started_at": job.get("round_started_at"),
+                            "previous_task_id": job["ov_task_id"]})
+            recovered = self.update_job(job_id, status="preparing", error="", finished_at="",
+                native_contract_recoveries=upgrades, recovery_history=history, native_repair_instruction="",
+                **({"native_explicit_retry": meta} if authorization is not None else {}),
+                compile_request={}, ov_task_id="", ov_status="", ov_stage="", ov_pipeline={}, materialized=False,
+                submission_idempotency_key=journal["submission_key"], submission_started_at="",
+                ov_task_created_at="", ov_task_started_at="", ov_task_updated_at="", ov_processing_seconds=None,
+                ov_sync_error="", ov_sync_failures=0, ov_next_retry_at="", materialize_attempts=0,
+                round_started_at=(job.get("round_started_at") if authorization is not None
+                                  else journal["budget_started_at"]))
+            self.append_log(job_id, "已核验远端终态、冻结来源及历史产物；"
+                            + ("管理员授权本次人工重试，原预算保留，追加独立尝试预算" if authorization is not None
+                               else "保留原编译 Skill、旧修订次数和已有恢复预算，以新版请求契约恢复"))
+            return recovered
+
+    def resume_identity_failure(self, job_id: str) -> dict[str, Any]:
+        """Recover the identified host error at its durable boundary, preserving frozen requests."""
+        with self._lock:
+            job = self.get_job(job_id)
+            if job.get("status") == "preparing" and (job.get("recovery_history") or []):
+                return job
+            from .artifact_recovery import ERROR_PREFIX, prepare_recovery
+            from .extract_recovery import ERROR_PREFIX as EXTRACT_ERROR_PREFIX
+            from .extract_recovery import prepare_recovery as prepare_extract_recovery
+            from .intent_recovery import ERROR as INTENT_ERROR
+            from .intent_recovery import prepare_recovery as prepare_intent_recovery
+            from .routing_recovery import ERROR as ROUTING_ERROR
+            from .routing_recovery import prepare_recovery as prepare_routing_recovery
+
+            capacity = str(job.get("error", "")).startswith(ERROR_PREFIX)
+            extraction = str(job.get("error", "")).startswith(EXTRACT_ERROR_PREFIX)
+            routing = job.get("error") == ROUTING_ERROR
+            intent = job.get("error") == INTENT_ERROR
+            if job.get("status") != "failed" or (job.get("error") != RECOVERABLE_IDENTITY_ERROR
+                                                 and not capacity and not extraction and not routing and not intent):
+                raise ValueError("此任务不属于已修复的可恢复失败")
+            if job.get("ov_cancel_reason"):
+                raise ValueError("已请求停止的任务不能自动恢复")
+            path = self._job_dir(job_id) / "round_inputs" / f"round-{job['current_round']}" / "staged/state.json"
+            if path.is_symlink():
+                raise ValueError("恢复状态必须来自当前任务的普通冻结文件")
+            state = json.loads(path.read_text(encoding="utf-8"))
+            if not capacity and not extraction and not routing and not intent and (
+                    state.get("round") != job["current_round"]
+                    or state.get("phase") != "identity_group"
+                    or state.get("current") is not None or state.get("complete")):
+                raise ValueError("任务不在可恢复的候选身份复核边界")
+            active = sum(row.get("status") in ACTIVE_JOB_STATES for row in self._iter_jobs_unlocked())
+            if active >= MAX_PARALLEL_JOBS:
+                raise RuntimeError("运行并发已满，请稍后恢复")
+            journal = prepare_recovery(path.parent, state, job, apply=True) if capacity else None
+            if extraction:
+                journal = prepare_extract_recovery(path.parent, state, job, apply=True)
+            if routing:
+                journal = prepare_routing_recovery(path.parent, state, job, apply=True)
+            if intent:
+                journal = prepare_intent_recovery(path.parent, state, job, apply=True)
+            history = list(job.get("recovery_history") or [])
+            history.append({"round": job["current_round"], "error": job["error"], "failed_at": job["finished_at"],
+                            "resumed_at": utc_now(),
+                            "reason": journal["reason"] if journal else "候选名称冲突已修复，从身份复核断点继续",
+                            **({"recovery_protocol": journal["protocol"]} if journal else {})})
+            recovered = self.update_job(job_id, status="preparing", error="", finished_at="", ov_task_id="",
+                                        ov_status="", recovery_history=history)
+            self.append_log(job_id, "从已修复失败断点恢复：保留原始来源、已受理请求、产物及未解决问题，从当前轮继续")
+            return recovered
 
     def summary(self, jobs: list[dict[str, Any]]) -> dict[str, Any]:
         return {

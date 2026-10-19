@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import bounded_compile_plan as planning
 from .candidate_identity import (
+    CONSOLIDATING_PARTITION_PROTOCOL,
     IDENTITY_FIELDS,
     IDENTITY_GROUP_PROTOCOL_V2,
     IDENTITY_PROTOCOL,
@@ -73,12 +74,18 @@ def _identity_controls(rows: list[dict], state: dict) -> dict:
     if state.get("identity_partition_protocol") in SUPPORTED_IDENTITY_PARTITION_PROTOCOLS:
         result["identity_partition_protocol"] = state["identity_partition_protocol"]
         result["max_identities"] = MAX_PARTITION_IDENTITIES
+    if state.get("identity_partition_protocol") == CONSOLIDATING_PARTITION_PROTOCOL:
+        from .identity_components import PROTOCOL
+        result["identity_consolidation_protocol"] = PROTOCOL
     return result
 
 
 def _freeze_group_protocol(context: dict, state: dict) -> None:
     if _explicit_survivor(state):
         context["identity_group_protocol"] = IDENTITY_GROUP_PROTOCOL_V2
+    if state.get("identity_partition_protocol") == CONSOLIDATING_PARTITION_PROTOCOL:
+        from .identity_components import PROTOCOL
+        context["identity_consolidation_protocol"] = PROTOCOL
 
 
 def _partition_level(root: Path, state: dict, level: int) -> dict:
@@ -279,6 +286,46 @@ def _prior_authorities(job: dict, root: Path):
         yield canonical, scope
 
 
+def _fork_prior_collision(job: dict, root: Path, directory: Path, plan: dict,
+                          prior: dict, current: dict) -> None:
+    """A reused slug is not a reviewed identity: preserve both proposals and exact scopes."""
+    json_text, read, save, sha, _ = _io()
+    original_name = current["name"]
+    digest = sha(json_text(current))
+    journal = directory / "name-conflicts" / (original_name + ".json")
+    if journal.exists():
+        transaction = read(journal)
+        if transaction["proposed_metadata_sha256"] != digest:
+            raise ValueError("Frozen candidate name conflict differs from its recorded proposal")
+    else:
+        taken = {row["name"] for row in plan["skills"]}
+        replacement = original_name[:47] + "-" + digest[:16]
+        for suffix in range(len(taken) + 1):
+            if replacement not in taken:
+                break
+            replacement = original_name[:47] + "-" + sha(digest + ":" + str(suffix))[:16]
+        else:
+            raise ValueError("Cannot reserve an independent candidate name")
+        transaction = {
+            "protocol": "te-prior-name-conflict.v1", "old_name": original_name, "new_name": replacement,
+            "prior_candidate_id": candidate_id(job["job_id"], original_name),
+            "new_candidate_id": candidate_id(job["job_id"], replacement),
+            "prior_metadata": copy.deepcopy(prior), "proposed_metadata": copy.deepcopy(current),
+            "proposed_metadata_sha256": digest,
+            "scope": read(root / "scopes" / (original_name + ".json")),
+            "reason": "同名提议的业务边界发生变化，分配独立身份并保留上一轮身份，等待正常业务归组与来源复核。",
+        }
+        save(journal, transaction)
+    replacement = transaction["new_name"]
+    save(root / "scopes" / (replacement + ".json"), transaction["scope"])
+    for path in (root / "method-decisions").glob("*.json"):
+        row = read(path)
+        if row.get("target") == "candidate" and row.get("name") == original_name:
+            save(path, {**row, "name": replacement})
+    current["name"] = replacement
+    save(root / "plan.json", plan)
+
+
 def _seed_catalog(job: dict, root: Path, folder: str, *, include_reviews: bool) -> None:
     _, read, save, _, _ = _io()
     directory = root / folder
@@ -364,9 +411,9 @@ def _seed_catalog(job: dict, root: Path, folder: str, *, include_reviews: bool) 
             current = next((row for row in plan["skills"] if row["name"] == candidate["name"]), None)
             if current:
                 if any(current[key] != candidate[key] for key in IDENTITY_FIELDS if key not in {"name", "rationale"}):
-                    raise ValueError(
-                        "Prior candidate name cannot silently change its canonical workflow; use explicit reuse"
-                    )
+                    _fork_prior_collision(job, root, directory, plan, candidate, current)
+                    current = None
+            if current:
                 candidate["source_refs"] = sorted(set(candidate["source_refs"] + current["source_refs"]))
                 current_scope = read(root / "scopes" / (candidate["name"] + ".json"))
                 refinement_ordinals = scope.get("refinement_ordinals", [])
@@ -626,6 +673,12 @@ def _replay_group_journal(root: Path, path: Path):
         for row in journal["survivors"]:
             catalog.put(row)
             save(root / "scopes" / (row["candidate"]["name"] + ".json"), row["scope"])
+            if row.get("consolidated_members"):
+                from .identity_components import PROTOCOL, digest
+                save(root / "identity/components" / (row["candidate"]["name"] + ".json"), {
+                    "protocol": PROTOCOL, "name": row["candidate"]["name"],
+                    "members": row["consolidated_members"], "members_sha256": digest(row["consolidated_members"]),
+                })
         for identity in journal["deactivated"]:
             catalog.deactivate(identity)
         catalog.compared(journal["assigned"], versions=journal.get("identity_versions"))
@@ -648,6 +701,13 @@ def _accept_groups(root: Path, current: dict, value) -> None:
         raise ValueError("Unknown frozen candidate grouping protocol")
     explicit = protocol == IDENTITY_GROUP_PROTOCOL_V2
     partition_protocol = context.get("identity_partition_protocol")
+    from .identity_components import PROTOCOL as consolidation_protocol
+    consolidate = context.get("identity_consolidation_protocol") == consolidation_protocol
+    if context.get("identity_consolidation_protocol") and (
+            not consolidate or partition_protocol != CONSOLIDATING_PARTITION_PROTOCOL):
+        raise ValueError("Unknown frozen candidate consolidation protocol")
+    if partition_protocol == CONSOLIDATING_PARTITION_PROTOCOL and not consolidate:
+        raise ValueError("Candidate consolidation policy is missing")
     if partition_protocol is not None:
         if partition_protocol not in SUPPORTED_IDENTITY_PARTITION_PROTOCOLS or not explicit:
             raise ValueError("Unknown frozen candidate identity partition protocol")
@@ -671,7 +731,7 @@ def _accept_groups(root: Path, current: dict, value) -> None:
 
         def group_survivor(group):
             preferred = catalog.survivor(group["candidate_ids"])
-            if explicit and not preferred["prior"]:
+            if explicit and (consolidate or not preferred["prior"]):
                 return catalog.get(group["survivor_candidate_id"])
             return preferred
 
@@ -679,17 +739,21 @@ def _accept_groups(root: Path, current: dict, value) -> None:
             survivor = group_survivor(group)
             priors = [identity for identity in group["candidate_ids"] if catalog.get(identity)["prior"]]
             split_reason = None
-            if explicit and len(priors) > 1:
+            if explicit and not consolidate and len(priors) > 1:
                 split_reason = "Keep separate identities: distinct previous authoritative identities cannot be replaced"
-            elif explicit and priors and group["survivor_candidate_id"] != survivor["candidate_id"]:
+            elif explicit and not consolidate and priors and group["survivor_candidate_id"] != survivor["candidate_id"]:
                 split_reason = "Keep separate identities: the nominee would replace a previous authoritative identity"
             conflicts = [
                 identity for identity in group["candidate_ids"]
-                if identity != survivor["candidate_id"] and latest_refinement(root, identity)
+                if identity != survivor["candidate_id"] and (
+                    latest_refinement(root, identity)
+                    or any(read(path).get("new_candidate_id") == identity
+                           for path in (root / "identity/name-conflicts").glob("*.json"))
+                )
                 and any(catalog.get(identity)["candidate"][key] != survivor["candidate"][key]
                         for key in BUSINESS_FIELDS)
             ]
-            if conflicts or split_reason:
+            if (conflicts and not consolidate) or split_reason:
                 reason = split_reason or (
                     "Keep separate identities: the chosen survivor would discard an accepted business refinement"
                 )
@@ -706,6 +770,9 @@ def _accept_groups(root: Path, current: dict, value) -> None:
                 continue
             survivor = copy.deepcopy(group_survivor(group))
             members = [catalog.get(identity) for identity in group["candidate_ids"]]
+            if consolidate:
+                from .identity_components import members_for
+                survivor["consolidated_members"] = members_for(members)
             survivor["selected"] = any(row["selected"] for row in members)
             survivor["candidate"]["source_refs"] = sorted({
                 ref for row in members for ref in row["candidate"]["source_refs"]
@@ -744,6 +811,7 @@ def _accept_groups(root: Path, current: dict, value) -> None:
             "identity_pass": context["identity_pass"], "coverage_receipts": context.get("coverage_receipts", []),
             "groups": groups, "survivors": survivors,
             "requested_groups": requested_groups, "host_splits": host_splits,
+            **({"identity_consolidation_protocol": consolidation_protocol} if consolidate else {}),
             "deactivated": deactivated, "aliases": aliases, "plan": plan,
             "coverage_file": coverage_file,
             "coverage": {"candidate_id": context["identity_ids"][0], "status": "model-reviewed",
@@ -958,6 +1026,11 @@ class CandidateIdentityMixin:
             report.pop("passes_scheduled", None)
         await asyncio.to_thread(repository.write_output, job["job_id"], "analysis/candidate-identities.json",
                                 json.dumps(report, ensure_ascii=False))
+        conflict_paths = sorted((root / "identity/name-conflicts").glob("*.json"))
+        for index, path in enumerate(conflict_paths):
+            await asyncio.to_thread(repository.write_output, job["job_id"],
+                                    f"analysis/name-conflicts/{index + 1:04d}.json",
+                                    json.dumps(await asyncio.to_thread(read, path), ensure_ascii=False))
         split_count = await asyncio.to_thread(lambda: sum(1 for _ in _split_audit(root)))
         if split_count:
             await asyncio.to_thread(repository.write_output_stream, job["job_id"],

@@ -2,11 +2,48 @@
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from pathlib import Path
 
 from . import bounded_compile_plan as planning
 from .source_units import PROTOCOL, SourceUnitCapacityError, _json, _sha, load_source_unit, load_source_units
+
+STRUCTURAL_COVERAGE_PROTOCOL = "te-structural-source-coverage.v1"
+
+
+def neutral_structure(unit: dict) -> bool:
+    """Recognize only blank syntax or generated worksheet labels, never business headings."""
+    return (unit["kind"] in {"separator", "empty"} and not unit["content"].strip()
+            or unit["kind"] == "heading" and bool(re.fullmatch(
+                r" {0,3}#{1,6}[ \t]+Sheet[1-9][0-9]*[ \t]*(?:\r?\n)?", unit["content"],
+            )))
+
+
+def structural_coverage(value: dict, units: list[dict], reference_map: dict) -> dict | None:
+    """Host-only exact syntax receipt; do not add model facts, methods or Evidence gaps."""
+    classified = {reference_map[ref] for group in ("methods", "facts", "deferred")
+                  for row in value[group] for ref in row["source_refs"]}
+    rows = [{key: unit[key] for key in ("id", "kind", "sha256")}
+            for unit in units if unit["id"] not in classified and neutral_structure(unit)]
+    if not rows:
+        return None
+    return {"protocol": STRUCTURAL_COVERAGE_PROTOCOL, "units": rows, "sha256": _sha(_json(rows))}
+
+
+def retained_structural_ids(root: Path, unit: dict) -> set[str]:
+    """Recheck host receipts from complete frozen units before downstream source routing."""
+    receipt = unit.get("structural_coverage")
+    if receipt is None:
+        return set()
+    rows = receipt["units"]
+    originals = [load_source_unit(root, row["id"]) for row in rows]
+    if (not rows or len({row["id"] for row in rows}) != len(rows)
+            or receipt != {"protocol": STRUCTURAL_COVERAGE_PROTOCOL, "units": rows, "sha256": _sha(_json(rows))}
+            or rows != [{key: original[key] for key in ("id", "kind", "sha256")} for original in originals]
+            or not all(neutral_structure(original) for original in originals)):
+        raise ValueError("Retained structural source coverage changed its original syntax or SHA")
+    return {row["id"] for row in rows}
 
 EXACT_UNIT_GUIDANCE = (
     "This frozen packet uses te-exact-source-units.v1. Each packet.evidence entry is one complete "
@@ -130,10 +167,14 @@ def bind_source_unit_index(root: Path, value: dict, packet: dict, context: dict,
     canonical = _canonical_extract_references(
         value, input_ids=context["input_ids"], source_refs=context["source_refs"], reference_map=reference_map,
     )
+    units = {unit["id"]: unit for unit in load_source_units(root, context["source_unit_ids"])}
     canonical = planning.validate_index(
         canonical, input_ids=context["input_ids"], source_refs=context["source_refs"], routing=True,
+        _retained_structure=tuple(ref for ref, identity in reference_map.items() if neutral_structure(units[identity])),
     )
-    units = {unit["id"]: unit for unit in load_source_units(root, context["source_unit_ids"])}
+    structure = structural_coverage(canonical, list(units.values()), reference_map)
+    structural_ids = {row["id"] for row in structure["units"]} if structure else set()
+    structural_ordinals = {ordinal for identity in structural_ids for ordinal in units[identity]["ordinals"]}
     bindings, source_unit_bindings = {}, {}
 
     def scope(refs: list[str]) -> list[str]:
@@ -150,11 +191,14 @@ def bind_source_unit_index(root: Path, value: dict, packet: dict, context: dict,
         for row in projected[group]:
             row["source_refs"] = scope(row["source_refs"])
     projected["context_refs"] = scope(canonical["context_refs"])
-    return {
+    result = {
         "id": _alias(identity), "value": projected, "bindings": bindings,
         "source_unit_protocol": PROTOCOL, "source_unit_bindings": source_unit_bindings,
         "assigned_unit_ids": list(context["assigned_unit_ids"]),
-        "ordinals": sorted({ordinal for values in bindings.values() for ordinal in values}),
+        "ordinals": sorted({ordinal for values in bindings.values() for ordinal in values} | structural_ordinals),
         "context_ordinals": sorted({ordinal for ref in projected["context_refs"] for ordinal in bindings[ref]}),
         "context_uncertain": canonical["context_uncertain"],
     }
+    if structure:
+        result["structural_coverage"] = structure
+    return result

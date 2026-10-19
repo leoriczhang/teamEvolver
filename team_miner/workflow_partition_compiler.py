@@ -92,10 +92,12 @@ def _inherited_policy(base_body: str, stages: tuple[str, ...]) -> str:
 def render_workflow_partition_compiler(base_body: str) -> str:
     """Render a pure method partition, independent of candidate-metadata output limits."""
     inherited = _inherited_policy(base_body, ("merge_index", "merge_batch", "direct_workflow", "plan"))
-    return render_single_stage_compiler(base_body, PARTITION_STAGE, inherited + PARTITION_RULES)
+    from .mining_intent import GUIDANCE
+    return render_single_stage_compiler(base_body, PARTITION_STAGE, inherited + PARTITION_RULES + GUIDANCE)
 
 
 def render_workflow_metadata_compiler(base_body: str) -> str:
     """Render one final workflow's canonical metadata without repeating its lineage."""
     inherited = _inherited_policy(base_body, ("direct_workflow", "plan"))
-    return render_single_stage_compiler(base_body, METADATA_STAGE, inherited + METADATA_RULES)
+    from .mining_intent import GUIDANCE
+    return render_single_stage_compiler(base_body, METADATA_STAGE, inherited + METADATA_RULES + GUIDANCE)

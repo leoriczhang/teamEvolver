@@ -4,7 +4,8 @@ from copy import deepcopy
 
 import pytest
 
-from team_miner.ov_compile_mining import LEGACY_SKILL_BODY, SKILL_BODY
+from team_miner.knowledge_compiler import SKILL_BODY
+from team_miner.ov_compile_mining import LEGACY_SKILL_BODY
 from team_miner.settings import (
     LEGACY_COMPILER_WARNING,
     compiler_contract_version,

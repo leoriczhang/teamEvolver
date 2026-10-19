@@ -5,7 +5,17 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from .ov_compile_mining import PLAN_SCHEMA_VERSION, SKILL_BODY
+from .knowledge_compiler import SKILL_BODY
+from .knowledge_compiler_v1 import SKILL_BODY as POINT_V1_SKILL_BODY
+from .knowledge_compiler_v2 import SKILL_BODY as POINT_V2_SKILL_BODY
+from .knowledge_compiler_v3 import SKILL_BODY as POINT_V3_SKILL_BODY
+from .knowledge_compiler_v4 import SKILL_BODY as POINT_V4_SKILL_BODY
+from .knowledge_compiler_v5 import SKILL_BODY as POINT_V5_SKILL_BODY
+from .knowledge_compiler_v6 import SKILL_BODY as POINT_V6_SKILL_BODY
+from .knowledge_compiler_v7 import SKILL_BODY as POINT_V7_SKILL_BODY
+from .native_compiler import SKILL_BODY as PREVIOUS_SKILL_BODY
+from .ov_compile_mining import PLAN_SCHEMA_VERSION
+from .task_compiler import SKILL_BODY as TASK_SKILL_BODY
 
 PIPELINE_DEFAULTS = {"max_rounds": 3, "runtime_timeout_seconds": 3600}
 PIPELINE_RANGES = {"max_rounds": (1, 5), "runtime_timeout_seconds": (60, 7200)}
@@ -61,9 +71,18 @@ def settings_payload(store_data: dict[str, Any]) -> dict[str, Any]:
             "label": "Skill 挖掘编译",
             "description": (
                 "OpenViking 每轮使用的编译 Skill；每轮受理前冻结，已有轮次不受后续修改影响。"
-                + (warning or "由模型规划 0–8 个独立 Skill Candidate，各自生成 Test Dataset。")
+                + (warning or "默认每轮一次整轮 Compile；按用户方向构建完整方法，后续补证增量更新同一产物目录。")
             ),
             "default_prompt": SKILL_BODY,
+            "previous_default_prompt": PREVIOUS_SKILL_BODY,
+            "previous_knowledge_default_prompt": POINT_V1_SKILL_BODY,
+            "previous_incremental_default_prompt": POINT_V2_SKILL_BODY,
+            "previous_fragment_default_prompt": POINT_V3_SKILL_BODY,
+            "previous_script_default_prompt": POINT_V4_SKILL_BODY,
+            "previous_collection_default_prompt": POINT_V5_SKILL_BODY,
+            "previous_anchor_default_prompt": POINT_V6_SKILL_BODY,
+            "previous_directory_default_prompt": POINT_V7_SKILL_BODY,
+            "task_default_prompt": TASK_SKILL_BODY,
             "effective_prompt": body,
             "overridden": body != SKILL_BODY,
             "char_count": len(body),

@@ -37,7 +37,7 @@ class Host(OvWorkflowPlanningMixin):
         return job
 
 
-async def _entered(tmp_path, count=4):
+async def _entered(tmp_path, count=4, *, mining_intent=None):
     host = Host()
     records = [_record(i) for i in range(count)]
     for i, record in enumerate(records):
@@ -49,6 +49,9 @@ async def _entered(tmp_path, count=4):
              "catalog_counts": {"method": count}, "selection_cursor": 0, "workflow_partition_protocol":
                  "te-workflow-partition.v2"}
     job = {"job_id": "workflow-test", "current_round": 1}
+    if mining_intent is not None:
+        state["mining_intent"] = mining_intent
+        job["mining_intent"] = mining_intent
     _write(tmp_path / "compiler-base.md", SKILL_BODY)
     await host._workflow_enter(job, tmp_path, state)
     return host, job, state, records

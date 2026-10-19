@@ -85,6 +85,9 @@ teamEvolver = [
 
 team_miner = [
     "README.md",
+    "compiler_skills/*/SKILL.md",
+    "compiler_skills/*/references/*.md",
+    "compiler_skills/*/scripts/*.py",
 ]
 
 [tool.pytest.ini_options]

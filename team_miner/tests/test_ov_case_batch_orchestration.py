@@ -256,7 +256,7 @@ def test_default_production_path_is_batched_and_six_frozen_compilers_unchanged(t
         final = await drive(owner, job)
         assert final["status"] == "waiting_human"
         assert all((root / "compilers" / (name + ".md")).read_bytes() == content for name, content in compilers.items())
-        assert (root / "aux-compilers/case_batch.md").is_file()
+        assert (root / "aux-compilers/case_batch_source_bound.md").is_file()
 
     asyncio.run(check())
 
@@ -537,8 +537,8 @@ def test_case_batch_bound_revision_with_twenty_mb_archived_prior_and_custom_ids(
                 assert note["revision_context_is_evidence"] is False
                 assert note["complete_previous_candidate_archived"] is True
                 assert note["previous_candidate"]["case_id"] == packet["derived_controls"]["case_id"]
-                assert len(note["previous_candidate"]["skill_body_excerpt"]) <= 3000
-                assert note["previous_candidate"]["skill_body_excerpt_truncated"] is True
+                assert note["previous_candidate"]["skill_body_excerpt_omitted"]
+                assert "skill_body_excerpt" not in note["previous_candidate"]
                 seen.append(packet["derived_controls"]["case_id"])
         assert len(owner.ov.batches[batch_start:]) == 2 and set(seen) == set(identities)
         assert state["current"] is None
@@ -810,7 +810,7 @@ def test_legacy_supersession_requires_verified_absence_and_unchanged_authority(t
 
             owner.ov.request = unavailable
         elif guard == "compiler_changed":
-            with (root / "aux-compilers/case_batch.md").open("a", encoding="utf-8") as stream:
+            with (root / "aux-compilers" / (current["compiler_stage"] + ".md")).open("a", encoding="utf-8") as stream:
                 stream.write("\nChanged compiler\n")
         else:
             _save(audit_path, {"replacement_child": "tampered"})

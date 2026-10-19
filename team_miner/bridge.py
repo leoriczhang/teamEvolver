@@ -99,7 +99,7 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
             return
         if (
             job.get("engine") != "ov_compile"
-            or job.get("status") not in ACTIVE_JOB_STATES
+            or (job.get("status") not in ACTIVE_JOB_STATES and not job.get("remote_terminal_unconfirmed"))
             or not job.get("ov_task_id")
             or (not force and not self._ov_skill_refresh_due(job))
         ):
@@ -114,7 +114,10 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
 
         async def refresh() -> None:
             try:
-                await self._refresh_ov_skill_job(job)
+                if job.get("remote_terminal_unconfirmed") and job.get("status") == "interrupted":
+                    await self._reconcile_unconfirmed_ov_skill_job(job)
+                else:
+                    await self._refresh_ov_skill_job(job)
             except Exception:
                 logger.exception("unexpected OV Skill mining refresh failure for %s", job["job_id"])
 
@@ -127,6 +130,35 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
                 tasks.pop(job["job_id"], None)
 
         task.add_done_callback(forget)
+
+    async def _reconcile_unconfirmed_ov_skill_job(self, observed: dict) -> None:
+        """Read-only reconciliation after local cancellation waiting has ended."""
+        repository = self._ov_skill_mining_repository()
+        async with self._ov_skill_mining_lock(observed["job_id"]):
+            job = await asyncio.to_thread(repository.get_job, observed["job_id"])
+            if (not job.get("remote_terminal_unconfirmed") or job.get("status") != "interrupted"
+                    or job.get("ov_task_id") != observed.get("ov_task_id")):
+                return
+            observed_at = utc_now()
+            changes = {"ov_last_sync_attempt_at": observed_at,
+                       "ov_next_retry_at": (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()}
+            try:
+                task = await self._knowledge_request(
+                    str(job.get("account") or ""), "GET", f"/api/v1/tasks/{job['ov_task_id']}", timeout=5.0,
+                    params={"include_events": "true"},
+                )
+                if task.get("task_id", job["ov_task_id"]) != job["ov_task_id"]:
+                    raise ValueError("远端状态不属于当前任务")
+                status = str(task.get("status") or "").lower()
+                changes.update(ov_status=status, ov_sync_error="", ov_last_synced_at=observed_at)
+                if status in {"completed", "succeeded", "success", "failed", "cancelled", "canceled"}:
+                    await self._release_staged_compile_slot(job, job["ov_task_id"])
+                    changes.update(remote_terminal_unconfirmed=False, remote_reconciled_at=observed_at,
+                                   status="interrupted", error="本地已中断等待；远端终态现已确认：" + status,
+                                   remote_state_warning="本地已中断等待；远端终态现已确认：" + status)
+            except Exception as exc:
+                changes["ov_sync_error"] = str(getattr(exc, "detail", exc))[:1000]
+            await asyncio.to_thread(repository.update_job, job["job_id"], **changes)
 
     def _start_ov_skill_monitor(self) -> None:
         """Track deadlines and cancellation even when no browser is polling."""
@@ -160,8 +192,14 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
         # Observe completion first: a deadline must never discard a completed result.
         if status not in {"accepted", "pending", "queued", "running", "committing", "cancelling"}:
             return job
-        elapsed = self._elapsed_seconds(str(job.get("round_started_at") or job.get("started_at") or ""), utc_now())
-        timeout = int(job.get("round_timeout_seconds") or job.get("runtime_timeout_seconds") or 3600)
+        from .native_compiler import is_native
+        if is_native(job):
+            from .native_recovery import effective_round_budget
+            budget_start, timeout = effective_round_budget(job)
+        else:
+            budget_start = str(job.get("round_started_at") or job.get("started_at") or "")
+            timeout = int(job.get("round_timeout_seconds") or job.get("runtime_timeout_seconds") or 3600)
+        elapsed = self._elapsed_seconds(budget_start, utc_now())
         expired = elapsed is not None and elapsed >= timeout
         reason = str(job.get("ov_cancel_reason") or "")
         if not reason and expired:
@@ -171,6 +209,21 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
                 ov_cancel_requested_at=utc_now(), stop_reason=reason, status="stopping",
             )
             await asyncio.to_thread(repository.append_log, job["job_id"], reason + "；请求取消并等待远端终态")
+        # Cancellation acceptance is not a terminal acknowledgement. Bound the local
+        # wait without claiming that remote work stopped or releasing its reservation.
+        sent = str(job.get("ov_cancel_sent_at") or "")
+        cancel_elapsed = self._elapsed_seconds(sent, utc_now()) if sent else None
+        if reason and cancel_elapsed is not None and cancel_elapsed >= 120:
+            message = "停止请求已受理超过120秒，远端终态未确认；保留远端原始状态，不视为已取消或已完成"
+            job = await asyncio.to_thread(
+                repository.update_job, job["job_id"], status="interrupted", finished_at=utc_now(),
+                ov_status=status, remote_terminal_unconfirmed=True, remote_state_warning=message,
+                ov_next_retry_at=(datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat(),
+                stop_reason=reason, error=message,
+                phase={"step1": "done", "step2": "interrupted", "step3": "idle"},
+            )
+            await asyncio.to_thread(repository.append_log, job["job_id"], message)
+            return job
         if not reason or status == "cancelling" or job.get("ov_cancel_sent_at"):
             return job
         try:
@@ -326,6 +379,9 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
         }
 
     async def _materialize_ov_skill_job(self, job: dict) -> dict:
+        from .native_compiler import is_native
+        if is_native(job):
+            return await self._materialize_native_round(job)
         repository = self._ov_skill_mining_repository()
         output_uri = validate_resource_uri(job.get("output_uri"))
         tree = await self._knowledge_tree(str(job.get("account") or ""), output_uri)
@@ -409,6 +465,8 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
             if status in {"completed", "succeeded", "success", "failed", "cancelled", "canceled"}:
                 await self._release_staged_compile_slot(job, task_id)
             job = await self._ov_enforce_deadline(repository, job, status)
+            if job.get("remote_terminal_unconfirmed") and job.get("status") == "interrupted":
+                return await asyncio.to_thread(repository.public_job, job, detail=detail)
             observed_at = utc_now()
             previous_stage = str(job.get("ov_stage") or "")
             if status in {"accepted", "pending", "queued"}:
@@ -479,6 +537,19 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
                 )
             if job.get("ov_last_sync_attempt_at") and previous_error:
                 repository.append_log(job["job_id"], "OpenViking 连接已恢复，任务状态同步成功")
+            from .mining_completion import completion_only
+            from .native_compiler import is_native
+            errors = ((task.get("meta") or {}).get("pipeline") or {}).get("errors") or []
+            if (is_native(job) and not job.get("ov_cancel_reason")
+                    and (public_status == "failed" or (
+                        public_status == "succeeded" and errors and not completion_only(job)))):
+                if public_status == "succeeded":
+                    error = "远端完成状态仍包含未成功的内部任务，不能按完整来源验收"
+                diagnosis = error + ("；" + json.dumps(errors, ensure_ascii=False) if errors else "")
+                job = await self._repair_native_round(job, diagnosis, task=task)
+                if job["status"] == "preparing":
+                    self._schedule_ov_skill_round_submission(job)
+                return await asyncio.to_thread(repository.public_job, job, detail=detail)
             if (job.get("staged_protocol") == "te-staged-compile.v1"
                     and status in {"completed", "succeeded", "success", "failed", "cancelled", "canceled"}):
                 job = await self._advance_staged_round(job, task)
@@ -513,6 +584,20 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
                 except Exception as exc:
                     materialize_seconds = round(time.perf_counter() - materialize_started, 3)
                     repository.append_log(job["job_id"], f"候选产物物化失败：{exc}")
+                    if completion_only(job):
+                        job = await asyncio.to_thread(repository.update_job, job["job_id"],
+                            materialize_warnings=[*job.get("materialize_warnings", []),
+                                                  f"远端挖掘已完成，本地文件同步未完成：{exc}"],
+                            materialize_seconds=materialize_seconds)
+                        job = await asyncio.to_thread(repository.finalize_materialized, job["job_id"])
+                        job = await self._complete_ov_skill_round(job)
+                        return await asyncio.to_thread(repository.public_job, job, detail=detail)
+                    from .native_round import NativeArtifactError
+                    if isinstance(exc, NativeArtifactError):
+                        job = await self._repair_native_round(job, str(exc), task=task, local_validation=True)
+                        if job["status"] == "preparing":
+                            self._schedule_ov_skill_round_submission(job)
+                        return await asyncio.to_thread(repository.public_job, job, detail=detail)
                     attempts = int(job.get("materialize_attempts") or 0) + 1
                     if attempts < 5:
                         job = await asyncio.to_thread(
@@ -540,7 +625,7 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
     async def _complete_ov_skill_round(self, job: dict) -> dict:
         repository = self._ov_skill_mining_repository()
         job = await asyncio.to_thread(repository.finish_materialized_round, job["job_id"])
-        if (not job.get("human_checkpoints_effective") and job.get("status") not in {"succeeded", "stopped", "failed"}
+        if (job.get("status") not in {"succeeded", "stopped", "failed", "waiting_human"}
                 and int(job["current_round"]) < int(job["max_rounds"])):
             job = await asyncio.to_thread(repository.prepare_automatic_next_round, job["job_id"])
             self._schedule_ov_skill_round_submission(job)
@@ -1130,8 +1215,13 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
                     max_rounds=rounds_hint,
                     runtime_timeout_seconds=timeout_seconds,
                     human_checkpoints=bool(body.get("human_checkpoints", True)),
+                    skip_empty_checkpoints=True,
+                    consolidate_reviewed_candidates=True,
                     candidate_contract_version=contract_version,
                     compiler_body=compiler_body,
+                    mining_mode=body.get("mining_mode", "auto"),
+                    mining_direction=body.get("mining_direction", ""),
+                    target_skill_count=body.get("target_skill_count"),
                 )
             except (ValueError, TypeError) as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1141,7 +1231,8 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
             snapshot_uri = f"{run_root}/rounds/round-1/source"
             job = await asyncio.to_thread(
                 repository.update_job, job["job_id"], source_snapshot=snapshot_uri,
-                original_source_snapshot=snapshot_uri, output_uri=f"{run_root}/rounds/round-1/output",
+                original_source_snapshot=snapshot_uri,
+                output_uri=job.get("stable_output_uri") or f"{run_root}/rounds/round-1/output",
                 options_warnings=[LEGACY_COMPILER_WARNING] if contract_version == 1 else [],
             )
             owner._start_ov_skill_monitor()
@@ -1150,6 +1241,38 @@ class SkillMinerBridgeMixin(OvRoundOrchestrationMixin):
                 status_code=201,
                 content={"ok": True, "jobs": [repository.public_job(job)], "summary": repository.summary([job])},
             )
+
+        @app.post("/api/mining/jobs/{job_id}/resume")
+        async def mining_job_resume(job_id: str, request: Request):
+            denied = _require_admin(request)
+            if denied is not None:
+                return denied
+            repository = owner._ov_skill_mining_repository()
+            try:
+                from .native_compiler import is_native
+                current = await asyncio.to_thread(repository.get_job, job_id)
+                body = await request.json() if await request.body() else {}
+                if not isinstance(body, dict):
+                    raise ValueError("恢复请求必须为对象")
+                authorization = None
+                if body:
+                    if (not is_native(current) or body.get("action") != "retry_with_new_budget"
+                            or set(body) != {"action", "request_id", "expected_task_id", "budget_seconds"}):
+                        raise ValueError("不支持的恢复动作或授权字段")
+                    user = request.state.console_user
+                    authorization = {**body, "authorized_by": str(
+                        user.get("username") or user.get("user_id") or user.get("id") or "admin")}
+                job = (await owner._resume_native_resource_failure(job_id, authorization) if is_native(current)
+                       else await asyncio.to_thread(repository.resume_identity_failure, job_id))
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="挖掘任务不存在") from exc
+            except (ValueError, OSError) as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except RuntimeError as exc:
+                raise HTTPException(status_code=429, detail=str(exc)) from exc
+            owner._start_ov_skill_monitor()
+            owner._schedule_ov_skill_round_submission(job)
+            return JSONResponse({"ok": True, "job": repository.public_job(job)})
 
         @app.get("/api/mining/jobs/{job_id}")
         async def mining_job_detail(job_id: str, request: Request):

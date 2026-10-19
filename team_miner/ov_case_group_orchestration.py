@@ -31,7 +31,8 @@ class FrozenCaseGroupError(ValueError):
     """Integrity failures are not model capacity or formatting repairs."""
 
 
-def render_case_group_compiler(base_body: str, max_packets: int = MAX_FILE_MAP_PACKETS) -> str:
+def render_case_group_compiler(base_body: str, max_packets: int = MAX_FILE_MAP_PACKETS, *,
+                               source_bound_context: bool = False) -> str:
     """Derive only this fresh compiler; old renderers and frozen bodies stay unchanged."""
     if type(max_packets) is not int or not 1 <= max_packets <= MAX_FILE_MAP_PACKETS:
         raise ValueError("A TE Case group Compile supports one to eight packet files")
@@ -45,6 +46,10 @@ def render_case_group_compiler(base_body: str, max_packets: int = MAX_FILE_MAP_P
         1,
     )
     case_rules = STAGE_RULES["case"]
+    if source_bound_context:
+        from .case_context import source_bound_case_rules
+
+        case_rules = source_bound_case_rules(case_rules)
     replacements = {
         "Return only the current complete canonical case JSON, never a dataset or sibling cases.":
             "Return one bounded group containing only this packet's assigned complete canonical Cases.",
@@ -94,6 +99,11 @@ def render_case_group_compiler(base_body: str, max_packets: int = MAX_FILE_MAP_P
         "native range IDs; inner Case provenance uses only each assignment's original source URIs. "
         "Native completion may be partial; TE validates and commits each Case separately."
     )
+    if source_bound_context:
+        rules = rules.replace("Preserve every assignment's own coverage_dimension.",
+                              "Retain each assignment's coverage preference; it is not a required domain condition.")
+        rules = rules.replace("Compare queries within this group and against previous_queries;",
+                              "Compare queries within this group; the host checks whole previous queries locally;")
     contract["synthesize"]["instructions"] = rules
     return (
         "---\nname: skill-miner-te-case-groups\n"
@@ -124,6 +134,7 @@ def _host():
 
 
 def _group_packet(root: Path, state: dict, candidate: dict, assignments: list[tuple], published: str):
+    from .case_context import case_history_controls, compact_history_controls
     from .ov_case_batch_orchestration import _bounded_case_revision
 
     _, _, json_text, _, _, _, _, _, _, _ = _host()
@@ -151,8 +162,7 @@ def _group_packet(root: Path, state: dict, candidate: dict, assignments: list[tu
             "coverage_dimension": planning.CASE_DIMENSIONS[context["case_index"]],
             **({"repair_error": slot["error"][:1000]} if slot["error"] else {}),
         } for slot, context, _ in assignments],
-        "previous_queries": state.get("case_group_previous_queries", []),
-        "previous_queries_excerpted": state.get("case_group_previous_queries_excerpted", False),
+        **state.get("case_group_history_controls", case_history_controls([])),
         "source_scope_rule": "Each Case uses only its own assignment's exact original Evidence, not the union.",
     }
     first = contexts[0]["case_index"]
@@ -177,12 +187,15 @@ def _group_packet(root: Path, state: dict, candidate: dict, assignments: list[tu
                 raise
             queries = controls["previous_queries"]
             if not queries:
+                if compact_history_controls(controls):
+                    continue
                 raise
             controls["previous_queries"] = [query[:len(query) // 2] for query in queries] if any(queries) else []
             controls["previous_queries_excerpted"] = True
 
 
 async def next_case_groups(owner, job: dict, root: Path, state: dict, candidate: dict, scope: dict):
+    from .case_context import CASE_CONTEXT_GROUP_STAGE
     from .ov_case_batch_orchestration import MAX_CASE_PACKETS, _batch_ledger, case_source_roles
 
     _, chunks_at, _, method_groups, package, prior_rows, read, save, sha, _ = _host()
@@ -198,15 +211,17 @@ async def next_case_groups(owner, job: dict, root: Path, state: dict, candidate:
     base = await asyncio.to_thread((root / "compiler-base.md").read_text, encoding="utf-8")
     if sha(base) != state["base_sha256"]:
         raise ValueError("Frozen base compiler changed")
-    await owner._ensure_aux_compiler(root, state, CASE_GROUP_COMPILER_STAGE, render_case_group_compiler(base))
+    await owner._ensure_aux_compiler(root, state, CASE_CONTEXT_GROUP_STAGE,
+                                     render_case_group_compiler(base, source_bound_context=True))
     _, published = package(await asyncio.to_thread(
-        (root / "aux-compilers" / (CASE_GROUP_COMPILER_STAGE + ".md")).read_text, encoding="utf-8"
+        (root / "aux-compilers" / (CASE_CONTEXT_GROUP_STAGE + ".md")).read_text, encoding="utf-8"
     ))
     previous = [await asyncio.to_thread(read, root / "cases" / name / f"{slot['index']:02d}.json")
                 for slot in ledger["slots"] if slot["status"] == "valid"]
     # These transient projections are not persisted in state; the full accepted Cases remain local.
-    packet_state = {**state, "case_group_previous_queries": [case["query"][:300] for case in previous],
-                    "case_group_previous_queries_excerpted": any(len(case["query"]) > 300 for case in previous)}
+    from .case_context import case_history_controls
+
+    packet_state = {**state, "case_group_history_controls": case_history_controls(previous)}
     assignments = []
     for slot in pending:
         index = slot["index"]
@@ -247,7 +262,7 @@ async def next_case_groups(owner, job: dict, root: Path, state: dict, candidate:
         contexts.append(context)
         cursor += width
     return await owner._submit_case_batch(
-        job, root, state, packets, contexts, compiler_stage=CASE_GROUP_COMPILER_STAGE,
+        job, root, state, packets, contexts, compiler_stage=CASE_CONTEXT_GROUP_STAGE,
         input_protocol=CASE_GROUP_PROTOCOL, instruction=group_instruction(state["language_policy"]),
     )
 
@@ -266,13 +281,18 @@ def verified_group_batch(root: Path, current: dict, ledger: dict | None = None):
             or sha(manifest) != current["packet_sha256"]):
         raise ValueError("Frozen Case group request changed")
     state = read(root / "state.json")
-    source_path = root / "aux-compilers" / (CASE_GROUP_COMPILER_STAGE + ".md")
+    from .case_context import CASE_CONTEXT_GROUP_STAGE
+
+    compiler_stage = current.get("compiler_stage", CASE_GROUP_COMPILER_STAGE)
+    if compiler_stage not in {CASE_GROUP_COMPILER_STAGE, CASE_CONTEXT_GROUP_STAGE}:
+        raise ValueError("Frozen Case group compiler stage changed")
+    source_path = root / "aux-compilers" / (compiler_stage + ".md")
     if source_path.is_symlink():
         raise ValueError("Frozen Case group compiler cannot be a symbolic link")
     source = source_path.read_text(encoding="utf-8")
     compiler_name, published = package(source)
     if (state.get("case_group_protocol") != CASE_GROUP_PROTOCOL
-            or sha(source) != state["aux_compilers"][CASE_GROUP_COMPILER_STAGE]
+            or sha(source) != state["aux_compilers"][compiler_stage]
             or sha(source) != current["compiler_source_sha256"] or published != body
             or request["skill"] != "viking://agent/skills/" + compiler_name):
         raise ValueError("Frozen Case group compiler or protocol changed")

@@ -12,6 +12,12 @@ import httpx
 from fastapi import HTTPException
 
 from . import bounded_compile_plan as planning
+from .case_context import (
+    CASE_CONTEXT_BATCH_STAGE,
+    CASE_NARRATIVE_PROTOCOL,
+    case_history_controls,
+    compact_history_controls,
+)
 from .compile_strategy import MAX_FILE_MAP_PACKETS
 from .output_language import output_language_instruction
 from .ov_case_group_orchestration import CASE_GROUP_PROTOCOL
@@ -58,7 +64,7 @@ def case_source_roles(
     }
 
 
-def _bounded_case_controls(chunks: list[dict], controls: dict, policy: dict) -> dict:
+def _bounded_case_controls(chunks: list[dict], controls: dict, policy: dict, *, max_chars: int = 32000 - 512) -> dict:
     """Project only non-Evidence history/diagnostics; keep exact source and Candidate controls intact."""
     checked = copy.deepcopy(controls)
     error = checked.get("repair_error", "")
@@ -75,13 +81,19 @@ def _bounded_case_controls(chunks: list[dict], controls: dict, policy: dict) -> 
     while True:
         try:
             planning.build_stage_packet("case", "case-output-11.json", evidence_chunks=chunks,
-                                        controls=checked, language_policy=policy, max_chars=32000 - 512)
+                                        controls=checked, language_policy=policy, max_chars=max_chars)
             return checked
         except ValueError as exc:
             if not str(exc).startswith("Stage packet exceeds"):
                 raise
             queries = checked.get("previous_queries", [])
             if not queries:
+                if compact_history_controls(checked):
+                    continue
+                if checked.get("repair_error"):
+                    checked["repair_error"] = checked["repair_error"][:len(checked["repair_error"]) // 2]
+                    checked["repair_error_excerpted"] = True
+                    continue
                 raise ValueError("Exact Case Evidence and core controls exceed the bounded packet budget") from exc
             if any(queries):
                 checked["previous_queries"] = [query[:len(query) // 2] for query in queries]
@@ -206,6 +218,13 @@ def _bounded_case_revision(root: Path, packet: dict, context: dict, published: s
                 "complete_previous_candidate_archived": True,
             }
         )
+        # Prior generated method examples may belong to different actors than this exact Case assignment.
+        # Only Case packets omit that narrative; artifact writers still need their complete prior body.
+        if packet.get("stage") == "case":
+            old = note["previous_candidate"]
+            old.pop("skill_body_excerpt", None)
+            old.pop("skill_body_excerpt_truncated", None)
+            old["skill_body_excerpt_omitted"] = True
     while True:
         packet["revision_context"] = json_text(note)
         if len(json_text(packet)) <= limit:
@@ -418,9 +437,14 @@ class OvCaseBatchOrchestrationMixin:
         old = copy.deepcopy(state["current"])
         if old.get("task_id") or old.get("input_protocol") is not None:
             raise ValueError("Only an unaccepted legacy file-source request can be superseded")
-        body = await asyncio.to_thread((root / "aux-compilers/case_batch.md").read_text, encoding="utf-8")
+        compiler_stage = old.get("compiler_stage", CASE_BATCH_STAGE)
+        if compiler_stage not in {CASE_BATCH_STAGE, CASE_CONTEXT_BATCH_STAGE}:
+            raise ValueError("Frozen Case batch compiler stage changed")
+        body = await asyncio.to_thread(
+            (root / "aux-compilers" / (compiler_stage + ".md")).read_text, encoding="utf-8"
+        )
         _, published = package(body)
-        if (sha(body) != old["compiler_source_sha256"] or sha(body) != state["aux_compilers"][CASE_BATCH_STAGE]
+        if (sha(body) != old["compiler_source_sha256"] or sha(body) != state["aux_compilers"][compiler_stage]
                 or sha(published) != old["compiler_sha256"]):
             raise ValueError("Legacy Case batch supersession must preserve its exact frozen compiler")
         contexts = [row["context"] for row in locators]
@@ -442,7 +466,8 @@ class OvCaseBatchOrchestrationMixin:
                 raise ValueError("Legacy Case batch supersession audit changed")
         else:
             await asyncio.to_thread(save, path, audit)
-        return await self._submit_case_batch(job, root, state, [json.loads(text) for text in texts], contexts)
+        return await self._submit_case_batch(job, root, state, [json.loads(text) for text in texts], contexts,
+                                             compiler_stage=compiler_stage)
 
     async def _staged_case_batch_next(self, job: dict, root: Path, state: dict, candidate: dict, scope: dict,
                                      *, force_single_cases: bool = False):
@@ -482,8 +507,11 @@ class OvCaseBatchOrchestrationMixin:
         base = await asyncio.to_thread((root / "compiler-base.md").read_text, encoding="utf-8")
         if sha(base) != state["base_sha256"]:
             raise ValueError("Frozen base compiler changed")
-        await self._ensure_aux_compiler(root, state, CASE_BATCH_STAGE, render_case_batch_compiler(base))
-        body = await asyncio.to_thread((root / "aux-compilers" / "case_batch.md").read_text, encoding="utf-8")
+        await self._ensure_aux_compiler(root, state, CASE_CONTEXT_BATCH_STAGE,
+                                        render_case_batch_compiler(base, source_bound_context=True))
+        body = await asyncio.to_thread(
+            (root / "aux-compilers" / (CASE_CONTEXT_BATCH_STAGE + ".md")).read_text, encoding="utf-8"
+        )
         previous = [
             await asyncio.to_thread(read, root / "cases" / name / f"{slot['index']:02d}.json")
             for slot in ledger["slots"]
@@ -513,17 +541,19 @@ class OvCaseBatchOrchestrationMixin:
                 "input_ids": context["input_ids"],
                 **case_source_roles(chunks, scope, root=root, group_index=group_index),
                 "coverage_dimension": planning.CASE_DIMENSIONS[ordinal],
-                "previous_queries": [case["query"][:300] for case in previous],
-                "previous_queries_excerpted": any(len(case["query"]) > 300 for case in previous),
+                **case_history_controls(previous),
                 "source_scope_rule": "Only this packet's exact original Evidence may support this Case. "
                 "Other packets are separate assignments. Missing runtime inputs are not missing business rules.",
                 "case_batch_size": min(MAX_CASE_PACKETS, len(pending)),
             }
             if slot["error"]:
                 controls["repair_error"] = slot["error"][:1000]
-            from .source_scope import EFFICIENCY_PROTOCOL
-            if state.get("efficiency_protocol") == EFFICIENCY_PROTOCOL:
-                controls = _bounded_case_controls(chunks, controls, state["language_policy"])
+            _, published = package(body)
+            envelope_budget = 48000 - len(published) - len(_batch_instruction(state["language_policy"]))
+            controls = _bounded_case_controls(
+                chunks, controls, state["language_policy"],
+                max_chars=min(32000 - 512, envelope_budget - 256),
+            )
             packet = planning.build_stage_packet(
                 "case",
                 f"case-output-{ordinal:02d}.json",
@@ -531,13 +561,13 @@ class OvCaseBatchOrchestrationMixin:
                 controls=controls,
                 language_policy=state["language_policy"],
             )
-            _, published = package(body)
             packet = await asyncio.to_thread(
                 _bounded_case_revision, root, packet, context, published, _batch_instruction(state["language_policy"])
             )
             packets.append(packet)
             contexts.append(context)
-        return await self._submit_case_batch(job, root, state, packets, contexts)
+        return await self._submit_case_batch(job, root, state, packets, contexts,
+                                             compiler_stage=CASE_CONTEXT_BATCH_STAGE)
 
     async def _submit_case_batch(self, job: dict, root: Path, state: dict, packets: list[dict], contexts: list[dict],
                                  *, compiler_stage: str = CASE_BATCH_STAGE,
@@ -599,8 +629,15 @@ class OvCaseBatchOrchestrationMixin:
             "request_sha256": sha(json_text(request)),
             "compiler_sha256": sha(published),
             "compiler_source_sha256": sha(body),
+            "compiler_stage": compiler_stage,
             "attempt": 0,
         }
+        if all(packet["derived_controls"].get("case_narrative_protocol") == CASE_NARRATIVE_PROTOCOL
+               for packet in packets):
+            # A live round's frozen reuse dependencies stay unchanged. Record this new request's
+            # context protocol on the request journal, not as a rewrite of its original round contract.
+            state["current"]["case_narrative_protocol"] = CASE_NARRATIVE_PROTOCOL
+            state["case_narrative_generation_protocol"] = CASE_NARRATIVE_PROTOCOL
         state["attempted_tasks"] = int(state.get("attempted_tasks", 0)) + 1
         await asyncio.to_thread(save, root / folder / "metadata.json", state["current"])
         job = await self._staged_save(

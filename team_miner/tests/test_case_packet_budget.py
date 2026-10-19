@@ -87,7 +87,7 @@ def test_unfit_core_source_is_explicitly_rejected_without_removing_original_rang
 @pytest.mark.parametrize("repair", ["", "\0" * 1000], ids=["initial", "format-repair"])
 def test_production_fresh_batch_caller_constructs_bounded_packet_and_keeps_local_history(tmp_path, repair):
     class CapturingOwner(BatchOwner):
-        async def _submit_case_batch(self, job, root, state, packets, contexts):
+        async def _submit_case_batch(self, job, root, state, packets, contexts, **kwargs):
             return {"packets": packets, "contexts": contexts}
 
     async def run():
@@ -126,7 +126,12 @@ def test_production_fresh_batch_caller_constructs_bounded_packet_and_keeps_local
         assert len(planning._json(packet)) <= 32000
         assert packet["evidence"] == chunks
         assert packet["derived_controls"]["case_id"] == "review-request-case-12"
-        assert packet["derived_controls"]["previous_queries_excerpted"]
+        assert packet["derived_controls"]["previous_queries_omitted"]
+        assert packet["derived_controls"]["previous_queries"] == []
+        history = packet["derived_controls"]
+        assert len(history["previous_query_fingerprints"]) == 11 or (
+            history["previous_query_fingerprints_count"] == 11 and history["previous_query_fingerprints_omitted"]
+        )
         assert len(_read(root / "cases/review-request/00.json")["query"]) == 1001
         if repair:
             assert packet["derived_controls"]["repair_error_excerpted"]

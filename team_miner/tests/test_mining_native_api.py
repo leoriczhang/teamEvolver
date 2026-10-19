@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from team_miner.bridge import SkillMinerBridgeMixin
+from team_miner.native_compiler import PROTOCOL as NATIVE_PROTOCOL
 from team_miner.ov_compile_mining import LEGACY_SKILL_BODY, SKILL_BODY, OvSkillMiningRepository
 from team_miner.settings import LEGACY_COMPILER_WARNING
 from teamEvolver.config_store import ConfigStore
@@ -156,7 +157,8 @@ def test_new_job_freezes_selected_compiler_contract_before_scheduling(native_api
 
     reset = client.post("/api/mining/prompts/ov_compile/reset")
     assert reset.status_code == 200, reset.text
-    assert owner._ov_skill_compiler_body() == SKILL_BODY
+    from team_miner.knowledge_compiler import SKILL_BODY as POINT_SKILL_BODY
+    assert owner._ov_skill_compiler_body() == POINT_SKILL_BODY
     assert repository.get_job(job["job_id"])["candidate_contract_version"] == expected_version
     assert (repository.jobs_root / job["job_id"] / "compiler-skill.md").read_text() == compiler_body
 
@@ -173,3 +175,90 @@ def test_invalid_saved_compiler_does_not_create_or_schedule_job(native_api):
     response = client.post("/api/mining/jobs", json={"input_dir": source["uri"], "source_id": source["source_id"]})
     assert response.status_code == 400 and "frontmatter" in response.json()["detail"]
     assert not owner.submissions and repository.list_jobs() == []
+
+
+@pytest.mark.parametrize("mode,direction,count", [("auto", "客户沟通", None),
+                                                  ("single", "完整客户沟通方法", 1), ("target", "", 4)])
+def test_job_creation_freezes_user_scope_and_count(native_api, mode, direction, count):
+    client, owner = native_api
+    repo = owner._ov_skill_mining_repository()
+    source = repo.save_source("default", "viking://resources/intent", tags=["skill"])
+    response = client.post("/api/mining/jobs", json={"input_dir": source["uri"], "mining_mode": mode,
+                                                  "mining_direction": direction, "target_skill_count": count})
+    assert response.status_code == 201, response.text
+    job = response.json()["jobs"][0]
+    assert job["mining_intent"]["mode"] == mode
+    assert job["mining_intent"]["direction"] == direction
+    assert job["mining_intent"]["target_count"] == count
+    assert job["empty_review_policy"] == "te-empty-review-skip.v1"
+    assert job["execution_protocol"] == NATIVE_PROTOCOL
+    assert job["output_uri"] == job["stable_output_uri"]
+    assert "staged_identity_partition_protocol" not in job
+    assert repo.get_job(job["job_id"])["mining_intent"] == owner.submissions[0]["mining_intent"]
+
+
+def test_invalid_single_goal_creates_no_job_or_remote_work(native_api):
+    client, owner = native_api
+    repo = owner._ov_skill_mining_repository()
+    source = repo.save_source("default", "viking://resources/intent", tags=["skill"])
+    response = client.post("/api/mining/jobs", json={"input_dir": source["uri"], "mining_mode": "single"})
+    assert response.status_code == 400 and "完整方法" in response.json()["detail"]
+    assert not repo.list_jobs() and not owner.submissions
+
+
+def test_completion_only_continue_api_preserves_success_until_explicit_feedback(native_api):
+    from team_miner.knowledge_compiler import SKILL_BODY as POINT_COMPILER
+
+    client, owner = native_api
+    repo = owner._ov_skill_mining_repository()
+    job = repo.create_job(name="完成后自愿修订", account="default", source_uri="viking://resources/source",
+                          source_snapshot_uri="viking://resources/snapshot", output_uri="viking://resources/output",
+                          document_count=1, max_rounds=2, compiler_body=POINT_COMPILER)
+    repo.write_output(job["job_id"], "compiled_skill/point/SKILL.md", "未验收的原始返回正文")
+    repo.update_job(job["job_id"], status="running", ov_status="completed")
+    repo.finalize_materialized(job["job_id"])
+    repo.finish_materialized_round(job["job_id"])
+    current = client.get(f"/api/mining/jobs/{job['job_id']}").json()["job"]
+    assert current["status"] == "succeeded" and current["pending_checkpoint"] is None
+    checkpoint = current["optional_revision"]
+    url = f"/api/mining/jobs/{job['job_id']}/continue"
+    payload = {"checkpoint_id": checkpoint["id"], "feedback": "完善现有场景选择步骤", "request_id": "manual-2"}
+    assert client.post(url, json=payload, headers={"x-test-role": "member"}).status_code == 403
+    assert client.post(url, json={**payload, "feedback": ""}).status_code == 409
+    assert repo.get_job(job["job_id"])["status"] == "succeeded"
+    response = client.post(url, json=payload)
+    assert response.status_code == 200, response.text
+    assert response.json()["job"]["current_round"] == 2
+    assert response.json()["job"]["completion_policy"] == "te-compile-finished.v1"
+    assert not response.json()["job"]["content_validated"]
+    duplicate = client.post(url, json=payload)
+    assert duplicate.status_code == 200 and duplicate.json()["job"]["current_round"] == 2
+    assert client.post(url, json={**payload, "feedback": "已改变的重复请求"}).status_code == 409
+
+
+def test_resume_preserves_frozen_request_and_requires_the_identified_host_failure(native_api):
+    from team_miner.ov_compile_mining import RECOVERABLE_IDENTITY_ERROR
+    client, owner = native_api
+    repo = owner._ov_skill_mining_repository()
+    job = repo.create_job(name="第二轮身份复核", account="default", source_uri="viking://resources/source",
+                          source_snapshot_uri="viking://resources/snapshot", output_uri="viking://resources/output",
+                          document_count=1, max_rounds=2, compiler_body=SKILL_BODY)
+    job = repo.update_job(job["job_id"], current_round=2, status="failed", error=RECOVERABLE_IDENTITY_ERROR,
+                          finished_at="2026-10-14T10:24:40Z")
+    root = repo.jobs_root / job["job_id"] / "round_inputs/round-2/staged"
+    root.mkdir(parents=True)
+    (root / "state.json").write_text(json.dumps({"round": 2, "phase": "identity_group", "current": None,
+                                               "complete": False}))
+    frozen = root / "request.json"
+    frozen.write_text('{"original":"immutable request"}')
+    before = frozen.read_bytes()
+    denied = client.post(f"/api/mining/jobs/{job['job_id']}/resume", headers={"x-test-role": "member"})
+    assert denied.status_code == 403
+    response = client.post(f"/api/mining/jobs/{job['job_id']}/resume")
+    assert response.status_code == 200, response.text
+    resumed = response.json()["job"]
+    assert resumed["status"] == "preparing" and resumed["current_round"] == 2
+    assert resumed["recovery_history"][0]["error"] == RECOVERABLE_IDENTITY_ERROR
+    assert frozen.read_bytes() == before
+    repo.update_job(job["job_id"], status="failed", error="Other unverified failure")
+    assert client.post(f"/api/mining/jobs/{job['job_id']}/resume").status_code == 409

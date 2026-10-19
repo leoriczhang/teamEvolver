@@ -84,6 +84,13 @@ def _build(packet: Any) -> tuple[dict, dict]:
         if controls["input_ids"] != quote_ids:
             raise QuoteAliasManifestError("Control quote assignment differs from the frozen Evidence")
         target["input_ids"] = list(quotes)
+    if controls.get("source_unit_review_protocol"):
+        operative = _ids(controls.get("method_input_ids"), empty=True)
+        context = _ids(controls.get("context_input_ids"), empty=True)
+        if set(operative) & set(context) or set(operative + context) != set(quote_ids):
+            raise QuoteAliasManifestError("Exact review method/context roles must partition the assigned quotes")
+        target["method_input_ids"] = _mapped(operative, qr, empty=True)
+        target["context_input_ids"] = _mapped(context, qr, empty=True)
     support = target.get("support_units", [])
     if not isinstance(support, list) or any(not isinstance(unit, dict) for unit in support):
         raise QuoteAliasManifestError("Support units must retain their declared quote assignments")

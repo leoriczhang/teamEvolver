@@ -118,7 +118,29 @@ def related_context(root: Path, state: dict, records: list[dict]) -> dict:
         if record["item"].get("kind") != "method":
             raise ValueError("Direct planning assignments must remain typed methods")
         methods.update(_ordinals(record["ordinals"], count))
-    shared, verified = _explicit_shared(root, state, methods)
+    exact_units = state.get("source_unit_protocol") == "te-exact-source-units.v1"
+    method_units = set()
+    if exact_units:
+        from .source_unit_review import prepare_routing
+
+        routing = prepare_routing(root, state)
+
+        def record_units(record):
+            bindings = record.get("source_unit_bindings")
+            if not isinstance(bindings, dict):
+                raise ValueError("Exact readonly context lost its original unit membership")
+            return {identity for ref in record["item"]["source_refs"] for identity in bindings[ref]}
+
+        method_units = {identity for record in records for identity in record_units(record)}
+        shared, verified = set(routing["shared_unit_ids"]), routing["coverage_complete"]
+        for group in routing["owned_context_groups"]:
+            if method_units.intersection(group["method_unit_ids"]):
+                shared.update(group["context_unit_ids"])
+        for group in routing["uncertain_unit_groups"]:
+            if method_units.intersection(group):
+                shared.update(group)
+    else:
+        shared, verified = _explicit_shared(root, state, methods)
     audit = {
         "budget_chars": MAX_RELATED_CONTEXT_CHARS,
         "shared_context_verified": verified,
@@ -142,8 +164,9 @@ def related_context(root: Path, state: dict, records: list[dict]) -> dict:
             for index in range(int(counts.get(kind, 0))):
                 record = _read(root, root / "catalog" / kind / f"{index:08d}.json")
                 ordinals = _ordinals(record["ordinals"], count)
-                exact = bool(ordinals & methods)
-                if not (exact if priority == "method" else not exact and bool(ordinals & shared)):
+                membership = record_units(record) if exact_units else ordinals
+                exact = bool(membership & (method_units if exact_units else methods))
+                if not (exact if priority == "method" else not exact and bool(membership & shared)):
                     continue
                 item = record["item"]
                 if item.get("kind") != kind:

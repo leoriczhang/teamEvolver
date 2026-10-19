@@ -14,9 +14,10 @@ IDENTITY_GROUP_SCHEMA_V2 = "skill-miner.identity-groups.v2"
 IDENTITY_GROUP_PROTOCOL_V2 = "te-candidate-identity-groups.v2"
 IDENTITY_PROTOCOL = "te-candidate-identity.v1"
 IDENTITY_PARTITION_PROTOCOL = "te-candidate-identity-partition.v2"
+CONSOLIDATING_PARTITION_PROTOCOL = "te-candidate-identity-partition.v3"
 LEGACY_IDENTITY_PARTITION_PROTOCOL = "te-candidate-identity-partition.v1"
 SUPPORTED_IDENTITY_PARTITION_PROTOCOLS = {
-    IDENTITY_PARTITION_PROTOCOL, LEGACY_IDENTITY_PARTITION_PROTOCOL,
+    IDENTITY_PARTITION_PROTOCOL, LEGACY_IDENTITY_PARTITION_PROTOCOL, CONSOLIDATING_PARTITION_PROTOCOL,
 }
 MAX_PARTITION_IDENTITIES = 32
 IDENTITY_FIELDS = ("name", "task", "trigger", "inputs", "outputs", "boundary", "rationale")
@@ -84,6 +85,17 @@ def render_identity_partition_compiler(base_body: str, *, protocol: str = IDENTI
         rule = LEGACY_PARTITION_RULE
     elif protocol == IDENTITY_PARTITION_PROTOCOL:
         rule = PARTITION_RULE
+    elif protocol == CONSOLIDATING_PARTITION_PROTOCOL:
+        rule = PARTITION_RULE.replace(
+            "An authority_priority\nstarting with 0 denotes a reviewed prior identity: "
+            "preserve it and keep different prior authorities separate.",
+            "Prior identity IDs are immutable lineage, not proof of independent workflows. "
+            "Prior identities may consolidate when the chosen existing parent covers their trigger, terminal "
+            "result and mandatory boundaries; all member contracts and source scopes remain archived."
+        )
+        rule += "\nConsolidation policy te-candidate-consolidation.v1. Preserve every accepted refinement as " \
+                "a source-supported parent branch. Different wording is not a conflict. Keep genuine " \
+                "incompatible normative boundaries separate; never merge only to reach a count."
     else:
         raise ValueError("Unknown candidate identity partition protocol")
     return render_single_stage_compiler(base_body, "identity_group", rule)
@@ -101,6 +113,7 @@ def identity_version(row: dict) -> str:
     """Invalidate a review when canonical business metadata or its exact scope changes."""
     return hashlib.sha256(_json({
         "candidate": row["candidate"], "scope": row.get("scope", {}), "prior": bool(row.get("prior")),
+        **({"consolidated_members": row["consolidated_members"]} if row.get("consolidated_members") else {}),
     }).encode()).hexdigest()
 
 

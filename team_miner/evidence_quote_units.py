@@ -33,7 +33,7 @@ def source_quote_unit(original: dict, position: int) -> dict:
     content = original["content"][relative : relative + QUOTE_UNIT_CHARS]
     start = original["start_char"] + relative
     end, digest = start + len(content), _sha(content)
-    return {
+    result = {
         "id": "src-" + _sha(_json([original["source_uri"], start, end, digest]))[:24],
         "source_uri": original["source_uri"],
         "start_char": start,
@@ -45,6 +45,9 @@ def source_quote_unit(original: dict, position: int) -> dict:
         "original_chunk_id": original["id"],
         "original_chunk_sha256": original["sha256"],
     }
+    if original.get("source_unit_id"):
+        result.update(source_unit_id=original["source_unit_id"], review_ordinals=original["review_ordinals"])
+    return result
 
 
 def validate_source_quote_unit(unit: dict, original: dict) -> None:
@@ -100,4 +103,6 @@ def resolve_quote_ids(value, *, evidence: list[dict], target_schema: str) -> tup
                     "original_chunk_id": unit.get("original_chunk_id"),
                 }
             )
+            if unit.get("source_unit_id"):
+                audit[-1].update(source_unit_id=unit["source_unit_id"], review_ordinals=unit["review_ordinals"])
     return checked, audit

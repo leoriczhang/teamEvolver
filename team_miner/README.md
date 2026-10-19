@@ -1,13 +1,80 @@
 # team_miner
 
-team_miner 承载控制台的 OV Skill 挖掘与知识库挖掘。Skill 挖掘由 teamEvolver 管理真实轮次与人工 Evidence 补证，每轮调用 OpenViking Compile；知识库挖掘将来源文档编译为 Wiki，并提供文件编辑、增量编译及关系图。
+team_miner 承载控制台的 OV Skill 挖掘与知识库挖掘。新默认编译 Skill 为 `knowledge_compiler.py` 的
+`te-knowledge-point-skill-mining.v8`：每个知识点一个专属教官 Skill，包含该知识点下多个对练任务。
+章节包含多个知识点，知识点包含多个任务；一个场景可以关联多个知识点，场景按实际关联作为配置复用，
+不强制组成章节→知识点→任务→场景的树。具体记录关联依据原文和真实补证，不能凭相同编号猜关联。
+语义组织由编译 Skill 完成。首次按任务总范围构建；增量轮由本次明确反馈确定写作集合，
+只把受影响知识点放入本轮写作集合，未修改知识点不派发“复制/保留”单元。旧稿只提供修订对照，
+提取阶段只登记其路径，不重新抽取教学内容；最终仅提交实际修改文件，其余由既有远端目录保留。
+提取单元优先使用当前分配消息已有的真实输入 ID，随即调用 Skill 的 index_assignment；
+消息外置时只读 assignment.json 开头最多 40 行取得锚点，不重复读取已经收到的分配。
+脚本读取该单元完整分配，确定文件角色和全部分片，模型不抄 ID 列表、不反复分页或执行旧稿指令。
+原文件完整登记；每个文件都有一条完整目录；旧输出均标为非事实，不提炼旧配置或分析中的教学内容。
+规划阶段由 Skill 脚本返回紧凑的原知识点目录和当前反馈，模型选择本轮范围，不反复翻读大 assignment。
+脚本返回精确的 emit 参数，目录即使不提供新事实也明确提交；随后构建一条 point-collection，继承六份完整原文，
+增量仅附所选知识点自己的旧 Markdown。一个交付单元内按顺序生成独立知识点 Skill，不并发派出 32 个写作者。
+原始表的“所属知识点”提供任务和场景归属，配置保持原始 ID、字段及原文引用。
+基础执行流程由 Skill 脚本生成，引用完整教官规则，不让各写作者分别概括同一套规则；
+不凭 easy/hard 标签增加门槛，扮演切换不使用客户姓名自称。教官系统提示词的情境示例不作为业务配置。
+重复 ID 和无法消歧的知识点重名不静默覆盖；任务遵循原表明确的数值排序，排序歧义保留原顺序并说明。
+配置的 source_issues 保留格式异常的原行定位及影响，不补造人物设定；只有必要执行依赖缺口时才确认。
+增量只局部编辑明确要求的旧 Markdown 和新增资源，不返回原配置或未修改文件。
+派发表与 FileResponse 清单由 Skill 脚本写入当前 scratch，以文件引用交付，避免长清单输出截断。
+业务取材和范围组织位于 Skill 及其附件，TE 仅装载、冻结、提交与同步；不生成 benchmark 或验证案例。
+
+全量实测历史保留：v4 在 32 个并发写作单元下遇到远端 `Too many open files`，只交付 27 份；
+v5 集中交付修正了该轮资源问题，但第三轮一个旧分析定位单元反复读取后未提交结果。
+v6 仍遇到旧配置定位单元未提交结果。v7 为每个文件准备非空目录和精确 emit 参数，规划只读取
+脚本返回的紧凑目录及当前反馈，避免把定位当作正文阅读。每次真实测试仍需核对内部任务、
+完整交付、来源与未修改文件，不能把远端完成状态当作这些检查已经通过。
+
+新任务冻结 `te-compile-finished.v1` 完成策略：远端 Compile 完成即记录挖掘成功，不执行 TE 内容验收，
+空产物、缺少正文或内容格式问题不使任务失败；远端执行失败和取消仍如实记录。文件同步/归档问题记录警告，
+保留远端输出位置。路径隔离、输入冻结、传输容量、幂等及有界并发继续生效。
+停止受理后 120 秒仍未收到远端终态时，TE 结束本地等待并标为 interrupted，保留原始 ov_status，
+明确 remote_terminal_unconfirmed。之后每 60 秒只读核对，确认远端终态后才释放并发占位；
+不把停止受理当作取消完成，不恢复已中断的挖掘或自动重提。未确认终态的记录不能删除。
+提交准备中的远端资源锁超时按临时冲突退避，沿用原请求标识和本轮预算；受理响应丢失先对账，
+不重复创建Compile。其他幂等或内容冲突继续报错，远端已失败的Compile不会因此自动重编译。
+
+旧版 `native_compiler.py`、按任务版 `task_compiler.py`、知识点首版 `knowledge_compiler_v1.py`、
+增量首版 `knowledge_compiler_v2.py`、分片版 `knowledge_compiler_v3.py`、脚本取材版 `knowledge_compiler_v4.py`、
+集中交付首版 `knowledge_compiler_v5.py`、锚点目录首版 `knowledge_compiler_v6.py`、非事实目录版
+`knowledge_compiler_v7.py`、附件和已冻结任务完整保留。
+`knowledge_compiler.py` 是新默认入口，`knowledge_compiler_v8.py` 只装载 `compiler_skills/knowledge-point-v8/` 的
+Skill正文、附件和脚本；设置返回 `previous_default_prompt`、`task_default_prompt`、
+`previous_knowledge_default_prompt`、`previous_incremental_default_prompt`、`previous_fragment_default_prompt`、
+`previous_script_default_prompt`、`previous_collection_default_prompt`、`previous_anchor_default_prompt`、
+`previous_directory_default_prompt` 便于取回。
+用户保存的自定义编译 Skill 不被默认更新覆盖；恢复默认只影响后续新任务。下文的组件验收和 Test Dataset
+协议描述历史编译 Skill，不适用于新的完成策略。知识库挖掘不变。
 
 ## 维护入口
 
 | 文件 | 职责 |
 | --- | --- |
+| `knowledge_compiler.py` | 新默认知识点教官 Skill、任务和多知识点场景关联、分批分段生成 |
+| `knowledge_compiler_v8.py` | 装载当前自包含挖掘 Skill、附件与脚本 |
+| `compiler_skills/knowledge-point-v8/` | 单个或多个知识点构建、材料歧义保留、规则保真和局部修订 |
+| `knowledge_compiler_v7.py` | 保留的非事实目录版及附件 |
+| `skill_router_compiler.py` | 装载已有 Skill 使用入口的独立编译模板与组装脚本 |
+| `compiler_skills/skill-router-v4/` | Skill 脚本保真提取目录并组装元信息、依赖和通用调用流程，按真实脚本入口验证 |
+| `compiler_skills/skill-router-v3/` | 保留的脚本入口试验版 |
+| `compiler_skills/skill-router-v2/` | 保留的使用入口生成试验版 |
+| `compiler_skills/skill-router-v1/` | 保留的历史使用入口编译模板 |
+| `knowledge_compiler_v6.py` | 保留的锚点目录首版及附件 |
+| `knowledge_compiler_v5.py` | 保留的集中交付首版及附件 |
+| `knowledge_compiler_v4.py` | 保留的脚本取材首版及附件 |
+| `knowledge_compiler_v3.py` | 完整保留的分片定位试验版Skill与附件 |
+| `knowledge_compiler_v2.py` | 完整保留的增量分工首版编译 Skill 与附件 |
+| `knowledge_compiler_v1.py` | 完整保留的知识点首版编译 Skill 与附件 |
+| `task_compiler.py` | 保留的按对练任务组织的历史编译 Skill |
+| `mining_completion.py` | 无内容验收的文件目录记录及完成策略 |
 | `bridge.py` | Skill 挖掘路由、主服务桥接与任务监控 |
 | `ov_round_orchestration.py` | 来源冻结、累积补证、独立编译器安装与幂等提交 |
+| `native_compiler.py` | 整轮原生编译 Skill：方法边界、中文、增量更新与交付要求 |
+| `native_round.py` | 每轮一次 Compile、补证增量输入、确定性产物验收与失败诊断 |
 | `ov_compile_mining.py` | 来源注册、任务状态、复核、归档与产物质量 |
 | `compile_strategy.py` | OV Compile 能力拆分计划与共享分析、候选包契约 |
 | `routes.py` | 知识库上传、编译、Wiki 编辑与发现 |
@@ -30,7 +97,33 @@ teamEvolver start --daemon
 
 在 `http://127.0.0.1:52010/` 登录，配置 OpenViking 的 Endpoint、Account 和服务端凭据，再注册或上传来源目录。给来源标记 Skill 或 Knowledge 用途后，在对应页面创建任务。
 
-Skill 挖掘支持 1–5 个真实轮次、每轮 60–7200 秒基础运行期限、人工补证、附件与来源引用、独立轮次归档、停止和删除。新任务先规划可独立执行的任务方法，再分批编译 Skill Candidate 集合；数量取决于触发场景、输入输出和独立执行、验证的边界，不按文档篇数拆分。重叠方法合并，完整流程中不能独立执行的步骤保持在同一候选内。每个规划任务最多输出 8 个候选，整轮候选数随有效方法增加。纯事实可归为事实信息；只有缺少必要 Evidence 的方法才请求补证。
+新默认任务支持 1–5 轮上限，每轮 60–7200 秒运行期限。每轮 Compile 完成即成功，不等待验收或自动空转。
+尚未达到轮数上限时，任务详情返回 `optional_revision`。可向原任务的 `/continue` 接口提交其 `id` 作为
+`checkpoint_id`，并提供非空 `feedback` 和稳定 `request_id`，开始下一轮修订。上一轮产物与冻结输入独立归档；
+原始产物作为修订上下文传入，不解析旧版方法或案例契约，不作为新事实。后续轮次沿用同一远端 `to` 和冻结编译 Skill，
+携带本次反馈与相关原始材料；自由反馈影响范围未知时回读完整冻结原文。此继续入口不恢复内容验收。
+
+每轮只提交一个 Native Compile。`te-method-ownership.v2.2` 与 `te-method-package-review.v2` 在其中按六个集合节点完成首次构建：来源 Map、观察 Shuffle、方法身份 Reduce、整包草稿 Map、独立最终复核 Map、Finalize。`contract.reduce` 复用同一个 records 配置，声明 `fields={}`，业务字段直接放在 payload，避免默认 text 包装；先读取实际分配数据（仅提供 `assignment_file` 时先回读文件）：顶层有 `group` 时只做观察组的身份归并，不制作文件包；没有 `group` 且为单条 method/notes 时才制作草稿或透传处置，不依赖观察是否带 kind。notes 仅传递真实处置，不伪造方法包。单 Skill、自由挖掘和指定数量共用这一分工。共用原文可以支持多个方法，但可阅读的背景不扩大写入范围。
+
+来源 Map 使用 `execution=agent,input_unit=file`：按原文件分配全部有序分片，必要时分页读取分配清单、分段回读完整原文，并在当前来源 Agent 内构建和有限修正 records。文件是读取分工，不是方法身份。每条观察的 `inputs` 仍须精确引用实际支持范围的原始 ID；可选 `evidence_spans` 不确定时省略，保留完整父链。较长记录集合分段写入后一次 `result_ref` 提交，单次仍最多64条，分页不解除上下文、迭代和运行期限。容量不足如实报告，不丢来源或凑方法；工具读取与修正能力不保证消除 ID 错误，也不保证更快。
+
+每个方法的草稿从一开始在唯一完整 `RecordResponse` 中分段构建，是一条保留当前方法父链的 `draft-package` 记录。其四项 `draft_files` 中，`SKILL.md` 和 `EVALUATION.md` 的 content 是完整 Markdown 字符串，`METHOD.json` 和含12个案例的 `benchmark.json` 的 content 是原生 JSON 对象，不先写四文件再复制转义拼包，也不依赖前一个 Agent 的私有文件引用或 ready_file 发布捷径。新的最终复核 Agent 独立对照分配原文，检查并实际修正整个方法及全部案例，再将 JSON 对象序列化、Markdown 字符串写为既有四文件。最终文件引用当前草稿记录，由 OV 保留其上游方法与原文谱系。草稿不是 Evidence，结构完整不等于正确；来源无法支持时如实暂缓。宿主只校验并汇总回执、来源和问题，确定性渲染 `BENCHMARK.md`，不增加外层模型阶段或补写业务事实。
+
+方法身份统一后，各分支的条件、执行角色和完成范围仍按原文保留；局部阈值、评分或子步骤数量不能提升成通用规则。Test Dataset 检查方法执行者可观察的行为与交付，其他参与者行为是情境输入或等待条件。最终复核 Agent 核对四份草稿及原文，分别统计每个 Case 的 12–24 条 output 与至少一条 trajectory；不足时选择有来源支持的完整情境或如实暂缓，不拼凑检查，也不依赖宿主追加 Compile 修补。新增复核不自动弥补身份阶段遗漏的原文，完整输入父链仍须按实际用途建立。
+
+方法记录的 `inputs` 同时传递实际需要的方法规则与情境、标准答案和参数；`source_roles` 解释用途，本身不授予原文读取权限。未使用观察通过 notes 说明处置。来源配置选择是最终 `SKILL.md` 的执行步骤：正文保留选择条件、局部步骤与终态，主流程按选中配置执行，不依赖不可观察的 scratch 自查。案例提供影响判断的完整输入，检查执行者如何处理输入，不把已给定事实再计为输出；同义改写不增加条件数。补证仅针对影响当前必要判断的未知事实，可选改进与未使用内容写入范围说明。这些语义核对由编译 Skill 指导，不增加外层 Compile 或宿主语义修订阶段。
+
+方法身份归并与规则配置归并分开判断：一个方法可以包含多个来源配置。适用性表以原文记录或明确适用范围为键，主题和交互模式只作导航；相同规则可合并展示并保留成员来源。源表关联按原始字段及命名空间解释，必要定义上下文进入真实输入父链。最终复核 Agent 根据原文校正方法任务与整包草稿，草稿中的条件不作为权威事实。
+
+身份比较使用执行者的操作、必要判断与完成状态，不以主题名称替代方法差异；仅替换主题或参数就能复用的过程保留为配置，来源支持不同调用前提、必要操作或不可互换终态时仍可独立。较大的方法记录集合、整包草稿和最终文件都在各自 Agent 内分段写入完整结果，再通过 `result_ref` 一次提交，避免把长集合塞入单次工具参数。独立复核增加同次 Compile 内的 Agent 工作量及完整草稿传输，不保证耗时下降或语义正确，记录数量与模型容量边界仍适用。
+
+增量输入另携带上一轮已复核的方法目录，作为非 Evidence 的稳定身份和范围上下文。修订草稿确定后，最后的 Map 替换为 `against=target` Shuffle 和 files Reduce，由最终 Agent 召回旧正文及版本摘要，整合本轮 Evidence 与草稿并复核，保留有效条件与 Case ID。records 阶段不读取召回的历史全文，因此这条路径是历史整合加复核，不是对完整增量成品的独立事后审核；需要的旧文件未召回时保留旧产物并说明未执行修订，不猜测历史内容。增量归并通过回执中的 `supersedes` 显式表达，被替代文件保留为谱系。原文、受理请求、失败产物、每轮归档均保留；新的任务不更改历史任务的冻结协议。语义分工由编译 Skill 表达，不得静默截断、强行归并或将一次实测成功宣称为任意规模保证。
+
+受理响应丢失先通过相同幂等键对账；网络失联保留任务并退避同步。远端失败或确定性产物校验失败后冻结诊断并停止，不自动在同轮提交新的 Compile，不放宽中文、来源或 Test Dataset 条件。已有的显式人工重试须通过各自受校验的恢复入口，保留独立授权、预算与冻结记录，并单独计入实际 Compile 数；不能冒称同一轮的一次无故障执行。界面显示真实受理次数及历史修订次数，文件冲突合并错误不推断成方法规划错误。文件包齐全只代表编译和结构验收完成，不代表业务正确或 True Replay 通过。耗时与知识库挖掘应通过相同来源实测比较，不能从外部调用次数推断。
+
+### 历史分批任务协议
+
+以下保留已存在任务的执行协议记录；新默认任务使用上面的原生整轮编译。已受理请求和运行中的历史任务不自动迁移。
 
 默认编译 Skill 使用有界分批执行：按文件读取原始 Evidence，长文件按原始文本范围切片；每次抽取只返回一个定位索引。方法、事实及局部缺口以稳定标识保存在本地账目中；规划分批逐项记录保留、合并、事实信息或暂缓的处置，不用文件级缺口替代全部方法。每个模型任务有独立输入与输出预算，完整来源映射保留在 TE 的本地清单中。模型只选择候选，TE 确定性地展开文件任务；Test Dataset 的十二个完整案例逐个校验后由程序组装。新任务在原文联合范围及完整输入预算允许时，最多四个案例共用一个文件任务，最多四个文件共用一次现有 Compile 的 Map 和 Finalize；容量不足时缩小案例组，直到使用原单案例路径。未知事实仍保留为缺口，程序不补写业务条件。
 

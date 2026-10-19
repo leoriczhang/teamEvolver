@@ -38,12 +38,16 @@ def _io():
 def _feedback(job: dict) -> str:
     """Feedback is control context and must not silently disappear at a size limit."""
     json_text, _, _, _, _ = _io()
+    from .mining_intent import intent_from_job
+    intent = intent_from_job(job)
+    intent_context = json_text({"mining_intent": intent, "is_factual_evidence": False}) if intent["active"] else ""
     if int(job["current_round"]) <= 1:
-        return ""
+        return intent_context
     submission = (job.get("supplements") or [{}])[-1]
     return json_text({"feedback": submission.get("feedback") or "",
                       "review_questions": submission.get("questions") or [],
-                      "revision_context_is_evidence": False})
+                      "revision_context_is_evidence": False,
+                      **({"mining_intent": intent} if intent["active"] else {})})
 
 
 def _immutable(root: Path, path: str, value: dict) -> dict:
@@ -297,7 +301,7 @@ class OvWorkflowPlanningMixin:
                 for group in restored["groups"] + restored["independent"]:
                     controls, manifest = build_workflow_metadata(group, max_controls_chars=min(
                         40000, state["workflow_packet_budget"] - len(state["workflow_revision"]) - 512,
-                    ))
+                    ), mining_intent=state.get("mining_intent"))
                     packet = _packet(METADATA_STAGE, next_group, controls, state)
                     entry = {"manifest": manifest, "group": group, "packet": packet}
                     path = f"workflow-planning/groups/{next_group:08d}.json"
@@ -337,6 +341,8 @@ class OvWorkflowPlanningMixin:
                 else:
                     raise FrozenPlanningIntegrityError("Cannot reserve a unique bounded workflow name")
                 provenance = group["provenance"]
+                if "intent" in value:
+                    _immutable(root, f"mining-intent/assessments/{candidate['name']}.json", value["intent"])
                 candidate["source_refs"] = provenance["source_files"]
                 previous = next((row for row in plan["skills"] if row["name"] == candidate["name"]), None)
                 if previous and previous != candidate:

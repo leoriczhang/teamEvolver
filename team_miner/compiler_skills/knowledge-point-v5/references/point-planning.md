@@ -1,0 +1,9 @@
+# 本轮写作范围
+
+只从原knowledge_catalog和本轮明确方向选题。首次构建列齐目标知识点；增量只列当前反馈需要修改的知识点。
+不明确时记录具体问题，不能默认全量重写。旧Skill只作对照，不是事实来源；未修改知识点不进入写作集合。
+
+将本轮实际ID和create/revise操作传给plan_collection，anchor_input_id为本次assignment的一条真实记录ID。
+脚本从真实输入登记六份完整原文、反馈和仅属于write_set的旧SKILL和旧Markdown资源，构建唯一point-collection。
+不逐知识点建32条写作记录，不需要自己复制输入ID列表、原始分片数组或大派发表。
+提交脚本返回的record_response_ref，检查返回write_set与所选集合一致即可。

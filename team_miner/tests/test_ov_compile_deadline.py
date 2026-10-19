@@ -68,6 +68,84 @@ async def test_terminal_wins_over_deadline(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_stale_cancellation_has_bounded_local_wait_without_faking_remote_terminal(tmp_path):
+    r, j = job_repo(tmp_path)
+    past = (datetime.now(timezone.utc) - timedelta(seconds=121)).isoformat()
+    j = r.update_job(j["job_id"], status="stopping", ov_cancel_reason="本次测试停止",
+                     ov_cancel_requested_at=past, ov_cancel_sent_at=past)
+
+    class Owner(SkillMinerBridgeMixin):
+        def _ov_skill_mining_repository(self):
+            return r
+
+        async def _knowledge_request(self, account, method, path, **kwargs):
+            assert method == "GET", "a previously accepted cancellation cannot resubmit or repeat POST"
+            return {"status": "cancelling", "stage": "compile: pipeline"}
+
+        async def _release_staged_compile_slot(self, *args, **kwargs):
+            raise AssertionError("uncertain remote work must keep its reservation")
+
+    result = await Owner()._refresh_ov_skill_job(j)
+    assert result["status"] == "interrupted" and result["finished_at"]
+    assert result["remote_terminal_unconfirmed"]
+    assert result["ov_status"] == "cancelling"
+    assert not result["materialized"]
+    assert "未确认" in result["error"]
+    late = r.update_job(j["job_id"], status="succeeded", error="", finished_at="")
+    assert late["status"] == "interrupted" and late["finished_at"]
+    with pytest.raises(RuntimeError):
+        r.delete_job(j["job_id"])
+
+
+@pytest.mark.asyncio
+async def test_read_only_reconciliation_records_ack_without_restarting_mining(tmp_path):
+    r, j = job_repo(tmp_path)
+    past = (datetime.now(timezone.utc) - timedelta(seconds=121)).isoformat()
+    j = r.update_job(j["job_id"], status="stopping", ov_cancel_reason="停止本次测试", ov_cancel_sent_at=past)
+
+    class Owner(SkillMinerBridgeMixin):
+        status = "cancelling"
+        released = 0
+
+        def _ov_skill_mining_repository(self):
+            return r
+
+        async def _knowledge_request(self, account, method, path, **kwargs):
+            assert method == "GET"
+            return {"task_id": j["ov_task_id"], "status": self.status}
+
+        async def _release_staged_compile_slot(self, *args):
+            self.released += 1
+
+    owner = Owner()
+    ended = await owner._ov_enforce_deadline(r, j, "cancelling")
+    await owner._reconcile_unconfirmed_ov_skill_job(ended)
+    pending = r.get_job(j["job_id"])
+    assert pending["status"] == "interrupted" and pending["remote_terminal_unconfirmed"]
+    assert owner.released == 0
+    owner.status = "completed"
+    await owner._reconcile_unconfirmed_ov_skill_job(pending)
+    confirmed = r.get_job(j["job_id"])
+    assert confirmed["status"] == "interrupted" and confirmed["ov_status"] == "completed"
+    assert not confirmed["remote_terminal_unconfirmed"] and owner.released == 1
+    assert "现已确认" in confirmed["error"]
+
+
+@pytest.mark.asyncio
+async def test_completed_acknowledgement_wins_after_cancel_wait(tmp_path):
+    r, j = job_repo(tmp_path)
+    past = (datetime.now(timezone.utc) - timedelta(seconds=121)).isoformat()
+    j = r.update_job(j["job_id"], ov_cancel_reason="停止", ov_cancel_sent_at=past)
+
+    class Owner(SkillMinerBridgeMixin):
+        async def _knowledge_request(self, *args, **kwargs):
+            raise AssertionError("terminal acknowledgement must not be cancelled again")
+
+    result = await Owner()._ov_enforce_deadline(r, j, "completed")
+    assert not result.get("remote_terminal_unconfirmed")
+
+
+@pytest.mark.asyncio
 async def test_large_round_uses_scaled_budget_and_keeps_cancel_deadline(tmp_path):
     r, j = job_repo(tmp_path)
     j = r.update_job(j["job_id"], round_timeout_seconds=120, round_work_units=16)

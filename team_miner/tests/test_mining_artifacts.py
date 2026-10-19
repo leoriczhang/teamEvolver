@@ -58,6 +58,23 @@ def test_current_evidence_reports_can_be_edited_but_review_protocol_is_readonly(
     assert target.read_bytes() == b'{"questions": []}'
 
 
+@pytest.mark.parametrize("location", ["workspace", "rounds/round-1/output", "rounds/round-1/reviewed_output"])
+@pytest.mark.parametrize("file,content", [
+    ("rules.md", "# 配套规则\n"), ("nested/configuration.json", '{"范围":"退货"}'),
+    ("SKILL.md", "# 同名资源\n"), ("EVALUATION.md", "# 同名评测资源\n"),
+    ("BENCHMARK.md", "# 同名测试资源\n"), ("benchmark.json", "{}"),
+])
+def test_reference_resources_can_be_previewed_without_mutating_the_package(tmp_path, location, file, content):
+    path = f"mining_jobs/job-1/{location}/compiled_skill/demo/references/{file}"
+    target = _artifact(tmp_path, path, content=content.encode("utf-8"))
+    preview = artifacts.read_artifact(tmp_path, path)
+    assert preview["kind"] == "resource"
+    assert preview["content"] == content
+    with pytest.raises(ValueError, match="只读|可编辑"):
+        artifacts.save_artifact(tmp_path, path, "Changed")
+    assert target.read_bytes() == content.encode("utf-8")
+
+
 @pytest.mark.parametrize("archive", ["output", "reviewed_output"])
 def test_round_archive_can_be_viewed_and_cannot_be_edited(tmp_path, archive):
     path = f"mining_jobs/job-1/rounds/round-1/{archive}/compiled_skill/demo/SKILL.md"

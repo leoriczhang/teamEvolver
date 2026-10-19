@@ -20,6 +20,7 @@ from fastapi import HTTPException
 from team_memory.compile_client import CompileClient
 
 from .document_converter import convert_knowledge_upload
+from .native_round import NativeRoundMixin
 from .output_language import output_language_instruction, resolve_output_language_policy
 from .ov_compile_mining import (
     LEGACY_SKILL_BODY,
@@ -42,6 +43,15 @@ INPUT_LIMITS = {
     "human": (256, 32 * 1024 * 1024, "累积补充 Evidence"),
     "context": (128, 16 * 1024 * 1024, "上一轮修订上下文"),
 }
+
+
+def _temporary_resource_lock(exc: Exception) -> bool:
+    """A resource lock conflict is transient; payload/idempotency conflicts remain definitive."""
+    return (
+        isinstance(exc, HTTPException)
+        and exc.status_code in {409, 423}
+        and re.search(r"\block acquire timed out after \d+(?:\.\d+)?\s*ms\b", str(exc.detail), re.I) is not None
+    )
 
 
 def _digest(content: str) -> str:
@@ -360,7 +370,7 @@ def _round_execution_budget(job: dict, entries: list[dict], compiler_body: str) 
     return {"round_work_units": units, "round_timeout_seconds": base * max(1, math.ceil(units / 8))}
 
 
-class OvRoundOrchestrationMixin(OvStagedOrchestrationMixin):
+class OvRoundOrchestrationMixin(NativeRoundMixin, OvStagedOrchestrationMixin):
     """Host implements knowledge HTTP methods and the local mining repository."""
 
     def _round_client(self, job: dict) -> CompileClient:
@@ -372,7 +382,9 @@ class OvRoundOrchestrationMixin(OvStagedOrchestrationMixin):
             agent_id="team-skill-evolver",
         )
 
-    async def _round_provision_compiler(self, client: CompileClient, package_name: str, body: str) -> dict:
+    async def _round_provision_compiler(
+        self, client: CompileClient, package_name: str, body: str, auxiliary_files: dict | None = None,
+    ) -> dict:
         """Create a content-addressed package once; never repair it with PUT."""
         current = await client.get_skill(skill_name=package_name)
         if not current.get("ok"):
@@ -387,6 +399,7 @@ class OvRoundOrchestrationMixin(OvStagedOrchestrationMixin):
                 skill_body=body,
                 parent_uri="viking://agent/skills",
                 version_message="Provision immutable SkillMiner compiler",
+                **({"auxiliary_files": auxiliary_files} if auxiliary_files is not None else {}),
             )
             # Another same-content submission may win creation. Always verify
             # the stored bytes; a conflict never grants permission to overwrite.
@@ -408,6 +421,13 @@ class OvRoundOrchestrationMixin(OvStagedOrchestrationMixin):
             raise ValueError("固定版本的 Compile Skill 已存在且内容不一致，拒绝覆盖")
         if detail.get("content_sha256") and detail["content_sha256"] != _digest(body):
             raise ValueError("固定版本的 Compile Skill 内容摘要不一致，拒绝执行")
+        if auxiliary_files is not None:
+            from team_memory.compile_client import _skill_package_files, _skill_package_matches
+
+            from .native_compiler import compiler_integrity_view
+            verified = compiler_integrity_view(detail, body, package_name)
+            if not _skill_package_matches(verified, body, _skill_package_files(package_name, body, auxiliary_files)):
+                raise ValueError("固定版本的Compile Skill附件清单或摘要不一致，拒绝执行")
         return current
 
     async def _round_write_immutable(self, account: str, uri: str, content: str) -> None:
@@ -856,6 +876,7 @@ class OvRoundOrchestrationMixin(OvStagedOrchestrationMixin):
                 if job.get("staged_protocol") == "te-staged-compile.v1" and job.get("staged_state_path"):
                     return await self._resume_staged_round(job)
                 if job.get("compile_request"):
+                    from .native_compiler import is_native
                     # Recover acceptance before touching frozen resources or shared compiler state.
                     key = job["submission_idempotency_key"]
                     try:
@@ -876,6 +897,11 @@ class OvRoundOrchestrationMixin(OvStagedOrchestrationMixin):
                                 finished_at=utc_now(),
                                 stop_reason="用户停止了未受理任务",
                             )
+                        if is_native(job):
+                            from .native_recovery import ensure_round_budget
+                            ensure_round_budget(job)
+                            if not await self._native_admit(job):
+                                return await asyncio.to_thread(repository.get_job, job["job_id"])
                         if job.get("compiler_uri"):
                             # New submissions bind the frozen body to an immutable
                             # namespace. Restore a missing package only after proving
@@ -893,16 +919,34 @@ class OvRoundOrchestrationMixin(OvStagedOrchestrationMixin):
                                 or _digest(body) != job.get("compiler_sha256")
                             ):
                                 raise ValueError("已冻结的 Compile Skill 摘要或地址发生变化，拒绝重试")
-                            await self._round_provision_compiler(client, name, body)
-                        accepted = await self._knowledge_request(
-                            account,
-                            "POST",
-                            "/api/v1/compile",
-                            timeout=60.0,
-                            extra_headers={"Idempotency-Key": key},
-                            json=job["compile_request"],
-                        )
+                            from .native_compiler import frozen_assets
+                            assets = await asyncio.to_thread(frozen_assets, job_dir, source_body)
+                            await self._round_provision_compiler(client, name, body, assets)
+                        if is_native(job):
+                            ensure_round_budget(job)
+                            from .native_retry_baseline import restore_baseline
+                            accepted = await restore_baseline(self, job)
+                        else:
+                            accepted = None
+                        if accepted is None:
+                            if is_native(job):
+                                ensure_round_budget(job)
+                            accepted = await self._knowledge_request(
+                                account,
+                                "POST",
+                                "/api/v1/compile",
+                                timeout=60.0,
+                                extra_headers={"Idempotency-Key": key},
+                                json=job["compile_request"],
+                            )
                     return await self._record_round_acceptance(repository, job, accepted, started)
+                from .native_compiler import is_native
+                if is_native(job):
+                    if not job.get("round_started_at"):
+                        job = await asyncio.to_thread(repository.update_job, job["job_id"], round_started_at=utc_now())
+                    from .native_recovery import ensure_round_budget
+                    ensure_round_budget(job)
+                    return await self._submit_native_round(job, client, started)
                 compiler_path = job_dir / f"compiler-round-{job['current_round']}.md"
                 if not await asyncio.to_thread(compiler_path.is_file):
                     # Freeze the compiler separately for each round. An accepted submission
@@ -917,6 +961,9 @@ class OvRoundOrchestrationMixin(OvStagedOrchestrationMixin):
                         compiler_body = await asyncio.to_thread(first_compiler.read_text, encoding="utf-8")
                     elif int(job.get("candidate_contract_version") or 1) < 2 and compiler_body == SKILL_BODY:
                         compiler_body = LEGACY_SKILL_BODY
+                    elif "te-native-mining.v1" in compiler_body and await asyncio.to_thread(first_compiler.is_file):
+                        # Existing host-pipeline jobs retain their frozen compiler.
+                        compiler_body = await asyncio.to_thread(first_compiler.read_text, encoding="utf-8")
                     _validate_compiler_contract(job, compiler_body)
                     await asyncio.to_thread(compiler_path.write_text, compiler_body, encoding="utf-8")
                 compiler_body = await asyncio.to_thread(compiler_path.read_text, encoding="utf-8")
@@ -1045,7 +1092,9 @@ class OvRoundOrchestrationMixin(OvStagedOrchestrationMixin):
                 )
             except (ValueError, HTTPException) as exc:
                 status = getattr(exc, "status_code", 400)
-                if status in {400, 401, 403, 409, 413, 422}:
+                if _temporary_resource_lock(exc):
+                    job = await self._round_submission_retry(repository, job, exc)
+                elif status in {400, 401, 403, 409, 413, 422}:
                     job = await asyncio.to_thread(
                         repository.update_job,
                         job["job_id"],
@@ -1065,6 +1114,15 @@ class OvRoundOrchestrationMixin(OvStagedOrchestrationMixin):
         task_id = str(accepted.get("task_id") or "") if isinstance(accepted, dict) else ""
         if not task_id:
             raise ValueError("OpenViking Compile 未返回 task_id")
+        from .native_compiler import is_native
+        native_changes = {}
+        if is_native(job):
+            await self._mark_staged_compile_slot(job, {"key": job["submission_idempotency_key"], "task_id": task_id})
+            history = list(job.get("native_compile_history", []))
+            if not any(row["task_id"] == task_id for row in history):
+                history.append({"round": job["current_round"], "task_id": task_id,
+                                "submission_key": job["submission_idempotency_key"], "accepted_at": utc_now()})
+            native_changes["native_compile_history"] = history
         job = await asyncio.to_thread(
             repository.update_job,
             job["job_id"],
@@ -1078,6 +1136,7 @@ class OvRoundOrchestrationMixin(OvStagedOrchestrationMixin):
             ov_sync_failures=0,
             ov_next_retry_at="",
             submission_error="",
+            **native_changes,
         )
         await asyncio.to_thread(
             repository.append_log, job["job_id"], f"第 {job['current_round']} 轮 OV Compile 已受理：{task_id}"

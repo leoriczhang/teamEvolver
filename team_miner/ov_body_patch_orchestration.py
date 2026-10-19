@@ -180,6 +180,8 @@ async def next_body_batch(owner, job: dict, root: Path, state: dict):
                     raise body_patch.BodyPatchCapacityError(result["reason"])
                 controls = {"candidate": result["controls"]["candidate"], "skill_name": name, "input_ids": ids,
                             "allowed_source_refs": context["source_refs"], "body_patch": result["controls"]}
+                from .identity_components import controls as component_controls
+                controls.update(await asyncio.to_thread(component_controls, root, name))
                 if ledger.get("error"):
                     controls["repair_error"] = ledger["error"][:1000]
                 packet = planning.build_stage_packet(

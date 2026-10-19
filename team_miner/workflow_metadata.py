@@ -86,7 +86,7 @@ def _checked_group(group: Any) -> dict:
     return copy.deepcopy(group)
 
 
-def _assemble(group: dict, limits: dict) -> tuple[dict, dict]:
+def _assemble(group: dict, limits: dict, mining_intent: dict | None = None) -> tuple[dict, dict]:
     frozen = _checked_group(group)
     methods, files, refs, scopes, scope_ids = [], {}, {}, {}, {}
     for identity, record in zip(frozen["member_ids"], frozen["records"]):
@@ -104,7 +104,12 @@ def _assemble(group: dict, limits: dict) -> tuple[dict, dict]:
             scope_ids[scope_key] = f"p{len(scopes) + 1}"
             scopes[scope_ids[scope_key]] = {"files": sorted(file_ids), "refs": sorted(ref_ids)}
         methods.append([identity, item["task"], item["boundary"], scope_ids[scope_key]])
-    assignment_sha = _sha({"protocol": PROTOCOL, "group": frozen, "limits": limits})
+    assignment = {"protocol": PROTOCOL, "group": frozen, "limits": limits}
+    if mining_intent is not None:
+        from .mining_intent import intent_from_job
+        mining_intent = intent_from_job({"mining_intent": mining_intent})
+        assignment["mining_intent"] = mining_intent
+    assignment_sha = _sha(assignment)
     controls = {
         "protocol": PROTOCOL, "output_schema": OUTPUT_SCHEMA, "assignment_sha256": assignment_sha,
         "parent_id": frozen["parent_id"], "member_ids": frozen["member_ids"][:],
@@ -113,6 +118,8 @@ def _assemble(group: dict, limits: dict) -> tuple[dict, dict]:
         "limits": {"max_output_chars": limits["max_output_chars"], "deferred_reason_max_chars": 400},
         "rule": _RULE,
     }
+    if mining_intent is not None:
+        controls["mining_intent"] = copy.deepcopy(mining_intent)
     manifest = {
         "protocol": PROTOCOL, "assignment_sha256": assignment_sha, "group": frozen,
         "group_sha256": _sha(frozen),
@@ -123,12 +130,15 @@ def _assemble(group: dict, limits: dict) -> tuple[dict, dict]:
                     "scopes": copy.deepcopy(scopes)},
         "limits": copy.deepcopy(limits), "controls_sha256": _sha(controls),
     }
+    if mining_intent is not None:
+        manifest["mining_intent"] = copy.deepcopy(mining_intent)
     manifest["manifest_sha256"] = _sha(manifest)
     return controls, manifest
 
 
 def build_workflow_metadata(
     group: dict, *, max_controls_chars: int = MAX_CONTROLS_CHARS, max_output_chars: int = MAX_OUTPUT_CHARS,
+    mining_intent: dict | None = None,
 ) -> tuple[dict, dict]:
     """Freeze a complete workflow; raise on capacity instead of truncating any member.
 
@@ -137,7 +147,7 @@ def build_workflow_metadata(
     """
     try:
         limits = _limits(max_controls_chars, max_output_chars)
-        controls, manifest = _assemble(group, limits)
+        controls, manifest = _assemble(group, limits, mining_intent)
     except (KeyError, TypeError, OverflowError, ValueError) as exc:
         if isinstance(exc, WorkflowMetadataManifestError):
             raise
@@ -152,12 +162,16 @@ def validate_workflow_metadata_manifest(manifest: Any, *, controls: dict | None 
     try:
         fields = {"protocol", "assignment_sha256", "group", "group_sha256", "member_sha256", "sources", "limits",
                   "controls_sha256", "manifest_sha256"}
+        if isinstance(manifest, dict) and "mining_intent" in manifest:
+            fields.add("mining_intent")
         if not isinstance(manifest, dict) or set(manifest) != fields:
             raise ValueError("Unexpected frozen workflow metadata manifest fields")
         limits = manifest["limits"]
         if not isinstance(limits, dict) or set(limits) != {"max_controls_chars", "max_output_chars"}:
             raise ValueError("Unexpected frozen workflow metadata limits")
-        expected_controls, expected = build_workflow_metadata(manifest["group"], **limits)
+        expected_controls, expected = build_workflow_metadata(
+            manifest["group"], **limits, mining_intent=manifest.get("mining_intent"),
+        )
         if expected != manifest:
             raise ValueError("Frozen workflow metadata assignment, records, source mappings or hashes changed")
         if controls is not None and controls != expected_controls:
@@ -178,7 +192,14 @@ def validate_workflow_metadata_output(value: Any, manifest: dict, *, language_po
             raise ValueError("Workflow metadata output belongs to another frozen assignment")
         refs = manifest["group"]["provenance"]["source_refs"]
         plan = {"schema_version": planning.PLAN_SCHEMA, "skills": [], "deferred": []}
-        if set(value) == {"schema_version", "assignment_sha256", "candidate"}:
+        intent_active = bool((manifest.get("mining_intent") or {}).get("active"))
+        candidate_fields = {"schema_version", "assignment_sha256", "candidate"}
+        if intent_active:
+            candidate_fields.add("intent")
+        if set(value) == candidate_fields:
+            if intent_active:
+                from .mining_intent import validate_assessment
+                validate_assessment(value["intent"], language_policy=language_policy)
             candidate = value["candidate"]
             if not isinstance(candidate, dict) or set(candidate) != CANDIDATE_FIELDS:
                 raise ValueError("One Candidate requires exactly its seven canonical metadata fields")

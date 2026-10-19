@@ -100,6 +100,11 @@ def _verify(root: Path, current: dict):
         if current.get("skill_body_protocol") == SKILL_BODY_PROTOCOL and context["stage"] == "skill_section":
             if controls.get("previous_body") != previous_body(root, context["skill_name"], context["section_index"]):
                 raise ValueError("Frozen Skill working copy changed")
+            if context.get("body_insert_protocol"):
+                from .skill_body_insert import controls as insert_controls
+
+                if controls.get("body_insert") != insert_controls(controls["previous_body"], context["input_ids"]):
+                    raise ValueError("Frozen body insertion assignment changed")
         if current.get("skill_body_protocol") == BODY_PATCH_PROTOCOL and context["stage"] == "skill_section":
             from .ov_body_patch_orchestration import verify_body_assignment
 
@@ -196,10 +201,12 @@ class OvArtifactBatchMixin:
             raise ValueError("Frozen base compiler changed")
         from .compile_strategy import render_stage_batch_compiler
 
-        key = phase + "_batch"
         integrated = state.get("skill_body_protocol") == SKILL_BODY_PROTOCOL
+        insert_enabled = integrated and state.get("body_insert_protocol") and phase == "skill_section"
+        key = phase + ("_insert_batch" if insert_enabled else "_batch")
         await self._ensure_aux_compiler(
-            root, state, key, render_stage_batch_compiler(base, phase, integrated_body=integrated)
+            root, state, key, render_stage_batch_compiler(base, phase, integrated_body=integrated,
+                                                        body_insert=bool(insert_enabled))
         )
         body = await asyncio.to_thread((root / "aux-compilers" / (key + ".md")).read_text, encoding="utf-8")
         _, published = package(body)
@@ -217,6 +224,9 @@ class OvArtifactBatchMixin:
                 from .ov_staged_orchestration import _raw_group
 
                 chunks, after = await asyncio.to_thread(_raw_group, root, scope["ordinals"], ledger["cursor"])
+                if ledger.get("body_max_chunks"):
+                    chunks = chunks[:ledger["body_max_chunks"]]
+                    after = ledger["cursor"] + len(chunks)
                 output = f"{name}-section-{ledger['section_count']:08d}.json"
                 context = {"after": after, "before": ledger["cursor"], "section_index": ledger["section_count"]}
             else:
@@ -242,6 +252,8 @@ class OvArtifactBatchMixin:
             }
             if ledger.get("error"):
                 controls["repair_error"] = ledger["error"][:1000]
+            from .identity_components import controls as component_controls
+            controls.update(await asyncio.to_thread(component_controls, root, name))
             if integrated and phase == "skill_section":
                 controls["previous_body"] = await asyncio.to_thread(previous_body, root, name, ledger["section_count"])
                 controls["source_scope_rule"] = (
@@ -249,6 +261,12 @@ class OvArtifactBatchMixin:
                     "generated context from this candidate and round, not new Evidence. Preserve its supported "
                     "rules and citations while integrating the current batch; never concatenate duplicate workflows."
                 )
+                if insert_enabled and controls["previous_body"]["content"]:
+                    from .skill_body_insert import PROTOCOL
+                    from .skill_body_insert import controls as insert_controls
+
+                    context["body_insert_protocol"] = PROTOCOL
+                    controls["body_insert"] = insert_controls(controls["previous_body"], context["input_ids"])
             while True:
                 try:
                     packet = planning.build_stage_packet(
@@ -269,6 +287,8 @@ class OvArtifactBatchMixin:
                                    source_refs=list(dict.fromkeys(chunk["source_uri"] for chunk in chunks)),
                                    ordinals=[chunk["ordinal"] for chunk in chunks])
                     controls.update(input_ids=context["input_ids"], allowed_source_refs=context["source_refs"])
+                    if context.get("body_insert_protocol"):
+                        controls["body_insert"] = insert_controls(controls["previous_body"], context["input_ids"])
             # Reuse the bounded revision projection, preserving current feedback and
             # only this candidate's prior identity; other candidates are not Evidence.
             from .ov_case_batch_orchestration import _bounded_case_revision
@@ -287,11 +307,11 @@ class OvArtifactBatchMixin:
             job = await self._staged_save(job, root, state, status="preparing", ov_task_id="")
             return await self._staged_candidate_next(job, root, state)
         state["phase"] = phase
-        return await self._submit_artifact_batch(job, root, state, phase, packets, contexts)
+        return await self._submit_artifact_batch(job, root, state, phase, packets, contexts, compiler_key=key)
 
-    async def _submit_artifact_batch(self, job, root, state, phase, packets, contexts):
+    async def _submit_artifact_batch(self, job, root, state, phase, packets, contexts, *, compiler_key=None):
         _, _, json_text, _, package, _, _, save, sha, write = _host()
-        key = phase + "_batch"
+        key = compiler_key or phase + "_batch"
         body = await asyncio.to_thread((root / "aux-compilers" / (key + ".md")).read_text, encoding="utf-8")
         if sha(body) != state["aux_compilers"][key]:
             raise ValueError("Frozen artifact compiler changed")
@@ -495,15 +515,16 @@ class OvArtifactBatchMixin:
                         content = (
                             response if isinstance(response, str) else response.get("content", response.get("text", ""))
                         )
+                        if isinstance(content, str):
+                            await asyncio.to_thread(
+                                write, root / "children" / current["child"] / (row["output_path"] + ".raw"), content
+                            )
                         if (
                             not isinstance(content, str)
                             or not content.strip()
                             or len(content) > planning.MAX_OUTPUT_CHARS
                         ):
                             raise ValueError("Independent artifact must be complete and within 12K characters")
-                        await asyncio.to_thread(
-                            write, root / "children" / current["child"] / (row["output_path"] + ".raw"), content
-                        )
                         if (context["stage"] == "skill_section"
                                 and current.get("skill_body_protocol") == BODY_PATCH_PROTOCOL):
                             from .ov_body_patch_orchestration import verify_body_assignment
@@ -512,6 +533,14 @@ class OvArtifactBatchMixin:
                             packet = await asyncio.to_thread(read, root / row["local_path"])
                             manifest = await asyncio.to_thread(verify_body_assignment, root, context, packet)
                             value = validate_body_patch(content, manifest)
+                        elif context.get("body_insert_protocol"):
+                            from .skill_body_insert import project, validate
+
+                            packet = await asyncio.to_thread(read, root / row["local_path"])
+                            prior = packet["derived_controls"]["previous_body"]
+                            patch = validate(content, prior, context["input_ids"], state["language_policy"])
+                            value = (patch if patch["schema_version"].endswith(".capacity.v1") else
+                                     project(patch, prior, context["input_ids"], state["language_policy"]))
                         elif context["stage"] == "skill_section":
                             value = json.loads(content)
                             if planning.is_deferred(value):
@@ -544,12 +573,24 @@ class OvArtifactBatchMixin:
                         if exc.status_code != 404:
                             raise
                         error = "Completed independent artifact disappeared"
-                    outcome = {"context": context, "valid": not error, "value": value, "error": error}
+                    outcome = {"context": context, "valid": not error, "value": value, "error": error,
+                               "raw_chars": len(content) if isinstance(content, str) else 0}
                     await asyncio.to_thread(save, audit_path, outcome)
                 if outcome["valid"]:
                     if context["stage"] == "skill_section":
                         if ledger["cursor"] not in {context["before"], context["after"]}:
                             raise ValueError("Artifact section cursor changed")
+                        if context.get("body_insert_protocol"):
+                            from .skill_body_insert import CAPACITY_SCHEMA
+
+                            if outcome["value"]["schema_version"] == CAPACITY_SCHEMA:
+                                if len(context["input_ids"]) <= 1:
+                                    raise ValueError("单个完整原文分片的新增正文仍超容量；未丢弃来源或旧条件")
+                                ledger.update(body_max_chunks=max(1, len(context["input_ids"]) // 2),
+                                              error="", format_attempts=0)
+                                await asyncio.to_thread(save, root / "artifact-batches/candidates" / (name + ".json"),
+                                                        ledger)
+                                continue
                         if current.get("skill_body_protocol") == BODY_PATCH_PROTOCOL:
                             from .ov_body_patch_orchestration import accept_body_assignment
                             from .skill_body_patch import CAPACITY_SCHEMA
@@ -583,6 +624,16 @@ class OvArtifactBatchMixin:
                         ledger["evaluation_ready"] = True
                     ledger.update(format_attempts=0, error="")
                 else:
+                    if (context.get("body_insert_protocol") and len(context["input_ids"]) > 1
+                            and outcome.get("raw_chars", 0) > planning.MAX_OUTPUT_CHARS):
+                        # An oversized delta changes the next assignment's source grouping,
+                        # rather than spending three format repairs on the same oversized work.
+                        ledger.update(body_max_chunks=max(1, len(context["input_ids"]) // 2),
+                                      capacity_split_count=ledger.get("capacity_split_count", 0) + 1,
+                                      error="", format_attempts=0)
+                        await asyncio.to_thread(save, root / "artifact-batches/candidates" / (name + ".json"),
+                                                ledger)
+                        continue
                     ledger.update(format_attempts=context["format_attempts"] + 1, error=outcome["error"])
                     if ledger["format_attempts"] >= MAX_ARTIFACT_ATTEMPTS:
                         exhausted.append(name)

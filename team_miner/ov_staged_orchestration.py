@@ -577,8 +577,11 @@ def _assignment_revision(root: Path, job: dict, controls: dict, context: dict, b
         ids = prior["case_ids"]
         if own_name:
             row["case_ids"] = ids
-            row["skill_body_excerpt"] = prior["skill_body_excerpt"][:3000]
-            row["skill_body_excerpt_truncated"] = len(prior["skill_body_excerpt"]) > 3000
+            if context.get("case_id"):
+                row["skill_body_excerpt_omitted"] = True
+            else:
+                row["skill_body_excerpt"] = prior["skill_body_excerpt"][:3000]
+                row["skill_body_excerpt_truncated"] = len(prior["skill_body_excerpt"]) > 3000
         else:
             row["case_ids_count"] = len(ids)
             row["case_id_mapping_sha256"] = _sha(_json(ids))
@@ -637,6 +640,11 @@ class OvStagedOrchestrationMixin(
         state = await asyncio.to_thread(_read, root / "state.json")
         if state.get("protocol") != STAGED_PROTOCOL or state.get("round") != int(job["current_round"]):
             raise ValueError("阶段状态不属于当前任务轮次")
+        if state.get("mining_intent"):
+            from .mining_intent import intent_from_job, intent_sha
+            intent = intent_from_job(job)
+            if state["mining_intent"] != intent or state.get("mining_intent_sha256") != intent_sha(intent):
+                raise ValueError("任务的冻结挖掘方向或数量已发生变化")
         return root, state
 
     async def _staged_save(self, job: dict, root: Path, state: dict, **changes) -> dict:
@@ -867,6 +875,11 @@ class OvStagedOrchestrationMixin(
             "current": None,
             "complete": False,
         }
+        from .mining_intent import intent_from_job, intent_sha
+        intent = intent_from_job(job)
+        if intent["active"]:
+            state["mining_intent"] = intent
+            state["mining_intent_sha256"] = intent_sha(intent)
         if job.get("staged_execution_protocol") == compile_admission.OPTIMIZED_PROTOCOL:
             state["execution_protocol"] = compile_admission.OPTIMIZED_PROTOCOL
         if efficient:
@@ -898,6 +911,9 @@ class OvStagedOrchestrationMixin(
             state["uncertainty_scope_protocol"] = UNCERTAINTY_SCOPE_PROTOCOL
         if case_groups:
             state["case_group_protocol"] = "te-case-groups.v1"
+        from .case_context import CASE_NARRATIVE_PROTOCOL
+
+        state["case_narrative_protocol"] = CASE_NARRATIVE_PROTOCOL
         if local_scope and job.get("staged_workflow_partition_protocol") == "te-workflow-partition.v2":
             state["workflow_partition_protocol"] = job["staged_workflow_partition_protocol"]
             for workflow_stage in ("workflow_partition", "workflow_metadata"):
@@ -1194,6 +1210,18 @@ class OvStagedOrchestrationMixin(
         if self._staged_stopped(job):
             return job
         phase = state["phase"]
+        if (phase in {"skill_section", "evaluation", "case"} and state.get("identity_review_complete")
+                and state.get("mining_intent", {}).get("active") and not state.get("intent_selection_complete")):
+            from .mining_intent import apply_intent_selection
+            audit = await asyncio.to_thread(apply_intent_selection, root, state)
+            await asyncio.to_thread(self._ov_skill_mining_repository().write_output, job["job_id"],
+                                    "analysis/mining-intent.json", _json(audit))
+            changes = {}
+            if audit["shortfall"] and not job.get("human_checkpoints_effective"):
+                changes = {"human_checkpoints_effective": True,
+                           "options_warnings": [*(job.get("options_warnings") or []),
+                                                "目标数量尚未满足，本轮需要人工复核实际数量或补充来源。"]}
+            job = await self._staged_save(job, root, state, **changes)
         if (phase in {"skill_section", "evaluation", "case"} and state.get("identity_review_complete")
                 and state.get("efficiency_protocol") == EFFICIENCY_PROTOCOL
                 and not state.get("source_routing_complete") and not state.get("current")):
@@ -1686,8 +1714,10 @@ class OvStagedOrchestrationMixin(
                 await asyncio.to_thread(_read, root / "cases" / name / f"{i:02d}.json")
                 for i in range(state["case_index"])
             ]
-            controls["previous_queries"] = [row["query"][:300] for row in prior]
-            controls["previous_queries_excerpted"] = any(len(row["query"]) > 300 for row in prior)
+            from .case_context import CASE_NARRATIVE_PROTOCOL, case_history_controls
+
+            controls.update(case_history_controls(prior))
+            state["case_narrative_generation_protocol"] = CASE_NARRATIVE_PROTOCOL
         return await self._staged_submit(job, root, state, state["phase"], path, chunks, controls, context)
 
     async def _advance_staged_round(self, job: dict, task: dict) -> dict:
@@ -2069,7 +2099,7 @@ class OvStagedOrchestrationMixin(
     async def _staged_defer_candidate(self, job: dict, root: Path, state: dict, name: str, reason: str) -> None:
         plan = await asyncio.to_thread(_read, root / "plan.json")
         marker = root / "deferred-candidates" / f"{name}.json"
-        if marker.is_file():
+        if marker.is_file() and (await asyncio.to_thread(_read, marker)).get("status") != "reopened":
             deferred = await asyncio.to_thread(_read, marker)
         else:
             candidate = next((row for row in plan["skills"] if row["name"] == name), None)
@@ -2088,7 +2118,19 @@ class OvStagedOrchestrationMixin(
         workspace = self._ov_skill_mining_repository().workspace(job)
         path = workspace / "compiled_skill" / name
         if path.exists():
-            await asyncio.to_thread(shutil.rmtree, path)
+            # Remove it from active output without discarding the generated method and evaluation.
+            archive = workspace / "excluded_skill" / name / _sha(_json(deferred))[:24]
+            if not archive.exists():
+                await asyncio.to_thread(archive.parent.mkdir, parents=True, exist_ok=True)
+                await asyncio.to_thread(shutil.move, str(path), str(archive))
+            else:
+                for existing in path.rglob("*"):
+                    archived = archive / existing.relative_to(path)
+                    if existing.is_file() and (
+                        not archived.is_file() or existing.read_bytes() != archived.read_bytes()
+                    ):
+                        raise ValueError("Excluded candidate archive cannot replace different generated files")
+                await asyncio.to_thread(shutil.rmtree, path)
         state["candidate_names"] = [value for value in state["candidate_names"] if value != name]
         state.pop("writer_pending_ordinals", None)
         state.update(phase="skill_section", cursor=0, section_count=0, case_index=0)
@@ -2326,9 +2368,32 @@ class OvStagedOrchestrationMixin(
     async def _staged_assemble(self, job: dict, root: Path, state: dict) -> dict:
         repository = self._ov_skill_mining_repository()
         plan = await asyncio.to_thread(_read, root / "plan.json")
+        if state.get("intent_selection_complete"):
+            audit = await asyncio.to_thread(_read, root / "mining-intent/selection.json")
+            target = state["mining_intent"]["target_count"]
+            shortfall = max(0, (target or 0) - len(plan["skills"]))
+            audit.update(final_count=len(plan["skills"]), final_shortfall=shortfall,
+                         count_met=target is None or not shortfall)
+            if shortfall:
+                refs = [row["uri"] for row in await asyncio.to_thread(
+                    lambda: [_read(path) for path in (root / "source-files").glob("*.json")]
+                )]
+                plan["deferred"] = [row for row in plan["deferred"]
+                                    if not row["reason"].startswith("目标数量尚未满足：")]
+                plan["deferred"].insert(0, {
+                    "reason": f"目标数量尚未满足：请求 {target} 个完整 Skill，最终生成 {len(plan['skills'])} 个。"
+                              "请复核实际数量或补充来源；不会硬凑、拆碎或强行归并。",
+                    "source_refs": refs,
+                })
+                job = await self._staged_save(job, root, state, human_checkpoints_effective=True)
+                await asyncio.to_thread(_save, root / "plan.json", plan)
+            await asyncio.to_thread(_save, root / "mining-intent/selection.json", audit)
+            await asyncio.to_thread(repository.write_output, job["job_id"], "analysis/mining-intent.json", _json(audit))
         for candidate in plan["skills"]:
             name = candidate["name"]
-            cases = [await asyncio.to_thread(_read, root / "cases" / name / f"{index:02d}.json") for index in range(12)]
+            from .case_corrections import corrected_case
+
+            cases = [await asyncio.to_thread(corrected_case, root, name, index) for index in range(12)]
             prior = await asyncio.to_thread(lambda: next(_prior_candidate_rows(root, name=name), None))
             prior_ids = prior["case_ids"] if prior else []
             dataset = planning.assemble_dataset(

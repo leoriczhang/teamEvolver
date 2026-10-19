@@ -71,7 +71,8 @@ def acquire(repository, job: dict, current: dict) -> bool:
             if (
                 other.get("engine") == "ov_compile"
                 and task_id
-                and other.get("status") in {"queued", "running", "preparing", "stopping"}
+                and (other.get("status") in {"queued", "running", "preparing", "stopping"}
+                     or other.get("remote_terminal_unconfirmed"))
                 and other["job_id"] not in covered_jobs
                 and task_id not in covered_tasks
             ):

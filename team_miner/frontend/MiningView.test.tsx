@@ -89,6 +89,86 @@ describe("MiningView real mining rounds", () => {
   });
   afterEach(cleanup);
 
+  it("shows actual whole-round Compile admissions separately from validated host subtasks", async () => {
+    installApi({ ...waitingJob(1, 2, false), status: "running", pending_checkpoint: null, rounds: [],
+      ...{ execution_protocol: "te-native-mining.v1", submission_seconds: 1,
+        native_compile_history: [{ round: 1, task_id: "native-1" }], native_repairs: [] },
+    });
+    render(<MiningView active page="jobs" />);
+    fireEvent.click(await screen.findByRole("button", { name: /真实多轮挖掘/ }));
+    expect(await screen.findByText("整轮编译 · 累计已受理 1 次 Compile")).toBeInTheDocument();
+    expect(screen.queryByText(/累计已校验.*个小任务/)).not.toBeInTheDocument();
+  });
+
+  it("explicitly retries a Native round once with the offered budget and labels the separate attempt", async () => {
+    const context = { expected_task_id: "native-failed-1", budget_seconds: 1800, format_guidance_sha256: "a".repeat(64) };
+    const initial = { ...waitingJob(2, 2, false), status: "failed", pending_checkpoint: null, error: "map: schema: invalid result",
+      ...{ can_retry_native: true, native_retry_context: context },
+    };
+    let release!: (value: unknown) => void;
+    const action = vi.fn(() => new Promise((resolve) => { release = resolve; }));
+    installApi(initial, action);
+    await openFailedJob();
+    const button = screen.getByRole("button", { name: "重新实测本轮" });
+    expect(screen.getByText(/保留原任务和历史，新增一次 30 分钟运行期限/)).toHaveTextContent("不代表预计完成时间");
+    expect(screen.queryByRole("button", { name: "从断点恢复" })).not.toBeInTheDocument();
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(button).toBeDisabled();
+    await waitFor(() => expect(action).toHaveBeenCalledTimes(1));
+    expect(action).toHaveBeenCalledWith("/api/mining/jobs/job-1/resume", {
+      action: "retry_with_new_budget", expected_task_id: context.expected_task_id, budget_seconds: 1800,
+      request_id: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i),
+    });
+    release({ job: { ...initial, status: "preparing", error: "", can_retry_native: false, native_retry_context: null,
+      native_explicit_retry: { attempt_budget: { seconds: 1800, started_at: "2026-10-10T00:02:00Z" } },
+    } });
+    expect(await screen.findByText("人工重试 · 本次运行期限：30 分 0 秒")).toBeInTheDocument();
+    expect(screen.getByText("本轮经过时间（含中断等待）")).toBeInTheDocument();
+    expect(screen.getByText("本次重试经过时间")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重新实测本轮" })).not.toBeInTheDocument();
+    await waitFor(() => expect(toastOk).toHaveBeenCalledWith("已重新实测本轮", expect.any(String)));
+  });
+
+  it("stops retry timing when the round reaches human review", async () => {
+    installApi({ ...waitingJob(2, 2),
+      ...{ execution_protocol: "te-native-mining.v1", round_completed_at: "2026-10-10T00:12:00Z",
+        native_explicit_retry: { attempt_budget: { seconds: 3600, started_at: "2026-10-10T00:02:00Z" } } },
+    });
+    await openJob();
+    const timer = screen.getByText("本次重试经过时间").parentElement!;
+    expect(within(timer).getByText("10 分 0 秒")).toBeInTheDocument();
+  });
+
+  it.each([
+    { can_retry_native: false, native_retry_context: { expected_task_id: "native-failed-1", budget_seconds: 1800, format_guidance_sha256: "a".repeat(64) } },
+    { can_retry_native: true, native_retry_context: null },
+    { can_retry_native: true, native_retry_context: { expected_task_id: "", budget_seconds: 1800, format_guidance_sha256: "a".repeat(64) } },
+  ])("does not offer a Native retry without an eligible server context (%j)", async (eligibility) => {
+    installApi({ ...waitingJob(2, 2, false), status: "failed", pending_checkpoint: null, error: "Compile failed", ...eligibility });
+    await openFailedJob();
+    expect(screen.queryByRole("button", { name: "重新实测本轮" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/新增一次.*分钟运行期限/)).not.toBeInTheDocument();
+  });
+
+  it("shows a Native retry error and releases the pending state without changing the job", async () => {
+    const actions: Record<string, any>[] = [];
+    installApi({ ...waitingJob(2, 2, false), status: "failed", pending_checkpoint: null, error: "map: schema: invalid result",
+      ...{ can_retry_native: true, native_retry_context: {
+        expected_task_id: "native-failed-1", budget_seconds: 1800, format_guidance_sha256: "a".repeat(64),
+      } },
+    }, (_path, body) => { actions.push(body); throw new Error("远端状态已经变化，请刷新"); });
+    await openFailedJob();
+    fireEvent.click(screen.getByRole("button", { name: "重新实测本轮" }));
+    await waitFor(() => expect(toastErr).toHaveBeenCalledWith("重新实测失败", "远端状态已经变化，请刷新"));
+    expect(screen.getByRole("button", { name: "重新实测本轮" })).toBeEnabled();
+    expect(screen.getByRole("region", { name: "本轮 Compile 失败" })).toHaveTextContent("map: schema: invalid result");
+    expect(screen.queryByText(/人工重试 · 本次运行期限/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重新实测本轮" }));
+    await waitFor(() => expect(actions).toHaveLength(2));
+    expect(actions[1].request_id).toBe(actions[0].request_id);
+  });
+
   it("previews generated Skill files during mining without editing or submitting an incomplete candidate", async () => {
     installApi({ ...waitingJob(1, 2, false), status: "running", pending_checkpoint: null, rounds: [] });
     render(<MiningView active page="jobs" />);
@@ -142,8 +222,8 @@ describe("MiningView real mining rounds", () => {
     fireEvent.click(await screen.findByRole("button", { name: "新建 Skill 挖掘" }));
     const slider = await screen.findByRole("slider", { name: /挖掘轮数上限/ });
     fireEvent.change(slider, { target: { value: "2" } });
-    expect(screen.getByRole("checkbox", { name: /每轮完成后等待人工补充 Evidence/ })).toBeChecked();
-    expect(screen.getByText(/基础运行期限；按输入分片和产物工作量自动延长，单次调用仍有超时保护/)).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: /有补证问题时等待人工补充 Evidence/ })).toBeChecked();
+    expect(screen.getByText(/运行期限用于保护预算，不代表预计完成时间/)).toBeInTheDocument();
     expect(screen.queryByText(/内部证据复核次数提示/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "创建任务" }));
     await waitFor(() => expect(created).toHaveBeenCalled());
@@ -164,6 +244,36 @@ describe("MiningView real mining rounds", () => {
     expect(screen.getByRole("combobox", { name: "选择 Skill 知识源" })).toHaveValue(source.path);
     fireEvent.click(screen.getByRole("button", { name: "创建任务" }));
     await waitFor(() => expect(created).toHaveBeenCalledWith("/api/mining/jobs", expect.objectContaining({ max_rounds: 2, runtime_timeout_seconds: 600, input_dir: source.path })));
+  });
+
+  it("requires a complete goal for single Skill mode and sends it with a fixed count", async () => {
+    const created = vi.fn(() => ({ jobs: [] }));
+    installApi(null, created);
+    render(<MiningView active page="jobs" />);
+    fireEvent.click(await screen.findByRole("button", { name: "新建 Skill 挖掘" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "挖掘模式" }), { target: { value: "single" } });
+    expect(screen.getByRole("button", { name: "创建任务" })).toBeDisabled();
+    fireEvent.change(screen.getByRole("textbox", { name: "挖掘方向" }), { target: { value: "完整客户对练沟通方法" } });
+    expect(screen.getByRole("button", { name: "创建任务" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "创建任务" }));
+    await waitFor(() => expect(created).toHaveBeenCalledWith("/api/mining/jobs", expect.objectContaining({
+      mining_mode: "single", mining_direction: "完整客户对练沟通方法", target_skill_count: 1,
+    })));
+  });
+
+  it("allows a target count without direction and rejects fractional counts", async () => {
+    const created = vi.fn(() => ({ jobs: [] }));
+    installApi(null, created);
+    render(<MiningView active page="jobs" />);
+    fireEvent.click(await screen.findByRole("button", { name: "新建 Skill 挖掘" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "挖掘模式" }), { target: { value: "target" } });
+    fireEvent.change(screen.getByRole("spinbutton", { name: "目标 Skill 数量" }), { target: { value: "2.5" } });
+    expect(screen.getByRole("button", { name: "创建任务" })).toBeDisabled();
+    fireEvent.change(screen.getByRole("spinbutton", { name: "目标 Skill 数量" }), { target: { value: "4" } });
+    fireEvent.click(screen.getByRole("button", { name: "创建任务" }));
+    await waitFor(() => expect(created).toHaveBeenCalledWith("/api/mining/jobs", expect.objectContaining({
+      mining_mode: "target", mining_direction: "", target_skill_count: 4,
+    })));
   });
 
   it("loads source references cheaply and verifies only the explicitly selected directory", async () => {
@@ -371,8 +481,8 @@ describe("MiningView real mining rounds", () => {
     const action = vi.fn();
     installApi(initial, action);
     const failure = await openFailedJob();
-    expect(failure).toHaveTextContent("能力拆分规划（Reduce）失败");
-    expect(failure).toHaveTextContent("模型输出达到单次长度上限，规划结果被截断");
+    expect(failure).toHaveTextContent("Reduce 输出截断：模型输出达到单次长度上限。");
+    expect(failure).not.toHaveTextContent("能力拆分规划");
     expect(failure).toHaveTextContent(initial.error);
     expect(failure.querySelector("img")).toBeNull();
     const warningRegion = screen.getByRole("region", { name: "任务 Compile 执行提示" });
@@ -396,7 +506,7 @@ describe("MiningView real mining rounds", () => {
       finished_at: "2026-10-10T00:02:00Z",
     };
     installApi(initial);
-    expect(await openFailedJob()).toHaveTextContent("能力拆分规划（Reduce）失败");
+    expect(await openFailedJob()).toHaveTextContent("Reduce 输出截断");
     expect(screen.getByRole("region", { name: "任务 Compile 执行提示" })).toHaveTextContent("reduce · truncated · Output limit reached");
     expect(screen.queryByText(/部分来源.*未完整处理/)).not.toBeInTheDocument();
     expect(screen.getByText("第 2 轮 · 未生成可审核产物")).toBeInTheDocument();
@@ -406,6 +516,47 @@ describe("MiningView real mining rounds", () => {
     await screen.findByRole("dialog", { name: "产物预览 · SKILL.md" });
     expect(screen.queryByRole("button", { name: "编辑产物" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /提交.*进化/ })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    {
+      remote_warnings: ["Unresolved output path compiled_skill/example/SKILL.md: reduce_merge: truncated: Output limit reached; reduce result size or use file references for agent files"],
+      ov_pipeline: undefined,
+    },
+    {
+      remote_warnings: [],
+      ov_pipeline: { errors: [{ stage: "reduce_merge", code: "truncated", message: "Output limit reached" }] },
+    },
+  ])("identifies file collision merge truncation from its explicit stage without calling it capability planning ($remote_warnings)", async (diagnosis) => {
+    const initial = {
+      ...waitingJob(), status: "failed", pending_checkpoint: null, artifacts: [], rounds: [],
+      ...diagnosis, error: "COMPILE_INCOMPLETE: No accepted final artifacts remain after failed jobs",
+    };
+    installApi(initial);
+    const failure = await openFailedJob();
+    expect(failure).toHaveTextContent("文件冲突合并（reduce_merge）输出截断");
+    expect(failure).not.toHaveTextContent("能力拆分规划");
+    expect(failure).not.toHaveTextContent("Reduce 输出截断");
+    const warnings = screen.getByRole("region", { name: "任务 Compile 执行提示" });
+    expect(warnings).toHaveTextContent("文件冲突合并（reduce_merge）的输出达到单次长度上限，被截断。");
+    expect(warnings).not.toHaveTextContent("能力拆分规划");
+    expect(warnings).not.toHaveTextContent("部分来源未完整处理");
+  });
+
+  it("does not infer a Reduce phase from a generic instruction to reduce result size", async () => {
+    const initial = {
+      ...waitingJob(), status: "failed", pending_checkpoint: null, artifacts: [], rounds: [],
+      ov_stage: "compile: pipeline",
+      remote_warnings: ["Writer warning: reduce result size because output limit reached"],
+      error: "COMPILE_INCOMPLETE: transform rejected the response",
+    };
+    installApi(initial);
+    expect(await openFailedJob()).toHaveTextContent("本轮 Compile 执行失败。");
+    const warnings = screen.getByRole("region", { name: "任务 Compile 执行提示" });
+    expect(warnings).toHaveTextContent("请结合任务状态和已有产物核对下方远端详情");
+    expect(warnings).not.toHaveTextContent("Reduce 输出截断");
+    expect(warnings).not.toHaveTextContent("文件冲突合并（reduce_merge）");
+    expect(warnings).not.toHaveTextContent("能力拆分规划");
   });
 
   it("keeps unclassified Compile warnings generic rather than inventing a source or Reduce failure", async () => {
@@ -544,6 +695,31 @@ describe("MiningView independent Skill Candidates", () => {
     fireEvent.click(within(screen.getByRole("region", { name: "Skill Candidate returns" })).getByRole("button", { name: "returns / EVALUATION.md" }));
     await screen.findByRole("dialog", { name: "产物预览 · EVALUATION.md" });
     expect(mockedApi).toHaveBeenCalledWith(`/api/mining/artifacts/content?path=${encodeURIComponent(candidateFiles("returns")[1].path)}`);
+    expect(screen.getByRole("button", { name: "编辑产物" })).toBeEnabled();
+  });
+
+  it.each(["rules.md", "configuration.json"])("groups %s with its Skill and keeps the resource preview read-only", async (file) => {
+    const initial = completedCandidateJob(["returns", "shipping"]);
+    const resource = {
+      ...artifact, name: file, kind: "resource", skill_name: "returns",
+      path: `job-1/workspace/compiled_skill/returns/references/nested/${file}`,
+    };
+    initial.artifacts = [...candidateFiles("returns"), ...candidateFiles("shipping"), resource];
+    const action = vi.fn();
+    installApi(initial, action);
+    await openCompletedJob();
+    const returns = screen.getByRole("region", { name: "Skill Candidate returns" });
+    const resourceButton = within(returns).getByRole("button", { name: `returns / ${file} 只读` });
+    expect(resourceButton).toHaveTextContent("配套资源");
+    expect(within(screen.getByRole("region", { name: "Skill Candidate shipping" })).queryByText(file)).not.toBeInTheDocument();
+    fireEvent.click(resourceButton);
+    await screen.findByRole("dialog", { name: `产物预览 · ${file}` });
+    expect(mockedApi).toHaveBeenCalledWith(`/api/mining/artifacts/content?path=${encodeURIComponent(resource.path)}`);
+    expect(screen.queryByRole("button", { name: "编辑产物" })).not.toBeInTheDocument();
+    expect(action).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.click(within(returns).getByRole("button", { name: "returns / EVALUATION.md" }));
+    await screen.findByRole("dialog", { name: "产物预览 · EVALUATION.md" });
     expect(screen.getByRole("button", { name: "编辑产物" })).toBeEnabled();
   });
 
@@ -796,6 +972,17 @@ describe("MiningView independent Skill Candidates", () => {
     } finally {
       confirm.mockRestore();
     }
+  });
+
+  it("shows an automatic empty-review receipt without rendering a human finish form", async () => {
+    const initial = {
+      ...completedCandidateJob(["parent"]), status: "succeeded", pending_checkpoint: null,
+      skipped_checkpoints: [{ round: 2, reason: "本轮无补证问题，自动跳过人工补证" }],
+    };
+    installApi(initial);
+    await openCompletedJob();
+    expect(screen.getByText("第 2 轮没有补证问题，已自动跳过人工补证。")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "结束挖掘并保留最终产物" })).not.toBeInTheDocument();
   });
 
   it("preserves submission and navigation for historical single-candidate jobs", async () => {

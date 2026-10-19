@@ -21,6 +21,10 @@ def _io():
 
 def prepare_source_routing(root: Path, state: dict) -> dict:
     """Require the complete accepted source scan before shrinking any writer assignment."""
+    if state.get("source_unit_protocol") == "te-exact-source-units.v1":
+        from .source_unit_review import prepare_routing
+
+        return prepare_routing(root, state)
     if state.get("source_scope_protocol") == SOURCE_SCOPE_PROTOCOL_V3:
         return _prepare_local_source_routing(root, state)
     from .bounded_compile_plan import INDEX_SCHEMA_V2
@@ -76,6 +80,8 @@ def prepare_source_routing(root: Path, state: dict) -> dict:
 
 def route_candidate_scope(root: Path, scope: dict, routing: dict) -> dict:
     """Keep method, heading/boundary neighbours and shared constraints as actual original Evidence."""
+    if routing.get("source_unit_protocol") == "te-exact-source-units.v1":
+        raise ValueError("Exact source routing requires original unit membership, not transport-only anchors")
     if routing.get("protocol") == SOURCE_SCOPE_PROTOCOL_V3:
         return _route_local_candidate_scope(root, scope, routing)
     read, _, sha = _io()
@@ -188,6 +194,15 @@ def _local_unit(root: Path, index: int, count: int) -> dict:
                 classified.update(ranges)
                 if group == "methods":
                     methods.update(ranges)
+        if unit.get("structural_coverage"):
+            from .source_unit_extraction import retained_structural_ids
+            from .source_units import load_source_unit
+
+            structural = {ordinal for identity in retained_structural_ids(root, unit)
+                          for ordinal in load_source_unit(root, identity)["ordinals"]}
+            if not structural <= ordinals:
+                raise ValueError("Retained structural coverage escaped its original source unit")
+            classified.update(structural)
         context = selected(value.get("context_refs"), empty=True)
         if context != _exact_ordinals(unit.get("context_ordinals"), count):
             raise ValueError("Local context mapping differs from its accepted classification")

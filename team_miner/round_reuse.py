@@ -23,6 +23,7 @@ PROTOCOL_FIELDS = (
     "compact_planning_protocol", "quote_alias_protocol", "identity_partition_protocol",
     "uncertainty_scope_protocol", "skill_body_protocol", "workflow_partition_protocol", "workflow_compiler_sha256",
     "source_fragment_protocol", "source_fragment_chars", "extract_max_chunks", "source_unit_protocol",
+    "mining_intent_sha256", "body_insert_protocol", "case_narrative_protocol",
 )
 SOURCE_UNIT_PROTOCOL = "te-exact-source-units.v1"
 
@@ -272,20 +273,27 @@ def _dependency_files(root: Path, metadata: dict) -> dict:
 
 
 def _writer_compilers(body: str, state: dict | None = None) -> dict:
+    from .case_context import CASE_CONTEXT_BATCH_STAGE, CASE_CONTEXT_GROUP_STAGE, CASE_NARRATIVE_PROTOCOL
+
     *_, sha = _host()
     integrated = bool(state and state.get("skill_body_protocol") == "te-incremental-skill-body.v1")
     kwargs = {"integrated_body": integrated}
     if state and state.get("skill_body_protocol") == "te-skill-body-patch.v1":
         kwargs["body_patch"] = True
+    source_bound = bool(state and state.get("case_narrative_protocol") == CASE_NARRATIVE_PROTOCOL)
     result = {
         "skill_section_batch": sha(render_stage_batch_compiler(body, "skill_section", **kwargs)),
         "evaluation_batch": sha(render_stage_batch_compiler(body, "evaluation")),
-        "case_batch": sha(render_case_batch_compiler(body)),
+        CASE_CONTEXT_BATCH_STAGE if source_bound else "case_batch": sha(
+            render_case_batch_compiler(body, source_bound_context=source_bound)
+        ),
     }
     if state and state.get("case_group_protocol") == "te-case-groups.v1":
         from .ov_case_group_orchestration import render_case_group_compiler
 
-        result["case_group_batch"] = sha(render_case_group_compiler(body))
+        result[CASE_CONTEXT_GROUP_STAGE if source_bound else "case_group_batch"] = sha(
+            render_case_group_compiler(body, source_bound_context=source_bound)
+        )
     return result
 
 
@@ -804,6 +812,12 @@ def try_reuse_candidate(job: dict, root: Path, state: dict, candidate: dict, sco
     name = candidate["name"]
     if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name):
         raise ValueError("Round reuse needs the exact canonical candidate name")
+    if (root / "identity/components" / (name + ".json")).exists():
+        _write_record(root / "reuse/misses", name, {
+            "name": name, "reason": "Consolidated member conditions require complete body and Case regeneration",
+            "source_round": header["round"] - 1,
+        })
+        return False
     record = _record(_cache_folder(root, header, "candidates"), name)
     if (state.get("source_unit_protocol") == SOURCE_UNIT_PROTOCOL
             and scope.get("source_units", {}).get("protocol") != SOURCE_UNIT_PROTOCOL):

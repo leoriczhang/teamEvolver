@@ -33,7 +33,8 @@ the final Skill contains the latest integrated method, not the concatenation of 
 
 def previous_body(root: Path, name: str, section_count: int) -> dict:
     """Use the latest operational revision, retaining skipped batches in the coverage ledger."""
-    for index in range(section_count - 1, -1, -1):
+    latest = {"section_index": None, "sha256": "", "title": "", "content": "", "is_evidence": False}
+    for index in range(section_count):
         path = root / "sections" / name / f"{index:08d}.json"
         if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
             raise ValueError("Skill working copy must stay inside its frozen round")
@@ -42,10 +43,15 @@ def previous_body(root: Path, name: str, section_count: int) -> dict:
         if value.get("schema_version") == planning.SECTION_SKIP_SCHEMA:
             planning.validate_section_skip(value, input_ids=value.get("input_ids", []))
             continue
-        planning.validate_section(value, input_ids=value.get("input_ids", []))
-        return {"section_index": index, "sha256": hashlib.sha256(raw.encode()).hexdigest(),
-                "title": value["title"], "content": value["content"], "is_evidence": False}
-    return {"section_index": None, "sha256": "", "title": "", "content": "", "is_evidence": False}
+        from .skill_body_insert import PROJECTION_SCHEMA, validate_projection
+
+        if value.get("schema_version") == PROJECTION_SCHEMA:
+            validate_projection(value, latest)
+        else:
+            planning.validate_section(value, input_ids=value.get("input_ids", []))
+        latest = {"section_index": index, "sha256": hashlib.sha256(raw.encode()).hexdigest(),
+                  "title": value["title"], "content": value["content"], "is_evidence": False}
+    return latest
 
 
 def iter_integrated_skill(candidate: dict, sections, *, expected_input_ids: list[str], source_refs: list[str]):
@@ -61,7 +67,12 @@ def iter_integrated_skill(candidate: dict, sections, *, expected_input_ids: list
         if section.get("schema_version") == planning.SECTION_SKIP_SCHEMA:
             planning.validate_section_skip(section, input_ids=ids)
         else:
-            planning.validate_section(section, input_ids=ids)
+            from .skill_body_insert import PROJECTION_SCHEMA, validate_projection
+
+            if section.get("schema_version") == PROJECTION_SCHEMA:
+                validate_projection(section, latest or {"title": "", "content": ""})
+            else:
+                planning.validate_section(section, input_ids=ids)
             latest = section
         if covered.intersection(ids):
             raise ValueError("Integrated Skill source batches overlap")

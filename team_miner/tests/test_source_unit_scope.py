@@ -24,11 +24,12 @@ from team_miner.tests.test_source_unit_extraction import POLICY, output_for
 from team_miner.tests.test_source_units import frozen
 
 
-def route_fixture(root, *, row_count=2, max_units=16, uncertain=False, empty_file=False):
+def route_fixture(root, *, row_count=2, max_units=16, uncertain=False, empty_file=False, extra_source=None):
     text = "# 完整复核方法\n\n| 条件 | 方法 |\n| --- | --- |\n" + "".join(
         f"| 条件 {index} | 先核实输入，再按该条件确认结果。 |\n" for index in range(row_count)
     ) + "\n"
-    state, manifest = frozen(root, [text, ""] if empty_file else [text])
+    sources = [text, extra_source] if extra_source is not None else [text, ""] if empty_file else [text]
+    state, manifest = frozen(root, sources)
     cursor, count, method_count = 0, 0, 0
     while cursor < manifest["unit_count"]:
         context = next_source_unit_assignment(root, cursor=cursor, count=manifest["unit_count"],
@@ -121,3 +122,41 @@ def test_duplicate_primary_classification_is_rejected_even_if_context_can_repeat
     _save(tmp_path / "units/0/00000001.json", first)
     with pytest.raises(ValueError, match="more than one accepted extraction"):
         route_exact_source_candidates(tmp_path, state, "viking://resources")
+
+
+def test_local_context_from_another_extraction_does_not_become_global_case_context(tmp_path):
+    _, _, state = route_fixture(tmp_path, row_count=10, max_units=4)
+    index = _read(tmp_path / "units/0/00000001.json")
+    local = index["value"]["methods"][0]["source_refs"][0]
+    foreign_row = index["source_unit_bindings"][local][0]
+    index["value"]["context_refs"].append(local)
+    _save(tmp_path / "units/0/00000001.json", index)
+    route_exact_source_candidates(tmp_path, state, "viking://resources")
+    groups = exact_case_groups(tmp_path, _read(tmp_path / "scopes/review.json"))
+    first_row = next(row["id"] for row in load_source_units(tmp_path, list(range(state["source_unit_count"])))
+                     if "| 条件 0 |" in row["content"])
+    first = next(group for group in groups if group["operative_ids"] == [first_row])
+    assert foreign_row not in first["unit_ids"]
+    local_siblings = [group for group in groups if foreign_row in group["unit_ids"]
+                      and foreign_row not in group["operative_ids"]]
+    assert local_siblings  # Retain the actual local constraint for its supported method owners.
+
+
+def test_unowned_rule_document_still_applies_to_every_exact_method(tmp_path):
+    _, _, state = route_fixture(tmp_path, row_count=2, max_units=4,
+                                extra_source="所有交流必须先征得同意；时间延长须再次获得同意。\n")
+    rule_id = None
+    for path in (tmp_path / "units/0").glob("*.json"):
+        unit = _read(path)
+        refs = [ref for row in unit["value"]["facts"] for ref in row["source_refs"]
+                if any("所有交流" in load_source_unit(tmp_path, identity)["content"]
+                       for identity in unit["source_unit_bindings"][ref])]
+        if refs:
+            unit["value"]["context_refs"] = refs
+            rule_id = unit["source_unit_bindings"][refs[0]][0]
+            _save(path, unit)
+    assert rule_id
+    route_exact_source_candidates(tmp_path, state, "viking://resources")
+    assert all(rule_id in group["unit_ids"] for group in exact_case_groups(
+        tmp_path, _read(tmp_path / "scopes/review.json"),
+    ))
