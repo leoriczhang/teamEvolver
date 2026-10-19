@@ -1,0 +1,1 @@
+"""Team Memory aggregation."""

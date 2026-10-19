@@ -1,0 +1,4 @@
+# The runtime image is built only from the release produced by
+# cicd_scripts/build.sh; nothing else from the source tree enters the context.
+*
+!release/

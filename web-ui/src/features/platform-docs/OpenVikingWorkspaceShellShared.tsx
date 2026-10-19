@@ -1,0 +1,866 @@
+import { api } from "@/api/client";
+import { Empty,Pill } from "@/components/common";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
+import {
+ChevronDown,
+ChevronRight,
+ExternalLink,
+FileCode2,
+FileJson,
+FileText,
+Folder,
+FolderOpen,
+Loader2,
+Send,
+Terminal,
+Trash2
+} from "lucide-react";
+import { useEffect,useRef,useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+
+export type ScopeName =
+  | "personal_memory"
+  | "team_memory"
+  | "personal_skills"
+  | "team_skills"
+  | "personal_resources"
+  | "team_resources"
+  | "personal_workspace"
+  | "team_workspace";
+
+export type ScopeConfig = {
+  name: ScopeName;
+  root_uri: string;
+  space: "personal" | "team";
+  kind: "memory" | "skills" | "resources" | "workspace";
+  can_write: boolean;
+  openviking_user?: string;
+};
+
+export type WorkspaceConfig = {
+  enabled: boolean;
+  deployment: "cloud" | "local" | string;
+  endpoint: string;
+  studio_url?: string;
+  cli_available?: boolean;
+  cli_full_access?: boolean;
+  account?: string;
+  root_key_configured?: boolean;
+  user_id: string;
+  scopes: Record<ScopeName, ScopeConfig>;
+};
+
+export type WorkspaceEntry = {
+  uri: string;
+  name: string;
+  is_dir: boolean;
+  size?: number | string | null;
+  modified_at?: string;
+  abstract?: string;
+  relative_path?: string;
+};
+
+export type TreeResponse = {
+  scope: ScopeName;
+  root_uri: string;
+  uri: string;
+  entries: WorkspaceEntry[];
+  exists: boolean;
+  can_write: boolean;
+};
+
+export type TreeNode = {
+  entry: WorkspaceEntry;
+  children: TreeNode[];
+};
+
+export type CliResult = {
+  ok: boolean;
+  exit_code: number;
+  command: string[];
+  stdout: string;
+  stderr: string;
+  truncated: boolean;
+};
+
+export type TerminalRecord = {
+  id: number;
+  command: string;
+  result?: CliResult;
+  running?: boolean;
+};
+
+export type WorkspaceDraft = {
+  uri: string;
+  name: string;
+  scope: ScopeName;
+  originalContent: string;
+  content: string;
+};
+
+export type SpaceKey = "personal" | "team";
+
+export type SpaceConfig = {
+  key: SpaceKey;
+  label: string;
+  members: { scope: ScopeName; label: string }[];
+};
+
+export const WORKSPACE_SPACES: SpaceConfig[] = [
+  {
+    key: "personal",
+    label: "个人记忆",
+    members: [
+      { scope: "personal_workspace", label: "个人记忆" },
+    ],
+  },
+  {
+    key: "team",
+    label: "团队资源",
+    members: [
+      { scope: "team_workspace", label: "团队资源" },
+    ],
+  },
+];
+
+export const SCOPE_LABELS: Record<ScopeName, string> = {
+  personal_memory: "个人 Memory",
+  team_memory: "团队 Memory",
+  personal_skills: "个人 Skill",
+  team_skills: "团队 Skill",
+  personal_resources: "个人 Resources",
+  team_resources: "团队 Resources",
+  personal_workspace: "个人记忆",
+  team_workspace: "团队资源",
+};
+
+export const GROUP_URI_PREFIX = "group://";
+
+export function groupUri(scope: ScopeName): string {
+  return `${GROUP_URI_PREFIX}${scope}`;
+}
+
+export function initialSpace(): SpaceConfig {
+  return WORKSPACE_SPACES[0];
+}
+
+export const DIRECTORY_PURPOSES: Record<string, string> = {
+  skills: "团队正式技能库，Agent 读取源",
+  "manifest.json": "技能清单索引：名称 → 版本/哈希",
+  "evolve_skill_registry.json": "技能 ID 登记表，保证 ID 跨节点稳定",
+  skill_lab: "技能实验室：datasets 数据集 / runs 实验结果",
+  skill_datasets: "技能测试集，按 <skill>/<dataset> 组织",
+  evolution_datasets: "从历史会话合成的进化数据集",
+  skill_evidence: "技能效果证据：注入次数、有效性",
+  skill_version_context: "技能版本上下文，真回放对比基线",
+  sessions: "待消费会话队列，进化引擎消费后删除",
+  session_archive: "会话永久归档",
+  session_filter_audit: "会话过滤决策审计（为何入队/跳过）",
+  session_ledger: "会话总账：queued→consumed 状态流转",
+  "session_index.json": "会话元信息索引，供控制台快速浏览",
+  skill_mutation_commits: "技能变更提交存档（publish/delete）",
+  candidate_skills: "候选技能暂存区，尚未进入正式 skills/",
+  validation_jobs: "验证任务，由进化服务产出",
+  validation_claims: "任务认领锁，防止重复验证",
+  validation_results: "验证执行结果，自动发布只读取 central-validator",
+  validation_evaluations: "Candidate True Replay 评估",
+  validation_decisions: "最终发布/拒绝裁决",
+  "validation_decision_index.json": "裁决总索引，供快速检索",
+  human_review: "人工复核任务队列（自动裁决拿不准时）",
+  "memory-changes": "记忆变更总账，支持真回放验证记忆改动",
+  "memory-replays": "记忆改动的真回放记录",
+  peers: "按客户/用户隔离区，个人技能落在 peers/<账号>/skills",
+  knowledge: "OpenViking 顶层数据类别（memories/resources/skills 并列）",
+  ".abstract.md": "OpenViking 自动生成的目录 L0 摘要",
+  ".overview.md": "OpenViking 自动生成的目录 L1 概览",
+};
+
+export function directoryPurpose(entry: WorkspaceEntry): string {
+  return DIRECTORY_PURPOSES[entry.name] || "";
+}
+
+export const MARKDOWN_EXTENSIONS = new Set(["md", "markdown", "mdx"]);
+
+export const HTML_EXTENSIONS = new Set(["html", "htm"]);
+
+export const JSON_EXTENSIONS = new Set(["json", "jsonl"]);
+
+export const CODE_EXTENSIONS = new Set([
+  "css",
+  "go",
+  "js",
+  "jsx",
+  "py",
+  "rs",
+  "sh",
+  "sql",
+  "ts",
+  "tsx",
+  "xml",
+  "yaml",
+  "yml",
+]);
+
+export function TreeRow({
+  node,
+  depth,
+  expanded,
+  forceExpanded,
+  selectedUri,
+  currentUri,
+  dirtyUris,
+  onOpen,
+}: {
+  node: TreeNode;
+  depth: number;
+  expanded: Set<string>;
+  forceExpanded: boolean;
+  selectedUri: string;
+  currentUri: string;
+  dirtyUris: Set<string>;
+  onOpen: (entry: WorkspaceEntry) => void;
+}) {
+  const isExpanded = forceExpanded || expanded.has(node.entry.uri);
+  const isCurrentDirectory = node.entry.is_dir && currentUri === node.entry.uri;
+  // Known top-level entries carry an inline Chinese purpose annotation.
+  const purpose = depth === 1 ? directoryPurpose(node.entry) : "";
+  return (
+    <>
+      <button
+        type="button"
+        title={purpose ? `${node.entry.uri}\n${purpose}` : node.entry.uri}
+        className={cn(
+          "group flex w-full items-center gap-1 py-1.5 pr-2 text-left text-xs hover:bg-muted/70",
+          selectedUri === node.entry.uri && "bg-muted",
+          isCurrentDirectory && "font-semibold text-sidebar-primary",
+        )}
+        style={{ paddingLeft: `${8 + depth * 14}px` }}
+        onClick={() => void onOpen(node.entry)}
+      >
+        {node.entry.is_dir ? (
+          isExpanded ? (
+            <ChevronDown className="size-3 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="size-3 shrink-0 text-muted-foreground" />
+          )
+        ) : (
+          <span className="w-3 shrink-0" />
+        )}
+        {node.entry.is_dir ? (
+          isExpanded ? (
+            <FolderOpen className="size-4 shrink-0 text-amber-600" />
+          ) : (
+            <Folder className="size-4 shrink-0 text-amber-600" />
+          )
+        ) : (
+          <FileIcon name={node.entry.name} />
+        )}
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className="truncate">{node.entry.name}</span>
+          {purpose && (
+            <span className="truncate text-[10px] font-normal text-muted-foreground">
+              {purpose}
+            </span>
+          )}
+        </span>
+        {dirtyUris.has(node.entry.uri) && (
+          <span
+            className="size-2 shrink-0 rounded-full bg-amber-500"
+            title="该文件有未保存改动"
+          />
+        )}
+        {!node.entry.is_dir && node.entry.size != null && (
+          <span className="hidden shrink-0 self-center text-[9px] text-muted-foreground group-hover:inline">
+            {formatBytes(node.entry.size)}
+          </span>
+        )}
+      </button>
+      {node.entry.is_dir &&
+        isExpanded &&
+        node.children.map((child) => (
+          <TreeRow
+            key={child.entry.uri}
+            node={child}
+            depth={depth + 1}
+            expanded={expanded}
+            forceExpanded={forceExpanded}
+            selectedUri={selectedUri}
+            currentUri={currentUri}
+            dirtyUris={dirtyUris}
+            onOpen={onOpen}
+          />
+        ))}
+    </>
+  );
+}
+
+export function FileIcon({ name }: { name: string }) {
+  const extension = fileExtension(name);
+  if (JSON_EXTENSIONS.has(extension)) {
+    return <FileJson className="size-4 shrink-0 text-amber-600" />;
+  }
+  if (CODE_EXTENSIONS.has(extension)) {
+    return <FileCode2 className="size-4 shrink-0 text-violet-600" />;
+  }
+  return <FileText className="size-4 shrink-0 text-blue-600" />;
+}
+
+export function DirectoryLevelPreview({
+  level,
+  content,
+  loading,
+}: {
+  level: "l0" | "l1";
+  content: string;
+  loading: boolean;
+}) {
+  if (loading) {
+    return (
+      <div className="flex h-full items-center justify-center gap-2 text-xs text-muted-foreground">
+        <Loader2 className="size-4 animate-spin" />
+        正在加载目录 {level.toUpperCase()}…
+      </div>
+    );
+  }
+  if (!content) {
+    return (
+      <div className="flex h-full items-center justify-center p-8">
+        <Empty>
+          {level === "l0"
+            ? "该目录暂未生成 L0 摘要。"
+            : "该目录暂未生成 L1 概览。"}
+        </Empty>
+      </div>
+    );
+  }
+  return (
+    <div className="h-full overflow-auto px-5 py-4">
+      <div className="mb-3 flex items-center gap-2">
+        <Pill tone={level === "l0" ? "blue" : "purple"}>
+          {level.toUpperCase()}
+        </Pill>
+        <span className="text-xs text-muted-foreground">
+          {level === "l0" ? "目录摘要" : "目录概览"}
+        </span>
+      </div>
+      {level === "l1" ? (
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+          {content}
+        </ReactMarkdown>
+      ) : (
+        <p className="whitespace-pre-wrap text-sm leading-7 text-foreground/90">
+          {content}
+        </p>
+      )}
+    </div>
+  );
+}
+
+export function FilePreview({
+  entry,
+  content,
+}: {
+  entry: WorkspaceEntry;
+  content: string;
+}) {
+  const extension = fileExtension(entry.name);
+  if (MARKDOWN_EXTENSIONS.has(extension)) {
+    return (
+      <div className="h-full overflow-auto px-5 py-4">
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={{
+            h1: ({ children }) => (
+              <h1 className="mb-4 border-b border-border pb-2 text-2xl font-bold">{children}</h1>
+            ),
+            h2: ({ children }) => (
+              <h2 className="mb-3 mt-6 text-xl font-bold">{children}</h2>
+            ),
+            h3: ({ children }) => (
+              <h3 className="mb-2 mt-5 text-base font-bold">{children}</h3>
+            ),
+            p: ({ children }) => (
+              <p className="my-3 text-sm leading-7 text-foreground/90">{children}</p>
+            ),
+            ul: ({ children }) => (
+              <ul className="my-3 list-disc space-y-1 pl-6 text-sm leading-6">{children}</ul>
+            ),
+            ol: ({ children }) => (
+              <ol className="my-3 list-decimal space-y-1 pl-6 text-sm leading-6">{children}</ol>
+            ),
+            blockquote: ({ children }) => (
+              <blockquote className="my-3 border-l-4 border-sidebar-primary/40 bg-muted/50 px-4 py-2 text-sm text-muted-foreground">
+                {children}
+              </blockquote>
+            ),
+            code: ({ children, className }) =>
+              className ? (
+                <code className={cn("font-mono text-xs", className)}>{children}</code>
+              ) : (
+                <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">{children}</code>
+              ),
+            pre: ({ children }) => (
+              <pre className="my-4 overflow-auto rounded-lg bg-slate-950 p-4 text-xs leading-5 text-slate-100">
+                {children}
+              </pre>
+            ),
+            table: ({ children }) => (
+              <div className="my-4 overflow-auto">
+                <table className="w-full border-collapse text-xs">{children}</table>
+              </div>
+            ),
+            th: ({ children }) => (
+              <th className="border border-border bg-muted px-2 py-1.5 text-left font-semibold">{children}</th>
+            ),
+            td: ({ children }) => (
+              <td className="border border-border px-2 py-1.5 align-top">{children}</td>
+            ),
+            a: ({ children, href }) => (
+              <a
+                className="text-sidebar-primary underline underline-offset-2"
+                href={href}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {children}
+              </a>
+            ),
+          }}
+        >
+          {content}
+        </ReactMarkdown>
+      </div>
+    );
+  }
+  if (HTML_EXTENSIONS.has(extension)) {
+    return (
+      <iframe
+        title={`Preview ${entry.name}`}
+        className="h-full w-full border-0 bg-white"
+        sandbox=""
+        srcDoc={content}
+      />
+    );
+  }
+  if (JSON_EXTENSIONS.has(extension)) {
+    return (
+      <pre className="h-full overflow-auto whitespace-pre-wrap break-words p-4 font-mono text-xs leading-5">
+        {formatJsonContent(content)}
+      </pre>
+    );
+  }
+  return (
+    <pre className="h-full overflow-auto whitespace-pre-wrap break-words p-4 font-mono text-xs leading-5">
+      {content || "（空文件）"}
+    </pre>
+  );
+}
+
+export function OpenVikingTerminal({
+  currentUri,
+  config,
+  scopeName,
+  userId,
+  onOpenUri,
+  onRefresh,
+}: {
+  currentUri: string;
+  config: WorkspaceConfig;
+  scopeName: ScopeName;
+  userId: string;
+  onOpenUri: (uri: string) => void;
+  onRefresh: () => void;
+}) {
+  const [command, setCommand] = useState("");
+  const [records, setRecords] = useState<TerminalRecord[]>([]);
+  const [history, setHistory] = useState<string[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+  const [running, setRunning] = useState(false);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const nextId = useRef(1);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({
+      top: scrollRef.current.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [records]);
+
+  async function run(raw = command) {
+    const value = raw.trim();
+    if (!value || running || !config.cli_available) return;
+    const id = nextId.current++;
+    setRecords((previous) => [
+      ...previous,
+      { id, command: value, running: true },
+    ]);
+    setHistory((previous) => [
+      value,
+      ...previous.filter((item) => item !== value),
+    ].slice(0, 50));
+    setHistoryIndex(-1);
+    setCommand("");
+    setRunning(true);
+    try {
+      const result = await api<CliResult>("/api/openviking/workspace/cli", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id: userId,
+          scope: scopeName,
+          current_uri: currentUri,
+          command: value,
+        }),
+      });
+      setRecords((previous) =>
+        previous.map((record) =>
+          record.id === id ? { ...record, running: false, result } : record,
+        ),
+      );
+      if (result.ok) onRefresh();
+    } catch (error: any) {
+      setRecords((previous) =>
+        previous.map((record) =>
+          record.id === id
+            ? {
+                ...record,
+                running: false,
+                result: {
+                  ok: false,
+                  exit_code: -1,
+                  command: ["ov"],
+                  stdout: "",
+                  stderr: error.message || "CLI request failed",
+                  truncated: false,
+                },
+              }
+            : record,
+        ),
+      );
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  const quickCommands = [
+    { label: "状态", command: "ov status" },
+    { label: "当前目录", command: `ov ls ${currentUri}` },
+    { label: "目录树", command: `ov tree ${currentUri} -L 2` },
+    { label: "全部命令", command: "ov --help" },
+  ];
+
+  return (
+    <section className="flex min-h-0 flex-col bg-[#fbfbfc]">
+      <header className="flex h-12 shrink-0 items-center justify-between border-b border-border px-3">
+        <div className="flex items-center gap-2">
+          <Terminal className="size-4" />
+          <span className="text-sm font-semibold">OpenViking CLI</span>
+          <Pill tone={config.cli_full_access ? "green" : "gray"}>
+            {config.cli_full_access ? "完整权限" : "当前空间"}
+          </Pill>
+        </div>
+        <div className="flex items-center gap-1">
+          {config.studio_url && (
+            <Button asChild variant="ghost" size="icon-sm" title="打开 Studio">
+              <a href={config.studio_url} target="_blank" rel="noreferrer">
+                <ExternalLink className="size-4" />
+              </a>
+            </Button>
+          )}
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            title="清空终端"
+            onClick={() => setRecords([])}
+          >
+            <Trash2 className="size-4" />
+          </Button>
+        </div>
+      </header>
+      <div className="shrink-0 border-b border-border px-3 py-2">
+        <div className="truncate font-mono text-[10px] text-muted-foreground">
+          scope: {currentUri}
+        </div>
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {quickCommands.map((item) => (
+            <button
+              key={item.label}
+              type="button"
+              disabled={running || !config.cli_available}
+              className="rounded-md border border-border bg-background px-2 py-1 text-[10px] font-semibold hover:bg-muted disabled:opacity-50"
+              onClick={() => void run(item.command)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto p-3">
+        {!config.cli_available ? (
+          <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
+            未找到 OpenViking CLI。请设置 OPENVIKING_CLI_BIN。
+          </div>
+        ) : records.length === 0 ? (
+          <div className="flex h-full min-h-[260px] flex-col items-center justify-center text-center">
+            <div className="grid size-14 place-items-center rounded-2xl bg-muted">
+              <Terminal className="size-7 text-muted-foreground" />
+            </div>
+            <div className="mt-4 text-lg font-semibold">OpenViking CLI</div>
+            <p className="mt-2 max-w-[280px] text-xs leading-5 text-muted-foreground">
+              直接执行原生 ov 命令。支持资源、文件系统、检索、Session、任务、快照与系统管理能力。
+            </p>
+            <div className="mt-4 grid w-full max-w-[290px] gap-2 text-left">
+              {[
+                ["ov add-resource URL --wait", "添加资源"],
+                ['ov add-memory "需要记住的内容"', "添加记忆"],
+                [`ov find "查询词" -u ${currentUri}`, "语义检索"],
+              ].map(([code, label]) => (
+                <button
+                  key={code}
+                  type="button"
+                  className="rounded-lg border border-border bg-background px-3 py-2 hover:bg-muted"
+                  onClick={() => setCommand(code)}
+                >
+                  <span className="block text-[10px] text-muted-foreground">{label}</span>
+                  <code className="mt-1 block truncate text-[10px]">{code}</code>
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {records.map((record) => (
+              <div key={record.id}>
+                <div className="flex items-start gap-2 font-mono text-[11px]">
+                  <span className="select-none text-sidebar-primary">❯</span>
+                  <span className="break-all">{record.command}</span>
+                </div>
+                {record.running ? (
+                  <div className="mt-2 flex items-center gap-2 pl-4 text-[10px] text-muted-foreground">
+                    <Loader2 className="size-3 animate-spin" />
+                    正在执行…
+                  </div>
+                ) : record.result ? (
+                  <div
+                    className={cn(
+                      "mt-2 rounded-lg border p-2.5",
+                      record.result.ok
+                        ? "border-border bg-background"
+                        : "border-destructive/30 bg-destructive/5",
+                    )}
+                  >
+                    <pre className="max-h-[360px] overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-4">
+                      {record.result.stdout ||
+                        record.result.stderr ||
+                        `exit ${record.result.exit_code}`}
+                    </pre>
+                    {record.result.stderr && record.result.stdout && (
+                      <pre className="mt-2 border-t border-border pt-2 whitespace-pre-wrap break-words font-mono text-[10px] leading-4 text-destructive">
+                        {record.result.stderr}
+                      </pre>
+                    )}
+                    <CliUriLinks
+                      text={`${record.result.stdout}\n${record.result.stderr}`}
+                      onOpen={onOpenUri}
+                    />
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="shrink-0 border-t border-border bg-background p-2.5">
+        <div className="flex items-end gap-2 rounded-lg border border-border px-2.5 py-2 focus-within:border-sidebar-primary">
+          <span className="pb-0.5 font-mono text-xs text-sidebar-primary">❯</span>
+          <textarea
+            value={command}
+            rows={1}
+            disabled={running || !config.cli_available}
+            placeholder={'输入 ov 命令，例如 ov find "OpenViking"'}
+            className="max-h-24 min-h-5 flex-1 resize-none bg-transparent font-mono text-[11px] leading-5 outline-none placeholder:text-muted-foreground"
+            onChange={(event) => setCommand(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void run();
+                return;
+              }
+              if (event.key === "ArrowUp" && history.length) {
+                event.preventDefault();
+                const next = Math.min(historyIndex + 1, history.length - 1);
+                setHistoryIndex(next);
+                setCommand(history[next]);
+              }
+              if (event.key === "ArrowDown" && historyIndex >= 0) {
+                event.preventDefault();
+                const next = historyIndex - 1;
+                setHistoryIndex(next);
+                setCommand(next >= 0 ? history[next] : "");
+              }
+            }}
+          />
+          <Button
+            size="icon-sm"
+            disabled={running || !command.trim() || !config.cli_available}
+            onClick={() => void run()}
+          >
+            <Send className="size-3.5" />
+          </Button>
+        </div>
+        <div className="mt-1.5 flex justify-between text-[9px] text-muted-foreground">
+          <span>↑↓ 历史命令 · Shift+Enter 换行</span>
+          <span>Enter 发送</span>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export function CliUriLinks({
+  text,
+  onOpen,
+}: {
+  text: string;
+  onOpen: (uri: string) => void;
+}) {
+  const uris = Array.from(
+    new Set(text.match(/viking:\/\/[^\s,，)）\]}】'"`]+/g) || []),
+  ).slice(0, 8);
+  if (!uris.length) return null;
+  return (
+    <div className="mt-2 flex flex-wrap gap-1 border-t border-border pt-2">
+      {uris.map((uri) => (
+        <button
+          key={uri}
+          type="button"
+          className="max-w-full truncate rounded bg-muted px-2 py-1 font-mono text-[9px] text-sidebar-primary hover:bg-muted/70"
+          title={uri}
+          onClick={() => onOpen(uri)}
+        >
+          {uri}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function buildTree(entries: WorkspaceEntry[], rootUri: string): TreeNode[] {
+  if (!rootUri) return [];
+  const nodeMap = new Map<string, TreeNode>();
+  for (const entry of entries) {
+    nodeMap.set(entry.uri, { entry, children: [] });
+  }
+  const roots: TreeNode[] = [];
+  for (const node of nodeMap.values()) {
+    const parent = parentUri(node.entry.uri);
+    const parentNode = nodeMap.get(parent);
+    if (parentNode && parentNode.entry.is_dir) {
+      parentNode.children.push(node);
+    } else if (parent === rootUri || node.entry.uri.startsWith(`${rootUri}/`)) {
+      roots.push(node);
+    }
+  }
+  const sortNodes = (nodes: TreeNode[]) => {
+    nodes.sort((left, right) => {
+      if (left.entry.is_dir !== right.entry.is_dir) {
+        return left.entry.is_dir ? -1 : 1;
+      }
+      return left.entry.name.localeCompare(right.entry.name);
+    });
+    for (const node of nodes) sortNodes(node.children);
+  };
+  sortNodes(roots);
+  return roots;
+}
+
+export function buildSpaceTree(
+  space: SpaceConfig,
+  scopes: ScopeConfig[],
+  entries: WorkspaceEntry[],
+): TreeNode[] {
+  if (scopes.length <= 1) {
+    const only = scopes[0];
+    return only ? buildTree(entries, only.root_uri) : [];
+  }
+  const groups: TreeNode[] = [];
+  for (const member of space.members) {
+    const scope = scopes.find((item) => item.name === member.scope);
+    if (!scope) continue;
+    const children = buildTree(
+      entries.filter((entry) => {
+        const root = scope.root_uri.replace(/\/+$/, "");
+        const uri = entry.uri.replace(/\/+$/, "");
+        return uri === root || uri.startsWith(`${root}/`);
+      }),
+      scope.root_uri,
+    );
+    groups.push({
+      entry: {
+        uri: groupUri(scope.name),
+        name: member.label,
+        is_dir: true,
+      },
+      children,
+    });
+  }
+  return groups;
+}
+
+export function filterTree(nodes: TreeNode[], query: string): TreeNode[] {
+  if (!query) return nodes;
+  const output: TreeNode[] = [];
+  for (const node of nodes) {
+    const children = filterTree(node.children, query);
+    const haystack = [
+      node.entry.name,
+      node.entry.uri,
+      node.entry.abstract || "",
+    ]
+      .join(" ")
+      .toLowerCase();
+    if (haystack.includes(query) || children.length) {
+      output.push({ ...node, children });
+    }
+  }
+  return output;
+}
+
+export function parentUri(uri: string) {
+  const clean = uri.replace(/\/+$/, "");
+  const schemeEnd = clean.indexOf("://");
+  const slash = clean.lastIndexOf("/");
+  return slash > schemeEnd + 2 ? clean.slice(0, slash) : clean;
+}
+
+export function fileExtension(name: string) {
+  const index = name.lastIndexOf(".");
+  return index >= 0 ? name.slice(index + 1).toLowerCase() : "";
+}
+
+export function fileKind(name: string) {
+  const extension = fileExtension(name);
+  if (MARKDOWN_EXTENSIONS.has(extension)) return "Markdown";
+  if (HTML_EXTENSIONS.has(extension)) return "HTML";
+  if (JSON_EXTENSIONS.has(extension)) return "JSON";
+  if (CODE_EXTENSIONS.has(extension)) return extension.toUpperCase();
+  return extension ? extension.toUpperCase() : "Text";
+}
+
+export function formatJsonContent(content: string) {
+  try {
+    return JSON.stringify(JSON.parse(content), null, 2);
+  } catch {
+    return content || "（空文件）";
+  }
+}
+
+export function formatBytes(value?: number | string | null) {
+  const size = Number(value);
+  if (!Number.isFinite(size) || size < 0) return "文件";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}

@@ -1,0 +1,22 @@
+
+.env*
+!.env.example
+.venv/
+node_modules/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+*.tsbuildinfo
+/runtime/
+/evolve_history.jsonl
+/build/
+/dist/
+/teamEvolver/web/dist/
+/config/skills/
+
+# Release build outputs (cicd_scripts/build.sh)
+/release/
+/.release-stage/
+/app.tar

@@ -1,0 +1,25 @@
+# Read-only bootstrap; supply credentials through environment variables.
+team_display_name: my-team
+llm_api_base: https://api.openai.com/v1
+llm_api_key: ''
+proxy_host: 0.0.0.0
+proxy_port: 52010
+self_registration_enabled: true
+sharing_viking_deployment: local
+sharing_viking_endpoint: http://127.0.0.1:1933
+sharing_viking_api_key: ''
+sharing_viking_account: default
+sharing_viking_user: team
+storage_pg_enabled: true
+storage_pg_schema: teamevolver
+sharing_local_fallback_enabled: false
+sharing_skill_backend: postgres
+sharing_session_backend: postgres
+logging:
+  level: INFO
+  console_enabled: true
+  file_enabled: true
+  directory: ~/.teamEvolver
+  max_file_mb: 100
+  retention_days: 14
+  max_total_mb: 2048
