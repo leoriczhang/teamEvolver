@@ -12,7 +12,7 @@ def _state_dir() -> Path:
 
 
 def _multi_replica_enabled() -> bool:
-    """Multi-replica mode (multi-tenancy plan Phase 3).
+    """Multi-replica mode.
 
     When enabled each replica records its own ``teamEvolver.{pid}.pid`` file
     and skips the singleton ``daemon_start.lock`` so multiple replicas can run

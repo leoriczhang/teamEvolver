@@ -1,69 +1,81 @@
-# Skill Mining
+# Knowledge Base Mining Guide
 
-Skill Mining turns domain documents and human Evidence supplements into a reviewable Skill Candidate and a Test Dataset derived from the same sources. teamEvolver manages jobs, rounds and candidate submission; OpenViking Compile reads the Evidence and generates the artifacts.
+Knowledge base mining compiles a raw knowledge directory in OpenViking into a structured Wiki. Compilation is performed by OpenViking's native Compile with a mining Skill; teamEvolver handles acceptance, permissions, task persistence, cancellation and result reconciliation. The code is in `team_miner/knowledge_miner/` and the console page in `team_miner/knowledge_miner/frontend/`, maintained independently from Skill mining in `team_miner/skill_miner/`. API details are in [Knowledge Base Mining API](../api/22-knowledge-mining.md).
 
-## Prepare and create a job
+## Prerequisites
 
-Start teamEvolver and configure a reachable OpenViking endpoint, account and server credentials in the console. Mining uses the model and execution environment configured in OpenViking.
+- The tenant has an OpenViking deployment, Account and Root Key configured ("Runtime Status" → "OpenViking Deployment")
+- The OpenViking server supports Compile. teamEvolver installs the default mining
+  Skill `viking://agent/skills/llm-wiki` when it is missing; custom Skills must
+  still be installed beforehand.
+- The current user is a tenant administrator
+- The Worker role is running; it executes the `miner.track_compile` and `miner.rebuild_index` tasks
 
-1. Register or upload a source and give its directory the Skill purpose tag. Knowledge compilation can use the Knowledge purpose tag on the same source.
-2. Choose 1–5 rounds (default 3), human Evidence checkpoints and a base round deadline of 60–7200 seconds (default 3600, extended with input shards and artifact-generation workload).
-3. Inspect progress, execution events, remote task IDs and errors. At most eight jobs execute concurrently; waiting for human review does not occupy an execution slot.
+Without OpenViking, the console "Knowledge Base Mining" menu shows a not-configured marker and the page links to "Runtime Status".
 
-The source is frozen when the job starts. Later changes to the original directory do not change its Evidence. Every round has separate inputs and outputs and a local archive.
+## Directory Conventions
 
-## Native round delivery
+A mining run involves three URIs, all from the tenant `miner` module configuration:
 
-New jobs submit one public OpenViking Compile per round. Within that Compile, the compiler Skill reads sources, consolidates methods, assigns content units, generates artifacts and reviews them. More content units do not add TE-side Compile calls or directly increase the number of final Skills.
+| Field | Default | Purpose |
+|------|--------|------|
+| `source_uri` | `viking://resources/agent_knowledge_workspace/input/raw_knowledge_base` | Knowledge sources: Markdown converted from the original documents |
+| `target_uri` | `viking://resources/agent_knowledge_workspace/output/processed_knowledge` | Knowledge base: the compiled Wiki |
+| `skill_uri` | `viking://agent/skills/llm-wiki` | Mining Skill used by Compile |
 
-`te-native-components.v2` organizes independent content units for each method while retaining v1 compatibility:
+`source_uri` and `target_uri` must be under `viking://resources/`, and `skill_uri` under `viking://agent/skills/`. There is no write API for this configuration; operators edit the `module='miner'` row in `tenant_configs`. If the configuration contains credential fields or unknown fields, every mining API returns 503.
 
-- A `core` unit generates `METHOD.json`, an executable `SKILL.md`, `EVALUATION.md` and a component manifest declaring resources, Case IDs, order and source dispositions. The main workflow selects configurations, loads resources and defines branches and completion conditions.
-- The Skill may declare original tables, rule dictionaries and existing prompts as source resources. TE verifies their SHA against this job's frozen inputs and copies the exact bytes, preserving conflicts, formatting and language. Generated `reference` units provide necessary configuration navigation, applicability and coverage mappings rather than transcribing long sources again.
-- Each `case` unit generates one complete Case JSON. Each method has 12 substantively different Cases with explicit sources.
+Before the first browse, upload, or mining run, teamEvolver checks `source_uri`
+and `target_uri` from parent to child. Missing directories are created
+automatically; existing directories and their contents are reused unchanged.
 
-Intermediate drafts carry configuration choices, concrete states and execution designs without embedding complete bodies in nested JSON. A fresh Agent reads the relevant original sources, independently reviews the design and writes the unit's complete files directly. TE validates manifests, paths, unique IDs, file completeness, source sets and the Test Dataset contract, then deterministically assembles source resources and `benchmark.json` in manifest order and renders `BENCHMARK.md`. TE does not select business rules, supply facts, add Cases or call Compile again for assembly.
+## Workflow
 
-Source resource declarations bind exact frozen source URIs, never live directories, unfrozen files or generated artifacts. SHA validation uses the frozen manifest, not model assertions. Exact source retention makes the text available but does not prove rule coverage. The Skill must still implement configuration selection, resource lookup, branches, conflict handling and completion conditions; Cases must check observable behavior for concrete states. Unit review and successful assembly do not establish complete cross-file business validation or a True Replay pass.
+### 1. Upload Knowledge Sources
 
-Sources are frozen one file at a time, with at most 10000 files and 20 MB per file; the former aggregate 16 MB source limit no longer applies. Source directories are traversed directory by directory through the existing paginated OV file-list API, without a fixed depth or tree-node cutoff. Job details show the effective deadline for the current round.
+In the "Knowledge Sources" tree, select a target directory and upload files or a folder. Supported formats: `.md`, `.markdown`, `.txt`, `.docx`, `.xlsx`, `.pdf`, `.csv`, `.pptx`. Up to 200 files per upload, each ≤20 MiB and ≤100 MiB in total.
 
-The component protocol applies only to newly frozen requests that select it. Existing jobs retain their compiler, requests, execution protocol and historical artifacts; they are not automatically migrated or recompiled. This flow uses existing OpenViking interfaces without changing OV code. TE manages source freezing, connection recovery, stopping and deterministic assembly; knowledge mining keeps its existing flow.
+An upload is accepted as a background task. The Worker converts each file to Markdown (extension replaced by `.md`), writes it to OpenViking and records a checkpoint per file; a retried task skips files already written. The request is rejected when two files convert to the same name.
 
-The first round determines and saves the primary language of the frozen original sources. Predominantly Chinese materials use Simplified Chinese. Later rounds retain that language regardless of earlier English artifacts or the language of supplements. Human-readable prose, explanations, case Queries, Checklist text, shared analysis and review questions use that language. Field names, IDs, file paths, source URIs, code, fixed enum values and direct source quotations remain unchanged. Structural labels such as `Checklist`, `Evidence` and `Materials` remain unchanged. The console has no separate output-language selector.
+### 2. Organize Knowledge Sources
 
-## Round artifacts
+The file tree supports previewing, editing and deleting files or directories. The root directory itself cannot be deleted. Edits are written back to OpenViking directly.
 
-| Path | Purpose |
-| --- | --- |
-| `analysis/evidence-map.md` | Evidence, reusable methods and source references |
-| `analysis/gaps.md` | Evidence gaps, conflicts and applicability boundaries |
-| `analysis/review.json` | Structured human review questions using `skill-miner.review.v1` |
-| `compiled_skill/<name>/SKILL.md` | Skill Candidate |
-| `compiled_skill/<name>/EVALUATION.md` | Evaluation notes |
-| `compiled_skill/<name>/BENCHMARK.md` | Readable Test Dataset description |
-| `compiled_skill/<name>/benchmark.json` | Test Dataset using `team-replay.dataset` |
+### 3. Start Compile
 
-The console supports artifact preview, scrollable Markdown and editing. Candidate submission uses the current edited artifacts. Structural validation does not prove business facts correct; failed source processing, unresolved questions and repaired formats still require review.
+Optionally enter "mining instructions" (≤4000 characters), choose the incremental compile start and launch. The first run is a full compile; afterwards the start time of the last successful compile is used as the `last_compile_time` watermark by default, so only new or changed content is processed.
 
-## Review and supplement Evidence
+Compile task execution:
 
-New jobs with human checkpoints enabled wait only when the current question list is nonempty, including optional questions. A native round with no questions ends the job without another Compile to fill the round limit; its complete output and a separate skip receipt are still archived. The legacy non-native workflow advances through the selected rounds. Skipping is not human approval, business validation, resolution of unknown source facts or new Evidence. Existing jobs retain their frozen checkpoint policy. Administrators inspect artifacts, answer structured questions, cite accessible OpenViking sources, upload documents and leave review comments. Required questions that cannot be confirmed must be explicitly marked unresolved.
+1. The API persists the request, enqueues `miner.track_compile` and returns a `job_id`.
+2. The Worker submits Compile to OpenViking with the `job_id` as idempotency key and stores the upstream `task_id` receipt.
+3. The Worker polls the upstream task until it ends. After a process restart it resumes from the receipt without resubmitting.
+4. On success it advances the watermark and derives a `miner.rebuild_index` task that rebuilds the Wiki link index.
 
-Continuing a native job starts an incremental Compile into the same artifact target, using actual supplements from the immediately preceding review, the necessary frozen originals implicated by its questions, and revision context. Freeform review feedback with an unknown impact scope conservatively includes all frozen originals. The legacy non-native workflow still reprocesses the original frozen sources and cumulative supplements. The previous Skill Candidate is revision context; it cannot replace verified Evidence or be cited as a source. At the round limit, finish the final review or stop. New Evidence provided during final review is not automatically compiled into existing artifacts.
+The page shows OpenViking Compile stage progress. Stopping cancels both the upstream task and the local task.
 
-Without human checkpoints, a native job ends after its current round passes structural validation, without another Compile; the legacy non-native workflow automatically executes all selected rounds. Restarts and network retries recover existing jobs and idempotent submissions. Stopping a running job requests remote cancellation; stop before deleting it.
+### 4. View the Knowledge Base
 
-See [Multi-round Skill Mining and Human Evidence Supplements](./17-multi-round-skill-mining.md).
+After compile, browse Wiki pages in the "Knowledge Base" tree and view backlinks. Generating the graph builds an HTML knowledge base graph from Wiki links.
 
-## Candidate validation and publication
+## Concurrency and Idempotency
 
-After mining, submit the Skill Candidate and Test Dataset to the existing candidate workflow. True Replay compares actual Baseline and Candidate execution; Candidate Review decides whether to Publish. Mining completion and human review never automatically publish a team Skill.
+- All write operations accept an `Idempotency-Key` header: the same key with the same request returns the same task; a different request returns 409.
+- Watermark and index updates for the same `(account_id, source_uri, target_uri, skill_uri)` scope are serialized with a PostgreSQL advisory lock.
+- Only the compile task matching the current watermark writes the index, so an older task finishing late never overwrites a newer index.
 
-## Configuration and API
+## Troubleshooting
 
-`mining.pipeline.max_rounds` sets the default round limit and `mining.pipeline.runtime_timeout_seconds` the default base round deadline. `mining.prompts.ov_compile` can override the compiler Skill body. Each round freezes its compiler, inputs and Compile request and binds a separate compiler URI derived from its content hash.
+| Symptom | Action |
+|------|------|
+| Every API returns 503 | Check whether the `miner` module configuration is missing or contains credential or unknown fields |
+| `403 TENANT_ACCOUNT_MISMATCH` | The request `account` differs from the tenant's effective OpenViking Account |
+| Task stays queued | Make sure the Worker role is running; check processes with `teamEvolver status` |
+| Task fails with `miner_compile_failed` | Check the upstream OpenViking task log; verify that a custom mining Skill is installed |
+| Upload fails with `miner_normalized_upload_limit` | Converted Markdown exceeds 100 MiB in total; split the upload |
 
-The runtime adds the job's language rules to new Compile requests while preserving saved custom business instructions verbatim; a language update does not require resetting them. Accepted requests and completed artifacts are not changed retroactively, automatically translated or recompiled.
+## Related Documents
 
-See [Skill Mining API](../api/17-skill-mining.md) for parameters, states and errors. See [Console Guide](./03-console.md) for knowledge uploads, Wiki compilation and browsing.
+- [Knowledge Base Mining API](../api/22-knowledge-mining.md)
+- [Workspace and Platform Assets API](../api/23-workspace-assets.md)
+- [Web Console User Guide](./03-console.md)

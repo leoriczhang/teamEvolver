@@ -1,26 +1,23 @@
 # 路线图
 
-## 当前状态
+## 当前能力
 
-已实现：
+- Agent 协议：租户 Key + `user_id` 鉴权的 Session 上报、Agent Context、Replay 分支与 Skill 拉取
+- 数据源接入：PostgreSQL 版本化 Adapter、预览、拉取与每日定时拉取
+- Skill 进化：Session 分析、按 Skill 分组、Agent 循环改进与新建、冲突合并、测试集生成
+- True Replay：Baseline 与 Candidate 独立工作区对比，Checklist 门禁与效率比较
+- Skill 版本：追加式版本链、幂等变更、回滚与 tombstone，Agent 通过 pull 获取
+- 团队 Memory：跨用户聚合、DreamCycle 维护、变更记录与 Memory Replay
+- 成功经验：经验库、Pattern 编译与 OpenViking 投影
+- 知识库挖掘：文档上传转换、OpenViking Compile 与 Wiki 图谱
+- 控制台：实验工作台、Prompt Studio、个人与团队资产、平台资产、租户与成员管理
+- 运行时：API 与 Worker 角色分离，PostgreSQL 任务队列、租约与围栏，支持多副本
 
-- Agent Protocol V1（注册、Session 上报、Context Workspace、Replay Branch、Skill Sync）
-- 11 阶段 Skill 进化管线与跨周期 Evidence
-- True Replay（Baseline vs Candidate 隔离验证 + 团队 Memory True Replay）
-- 跨 User 团队 Memory 聚合（用户筛选、增量编译、tree-reduce、可编辑聚合 Skill）
-- 可选 DreamCycle Memory 维护与变更账本
-- Skill 版本管理、审计链、tombstone、durable outbox
-- 个人 Skill 编辑、团队发布申请与管理员审批
-- 通用 Agent Protocol v2 接入和 Pi Agent 接入参考
-- Langfuse 入站拉取、出站追踪与自定义 Trace 映射
-- 实验工作台（多文件 Skill Candidate 编辑、Diff 与 True Replay）
-- 个人记忆、团队资源与只读平台资产视图
-- 远程自建/火山云 OpenViking 配置热重载
-- Skill Miner 文档挖掘与 Benchmark
-- 控制台内置中英双语文档阅读、全文搜索和引用校验
+## 待完成
 
-## 长期愿景
+- 真实 OpenViking 环境的端到端验收（Compile、检索清理、ACL）
 
-- 成为 Agent 团队能力进化的事实标准协议
-- 支持跨组织的 Skill 验证和共享（联邦验证）
-- 自动发现团队能力瓶颈并主动发起进化
+## 长期方向
+
+- 跨组织的 Skill 验证与共享
+- 自动发现团队能力瓶颈并发起进化

@@ -12,8 +12,9 @@ export default defineConfig({
     dedupe: ['react', 'react-dom'],
     alias: {
       '@': path.resolve(__dirname, './src'),
-      '@memory': path.resolve(__dirname, '../team_memory/frontend'),
-      '@miner': path.resolve(__dirname, '../team_miner/frontend'),
+      '@skill-miner': path.resolve(__dirname, '../team_miner/skill_miner/frontend'),
+      '@knowledge-miner': path.resolve(__dirname, '../team_miner/knowledge_miner/frontend'),
+      '@codemirror/lang-yaml': path.resolve(__dirname, 'node_modules/@codemirror/lang-yaml'),
       'react': path.resolve(__dirname, 'node_modules/react'),
       'react-dom': path.resolve(__dirname, 'node_modules/react-dom'),
       'lucide-react': path.resolve(__dirname, 'node_modules/lucide-react'),
@@ -25,9 +26,10 @@ export default defineConfig({
   },
   test: {
     include: [
+      'src/**/*.test.ts',
       'src/**/*.test.tsx',
-      '../team_memory/frontend/**/*.test.tsx',
-      '../team_miner/frontend/**/*.test.tsx',
+      '../team_miner/skill_miner/frontend/**/*.test.tsx',
+      '../team_miner/knowledge_miner/frontend/**/*.test.tsx',
     ],
   },
   base: '/',
@@ -39,8 +41,6 @@ export default defineConfig({
     fs: { allow: [path.resolve(__dirname, '..')] },
     port: 5174,
     proxy: {
-      '/kee': { target: 'http://127.0.0.1:52010', changeOrigin: true },
-      '/te': { target: 'http://127.0.0.1:52010', changeOrigin: true },
       '/api': { target: 'http://127.0.0.1:52010', changeOrigin: true },
       '/status': { target: 'http://127.0.0.1:52010', changeOrigin: true },
       '/storage': { target: 'http://127.0.0.1:52010', changeOrigin: true },

@@ -5,7 +5,7 @@ judge verdict for a whole session (good / mixed / bad). That is enough to
 decide whether a session enters the evolution queue, but it never says *where*
 inside the session a problem sits. In this codebase one Trace maps to exactly
 one turn (each ``turn`` carries its own ``trace_id``; see ``langfuse_convert`` /
-``sf_agent_adapter``), so a trace-level analysis is a per-turn analysis.
+``trace_mapping``), so a trace-level analysis is a per-turn analysis.
 
 This stage runs for every non-empty session and walks the trajectory in bounded
 LLM batches. For each trace it decides whether that trace is the locus of a

@@ -111,7 +111,7 @@ root `index.md` sits directly at the target root.
 
 ## Cross references
 
-Use standard Markdown links between pages, e.g. `[顺丰标快](entities/products/顺丰标快.md)`.
+Use standard Markdown links between pages, e.g. `[标准快递](entities/products/standard-express.md)`.
 Do NOT use `[[wikilink]]` double-bracket syntax: OpenViking builds its relation
 graph and backlinks only from Markdown links, so double brackets become inert
 text. Link the first mention of another page in a paragraph; never self-link;

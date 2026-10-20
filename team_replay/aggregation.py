@@ -6,33 +6,22 @@ from typing import Any
 
 from .metrics import REPLAY_METRICS, UNAVAILABLE, compare_efficiency, metric_number
 from .policy import aggregate_case_checklists, progressive_replay_decision
-from .results import replay_execution_summary
 
 
 def aggregate_true_replay_windows(
     results: list[tuple[str, dict[str, Any]]],
 ) -> dict[str, Any]:
-    observed = [(window, result, replay_execution_summary(result)) for window, result in results]
     evaluated = [
         (window, result)
-        for window, result, execution in observed
-        if execution["status"] == "completed"
+        for window, result in results
+        if str(result.get("status") or "") in {"", "evaluated"}
     ]
-    incomplete = [execution for _, _, execution in observed if execution["status"] != "completed"]
-    incomplete_status = (
-        "failed" if any(item["status"] == "failed" for item in incomplete)
-        else "skipped" if any(item["status"] == "skipped" for item in incomplete)
-        else "not_run"
-    )
-    reason = "; ".join(dict.fromkeys(item["reason"] for item in incomplete if item["reason"]))
     if not evaluated:
         return {
-            "status": incomplete_status,
+            "status": "skipped",
             "accepted": False,
             "no_regression": False,
-            "reason": reason or "no replay window produced an evaluation",
-            "case_count": sum(execution["case_count"] for _, _, execution in observed),
-            "cases": [case for window, result in results for case in result.get("cases") or []],
+            "reason": "no replay window produced an evaluation",
             "window_results": {window: result for window, result in results},
         }
     all_windows_evaluated = len(evaluated) == len(results)
@@ -86,12 +75,15 @@ def aggregate_true_replay_windows(
         verdict = "inconclusive"
     no_regression = bool(policy.get("no_regression")) and all_windows_evaluated
     return {
-        "status": "evaluated" if all_windows_evaluated else incomplete_status,
+        "status": "evaluated",
         "mode": "true_replay",
         "accepted": accepted,
         "verdict": verdict,
         "no_regression": no_regression,
-        "case_count": len(cases),
+        "case_count": sum(
+            int(result.get("case_count") or 0)
+            for _, result in evaluated
+        ),
         "cases": cases,
         "efficiency": efficiency,
         "checklist": branch_checklists,
@@ -101,5 +93,4 @@ def aggregate_true_replay_windows(
             "all_windows_evaluated": all_windows_evaluated,
         },
         "window_results": {window: result for window, result in results},
-        "reason": reason if not all_windows_evaluated else policy.get("decision_basis", ""),
     }

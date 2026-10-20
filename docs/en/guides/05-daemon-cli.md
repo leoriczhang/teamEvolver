@@ -1,430 +1,107 @@
-# CLI & Daemon Reference
+# Operations CLI
 
-teamEvolver provides command-line tools for service management, configuration management, skill synchronization, diagnostics, etc. This document details all CLI commands and daemon runtime mechanics.
+The `teamEvolver` command is defined in `teamEvolver/cli/__init__.py` and is available after installing the wheel or `pip install -e .`. Commands fall into two groups:
 
-CLI entry point defined in `teamEvolver/cli/__init__.py`, executable command name `teamEvolver`.
+- **Local commands** read the bootstrap configuration or connect to PostgreSQL directly: `start`, `stop`, `status`, `config`, `schema`
+- **API commands** call a running `api` role over HTTP: `datasource`, `skills`, `validation`
 
-## General Notes
+All commands read the bootstrap configuration from environment variables and the YAML pointed to by `TEAMEVOLVER_CONFIG_FILE`; fields are listed in the [Configuration Reference](./01-configuration.md).
 
-### Command Structure
+## Process Management
 
-```
-teamEvolver <command> [subcommand] [options] [arguments]
-```
-
-View all available commands:
+### start
 
 ```bash
-teamEvolver --help
+teamEvolver start [--role api|worker|all] [--port PORT] [-d|--daemon] [--log-file PATH]
 ```
-
-View subcommand help:
-
-```bash
-teamEvolver skills --help
-teamEvolver langfuse pull --help
-```
-
-### Runtime File Locations
-
-All runtime state files stored under `~/.teamEvolver/` directory:
-
-| File | Description |
-|------|-------------|
-| `config.yaml` | Main configuration file |
-| `teamEvolver.pid` | Daemon mode PID file |
-| `teamEvolver.log` | Foreground and daemon rotating log file |
-| `prompt_overrides.json` | Prompt Studio Prompt override configuration |
-| `stage_settings.json` | Per-stage model parameter override configuration |
-| `console_sessions.json` | Web console login sessions |
-| `users.json` | Console user registry |
-| `agent-protocol.env` | Agent protocol environment variables (optional, auto-loaded on daemon start) |
-| `skill_mirror_spool/` | Skill library async mirror spool (pending push/delete events to deliver to OpenViking) |
-
-## Service Management Commands
-
-### teamEvolver start
-
-Starts teamEvolver service.
-
-```bash
-teamEvolver start [OPTIONS]
-```
-
-Options:
 
 | Option | Description |
-|--------|-------------|
-| `--port INTEGER` | Override service port for this start (does not modify persistent configuration) |
-| `-d, --daemon` | Run as daemon (background) process |
-| `--log-file PATH` | Specify log file path in foreground or daemon mode, default `~/.teamEvolver/teamEvolver.log` |
+|------|------|
+| `--role` | Runtime role; defaults to `TEAMEVOLVER_ROLE`, then `api` |
+| `--port` | HTTP port for `api` / `all` (default `proxy_port`, i.e. 52010); health port for `worker` (default 52011) |
+| `-d, --daemon` | Start in the background; the PID is written to `~/.teamEvolver/teamEvolver.pid` |
+| `--log-file` | Log file; in background mode without it, process output goes to `/tmp/te_runtime.log` |
 
-Examples:
+Startup constraints:
 
-```bash
-# Foreground start (development/debug)
-teamEvolver start
+- PostgreSQL must be configured (`TEAMEVOLVER_PG_DSN` or `TEAMEVOLVER_PG_*`), otherwise the command exits
+- `all` is allowed only with `TEAMEVOLVER_ENV=local`; production runs `api` and `worker` separately
+- The database schema is never created at startup; run `teamEvolver schema apply` on first deployment
+- Background mode refuses to start while the recorded PID is alive; with `TEAMEVOLVER_MULTI_REPLICA=true` each process uses its own PID file
 
-# Background start
-teamEvolver start --daemon
+The `api` role serves the console and all HTTP APIs and runs no tasks; the `worker` role claims `worker_tasks` and exposes only `/healthz` and `/readyz`.
 
-# Background start with temporary port 30001
-teamEvolver start --daemon --port 30001
-
-# Background start with specified log file
-teamEvolver start --daemon --log-file /var/log/teamevolver.log
-```
-
-Startup behavior:
-
-1. Checks if configuration file exists; if not prompts to run `teamEvolver config` first
-2. In Daemon mode:
-   - Acquires startup lock to prevent duplicate starts
-   - Creates a child process that owns rotating file logging; stdin/stdout are discarded and stderr remains available for diagnostics
-   - Sets `TEAMEVOLVER_RUNTIME_KIND=daemon` and `TEAMEVOLVER_RUNTIME_LOG_PATH` environment variables
-   - Waits up to 15 seconds (configurable via `TEAMEVOLVER_DAEMON_READY_TIMEOUT_S` env var) until `/healthz` returns ok
-   - On startup failure auto-cleans child process and PID file
-3. In foreground mode: Runs Launcher directly until Ctrl+C interrupt received
-4. When `--port` specified: Creates temporary configuration file, auto-cleaned on exit
-
-### teamEvolver stop
-
-Stops running teamEvolver daemon.
-
-```bash
-teamEvolver stop
-```
-
-Behavior:
-
-1. Reads `~/.teamEvolver/teamEvolver.pid` to get PID
-2. Sends SIGTERM signal to process
-3. Deletes PID file
-4. If process doesn't exist (stale PID file), only cleans PID file with notification
-
-Note: Services started in foreground mode cannot be stopped via this command; use Ctrl+C.
-
-### teamEvolver status
-
-Checks teamEvolver service running status.
+### stop and status
 
 ```bash
 teamEvolver status
+teamEvolver stop
 ```
 
-Possible outputs:
+`status` reads the PID file and reports whether the process is running. `stop` sends SIGTERM to the recorded PID; the process revokes readiness first, then waits for in-flight tasks before exiting.
 
-```
-teamEvolver: not running                    # PID file doesn't exist
-teamEvolver: not running (stale PID file)   # Process dead, cleaning stale PID
-teamEvolver: starting (PID=12345, service=:52010)  # Process exists but /healthz not ready
-teamEvolver: running  (PID=12345, service=:52010) # Running normally
-```
+## Configuration and Schema
 
-Status check confirms service readiness via HTTP request to `http://127.0.0.1:<port>/healthz`.
-
-## Configuration Management Commands
-
-### teamEvolver config
-
-Reads or modifies configuration values.
+### config
 
 ```bash
-teamEvolver config <key_or_action> [value]
+teamEvolver config
 ```
 
-Usage:
+Prints the merged bootstrap configuration with secrets redacted. The command is read-only; tenant and module online configuration is changed through the console or API.
+
+### schema
 
 ```bash
-# View all configuration (including config file path)
-teamEvolver config show
-
-# Read single configuration item (dot-separated nested key)
-teamEvolver config <key>
-
-# Set configuration item
-teamEvolver config <key> <value>
+teamEvolver schema status
+teamEvolver schema apply --dry-run
+teamEvolver schema apply
 ```
 
-Examples:
+`status` lists the versions and checksums in `teamEvolver/database/schema/`. `apply` runs pending SQL in version order and records them in `schema_versions`; it is idempotent. `--dry-run` only lists pending versions.
+
+## API Commands
+
+API commands target `http://127.0.0.1:<proxy_port>` by default; `--url` selects another address and `--tenant` selects the tenant.
+
+### datasource
 
 ```bash
-# View complete configuration
-teamEvolver config show
-
-# Read LLM API Key
-teamEvolver config llm.api_key
-
-# Set port
-teamEvolver config service.port 52010
-
-# Enable Langfuse tracing
-teamEvolver config langfuse.tracing_enabled true
-
-# Set DreamCycle active window
-teamEvolver config dreamcycle.active_start_hour 22
-teamEvolver config dreamcycle.active_end_hour 6
+teamEvolver datasource --tenant demo status
+teamEvolver datasource --tenant demo bind example-doris.py
+teamEvolver datasource --tenant demo test
+teamEvolver datasource --tenant demo list --from-timestamp ... --to-timestamp ... --max-sessions 20
+teamEvolver datasource --tenant demo pull --from-timestamp ... --to-timestamp ...
 ```
 
-Notes:
+Uses `TEAMEVOLVER_ROOT_API_KEY`. `list` and `pull` accept `--from-timestamp`, `--to-timestamp`, `--session-id` and `--user-id`. `--tenant` defaults to `default`. See the [Data Source Onboarding Guide](./10-datasource-onboarding.md).
 
-- String values `"true"`/`"false"` automatically converted to booleans
-- Numeric strings automatically converted to integers or floats
-- Set values immediately written to `config.yaml`, but some configuration requires service restart to take effect
-- Supports arbitrary depth dot-separated keys, e.g., `evolve.dataset_min_requirements`
-
-## Skill Management Commands
-
-`teamEvolver skills` command group manages local skill synchronization with OpenViking cloud.
+### skills
 
 ```bash
-teamEvolver skills <subcommand> [options]
+teamEvolver skills --tenant demo list
+teamEvolver skills --tenant demo pull --user-id alice
 ```
 
-### teamEvolver skills push
+- `list` calls `GET /api/skills` with `TEAMEVOLVER_ROOT_API_KEY`
+- `pull` calls `GET /sync/skills` with the tenant Key `TEAMEVOLVER_TENANT_TOKEN` and writes the visible Skills to the local cache `skills_runtime_cache_dir` (default `~/.teamEvolver/runtime/skills`)
 
-Pushes local skills to cloud shared storage.
+The local cache can be deleted and rebuilt at any time; the authoritative versions always live in the server-side SkillHub.
+
+### validation
 
 ```bash
-teamEvolver skills push [--no-filter]
+teamEvolver validation --tenant demo status
 ```
 
-Options:
-
-| Option | Description |
-|--------|-------------|
-| `--no-filter` | Skip quality threshold filtering, push all local skills (default only pushes skills with injection count >=5 and effectiveness >=0.3) |
-
-Push automatically checks statistics in `skills/skill_stats.json`; skills not meeting thresholds filtered to ensure shared skill quality.
-
-Push goes through `team_skills/library/mutations.py:SkillMutationService` (the `_push_via_mutations` path): each skill writes one mutation commit and one sync outbox event, delivered asynchronously to OpenViking by the background flusher. The result includes `uploaded`, `skipped`, `filtered`, `submitted` (submission count) and the list of event IDs (`event_ids`).
-
-### teamEvolver skills pull
-
-Pulls shared skills from cloud to local.
-
-```bash
-teamEvolver skills pull
-```
-
-Pull results include: `downloaded` (new), `skipped` (no change), `deleted` (removed locally because deleted from cloud), `total_remote` (total remote skill count), `restored_from_backup` (whether backup recovery was used after a pull failure), and `backup_dir` (backup directory).
-
-### teamEvolver skills sync
-
-Bidirectional sync: pull then push.
-
-```bash
-teamEvolver skills sync
-```
-
-Equivalent to executing `pull` then `push` sequentially.
-
-### teamEvolver skills list-remote
-
-Lists cloud-available shared skills.
-
-```bash
-teamEvolver skills list-remote
-```
-
-Displays each skill's name, category, description, uploader, and upload time.
-
-### Skill Sync Prerequisites
-
-Must correctly configure `sharing` section before using skill sync commands:
-
-```bash
-teamEvolver config sharing.viking_deployment cloud
-teamEvolver config sharing.viking_api_key "your-root-key"
-```
-
-## Langfuse Commands
-
-`teamEvolver langfuse` command group for Langfuse integration management and session pull.
-
-```bash
-teamEvolver langfuse <subcommand> [options]
-```
-
-### teamEvolver langfuse status
-
-Checks Langfuse connection status and configuration.
-
-```bash
-teamEvolver langfuse status
-```
-
-Output includes: host, session_pull_enabled, tracing_enabled, tracing_environment, key presence, default filters, SDK availability, service connectivity, total sessions.
-
-### teamEvolver langfuse list
-
-Lists Langfuse sessions matching filter conditions (does not perform ingestion).
-
-```bash
-teamEvolver langfuse list [FILTER_OPTIONS]
-```
-
-Common filter options (applies to both `list` and `pull`):
-
-| Option | Description |
-|--------|-------------|
-| `-e, --environment ENV` | Filter by environment (repeatable for multiple) |
-| `-u, --user-id ID` | Filter by userId |
-| `--tag TAG` | Filter by tag (repeatable, all must match) |
-| `--release RELEASE` | Filter by release |
-| `--version VERSION` | Filter by version |
-| `--name NAME` | Filter by trace name |
-| `--session-id ID` | Pull specified single session |
-| `--from TIMESTAMP` | Only pull sessions after this ISO 8601 time |
-| `--to TIMESTAMP` | Only pull sessions before this ISO 8601 time |
-| `-m, --metadata KEY=VALUE` | Filter by metadata key-value pairs (repeatable) |
-| `--max-sessions N` | Limit returned session count |
-
-Examples:
-
-```bash
-# List production environment sessions
-teamEvolver langfuse list -e production
-
-# List sessions with specified tags
-teamEvolver langfuse list --tag agent --tag coding
-
-# List recent sessions for specific user
-teamEvolver langfuse list -u user-123 --from 2026-08-01T00:00:00Z
-```
-
-### teamEvolver langfuse pull
-
-Pulls matching Langfuse sessions into teamEvolver evolution pipeline.
-
-```bash
-teamEvolver langfuse pull [FILTER_OPTIONS] [OPTIONS]
-```
-
-Additional options:
-
-| Option | Description |
-|--------|-------------|
-| `--user-alias ALIAS` | Set user_alias attribution for pulled sessions |
-| `--force` | Force reprocess sessions with unchanged content |
-| `--defer-trigger` | Enqueue but don't trigger evolution round |
-| `--in-process` | Process directly locally (no dependency on running teamEvolver service) |
-
-By default, `pull` executes via HTTP POST to running teamEvolver service's `/langfuse/pull` endpoint. Using `--in-process` processes directly within CLI process, suitable for bulk imports when service not running.
-
-Examples:
-
-```bash
-# Pull using default config
-teamEvolver langfuse pull
-
-# Pull and mark source
-teamEvolver langfuse pull --user-alias "langfuse-import" -e production
-
-# Local bulk import
-teamEvolver langfuse pull --in-process --max-sessions 200 --force
-```
-
-## Diagnostic Commands
-
-`teamEvolver diag` related command groups for integration diagnostics and maintenance.
-
-### teamEvolver validation status
-
-Views background validation Worker configuration and current status.
-
-```bash
-teamEvolver validation status
-```
-
-Shows validation mode, concurrency settings, required results/approvals count, whether Worker idle, etc.
-
-### teamEvolver validation run-once
-
-Runs one background validation polling iteration.
-
-```bash
-teamEvolver validation run-once [--force]
-```
-
-| Option | Description |
-|--------|-------------|
-| `--force` | Force execution even when Worker not idle |
-
-By default, validation Worker only executes polling after idle exceeding `validation.idle_after_seconds`; this command manually triggers one.
-
-## Daemon Process Management Details
-
-### PID File Mechanism
-
-After successful Daemon startup, child process PID written to `~/.teamEvolver/teamEvolver.pid`. `status` and `stop` commands locate process via this file.
-
-If process exits abnormally without cleaning PID file, `status` command detects process non-existence and auto-cleans stale PID file.
-
-### Startup Lock
-
-`start --daemon` uses file lock to prevent concurrent starts. If another daemon startup in progress, displays corresponding PID and exits.
-
-### Health Check Wait
-
-After Daemon startup, parent process polls `http://127.0.0.1:<port>/healthz` endpoint, waiting up to 15 seconds. Timeout judges startup failed, terminates child process and errors. Wait time adjustable via environment variable:
-
-```bash
-TEAMEVOLVER_DAEMON_READY_TIMEOUT_S=30 teamEvolver start --daemon
-```
-
-### Environment Variable Propagation
-
-Daemon child process inherits current shell environment variables, additionally sets:
-
-- `TEAMEVOLVER_RUNTIME_KIND=daemon`
-- `TEAMEVOLVER_RUNTIME_LOG_PATH=<log-path>`
-
-Additionally, if `~/.teamEvolver/agent-protocol.env` file exists, environment variables loaded dotenv-style (as defaults only, not overriding existing environment variables).
-
-### Log Handling
-
-In Daemon mode both stdout and stderr redirected to log file (append mode):
-
-- Default log path: `~/.teamEvolver/teamEvolver.log`
-- Customizable via `--log-file`
-- Parent process creates log file directory if it doesn't exist
-- Foreground mode logs output directly to terminal
-
-### Process Termination
-
-- `teamEvolver stop` sends SIGTERM
-- systemd management sends SIGTERM via systemd, sends SIGKILL after timeout
-- Ctrl+C triggers graceful shutdown in foreground mode
-
-## Environment Variable Reference
-
-Besides configuration file, following environment variables affect CLI and Daemon behavior:
-
-| Environment Variable | Description |
-|---------------------|-------------|
-| `TEAMEVOLVER_DAEMON_READY_TIMEOUT_S` | Daemon startup health check timeout seconds, default 15 |
-| `EVOLVE_INGEST_API_KEY` | Bearer Token auth key for `/ingest_session` and `/langfuse/pull` endpoints |
-| `TEAMEVOLVER_PROXY_API_KEY` | Model proxy endpoint API Key |
-| `TEAMEVOLVER_MAX_SESSION_BODY_BYTES` | Session upload request body max bytes, default 32MB |
-| `EVOLVE_HISTORY_PATH` | Evolution history JSONL file path |
-| `TEAMEVOLVER_PROMPT_OVERRIDES_PATH` | Custom Prompt override file path |
-| `TEAMEVOLVER_STAGE_SETTINGS_PATH` | Custom stage settings file path |
-| `ARK_API_KEY` | Volcengine Ark API Key (used by Skill Miner) |
-| `LANGFUSE_*` | Various Langfuse configuration environment variables; see observability guide |
+Calls `GET /api/skill-candidates?scope=open` with `TEAMEVOLVER_ROOT_API_KEY` and lists Candidates waiting for validation or review.
 
 ## Exit Codes
 
-| Exit Code | Description |
-|-----------|-------------|
-| 0 | Success |
-| 1 | General error (missing config, command execution failure, etc.) |
+Commands return 0 on success. Invalid arguments, missing required environment variables or non-2xx HTTP responses return non-zero with the reason on standard error; database driver errors never echo SQL content.
 
-Common error scenarios:
+## Related Documents
 
-- Executing `start` when configuration file doesn't exist: exit code 1, prompts to run `teamEvolver config` first
-- Starting when port occupied: Daemon child process exits abnormally, parent errors and prompts to view logs
-- Executing `skills push/pull/sync` when sharing not configured: errors prompting to configure sharing first
-- Executing `langfuse` commands when Langfuse not configured or keys missing: errors prompting configuration
-
-See [Service logging](15-service-logging.md) for rotation, configuration and degradation behavior.
+- [Deployment Guide](./02-deployment.md)
+- [Configuration Reference](./01-configuration.md)
+- [Troubleshooting](./06-troubleshooting.md)

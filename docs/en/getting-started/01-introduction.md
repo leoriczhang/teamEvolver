@@ -1,53 +1,53 @@
 # Introduction
 
-teamEvolver is a **control plane for Agent team capability evolution**. It is not another Agent Runtime, but a capability evolution layer that sits on top of existing Agent Runtimes (such as Pi, Codex, etc.), converting experience generated from real work into reusable, verifiable, and governable team Skills and team Memory.
+teamEvolver is the **capability evolution control plane for Agent teams**. It does not execute tasks; it sits on top of existing Agent Runtimes and turns experience from real work into reusable, verifiable, governed team Skills and team Memory.
 
-## Core Positioning
+## Positioning
 
-Agent Runtimes are responsible for executing tasks, while teamEvolver is responsible for making teams stronger with use:
+The Agent Runtime executes tasks; teamEvolver makes the team stronger with use:
 
-- **Experience Feedback Loop**: Extracts reusable Evidence from actual Agent Sessions
-- **Candidate Generation**: Generates Skill Candidates and Memory Change proposals based on Evidence
-- **Grounded Validation**: Runs Baseline and Candidate in parallel in isolated real Agent Runtimes via True Replay
-- **Gated Release**: Checklist completion gate + efficiency comparison (rounds/tool calls/Token) + admin review
-- **Continuous Evolution**: DreamCycle maintains existing team Memory, while the cross-user aggregation pipeline uses an editable Skill and `ov compile` to consolidate personal experience into a shared team directory
+- **Experience intake**: Sessions pushed by Agents or pulled from data sources are analyzed and become formal Sessions and Evidence.
+- **Candidate generation**: Skill Evolution generates Skill Candidates from Evidence; Memory Evolution generates Memory Changes.
+- **Real validation**: True Replay runs Baseline and Candidate in isolated real Agent sessions, uses the Checklist as the completion gate, then compares objective efficiency.
+- **Gated publishing**: Candidate Review combines static checks with the True Replay verdict to decide Publish; Rollback restores historical content as a new version.
+- **Continuous evolution**: team Memory is deduplicated and revised through cross-user aggregation and DreamCycle maintenance.
 
-## Relationship with OpenViking
+## Runtime Shape
 
-teamEvolver uses OpenViking to persist shared assets and evolution artifacts; local storage is limited to configuration, login Sessions, and runtime state:
+The same release and image run in two roles:
 
-| Data Type | Location in OpenViking |
-|-----------|------------------------|
-| Team Skill | Versioned Skill Bundles under `viking://resources/team-skill-evolver/skills/` |
-| Personal Skill | `viking://resources/team-skill-evolver/peers/<account>/skills/` |
-| Team Memory | `viking://resources/shared-knowledge/` by default; the prefix is configurable |
-| Personal Memory | `viking://user/<user>/memories/` |
-| Sessions and evolution artifacts | `sessions/`, `session_archive/`, `candidate_skills/`, `validation_*`, and related paths under `viking://resources/team-skill-evolver/` |
-| Snapshot | Account-scoped OpenViking Snapshot history, addressed by immutable commit OIDs |
+| Role | Responsibility |
+| --- | --- |
+| `api` | Authentication, authorization, validation, short accept transactions and queries; long tasks are written to `worker_tasks` and return `202 Accepted` |
+| `worker` | Claims `worker_tasks` and runs long tasks such as Session analysis, Skill Evolution, True Replay, Memory Compile and experience sync |
 
-The console exposes these assets through three distinct entries:
+Both roles scale horizontally without session affinity. Architecture details are in [Architecture](../concepts/01-architecture.md).
 
-- **Experiment Workbench** edits Skill bundles and runs True Replay against unsaved Candidates.
-- **Personal and Team Assets** browses and maintains Personal Memory under `viking://user` and Team Resources under `viking://resources`.
-- **Platform Assets** contains read-only internal artifacts such as Sessions, Candidates, Validation records, and Evidence; Agents cannot reference this storage.
+## Data Ownership
+
+| Data | Authority |
+| --- | --- |
+| Global configuration, tenants, members, Secret Refs, Adapters, Sessions, Skill versions, Candidates, Datasets, Replay, Memory runs, Worker tasks, audit | PostgreSQL |
+| External knowledge artifacts such as Skills, Memory and Wiki, plus Compile Tasks | OpenViking |
+| Large objects such as immutable payloads, reports and Team Miner watermarks | PostgreSQL `storage_objects` (ObjectStore) |
+| Temporary files, logs, PIDs and rebuildable caches | Local directories |
+
+Local directories hold no unique copy of anything; replicas coordinate only through PostgreSQL. See [Storage and Directory Layout](../concepts/09-storage-layout.md).
 
 ## Use Cases
 
-- **Team Coding Agents**: Multiple Agent instances share team Skills, automatically distilling new skills from completed tasks
-- **Multi-Runtime Integration**: Pi, Codex and other Coding Agent Runtimes unified evolution and capability distribution
-- **Enterprise Internal Agents**: Private deployment, accumulating domain Memory and Skills from business conversations
-- **Evaluation and Evolution Research**: Using True Replay for rigorous Baseline vs Candidate comparison experiments
+- **Team coding Agents**: members share team Skills and distill new Skills from completed tasks.
+- **Enterprise internal Agents**: private deployment that accumulates domain Skills and Memory from business Sessions.
+- **Multiple Runtimes**: different Agent Runtimes report Sessions, read Context and pull Skills through the same v2 protocol.
+- **Evaluation and evolution research**: True Replay runs controlled Baseline vs Candidate experiments.
 
-## What It Does Not Do
+## Non-Goals
 
-teamEvolver explicitly does not take on the following responsibilities:
-
-- **Does Not Execute Tasks**: Has no own Agent Runtime; all Replays execute in connected Runtimes
-- **Does Not Replace Agent Configuration**: The Agent's own model, tools, and system Prompt remain managed by the Runtime
-- **Does Not Perform Centralized Inference**: LLM calls in the evolution Pipeline are configurable but only assist analysis; they do not replace Runtime inference
-- **Does Not Bypass Governance Boundaries**: The default `validated` mode requires Checklist, result-count, and runtime-compatibility gates; gray-zone results enter human review, while administrators may explicitly choose `direct` or force a release
+- **No task execution**: there is no built-in Agent Runtime; True Replay runs in the integrator's Runtime through the tenant-bound ReplayAdapterFactory.
+- **No replacement of Agent configuration**: models, tools and system Prompts stay managed by the Runtime.
+- **No bypass of governance**: a Candidate is published automatically only when static checks pass and True Replay returns accept; administrators can explicitly choose `force`.
 
 ## Next Steps
 
-- [Quick Start](./02-quickstart): Run a local teamEvolver instance in 5 minutes
-- [Installation & Deployment](./03-installation): Complete installation and configuration instructions
+- [Quickstart](./02-quickstart.md): start an all-in-one development environment locally.
+- [Installation](./03-installation.md): development install, release build and offline install.

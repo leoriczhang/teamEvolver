@@ -1,17 +1,4 @@
-.git/
-.test-home/
-runtime/
-.env
-.env.*
-客户上下文/
-**/*.orig
-.venv/
-.pytest_cache/
-.ruff_cache/
-**/__pycache__/
-**/*.py[cod]
-**/*.egg-info/
-web-ui/node_modules/
-web-ui/dist/
-artifacts/
-ppt/
+# The runtime image is built only from the release produced by
+# cicd_scripts/build.sh; nothing else from the source tree enters the context.
+*
+!release/

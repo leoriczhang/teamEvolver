@@ -233,6 +233,7 @@ class AsyncLLMClient:
         tenant_id: str = "",
         max_concurrency: int | None = None,
         queue_capacity: int | None = None,
+        stage_api_keys: dict[str, str] | None = None,
     ) -> None:
         import httpx
         from openai import OpenAI
@@ -246,6 +247,7 @@ class AsyncLLMClient:
         if resolved_base.endswith("/chat/completions"):
             resolved_base = resolved_base[:-len("/chat/completions")]
         self._api_key = resolved_api_key
+        self._stage_api_keys = dict(stage_api_keys or {})
         self._base_url = resolved_base
         self._http_timeout = httpx.Timeout(
             max(1.0, float(timeout_seconds)),
@@ -312,7 +314,8 @@ class AsyncLLMClient:
 
     async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
         """Send a chat completion request and return the assistant content."""
-        requested_api_key = str(kwargs.pop("api_key", self._api_key) or "").strip()
+        stage = kwargs.pop("stage_id", "")
+        requested_api_key = str(kwargs.pop("api_key", self._stage_api_keys.get(stage, self._api_key)) or "").strip()
         requested_base_url = str(kwargs.pop("base_url", self._base_url) or "").strip()
         client = self._client_for(
             api_key=requested_api_key,

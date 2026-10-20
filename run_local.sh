@@ -22,7 +22,7 @@ CONFIG_DIR="$RUNTIME_DIR/config"
 
 if [ ! -x ".venv/bin/teamEvolver" ]; then
     echo "未找到 .venv，请先执行:"
-    echo "  python3 -m venv .venv && .venv/bin/pip install -e '.[all]'"
+    echo "  python3 -m venv .venv && .venv/bin/pip install --require-hashes -r requirements.lock && .venv/bin/pip install --no-deps -e ."
     exit 1
 fi
 
@@ -40,8 +40,14 @@ if [ ! -e "$RUNTIME_DIR/.teamEvolver" ]; then
 fi
 
 export HOME="$RUNTIME_DIR"
-.venv/bin/teamEvolver config service.port "$PORT"
-.venv/bin/teamEvolver config evolve.server_url "http://127.0.0.1:$PORT"
+if [ -f "$CONFIG_DIR/.env" ]; then
+    set -a
+    . "$CONFIG_DIR/.env"
+    set +a
+fi
+export TEAMEVOLVER_CONFIG_FILE="$CONFIG_DIR/config.yaml"
+export TEAMEVOLVER_API_PORT="$PORT"
+export TEAMEVOLVER_ENV=local
 
 cleanup() {
     echo "Shutting down..."
@@ -52,7 +58,7 @@ cleanup() {
 trap cleanup SIGINT SIGTERM EXIT
 
 echo "Starting teamEvolver on port $PORT..."
-.venv/bin/teamEvolver start --port "$PORT" &
+.venv/bin/teamEvolver start --role all --port "$PORT" &
 SERVER_PID=$!
 
 echo ""

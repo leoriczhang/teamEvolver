@@ -1,254 +1,197 @@
-> The console is now KEE. Package/CLI names, IDs and database schemas remain compatible.
-> R6 method governance and Wiki publication live in TE; OV supplies generic content/ACL/search/index.
-> See [R6 handoff](docs/kee-r6/HANDOFF.md) and [operations](docs/en/guides/20-kee-r6.md).
-
 # teamEvolver
 
 <div align="center">
 
-### The Capability Evolution Control Plane for Agent Teams
+### Capability Evolution Control Plane for Agent Teams
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.11-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-Control%20Plane-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/Console-React%20%2B%20TypeScript-149ECA.svg?logo=react&logoColor=white)](https://react.dev/)
 [![OpenViking](https://img.shields.io/badge/Context-OpenViking-0F766E.svg)](https://github.com/volcengine/OpenViking)
 [![License](https://img.shields.io/badge/License-MIT-18181B.svg)](./LICENSE)
 [![中文](https://img.shields.io/badge/README-中文-2563EB.svg)](./README.md)
 
-**Turn real Agent Sessions into reusable, validated, and governed team Skills and team Memory.**
+**Turn real Agent Sessions into reusable, verifiable, governed team Skills and team Memory.**
 
 </div>
 
 ---
 
-## Product
+## Positioning
 
-teamEvolver runs outside the Agent runtime and owns continuous capability evolution and governance. It receives real Sessions and domain material, extracts traceable Evidence, proposes Skill Candidates or Memory Changes, and closes the loop through static checks, True Replay, optional human gates, versioned publication, and controlled distribution.
+teamEvolver sits outside the Agent Runtime and keeps team capabilities evolving under governance. It receives Sessions reported by Agents or pulled from data sources, derives Evidence through mandatory analysis, generates Skill Candidates or Memory Changes, and closes the loop through static checks, True Replay, Candidate Review, version publishing and pull distribution.
 
-It is neither another Agent runtime nor a file synchronization script:
+- Agents keep their own models, tools, workspaces and execution loops.
+- teamEvolver owns Evidence, evolution, validation, versions, audit and publishing.
+- PostgreSQL is the only authority for mutable business state; OpenViking stores knowledge artifacts such as personal and team Memory, personal Skills and Wiki.
+- One image runs in two roles, `api` and `worker`, and both scale horizontally.
 
-- Agents keep their own models, tools, workspaces, and execution loops.
-- teamEvolver owns Evidence, evolution, validation, versions, audit, and release.
-- OpenViking stores team Skills, Memory, Sessions, and replay snapshots.
-- Langfuse can independently provide Session ingestion and evolution observability.
 
 ## Evolution Loop
 
 ```mermaid
 flowchart LR
-    A["Real Sessions / Domain Material"] --> B["Evidence Classification"]
-    B --> C["Skill Candidate"]
-    B --> D["Memory Change"]
-    C --> E["Test Dataset"]
-    E --> F["True Replay<br/>Baseline vs Candidate"]
-    F --> G["Candidate Review"]
-    G --> H["Versioned Release"]
-    H --> I["Agent Skill Pull"]
-    D --> J["Memory maintenance"]
-    J --> K["Memory True Replay"]
-    K --> L["Team Memory"]
+    A["Session push / data source pull"] --> B["normalize → analyze → archive"]
+    B --> C["Skill Evolution"]
+    C --> D["Skill Candidate"]
+    D --> E["True Replay<br/>Baseline vs Candidate"]
+    E --> F["Candidate Review"]
+    F --> G["New version"]
+    G --> H["GET /sync/skills"]
+    I["Personal Memory"] --> J["Cross-user aggregation + DreamCycle"]
+    J --> K["Team Memory"]
+    J --> L["Memory Replay"]
 ```
 
-A Checklist is a completion gate, not a weighted score. Once the gate passes, True Replay compares efficiency by interaction turns, tool calls, and total tokens, in that order.
+The Checklist is a completion gate, not a weighted score. Once both sides complete the Checklist, True Replay compares interaction turns, tool calls and token usage in that order.
 
-## Core Capabilities
+## Capabilities
 
-| Module | Current capability |
+| Module | Capability |
 | --- | --- |
-| Sessions and Evidence | agent-session.v2 ingest, Langfuse pull, value classification, recent/historical Evidence windows, filter audit |
-| Skill Evolution | Summarize, judge, group, improve/create/merge, and same-source Test Dataset synthesis |
-| True Replay | Run Baseline and Candidate in the real Agent Runtime; inspect Checklist completion, traces, artifacts, and efficiency |
-| Candidate Governance | Review, replay-gated or forced publish, version detail, full Bundle diff, rollback, and audit |
-| Memory Evolution | Memory maintenance, cross-user team-memory aggregation, editable aggregation Skill, incremental compilation, and Memory Replay |
-| Experiment Workbench | Edit Skill bundles and run True Replay against unsaved multi-file Candidates |
-| Personal and Team Assets | Browse and edit OpenViking assets from `viking://user` and `viking://resources` |
-| Skill Mining | OpenViking Compile rounds, human Evidence supplements, artifact editing and candidate submission |
-| Knowledge Compilation | Normalize uploaded documents and submit asynchronous OpenViking compile jobs |
-| Agent Protocol v2 | Tenant principals, Context, Session ingest, ReplayAdapterFactory, and Skill pull |
-| Observability | Langfuse Session import plus model, tool, Skill Evolution, and Memory maintenance tracing |
-
-Every team Skill mutation goes through `SkillMutationService`, which owns commit records, tombstones, a durable outbox, and per-Agent delivery state.
+| Session intake | v2 protocol push, tenant data source Adapter pulls and scheduled pulls, value classification and four-dimension scoring |
+| Skill Evolution | Per-Skill group planning, team evidence threshold, Candidates with same-source Test Datasets |
+| True Replay | Runs Baseline and Candidate in the real Agent through the tenant-bound Replay Adapter, with Checklist judge and progressive disclosure |
+| Team Skill library | PostgreSQL append-only version chain, publish, rollback, tombstone, idempotent mutations, ETag pull |
+| Team Memory | Cross-user aggregation, DreamCycle maintenance, Memory Change and Memory Replay |
+| Successful experiences | Experience and Pattern compile, projection into OpenViking |
+| Knowledge base mining | Uploaded material converted to Markdown, OpenViking Compile builds the Wiki |
+| Experiment workbench | Edit Skill Bundles and run True Replay on unsaved Candidates against datasets |
+| Multi-tenancy | Tenants, members, platform / tenant administrators, RLS isolation, tenant keys |
 
 ## Console
 
-### Operations Overview
-
-The complete Session queue and history, pending candidates, replay decisions, and Skill versions.
+### Run Overview
 
 <a href="./docs/assets/teamEvolver-console-dashboard.png">
-  <img src="./docs/assets/teamEvolver-console-dashboard.png" alt="Complete teamEvolver operations overview" width="100%">
+  <img src="./docs/assets/teamEvolver-console-dashboard.png" alt="teamEvolver run overview" width="100%">
 </a>
 
-### White-box Evolution Pipeline
-
-The complete Skill Evolution pipeline, eight editable prompts, model and process settings, and real input/output testing.
+### Evolution Pipeline
 
 <a href="./docs/assets/teamEvolver-evolution-pipeline.png">
-  <img src="./docs/assets/teamEvolver-evolution-pipeline.png" alt="Complete teamEvolver evolution pipeline" width="100%">
+  <img src="./docs/assets/teamEvolver-evolution-pipeline.png" alt="teamEvolver evolution pipeline" width="100%">
 </a>
+
+Console navigation has seven groups: skill mining, workbench, agents and capabilities, knowledge and methods, evolution and experiments, review and publishing, settings and integration. See [Web Console](./docs/en/guides/03-console.md).
 
 ## Architecture
 
 ```mermaid
 flowchart TB
-    subgraph Sources["Evidence Sources"]
-        Pi["Pi Agent"]
-        Generic["Agent Protocol v2"]
-        LFIn["Langfuse Sessions"]
-        Docs["Domain Documents"]
-    end
-
-    subgraph Control["teamEvolver Control Plane :52010"]
-        Console["React Console"]
-        API["FastAPI"]
-        Evolution["Skill Evolution"]
-        Replay["Validation Worker / True Replay"]
-        Memory["Memory maintenance / Team Memory Aggregation"]
-        Mutation["SkillMutationService / Outbox"]
-    end
-
-    subgraph Context["OpenViking"]
-        Sessions["Sessions / Evidence"]
-        Skills["Team Skills / Versions"]
-        Memories["Personal + Team Memory"]
-        Snapshots["Replay Snapshots"]
-    end
-
-    Sources --> API
-    Console --> API
-    API --> Evolution
-    API --> Replay
-    API --> Memory
-    Evolution --> Mutation
-    Mutation <--> Skills
-    API <--> Sessions
-    API <--> Memories
-    Replay <--> Snapshots
-    Mutation --> Pi
-    Mutation --> Generic
+    Agent["Agent Runtime<br/>tenant key + user_id"] --> LB["Load balancer"]
+    Browser["Browser console"] --> LB
+    LB --> API["teamEvolver api ×N<br/>auth · validation · short txn · 202"]
+    API --> PG[("PostgreSQL<br/>RLS · worker_tasks")]
+    Worker["teamEvolver worker ×N<br/>Session analysis · Evolution · Replay · Memory"] --> PG
+    Worker --> OV[("OpenViking<br/>Memory · Skill · Wiki · Compile")]
+    API --> OV
+    Worker --> Replay["Replay Adapter<br/>customer Agent"]
 ```
 
-The console, evolution engine, validation queue, Memory maintenance, knowledge compilation, and Agent integrations share one FastAPI service and one configuration source.
+The API only does authentication, authorization, validation, short accept transactions and queries; long tasks are written to `worker_tasks`, return `202`, and are claimed by Workers. See [Architecture](./docs/en/concepts/01-architecture.md).
 
-## Quick Start
+## Quickstart
 
-Requires Python 3.10+.
+Requirements: Python 3.11, PostgreSQL 14+, OpenViking, an OpenAI-compatible model endpoint.
 
 ```bash
-git clone https://github.com/leoriczhang/teamEvolver.git
-cd teamEvolver
-
-python3 -m venv .venv
+bash scripts/install_teamEvolver.sh
 source .venv/bin/activate
-python -m pip install -U pip
-python -m pip install -e ".[all]"
 
-teamEvolver config service.port 52010
-teamEvolver start --daemon
-teamEvolver status
+export TEAMEVOLVER_ENV=local
+export TEAMEVOLVER_PG_DSN="postgresql://te_app:...@127.0.0.1:5432/teamevolver"
+export TEAMEVOLVER_ROOT_API_KEY="<random>"
+export TEAMEVOLVER_OV_ENDPOINT="http://127.0.0.1:1933"
+export TEAMEVOLVER_OV_API_KEY="<OpenViking Root Key>"
+export TEAMEVOLVER_LLM_API_KEY="<model key>"
+
+teamEvolver schema apply
+teamEvolver start --role all
 ```
 
-Open `http://127.0.0.1:52010/`. The first visit opens the administrator bootstrap screen. The form defaults to `admin`; use a strong password in production. After signing in, configure:
-
-1. **Global Model**: OpenAI-compatible Base URL, model, and API key.
-2. **Runtime Status → OpenViking Deployment**: choose Volcengine Cloud or self-hosted. For a remote self-hosted server, set the endpoint override, for example `http://10.0.0.8:1933`.
-3. **Users & Permissions**: configure console users, roles, and Account + Name bindings for Personal Memory and Team Resources. Trusted mode uses one server-side Root Key.
-4. **Agent Integration**: configure the tenant Key and user_id; bind a runtime adapter when using True Replay.
-5. **Langfuse Integration**: optionally enable Session pull, outbound tracing, or a custom Trace mapper.
-
-The console is organized into five areas:
-
-| Area | Main entries |
-| --- | --- |
-| Skill Mining | Overview, knowledge sources, mining jobs |
-| Evolution Loop | Operations, candidate review, evolution/filter audit, Langfuse, Skill/team-Memory evolution |
-| Asset Center | Experiment Workbench, personal and team assets, platform assets |
-| Governance | Global model, users and permissions, runtime status |
-| Documentation | Built-in bilingual reader and search |
+Open `http://127.0.0.1:52010/`; the first visit shows the administrator initialization page. Full steps are in [Quickstart](./docs/en/getting-started/02-quickstart.md).
 
 Common commands:
 
 ```bash
 teamEvolver status
 teamEvolver config show
+teamEvolver schema status
 teamEvolver stop
 ```
 
-The repository includes the production console build. Run the frontend build only when changing `web-ui/`.
-
-Docker Compose is also supported. The image builds the console, installs the full Python dependency set, bundles the OpenViking CLI, and stores runtime data under the repository's `runtime/` directory:
+Production runs the `api` and `worker` roles separately; see [Production Deployment Guide](./docs/en/guides/02-deployment.md). `compose.yaml` at the repository root starts both roles from one image:
 
 ```bash
-docker compose up -d --build
-docker compose ps
+TARGET_ARCH=x86_64 sh cicd_scripts/build.sh
+docker compose build
+docker compose up -d
 ```
 
 ## Agent Integration
 
-Use [v2](./docs/en/agent-integrations/06-protocol-v2.md) with a service URL, tenant Key and user_id.
-Context and Sessions belong to tenant/user; the tenant configuration determines the Account.
-Skills use authenticated pull; True Replay uses a tenant-bound ReplayAdapterFactory with independent sessions.
-OpenViking Root and model keys stay on the server.
+Use [Protocol v2](./docs/en/agent-integrations/06-protocol-v2.md): a service address, a tenant key and `user_id` are all an Agent needs; no Agent registration.
 
-## Safety and Consistency
+| Purpose | Endpoint |
+| --- | --- |
+| Report Sessions | `POST /ingest_session` |
+| Get context | `/internal/agents/context/*` |
+| Pull team Skills | `GET /sync/skills` |
 
-- Replay materializes only the required runtime configuration, never a complete production database.
-- Candidate processes do not receive upstream model credentials; model access uses an ephemeral broker.
-- External side effects fail closed unless they can be replayed deterministically.
-- Context references are server-issued and bound to Tenant, User, Session, and expiry.
-- Team Memory and team Skills are read-only to regular Agents; personal-Memory writes validate tenant/user ownership.
-- Skill publish, rollback, and delete use one mutation path; Agents always pull versions.
-- Langfuse tracing is fail-open and never blocks evolution or Memory maintenance.
+The OpenViking Root Key and model keys are used only on the server. True Replay creates an independent session per branch through the tenant-bound Replay Adapter.
 
-## Repository Layout
+## Security and Consistency
+
+- Every business table has RLS isolating by `tenant_id`; the application role must be NOSUPERUSER, NOBYPASSRLS.
+- Credentials are stored as Secret Refs; endpoints only report whether they are configured.
+- Workers use leases and fences to prevent duplicate execution; external writes with unknown results are reconciled instead of retried blindly.
+- Team Skill mutations write version, files and idempotency record in one transaction; Agents always fetch versions by pull.
+- Context references are issued by the server, bound to `(tenant_id, user_id)`, and expire after 15 minutes.
+- Team Memory and team Skills are read-only for Agents; Agents can write only personal Memory.
+- Tools with external side effects that cannot be replayed deterministically fail directly in Replay instead of falling back to real calls.
+
+## Project Layout
 
 ```text
-teamEvolver/
-├── teamEvolver/
-│   ├── admin/           # Console identity, authorization, and tenant settings
-│   ├── cli/             # Service, datasource, diagnostics, and storage commands
-│   ├── integrations/    # Tenant principals, Context, and skillopt rollout
-│   ├── proxy/           # FastAPI, console, and Workspace interfaces
-│   ├── config_store/    # YAML defaults, persistence, and runtime bridge
-│   ├── storage/         # PostgreSQL, local, and OpenViking storage adapters
-│   └── true_replay.py   # Replay subprocess host-wiring entry point
-├── session_ingestion/   # Session push, pull, shared ingestion, and source Adapters
-├── team_memory/         # Memory aggregation, maintenance, ledger, and routes
-├── team_replay/         # True Replay Interface, engine, policy, and Runtime Adapters
-├── web-ui/              # React + TypeScript console source
-├── tests/               # Unit, integration, protocol, and replay tests
-└── docs/                # Markdown documentation sources (bilingual zh/en, browsable in-console)
+team-evolver/
+├── teamEvolver/          # platform: composition root, bootstrap config, database, runtime, storage, OpenViking client, identity, CLI
+├── session_ingestion/    # Session push, data source pull, mandatory analysis stages
+├── team_skills/          # Skill library, Candidates, Evolution, successful experiences, import/export, workbench
+├── team_replay/          # True Replay, Test Datasets, Replay Adapter
+├── team_memory/          # team Memory aggregation, DreamCycle maintenance, Memory Replay
+├── team_miner/           # mining composition entrypoints
+│   ├── knowledge_miner/ # knowledge base mining: documents → Wiki
+│   └── skill_miner/     # Skill mining: documents → Skill packages
+├── web-ui/               # React + TypeScript console sources
+├── tests/                # unit, integration, architecture and docs contract tests
+└── docs/                 # bilingual Markdown docs
 ```
 
 ## Documentation
 
-Documentation is maintained as Markdown source files in `docs/`, available in both English and Chinese. After logging into the console, the built-in reader under "Docs → Documentation" in the left sidebar supports sidebar tree navigation, full-text search, language switching, and Markdown/GFM/code block/table rendering:
+The docs index is [docs/README.md](./docs/README.md).
 
 | Section | Content |
 | --- | --- |
-| Getting Started | [Introduction](./docs/en/getting-started/01-introduction.md), [Quick Start](./docs/en/getting-started/02-quickstart.md), [Installation](./docs/en/getting-started/03-installation.md) |
-| Concepts | [Architecture](./docs/en/concepts/01-architecture.md), [Evolution Loop](./docs/en/concepts/02-evolution-loop.md), [Skills](./docs/en/concepts/03-skills.md), [Memory & Memory maintenance](./docs/en/concepts/04-memory.md), [True Replay](./docs/en/concepts/06-true-replay.md) |
+| Getting started | [Introduction](./docs/en/getting-started/01-introduction.md), [Quickstart](./docs/en/getting-started/02-quickstart.md), [Installation](./docs/en/getting-started/03-installation.md) |
+| Concepts | [Architecture](./docs/en/concepts/01-architecture.md), [Evolution Loop](./docs/en/concepts/02-evolution-loop.md), [Skills](./docs/en/concepts/03-skills.md), [Memory](./docs/en/concepts/04-memory.md), [True Replay](./docs/en/concepts/06-true-replay.md), [Storage](./docs/en/concepts/09-storage-layout.md) |
 | Guides | [Configuration](./docs/en/guides/01-configuration.md), [Deployment](./docs/en/guides/02-deployment.md), [Web Console](./docs/en/guides/03-console.md), [Observability](./docs/en/guides/04-observability.md), [Troubleshooting](./docs/en/guides/06-troubleshooting.md) |
-| Agent Integrations | [Overview](./docs/en/agent-integrations/01-overview.md), [Protocol v2 Spec](./docs/en/agent-integrations/06-protocol-v2.md), [Pi Agent](./docs/en/agent-integrations/04-pi-agent.md), [Custom Agent](./docs/en/agent-integrations/05-custom-agent.md) |
-| API Reference | [Overview](./docs/en/api/01-overview.md), [Session Ingest](./docs/en/api/03-session-ingest.md), [Context Workspace](./docs/en/api/04-context-workspace.md), [Skills Admin](./docs/en/api/09-skills-admin.md), [Team Memory Aggregation](./docs/en/api/11-team-memory-aggregation.md) |
-| Design Notes | [Master PRD](./docs/design/01-master-prd.md), [Memory maintenance Evaluation](./docs/design/02-dreamcycle-snapshot-evaluation.md), [OpenViking Research](./docs/design/03-openviking-capabilities.md) |
+| Agent integration | [Overview](./docs/en/agent-integrations/01-overview.md), [Protocol v2](./docs/en/agent-integrations/06-protocol-v2.md), [Custom Agent](./docs/en/agent-integrations/05-custom-agent.md) |
+| API reference | [API Overview](./docs/en/api/01-overview.md), [Endpoint Index](./docs/en/api/00-endpoints.md) |
+| 中文 | [中文文档](./docs/zh/getting-started/01-introduction.md) |
 
-### Documentation sync convention
+After code changes, update the docs following the [Docs Maintenance Guide](./docs/en/api/99-docs-maintenance.md) and run `node docs/scripts/check-docs-refs.mjs --strict`.
 
-When modifying code, update the corresponding docs following the [Docs Maintenance Guide](./docs/en/api/99-docs-maintenance.md). Run `node docs/scripts/check-docs-refs.mjs` before committing to verify all code references and links are valid.
-
-- [Protocol JSON Schemas](./docs/schemas/)
-- [中文文档](./docs/zh/getting-started/01-introduction.md)
-
-## Development Verification
+## Development
 
 ```bash
-python -m pip install -e ".[all,dev]"
+bash scripts/install_teamEvolver.sh
 npm --prefix web-ui ci
 bash scripts/verify_local.sh
 ```
 
-`verify_local.sh` runs Python compilation, the test suite, and the production frontend build.
+`verify_local.sh` runs Python compilation, the test suite, frontend tests and the production build.
 
 ## License
 

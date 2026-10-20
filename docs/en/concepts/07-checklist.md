@@ -1,146 +1,100 @@
 # Checklist Gate
 
-Checklist is a **flat completion condition set** that each Replay Case in True Replay must satisfy. It is a completion gate (pass/fail), not a quality score—Candidate must complete all Checklist items; no partial credit, no weighting, no quality scoring.
+A Checklist is the **flat set of completion conditions** each Replay Case in True Replay must satisfy. It is a completion gate (pass/fail), not a quality score: the Case is complete only when every item is satisfied, with no partial credit and no weighting.
 
-## Checklist is Completion Gate, Not Scoring
+## A Completion Gate, Not a Score
 
-Checklist's core purpose is **determining whether task is complete**, not determining quality of completion. This is fundamentally different from quality scoring:
+| Aspect | Checklist gate | Quality score |
+|------|---------------|---------|
+| Output | Boolean `all_satisfied` | Continuous score or grade |
+| Item relationship | All must hold (AND) | Weighted sum, items can compensate each other |
+| Partial completion | Any unmet item fails | Partial scores raise the total |
+| Basis | Only concrete evidence of completion | Quality, elegance and similar |
+| Role in decisions | Pre-gate | Efficiency is compared only after the gate passes |
 
-| Dimension | Checklist Gate | Quality Scoring |
-|-----------|---------------|----------------|
-| Output | Boolean (all_satisfied: true/false) | Continuous score or grade |
-| Item relationship | All items must be satisfied (AND logic) | Weighted sum, can compensate each other |
-| Partial completion | Any single item fails → fail | Partial item scores can raise total |
-| Judgment basis | Only looks for concrete Evidence of completion | Evaluates quality, elegance, efficiency, etc. |
-| Role in decision | Upfront hard gate, fail → immediate reject | Efficiency comparison only after Checklist passes |
+## Checklist of a Single Replay Case
 
-> **Note**: Checklist Judge system prompt explicitly requires "Evaluate each checklist item using only the supplied responses, tool trajectory, and real workspace artifacts. Output JSON {items:[{id,satisfied,evidence}],all_satisfied}. Do not infer success without concrete evidence."—no completion inference without concrete Evidence.
-
-## Single Replay Case Checklist
-
-Each Replay Case carries a set of Checklist items, each containing:
+The Checklist comes from the `checks` field of a Test Dataset Case (`team_replay/policy.py:normalize_case_checklist`):
 
 | Field | Description |
-|-------|-------------|
-| `id` | Stable identifier; output items `R{NN}` (e.g., R01, R02), trajectory items `T{NN}` (e.g., T01, T02) |
-| `text` | Natural language description of completion condition |
-| `kind` | `output` (output requirement) or `trajectory` (execution trajectory requirement) |
-| `satisfied` | (filled after evaluation) Whether satisfied, boolean |
-| `evidence` | (filled after evaluation) Concrete Evidence for satisfaction or non-satisfaction |
+|------|------|
+| `id` | Stable identifier, unique within the Case |
+| `text` | Natural-language completion condition |
+| `kind` | `output` (output requirement) or `trajectory` (process requirement) |
+| `polarity` | Optional; `must_not` marks a forbidden behavior |
 
-### Checklist Item Sources
+Items missing `id` or `text`, or with an invalid `kind`, are dropped. When Candidates are generated, the dataset synthesis step (`team_replay/datasets/synthesis.py`) produces `checks` from the same Evidence; they can also be edited on the "Datasets" page.
 
-Checklist items can be set two ways:
+## Checklist Judge
 
-1. **Explicit specification**: Case directly provides `checklist` array, each item containing `id`, `text`, `kind`
-2. **Auto-generation**: When Case doesn't explicitly provide checklist, auto-flattened from `requirements` and `trajectory_requirements` fields:
-   - `requirements` flattened to output items (R01, R02, ...)
-   - `trajectory_requirements` flattened to trajectory items (T01, T02, ...)
-   - Supports Markdown list format, automatically strips list prefixes and deduplicates
+After each interaction turn an independent judge evaluates the Checklist (`team_replay/judging.py:judge_checklist`):
 
-Flattening logic handles: lists/tuples/dicts (extracts text/requirement fields), multi-line text, Markdown list prefixes (`-`, `*`, numeric numbering, etc.).
+1. **Input**: Checklist, per-turn interactions, full message trajectory and artifacts.
+2. **Output**: `{items:[{id, satisfied, evidence}], all_satisfied, positive_observations}`. The output must cover every `id`, and each item needs a boolean `satisfied` and a string `evidence`.
+3. **Evidence requirement**: an item with `satisfied=true` but empty `evidence` counts as unmet.
+4. **Fail closed**: when the model is unavailable or the output is invalid, every item is marked unmet, the report says `judge="unavailable"`, and the branch stops.
 
-## Checklist Judge Evaluation
+The judge system prompt is `JUDGE_SYSTEM` and can be overridden through the Replay judge configuration.
 
-After each interaction turn, Checklist Judge uses LLM to evaluate current execution state:
+## Progressive Disclosure
 
-1. **Input**: Checklist item list, interaction history (interactions), tool trajectory (tool_trajectory), workspace artifact file list (workspace_artifacts with text preview, max 40 files). Local branches read artifacts from the branch workspace; server-driven remote branches have no local workspace, so the Judge instead receives the `artifacts` reported by the Agent per turn (mapped to `workspace_artifacts`, see `team_replay/engine.py:_evaluate_local_checklist`)
-2. **Output**: `{items: [{id, satisfied, evidence}], all_satisfied}`
-3. **Conservative fallback**: When Judge unavailable, all items marked `satisfied: false`, evidence "checklist judge unavailable", judge status marked "unavailable"
+1. The first turn sends only the Case `query`.
+2. After each judge evaluation, `select_disclosure_items` picks the next batch, in order, from unmet and undisclosed items (`replay.progressive_disclosure.batch_size`, default 4).
+3. The user simulator sees only this batch and already disclosed requirements, and produces natural user feedback as the next turn input; feedback contains no item IDs or scores.
+4. The branch ends when everything is satisfied, nothing is left to disclose, or `max_interactions` is reached.
 
-Judge makes decisions based only on provided Evidence, no speculation. Evaluation results used by progressive disclosure protocol to determine which unsatisfied items to expose next round.
+## Aggregating Case Checklists
 
-### Checklist in Progressive Disclosure
+`team_replay/policy.py:aggregate_case_checklists` aggregates multiple Cases:
 
-Progressive disclosure protocol uses Checklist evaluation results to drive subsequent interaction:
+- `all_satisfied`: true only when every item of every Case is satisfied.
+- `case_count`, `total`, `satisfied_count`, `unmet_count`: cross-Case counts.
+- `reports`: per-Case reports.
+- If the judge is unavailable for any Case, the aggregate has `judge="unavailable"`.
 
-1. After first round execution, Judge evaluates which items satisfied
-2. Takes batch (batch_size, default 4) of unsatisfied and undisclosed items as next round prompt
-3. Agent addresses these unsatisfied items
-4. Repeats until all items satisfied or no more items to disclose
+## How the Checklist Gates Candidates
 
-Per-round disclosure prompt format:
-```
-Round N Checklist check still has unsatisfied items.
-Preserve completed content, only address following requirements:
-1. [R01] Specific requirement text
-2. [T01] Specific requirement text
-...
-After completion, re-examine existing artifacts and provide latest results.
+```text
+Any judge unavailable ────────────► inconclusive (checklist_judge_unavailable)
+Neither completed ────────────────► inconclusive (both_checklists_incomplete)
+Candidate incomplete ─────────────► reject (candidate_checklist_incomplete)
+Candidate done, Baseline not ─────► accept (candidate_only_completed_checklist)
+Both completed ───────────────────► efficiency comparison: turns → tool calls / tokens
 ```
 
-## Aggregate Case Checklist
-
-One Skill Candidate's True Replay contains multiple Replay Cases (from Test Dataset). All Cases' Checklist results aggregate to candidate version's overall Checklist result:
-
-- **Per-Case evaluation**: Each Case runs Baseline and Candidate branches independently, each gets Checklist report
-- **Aggregation logic**: `aggregate_case_checklists` summarizes all Case results
-  - `all_satisfied`: **All** Checklist items across **all** Cases must be satisfied for true (AND logic)
-  - `case_count`: Number of Cases with Checklist items
-  - `total`/`satisfied_count`/`unmet_count`: Cross-Case aggregated item statistics
-  - `reports`: Detailed Checklist report per Case
-
-> **Note**: Aggregation is strict—if even one Case has one Checklist item unsatisfied, entire Candidate's Checklist gate fails. This ensures Candidate not accepted under known-failure scenarios.
-
-## How Checklist Gates Candidate Acceptance
-
-Checklist results together with efficiency comparison determine whether Candidate passes; decision priority:
-
-```
-Checklist Gate ──► Efficiency Comparison
-    │                  │
-    ├─ Candidate fails ──► Reject immediately (candidate_checklist_incomplete)
-    │
-    ├─ Candidate passes, Baseline fails ──► Accept immediately (candidate_only_completed_checklist)
-    │
-    └─ Both pass ──► Enter efficiency comparison (turns→tool calls→Token)
-```
-
-Specific decision rules implemented in `progressive_replay_decision`, strategy ID `progressive_checklist_then_turn_priority_v1`:
-
-| Scenario | Decision | decision_basis |
-|----------|----------|----------------|
-| Candidate has Checklist but not all satisfied | Reject | `candidate_checklist_incomplete` |
-| Candidate passes, Baseline has Checklist but fails | Accept | `candidate_only_completed_checklist` |
-| Both pass or both have no Checklist | Enter efficiency comparison | Determined by objective_replay_decision |
-| Checklist Judge unavailable | All items considered unsatisfied → Reject | Conservative fail-closed |
+The rules are implemented in `team_replay/policy.py:progressive_replay_decision`. The efficiency comparison is described in [True Replay](./06-true-replay.md#verdict).
 
 ## Checklist vs Quality Scoring
 
-Understanding Checklist's boundaries is important:
+**The Checklist answers**: were all required outputs and steps completed? For example "was the configuration file generated", "were the tests run".
 
-**Questions Checklist answers**: Are all required outputs and steps for the task completed?
-- E.g.: "Was config file generated?", "Were tests run?", "Was PR created?"
-- Only judges existence and completion, not goodness
+**The Checklist does not answer**:
 
-**Questions Checklist does NOT answer**:
-- Is generated code high quality? → This is efficiency metrics (fewer turns/tool calls imply more direct solutions) and human review's responsibility
-- Is solution optimal? → Efficiency comparison can reflect优劣 on turn/Token dimensions
-- Are edge cases handled? → This requires Test Dataset containing corresponding edge Cases
-
-This design ensures objectivity and reproducibility of automatic validation: completion is judgeable fact, quality assessment left to humans or more complex mechanisms.
+- Whether the code is good: judged by efficiency metrics and human review.
+- Whether the approach is optimal: reflected in turns, tool calls and tokens in the efficiency comparison.
+- Whether edge cases are handled: the Test Dataset must contain corresponding edge Cases.
 
 ## Checklist in Memory Replay
 
-DreamCycle's Memory True Replay also uses Checklist gate, but at smaller scale:
+Memory Replay uses the same judge, disclosure and verdict rules (`team_memory/replay.py:specification` converts the request into a single-Case `ReplaySpec`):
 
-- Each Memory Replay has only one Case (not multiple Cases from Test Dataset)
-- Checklist passed by caller; minimum 1 item, maximum 50 items
-- Validation logic identical to Skill Replay: Baseline and Candidate execute in parallel, Checklist gate takes priority over efficiency comparison
-- Requires before and after Memory content hashes differ (`before_hash != after_hash`), otherwise treated as no change and errors directly
+- Each Memory Replay has exactly one Case; the request must provide `query` and `checklist`. `checklist` can be an array of objects or newline-separated text, each line becoming an `output` item.
+- Baseline is the Memory content before the change and Candidate the content after; the treatment revision is the content's SHA-256.
+- Replays of historical Memory Changes read the before and after snapshots automatically; see [Memory](./04-memory.md#memory-change-and-true-replay).
 
 ## Code Entry Points
 
 | Module | Path |
-|--------|------|
-| Progressive disclosure & Checklist decisions | [replay/policy.py](../../../team_replay/policy.py) |
-| Checklist item generation | [dataset_synthesizer.py](../../../team_replay/datasets/synthesis.py) |
-| Local Checklist Judge | [replay/engine.py](../../../team_replay/engine.py) (`_evaluate_local_checklist`) |
-| Efficiency comparison decisions | [replay/metrics.py](../../../team_replay/metrics.py) |
-| Memory Replay Checklist | [replay/memory.py](../../../team_replay/memory.py) |
+|------|------|
+| Checklist normalization, disclosure and verdict | [policy.py](../../../team_replay/policy.py) |
+| Judge and user simulator | [judging.py](../../../team_replay/judging.py) |
+| Branch execution | [execution.py](../../../team_replay/execution.py) |
+| Efficiency comparison | [metrics.py](../../../team_replay/metrics.py) |
+| Checklist generation | [synthesis.py](../../../team_replay/datasets/synthesis.py) |
+| Memory Replay input | [team_memory/replay.py](../../../team_memory/replay.py) |
 
-## Related Documentation
+## Related Docs
 
-- [True Replay](./06-true-replay): Checklist role in True Replay and progressive disclosure protocol
-- [Evolution Loop](./02-evolution-loop): Checklist gate position in evolution loop
-- [Publish & Rollback](./08-publish-rollback): Publishing process after passing gate
+- [True Replay](./06-true-replay.md)
+- [Evolution Loop](./02-evolution-loop.md)
+- [Publish and Rollback](./08-publish-rollback.md)

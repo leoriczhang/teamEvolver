@@ -1,101 +1,44 @@
 #!/usr/bin/env bash
+# Developer install from this checkout: hashed locked dependencies, then the
+# project in editable mode with the dev tools. Releases are installed from
+# app.tar by cicd_scripts/install.sh instead.
 set -euo pipefail
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 VENV_DIR="${TEAMEVOLVER_VENV_DIR:-$ROOT_DIR/.venv}"
-INSTALL_EXTRAS="${TEAMEVOLVER_INSTALL_EXTRAS:-all}"
-RUN_START=0
+APPLY_SCHEMA=0
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--venv-dir PATH] [--python BIN] [--extras LIST] [--run-start]
+Usage: $(basename "$0") [--venv-dir PATH] [--python BIN] [--apply-schema]
 
-Installs teamEvolver from the current repository checkout into a local virtualenv.
+  --apply-schema  run 'teamEvolver schema apply' (needs TEAMEVOLVER_PG_DSN)
 
-Examples:
-  bash scripts/install_teamEvolver.sh
-  bash scripts/install_teamEvolver.sh --venv-dir ~/.venvs/teamEvolver
-  bash scripts/install_teamEvolver.sh --extras all --run-start
-
-Default project install command:
-  python -m pip install -e ".[all]"
-
-After install you can run:
-  teamEvolver config show
-  teamEvolver start
-
-Open http://127.0.0.1:52010/ to initialize the administrator and configure the service.
+Then start a local all-in-one runtime with:
+  teamEvolver start --role all
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --venv-dir)
-      VENV_DIR="$2"
-      shift 2
-      ;;
-    --python)
-      PYTHON_BIN="$2"
-      shift 2
-      ;;
-    --extras)
-      INSTALL_EXTRAS="$2"
-      shift 2
-      ;;
-    --run-setup)
-      echo "--run-setup has been removed. Start teamEvolver and complete setup in the console." >&2
-      exit 2
-      ;;
-    --run-start)
-      RUN_START=1
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "Unknown argument: $1" >&2
-      usage >&2
-      exit 2
-      ;;
+    --venv-dir) VENV_DIR="$2"; shift 2 ;;
+    --python) PYTHON_BIN="$2"; shift 2 ;;
+    --apply-schema) APPLY_SCHEMA=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
 
-if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-  echo "Python executable not found: $PYTHON_BIN" >&2
-  exit 1
-fi
-
-echo "[install_teamEvolver] repo root: $ROOT_DIR"
-echo "[install_teamEvolver] python: $PYTHON_BIN"
-echo "[install_teamEvolver] venv: $VENV_DIR"
-echo "[install_teamEvolver] extras: $INSTALL_EXTRAS"
-
 cd "$ROOT_DIR"
 "$PYTHON_BIN" -m venv "$VENV_DIR"
-# shellcheck disable=SC1090
-source "$VENV_DIR/bin/activate"
+"$VENV_DIR/bin/python" -m pip install -U pip
+"$VENV_DIR/bin/python" -m pip install --require-hashes -r requirements.lock
+"$VENV_DIR/bin/python" -m pip install --no-deps -e .
+"$VENV_DIR/bin/python" -m pip install ruff pytest pytest-asyncio anyio build
+"$VENV_DIR/bin/python" -m pip check
 
-if ! python -m pip --version >/dev/null 2>&1; then
-  echo "[install_teamEvolver] pip missing in existing virtualenv; bootstrapping with ensurepip"
-  python -m ensurepip --upgrade
+if [[ "$APPLY_SCHEMA" -eq 1 ]]; then
+  "$VENV_DIR/bin/teamEvolver" schema apply
 fi
-python -m pip install -U pip
-python -m pip install -e ".[${INSTALL_EXTRAS}]"
-
-echo
-echo "[install_teamEvolver] install complete"
-echo "[install_teamEvolver] activate with:"
-echo "  source \"$VENV_DIR/bin/activate\""
-echo "[install_teamEvolver] next steps:"
-echo "  teamEvolver config show"
-echo "  teamEvolver start"
-echo "  Open http://127.0.0.1:52010/ to initialize the administrator and configure the service."
-
-if [[ "$RUN_START" -eq 1 ]]; then
-  echo
-  echo "[install_teamEvolver] running: teamEvolver start"
-  teamEvolver start
-fi
+echo "[install_teamEvolver] ready: source \"$VENV_DIR/bin/activate\""

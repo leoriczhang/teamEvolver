@@ -1,103 +1,138 @@
-# 控制台身份与租户权限
+# 控制台身份与租户权限 API
 
-## API 实现介绍
+控制台使用三层身份：
 
-控制台采用三层身份模型：
+| 身份 | 范围 | 能力 |
+| --- | --- | --- |
+| 平台管理员（`platform_role=platform_admin`） | 全平台 | 创建与停用租户、平台设置、账号管理、权限审计；可进入任一 active 租户并拥有租户管理员能力 |
+| 租户管理员（成员 `role=tenant_admin`） | 单个租户 | 成员、租户 Key、租户配置、团队资产发布与审批 |
+| 普通成员（成员 `role=member`） | 单个租户 | 工作台、个人资产、团队资产读取与发布申请 |
 
-| 身份 | 范围 | 主要能力 |
-|------|------|----------|
-| 平台超级管理员 | 全平台 | 租户生命周期、平台配置、全局审计、登录账号管理 |
-| 租户管理员 | 单个租户 | 成员、租户 Key、租户配置、团队资产发布与审批 |
-| 普通成员 | 单个租户 | 工作台、Session、个人资产、团队资产读取与发布申请 |
+浏览器每次请求都必须显式发送 `X-Tenant-Id`，服务端用 `teamEvolver/admin/authorization.py:resolve_console_membership` 重新校验租户状态、账号状态与成员关系。能力集合见 [API 概览 · 控制台 Session](./01-overview.md#控制台-session)。Agent 不使用控制台账号，见 [协议 v2](../agent-integrations/06-protocol-v2.md)。
 
-平台超级管理员可以查看租户列表，但不会自动获得租户治理权限。进入租户后必须提供原因并开启 30 分钟、绑定当前登录 Session 的支持模式，才能执行租户管理员操作。每次平台访问、支持模式变更和权限写操作都会进入权限审计。
-
-浏览器必须显式发送 `X-Tenant-Id` 才会进入租户。服务端在每次请求中重新校验租户状态、账号状态和成员关系，不信任本地缓存。Agent 身份不查询控制台账号或成员表，继续使用租户 Key 加请求中声明的 `user_id`。
+账号、成员关系与审计保存在 PostgreSQL，由 `teamEvolver/admin/identity_store.py:IdentityStore` 读写。
 
 代码入口：
 
-- `teamEvolver/admin/identity_store.py:IdentityStore`
-- `teamEvolver/admin/authorization.py:bind_console_user`
-- `teamEvolver/proxy/identity_routes.py:register_identity_routes`
+- 认证：`teamEvolver/admin/authn.py:build_console_authorizer`
+- 登录、用户、身份、成员：`teamEvolver/admin/api/__init__.py:create_router`
+- 租户：`teamEvolver/tenants/api/__init__.py:create_router`
+- 平台与租户设置：`teamEvolver/admin/api/settings.py:create_router`
 
-## 接口和参数说明
-
-所有接口使用控制台 HttpOnly Session Cookie。租户内接口还要求 `X-Tenant-Id` 与路径中的 `tenant_id` 一致。
+## 登录
 
 | 方法 | 路径 | 权限 | 说明 |
-|------|------|------|------|
-| GET | `/api/auth/status` | 已登录账号 | 返回平台身份、当前租户角色、Capability、可用租户和支持模式 |
-| GET | `/api/identity/tenants` | 已登录账号 | 返回当前账号可选择的活跃租户 |
-| POST | `/api/identity/support` | 平台超级管理员 | 为当前 Session 开启 30 分钟支持模式 |
-| DELETE | `/api/identity/support` | 平台超级管理员 | 退出当前 Session 的支持模式 |
-| GET | `/api/identity/audit?limit=100` | 平台超级管理员 | 查询最近权限审计，`limit` 范围为 1 到 500 |
-| GET | `/api/tenants/{tenant_id}/members` | 租户管理员或支持模式 | 查询租户成员 |
-| PUT | `/api/tenants/{tenant_id}/members/{user_id}` | 租户管理员或支持模式 | 新增或更新成员关系 |
-| PUT | `/api/identity/users/{user_id}/access` | 平台超级管理员 | 更新平台身份或账号状态 |
+| --- | --- | --- | --- |
+| GET | `/api/auth/status` | 匿名 | 登录状态、当前用户、可用租户、`needs_setup`、`self_registration_enabled`、`customer_mode` |
+| POST | `/api/auth/bootstrap` | 匿名（仅无账号时） | 创建首个账号，成为平台管理员；密码至少 12 个字符 |
+| POST | `/api/auth/login` | 匿名 | `{"username", "password"}`，设置 Session Cookie |
+| POST | `/api/auth/register` | 见下文 | 自主注册普通账号 |
+| POST | `/api/auth/logout` | 已登录 | 撤销 Session 并清除 Cookie |
 
-开启支持模式的请求体：
+`/api/auth/status` 中的 `user` 包含 `platform_role`、`tenant_id`（通过校验的当前租户，否则为 null）、`tenant_role`、`capabilities`。
 
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `tenant_id` | string | 是 | 当前要支持的活跃租户 |
-| `reason` | string | 是 | 审计原因，最多保留 500 个字符 |
+### 自主注册
 
-成员更新请求体：
+`POST /api/auth/register` 接收 `username`、`password`，可选 `display_name`、`email`，创建的账号始终为普通用户且没有任何租户成员关系。
 
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `role` | string | 否 | `tenant_admin` 或 `member`，默认 `member` |
-| `status` | string | 否 | `active` 或 `disabled`，默认 `active` |
-
-平台账号更新请求体只接受 `platform_role`（`platform_admin` / `user`）和 `status`（`active` / `disabled`）。
-
-## 使用示例
+- 启动配置 `self_registration_enabled=true`（环境变量 `TEAMEVOLVER_SELF_REGISTRATION_ENABLED`）时允许匿名注册。
+- 关闭时只有服务 Root Key 可以调用，其他请求返回 `403 SELF_REGISTRATION_DISABLED`。
+- 尚未初始化首个账号返回 409；用户名已存在返回 409。
 
 ```bash
-curl -X POST 'http://localhost:52010/api/identity/support' \
+curl -X POST http://localhost:52010/api/auth/register \
+  -H "Authorization: Bearer $TEAMEVOLVER_ROOT_API_KEY" \
   -H 'Content-Type: application/json' \
-  -H 'X-Tenant-Id: tenant-a' \
-  -b 'teamEvolver_console_session=<session>' \
-  --data '{"tenant_id":"tenant-a","reason":"排查租户配置异常"}'
+  -d '{"username": "new-user", "password": "replace-with-a-strong-password"}'
 ```
 
-```bash
-curl -X PUT 'http://localhost:52010/api/tenants/tenant-a/members/alice' \
-  -H 'Content-Type: application/json' \
-  -H 'X-Tenant-Id: tenant-a' \
-  -b 'teamEvolver_console_session=<session>' \
-  --data '{"role":"tenant_admin","status":"active"}'
-```
+## 账号
 
-## 响应、错误与迁移
+| 方法 | 路径 | 权限 | 说明 |
+| --- | --- | --- | --- |
+| GET | `/api/users` | 已登录 | 平台管理员看到全部账号；租户管理员看到本租户 active 成员；普通成员只看到自己 |
+| GET | `/api/users/{user_id}` | 本人或平台管理员 | 账号详情 |
+| POST | `/api/users` | 平台管理员 | 创建普通账号，不能指定 `role` 或 `platform_role` |
+| PUT | `/api/users/{user_id}/profile` | 本人或平台管理员 | 修改资料 |
+| DELETE | `/api/users/{user_id}` | 平台管理员 | 删除账号 |
+| PUT | `/api/identity/users/{user_id}/access` | 平台管理员 | `{"platform_role": "platform_admin"|"user", "status": "active"|"disabled"}` |
+| GET | `/api/identity/tenants` | 已登录 | 当前账号可进入的 active 租户 |
+| GET | `/api/identity/audit?limit=100` | 平台管理员 | 最近的权限审计，`limit` 1–500 |
 
-`GET /api/auth/status` 的 `user` 包含：
+移除最后一个 active 平台管理员返回 `409 LAST_PLATFORM_ADMIN`。没有可用平台管理员时，用 Root Key 调用 `PUT /api/identity/users/{user_id}/access` 恢复。
 
-- `platform_role`：全局身份；
-- `tenant_role`：当前显式选择租户中的角色，没有成员关系时为 `null`；
-- `tenant_id`：通过校验的当前租户，没有选择或选择无效时为 `null`；
-- `capabilities`：本次请求的生效能力；
-- `support`：当前 Session 的支持模式记录或 `null`。
+## 租户与成员
 
-主要错误：
+| 方法 | 路径 | 权限 | 说明 |
+| --- | --- | --- | --- |
+| GET | `/api/tenants` | 已登录 | 平台管理员看到全部租户，其他用户看到自己所在租户；附带 `machine_credential`（`default` 租户 Key 是否已配置） |
+| POST | `/api/tenants` | 平台管理员 | `{"display_name", "account_id"?}` 创建租户 |
+| POST | `/api/tenants/{tenant_id}/status` | 平台管理员 | `{"status": "active"|"disabled"}` |
+| POST | `/api/tenants/{tenant_id}/rotate-token` | 该租户管理员 | 轮换租户 Key，返回新的 `agent_token`；`default` 租户不可轮换 |
+| GET | `/api/tenants/{tenant_id}/config` | 该租户管理员 | 租户配置覆盖（凭证字段只返回是否存在）与可编辑键 |
+| PUT | `/api/tenants/{tenant_id}/config` | 该租户管理员 | `{"overrides": {...}}` 合并写入；值为 `null` 删除该键 |
+| GET | `/api/tenants/{tenant_id}/members` | 该租户管理员 | 成员列表 |
+| PUT | `/api/tenants/{tenant_id}/members/{user_id}` | 该租户管理员 | `{"role": "tenant_admin"|"member", "status": "active"|"disabled"}` 新增或更新成员 |
 
-| 状态码 | detail | 原因 |
-|--------|--------|------|
-| 403 | `PLATFORM_ADMIN_REQUIRED` | 非平台超级管理员调用平台接口 |
-| 403 | `TENANT_ADMIN_REQUIRED` | 普通成员执行租户治理 |
-| 403 | `SUPPORT_MODE_REQUIRED` | 平台超级管理员未开启当前租户支持模式 |
+路径中的 `tenant_id` 必须等于当前 `X-Tenant-Id`，否则返回 `403 TENANT_MISMATCH`。
+
+创建租户时：
+
+1. 在 PostgreSQL 写入租户行，并为 5 个模块（`session`、`skills`、`replay`、`memory`、`miner`）写入默认配置行。
+2. 尽力创建同名 OpenViking Account，并写入 `sharing_viking_account`；失败时不回滚租户，响应的 `openviking_account.error` 给出原因。
+3. 尽力初始化 OpenViking 目录骨架，结果在 `openviking_dirs` 中返回。
+4. 返回一次明文 `agent_token`，服务端只保存其 SHA-256。
+
+租户配置覆盖使用 `TeamEvolverConfig` 的扁平字段名。租户管理员只能写入模型相关字段（`llm_provider`、`llm_api_base`、`llm_model_id`、`llm_api_key`、`llm_max_tokens`、`llm_temperature`、`llm_max_concurrency`、`llm_queue_capacity`、`llm_request_timeout_seconds`）与配额（`max_concurrent_sessions`、`max_evolve_per_day`），其他字段返回 `403 PLATFORM_CONFIG_REQUIRED`；平台管理员可写入除服务级字段外的全部字段，未知字段返回 400。模块配置（`tenant_configs`）由各模块接口维护，不经过此接口。
+
+## 平台与租户设置
+
+| 方法 | 路径 | 权限 | 说明 |
+| --- | --- | --- | --- |
+| GET / PUT | `/api/model-settings` | 租户管理员 | 租户进化模型：`model`、`base_url`、`temperature`、`max_tokens`、`api_key` / `clear_api_key`，保存在 `skills` 模块配置的 `model` |
+| POST | `/api/model-settings/test` | 租户管理员 | 测试模型连通性，返回 202 |
+| GET | `/api/sharing-config` | 租户管理员 | OpenViking 部署方式、地址、Account、团队 User、Key 是否存在 |
+| PUT | `/api/sharing-config` | 平台管理员 | 修改上述字段；`api_key` 以 Secret Ref 保存在全局配置 |
+| POST | `/api/sharing-config/bootstrap-dirs` | 平台管理员 | `{"account"?}` 初始化 OpenViking 目录骨架，返回 202 |
+| GET / PUT | `/api/team-settings` | 平台管理员 | 控制台显示名称 `display_name` |
+| GET / PUT | `/api/langfuse-tracing-config` | 平台管理员 | 出站 Langfuse 链路观测配置 |
+| POST | `/api/langfuse-tracing-config/test` | 平台管理员 | 测试链路观测，返回 202 |
+| GET | `/api/storage/status` | 租户管理员 | PostgreSQL 连接池状态 |
+| GET | `/api/openviking-accounts` | 平台管理员 | OpenViking Account 列表 |
+| GET | `/api/openviking-accounts/{account}/users` | 平台管理员 | Account 下的用户 |
+| POST | `/api/openviking-accounts/{account}/import-users` | 租户管理员 | `{"user_ids": [...]}` 导入为控制台账号 |
+
+全局设置保存在 `teamevolver_config`，租户设置保存在 `tenant_configs`，写入使用 revision 乐观锁。凭证以 Secret Ref 加密保存，需要 `TEAMEVOLVER_SECRET_MASTER_KEY`（未设置时使用 `TEAMEVOLVER_ROOT_API_KEY` 作为主密钥），两者都缺失返回 503。
+
+## 个人 Skill 与发布申请
+
+个人 Skill 保存在 OpenViking 个人空间（`personal_skills` 作用域）。
+
+| 方法 | 路径 | 权限 | 说明 |
+| --- | --- | --- | --- |
+| GET | `/api/users/{user_id}/skills?space=personal` | 本人或租户管理员 | 列出个人或 OpenViking 团队目录（`space=team`）中的 Skill |
+| GET / DELETE | `/api/users/{user_id}/skills/{name}` | 本人或租户管理员 | 读取 / 删除 |
+| POST | `/api/users/{user_id}/skills` | 本人或租户管理员 | 保存：`space`、`name`、`skill_md` 或 `description` / `category` / `body` |
+| POST | `/api/users/{user_id}/share` | 本人或租户管理员 | `{"direction": "personal_to_team"|"team_to_personal", "skill_names": [...]}` 复制；`personal_to_team` 仅租户管理员 |
+| POST | `/api/users/{user_id}/publish-requests` | 本人或租户管理员 | `{"skill_names", "note"}` 申请发布到团队 |
+| GET | `/api/skill-publish-requests` | 已登录 | 租户管理员看到全部，普通成员看到自己的申请 |
+| POST | `/api/skill-publish-requests/{request_id}/approve` | 租户管理员 | 批准，把个人 Skill 复制到 OpenViking 团队目录 |
+| POST | `/api/skill-publish-requests/{request_id}/reject` | 租户管理员 | 拒绝 |
+
+批准与共享写入 OpenViking 的团队 Skill 目录（`team_skills` 作用域），供 Context 检索。Agent 通过 `/sync/skills` 拉取的团队 Skill 来自 PostgreSQL [团队 Skill 库](./09-skills-admin.md)，两者分别维护。
+
+## 错误
+
+| 状态 | detail | 原因 |
+| --- | --- | --- |
+| 401 | `login required` | 未登录 |
+| 401 | `invalid username or password` | 登录失败 |
+| 403 | `USER_DISABLED` | 账号已停用 |
+| 403 | `PLATFORM_ADMIN_REQUIRED` | 非平台管理员调用平台接口 |
+| 403 | `TENANT_ADMIN_REQUIRED` | 非租户管理员执行租户治理 |
 | 403 | `TENANT_ACCESS_DENIED` | 选择了无权访问或已停用的租户 |
-| 403 | `TENANT_MEMBERSHIP_REQUIRED` | 未显式选择租户或没有成员关系 |
-| 409 | `LAST_PLATFORM_ADMIN` | 操作会移除最后一个活跃平台超级管理员 |
-| 409 | `LAST_TENANT_ADMIN` | 操作会移除租户最后一个活跃管理员 |
-
-首次运行新版本时，旧 `users.json` 或 PG `_admin/users.json` 只迁移一次：
-
-1. 旧 `admin` 迁移为 `default` 租户的 `tenant_admin`，不会自动成为平台超级管理员。
-2. 升级前设置 `TEAMEVOLVER_PLATFORM_ADMINS=<旧用户ID>[,<旧用户ID>...]`，仅这些用户在首次迁移时成为平台超级管理员。
-3. 新安装的首次 bootstrap 用户直接成为平台超级管理员；自主注册用户没有隐式 `default` 成员关系。
-4. 身份数据在 PG 模式写入独立控制表；Standalone 模式写入 `console_identity.sqlite3`。旧 JSON 在迁移完成后不再作为权限来源。
-5. 若迁移已经完成，不要修改旧 JSON 重试；应由现有平台超级管理员通过控制台调整身份。
-
-若迁移后没有平台超级管理员，可使用已配置的 `TEAMEVOLVER_ROOT_API_KEY` 调用
-`PUT /api/identity/users/{user_id}/access` 恢复一个平台超级管理员；Root Key 不应写入浏览器或前端配置。
+| 403 | `TENANT_MEMBERSHIP_REQUIRED` | 未选择租户或没有成员关系 |
+| 403 | `TENANT_MISMATCH` | 路径租户与 `X-Tenant-Id` 不一致 |
+| 403 | `PLATFORM_CONFIG_REQUIRED` | 租户管理员写入了平台字段 |
+| 409 | `LAST_PLATFORM_ADMIN` / `LAST_TENANT_ADMIN` | 操作会移除最后一个 active 平台管理员或租户管理员 |
+| 409 | `users already exist` | 已初始化后再次调用 bootstrap |

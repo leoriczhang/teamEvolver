@@ -1,153 +1,123 @@
-# Session System
+# Sessions
 
-A Session is a complete interaction record generated between an Agent and a user around a task. It is not a chat log, but a structured record containing conversations, tool calls, artifacts, context usage, and efficiency data, serving as the input source for teamEvolver's evolution closed loop.
+A Session is the complete record of one task-oriented interaction between an Agent and a user, including the conversation, tool calls, artifacts, context usage and efficiency data. Sessions are the original source of all Evidence.
 
-## Session as Complete Interaction Record
+## Session as a Complete Interaction Record
 
-A Session records the entire process of an Agent from receiving a task to completion (or termination), with core elements including:
+A v2 Session contains at least `session_id`, `runtime.type`, `runtime_context.user_id` and non-empty `turns`. Each turn can carry:
 
-- **Identity information**: `session_id` (unique identifier), `runtime` (runtime type), `runtime_context.user_id` (user identifier)
-- **Turn sequence (turns)**: Each turn contains `turn_num`, `prompt_text`/`instruction` (user input), `response_text`/`response` (Agent reply), `messages` (complete message sequence), `tool_calls`/`tool_results` (tool calls and results)
-- **Efficiency metrics (metrics)**: `interaction_turns` (interaction turns), `tool_call_count` (tool call count), `total_tokens` (total Token consumption), with breakdown for input/output/cache/reasoning tokens
-- **Context usage (context_usage)**: Records actual context references used in that turn, including `context_snapshot_id`, `memory_refs`, `skill_refs`, `feedback`
-- **Source materials**: User-uploaded files, embedded as base64 or referenced via sandbox snapshot paths
+- User input and Agent reply (`prompt_text`, `response_text` or full `messages`)
+- Tool calls and results
+- `context_usage`: the Context references actually used in this turn
+- Artifacts and efficiency metrics
 
-Formal Session Schema definition at [agent-session-v1.schema.json](../../schemas/agent-session-v1.schema.json).
+The formal definition is [agent-session-v2.schema.json](../../schemas/agent-session-v2.schema.json) together with [Agent Protocol v2](../agent-integrations/06-protocol-v2.md).
 
-## Session Ingest Pipeline
+## Intake and Mandatory Analysis
 
-After each session concludes, the Agent reports the Session trajectory via `POST /ingest_session` endpoint. The ingest pipeline performs:
+Two entry points feed the same persisted pipeline:
 
-1. **Identity validation**: Validates the tenant Key and user_id, binding a tenant principal
-2. **Schema validation**: Checks required fields (schema_version, protocol_version, session_id, runtime, runtime_context, turns)
-3. **Duplicate detection**: Determines duplicate submissions of processed Sessions via content fingerprint. Fingerprint computed from turn count and conversation text hash; same Session with no new turns not re-enqueued
-4. **Dual-write storage**: Writes simultaneously to queue (`sessions/`) and archive (`session_archive/`); queue consumed by evolution engine, archive for audit and historical lookup. Post-consumption archiving by the evolution engine preserves `value_judge` and `judge` as well (`team_skills/evolution/runtime/orchestrator.py:_archive_sessions`)
-5. **Index update**: Maintains `session_index.json`, recording metadata for all Sessions (title, user, turn count, Token, tool call count, value judgment result `value_judge`, plus session-level `judge` scores and per-dimension reasons — `teamEvolver/session_store.py:_session_meta`)
-6. **Filter audit**: Writes to `session_filter_audit/`; each record carries the metadata plus `value_judge` (including the decision `mode`) and `judge` scores (`teamEvolver/session_store.py:save_filter_audit`)
+| Entry | Acceptance | First task |
+| --- | --- | --- |
+| Agent push `POST /ingest_session` | Validates the v2 envelope, tenant key and `user_id`, and the `context_usage` references | `session.normalize` |
+| Data source pull `POST /api/datasource/pull` or scheduled pull | Checks that the Adapter is bound at a fixed revision | `session.pull`, which accepts each item and enqueues `session.normalize` |
 
-Sessions removed from queue after consumption by evolution engine, but archive permanently retained.
+In one short transaction the API writes `ingestions`, the raw payload (PostgreSQL ObjectStore) and `worker_tasks`, and returns `202` with `job_id`. The task payload pins `config_revision` and `adapter_revision`, so later configuration or Adapter changes do not affect in-flight tasks.
 
-## Session Filtering & Value Classification
+The Worker runs four mandatory stages in order; each writes a `session_stage_results` row whose result is an immutable payload:
 
-Before entering evolution queue, Sessions undergo value judgment by `SessionValueClassifier`, determining whether they enter the Skill Evolution pipeline.
+1. `normalize`: validate `turns` and produce the standard Session.
+2. `analyze`: one model call for value classification, summary and four-dimension scoring (`team_skills/evolution/stages/analyze.py:analyze_session`).
+3. `trace_analyze`: per-trace analysis (`team_skills/evolution/stages/trace_analyze.py:analyze_session_traces`).
+4. `archive`: writes the formal `sessions` row only after the first three stages succeed.
 
-### Decision Categories
+A missing model, a failed call or invalid output fails the stage, which is retried by the Worker retry rules; no rule-based substitute is produced and no formal Session is written.
 
-| decision | Meaning | Destination |
-|----------|---------|-------------|
-| `valuable` | Contains reusable team-level Skill Evidence: executed workflows, concrete outputs, explicit Skill gaps, domain processes, or user feedback on outputs | Enters Skill Evolution queue |
-| `memory_candidate` | Useful Evidence is user-specific preferences or habits (not team SOP), and may remain useful for that user's future tasks | Skipped and archived. No Memory Evolution routing exists at ingest (DreamCycle superseded): any decision other than `valuable` is skipped, and `memory_candidates` is only recorded as part of the `value_judge` result (`session_ingestion/service.py:ingest`) |
-| `task_only` | Real task request but no completion outputs or actionable evolution Evidence yet | Skipped and archived, awaiting more Evidence accumulation |
-| `chitchat` | Social, empty conversation, or non-task interaction | Skipped, does not enter evolution |
+## Value Classification
 
-### Decision Modes
+`value_judge.decision` from `analyze` determines `sessions.decision`:
 
-Only merged LLM analysis (`mode=merged`) is supported. Classification, trajectory summary, and four-dimensional scores must all be returned before persistence. User feedback, Candidate audit markers, and prior scores are model inputs; none bypass analysis.
+| Model decision | `sessions.decision` | Destination |
+|----------|------|------|
+| `valuable`: contains reusable team-level Skill Evidence | `valuable` | Consumable by Skill Evolution |
+| `memory_candidate`, `task_only`, `chitchat` and similar | `skipped` | Archived, not used by Skill Evolution |
 
-Every Trace must also receive an explicit model verdict, marked `source=llm`. Missing clients, failed calls, omitted traces, or invalid outputs fail analysis. No rule-based replacements or default normal verdicts are produced. Long Sessions are processed in bounded batches; hooks run only after every batch succeeds.
+The full decision goes to `filter_audit` and the four scores to `judge`. Injected Skills (`injected_skills`) only mean the Skill was visible to the Agent and are not Evidence; Skills actually used, tool calls, procedures and task outcomes are Evidence.
 
-Later evolution only reuses complete scores marked `source=llm`, a summary, and a `mode=merged` classification. Legacy rule-based results or records containing only an overall score must be analyzed again when reingested or consumed by evolution.
+## Evidence
 
-> **Note**: Injected Skills (`injected_skills`) only indicate Skills visible to Agent, not Evidence; actually used Skills (`used_skills`), tool calls, concrete operational workflows, and task outputs are much stronger Evidence signals. Do not misjudge explicit requirements for single deliverables as user Memory.
-
-### Session Summary
-
-The merged analyzer reads the Session trajectory, interactions, tool results, extractable source/output artifacts, and Skill usage metadata. The model generates the summary together with classification and scores in one call; all three outputs must validate before results are committed.
-
-## Evidence Accumulation
-
-Single Sessions typically insufficient to trigger evolution. Evolution engine aggregates similar Evidence into change windows, generating Candidates only when Evidence accumulates to threshold (`evolve.evidence_change_debt_threshold=3`).
-
-Session's `context_usage` is key for Evidence provenance:
-- **`used_context_refs`**: List of context_ref actually read by Agent in Context Workspace, reported by Agent at Session commit, server resolves to concrete OpenViking Memory/Skill references
-- **`verified` flag**: When Agent confirms using team Skill and provides feedback (outcome, correction), that Skill reference marked verified—most valuable Evidence source
-- **`context_snapshot_id`**: Frozen Context projection ID, ensuring same Session's context can be reconstructed
-
-## Session Materials
-
-Sessions may reference user-uploaded files as task inputs. `collect_session_materials` recovers these files from Sessions, supporting two sources:
-
-1. **Embedded materials (source_materials)**: Cross-host Agents carry file content directly in Session payload via base64 encoding
-2. **Sandbox snapshot (sandbox_snapshot_path)**: Same-host Pi Agent deployments recover uploaded files via tar.gz snapshot path, without inflating ingest payload
-
-Material collection performs deduplication (SHA-256 deduplication) and size limits: single file ≤20MB, total size ≤80MB, total file count ≤100. Recovered materials used to inject isolated sandbox workspace during True Replay, ensuring Replay Cases can access original input files.
-
-Path security handling: Only relative paths accepted, absolute paths and paths containing `..` rejected to prevent path traversal.
+Skill Evolution consumes Sessions with `decision=valuable` and records cross-cycle accumulated Evidence per Skill in `skill_evidence`. Each branch needs at least `min_group_sessions` Sessions and `min_group_users` users; see [Evolution Loop](./02-evolution-loop.md).
 
 ## context_usage Tracking
 
-Each turn in a Session can carry `context_usage` field, tracking which contexts the Agent actually used:
+Each turn can carry `context_usage`:
 
 ```json
 {
   "context_usage": {
     "context_snapshot_id": "ctxsnap_...",
-    "memory_refs": [...],
-    "skill_refs": [...],
-    "feedback": {
-      "outcome": "success|partial|failure",
-      "correction": "user correction content",
-      "error_code": "..."
-    }
+    "memory_refs": [{"context_ref": "...", "operation": "retrieved"}],
+    "skill_refs": [{"context_ref": "...", "operation": "injected"}],
+    "feedback": {"outcome": "success", "correction": ""}
   }
 }
 ```
 
-Agents report `used_context_refs` via Context Workspace's `sessions/commit` endpoint; server resolves these opaque refs to concrete OpenViking resource references and submits OpenViking `session.used` records. Usage records persisted per payload, ensuring failed retries do not double-count.
+At push acceptance `teamEvolver/context/usage.py:verify_usage` checks: the snapshot belongs to the current tenant and user; each `context_ref` was issued by a Context endpoint, is unexpired, has the matching kind and belongs to that snapshot; `operation` is one of `retrieved`, `injected`, `read`, `selected`; at most 200 per kind. Failures return 400.
+
+## Session Materials
+
+Sessions can reference files uploaded by users. `team_replay/datasets/materials.py:collect_session_materials` recovers materials from a Session for Test Datasets and True Replay:
+
+1. **Inline materials** (`source_materials`): cross-host Agents carry file contents as base64.
+2. **Sandbox snapshot** (`runtime_context.sandbox_snapshot_path`): same-host deployments recover from a tar.gz snapshot.
+
+Materials are deduplicated by SHA-256, with ≤ 20 MiB per file, ≤ 80 MiB total and at most 100 files; only relative paths are accepted, and absolute paths and `..` are rejected.
 
 ## metrics Fields
 
-Session's metrics field records efficiency data, baseline source for True Replay efficiency comparison:
+| Field | Description |
+|------|------|
+| `interaction_turns` | Number of interaction turns |
+| `tool_call_count` | Total tool calls |
+| `total_tokens` | Total tokens |
+| `input_tokens`, `output_tokens` | Input and output tokens |
+| `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens` | Cache and reasoning tokens |
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `interaction_turns` | int | Number of interaction turns between Agent and user/tools |
-| `tool_call_count` | int | Total tool calls |
-| `total_tokens` | int | Total Token consumption (input + output) |
-| `input_tokens` | int | Input Token count |
-| `output_tokens` | int | Output Token count |
-| `cache_read_tokens` | int | Cache read Token count |
-| `cache_write_tokens` | int | Cache write Token count |
-| `reasoning_tokens` | int | Reasoning Token count |
+These metrics feed the True Replay efficiency comparison; missing values are recorded as unavailable, never filled with 0.
 
-These metrics used in True Replay for Baseline vs Candidate efficiency comparison, priority order: turns → tool call count → total Token.
+## Session Storage
 
-## Session Storage Structure
+| Location | Content |
+| --- | --- |
+| `ingestions` | Acceptance record: source, external ID, user, Account, `dedupe_key`, task ID, Adapter/configuration revision, payload reference and hash, business time |
+| `session_stage_results` | Status, result reference and error code per stage |
+| `sessions` | Formal Session: `decision`, `judge`, `filter_audit`, `meta`, `content_ref`, `content_hash`, `business_time`, `ingested_at` |
+| `storage_objects` | Raw payload (`ingest/<tenant>/<ingestion>.json`) and per-stage results (`session/<hash>/<stage>/<digest>.json`) |
 
-In OpenViking backend, Session data organized by prefix:
+The console shows both `business_time` (when it happened) and `ingested_at` (when it was stored). All tables have RLS enabled.
 
-| Prefix | Purpose |
-|--------|---------|
-| `sessions/{session_id}.json` | Pending consumption queue (deleted after consumption) |
-| `session_archive/{session_id}.json` | Permanent archive |
-| `session_filter_audit/{session_id}.json` | Filter decision audit records |
-| `session_index.json` | Metadata index for all Sessions (max 10000 entries) |
+## Idempotency
 
-Archive retains complete Session content and status (queued/consumed/skipped). Index sorted by ingest time descending, supporting fast console browsing and filtering.
-
-## Content Fingerprinting & Idempotency
-
-Session storage uses content fingerprinting for idempotent writes:
-- Fingerprint computed from each turn's prompt_text, response_text, runtime type and user principal, context_usage (snapshot_id, memory_refs, skill_refs, feedback)
-- Duplicate submissions for same session_id are fingerprint-compared against the archived copy (`teamEvolver/session_store.py:duplicate_of_processed`); an unchanged fingerprint (no new turns) is judged duplicate, the endpoint returns `duplicate`, and the session is not re-enqueued
-- If fingerprint changes (new turns), updates archive and queue, treated as session continuation
-- A request carrying `force_reprocess` bypasses this check and forces reprocessing
-
-This prevents Agents from re-entering same conversation into evolution pipeline due to retries or delayed reporting.
+- The `dedupe_key` of an Agent push is `push:<session_id>`; a repeated push within a tenant returns the first `ingestion_id` and `job_id` with `dedupe=true`.
+- The `dedupe_key` of a pull is computed from the request window and filters; scheduled pulls deduplicate by date window.
+- The formal Session ID is computed from `(tenant_id, user_id, session_id)` (`session_ingestion/identifiers.py:tenant_user_session_id`), so same-named Sessions of different tenants or users do not collide.
 
 ## Code Entry Points
 
 | Module | Path |
-|--------|------|
-| Session storage & lifecycle | [session_store.py](../../../teamEvolver/session_store.py) |
-| Session value classifier | [session_filter.py](../../../teamEvolver/session_filter.py) |
-| Session materials collection | [session_materials.py](../../../teamEvolver/session_materials.py) |
-| Session Schema definition | [docs/schemas/agent-session-v1.schema.json](../../schemas/agent-session-v1.schema.json) |
-| Agent integration protocol (Session Ingest) | [Protocol V2 specification](../agent-integrations/06-protocol-v2.md) |
+|------|------|
+| HTTP acceptance | [api/__init__.py](../../../session_ingestion/api/__init__.py) |
+| Data source control plane | [api/datasource.py](../../../session_ingestion/api/datasource.py) |
+| Worker Handlers | [handlers/](../../../session_ingestion/handlers/) |
+| Mandatory stages | [stages.py](../../../session_ingestion/stages.py) |
+| v2 envelope | [push/protocol.py](../../../session_ingestion/push/protocol.py) |
+| Repository and queries | [repository.py](../../../session_ingestion/repository.py), [queries.py](../../../session_ingestion/queries.py) |
+| Immutable payloads | [payloads.py](../../../session_ingestion/payloads.py) |
 
-## Related Documentation
+## Related Docs
 
-- [Architecture Overview](./01-architecture): Session Ingest position in architecture
-- [Evolution Loop](./02-evolution-loop): How Sessions drive evolution loop
-- [True Replay](./06-true-replay): Sessions as True Replay Case source
-- [Memory System](./04-memory): Memory system overview
+- [Session Ingestion API](../api/03-session-ingest.md)
+- [Session Query API](../api/08-sessions-api.md)
+- [Tenant Data Source Onboarding](../guides/10-datasource-onboarding.md)
+- [Evolution Loop](./02-evolution-loop.md)

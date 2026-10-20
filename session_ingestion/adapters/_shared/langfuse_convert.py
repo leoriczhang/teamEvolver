@@ -41,7 +41,7 @@ def _title_from_payload(payload: Any) -> str:
     """First user question found in a JSON envelope.
 
     openclaw/openapi agents wrap the current turn as
-    ``{"sender": ..., "msg": {"content": {"query": "..."}}}``.
+    ``{"sender":..., "msg": {"content": {"query": "..."}}}``.
     """
     if not isinstance(payload, dict):
         return ""
@@ -134,7 +134,7 @@ def _title_from_prompt(prompt_text: str) -> str:
     """Extract a human-readable session title candidate from a turn prompt.
 
     Agent payloads often wrap the user message in JSON envelopes (e.g.
-    openclaw's ``{"sender": ..., "msg": {"content": {"query": ...}}}``);
+    openclaw's ``{"sender":..., "msg": {"content": {"query":...}}}``);
     unwrap the most common shapes and fall back to the first meaningful
     plain-text line. Prompts carrying the question only inside an embedded
     envelope (after the ``Conversation info`` header) are unwrapped last so
@@ -495,7 +495,7 @@ def convert_langfuse_session(
     """Convert a Langfuse session plus its full traces into a teamEvolver session.
 
     ``session`` is the object returned by ``GET /api/public/sessions/513386726504_AWS_us-west-1`` (or a
-    minimal ``{"id": ...}`` when only the id is known). ``traces`` is a list of
+    minimal ``{"id":...}`` when only the id is known). ``traces`` is a list of
     ``TraceWithFullDetails`` (each including its ``observations``), which the
     caller has already fetched and may pre-filter/sort.
 

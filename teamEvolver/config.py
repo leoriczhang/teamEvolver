@@ -1,19 +1,16 @@
 """Unified configuration for teamEvolver."""
 
 from dataclasses import dataclass, field
-from typing import Any
-
-from team_memory.config import TeamMemoryConfig
 
 VOLCENGINE_OPENVIKING_ENDPOINT = "https://api.vikingdb.cn-beijing.volces.com/openviking"
 # Default endpoint for a locally self-hosted ``openviking-server`` (see
 # https://docs.openviking.ai server quickstart — Uvicorn binds :1933).
 LOCAL_OPENVIKING_ENDPOINT = "http://localhost:1933"
 TEAM_SKILL_ROOT_PREFIX = "team-skill-evolver"
-DEFAULT_LLM_API_BASE = "https://ark.cn-beijing.volces.com/api/v3"
-DEFAULT_LLM_MODEL_ID = "volcengine/glm-5.2-aicc"
+DEFAULT_LLM_API_BASE = "https://api.openai.com/v1"
+DEFAULT_LLM_MODEL_ID = "gpt-4o-mini"
 DEFAULT_LLM_API_MODE = "chat"
-DEFAULT_LLM_MAX_TOKENS = 100000
+DEFAULT_LLM_MAX_TOKENS = 16384
 DEFAULT_LLM_TEMPERATURE = 0.4
 DEFAULT_LLM_MAX_CONCURRENCY = 8
 DEFAULT_LLM_QUEUE_CAPACITY = 64
@@ -35,10 +32,43 @@ def resolve_viking_endpoint(deployment: str, endpoint: str = "") -> str:
 
 
 @dataclass
-class TeamEvolverConfig(TeamMemoryConfig):
+class TeamEvolverConfig:
     # Internal source path used by admin routes that need to persist runtime
-    # config updates back to the same file.
     _config_file: str = field(default="", repr=False)
+
+    # ------------------------------------------------------------------ #
+    # Team Memory (owned conceptually by ``team_memory`` module).          #
+    # These flat fields mirror ``team_memory.config.TeamMemoryConfig`` so   #
+    # the platform global config stays dependency-free (platform must not   #
+    # import business packages). ``team_memory`` remains the authoritative  #
+    # source of this field set; ``team_memory`` tests assert the two stay   #
+    # in sync. Keep additions mirrored in both places.                      #
+    # ------------------------------------------------------------------ #
+    # Maintenance is a scheduled ``ov cp`` + ``ov compile`` run.
+    memory_maintenance_enabled: bool = False
+    memory_maintenance_auto_start: bool = False
+    memory_maintenance_interval_seconds: int = 86400
+    # Cross-user memory aggregation (deterministic staging + ov compile).
+    aggregation_enabled: bool = False
+    aggregation_shared_knowledge_prefix: str = "shared-knowledge"
+    aggregation_okf_skill_uri: str = "viking://agent/skills/team-memory-okf"
+    aggregation_maintenance_skill_uri: str = "viking://agent/skills/team-memory-maintenance"
+    aggregation_staging_dir: str = "staging"
+    aggregation_kinds: list[str] = field(default_factory=list)
+    aggregation_account_user_limit: int = 50_000
+    aggregation_account_user_page_size: int = 1_000
+    aggregation_phase1_concurrency: int = 6
+    aggregation_merge_fan_in: int = 4
+    aggregation_merge_concurrency: int = 4
+    aggregation_partition_threshold: int = 512
+    aggregation_partition_count: int = 256
+    aggregation_preserve_manual_edits: bool = False
+    aggregation_incremental_publish: bool = False
+    aggregation_publish_batch_users: int = 8
+    aggregation_run_detail_limit: int = 2_000
+    aggregation_compile_runtime_timeout_seconds: int = 3000
+    aggregation_merge_group_max_attempts: int = 2
+    aggregation_state_dir: str = ""
 
     # ------------------------------------------------------------------ #
     # Team identity                                                       #
@@ -51,17 +81,6 @@ class TeamEvolverConfig(TeamMemoryConfig):
     # Rebuildable per-tenant cache used by file-based runtimes.
     # Published Skill state lives in SkillHub storage.
     skills_runtime_cache_dir: str = "~/.teamEvolver/runtime/skills"
-    replay_adapter: str = ""
-    replay_adapters_dir: str = ""
-
-    # ------------------------------------------------------------------ #
-    # Skillopt rollout (DEAP /skillopt/update)                            #
-    # ------------------------------------------------------------------ #
-    # After a Skill publish commits, materialize the full version bundle in a
-    # persistent DEAP workspace (rollout-<timestamp>-<suffix>, never deleted).
-    skillopt_rollout_enabled: bool = False
-    skillopt_rollout_endpoint: str = ""
-    skillopt_rollout_workspace_prefix: str = "rollout-"
 
     # ------------------------------------------------------------------ #
     # API Server                                                          #
@@ -74,7 +93,6 @@ class TeamEvolverConfig(TeamMemoryConfig):
     # LLM forwarding                                                      #
     # ------------------------------------------------------------------ #
     logging: dict = field(default_factory=dict)
-    ontology: dict = field(default_factory=dict)
     compile: dict = field(default_factory=dict)
     experience_sync: dict = field(default_factory=dict)
     llm_api_base: str = DEFAULT_LLM_API_BASE
@@ -106,14 +124,8 @@ class TeamEvolverConfig(TeamMemoryConfig):
     # supported for mounted NAS or OpenViking deployments.
 
     # When the team skill library is on the local backend, evolved/pushed
-    # skills are mirrored asynchronously to OpenViking so remote Agents can keep
     # reading them from ``viking://resources/{root_prefix}/skills/<name>/``.
-    # Only that subtree is mirrored — registry/manifest stay local.
-    sharing_skill_mirror_enabled: bool = True
-    # Local spool directory for pending mirror deliveries; empty means
-    # ~/.teamEvolver/skill_mirror_spool. The spool makes mirroring durable:
     # OpenViking outages never block evolution, deliveries retry with backoff.
-    sharing_skill_mirror_spool_dir: str = ""
 
     # Built-in local-storage fallback. When enabled (default), any object store
     # built for an OpenViking deployment that is currently unavailable
@@ -147,7 +159,7 @@ class TeamEvolverConfig(TeamMemoryConfig):
     # not rename
     sharing_viking_root_prefix: str = TEAM_SKILL_ROOT_PREFIX
     # ------------------------------------------------------------------ #
-    # PostgreSQL local-state storage (multi-tenancy plan §2.4)             #
+    # PostgreSQL local-state storage              #
     # ------------------------------------------------------------------ #
     # Backends created with backend="postgres" land here. Uses the project's
     # dedicated pgm instance; all TeamEvolver tables live in the dedicated
@@ -173,45 +185,12 @@ class TeamEvolverConfig(TeamMemoryConfig):
     # ------------------------------------------------------------------ #
     # Evolve server integration                                           #
     # ------------------------------------------------------------------ #
-    evolve_server_url: str = "http://127.0.0.1:52010"
-    evolve_use_session_judge: bool = True
-    evolve_publish_mode: str = "validated"
-    evolve_human_review_enabled: bool = True
-    evolve_interval_seconds: int = 600
     # Drain throttling: queued sessions are read in batches so a large backlog
     # does not saturate the (self-hosted) OpenViking storage. Raise batch size
     # or lower the delay to drain faster on a beefier storage instance.
-    evolve_drain_batch_size: int = 25
-    evolve_drain_batch_delay_seconds: float = 1.0
     # Max sessions consumed per evolution cycle (0 = unlimited). Lets a large
     # backlog be fed once and churned down over multiple cycles with bounded
     # blast radius per cycle.
-    evolve_drain_max_per_cycle: int = 0
-    evolve_evidence_enabled: bool = True
-    evolve_evidence_max_entries: int = 400
-    evolve_evidence_recent_limit: int = 20
-    evolve_evidence_historical_limit: int = 20
-    evolve_evidence_replay_cases_per_window: int = 1
-    evolve_evidence_change_debt_threshold: int = 3
-    evolve_dataset_synthesis_enabled: bool = True
-    evolve_dataset_test_cases: int = 2
-    evolve_dataset_min_requirements: int = 12
-    evolve_dataset_max_requirements: int = 24
-    evolve_dataset_disclosure_batch_size: int = 4
-    evolve_candidate_coalesce_enabled: bool = True
-    evolve_max_parallel_groups: int = 4
-    evolve_agent_max_rounds: int = 12
-    evolve_agent_max_tool_calls_per_round: int = 8
-    # Team-evidence minima per evolution branch (see EvolveServerConfig).
-    evolve_min_group_sessions: int = 2
-    evolve_min_group_users: int = 2
-    evolve_bundle_text_extensions: list[str] = field(
-        default_factory=lambda: [".py", ".sh"]
-    )
-    evolve_bundle_max_file_bytes: int = 262144
-    evolve_bundle_max_prompt_bytes: int = 786432
-    evolve_bundle_allow_delete: bool = True
-    evolve_bundle_static_checks_enabled: bool = True
 
     # ------------------------------------------------------------------ #
     # Background validation                                               #
@@ -219,15 +198,6 @@ class TeamEvolverConfig(TeamMemoryConfig):
     # Enabled by default so the server's validated publish_mode has clients
     # that actually run candidate-vs-baseline replay; otherwise candidates
     # would queue indefinitely and never publish.
-    validation_enabled: bool = True
-    validation_mode: str = "true_replay"
-    validation_runtimes: list[str] = field(
-        default_factory=lambda: ["deap", "langfuse", "doris"]
-    )
-    validation_idle_after_seconds: int = 300
-    validation_poll_interval_seconds: int = 60
-    validation_max_jobs_per_day: int = 5
-    validation_max_concurrency: int = 1
     # ------------------------------------------------------------------ #
     # Langfuse observability                                               #
     # ------------------------------------------------------------------ #
@@ -248,18 +218,9 @@ class TeamEvolverConfig(TeamMemoryConfig):
     # ------------------------------------------------------------------ #
     # Tenant adapter binding                                              #
     # ------------------------------------------------------------------ #
-    datasource_adapter: str = ""
     # Per-tenant daily pull schedule. The default tenant reads this value
     # from config.yaml; non-default tenants override the complete dictionary
     # in tenants.config through the dedicated datasource API.
-    datasource_schedule: dict[str, Any] = field(
-        default_factory=lambda: {
-            "enabled": False,
-            "time": "00:00",
-            "timezone": "Asia/Shanghai",
-            "window": "previous_day",
-        }
-    )
     # Deployment-owned tenant-file directory; empty uses the adapters package.
     # Not tenant-overridable. Shared upstream code ships inside
     # session_ingestion/adapters/.

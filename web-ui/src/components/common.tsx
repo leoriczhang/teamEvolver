@@ -1,8 +1,8 @@
-import * as React from "react";
-import { Info } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { Tooltip,TooltipContent,TooltipProvider,TooltipTrigger } from "@/components/ui/tooltip";
 import { GLOSSARY } from "@/lib/glossary";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
+import { Info } from "lucide-react";
+import * as React from "react";
 
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_VISIBLE_PAGES = 50;

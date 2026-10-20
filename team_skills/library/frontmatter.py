@@ -76,7 +76,7 @@ def validate_skill_md(
     *,
     expected_name: str = "",
 ) -> dict[str, Any]:
-    """Validate the strict, upclaw-compatible SKILL.md wire format."""
+    """Validate the strict, Agent-compatible SKILL.md wire format."""
     try:
         text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw or "")
     except UnicodeDecodeError as exc:

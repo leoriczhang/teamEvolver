@@ -1,49 +1,13 @@
-# Tenant Data Adapters
+# Tenant Data Source Adapters
 
-Each top-level `.py` file is bound to one tenant through `/api/datasource`.
-Upstream connection, filtering and conversion belong here. The platform only
-consumes standard Sessions. See `product-agent.py` for a complete example.
+Each top-level `.py` file in this directory is a bundled data source Adapter template. An Adapter connects to an upstream (Doris, Langfuse and others), filters records and converts them into standard Sessions; the platform only consumes standard Sessions. Start with `example-doris.py`, `example-langfuse.py` or `example-custom-mapping.py`. These examples are disabled until configured.
 
-Files declare a literal `SOURCE` dictionary and `build_adapter()` returning
-`health`, `list_session_ids`, `iter_session_id_batches`, `fetch_session`,
-`convert_session` and `close`.
-`SOURCE.supported_filters` and `required_filters` drive the console form.
-`SOURCE.max_sessions` is only the preview-row default; ingestion never uses it
-as a total limit.
-Credentials come from environment variables, never source literals.
+A file declares a literal `SOURCE` dictionary and a top-level `build_adapter()` returning an object with `health`, `list_session_ids`, `iter_session_id_batches`, `fetch_session`, `convert_session` and `close`. `SOURCE.supported_filters` and `required_filters` drive the console form; `SOURCE.max_sessions` is only the preview default and never limits a pull. Credentials come from environment variables, never source literals. Validation rules are in `_runtime.py:validate_content`.
 
-Non-default tenants persist `datasource_adapter` in tenant overrides. Default
-uses `datasource.adapter` in the active YAML. Bindings are explicit and never
-inherited or guessed from display names. One file cannot bind to two tenants.
-Missing or broken files fail closed. Top-level file changes reload by content
-hash; shared module/environment changes require restart.
+Adapter source is versioned in PostgreSQL (`adapter_versions`) and bound per tenant in `adapter_bindings`, both managed by `repository.py:AdapterRepository`. Files in this directory become usable only after they are written to PostgreSQL with the service Root Key (`PUT /api/datasource/code`) and bound by a tenant administrator (`PUT /api/datasource`). Running pulls pin the revision current at acceptance; `worker.py` loads that revision and streams bounded batches on the Worker.
 
-Admins can upload, create and edit runtime copies. Unsaved drafts can be
-validated, health-tested, previewed or used to convert one Session without
-writing to disk. Saving uses an expected revision and atomic replacement.
-Runtime copies are not durable across deployment or container replacement;
-contact the project Owner to merge verified changes into
-`session_ingestion/adapters/` and release.
+`_shared/` holds field mapping and builder helpers used by the agent files; `sources/` holds the Doris and Langfuse source implementations.
 
-The console also supports binding, saved connection testing, Session preview
-and ingestion. Pulls traverse the complete filtered window through bounded
-adapter batches and return `202 Accepted`; progress is exposed by the schedule
-status endpoint. `/api/datasource` exposes GET/PUT; `/code` is GET/PUT;
-`/code/test`, `/test`, `/sessions` and `/pull` are POST. Tenant tokens only access their own
-`/pull`; other operations require admin. Requests cannot select an agent or
-adapter. At most four tenants pull concurrently, one pull per tenant.
+Shared mapping extracts structured user IDs, titles, prompts and trace IDs, with provenance. Add source-specific interpretation in your Adapter hooks. Doris table names use `DORIS_TRACES_TABLE`, `DORIS_OBSERVATIONS_TABLE` and `DORIS_MAPPING_TABLE`; their columns must match the queries in `sources/doris.py`. Direct access requires `pymysql`; HTTP access requires an explicit `DORIS_PROXY_URL` and verifies TLS by default.
 
-Deploy the complete `session_ingestion/` package and rebuilt console. Configure
-Doris environment variables, verify each file's upstream project, explicitly
-bind existing Account IDs, then probe and preview before pulling a small batch.
-No automatic production binding or data migration is performed.
-The land-network file currently resolves its project name via the mapping table.
-
-Legacy Python imports and persisted fields remain for offline migration only;
-they do not drive live pulls.
-
-CLI: `teamEvolver datasource --tenant ACCOUNT status`, `bind FILE.py`, `test`,
-`list --max-sessions 100` or
-`pull --from-timestamp ... --to-timestamp ...`.
-
-Outbound telemetry stays in `teamEvolver/observability/` and has its own page.
+Endpoints, scheduled pulls and the CLI (`teamEvolver datasource --tenant ACCOUNT status|bind|test|list|pull`) are documented in [Session Ingestion and Data Source API](../../docs/en/api/03-session-ingest.md#data-source-adapters) and [Data Source Onboarding](../../docs/en/guides/10-datasource-onboarding.md).

@@ -19,7 +19,6 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Optional
 
-from team_skills.evolution.kernel.enums import DecisionAction
 from team_skills.evolution.agent.cards import build_merge_card, build_round1_user_msg, render_observation_message
 from team_skills.evolution.agent.contract import (
     normalize_classification,
@@ -27,6 +26,7 @@ from team_skills.evolution.agent.contract import (
     validate_final,
 )
 from team_skills.evolution.agent.tools import ToolContext, ToolRegistry, build_protocol_appendix
+from team_skills.evolution.kernel.enums import DecisionAction
 
 logger = logging.getLogger(__name__)
 
@@ -74,8 +74,8 @@ def _prevalidate_file_changes(skill: dict, ctx: ToolContext) -> str:
     if not ctx.current_skill:
         return ""  # create stage: no bundle to validate against
     try:
-        from team_skills.library.bundle import candidate_skill_bundle
         from team_skills.evolution.kernel.bundle_changes import materialize_bundle_changes
+        from team_skills.library.bundle import candidate_skill_bundle
 
         materialize_bundle_changes(
             skill,

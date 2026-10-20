@@ -1,0 +1,6 @@
+logging:
+  level: INFO
+  console_enabled: true
+  file_enabled: false
+sharing_viking_deployment: local
+sharing_viking_account: default

@@ -1,172 +1,121 @@
 # 安装部署
 
+teamEvolver 有两种安装方式：开发者从源码目录安装，交付环境从不可变 release 离线安装。两者安装的是同一组 Python 包（`teamEvolver`、`session_ingestion`、`team_skills`、`team_replay`、`team_memory`、`team_miner`）。
+
 ## 环境要求
 
-| 组件 | 最低版本 | 说明 |
-|------|---------|------|
-| Python | 3.10+ | 运行 teamEvolver 后端 |
-| pip | 23.0+ | 安装 Python 包 |
-| Node.js | 18+ | 仅修改前端时需要 |
-| OpenViking | 兼容当前 Content、Session、Snapshot 与 Compile API | 持久化后端，本地、远程自建或火山云 |
-| 操作系统 | Linux / macOS | Windows 需 WSL2 |
+| 组件 | 版本 | 说明 |
+|------|------|------|
+| Python | 3.11（最低 3.10） | release 镜像为 `python:3.11-slim-trixie` |
+| PostgreSQL | 14+ | 应用角色必须是 NOSUPERUSER、NOBYPASSRLS |
+| OpenViking | 兼容 Content、Session、Search、Compile API | 知识制品权威源；容器内置固定版本 `ov` CLI |
+| Node.js / npm | 20+ | 仅构建控制台时需要 |
+| Docker | BuildKit | 构建 release 与镜像 |
+| uv | 任意新版本 | 仅重新生成锁文件时需要 |
 
-## 安装方式
+## 依赖来源
 
-### PyPI 安装
+- `pyproject.toml` 是 Python 直接依赖的唯一来源，只有 `dev` 一个 extra。
+- `requirements.lock`（运行依赖）和 `build-requirements.lock`（构建工具）由 `scripts/lock_dependencies.sh` 生成，每个包都带 SHA-256，覆盖 CPython 3.11 的 Linux amd64/arm64。
+- 修改 `pyproject.toml` 后必须重新执行 `scripts/lock_dependencies.sh`。
 
-```bash
-pip install teamEvolver
-```
-
-### 源码安装（使用当前仓库版本）
-
-```bash
-git clone https://github.com/leoriczhang/teamEvolver.git
-cd teamEvolver
-pip install -e ".[all]"
-```
-
-可选依赖分组：
-
-| extra | 包含内容 |
-|-------|---------|
-| `sharing` | OpenViking 共享存储支持（boto3） |
-| `validation` | True Replay 验证（openai SDK） |
-| `truereplay` | 完整 True Replay 能力 |
-| `dev` | 开发依赖（pytest、anyio） |
-| `all` | 全部依赖 |
-
-### 前端构建（仅开发者需要）
-
-普通安装使用预构建的前端产物，无需构建。如果你修改了 `web-ui/` 源码：
+## 开发安装
 
 ```bash
-cd web-ui
-npm install
-npm run build
-# 产物输出到 teamEvolver/web/dist/
+bash scripts/install_teamEvolver.sh            # 可选 --venv-dir、--python
+bash scripts/install_teamEvolver.sh --apply-schema   # 同时执行 schema apply（需要 TEAMEVOLVER_PG_DSN）
+source .venv/bin/activate
 ```
 
-### Docker Compose
+脚本步骤：创建 venv → `pip install --require-hashes -r requirements.lock` → `pip install --no-deps -e .` → 安装 ruff、pytest 等开发工具 → `pip check`。
 
-仓库根目录提供 `Dockerfile` 与 `compose.yaml`。镜像会构建控制台、安装 `.[all]` 依赖并捆绑固定版本的 OpenViking CLI：
+控制台源码在 `web-ui/`，构建产物写入 `teamEvolver/web/dist/` 并随 wheel 打包：
 
 ```bash
-docker compose up -d --build
-docker compose ps
+npm --prefix web-ui ci
+npm --prefix web-ui test
+npm --prefix web-ui run build
 ```
 
-默认映射宿主机端口 `52010`，可通过 `TEAMEVOLVER_PORT` 修改。配置与 SkillMiner 运行产物保存在 `runtime/` 挂载目录；升级镜像不会删除这些数据。
+## 构建 release
 
-## 初始配置
-
-使用 `teamEvolver config <key> <value>` 写入配置，或直接编辑 `~/.teamEvolver/config.yaml`。CLI 不是交互式向导；第一次执行任意设置命令时会创建配置文件。
-
-### 最小可运行配置
-
-```yaml
-service:
-  port: 52010
-  host: 0.0.0.0
-
-llm:
-  provider: custom
-  model_id: doubao-seed-evolving
-  api_base: https://ark.cn-beijing.volces.com/api/v3
-  api_key: "your-llm-api-key"
-
-sharing:
-  backend: viking
-  viking_deployment: local
-  viking_endpoint: http://localhost:1933
-  viking_account: default
-  viking_user: team
-  viking_team_api_key: "your-service-or-admin-key"
-
-evolve:
-  publish_mode: validated
-  human_review_enabled: true
-
-validation:
-  enabled: true
-  mode: true_replay
-
-aggregation:
-  enabled: true
-  shared_knowledge_prefix: shared-knowledge
+```bash
+TARGET_ARCH=x86_64 sh cicd_scripts/build.sh     # 或 TARGET_ARCH=aarch64
 ```
 
-### 配置项位置
+构建顺序：
 
-| 路径 | 说明 |
-|------|------|
-| `~/.teamEvolver/config.yaml` | 主配置文件 |
-| `~/.teamEvolver/runtime/skills/` | Skill 运行缓存目录 |
-| `~/.team_memory/` | 团队记忆聚合 Skill、指纹与增量状态 |
-| `~/.teamEvolver/teamEvolver.pid` | Daemon PID 文件 |
-| `~/.teamEvolver/teamEvolver.log` | 默认 Daemon 日志 |
+1. 前端 `npm ci`、测试、生产构建（`SKIP_FRONTEND=1` 可复用已有产物）。
+2. 按目标镜像的解释器版本和 manylinux 架构下载 hash 校验过的 wheelhouse；只发布 sdist 的依赖（如 `jieba`）保留锁定的 sdist。
+3. 在运行时镜像内以 `--network none` 构建应用 wheel。
+4. 生成 `release/manifest.json`（版本、目标镜像 digest、Schema 版本和全部文件 SHA-256），打包为 `app.tar`。
+
+```text
+release/
+├── teamevolver-<version>-py3-none-any.whl
+├── wheels/
+├── requirements.lock
+├── build-requirements.lock
+├── install.sh
+├── container_start.sh
+└── manifest.json
+```
+
+## 离线安装
+
+```bash
+mkdir -p /app/deploy && tar -xf app.tar -C /app/deploy
+python3.11 -m venv /opt/teamEvolver-venv
+PYTHON_BIN=/opt/teamEvolver-venv/bin/python sh /app/deploy/install.sh
+```
+
+`install.sh` 先按 manifest 校验每个文件，再以 `--no-index --require-hashes` 安装构建工具、依赖和应用 wheel，最后执行 `pip check`。安装过程不需要网络，也不需要源码目录。
+
+`scripts/verify_offline_install.sh [app.tar] [linux/amd64|linux/arm64]` 在 `--network none` 的空容器中验证这一流程。
+
+## 容器镜像
+
+```bash
+TARGET_ARCH=x86_64 sh cicd_scripts/build.sh
+docker build --platform linux/amd64 -t teamevolver:<version> .
+```
+
+Dockerfile 只 `COPY release/`，不复制源码，也不设置 `PYTHONPATH`。镜像内置固定版本和校验和的 OpenViking CLI，并安装 `git`（仅供 Skill Git 导入导出使用）。入口为 `container_start.sh`，必须设置 `TEAMEVOLVER_ROLE=api` 或 `worker`。部署方式见 [生产部署指南](../guides/02-deployment.md)。
+
+## 初始化数据库
+
+```bash
+export TEAMEVOLVER_PG_DSN="postgresql://te_app:...@db:5432/teamevolver"
+teamEvolver schema apply --dry-run   # 列出待执行版本
+teamEvolver schema apply
+teamEvolver schema status
+```
+
+Schema（默认 `teamevolver`，可用 `TEAMEVOLVER_PG_SCHEMA` 修改）必须预先由管理员创建并归属应用角色。`schema apply` 幂等，执行记录写入 `schema_versions`。业务模块不在运行时建表。
 
 ## 启动与管理
 
-### 前台启动（调试用）
-
 ```bash
-teamEvolver start
-```
-
-### 后台守护进程
-
-```bash
-teamEvolver start --daemon
-```
-
-### 查看状态
-
-```bash
+teamEvolver start --role api       # HTTP API + 控制台，默认端口 52010
+teamEvolver start --role worker    # Worker + 健康端口，默认 52011
+teamEvolver start --role all       # 仅 TEAMEVOLVER_ENV=local
+teamEvolver start --role api --daemon --log-file /var/log/te-api.log
 teamEvolver status
-```
-
-### 停止服务
-
-```bash
 teamEvolver stop
-```
-
-### 查看日志
-
-```bash
-# Daemon 模式下
-tail -f ~/.teamEvolver/teamEvolver.log
 ```
 
 ## 验证安装
 
 ```bash
-# 1. 检查服务健康
-curl -fsS http://localhost:52010/health
-
-# 2. 检查状态
-curl -fsS http://localhost:52010/status | python -m json.tool
-
-# 3. 访问控制台
-# 浏览器打开 http://localhost:52010/
-
-# 4. 运行测试（源码安装时）
-python -m pytest tests/ -v
+curl http://localhost:52010/healthz      # 存活
+curl -i http://localhost:52010/readyz    # 就绪；PG 不可用或排空时返回 503
+curl -i http://localhost:52011/readyz    # Worker 就绪
+teamEvolver config show                  # 查看脱敏后的启动配置
+python -m pytest                         # 源码安装时
 ```
 
 ## 升级
 
-```bash
-pip install --upgrade teamEvolver
-# 或源码安装：
-cd teamEvolver && git pull && pip install -e ".[all]"
-
-# 重启服务
-teamEvolver stop && teamEvolver start --daemon
-```
-
-## 相关文档
-
-- [配置参考](../guides/01-configuration)：所有配置项的完整说明
-- [生产部署](../guides/02-deployment)：生产环境部署最佳实践
+1. 构建新 release，在预发环境执行离线安装和 `teamEvolver schema apply --dry-run`。
+2. 执行 `teamEvolver schema apply`。Schema 只向前演进；应用回滚只能回到兼容当前 Schema 的 release。
+3. 逐个替换 API 与 Worker 实例。实例收到 SIGTERM 后先撤销 readiness，再等待在途任务结束。

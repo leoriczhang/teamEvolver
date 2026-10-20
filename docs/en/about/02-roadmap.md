@@ -1,26 +1,23 @@
 # Roadmap
 
-## Current Status
+## Current Capabilities
 
-Implemented:
+- Agent protocol: Session ingest, Agent Context, Replay branches and Skill pull, authenticated by tenant Key + `user_id`
+- Data source onboarding: versioned adapters in PostgreSQL, preview, pull and daily scheduled pull
+- Skill evolution: Session analysis, grouping by Skill, Agent-loop improvement and creation, conflict merge, dataset synthesis
+- True Replay: Baseline vs Candidate in separate workspaces, Checklist gate and efficiency comparison
+- Skill versions: append-only version chain, idempotent mutations, rollback and tombstones, delivered to Agents by pull
+- Team Memory: cross-user aggregation, DreamCycle maintenance, change records and Memory Replay
+- Successful experiences: experience library, pattern compilation and OpenViking projection
+- Knowledge base mining: document upload and conversion, OpenViking Compile and Wiki graph
+- Console: experiment workbench, Prompt Studio, personal and team assets, platform assets, tenant and member management
+- Runtime: separate API and Worker roles, PostgreSQL task queue, leases and fences, multi-replica support
 
-- Agent Protocol V1 (registration, Session ingest, Context Workspace, Replay Branch, Skill Sync)
-- 11-stage Skill evolution pipeline with cross-cycle Evidence
-- True Replay (Baseline vs Candidate isolation plus team-Memory True Replay)
-- Cross-user team-Memory aggregation (user selection, incremental compilation, tree-reduce, editable aggregation Skill)
-- Optional DreamCycle Memory maintenance and change ledger
-- Skill versioning, audit chain, tombstones, and durable outbox
-- Personal-Skill editing, team publish requests, and administrator approval
-- Generic Agent Protocol v2 integration and Pi Agent reference integration
-- Langfuse inbound pull, outbound tracing, and custom Trace mapping
-- Experiment Workbench (multi-file Skill Candidate editing, Diff, and True Replay)
-- Personal Memory, Team Resources, and read-only Platform Assets
-- Hot-reloaded remote self-hosted or Volcengine Cloud OpenViking configuration
-- Skill Miner document mining and Benchmark workflows
-- Built-in bilingual documentation, full-text search, and reference validation
+## Pending
 
-## Long-term Vision
+- End-to-end acceptance against a real OpenViking environment (Compile, retrieval cleanup, ACL)
 
-- Become the de facto protocol for Agent team capability evolution
-- Support cross-organization Skill validation and sharing (federated validation)
-- Automatically discover team capability bottlenecks and initiate evolution
+## Long-term Direction
+
+- Cross-organization Skill validation and sharing
+- Automatically discovering team capability bottlenecks and starting evolution

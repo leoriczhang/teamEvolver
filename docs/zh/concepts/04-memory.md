@@ -1,133 +1,112 @@
 # Memory 体系
 
-> 当前团队 Memory 已收敛为两阶段 compile：聚合写入正式目录，`ov cp` 留私有快照，再由可配置 DreamCycle Skill 维护同一目录。下文旧 ReAct Job 与逐条变更账本仅描述历史兼容能力。现行执行规则见 [团队 Memory 两阶段进化](../api/12-team-memory.md)。
-
-Memory 是可检索的长期事实、背景、偏好与团队共识。它为 Agent 提供上下文，而不是像 Skill 一样规定完整任务流程。teamEvolver 将 Memory 分为个人资产和团队资产，并用独立的聚合、维护、实验和审计链路管理它们。
+Memory 是可检索的长期事实、背景、偏好和团队共识。它为 Agent 提供上下文，不规定完整任务流程。个人 Memory 和团队 Memory 都保存在 OpenViking；Memory 运行、阶段、检查点、Memory Change 和 Replay 记录保存在 PostgreSQL。
 
 ## 个人 Memory 与团队 Memory
 
 | 维度 | 个人 Memory | 团队 Memory |
 |------|-------------|-------------|
-| 默认路径 | `viking://user/<user>/memories/` | `viking://resources/shared-knowledge/` |
-| 可配置项 | 每个用户的 `personal_space.viking_user` | `aggregation.shared_knowledge_prefix` |
-| Agent 权限 | 通过 Context Workspace 的 `remember` / `forget` 写自己的 Memory | 只读 |
-| 控制台权限 | 本人可编辑自己的 Memory；管理员可切换用户 | 仅管理员可编辑 |
-| 主要来源 | 用户偏好、工作习惯、个人事实和 Session 抽取结果 | 多个用户中反复出现并经过聚合的共性知识 |
-| 进化方式 | Agent 写入、资产页编辑 | 跨 User 聚合、管理员批量编辑、可选 DreamCycle 维护和 Memory Replay |
+| 路径 | `viking://user/<user>/memories/` | `viking://resources/<shared_knowledge_prefix>/`，默认 `shared-knowledge` |
+| Agent 权限 | Context `remember` / `forget` 只写自己的 Memory | 只读 |
+| 控制台 | 本人编辑自己的 Memory；管理员可切换用户 | 仅租户管理员编辑 |
+| 来源 | Agent 写入、用户编辑 | 跨用户聚合 + DreamCycle 维护 |
 
-团队 Memory 使用 Account 共享的 Resources 命名空间，不属于某个用户的私有 `memories/`。这使授权用户可以检索同一份团队产物，同时仍由 teamEvolver 控制写权限。
+团队 Memory 位于 Account 共享的 Resources 命名空间，授权用户都能检索同一份产物，写权限仍由 teamEvolver 控制。
 
-## 跨 User 团队 Memory 聚合
+## Memory Evolution
 
-当前控制台中的「进化链路 → 团队 Memory 自进化」使用 `MemoryAggregationService` 和 `ov compile`：
+一次 Memory 运行由 `POST /api/aggregation/run`（`pipeline` 为 `both`、`aggregation` 或 `maintenance`）或 `POST /api/memory/maintenance/run`（固定 `maintenance`）受理。API 固定当时的 `memory` 模块配置 revision，写入 `memory_runs` 和 `memory.aggregate` 任务后返回 `202`。Worker 执行 `team_memory/pipeline.py`：
 
-1. 控制台管理员默认使用系统配置的 Endpoint、Account 和 Trusted Root Key；独立接口也支持 `admin_key` 的 API-key 模式。
-2. 服务端使用 Root/Admin Key 枚举用户；API-key 模式同时读取现存的用户明文 Key，排除 team 服务用户。
-3. 管理员全选、反选或逐个选择参与用户，并选择增量或全量模式。
-4. Phase 1 使用每个用户的身份并发读取可见 Memory 原文，确定性写入 merge 身份的私有 staging；不调用模型或 Skill。
-5. Phase 2 使用固定的 Skill revision，以最多 15 个源为一组做 tree-reduce；大账号只在私有工作区使用固定哈希分区，随后跨分区再次语义归并到配置的团队 Memory 根。
+1. **排他**：同一 OpenViking Account 同时只允许一个 Memory 运行，由 `resource_leases` 的 `memory:account:<account>` 租约保证；被占用时 5 秒后重试。
+2. **变更前快照**：把目标目录复制到运行工作根 `before/`。
+3. **聚合阶段**（`aggregation`、`both`）：
+   - 固定聚合 Skill（默认 `viking://agent/skills/team-memory-okf`）到工作根，记录 revision。
+   - 分页枚举 Account 用户（默认每页 1000，安全上限 50000），排除 merge 身份自己。
+   - 逐个用户读取 `memories/` 下所选类型的原文，确定性写入私有 staging 的 `snapshot.jsonl`；单用户上限 20 MiB，不调用模型。
+   - 增量模式下，用户原文指纹和 Skill revision 都未变化时复用上次快照。
+   - 以 `merge_fan_in`（默认 4，范围 2–15）为组做 tree-reduce Compile；用户数达到 `partition_threshold`（默认 512）时先按稳定哈希分为 `partition_count`（默认 256）个分区。
+4. **维护阶段 DreamCycle**（`maintenance`、`both`）：固定维护 Skill（默认 `viking://agent/skills/team-memory-maintenance`），把当前团队 Memory 复制为私有快照作为输入，再 Compile 回同一目录，完成去重、修订和过时标记。
+5. **变更后快照**：复制到 `after/`，并写入一条 Memory Change（before/after 引用）。
 
-默认目录：
+每个阶段完成后写入 `memory_stages`；每个用户的快照指纹写入 `memory_checkpoints`。Worker 崩溃或租约过期后，另一个 Worker 从已完成阶段续跑，不重复已完成的用户快照或 Compile。
+
+工作根：
 
 ```text
 个人源     viking://user/<user>/memories/<kind>/
-工作根     viking://user/<merge-user>/resources/teamEvolver/staging/<target-hash>/
-最终根     viking://resources/shared-knowledge/
+工作根     viking://user/<merge-user>/resources/teamEvolver/staging/<run-id>/
+最终根     viking://resources/<shared_knowledge_prefix>/
 ```
 
-`shared_knowledge_prefix` 和 `staging_dir` 可配置。工作根属于 merge 身份的私有 Resources，原始快照和 `_merge` 中间产物不会暴露到 account 共享 Resources；最终根只包含聚合后的团队 Memory。
+工作根位于 merge 身份的私有 Resources，原始快照与中间产物不暴露到 Account 共享 Resources。
 
-### 聚合 Skill
+## 聚合 Skill 与维护 Skill
 
-聚合输出结构由「团队记忆聚合 Skill」定义。管理员可在控制台编辑完整 `SKILL.md`，内容会发布到账号级共享目录 `viking://agent/skills/team-memory-okf` 并生成版本快照。Skill 只在 Phase 2 merge 中执行。
+两个 Skill 定义聚合输出结构和维护规则，保存在 OpenViking。管理员在「进化链路 → 团队 Memory 自进化」中读写：
 
-Skill 内容变化只会使下一次运行重新执行受影响的 merge；不会重新复制未变化用户的 staging。用户 Memory 内容未变化且快照仍存在时，增量模式直接复用该快照。
+- `GET /api/aggregation/okf-skill?stage=aggregation|maintenance`
+- `PUT /api/aggregation/okf-skill?stage=...`：Skill `name` 必须与配置 URI 末段一致，正文不超过 128 KiB；保存作为 `memory.compile` 任务受理，返回 `202`。
 
-### 规模与失败恢复
-
-- Phase 1 快照复制默认最大并发为 6。
-- 用户清单按每页 1,000 个稳定分页读取，默认安全上限为 50,000。
-- `merge_fan_in` 默认 4，运行时限制为 2–15，避免超过 compile 的 16 源上限。
-- staging 用户超过 512 时，最多使用 256 个稳定私有分区；新增或变化用户只使所属分区及其通向最终语义根的路径失效。
-- 10,000 用户首次全量当前约需 3,600 次 merge compile；支持断点续跑，但耗时和模型成本仍取决于部署吞吐。
-- 最终共享目录仍完全遵循用户编辑的 Skill 语义结构；它是提炼后的团队 Memory，原始不可变快照只保留在私有工作区。
-- 单用户失败不会中止其他用户；下一次增量运行会重试失败或内容变化的用户。
-- 每组完成后立即追加检查点。服务重启会清空实时任务列表，但不会清除已完成快照或 merge 检查点。
-
-完整接口见 [团队记忆聚合 API](../api/11-team-memory-aggregation.md)。
-
-## 团队 Memory 维护（DreamCycle）
-
-团队 Memory 维护已由跨 User `ov compile` 聚合接管。`dreamcycle.enabled` / `dreamcycle.auto_start` 现在只用于开启聚合维护守护进程，触发后等价于调用聚合 run 接口（`pipeline=maintain`），不再执行任何 ReAct Job，也不存在独立的维护模型配置。它默认关闭。
-
-### 调度窗口
-
-- `active_start_hour=0`、`active_end_hour=6`：默认活跃窗口为 0:00–6:00
-- `rounds_per_window=3`：每个窗口最多 3 轮
-- `round_interval_minutes=90`：轮次间隔 90 分钟
-
-历史 ReAct Job（`team_overview` / `deduplication` / `cleanup` / `onboarding_check` / `consolidate`）与旧 ReAct 写入调度已停用，仅保留历史账本与 Memory Replay 的读取能力。
-
-维护目标为 `aggregation.shared_knowledge_prefix` 下的共享目录，完整执行规则见 [团队 Memory 两阶段进化](../api/12-team-memory.md)。
+Skill 变化只使下一次运行重新执行受影响的 Compile，不重复复制未变化用户的快照。
 
 ## Memory Change 与 True Replay
 
-Memory 维护写入会通过 `MemoryChangeLedger` 记录 before/after Snapshot OID、内容 hash、diff hash、来源引用、策略理由和执行结果。记录使用 `teamevolver.memory-change.v1`，存放在平台根下的 `memory-changes/`。
+`GET /api/memory/changes` 列出 Memory Change。管理员可以把一次变更作为 Memory Replay：
 
-`MemoryTrueReplayRunner` 可以把变更前内容作为 Baseline、变更后内容作为 Candidate，在冻结 Context 下执行 A/B Replay。Checklist 仍是完成门禁；通过后按交互轮次、工具调用数、Token 依次比较效率。结果存放在 `memory-replays/<change_id>/`。
+- `POST /api/memory/changes/{change_id}/true-replay`：读取变更前后快照（上限 2 MiB），Baseline 为变更前内容，Candidate 为变更后内容。
+- `POST /api/openviking/memory/true-replay`：直接提交 `memory_path`、`before_content`、`after_content`。
+
+两者都作为 `memory.replay` 任务执行，复用 [True Replay](./06-true-replay.md) 的 Checklist 门禁和效率比较。历史结果见 `GET /api/memory/changes/{change_id}/true-replays`。
 
 ## 资产页编辑
 
-「资产中心 → 个人与团队资产」从 `viking://user` 和 `viking://resources` 展示可访问内容：
+「个人与团队资产」通过 `/api/openviking/workspace/*` 浏览和编辑 `viking://user` 与 `viking://resources`：
 
 - 浏览目录、文件及 L0/L1 摘要
-- 管理员或资产所有者进入编辑模式
-- 跨多个文件保留草稿，统一查看 Diff 后批量保存
-- 通过内容哈希前置条件防止覆盖并发修改
+- 管理员或资产所有者进入编辑模式，跨多个文件保留草稿，统一查看 Diff 后批量保存
+- 批量写使用内容哈希前置条件，防止覆盖并发修改
 
-## 配置示例
+## 配置
 
-```yaml
-aggregation:
-  enabled: true
-  shared_knowledge_prefix: shared-knowledge
-  staging_dir: staging
-  account_user_limit: 50000
-  account_user_page_size: 1000
-  phase1_concurrency: 6
-  merge_fan_in: 4
-  merge_concurrency: 4
-  partition_threshold: 512
-  partition_count: 256
+`memory` 模块配置保存在 `tenant_configs`，`GET/POST /api/aggregation/settings` 读写其中的 `aggregation` 对象，必须携带 `expected_revision`：
 
-dreamcycle:
-  enabled: false
-  active_start_hour: 0
-  active_end_hour: 6
-  rounds_per_window: 3
-  round_interval_minutes: 90
-  max_turns_per_job: 25
-  dedup_merge_threshold: 0.86
-  dedup_warn_threshold: 0.72
+```json
+{
+  "expected_revision": 3,
+  "shared_knowledge_prefix": "shared-knowledge",
+  "okf_skill_uri": "viking://agent/skills/team-memory-okf",
+  "maintenance_skill_uri": "viking://agent/skills/team-memory-maintenance",
+  "kinds": [],
+  "account_user_limit": 50000,
+  "account_user_page_size": 1000,
+  "merge_fan_in": 4,
+  "merge_concurrency": 4,
+  "partition_threshold": 512,
+  "partition_count": 256,
+  "preserve_manual_edits": false,
+  "incremental_publish": false,
+  "publish_batch_users": 8
+}
 ```
+
+`preserve_manual_edits=true` 时，当前团队 Memory 作为额外输入参与聚合；`incremental_publish=true` 时只把变化用户按 `publish_batch_users` 分批写入目标目录。维护默认手动运行；将 `maintenance.trigger_mode` 设为 `automatic` 后，Worker 按 `maintenance.interval_seconds` 定时受理维护任务，管理员仍可随时手动运行。
 
 ## 代码入口
 
 | 模块 | 路径 |
 |------|------|
-| 跨 User 聚合服务 | `team_memory/service.py` |
-| 聚合路由与设置 | `team_memory/routes.py` |
-| 聚合 Skill | `team_memory/aggregation/okf_skill.py` |
-| Workspace 作用域与批量写 | `teamEvolver/proxy/openviking_workspace.py` |
-| Memory 维护守护进程 | `team_memory/maintenance/runtime.py` |
-| Memory Change 账本 | `team_memory/memory_changes.py` |
-| Memory Replay | `team_replay/memory.py` |
-| OpenViking 存储客户端 | `teamEvolver/storage/viking.py` |
+| HTTP | [api/](../../../team_memory/api/) |
+| 运行受理 | [runs.py](../../../team_memory/runs.py) |
+| 流水线 | [pipeline.py](../../../team_memory/pipeline.py) |
+| Compile 分组 | [merge.py](../../../team_memory/merge.py) |
+| Worker Handler | [handlers.py](../../../team_memory/handlers.py) |
+| 仓库 | [repository.py](../../../team_memory/repository.py) |
+| OpenViking 适配 | [openviking.py](../../../team_memory/openviking.py) |
+| 维护 Skill 默认内容 | [maintenance_skill.py](../../../team_memory/maintenance/maintenance_skill.py) |
+| Memory Replay | [replay.py](../../../team_memory/replay.py) |
 
 ## 相关文档
 
 - [存储空间与目录布局](./09-storage-layout.md)
 - [True Replay](./06-true-replay.md)
-- [配置参考](../guides/01-configuration.md)
-- [Web 控制台](../guides/03-console.md)
 - [团队记忆聚合 API](../api/11-team-memory-aggregation.md)

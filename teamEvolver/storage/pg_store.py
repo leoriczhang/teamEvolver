@@ -4,7 +4,7 @@ Implements the same synchronous object-store contract as
 :class:`~teamEvolver.storage.local.LocalObjectStore` and
 :class:`~teamEvolver.storage.viking.OpenVikingObjectStore`
 (``get_object`` / ``put_object`` / ``delete_object`` / ``iter_objects``) on
-top of the ``objects`` kv table (multi-tenancy plan §2.1), with native
+top of the ``objects`` kv table , with native
 transactional ``batch_write`` including precondition enforcement
 (``create_if_absent`` / ``replace_if_hash``).
 
@@ -18,28 +18,31 @@ from __future__ import annotations
 
 import hashlib
 import io
-import json
 import re
 from collections.abc import Mapping
 from typing import Any, Iterator
 
-from .base import ObjectInfo, _BytesObject, read_bytes
-from .pg_pool import (
+from ..database.pool import (
     _DEFAULT_COMMAND_TIMEOUT,
     _DEFAULT_POOL_MAX,
     _DEFAULT_POOL_MIN,
-    _DEFAULT_SCHEMA,
-    _advisory_key,
+    DEFAULT_SCHEMA,
     dsn_from_env,
-    get_pg_runtime,
+    get_database_pool,
     validate_schema_name,
 )
+from .base import ObjectInfo, _BytesObject, read_bytes
 
 _BATCH_MAX_OPERATIONS = 256
 _BATCH_MAX_FILE_BYTES = 8 * 1024 * 1024
 _BATCH_MAX_TOTAL_BYTES = 16 * 1024 * 1024
 
 _TENANT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_DEFAULT_SCHEMA = DEFAULT_SCHEMA
+
+
+def _advisory_key(schema, tenant_id):
+    return int.from_bytes(hashlib.sha256(f"{schema}:{tenant_id}".encode()).digest()[:8], "big", signed=True)
 
 
 def validate_tenant_id(tenant_id: str) -> str:
@@ -97,7 +100,7 @@ class PgObjectStore:
         self._command_timeout = command_timeout
         self._ssl = ssl or "prefer"
         self._op_timeout = float(op_timeout)
-        self._runtime = runtime or get_pg_runtime(
+        self._runtime = runtime or get_database_pool(
             dsn=self._dsn,
             schema=schema,
             pool_min=pool_min,
@@ -206,87 +209,6 @@ class PgObjectStore:
 
         return self._runtime.run(_bulk(), timeout=self._op_timeout)
 
-    def write_session_records(self, objects: Mapping[str, bytes], index_key: str, rows: list[dict]) -> None:
-        """Commit queue/archive/audit and per-session index rows atomically."""
-        async def write():
-            async with self._runtime.tenant_conn(self._tenant_id) as conn:
-                async with conn.transaction():
-                    for row in sorted(rows, key=lambda value: value["session_id"]):
-                        await conn.execute(
-                            "SELECT pg_advisory_xact_lock($1)",
-                            _advisory_key(self._schema, f"{self._tenant_id}:session:{row['session_id']}"),
-                        )
-                    for key, body in sorted(objects.items()):
-                        await conn.execute(
-                            f"INSERT INTO {self._schema}.objects (tenant_id, key, content) VALUES ($1,$2,$3) "
-                            "ON CONFLICT (tenant_id,key) DO UPDATE SET content=EXCLUDED.content, updated_at=now()",
-                            self._tenant_id, _clean_key(key), body,
-                        )
-                    for row in rows:
-                        await conn.execute(
-                            f"INSERT INTO {self._schema}.session_index (tenant_id,index_key,session_id,meta) "
-                            "VALUES ($1,$2,$3,$4::jsonb) ON CONFLICT (tenant_id,index_key,session_id) "
-                            "DO UPDATE SET meta=EXCLUDED.meta, updated_at=now()",
-                            self._tenant_id, index_key, row["session_id"], json.dumps(row),
-                        )
-        self._runtime.run(write(), timeout=self._op_timeout)
-
-    def consume_session(self, queue_key: str, expected_hash: str, archive_key: str, archive: dict) -> bool:
-        """Acknowledge only the exact Session revision consumed by this cycle."""
-        if not expected_hash:
-            raise ValueError("session consumption requires the drained content hash")
-
-        async def consume():
-            async with self._runtime.tenant_conn(self._tenant_id) as conn:
-                async with conn.transaction():
-                    await conn.execute(
-                        "SELECT pg_advisory_xact_lock($1)",
-                        _advisory_key(self._schema, f"{self._tenant_id}:session:{archive['session_id']}"),
-                    )
-                    row = await conn.fetchrow(
-                        f"SELECT content FROM {self._schema}.objects WHERE tenant_id=$1 AND key=$2 FOR UPDATE",
-                        self._tenant_id, queue_key,
-                    )
-                    if row is None or hashlib.sha256(bytes(row["content"])).hexdigest() != expected_hash:
-                        return False
-                    await conn.execute(
-                        f"INSERT INTO {self._schema}.objects (tenant_id,key,content) VALUES ($1,$2,$3) "
-                        "ON CONFLICT (tenant_id,key) DO UPDATE SET content=EXCLUDED.content, updated_at=now()",
-                        self._tenant_id, archive_key, json.dumps(archive).encode(),
-                    )
-                    await conn.execute(
-                        f"DELETE FROM {self._schema}.objects WHERE tenant_id=$1 AND key=$2",
-                        self._tenant_id, queue_key,
-                    )
-                    return True
-        return self._runtime.run(consume(), timeout=self._op_timeout)
-
-    def read_session_index(self, index_key: str, limit: int = 10000) -> list[dict]:
-        async def read():
-            async with self._runtime.tenant_conn(self._tenant_id) as conn:
-                return await conn.fetch(
-                    f"SELECT meta FROM {self._schema}.session_index "
-                    "WHERE tenant_id=$1 AND index_key=$2 ORDER BY updated_at DESC LIMIT $3",
-                    self._tenant_id, index_key, limit,
-                )
-        rows = self._runtime.run(read(), timeout=self._op_timeout)
-        return [json.loads(row["meta"]) if isinstance(row["meta"], str) else row["meta"] for row in rows]
-
-    def experience_import_sources(self, **kwargs):
-        from .experience_import import sources_page
-
-        return sources_page(self, **kwargs)
-
-    def experience_import_page(self, source, **kwargs):
-        from .experience_import import project_page
-
-        return project_page(self, source, **kwargs)
-
-    def experience_import_unchanged(self, source):
-        from .experience_import import source_unchanged
-
-        return source_unchanged(self, source)
-
     # -- conditional batch write ------------------------------------------- #
 
     def changed_objects_page(self, *, pattern: str, after_time: str, after_key: str,
@@ -327,26 +249,8 @@ class PgObjectStore:
                 return (await conn.fetchval("SELECT clock_timestamp()")).isoformat()
         return self._runtime.run(now(), timeout=self._op_timeout)
 
-    def try_background_lock(self, namespace: str) -> bool:
-        return self._runtime.try_advisory_lock(f"{namespace}:{self._tenant_id}")
 
-    def check_background_lock(self, namespace: str) -> None:
-        """Fail closed if the dedicated lock connection was lost."""
-        name = f"{namespace}:{self._tenant_id}"
-        async def check():
-            with self._runtime._advisory_lock:
-                conn = self._runtime._advisory_conns.get(name)
-            try:
-                if conn is None or conn.is_closed():
-                    raise RuntimeError("BACKGROUND_LOCK_LOST")
-                await conn.fetchval("SELECT 1")
-            except Exception:
-                # A terminated asyncpg pool proxy can raise even on is_closed.
-                raise RuntimeError("BACKGROUND_LOCK_LOST") from None
-        self._runtime.run(check(), timeout=self._op_timeout)
 
-    def release_background_lock(self, namespace: str) -> None:
-        self._runtime.release_advisory_lock(f"{namespace}:{self._tenant_id}")
 
     def object_precondition(self, key: str) -> dict[str, str]:
         """Capture the current object state for a later conditional batch."""
@@ -424,7 +328,7 @@ class PgObjectStore:
                                     "(replace_if_hash mismatch)"
                                 )
                         # An absent row cannot be protected by SELECT FOR UPDATE.
-                        # INSERT ... DO NOTHING decides the winner atomically.
+                        # INSERT... DO NOTHING decides the winner atomically.
                         if kind == "create_if_absent":
                             result = await conn.execute(
                                 f"INSERT INTO {self._schema}.objects (tenant_id,key,content) VALUES ($1,$2,$3) "

@@ -12,13 +12,13 @@ from pathlib import PurePosixPath
 from typing import Any, Callable, Mapping, Protocol
 
 from .engine import (
-    source_runtime_type,
-    resolve_factory,
-    make_context,
     execute_pair,
-    read_team_evolver_harness,
     load_context_snapshot,
+    make_context,
+    read_team_evolver_harness,
     render_trajectory,
+    resolve_factory,
+    source_runtime_type,
     spawn_native_agent_branch,
 )
 from .host import current_host

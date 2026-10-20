@@ -1,16 +1,13 @@
 # Source adapter: doris
 #
-# 从 Apache Doris 拉取 Langfuse 格式的 trace 数据（统一走 Doris，不再直连 Langfuse API）。
-# Doris 表结构与 inc-aiagent-core-skill-opt/core/doris_client.py 一致：
-#   - langfuse_traces_log_new_grey（trace 表）
-#   - langfuse_observations_log_new_grey（observation 表）
-#   - langfuse_project_id_mapping_grey（项目 ID 映射表）
+# 从 Apache Doris 拉取 Langfuse 格式的 trace 数据。
+# 表名通过 DORIS_TRACES_TABLE、DORIS_OBSERVATIONS_TABLE 和 DORIS_MAPPING_TABLE 配置。
 #
 # 每个 agent 的 project_id 在 datasource.options 或 per-agent adapter 头部注释中配置。
-# Doris 帐号密码从环境变量读取（.env_prd / .env_sit）：
+# Doris 帐号密码从环境变量读取：
 #   DORIS_HOSTS, DORIS_PORT, DORIS_USER, DORIS_PASSWORD, DORIS_DB
 #
-# 热重载：改完保存即生效，无需重启服务。
+# 修改共享数据源模块后需重启服务。
 
 from __future__ import annotations
 
@@ -18,6 +15,7 @@ import itertools
 import json
 import logging
 import os
+import re
 import socket
 import threading
 import time
@@ -38,16 +36,19 @@ DORIS_PORT = int(os.getenv("DORIS_PORT", "9030"))
 DORIS_USER = os.getenv("DORIS_USER", "")
 DORIS_PASSWORD = os.getenv("DORIS_PASSWORD", "")
 DORIS_DB = os.getenv("DORIS_DB", "")
-DORIS_PROXY_URL = os.getenv(
-    "DORIS_PROXY_URL",
-    "https://skill-opt.sf-express.com/api/doris/query",
-)
+DORIS_PROXY_URL = os.getenv("DORIS_PROXY_URL", "")
 _FORCE_PROXY = os.getenv("DORIS_FORCE_PROXY", "").strip() in ("1", "true", "yes")
 
-# 表名
-T_TRACES = "langfuse_traces_log_new_grey"
-T_OBSERVATIONS = "langfuse_observations_log_new_grey"
-T_MAPPING = "langfuse_project_id_mapping_grey"
+def _table_name(env: str, default: str) -> str:
+    value = os.getenv(env, default)
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?", value):
+        raise ValueError(f"{env} must be a table name or database.table")
+    return value
+
+
+T_TRACES = _table_name("DORIS_TRACES_TABLE", "langfuse_traces")
+T_OBSERVATIONS = _table_name("DORIS_OBSERVATIONS_TABLE", "langfuse_observations")
+T_MAPPING = _table_name("DORIS_MAPPING_TABLE", "langfuse_project_id_mapping")
 
 _OBS_COLS = (
     "trace_id, id, type, name, parent_observation_id, start_time, end_time, "
@@ -160,12 +161,14 @@ def _query_direct(sql: str, timeout: int = 120) -> Optional[list[dict]]:
 
 def _query_proxy(sql: str, timeout: int = 180, retries: int = 3) -> list[dict]:
     import httpx
+    if not DORIS_PROXY_URL:
+        raise ValueError("DORIS_PROXY_URL is required when direct Doris access is unavailable")
     payload = {
         "sql": sql, "host": _host_order()[0], "port": DORIS_PORT,
         "username": DORIS_USER, "password": DORIS_PASSWORD, "database": DORIS_DB,
     }
     ca_bundle = os.getenv("DORIS_CA_BUNDLE")
-    verify = ca_bundle if ca_bundle else False
+    verify = ca_bundle if ca_bundle else True
     last_err: Optional[str] = None
     for attempt in range(1, retries + 1):
         try:
@@ -376,7 +379,7 @@ def fetch_traces_full_batch(trace_ids: list[str]) -> list[dict]:
 
 
 # =====================================================================
-# 会话类型判定（复刻 skill-opt 的 _session_kind）
+# 会话类型判定
 # =====================================================================
 def _session_kind(session_id: Optional[str]) -> str:
     if not session_id:

@@ -1,4 +1,4 @@
-import type { SharingConfig } from "@/api/client";
+import type { SharingConfig } from "@/features/operations/api/client";
 
 /** OpenViking 是否已具备可用连接配置。 */
 export function hasOpenVikingConfiguration(config?: SharingConfig | null): boolean {

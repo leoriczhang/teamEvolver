@@ -1,349 +1,84 @@
-"""
-Daemon lifecycle commands: start / stop / status.
-
-Handles foreground and background (detached) service startup, health probing,
-PID bookkeeping, and graceful shutdown.
-"""
-
+"""Start only the application composition root with an explicit runtime role."""
 from __future__ import annotations
 
-import json
 import os
+import signal
+import subprocess
 import sys
 from pathlib import Path
 
 import click
 
 from .. import runtime_state
-from ..config_store import ConfigStore
-
-
-def _effective_service_port(config_store: ConfigStore, override_port: int | None) -> int:
-    if override_port:
-        return override_port
-    return int(config_store.get("service.port") or 52010)
-
-
-def _is_process_alive(pid: int) -> bool:
-    return runtime_state.process_alive(pid)
-
-
-def _read_pid() -> int | None:
-    return runtime_state.read_pid()
-
-
-def _clear_pid():
-    runtime_state.clear_pid()
-
-
-def _clear_pid_if_matches(pid: int):
-    runtime_state.clear_pid_if_matches(pid)
-
-
-def _healthz_ready(port: int, timeout: float = 0.5) -> bool:
-    import urllib.request
-
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=timeout) as resp:
-            if resp.status != 200:
-                return False
-            payload = json.loads(resp.read().decode("utf-8"))
-            return payload.get("ok") is True
-    except Exception:
-        return False
-
-
-def _ensure_daemon_not_running():
-    if runtime_state._multi_replica_enabled():
-        # Multi-replica mode: multiple daemons may coexist on one host; the
-        # singleton check is skipped (cross-replica cycle isolation is enforced
-        # by pg_advisory_lock in the scheduler).
-        return
-    pid = _read_pid()
-    if pid is None:
-        return
-
-    if not _is_process_alive(pid):
-        _clear_pid()
-        return
-
-    raise click.ClickException(
-        f"teamEvolver is already running (PID={pid}). "
-        "Use 'teamEvolver status' to inspect it or 'teamEvolver stop' before starting a new daemon."
-    )
-
-
-def _wait_for_daemon_ready(proc, port: int, log_path: Path, timeout_s: float = 15.0):
-    import time
-
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        returncode = proc.poll()
-        if returncode is not None:
-            raise click.ClickException(f"teamEvolver daemon exited with code {returncode}. Check logs: {log_path}")
-        if _healthz_ready(port):
-            return
-        time.sleep(0.2)
-
-    raise click.ClickException(f"teamEvolver daemon did not become healthy in time. Check logs: {log_path}")
-
-
-def _daemon_ready_timeout_seconds(default: float = 15.0) -> float:
-    raw = str(os.environ.get("TEAMEVOLVER_DAEMON_READY_TIMEOUT_S", "")).strip()
-    if not raw:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        return default
-    return value if value > 0 else default
-
-
-def _spawn_daemon_process(
-    port: int | None,
-    log_file: str | None,
-    effective_port: int,
-    env_sources: dict[str, str] | None = None,
-) -> tuple[int, Path]:
-    import os
-    import signal
-    import subprocess
-
-    from ..logging_runtime import ENV, resolve_settings
-
-    logging_config = ConfigStore().get("logging") or {}
-    settings = resolve_settings(logging_config, log_file=log_file)
-    log_path = Path(settings["path"])
-
-    try:
-        with runtime_state.daemon_start_lock():
-            _ensure_daemon_not_running()
-
-            cmd = [sys.executable, "-m", "teamEvolver", "start"]
-            if port:
-                cmd.extend(["--port", str(port)])
-
-            if log_file:
-                cmd.extend(["--log-file", log_file])
-            inherited = dict(os.environ)
-            # Let the child load file-derived log values itself, preserving their provenance.
-            for name, source in (env_sources or {}).items():
-                if name in ENV.values() and source.startswith("env_file:"):
-                    inherited.pop(name, None)
-            child_env = inherited
-            child_env["TEAMEVOLVER_RUNTIME_KIND"] = "daemon"
-            child_env["TEAMEVOLVER_RUNTIME_LOG_PATH"] = str(log_path)
-            popen_kwargs = {
-                "stdin": subprocess.DEVNULL,
-                "stdout": subprocess.DEVNULL,
-                # Emergency diagnostics remain visible to the invoking platform.
-                "stderr": None,
-                "close_fds": True,
-                "env": child_env,
-            }
-            if os.name == "nt":
-                popen_kwargs["creationflags"] = (getattr(subprocess, "DETACHED_PROCESS", 0)
-                                                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
-            else:
-                popen_kwargs["start_new_session"] = True
-            proc = subprocess.Popen(cmd, **popen_kwargs)
-            log_path = Path(resolve_settings(logging_config, log_file=log_file,
-                                             process_id=proc.pid)["path"])
-
-            try:
-                _wait_for_daemon_ready(
-                    proc,
-                    effective_port,
-                    log_path,
-                    timeout_s=_daemon_ready_timeout_seconds(),
-                )
-            except Exception:
-                try:
-                    if proc.poll() is None:
-                        if os.name == "nt":
-                            proc.terminate()
-                        else:
-                            os.killpg(proc.pid, signal.SIGTERM)
-                        try:
-                            proc.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            if os.name == "nt":
-                                proc.kill()
-                            else:
-                                os.killpg(proc.pid, signal.SIGKILL)
-                            proc.wait(timeout=5)
-                except Exception:
-                    pass
-
-                _clear_pid_if_matches(proc.pid)
-                raise
-
-            return proc.pid, log_path
-    except RuntimeError as exc:
-        owner_pid = exc.args[0] if exc.args else "?"
-        raise click.ClickException(
-            f"Another 'teamEvolver start --daemon' is already in progress (PID={owner_pid}). "
-            "Wait for it to finish or stop that process before retrying."
-        ) from None
+from ..bootstrap import load_bootstrap
 
 
 @click.command()
-@click.option(
-    "--port",
-    type=int,
-    default=None,
-    help="Override service port for this session.",
-)
-@click.option(
-    "--daemon",
-    "-d",
-    is_flag=True,
-    default=False,
-    help="Run teamEvolver in the background.",
-)
-@click.option(
-    "--log-file",
-    type=click.Path(dir_okay=False, path_type=str),
-    default=None,
-    help="Override the foreground or daemon log file (default: ~/.teamEvolver/teamEvolver.log).",
-)
-def start(port: int | None, daemon: bool, log_file: str | None):
-    """Start the teamEvolver service (console + evolution + validation)."""
-    import asyncio
+@click.option("--role", type=click.Choice(["api", "worker", "all"]), default=None)
+@click.option("--port", type=click.IntRange(1, 65535), default=None)
+@click.option("--daemon", "-d", is_flag=True)
+@click.option("--log-file", type=click.Path(dir_okay=False), default=None)
+def start(role, port, daemon, log_file):
+    """Run API or Worker; all is for local development."""
+    from ..logging_runtime import configure, register_secrets, shutdown
+    from ..runtime.entrypoint import run_role
 
-    from ..log_color import setup_logging
-
-    setup_logging()
-
-    import logging
-
-    from ..logging_runtime import configure, event, register_secrets, shutdown
-
-    try:
-        cs = ConfigStore()
-        raw = cs.load()
-        register_secrets(raw)
-        if not daemon:
-            configure(raw.get("logging"), log_file=log_file, config_file=cs.config_file,
-                      env_file=cs.env_file, sources=cs.env_sources)
-    except Exception:
-        try:
-            configure(log_file=log_file)
-        except ValueError:
-            configure(log_file=log_file, environ={})
-        logging.getLogger(__name__).exception("startup.configuration_failed")
-        shutdown()
-        raise click.ClickException("Configuration failed; inspect service logs") from None
-    if not cs.exists():
-        click.echo(
-            "No config found. Run 'teamEvolver config' first.",
-            err=True,
-        )
-        sys.exit(1)
-
+    config = load_bootstrap()
+    role = role or os.environ.get("TEAMEVOLVER_ROLE", "api")
+    if role not in {"api", "worker", "all"}:
+        raise click.ClickException("TEAMEVOLVER_ROLE must be api, worker or all")
+    if role == "all" and os.environ.get("TEAMEVOLVER_ENV", "local") != "local":
+        raise click.ClickException("all runtime is restricted to local development")
+    if not config.storage_pg_dsn:
+        raise click.ClickException("runtime requires PostgreSQL; configure TEAMEVOLVER_PG_DSN")
     if daemon:
-        configured_port = _effective_service_port(cs, None)
-        # Do not create a temporary config snapshot when the requested port is
-        # already the durable value. Runtime admin updates must keep writing
-        # the real config file in daemon mode.
-        daemon_port = port if port and port != configured_port else None
-        pid, log_path = _spawn_daemon_process(
-            daemon_port,
-            log_file,
-            effective_port=_effective_service_port(cs, port),
-            env_sources=cs.env_sources,
-        )
-        click.echo(
-            f"teamEvolver started in background (PID={pid}). Logs: {log_path}. "
-            "Use 'teamEvolver status' to check health and 'teamEvolver stop' to stop it."
-        )
+        with runtime_state.daemon_start_lock():
+            pid = runtime_state.read_pid()
+            if pid and runtime_state.process_alive(pid):
+                raise click.ClickException(f"teamEvolver is already running (PID={pid})")
+            log_path = Path(log_file or "/tmp/te_runtime.log")
+            command = [sys.executable, "-m", "teamEvolver", "start", "--role", role]
+            if port:
+                command += ["--port", str(port)]
+            if log_file:
+                command += ["--log-file", str(log_file)]
+            with log_path.open("ab") as output:
+                proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output,
+                                        stderr=output, start_new_session=True)
+            state = runtime_state.pid_file_path()
+            state.parent.mkdir(parents=True, exist_ok=True)
+            state.write_text(str(proc.pid))
+            click.echo(f"Started {role} (PID={proc.pid}); logs: {log_path}")
         return
-
-    if port:
-        import tempfile
-
-        import yaml
-
-        from ..config_store import ConfigStore as _CS
-
-        data = cs.load()
-        data.setdefault("service", {})["port"] = port
-        tmp = tempfile.NamedTemporaryFile(
-            mode="w",
-            suffix=".yaml",
-            delete=False,
-            encoding="utf-8",
-            dir=cs.config_file.parent,
-        )
-        try:
-            yaml.dump(data, tmp)
-        finally:
-            tmp.close()
-        tmp_path = Path(tmp.name)
-        cs = _CS(config_file=tmp_path)
-    else:
-        tmp_path = None
-
-    from ..launcher import Launcher
-
-    event(logging.getLogger(__name__), "startup.configuration_loaded", config_file=str(cs.config_file),
-          env_file=str(cs.env_file or ""), ontology_enabled=bool((raw.get("ontology") or {}).get("enabled", False)))
-    launcher = Launcher(cs)
+    from dataclasses import asdict
+    register_secrets(asdict(config))
+    configure(config.logging, log_file=log_file)
     try:
-        asyncio.run(launcher.start())
-    except Exception:
-        logging.getLogger(__name__).exception("startup.service_failed")
-        raise
-    except KeyboardInterrupt:
-        click.echo("\nInterrupted — stopping teamEvolver.")
-        launcher.stop()
+        run_role(role=role, config=config,
+                 api_port=port if role != "worker" else None,
+                 worker_health_port=port if role == "worker" else None)
     finally:
-        if tmp_path is not None:
-            tmp_path.unlink(missing_ok=True)
+        runtime_state.clear_pid_if_matches(os.getpid())
         shutdown()
 
 
 @click.command()
 def stop():
-    """Stop a running teamEvolver instance."""
-    import os
-    import signal
-    from pathlib import Path
-
-    pid_file = Path.home() / ".teamEvolver" / "teamEvolver.pid"
-    if not pid_file.exists():
-        click.echo("teamEvolver is not running (no PID file found).")
+    """Signal the recorded runtime PID."""
+    pid = runtime_state.read_pid()
+    if not pid:
+        click.echo("teamEvolver is not running")
         return
     try:
-        pid = int(pid_file.read_text().strip())
         os.kill(pid, signal.SIGTERM)
-        pid_file.unlink(missing_ok=True)
-        click.echo(f"Sent SIGTERM to PID {pid}.")
     except ProcessLookupError:
-        click.echo("Process not found — cleaning up stale PID file.")
-        pid_file.unlink(missing_ok=True)
-    except Exception as e:
-        click.echo(f"Error stopping teamEvolver: {e}", err=True)
+        pass
+    runtime_state.clear_pid_if_matches(pid)
+    click.echo(f"Stopped PID {pid}")
 
 
 @click.command()
 def status():
-    """Check whether teamEvolver is running."""
-    pid = _read_pid()
-    if pid is None:
-        click.echo("teamEvolver: not running")
-        return
-
-    if not _is_process_alive(pid):
-        click.echo("teamEvolver: not running (stale PID file)")
-        _clear_pid()
-        return
-
-    cs = ConfigStore()
-    port = int(cs.get("service.port") or 52010)
-
-    healthy = _healthz_ready(port, timeout=2.0)
-    if healthy:
-        click.echo(f"teamEvolver: running  (PID={pid}, service=:{port})")
-    else:
-        click.echo(f"teamEvolver: starting (PID={pid}, service=:{port})")
+    """Inspect the recorded runtime process."""
+    pid = runtime_state.read_pid()
+    click.echo(f"teamEvolver: running (PID={pid})" if pid else "teamEvolver: not running")

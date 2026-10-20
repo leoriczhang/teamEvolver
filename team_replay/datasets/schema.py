@@ -6,9 +6,7 @@ import copy
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
-
 DATASET_SCHEMA = "team-replay.dataset"
-DATASET_SCHEMA_V2 = "team-replay.dataset.v2"
 
 _DOCUMENT_KEYS = {
     "schema_version",
@@ -80,27 +78,23 @@ def normalize_checks(value: Any) -> list[dict[str, Any]]:
 
 
 def output_requirements(case: Mapping[str, Any]) -> list[str]:
-    return [
-        str(item["text"])
-        for item in normalize_checks(case.get("checks"))
-        if item["kind"] == "output"
-    ]
+    return [str(item["text"]) for item in normalize_checks(case.get("checks")) if item["kind"] == "output"]
 
 
 def trajectory_requirements(case: Mapping[str, Any]) -> list[str]:
-    return [
-        str(item["text"])
-        for item in normalize_checks(case.get("checks"))
-        if item["kind"] == "trajectory"
-    ]
+    return [str(item["text"]) for item in normalize_checks(case.get("checks")) if item["kind"] == "trajectory"]
 
 
 def normalize_skill_refs(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, (list, tuple)):
+        raise DatasetSchemaError("skills must be an array")
     values = value if isinstance(value, (list, tuple)) else [value]
     result: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in values:
         if isinstance(item, Mapping):
+            if set(item) - {"skill_id", "revision", "content_hash"}:
+                raise DatasetSchemaError("unsupported Skill reference field")
             skill_id = str(item.get("skill_id") or "").strip()
             ref = {"skill_id": skill_id}
             for key in ("revision", "content_hash"):
@@ -110,7 +104,7 @@ def normalize_skill_refs(value: Any) -> list[dict[str, Any]]:
             skill_id = str(item or "").strip()
             ref = {"skill_id": skill_id}
         if not skill_id or skill_id in seen:
-            continue
+            raise DatasetSchemaError("Skill ids must be nonempty and unique")
         seen.add(skill_id)
         result.append(ref)
     result.sort(key=lambda item: item["skill_id"])
@@ -140,11 +134,11 @@ def normalize_case(
     if not query:
         raise DatasetSchemaError(f"case {case_id} query is required")
 
-    raw_skill_ids = (
-        payload.get("skill_ids")
-        if "skill_ids" in payload
-        else list(default_skill_ids)
-    )
+    raw_skill_ids = payload.get("skill_ids") if "skill_ids" in payload else list(default_skill_ids)
+    if not isinstance(raw_skill_ids, list) or any(not isinstance(item, str) for item in raw_skill_ids):
+        raise DatasetSchemaError("skill_ids must be an array of strings")
+    if len(raw_skill_ids) != len(set(raw_skill_ids)) or any(not item.strip() for item in raw_skill_ids):
+        raise DatasetSchemaError("skill_ids must be nonempty and unique")
     skill_ids = sorted(text_items(raw_skill_ids))
     materials = payload.get("materials", [])
     provenance = payload.get("provenance", {})
@@ -152,6 +146,8 @@ def normalize_case(
     metadata = payload.get("metadata", {})
     if not isinstance(materials, list):
         raise DatasetSchemaError("materials must be an array")
+    if any(not isinstance(item, Mapping) or not item.get("path") for item in materials):
+        raise DatasetSchemaError("each material requires a path")
     if not isinstance(provenance, Mapping):
         raise DatasetSchemaError("provenance must be an object")
     if not isinstance(replay, Mapping):
@@ -162,11 +158,14 @@ def normalize_case(
     raw_disclosure = replay.get("progressive_disclosure", {})
     if not isinstance(raw_disclosure, Mapping):
         raise DatasetSchemaError("replay.progressive_disclosure must be an object")
+    batch_size = raw_disclosure.get("batch_size", 4)
+    if type(batch_size) is not int or not 1 <= batch_size <= 100:
+        raise DatasetSchemaError("progressive disclosure batch_size must be 1..100")
     normalized_replay = copy.deepcopy(dict(replay))
     normalized_replay["progressive_disclosure"] = {
         "enabled": bool(raw_disclosure.get("enabled", True)),
         "initial_visibility": "query_only",
-        "batch_size": max(1, int(raw_disclosure.get("batch_size") or 4)),
+        "batch_size": batch_size,
         "stop_when": "all_checklist_items_satisfied",
     }
 
@@ -176,9 +175,7 @@ def normalize_case(
         "skill_ids": skill_ids,
         "checks": normalize_checks(payload.get("checks")),
         "materials": [
-            copy.deepcopy(dict(item))
-            for item in materials
-            if isinstance(item, Mapping) and item.get("path")
+            copy.deepcopy(dict(item)) for item in materials if isinstance(item, Mapping) and item.get("path")
         ],
         "provenance": copy.deepcopy(dict(provenance)),
         "replay": normalized_replay,
@@ -246,13 +243,18 @@ def normalize_document(
         raise DatasetSchemaError(f"schema_version must be {DATASET_SCHEMA}")
     if not isinstance(payload.get("cases"), list):
         raise DatasetSchemaError("cases must be an array")
+    if any(not isinstance(item, Mapping) for item in payload["cases"]):
+        raise DatasetSchemaError("every case must be an object")
+    for key in ("source", "metadata"):
+        if key in payload and not isinstance(payload[key], Mapping):
+            raise DatasetSchemaError(f"{key} must be an object")
     return make_document(
         dataset_id=str(payload.get("dataset_id") or default_dataset_id),
         name=str(payload.get("name") or default_name),
         description=str(payload.get("description") or ""),
-        skills=payload.get("skills") or [],
+        skills=payload.get("skills", []),
         source=payload.get("source") if isinstance(payload.get("source"), Mapping) else {},
-        cases=[item for item in payload["cases"] if isinstance(item, Mapping)],
+        cases=payload["cases"],
         metadata=payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {},
         created_at=str(payload.get("created_at") or ""),
         updated_at=str(payload.get("updated_at") or ""),
@@ -327,72 +329,3 @@ def validate_document(payload: Any, *, allow_empty: bool = False) -> list[str]:
         if not isinstance(case.get("metadata"), Mapping):
             errors.append(f"{label}.metadata 必须是对象")
     return errors
-
-
-def legacy_case_view(
-    case: Mapping[str, Any],
-    *,
-    document: Mapping[str, Any] | None = None,
-    text_requirements: bool = False,
-    include_snapshot: bool = True,
-) -> dict[str, Any]:
-    """Project one canonical case onto transitional flat API fields."""
-    normalized = normalize_case(case)
-    provenance = copy.deepcopy(dict(normalized.get("provenance") or {}))
-    session_snapshot = provenance.pop("session_snapshot", None)
-    metadata = copy.deepcopy(dict(normalized.get("metadata") or {}))
-    output = output_requirements(normalized)
-    trajectory = trajectory_requirements(normalized)
-    skill_refs = (
-        normalize_skill_refs((document or {}).get("skills"))
-        if document is not None
-        else []
-    )
-    skill_ids = list(normalized.get("skill_ids") or [])
-    if not skill_ids:
-        skill_ids = [item["skill_id"] for item in skill_refs]
-    if not skill_refs:
-        skill_refs = normalize_skill_refs(skill_ids)
-    name = normalized.get("name", normalized["query"])
-    result = {
-        "case_id": normalized["case_id"],
-        "dataset_id": normalized["case_id"],
-        "item_id": normalized["case_id"],
-        "dataset_format": DATASET_SCHEMA_V2,
-        "skills": skill_refs,
-        "skill_ids": skill_ids,
-        "skill_name": skill_ids[0] if len(skill_ids) == 1 else "",
-        "name": name,
-        "title": name,
-        "query": normalized["query"],
-        "requirements": "\n".join(output) if text_requirements else output,
-        "trajectory_requirements": (
-            "\n".join(trajectory) if text_requirements else trajectory
-        ),
-        "checklist": copy.deepcopy(normalized["checks"]),
-        "checks": copy.deepcopy(normalized["checks"]),
-        "materials": copy.deepcopy(normalized["materials"]),
-        "source": provenance,
-        "source_session_ids": list(provenance.get("session_ids") or []),
-        "session_id": str(
-            provenance.get("session_id")
-            or next(iter(provenance.get("session_ids") or []), "")
-        ),
-        "trace_id": str(provenance.get("trace_id") or ""),
-        "turn_num": provenance.get("turn_num") or 1,
-        "timestamp": str(provenance.get("timestamp") or ""),
-        "ingested_at": str(provenance.get("ingested_at") or ""),
-        "evidence_window": str(provenance.get("evidence_window") or ""),
-        "synthesis_mode": str(provenance.get("synthesis_mode") or ""),
-        "progressive_disclosure": copy.deepcopy(
-            normalized["replay"]["progressive_disclosure"]
-        ),
-        **metadata,
-    }
-    if document is not None:
-        result["created_at"] = str(document.get("created_at") or "")
-        result["updated_at"] = str(document.get("updated_at") or "")
-        result["description"] = str(document.get("description") or "")
-    if include_snapshot and isinstance(session_snapshot, Mapping):
-        result["session"] = copy.deepcopy(dict(session_snapshot))
-    return result

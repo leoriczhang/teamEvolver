@@ -1,29 +1,46 @@
+# Single-host deployment of one release: API and Worker roles from the same
+# image. Build the release first (cicd_scripts/build.sh), then `docker compose
+# build`. PostgreSQL is external; provide TEAMEVOLVER_PG_DSN and the Root Key
+# through deploy/.env (not committed).
+x-teamevolver: &teamevolver
+  image: "${TEAMEVOLVER_IMAGE:-teamevolver:latest}"
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  env_file:
+    - path: deploy/.env
+      required: false
+  environment: &teamevolver-env
+    TZ: Asia/Shanghai
+    OPENVIKING_CLI_BIN: "${OPENVIKING_CLI_BIN:-/usr/local/bin/ov}"
+
 services:
-  teamevolver:
-    # Set TEAMEVOLVER_IMAGE when deploying a versioned image; local compose
-    # builds keep a stable default tag without pinning an obsolete commit.
-    image: "${TEAMEVOLVER_IMAGE:-teamevolver:latest}"
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: teamevolver
-    restart: unless-stopped
+  teamevolver-api:
+    <<: *teamevolver
+    container_name: teamevolver-api
     ports:
       - "${TEAMEVOLVER_PORT:-52010}:52010"
     environment:
-      TZ: Asia/Shanghai
+      <<: *teamevolver-env
+      TEAMEVOLVER_ROLE: api
       TEAMEVOLVER_PORT: "52010"
-      # Prefer the source copied to /app over the wheel installed by pip.
-      # This keeps the main service on the checked-out release.
-      PYTHONPATH: /app
-      # The image contains the pinned OpenViking CLI.  This remains
-      # overridable for diagnostics without depending on a host installation.
-      OPENVIKING_CLI_BIN: "${OPENVIKING_CLI_BIN:-/usr/local/bin/ov}"
-    volumes:
-      # Console account, model configuration, and service state.
-      - ./runtime/config:/var/lib/teamEvolver/.teamEvolver
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:52010/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:52010/readyz', timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  teamevolver-worker:
+    <<: *teamevolver
+    container_name: teamevolver-worker
+    environment:
+      <<: *teamevolver-env
+      TEAMEVOLVER_ROLE: worker
+      TEAMEVOLVER_PORT: "52011"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:52011/readyz', timeout=3)"]
       interval: 20s
       timeout: 5s
       retries: 5

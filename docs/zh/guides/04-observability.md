@@ -1,408 +1,97 @@
-# Langfuse 可观测性指南
-
-当前版本的上游接入已迁入 `session_ingestion/adapters/`，统一采用[租户文件契约](10-datasource-onboarding.md)。
-本页旧入站配置与 CLI 示例仅供迁移参考，不再控制在线拉取。
-平台出站观测仍使用独立 `langfuse.tracing_*` 配置，在控制台「链路观测」管理。
-
-teamEvolver 深度集成 Langfuse 提供 LLM 应用可观测能力。Langfuse 集成包含两种独立工作模式，可分别启用：
-
-1. **入站会话拉取（Session Pull）**：从 Langfuse 拉取已有的 Agent 会话数据，送入 teamEvolver 进化流水线
-2. **出站追踪（Tracing）**：将 teamEvolver 自身进化过程中的 LLM 调用发送到 Langfuse 进行追踪分析
-
-相关代码位于：
-- `teamEvolver/observability/langfuse.py`：追踪运行时和配置管理
-- `session_ingestion/adapters/_shared/langfuse_client.py`：Langfuse v3 公共 API HTTP 客户端
-- `session_ingestion/adapters/_shared/langfuse_pull.py`：Session 拉取编排层
-- `session_ingestion/adapters/_shared/langfuse_convert.py`：Langfuse Session 格式到 teamEvolver 格式的转换
-
-## 两种模式对比
-
-| 维度 | 入站会话拉取 | 出站追踪 |
-|------|-------------|---------|
-| 方向 | Langfuse → teamEvolver | teamEvolver → Langfuse |
-| 配置开关 | `langfuse.enabled` | `langfuse.tracing_enabled` |
-| 用途 | 将外部 Agent 的会话作为进化输入 | 调试和监控进化流水线自身的 LLM 调用 |
-| 数据内容 | 完整会话轨迹、工具调用、评分 | 进化各阶段的 System Prompt、User Message、模型输出、Token 用量 |
-| 运行方式 | 定时/手动拉取 | 每次 LLM 调用自动捕获 |
-| 对进化的影响 | 为进化提供原材料 | 无副作用，fail-open 设计 |
-
-两种模式使用独立的 Langfuse 连接。入站连接可以按租户配置；出站追踪连接是服务级配置，所有租户统一上报到同一个 Langfuse Project，不接受租户覆盖。
-
-## 配置说明
-
-所有 Langfuse 相关配置位于 config.yaml 的 `langfuse` 节：
-
-### 基础连接配置
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `enabled` | boolean | `false` | 是否启用入站会话拉取 |
-| `host` | string | `"https://cloud.langfuse.com"` | Langfuse 服务地址。自托管实例改为你的地址，如 `"http://127.0.0.1:3000"` |
-| `public_key` | string | `""` | Langfuse Project Public Key，从 Langfuse 项目设置中获取 |
-| `secret_key` | string | `""` | Langfuse Project Secret Key |
-
-### 出站追踪配置
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `tracing_enabled` | boolean | `false` | 是否启用出站 LLM 调用追踪 |
-| `tracing_host` | string | `""` | 全局观测 Langfuse 地址，独立于入站 `host` |
-| `tracing_public_key` | string | `""` | 全局观测 Project Public Key |
-| `tracing_secret_key` | string | `""` | 全局观测 Project Secret Key |
-| `tracing_environment` | string | `"local"` | 环境标签，用于在 Langfuse UI 中区分不同部署环境。建议值：`production`、`staging`、`local`。只允许字母、数字、`-`、`_` |
-| `tracing_release` | string | `""` | 版本标签，标记当前部署版本（如 git commit hash、版本号） |
-| `tracing_sample_rate` | float | `1.0` | 采样率，范围 0.0-1.0。生产环境建议设为 `0.1`（10% 采样）以降低成本 |
-| `tracing_capture_content` | boolean | `true` | 是否捕获完整的 LLM 输入输出内容。设为 `false` 则仅记录元数据和 Token 用量 |
-| `tracing_flush_at` | integer | `1` | 累积多少条 trace 后批量刷新到 Langfuse |
-| `tracing_flush_interval_seconds` | float | `1.0` | 定时刷新间隔（秒） |
-| `timeout_seconds` | integer | `30` | Langfuse API 请求超时时间 |
-
-### 入站拉取默认过滤配置
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `page_limit` | integer | `50` | 分页拉取每页大小 |
-| `max_sessions` | integer | `100` | 单次拉取最大会话数 |
-| `default_environment` | list | `[]` | 默认按 environment 过滤，空列表表示不过滤 |
-| `default_user_id` | string | `""` | 默认按 userId 过滤 |
-| `default_tags` | list | `[]` | 默认按 tags 过滤（所有指定标签都必须匹配） |
-| `default_release` | string | `""` | 默认按 release 过滤 |
-| `default_version` | string | `""` | 默认按 version 过滤 |
-| `default_trace_name` | string | `""` | 默认按 trace name 过滤 |
-
-### 凭证获取
-
-1. 登录 Langfuse（cloud.langfuse.com 或你的自托管实例）
-2. 进入 Settings → Projects
-3. 创建或选择一个 Project
-4. 在 API Keys 部分点击 "Create new API keys"
-5. 复制 Public Key 和 Secret Key
-
-注意：Public Key 以 `pk-lf-` 开头，Secret Key 以 `sk-lf-` 开头。
-
-## 配置示例
-
-### 仅启用出站追踪（推荐用于生产监控）
-
-```yaml
-langfuse:
-  enabled: false
-  tracing_enabled: true
-  tracing_host: "https://cloud.langfuse.com"
-  tracing_public_key: "pk-lf-observability"
-  tracing_secret_key: "sk-lf-observability"
-  tracing_environment: "production"
-  tracing_release: "v1.2.3"
-  tracing_sample_rate: 0.1
-  tracing_capture_content: true
-```
-
-### 同时启用入站拉取和出站追踪
-
-```yaml
-langfuse:
-  enabled: true
-  host: "https://tenant-source.example.com"
-  public_key: "pk-lf-source"
-  secret_key: "sk-lf-source"
-  tracing_enabled: true
-  tracing_host: "https://global-observability.example.com"
-  tracing_public_key: "pk-lf-observability"
-  tracing_secret_key: "sk-lf-observability"
-  tracing_environment: "production"
-  tracing_sample_rate: 0.5
-  default_environment:
-    - "production"
-  default_tags:
-    - "agent"
-    - "coding"
-  max_sessions: 50
-```
-
-### 自托管 Langfuse
-
-```yaml
-langfuse:
-  enabled: true
-  host: "http://tenant-langfuse.internal.example.com"
-  public_key: "pk-lf-source"
-  secret_key: "sk-lf-source"
-  tracing_enabled: true
-  tracing_host: "http://observability-langfuse.internal.example.com"
-  tracing_public_key: "pk-lf-observability"
-  tracing_secret_key: "sk-lf-observability"
-  tracing_environment: "local"
-```
-
-也可以通过环境变量覆盖全局出站追踪配置（优先级高于 config.yaml，不用于租户数据源拉取）：
-
-```bash
-export LANGFUSE_HOST="https://cloud.langfuse.com"
-export LANGFUSE_PUBLIC_KEY="pk-lf-xxxxxxxx"
-export LANGFUSE_SECRET_KEY="sk-lf-xxxxxxxx"
-export LANGFUSE_TRACING_ENABLED="true"
-export LANGFUSE_TRACING_ENVIRONMENT="production"
-export LANGFUSE_SAMPLE_RATE="0.1"
-```
-
-## 出站追踪：追踪什么内容
-
-启用出站追踪后，进化流水线中每个 LLM 调用都会被自动捕获并发送到 Langfuse。追踪采用 fail-open 设计：如果 Langfuse 不可用，不会影响进化流程正常运行，仅在日志中记录警告。
-
-### 被追踪的 LLM 调用
-
-进化流水线中以下阶段的 LLM 调用会被追踪：
-
-| 阶段 | Trace Name | 标签 |
-|------|-----------|------|
-| 进化周期（Cycle，周期级 Trace，非 LLM 调用） | `teamEvolver.evolve.cycle` | `["evolve", "cycle"]` |
-| 价值分类（Session Filter） | `teamEvolver.evolve.session_filter` | `["llm", "evolve", "session-filter"]` |
-| 会话总结（Summarize） | `teamEvolver.evolve.summarize` | `["llm", "evolve", "summarize"]` |
-| 会话评分（Judge） | `teamEvolver.evolve.judge` | `["llm", "evolve", "judge"]` |
-| 技能改进（Evolve Skill） | `team-skill-evolver:evolve_skill:{skill_name}` | `["llm", "team-skill-evolver", "teamEvolver.evolve", "evolve_skill", "skill:{skill_name}", ...源会话 ID]` |
-| 新技能创建（Create Skill） | `team-skill-evolver:create_skill` | `["llm", "team-skill-evolver", "teamEvolver.evolve", "create_skill", ...源会话 ID]` |
-| 冲突合并（Merge Skill） | `team-skill-evolver:merge_skill:{skill_name}` | `["llm", "team-skill-evolver", "teamEvolver.evolve", "merge_skill", "skill:{skill_name}"]` |
-| 测试集生成（Dataset Synthesis） | `team-skill-evolver:dataset_synthesis:{skill_name}` | `["llm", "team-skill-evolver", "dataset-synthesis", "skill:{skill_name}"]` |
-| Prompt Studio 测试 | `teamEvolver.evolve.prompt_test.{stage_id}` | `["llm", "evolve", "prompt-studio", {stage_id}]` |
-
-说明：
-
-- 标签中的 `llm` 由 LLM 客户端对所有被追踪调用统一附加；技能改进/新建/合并的名称与标签由 `team_skills/evolution/stages/execute.py:_llm_trace_kwargs` 生成，测试集生成的见 `team_replay/datasets/synthesis.py`。
-- 设置环境变量 `EVOBENCH_RUN_ID` 时，技能进化类 Trace 会追加 run id 标签，并携带 `trace_session_id`（`team-skill-evolver:{run_id}:{operation}:{skill_name}`）与 `trace_user_id`。
-- 源会话 ID 最多 20 个作为标签追加，Metadata 中最多保留 50 个；设置 `EVOBENCH_RUN_ID` 时，被合并/改进的 Skill 名称不存在于库中时 Trace Name 省略 `:{skill_name}` 后缀。
-
-DreamCycle 启用后，其 Job 的 LLM 调用也会被追踪（Trace Name 形如
-`team_memory.maintenance.dreamcycle.round`、`team_memory.maintenance.dreamcycle.{job_name}`）。
-
-### 每条 Trace 包含的数据
-
-对于每个被追踪的 LLM 调用，会记录以下信息：
-
-- **Input**：完整的 System Prompt 和 User Message（当 `tracing_capture_content: true` 时）
-- **Output**：模型返回的完整文本
-- **Model**：使用的模型名称
-- **Model Parameters**：temperature、max_tokens 等参数
-- **Usage Details**：prompt tokens、completion tokens、total tokens
-- **Metadata**：组件名、操作名、阶段 ID、源会话 ID 等结构化元数据
-- **Session ID**：关联的 teamEvolver 会话 ID（用于在 Langfuse 中按会话分组）
-- **Tags**：自动添加 `teamEvolver` 标签和阶段特定标签
-- **Environment**：由 `tracing_environment` 配置
-- **Release**：由 `tracing_release` 配置
+# 链路观测指南
 
-### Trace 层级结构
+链路观测把 teamEvolver 自身的模型调用上报到 Langfuse，用于排查进化各阶段的 Prompt、输出、Token 用量和耗时。它是服务级配置，所有租户上报到同一个 Langfuse Project。从 Langfuse 拉取 Agent 会话属于数据源接入，使用独立的凭证，见 [数据源接入指南](./10-datasource-onboarding.md)。
 
-追踪使用嵌套 Span 结构：
+代码入口：`teamEvolver/observability/langfuse.py`（运行时与配置）、`teamEvolver/llm.py`（模型调用埋点）、`teamEvolver/admin/api/settings.py`（配置接口）。
 
-- 每个进化轮次对应一个 Trace
-- 每个 LLM 阶段对应 Trace 下的一个 Span
-- 同一阶段内的子调用对应嵌套 Span
+## 配置来源
 
-这样在 Langfuse UI 中可以清晰看到一次完整进化循环中各阶段的调用关系和耗时。
+配置按以下优先级合并，高优先级覆盖低优先级：
 
-## 入站会话拉取：如何工作
+1. `LANGFUSE_*` 环境变量
+2. 控制台「链路观测」保存的在线配置（`teamevolver_config.tracing`）
+3. 启动配置 `langfuse_tracing_*` 字段
 
-入站会话拉取模式从 Langfuse 拉取外部 Agent 的会话数据，经过格式转换后送入 teamEvolver 的会话队列，触发后续的价值分类和技能进化。
+Worker 在每轮租户刷新时（至少间隔 10 秒）重新读取在线配置并应用，配置变化时重建 Langfuse 客户端，不需要重启进程。
 
-### 支持的过滤维度
+| 启动配置字段 | 环境变量 | 默认 | 说明 |
+|--------------|----------|------|------|
+| `langfuse_tracing_enabled` | `LANGFUSE_TRACING_ENABLED` | false | 是否上报 |
+| `langfuse_tracing_host` | `LANGFUSE_BASE_URL` / `LANGFUSE_HOST` | 空 | Langfuse 地址 |
+| `langfuse_tracing_public_key` | `LANGFUSE_PUBLIC_KEY` | 空 | Project Public Key |
+| `langfuse_tracing_secret_key` | `LANGFUSE_SECRET_KEY` | 空 | Project Secret Key |
+| `langfuse_tracing_environment` | `LANGFUSE_TRACING_ENVIRONMENT` | `local` | 环境标签，只允许字母、数字、`-`、`_` |
+| `langfuse_tracing_release` | `LANGFUSE_RELEASE` | 空 | 版本标签 |
+| `langfuse_tracing_sample_rate` | `LANGFUSE_SAMPLE_RATE` | 1.0 | 采样率 0–1 |
+| `langfuse_tracing_capture_content` | `LANGFUSE_CAPTURE_CONTENT` | true | 是否记录模型输入输出；关闭后只记录元数据与用量 |
+| `langfuse_tracing_flush_at` | `LANGFUSE_FLUSH_AT` | 1 | 批量刷新条数 |
+| `langfuse_tracing_flush_interval_seconds` | `LANGFUSE_FLUSH_INTERVAL` | 1.0 | 刷新间隔（秒） |
+| `langfuse_tracing_timeout_seconds` | `LANGFUSE_TIMEOUT` | 30 | 请求超时（秒） |
 
-拉取时支持丰富的过滤条件，可在配置文件中设置默认值，每次拉取时也可通过 CLI 参数临时覆盖：
+公钥与私钥同时存在时才会创建客户端。
 
-- **时间范围**：`from_timestamp` / `to_timestamp`（ISO 8601 格式）
-- **环境**：`environment`（可指定多个，匹配任意一个）
-- **用户 ID**：`user_id`
-- **标签**：`tags`（必须全部匹配）
-- **版本**：`release` / `version`
-- **Trace 名称**：`trace_name`
-- **指定会话**：`session_id`（拉取单个会话）
-- **元数据**：`metadata`（按 metadata 键值对过滤）
+## 控制台与接口
 
-### 拉取流程
+平台管理员在「审查与发布 → 链路观测」配置开关、地址、采样率与是否采集模型输入输出，并测试连接。
 
-1. 根据过滤条件查询匹配的 Trace 列表（通过 `/api/public/traces` 端点）
-2. 从 Trace 结果中解析出唯一的 Session ID 集合
-3. 逐个拉取 Session 详情（通过 `/api/public/sessions/{id}` 端点），包含所有 Trace 和 Observation
-4. 调用 `langfuse_convert.py` 将 Langfuse 格式转换为 teamEvolver 会话格式
-5. 送入会话队列，经过 Session Filter 价值分类
-6. 高价值会话进入进化流水线
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/langfuse-tracing-config` | 在线配置，以及启动配置中是否存在公钥/私钥 |
+| PUT | `/api/langfuse-tracing-config` | 保存在线配置；字段限于 `enabled`、`host`、`environment`、`release`、`sample_rate`、`capture_content`、`flush_at`、`flush_interval_seconds`、`public_key`、`secret_key` |
+| POST | `/api/langfuse-tracing-config/test` | `{"host", "public_key", "secret_key"}` 测试连接，返回 202 与 `job_id` |
 
-### 认证方式
+提交的 `secret_key` 加密保存为 Secret Ref，接口不回显明文；加密需要 `TEAMEVOLVER_SECRET_MASTER_KEY`（未设置时使用 `TEAMEVOLVER_ROOT_API_KEY`）。连接测试由 Worker 请求 `<host>/api/public/projects`，结果通过 `GET /api/jobs/{job_id}` 查询。
 
-Langfuse API 使用 HTTP Basic Auth：
-- 用户名：Public Key
-- 密码：Secret Key
+## 上报内容
 
-`langfuse_client.py` 使用 `httpx` 直接调用公共 REST API，不依赖 Langfuse Python SDK 进行数据拉取。
+每次模型调用生成一个 `generation` 类型的 observation，包含：
 
-## CLI 命令
+- 输入消息与工具定义（`capture_content=true` 时）
+- 模型输出、`finish_reason`
+- 模型名、`temperature`、`max_completion_tokens`
+- Token 用量
+- Metadata：组件、操作、重试次数等
+- 标签：统一附加 `teamEvolver` 与 `llm`，再加阶段标签
 
-teamEvolver 提供了 `teamEvolver langfuse` 命令组管理 Langfuse 集成：
+重试的每次尝试单独记录，`metadata.attempt` 标明序号。上报失败不影响模型调用，错误记入日志 `[Langfuse] tracing unavailable` 并在状态中保留 `last_error`。
 
-### 查看连接状态
+### Trace 名称
 
-```bash
-teamEvolver langfuse status
-```
+| 阶段 | Trace 名称 |
+|------|------------|
+| Session 分析 | `team_skills.evolution.analyze_session` |
+| Trace 坏例分析 | `team_skills.evolution.analyze_trace_badcase` |
+| Skill 改进 | `team-skill-evolver:evolve_skill:<skill>` |
+| 新建 Skill | `team-skill-evolver:create_skill` |
+| Skill 合并 | `team-skill-evolver:merge_skill:<skill>` |
+| 测试集生成 | `team-skill-evolver:dataset_synthesis:<skill>` |
+| Prompt 测试 | `team_skills.evolution.prompt_test.<stage_id>` |
+| Session 切分 | `session_ingestion.split_session` |
+| 经验模式编译 | `skill_experience_pattern.compile` |
+| 未指定名称的调用 | `teamEvolver.llm.chat` |
 
-输出包括：
+Skill 改进、新建与合并的标签包含 `team-skill-evolver`、`team_skills.evolution`、操作名、`skill:<skill>` 以及最多 20 个源 Session ID；Metadata 最多保留 50 个源 Session ID。设置环境变量 `EVOBENCH_RUN_ID` 时追加 run id 标签，并以 `team-skill-evolver:<run_id>:<operation>:<skill>` 作为 Langfuse Session ID。
 
-- host 地址
-- session_pull_enabled / tracing_enabled 状态
-- tracing_environment
-- public_key/secret_key 是否存在
-- max_sessions 配置
-- 默认过滤条件
-- Langfuse SDK 是否可用
-- 是否能成功连接 Langfuse 服务
-- 总会话数（若可访问）
+## 在 Langfuse 中查看
 
-### 预览匹配的会话
-
-```bash
-# 列出使用默认过滤条件匹配的会话
-teamEvolver langfuse list
-
-# 列出指定环境的会话
-teamEvolver langfuse list --environment production --environment staging
-
-# 列出指定用户的会话
-teamEvolver langfuse list --user-id user-123
-
-# 列出指定标签的会话
-teamEvolver langfuse list --tag agent --tag coding
-
-# 按时间范围过滤
-teamEvolver langfuse list --from 2026-01-01T00:00:00Z --to 2026-01-31T23:59:59Z
-
-# 拉取单个会话
-teamEvolver langfuse list --session-id abc-123-def
-
-# 限制返回数量
-teamEvolver langfuse list --max-sessions 20
-```
-
-`list` 命令只查询并展示，不会执行 ingestion。
-
-### 拉取会话进入进化流水线
-
-```bash
-# 使用默认配置拉取
-teamEvolver langfuse pull
-
-# 带过滤条件拉取
-teamEvolver langfuse pull --environment production --max-sessions 50
-
-# 拉取并指定用户别名
-teamEvolver langfuse pull --user-alias "langfuse-import"
-
-# 强制重新处理已处理过的会话
-teamEvolver langfuse pull --force
-
-# 拉取但不触发进化（仅入队）
-teamEvolver langfuse pull --defer-trigger
-
-# 本地处理（不依赖正在运行的 teamEvolver 服务）
-teamEvolver langfuse pull --in-process
-```
-
-拉取结果的 `total` 保留上游返回的原始 Session 数；`counts` 包含 queued、skipped、duplicate、empty、error 和 filtered，`retry_count` 是本批 Langfuse HTTP 瞬态重试次数。Adapter 的 `SOURCE.exclude_session_id_patterns` 使用大小写敏感 glob 在 fetch 前过滤噪声 Session；显式指定单个 `session_id` 时绕过该过滤。
-
-## 服务状态关联
-
-```bash
-curl -s http://127.0.0.1:52010/storage/status
-curl -s 'http://127.0.0.1:52010/status?refresh=true'
-```
-
-两类状态都返回 `instance_id` 和 `tenant_id`。重点字段：
-
-| 字段 | 含义 |
-|---|---|
-| `skill_storage` / `session_storage` | configured backend、实际 bucket 类型及可达性 |
-| `multi_replica_safe` | Skill 与 Session 是否都实际使用 PostgreSQL |
-| `skill_cache.local_cache_matches_manifest` | 当前 Pod 本地缓存是否与共享 manifest 一致 |
-| `manifest_generation` / `manifest_hash` | 跨 Pod 对比共享版本 |
-| `outbox.backlog` / `dead_letter` / `last_error` | 发布投递积压和最后错误 |
-| `rollout_supervisor` | supervisor 是否运行，以及该租户上一轮 lease/投递状态 |
-
-请求日志和持久化记录应优先关联 `instance_id`、`tenant_id`、`job_id`、`candidate_revision`、`mutation_id`、`event_id`、`workspace`、`skill_name`、`version` 与 `tree_sha256`。Replay 的 `missing_metrics`、`metrics_incomplete_reason` 和 `traceId` 位于评审结果中，不应把 unavailable 指标解释为 0。
-
-## 在 Langfuse UI 中查看 Traces
-
-### 查看 teamEvolver 出站 Traces
-
-1. 登录 Langfuse
-2. 进入 Tracing 页面
-3. 在左侧过滤栏中：
-   - 选择 Environment（如 `production`）
-   - 添加 Tag 过滤：`evolve`（进化流水线各阶段）或 `team-skill-evolver`（技能进化分支）
-4. 可以看到所有 teamEvolver 发出的 Trace
-
-### 按阶段筛选
-
-要查看特定阶段的调用，添加对应的 Tag 过滤，如 `summarize`、`judge`、`evolve_skill` 等。
-
-### 查看 Token 用量和成本
-
-在 Langfuse 的 Metrics 页面可以按 Environment、Tags、Model 维度查看：
-- 总 Token 用量趋势
-- 各阶段耗时分布
-- 成本估算（需在 Langfuse 中配置模型价格）
-
-### 会话回放
-
-点击单个 Trace 可以看到完整的：
-- 输入输出内容
-- 嵌套调用关系
-- 每个 Span 的耗时
-- Token 用量明细
-- 元数据
-
-## Langfuse 与 teamEvolver 控制台的区别
-
-| 功能 | teamEvolver 控制台 | Langfuse UI |
-|------|-------------------|-------------|
-| 进化状态监控 | 支持 | 不支持 |
-| 技能管理 | 支持 | 不支持 |
-| 候选审核 | 支持 | 不支持 |
-| Prompt 编辑测试 | 支持 | 不支持 |
-| LLM 调用全链路追踪 | 基础日志 | 完整支持 |
-| Token 用量统计 | 基础 | 详细，可按多维度聚合 |
-| 成本分析 | 不支持 | 支持（需配置价格） |
-| Trace 历史检索 | 有限 | 强大的过滤和搜索 |
-| 外部 Agent 会话浏览 | 不支持 | 原生支持 |
-| 会话评分和标注 | 不支持 | 原生支持 |
-
-建议同时使用两者：teamEvolver 控制台用于操作和管理，Langfuse 用于深度调试和 LLM 调用层面的问题排查。
+1. 在 Tracing 页面按 Environment 过滤部署环境。
+2. 用标签 `team-skill-evolver` 查看 Skill 进化调用，用 `skill:<name>` 定位某个 Skill。
+3. 用源 Session ID 标签反查某次进化消费了哪些 Session。
+4. 在 Metrics 页面按模型、标签统计 Token 用量与耗时。
 
 ## 故障排查
 
-### Trace 没有出现在 Langfuse 中
+| 现象 | 检查 |
+|------|------|
+| 没有任何 Trace | 开关是否开启；公钥/私钥是否都已配置；`LANGFUSE_TRACING_ENABLED` 是否覆盖为 false |
+| 控制台修改不生效 | Worker 是否在运行；`LANGFUSE_*` 环境变量是否覆盖了同名字段 |
+| 连接测试失败 | 从 Worker 所在主机访问 `<host>/api/public/projects`，确认网络与密钥 |
+| 只有元数据没有内容 | `capture_content` 为 false |
 
-1. 检查 `tracing_enabled` 是否为 `true`
-2. 检查 `tracing_public_key` 和 `tracing_secret_key` 是否正确
-3. 检查 `tracing_host` 是否能从服务器访问（自托管实例注意网络连通性）
-4. 查看 teamEvolver 日志中是否有 `[Langfuse] tracing unavailable` 警告
-5. 运行 `teamEvolver langfuse status` 检查 `reachable: True`
+处理敏感数据时关闭 `capture_content`，或使用自托管 Langfuse。生产环境建议采样率 0.05–0.2，排查问题时临时调到 1.0。
 
-### 入站拉取没有找到会话
+## 相关文档
 
-1. 确认会话是在与 `default_environment` 匹配的环境中记录的
-2. 检查 Trace 上的 Tags 是否包含你过滤的标签
-3. 先运行 `teamEvolver langfuse list` 确认匹配数量
-4. 确认会话是在 `from_timestamp` 之后创建的
-5. Langfuse 的 Sessions 列表端点原生只支持 environment + 时间过滤，其他维度通过 /traces 端点间接匹配，确保你的 Trace 打了正确的 userId/tags/release 属性
-
-### 采样率设置建议
-
-- **开发环境**：`tracing_sample_rate: 1.0`（全量采样，便于调试）
-- **预发布环境**：`tracing_sample_rate: 1.0`（全量采样，验证集成）
-- **生产环境**：`tracing_sample_rate: 0.05-0.2`（5%-20% 采样，平衡成本和可观测性）
-- **排查问题时**：临时设为 `1.0`，问题解决后调回
-
-### 敏感数据
-
-如果进化流程中处理敏感数据：
-
-1. 设置 `tracing_capture_content: false`，仅记录元数据、Token 用量和耗时
-2. 或者在自托管 Langfuse 实例中运行，数据不离开你的网络
-3. 注意：入站拉取会从 Langfuse 拉取完整会话内容，确保 Langfuse 本身的访问控制已配置好
+- [配置参考](./01-configuration.md)
+- [服务日志](./15-service-logging.md)
+- [Prompt Studio 指南](./08-prompt-studio.md)

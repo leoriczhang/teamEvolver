@@ -1,231 +1,111 @@
-# Health and Status API
+# Health, Status and Jobs API
 
-Upstream datasource status and probes now use admin-only `GET /api/datasource`
-and `POST /api/datasource/test`. The legacy `/langfuse/status` below returns 410.
-See [tenant datasource onboarding](../guides/10-datasource-onboarding.md).
+Code entry points:
 
-## 1. API Implementation Overview
+- Health and status: `teamEvolver/observability/api/__init__.py:create_router`
+- Worker health port: `teamEvolver/runtime/http_runtime.py:build_health_app`
+- Unified job endpoints: `teamEvolver/operations/api/__init__.py:create_router`
+- Task state machine: `teamEvolver/runtime/repository.py:WorkerTaskRepository`
 
-Health and status interfaces are used to monitor the running status of the teamEvolver service, check component connectivity, and manually trigger evolution cycles. These interfaces do not require authentication (designed for internal network deployment; access should be controlled at the network boundary).
+## Health Checks
 
-Code implementation: `teamEvolver/proxy/routes.py` (`/health`, `/healthz`, `/status`, `/trigger-dreamcycle`, `/storage/status`)
+| Role | Port | Routes |
+| --- | --- | --- |
+| `api` | `TEAMEVOLVER_API_PORT`, default 52010 | `/healthz`, `/readyz`, `/status` and all business endpoints |
+| `worker` | Default 52011 (changeable with `teamEvolver start --role worker --port`) | Only `/healthz`, `/readyz` |
+| `all` | Same as `api` | Same as `api`, with the Worker running in the same process |
 
-## 2. Interface and Parameter Specification
-
----
-
-### GET /health
-
-Health check endpoint, returns service alive status.
-
-**Authentication:** None
-
-**Response:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `status` | string | Fixed as `"ok"` |
-
----
+None of the three routes require authentication.
 
 ### GET /healthz
 
-Kubernetes-style liveness probe, returns simple ok status.
+Liveness probe; returns 200 while the process is alive:
 
-**Authentication:** None
+```json
+{"ok": true, "role": "api"}
+```
 
-**Response:**
+### GET /readyz
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `ok` | boolean | Fixed as `true` |
+Readiness probe, reading `teamEvolver/runtime/lifecycle.py:RuntimeLifecycle.ready`. Returns 200 once lifecycle startup completes, and 503 when: startup has not finished, a graceful shutdown is in progress, the Worker loop reports PostgreSQL unavailable, or the Worker loop exited unexpectedly outside shutdown.
 
----
+```json
+{"ready": false, "role": "worker"}
+```
+
+During shutdown readiness is withdrawn first; in-flight tasks are awaited after the load balancer has removed the replica.
 
 ### GET /status
 
-Service status dashboard, returns runtime metrics such as queue depth and registered skill count.
-
-**Authentication:** None (also used by the console)
-
-**Query Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `refresh` | boolean | No | Whether to force refresh cache, default false |
-
-**Response Fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `running` | boolean | Whether evolution loop is running (note: current implementation always returns false; service availability is determined by other fields) |
-| `pending_sessions` | integer | Number of Sessions waiting in queue for processing |
-| `registered_skills` | integer | Number of registered team Skills |
-| `skills` | object | Skill details map, keyed by skill name |
-| `skills.<name>.skill_id` | string | Skill ID |
-| `skills.<name>.version` | integer | Current version number |
-
-**Caching:** Response cached for 5 seconds; `refresh=true` forces a refresh.
-
----
-
-### POST /trigger
-
-Manually trigger an evolution cycle. The background still automatically scans the queue at configured intervals (default 600 seconds).
-
-**Authentication:** None (should be restricted by firewall)
-
-**Method:** POST
-
-**Response:** Returned by the embedded evolution application, typically 202 Accepted indicating triggered.
-
-**Note:** The `/trigger` path is handled by the embedded evolution middleware, responded to by the evolution engine in `team_skills/evolution/runtime/orchestrator.py`. If the evolution engine is not ready or not configured, it may return an error.
-
-Related code: `teamEvolver/proxy/routes.py:824` (`_is_embedded_evolve_path`), `teamEvolver/proxy/server.py:332` (`_dispatch_embedded_evolve_request`)
-
----
-
-### POST /trigger-dreamcycle
-
-Trigger DreamCycle memory maintenance tasks.
-
-**Authentication:** None (internal interface)
-
-**Response:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `status` | string | `started` or `not_configured` |
-
-Returns 503 status code when DreamCycle is not configured.
-
----
-
-### GET /storage/status
-
-Check shared storage (OpenViking) configuration and connectivity.
-
-**Authentication:** None
-
-**Response Fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `backend` | string | Storage backend type (`viking` or `none`) |
-| `deployment` | string | Deployment mode (`cloud` or `local`) |
-| `endpoint` | string | OpenViking endpoint address |
-| `namespace` | string | Namespace |
-| `api_key_present` | boolean | Whether API Key is configured |
-| `reachable` | boolean | Whether storage is reachable |
-| `reason` | string | Unreachability reason (when reachable=false) |
-
-Code: `teamEvolver/proxy/routes.py:1520` (`_storage_status`)
-
----
-
-### GET /langfuse/status
-
-Check Langfuse observability integration status.
-
-**Authentication:** None
-
-**Response Fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `enabled` | boolean | Whether Langfuse is enabled |
-| `tracing` | object | Tracing status |
-| `host` | string | Langfuse host address |
-| `public_key_present` | boolean | Whether Public Key is configured |
-| `secret_key_present` | boolean | Whether Secret Key is configured |
-| `reachable` | boolean | Whether reachable |
-| `total_sessions` | integer | Total Session count |
-| `reason` | string | Unreachability reason |
-
-## 3. Usage Examples
-
-### Health Check
-
-```bash
-curl -fsS "http://localhost:52010/health"
-```
-
-Response:
-
 ```json
-{"status": "ok"}
+{"role": "api", "ready": true}
 ```
 
-### View Service Status
+`/status` also accepts the tenant key so Agent runtimes can probe the service.
 
-```bash
-curl -fsS "http://localhost:52010/status"
-```
+## Unified Job Endpoints
 
-Example response:
+Every `job_id` returned by a `202 Accepted` response is a `worker_tasks.task_id` and can be used with the endpoints below. The tenant comes from the request identity and RLS limits visibility to the tenant's own tasks; other tenants' tasks return 404. Console login or the Root Key is required.
+
+### GET /api/jobs/{job_id}
 
 ```json
 {
-  "running": false,
-  "pending_sessions": 3,
-  "registered_skills": 5,
-  "skills": {
-    "database-debugging": {"skill_id": "database-debugging", "version": 3},
-    "code-review": {"skill_id": "code-review", "version": 1}
-  }
+  "job_id": "3f0c...:session.normalize",
+  "kind": "session.normalize",
+  "status": "running",
+  "attempt": 1,
+  "cancel_requested": false,
+  "upstream_task_id": "",
+  "result_ref": "",
+  "error_code": "",
+  "created_at": "2026-10-14T08:00:00Z",
+  "updated_at": "2026-10-14T08:00:03Z"
 }
 ```
 
-### Manually Trigger Evolution
+| Status | Meaning |
+| --- | --- |
+| `queued` | Waiting for a Worker to claim it |
+| `running` | A Worker holds the lease and is executing |
+| `retry_wait` | Failed and waiting for retry with backoff |
+| `waiting_external` | An external task was submitted (such as OpenViking Compile) and is awaited; `upstream_task_id` is the upstream task ID |
+| `reconciling` | Result unknown, reconciling with the upstream |
+| `succeeded` | Succeeded; `result_ref` points to the result |
+| `failed` | Terminal failure; `error_code` holds the reason |
+| `cancelled` | Cancelled |
 
-```bash
-curl -fsS -X POST "http://localhost:52010/trigger"
-```
+Business results are read from each module's `.../jobs/{job_id}/result`, for example `/api/datasource/jobs/{job_id}/result`, `/api/skill-evolution/jobs/{job_id}/result`.
 
-### Check Storage Status
+### POST /api/jobs/{job_id}/cancel
 
-```bash
-curl -fsS "http://localhost:52010/storage/status"
-```
-
-Example response (healthy):
-
-```json
-{
-  "backend": "viking",
-  "deployment": "local",
-  "endpoint": "http://localhost:52011",
-  "namespace": "resources",
-  "api_key_present": false,
-  "reachable": true
-}
-```
-
-### Check Liveness Probe
-
-```bash
-curl -fsS "http://localhost:52010/healthz"
-```
-
-Response:
+- `queued`, `retry_wait`: becomes `cancelled` immediately.
+- `running`, `waiting_external`, `reconciling`: sets `cancel_requested=true`; the Worker stops at a safe point and does not interrupt non-idempotent external writes.
+- Already terminal: returns the current task view.
 
 ```json
-{"ok": true}
+{"job_id": "...", "status": "running", "cancel_requested": true}
 ```
 
-## 4. Response Contract and Error Handling
+### POST /api/jobs/{job_id}/retry
 
-### Error Codes
+Only affects `failed` tasks, putting them back to `queued`; `attempt` increments on the next claim. Other states return `409 only a failed job can be retried (status=<status>)`.
 
-| HTTP Status | Scenario |
-|------------|---------|
-| 503 | DreamCycle not configured (`/trigger-dreamcycle`) |
-| 503 | Upstream model base URL not configured (model proxy endpoints, does not affect health checks) |
-| 503 | Session storage not configured (at `/ingest_session`, does not affect health checks) |
+## Worker Kinds
 
-### Deployment Recommendations
+| kind | Module | Source |
+| --- | --- | --- |
+| `session.pull`, `session.normalize`, `session.analyze`, `session.archive` | Session intake | Push, data source pull, scheduled pull |
+| `skill.evolve` | Skill evolution | Evolution trigger, Prompt tests, model / tracing tests, OpenViking directory initialization |
+| `skill.validate` | Skill validation | Candidate evaluation and validation |
+| `skill.transfer` | Skill transfer | Skill import and export |
+| `experience.sync` | Successful experiences | Experience sync, full import, Pattern compile |
+| `memory.aggregate`, `memory.compile`, `memory.replay` | Team Memory | Memory runs, maintenance, Memory Skill publishing, Memory Replay |
+| `miner.track_compile`, `miner.rebuild_index` | Knowledge base mining | Mining jobs, uploads, edits, deletes |
+| `replay.run`, `dataset.run` | Replay | Replay runs, Adapter tests, dataset runs and synthesis |
 
-1. **Load Balancer Health Checks:** Use `/healthz` as the L7 health check path, `/health` as the readiness probe.
-2. **Network Isolation:** `/trigger` and `/trigger-dreamcycle` have no authentication; production environments should restrict access to internal networks via firewalls.
-3. **Monitoring Metrics:** Periodically scrape the `pending_sessions` value from `/status`; continuous growth indicates insufficient evolution processing capacity or queue blockage.
-4. **Storage Alerts:** Note that a "healthy but in fallback" state exists: `fallback_active: true`, `effective_backend: local`, while `reachable` remains `true`; writes are kept locally and are not automatically synced back to OpenViking. Alert on `fallback_active` being `true` or `effective_backend` not matching the expected backend, rather than relying solely on `reachable: false`; also watch for sustained growth of `mirror.backlog`/`mirror.oldest_age_seconds` and `mirror.dead_letter > 0`.
+On each tenant refresh the Worker applies the tracing configuration and dispatches data source pulls, Skill evolution, Memory maintenance and successful experience sync. Task dispatch uses leases and dedupe keys, so multiple Worker replicas can run concurrently.
+
+## Service Logging Status
+
+`GET /api/logging/status` is described in [Service Logging Status](./15-logging-status.md).

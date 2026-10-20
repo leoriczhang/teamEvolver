@@ -1,79 +1,123 @@
 # Skill Import and Export
 
-## Implementation and authentication
+Skill import and export move Skills between the team Skill library and ZIP files, Skill marketplaces and Git repositories. All operations act on the current tenant's team Skills and require a tenant administrator. The console has no entry for them; use the API.
 
-Skill transfer endpoints remain available for API compatibility, but the console no longer exposes import or export actions. Transfers operate on the current tenant's team Skills. Every endpoint requires an administrator console session.
+Code entry points: `team_skills/api/transfer.py:create_router`, `team_skills/transfer/commands.py:TransferCommands`, `team_skills/transfer/handler.py:transfer`, `team_skills/transfer/service.py:SkillTransferService`.
 
-`SkillTransferService` in `team_skills/transfer/service.py` exposes `import_skills(channel, options, conflict=...)` and `export_skills(channel, names, options)`. A `TransferAdapter` transports complete `SkillPackage` objects (name, relative file paths mapped to bytes, origin metadata). ZIP, marketplace and Git adapters share validation, conflict handling and version recording. Embedded callers can register additional adapters through the constructor.
+Imports and exports are asynchronous: the API validates the request, encrypts credentials, writes `skill_transfers` and a `skill.transfer` task in one transaction and returns 202; the Worker performs the network, ZIP and Git work. Exports pin the current version of the selected Skills at acceptance.
 
-Imports validate the entire input before committing individual Skills through `SkillMutationService`, then replace local working copies. Unchanged content retains its version. Exports prefer the current recorded version and preserve binary attachments. Storage follows existing local/NAS or Viking settings; pull mode does not create a delivery outbox.
+## Endpoints
 
-HTTP implementation: `teamEvolver/proxy/skill_transfer.py:register_skill_transfer_routes`.
-
-## Endpoints and requests
-
-| Endpoint | Purpose |
+| Method and path | Description |
 |---|---|
-| `GET /api/skills/transfer/channels` | Available channels and capabilities |
-| `GET /api/skills/transfer/skills` | Exportable team Skills and versions |
-| `POST /api/skills/import` | `{channel, options, conflict?}` |
-| `POST /api/skills/export` | `{channel, names, options?}`; ZIP bytes or remote result JSON |
-| `POST /api/skills/import-zip` | Compatible single-Skill ZIP import |
-| `POST /api/skills/import-zip-batch` | Compatible batch ZIP import |
+| `GET /api/skills/transfer/channels` | Channels and their import / export capabilities: `zip`, `marketplace`, `git` |
+| `GET /api/skills/transfer/skills` | Team Skills and versions available for export |
+| `POST /api/skills/import` | Accept an import, returns 202 |
+| `POST /api/skills/export` | Accept an export, returns 202 |
+| `GET /api/skills/transfer/jobs/{job_id}/result` | Task result; `result` is null until finished |
+| `GET /api/skills/transfer/jobs/{job_id}/download` | Archive of a ZIP export (`application/zip`), sha256-verified before download |
 
-Channels: `zip`, `marketplace`, `git`. Import conflict policy: `replace` (default), `skip`, or `error` (reject the whole batch before writing). Export requires explicit, unique `names`. Limits per operation: 256 Skills, 4096 files, 128 MiB content and 64 MiB ZIP. Traversal paths, duplicate names, encrypted ZIP entries and symlinks are rejected.
+Accept response:
 
-All POST endpoints expect JSON. Direct multipart or binary ZIP uploads return 415; encode ZIP bytes in `zip_b64` instead of uploading a form file.
+```json
+{"status": "accepted", "job_id": "transfer-export:...", "status_url": "/api/jobs/transfer-export:..."}
+```
 
-### ZIP
+Repeated requests with the same `Idempotency-Key` return the same task; the same key with a different request returns 409.
 
-Import requires `options.zip_b64`; optional `name` applies only to a single Skill. Root, wrapped and nested multi-Skill archives are recognized. Description frontmatter is required; names default to frontmatter then directory names. Exports contain `<name>/SKILL.md` and attachments and can be reimported.
+## Requests
 
-### Marketplace
+Import: `{"channel": "zip|marketplace|git", "options": {...}, "conflict": "replace"}`. `conflict` is `replace` (default, records a new version), `skip` (skips Skills with an existing name) or `error` (rejects the whole request if any name exists).
 
-`provider` is `clawhub` (default) or `http`. ClawHub uses `registry_url` (default `https://clawhub.ai`), `slug` (required for import, defaults to the Skill name for export), optional import `version`, and required semver export `version` and `token`. Export supports one Skill and optional `display_name` and `changelog`.
+Export: `{"channel": "zip|marketplace|git", "names": ["demo"], "options": {...}}`. `names` is required, unique, 1–256 entries.
 
-The [official v1 HTTP contract](https://github.com/openclaw/clawhub/blob/main/docs/http-api.md) uses `GET /api/v1/download?slug=&version=` and `POST /api/v1/skills` with multipart `payload` JSON and `files[]`. Only ZIP responses are consumed; Git source descriptors should be imported through the Git channel.
+Limits: at most 256 Skills, 4096 files, 128 MiB of content and a 64 MiB ZIP per request. Path traversal, duplicate names, symlinks and encrypted ZIPs are rejected before anything is written.
 
-Custom HTTP imports require a `download_url` returning ZIP. Exports require an `upload_url` accepting multipart ZIP under `file_field` (default `file`), plus a JSON-encoded `names` form field, and returning a successful JSON object. Optional `token` is sent as Bearer authorization. Other marketplace protocols require a new adapter.
+Requests must be `application/json`; other media types return 415. ZIP content goes in `options.zip_b64`. `options` accepts only the fields listed below, strings are at most 8192 characters (except `zip_b64`), and `token` and `secret_ref` are mutually exclusive. `token` is encrypted into a Secret Ref at acceptance (needs `TEAMEVOLVER_SECRET_MASTER_KEY`) and never written to task records, results or logs.
 
-### Git
+### ZIP options
 
-| Option | Description |
+| Parameter | Direction | Description |
+|---|---|---|
+| `zip_b64` | Import, required | Base64 ZIP content; keeps the existing JSON upload contract |
+| `name` | Import, optional | Name for a single-Skill import only; otherwise the SKILL.md name is used, falling back to the directory name |
+| `single` | Import, optional | Boolean; when true the ZIP must contain exactly one Skill |
+
+Root-level `SKILL.md`, a single wrapper directory, and multi-level layouts such as `workspace/skills/<name>/SKILL.md` are detected automatically. Each Skill's frontmatter must have a description. Exports are laid out as `<name>/SKILL.md` with attachments in the same directory.
+
+### Marketplace options
+
+| Parameter | Description |
 |---|---|
-| `url` | Required for import/new-branch export; HTTP(S), SSH or scp-style URL, no local server paths |
-| `branch` | Source/base branch; blank uses the remote default |
-| `commit` | Optional import revision, 7–40 hex characters; full resolved commit is recorded |
-| `path` | Skill directory, default `skills`; `.` means repository root |
+| `provider` | `clawhub` (default) or `http` |
+| `registry_url` | ClawHub service address, default `https://clawhub.ai` |
+| `slug` | Required for ClawHub pulls; uploads default to the Skill name |
+| `version` | Optional for pulls (empty uses the latest); required semantic version for uploads, such as `1.0.0` |
+| `token` / `secret_ref` | Bearer token or an existing Secret Ref; required for ClawHub uploads |
 | `name` | Optional single-Skill import name |
-| `username`, `token` | Request-only HTTP credentials |
+| `display_name`, `changelog` | Optional ClawHub upload display name and release notes |
+| `download_url` | Required for `http` imports; GET must return a ZIP |
+| `upload_url` | Required for `http` exports; receives the ZIP via POST multipart and returns a JSON object on success |
+| `file_field` | `http` upload field name, default `file`; a `names` field carries a JSON array of names |
+
+ClawHub uses the [official v1 HTTP protocol](https://github.com/openclaw/clawhub/blob/main/docs/http-api.md): `GET /api/v1/download?slug=&version=`; a single-Skill upload uses `POST /api/v1/skills` with a `payload` JSON and `files[]` in the multipart body. Marketplace rejections or rate limiting fail the task and uploads are not retried automatically. Only ZIPs returned by the marketplace are handled; if an entry returns a Git source descriptor, import that repository through the Git channel. Custom marketplaces must follow the ZIP contract in the table; other protocols can be added as new Adapters.
+
+### Git options
+
+| Parameter | Description |
+|---|---|
+| `url` | Required for imports and `new_branch` exports; HTTP(S), SSH or `git@host:path`; server-local paths are not accepted |
+| `branch` | Import source branch, export base branch; empty uses the repository default branch |
+| `commit` | Optional for imports, a 7–40 hex commit; the fully resolved commit is recorded |
+| `path` | Skill directory, default `skills`; `.` means the repository root |
+| `name` | Optional single-Skill import name |
+| `username`, `token` | HTTP Git account and password/token; `token` is encrypted into a Secret Ref, or pass an existing `secret_ref` directly |
 | `mode` | Export: `new_branch` (default) or `new_repository` |
-| `new_branch` | New ref; generated unique name for existing repos, `main` for new repos |
+| `new_branch` | New branch name; existing repositories get a unique generated name by default, new repositories default to `main` |
 | `message` | Optional commit message |
 | `provider` | New repository: `github` (default) or `gitlab` |
-| `api_url` | GitHub default `https://api.github.com`; GitLab default `https://gitlab.com/api/v4` |
-| `repo_name` | Required for new repositories, together with `token` |
-| `namespace` | GitHub organization or numeric GitLab namespace ID; blank uses current account |
-| `private` | New repository visibility, boolean, defaults to true |
+| `api_url` | New repository API root, default GitHub `https://api.github.com` or GitLab `https://gitlab.com/api/v4` |
+| `repo_name` | New repository name, required; creating a repository also requires a token |
+| `namespace` | GitHub organization name or GitLab numeric namespace_id; empty uses the current account |
+| `private` | Whether the new repository is private, boolean, default true |
 
-Sync is an explicit one-time pull, without scheduled jobs or deletion of unrelated local Skills. SSH uses the service account's keys and known_hosts. Exports replace selected Skill directories and preserve unrelated repository content. The target branch must not exist. If repository creation succeeds but pushing fails, the error includes the created repository URL for recovery.
+A sync is one explicit pull; it registers no schedule and deletes no other local Skills. SSH uses the SSH key and known_hosts configured for the service account. Exports keep unselected content in the repository and replace only the selected Skill directories; the target branch must not exist yet. A failed repository creation never falls back to overwriting an existing repository; if the repository was created but the push failed, the response gives the repository address for a retry.
 
 ## Examples
 
 ```bash
-curl -b console.cookies http://localhost:52010/api/skills/import \
+curl http://localhost:52010/api/skills/import \
+  -H "Authorization: Bearer $TEAMEVOLVER_ROOT_API_KEY" -H 'X-Tenant-Id: demo' \
   -H 'Content-Type: application/json' \
   -d '{"channel":"git","conflict":"replace","options":{"url":"https://git.example.com/team/repo.git","branch":"main","path":"skills"}}'
 
-curl -b console.cookies http://localhost:52010/api/skills/export \
+curl http://localhost:52010/api/skills/export \
+  -H "Authorization: Bearer $TEAMEVOLVER_ROOT_API_KEY" -H 'X-Tenant-Id: demo' \
   -H 'Content-Type: application/json' \
-  -d '{"channel":"zip","names":["demo"]}' -o demo.zip
+  -d '{"channel":"zip","names":["demo"]}'
+
+curl -o demo.zip http://localhost:52010/api/skills/transfer/jobs/<job_id>/download \
+  -H "Authorization: Bearer $TEAMEVOLVER_ROOT_API_KEY" -H 'X-Tenant-Id: demo'
 ```
 
-## Results and errors
+The third command downloads the archive after the export task succeeds.
 
-Import results include `imported`, `skipped`, and `errors`. Imported entries include `name`, `created`, `status` (created/updated/unchanged), `version`, `files`, `tree_sha256`, and non-secret `origin` metadata. Inspect `errors` even on HTTP 200: storage commits are per Skill, not transactional across a batch. `errors[].stored=true` means the version was committed but the local cache needs retrying. Existing SkillHub partial-write semantics apply to backend failures.
+## Results and Errors
 
-ZIP export returns a download. Remote exports return `exported`; Git also returns `url`, `branch`, and `commit`. Remote writes are not automatically retried.
+Import results contain three arrays: `imported`, `skipped`, `errors`. `imported` items contain `name`, `created`, `status` (`created`, `updated`, `unchanged`), `version`, `files`, `tree_sha256`, `origin`; Git sources record branch, commit and path, marketplace sources record provider, slug and version. Skills with identical content do not get a new version. Package format errors fail before anything is written; per-Skill commits can partially succeed, so callers must check `errors`.
 
-HTTP errors: 400/422 invalid input, 403 admin required, 404 missing Skill, 409 conflict, 413 size limits, 415 unsupported request media type, 429 transfer capacity, 502 remote/storage error, 503 Git unavailable, 504 Git timeout. Blocking I/O runs in worker threads; requests wait for completion with two transfer slots per process. Credentials are not persisted in URLs, cache configuration or results. Live marketplace publishing and hosted repository creation require deployment network access and permissions.
+Marketplace and Git export results contain `exported`; Git also includes the repository address, branch and commit. ZIP export results contain `download_url` and `sha256`.
+
+An interrupted export is not pushed again automatically: the Worker first reconciles with the remote using its checkpoint, and when that cannot be confirmed the task enters `reconciling`.
+
+| Status | Meaning |
+|---|---|
+| 400 | Invalid package format, channel parameters, path or request structure |
+| 403 | Not a tenant administrator |
+| 404 | Selected Skill does not exist, or task / archive does not exist |
+| 409 | `Idempotency-Key` conflict, name conflict, target Git branch already exists, archive verification failed |
+| 413 | File count or size over the limit |
+| 415 | Request is not JSON |
+| 503 | Credential encryption master key not configured, or tenant `skills` module configuration missing |
+
+Network-class failures (408, 429, 502, 503, 504) are retried by the Worker automatically; other failures set the task `error_code` to `transfer_error_<status>`.

@@ -1,240 +1,111 @@
-# 健康与状态 API
+# 健康、状态与任务 API
 
-上游数据源已统一为租户 `.py` 文件接口 `GET /api/datasource` 和
-`POST /api/datasource/test`，均需管理员身份。下文旧 `/langfuse/status` 已退役（410）。
-绑定、预览与拉取契约见[租户数据源接入](../guides/10-datasource-onboarding.md)。
+代码入口：
 
-## 1. API 实现介绍
+- 健康与状态：`teamEvolver/observability/api/__init__.py:create_router`
+- Worker 健康端口：`teamEvolver/runtime/http_runtime.py:build_health_app`
+- 统一任务接口：`teamEvolver/operations/api/__init__.py:create_router`
+- 任务状态机：`teamEvolver/runtime/repository.py:WorkerTaskRepository`
 
-健康与状态接口用于监控 teamEvolver 服务的运行状态、检查组件连通性，以及手动触发进化周期。这些接口不需要认证（设计为内网部署，应由网络边界控制访问）。
+## 健康检查
 
-代码实现：`teamEvolver/proxy/routes.py`（`/health`、`/healthz`、`/status`、`/trigger`、`/storage/status`）
+| 角色 | 端口 | 路由 |
+| --- | --- | --- |
+| `api` | `TEAMEVOLVER_API_PORT`，默认 52010 | `/healthz`、`/readyz`、`/status` 及全部业务接口 |
+| `worker` | 默认 52011（`teamEvolver start --role worker --port` 可改） | 仅 `/healthz`、`/readyz` |
+| `all` | 同 `api` | 同 `api`，进程内同时运行 Worker |
 
-## 2. 接口和参数说明
-
----
-
-### GET /health
-
-健康检查端点，返回服务存活状态。
-
-**认证：** 无
-
-**响应：**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `status` | string | 固定为 `"ok"` |
-
----
+三个路由均无需认证。
 
 ### GET /healthz
 
-Kubernetes 风格存活探针，返回简单的 ok 状态。
+存活探针，进程存活即返回 200：
 
-**认证：** 无
+```json
+{"ok": true, "role": "api"}
+```
 
-**响应：**
+### GET /readyz
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `ok` | boolean | 固定为 `true` |
+就绪探针，读取 `teamEvolver/runtime/lifecycle.py:RuntimeLifecycle.ready`。生命周期启动完成后返回 200；以下情况返回 503：启动尚未完成、正在优雅停机、Worker 循环报告 PostgreSQL 不可用、Worker 循环在停机之外意外退出。
 
----
+```json
+{"ready": false, "role": "worker"}
+```
+
+停机时先撤销就绪状态，负载均衡摘除副本后再等待在途任务结束。
 
 ### GET /status
 
-服务状态仪表盘，返回队列深度、注册技能数等运行时指标。
-
-**认证：** 无（控制台也使用此接口）
-
-**Query 参数：**
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `refresh` | boolean | 否 | 是否强制刷新缓存，默认 false |
-
-**响应字段：**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `running` | boolean | 进化循环是否运行中（注：当前实现固定返回 false，服务可用性通过其他字段判断） |
-| `pending_sessions` | integer | 队列中等待处理的 Session 数 |
-| `registered_skills` | integer | 已注册的团队 Skill 数量 |
-| `skills` | object | 技能详情映射，key 为技能名 |
-| `skills.<name>.skill_id` | string | 技能 ID |
-| `skills.<name>.version` | integer | 当前版本号 |
-
-**缓存：** 响应缓存 5 秒，`refresh=true` 时强制刷新。
-
----
-
-### POST /trigger
-
-手动触发一次进化周期（evolve cycle）。后台仍会按配置间隔（默认 600 秒）自动扫描队列。
-
-**认证：** 无（应由防火墙限制访问）
-
-**方法：** POST
-
-**响应：** 由嵌入式进化应用返回，通常为 202 Accepted 表示已触发。
-
-**注意：** `/trigger` 路径经过嵌入式进化中间件处理，由 `team_skills/evolution/runtime/orchestrator.py` 中的进化引擎响应。如果进化引擎未就绪或未配置，可能返回错误。
-
-相关代码：`teamEvolver/proxy/routes.py:824` (`_is_embedded_evolve_path`)、`teamEvolver/proxy/server.py:332` (`_dispatch_embedded_evolve_request`)
-
----
-
-### POST /trigger-dreamcycle
-
-触发 DreamCycle 内存维护任务。
-
-**认证：** 无（内部接口）
-
-**响应：**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `status` | string | `started` 或 `not_configured` |
-
-未配置 DreamCycle 时返回 503 状态码。
-
----
-
-### GET /storage/status
-
-检查共享存储（OpenViking）的配置和连通性。
-
-**认证：** 无
-
-**响应字段：**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `backend` | string | 存储后端类型（`viking` 或 `none`） |
-| `deployment` | string | 部署模式（`cloud` 或 `local`） |
-| `endpoint` | string | OpenViking 端点地址 |
-| `namespace` | string | 命名空间 |
-| `api_key_present` | boolean | API Key 是否已配置 |
-| `sharing_enabled` | boolean | 已废弃的兼容字段，固定返回 true |
-| `fallback_enabled` | boolean | 是否启用本地回退（`sharing.local_fallback_enabled`，默认 true） |
-| `effective_backend` | string | 实际生效的存储后端（`viking` 或 `local`） |
-| `fallback_active` | boolean | 配置为 `viking` 但探测失败、实际回退到本地存储时为 true |
-| `local_root` | string | 本地存储根目录（生效后端为 local 时返回） |
-| `session_backend` | string | Session 存储后端（默认 `local`） |
-| `skill_backend` | string | Skill 库存储后端（默认 `local`） |
-| `mirror_enabled` | boolean | Skill 库是否启用异步镜像到 OpenViking |
-| `mirror` | object | 镜像 spool 健康摘要：`enabled`、`spool_dir`、`backlog`、`oldest_age_seconds`、`dead_letter`、`last_error` |
-| `reachable` | boolean | 存储是否可达（注意：回退状态下仍为 true） |
-| `reason` | string | 状态说明：`viking_unavailable: <原因>`（OpenViking 不可用已回退本地，此时 reachable=true），或存储探测异常信息（此时 reachable=false） |
-
-代码：`teamEvolver/proxy/routes.py:_storage_status`
-
----
-
-### GET /langfuse/status
-
-检查 Langfuse 可观测性集成状态。
-
-**认证：** 无
-
-**响应字段：**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `enabled` | boolean | 是否启用 Langfuse |
-| `tracing` | object | Tracing 状态 |
-| `host` | string | Langfuse 主机地址 |
-| `public_key_present` | boolean | Public Key 是否配置 |
-| `secret_key_present` | boolean | Secret Key 是否配置 |
-| `reachable` | boolean | 是否可达 |
-| `total_sessions` | integer | 总 Session 数 |
-| `reason` | string | 不可达原因 |
-
-## 3. 使用示例
-
-### 健康检查
-
-```bash
-curl -fsS "http://localhost:52010/health"
-```
-
-响应：
-
 ```json
-{"status": "ok"}
+{"role": "api", "ready": true}
 ```
 
-### 查看服务状态
+`/status` 也允许租户 Key 访问，供 Agent 运行时探测服务。
 
-```bash
-curl -fsS "http://localhost:52010/status"
-```
+## 统一任务接口
 
-响应示例：
+所有 `202 Accepted` 受理返回的 `job_id` 都是 `worker_tasks.task_id`，可用以下接口操作。租户由请求身份确定，RLS 保证只能看到本租户任务，其他租户的任务返回 404。需要控制台登录或 Root Key。
+
+### GET /api/jobs/{job_id}
 
 ```json
 {
-  "running": false,
-  "pending_sessions": 3,
-  "registered_skills": 5,
-  "skills": {
-    "database-debugging": {"skill_id": "database-debugging", "version": 3},
-    "code-review": {"skill_id": "code-review", "version": 1}
-  }
+  "job_id": "3f0c...:session.normalize",
+  "kind": "session.normalize",
+  "status": "running",
+  "attempt": 1,
+  "cancel_requested": false,
+  "upstream_task_id": "",
+  "result_ref": "",
+  "error_code": "",
+  "created_at": "2026-10-14T08:00:00Z",
+  "updated_at": "2026-10-14T08:00:03Z"
 }
 ```
 
-### 手动触发进化
+| 状态 | 含义 |
+| --- | --- |
+| `queued` | 等待 Worker 领取 |
+| `running` | Worker 持有租约执行中 |
+| `retry_wait` | 失败后按退避等待重试 |
+| `waiting_external` | 已提交外部任务（如 OpenViking Compile），等待上游完成；`upstream_task_id` 为上游任务 ID |
+| `reconciling` | 结果未知，正在与上游对账 |
+| `succeeded` | 成功，`result_ref` 指向结果 |
+| `failed` | 终态失败，`error_code` 为原因 |
+| `cancelled` | 已取消 |
 
-```bash
-curl -fsS -X POST "http://localhost:52010/trigger"
-```
+业务结果用各模块的 `.../jobs/{job_id}/result` 读取，例如 `/api/datasource/jobs/{job_id}/result`、`/api/skill-evolution/jobs/{job_id}/result`。
 
-### 检查存储状态
+### POST /api/jobs/{job_id}/cancel
 
-```bash
-curl -fsS "http://localhost:52010/storage/status"
-```
-
-响应示例（正常）：
-
-```json
-{
-  "backend": "viking",
-  "deployment": "local",
-  "endpoint": "http://localhost:52011",
-  "namespace": "resources",
-  "api_key_present": false,
-  "reachable": true
-}
-```
-
-### 检查存活探针
-
-```bash
-curl -fsS "http://localhost:52010/healthz"
-```
-
-响应：
+- `queued`、`retry_wait`：立即变为 `cancelled`。
+- `running`、`waiting_external`、`reconciling`：置 `cancel_requested=true`，Worker 在安全点停止，不中断不可幂等的外部写入。
+- 已是终态：返回当前任务视图。
 
 ```json
-{"ok": true}
+{"job_id": "...", "status": "running", "cancel_requested": true}
 ```
 
-## 4. 响应契约与错误处理
+### POST /api/jobs/{job_id}/retry
 
-### 错误码
+只对 `failed` 任务生效，将其重新置为 `queued`，`attempt` 在下次领取时递增。其他状态返回 `409 only a failed job can be retried (status=<status>)`。
 
-| HTTP 状态码 | 场景 |
-|------------|------|
-| 503 | DreamCycle 未配置（`/trigger-dreamcycle`） |
-| 503 | 上游模型 base URL 未配置（模型代理端点，不影响健康检查） |
-| 503 | Session 存储未配置（`/ingest_session` 时，不影响健康检查） |
+## Worker kind
 
-### 部署建议
+| kind | 模块 | 来源 |
+| --- | --- | --- |
+| `session.pull`、`session.normalize`、`session.analyze`、`session.archive` | Session 接入 | 上报、数据源拉取、定时拉取 |
+| `skill.evolve` | Skill 进化 | 进化触发、Prompt 测试、模型 / 链路观测测试、OpenViking 目录初始化 |
+| `skill.validate` | Skill 验证 | Candidate 评估与验证 |
+| `skill.transfer` | Skill 导入导出 | Skill 导入导出 |
+| `experience.sync` | 成功经验 | 经验同步、全量导入、Pattern 编译 |
+| `memory.aggregate`、`memory.compile`、`memory.replay` | 团队 Memory | Memory 运行、维护、Memory Skill 发布、Memory Replay |
+| `miner.track_compile`、`miner.rebuild_index` | 知识库挖掘 | 挖掘任务、上传、编辑、删除 |
+| `replay.run`、`dataset.run` | Replay | Replay 运行、Adapter 测试、数据集运行与合成 |
 
-1. **负载均衡健康检查**：使用 `/healthz` 作为 L7 健康检查路径，`/health` 作为就绪探针。
-2. **网络隔离**：`/trigger` 和 `/trigger-dreamcycle` 无认证，生产环境应通过防火墙限制为内网访问。
-3. **监控指标**：定期抓取 `/status` 的 `pending_sessions` 值，持续增长表示进化处理能力不足或队列堵塞。
-4. **存储告警**：`/storage/status` 返回 `reachable: false` 时触发告警，表示共享存储不可用，Skill 同步和 Memory 功能将降级。
+Worker 每轮刷新租户时应用追踪配置，并调度数据源拉取、Skill 进化、Memory 维护与成功经验同步。任务调度由租约和去重键保护，多副本 Worker 可同时运行。
+
+## 服务日志状态
+
+`GET /api/logging/status` 见 [服务日志状态](./15-logging-status.md)。

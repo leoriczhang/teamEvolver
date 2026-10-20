@@ -1,6 +1,21 @@
-# Service logging
+# Service Logging
 
-Foreground, container and daemon starts use the same bounded logging queue and writer thread. Logs go to stderr and `~/.teamEvolver/teamEvolver.log` by default. SIT/PRD templates use `/app/deploy/logs/teamEvolver.log`. Ontology working artifacts remain under `ontology.state_dir`; they are not log files.
+Service logs are managed by `teamEvolver/logging_runtime.py`. `api` and `worker` processes write the same rotating file format in foreground, background and container modes, and also write to standard error for platform collection. Logging is a service-level bootstrap setting; changes take effect after restart.
+
+## Log Location
+
+| Scenario | Path |
+|------|------|
+| Local default | `~/.teamEvolver/teamEvolver.log` |
+| Example custom container log directory | `/app/deploy/logs/teamEvolver.log` |
+| `--log-file PATH` | The given path; file output is forced on |
+| Multiple replicas | `<directory>/<instance>/teamEvolver.log` when `TEAMEVOLVER_MULTI_REPLICA=true` |
+
+In multi-replica mode `<instance>` is `TEAMEVOLVER_INSTANCE_ID`, or host name plus PID when unset. A second process on the same path cannot get the file lock and degrades to standard error only.
+
+Platform administrators can see the current process's actual path, file state, queue depth and drop counts in "Runtime Status → Service Logs" or `GET /api/logging/status`. Behind a load balancer each request may hit a different instance.
+
+## Configuration
 
 ```yaml
 logging:
@@ -13,18 +28,52 @@ logging:
   max_total_mb: 2048
 ```
 
-These are service settings; tenant overrides are ignored. Corresponding environment variables are `TEAMEVOLVER_LOG_LEVEL`, `TEAMEVOLVER_LOG_CONSOLE_ENABLED`, `TEAMEVOLVER_LOG_FILE_ENABLED`, `TEAMEVOLVER_LOG_DIR`, `TEAMEVOLVER_LOG_MAX_FILE_MB`, `TEAMEVOLVER_LOG_RETENTION_DAYS`, and `TEAMEVOLVER_LOG_MAX_TOTAL_MB`. Priority: explicit `--log-file` (also enables file output), process environment, loaded environment file, YAML, defaults. Restart to apply changes.
+| Field | Environment variable | Default |
+|------|----------|------|
+| `level` | `TEAMEVOLVER_LOG_LEVEL` | INFO |
+| `directory` | `TEAMEVOLVER_LOG_DIR` | `~/.teamEvolver` |
+| `file_enabled` | `TEAMEVOLVER_LOG_FILE_ENABLED` | true |
+| `console_enabled` | `TEAMEVOLVER_LOG_CONSOLE_ENABLED` | true |
+| `max_file_mb` | `TEAMEVOLVER_LOG_MAX_FILE_MB` | 100 |
+| `retention_days` | `TEAMEVOLVER_LOG_RETENTION_DAYS` | 14 |
+| `max_total_mb` | `TEAMEVOLVER_LOG_MAX_TOTAL_MB` | 2048 |
 
-Directories are created automatically. Rotation uses the local date and size in MiB; archives are named `teamEvolver.log.YYYY-MM-DD.000001`. Startup, rotation and minute checks delete only matching archives, oldest first. Active files, artifacts, unrelated files and symlinks are never removed. Keep the total budget larger than the per-file limit. The active file can temporarily exceed the total budget.
+Priority from high to low: `--log-file`, environment variables, YAML, defaults. Booleans accept `1/0`, `true/false`, `yes/no`, `on/off`; sizes and days must be positive integers, and invalid values fail startup.
 
-Enable `TEAMEVOLVER_MULTI_REPLICA=1` for shared log volumes. Give each replica a stable, unique `TEAMEVOLVER_INSTANCE_ID` to reuse its directory on restart; otherwise hostname and PID are used. A file lock prevents concurrent ownership. Retention is per instance; abandoned PID directories need platform lifecycle cleanup.
+At startup the `logging.configured` event records the final path and the source of each field.
 
-A queue holds at most 8192 records. Overflow is counted; ERROR and higher also use stderr. Shutdown drains for up to approximately three seconds. File failures degrade to stderr, even when regular console output is disabled, with recovery attempted every minute. Administrators can inspect the current process through the runtime view and [logging status API](../api/15-logging-status.md). A blocked filesystem cannot guarantee delivery, but it does not block the request event loop.
+## Rotation and Retention
 
-Validated `X-Request-ID` values correlate HTTP requests, OV calls and thread-pool work. Background jobs use task ID and attempt. `TE_ROUTE_NOT_REGISTERED` identifies an unmatched TE route; `OV_NOT_FOUND`, `ONTOLOGY_DISABLED`, `FORBIDDEN`, `OV_TIMEOUT` and identity mismatch events identify upstream failures. Successful GET polling uses DEBUG. Repeated ontology failures are summarized; first failure, changed error and recovery are logged immediately.
+- Rotates by local date and file size; archives are named `teamEvolver.log.YYYY-MM-DD.000001` with increasing sequence numbers that never overwrite
+- Retention and total size are checked at startup, on rotation and every minute; the oldest archives are deleted first
+- Only regular files matching the archive naming are deleted; the active file, symlinks and other files are never touched
+- The active file may briefly push the total above `max_total_mb`; keep `max_total_mb >= max_file_mb`
 
-Credentials, query parameters and business payloads are excluded from diagnostic events. Tracebacks retain frame locations and exception types, not arbitrary exception values or code lines. Skill mining observes remote OV task status, round progress and safe diagnostic metadata. Adding diagnostics does not change permissions, publication semantics, schemas or feature flags and does not itself resolve existing Not Found errors. Actual SIT mounts and permissions still require deployment acceptance.
+## Degradation
 
-## Access save displays `[object Object]`
+Logs go through a bounded queue of at most 8192 records written by a dedicated thread:
 
-A SIT reproduction on 2026-09-21 identified Ontology JSON requests sent as `text/plain`, causing TE to return HTTP 422 before persisting access. The old client rendered FastAPI validation arrays as `[object Object]`. The fix explicitly sets `application/json` on Ontology POST/PUT requests and displays validation locations/messages without echoing `input` or `ctx`. Inspect the PUT receipt separately from subsequent capabilities GET errors. The frontend fix requires an updated frontend deployment.
+- When the queue is full, records are dropped and counted in `dropped_count`; ERROR and above are also written directly to standard error
+- When the directory is unwritable, the disk is full or rotation fails, the file state becomes `degraded`; logs go to standard error and recovery is retried every minute
+- `file_missed_count` counts records not written to the file; they were still written to standard error
+- At exit, the process waits about 3 seconds to drain the queue
+
+Degradation and recovery are logged as `logging.file_degraded` and `logging.file_recovered`; the periodic health summary is `logging.health`. Log write failures never affect request handling.
+
+## Log Format
+
+Each line contains a time with time zone, level, logger, PID, event name and structured fields. HTTP requests use a validated `X-Request-ID` (generated when missing) and echo it in the response header; thread-pool work inherits the request context and Worker tasks are correlated by `task_id`. Successful GET polling is logged at DEBUG.
+
+The following never enter logs: model prompt and response bodies, source document bodies, approval notes, credentials, cookies. Fields matching `api_key`, `password`, `secret`, `authorization`, `cookie`, `token`, `root_key`, and registered configuration secrets, are redacted. Stack traces keep file, line and exception type and omit business data in exception messages.
+
+## Investigation Order
+
+1. Use `logging.configured` to confirm the process loaded the expected configuration and directory.
+2. Correlate `http.completed` and later events by request ID or `job_id`.
+3. Requests to unmatched routes are logged as `http.completed` with error code `TE_ROUTE_NOT_REGISTERED` and route field `<unmatched>`.
+
+## Related Documents
+
+- [Configuration Reference](./01-configuration.md)
+- [Logging Status API](../api/15-logging-status.md)
+- [Troubleshooting](./06-troubleshooting.md)

@@ -70,7 +70,7 @@ def normalize_backend(backend: str | None, *, endpoint: str = "") -> str:
         return "viking"
     if value == "viking":
         return "viking"
-    # PostgreSQL local-state backend (multi-tenancy plan §2.4).
+    # PostgreSQL local-state backend.
     if value in {"pg", "postgres", "postgresql"}:
         return "postgres"
     if value:
@@ -103,7 +103,7 @@ def is_not_found_error(exc: Exception) -> bool:
     text = str(exc)
     if "NotFound" in name:
         return True
-    # OpenViking surfaces missing URIs as "NOT_FOUND: ..." or "RESOURCE_NOT_FOUND: ..."
+    # OpenViking surfaces missing URIs as "NOT_FOUND:..." or "RESOURCE_NOT_FOUND:..."
     if "NOT_FOUND" in text or "NoSuchURI" in text:
         return True
     return False

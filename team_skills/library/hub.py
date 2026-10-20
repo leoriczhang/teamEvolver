@@ -18,24 +18,17 @@ import hashlib
 import json
 import logging
 import os
-import shutil
 import threading
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Collection, Optional
+from typing import Any, Collection, Optional
 
-if TYPE_CHECKING:
-    from team_skills.library.mirror import VikingSkillMirror
-
-from team_skills.library import frontmatter, layout
+from team_skills.library import frontmatter
 from team_skills.library.bundle import (
     bundle_entrypoint_bytes,
     bundle_file_records,
-    bundle_has_only_entrypoint,
     bundle_tree_sha256,
     coerce_skill_bundle,
     is_ignored_bundle_rel_path,
-    read_skill_bundle_with_meta,
-    write_skill_bundle,
 )
 from team_skills.library.publication import (
     load_manifest_snapshot,
@@ -44,8 +37,6 @@ from team_skills.library.publication import (
 from team_skills.library.registry import SkillIDRegistry
 from teamEvolver.storage import (
     _VIKING_ROOT_PREFIX,
-    InMemoryObjectStore,
-    LocalObjectStore,
     PgObjectStore,
     build_object_store,
     is_not_found_error,
@@ -53,6 +44,8 @@ from teamEvolver.storage import (
     peer_key_prefix,
     pg_dsn_available,
 )
+
+from .cache_operations import SkillCacheOperations
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +61,7 @@ class SkillFileConflictError(RuntimeError):
     """Raised when a skill file changed in storage since the caller read it."""
 
 
-class SkillHub:
+class SkillHub(SkillCacheOperations):
     """Read and mutate the authoritative tenant Skill registry."""
 
     def __init__(
@@ -89,7 +82,6 @@ class SkillHub:
         allow_fallback: bool = False,
         fallback_root: str = "",
         fallback_backend: str = "local",
-        mirror_spool_dir: str = "",
         # PostgreSQL local-state backend (used when backend == "postgres").
         # Empty pg_dsn derives from the OV_PG_* environment variables.
         pg_dsn: str = "",
@@ -139,16 +131,9 @@ class SkillHub:
         # local: the hub used by the mirror outbox to push the skills subtree
         # to OpenViking for remote Agents. None when mirroring is disabled or
         # the primary bucket is already viking.
-        self._mirror_viking_hub: Optional["SkillHub"] = None
         # Spool directory for mirror deliveries (empty = default
         # ~/.teamEvolver/skill_mirror_spool). Kept on the hub so every enqueue
         # writes to the same spool the flusher/status read from.
-        self._mirror_spool_dir = str(mirror_spool_dir or "")
-
-    @property
-    def mirror_viking_hub(self) -> Optional["SkillHub"]:
-        """Viking hub used by the skill mirror outbox (None when not mirroring)."""
-        return self._mirror_viking_hub
 
     @property
     def _is_pg_backend(self) -> bool:
@@ -158,43 +143,6 @@ class SkillHub:
         stay bare (no ``tenants/<id>/`` directory prefix).
         """
         return isinstance(self._bucket, PgObjectStore)
-
-    def _build_mirror(self) -> Optional["VikingSkillMirror"]:
-        """Build the mirror outbox for this hub (None when not mirroring)."""
-        if self._mirror_viking_hub is None:
-            return None
-        from team_skills.library.mirror import VikingSkillMirror
-
-        return VikingSkillMirror(
-            spool_dir=self._mirror_spool_dir or None,
-            viking_hub=self._mirror_viking_hub,
-            sequence_bucket=self._bucket,
-        )
-
-    def mirror_enqueue_push(self, skill_name: str, bundle_files: dict[str, bytes]) -> None:
-        """Enqueue an OpenViking mirror for one freshly-published skill.
-
-        No-op unless this hub is local-backed with a mirror attached. Never
-        raises — mirroring must not break the publish path; failures are
-        retried by the background flusher.
-        """
-        mirror = self._build_mirror()
-        if mirror is None:
-            return
-        try:
-            mirror.enqueue_skill(skill_name, bundle_files)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[SkillHub] mirror enqueue failed for %s: %s", skill_name, exc)
-
-    def mirror_enqueue_delete(self, skill_name: str) -> None:
-        """Enqueue removal of one skill's mirrored subtree (best-effort)."""
-        mirror = self._build_mirror()
-        if mirror is None:
-            return
-        try:
-            mirror.enqueue_delete(skill_name)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[SkillHub] mirror delete enqueue failed for %s: %s", skill_name, exc)
 
     @classmethod
     def from_bucket(
@@ -215,8 +163,6 @@ class SkillHub:
         hub._customer_id = str(customer_id or "").strip("/")
         hub._user_alias = user_alias or os.environ.get("USER", "anonymous")
         hub._tenant_id = str(tenant_id or "default").strip()
-        hub._mirror_viking_hub = None
-        hub._mirror_spool_dir = ""
         return hub
 
     # ------------------------------------------------------------------ #
@@ -323,37 +269,12 @@ class SkillHub:
             allow_fallback=allow_fallback,
             fallback_root=local_root,
             fallback_backend=fallback_backend if key_scope == "team" else "local",
-            mirror_spool_dir=str(getattr(config, "sharing_skill_mirror_spool_dir", "") or ""),
             viking_namespace=namespace,
             tenant_id=tenant_id,
             **viking_kwargs,
             **pg_kwargs,
         )
 
-        # When the primary bucket is local or PostgreSQL and the mirror is enabled,
-        # attach a viking hub used by the mirror outbox to push the skills
-        # subtree — PostgreSQL is also the OpenViking-outage fallback target, and
-        # edits made during an outage must still reach OpenViking. The mirror
-        # target bypasses the fallback (an unavailable OpenViking must surface as
-        # a failed delivery, not silently write elsewhere).
-        mirror_enabled = bool(getattr(config, "sharing_skill_mirror_enabled", True))
-        if (
-            isinstance(hub._bucket, (LocalObjectStore, PgObjectStore))
-            and mirror_enabled
-            and viking_endpoint
-            and has_viking_key
-            and key_scope == "team"
-        ):
-            hub._mirror_viking_hub = cls(
-                backend="viking",
-                endpoint=viking_endpoint,
-                customer_id=customer_id,
-                allow_fallback=False,
-                mirror_spool_dir=str(getattr(config, "sharing_skill_mirror_spool_dir", "") or ""),
-                viking_namespace=namespace,
-                tenant_id=tenant_id,
-                **viking_kwargs,
-            )
         return hub
 
     @classmethod
@@ -507,20 +428,6 @@ class SkillHub:
         )
         return record
 
-    @staticmethod
-    def _local_bundle_matches_record(skill_dir: str, record: dict[str, Any]) -> bool:
-        bundle, _records, tree_sha = read_skill_bundle_with_meta(skill_dir)
-        if not bundle:
-            return False
-        if record.get("format") == "skill-bundle":
-            return str(record.get("tree_sha256") or "") == tree_sha
-
-        try:
-            skill_md = bundle_entrypoint_bytes(bundle)
-        except Exception:
-            return False
-        skill_sha = hashlib.sha256(skill_md).hexdigest()
-        return bundle_has_only_entrypoint(bundle) and str(record.get("sha256") or "") == skill_sha
 
     # ------------------------------------------------------------------ #
     # Manifest operations                                                  #
@@ -648,7 +555,7 @@ class SkillHub:
                             raise
                         continue
                     registry.mark_persisted()
-                    self.mirror_enqueue_push(name, bundle)
+
                     return {"uploaded": 1, "skipped": 0, "record": entry}
 
             manifest = self._load_remote_manifest()
@@ -673,7 +580,7 @@ class SkillHub:
             )
             self._save_remote_manifest(manifest)
             registry.save_to_oss(self._bucket, self._prefix())
-            self.mirror_enqueue_push(name, bundle)
+
             return {"uploaded": 1, "skipped": 0, "record": entry}
 
     def _commit_bundle(
@@ -739,217 +646,16 @@ class SkillHub:
     # Runtime-cache discovery                                              #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _list_cached_skill_dirs(skills_dir: str) -> dict[str, list[str]]:
-        """Return ``{skill_name: [skill_dir, ...]}`` for cached Skill folders."""
-        out: dict[str, list[str]] = {}
-        if not os.path.isdir(skills_dir):
-            return out
-        for entry in os.scandir(skills_dir):
-            if not entry.is_dir():
-                continue
-            if os.path.isfile(os.path.join(entry.path, "SKILL.md")):
-                out.setdefault(entry.name, []).append(entry.path)
-        return out
 
-    @staticmethod
-    def _resolve_cache_target_dir(
-        skills_dir: str,
-        skill_name: str,
-        category: str,
-        local_dirs_by_name: dict[str, list[str]],
-    ) -> str:
-        """Choose the runtime-cache directory for a materialized Skill."""
-        del local_dirs_by_name
-        target = layout.skill_dir_for(skills_dir, skill_name, category)
-        return target
 
-    @staticmethod
-    def _remove_duplicate_local_skill_dirs(
-        skill_name: str,
-        keep_dir: str,
-        local_dirs_by_name: dict[str, list[str]],
-    ) -> None:
-        keep_real = os.path.realpath(keep_dir)
-        for skill_dir in local_dirs_by_name.get(skill_name) or []:
-            if os.path.realpath(skill_dir) == keep_real:
-                continue
-            if not os.path.isdir(skill_dir):
-                continue
-            shutil.rmtree(skill_dir)
-            logger.info("[SkillHub] removed duplicate local skill dir: %s", skill_dir)
 
-    @staticmethod
-    def _prune_backups(backup_root: str, prefix: str, keep: int = 3) -> None:
-        """Keep only the newest ``keep`` backups for the current skills dir."""
-        try:
-            names = sorted(n for n in os.listdir(backup_root) if n.startswith(prefix))
-        except Exception:
-            return
-        to_delete = names[:-keep] if keep > 0 else names
-        for name in to_delete:
-            try:
-                shutil.rmtree(os.path.join(backup_root, name))
-            except Exception:
-                pass
 
     # ------------------------------------------------------------------ #
     # Durable store -> runtime cache                                       #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _materialization_result(
-        *,
-        downloaded: int,
-        skipped: int,
-        deleted: int,
-        total_remote: int,
-        restored_from_backup: bool,
-        backup_dir: str,
-    ) -> dict[str, Any]:
-        return {
-            "downloaded": downloaded,
-            "skipped": skipped,
-            "deleted": deleted,
-            "total_remote": total_remote,
-            "restored_from_backup": restored_from_backup,
-            "backup_dir": backup_dir,
-        }
 
-    def materialize_runtime_cache(
-        self,
-        runtime_cache_dir: str,
-    ) -> dict[str, Any]:
-        """Materialize stored Skills into a rebuildable runtime cache.
 
-        The cache strictly mirrors the authoritative manifest. Materialization
-        is staged and backed up so a failed download cannot expose a partial
-        cache to file-based runtimes.
-        """
-        os.makedirs(runtime_cache_dir, exist_ok=True)
-        cached_dirs = self._list_cached_skill_dirs(runtime_cache_dir)
-        manifest = self._load_remote_manifest()
-        return self._materialize_mirror(
-            runtime_cache_dir,
-            manifest,
-            cached_dirs,
-        )
-
-    def _materialize_mirror(
-        self,
-        skills_dir: str,
-        manifest: dict[str, dict[str, Any]],
-        local_dirs_by_name: dict[str, list[str]],
-    ) -> dict[str, Any]:
-        """Full mirror pull: stage into a temp dir, then swap in with rollback."""
-        local_skills = {name: dirs[-1] for name, dirs in local_dirs_by_name.items() if dirs}
-        parent_dir = os.path.dirname(os.path.abspath(skills_dir))
-        base_name = os.path.basename(os.path.abspath(skills_dir))
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        backup_root = os.path.join(parent_dir, _BACKUP_DIRNAME)
-        os.makedirs(backup_root, exist_ok=True)
-        backup_prefix = f"{base_name}_"
-        backup_dir = os.path.join(backup_root, f"{backup_prefix}{stamp}")
-        staging_dir = os.path.join(parent_dir, f"{_STAGE_PREFIX}{base_name}_{stamp}")
-
-        try:
-            shutil.copytree(skills_dir, backup_dir)
-        except Exception as e:
-            logger.warning("[SkillHub] backup before pull failed: %s", e)
-            return self._materialization_result(
-                downloaded=0,
-                skipped=0,
-                deleted=0,
-                total_remote=len(manifest),
-                restored_from_backup=False,
-                backup_dir="",
-            )
-
-        os.makedirs(staging_dir, exist_ok=True)
-        resolved_targets: dict[str, str] = {}
-        downloaded = 0
-        skipped = 0
-        deleted = 0
-
-        try:
-            for name, rec in manifest.items():
-                category = str(rec.get("category", "general") or "general")
-                target_dir = self._resolve_cache_target_dir(skills_dir, name, category, local_dirs_by_name)
-                resolved_targets[name] = target_dir
-                staged_dir = os.path.join(staging_dir, os.path.relpath(target_dir, skills_dir))
-
-                if os.path.isdir(target_dir) and self._local_bundle_matches_record(target_dir, rec):
-                    skipped += 1
-                    shutil.copytree(target_dir, staged_dir, dirs_exist_ok=True)
-                    continue
-
-                try:
-                    bundle = self._download_skill_bundle(name, rec)
-                except Exception as e:
-                    raise RuntimeError(f"failed to download skill {name}: {e}") from e
-
-                write_skill_bundle(staged_dir, bundle, clean=True)
-                downloaded += 1
-                logger.info("[SkillHub] materialized Skill: %s", name)
-
-            remote_names = set(manifest.keys())
-            local_names = set(local_skills.keys())
-            for stale in sorted(local_names - remote_names):
-                shutil.rmtree(local_skills[stale], ignore_errors=False)
-                deleted += 1
-
-            for name in sorted(remote_names):
-                rec = manifest.get(name, {})
-                category = str(rec.get("category", "general") or "general")
-                dst_dir = resolved_targets.get(name) or self._resolve_cache_target_dir(
-                    skills_dir, name, category, local_dirs_by_name
-                )
-                src_dir = os.path.join(staging_dir, os.path.relpath(dst_dir, skills_dir))
-                if os.path.isdir(dst_dir):
-                    shutil.rmtree(dst_dir)
-                os.makedirs(os.path.dirname(dst_dir), exist_ok=True)
-                shutil.move(src_dir, dst_dir)
-                self._remove_duplicate_local_skill_dirs(name, dst_dir, local_dirs_by_name)
-
-        except Exception as e:
-            logger.warning("[SkillHub] mirror pull failed, restoring backup: %s", e)
-            restored_from_backup = False
-            try:
-                if os.path.isdir(skills_dir):
-                    shutil.rmtree(skills_dir)
-                shutil.copytree(backup_dir, skills_dir)
-                restored_from_backup = True
-                logger.info("[SkillHub] local skills restored from backup: %s", backup_dir)
-            except Exception as restore_err:
-                logger.error("[SkillHub] backup restore failed: %s", restore_err)
-            return self._materialization_result(
-                downloaded=0,
-                skipped=0,
-                deleted=0,
-                total_remote=len(manifest),
-                restored_from_backup=restored_from_backup,
-                backup_dir=backup_dir,
-            )
-        finally:
-            if os.path.isdir(staging_dir):
-                shutil.rmtree(staging_dir, ignore_errors=True)
-
-        logger.info(
-            "[SkillHub] cache materialized: %d downloaded, %d skipped, %d deleted, %d total",
-            downloaded,
-            skipped,
-            deleted,
-            len(manifest),
-        )
-        self._prune_backups(backup_root, backup_prefix, keep=3)
-        return self._materialization_result(
-            downloaded=downloaded,
-            skipped=skipped,
-            deleted=deleted,
-            total_remote=len(manifest),
-            restored_from_backup=False,
-            backup_dir=backup_dir,
-        )
 
     # ------------------------------------------------------------------ #
     # Delete from durable storage                                         #
@@ -988,7 +694,7 @@ class SkillHub:
             registry.save_to_oss(self._bucket, self._prefix())
 
         logger.info("[SkillHub] deleted remote skill: %s (existed=%s)", name, existed)
-        self.mirror_enqueue_delete(name)
+
         return {"deleted": existed, "name": name}
 
     # ------------------------------------------------------------------ #
@@ -999,27 +705,6 @@ class SkillHub:
         """Return the tenant's published Skill metadata."""
         return list(self._load_remote_manifest().values())
 
-    def describe_source(self) -> dict[str, Any]:
-        """Describe the live backend, for consoles that show where skills live.
-
-        ``backend`` is ``viking`` / ``postgres`` / ``local`` (``memory`` for the
-        in-process test double); ``fallback`` is true when OpenViking was
-        unreachable and the configured fallback store is in use instead.
-        """
-        bucket = self._bucket
-        if isinstance(bucket, PgObjectStore):
-            backend = "postgres"
-        elif isinstance(bucket, LocalObjectStore):
-            backend = "local"
-        elif isinstance(bucket, InMemoryObjectStore):
-            backend = "memory"
-        else:
-            backend = "viking"
-        return {
-            "backend": backend,
-            "fallback": bool(getattr(bucket, "fallback_active", False)),
-            "reason": str(getattr(bucket, "fallback_reason", "") or ""),
-        }
 
     # ------------------------------------------------------------------ #
     # Hub-only bundle file access (no local working copy)                  #
@@ -1082,10 +767,10 @@ class SkillHub:
         single source every page reads. ``expected_sha256`` enforces optimistic
         concurrency — ``None`` means "file must not exist yet", a string must
         match the stored file's hash; a mismatch raises
-        :class:`SkillFileConflictError`.
+      :class:`SkillFileConflictError`.
 
         Returns the new manifest record ``{name, version, sha256, tree_sha256,
-        files, ...}``.
+        files,...}``.
         """
         name = self._clean_skill_name(skill_name)
         clean = self._clean_rel_path(rel_path)
@@ -1114,8 +799,8 @@ class SkillHub:
     def list_versions(self, skill_name: str) -> dict[str, Any]:
         """Return the version history for one skill from the ID registry.
 
-        Shape: ``{skill_id, current_version, versions: [int, ...],
-        history: [{version, action, timestamp, ...}, ...]}``. ``versions`` is a
+        Shape: ``{skill_id, current_version, versions: [int,...],
+        history: [{version, action, timestamp,...},...]}``. ``versions`` is a
         descending list of every version we can actually reconstruct from
         storage (each has a ``versions/v{n}/`` bundle), so the UI never offers a
         version that cannot be viewed or rolled back to.
@@ -1188,7 +873,7 @@ class SkillHub:
         raise FileNotFoundError(f"version v{version} of {skill_name} not found in storage")
 
     def read_version_bundle(self, skill_name: str, version: int) -> dict[str, bytes]:
-        """Public accessor for a full version bundle (skillopt rollout delivery)."""
+        """Public accessor for a full version bundle."""
         return self._read_version_bundle(skill_name, int(version))
 
     def get_version_detail(self, skill_name: str, version: int) -> dict[str, Any]:

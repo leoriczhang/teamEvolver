@@ -1,8 +1,7 @@
 """Transactional console identity control plane, independent of tenant objects.
 
-PostgreSQL deployments use dedicated tables; standalone deployments use SQLite.
-Legacy users are imported once. No backend fallback and no automatic promotion of
-legacy admins to platform administrators.
+PostgreSQL deployments use versioned tables; isolated tests may use SQLite.
+There is no runtime migration of old JSON identities or backend fallback.
 """
 from __future__ import annotations
 
@@ -22,9 +21,7 @@ from contextvars import copy_context
 from pathlib import Path
 from typing import Callable
 
-from fastapi import HTTPException
-
-from ..local_state import identity_database_file
+from starlette.exceptions import HTTPException
 
 _TABLES = {
     "console_users": "id TEXT PRIMARY KEY, record TEXT NOT NULL",
@@ -43,7 +40,11 @@ _INITIALIZED_LOCK = threading.Lock()
 
 
 def registry_path(config) -> Path:
-    return identity_database_file(config)
+    config_file = str(getattr(config, "_config_file", "") or "")
+    base = Path(config_file).expanduser().parent if config_file else Path(
+        os.environ.get("TEAMEVOLVER_CONFIG_DIR") or Path.home() / ".teamEvolver"
+    )
+    return base / "console_identity.sqlite3"
 
 
 class _SQLiteConnection:
@@ -72,9 +73,9 @@ class IdentityStore:
         self.runtime = runtime
         self.pg = bool(getattr(config, "storage_pg_enabled", False))
         if self.pg and runtime is None:
-            from ..storage.pg_pool import dsn_from_env, get_pg_runtime
+            from ..database.pool import dsn_from_env, get_database_pool
 
-            self.runtime = get_pg_runtime(
+            self.runtime = get_database_pool(
                 dsn=getattr(config, "storage_pg_dsn", "") or dsn_from_env(),
                 schema=getattr(config, "storage_pg_schema", "teamevolver"),
                 pool_min=1, pool_max=5, ssl=getattr(config, "storage_pg_ssl", "prefer"),
@@ -101,23 +102,18 @@ class IdentityStore:
         with _INITIALIZED_LOCK:
             needs_initialization = self._initialization_key not in _INITIALIZED
         if self.pg:
-            pool = await self.runtime._ensure_pool()
-            async with pool.acquire() as conn, conn.transaction():
-                if needs_initialization or mutate:
-                    # Serializes migrations, mutations and last-admin checks
-                    # across workers. Reads stay concurrent after initialization.
-                    from ..storage.pg_pool import _advisory_key
-
+            async with self.runtime.admin_conn() as conn, conn.transaction():
+                if mutate:
+                    # Serialize last-admin checks across replicas.
+                    lock = int.from_bytes(
+                        hashlib.sha256(f"{self.prefix}:console-identity".encode()).digest()[:8],
+                        "big", signed=True,
+                    )
                     await conn.execute(
                         "SELECT pg_advisory_xact_lock($1)",
-                        _advisory_key(self.prefix, "console-identity"),
+                        lock,
                     )
-                if needs_initialization:
-                    await self._initialize(conn)
                 yield conn
-            if needs_initialization:
-                with _INITIALIZED_LOCK:
-                    _INITIALIZED.add(self._initialization_key)
         else:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             db_path = self.path
@@ -130,7 +126,7 @@ class IdentityStore:
                 conn.execute("BEGIN IMMEDIATE" if mutate or needs_initialization else "BEGIN")
                 adapter = _SQLiteConnection(conn)
                 if needs_initialization:
-                    await self._initialize(adapter)
+                    await self._initialize_sqlite(adapter)
                 yield adapter
                 conn.commit()
                 if needs_initialization:
@@ -142,70 +138,10 @@ class IdentityStore:
             finally:
                 conn.close()
 
-    async def _initialize(self, conn):
+    async def _initialize_sqlite(self, conn):
+        """Create only the isolated local test store, without importing files."""
         for table, columns in _TABLES.items():
             await conn.execute(f"CREATE TABLE IF NOT EXISTS {self.prefix}{table} ({columns})")
-        sessions_marker = await conn.fetchrow(
-            f"SELECT id FROM {self.prefix}console_auth_meta WHERE id='sessions-v1'"
-        )
-        if not sessions_marker:
-            if self.pg:
-                await conn.execute("SELECT set_config('app.tenant_id', 'default', true)")
-                legacy = await conn.fetchrow(
-                    f"SELECT content FROM {self.prefix}objects "
-                    "WHERE tenant_id='default' AND key='_admin/console_sessions.json'"
-                )
-                sessions = json.loads(bytes(legacy["content"])) if legacy else {}
-                await conn.execute("SELECT set_config('app.tenant_id', '', true)")
-            else:
-                path = self.path.with_name("console_sessions.json")
-                sessions = json.loads(path.read_text()) if path.exists() else {}
-            for token, record in sessions.items():
-                await self._put(conn, "console_login_sessions", hashlib.sha256(token.encode()).hexdigest(), record)
-            await self._put(conn, "console_auth_meta", "sessions-v1", {"completed_at": time.time()})
-        marker = await conn.fetchrow(f"SELECT id FROM {self.prefix}console_auth_meta WHERE id='migration-v1'")
-        if marker:
-            return
-        if self.pg:
-            # Read the old default-tenant object on this transaction, then
-            # immediately clear the tenant setting. Never read a local cache.
-            await conn.execute("SELECT set_config('app.tenant_id', 'default', true)")
-            legacy = await conn.fetchrow(
-                f"SELECT content FROM {self.prefix}objects WHERE tenant_id='default' AND key='_admin/users.json'"
-            )
-            data = json.loads(bytes(legacy["content"])) if legacy else {}
-            await conn.execute("SELECT set_config('app.tenant_id', '', true)")
-        else:
-            legacy_users = self.path.with_name("users.json")
-            data = json.loads(legacy_users.read_text()) if legacy_users.exists() else {}
-        allowlist = {
-            item.strip()
-            for item in os.environ.get("TEAMEVOLVER_PLATFORM_ADMINS", "").split(",")
-            if item.strip()
-        }
-        migrated_ids = set()
-        for raw in data.get("users", []):
-            if not isinstance(raw, dict) or not raw.get("id"):
-                continue
-            user = copy.deepcopy(raw)
-            uid = str(user["id"])
-            if uid in migrated_ids:
-                continue
-            migrated_ids.add(uid)
-            old_role = user.pop("role", "user")
-            user["platform_role"] = "platform_admin" if uid in allowlist else "user"
-            user["status"] = "active"
-            await self._put(conn, "console_users", uid, user)
-            await self._put_member(conn, {
-                "tenant_id": "default", "user_id": uid,
-                "role": "tenant_admin" if old_role == "admin" else "member",
-                "status": "active", "created_by": "migration", "created_at": time.time(),
-            })
-        await self._put(conn, "console_auth_meta", "migration-v1", {"completed_at": time.time()})
-        if data.get("users"):
-            await self._audit(conn, "migration", "identity.migrate", "default", {
-                "users": len(data["users"]), "platform_admins": sorted(allowlist),
-            })
 
     async def _put(self, conn, table, uid, value):
         await conn.execute(

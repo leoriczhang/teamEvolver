@@ -16,35 +16,12 @@ from .datasets.schema import DATASET_SCHEMA
 REPLAY_SPEC_SCHEMA = "team-replay.spec"
 REPLAY_RUN_RESULT_SCHEMA = "team-replay.run-result"
 CHECKLIST_FIRST_POLICY = "checklist-first-efficiency"
-DOCUMENT_REPLAY_RUNTIME = "document"
 
 SubjectKind = Literal["skill", "skill_set", "memory"]
 
 
 class ReplayContractError(ValueError):
     """Raised when a producer submits an invalid Replay specification."""
-
-
-def document_replay_execution() -> dict[str, str]:
-    """Bind a document Case to the tenant's selected real Agent factory."""
-    return {
-        "kind": "document",
-        "runtime_type": DOCUMENT_REPLAY_RUNTIME,
-        "binding": "tenant_replay_adapter",
-    }
-
-
-def document_runtime_type(case: Mapping[str, Any]) -> str:
-    """Recognize an explicit document execution without inferring a Session."""
-    replay = case.get("replay")
-    if not isinstance(replay, Mapping) or "execution" not in replay:
-        return ""
-    execution = replay["execution"]
-    if not isinstance(execution, Mapping) or dict(execution) != document_replay_execution():
-        raise ReplayContractError(
-            "Unsupported Case execution; document execution must use the tenant Replay adapter binding"
-        )
-    return DOCUMENT_REPLAY_RUNTIME
 
 
 @dataclass(frozen=True)
@@ -92,8 +69,8 @@ class ReplaySpec:
             raise ReplayContractError("subject_id is required")
         if not self.cases:
             raise ReplayContractError("Test Dataset must contain at least one case")
-        for case in self.cases:
-            document_runtime_type(case)
+        if self.dataset_format != DATASET_SCHEMA:
+            raise ReplayContractError(f"dataset format must be {DATASET_SCHEMA}")
         if self.policy_id != CHECKLIST_FIRST_POLICY:
             raise ReplayContractError(
                 f"unsupported Replay policy: {self.policy_id}"

@@ -1,394 +1,127 @@
 # Prompt Studio Guide
 
-Prompt Studio is teamEvolver's white-box tool that transforms the skill evolution pipeline from a black box into an inspectable, editable, testable transparent system. With Prompt Studio, you can view each evolution stage's system Prompt, modify them, test effects using real sessions, and independently tune model parameters per stage.
+Prompt Studio is the console page "Evolution Pipeline → Skills Self-Evolution". It shows the Skill evolution pipeline, edits the system prompt and model parameters of each LLM stage, and tests stage output against real Sessions. All settings are stored per tenant in the `skills` module configuration; the Worker uses the configuration revision pinned when a task was accepted.
 
-Backend logic at `team_skills/evolution/prompt_studio.py`, frontend view at `web-ui/src/views/PromptStudioView.tsx`.
+Code entry points: `team_skills/api/prompts.py:create_router` (API), `team_skills/evolution/prompt_studio.py` (stage catalog and prompt resolution), `team_skills/evolution/prompt_test.py` (stage tests), `web-ui/src/features/skills/PromptStudioView.tsx` (page).
 
-## Design Philosophy
+## Pipeline
 
-Historically, system Prompts for LLM stages in evolution pipeline were constants hardcoded in Python modules, invisible black boxes to console users. Prompt Studio elevates these Prompts to first-class citizens:
-
-- **Inspectable**: View actual System Prompt used per stage (including defaults and your saved overrides)
-- **Editable**: Directly edit Prompt online; changes take effect immediately
-- **Testable**: Select real historical sessions, run tests with currently edited Prompt, see System Message, User Message and model output
-- **Tunable**: Each stage can independently configure temperature, max_tokens, even specify different models
-- **Rollbackable**: One-click reset to built-in default Prompt
-- **Version Persistence**: Prompt overrides stored in `~/.teamEvolver/prompt_overrides.json`, stage model settings stored in `~/.teamEvolver/stage_settings.json`
-
-Override file paths customizable via environment variables:
-- `TEAMEVOLVER_PROMPT_OVERRIDES_PATH`
-- `TEAMEVOLVER_STAGE_SETTINGS_PATH`
-
-## Pipeline Stages
-
-Evolution pipeline defines 11 stage nodes total (8 are LLM call stages with editable Prompts):
-
-### Complete Stage Graph
-
-```
-ingest → session_filter → summarize → judge → group → ┬→ evolve_skill → ┬→ merge → dataset_synthesis → validate → replay_checklist → publish
-                                                        └→ create_skill ─┘
+```text
+ingest → analyze_session → group
+                           ├─ evolve_skill / create_skill ─ (optional merge) ─┐
+                           └─ dataset_synthesis ──────────────────────────────┤
+                                                                             ▼
+                                              validate → replay_checklist → publish
+analyze_session → analyze_trace_badcase
 ```
 
-| Stage ID | Type | Editable Prompt | Description |
-|----------|------|----------------|-------------|
-| `ingest` | IO | No | Session enqueue, no LLM calls |
-| `session_filter` | LLM | Yes | Value classification, determines whether session is skill evidence, user memory, ordinary task, or chitchat |
-| `summarize` | LLM | Yes | Session summary, builds lossless trajectory and generates trajectory-aware summary |
-| `judge` | LLM | Yes | Session scoring, supplements multi-dimensional scores for sessions lacking reliable scores |
-| `group` | Logic | No | Group by skill, no LLM calls |
-| `evolve_skill` | LLM | Yes | Improve skill, decides improve/optimize_description/create/skip for existing skills |
-| `create_skill` | LLM | Yes | Create skill, identifies reusable patterns from no-skill bucket and generates new skills |
-| `merge` | LLM | Yes | Conflict merge, merges two evolved versions of same-named skill |
-| `dataset_synthesis` | LLM | Yes | Test set generation, generates progressive test datasets with Checklist |
-| `validate` | Gate | No | True replay validation, non-LLM logic |
-| `replay_checklist` | LLM | Yes | Checklist judge, verifies replay results satisfy Checklist item by item |
-| `publish` | IO | No | Publish, writes to skill library and syncs to cloud |
-
-### Per-LLM-Stage Details
-
-#### session_filter (Value Classification)
-
-- **Module**: `teamEvolver.session_filter`
-- **Symbol**: `_SESSION_CLASSIFIER_SYSTEM`
-- **Default Temperature**: 0.0
-- **Default Max Tokens**: 512
-- **Input variables**: session summary (requests, tools, interactions, metrics)
-- **Injects shared blocks**: No
-- **Description**: Determines whether session enters evolution queue, and distinguishes team Skill evidence from user Memory candidates. This is first gate of pipeline; high temperature may cause classification instability, recommend keeping low temperature.
-
-#### summarize (Session Summary)
-
-- **Module**: `teamEvolver.evolve.stages.summarize`
-- **Symbol**: `_SUMMARIZE_SESSION_SYSTEM`
-- **Default Temperature**: 0.2
-- **Default Max Tokens**: 100000
-- **Input variables**: session JSON (interactions, tool calls, scores)
-- **Injects shared blocks**: No
-- **Description**: Generates trajectory-aware analysis summary for individual session for subsequent scoring and evolution. Requires large token cap for long sessions.
-
-#### judge (Session Scoring)
-
-- **Module**: `teamEvolver.evolve.stages.judge`
-- **Symbol**: `_JUDGE_SYSTEM`
-- **Default Temperature**: 0.1
-- **Default Max Tokens**: 32768
-- **Input variables**: session payload (trajectory, summary, artifacts, prior scores)
-- **Injects shared blocks**: No
-- **Description**: Supplements scores for sessions lacking reliable scores, outputs JSON dimensional scores. Low temperature ensures scoring consistency.
-
-#### evolve_skill (Skill Improvement, agent loop)
-
-- **Module**: `teamEvolver.evolve.stages.execute`
-- **Symbol**: `_EVOLVE_FROM_SESSIONS_SYSTEM`
-- **Default Temperature**: 0.4
-- **Default Max Tokens**: 16384
-- **Input variables**: `{skill_name}`, round-1 session index card (one line per session), current skill outline card, cross-cycle evidence, evaluation cohort, existing skill names
-- **Injects shared blocks**: Yes
-- **Description**: The core evolution stage, running as a multi-round agent loop (see [Agent Loop Protocol](#agent-loop-protocol)). Round 1 produces a plan (improve / optimize_description / create / skip) from the session index card; a plan with `action_candidate=skip` exits immediately. Later rounds load evidence on demand via tools and stage edits through `propose_edits` before the final submission. The raw prompt template (task card) carries sentinel placeholders (`__GENERALIZATION_RULES__`, `__USER_OVERRIDE_RULE__`, `__EVIDENCE_ROUTING_RULES__`, `__OUTPUT_LANGUAGE_RULE__`); preserve them when saving overrides — shared rule blocks are injected at runtime.
-
-#### create_skill (Skill Creation, agent loop)
-
-- **Module**: `teamEvolver.evolve.stages.execute`
-- **Symbol**: `_CREATE_FROM_SESSIONS_SYSTEM`
-- **Default Temperature**: 0.4
-- **Default Max Tokens**: 16384
-- **Input variables**: round-1 session index card, cross-cycle evidence, evaluation cohort, existing skill names
-- **Injects shared blocks**: Yes
-- **Description**: Identifies reusable patterns from no-skill-match session buckets and generates brand-new skills, also as an agent loop. `read_library_skill` loads an existing skill's full text for differentiation; `check_name` validates the new name against collisions.
-
-#### merge (Conflict Merge, agent loop)
-
-- **Module**: `teamEvolver.evolve.stages.execute`
-- **Symbol**: `_MERGE_SKILL_SYSTEM`
-- **Default Temperature**: 0.3
-- **Default Max Tokens**: 8192
-- **Input variables**: Version A (existing skill), Version B (new evolved version)
-- **Injects shared blocks**: No
-- **Description**: Merges two conflicting evolved versions of the same-named skill into one superior version. Both versions are inlined in the round-1 message; the model runs the pre-submit self-review against the merge principles and outputs the final merged skill object. A failed loop keeps the incoming version.
-
-#### dataset_synthesis (Test Set Generation)
-
-- **Module**: `teamEvolver.dataset_synthesizer`
-- **Symbol**: `_SYNTHESIZE_SYSTEM`
-- **Default Temperature**: 0.3
-- **Default Max Tokens**: 16384
-- **Input variables**: `{case_count}`, `{min_requirements}`, `{max_requirements}`, candidate Skill, Session trajectories, team SOP evidence, replay seeds
-- **Injects shared blocks**: No
-- **Description**: Simultaneously generates progressive test datasets with Checklist from session evidence and cross-cycle SOP evidence. Template variables like `{case_count}` replaced with actual values at runtime.
-
-#### replay_checklist (Checklist Judge)
-
-- **Module**: `team_replay.engine`
-- **Symbol**: `_CHECKLIST_JUDGE_SYSTEM`
-- **Default Temperature**: 0.0
-- **Default Max Tokens**: 8192
-- **Input variables**: checklist, interactions, tool trajectory, workspace artifacts
-- **Injects shared blocks**: No
-- **Description**: After true replay completes, verifies Checklist items satisfied one by one. Judge only allows judgment based on observable evidence; temperature=0 ensures adjudication consistency.
-
-## Agent Loop Protocol
-
-The three skill-writing stages (`evolve_skill`, `create_skill`, `merge`) run as a controlled agent loop (implemented in `team_skills/evolution/agent/`) over a text-JSON protocol (no native tool calling):
-
-1. **Round 1 plan (mandatory)**: from a dense index card (one line per session + current skill outline) the model outputs `{"type": "plan", "action_candidate": ..., "evidence_classification": {...}, "plan": [...], "rationale": ...}`. The runtime gates deterministically: `action_candidate=skip` exits immediately; a non-skip plan with an empty `team_skill` bucket gets one correction round, then exits as skip.
-2. **Act rounds (tool calls)**: the model calls tools on demand; the runtime executes them and feeds observations back. Tools per stage:
-   - `read_session` (load one session's summary/trajectory/tail/full on demand), `search_sessions` (keyword search)
-   - evolve: `read_skill` (byte-exact current body — the anchor source), `read_bundle_file`, `propose_edits` (mechanical apply + staging, failures fed back), `check_generalization` (hardcoded-suspect scan)
-   - create: `read_library_skill` (differentiation against existing skills), `check_name` (name collision check)
-3. **final (submit)**: `{"type": "final", "decision": {...}}`. Submit-time contract validation (team_skill gate, file_changes pre-validation, content/staging backfill); failures come back as one correction round.
-4. **Round budget**: `evolve.agent_max_rounds` (default 12, clamped 2-24) and `evolve.agent_max_tool_calls_per_round` (default 8, clamped 1-16). The penultimate round carries a must-submit warning; at exhaustion the loop closes from staged state (best-effort, degrading to skip/None when nothing was staged).
-
-**Override semantics (important)**: Prompt Studio edits the *task card* (role, mission, editing principles, shared rule blocks). The loop protocol (turn formats, tool contracts, final decision schema) is a code-owned `TOOL_PROTOCOL_APPENDIX` force-appended at runtime and **not overridable** — overrides should describe the task, not the wire format.
-
-Progressive disclosure: round 1 carries only index cards; full content loads on demand. This keeps the context dense and makes `propose_edits` anchors always come from the byte-exact `read_skill` body, eliminating the "anchor rewritten from memory" failure mode at its root.
-
-## Prompt Studio Web Interface
-
-Select "Prompt Studio" in Web console left navigation to enter. Interface divided into three main areas:
-
-### Left: Pipeline Visualization
-
-- Shows complete directed graph, nodes colored by type:
-  - Gray: IO nodes (ingest, publish)
-  - Blue: LLM stages (editable Prompt)
-  - Purple: Logic nodes (group)
-  - Amber: Validation gate (validate)
-- Badges displayed on LLM nodes:
-  - "Override": Stage has user-saved Prompt override
-  - "Params Modified": Stage model parameters differ from defaults
-- Click node to select corresponding stage
-- Arrows between nodes show data flow
-
-### Middle: Prompt List + Editor
-
-- **Stage List**: Shows all 8 LLM stages with brief descriptions
-- **Prompt Editor**: After selecting stage shows:
-  - Stage name and description
-  - Currently effective Prompt text box (editable)
-  - "Show Default" toggle: Switch between viewing code-built default Prompt vs currently effective Prompt
-  - If stage injects shared blocks, three shared block contents displayed:
-    - `__GENERALIZATION_RULES__`: Generalization rules
-    - `__USER_OVERRIDE_RULE__`: User override rules
-    - `__EVIDENCE_ROUTING_RULES__`: Evidence routing rules
-  - Save button (admin only)
-  - Reset button (restore defaults, admin only)
-
-### Right: Model Parameters + Test Panel
-
-- **Model Parameters Area**:
-  - Model: Specify model used for that stage (empty uses global `llm.model_id`)
-  - Temperature: 0.0-2.0 slider
-  - Max Tokens: Numeric input
-  - Shows default value reference
-  - Reset button restores default parameters
-
-- **Test Panel**:
-  - Session selector: Select one from recent 50 historical sessions as test input
-  - "Run Test" button
-  - Test results displayed in three tabs:
-    - **System Prompt**: Actual system message sent this test (edited Prompt + expanded shared blocks)
-    - **User Message**: Real user message constructed at test runtime (using same build logic as session stage)
-    - **Model Output**: Output content returned by LLM
-
-- **Evolution Process Parameters** (bottom, collapsible):
-  - Editable core parameters for evolve and validation sections
-  - Saved together when saving
-
-## How to Use Prompt Studio
-
-### Workflow: Edit and Test Prompt
-
-Recommended iteration flow:
-
-1. **Select Stage**: Click stage to modify in pipeline graph or list
-2. **Understand Default Prompt**: Toggle "Show Default" to read default Prompt, understand its design intent
-3. **Small-step Modification**: Make incremental changes in editor; don't overhaul at once
-4. **Select Test Session**: Choose representative historical session from right panel
-5. **Run Test**: Click "Run Test", view three-column results
-   - System Prompt as expected (shared blocks correctly expanded)
-   - User Message is format real stage would receive
-   - Model Output quality meets requirements
-6. **Compare**: Can record default Prompt output, compare with modified
-7. **Save**: Click Save when test satisfied. Next evolution round immediately uses new Prompt after save
-8. **Observe**: Observe subsequent evolution round effects in Dashboard and Evolution Pipeline views
-
-### Test Panel Authenticity
-
-Prompt Studio tests are not "simulations"—they use identical message construction logic as real evolution pipeline:
-
-- `session_filter`: Uses `_session_summary()` to construct input identical to real classifier
-- `summarize`: Uses `_build_session_payload()` to construct real payload
-- `judge`: Ensures `_trajectory` and `_summary` metadata exist before calling `_build_judge_payload()`
-- `evolve_skill`/`create_skill`/`merge`: **runs the real agent loop** (rounds capped at 6) with the same index-card / dual-version construction and tool set as production; the result additionally returns a per-round `rounds` transcript rendered in the test panel
-- `dataset_synthesis`: Rendered using `render_synthesis_prompt()`
-- `replay_checklist`: Constructs example checklist and interaction records
-
-This means User Message you see in test panel is exactly message LLM receives in real evolution; test results reliably reflect actual behavior.
-
-### Model Parameter Tuning Recommendations
-
-Different stages suit different parameter configurations:
-
-| Stage | Temperature Recommendation | Max Tokens Recommendation | Rationale |
-|-------|---------------------------|--------------------------|-----------|
-| session_filter | 0.0-0.1 | 512 | Classification tasks need determinism |
-| summarize | 0.1-0.3 | 100000+ | Summary needs complete information coverage |
-| judge | 0.0-0.2 | 32768 | Scoring needs consistency |
-| evolve_skill | 0.3-0.6 | 16384 | Creative improvement needs moderate randomness |
-| create_skill | 0.3-0.6 | 16384 | New skill creation needs creativity |
-| merge | 0.2-0.4 | 8192 | Merging primarily fusion; doesn't need high randomness |
-| dataset_synthesis | 0.2-0.4 | 16384 | Question generation needs diversity but cannot diverge |
-| replay_checklist | 0.0 | 8192 | Strict evidence adjudication must be deterministic |
-
-If certain stage needs stronger model (like creating complex skills), can specify stronger model ID individually for that stage; other stages use default model to balance cost and speed.
-
-## Shared Blocks Explanation
-
-Two skill authoring stages (`evolve_skill` and `create_skill`) Prompts contain three special placeholders; these placeholders automatically replaced with shared rule blocks when Prompt takes effect. When editing these stages' Prompts, preserve these placeholders:
-
-- `__GENERALIZATION_RULES__`: Generalization rules; controls degree to which skills abstract from specific sessions to reusable SOPs
-- `__USER_OVERRIDE_RULE__`: User override rules; handles user-manually-modified skills
-- `__EVIDENCE_ROUTING_RULES__`: Evidence routing rules; controls how session evidence referenced and presented
-
-Actual shared block content defined in `team_skills/evolution/stages/execute.py`, injected at runtime via `_inject_shared_blocks()` function. When viewing stage details in Prompt Studio interface, can see current content of three shared blocks.
-
-If you delete these placeholders, shared rules won't be injected, potentially causing abnormal evolution behavior. Resetting to default Prompt restores placeholders.
-
-## Variable Placeholders
-
-Some Prompt templates contain runtime variable placeholders using `{variable_name}` syntax. Preserve these placeholders when editing:
-
-| Stage | Placeholder | Runtime Value |
-|-------|-------------|---------------|
-| evolve_skill | `{skill_name}` | Name of skill being evolved |
-| dataset_synthesis | `{case_count}` | Number of test cases to generate |
-| dataset_synthesis | `{min_requirements}` | Minimum checklist items |
-| dataset_synthesis | `{max_requirements}` | Maximum checklist items |
-
-## Access Control
-
-- **Admin**: Can edit Prompts, modify model parameters, save, reset
-- **User**: Can view pipeline graph, view Prompt content, run tests, but cannot save modifications
-
-## Prompt Version Management
-
-Current Prompt Studio version uses simple override mechanism:
-
-- Save override writes to `prompt_overrides.json`
-- Reset deletes corresponding entry, restores default
-- Modifications take effect immediately on next LLM call
-- Configuration file is text format (JSON), can be manually backed up or placed under version control
-
-Recommend manually backing up override files before major modifications:
-
-```bash
-cp ~/.teamEvolver/prompt_overrides.json ~/.teamEvolver/prompt_overrides.json.bak
-cp ~/.teamEvolver/stage_settings.json ~/.teamEvolver/stage_settings.json.bak
-```
-
-## API Endpoints
-
-Prompt Studio HTTP API at `/api/skill-evolution/`:
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/skill-evolution/pipeline` | GET | Get pipeline graph with override markers |
-| `/api/skill-evolution/prompts` | GET | Get all Prompt summary list |
-| `/api/skill-evolution/prompts/<stage_id>` | GET | Get single stage complete details |
-| `/api/skill-evolution/prompts/<stage_id>` | POST | Save Prompt override and model parameters |
-| `/api/skill-evolution/prompts/<stage_id>/test` | POST | Run test |
-| `/api/skill-evolution/prompts/<stage_id>/reset` | POST | Reset to default Prompt |
-| `/api/skill-evolution/session-samples` | GET | Get sessions list for testing |
-
-Test interface request body:
-
-```json
-{
-  "session_id": "abc-123",
-  "system_prompt": "(optional) temporary test Prompt, not saved"
-}
-```
-
-If `system_prompt` non-empty, test uses temporary Prompt (for quick trial-and-error); empty uses currently saved effective Prompt.
-
-## Python API
-
-To operate Prompt Studio from scripts or Notebooks, can directly call functions in `team_skills/evolution/prompt_studio.py`:
-
-```python
-from teamEvolver.evolve.prompt_studio import (
-    list_prompts,
-    get_prompt,
-    set_override,
-    reset_override,
-    effective_prompt,
-    set_stage_settings,
-    reset_stage_settings,
-    stage_call_options,
-    pipeline_graph,
-    run_stage_test,
-)
-
-# List all editable Prompts
-prompts = list_prompts()
-
-# Get stage details
-detail = get_prompt("evolve_skill")
-print(detail["default_prompt"])  # Default Prompt
-print(detail["effective_prompt"])  # Currently effective Prompt
-print(detail["shared_blocks"])  # Shared blocks (injection stages only)
-
-# Set override
-set_override("judge", "Your custom Prompt text...")
-
-# Reset
-reset_override("judge")
-
-# Get Prompt that should be used at runtime (used by call sites)
-prompt = effective_prompt("summarize", fallback=default_in_module)
-
-# Set model parameters
-set_stage_settings("evolve_skill", {
-    "temperature": 0.5,
-    "max_tokens": 32768,
-    "model": "doubao-seed-evolving-large",
-})
-
-# Get stage call options
-options = stage_call_options("evolve_skill")
-# {"temperature": 0.5, "max_tokens": 32768, "model": "doubao-seed-evolving-large"}
-
-# Get pipeline graph
-graph = pipeline_graph()
-```
-
-## Relationship with White-box Configuration
-
-Prompt Studio is complementary to global evolution parameters (evolve section):
-
-- **Prompt Studio** controls per-stage LLM Prompts and model sampling parameters; it's "how to think" level configuration
-- **evolve section configuration** controls macro parameters of evolution flow:
-  - Evolution interval (`interval_seconds`)
-  - Publish mode (`publish_mode`)
-  - Evidence library size (`evidence_max_entries`)
-  - Test set parameters (`dataset_test_cases`, `dataset_min_requirements`, etc.)
-  - Human review settings (`human_review_enabled`)
-  - Validation gates (`validation_max_rejections`)
-- **validation section configuration** controls validation strategy:
-  - Validation mode (`mode`: true_replay/replay)
-  - Concurrency (`max_concurrency`)
-  - Pass gates (`required_results`, `required_approvals`)
-
-"Evolution Process Parameters" area on right panel of Prompt Studio can directly edit core evolve and validation parameters, updated together when saving Prompt.
-
-## Best Practices
-
-1. **Change one stage at a time**: After modification run several evolution rounds observing effects; confirm no issues before changing next
-2. **Keep defaults as reference**: Frequently compare against default Prompt, understand impact of each change
-3. **Verify using test panel**: Before saving always test with at least 2-3 different session types
-4. **Modify evolve_skill/create_skill cautiously**: These are core stages directly affecting skill quality; backup before modifying
-5. **Do not delete shared block placeholders**: Placeholders like `__GENERALIZATION_RULES__` are critical
-6. **Keep judge-type stages at low temperature**: judge and replay_checklist recommend 0.0-0.1
-7. **Monitor Token usage**: If you set excessively large max_tokens for a stage and model frequently outputs verbose content, consider tightening Prompt or reducing max_tokens
-8. **Review skill outputs**: After modifying Prompts, pay close attention to candidate skill quality produced in next few evolution rounds; carefully evaluate in console candidate review page
+Skill evolution and Dataset synthesis start concurrently from the same frozen Sessions and cross-cycle Evidence. Dataset synthesis does not read this round's proposal; validation starts only when both the Candidate and its Cases are ready. The console marks improve/create as conditional paths and validation as a join.
+
+| Node | Kind | Description |
+|------|------|------|
+| `ingest` | Input | Sessions arrive through the ingest API or a data source pull |
+| `analyze_session` | LLM | One call performs value classification, trajectory summary and session scoring |
+| `analyze_trace_badcase` | LLM | Analyzes problems across all Traces of a Session |
+| `group` | Logic | Groups by Skill used; Sessions without a Skill go to the no-skill group |
+| `evolve_skill` | LLM | For an existing Skill, decides improve, optimize_description, create or skip |
+| `create_skill` | LLM | Decides whether the no-skill group contains a reusable pattern and creates a new Skill |
+| `merge` | LLM | Merges two evolved versions of the same Skill when they conflict |
+| `dataset_synthesis` | LLM | Runs alongside Skill evolution and independently generates Test Datasets from shared Evidence |
+| `validate` | Gate | Waits for the Candidate and Dataset, then runs True Replay to compare turns, tool calls and tokens |
+| `replay_checklist` | LLM | Judges each Checklist item from replies, tool trajectory and workspace artifacts |
+| `publish` | Output | Candidates passing the gate are published to SkillHub |
+
+The evolution flow is in [Evolution Loop](../concepts/02-evolution-loop.md), and gate rules in [Checklist](../concepts/07-checklist.md).
+
+## Editable Stages
+
+| Stage ID | Default temperature | Default max_tokens |
+|---------|------------------|-----------------|
+| `analyze_session` | 0.1 | 32768 |
+| `analyze_trace_badcase` | 0.1 | 8192 |
+| `evolve_skill` | 0.4 | 16384 |
+| `create_skill` | 0.4 | 16384 |
+| `merge` | 0.3 | 8192 |
+| `dataset_synthesis` | 0.3 | 16384 |
+| `replay_checklist` | 0.0 | 8192 |
+
+`evolve_skill`, `create_skill` and `merge` run as an Agent loop: the model plans, calls tools to load evidence as needed, and finally submits a result.
+
+### Shared Blocks
+
+The `evolve_skill` and `create_skill` templates contain shared-block placeholders that expand into common rules at run time:
+
+| Placeholder | Content |
+|--------|------|
+| `__GENERALIZATION_RULES__` | Generalization rules, so details of a single Session are not written into the Skill |
+| `__USER_OVERRIDE_RULE__` | Explicit user requests take precedence |
+| `__EVIDENCE_ROUTING_RULES__` | Evidence loading rules |
+| `__OUTPUT_LANGUAGE_RULE__` | Output language rule |
+
+The editor shows the unexpanded template; saved overrides are expanded the same way at run time. Removing a placeholder removes the corresponding rules from that stage.
+
+## Settings
+
+Each stage can override:
+
+| Field | Description |
+|------|------|
+| `prompt` | System prompt override; must not be empty |
+| `model` / `base_url` | Stage-specific model; empty inherits the tenant default model |
+| `temperature` / `max_tokens` | Sampling parameters |
+| `api_key` | Stage-specific key, encrypted as a Secret Ref and never echoed; `clear_api_key=true` clears it |
+
+Saving `api_key` requires `TEAMEVOLVER_SECRET_MASTER_KEY` (or `TEAMEVOLVER_ROOT_API_KEY`) on the service, otherwise 503 is returned. Reset removes both the prompt override and the model settings of the stage.
+
+Process parameters are edited under "Process Parameters" on the same page:
+
+| Field | Default | Description |
+|------|------|------|
+| `evolution_max_sessions` | 100 | Maximum Sessions consumed per evolution round |
+| `min_group_sessions` | 2 | Minimum Sessions for a Skill group to enter evolution |
+| `min_group_users` | 2 | Minimum users for a Skill group to enter evolution |
+| `evolution_trigger_mode` | manual | Manual trigger or periodic automatic trigger |
+| `evolution_interval_seconds` | 600 | Automatic trigger interval |
+| `bundle_allow_delete` | true | Whether evolution may delete bundle files |
+| `bundle_prompt_max_bytes` | 786432 | Total budget of bundle content injected during evolution |
+| `bundle_edit_max_bytes` | 262144 | Per-file edit limit |
+| `auto_evaluate` | true | Whether a new Candidate is submitted for validation automatically |
+| `publish_mode` | manual | Publish after accepted validation or wait for human review |
+
+## Testing a Stage
+
+1. Choose a stage on the left and edit the prompt (saving is optional).
+2. Choose a real Session from the sample list.
+3. Click test. The request is accepted as a `skill.evolve` task (operation `prompt_test`) and returns a `job_id`.
+4. The Worker runs it with the edited prompt and the stage model settings; the result includes the system prompt, user message and model output. Agent-loop stages run at most 6 rounds and return a per-round transcript.
+
+Tests use the real model, write no Candidate and change no Skill. With trace observability enabled, test calls are reported as `team_skills.evolution.prompt_test.<stage_id>`.
+
+## API
+
+| Method | Path | Description |
+|------|------|------|
+| GET | `/api/skill-evolution/pipeline` | Pipeline nodes and edges |
+| GET | `/api/skill-evolution/prompts` | Summary of every stage, including override flags and current model parameters |
+| GET | `/api/skill-evolution/prompts/{stage_id}` | Stage details: default template, current template, expanded text, variables |
+| PUT | `/api/skill-evolution/prompts/{stage_id}` | Save stage settings, optionally with `expected_revision` |
+| POST | `/api/skill-evolution/prompts/{stage_id}/reset` | Restore defaults |
+| GET | `/api/skill-evolution/settings` | Process parameters and `revision` |
+| PUT | `/api/skill-evolution/settings` | `{"evolve": {...}, "revision"}` save process parameters |
+| GET | `/api/skill-evolution/session-samples?limit=` | Sessions available for tests (1–200) |
+| POST | `/api/skill-evolution/prompts/{stage_id}/test` | `{"session_id", "prompt"?}` accept a test; returns 202 |
+
+Write operations require a tenant administrator. Configuration writes compare revisions; concurrent edits return a conflict and must be retried after refresh. Unknown stages return 404 and unsupported fields return 400.
+
+## Recommendations
+
+- Compare outputs before and after an edit in the test panel before saving
+- Change one stage at a time and watch the Candidates and True Replay results of the next evolution round
+- `replay_checklist` is the validation judge; raising its temperature reduces judgment stability
+- Before changing the output structure of `analyze_session`, make sure downstream parsing fields stay the same
+
+## Related Documents
+
+- [Evolution Loop](../concepts/02-evolution-loop.md)
+- [Trace Observability Guide](./04-observability.md)
+- [Web Console User Guide](./03-console.md)

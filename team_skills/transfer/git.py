@@ -1,14 +1,9 @@
 """Git transfer: isolated checkouts, explicit revisions and new remote refs."""
 from __future__ import annotations
 
-import os
 import re
 import shutil
-import signal
-import subprocess
-import tempfile
 import uuid
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -16,6 +11,7 @@ from urllib.parse import urlsplit
 
 from .channels import http_url, request_json
 from .packages import ExportResult, SkillPackage, TransferError, discover, read_directory, safe_path
+from .process import workspace
 
 
 class GitAdapter:
@@ -30,51 +26,15 @@ class GitAdapter:
             return url
         if parsed.scheme in {"http", "https"}:
             return http_url(url)
-        if parsed.scheme == "ssh" and parsed.hostname and not parsed.password:
+        if (parsed.scheme == "ssh" and parsed.hostname and not parsed.password
+                and not parsed.query and not parsed.fragment and not any(ord(c) < 32 for c in url)):
             return url
         if re.fullmatch(r"[\w.-]+@[\w.-]+:[\w./-]+", url):
             return url
         raise TransferError("Git 地址必须是 HTTP(S)、SSH 或 git@host:path 格式")
 
-    @contextmanager
     def _workspace(self, options: Mapping[str, Any]):
-        with tempfile.TemporaryDirectory(prefix="te-skill-git-") as tmp:
-            root = Path(tmp)
-            repo = root / "repo"
-            repo.mkdir()
-            askpass = root / "askpass"
-            askpass.write_text('#!/bin/sh\ncase "$1" in\n*Username*) printf "%s\\n" "$TE_SKILL_GIT_USER" ;;\n'
-                               '*) printf "%s\\n" "$TE_SKILL_GIT_TOKEN" ;;\nesac\n')
-            askpass.chmod(0o700)
-            env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-            env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": str(askpass),
-                        "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
-                        "GIT_SSH_COMMAND": "ssh -oBatchMode=yes -oStrictHostKeyChecking=yes",
-                        "TE_SKILL_GIT_USER": str(options.get("username") or "oauth2"),
-                        "TE_SKILL_GIT_TOKEN": str(options.get("token") or "")})
-
-            def run(*args: str, check: bool = True) -> subprocess.CompletedProcess:
-                command = ["git", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=",
-                           "-c", "protocol.file.allow=" + ("always" if self.allow_local else "never"),
-                           "-c", "user.name=teamEvolver", "-c", "user.email=skills@teamevolver.local", *args]
-                try:
-                    process = subprocess.Popen(command, cwd=repo, env=env, stdout=subprocess.PIPE,
-                                               stderr=subprocess.PIPE, text=True, start_new_session=True)
-                    try:
-                        stdout, stderr = process.communicate(timeout=300)
-                    except subprocess.TimeoutExpired:
-                        os.killpg(process.pid, signal.SIGKILL)
-                        process.communicate()
-                        raise TransferError("Git 操作超时，请检查网络或仓库大小", 504) from None
-                except OSError as exc:
-                    raise TransferError("无法运行 Git，请检查服务端 Git 安装", 503) from exc
-                result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
-                if check and result.returncode:
-                    # Git errors can contain credentials/URLs; never echo raw stderr.
-                    raise TransferError("Git 操作失败，请检查仓库地址、分支和访问权限", 502)
-                return result
-
-            yield repo, run
+        return workspace(options, allow_local=self.allow_local)
 
     @staticmethod
     def _ref(value: Any, run, *, default: str = "") -> str:
@@ -135,6 +95,7 @@ class GitAdapter:
             if namespace and not re.fullmatch(r"[A-Za-z0-9_-]+", namespace):
                 raise TransferError("GitHub 组织名不合法")
             route = f"/orgs/{namespace}/repos" if namespace else "/user/repos"
+            options.get("_checkpoint", lambda _: None)({"effect": "create_repository"})
             result = request_json("POST", base + route, headers={"Authorization": f"Bearer {token}"},
                                   json={"name": name, "private": private, "auto_init": False})
             return self._url(result.get("clone_url")), str(result.get("html_url") or "")
@@ -145,6 +106,7 @@ class GitAdapter:
                 if not namespace.isdigit():
                     raise TransferError("GitLab namespace 必须填写数字 namespace_id")
                 payload["namespace_id"] = int(namespace)
+            options.get("_checkpoint", lambda _: None)({"effect": "create_repository"})
             result = request_json("POST", base + "/projects", headers={"PRIVATE-TOKEN": token}, json=payload)
             return self._url(result.get("http_url_to_repo")), str(result.get("web_url") or "")
         raise TransferError("新建仓库 provider 必须是 github 或 gitlab")
@@ -186,14 +148,24 @@ class GitAdapter:
                 # Validate and stage all local content before the external creation.
                 url, web_url = self._create_repository(options)
                 run("remote", "add", "origin", url)
-            try:
-                # Empty lease requires the ref to remain absent, including racing writers.
-                run("push", f"--force-with-lease=refs/heads/{new_branch}:", "origin", f"HEAD:refs/heads/{new_branch}")
-            except TransferError as exc:
-                if mode == "new_repository":
-                    message = f"仓库已创建（{web_url or url}），上传失败；可向该仓库新建分支重试"
-                    raise TransferError(message, 502) from exc
-                raise
-            return ExportResult({"channel": "git", "exported": [p.name for p in packages],
-                                 "url": web_url or url, "branch": new_branch,
-                                 "commit": run("rev-parse", "HEAD").stdout.strip()})
+            metadata = {"channel": "git", "exported": [p.name for p in packages],
+                        "url": http_url(web_url) if web_url else url, "branch": new_branch,
+                        "commit": run("rev-parse", "HEAD").stdout.strip()}
+            checkpoint = options.get("_checkpoint", lambda _: None)
+            checkpoint({"effect": "push", "url": url, "expected": metadata})
+            # Empty lease requires the ref to remain absent, including racing writers.
+            run("push", f"--force-with-lease=refs/heads/{new_branch}:", "origin", f"HEAD:refs/heads/{new_branch}")
+            checkpoint({"receipt": metadata})
+            return ExportResult(metadata)
+
+    def reconcile(self, checkpoint, options):
+        """Read-only confirmation after push response loss; never create/push again."""
+        if checkpoint.get("effect") != "push":
+            return None
+        expected = checkpoint["expected"]
+        with self._workspace(options) as (_repo, run):
+            value = run("ls-remote", "--heads", self._url(checkpoint["url"]),
+                        "refs/heads/" + expected["branch"]).stdout.strip()
+            if value and value.split()[0] == expected["commit"]:
+                return expected
+        return None

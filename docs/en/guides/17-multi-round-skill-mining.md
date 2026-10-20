@@ -1,68 +1,69 @@
 # Multi-round Skill Mining and Human Supplements
 
-New default jobs use `te-native-mining.v1`. TE manages sources, tasks, human supplements and acceptance. One OV Compile per normal round uses a compiler Skill to discover, consolidate and generate complete methods and Cases. A Compile may contain multiple model calls and internal jobs.
+Skill mining compiles registered OpenViking documents into deliverable Skill packages and lives in `team_miner/skill_miner/`. The current default compiler constructs or locally revises instructor Skills by knowledge point from course source tables. It does not generate validation Cases or publish automatically. Knowledge base mining remains separate in `team_miner/knowledge_miner/` and compiles documents into Wiki pages.
 
-The first round builds complete artifacts. Later rounds incrementally update the same remote target. Original materials and the compiler are frozen; changing the source directory does not alter an existing job.
+The console retains Mining Overview, Sources and Skill Mining entries. Each accepted round uses frozen inputs and a compiler Skill; later edits to original directories or default instructions do not rewrite accepted rounds.
+
+## Prerequisites and persistence
+
+- API and Worker roles are deployed and the selected tenant has a `miner` module configuration. Missing configuration returns503 without local YAML fallback.
+- The operator is a tenant `tenant_admin` or `platform_admin` and the tenant's OpenViking Account is configured.
+- PostgreSQL persists jobs, rounds, attachments and artifact content. OpenViking stores knowledge artifacts and Compile Tasks; working directories are rebuildable caches.
+- Skill mining defaults and compiler instructions persist separately in PostgreSQL. Saves and resets use independent `revision` / `expected_revision` values; stale versions return409 instead of overwriting another operator's changes.
+
+Long operations such as uploads and artifact saves return202 with a background job receipt. The console waits for a completed `result` before reporting success. Failed or cancelled work and missing results are errors. See the [Skill Mining API](../api/17-skill-mining.md).
 
 ## Create a job
 
-Select a registered directory tagged for Skill use.
+Register a directory under Sources, tag it for Skill use, then create a task from Skill Mining.
 
 | Setting | Behavior |
 | --- | --- |
-| Maximum rounds | 1–5, default3; an upper bound rather than mandatory empty rounds |
-| Human supplements | Wait for real questions; an empty question list skips supplementation and finishes mining |
+| Maximum rounds | 1–5, default3; an upper bound, without mandatory empty rounds |
+| Human supplements | Jobs using the review-question contract wait for real questions; default delivery completion does not depend on human approval |
 | Round deadline | 60–7200 seconds, default3600; a budget protection, not an ETA |
-| Free discovery | Optional direction; discover complete independent methods supported by sources |
-| Single Skill | Required complete-task direction; integrate steps and scenario parameters |
-| Target count | 1–100, optional direction; explain insufficient support without forced splits or merges |
+| Free discovery | Optional direction; the selected compiler organizes source-supported artifacts |
+| Single Skill | Required direction and a fixed target count of1 |
+| Target count | 1–100, optional direction; report insufficient support without forced splits or merges |
 
-Compile uses OV's models and runtime. Fewer external Compile requests do not prove fewer model calls or lower latency; output and Case volume matter.
+Compile uses OpenViking's models and runtime. One external Compile may contain multiple model calls and internal tasks; external request counts alone do not establish workload.
 
-## Capability splitting and candidate collections
+## Default delivery and revisions
 
-The compiler uses triggers, complete steps, applicability and independent completion outcomes. People, amounts, channels and scenario numbers are usually parameters. Different customers' values are not automatically source contradictions.
+The default compiler is `team_miner/skill_miner/knowledge_compiler_v8.py`, using execution protocol `te-native-mining.v1` and completion policy `te-compile-finished.v1`. After remote completion, TE preserves returned files and records successful mining without adding content acceptance gates or requiring `EVALUATION.md`, `METHOD.json`, `benchmark.json` or validation Cases.
 
-Each method produces `compiled_skill/<slug>/SKILL.md`, `EVALUATION.md`, `benchmark.json` and `METHOD.json`. The receipt contains task, trigger, inputs, outputs, boundary, sources and supplement questions. TE deterministically aggregates receipts into `analysis/capability-plan.json` using `skill-miner.plan.v1`.
+The job reports `content_validated=false` and its candidate inventory reports `can_submit=false`. Mining delivery is complete; this does not establish business correctness, successful True Replay or permission to publish.
 
-Each `team-replay.dataset` contains12 Cases with at least12 output conditions and one trajectory condition per Case. TE renders `BENCHMARK.md` from validated JSON without generating duplicate content or inventing conditions.
+Administrators can inspect and edit current artifacts. Within the round limit, explicit supplementary revision requirements can start another round. Continuation freezes those requirements, attachments and necessary original and prior-round context, then incrementally updates the same remote target. Empty automatic continuation is not allowed. Existing files and round archives remain available.
 
-Non-method content uses `analysis/notes/*.json` for source-backed dispositions. Facts and out-of-scope content do not automatically create questions. A zero-method result retains explanations and cannot be submitted as a candidate.
+## Review and supplements for complete candidates
 
-Incremental consolidation declares existing members in `METHOD.json.supersedes`. TE validates references and cycles without making semantic merging decisions. Original files remain in remote storage, local lineage and round archives. The surviving method must integrate valid steps, conditions and sources.
+Jobs explicitly using the candidate-review contract still support independent methods, capability plans and Test Datasets:
 
-## Review and supplements
+- Complete packages contain `SKILL.md`, `EVALUATION.md`, `benchmark.json`, `BENCHMARK.md` and actual returned references or scripts.
+- Each `team-replay.dataset` has12–24 Cases per independent candidate, with12–24 output conditions and at least one trajectory condition per Case.
+- Capability plans follow independently executable task boundaries. Facts and insufficient Evidence retain explanations instead of invented methods.
+- Human review collects concrete answers and sources, explicitly unresolved questions, attachments, feedback and permitted artifact edits.
+- Only a valid, real empty-question receipt can skip supplements. A missing or malformed receipt is not an empty question list.
 
-1. Inspect methods, evaluations and Test Datasets against original conditions and scenario boundaries.
-2. Answer real questions with sources; mark unknown facts unresolved.
-3. Attach materials, provide feedback or edit permitted current artifacts.
-4. Continue to freeze incremental inputs and submit the next Compile.
+Delivery-only packages cannot enter this flow through invented evaluation Cases.
 
-An empty question list finishes mining with a separate `skipped_checkpoints` receipt. It fabricates no human approval or Evidence. Missing or invalid receipts are not empty reviews. Skipping supplementation does not replace True Replay or Candidate Review.
+## Submission and publishing boundaries
 
-When human supplementation is disabled, finish the current round while preserving unanswered questions. Do not start another round without new Evidence.
+A completed task can submit a selected independent candidate only after its complete artifacts and Test Dataset pass revalidation. An incomplete sibling does not block complete candidates. Submission preserves the full package, rather than one Markdown entrypoint.
 
-## Inputs to the next round
+Repeated submission of the same raw package returns the same candidate without resetting validation or human review. A different live candidate with the same name makes the accepted background task fail with a conflict `error_code`; resolve the existing candidate first. Legacy inline materials become verified files in the candidate bundle so that both Replay branches receive the same content; the original mining package stays unchanged. Submission creates only an `open` candidate. True Replay, Candidate Review and Publish retain the main platform's gates; submission never publishes automatically.
 
-The same job retains the same `to`. The next `from` contains actual supplements, attachments, implicated frozen originals and changed revision context. Explicit question references select implicated originals; feedback with unknown impact conservatively includes all original material.
+Document source URIs remain Evidence rather than recorded Sessions. Compiler-provided Session identities, private Context, runtime and Adapter choices do not determine execution identity. Execution uses the tenant's configured and frozen Replay Adapter.
 
-Unchanged artifacts are not copied into new sources. Compile recalls related history using `against=target`. Edited artifacts under `revision/` are context, never factual provenance. Old citation identities remain validated. Questions are not answers.
+## Failure and recovery
 
-Every round archives inputs and complete outputs. The current workspace switches only after deterministic acceptance. Original materials, requests, raw outputs and previous versions remain available.
+- Synchronization failures retain the last known state and retry with backoff without creating a replacement Compile.
+- Lost acceptance uses the original idempotency key to reconcile the same request instead of blindly resubmitting.
+- A stop request waits for upstream cancellation or terminal confirmation; local intent does not establish remote cancellation.
+- Jobs using acceptance contracts apply bounded repairs only to recognized format, incomplete-artifact or truncation failures, preserving original requests, errors and results.
+- Missing configuration and unavailable PostgreSQL or OpenViking fail explicitly. Local caches cannot replace authoritative state or remote results.
 
-## Failures and recovery
+Rounds, Compile receipts, timings, supplements and archives each report their own evidence. Completion receipts, format checks and local tests cannot replace real business use or True Replay.
 
-- Synchronization failure preserves the task and retries with backoff.
-- A lost acceptance response is reconciled by the original idempotency key; any resubmission uses the identical frozen request.
-- Remote or artifact failures retain the real error, request and result. At most two whole-task repairs per round follow; remaining failures are reported honestly.
-- Chinese, source and Case checks remain enforced. Unknown business facts require human supplements.
-
-The UI reports actual Compile admissions and repairs. Saved workspace versions support switching retries without overwriting history.
-
-## Finish and validate the result
-
-Structural acceptance checks language, complete files, provenance, Test Dataset format and count constraints. It does not prove business correctness or True Replay success. Existing candidate selection, True Replay, Candidate Review and Publish gates remain in force. Mining never publishes automatically.
-
-## Historical jobs
-
-Existing jobs retain their frozen single-candidate or staged protocols without request or artifact migration. Custom compiler Skills retain their content; resetting settings enables native whole-round execution for newly created jobs.
+The tenant Replay Adapter used for these document Cases must support the `document` runtime and independent execution without a source Session. An Adapter restricted to another source runtime may reject it. Do not fabricate Sessions or private Context, or switch Adapters to bypass that restriction. Verify real Adapter compatibility separately; a fixed local test Factory establishes interface compatibility only.

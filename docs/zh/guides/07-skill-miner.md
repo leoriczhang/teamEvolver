@@ -1,69 +1,79 @@
-# Skill 挖掘
+# 知识库挖掘指南
 
-Skill 挖掘把领域文档及人工补充的 Evidence 转成可审核的 Skill Candidate 和同源 Test Dataset。teamEvolver 管理任务、轮次和候选提交，OpenViking Compile 负责读取 Evidence 并生成产物。
+知识库挖掘把 OpenViking 中的原始知识目录编译为结构化 Wiki。编译由 OpenViking 原生 Compile 使用挖掘 Skill 执行；teamEvolver 负责受理、权限、任务持久化、取消与结果核对。代码位于 `team_miner/knowledge_miner/`，控制台页面位于 `team_miner/knowledge_miner/frontend/`，与 `team_miner/skill_miner/` 中的 Skill 挖掘独立维护。接口细节见 [知识库挖掘 API](../api/22-knowledge-mining.md)。
 
-## 准备与创建任务
+## 前置条件
 
-启动 teamEvolver，在控制台配置可访问的 OpenViking Endpoint、Account 和服务端凭据。挖掘使用 OpenViking 上的模型及执行环境。
+- 租户已配置 OpenViking 部署、Account 与 Root Key（「运行状态」→「OpenViking 部署」）
+- OpenViking 服务端支持 Compile；默认挖掘 Skill `viking://agent/skills/llm-wiki`
+  缺失时由 teamEvolver 自动安装，自定义 Skill 仍需预先安装
+- 当前用户是租户管理员
+- Worker 角色正在运行，负责执行 `miner.track_compile` 与 `miner.rebuild_index` 任务
 
-1. 在知识源页面注册或上传来源，确认目录带有 Skill 用途标签。知识库挖掘可以使用同一来源的 Knowledge 用途标签。
-2. 创建任务并设置最大轮数（1–5，默认 3）、人工补证和每轮基础运行期限（60–7200 秒，默认 3600；大来源按输入分片和产物工作量自动延长）。
-3. 查看任务进度、执行事件、远端任务 ID 和错误信息。最多同时执行 8 个任务；人工等待阶段不占执行名额。
+未配置 OpenViking 时，控制台的「知识库挖掘」菜单显示未配置标记，页面引导到「运行状态」。
 
-来源在任务开始时冻结。后续修改原目录不会改变该任务的 Evidence。每轮使用独立输入与输出，并保存本地归档。
+## 目录约定
 
-## 原生整轮交付
+一次挖掘涉及三个 URI，均来自租户 `miner` 模块配置：
 
-新任务默认每轮只提交一次公共 OpenViking Compile。编译 Skill 在这次 Compile 内完成来源阅读、方法归并、内容分工、生成与复核；内容单元增多不会增加 TE 的外层 Compile 调用，也不会直接增加最终 Skill 数量。
+| 字段 | 默认值 | 作用 |
+|------|--------|------|
+| `source_uri` | `viking://resources/agent_knowledge_workspace/input/raw_knowledge_base` | 知识源，存放原始文档转换后的 Markdown |
+| `target_uri` | `viking://resources/agent_knowledge_workspace/output/processed_knowledge` | 知识库，存放编译产出的 Wiki |
+| `skill_uri` | `viking://agent/skills/llm-wiki` | 编译使用的挖掘 Skill |
 
-`te-native-components.v2` 按方法组织独立的内容单元，并保留旧 v1 产物兼容：
+`source_uri` 与 `target_uri` 必须位于 `viking://resources/` 下，`skill_uri` 必须位于 `viking://agent/skills/` 下。配置没有写入接口，由运维直接修改 `tenant_configs` 中 `module='miner'` 的行；配置中出现凭证字段或未知字段时，所有挖掘接口返回 503。
 
-- `core` 单元生成 `METHOD.json`、可执行的 `SKILL.md`、`EVALUATION.md` 和组件清单，声明配套资源、Case ID、顺序及来源去向。主流程负责配置选择、资源读取、分支和完成条件。
-- 原表、规则字典和已有提示词可由 Skill 在清单中声明为原文资源。TE 只从本任务冻结输入核对 SHA 并逐字装配，保留原始矛盾、格式和语言，不重写事实。生成的 `reference` 单元负责必要的配置导航、适用关系和覆盖对照，避免重复转写长篇原文。
-- `case` 单元各生成一个完整的 Case JSON；每个方法有 12 个具备实质差异、来源明确的 Case。
+teamEvolver 在首次浏览、上传或启动挖掘前按父目录到子目录的顺序检查
+`source_uri` 与 `target_uri`；目录不存在时自动创建，已存在时直接复用且不覆盖内容。
 
-中间草稿只传配置选择、具体状态与执行设计，不把整篇正文嵌入中间 JSON。新的 Agent 读取相关原文后独立复核设计，并直接写出该单元声明的完整文件。TE 校验组件清单、路径、唯一 ID、文件完整性、来源集合和 Test Dataset 契约，随后按清单顺序确定性装配原文资源、`benchmark.json` 并渲染 `BENCHMARK.md`。TE 不选择业务规则、不补写事实或新增 Case，也不为装配再次调用 Compile。
+## 操作流程
 
-原文资源声明使用精确冻结源 URI，不能指向实时目录、未冻结文件或生成产物；SHA 由冻结清单校验，不能依赖模型自报。复制后的源文本保持可查用，但复制完整不等于规则覆盖。Skill 仍须给出配置匹配、资源查用、分支、冲突处置与完成条件；案例须验证具体状态下的可观察行为。单元复核和装配成功不代表已完成全包跨文件业务审查，更不代表 True Replay 通过。
+### 1. 上传知识源
 
-来源逐文件冻结，目录最多 10000 个文件，单文件最多 20 MB；原始来源没有 16 MB 的总量限制。来源目录通过现有 OV 文件列表接口逐目录分页读取，不按固定目录深度或树节点数截断。任务详情显示当前轮次实际运行期限。
+在「知识源」文件树中选择目标目录，上传文件或整个文件夹。支持格式：`.md`、`.markdown`、`.txt`、`.docx`、`.xlsx`、`.pdf`、`.csv`、`.pptx`。单次最多 200 个文件，单文件 ≤20 MiB，合计 ≤100 MiB。
 
-组件协议只用于采用该协议的新冻结请求。旧任务保留原编译器、请求、执行协议和历史产物，不自动迁移或重编译。上述流程使用现有 OpenViking 接口，不修改 OV 代码；来源冻结、断线恢复、停止和确定性装配由 TE 管理，知识库挖掘保持原有流程。
+上传受理为后台任务。Worker 逐个文件转换为 Markdown（扩展名替换为 `.md`）并写入 OpenViking，每个文件完成后记录检查点；任务中断后重试会跳过已写入的文件。两个文件转换后同名时请求被拒绝。
 
-首轮按冻结的原始来源确定并保存主要语言，中文主导的材料使用简体中文。后续轮次沿用该语言，不因旧英文产物或补证语言改变。面向人的正文、说明、案例 Query、Checklist 自然语言、共享分析和复核问题使用该语言；字段名、ID、文件路径、来源 URI、代码、固定枚举和原文直接引用保持原样。`Checklist`、`Evidence`、`Materials` 等结构标签保留原样。控制台没有独立的输出语言选择器。
+### 2. 整理知识源
 
-## 每轮产物
+文件树支持预览、编辑与删除文件或目录。根目录本身不能删除。编辑后的内容直接写回 OpenViking。
 
-| 路径 | 用途 |
-| --- | --- |
-| `analysis/evidence-map.md` | Evidence 与可复用方法的对应关系、来源引用 |
-| `analysis/gaps.md` | Evidence 缺口、冲突和适用边界 |
-| `analysis/review.json` | 结构化人工复核问题，契约为 `skill-miner.review.v1` |
-| `compiled_skill/<name>/SKILL.md` | Skill Candidate 正文 |
-| `compiled_skill/<name>/EVALUATION.md` | 评估说明 |
-| `compiled_skill/<name>/BENCHMARK.md` | Test Dataset 的可读说明 |
-| `compiled_skill/<name>/benchmark.json` | 统一 `team-replay.dataset` 格式的 Test Dataset |
+### 3. 启动编译
 
-控制台支持产物预览、Markdown 滚动阅读与编辑。最终提交使用当前编辑后的产物。文件结构校验不证明业务事实正确；来源处理失败、未解决的问题或格式补齐仍显示为需复核。
+填写「本次挖掘要求」（可选，≤4000 字符），选择增量编译起点后启动。首次运行为全量编译；之后默认使用上次成功编译的开始时间作为 `last_compile_time` 水位，只处理新增或变更内容。
 
-## 多轮复核与补证
+编译任务的执行过程：
 
-新任务启用人工补证时，仅在本轮问题清单非空时等待人工复核，选答问题也保留此等待。原生整轮任务的问题数为 0 时直接结束，不为凑满轮数再调用 Compile；本轮完整产物和跳过记录仍归档。非原生旧流程按所选轮数推进。自动跳过不表示人工批准、业务质量通过或原文未知事实已解决，也不添加补充 Evidence。已有任务沿用其冻结的检查点策略。管理员查看产物、回答结构化问题、补充可访问的 OpenViking 来源引用、上传附件或填写复核意见。无法确认的必答问题应明确标记为未解决。
+1. API 持久化请求并入队 `miner.track_compile`，返回 `job_id`。
+2. Worker 以 `job_id` 作为幂等键向 OpenViking 提交 Compile，并保存上游 `task_id` 回执。
+3. Worker 轮询上游任务直到结束。进程重启后从回执恢复，不会重复提交。
+4. 成功时更新水位，并派生 `miner.rebuild_index` 任务重建 Wiki 链接索引。
 
-点击继续后，原生整轮任务以紧邻上一轮的真实补证、问题涉及的必要冻结原文和修订上下文作为下一轮输入，向同一产物目标增量编译；自由文本复核意见无法界定影响范围时，保守带入全部冻结原文。非原生旧流程仍重新处理原始冻结来源和累计补证。上一轮 Skill Candidate 只作为修订上下文，不能代替已证实的 Evidence，也不能用于来源引用。达到轮数上限后可以完成最终复核或停止任务；最后复核新增的内容不会自动编入已有产物。
+页面显示 OpenViking Compile 阶段进度。点击停止会同时取消上游任务和本地任务。
 
-关闭人工补证时，原生整轮任务在当前轮产物完成结构校验后直接结束，不额外调用 Compile；非原生旧流程自动执行所选轮数。服务重启和网络重试会恢复已有任务及幂等提交状态。执行中的任务停止时请求远端取消；删除前应先停止任务。
+### 4. 查看知识库
 
-详见 [多轮 Skill 挖掘与人工补证](./17-multi-round-skill-mining.md)。
+编译完成后在「知识库」文件树浏览 Wiki 页面，查看反向引用。点击生成图谱会根据 Wiki 链接构建知识库 HTML 图谱。
 
-## 候选验证与发布
+## 并发与幂等
 
-完成挖掘后，管理员将 Skill Candidate 与 Test Dataset 提交到现有候选流程。True Replay 比较 Baseline 与 Candidate 的真实执行结果，Candidate Review 决定是否 Publish。挖掘完成和人工补证结束均不自动发布团队 Skill。
+- 所有写操作支持 `Idempotency-Key` 请求头：相同 Key 加相同请求返回同一任务，不同请求返回 409。
+- 同一 `(account_id, source_uri, target_uri, skill_uri)` 范围的水位与索引更新使用 PostgreSQL advisory lock 串行化。
+- 只有与当前水位对应的编译任务会写入索引，较早完成的任务不会覆盖较新的索引。
 
-## 配置与接口
+## 故障排查
 
-`mining.pipeline.max_rounds` 设置默认轮数，`mining.pipeline.runtime_timeout_seconds` 设置默认每轮基础期限。`mining.prompts.ov_compile` 可覆盖编译 Skill 正文；每轮冻结正文、输入和 Compile 请求，并绑定内容摘要对应的独立编译器 URI。
+| 现象 | 处理 |
+|------|------|
+| 所有接口返回 503 | 检查 `miner` 模块配置是否缺失、包含凭证字段或未知字段 |
+| `403 TENANT_ACCOUNT_MISMATCH` | 请求中的 `account` 与租户生效的 OpenViking Account 不一致 |
+| 任务一直排队 | 确认 Worker 角色在运行，用 `teamEvolver status` 查看进程 |
+| 任务失败 `miner_compile_failed` | 在 OpenViking 侧查看上游任务日志；自定义挖掘 Skill 需确认已安装 |
+| 上传失败 `miner_normalized_upload_limit` | 转换后的 Markdown 合计超过 100 MiB，拆分上传 |
 
-运行时将任务语言规则加入新的 Compile 请求，自定义业务编译指令原样保存，无需为语言更新而重置。已受理的请求与已完成的产物不追溯修改，不会自动翻译或重新 Compile。
+## 相关文档
 
-接口参数、状态与错误见 [Skill 挖掘 API](../api/17-skill-mining.md)。知识库上传、Wiki 编译与浏览说明见 [控制台](./03-console.md)。
+- [知识库挖掘 API](../api/22-knowledge-mining.md)
+- [Workspace 与平台资产 API](../api/23-workspace-assets.md)
+- [Web 控制台用户指南](./03-console.md)

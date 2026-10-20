@@ -2,83 +2,14 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-from typing import Any, Iterable
-
-from .contracts import document_runtime_type
+from typing import Any
 
 
 def _runtime(value: Any) -> str:
     return str(value or "").strip().lower().replace("_", "-")
 
 
-def _metadata(skill: dict[str, Any]) -> dict[str, Any]:
-    extra = (
-        skill.get("extra_frontmatter")
-        if isinstance(skill.get("extra_frontmatter"), dict)
-        else skill.get("_extra_frontmatter")
-        if isinstance(skill.get("_extra_frontmatter"), dict)
-        else {}
-    )
-    policy = (
-        skill.get("runtime_policy")
-        if isinstance(skill.get("runtime_policy"), dict)
-        else {}
-    )
-    return {**extra, **policy, **skill}
-
-
-def _string_list(value: Any) -> list[str]:
-    if isinstance(value, str):
-        value = value.replace(",", " ").split()
-    return sorted(
-        {
-            _runtime(item)
-            for item in value or []
-            if _runtime(item)
-        }
-    )
-
-
-def _runtime_declaration(skill: dict[str, Any]) -> dict[str, Any]:
-    metadata = _metadata(skill)
-    supported = _string_list(metadata.get("supported_runtimes"))
-    portable_value = metadata.get("portable")
-    portable = (
-        portable_value
-        if isinstance(portable_value, bool)
-        else str(portable_value or "").strip().lower()
-        in {"1", "true", "yes", "on"}
-    )
-    return {
-        "portable": bool(portable),
-        "supported_runtimes": supported,
-        "required_agent_capabilities": _string_list(
-            metadata.get("required_agent_capabilities")
-        ),
-        "required_tools": _string_list(metadata.get("required_tools")),
-        "supported_platforms": _string_list(
-            metadata.get("supported_platforms")
-        ),
-        "bundle_format": _runtime(
-            metadata.get("bundle_format")
-            or metadata.get("format")
-        ),
-        "declaration": (
-            "supported_runtimes"
-            if supported
-            else "portable"
-            if portable
-            else "source_runtime_only"
-        ),
-    }
-
-
 def runtime_type_for_case(case: dict[str, Any]) -> str:
-    document = document_runtime_type(case)
-    if document:
-        return document
     provenance = (
         case.get("provenance")
         if isinstance(case.get("provenance"), dict)
@@ -90,165 +21,6 @@ def runtime_type_for_case(case: dict[str, Any]) -> str:
         else {}
     )
     return _runtime(runtime.get("type"))
-
-
-def _source_runtimes(
-    sessions: Iterable[dict[str, Any]],
-    cases: Iterable[dict[str, Any]],
-) -> list[str]:
-    values: set[str] = set()
-    for session in sessions:
-        runtime = (
-            session.get("runtime")
-            if isinstance(session.get("runtime"), dict)
-            else {}
-        )
-        value = _runtime(runtime.get("type") or session.get("source"))
-        if value:
-            values.add(value)
-    for case in cases:
-        value = runtime_type_for_case(case)
-        if value:
-            values.add(value)
-    return sorted(values)
-
-
-def prepare_runtime_validation(
-    *,
-    skill: dict[str, Any],
-    sessions: list[dict[str, Any]],
-    replay_cases: list[dict[str, Any]],
-    validation_runtimes: list[str],
-) -> dict[str, Any]:
-    """Build a validation matrix and neutral cases for missing runtime classes."""
-    declaration = _runtime_declaration(skill)
-    configured_runtimes = set(_string_list(validation_runtimes))
-    sessions_by_id = {
-        str(session.get("session_id") or ""): session
-        for session in sessions
-        if str(session.get("session_id") or "")
-    }
-    cases: list[dict[str, Any]] = []
-    for raw_case in replay_cases:
-        case = dict(raw_case)
-        provenance = dict(case.get("provenance") or {})
-        if document_runtime_type(case):
-            # Evidence references are not historical Session execution inputs.
-            cases.append(case)
-            continue
-        source = sessions_by_id.get(str(provenance.get("session_id") or ""))
-        if source and not isinstance(provenance.get("source_runtime"), dict):
-            runtime = (
-                source.get("runtime")
-                if isinstance(source.get("runtime"), dict)
-                else {}
-            )
-            provenance["source_runtime"] = dict(runtime)
-        if source and not isinstance(
-            provenance.get("source_runtime_context"),
-            dict,
-        ):
-            context = (
-                source.get("runtime_context")
-                if isinstance(source.get("runtime_context"), dict)
-                else {}
-            )
-            provenance["source_runtime_context"] = {
-                key: context.get(key)
-                for key in (
-                    "tenant_id",
-                    "profile_id",
-                    "environment_id",
-                    "model_config_id",
-                    "user_id",
-                )
-                if context.get(key) not in (None, "")
-            }
-        case["provenance"] = provenance
-        cases.append(case)
-    source_runtimes = _source_runtimes(sessions, cases)
-    if declaration["supported_runtimes"]:
-        required = list(declaration["supported_runtimes"])
-    elif declaration["portable"]:
-        required = sorted({*configured_runtimes, *source_runtimes})
-    else:
-        required = list(source_runtimes)
-
-    missing_capabilities = sorted(
-        runtime for runtime in required if runtime not in configured_runtimes
-    )
-    incompatible = {}
-    represented = {
-        runtime_type_for_case(case)
-        for case in cases
-        if runtime_type_for_case(case)
-    }
-    seed = next(
-        (
-            dict(case)
-            for case in cases
-            if str(case.get("query") or "").strip()
-        ),
-        None,
-    )
-    for runtime in required:
-        if (
-            runtime in represented
-            or runtime not in configured_runtimes
-            or runtime in incompatible
-            or seed is None
-        ):
-            continue
-        digest = hashlib.sha256(
-            json.dumps(
-                {
-                    "runtime": runtime,
-                    "case": seed.get("case_id") or seed.get("dataset_id"),
-                },
-                sort_keys=True,
-            ).encode("utf-8")
-        ).hexdigest()[:20]
-        neutral = {
-            **seed,
-            "case_id": f"compat-{runtime}-{digest}",
-            "provenance": {
-                "session_id": f"compat-{runtime}-{digest}",
-                "session_ids": [],
-                "source_runtime": {"type": runtime},
-                "source_runtime_context": {},
-                "context_snapshot": {},
-                "context_snapshot_id": "",
-            },
-            "metadata": {
-                **dict(seed.get("metadata") or {}),
-                "context_policy": {
-                    "mode": "neutral",
-                    "team_only": True,
-                    "personal_context": False,
-                },
-                "compatibility_runtime": runtime,
-            },
-        }
-        if document_runtime_type(seed):
-            neutral["replay"] = dict(seed.get("replay") or {})
-            neutral["replay"].pop("execution", None)
-        cases.append(neutral)
-        represented.add(runtime)
-
-    policy = {
-        **declaration,
-        "source_runtimes": source_runtimes,
-        "required_runtimes": required,
-        "available_replay_runtimes": sorted(configured_runtimes),
-        "missing_replay_runtimes": missing_capabilities,
-        "incompatible_runtimes": incompatible,
-        "distribution_runtimes": (
-            required
-            if declaration["supported_runtimes"] or declaration["portable"]
-            else []
-        ),
-    }
-    return {"policy": policy, "replay_cases": cases}
 
 
 def evaluate_runtime_compatibility(
@@ -282,8 +54,6 @@ def evaluate_runtime_compatibility(
             entries = per_runtime.items()
         else:
             runtime = _runtime(result.get("runtime_type"))
-            if not runtime and len(required) == 1:
-                runtime = required[0]
             entries = [(runtime, result)] if runtime else []
         for raw_runtime, raw_entry in entries:
             runtime = _runtime(raw_runtime)
@@ -294,7 +64,9 @@ def evaluate_runtime_compatibility(
                 or raw_entry.get("verdict")
                 or ""
             ).lower()
-            accepted = bool(raw_entry.get("accepted")) or decision == "accept"
+            accepted = decision == "accept" and raw_entry.get("accepted") is True
+            if raw_entry.get("status") not in {"evaluated", "completed"}:
+                accepted = False
             rejected = bool(raw_entry.get("rejected")) or decision == "reject"
             current = matrix[runtime]
             if rejected:
@@ -303,13 +75,13 @@ def evaluate_runtime_compatibility(
                     "accepted": False,
                     "decision": "reject",
                 }
-            elif accepted and current.get("status") != "rejected":
+            elif accepted and current.get("status") not in {"rejected", "inconclusive"}:
                 matrix[runtime] = {
                     "status": "accepted",
                     "accepted": True,
                     "decision": decision or "accept",
                 }
-            elif current.get("status") == "missing":
+            elif not accepted and current.get("status") != "rejected":
                 matrix[runtime] = {
                     "status": "inconclusive",
                     "accepted": False,

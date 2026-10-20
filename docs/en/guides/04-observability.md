@@ -1,402 +1,97 @@
-# Langfuse Observability Guide
-
-Inbound integration now lives in `session_ingestion/adapters/` under the
-[tenant-file contract](10-datasource-onboarding.md). Legacy inbound configuration
-and CLI examples below are migration references only. Outbound platform tracing
-still uses dedicated `langfuse.tracing_*` settings on the Global Observability page.
-
-teamEvolver deeply integrates Langfuse to provide LLM application observability. Langfuse integration includes two independent working modes, can be enabled separately:
-
-1. **Inbound Session Pull**: Pull existing Agent session data from Langfuse into teamEvolver evolution pipeline
-2. **Outbound Tracing**: Send teamEvolver's own evolution process LLM calls to Langfuse for tracing analysis
-
-Related code at:
-- `teamEvolver/observability/langfuse.py`: Tracing runtime and configuration management
-- `session_ingestion/adapters/_shared/langfuse_client.py`: Langfuse v3 public API HTTP client
-- `session_ingestion/adapters/_shared/langfuse_pull.py`: Session pull orchestration layer
-- `session_ingestion/adapters/_shared/langfuse_convert.py`: Langfuse Session format to teamEvolver format conversion
-
-## Two Mode Comparison
-
-| Dimension | Inbound Session Pull | Outbound Tracing |
-|-----------|---------------------|-----------------|
-| Direction | Langfuse → teamEvolver | teamEvolver → Langfuse |
-| Config toggle | `langfuse.enabled` | `langfuse.tracing_enabled` |
-| Purpose | Use external Agent sessions as evolution input | Debug and monitor evolution pipeline's own LLM calls |
-| Data content | Complete session trajectories, tool calls, scores | System Prompts, User Messages, model outputs, Token usage across evolution stages |
-| Execution | Scheduled/manual pull | Auto-captured per LLM call |
-| Impact on evolution | Provides raw material for evolution | No side effects, fail-open design |
-
-The two modes use separate Langfuse connections. Inbound connections can be configured per tenant. Outbound tracing is service-wide: every tenant reports to one operator-managed Langfuse project, and tenant overrides are rejected.
-
-## Configuration Reference
-
-All Langfuse-related configuration in config.yaml `langfuse` section:
-
-### Basic Connection Configuration
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `enabled` | boolean | `false` | Whether to enable inbound session pull |
-| `host` | string | `"https://cloud.langfuse.com"` | Langfuse service address. Self-hosted instances change to your address, e.g., `"http://127.0.0.1:3000"` |
-| `public_key` | string | `""` | Langfuse Project Public Key, obtained from Langfuse project settings |
-| `secret_key` | string | `""` | Langfuse Project Secret Key |
-
-### Outbound Tracing Configuration
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `tracing_enabled` | boolean | `false` | Whether to enable outbound LLM call tracing |
-| `tracing_host` | string | `""` | Global observability Langfuse URL, separate from inbound `host` |
-| `tracing_public_key` | string | `""` | Global observability project public key |
-| `tracing_secret_key` | string | `""` | Global observability project secret key |
-| `tracing_environment` | string | `"local"` | Environment tag, distinguishes deployment environments in Langfuse UI. Recommended values: `production`, `staging`, `local`. Only letters, numbers, `-`, `_` allowed |
-| `tracing_release` | string | `""` | Release tag, marks current deployment version (e.g., git commit hash, version number) |
-| `tracing_sample_rate` | float | `1.0` | Sample rate, range 0.0-1.0. Production recommend `0.1` (10% sampling) to reduce cost |
-| `tracing_capture_content` | boolean | `true` | Whether to capture complete LLM input/output content. Set to `false` to record only metadata and Token usage |
-| `tracing_flush_at` | integer | `1` | Batch flush to Langfuse after accumulating traces |
-| `tracing_flush_interval_seconds` | float | `1.0` | Periodic flush interval in seconds |
-| `timeout_seconds` | integer | `30` | Langfuse API request timeout in seconds |
-
-### Inbound Pull Default Filter Configuration
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `page_limit` | integer | `50` | Page size for paginated pulls |
-| `max_sessions` | integer | `100` | Maximum sessions per pull |
-| `default_environment` | list | `[]` | Default filter by environment; empty list means no filter |
-| `default_user_id` | string | `""` | Default filter by userId |
-| `default_tags` | list | `[]` | Default filter by tags (all specified tags must match) |
-| `default_release` | string | `""` | Default filter by release |
-| `default_version` | string | `""` | Default filter by version |
-| `default_trace_name` | string | `""` | Default filter by trace name |
-
-### Obtaining Credentials
-
-1. Login to Langfuse (cloud.langfuse.com or your self-hosted instance)
-2. Go to Settings → Projects
-3. Create or select a Project
-4. In API Keys section click "Create new API keys"
-5. Copy Public Key and Secret Key
-
-Note: Public Key starts with `pk-lf-`, Secret Key starts with `sk-lf-`.
-
-## Configuration Examples
-
-### Outbound Tracing Only (recommended for production monitoring)
-
-```yaml
-langfuse:
-  enabled: false
-  tracing_enabled: true
-  tracing_host: "https://cloud.langfuse.com"
-  tracing_public_key: "pk-lf-observability"
-  tracing_secret_key: "sk-lf-observability"
-  tracing_environment: "production"
-  tracing_release: "v1.2.3"
-  tracing_sample_rate: 0.1
-  tracing_capture_content: true
-```
-
-### Both Inbound Pull and Outbound Tracing Enabled
-
-```yaml
-langfuse:
-  enabled: true
-  host: "https://tenant-source.example.com"
-  public_key: "pk-lf-source"
-  secret_key: "sk-lf-source"
-  tracing_enabled: true
-  tracing_host: "https://global-observability.example.com"
-  tracing_public_key: "pk-lf-observability"
-  tracing_secret_key: "sk-lf-observability"
-  tracing_environment: "production"
-  tracing_sample_rate: 0.5
-  default_environment:
-    - "production"
-  default_tags:
-    - "agent"
-    - "coding"
-  max_sessions: 50
-```
-
-### Self-Hosted Langfuse
-
-```yaml
-langfuse:
-  enabled: true
-  host: "http://tenant-langfuse.internal.example.com"
-  public_key: "pk-lf-source"
-  secret_key: "sk-lf-source"
-  tracing_enabled: true
-  tracing_host: "http://observability-langfuse.internal.example.com"
-  tracing_public_key: "pk-lf-observability"
-  tracing_secret_key: "sk-lf-observability"
-  tracing_environment: "local"
-```
-
-Environment variables can override the global outbound tracing connection (higher priority than config.yaml; they do not configure tenant session sources):
-
-```bash
-export LANGFUSE_HOST="https://cloud.langfuse.com"
-export LANGFUSE_PUBLIC_KEY="pk-lf-xxxxxxxx"
-export LANGFUSE_SECRET_KEY="sk-lf-xxxxxxxx"
-export LANGFUSE_TRACING_ENABLED="true"
-export LANGFUSE_TRACING_ENVIRONMENT="production"
-export LANGFUSE_SAMPLE_RATE="0.1"
-```
-
-## Outbound Tracing: What Gets Traced
-
-When outbound tracing enabled, each LLM call in evolution pipeline automatically captured and sent to Langfuse. Tracing uses fail-open design: if Langfuse unavailable, evolution pipeline continues normally, only warning logged.
-
-### Traced LLM Calls
-
-Following stages' LLM calls in evolution pipeline are traced:
-
-| Stage | Trace Name | Tags |
-|-------|-----------|------|
-| Value Classification (Session Filter) | `teamEvolver.evolve.session_filter` | `["teamEvolver", "evolve", "session_filter"]` |
-| Summarize | `teamEvolver.evolve.summarize` | `["teamEvolver", "evolve", "summarize"]` |
-| Judge (Session scoring) | `teamEvolver.evolve.judge` | `["teamEvolver", "evolve", "judge"]` |
-| Skill Improvement (Evolve Skill) | `teamEvolver.evolve.evolve_skill` | `["teamEvolver", "evolve", "evolve_skill"]` |
-| New Skill Creation (Create Skill) | `teamEvolver.evolve.create_skill` | `["teamEvolver", "evolve", "create_skill"]` |
-| Conflict Merge (Merge) | `teamEvolver.evolve.merge` | `["teamEvolver", "evolve", "merge"]` |
-| Dataset Synthesis | `teamEvolver.evolve.dataset_synthesis` | `["teamEvolver", "evolve", "dataset_synthesis"]` |
-| Checklist Judge (Replay Checklist) | `teamEvolver.evolve.replay_checklist` | `["teamEvolver", "evolve", "replay_checklist"]` |
-| Prompt Studio Test | `teamEvolver.evolve.prompt_test.<stage_id>` | `["teamEvolver", "evolve", "prompt-studio", <stage_id>]` |
-
-DreamCycle Job LLM calls also traced when enabled.
-
-### Data Contained in Each Trace
-
-For each traced LLM call, following information recorded:
-
-- **Input**: Complete System Prompt and User Message (when `tracing_capture_content: true`)
-- **Output**: Complete text returned by model
-- **Model**: Model name used
-- **Model Parameters**: temperature, max_tokens, etc.
-- **Usage Details**: prompt tokens, completion tokens, total tokens
-- **Metadata**: Structured metadata like component name, operation name, stage ID, source session ID
-- **Session ID**: Carried only by skill-evolution Traces when `EVOBENCH_RUN_ID` is set (`team-skill-evolver:{run_id}:{operation}:{skill_name}`); source session IDs are recorded in Metadata
-- **Tags**: LLM calls automatically get the `llm` tag plus stage-specific tags (see table above)
-- **Environment**: Configured by `tracing_environment`
-- **Release**: Configured by `tracing_release`
+# Trace Observability Guide
 
-### Trace Hierarchy
-
-Tracing uses nested Span structure:
+Trace observability reports teamEvolver's own model calls to Langfuse, to investigate prompts, outputs, token usage and latency of each evolution stage. It is a service-level setting; all tenants report to the same Langfuse project. Pulling Agent sessions from Langfuse belongs to data source onboarding and uses separate credentials; see the [Data Source Onboarding Guide](./10-datasource-onboarding.md).
 
-- Each evolution round corresponds to one Trace
-- Each LLM stage corresponds to one Span under Trace
-- Sub-calls within same stage correspond to nested Spans
+Code entry points: `teamEvolver/observability/langfuse.py` (runtime and settings), `teamEvolver/llm.py` (model call instrumentation), `teamEvolver/admin/api/settings.py` (configuration API).
 
-This clearly shows call relationships and timing across stages in one complete evolution cycle in Langfuse UI.
+## Configuration Sources
 
-## Inbound Session Pull: How It Works
+Settings are merged in the following order, higher priority overriding lower:
 
-Inbound session pull mode pulls external Agent session data from Langfuse, converts format, then feeds into teamEvolver session queue triggering subsequent value classification and skill evolution.
+1. `LANGFUSE_*` environment variables
+2. Online settings saved in the console "Trace Observability" page (`teamevolver_config.tracing`)
+3. Bootstrap configuration fields `langfuse_tracing_*`
 
-### Supported Filter Dimensions
+On each tenant refresh round (at least 10 seconds apart) the Worker re-reads the online settings and applies them; when they change, the Langfuse client is rebuilt without a process restart.
 
-Pull supports rich filter conditions; default values can be set in config file, can also be temporarily overridden via CLI parameters per pull:
+| Bootstrap field | Environment variable | Default | Description |
+|--------------|----------|------|------|
+| `langfuse_tracing_enabled` | `LANGFUSE_TRACING_ENABLED` | false | Whether to report |
+| `langfuse_tracing_host` | `LANGFUSE_BASE_URL` / `LANGFUSE_HOST` | empty | Langfuse address |
+| `langfuse_tracing_public_key` | `LANGFUSE_PUBLIC_KEY` | empty | Project public key |
+| `langfuse_tracing_secret_key` | `LANGFUSE_SECRET_KEY` | empty | Project secret key |
+| `langfuse_tracing_environment` | `LANGFUSE_TRACING_ENVIRONMENT` | `local` | Environment tag; letters, digits, `-`, `_` only |
+| `langfuse_tracing_release` | `LANGFUSE_RELEASE` | empty | Release tag |
+| `langfuse_tracing_sample_rate` | `LANGFUSE_SAMPLE_RATE` | 1.0 | Sample rate 0–1 |
+| `langfuse_tracing_capture_content` | `LANGFUSE_CAPTURE_CONTENT` | true | Record model input and output; when off, only metadata and usage are recorded |
+| `langfuse_tracing_flush_at` | `LANGFUSE_FLUSH_AT` | 1 | Batch flush size |
+| `langfuse_tracing_flush_interval_seconds` | `LANGFUSE_FLUSH_INTERVAL` | 1.0 | Flush interval (seconds) |
+| `langfuse_tracing_timeout_seconds` | `LANGFUSE_TIMEOUT` | 30 | Request timeout (seconds) |
 
-- **Time range**: `from_timestamp` / `to_timestamp` (ISO 8601 format)
-- **Environment**: `environment` (can specify multiple, matches any)
-- **User ID**: `user_id`
-- **Tags**: `tags` (all must match)
-- **Version**: `release` / `version`
-- **Trace Name**: `trace_name`
-- **Specific Session**: `session_id` (pull single session)
-- **Metadata**: `metadata` (filter by metadata key-value pairs)
+A client is created only when both the public and secret keys are present.
 
-### Pull Flow
+## Console and API
 
-1. Query matching Trace list per filter conditions (via `/api/public/traces` endpoint)
-2. Parse unique Session ID set from Trace results
-3. Pull Session details one by one (via `/api/public/sessions/{id}` endpoint), including all Traces and Observations
-4. Call `langfuse_convert.py` to convert Langfuse format to teamEvolver session format
-5. Feed into session queue, undergo Session Filter value classification
-6. High-value sessions enter evolution pipeline
+Platform administrators configure the switch, address, sample rate and content capture in "Review & Publish → Trace Observability", and can test the connection.
 
-### Authentication
+| Method | Path | Description |
+|------|------|------|
+| GET | `/api/langfuse-tracing-config` | Online settings, and whether the bootstrap configuration has public/secret keys |
+| PUT | `/api/langfuse-tracing-config` | Save online settings; fields limited to `enabled`, `host`, `environment`, `release`, `sample_rate`, `capture_content`, `flush_at`, `flush_interval_seconds`, `public_key`, `secret_key` |
+| POST | `/api/langfuse-tracing-config/test` | `{"host", "public_key", "secret_key"}` connection test; returns 202 and `job_id` |
 
-Langfuse API uses HTTP Basic Auth:
-- Username: Public Key
-- Password: Secret Key
+A submitted `secret_key` is encrypted and stored as a Secret Ref; the API never echoes the plaintext. Encryption requires `TEAMEVOLVER_SECRET_MASTER_KEY` (falling back to `TEAMEVOLVER_ROOT_API_KEY`). The connection test is run by the Worker against `<host>/api/public/projects`; read the result with `GET /api/jobs/{job_id}`.
 
-`langfuse_client.py` uses `httpx` to directly call public REST API, does not depend on Langfuse Python SDK for data pull.
+## Reported Content
 
-## CLI Commands
+Each model call produces one `generation` observation containing:
 
-teamEvolver provides `teamEvolver langfuse` command group for managing Langfuse integration:
+- Input messages and tool definitions (when `capture_content=true`)
+- Model output and `finish_reason`
+- Model name, `temperature`, `max_completion_tokens`
+- Token usage
+- Metadata: component, operation, retry count and so on
+- Tags: `teamEvolver` and `llm` on every call, plus stage tags
 
-### Check Connection Status
+Each retry attempt is recorded separately, with `metadata.attempt` as its sequence number. Reporting failures never affect the model call; the error is logged as `[Langfuse] tracing unavailable` and kept as `last_error` in status.
 
-```bash
-teamEvolver langfuse status
-```
+### Trace Names
 
-Output includes:
+| Stage | Trace name |
+|------|------------|
+| Session analysis | `team_skills.evolution.analyze_session` |
+| Trace bad-case analysis | `team_skills.evolution.analyze_trace_badcase` |
+| Skill improvement | `team-skill-evolver:evolve_skill:<skill>` |
+| New Skill | `team-skill-evolver:create_skill` |
+| Skill merge | `team-skill-evolver:merge_skill:<skill>` |
+| Dataset synthesis | `team-skill-evolver:dataset_synthesis:<skill>` |
+| Prompt test | `team_skills.evolution.prompt_test.<stage_id>` |
+| Session split | `session_ingestion.split_session` |
+| Experience pattern compile | `skill_experience_pattern.compile` |
+| Calls without a name | `teamEvolver.llm.chat` |
 
-- host address
-- session_pull_enabled / tracing_enabled status
-- tracing_environment
-- public_key/secret_key presence
-- max_sessions config
-- Default filter conditions
-- Langfuse SDK availability
-- Whether can successfully connect to Langfuse service
-- Total session count (if accessible)
+Tags of Skill improvement, creation and merge include `team-skill-evolver`, `team_skills.evolution`, the operation name, `skill:<skill>` and up to 20 source Session IDs; metadata keeps up to 50 source Session IDs. When the `EVOBENCH_RUN_ID` environment variable is set, the run id is added as a tag and `team-skill-evolver:<run_id>:<operation>:<skill>` is used as the Langfuse Session ID.
 
-### Preview Matching Sessions
+## Viewing in Langfuse
 
-```bash
-# List sessions matching default filters
-teamEvolver langfuse list
-
-# List sessions for specified environment
-teamEvolver langfuse list --environment production --environment staging
-
-# List sessions for specified user
-teamEvolver langfuse list --user-id user-123
-
-# List sessions with specified tags
-teamEvolver langfuse list --tag agent --tag coding
-
-# Filter by time range
-teamEvolver langfuse list --from 2026-01-01T00:00:00Z --to 2026-01-31T23:59:59Z
-
-# Pull single session
-teamEvolver langfuse list --session-id abc-123-def
-
-# Limit return count
-teamEvolver langfuse list --max-sessions 20
-```
-
-`list` command only queries and displays; does not perform ingestion.
-
-### Pull Sessions into Evolution Pipeline
-
-```bash
-# Pull using default config
-teamEvolver langfuse pull
-
-# Pull with filter conditions
-teamEvolver langfuse pull --environment production --max-sessions 50
-
-# Pull and specify user alias
-teamEvolver langfuse pull --user-alias "langfuse-import"
-
-# Force reprocess previously processed sessions
-teamEvolver langfuse pull --force
-
-# Pull but don't trigger evolution (enqueue only)
-teamEvolver langfuse pull --defer-trigger
-
-# Local processing (no dependency on running teamEvolver service)
-teamEvolver langfuse pull --in-process
-```
-
-The pull response preserves the original upstream Session count in `total`. Its `counts` include queued, skipped, duplicate, empty, error, and filtered; `retry_count` is the number of transient Langfuse HTTP retries in that batch. `SOURCE.exclude_session_id_patterns` applies case-sensitive glob filtering before fetch. An explicit single `session_id` bypasses automatic exclusions for diagnostics.
-
-## Service Status Correlation
-
-```bash
-curl -s http://127.0.0.1:52010/storage/status
-curl -s 'http://127.0.0.1:52010/status?refresh=true'
-```
-
-Both responses include `instance_id` and `tenant_id`. Key fields:
-
-| Field | Meaning |
-|---|---|
-| `skill_storage` / `session_storage` | Configured backend, actual bucket type, and reachability |
-| `multi_replica_safe` | Whether both Skill and Session state actually use PostgreSQL |
-| `skill_cache.local_cache_matches_manifest` | Whether this Pod's local cache matches the shared manifest |
-| `manifest_generation` / `manifest_hash` | Shared-version values to compare across Pods |
-| `outbox.backlog` / `dead_letter` / `last_error` | Publication delivery backlog and last failure |
-| `rollout_supervisor` | Supervisor liveness and the tenant's latest lease/delivery state |
-
-Correlate logs and durable records with `instance_id`, `tenant_id`, `job_id`, `candidate_revision`, `mutation_id`, `event_id`, `workspace`, `skill_name`, `version`, and `tree_sha256`. Replay `missing_metrics`, `metrics_incomplete_reason`, and `traceId` are exposed in evaluation results; never interpret unavailable metrics as zero.
-
-## Viewing Traces in Langfuse UI
-
-### Viewing teamEvolver Outbound Traces
-
-1. Login to Langfuse
-2. Go to Tracing page
-3. In left filter bar:
-   - Select Environment (e.g., `production`)
-   - Add Tag filter: `teamEvolver`
-4. Can see all Traces emitted by teamEvolver
-
-### Filtering by Stage
-
-To view calls for specific stage, add corresponding Tag filter, e.g., `summarize`, `judge`, `evolve_skill`, etc.
-
-### Viewing Token Usage and Cost
-
-In Langfuse Metrics page can view by Environment, Tags, Model dimensions:
-- Total Token usage trends
-- Per-stage latency distribution
-- Cost estimation (requires configuring model prices in Langfuse)
-
-### Session Replay
-
-Click individual Trace to see complete:
-- Input/output content
-- Nested call relationships
-- Per-Span latency
-- Token usage details
-- Metadata
-
-## Langfuse vs teamEvolver Console
-
-| Feature | teamEvolver Console | Langfuse UI |
-|---------|-------------------|-------------|
-| Evolution status monitoring | Supported | Not supported |
-| Skill management | Supported | Not supported |
-| Candidate review | Supported | Not supported |
-| Prompt editing/testing | Supported | Not supported |
-| LLM call full-chain tracing | Basic logging | Full support |
-| Token usage statistics | Basic | Detailed, multi-dimensional aggregation |
-| Cost analysis | Not supported | Supported (with price config) |
-| Trace history search | Limited | Powerful filtering and search |
-| External Agent session browsing | Not supported | Natively supported |
-| Session scoring and annotation | Not supported | Natively supported |
-
-Recommended to use both: teamEvolver console for operations and management, Langfuse for deep debugging and LLM-call-level issue troubleshooting.
+1. Filter by Environment on the Tracing page.
+2. Use the tag `team-skill-evolver` for Skill evolution calls and `skill:<name>` for one Skill.
+3. Use source Session ID tags to find which Sessions an evolution consumed.
+4. Aggregate token usage and latency by model and tag on the Metrics page.
 
 ## Troubleshooting
 
-### Traces not appearing in Langfuse
+| Symptom | Check |
+|------|------|
+| No traces at all | Switch enabled; both keys configured; `LANGFUSE_TRACING_ENABLED` not overriding to false |
+| Console changes have no effect | Worker running; `LANGFUSE_*` environment variables not overriding the same field |
+| Connection test fails | Reach `<host>/api/public/projects` from the Worker host; check network and keys |
+| Metadata only, no content | `capture_content` is false |
 
-1. Check `tracing_enabled` is `true`
-2. Check `tracing_public_key` and `tracing_secret_key` are correct
-3. Check `tracing_host` is accessible from server (self-hosted instances verify network connectivity)
-4. Check teamEvolver logs for `[Langfuse] tracing unavailable` warnings
-5. Run `teamEvolver langfuse status` to verify `reachable: True`
+For sensitive data, turn off `capture_content` or use a self-hosted Langfuse. A sample rate of 0.05–0.2 is recommended in production; raise it to 1.0 temporarily while investigating.
 
-### Inbound pull not finding sessions
+## Related Documents
 
-1. Confirm sessions recorded in environment matching `default_environment`
-2. Check Tags on Traces include your filtered tags
-3. First run `teamEvolver langfuse list` to confirm match count
-4. Confirm sessions created after `from_timestamp`
-5. Langfuse Sessions list endpoint natively supports environment + time filtering only; other dimensions matched indirectly via /traces endpoint, ensure your Traces set correct userId/tags/release attributes
-
-### Sample Rate Recommendations
-
-- **Development**: `tracing_sample_rate: 1.0` (full sampling for debugging)
-- **Staging**: `tracing_sample_rate: 1.0` (full sampling to verify integration)
-- **Production**: `tracing_sample_rate: 0.05-0.2` (5%-20% sampling, balancing cost and observability)
-- **Troubleshooting issues**: Temporarily set to `1.0`, revert after resolution
-
-### Sensitive Data
-
-If evolution pipeline processes sensitive data:
-
-1. Set `tracing_capture_content: false` to record only metadata, Token usage and latency
-2. Or run on self-hosted Langfuse instance where data doesn't leave your network
-3. Note: Inbound pull pulls complete session content from Langfuse; ensure Langfuse's own access control properly configured
+- [Configuration Reference](./01-configuration.md)
+- [Service Logging](./15-service-logging.md)
+- [Prompt Studio Guide](./08-prompt-studio.md)

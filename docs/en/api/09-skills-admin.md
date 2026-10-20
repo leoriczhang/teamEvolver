@@ -1,390 +1,94 @@
-# Skill Management API
+# Team Skill Library API
 
-For the compatibility ZIP, marketplace, and Git transfer APIs, see [Skill Import and Export](./18-skill-transfer.md). The console no longer exposes these actions; API calls still use the current tenant and Skill version history.
+The team Skill library is stored in PostgreSQL: `skills` holds the current version, `skill_versions` each immutable version, and bundle files are stored content-addressed. Every write creates a new version in one transaction, and every API replica reads the same data. After a write commits the local runtime cache is refreshed on a best-effort basis; a cache failure is only reported in the response's `runtime_cache` and does not affect the committed version.
 
-## 1. API Implementation Overview
+Code entry points: `team_skills/api/__init__.py:create_router`, `team_skills/library/repository.py:SkillLibraryRepository`.
 
-The Skill Management API provides team-Skill CRUD, version rollback, and cloud sync, plus personal-Skill editing, personal/team copying, and publish requests. These endpoints require a console login; team-Skill writes and publish-request decisions require administrator access. Team-Skill changes are stored in the local Skill library, asynchronously mirrored to OpenViking, and notify registered Agents through the Skill Sync outbox.
+Agent pulls are covered in [Skill Pull](./06-skill-sync.md). Personal Skills (`/api/users/{user_id}/skills*`) are stored in the OpenViking personal space; see [Console Identity and Tenant Permissions](./20-console-rbac.md#personal-skills-and-publish-requests).
 
-Code implementation: `teamEvolver/proxy/skills_admin.py` (`SkillsAdminMixin`)
-Skill editor: `team_skills/library/editor.py`
-Cloud sync: `team_skills/library/mutations.py` (`SkillMutationService`), `team_skills/library/hub.py` (`SkillHub`)
+## Permissions and Common Rules
 
-## 2. Interface and Parameter Specification
+- Read endpoints require console login (tenant member) or the Root Key; write endpoints require a tenant administrator.
+- Skill names may contain only letters, digits, `.`, `-` and `_`.
+- Bundle limits come from the tenant `skills` module configuration: `max_bundle_files` (default 1024), `max_bundle_bytes` (default 64 MiB), `max_file_bytes` (default 16 MiB). Exceeding them returns 413.
+- Write endpoints support `Idempotency-Key`: retrying with the same key returns the first result without creating another version.
+- Write bodies are limited to 96 MiB.
 
-All endpoints require a console login. Team-Skill writes, rollback, and publish-request decisions require administrator access; regular users may manage their own personal Skills.
-
----
+## Reads
 
 ### GET /api/skills
 
-List all Skills in the local Skill library.
-
-**Authentication:** Console Cookie (login required, no admin needed)
-
-**Response Fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `sharing_enabled` | boolean | Deprecated compatibility field; always true |
-| `skill_backend` | string | Authoritative Skill storage backend |
-| `delivery_mode` | string | Agent delivery mode: `push` or `pull` |
-| `skills` | array | Skill summary list |
-
-**Skill Summary Fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `name` | string | Skill name |
-| `description` | string | Description |
-| `category` | string | Category |
-| `files` | array[string] | Included file list |
-
----
-
-### GET /api/skills/{name}
-
-Get detailed information about a single Skill.
-
-**Authentication:** Console Cookie
-
-**Path Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `name` | string | Yes | Skill name |
-
-**Response:** Complete Skill details, including frontmatter parsing results and file list. Returns 404 if Skill does not exist.
-
----
-
-### POST /api/skills
-
-Create or update a Skill.
-
-**Authentication:** Console Cookie (admin required)
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `name` | string | Yes | Skill name |
-| `description` | string | Yes | Description |
-| `category` | string | No | Category, default `general` |
-| `body` | string | Yes | SKILL.md body content |
-| `skill_md` | string | No | Raw SKILL.md content (raw edit mode, overrides body when provided) |
-
-**Response Fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `name` | string | Skill name |
-| `created` | boolean | Whether newly created |
-| `dir` | string | Local directory path |
-| `loaded_skills` | integer | Total Skill count after reload |
-| `cloud` | object | Cloud sync result |
-| `cloud.synced` | boolean | Whether sync succeeded |
-| `cloud.event_id` | string | Sync event ID |
-
----
-
-### DELETE /api/skills/{name}
-
-Delete a Skill.
-
-**Authentication:** Console Cookie (admin required)
-
-**Path Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `name` | string | Yes | Skill name |
-
-**Response:** Deletion result, including cloud sync status.
-
----
-
-### POST /api/skills/{name}/files
-
-Add or replace bundle files to a Skill.
-
-**Authentication:** Console Cookie (admin required)
-
-**Path Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `name` | string | Yes | Skill name |
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `files` | array | Yes | File list |
-| `files[].path` | string | Yes | Relative path |
-| `files[].content_b64` | string | Yes | File content (base64-encoded) |
-
-**Response:** Update result, including cloud sync status.
-
----
-
-### DELETE /api/skills/{name}/files/{rel_path}
-
-Delete a bundle file from a Skill.
-
-**Authentication:** Console Cookie (admin required)
-
-**Path Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `name` | string | Yes | Skill name |
-| `rel_path` | string | Yes | File relative path |
-
----
-
-### POST /api/skills/import-zip
-
-Import a ZIP-packaged Skill.
-
-**Authentication:** Console Cookie (admin required)
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `zip_b64` | string | Yes | ZIP file content (base64-encoded) |
-| `name` | string | No | Override Skill name |
-
----
-
-### GET /api/skills/{name}/versions
-
-List cloud version history for a Skill.
-
-**Authentication:** Console Cookie
-
-**Path Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `name` | string | Yes | Skill name |
-
-**Response Fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `name` | string | Skill name |
-| `skill_id` | string | Skill ID (assigned by the registry, stable across nodes) |
-| `current_version` | integer | Current version |
-| `versions` | array[integer] | Viewable/rollback-capable version numbers (descending; each has a `versions/v{n}/` bundle) |
-| `history` | array | Version history list |
-| `history[].version` | integer | Version number |
-| `history[].timestamp` | string | Creation time (UTC ISO-8601) |
-| `history[].action` | string | Change action (e.g. `publish`, `update`, `rollback:v<N>`) |
-| `history[].content_sha` | string | SHA-256 of SKILL.md content |
-| `history[].tree_sha256` | string | Bundle tree hash (optional) |
-| `history[].files` | array | Bundle file records (optional) |
-
-**Caching:** Version list cached for 15 seconds.
-
----
-
-### GET /api/skills/{name}/versions/{version}
-
-Get detailed content and evolution context for a specified version.
-
-**Authentication:** Console Cookie
-
-**Path Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `name` | string | Yes | Skill name |
-| `version` | integer | Yes | Version number |
-
-**Response Fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `name` | string | Skill name |
-| `version` | integer | Version number |
-| `content` | string | SKILL.md content |
-| `files` | object | Bundle files |
-| `evolution` | object | Evolution context (job info, evaluation results, diff) |
-| `evolution.job_id` | string | Evolution job ID |
-| `evolution.proposed_action` | string | Change type |
-| `evolution.rationale` | string | Optimization rationale |
-| `evolution.evaluation` | object | Evaluation result |
-| `evolution.skill_diff` | string | Unified diff from previous version |
-
----
-
-### POST /api/skills/{name}/rollback
-
-Roll back a Skill to a specified version. This re-publishes the target version content as a new version and syncs to cloud and local.
-
-**Authentication:** Console Cookie (admin required)
-
-**Path Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `name` | string | Yes | Skill name |
-
-**Query Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `target_version` | integer | Yes | Rollback target version number |
-
-**Response Fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `name` | string | Skill name |
-| `new_version` | integer | New version number (after rollback) |
-| `restored_from` | integer | Target version that was rolled back to |
-| `loaded_skills` | integer | Total Skill count after reload |
-| `event_id` | string | Sync event ID |
-
----
-
-### Personal Skills and Team Publication
-
-The following endpoints are implemented by `teamEvolver/proxy/users_admin.py`:
-
-| Method and path | Permission | Purpose |
-|-----------------|------------|---------|
-| `GET /api/users/{user_id}/skills?space=personal|team` | User or administrator | List Skills in one space |
-| `GET /api/users/{user_id}/skills/{name}?space=personal|team` | User or administrator | Read one Skill |
-| `POST /api/users/{user_id}/skills` | User or administrator; team space is admin-only | Create or update a personal/team Skill |
-| `DELETE /api/users/{user_id}/skills/{name}?space=personal|team` | User or administrator; team space is admin-only | Delete a Skill |
-| `POST /api/users/{user_id}/share` | User or administrator; personal→team is admin-only | Copy selected Skills between personal and team spaces |
-| `GET /api/skill-publish-requests` | Logged-in user | Users see their own requests; administrators see all requests |
-| `POST /api/users/{user_id}/publish-requests` | User or administrator | Request publication of personal Skills to the team space |
-| `POST /api/skill-publish-requests/{request_id}/approve` | Administrator | Approve and copy Skills into the team space |
-| `POST /api/skill-publish-requests/{request_id}/reject` | Administrator | Reject a publish request |
-
-A personal-Skill save body uses `space`, `name`, and full `skill_md`; alternatively provide `description`, `category`, and `body` and let the server build `SKILL.md`. Regular users cannot write the team space directly and must submit a publish request.
-
-### GET /sync/skills
-
-Get complete Skill Bundle snapshot (lightweight Agent pull endpoint, no admin authentication required).
-
-**Authentication:** None (internal network endpoint)
-
-See [Skill Sync API](./06-skill-sync.md) for detailed documentation.
-
----
-
-### GET /skills-ui
-
-Single-file Skill management UI page.
-
-**Authentication:** None (HTML page)
-
-## 3. Usage Examples
-
-### List All Skills
-
-```bash
-curl -b "teamEvolver_console_session=<token>" \
-  "http://localhost:52010/api/skills"
-```
-
-Example response:
-
 ```json
 {
-  "sharing_enabled": true,
   "skill_backend": "postgres",
-  "delivery_mode": "push",
-  "skills": [
-    {
-      "name": "database-debugging",
-      "description": "Database troubleshooting guide",
-      "category": "backend",
-      "files": ["SKILL.md", "references/mysql-troubleshooting.md"]
-    }
-  ]
+  "delivery_mode": "pull",
+  "skills": [{"name": "cost-report", "skill_id": "...", "version": 3, "description": "...", "category": "general",
+              "sha256": "...", "tree_sha256": "...", "files": [], "file_count": 2, "runtime_policy": {},
+              "updated_by": "admin", "updated_at": "..."}]
 }
 ```
 
-### Create/Update Skill
+### GET /api/skills/{name}
 
-```bash
-curl -X POST -b "teamEvolver_console_session=<token>" \
-  -H "Content-Type: application/json" \
-  "http://localhost:52010/api/skills" \
-  -d '{
-    "name": "code-review",
-    "description": "Code review best practices",
-    "category": "general",
-    "body": "# Code Review\n\n## Checklist\n- [ ] Function names are clear\n- [ ] Error handling is present\n"
-  }'
+Current version, with `body`, `skill_md` (full `SKILL.md`), `files`, `file_count`, `version`, `updated_at`.
+
+### GET /api/skills/{name}/versions
+
+```json
+{"name": "cost-report", "skill_id": "...", "current_version": 3, "versions": [1, 2, 3],
+ "history": [{"version": 3, "action": "rollback", "timestamp": "...", "tree_sha256": "...", "actor": "admin", "restored_from": 1}]}
 ```
 
-### Rollback to Specified Version
+`versions` excludes tombstone versions from deletes; `history` includes all versions.
 
-```bash
-curl -X POST -b "teamEvolver_console_session=<token>" \
-  "http://localhost:52010/api/skills/database-debugging/rollback?target_version=2"
+### GET /api/skills/{name}/versions/{version}
+
+The given version's `content`, `raw_md`, `files` (`path`, `sha256`, `size`), `tree_sha256`, `is_current`, and `evolution`: which evolution cycle or Candidate produced it.
+
+## Writes
+
+### POST /api/skills
+
+Create or update `SKILL.md`, keeping existing attachments.
+
+| Field | Description |
+| --- | --- |
+| `name` | Required |
+| `skill_md` | Full `SKILL.md`; when given, the structured fields below are ignored |
+| `description` | Required for structured edits |
+| `category` | Default `general` |
+| `body` | Body |
+| `base_version` | Optional; returns 409 when the current version has changed |
+
+Structured edits keep other keys of the existing frontmatter. The response contains `version`, `files`, `file_count`, `created`, `runtime_cache`.
+
+### POST /api/skills/{name}/files
+
+```json
+{"files": [{"path": "scripts/run.py", "content_b64": "..."}]}
 ```
 
-### Add Bundle File
+Adds or replaces attachments. Paths must be safe relative paths inside the bundle; `SKILL.md` can only be changed with `POST /api/skills`.
 
-```bash
-curl -X POST -b "teamEvolver_console_session=<token>" \
-  -H "Content-Type: application/json" \
-  "http://localhost:52010/api/skills/database-debugging/files" \
-  -d '{
-    "files": [
-      {
-        "path": "references/postgres-tuning.md",
-        "content_b64": "IyBQb3N0Z3JlUyBUdW5pbmcK..."
-      }
-    ]
-  }'
-```
+### DELETE /api/skills/{name}/files/{rel_path}
 
-## 4. Response Contract and Error Handling
+Deletes one attachment; `SKILL.md` cannot be deleted.
 
-### Error Codes
+### POST /api/skills/{name}/rollback?target_version=N
 
-| HTTP Status | Error Message | Cause |
-|------------|--------------|-------|
-| 400 | Field validation error | Empty name, invalid content, ZIP format error, etc. |
-| 401 | `login required` | Not logged in |
-| 401 | `setup required` | Admin account not yet initialized |
-| 403 | `only admin users can perform this operation` | Non-admin user performing write operations |
-| 404 | Skill not found | Skill with specified name does not exist |
-| 404 | `version unavailable` | Specified version does not exist or cannot be retrieved |
+Publishes the content of version N as the new current version and returns `restored_from` and `new_version`.
 
-### Caching Notes
+### DELETE /api/skills/{name}
 
-| Endpoint | Cache Duration |
-|---------|---------------|
-| `GET /api/skills` | No caching (reads local files directly) |
-| `GET /api/skills/{name}/versions` | 15 seconds |
-| `GET /api/skills/{name}/versions/{version}` | 30 seconds |
+Writes a tombstone version; the Skill disappears from the list and Agent pulls, and historical versions are kept.
 
-Any write operation (POST/PUT/DELETE/rollback) clears related caches and triggers Skill Manager reload, ensuring injected Skills are immediately available.
+## Errors
 
-### Cloud Sync Behavior
-
-- Write operations (create/update/delete/rollback) automatically trigger cloud sync;
-- Sync failure does not affect local writes; response contains `cloud.synced: false` with failure reason;
-- Successful cloud sync triggers Skill Sync webhook, notifying registered Agents to update local caches.
-
-### Skill Mutation Service (write path)
-
-All team-Skill writes go through `team_skills/library/mutations.py:SkillMutationService` (actions `publish|update|rollback|delete`). Each change produces three kinds of persistent records:
-
-- Commit records in `skill_mutation_commits/` (full change audit);
-- Sync outbox events in `skill_sync_outbox/` (delivered to Agent runtimes);
-- Delete tombstones in `skill_tombstones/` (for the delete action).
-
-Outbox events enter the terminal `dead_letter` state after retries are exhausted; `SkillMutationService.reconcile()` repairs and redelivers them.
-
-Note: the Skill library is stored local-first and asynchronously mirrored to OpenViking via a durable spool (`sharing.skill_mirror_spool_dir`); mirror status is available in `GET /storage/status` (`mirror_enabled`, `mirror`).
+| Status | Cause |
+| --- | --- |
+| 400 | Invalid name, missing field, unsafe path, invalid base64, or an attempt to change `SKILL.md` through the attachment endpoint |
+| 403 | Not a tenant administrator |
+| 404 | Skill or version does not exist |
+| 409 | `base_version` conflict, or an `Idempotency-Key` reused for a different request |
+| 413 | Bundle or body over the limit |
+| 503 | Tenant `skills` module configuration missing |

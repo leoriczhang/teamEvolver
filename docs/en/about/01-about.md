@@ -1,40 +1,36 @@
 # About teamEvolver
 
-teamEvolver is an open-source Agent team capability evolution control plane that enables teams' AI Agents to continuously learn and evolve from real work.
+teamEvolver is a control plane for evolving the capabilities of an Agent team. It receives real Agent Sessions, extracts Evidence, generates Skill Candidates and validates them with True Replay, and publishes them as team Skills through Candidate Review; it also aggregates and maintains members' personal Memory into Team Memory.
 
-## Project Philosophy
+## Design Principles
 
-The value of AI Agents lies not in the quality of single answers, but in the continuous accumulation of team capabilities. When an Agent completes a complex task, the experience generated should be reused by the entire team, rather than disappearing into conversation history.
-
-teamEvolver's design principles:
-
-1. **Evidence-driven:** Every Skill/Memory change has traceable Evidence sources
-2. **Genuine Validation:** Candidates must pass True Replay validation in isolated environments on real Agent Runtimes
-3. **White-box Control:** All Prompts, model parameters, and evolution processes are configurable, observable, and intervenable
-4. **Security Isolation:** Replay branches run in sandboxes without producing real external side effects
-5. **Governance First:** Checklist gates + human review + complete audit chain
+1. **Evidence driven**: every Skill or Memory change can be traced back to source Sessions
+2. **Real validation**: Candidates are replayed against the Baseline in separate workspaces; the Checklist must pass before efficiency is compared
+3. **White-box control**: prompts, model parameters and process parameters can be viewed, changed and tested in the console
+4. **Governance first**: publishing goes through gates and human review, and the version chain and audit records are kept in full
+5. **Tenant isolation**: all business data is isolated per tenant, enforced by PostgreSQL row-level security
 
 ## Tech Stack
 
-- **Backend:** Python 3.10+, FastAPI, Pydantic
-- **Frontend:** React 18, TypeScript, Vite, shadcn/ui, Tailwind CSS
-- **Storage:** OpenViking (required)
-- **Observability:** Langfuse (optional)
-- **Documentation:** Markdown sources + built-in console reader (full-text search, bilingual zh/en)
+| Layer | Components |
+|------|------|
+| Backend | Python 3.10+, FastAPI, asyncpg |
+| Frontend | React 18, TypeScript, Vite, Tailwind CSS |
+| Authoritative store | PostgreSQL (required) |
+| Knowledge store | OpenViking (Memory, Resources, Compile) |
+| Observability | Langfuse (optional) |
+
+The runtime has two roles, `api` and `worker`, each scaled horizontally; see [Architecture](../concepts/01-architecture.md).
 
 ## License
 
-MIT License. See [LICENSE](https://github.com/leoriczhang/teamEvolver/blob/main/LICENSE) for details.
+MIT License; see `LICENSE` in the repository root.
 
 ## Contributing
 
-Issues and Pull Requests are welcome:
+Before submitting code:
 
-- Issue Tracking: [GitHub Issues](https://github.com/leoriczhang/teamEvolver/issues)
-- Code Repository: [leoriczhang/teamEvolver](https://github.com/leoriczhang/teamEvolver)
-- Documentation Standards: See [Documentation Maintenance Guide](../api/99-docs-maintenance)
-
-Before submitting code, please ensure:
-1. Existing tests pass: `python -m pytest tests/ -v`
-2. Code style is followed: `ruff check teamEvolver/`
-3. Related documentation is updated
+1. Run tests: `python -m pytest tests/`
+2. Run lint: `ruff check .`
+3. For frontend changes, run `npm --prefix web-ui test` and `npm --prefix web-ui run build`
+4. Update the Chinese and English documents together and pass `node docs/scripts/check-docs-refs.mjs --strict`; see [Docs Maintenance](../api/99-docs-maintenance.md)

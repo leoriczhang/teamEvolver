@@ -23,8 +23,14 @@ def stable_hash(value: Any) -> str:
 
 
 def normalize_artifact_rel_path(rel_path: str) -> str:
-    value = str(rel_path or "").strip().replace("\\", "/")
+    if not isinstance(rel_path, str):
+        raise ValueError("Artifact path must be text")
+    value = rel_path.strip()
     parts = PurePosixPath(value).parts
-    if not value or not parts or PurePosixPath(value).is_absolute() or re.match(r"^[A-Za-z]:", value) or any(part in {"", ".", ".."} for part in parts):
+    if (
+        not value or not parts or PurePosixPath(value).is_absolute() or re.match(r"^[A-Za-z]:", value)
+        or "\\" in value or ":" in value
+        or any(part in {"", ".", ".."} or part.startswith(".") for part in value.split("/"))
+    ):
         raise ValueError(f"Unsafe artifact path: {rel_path!r}")
     return "/".join(parts)

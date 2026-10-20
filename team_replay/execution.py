@@ -7,7 +7,14 @@ import time
 from typing import Any, Callable, Mapping
 
 from ._util import stable_hash
-from .hooks import RUNTIME_METRICS, ReplayAdapterFactory, ReplayContext, ReplaySession, ReplayUnsupported, validate_observation
+from .hooks import (
+    RUNTIME_METRICS,
+    ReplayAdapterFactory,
+    ReplayContext,
+    ReplaySession,
+    ReplayUnsupported,
+    validate_observation,
+)
 from .judging import judge_checklist, render_user_feedback
 from .metrics import UNAVAILABLE, count_tool_calls
 from .policy import normalize_case_checklist, progressive_config, select_disclosure_items
@@ -131,6 +138,9 @@ def run_branch(
                 result.update(ok=False, status="failed", error_code="REPLAY_CLEANUP_FAILED", error=str(exc))
         result.update(
             interaction_turns=len(result["interactions"]), elapsed_seconds=round(time.monotonic() - started, 6),
-            **{key: totals[key] if key in totals and key not in unavailable else UNAVAILABLE for key in RUNTIME_METRICS},
+            **{
+                key: totals[key] if key in totals and key not in unavailable else UNAVAILABLE
+                for key in RUNTIME_METRICS
+            },
         )
     return result

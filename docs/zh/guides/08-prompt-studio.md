@@ -1,394 +1,127 @@
 # Prompt Studio 指南
 
-Prompt Studio 是 teamEvolver 提供的白盒化工具，将技能进化流水线从黑盒变为可检查、可编辑、可测试的透明系统。通过 Prompt Studio，你可以查看每个进化阶段的系统 Prompt、修改它们、使用真实会话测试效果，并独立调整每个阶段的模型参数。
+Prompt Studio 是控制台「进化链路 → Skills 自进化」页面，用于查看 Skill 进化流水线、编辑各 LLM 阶段的 System Prompt 与模型参数，并用真实 Session 测试阶段输出。所有设置按租户保存在 `skills` 模块配置中，Worker 执行任务时使用受理时固定的配置 revision。
 
-后端逻辑位于 `team_skills/evolution/prompt_studio.py`，前端视图位于 `web-ui/src/views/PromptStudioView.tsx`。
+代码入口：`team_skills/api/prompts.py:create_router`（接口）、`team_skills/evolution/prompt_studio.py`（阶段目录与 Prompt 解析）、`team_skills/evolution/prompt_test.py`（阶段测试）、`web-ui/src/features/skills/PromptStudioView.tsx`（页面）。
 
-## 设计理念
+## 流水线
 
-历史上，进化流水线中各 LLM 阶段的系统 Prompt 是硬编码在 Python 模块中的常量，对控制台用户来说是不可见的黑盒。Prompt Studio 将这些 Prompt 提升为一等公民：
-
-- **可检查**：查看每个阶段实际使用的 System Prompt（包括默认值和你已保存的覆盖）
-- **可编辑**：直接在线编辑 Prompt，编辑后立即生效
-- **可测试**：选择真实历史会话，用当前编辑的 Prompt 运行测试，看到 System Message、User Message 和模型输出
-- **可调节**：每个阶段可独立配置 temperature、max_tokens，甚至指定不同的模型
-- **可回滚**：一键重置回代码内置的默认 Prompt
-- **版本持久化**：Prompt 覆盖存储在 `~/.teamEvolver/prompt_overrides.json`，阶段模型设置存储在 `~/.teamEvolver/stage_settings.json`
-
-覆盖文件路径可通过环境变量自定义：
-- `TEAMEVOLVER_PROMPT_OVERRIDES_PATH`
-- `TEAMEVOLVER_STAGE_SETTINGS_PATH`
-
-## 流水线阶段
-
-进化流水线共定义 11 个阶段节点（其中 8 个是 LLM 调用阶段，拥有可编辑 Prompt）：
-
-### 完整阶段图
-
-```
-ingest → session_filter → summarize → judge → group → ┬→ evolve_skill → ┬→ merge → dataset_synthesis → validate → replay_checklist → publish
-                                                        └→ create_skill ─┘
+```text
+ingest → analyze_session → group
+                           ├─ evolve_skill / create_skill ─ (按需 merge) ─┐
+                           └─ dataset_synthesis ──────────────────────────┤
+                                                                         ▼
+                                          validate → replay_checklist → publish
+analyze_session → analyze_trace_badcase
 ```
 
-| 阶段 ID | 类型 | 可编辑 Prompt | 说明 |
-|---------|------|--------------|------|
-| `ingest` | IO | 否 | 会话入队，无 LLM 调用 |
-| `session_filter` | LLM | 是 | 价值分类，判断会话属于技能证据、用户记忆、普通任务还是闲聊 |
-| `summarize` | LLM | 是 | 会话总结，构建无损轨迹并生成轨迹感知摘要 |
-| `judge` | LLM | 是 | 会话评分，对缺少可靠分数的会话补打多维度分 |
-| `group` | 逻辑 | 否 | 按技能分组，无 LLM 调用 |
-| `evolve_skill` | LLM | 是 | 改进技能，多轮 agent 循环（plan → act → submit），对已有技能决定 improve/optimize_description/create/skip |
-| `create_skill` | LLM | 是 | 新建技能，多轮 agent 循环，从 no-skill 桶识别可复用模式并生成新技能 |
-| `merge` | LLM | 是 | 冲突合并，按合并原则自检后输出同名技能两个进化版本的合并结果 |
-| `dataset_synthesis` | LLM | 是 | 测试集生成，生成带 Checklist 的渐进式测试数据集 |
-| `validate` | 门禁 | 否 | 真回放校验，非 LLM 逻辑 |
-| `replay_checklist` | LLM | 是 | Checklist 裁判，逐条核验回放结果是否满足 Checklist |
-| `publish` | IO | 否 | 发布，写入技能库并同步云端 |
+技能进化与测试集生成使用同一批冻结的 Session 和跨周期 Evidence 并行启动。测试集不读取本轮候选内容；候选技能和测试集均完成后才进入验证。页面将改进/新建标为条件路径，将验证标为汇合点。
 
-### 各 LLM 阶段详情
-
-#### session_filter（价值分类）
-
-- **模块**：`teamEvolver.session_filter`
-- **符号**：`_SESSION_CLASSIFIER_SYSTEM`
-- **默认 Temperature**：0.0
-- **默认 Max Tokens**：512
-- **输入变量**：session summary（requests, tools, interactions, metrics）
-- **注入共享块**：否
-- **说明**：决定会话是否进入进化队列，并区分团队 Skill 证据与用户 Memory 候选。这是流水线的第一道门，高温度可能导致分类不稳定，建议保持低 temperature。
-
-#### summarize（会话总结）
-
-- **模块**：`teamEvolver.evolve.stages.summarize`
-- **符号**：`_SUMMARIZE_SESSION_SYSTEM`
-- **默认 Temperature**：0.2
-- **默认 Max Tokens**：100000
-- **输入变量**：session JSON（interactions, tool calls, scores）
-- **注入共享块**：否
-- **说明**：对单个会话生成轨迹感知分析摘要，供后续评分与进化使用。需要大 token 上限以处理长会话。
-
-#### judge（会话评分）
-
-- **模块**：`teamEvolver.evolve.stages.judge`
-- **符号**：`_JUDGE_SYSTEM`
-- **默认 Temperature**：0.1
-- **默认 Max Tokens**：32768
-- **输入变量**：session payload（trajectory, summary, artifacts, prior scores）
-- **注入共享块**：否
-- **说明**：对缺少可靠分数的会话补打分，输出 JSON 维度分。低 temperature 保证评分一致性。
-
-#### evolve_skill（改进技能，agent 循环）
-
-- **模块**：`teamEvolver.evolve.stages.execute`
-- **符号**：`_EVOLVE_FROM_SESSIONS_SYSTEM`
-- **默认 Temperature**：0.4
-- **默认 Max Tokens**：16384
-- **输入变量**：`{skill_name}`、round-1 会话索引卡（每会话一行）、current skill 大纲卡、cross-cycle evidence、evaluation cohort、existing skill names
-- **注入共享块**：是
-- **说明**：这是核心进化阶段，以多轮 agent 循环运行（见 [Agent 循环工作协议](#agent-循环工作协议)）。第 1 轮基于会话索引卡输出 plan（improve / optimize_description / create / skip），plan 的 action_candidate=skip 时立即终局；随后按需用工具加载证据、经 `propose_edits` 暂存编辑，final 提交。原始 Prompt 模板（任务卡）中包含 sentinel 占位符（`__GENERALIZATION_RULES__`、`__USER_OVERRIDE_RULE__`、`__EVIDENCE_ROUTING_RULES__`、`__OUTPUT_LANGUAGE_RULE__`），保存覆盖时保留这些占位符即可，运行时会自动注入共享规则块。
-
-#### create_skill（新建技能，agent 循环）
-
-- **模块**：`teamEvolver.evolve.stages.execute`
-- **符号**：`_CREATE_FROM_SESSIONS_SYSTEM`
-- **默认 Temperature**：0.4
-- **默认 Max Tokens**：16384
-- **输入变量**：round-1 会话索引卡、cross-cycle evidence、evaluation cohort、existing skill names
-- **注入共享块**：是
-- **说明**：从无技能匹配的会话桶中识别可复用模式并生成全新技能，同样以 agent 循环运行。可用 `read_library_skill` 读取既有技能全文做差异化定位，用 `check_name` 校验新名称是否冲突。同样包含共享块占位符。
-
-#### merge（冲突合并，agent 循环）
-
-- **模块**：`teamEvolver.evolve.stages.execute`
-- **符号**：`_MERGE_SKILL_SYSTEM`
-- **默认 Temperature**：0.3
-- **默认 Max Tokens**：8192
-- **输入变量**：Version A（现有技能）、Version B（新进化版本）
-- **注入共享块**：否
-- **说明**：当同名技能产生两个冲突的进化版本时合并为一个更优版本。两个版本的全文内联在第 1 轮消息中；模型对照合并原则完成"提交前自检"后输出 final（合并后的 skill 对象）。循环失败时保留新进版本（incoming）。
-
-#### dataset_synthesis（测试集生成）
-
-- **模块**：`teamEvolver.dataset_synthesizer`
-- **符号**：`_SYNTHESIZE_SYSTEM`
-- **默认 Temperature**：0.3
-- **默认 Max Tokens**：16384
-- **输入变量**：`{case_count}`、`{min_requirements}`、`{max_requirements}`、candidate Skill、Session trajectories、team SOP evidence、replay seeds
-- **注入共享块**：否
-- **说明**：从会话证据和跨周期 SOP 证据同步生成带 Checklist 的渐进式测试数据集。模板变量 `{case_count}` 等会在运行时被实际值替换。
-
-#### replay_checklist（Checklist 裁判）
-
-- **模块**：`team_replay.engine`
-- **符号**：`_CHECKLIST_JUDGE_SYSTEM`
-- **默认 Temperature**：0.0
-- **默认 Max Tokens**：8192
-- **输入变量**：checklist、interactions、tool trajectory、workspace artifacts
-- **注入共享块**：否
-- **说明**：在真回放完成后，逐条核验 Checklist 项是否满足。裁判只允许依据可观察证据判定，temperature=0 保证裁决一致性。
-
-## Agent 循环工作协议
-
-`evolve_skill`、`create_skill`、`merge` 三个技能编写阶段以受控 agent 循环运行（实现位于 `team_skills/evolution/agent/`）。循环采用文本 JSON 协议（不依赖原生 tool calling）：
-
-1. **第 1 轮 plan（强制）**：模型基于高密度索引卡（每会话一行 + 当前 Skill 大纲）输出 `{"type": "plan", "action_candidate": ..., "evidence_classification": {...}, "plan": [...], "rationale": ...}`。运行时做确定性门控：`action_candidate=skip` 直接终局；非 skip 但 `team_skill` 证据为空先给一轮纠错，仍为空则终局 skip。
-2. **act 轮（工具调用）**：模型按需调用工具，运行时执行后以观测（Observations）反馈。工具集按阶段启用：
-   - `read_session`（按需读单会话 summary/trajectory/tail/full）、`search_sessions`（关键词检索）
-   - evolve：`read_skill`（byte-exact 当前正文，编辑锚点来源）、`read_bundle_file`、`propose_edits`（编辑机械应用与暂存，失败明细回喂）、`check_generalization`（硬编码嫌疑扫描）
-   - create：`read_library_skill`（读既有技能做差异化）、`check_name`（名称冲突校验）
-3. **final（提交）**：`{"type": "final", "decision": {...}}`。提交时做契约校验（team_skill 门、file_changes 预校验、content/暂存回填），失败则作为纠错观测回喂。
-4. **轮数预算**：`evolve.agent_max_rounds`（默认 12，clamp 2-24）与 `evolve.agent_max_tool_calls_per_round`（默认 8，clamp 1-16）。倒数第二轮注入"必须提交"提醒；到顶未提交时按已暂存状态做 best-effort 收尾（无暂存则降级 skip / None）。
-
-**覆盖语义（重要）**：Prompt Studio 编辑的是"任务卡"（角色、使命、编辑原则、共享规则块）。循环协议（回合格式、工具契约、final 决策 schema）由代码所有的 `TOOL_PROTOCOL_APPENDIX` 在运行时强制追加，**不可被覆盖**——旧的一次性输出格式说明不再需要，覆盖文本不应描述输出格式，只描述任务本身。
-
-渐进式披露：第 1 轮只给索引卡，全文按需加载。这既让上下文保持高信息密度，也让 `propose_edits` 的锚点始终来自 `read_skill` 的 byte-exact 正文，从根源上消除"凭记忆重写锚点"的失败模式。
-
-## Prompt Studio Web 界面
-
-在 Web 控制台左侧导航中选择 "Prompt Studio" 进入。界面分为三个主要区域：
-
-### 左侧：流水线可视化
-
-- 展示完整的有向图，节点按类型着色：
-  - 灰色：IO 节点（ingest、publish）
-  - 蓝色：LLM 阶段（可编辑 Prompt）
-  - 紫色：逻辑节点（group）
-  - 琥珀色：校验门禁（validate）
-- LLM 节点上会显示角标：
-  - "已覆盖"：该阶段有用户保存的 Prompt 覆盖
-  - "参数已修改"：该阶段的模型参数与默认值不同
-- 点击节点选中对应阶段
-- 节点之间的箭头显示数据流向
-
-### 中间：Prompt 列表 + 编辑器
-
-- **阶段列表**：显示所有 8 个 LLM 阶段，带简短描述
-- **提示词编辑器**：选中阶段后显示：
-  - 阶段名称和描述
-  - 当前生效的 Prompt 文本框（可编辑）
-  - "显示默认值"开关：切换查看代码内置默认 Prompt vs 当前生效 Prompt
-  - 如果该阶段注入共享块，会显示三个共享块内容：
-    - `__GENERALIZATION_RULES__`：泛化规则
-    - `__USER_OVERRIDE_RULE__`：用户覆盖规则
-    - `__EVIDENCE_ROUTING_RULES__`：证据路由规则
-  - 保存按钮（仅管理员可见）
-  - 重置按钮（恢复默认值，仅管理员可见）
-
-### 右侧：模型参数 + 测试面板
-
-- **模型参数区域**：
-  - Model：指定该阶段使用的模型（留空使用全局 `llm.model_id`）
-  - Temperature：0.0-2.0 滑块
-  - Max Tokens：数字输入
-  - 显示默认值参考
-  - 重置按钮恢复默认参数
-
-- **测试面板**：
-  - 会话选择器：从最近 50 条历史会话中选择一个作为测试输入
-  - "运行测试"按钮
-  - 测试结果分三个标签页展示：
-    - **System Prompt**：本次测试实际发送的系统消息（编辑后的 Prompt + 展开的共享块）
-    - **User Message**：测试运行时构建的真实用户消息（使用与会话阶段相同的构建逻辑）
-    - **Model Output**：LLM 返回的输出内容
-
-- **进化过程参数**（底部，可折叠）：
-  - 可编辑 evolve 节和 validation 节的核心参数
-  - 保存时一并更新
-
-## 如何使用 Prompt Studio
-
-### 工作流：编辑并测试 Prompt
-
-推荐的迭代流程：
-
-1. **选择阶段**：在流水线图或列表中点击要修改的阶段
-2. **理解默认 Prompt**：打开"显示默认值"阅读默认 Prompt，理解其设计意图
-3. **小步修改**：在编辑器中做增量修改，不要一次性大改
-4. **选择测试会话**：从右侧选择一个有代表性的历史会话
-5. **运行测试**：点击"运行测试"，查看三栏结果
-   - System Prompt 是否符合预期（共享块是否正确展开）
-   - User Message 是否是真实阶段会收到的格式
-   - Model Output 质量是否达到要求
-6. **对比**：可以记录默认 Prompt 的输出，与修改后对比
-7. **保存**：测试满意后点击保存。保存后下一轮进化立即使用新 Prompt
-8. **观察**：在 Dashboard 和 Evolution Pipeline 视图观察后续进化轮次的效果
-
-### 测试面板的真实性
-
-Prompt Studio 的测试不是"模拟"——它使用与真实进化流水线完全相同的消息构建逻辑：
-
-- `session_filter`：使用 `_session_summary()` 构建与真实分类器完全一致的输入
-- `summarize`：使用 `_build_session_payload()` 构建真实载荷
-- `judge`：确保 `_trajectory` 和 `_summary` 元数据存在后调用 `_build_judge_payload()`
-- `evolve_skill`/`create_skill`/`merge`：**运行真实的 agent 循环**（轮数上限 6），使用与生产一致的索引卡/双版本卡构造与工具集；结果额外返回 `rounds` 逐轮记录，测试面板会渲染每轮的类型（plan / 工具 / final）
-- `dataset_synthesis`：使用 `render_synthesis_prompt()` 渲染
-- `replay_checklist`：构建示例 checklist 和交互记录
-
-这意味着你在测试面板看到的 User Message 就是真实进化时 LLM 收到的消息，测试结果可靠反映实际行为。
-
-### 模型参数调优建议
-
-不同阶段适合不同的参数配置：
-
-| 阶段 | Temperature 建议 | Max Tokens 建议 | 理由 |
-|------|-----------------|-----------------|------|
-| session_filter | 0.0-0.1 | 512 | 分类任务需要确定性 |
-| summarize | 0.1-0.3 | 100000+ | 摘要需要覆盖完整信息 |
-| judge | 0.0-0.2 | 32768 | 评分需要一致性 |
-| evolve_skill | 0.3-0.6 | 16384 | 创造性改进需要适度随机性 |
-| create_skill | 0.3-0.6 | 16384 | 新技能创建需要创造性 |
-| merge | 0.2-0.4 | 8192 | 合并以融合为主，不需要太高随机性 |
-| dataset_synthesis | 0.2-0.4 | 16384 | 出题需要多样性但不能发散 |
-| replay_checklist | 0.0 | 8192 | 严格的证据裁决必须确定 |
-
-如果某个阶段需要更强的模型（如创建复杂技能），可以为该阶段单独指定更强的模型 ID，其他阶段使用默认模型以平衡成本和速度。
-
-## 共享块说明
-
-`evolve_skill` 和 `create_skill` 两个技能编写阶段的 Prompt 中包含三个特殊占位符，这些占位符在 Prompt 生效时会被自动替换为共享规则块。编辑这些阶段的 Prompt 时，请保留这些占位符：
-
-- `__GENERALIZATION_RULES__`：泛化规则，控制技能从具体会话抽象为可复用 SOP 的程度
-- `__USER_OVERRIDE_RULE__`：用户 override 规则，处理用户手动修改过的技能
-- `__EVIDENCE_ROUTING_RULES__`：证据路由规则，控制如何引用和呈现会话证据
-
-共享块的实际内容定义在 `team_skills/evolution/stages/execute.py` 中，通过 `_inject_shared_blocks()` 函数在运行时注入。在 Prompt Studio 界面查看阶段详情时，可以看到三个共享块的当前内容。
-
-如果你删除了这些占位符，共享规则将不会被注入，可能导致进化行为异常。重置回默认 Prompt 可以恢复占位符。
-
-## 变量占位符
-
-部分 Prompt 模板包含运行时变量占位符，采用 `{variable_name}` 语法。编辑时请保留这些占位符：
-
-| 阶段 | 占位符 | 运行时值 |
-|------|--------|---------|
-| evolve_skill | `{skill_name}` | 正在进化的技能名称 |
-| dataset_synthesis | `{case_count}` | 生成测试用例数量 |
-| dataset_synthesis | `{min_requirements}` | 最少检查项数量 |
-| dataset_synthesis | `{max_requirements}` | 最多检查项数量 |
-
-## 权限控制
-
-- **管理员（admin）**：可以编辑 Prompt、修改模型参数、保存、重置
-- **普通用户（user）**：可以查看流水线图、查看 Prompt 内容、运行测试，但不能保存修改
-
-## Prompt 版本管理
-
-当前版本的 Prompt Studio 采用简单的覆盖机制：
-
-- 保存覆盖时写入 `prompt_overrides.json`
-- 重置时删除对应条目，恢复默认
-- 修改立即生效于下一次 LLM 调用
-- 配置文件是文本格式（JSON），可以手动备份或纳入版本控制
-
-建议在重大修改前手动备份覆盖文件：
-
-```bash
-cp ~/.teamEvolver/prompt_overrides.json ~/.teamEvolver/prompt_overrides.json.bak
-cp ~/.teamEvolver/stage_settings.json ~/.teamEvolver/stage_settings.json.bak
-```
-
-## API 端点
-
-Prompt Studio 的 HTTP API 位于 `/api/skill-evolution/`：
-
-| 端点 | 方法 | 说明 |
+| 节点 | 类型 | 说明 |
 |------|------|------|
-| `/api/skill-evolution/pipeline` | GET | 获取带覆盖标记的流水线图 |
-| `/api/skill-evolution/prompts` | GET | 获取所有 Prompt 摘要列表 |
-| `/api/skill-evolution/prompts/<stage_id>` | GET | 获取单个阶段完整详情 |
-| `/api/skill-evolution/prompts/<stage_id>` | POST | 保存 Prompt 覆盖和模型参数 |
-| `/api/skill-evolution/prompts/<stage_id>/test` | POST | 运行测试 |
-| `/api/skill-evolution/prompts/<stage_id>/reset` | POST | 重置为默认 Prompt |
-| `/api/skill-evolution/session-samples` | GET | 获取测试用会话列表 |
+| `ingest` | 输入 | Session 经接入接口或数据源拉取进入 |
+| `analyze_session` | LLM | 一次调用完成价值分类、轨迹摘要与会话评分 |
+| `analyze_trace_badcase` | LLM | 对 Session 的全部 Trace 输出问题分析 |
+| `group` | 逻辑 | 按使用的 Skill 分组，无 Skill 的 Session 归入 no-skill 组 |
+| `evolve_skill` | LLM | 对已有 Skill 决定 improve、optimize_description、create 或 skip |
+| `create_skill` | LLM | 从 no-skill 组判断是否存在可复用模式并生成新 Skill |
+| `merge` | LLM | 同名 Skill 的两个进化版本冲突时合并 |
+| `dataset_synthesis` | LLM | 与技能进化并行，从同源 Evidence 独立生成带 Checklist 的 Test Dataset |
+| `validate` | 门禁 | 等待候选技能与测试集均完成后执行 True Replay，比较轮次、工具调用与 Token |
+| `replay_checklist` | LLM | 依据回复、工具轨迹与工作区产物逐条判定 Checklist |
+| `publish` | 输出 | 通过门禁的 Candidate 发布到 SkillHub |
 
-测试接口请求体：
+进化流程见 [进化闭环](../concepts/02-evolution-loop.md)，门禁规则见 [Checklist](../concepts/07-checklist.md)。
 
-```json
-{
-  "session_id": "abc-123",
-  "system_prompt": "(可选) 临时测试用 Prompt，不保存"
-}
-```
+## 可编辑阶段
 
-如果 `system_prompt` 不为空，测试使用临时 Prompt（便于快速试错）；为空则使用当前保存的生效 Prompt。
+| 阶段 ID | 默认 temperature | 默认 max_tokens |
+|---------|------------------|-----------------|
+| `analyze_session` | 0.1 | 32768 |
+| `analyze_trace_badcase` | 0.1 | 8192 |
+| `evolve_skill` | 0.4 | 16384 |
+| `create_skill` | 0.4 | 16384 |
+| `merge` | 0.3 | 8192 |
+| `dataset_synthesis` | 0.3 | 16384 |
+| `replay_checklist` | 0.0 | 8192 |
 
-## Python API
+`evolve_skill`、`create_skill` 与 `merge` 以 Agent 循环运行：模型先规划，再按需调用工具加载证据，最后提交结果。
 
-如需在脚本或 Notebook 中操作 Prompt Studio，可直接调用 `team_skills/evolution/prompt_studio.py` 中的函数：
+### 共享块
 
-```python
-from teamEvolver.evolve.prompt_studio import (
-    list_prompts,
-    get_prompt,
-    set_override,
-    reset_override,
-    effective_prompt,
-    set_stage_settings,
-    reset_stage_settings,
-    stage_call_options,
-    pipeline_graph,
-    run_stage_test,
-)
+`evolve_skill` 与 `create_skill` 的模板包含共享块占位符，运行时展开为统一规则：
 
-# 列出所有可编辑 Prompt
-prompts = list_prompts()
+| 占位符 | 内容 |
+|--------|------|
+| `__GENERALIZATION_RULES__` | 泛化规则，避免把单次 Session 的细节写入 Skill |
+| `__USER_OVERRIDE_RULE__` | 用户显式要求优先 |
+| `__EVIDENCE_ROUTING_RULES__` | 证据加载规则 |
+| `__OUTPUT_LANGUAGE_RULE__` | 输出语言规则 |
 
-# 获取某个阶段详情
-detail = get_prompt("evolve_skill")
-print(detail["default_prompt"])  # 默认 Prompt
-print(detail["effective_prompt"])  # 当前生效 Prompt
-print(detail["shared_blocks"])  # 共享块（仅注入阶段有）
+编辑器显示未展开的模板，保存后的覆盖同样在运行时展开。删除占位符会使该阶段不再包含对应规则。
 
-# 设置覆盖
-set_override("judge", "你的自定义 Prompt 文本...")
+## 设置项
 
-# 重置
-reset_override("judge")
+每个阶段可单独覆盖：
 
-# 获取运行时应该使用的 Prompt（调用点使用）
-prompt = effective_prompt("summarize", fallback=default_in_module)
+| 字段 | 说明 |
+|------|------|
+| `prompt` | System Prompt 覆盖，不能为空 |
+| `model` / `base_url` | 阶段专用模型，留空继承租户默认模型 |
+| `temperature` / `max_tokens` | 采样参数 |
+| `api_key` | 阶段专用 Key，加密保存为 Secret Ref，接口不回显；`clear_api_key=true` 清除 |
 
-# 设置模型参数
-set_stage_settings("evolve_skill", {
-    "temperature": 0.5,
-    "max_tokens": 32768,
-    "model": "doubao-seed-evolving-large",
-})
+保存 `api_key` 需要服务配置 `TEAMEVOLVER_SECRET_MASTER_KEY`（或 `TEAMEVOLVER_ROOT_API_KEY`），否则返回 503。重置会同时删除该阶段的 Prompt 覆盖与模型设置。
 
-# 获取阶段调用选项
-options = stage_call_options("evolve_skill")
-# {"temperature": 0.5, "max_tokens": 32768, "model": "doubao-seed-evolving-large"}
+流程参数在同页「过程参数」中修改：
 
-# 获取流水线图
-graph = pipeline_graph()
-```
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| `evolution_max_sessions` | 100 | 每轮进化最多消费的 Session 数 |
+| `min_group_sessions` | 2 | Skill 分组进入进化的最少 Session 数 |
+| `min_group_users` | 2 | Skill 分组进入进化的最少用户数 |
+| `evolution_trigger_mode` | manual | 手动触发或定时自动触发 |
+| `evolution_interval_seconds` | 600 | 自动触发间隔 |
+| `bundle_allow_delete` | true | 是否允许进化删除 Bundle 文件 |
+| `bundle_prompt_max_bytes` | 786432 | 进化时注入 Bundle 内容的总预算 |
+| `bundle_edit_max_bytes` | 262144 | 单个文件编辑上限 |
+| `auto_evaluate` | true | Candidate 生成后是否自动提交验证 |
+| `publish_mode` | manual | 验证通过后自动发布或等待人工审核 |
 
-## 与白盒配置的关系
+## 测试阶段
 
-Prompt Studio 与全局进化参数（evolve 节）是互补关系：
+1. 在左侧选择阶段，编辑 Prompt（可不保存）。
+2. 从 Session 样本列表选择一条真实 Session。
+3. 点击测试。请求以 `skill.evolve` 任务（操作 `prompt_test`）受理，返回 `job_id`。
+4. Worker 用当前编辑的 Prompt 与阶段模型设置执行，结果包含 System Prompt、User Message 与模型输出；Agent 循环阶段最多运行 6 轮，并返回逐轮记录。
 
-- **Prompt Studio** 控制每个阶段的 LLM Prompt 和模型采样参数，是"如何思考"层面的配置
-- **evolve 节配置** 控制进化流程的宏观参数：
-  - 进化间隔（`interval_seconds`）
-  - 发布模式（`publish_mode`）
-  - 证据库大小（`evidence_max_entries`）
-  - 测试集参数（`dataset_test_cases`、`dataset_min_requirements` 等）
-  - 人工审核设置（`human_review_enabled`）
-  - 校验门槛（`validation_max_rejections`）
-- **validation 节配置** 控制校验策略：
-  - 校验模式（`mode`：true_replay/replay）
-  - 并发度（`max_concurrency`）
-  - 通过门槛（`required_results`、`required_approvals`）
+测试使用真实模型，不写入 Candidate，也不修改 Skill。启用链路观测时，测试调用以 `team_skills.evolution.prompt_test.<stage_id>` 上报。
 
-在 Prompt Studio 右侧面板的"进化过程参数"区域可以直接编辑 evolve 和 validation 的核心参数，保存 Prompt 时一并更新。
+## 接口
 
-## 最佳实践
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/skill-evolution/pipeline` | 流水线节点与边 |
+| GET | `/api/skill-evolution/prompts` | 所有阶段摘要，含是否覆盖、当前模型参数 |
+| GET | `/api/skill-evolution/prompts/{stage_id}` | 阶段详情：默认模板、当前模板、展开后文本、变量 |
+| PUT | `/api/skill-evolution/prompts/{stage_id}` | 保存阶段设置，可带 `expected_revision` |
+| POST | `/api/skill-evolution/prompts/{stage_id}/reset` | 恢复默认 |
+| GET | `/api/skill-evolution/settings` | 过程参数与 `revision` |
+| PUT | `/api/skill-evolution/settings` | `{"evolve": {...}, "revision"}` 保存过程参数 |
+| GET | `/api/skill-evolution/session-samples?limit=` | 可用于测试的 Session（1–200） |
+| POST | `/api/skill-evolution/prompts/{stage_id}/test` | `{"session_id", "prompt"?}` 受理测试，返回 202 |
 
-1. **一次只改一个阶段**：修改后运行几轮进化观察效果，确认没问题再改下一个
-2. **保留默认值作为参考**：经常对比默认 Prompt，理解每次修改的影响
-3. **使用测试面板验证**：保存前务必用至少 2-3 个不同类型的会话测试
-4. **谨慎修改 evolve_skill/create_skill**：这两个是核心阶段，直接影响技能质量；修改前备份
-5. **不要删除共享块占位符**：`__GENERALIZATION_RULES__` 等占位符是关键
-6. **裁判类阶段保持低 temperature**：judge 和 replay_checklist 建议 0.0-0.1
-7. **监控 Token 用量**：如果为某个阶段设置了过大的 max_tokens 且模型频繁输出冗长内容，考虑收紧 Prompt 或降低 max_tokens
-8. **审核技能产出**：修改 Prompt 后，重点关注下几轮进化产生的候选技能质量，在控制台的候选审核页面仔细评估
+写操作要求租户管理员。配置写入使用 revision 比较，并发修改返回冲突，需刷新后重试。未知阶段返回 404，不支持的字段返回 400。
+
+## 使用建议
+
+- 先在测试面板对比修改前后的输出，再保存
+- 一次只调整一个阶段，观察下一轮进化的 Candidate 与 True Replay 结果
+- `replay_checklist` 是验证裁判，提高 temperature 会降低判定稳定性
+- 修改 `analyze_session` 输出结构前确认下游解析字段不变
+
+## 相关文档
+
+- [进化闭环](../concepts/02-evolution-loop.md)
+- [链路观测指南](./04-observability.md)
+- [Web 控制台用户指南](./03-console.md)

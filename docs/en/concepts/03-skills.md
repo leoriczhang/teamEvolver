@@ -1,113 +1,125 @@
-# Skill System
+# Skills
 
-Skills are **executable, reusable task methods** that clearly specify applicable scenarios, operational steps, constraints, and supporting resources. A Skill is not a Prompt, not a script file, not an SOP document—it is an executable capability unit that has been team-validated and governed.
+A Skill is an **executable, reusable task method** that states when it applies, the steps, constraints and supporting resources. The team Skill version chain is stored in PostgreSQL; new versions come from Candidate Review or administrator changes, and Agents pull them through `GET /sync/skills`.
 
 ## Skill Structure
 
-A Skill Bundle is a directory containing:
+A Skill Bundle is a set of files; `SKILL.md` is required:
 
-```
+```text
 my-skill/
-├── SKILL.md          # Main entry (required), declares metadata using YAML frontmatter
-├── references/       # Reference documents (optional)
-│   ├── policy.md
-│   └── examples.md
-├── scripts/          # Helper scripts (optional)
-│   └── helper.py
-└── assets/           # Supporting resources (optional)
-    └── template.md
+├── SKILL.md          # entry: YAML frontmatter + body
+├── references/       # reference documents (optional)
+├── scripts/          # helper scripts (optional)
+└── assets/           # supporting resources (optional)
 ```
 
 ### SKILL.md Frontmatter
 
 ```yaml
 ---
-name: my-skill                # Skill unique identifier
-version: "1.2.0"              # Semantic version
-description: Brief description of what this Skill does
-applicable_when: Trigger condition description  # When to load this Skill
-required_tools: [edit, bash]  # Required tools list
-author: team-name             # Author/team
-created_at: "2025-01-01"      # Creation date
-updated_at: "2025-03-15"      # Update date
-tags: [code-review, backend]  # Tags
+name: my-skill           # unique identifier, same as the directory name
+description: What this Skill is for and when it triggers
+category: general        # category, default general
 ---
 ```
 
+`name` and `description` are required; other frontmatter fields are kept as is. Parsing and rendering are in `team_skills/library/frontmatter.py`.
+
+### Bundle Limits
+
+The tenant `skills` module configuration limits bundle size, validated before writes:
+
+| Field | Default |
+| --- | --- |
+| `max_bundle_files` | 1024 |
+| `max_bundle_bytes` | 64 MiB |
+| `max_file_bytes` | 16 MiB |
+
+## Team Skill Library
+
+PostgreSQL is the only authority for the team Skill library (`003_skills.sql`):
+
+| Table | Content |
+| --- | --- |
+| `skills` | Current manifest head: name, `skill_id`, current version, description, category, `runtime_policy`, `sha256`, `tree_sha256` |
+| `skill_versions` | Append-only version history |
+| `skill_version_files` / `skill_blobs` | File list per version and content-addressed file bytes |
+| `skill_mutations` | Mutation idempotency ledger |
+| `skill_candidates` / `skill_candidate_files` / `skill_candidate_events` | Candidates, files and events |
+
+Write rules (`team_skills/library/repository.py:SkillLibraryRepository`):
+
+- Each mutation first locks the Skill head row inside the tenant transaction, serializing across Pods without in-process locks.
+- The mutation ID is looked up after locking: a repeated request returns the first result, and the same ID with a different request returns a conflict. Console write endpoints pass it via the `Idempotency-Key` header.
+- Version row, files, blobs, head and mutation are written in one transaction.
+- Versions are append-only: rollback and delete both write new versions, delete is a tombstone version, and history is never rewritten.
+
+The local `skills_runtime_cache_dir` is only a rebuildable cache materialized from these rows; a failed refresh does not affect committed state.
+
 ## Personal and Team Skills
 
-| Dimension | Personal Skill | Team Skill |
-|-----------|----------------|------------|
-| Default path | `viking://resources/team-skill-evolver/peers/<account>/skills/` | `viking://resources/team-skill-evolver/skills/` |
-| Edit permission | User or administrator | Administrator |
-| Agent use | Agents mapped to that user | Authorized team Agents |
-| Publication | Regular users submit a publish request; administrators can copy directly | Candidate or administrator mutation enters the version chain |
+| Aspect | Personal Skill | Team Skill |
+|------|------------|------------|
+| Storage | OpenViking `viking://resources/<root_prefix>/peers/<user>/skills/` | PostgreSQL version chain |
+| Editing | The user or an administrator, via "Personal and team assets" | Tenant administrators, via Candidate Review or `/api/skills` |
+| Agent read | Context `personal_skills` scope | `GET /sync/skills`, and Context `team_skills` scope |
+| Promotion to team | The user submits a publish request, an administrator approves | — |
 
-Personal Skills can be edited directly in **Personal and Team Assets**. A regular user submits a personal-to-team publish request for administrator approval; team-to-personal copying can install a team Skill into a personal space.
-
-## Skill Version Management
-
-Skills in teamEvolver have three states:
+## Skill States
 
 | State | Description | Affects Agents |
-|-------|-------------|----------------|
-| **Published** | Currently active version, passed all gates | Agents pull this version by default |
-| **Candidate** | Under validation/review, does not overwrite published version | Does not affect production Agents |
-| **Archived** | Superseded by new version, but complete content and audit chain preserved | Not directly usable, can be rolled back to |
+|------|------|---------------|
+| Published | Current version in `skills` | Agents pull this version |
+| Candidate | Four states: `open`, `validating`, `published`, `rejected` | Not before publishing |
+| Historical | Versions in `skill_versions` superseded by newer ones | Restorable by Rollback |
 
-The shared team-Skill registry uses monotonically increasing integer versions (`v1`, `v2`, ...). Rollback republishes a historical Bundle as a newer version and never moves or deletes old versions. `SkillMutationService` owns commits, tombstones, and the sync outbox.
+Version numbers are monotonically increasing integers.
 
 ## Skill Lifecycle
 
 ```text
-Evidence → static checks → Candidate → True Replay
-                                  ├─ gates pass → new version → Skill Sync
-                                  ├─ gray zone → human review → publish or reject
-                                  └─ gates fail → reject or revise
-Administrator force-publish ─────────────────────┘
+Evidence → skill.evolve → Skill Candidate (open)
+                              │ evaluate / validate
+                              ▼
+                       validating: static checks + True Replay
+                              ├─ accept (auto) or force → published → new version
+                              ├─ reject → rejected
+                              └─ inconclusive → back to open, awaiting manual handling
+Administrator edits via /api/skills ──────────────► new version
 ```
 
-`publish_mode: validated` uses the Candidate validation queue. A Candidate may publish automatically after result-count, approval-count, and runtime-compatibility gates pass; gray-zone results can enter human review. `publish_mode: direct` bypasses the validation queue.
+## Agent Pull
 
-## Skill Synchronization
-
-### Pull Mode
-
-Agent calls at startup or before each session:
-
-```
-GET /internal/agents/context/skills?user_id=<user>
-# Legacy form during the compatibility window:
-# GET /internal/agents/context/skills?external_subject=<user>&integration_id=<integration_id>
-Authorization: Bearer <tevt_ tenant machine credential>
+```http
+GET /sync/skills?user_id=alice
+Authorization: Bearer tevt_...
+If-None-Match: "<previous ETag>"
 ```
 
-Returns currently published team Skill Bundle manifest and content.
+The response contains each Skill's name, version, `tree_sha256` and base64 file contents; the ETag is computed from the tenant, Account and each Skill's name, version and `tree_sha256`, and an unchanged snapshot returns `304`. See [Skill pull API](../api/06-skill-sync.md).
 
-### Push Mode
+## Distribution to Agents
 
-After Skill publication, `SkillMutationService` sends update notifications to push-capable Agents via outbox mechanism. Push adapters are registered in [skill_sync_adapters.py](../../../teamEvolver/integrations/skill_sync_adapters.py).
+Skills are distributed only by pull: Agents call `GET /sync/skills` with the tenant credential + `user_id` to fetch a snapshot of all current Skills (with ETag). Publishing writes only versions and tombstones, creates no delivery outbox, and every API replica returns the same result.
 
-### Agent Skill Pull
+## Skill and Memory Boundary
 
-Agents pull Skill Bundles using their tenant Key and declared user_id and preserve versions and tombstones. See [Skill Sync API](../api/06-skill-sync.md) and [Custom Agent Integration](../agent-integrations/05-custom-agent.md).
-
-## Boundary Between Skill and Memory
-
-| Dimension | Skill | Memory |
-|-----------|-------|--------|
-| Content nature | Executable task methods (steps, workflows) | Retrievable facts and context |
-| Prescribes execution flow | Yes, explicit steps | No, does not prescribe complete workflow |
-| Validation method | True Replay comparison | Memory Replay; aggregation output constrained by its Skill |
-| Update gate | Candidate gates, administrator release, or publish request | Agents write only personal Memory; only administrators/evolution paths write team Memory |
-| Typical examples | "How to do Code Review", "How to write unit tests" | "Team uses pnpm", "Service port is 52010" |
+| Aspect | Skill | Memory |
+|------|-------|--------|
+| Nature | Executable task method (steps, procedure) | Retrievable facts and background |
+| Prescribes execution | Yes | No |
+| Validation | True Replay comparison | Memory Replay; aggregated content is constrained by the aggregation Skill |
+| Writes | Candidate Review, administrator edits, publish requests | Agents write only personal Memory; team Memory is written by aggregation and DreamCycle |
+| Typical example | "How to do Code Review" | "The team uses pnpm" |
 
 ## Code Entry Points
 
 | Module | Path |
-|--------|------|
-| Skill Bundle model | [skills/bundle.py](../../../team_skills/library/bundle.py) |
-| Mutation service | [skills/mutations.py](../../../team_skills/library/mutations.py) |
-| Render engine | [skills/render.py](../../../team_skills/library/render.py) |
-| Registry | [skills/registry.py](../../../team_skills/library/registry.py) |
-| Frontmatter parser | [skills/frontmatter.py](../../../team_skills/library/frontmatter.py) |
+|------|------|
+| Library repository | [repository.py](../../../team_skills/library/repository.py) |
+| Bundle model | [bundle.py](../../../team_skills/library/bundle.py) |
+| Frontmatter | [frontmatter.py](../../../team_skills/library/frontmatter.py) |
+| Candidate repository | [candidates/repository.py](../../../team_skills/candidates/repository.py) |
+| Static checks | [static_checks.py](../../../team_skills/candidates/static_checks.py) |
+| HTTP | [api/](../../../team_skills/api/) |

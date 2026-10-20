@@ -48,13 +48,9 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from typing import Any, Callable
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(_REPO_ROOT))
-
-from .protocol import (  # noqa: E402
+from .protocol import (
     REPLAY_TURN_RESULT_SCHEMA,
     ReplayProtocolError,
     normalize_replay_turn_request,
@@ -86,7 +82,7 @@ def example_handler(req: dict[str, Any]) -> dict[str, Any]:
 
     Must return:
       {"final_response": str, "messages": [...],
-       "metrics": {"tool_call_count": int, "total_tokens": int, ...},
+       "metrics": {"tool_call_count": int, "total_tokens": int,...},
        "artifacts": [...]}  # artifacts optional
     """
     # >>> Replace this body with your agent call, e.g.:
@@ -117,7 +113,7 @@ def example_handler(req: dict[str, Any]) -> dict[str, Any]:
 # key = runtime_type registered with teamEvolver; value = handler function.
 AGENT_HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "example": example_handler,
-    # "openclaw": openclaw_handler,
+    # "agent-a": agent_a_handler,
     # "agent-b": agent_b_handler,
 }
 

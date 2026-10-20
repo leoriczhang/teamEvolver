@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from typing import Any, Mapping, Protocol
 
 from .hooks import ReplayAdapterFactory
@@ -45,6 +46,7 @@ class ReplayHost(Protocol):
     ) -> dict[str, Any]: ...
 
 _host: ReplayHost | None = None
+_bound_host: ContextVar[ReplayHost | None] = ContextVar("replay_host", default=None)
 
 
 def configure_host(host: ReplayHost | None) -> None:
@@ -55,9 +57,10 @@ def configure_host(host: ReplayHost | None) -> None:
 
 
 def current_host(*, required: bool = True) -> ReplayHost | None:
-    if _host is None and required:
+    host = _bound_host.get() or _host
+    if host is None and required:
         raise ReplayHostUnavailable(
             "Replay host is not configured; install a host Adapter before "
             "using host-owned jobs, sessions, Skill treatments, or credentials"
         )
-    return _host
+    return host

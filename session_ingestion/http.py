@@ -6,7 +6,8 @@ import json
 import os
 from typing import Any
 
-from fastapi import HTTPException, Request
+from starlette.exceptions import HTTPException
+from starlette.requests import Request
 
 
 def max_session_body_bytes() -> int:

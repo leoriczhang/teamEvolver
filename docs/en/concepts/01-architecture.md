@@ -1,165 +1,144 @@
-# Architecture Overview
+# Architecture
 
-teamEvolver is a monolithic FastAPI service (default port 52010) that embeds the evolution engine, team-Memory aggregation, DreamCycle, validation Worker, SkillMiner, and React console. Its own ledgers — Session queue/index/audit — live by default in the built-in local object store (`teamEvolver/storage/local.py:LocalObjectStore`); OpenViking holds the asynchronously mirrored Skill library, team Memory, and aggregation products. YAML configuration, console Sessions, and some runtime state remain under `~/.teamEvolver/`.
+teamEvolver is a modular monolith: one release, one image, running in two roles, `api` and `worker`. The API only does authentication, authorization, validation, short accept transactions and queries; every long task runs as `202 Accepted + worker_tasks + Worker Handler`. PostgreSQL is the only authority for mutable business state; OpenViking is the authority for external knowledge artifacts and Compile Tasks.
 
-When OpenViking is unavailable, storage automatically falls back to the local `LocalObjectStore` (determined via connectivity probing + TTL cache; writes stay local during fallback). The Skill library is local-first and asynchronously mirrored local→OpenViking through a durable spool and background flusher (`team_skills/library/mirror.py:VikingSkillMirror`).
+## System Diagram
 
-## System Architecture Diagram
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    External Agent Runtimes                   │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐ │
-│  │ Agent    │  │ Pi (AH)  │  │ Codex    │  │ Custom Agent │ │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────┬───────┘ │
-│       │     Hook/SDK│     SDK    │     Protocol V1         │
-└───────┼─────────────┼────────────┼──────────────┼───────────┘
-        │             │            │              │
-        ▼             ▼            ▼              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                  teamEvolver Service (:52010)                │
-│                                                              │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────────┐  │
-│  │ Proxy Server │  │ Agent Proto  │  │ Context Workspace │  │
-│  │ (FastAPI)    │◄─┤ V1 Handler   │◄─┤ (token-scoped)    │  │
-│  └──────┬───────┘  └──────────────┘  └───────────────────┘  │
-│         │                                                    │
-│  ┌──────▼───────┐  ┌──────────────┐  ┌───────────────────┐  │
-│  │ Session      │  │ Evolve Kernel│  │ Skill Mutation    │  │
-│  │ Ingest/Filter│─►│ (11-stage    │─►│ Service (commit/  │  │
-│  │              │  │  pipeline)   │  │  tombstone/outbox)│  │
-│  └──────────────┘  └──────┬───────┘  └─────────┬─────────┘  │
-│                           │                     │            │
-│  ┌──────────────┐  ┌──────▼───────┐  ┌──────────▼────────┐  │
-│  │ DreamCycle   │  │ True Replay  │  │ Validation Worker │  │
-│  │ Scheduler    │  │ (baseline vs │◄─┤ (async, isolated) │  │
-│  │ (Memory job) │  │  candidate)  │  │                   │  │
-│  └──────┬───────┘  └──────────────┘  └───────────────────┘  │
-│         │                                                    │
-│  ┌──────▼───────┐  ┌──────────────┐  ┌───────────────────┐  │
-│  │ Langfuse     │  │ Dataset      │  │ Web Console       │  │
-│  │ (tracing)    │  │ Synthesizer  │  │ (React, embedded) │  │
-│  └──────────────┘  └──────────────┘  └───────────────────┘  │
-│         │                                                    │
-└─────────┼────────────────────────────────────────────────────┘
-          │
+```text
+                 Agent Runtime (v2: tenant key + user_id)      Browser console (Session Cookie)
+                               │                                       │
+                               ▼                                       ▼
+        ┌──────────────── Load balancer (no session affinity) ─────────────────┐
+        ▼                                                                  ▼
+┌──────────────────────┐                                  ┌──────────────────────┐
+│ teamEvolver api ×N   │  create_app(): auth → tenant ctx → │ teamEvolver api ×N   │
+│ :52010               │  module Router → short txn → 202  │                      │
+└─────────┬────────────┘                                  └─────────┬────────────┘
+          │ domain record + payload + worker_tasks (one transaction)  │
+          ▼                                                         ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ PostgreSQL (RLS, isolated by tenant_id)                                     │
+│ teamevolver_config · tenants · tenant_configs · secret_refs · adapters      │
+│ ingestions · sessions · skills · skill_versions · skill_candidates          │
+│ datasets · memory_runs · context_* · worker_tasks · resource_leases         │
+│ tenant_usage · artifacts · storage_objects · audit_log · schema_versions    │
+└─────────────────────────────────────────────────────────────────────────────┘
+          ▲ claim with FOR UPDATE SKIP LOCKED, write back with fence check   ▲
+┌─────────┴────────────┐                                  ┌─────────┴────────────┐
+│ teamEvolver worker ×N│ Handlers: session.* skill.*       │ teamEvolver worker ×N│
+│ health port :52011   │ replay.* memory.* miner.*        │                      │
+└─────────┬────────────┘                                  └─────────┬────────────┘
+          │ Compile / Content / Session / Search (Root Key + Account + User)
           ▼
-┌─────────────────────────────────────────────────────────────┐
-│         Local Object Store  +  OpenViking (storage)          │
-│  Sessions/ledgers -> local object store (default)            │
-│  Skills(mirrored) │  Memory  │  Snapshots  │  Resources     │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ OpenViking: Skill · Memory · Wiki · Compile Task                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Core Components
+## Module Boundaries
 
-### Proxy Server ([server.py](../../../teamEvolver/proxy/server.py))
+```text
+teamEvolver/            platform layer
+├── app.py              the only FastAPI factory and business composition root (create_app, build_role_services)
+├── bootstrap.py        read-only bootstrap configuration (environment + optional YAML)
+├── config_runtime.py   global and tenant module configuration in PG (revision CAS)
+├── database/           pools, transactions, RLS, schema_runner and versioned SQL
+├── runtime/            role entrypoints, lifecycle, worker_tasks repository, Worker loop, leases
+├── storage/            ObjectStore (PostgreSQL storage_objects; local implementation for development only)
+├── openviking/         the only OpenViking HTTP/Compile client
+├── security/           Secret encryption, AgentPrincipal
+├── admin/ tenants/     console identity, RBAC, users, tenants
+├── operations/         unified /api/jobs endpoints
+├── observability/      health, readiness, logging status, Langfuse outbound tracing
+├── platform_docs/      console entry, platform assets, OpenViking Workspace
+├── context/            Agent Context gateway
+└── cli/                teamEvolver command line
+session_ingestion/      Session push, data source pull, mandatory analysis stages
+team_skills/            Skill library, Candidate, Evolution, Experience, Transfer, Workbench
+team_replay/            True Replay, Test Dataset, ReplayAdapterFactory
+team_memory/            team Memory aggregation, DreamCycle maintenance, Memory Replay
+team_miner/             mining module composition entrypoints
+├── knowledge_miner/    knowledge base mining (OpenViking Compile tracking and Wiki indexing)
+├── skill_miner/        Skill mining (sources, compilation, artifact review and Candidate submission)
+└── shared/             document format conversion shared by both mining workflows
+web-ui/                 React console sources, built into teamEvolver/web/dist/
+```
 
-FastAPI application assembly entry point, responsible for:
-- Registering all HTTP routes (console static files, health checks, Agent protocol interfaces, admin interfaces)
-- Initializing Langfuse tracing, DreamCycle, team-Memory aggregation, and the background validation Worker
-- Mounting embedded static frontend (from `teamEvolver/web/dist/`)
+Business modules provide `api/` (`create_router(services, **kwargs)`), `handlers`, `config.py`, `schemas.py` and `repository.py`. Exceptions: `team_replay/contracts.py` is the cross-module Replay contract; `team_miner/knowledge_miner` stores receipts, watermarks and indexes through the PostgreSQL ObjectStore without a dedicated `repository.py`. `team_miner/api` and `team_miner/handlers.py` compose both mining workflows; knowledge base mining retains its `miner` configuration and task identities.
 
-### Session Ingestion ([session_ingestion](../../../session_ingestion/README.md))
+## Dependency Rules
 
-Owns both Session entry modes: Agent push and tenant datasource pull. Each mode performs its transport-specific authentication or conversion before entering the same deduplication, Evidence Classification, archive, queue, and Evolution-trigger pipeline.
+1. `teamEvolver/database`, `runtime`, `storage`, `openviking`, `llm.py` and `observability` do not import business modules.
+2. `teamEvolver/app.py` is the only composition root; it mounts the 11 `api` packages in a fixed order and rejects duplicate `(method, path)` pairs.
+3. Business modules do not import `teamEvolver.app` or another module's Handlers; cross-module access goes only through public Contracts, read-only Queries, persisted tasks or `services.extras` injected by the composition root.
+4. A Repository only accesses its own domain's tables.
+5. FastAPI appears only in `teamEvolver/app.py`, `teamEvolver/runtime/http_runtime.py` and each module's `api/`.
+6. No hand-written production file exceeds 1000 lines.
 
-### Agent Protocol V1 ([agent_protocol.py](../../../teamEvolver/integrations/agent_protocol.py))
+These rules are checked statically by `tests/contracts/test_dependencies.py`, `tests/contracts/test_package_contracts.py` and `tests/contracts/test_application_contracts.py`.
 
-Integration protocol layer for external Agents, defining capability constants:
+## Request Path (API Role)
 
-| Capability Constant | Description |
-|---------------------|-------------|
-| `session.ingest.v1` | Session trajectory ingestion |
-| `context.workspace.v1` | Context read/write (Memory/Skill) |
-| `replay.branch.v1` | True Replay branch execution |
-| `skill.sync.v1` | Team Skill distribution sync |
+1. `teamEvolver/runtime/http_runtime.py` generates `request_id`/`trace_id` and calls the injected authorizer.
+2. `teamEvolver/admin/authn.py:build_console_authorizer` resolves the identity: service Root Key, tenant key (`tevt_`) or console Session cookie, and binds the `TenantContext`.
+3. The module Router checks permissions, parameters, idempotency keys and resource limits.
+4. In one tenant transaction it writes the domain record, the immutable payload and `worker_tasks`, and returns `202`, `job_id` and `status_url` (`/api/jobs/{job_id}`).
+5. Routers do not run LLM calls, Replay, Compile polling, batch file processing or external delivery directly.
 
-### Context Workspace ([agent_context.py](../../../teamEvolver/proxy/agent_context.py))
+## Worker Execution Model
 
-Context uses a tenant Key and declared user_id, returning tenant/user-bound opaque refs while keeping OpenViking credentials on the server.
+`teamEvolver/runtime/worker.py:run_worker` polls and claims tasks across all active tenants:
 
-### Evolve Kernel ([evolve/](../../../team_skills/evolution/))
+- Claims use `FOR UPDATE SKIP LOCKED`; each claim increments `fence`, and result writes must match tenant, owner, attempt and fence, so late writes from an old attempt are rejected.
+- The default lease is 60 seconds, renewed by heartbeat; after a failed renewal no new external side effects may start.
+- Failures retry up to 3 times by default with 5/30/120 second backoff plus jitter.
+- When the upstream result is unknown the task enters `reconciling` and is reconciled by idempotency key instead of being resubmitted blindly.
+- `resource_leases` control tenant concurrency and exclusive resources such as Memory target trees and experience delivery; `tenant_usage` counts logical tasks.
+- During short PG outages the Worker loop keeps running with 1, 2, 4… up to 30 second backoff and `/readyz` returns 503; it resumes automatically after recovery.
 
-11-stage evolution pipeline from Session to published Skill:
+State machine:
 
-1. **Ingest** — Receive and validate Session payload
-2. **Filter** — Filter by source, length, and outliers
-3. **Summarize** — Extract turn summaries and key decisions
-4. **Judge** — Evidence classification (Skill/Memory/task requirement/runtime issue/insufficient)
-5. **Group** — Aggregate similar Evidence into change windows
-6. **Evolve** — Generate Skill Candidate or Memory Change proposals
-7. **Create** — Create Candidate version (does not affect published versions)
-8. **Merge** — Merge context dependencies
-9. **Dataset Synthesis** — Generate test datasets from homologous Evidence
-10. **Validate** — True Replay validation (Baseline vs Candidate)
-11. **Publish** — Release new version after passing gates, sync to Agents
+```text
+queued -> running -> succeeded
+                  -> retry_wait -> queued
+                  -> waiting_external -> reconciling -> succeeded/failed
+                  -> failed
+                  -> cancelled
+```
 
-### True Replay ([replay/engine.py](../../../team_replay/engine.py))
+The closed set of Handler kinds is `teamEvolver/runtime/tasks.py:TASK_KINDS`:
 
-Executes Baseline and Candidate branches in parallel in isolated real Agent Runtimes:
-- Baseline: Control group without Candidate loaded
-- Candidate: Experimental group with the Skill to validate loaded
-- Uses frozen Context projection (Snapshot Hash)
-- Checklist as completion gate, efficiency ranked by turns → tool calls → Token
+| Module | kind |
+| --- | --- |
+| session_ingestion | `session.pull`, `session.normalize`, `session.analyze`, `session.archive` |
+| team_skills | `skill.evolve`, `skill.validate`, `skill.transfer`, `experience.sync` |
+| team_replay | `replay.run`, `dataset.run` |
+| team_memory | `memory.aggregate`, `memory.compile`, `memory.replay` |
+| team_miner | `miner.track_compile`, `miner.rebuild_index` |
 
-### Skill Mutation Service ([mutations.py](../../../team_skills/library/mutations.py))
+## Lifecycle
 
-All team Skill create/update/delete operations must go through this service:
-- Transactional changes: commit records + tombstone
-- Persistent sync outbox ensuring reliable distribution
-- Monotonically increasing version numbers, complete audit chain preserved
+`teamEvolver/runtime/lifecycle.py:RuntimeLifecycle` fixes the shutdown order: withdraw readiness → stop claiming → wait for in-flight tasks (default 30 seconds) → close external clients and pools. The load balancer stops sending new requests once `/readyz` returns 503.
 
-### DreamCycle ([dreamcycle/](../../../team_memory/legacy_dreamcycle/))
+## Ports
 
-Continuous team Memory evolution:
-- `team_overview` — Maintains team profile
-- `dedup` — Semantic deduplication
-- `cleanup` — Cleans up expired and low-value Memory
-- `consolidate` — Merges related Memory entries
-- `onboarding_check` — Newcomer discoverability checks
-- Default runs during 0-6 AM window
+| Role | Default port | Serves |
+| --- | --- | --- |
+| `api` | 52010 (`TEAMEVOLVER_API_PORT` or `--port`) | All HTTP APIs, console, `/healthz`, `/readyz`, `/status` |
+| `worker` | 52011 (`--port`) | `/healthz`, `/readyz` |
+| `all` | 52010 | Local development: API + Worker in one process |
 
-### Team-Memory Aggregation ([aggregation/](../../../team_memory/))
-
-After an administrator selects OpenViking Account users, the aggregation service creates model-free deterministic per-user snapshots with bounded concurrency, then writes `viking://resources/<shared_knowledge_prefix>/` through bounded tree-reduce compile. Raw snapshots and intermediates stay in the merge identity's private Resources, and persisted fingerprints enable incremental skipping.
-
-### Validation Worker ([validation/worker.py](../../../team_skills/candidates/worker.py))
-
-Asynchronous validation Worker consuming Candidate queue in background, executing True Replay and collecting results.
-
-### Langfuse ([observability/langfuse.py](../../../teamEvolver/observability/langfuse.py))
-
-- **Inbound**: Pulls Agent Session trajectories from Langfuse
-- **Outbound**: Reports all LLM calls in the evolution pipeline to Langfuse for observability
-- All Prompts and model parameters are white-box configurable in the console
-
-## Port Conventions
-
-teamEvolver uses a single **52010** port for all capabilities:
-
-| Path | Method | Description |
-|------|--------|-------------|
-| `/health`, `/healthz` | GET | Health check |
-| `/status` | GET | Service status, queue count, skill count |
-| `/console` | GET | Web console |
-| `/ingest_session` | POST | Agent Session ingestion |
-| `/internal/agents/*` | * | Agent Protocol V1 internal interfaces |
-| `/trigger` | POST | Manually trigger evolution cycle |
-| `/api/aggregation/*` | * | Team-Memory aggregation, runs, and settings |
-| `/api/*` | * | Other console management APIs |
+All endpoints are listed in the [Endpoint Index](../api/00-endpoints.md).
 
 ## Code Entry Points
 
-| Component | Code Path |
-|-----------|-----------|
-| Service startup | [launcher.py](../../../teamEvolver/launcher.py) |
-| CLI entry point | [cli/](../../../teamEvolver/cli/) |
-| HTTP routes | [proxy/routes.py](../../../teamEvolver/proxy/routes.py) |
-| Evolution core | [evolve/](../../../team_skills/evolution/) |
-| Skill management | [skills/](../../../team_skills/library/) |
-| Agent integration | [integrations/](../../../teamEvolver/integrations/) |
-| DreamCycle | [dreamcycle/](../../../team_memory/legacy_dreamcycle/) |
-| Team-Memory aggregation | [aggregation/](../../../team_memory/) |
-| Configuration store | [config_store/](../../../teamEvolver/config_store/) |
-| Frontend source | [web-ui/src/](../../../web-ui/src/) |
+| Component | Path |
+|------|---------|
+| Role entrypoint | [entrypoint.py](../../../teamEvolver/runtime/entrypoint.py) |
+| Composition root | [app.py](../../../teamEvolver/app.py) |
+| CLI | [cli/](../../../teamEvolver/cli/) |
+| Worker loop | [worker.py](../../../teamEvolver/runtime/worker.py) |
+| Task repository | [repository.py](../../../teamEvolver/runtime/repository.py) |
+| Schema versions | [schema/](../../../teamEvolver/database/schema/) |
+| Configuration | [config_runtime.py](../../../teamEvolver/config_runtime.py), [bootstrap.py](../../../teamEvolver/bootstrap.py) |
+| Frontend sources | [web-ui/src/](../../../web-ui/src/) |

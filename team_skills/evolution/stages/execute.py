@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextvars import ContextVar
 from typing import Any, Optional
 
 from teamEvolver.llm import AsyncLLMClient
@@ -390,9 +391,6 @@ def _inject_shared_blocks(template: str) -> str:
 # that write skill content. Done once at import time.
 _EVOLVE_FROM_SESSIONS_SYSTEM = _inject_shared_blocks(_EVOLVE_FROM_SESSIONS_SYSTEM)
 _CREATE_FROM_SESSIONS_SYSTEM = _inject_shared_blocks(_CREATE_FROM_SESSIONS_SYSTEM)
-
-from contextvars import ContextVar
-
 
 def _effective_system(stage_id: str, fallback: str) -> str:
     """Return a stage's system prompt, honoring any Prompt Studio override.

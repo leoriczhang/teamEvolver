@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any, Optional
 
@@ -237,6 +238,7 @@ def _build_segment(
     if title and f"第{index}/{total}段" not in title:
         title = f"{title}（第{index}/{total}段）"
 
+    suffix = f"_s{start:03d}-{end:03d}"
     metadata = dict(base.get("metadata") or {})
     metadata["split_from_session"] = base_id
     metadata["split_segment"] = {
@@ -248,7 +250,7 @@ def _build_segment(
     }
 
     segment: dict[str, Any] = {
-        "session_id": f"{base_id}_s{start:03d}-{end:03d}"[:200],
+        "session_id": f"{base_id[:200 - len(suffix)]}{suffix}",
         "turns": turns,
         "messages": messages,
         "system_prompt": base.get("system_prompt") or "",
@@ -280,6 +282,8 @@ def _build_segment(
         segment["timestamp"] = timestamp.isoformat()
     elif base.get("timestamp"):
         segment["timestamp"] = base["timestamp"]
+    if base.get("business_time") is not None:
+        segment["business_time"] = base["business_time"]
 
     langfuse = base.get("langfuse")
     if isinstance(langfuse, dict):
@@ -300,7 +304,12 @@ def _build_segment(
     return segment
 
 
-async def split_session(config, session: dict[str, Any]) -> list[dict[str, Any]]:
+async def split_session(
+    config,
+    session: dict[str, Any],
+    *,
+    client_factory: Callable[[], Awaitable[Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Return the sub-sessions to ingest for ``session`` (usually ``[session]``).
 
     Every session is evaluated for a semantic topic split (no turn-count
@@ -329,7 +338,11 @@ async def split_session(config, session: dict[str, Any]) -> list[dict[str, Any]]
     if not turns:
         return [session]
 
-    client = _split_client(config)
+    try:
+        client = await client_factory() if client_factory is not None else _split_client(config)
+    except Exception as exc:  # noqa: BLE001 - splitting is best-effort
+        logger.warning("[SessionSplit] split LLM client unavailable: %s", exc)
+        return [session]
     if client is None:
         return [session]
     boundaries = await _llm_boundaries(client, turns)

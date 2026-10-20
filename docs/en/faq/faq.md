@@ -1,122 +1,104 @@
-# Frequently Asked Questions
+# FAQ
 
 ## Basic Concepts
 
-### What is the relationship between teamEvolver and OpenViking?
+### How does teamEvolver relate to OpenViking?
 
-teamEvolver is an Agent capability evolution control plane built on top of OpenViking. OpenViking handles persistent storage (Memory, Skill, Session, Snapshot), while teamEvolver manages evolution logic (Evidence extraction, Candidate generation, True Replay validation, gated publishing). Without OpenViking, teamEvolver cannot run.
+PostgreSQL is the only authoritative store of teamEvolver's mutable state: Sessions, Skill versions, Candidates, tasks and configuration all live there. OpenViking stores Memory and Resources readable by Agents and provides Compile; Team Memory aggregation, knowledge base mining and successful experience sync depend on it. Without OpenViking, Session ingest, Skill evolution, True Replay and publishing still work.
 
 ### Is teamEvolver an Agent Runtime?
 
-No. teamEvolver is not the Agent Runtime for user tasks and does not take over an integrated Agent's tool loop. It does call the configured model for Evidence extraction, evolution, and validation. It is a control layer sitting on top of existing Agent Runtimes (Pi, Codex, etc.), responsible for enabling continuous evolution of team capabilities.
+No. teamEvolver does not run user-facing Agent tasks and does not take over the Agent's tool loop. On top of existing Agent Runtimes, it receives Sessions, generates and validates Skill Candidates, and maintains Team Memory. Analysis, evolution and validation call the configured model.
 
-### What is the relationship between teamEvolver and Langfuse?
+### How does teamEvolver relate to Langfuse?
 
-Langfuse is an observability tool. teamEvolver uses it for two purposes: (1) pulling Session trajectories reported by other Agents from Langfuse; (2) reporting LLM calls within the evolution Pipeline to Langfuse for tracing. Langfuse is an optional dependency; the system runs without it configured.
+Two independent uses: a data source adapter can pull Agent sessions from Langfuse, see the [Data Source Onboarding Guide](../guides/10-datasource-onboarding.md); trace observability reports teamEvolver's own model calls to Langfuse, see the [Trace Observability Guide](../guides/04-observability.md). Both are optional.
 
 ## Deployment and Configuration
 
 ### What is the default port?
 
-**52010**. All capabilities (console, API, health checks) use this single port.
+The `api` role uses 52010 for the console, API and health checks. The `worker` role serves only `/healthz` and `/readyz` on 52011.
 
 ### Where is the configuration file?
 
-`~/.teamEvolver/config.yaml`. Use the `teamEvolver config <key> <value>` command to modify settings.
+The bootstrap configuration comes from environment variables and the YAML pointed to by `TEAMEVOLVER_CONFIG_FILE`; `teamEvolver config` shows the merged result read-only. Tenant and module configuration lives in PostgreSQL and is changed through the console or API. See the [Configuration Reference](../guides/01-configuration.md).
 
-### Which LLM Providers are supported?
+### Which models are supported?
 
-Any provider compatible with the OpenAI Chat Completions API. The default configuration is Volcano Engine Doubao (`https://ark.cn-beijing.volces.com/api/v3`), configurable via `llm.api_base` and `llm.api_key`.
+Any service compatible with the OpenAI Chat Completions API. The default Base URL is `https://api.openai.com/v1` and the model is `gpt-4o-mini`. The bootstrap configuration uses `TEAMEVOLVER_LLM_*`, the tenant default model is changed in the console "Model Settings", and stage models are overridden in "Evolution Pipeline".
 
-### Is DreamCycle enabled by default?
+### Do evolution and Memory aggregation run on a schedule?
 
-No. DreamCycle is a background Job for continuous team Memory evolution and requires explicit enabling with `dreamcycle.enabled: true`. It runs in the default 0-6 AM window.
+Not by default. Skill evolution and Team Memory maintenance can each be configured in the console for manual or periodic automatic triggering; manual run actions always remain available. The Worker also runs scheduled data source pulls and successful experience sync.
 
-### Can I connect a self-hosted OpenViking server on another machine?
+### Can I connect to a self-hosted OpenViking on another machine?
 
-Yes. Under **Governance → Runtime Status → OpenViking Deployment**, select **Self-hosted OpenViking** and enter a remotely reachable endpoint such as `http://10.0.0.8:1933`. Saving hot-reloads the integration without restarting teamEvolver.
+Yes. In "Runtime Status → OpenViking Deployment" choose remote self-hosted and enter a reachable address in the Endpoint override, for example `http://openviking.example.com:1933`. Saving hot-reloads without a restart.
 
-### How do DreamCycle and team-Memory aggregation differ?
+### What is the difference between DreamCycle and Team Memory aggregation?
 
-Cross-user aggregation is explicitly started by an administrator after selecting Account users and uses `ov compile` to produce shared output under `viking://resources/<shared_knowledge_prefix>/`. DreamCycle is an optional scheduled maintenance engine for overview, deduplication, cleanup, and discoverability. They are configured independently.
+They are two stages of a Team Memory run. The aggregation stage reads the personal Memory of selected users and compiles it into Team Memory; the DreamCycle maintenance stage deduplicates, revises and marks outdated content in existing Team Memory. A run can do aggregation only, maintenance only, or both; see [Memory](../concepts/04-memory.md).
 
 ## Agent Integration
 
-### What do I need for minimum integration?
+### What is the minimal integration?
 
-1. Obtain the service URL and tenant credential `tevt_` from the administrator.
-2. Configure a tenant-scoped `user_id`.
-3. Call `/ingest_session` after an Agent Session using [v2](../agent-integrations/06-protocol-v2.md).
+1. Get the service address and tenant Key from the administrator.
+2. Decide a stable `user_id` for each end user.
+3. After a Session ends, call `POST /ingest_session` per the [Agent Protocol](../agent-integrations/06-protocol-v2.md).
 
-Under the V1 protocol (compatibility window):
+The minimal integration needs neither Replay nor Skill pull.
 
-1. Register the Agent by calling `/internal/agents/register` using the control-plane key
-2. Obtain and save the **tenant machine credential** `tevt_` from the operator (registration itself no longer issues any token)
-3. Admin completes `external_subject → user` mapping in the console
-4. Call `/ingest_session` to report trajectories after Agent sessions end
+### What if the tenant Key leaks?
 
-Minimum integration does not require implementing Replay or Skill Sync.
+Rotate the tenant Key in "Members & Access" or call `POST /api/tenants/{tenant_id}/rotate-token`. The new Key is shown once, the old Key stops working immediately, and the server stores only a hash. Rotation affects every Agent of the tenant, so update their configuration.
 
-### What to do about SUBJECT_NOT_MAPPED error?
+### Can multiple Agent Runtimes connect?
 
-Use a tenant Key and user_id; see [v2](../agent-integrations/06-protocol-v2.md). Mapping errors only apply to migration-era v1 requests; upgrade the client.
-
-### What if the Agent-side credential is compromised?
-
-The Agent data plane has only one machine credential—the **tenant machine credential (`tevt_`)**—so an Agent-side leak is a leak of that credential. Registration no longer issues per-Agent tokens, and there is no per-Agent rotation.
-
-- **Multi-tenant deployments**: rotate it from the tenant page in the console via `POST /api/tenants/{tenant_id}/rotate-token` (requires a console session or the Root Key). The new credential immediately invalidates the old one, and the server stores only its SHA-256 hash.
-- **Single-tenant deployments** (`storage_pg` disabled): rotate by changing the value of the `TEAMEVOLVER_TENANT_TOKEN` environment variable and restarting the process.
-
-The credential is shown in full only once at issuance (or configuration, on single-tenant deployments); a lost credential cannot be recovered, only re-issued or rotated. Note that it is **tenant**-scoped: rotating it affects every Agent in that tenant.
-
-### Can I integrate multiple Agent Runtimes?
-
-Yes. Runtimes use the same tenant Key and declare the actual user. Runtime type is only an analytics and runtime-selection label. Context and Sessions are isolated by tenant/user.
-
-Under the V1 protocol (compatibility window), each Agent Runtime receives an independent `integration_id` during registration (registration no longer issues tokens; the data plane uniformly uses the tenant machine credential), and they are isolated by the declared `integration_id` ownership. teamEvolver aggregates Sessions from all registered Agents for evolution.
+Yes. Different Runtimes use the same tenant Key and declare the real user's `user_id`. Context and Sessions are isolated by `(tenant_id, user_id)`, and all Sessions take part in evolution together.
 
 ## True Replay
 
 ### Does True Replay call real external tools?
 
-Fail-closed by default. Replay-capable Agents must distinguish external tools (network requests, sending emails, writing to databases, etc.) from in-sandbox tools (file editing, bash commands). External tools that cannot be deterministically replayed cause Cases to be marked unrunnable, rather than falling back to live side effects. See [True Replay](../concepts/06-true-replay).
+That is up to the Replay adapter. The adapter must give each branch its own workspace and distinguish tools that can be replayed in a sandbox from tools with external side effects. Cases that cannot be replayed safely should be marked not runnable. See [True Replay](../concepts/06-true-replay.md).
 
-### What is the relationship between Checklist and scoring?
+### How do Checklists relate to scoring?
 
-Checklist is a **completion gate** (pass/fail), not a quality score. Candidates must satisfy all Checklist items to pass, after which efficiency is compared (turns → tool calls → Tokens). Checklist does not contribute scores during efficiency comparison.
+A Checklist is a completion gate, not a quality score. A Candidate must satisfy every Checklist item, and only then is efficiency compared by interaction turns, tool calls and token usage. See [Checklist](../concepts/07-checklist.md).
 
-### Must the Baseline branch also pass Checklist?
+### Must the Baseline branch also pass the Checklist?
 
-Yes. If even Baseline cannot complete the Checklist, it indicates a problem with the test Case itself or a fundamental Skill defect; in this case, no Candidate comparison is performed.
+Yes. When the Baseline cannot complete the Checklist, the Case or the existing Skill has a problem, and no efficiency comparison is made.
 
 ## Skills and Memory
 
-### Auto-publish or human review?
+### Automatic publish or human review?
 
-The default is `publish_mode: validated`. A Candidate may be published by the background process after `validation.required_results`, `validation.required_approvals`, and runtime-compatibility gates pass; gray-zone results enter human review when `human_review_enabled: true`. `publish_mode: direct` skips the Candidate validation queue.
+With `auto_evaluate=true` (default), a Candidate is evaluated automatically after generation. `publish_mode=manual` (default) requires an administrator to publish from "Candidate Review". With `automatic`, publishing occurs only when static checks and the runtime gate pass and the verdict is accept. See [Evolution Loop](../concepts/02-evolution-loop.md).
 
-### Does Skill rollback delete versions?
+### Does a Skill rollback delete versions?
 
-No. Rollback means "restoring historical content as a new version number"; all versions are preserved, forming a complete audit chain.
+No. A rollback writes a new version with historical content, and every version is kept. See [Publish and Rollback](../concepts/08-publish-rollback.md).
 
-### What is the difference between personal Memory and team Memory?
+### What is the difference between personal and Team Memory?
 
-- **Personal Memory:** Belongs to a single user, can only be written and read by that user's Agents; Memory written via `POST /internal/agents/context/remember` is personal Memory by default
-- **Team Memory:** Stored under `viking://resources/shared-knowledge/` by default, produced by cross-user aggregation and optionally maintained by administrators or DreamCycle; read-only to Agents
+- **Personal Memory**: under `viking://user/<user>/memories/`, written by Agents through `POST /internal/agents/context/remember`, editable by the owner in the console
+- **Team Memory**: under `viking://resources/shared-knowledge/` by default, generated and maintained by Team Memory runs, read-only for Agents, editable by tenant administrators
 
 ## Troubleshooting
 
-### After service startup, /status shows openviking_connected: false?
+### Runtime status says OpenViking is unavailable?
 
-Check that `sharing.viking_endpoint` and the service key (prefer `sharing.viking_team_api_key`) are correct and the OpenViking service is network-reachable.
+Check the Endpoint, Account and Root Key in "Runtime Status → OpenViking Deployment", and the network from the service to OpenViking.
 
-### Session ingest succeeded but not visible in queue?
+### Session ingest succeeded but the console does not show it?
 
-Use a tenant Key and user_id; see [v2](../agent-integrations/06-protocol-v2.md). Mapping errors only apply to migration-era v1 requests; upgrade the client.
+202 only means accepted. Call `GET /api/jobs/{job_id}` with the returned `job_id` to see whether `session.normalize` and `session.analyze` finished; analysis needs a working model and a running Worker.
 
-### "cannot find module" error during frontend build?
+### Frontend build reports "cannot find module"?
 
-Run `npm install` in the `web-ui/` directory to install frontend dependencies, then re-run `npm run build`.
+Run `npm --prefix web-ui ci` in the repository root, then `npm --prefix web-ui run build`.
 
-For more issues, see the [Troubleshooting Guide](../guides/06-troubleshooting).
+More in [Troubleshooting](../guides/06-troubleshooting.md).

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77,<85", "wheel>=0.41,<1"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,8 @@ version = "0.1.0"
 description = "teamEvolver: standalone multi-file team skill evolution, validation, and synchronization."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "teamEvolver Contributors" },
 ]
@@ -16,7 +17,6 @@ keywords = ["skills", "agents", "skill-library", "validation"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -29,6 +29,7 @@ dependencies = [
     "fastapi>=0.100",
     "uvicorn[standard]>=0.23",
     "httpx>=0.25.0",
+    "asyncpg>=0.29.0",
     "json-repair>=0.44.0",
     "langfuse>=4.14,<5.0",
     "openai>=1.0,<3",
@@ -36,44 +37,29 @@ dependencies = [
     "pypdf>=5.0",
     "python-docx>=1.1",
     "cryptography>=42",
-    "jsonschema[format]>=4.18",
-    "jieba>=0.42",
-    "beautifulsoup4>=4.12",
-    "tomli-w>=1.0",
-    "tomli>=2; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
-pg = [
-    "asyncpg>=0.29.0",
-]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "anyio>=4.0",
+    "ruff>=0.6",
+    "build>=1.2",
 ]
-all = [
-    "teamEvolver[pg]",
-]
-
-[project.urls]
-Homepage = "https://github.com/leoriczhang/teamEvolver"
-Repository = "https://github.com/leoriczhang/teamEvolver"
-Issues = "https://github.com/leoriczhang/teamEvolver/issues"
 
 [project.scripts]
 teamEvolver = "teamEvolver.cli:main"
-teamEvolver-memory = "team_memory.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["teamEvolver*", "team_skills*", "session_ingestion*", "team_memory*", "team_miner*", "team_replay*", "team_ontology*"]
-exclude = ["team_memory.tests*", "team_memory.frontend*", "team_miner.tests*", "team_miner.frontend*", "team_replay.tests*", "team_skills.tests*", "team_skills.frontend*"]
+include = ["teamEvolver*", "team_skills*", "session_ingestion*", "team_memory*", "team_miner*", "team_replay*"]
+exclude = ["tests*", "team_miner.*.frontend*", "team_skills.frontend*"]
 
 [tool.setuptools.package-data]
-team_ontology = ["skills/*/SKILL.md", "contracts/*.json", "engine/LICENSE", "engine/SOURCE.json", "kee/compile-skill.md", "kee/contracts/*.json"]
 team_memory = ["README.md"]
 team_replay = ["README.md"]
+"team_miner.skill_miner" = ["compiler_skills/**/*.md", "compiler_skills/**/*.py", "compiler_skills/**/*.json"]
 "session_ingestion" = ["README.md"]
 "session_ingestion.adapters" = ["*.py", "README.md"]
 "session_ingestion.adapters._shared" = ["*.md"]
@@ -81,17 +67,17 @@ teamEvolver = [
     "web/*.html",
     "web/dist/*.html",
     "web/dist/assets/*",
-]
-
-team_miner = [
-    "README.md",
-    "compiler_skills/*/SKILL.md",
-    "compiler_skills/*/references/*.md",
-    "compiler_skills/*/scripts/*.py",
+    "database/schema/*.sql",
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "team_memory/tests", "team_miner/tests", "team_replay/tests"]
+testpaths = ["tests"]
+markers = [
+    "postgres: requires an isolated PostgreSQL database",
+    "external: depends on another repository or external integration",
+    "e2e: exercises a complete application workflow",
+]
+
 
 [tool.ruff]
 line-length = 120

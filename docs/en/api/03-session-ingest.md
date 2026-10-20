@@ -1,210 +1,174 @@
-# Session Ingest API
+# Session Ingestion and Data Source API
 
-## 1. API Implementation Overview
+Sessions enter in two ways: Agent push and tenant data source pull. Both share one accept path: the API checks identity and protocol, writes the `ingestions` record, the raw payload and `worker_tasks` in one short transaction, and returns `202`. The Worker runs `session.normalize → session.analyze → session.archive`; a pull first runs `session.pull` and then derives a normalize task for each Session it fetched.
 
-The Session ingest interface is used by Agents to submit complete session trajectory data (conversation turns, tool calls, skill usage, metrics, etc.) to teamEvolver. Ingested Sessions are filtered by a value classifier; valuable sessions enter the evolution queue to drive automatic optimization and evolution of Skills.
+Code entry points:
 
-v2 uses a tenant credential `tevt_` and `runtime_context.user_id`. The server derives the Account from tenant configuration. Unregistered runtimes and users absent from the console registry can ingest. Clients cannot override the tenant or Account.
+- Acceptance: `session_ingestion/api/__init__.py:create_router`
+- Protocol validation: `session_ingestion/push/protocol.py:normalize_session_envelope`
+- Data source control plane: `session_ingestion/api/datasource.py:create_router`
+- Worker stages: `session_ingestion/handlers/__init__.py`
+- Scheduled pulls: `session_ingestion/schedule.py:enqueue_due`
 
-Under the V1 protocol (compatibility window), Session ingest accepts only the **tenant machine credential** (`tevt_`, the only machine credential on the Agent data plane); without a valid credential it returns `401 TENANT_TOKEN_REQUIRED`. Ingest must provide `runtime_context.external_subject` for subject mapping. The protocol-required `runtime.integration_id` in the envelope is resolved against the Agents registered in that tenant: an unknown id returns `403 UNKNOWN_INTEGRATION_ID`, and a registered but non-`active` Agent returns `403 INTEGRATION_DISABLED`. The `session.ingest.v1` capability no longer gates admission (any registered `active` Agent of the tenant can report as itself); it remains declaration/display metadata only.
-
-For Agents already using Context Workspace, the `context_usage` field in turns is validated server-side to ensure the validity and ownership of context_refs.
-
-Code implementation: `session_ingestion/push/routes.py` (`register_push_routes`)
-Shared inbound pipeline: `session_ingestion/service.py` (`ingest`)
-Protocol validation: `session_ingestion/push/protocol.py` (`normalize_session_envelope`)
-Context usage verification: `teamEvolver/integrations/context_workspace.py:514` (`verify_context_usage`)
-
-## 2. Interface and Parameter Specification
-
-### Request
+## Agent Push
 
 ```
 POST /ingest_session
-Authorization: Bearer <tenant machine credential tevt_<random>>
+Authorization: Bearer tevt_...
 Content-Type: application/json
 ```
 
-### Request Body (`teamevolver.agent-session.v2` schema)
+### Request Body
+
+The envelope is `teamevolver.agent-session.v2`; the schema is [agent-session-v2.schema.json](../../schemas/agent-session-v2.schema.json).
 
 | Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `schema_version` | string | Yes | Must be `teamevolver.agent-session.v2` |
-| `protocol_version` | string | Yes | Protocol version, `2.0` |
-| `session_id` | string | Yes | Session unique identifier, maximum 160 characters |
-| `runtime` | object | Yes | Runtime information |
-| `runtime.type` | string | Yes | Runtime label for analytics and Replay; no registration required (V1: runtime type matching runtime_type at registration) |
-| `runtime.integration_id` | string | V1 only | Integration ID; must belong to the current tenant (derived from the credential) and be `active` |
+| --- | --- | --- | --- |
+| `schema_version` | string | Yes | Always `teamevolver.agent-session.v2` |
+| `protocol_version` | string | Yes | Always `2.0` |
+| `session_id` | string | Yes | Caller's Session ID |
+| `runtime.type` | string | Yes | Runtime label such as `custom-agent`, `pi`; not used for authentication |
 | `runtime.version` | string | No | Runtime version |
-| `runtime.protocol_version` | string | No | Protocol version, defaults to `2.0` |
-| `runtime_context` | object | Yes | Runtime context |
-| `runtime_context.user_id` | string | Yes | Tenant-scoped declared user; 1..160 normalized characters |
-| `turns` | array | Yes | Conversation turns array, at least 1 turn |
-| `turns[].turn_num` | integer | Yes | Turn sequence number, starting from 1 |
-| `turns[].prompt_text` | string | No | User input text |
-| `turns[].response_text` | string | No | Agent response text |
-| `turns[].messages` | array | No | Complete message list (system/user/assistant/tool) |
-| `turns[].tool_calls` | array | No | Tool call records |
-| `turns[].tool_results` | array | No | Tool return results |
-| `turns[].injected_skills` | array | No | Skills injected in this turn |
-| `turns[].used_skills` | array | No | Skills actually used in this turn |
-| `turns[].modified_skills` | array | No | Skills modified in this turn |
-| `turns[].metrics` | object | No | Per-turn metrics (token consumption, etc.) |
-| `turns[].context_usage` | object | No | Context usage information |
-| `turns[].context_usage.context_snapshot_id` | string | No | Context snapshot ID |
-| `turns[].context_usage.memory_refs` | array | No | Memory reference list used |
-| `turns[].context_usage.skill_refs` | array | No | Skill reference list used |
-| `turns[].context_usage.feedback` | object | No | User feedback |
+| `runtime_context.user_id` | string | Yes | User ID within the tenant; rules in [Protocol v2](../agent-integrations/06-protocol-v2.md#identity) |
+| `turns` | array | Yes | Non-empty array of objects |
+| `turns[].turn_num` | integer | No | Turn number |
+| `turns[].prompt_text` / `response_text` | string | No | User input and Agent answer |
+| `turns[].messages` | array | No | Full message list |
+| `turns[].tool_calls` / `tool_results` | array | No | Tool calls and results |
+| `turns[].injected_skills` / `used_skills` / `modified_skills` | array | No | Skill usage |
+| `turns[].metrics` | object | No | Metrics observed in this turn |
+| `turns[].context_usage` | object | No | Context references used in this turn, see below |
 | `metrics` | object | No | Session-level metrics |
-| `metrics.interaction_turns` | integer | No | Total interaction turns |
-| `metrics.tool_call_count` | integer | No | Total tool call count |
-| `metrics.total_tokens` | integer | No | Total token consumption |
-| `metrics.input_tokens` | integer | No | Input tokens |
-| `metrics.output_tokens` | integer | No | Output tokens |
-| `source_materials` | array | No | Source material list (code repositories, documents, etc.) |
-| `system_prompt` | string | No | System prompt |
-| `title` | string | No | Session title |
-| `force_reprocess` | boolean | No | Force reprocessing of already processed Sessions (bypasses content fingerprint dedup); the session then records a `reprocess_reason` (default `explicit dashboard reingest`, may be passed explicitly in the request body) |
-| `defer_evolution_trigger` | boolean | No | Defer evolution cycle trigger (used for batch ingest) |
+| `title`, `system_prompt` | string | No | Session title and system prompt |
+| `source_materials` | array | No | Initial task materials |
+| `business_time` | string | No | Business time (ISO 8601) |
+| `meta` | object | No | Extra metadata |
 
-### Request Body Size Limit
+`runtime.integration_id` and `runtime_context.external_subject` belong to the retired Agent registration protocol and return 400 when present. The server determines the tenant from the tenant key and the OpenViking Account from the tenant's effective configuration; clients cannot override either.
 
-Default maximum 32MB, adjustable via the `TEAMEVOLVER_MAX_SESSION_BODY_BYTES` environment variable (minimum 1KB).
+### context_usage
+
+```json
+{
+  "context_snapshot_id": "ctxsnap_...",
+  "memory_refs": [{"context_ref": "ctxref_...", "operation": "injected"}],
+  "skill_refs": [{"context_ref": "ctxref_...", "operation": "read"}],
+  "feedback": {}
+}
+```
+
+At acceptance `teamEvolver/context/usage.py:verify_usage` checks that snapshots and references belong to the current `(tenant_id, user_id)` and are not revoked, that reference kinds match their field, that `operation` is one of `retrieved`, `injected`, `read`, `selected`, and that there are at most 200 per kind. When a snapshot is given, references must belong to it.
 
 ### Response
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `status` | string | Processing status: `queued` (enqueued), `duplicate` (duplicate skipped), `skipped` (no value skipped) |
-| `session_id` | string | Session ID |
-| `queued` | boolean | Whether entered the evolution queue |
-| `key` | string | Queue key (returned only when queued) |
-| `trigger_scheduled` | boolean | Whether evolution trigger is scheduled (returned only when queued) |
-| `value_judge` | object | Value classification produced by mandatory Session Analyze (returned when skipped/queued; `mode` is `merged`) |
+```json
+{
+  "accepted": true,
+  "ingestion_id": "3f0c...",
+  "job_id": "3f0c...:session.normalize",
+  "status": "accepted",
+  "status_url": "/api/jobs/3f0c...:session.normalize",
+  "dedupe": false
+}
+```
 
-## 3. Usage Examples
+Pushing the same `session_id` again within a tenant returns the first `ingestion_id`, `job_id` and current status with `dedupe` set to `true`.
+
+`job_id` refers only to the first stage. The final Session state is visible in the console, or via `/api/sessions/{session_id}/stages` in [Session Queries](./08-sessions-api.md).
+
+### Processing Stages
+
+| Stage | Worker kind | Content |
+| --- | --- | --- |
+| normalize | `session.normalize` | Normalize the envelope and write the stage result |
+| analyze | `session.analyze` | Two model stages, Session Analyze (value classification) and Trace Analyze; either failing retries |
+| archive | `session.archive` | Writes the formal Session (business time + ingest time) after all required stages succeed |
+
+Sessions classified `valuable` become evolution input; `skipped` Sessions are also kept for audit. A failed model call never produces a formal Session.
+
+### Errors
+
+| Status | detail | Cause |
+| --- | --- | --- |
+| 400 | `unsupported session schema` | `schema_version` is not v2 |
+| 400 | `PROTOCOL_VERSION_UNSUPPORTED` | `protocol_version` is not `2.0` |
+| 400 | `retired Agent identity fields are not accepted` | Contains `integration_id` or `external_subject` |
+| 400 | `V2 session runtime.type is required` | Missing `runtime.type` |
+| 400 | `V2 session session_id is required` | Missing `session_id` |
+| 400 | `USER_ID_REQUIRED` / `USER_ID_INVALID` | `user_id` missing or invalid |
+| 400 | `V2 session turns must be a non-empty list of objects` | `turns` empty or elements are not objects |
+| 400 | `invalid or expired context reference` and similar | `context_usage` validation failed |
+| 400 | `session body must be valid JSON` / `session body must be an object` | Malformed body |
+| 401 | `TENANT_TOKEN_REQUIRED` | No valid tenant key |
+| 413 | `session body exceeds <n> bytes` | Exceeds `TEAMEVOLVER_MAX_SESSION_BODY_BYTES` (default 32 MiB) |
+| 503 | `TENANT_ACCOUNT_REQUIRED` | Tenant has no OpenViking Account configured |
+
+### Example
 
 ```bash
-curl -X POST "http://localhost:52010/ingest_session" \
-  -H "Authorization: Bearer tevt_abcdef1234567890" \
-  -H "Content-Type: application/json" \
+curl -X POST http://localhost:52010/ingest_session \
+  -H "Authorization: Bearer $TEAMEVOLVER_TENANT_TOKEN" \
+  -H 'Content-Type: application/json' \
   -d '{
     "schema_version": "teamevolver.agent-session.v2",
     "protocol_version": "2.0",
-    "session_id": "sess-20240115-001",
-    "runtime": {
-      "type": "my-agent",
-      "version": "1.0.0",
-      "protocol_version": "2.0"
-    },
-    "runtime_context": {
-      "user_id": "user-001"
-    },
-    "title": "Database connection troubleshooting",
-    "system_prompt": "You are a helpful coding assistant.",
-    "turns": [
-      {
-        "turn_num": 1,
-        "prompt_text": "My database connection keeps timing out, how do I troubleshoot?",
-        "response_text": "Database connection timeouts can be investigated from the following aspects...",
-        "messages": [
-          {"role": "user", "content": "My database connection keeps timing out, how do I troubleshoot?"},
-          {"role": "assistant", "content": "Database connection timeouts can be investigated from the following aspects..."}
-        ],
-        "tool_calls": [],
-        "tool_results": [],
-        "injected_skills": ["database-debugging"],
-        "used_skills": ["database-debugging"],
-        "metrics": {
-          "input_tokens": 520,
-          "output_tokens": 890
-        }
-      }
-    ],
-    "metrics": {
-      "interaction_turns": 1,
-      "tool_call_count": 0,
-      "total_tokens": 1410
-    },
-    "source_materials": []
+    "session_id": "task-001",
+    "runtime": {"type": "my-agent"},
+    "runtime_context": {"user_id": "alice"},
+    "turns": [{"turn_num": 1, "prompt_text": "Analyze cost", "response_text": "Cost report done."}]
   }'
 ```
 
-## 4. Response Contract and Error Handling
+## Data Source Adapters
 
-### Success Response Example (Enqueued)
+A data source Adapter is a tenant-supplied Python file that connects to the upstream (Doris, Langfuse and others), filters records and converts them into standard Sessions. Adapter source is versioned in PostgreSQL `adapter_versions` and the tenant binding is in `adapter_bindings`; running tasks pin the revision current at acceptance. Files under `session_ingestion/adapters/` in the repository are bundled templates and must be written to PG with the Root Key before they can be bound.
+
+Adapter file requirements (`session_ingestion/adapters/_runtime.py:validate_content`):
+
+- The file name ends with `.py`, does not start with `_`, and the content is at most 256 KiB.
+- It defines `build_adapter()` at the top level.
+- Optional literal dict `SOURCE`: `enabled` (bool), `supported_filters` / `required_filters` (string lists; required must be contained in supported), `exclude_session_id_patterns`, `max_sessions` (1–1000, default preview count).
+- Credentials are read from environment variables, never written in source.
+
+### Endpoints
+
+| Method | Path | Permission | Description |
+| --- | --- | --- | --- |
+| GET | `/api/datasource` | Tenant administrator | Current binding, available Adapters, schedule and last pull status |
+| PUT | `/api/datasource` | Tenant administrator | `{"file": "x.py", "revision": 3}` binds; an empty `file` unbinds; omitting revision takes the latest |
+| GET | `/api/datasource/code?file=x.py` | Root Key | Read latest source and revision |
+| PUT | `/api/datasource/code` | Root Key | `{"file", "code", "expected_revision"}` saves a new version; a revision mismatch returns 409 |
+| POST | `/api/datasource/code/test` | Root Key | `{"file", "code", "mode", ...}` tests an unsaved draft; `mode` is `validate`, `health`, `preview` or `session` |
+| POST | `/api/datasource/test` | Tenant administrator | Connectivity check of the bound Adapter, returns 202 |
+| POST | `/api/datasource/sessions` | Tenant administrator | `{"filters": {...}, "max_sessions": 100}` previews the Session list, returns 202 |
+| POST | `/api/datasource/pull` | Tenant administrator or tenant key | `{"from_timestamp", "to_timestamp", "filters"}` pulls and ingests, returns 202 |
+| GET | `/api/datasource/jobs/{job_id}/result` | Tenant administrator | Result of test, preview and pull tasks |
+| GET | `/api/datasource/schedule` | Tenant administrator | Same as `GET /api/datasource` |
+| PUT | `/api/datasource/schedule` | Tenant administrator | Save the scheduled pull configuration |
+| POST | `/api/datasource/schedule/run` | Tenant administrator | Pull once now using the scheduled window (previous calendar day) |
+
+`validate` mode returns `{"ok": true, "metadata": {...}}` synchronously; other tests, previews and pulls run as `session.pull` tasks on the Worker. `max_sessions` ranges 1–1000. A pull walks the full filter window and is not limited by `max_sessions`.
+
+### Scheduled Pull
 
 ```json
-{
-  "status": "queued",
-  "session_id": "sess-20240115-001",
-  "queued": true,
-  "key": "sess-20240115-001",
-  "trigger_scheduled": true,
-  "value_judge": {
-    "decision": "valuable",
-    "confidence": 0.92,
-    "reason": "Contains specific technical problem and effective solution"
-  }
-}
+{"enabled": true, "time": "02:00", "timezone": "Asia/Shanghai", "window": "previous_day"}
 ```
 
-### Success Response Example (Duplicate Skipped)
+All four fields are required and `window` only supports `previous_day`. An Adapter must be bound before enabling. The configuration is stored as `datasource_schedule` in the tenant `session` module configuration. The Worker calls `enqueue_due` on each tenant refresh: once local time reaches `time`, it accepts one pull for the previous calendar day; the window is deduplicated by `dedupe_key`, so multiple Worker replicas never accept it twice.
 
-```json
-{
-  "status": "duplicate",
-  "session_id": "sess-20240115-001",
-  "queued": false
-}
+### CLI
+
+`teamEvolver datasource` calls these endpoints with the Root Key and needs `TEAMEVOLVER_ROOT_API_KEY`:
+
+```bash
+teamEvolver datasource --tenant demo status
+teamEvolver datasource --tenant demo bind example-doris.py
+teamEvolver datasource --tenant demo test
+teamEvolver datasource --tenant demo list --from-timestamp 2026-10-01T00:00:00+08:00 --to-timestamp 2026-10-02T00:00:00+08:00 --max-sessions 20
+teamEvolver datasource --tenant demo pull --from-timestamp 2026-10-01T00:00:00+08:00 --to-timestamp 2026-10-02T00:00:00+08:00
 ```
 
-### Success Response Example (No Value Skipped)
+`--url` sets the service address, default `http://127.0.0.1:<api_port>`.
 
-```json
-{
-  "status": "skipped",
-  "session_id": "sess-20240115-001",
-  "queued": false,
-  "value_judge": {
-    "decision": "frivolous",
-    "confidence": 0.85,
-    "reason": "Casual conversation, no technical value"
-  }
-}
-```
-
-### Error Codes
-
-| HTTP Status | Error Message | Cause |
-|------------|--------------|-------|
-| 401 | `TENANT_TOKEN_REQUIRED` | Missing a valid tenant machine credential (`tevt_`) |
-| 400 | `PROTOCOL_VERSION_UNSUPPORTED` | Strict mode requires protocol major version 2 |
-| 400 | `unsupported session schema: <schema>` | schema_version is not `teamevolver.agent-session.v2` |
-| 400 | `V2 session session_id is required` | Missing session_id |
-| 400 | `V2 session runtime.type is required` | Missing runtime.type |
-| 400 | `V2 session turns must be a non-empty list` | turns is empty or not an array |
-| 403 | `UNKNOWN_INTEGRATION_ID` | (V1) runtime.integration_id is not registered in this tenant |
-| 403 | `INTEGRATION_DISABLED` | (V1) The Agent for runtime.integration_id is registered but not active |
-| 403 | `SUBJECT_NOT_MAPPED` | (V1) runtime_context.external_subject not mapped to teamEvolver user |
-| 400 | `PROTOCOL_VERSION_UNSUPPORTED: <version>` | (V1) Protocol version major version is not 1 |
-| 400 | `unsupported session schema: <schema>` | (V1) schema_version is not `teamevolver.agent-session.v1` |
-| 400 | `V1 session session_id is required` | (V1) Missing session_id |
-| 400 | `V1 session runtime.type is required` | (V1) Missing runtime.type |
-| 400 | `V1 session runtime.integration_id is required` | (V1) Missing runtime.integration_id |
-| 400 | `V1 session turns must be a non-empty list` | (V1) turns is empty or not an array |
-| 400 | `invalid context_usage: <reason>` | References in context_usage are invalid or expired |
-| 400 | `session body must be valid JSON` | Request body is not valid JSON |
-| 400 | `session body must be an object` | Request body is not a JSON object |
-| 413 | `session body exceeds <limit> bytes` | Request body exceeds size limit |
-| 503 | `session storage is not configured` | Session storage not configured |
-
-
-
-The server derives the internal ID from tenant/user/external Session ID, so returned IDs may differ from input. Source IDs are preserved for display and tracing. Legacy envelopes work only during the `dual` window; strict mode requires v2.
-
-| HTTP | Error |
-| --- | --- |
-| 400 | `USER_ID_REQUIRED` / `USER_ID_INVALID` |
-
-When the request body does not contain `schema_version` or is not identified as `teamevolver.agent-session.v1`, the system falls back to legacy compatibility mode, using a shared secret (`EVOLVE_INGEST_API_KEY`) for authentication, and mapping usernames via `user_alias`/`runtime_context.username`. This mode exists only for compatibility with legacy Agent integrations; new integrations should use the V1 protocol. The legacy branch is unchanged: even when a tenant machine credential carries a legacy payload, it still goes through the same lenient `resolve_registered_user_id` mapping.
+Step-by-step instructions are in [Data Source Onboarding](../guides/10-datasource-onboarding.md).

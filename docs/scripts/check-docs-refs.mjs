@@ -9,7 +9,7 @@
  *
  * Usage:
  *   npm run check:refs
- *   node scripts/check-docs-refs.mjs [--strict]
+ *   node docs/scripts/check-docs-refs.mjs [--strict]
  *
  * Exit code 0 = all refs valid; non-zero = broken refs found.
  */
@@ -43,11 +43,17 @@ function walkMarkdown(dir, results = []) {
   return results
 }
 
+// Maintained documentation: bilingual docs, design notes and the docs index /
+// coding-agent pages (see docs/README.md).
+const topLevelMarkdown = ['README.md', 'coding-agent.md', 'coding-agent.en.md']
+  .map(entry => path.join(docsRoot, entry))
+  .filter(entry => fs.existsSync(entry))
+
 const mdFiles = [
   ...walkMarkdown(path.join(docsRoot, 'zh')),
   ...walkMarkdown(path.join(docsRoot, 'en')),
   ...walkMarkdown(path.join(docsRoot, 'design')),
-  ...walkMarkdown(path.join(docsRoot, 'ontology-integration')),
+  ...topLevelMarkdown,
 ]
 
 // ---------------------------------------------------------------------------
@@ -64,13 +70,22 @@ const mdLinkRegex = /\[([^\]]*)\]\((?!file:)([^)]+\.md[^)]*)\)/g
 // Matches ![alt](/assets/image.png) or ![alt](./assets/image.png)
 const imageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g
 
-// Matches "code entry" lines like:
-//   teamEvolver/proxy/routes.py:register_agent
-//   teamEvolver/evolve/prompt_studio.py
-const codeEntryRegex = /(?:^|\s)`((?:teamEvolver|team_memory)\/[a-zA-Z0-9_/.]+\.py)(?::([a-zA-Z_][a-zA-Z0-9_.]*))?`/gm
+// Matches backticked code entries in any repository package, e.g.
+//   `teamEvolver/app.py:create_app`
+//   `team_skills/api/candidates.py`
+const codePackages = [
+  'teamEvolver', 'team_memory', 'team_skills', 'team_replay', 'team_miner',
+  'session_ingestion', 'web-ui', 'scripts', 'cicd_scripts', 'tests',
+].join('|')
+const codeEntryRegex = new RegExp(
+  '`((?:' + codePackages + ')\\/[a-zA-Z0-9_\\-/.]+\\.(?:py|ts|tsx|sh|sql|mjs))' +
+  '(?::([a-zA-Z_][a-zA-Z0-9_.]*))?`',
+  'gm',
+)
 
-// Matches code-entry lines that look like: `- `teamEvolver/...``
-const codeEntryListRegex = /`((?:teamEvolver|team_memory)\/[a-zA-Z0-9_/.]+\.py)`/g
+// Matches relative markdown links to repository files that are not markdown
+// pages, e.g. [app.py](../../../teamEvolver/app.py) or [cli/](../../../teamEvolver/cli/)
+const repoLinkRegex = /\[([^\]]*)\]\((?!https?:|mailto:|file:|#|\/)([^)\s]+)\)/g
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -128,7 +143,6 @@ for (const mdFile of mdFiles) {
   filesChecked++
   const rel = path.relative(docsRoot, mdFile)
   const content = fs.readFileSync(mdFile, 'utf8')
-  const lines = content.split('\n')
 
   // 1. Check file:/// references (file:///path -> absolute path /path)
   for (const match of content.matchAll(codeFileRegex)) {
@@ -167,7 +181,7 @@ for (const mdFile of mdFiles) {
       const symName = symbol.split('.').pop()
       const symbolRegex = new RegExp(
         `(?:def|class|async\\s+def)\\s+${symName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}\\b` +
-        `|^${symName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}\\s*=:?`,
+        `|^${symName.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}\\s*(?::[^=\\n]+)?=`,
         'm'
       )
       if (!symbolRegex.test(fileContent)) {
@@ -191,6 +205,19 @@ for (const mdFile of mdFiles) {
     ]
     if (!candidates.some(p => fileExists(p))) {
       errors.push(`[${rel}] Broken internal link: ${linkTarget} -> ${path.relative(docsRoot, targetPath)}`)
+    }
+  }
+
+  // 3b. Check relative links to non-markdown repository files and directories
+  for (const match of content.matchAll(repoLinkRegex)) {
+    const linkTarget = normalizePath(match[2])
+    if (!linkTarget || /\.md$/.test(linkTarget)) continue
+    if (match.index > 0 && content[match.index - 1] === '!') continue // images: step 4
+    refsChecked++
+    const targetPath = resolveInternalLink(linkTarget, mdFile)
+    const candidates = [targetPath, targetPath + '.md', path.join(targetPath, 'index.md')]
+    if (!candidates.some(p => pathExists(p))) {
+      errors.push(`[${rel}] Broken relative link: ${match[2]} -> ${path.relative(repoRoot, targetPath)}`)
     }
   }
 
@@ -245,6 +272,12 @@ if (fs.existsSync(schemasDir)) {
   for (const ref of schemaRefs) {
     if (!fileExists(path.join(schemasDir, ref))) {
       errors.push(`Referenced schema file missing: schemas/${ref}`)
+    }
+  }
+  // Every published schema must be documented; retired protocol schemas are deleted.
+  for (const schema of schemas) {
+    if (!schemaRefs.has(schema)) {
+      warnings.push(`Schema not referenced by any maintained page: schemas/${schema}`)
     }
   }
 }

@@ -1,8 +1,14 @@
 # Skill Mining API
 
-These console-internal interfaces manage real OpenViking Compile rounds and human Evidence supplements. They require a valid console Session Cookie and existing mining administration permissions. Tenant machine credentials cannot call these management interfaces. The Agent data-plane protocol is unchanged.
+These console-internal interfaces manage OpenViking Compile rounds and human Evidence supplements. They require a valid console Session Cookie and either `tenant_admin` in the selected tenant or `platform_admin`. Ordinary members and tenant machine credentials cannot call these management interfaces. The Agent data-plane protocol is unchanged.
 
-Execution and synchronization live in the [main-service bridge](../../../team_miner/bridge.py); local jobs, rounds and supplements live in the [job repository](../../../team_miner/ov_compile_mining.py). See [Multi-round Skill Mining](../guides/17-multi-round-skill-mining.md) for the workflow.
+`team_miner/api/` composes the interfaces. Skill mining lives in `team_miner/skill_miner/`, separately from knowledge base mining in `team_miner/knowledge_miner/`. Jobs, rounds, supplements and artifact content persist through the [PostgreSQL Repository](../../../team_miner/skill_miner/repository.py); temporary working directories are rebuildable caches. See [Multi-round Skill Mining](../guides/17-multi-round-skill-mining.md) for the workflow.
+
+## Default delivery and candidate eligibility
+
+The current default compiler is the knowledge-point Skill compiler in `knowledge_compiler_v8.py`, exposed through `team_miner/skill_miner/knowledge_compiler.py`. Its `completion_policy: te-compile-finished.v1` records mining completion after remote Compile completion and persistence of returned artifacts. Content acceptance, Test Datasets and human approval are not completion gates. This mode does not require `benchmark.json`; its inventory explicitly reports `content_validated=false` and `can_submit=false`.
+
+Mining completion therefore does not establish Candidate Review eligibility. The capability plan,12–24 Cases and human Evidence question contracts below apply to jobs explicitly using that review contract. Delivery-only packages cannot be submitted directly, and TE does not invent evaluations or Cases to make them eligible. Within the round limit, explicit revision requirements can start another round without empty automatic continuation. Review-capable packages must pass revalidation of the selected independent candidate before submission.
 
 ## Interfaces
 
@@ -16,6 +22,26 @@ Execution and synchronization live in the [main-service bridge](../../../team_mi
 | POST | `/api/mining/jobs/{job_id}/finish` | Save final review and finish mining |
 | POST | `/api/mining/jobs/{job_id}/resume` | Recover an identified failure or explicitly authorize one format-fix test |
 
+## Execution and configuration
+
+### Background mutation results
+
+Uploads, conversion, artifact saves and other long operations involving external I/O first enqueue PostgreSQL `worker_tasks` and return HTTP 202 with the receipt below. API requests do not poll Compile or convert batches inline.
+
+```json
+{"job_id":"skill-miner-command:example","status_url":"/api/mined-jobs/skill-miner-command:example"}
+```
+
+Poll the receipt's `status_url` while the status is `queued`, `running`, `retry_wait`, `waiting_external` or `reconciling`. A `succeeded` response must include `result` with the operation's original response shape, such as upload `file_count`, saved `content` or the updated `job`. A `failed` or `cancelled` response provides `error_code` and is not a successful save. Polls remain bound to the submitting tenant. The console waits for at most20 minutes without resubmitting the mutation; persisted work remains available afterward.
+
+Skill mining jobs under `/api/mining/jobs` retain the business states documented below. A mining job and the Worker command that performs one operation have separate identities. HTTP 202 alone does not prove Compile execution or artifact persistence.
+
+### Settings revisions
+
+The tenant's `miner` module configuration is required. Missing configuration returns503 without YAML or local-directory fallback. It provides runtime configuration needed by both knowledge base mining and Skill mining. Skill-specific round limits, deadlines and compiler instructions live separately in PostgreSQL `skill_mining_settings` and do not rewrite knowledge base mining settings.
+
+`GET /api/mining/settings` returns its independent `revision`. `POST /api/mining/settings` and `POST /api/mining/prompts/ov_compile/reset` require the matching `expected_revision`. Compare-and-swap rejects stale updates with409; reload and review before saving again. Accepted jobs freeze both the `miner` module revision and Skill settings revision instead of reading later defaults.
+
 ## Create a job
 
 The main fields of `POST /api/mining/jobs` are:
@@ -26,23 +52,23 @@ The main fields of `POST /api/mining/jobs` are:
 | `source_id` | string | Registered source reference tagged for Skill use |
 | `input_dir` | string | Selected OpenViking Resources directory URI |
 | `max_rounds` | integer | Actual round limit, 1–5, default 3 |
-| `human_checkpoints` | boolean | Wait for human review after each round, default true |
+| `human_checkpoints` | boolean | Wait for review after each review-contract round, default true |
 | `mining_mode` | string | `auto` discovery (default), `single` one complete Skill, or `target` requested count |
 | `mining_direction` | string | Up to 4000 characters; optional in auto/target, required complete-method goal in single |
 | `target_skill_count` | integer/null | Required integer 1–100 in target, fixed to 1 in single, null or omitted in auto |
 | `runtime_timeout_seconds` | integer | Round execution budget, 60–7200 seconds, default3600; not an ETA |
 
-Default jobs use `execution_protocol: "te-native-mining.v1"`: one normal Compile per round, full initial construction, then incremental updates of the same `stable_output_uri` using current supplements, implicated originals and changed revision context. `max_rounds` is an upper bound; an empty question list finishes mining without an empty extra round.
+Whole-round jobs use `execution_protocol: "te-native-mining.v1"`: one normal Compile per round, full initial construction, then incremental updates of the same `stable_output_uri` using current supplements, implicated originals and changed revision context. `max_rounds` is an upper bound; an empty question list finishes mining without an empty extra round.
 
 The first round determines and saves the primary language of the frozen original sources, using Simplified Chinese when Chinese predominates. Later rounds retain that language rather than deriving it from earlier English artifacts or supplements. The runtime adds the job's language rules to new Compile requests. Human-readable prose, explanations, case Queries, Checklist text, shared analysis and review questions use that language. Field names, IDs, file paths, source URIs, code, fixed enum values, direct source quotations and structural labels such as `Checklist`, `Evidence` and `Materials` remain unchanged. Neither the current API nor the console offers a separate output-language option.
 
 Saved custom business instructions remain unchanged and do not require a reset for a language update. Accepted requests retain their frozen version; completed artifacts are not automatically translated or recompiled.
 
-Default compiler jobs use `candidate_contract_version: 2`. One native Compile plans complete independent methods and generates their artifacts. Counts follow goals and sources rather than files, customer profiles or substeps, without the old host eight-candidate batch limit. Insufficient support remains explicit rather than forcing a count.
+Jobs using the multi-candidate review contract use `candidate_contract_version: 2`. One native Compile plans complete independent methods and generates their artifacts. Counts follow goals and sources rather than files, customer profiles or substeps, without the old host eight-candidate batch limit. Insufficient support remains explicit rather than forcing a count.
 
 When a previously saved custom compiler Skill still uses the single-candidate contract, new jobs retain `candidate_contract_version: 1` with a compatibility warning. Reset to the current default compiler Skill to enable multiple candidates in subsequently created jobs. Existing jobs retain their frozen contracts.
 
-The new execution lives in [native rounds](../../../team_miner/native_round.py) and the [compiler Skill](../../../team_miner/native_compiler.py). Per-method METHOD.json receipts aggregate into the existing capability plan. Test Dataset Markdown is deterministically rendered from validated JSON. Lost acceptance is reconciled by the original key; only explicit artifact-validation failures or truncated output permit at most two whole-task repairs per round. Dependency, source, authentication, transport and unknown failures retain structured diagnostics without becoming new business instructions, preserving original requests, errors and results.
+Whole-round execution lives in [native rounds](../../../team_miner/skill_miner/native_round.py) and the [compiler Skill](../../../team_miner/skill_miner/native_compiler.py). Per-method METHOD.json receipts aggregate into the existing capability plan. Test Dataset Markdown is deterministically rendered from validated JSON. Lost acceptance is reconciled by the original key; only explicit artifact-validation failures or truncated output permit at most two whole-task repairs per round. Dependency, source, authentication, transport and unknown failures retain structured diagnostics without becoming new business instructions, preserving original requests, errors and results.
 
 Proposed deferrals are checked against the relevant original files in bounded tasks before final supplement questions are generated. An omitted rule in a reference summary or an unspecified runtime input is not sufficient evidence of a gap. Later batches and rounds reuse candidate identities; bounded reviews of similar methods retain merge reasons and complete source lineage. Sharing a source, formula or workflow step does not automatically justify merging, and similarity retrieval does not guarantee exhaustive duplicate detection. Each stage compiler carries only its current output contract, with shared business rules kept separate from the full artifact layout. Frozen requests are never rewritten retroactively.
 
@@ -107,8 +133,8 @@ compiled_skill/<skill-name>/BENCHMARK.md
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `schema_version` | string | Fixed value `skill-miner.plan.v1` |
-| `skills` | object[] | Method plans for the round; the default batched flow is not limited by the per-task bound of eight |
-| `deferred` | object[] | Content deferred for insufficient Evidence, with reasons; the default batched flow records facts separately without inventing gaps |
+| `skills` | object[] | Method plans for the round; the staged flow is not limited by the per-task bound of eight |
+| `deferred` | object[] | Content deferred for insufficient Evidence, with reasons; the staged flow records facts separately without inventing gaps |
 
 Each entry in `skills` contains:
 
@@ -147,7 +173,7 @@ Candidate evaluation responses expose `completed`, `skipped`, `not_run`, or `fai
 }
 ```
 
-Attachments are saved locally within the job and frozen into the next round's inputs on continuation. The response includes `ok`, `saved` and the updated `job`; `saved` lists names and references. Staging does not directly modify the original OpenViking source or generated artifacts.
+Attachment content and job references persist in PostgreSQL; temporary directories are rebuilt only for execution. Continuation freezes them into the next round's inputs. The completed background command's `result` includes `ok`, `saved` and the updated `job`; `saved` lists names and references. Staging does not directly modify the original OpenViking source or generated artifacts.
 
 Each upload accepts 1–10 files, with at most 20 staged attachments per round. Original files are limited to 10 MB each and 20 MB per upload. The round's converted Markdown attachments are limited to 8 MB in total.
 
@@ -190,7 +216,7 @@ Job details include status, `current_round`, a `rounds` list, the current `pendi
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `execution_protocol` | string | New default `te-native-mining.v1` |
+| `execution_protocol` | string | `te-native-mining.v1` for whole-round execution |
 | `stable_output_uri` | string | The remote target retained across rounds of one job |
 | `native_compile_history` | array | Actual admitted task IDs and rounds, not internal model calls |
 | `native_repairs` | array | Bounded whole-task repair errors and previous task records |
@@ -221,7 +247,7 @@ Every round has its own deadline. `waiting_human` consumes neither runtime allow
 
 ## Errors
 
-Errors return an HTTP status and a `detail` description. Common cases are:
+Before acceptance, errors return an HTTP status and a `detail` description. Long operations already accepted with202 expose terminal `failed` status and `error_code` at their `status_url`; inspect that background result for execution-time errors below. Common cases are:
 
 | Status | Situation | Action |
 | --- | --- | --- |
@@ -230,15 +256,27 @@ Errors return an HTTP status and a `detail` description. Common cases are:
 | 404 | Missing job or source | Query a valid reference |
 | 409 | Not waiting for review, stale checkpoint, unknown or unanswered required questions, round limit reached or request conflict | Refresh details, correct answers or explicitly mark questions unresolved |
 | 413 | Attachment exceeds the allowed size | Reduce upload content |
-| 429 | All 8 execution slots are occupied | Retry after existing work finishes |
+| 429 | Execution slots or the bounded queue are full | Retry after existing work finishes |
 | 502 | OpenViking source reading is temporarily unavailable | Check existing jobs and retry once connectivity recovers |
 
-Creation and continuation persist local state before preparing remote inputs and submitting Compile in the background. Inspect job `error`, `submission_error` or synchronization information for background failures. A successful HTTP response does not mean remote Compile execution has started.
+Creation and continuation persist PostgreSQL state before preparing remote inputs and submitting Compile in the background. Inspect job `error`, `submission_error` or synchronization information for background failures. A successful HTTP response does not mean remote Compile execution has started.
 
 Shared Test Dataset validation checks structure rather than business facts. Evidence gaps require review even when the format is valid. Final artifacts still require True Replay and Candidate Review.
 
-The new default contract saves `round_work_units` (estimated input-shard and artifact-generation workload) and `round_timeout_seconds` (effective round deadline). Each stage task reserves one eighth of the base deadline, with a minimum of 180 seconds per task; the total remains at least the base deadline. Once planning completes, file and case generation tasks enter the estimate. Within a round, the deadline can only increase and its start time stays unchanged; the next round is estimated independently. Retrying the same accepted request does not add work units. Existing frozen requests are unchanged. Original sources are persisted one file at a time, up to 10000 files and 20 MB per file, without the former aggregate 16 MB limit.
+The staged execution contract saves `round_work_units` (estimated input-shard and artifact-generation workload) and `round_timeout_seconds` (effective round deadline). Each stage task reserves one eighth of the base deadline, with a minimum of 180 seconds per task; the total remains at least the base deadline. Once planning completes, file and case generation tasks enter the estimate. Within a round, the deadline can only increase and its start time stays unchanged; the next round is estimated independently. Retrying the same accepted request does not add work units. Existing frozen requests are unchanged. Original sources are persisted one file at a time, up to 10000 files and 20 MB per file, without the former aggregate 16 MB limit.
 
 Sources are traversed directory by directory through the existing paginated OV file-list API, without a fixed depth or tree-node cutoff. Truncation signals, permission errors, repeated pages and out-of-scope entries are never treated as a complete source. Skill sections are validated and written atomically as a stream; final identity checks and archive hashes read bounded blocks without truncating the body during assembly.
 
 Native failures are stored as `native_failure` with their original diagnostics and fingerprint. Only explicit artifact-validation failures or truncated output permit at most two whole-round repairs. Dependency, source, authentication, transport and unknown failures are not fed back as business instructions. `native_resource_recovery` retains historical resource recovery; `native_contract_recoveries` records bounded explicit guidance upgrades for undeclared-attachment failures and their version hashes. `can_retry_native` and `native_retry_context` expose eligibility for the explicit format-fix test. `native_explicit_retry` retains its administrator authorization summary and separate `attempt_budget` alongside `old_budget`.
+
+## Submit an independent Skill Candidate
+
+`POST /api/mined-jobs/{job_id}/skills/{skill_name}/submit` accepts only optional `artifact_path`, which must identify that Skill's current `SKILL.md` in the specified job. Acceptance returns202 for a background command. Its `result` provides `created`, candidate `job_id`, `skill_name`, `candidate_revision` and `question_count`.
+
+The Worker reads the complete package and capability plan from PostgreSQL and revalidates the selected independent candidate. An incomplete sibling does not block a complete candidate. The package retains `SKILL.md`, `EVALUATION.md`, `benchmark.json`, `BENCHMARK.md` and any returned `METHOD.json`, scripts and reference files. An entrypoint or completion receipt alone does not replace validation.
+
+Resubmitting the same raw bundle and execution-binding version within one tenant returns the same candidate without revising it or resetting review state. Another live candidate with that name makes the accepted background task fail with a conflict `error_code`, preserving human edits and in-flight validation. Worker fences, snapshot revisions and PostgreSQL transaction locks guard writes. Legacy inline Case materials become real `references/mining-materials/<case_id>/<sha256>.txt` files only in the candidate copy. Its canonical Test Dataset references those files, and both Replay branches receive the same verified content. Platform bundle limits apply; collisions or missing content reject submission. Original mining bytes and source hashes remain unchanged. Submission creates an `open` candidate without starting True Replay or Publish.
+
+Source Viking URI citations remain intact. Compiler-provided Session identities, runtimes, Adapter choices and private Context snapshots do not become execution input. TE binds trusted `document` execution to the tenant's configured Replay Adapter; the platform freezes configuration and Adapter revisions when review execution is accepted.
+
+The tenant Replay Adapter used for these document Cases must support the `document` runtime and independent execution without a source Session. An Adapter restricted to another source runtime may reject it. Do not fabricate Sessions or private Context, or switch Adapters to bypass that restriction. Verify real Adapter compatibility separately; a fixed local test Factory establishes interface compatibility only.

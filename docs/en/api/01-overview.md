@@ -1,186 +1,127 @@
-# API overview
+# API Overview
 
-The Agent data plane uses `tevt_ + user_id`; see [v2 identity](../agent-integrations/06-protocol-v2.md).
-The console separates platform administrators, tenant administrators and members; see [Console Identity and Tenant Authorization](./20-console-rbac.md). Tenant Keys cannot call console management APIs.
-
-| Capability | API |
-| --- | --- |
-| Session ingestion | [POST /ingest_session](./03-session-ingest.md) |
-| Nine Context routes | [Context Workspace](./04-context-workspace.md) |
-| Skill bundles | [GET /sync/skills](./06-skill-sync.md) |
-| Replay binding and source | [Replay adapters](./05-replay-branch.md) |
-| Session management | [Sessions](./08-sessions-api.md) |
-| Skill management | [Skills](./09-skills-admin.md) |
-| Validation | [Validation](./10-validation.md) |
-| Memory | [Team Memory](./12-team-memory.md) |
-
-Missing/invalid user IDs return `400 USER_ID_REQUIRED` / `400 USER_ID_INVALID`.
-Invalid tenant credentials return 401. Context resources additionally validate tenant/user and expiry.
+All HTTP endpoints are served by the `api` role on one port (default 52010). The full route list is in the [Endpoint Index](./00-endpoints.md), which is generated from code.
 
 | Item | Value |
-|------|-------|
-| Default Base URL | `http://<host>:52010` |
-| Content-Type | `application/json` (except for file uploads) |
-| Character Encoding | UTF-8 |
-
-teamEvolver uses a single unified port `52010` for all HTTP interfaces, including health checks, Agent Protocol APIs, console APIs, and static web console assets.
+| --- | --- |
+| Base URL | `http://<host>:52010` |
+| Content-Type | `application/json` (file uploads also use JSON + base64 fields) |
+| Encoding | UTF-8 |
+| Long tasks | `202 Accepted` with `job_id` and `status_url` |
 
 ## Authentication
 
-teamEvolver API uses three authentication mechanisms, plus a small set of unauthenticated health and compatibility endpoints:
+Authentication is done by `teamEvolver/admin/authn.py:build_console_authorizer`. Each request is identified as one of the following, in order:
 
-| Authentication Method | Applicable Scenarios | Header Format |
-|----------------------|---------------------|---------------|
-| Legacy ingest key | Non-V1 Session ingest compatibility path | `Authorization: Bearer <EVOLVE_INGEST_API_KEY>` |
-| Tenant Machine Credential | Agent data plane and protocol APIs (Session ingest, Context Workspace, datasource pull, status queries) | `Authorization: Bearer <tenant_agent_token>` |
-| Console Session Cookie | Console management APIs (`/api/*`) | Cookie: `teamEvolver_console_session=<token>` |
-| No Authentication | Health checks, status queries | No authentication required |
+| Identity | Header | Tenant source | Scope |
+| --- | --- | --- | --- |
+| Service Root Key | `Authorization: Bearer <TEAMEVOLVER_ROOT_API_KEY>` | `X-Tenant-Id`, default `default` | All endpoints, treated as the platform administrator service identity |
+| Tenant Key | `Authorization: Bearer tevt_...` | Resolved from the key | Agent data-plane paths only |
+| Console Session | Cookie `teamEvolver_console_session_<hash>` + `X-Tenant-Id` | Explicit `X-Tenant-Id`; membership is checked on every request | Console endpoints, authorized by capability |
+| Anonymous | None | — | `/`, `/console`, `/healthz`, `/readyz`, `/api/auth/*`, static assets |
 
-### Control Plane Key
+### Service Root Key
 
-The key configured through `EVOLVE_INGEST_API_KEY` is used only by the legacy non-V1 Session ingest compatibility path. New integrations use tenant machine credentials.
+`TEAMEVOLVER_ROOT_API_KEY` is a deployment-level secret for operations scripts and the CLI (`teamEvolver datasource` calls the API with it). It maps to the platform administrator service identity and can select any active tenant via `X-Tenant-Id`; a missing or disabled tenant returns `403 TENANT_ACCESS_DENIED`.
 
-Code entry point: `teamEvolver/proxy/routes.py`
+Only the Root Key can read and write tenant Python source: `/api/datasource/code`, `/api/replay-adapter/code` and their `test` endpoints. The Root Key must never be sent to a browser.
 
-### Tenant Machine Credential
+### Tenant Key
 
-The **only machine credential** on the Agent data plane (format `tevt_<random>`): registration no longer issues any per-Agent access token, and any bearer starting with `tev1_` is rejected with `401 {"detail": "AGENT_ACCESS_TOKEN_RETIRED"}` (a temporary migration aid so credentials cached in Agent configs are diagnosable; planned for removal in a later minor).
+Tenant keys start with `tevt_` and are the only machine credential of the Agent data plane. The server stores only their SHA-256 digest and resolves the tenant through `teamEvolver/tenants/registry.py:TenantRegistry`. An invalid key or disabled tenant returns `401 invalid tenant token`; an `X-Tenant-Id` that differs from the key's tenant returns `403 tenant mismatch`.
 
-It is the **tenant-level full-privilege machine credential**: the tenant identity is derived server-side from the credential (a client-supplied `X-Tenant-Id` that disagrees with the derivation is rejected), and it can call these machine paths:
+Tenant keys can only access these paths (`_AGENT_MACHINE_PATHS` in `teamEvolver/admin/authn.py`):
 
-- `/ingest_session` (including Agent Protocol V1 ingest)
-- `/internal/agents/context/*` (all 9 Context Workspace routes)
-- `/langfuse/pull`, `/api/datasource/pull`, `/trigger`, `/status`, `/history`, `/sessions`, `/conversations`, `/storage/status`
+- `/ingest_session`
+- `/internal/agents/context/*`
+- `/sync/skills`
+- `/api/datasource/pull`
+- `/status`, `/history`
 
-The credential is not narrowed by capability → scope mapping (full privilege), but **Context Workspace calls must declare `integration_id`** (query parameter on GET routes, body field on POST routes). The server validates that the Agent belongs to the current tenant and is `active`. The declared identity is the ownership key for `context_ref` issuance/validation, Context Sessions and audit records.
+Other paths return `403 console admin required`. The caller declares `user_id` in the request and the principal is `(tenant_id, user_id)`; rules are in [Protocol v2](../agent-integrations/06-protocol-v2.md).
 
-**Issuance and rotation:**
+Issuing and rotation:
 
-- Multi-tenant deployments: issued by the console when a tenant is created, displayed in full exactly once; the server only stores its SHA-256 hash. Rotate it via `POST /api/tenants/{tenant_id}/rotate-token`; the previous credential stops working immediately.
-- Single-tenant deployments (`storage_pg` disabled): the console does not issue credentials; the operator configures **one** credential via the `TEAMEVOLVER_TENANT_TOKEN` environment variable (or `tenant.machine_token` in config.yaml). It must start with `tevt_`, and the server resolves it to the `default` tenant. Generate it with: `TEAMEVOLVER_TENANT_TOKEN="tevt_$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')"`. Rotation means changing the value and restarting the process. The console's tenant page shows whether it is configured (and the generation command when it is not). On single-tenant deployments this credential is administrator-equivalent on the machine paths.
-
-Management APIs (`/api/*`) **do not accept** this credential. The `default` tenant never carries a console-issued credential: `POST /api/tenants/default/rotate-token` is rejected (400 `default is reserved`), and the console hides the rotate action for it.
-
-Code entry point: `teamEvolver/tenants/registry.py:resolve_by_agent_token`
+- `POST /api/tenants` returns the plaintext key once when a platform administrator creates a tenant.
+- Tenant administrators rotate it with `POST /api/tenants/{tenant_id}/rotate-token`; the old key stops working immediately.
+- The `default` tenant's key is not issued by the console. It is the single key configured in `TEAMEVOLVER_TENANT_TOKEN` (must start with `tevt_`); rotate it by changing the value and restarting.
 
 ### Console Session
 
-An HttpOnly Cookie obtained after logging in via `/api/auth/login`, valid for 24 hours. The browser must explicitly select a tenant, and membership is revalidated on every request. Platform administrators must start a 30-minute, Session-bound support mode before performing tenant governance.
+A successful `POST /api/auth/login` sets an HttpOnly cookie named `teamEvolver_console_session_<12-char hash of host:port:root_path>`, valid for 24 hours and renewed while in use. The browser must send an explicit `X-Tenant-Id` on every request, and the server checks membership with `teamEvolver/admin/authorization.py:resolve_console_membership`:
 
-Code entry point: `teamEvolver/proxy/routes.py:require_console_auth` middleware
+- Members get `workspace.use`, `sessions.use`, `personal.manage`, `team.read`, `team.submit`.
+- Tenant administrators additionally get `tenant.manage`, `members.manage`, `team.publish`.
+- Platform administrators can enter any active tenant with tenant administrator capabilities, plus `platform.manage`, `users.manage`, `audit.read`.
 
-## Versioning
+Without a valid tenant only control-plane paths such as login, identity and tenant management are available; others return `403 TENANT_MEMBERSHIP_REQUIRED` or `403 TENANT_ACCESS_DENIED`. See [Console Identity and Tenant Permissions](./20-console-rbac.md).
 
-Agent Protocol APIs use the `protocol_version` field for version control. The current version is `1.0`. Unknown major versions return a `PROTOCOL_VERSION_UNSUPPORTED` error.
+## Asynchronous Tasks
 
-- Specify `protocol_version` at the top level of the payload during registration
-- Specify in `runtime.protocol_version` during Session ingest
-- Both Replay requests and responses include `schema_version` and `protocol_version` fields
+Operations that write to external systems or take time write the domain record and `worker_tasks` in one short transaction, then return:
+
+```json
+{"job_id": "...", "status": "queued", "status_url": "/api/jobs/<job_id>"}
+```
+
+Each module's accept response also includes its own fields (such as `ingestion_id`, `run_id`). Use the [unified job endpoints](./07-health-status.md#unified-job-endpoints) to query, cancel or retry; each module's `.../jobs/{job_id}/result` returns the business result.
+
+For accept endpoints that take an `Idempotency-Key` header, resubmitting the same key returns the first accepted task; the same key with a different body returns 409. Keys are at most 200 characters.
 
 ## Error Format
 
-All API errors use HTTP status codes uniformly with a JSON response body:
+Errors are an HTTP status code + JSON:
 
 ```json
-{
-  "detail": "Error description message"
-}
+{"detail": "TENANT_ADMIN_REQUIRED"}
 ```
 
-Some Agent Protocol interfaces return structured error codes (string constants), for example:
+Common errors:
 
-- `SUBJECT_NOT_MAPPED` -- Subject not mapped (403)
-- `PROTOCOL_VERSION_UNSUPPORTED` -- Protocol version not supported (400)
-- `INVALID_PAYLOAD` -- Invalid request body format (400)
-- `WORKSPACE_TOKEN_INVALID` -- Invalid access token (401)
-- `TENANT_TOKEN_REQUIRED` -- V1 Session ingest is missing the tenant machine credential (401)
-- `AGENT_ACCESS_TOKEN_RETIRED` -- The request carried a retired `tev1_` Agent access token (401)
-- `INTEGRATION_ID_REQUIRED` -- Tenant machine credential used without declaring integration_id (400)
-- `UNKNOWN_INTEGRATION_ID` -- Declared integration_id is not registered in this tenant (403)
-- `INTEGRATION_DISABLED` -- Declared Agent is disabled (403)
-- `CONTEXT_REF_INVALID` -- Invalid or expired context reference (404)
-- `CONTEXT_SCOPE_FORBIDDEN` -- Context scope permission denied (403)
+| Status | detail | Meaning |
+| --- | --- | --- |
+| 400 | `USER_ID_REQUIRED` / `USER_ID_INVALID` | Agent request is missing `user_id` or uses an invalid one |
+| 400 | `PROTOCOL_VERSION_UNSUPPORTED` | The Session envelope `protocol_version` is not `2.0` |
+| 401 | `TENANT_TOKEN_REQUIRED` | The Agent data plane did not use a valid tenant key |
+| 401 | `login required` | Console endpoint without login |
+| 403 | `TENANT_ADMIN_REQUIRED` / `PLATFORM_ADMIN_REQUIRED` | Insufficient capability |
+| 403 | `CONTEXT_SCOPE_FORBIDDEN` | The Context scope does not allow the operation |
+| 404 | `CONTEXT_REF_INVALID` | `context_ref` does not exist, was revoked or belongs to another user |
+| 409 | — | Version conflict (`expected_revision` / `expected_sha256` mismatch) or the state does not allow the operation |
+| 413 | — | Request body exceeds the endpoint limit |
+| 503 | — | Tenant module configuration missing, or an external dependency is not configured or unavailable |
 
-## Rate Limits
+## Request Limits
 
-- Session ingest request body maximum 32MB (configurable via `TEAMEVOLVER_MAX_SESSION_BODY_BYTES` environment variable, minimum 1KB)
-- Context resolve query string maximum 8000 characters
-- Context remember content maximum 128KB
-- Context read single content maximum 500,000 characters
-- Skill bundle reading maximum 100 files, total content not exceeding 500,000 characters
-- Context Session used_context_refs maximum 200 entries
+| Endpoint | Limit |
+| --- | --- |
+| `POST /ingest_session` body | 32 MiB, adjustable via `TEAMEVOLVER_MAX_SESSION_BODY_BYTES`, minimum 1 KiB |
+| Context body | 256 KiB |
+| Context `resolve.query` | 8000 characters |
+| Context `remember.content` | 128 KiB |
+| Context `read` content per call | 500 KiB; Skill bundles at most 100 files |
+| `context_usage` references per kind | 200 |
+| Replay / dataset body | 96 MiB |
+| Skill library write body | 96 MiB |
+| Memory body | 256 KiB |
 
 ## API Groups
 
-### Agent Protocol Interfaces
-
-| Document | Description |
-|---------|-------------|
-| [Agent registration retirement](./02-agent-register.md) | Current tenant Key and user identity model |
-| [Session Ingest](./03-session-ingest.md) | Submit Agent session trajectory data |
-| [Context Workspace](./04-context-workspace.md) | Context resolution, reading, Memory read/write |
-| [Replay Branch Execution](./05-replay-branch.md) | teamEvolver callback to Agent for True Replay execution |
-| [Skill Sync](./06-skill-sync.md) | Skill pull and push synchronization |
-
-### Control Plane Interfaces
-
-| Document | Description |
-|---------|-------------|
-| [Health and Status](./07-health-status.md) | Health checks, service status, manual evolution trigger |
-| [Session Queries](./08-sessions-api.md) | Query queued Sessions and processed conversations |
-| [Skill Management](./09-skills-admin.md) | Team/personal Skill CRUD, publish requests, rollback, and versions |
-| [Validation and Candidates](./10-validation.md) | Candidate queries, Replay evaluation, release decisions, and deletion |
-| [Team Memory Aggregation](./11-team-memory-aggregation.md) | Cross-user aggregation, run recovery, aggregation Skill, and output settings |
-| [Console Identity and Tenant Authorization](./20-console-rbac.md) | Platform identity, memberships, support mode, authorization audit, and migration |
-
-### Console-internal interfaces
-
-The following `/api/*` endpoints serve the built-in console and require a console Session Cookie. They evolve with the console and are not part of the stable Agent Protocol V1 compatibility surface:
-
-| Prefix | Purpose | Main documentation |
-|--------|---------|--------------------|
-| `/api/auth/*`, `/api/identity/*`, `/api/users/*`, `/api/tenants/*` | Login, platform identity, tenant membership, support mode, and authorization audit | [Console Identity and Tenant Authorization](./20-console-rbac.md) |
-| `/api/openviking/workspace/*` | Workspace browsing, L0/L1, conditional batch writes, and CLI | [Storage Layout](../concepts/09-storage-layout.md) |
-| `/api/replay-lab/*`, `/api/openviking/memory/*` | Skill/Memory experiments and True Replay | [Web Console](../guides/03-console.md) |
-| `/api/mining/*` | Knowledge sources, OV mining rounds, human Evidence supplements and artifact preview/editing | [Skill Mining Guide](../guides/07-skill-miner.md) |
-| `/api/mining/jobs/*` | Real Compile rounds, human checkpoints and Evidence supplements | [Skill Mining API](./17-skill-mining.md) |
-| `/api/langfuse-config`, `/api/langfuse-tracing-config`, `/langfuse/*` | Tenant sources, global tracing, pull, mapping, and status | [Observability Guide](../guides/04-observability.md) |
-| `/api/docs/*` | Built-in document tree, page reads, and search | [Documentation Maintenance](./99-docs-maintenance.md) |
-| `/api/sharing-config`, `/api/model-settings`, `/api/model-settings/test`, `/api/skill-evolution/settings` | Sharing/local-fallback storage config, evolution model config (with connectivity test), and evolution settings | [Web Console](../guides/03-console.md) |
-| `/api/skill-evolution/session-analysis/audit`, `/api/mined-skills`, `/api/mined-skills/{name}/submit` | Session filter audit queries, mining artifact queries and submission | [Skill Miner Guide](../guides/07-skill-miner.md) |
-| `/api/openviking-accounts`, `/api/openviking-accounts/{account}/users`, `/api/openviking-accounts/{account}/import-users` | OpenViking account list, account users, and user import | [Web Console](../guides/03-console.md) |
-| `/sessions`, `/conversations`, `/conversations/export`, `/conversations/status`, `/conversations/{session_id}`, `/conversations/{session_id}/process`, `/history` | Console Session/conversation browsing, export, processing status, and history queries | [Session Queries](./08-sessions-api.md) |
-| `/v1/models`, `/v1/chat/completions` | OpenAI-compatible model proxy (model listing and chat completions) | — |
-| `/internal/agentshub/openviking-config`, `/internal/reload-skills` | AgentsHub internal config delivery, Skill runtime reload | — |
-
-### Documentation Maintenance
-
-| Document | Description |
-|---------|-------------|
-| [Documentation Maintenance Guide](./99-docs-maintenance.md) | Documentation writing standards and maintenance processes |
-
-## Console account registration
-
-`GET /api/auth/status` includes the boolean `self_registration_enabled` alongside
-the existing session status. No credentials are returned.
-
-`POST /api/auth/register` accepts `username`, `password`, and optional `display_name`
-and `email`. It always creates an ordinary user; a supplied `role` cannot grant admin rights.
-
-- With `service.self_registration_enabled=true`, anonymous registration remains available.
-- With `false`, registration requires a TE service Root Key verified by the authentication
-  middleware. Otherwise it returns `403` with `{"detail":"SELF_REGISTRATION_DISABLED"}`.
-- Initial admin bootstrap is still required; setup-required and duplicate usernames return
-  `409`. Missing username/password returns `400` after registration authorization succeeds.
-- Existing administrator user-management APIs remain available. Tenant Agent keys cannot register users.
-
-Backend example (`TE_ROOT_KEY` must hold the TE service Root Key, never browser code):
-
-```bash
-curl -X POST 'http://localhost:52010/api/auth/register' \
-  -H "Authorization: Bearer ${TE_ROOT_KEY}" \
-  -H 'Content-Type: application/json' \
-  --data '{"username":"new-user","password":"replace-with-a-strong-password"}'
-```
-
-See [configuration](../guides/01-configuration.md#console-self-registration) for precedence and restart requirements.
+| Page | Content |
+| --- | --- |
+| [Session Ingestion and Data Sources](./03-session-ingest.md) | `POST /ingest_session`, data source Adapters and scheduled pulls |
+| [Agent Context](./04-context-workspace.md) | The nine Context endpoints |
+| [Replay and Experiment Workbench](./05-replay-branch.md) | Replay Adapter, datasets, Replay runs, workbench |
+| [Skill Pull](./06-skill-sync.md) | `GET /sync/skills` |
+| [Health, Status and Jobs](./07-health-status.md) | `/healthz`, `/readyz`, `/status`, `/api/jobs/*` |
+| [Session Queries](./08-sessions-api.md) | Console Session list, content, export |
+| [Team Skill Library](./09-skills-admin.md) | Skill CRUD, versions, rollback, delivery records |
+| [Candidates and Evolution](./10-validation.md) | Skill Candidates, evolution triggers, Prompt and evolution settings |
+| [Team Memory](./11-team-memory-aggregation.md) | Memory runs, maintenance, changes and Memory Replay |
+| [Service Logging Status](./15-logging-status.md) | `/api/logging/status` |
+| [Successful Experiences](./16-experience-sync.md) | Experiences, Patterns and experience sync |
+| [Skill Import and Export](./18-skill-transfer.md) | ZIP, marketplace, Git |
+| [Console Identity and Tenant Permissions](./20-console-rbac.md) | Login, users, tenants, members, platform settings |
+| [Knowledge Base Mining](./22-knowledge-mining.md) | `/api/knowledge-mining/*` |
+| [Workspace and Platform Assets](./23-workspace-assets.md) | `/api/openviking/workspace/*`, `/api/platform-assets/*` |
+| [Docs Maintenance](./99-docs-maintenance.md) | Docs conventions, endpoint index and check scripts |

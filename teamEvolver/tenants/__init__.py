@@ -1,4 +1,4 @@
-"""Tenant management (multi-tenancy plan Phase 1)."""
+"""Tenant registry, membership governance and tenant configuration."""
 
 from .registry import (
     AGENT_TOKEN_PREFIX,

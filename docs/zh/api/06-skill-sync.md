@@ -1,45 +1,75 @@
 # Skill 拉取 API
 
-Skill 分发统一使用拉取模式。teamEvolver 不维护 Agent 注册回调或 Skill Sync
-webhook outbox；发布、回滚和删除由 `SkillMutationService` 写入版本与
-tombstone，客户端通过快照接口获取当前状态。
+Agent 在模型调用前拉取本租户团队 Skill 的完整 bundle。团队 Skill 的权威版本保存在 PostgreSQL，所有 API 副本返回相同内容。交付模式为 pull，服务端不向 Agent 推送。
 
-## 完整 Bundle 快照
+代码入口：`team_skills/api/__init__.py:create_router`（`_register_agent_pull`）。
 
-```http
-GET /sync/skills?user_id=alice
-Authorization: Bearer tevt_<random>
+## 请求
+
+```
+GET /sync/skills?user_id=<user_id>
+Authorization: Bearer tevt_...
+If-None-Match: "<上次的 ETag>"
 ```
 
-服务端从租户凭证解析 Account，并校验 `user_id`。客户端声明的租户不能改变
-数据范围。
+| 参数 | 必填 | 说明 |
+| --- | --- | --- |
+| `user_id` | 是 | 租户内用户 ID，规则见 [协议 v2](../agent-integrations/06-protocol-v2.md#身份) |
+| `If-None-Match` | 否 | 上次响应的 `ETag`，内容未变时返回 304 |
 
-响应包含：
+## 响应
 
-| 字段 | 说明 |
-|------|------|
-| `status` | `ok` 或 `error` |
-| `skills` | 当前租户的 Skill Bundle 列表 |
-| `skills[].name` | Skill 名称 |
-| `skills[].version` | 已发布版本 |
-| `skills[].files` | Bundle 文件及 base64 内容 |
-| `skills[].tombstone` | 删除标记（存在时客户端应移除本地版本） |
-| `total` | Skill 总数 |
-
-## Context Skill 清单
-
-```http
-GET /internal/agents/context/skills?user_id=alice&scope=team
-Authorization: Bearer tevt_<random>
+```json
+{
+  "status": "ok",
+  "source": "registry",
+  "total": 1,
+  "skills": [{
+    "name": "cost-report",
+    "skill_id": "...",
+    "version": 3,
+    "description": "...",
+    "category": "general",
+    "runtime_policy": {},
+    "sha256": "...",
+    "tree_sha256": "...",
+    "files": [{"path": "SKILL.md", "content_b64": "..."}]
+  }]
+}
 ```
 
-该接口返回 `name`、`qualified_skill_id` 和 `context_ref`，随后可通过 Context
-`read` 获取内容。`integration_id` 可作为来源标签，但不需要注册记录。
+响应头：
 
-## 客户端同步规则
+| Header | 值 |
+| --- | --- |
+| `ETag` | 由 `(tenant_id, account_id, [(name, version, tree_sha256)...])` 计算的 sha256 |
+| `Cache-Control` | `private, no-cache` |
+| `Vary` | `Authorization` |
 
-1. 以 `name + version` 判断是否需要更新。
-2. 原子替换完整 Bundle，不拼接单个文件。
-3. 保留最近一次成功快照；拉取失败时继续使用该快照。
-4. 遇到 tombstone 时删除对应本地 Bundle。
-5. 不从响应或日志中持久化租户 Key。
+`If-None-Match` 与当前 `ETag` 相同（或为 `*`）时返回 `304 Not Modified`，无响应体。客户端可按 `tree_sha256` 判断单个 Skill 是否变化，只重写变化的目录。
+
+## 错误
+
+| 状态 | detail | 原因 |
+| --- | --- | --- |
+| 400 | `USER_ID_REQUIRED` / `USER_ID_INVALID` | `user_id` 缺失或非法 |
+| 401 | `TENANT_TOKEN_REQUIRED` | 未使用有效租户 Key |
+| 503 | `TENANT_ACCOUNT_REQUIRED` | 租户未配置 OpenViking Account |
+
+## 示例
+
+```bash
+curl -i "http://localhost:52010/sync/skills?user_id=alice" \
+  -H "Authorization: Bearer $TEAMEVOLVER_TENANT_TOKEN"
+```
+
+## CLI
+
+```bash
+teamEvolver skills --tenant demo list
+teamEvolver skills --tenant demo pull --user-id alice
+```
+
+`list` 使用 `TEAMEVOLVER_ROOT_API_KEY` 调用 `GET /api/skills`。`pull` 使用 `TEAMEVOLVER_TENANT_TOKEN` 调用 `/sync/skills`，并把 bundle 写入本机可重建缓存（`skills_runtime_cache_dir`）。
+
+团队 Skill 的发布与回滚见 [团队 Skill 库](./09-skills-admin.md)。

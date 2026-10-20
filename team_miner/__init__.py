@@ -1,1 +1,1 @@
-"""OpenViking-backed Skill mining and knowledge compilation."""
+"""Independent knowledge and Skill mining businesses, composed by the platform."""

@@ -104,6 +104,13 @@ def discover(files: Mapping[str, bytes], *, name: str = "", origin: dict[str, st
         if not isinstance(fm, dict):
             raise TransferError("SKILL.md frontmatter 必须是对象")
         inferred = name or str(fm.get("name") or "").strip() or root.rstrip("/").rsplit("/", 1)[-1]
+        if name and fm.get("name") != name:
+            split = frontmatter.split_skill_md(members["SKILL.md"].decode("utf-8"))
+            members["SKILL.md"] = frontmatter.render_skill_md(
+                name=name, description=str(fm.get("description") or ""),
+                category=str(fm.get("category") or "general"), content=split[1] if split else "",
+                extra_frontmatter={k: v for k, v in fm.items() if k not in {"name", "description", "category"}},
+            ).encode("utf-8")
         item = package(inferred, members, origin)
         if item.name in seen:
             raise TransferError(f"导入包含重复 Skill 名称：{item.name}")

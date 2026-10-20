@@ -1,162 +1,177 @@
 # Web Console User Guide
 
-The teamEvolver console and API share one FastAPI service, available by default at `http://127.0.0.1:52010/`. Frontend source lives in `web-ui/src/`, and the production build lives in `teamEvolver/web/dist/`.
+The console and the API are served by the same `api` role process, at `http://127.0.0.1:52010/` by default. The frontend source is in `web-ui/src/`, navigation is defined in `web-ui/src/App.tsx`, and the build output is in `teamEvolver/web/dist/`. When the console is not built, `GET /` returns 503.
 
-## Login and Bootstrap
+## Sign-in and Setup
 
-When no users exist, the first visit opens the administrator bootstrap screen. The form defaults to username and password `admin`; replace the password before submitting in production. After bootstrap, other members may register regular accounts from the login screen, and administrators can adjust roles and Workspace bindings under **Users & Permissions**.
+When the system has no users, the console shows the administrator setup page, which calls `POST /api/auth/bootstrap`. The form is prefilled with username and password `admin`; production deployments must change the password before submitting.
 
-The console uses an HttpOnly Session Cookie. Regular users can view and edit only their own personal assets. Administrators can switch users and manage team assets.
+After setup, other people can register on the sign-in page (`POST /api/auth/register`). The registration entry is hidden when `self_registration_enabled=false`. A newly registered account has no tenant membership; a tenant administrator must add it in "Members & Access" before it can enter the tenant.
+
+Console sign-in uses an HttpOnly Session Cookie; the Root Key is never sent to the browser. Roles and permissions are described in [Console RBAC](../api/20-console-rbac.md).
+
+## Tenant Switching and Visibility
+
+The tenant selector at the top of the sidebar lists the tenants the current user can enter. Switching reloads the whole page so no cross-tenant cache survives. Menu visibility is determined by role only:
+
+| Marker | Visible to |
+|------|----------|
+| None | Users with a tenant membership |
+| Tenant administrator | `tenant_admin` of the current tenant |
+| Platform administrator | `platform_role=platform_admin` |
+
+A page can be opened directly with `?view=<key>`, for example `/?view=workspace`; tabs of the run overview are selected with `&tab=<key>`.
 
 ## Navigation
 
-| Area | Pages | Purpose |
-|------|-------|---------|
-| Skill Mining | Overview, Knowledge Sources, Mining Jobs | Manage document sources, run multiple Compile rounds, supplement Evidence and review artifacts |
-| Evolution Loop | Operations, Langfuse Integration, Evolution Pipeline | Follow Session → Candidate → Replay → Publish and configure Skill/Memory evolution |
-| Asset Center | Experiment Workbench, Personal and Team Assets, Platform Assets | Edit and validate Skills, manage Agent-referable assets, or inspect internal storage read-only |
-| Governance | Global Model, Users & Permissions, Runtime Status | Manage models, identities, OpenViking deployment, and system health |
-| Documentation | Documentation | Read and search repository Markdown in English or Chinese |
-
-Pages can be opened directly with `?view=<key>`, for example `/?view=workspace` or `/?view=health`.
+| Group | Page | `view` | Visibility |
+|------|------|--------|--------|
+| Skill Mining | Knowledge Base Mining | `mine-knowledge-base` | Tenant administrator, OpenViking required |
+| Workbench | Run Overview | `dashboard` | Member |
+| Workbench | Experiment Workbench | `workspace` | Member |
+| Workbench | Runtime Status | `health` | Tenant administrator |
+| Agents & Capabilities | Personal & Team Assets | `agent-assets` | Member |
+| Agents & Capabilities | Platform Assets | `platform` | Tenant administrator |
+| Agents & Capabilities | Members & Access | `members` | Tenant administrator |
+| Knowledge & Methods | Experience Library | `experiences` | Member |
+| Evolution & Experiments | Datasets | `datasets` | Member |
+| Evolution & Experiments | Evolution Pipeline | `prompt-studio` | Tenant administrator |
+| Review & Publish | Review & Publish Entry | `review-center` | Member |
+| Review & Publish | Access Audit | `identity-audit` | Platform administrator |
+| Review & Publish | Trace Observability | `observability` | Platform administrator |
+| Settings & Access | Platform Users | `users` | Platform administrator |
+| Settings & Access | Tenant Management | `tenants` | Platform administrator |
+| Settings & Access | Model Settings | `model` | Tenant administrator |
+| Settings & Access | Data Source Onboarding | `datasource` | Tenant administrator |
 
 ## Skill Mining
 
-### Overview
+### Knowledge Base Mining
 
-Summarizes knowledge sources, mining jobs, artifacts, and runtime state with shortcuts to common actions.
+Knowledge base mining compiles a raw knowledge directory in OpenViking into a structured Wiki. The page has two file trees, "Knowledge Sources" and "Knowledge Base":
 
-### Knowledge Sources
+- Upload files or folders to the knowledge sources; the service converts them to Markdown
+- Browse, edit and delete source and Wiki files, and view backlinks
+- Enter mining instructions, choose the incremental compile start, launch OpenViking Compile and follow stage progress
+- Generate an HTML knowledge base graph
 
-The source page supports:
+Without OpenViking configured, the page shows a configuration notice and links to "Runtime Status". The full workflow is in the [Knowledge Base Mining Guide](./07-skill-miner.md).
 
-- Uploading documents and tracking post-processing
-- Creating, renaming, merging, and deleting source directories
-- Browsing source files and readiness state
-- Carrying a selected directory directly into a new mining job
+## Workbench
 
-### Mining Jobs
+### Run Overview
 
-Console mining jobs run these stages:
+The run overview has four tabs:
 
-1. Freeze the source snapshot and submit this round's OpenViking Compile.
-2. Materialize and validate the round's Skill Candidate and Test Dataset.
-3. If human checkpoints are enabled, wait for review, answers and supplementary documents.
-4. Continue to another round or finish mining before True Replay and Candidate Review.
+| Tab | `tab` | Content |
+|------|-------|------|
+| Overview | `overview` | Service status, Session queue and history, Candidate summary, Skill versions |
+| Candidate Review | `candidates` | Candidate details, bundle diff, A/B replay details and publish decision |
+| Evolution Audit | `audit` | Sessions consumed by each evolution cycle, Candidates produced and publish results |
+| Filter Audit | `filter` | valuable / chitchat classification of Sessions before queuing |
 
-Jobs support parallel execution, stop, delete, copyable diagnostics, round inspection, human Evidence supplements and continuation. With checkpoints disabled, the configured rounds run automatically. Completed Markdown artifacts can be previewed or edited, and the Skill Candidate can enter validation. See [Multi-round Skill Mining and Human Evidence Supplements](./17-multi-round-skill-mining.md).
+A Candidate first passes the Checklist completion gate, then efficiency is compared by interaction turns, tool calls and token usage; see [Checklist](../concepts/07-checklist.md). Candidate review supports the user marks `reviewed` and `rejected`; publishing (including force publish) marks the Candidate `adopted` automatically.
 
-## Evolution Loop
+### Experiment Workbench
 
-### Operations
+The experiment workbench combines Skill bundle editing and True Replay debugging in one view:
 
-The Operations page has four tabs:
+- The file tree on the left edits `SKILL.md`, scripts and reference files, with quick open and new file
+- Choose a Test Dataset and run parameters, then run True Replay in the debug console
+- Candidate trace and file diff are shown at the bottom
 
-- **Overview**: service status, Session queue and history, Candidate summary, and Skill versions
-- **Candidate Review**: Candidate detail, Bundle Diff, True Replay evidence, and release decision
-- **Evolution Audit**: Sessions consumed, Candidates generated, and release outcome for every cycle
-- **Filter Audit**: pre-ingest Session value classification and skip reasons
-
-A Candidate must first pass the Checklist completion gate. Efficiency is then compared in order by interaction turns, tool calls, and tokens. Administrators can publish according to the evaluation or force a release when they explicitly accept the risk.
-
-### Langfuse Integration
-
-The Langfuse page manages two independent paths:
-
-- **Inbound Session pull** previews and imports Sessions filtered by environment, user, tags, release, version, or trace name.
-- **Outbound tracing** records teamEvolver's internal model and tool calls.
-
-Administrators can also manage per-agent entries in the "Mapper Registry" panel: each entry carries routing constraints (trace-name patterns, tags, sessionId patterns — first match in list order wins) and mapping code (optionally a `map_session` session hook). Per-entry template insertion and dry-run (including route-match feedback) plus a panel-level "Route Preview" (paste a sample Trace to see the whole registry's routing outcome) are supported. A mapper error falls back for that trace without aborting the whole import.
-
-### Evolution Pipeline
-
-The top-level tabs are:
-
-- **Skill Evolution**: pipeline graph, editable Prompts, stage model options, process settings, and real input/output tests
-- **Team Memory Evolution**: cross-user memory aggregation
-
-Team-Memory aggregation follows three explicit steps:
-
-1. Enter or confirm the OpenViking Account and choose incremental or full mode.
-2. Load Account users and select them with select-all, clear, or invert controls.
-3. Confirm the selection, start the background task, and poll group progress.
-
-After a page refresh, the console restores the latest task from the service. Restarting the service process clears this run list. Administrators can edit the **Team Memory Aggregation Skill** and configure the final output prefix on the same page. The default final root is `viking://resources/shared-knowledge/`; Phase 1 raw snapshots and merge intermediates stay in the merge identity's private Resources, and the Skill runs only during merge.
-
-## Experiment Workbench
-
-The Experiment Workbench combines Skill bundle editing and True Replay debugging. The file tree edits `SKILL.md`, scripts, and reference files; the right panel selects the dataset and run parameters; the bottom panel shows Candidate traces and file diffs. Every unsaved text file is included in the Candidate without first overwriting the released Skill.
-
-## Personal and Team Assets
-
-The asset page exposes two OpenViking roots:
-
-| Space | Root URI |
-|-------|----------|
-| Personal Memory | `viking://user` |
-| Team Resources | `viking://resources` |
-
-The tree supports search, Markdown/JSON/code previews, source view, and directory L0/L1 summaries. Self-hosted OpenViking deployments expose a Studio link. An embedded CLI is also available when the `ov` binary is installed. The console does not expose Skill import or export actions.
-
-### Multi-file Editing
-
-1. Click **Edit** to enter edit mode.
-2. Modify multiple text files. Drafts remain available while switching files or asset spaces.
-3. Click **Finish editing** to review each numbered line-level Diff.
-4. Click **Save changes** to submit the batch.
-
-The server compares content hashes captured when editing began. If another writer changed any file, it returns 409 and preserves all drafts. Each file is limited to 2 MB; one batch may contain at most 100 files and 16 MB. Team Resources are writable only by administrators; Platform Assets always remains read-only.
-
-## Platform Assets
-
-Platform Assets is read-only and exposes only directories required by teamEvolver itself, including:
-
-- `sessions/`, `session_archive/`, `session_ledger/`
-- `candidate_skills/`, `validation_*`
-- `skill_lab/`, `skill_datasets/`, `evolution_datasets/`
-- `skill_evidence/`, `memory-changes/`, `memory-replays/`
-- `skill_mutation_commits/`, `skill_sync_outbox/`
-
-The page separates Session state from Skill-evolution artifacts by storage source. Session objects come from PostgreSQL (or local/NAS), while Skill artifacts come from NAS. It provides a logical-key tree, content preview, category counts, and backend labels without depending on OpenViking or showing the OV CLI. These paths are not offered directly to Agents as Workspace assets.
-
-## Governance
-
-### Global Model
-
-Administrators configure an OpenAI-compatible Base URL, Model ID, API Key, Max Tokens, and Temperature and can test the connection directly. Saving hot-reloads the global model used by evolution and mining. Stage-specific overrides remain under **Evolution Pipeline**.
-
-### Users & Permissions
-
-This page manages:
-
-- Team display name
-- User account, role, display name, email, and password
-- Console profiles and Personal Memory/Team Resources settings; Agents use tenant Key + user_id
-- Account + Name bindings for Personal Memory and Team Resources
-
-Trusted mode always uses the tenant Root Key. User records store only the OpenViking Name, while Account comes from the current tenant configuration. Regular users can read and update only their own profile; administrators manage all users.
+Unsaved text edits take part in the run as the Candidate; the formal Skill does not have to be overwritten first. Only tenant administrators can save, and a save creates a new version through SkillHub.
 
 ### Runtime Status
 
-Runtime Status aggregates checks for the service, OpenViking, model, user registry, team Skills, and Agent Integrations and reports queue and Candidate counts.
+The runtime status page aggregates checks for the service, PostgreSQL pool, object storage, OpenViking, model, Replay adapter, service logs and Agent pull, each with a suggested action.
 
-The **OpenViking Deployment** panel supports:
+The "OpenViking Deployment" panel selects Volcano Engine OpenViking, local self-hosted, or remote self-hosted (with an Endpoint override), and configures the Account and Root Key. Saving hot-reloads the OpenViking integration without a process restart.
 
-- Volcengine Cloud OpenViking
-- Self-hosted OpenViking on the same machine
-- Remote self-hosted OpenViking through an endpoint override
-- Account and OpenViking Root Key
+## Agents & Capabilities
 
-Saving hot-reloads OpenViking, DreamCycle, and embedded evolution integrations without restarting the main process.
+### Personal & Team Assets
 
-## Built-in Documentation
+The assets page browses two OpenViking root spaces:
 
-**Documentation** automatically scans `docs/zh/`, `docs/en/`, and `docs/design/`. The reader supports a directory tree, full-text search, language switching, GFM tables, code blocks, and repository images.
+| Space | Root URI | Write access |
+|------|--------|--------|
+| Personal memory | `viking://user` | The owner |
+| Team resources | `viking://resources` | Tenant administrator |
 
-## Related Documentation
+The file tree supports search, Markdown/JSON/code preview and directory L0/L1 summaries. When the server has the OpenViking CLI installed, the page shows a built-in terminal; regular users can run read-only commands only.
+
+Multi-file editing:
+
+1. Click "Edit" to enter edit mode.
+2. Edit several text files; switching files keeps drafts.
+3. Click "Finish Editing" to review per-file line diffs.
+4. Click "Confirm Save" to submit the batch.
+
+The server compares each file with its content at the start of editing; if any file was changed by someone else, the whole batch returns 409 and the drafts are kept. A batch holds at most 100 files, each ≤2 MiB and ≤16 MiB in total. The API is in [Workspace and Platform Assets API](../api/23-workspace-assets.md).
+
+### Platform Assets
+
+Platform assets show, read-only, the task payloads of the current tenant in the PostgreSQL ObjectStore, grouped as ingest originals, Session stage results and Memory Compile results. The page offers a logical key tree, content preview and per-category counts, and does not depend on OpenViking. These objects are never served to Agents.
+
+### Members & Access
+
+On this page a tenant administrator can:
+
+- Add members by user ID and assign the `tenant_admin` or `member` role
+- Rotate the tenant Key; the new Key is shown once
+- Set the tenant runtime quota
+
+Agents connect with the tenant Key plus a declared `user_id`; console membership and Agent identity are independent. The default tenant's access credential is configured by a platform administrator.
+
+## Knowledge & Methods
+
+### Experience Library
+
+The experience library shows Skill defect experiences and exemplary practices produced by Session analysis, filterable by Skill and keyword. Experiences come from `used_skills` in Sessions; the Skill does not need to be uploaded. Tenant administrators can manage successful experience sync on the same page; see [Successful Experience Sync](./16-successful-experience-sync.md).
+
+## Evolution & Experiments
+
+### Datasets
+
+The datasets page creates Test Datasets from Sessions, edits the initial query, output Checklist and trajectory Checklist, exports datasets and starts batch replay validation. Batch replay concurrency is 1–2 and the per-case timeout is 30–1800 seconds.
+
+### Evolution Pipeline
+
+The evolution pipeline page has two tabs:
+
+- **Skills Self-Evolution**: edit per-stage prompts, models and process parameters, and test stage output with real input; see the [Prompt Studio Guide](./08-prompt-studio.md)
+- **Team Memory Self-Evolution**: choose the OpenViking Account and members, run Team Memory manually in "aggregation only", "maintenance only" or "aggregation + maintenance" mode, and configure the aggregation and maintenance Skills; see [Team Memory Aggregation API](../api/11-team-memory-aggregation.md)
+
+## Review & Publish
+
+"Review & Publish Entry" links to Skill Candidate Review in the run overview. Published Skills and team Memory each retain their maintenance entry.
+
+Platform administrators view platform access, membership and identity change records in "Access Audit", and configure global outbound Langfuse tracing in "Trace Observability", including sample rate and whether model input and output are captured.
+
+## Settings & Access
+
+### Platform Users and Tenant Management
+
+Platform administrators manage sign-in accounts and platform identities in "Platform Users", and create or disable tenants in "Tenant Management". When a tenant is created, the system looks up an OpenViking Account with the same name as `tenant_id`; an existing Account is bound, otherwise one is created with the Root Key.
+
+### Model Settings
+
+Tenant administrators configure the tenant's default model, Base URL, API Key, Max Tokens and Temperature, and can test the connection. Per-stage model overrides are managed in "Evolution Pipeline".
+
+### Data Source Onboarding
+
+The data source onboarding page manages the tenant's Session data source:
+
+- Edit data source connection and filters
+- Upload and edit adapter source, save it as an immutable version, and verify conversion with draft tests
+- Preview and manually pull Sessions, with business time window and system completion time
+- Enable the daily scheduled pull and set the trigger time and time zone
+
+Adapters run with the service process's permissions; upload trusted code only. Steps are in the [Data Source Onboarding Guide](./10-datasource-onboarding.md).
+
+## Related Documents
 
 - [Configuration Reference](./01-configuration.md)
-- [Skill Miner Guide](./07-skill-miner.md)
-- [Prompt Studio Guide](./08-prompt-studio.md)
-- [Storage Spaces and Directory Layout](../concepts/09-storage-layout.md)
-- [Team Memory Aggregation API](../api/11-team-memory-aggregation.md)
+- [Console RBAC](../api/20-console-rbac.md)
+- [Storage Spaces and Layout](../concepts/09-storage-layout.md)

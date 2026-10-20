@@ -107,9 +107,9 @@ def _loads_lenient(clean: str, *, allow_repair: bool) -> Optional[Any]:
 def parse_turn(raw: str, *, allow_repair: bool = False) -> dict[str, Any]:
     """Parse one assistant turn of the loop protocol.
 
-    Returns ``{"ok": True, "type": ..., ...}`` with one of ``plan`` /
+    Returns ``{"ok": True, "type":...,...}`` with one of ``plan`` /
     ``calls`` / ``decision`` depending on the detected type, or
-    ``{"ok": False, "error": ...}``. Detection order: explicit ``type``
+    ``{"ok": False, "error":...}``. Detection order: explicit ``type``
     field, then the current structural fields.
     """
     text = _strip_outer_fences(_strip_reasoning(raw))

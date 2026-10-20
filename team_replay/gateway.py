@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Callable
 
 from .contracts import (
     REPLAY_RUN_RESULT_SCHEMA,
@@ -18,18 +18,6 @@ def _subject(spec: ReplaySpec) -> dict[str, Any]:
         **({"id": spec.subject_id} if spec.subject_id else {}),
         **({"ids": list(spec.subject_ids)} if spec.subject_ids else {}),
     }
-
-
-class ReplayGateway(Protocol):
-    def evaluate(
-        self,
-        spec: ReplaySpec,
-        *,
-        case_index: int | None = None,
-        timeout_seconds: int = 600,
-        max_interactions: int | None = None,
-    ) -> dict[str, Any]:
-        """Execute one Replay specification and return an immutable result."""
 
 
 @dataclass
@@ -103,3 +91,22 @@ class DisabledReplayGateway:
             "reason": self.reason,
             "cases": [],
         }
+
+
+@dataclass
+class HostReplayGateway:
+    """Run the shared pure Engine through an explicitly injected ReplayHost."""
+    host: object
+    judge: Callable | None = None
+    feedback: Callable | None = None
+
+    def evaluate(self, spec, *, case_index=None, timeout_seconds=600, max_interactions=None):
+        from dataclasses import replace
+
+        from .runner import evaluate_spec
+
+        pinned = replace(spec, limits={
+            **spec.limits, "timeout_seconds": timeout_seconds,
+            "max_interactions": max_interactions or spec.limits.get("max_interactions", 4),
+        })
+        return evaluate_spec(pinned, host=self.host, case_index=case_index, judge=self.judge, feedback=self.feedback)

@@ -1,50 +1,42 @@
-# Pi Agent / AgentsHub integration
+# Pi Agent / AgentsHub Integration
 
-Pi Agent uses [Protocol V2](./06-protocol-v2.md), like any other custom
-runtime. A tenant machine credential authenticates the request and `user_id`
-identifies the business user. Agent registration and capability declarations
-are not required.
+Pi Agent and AgentsHub integrate through [Protocol v2](./06-protocol-v2.md). The Session `runtime.type` uses the actual runtime label (such as `pi`, `agentshub`); it is used only for analysis and Replay selection and plays no part in authentication.
 
-## Basic configuration
+## Data Plane
 
-```bash
-export TEAMEVOLVER_URL="http://<teamevolver-host>:52010"
-export TEAMEVOLVER_TENANT_TOKEN="tevt_<random>"
-```
+| Purpose | Endpoint | Description |
+| --- | --- | --- |
+| Session reporting | `POST /ingest_session` | Report after the task; `runtime_context.user_id` is the AgentsHub user |
+| Context | `/internal/agents/context/*` | `resolve` before model calls, `read` as needed; `remember` writes personal Memory |
+| Skill pull | `GET /sync/skills` | Incremental via `ETag`; install bundles into Pi's Skill directory |
 
-Pi reports its actual runtime label in Sessions:
+Request formats and error codes are in [Session Ingestion](../api/03-session-ingest.md), [Agent Context](../api/04-context-workspace.md), [Skill Pull](../api/06-skill-sync.md).
+
+## Runtime Context
 
 ```json
 {
-  "session_id": "pi-session-001",
-  "user_id": "alice",
-  "runtime": {"type": "pi"}
+  "runtime": {"type": "pi", "version": "1.4.0"},
+  "runtime_context": {"user_id": "alice"},
+  "turns": [{
+    "turn_num": 1,
+    "prompt_text": "...",
+    "response_text": "...",
+    "tool_calls": [],
+    "context_usage": {"context_snapshot_id": "ctxsnap_...", "skill_refs": [{"context_ref": "ctx_...", "operation": "injected"}]}
+  }]
 }
 ```
 
-`runtime.type` is used for analysis and Replay Runtime selection, not
-authentication.
-
-## Context and Skills
-
-- Context Workspace uses `/internal/agents/context/*`.
-- Every request explicitly supplies `user_id`.
-- `integration_id` may be a stable deployment label for source attribution and auditing.
-- Skills are pulled; publishing does not depend on a registered webhook.
-- The OpenViking Root Key remains only on the teamEvolver server.
+References in `context_usage` must come from `resolve` / `skills` responses for the same `user_id` and are valid for 15 minutes.
 
 ## True Replay
 
-The deployment owner configures a Replay Adapter for the Pi Runtime and an
-administrator binds it to the tenant. The Adapter creates isolated Baseline
-and Candidate sessions and workspaces. Downstream input must not contain
-Checklists, evaluation criteria, or candidate-quality labels.
+True Replay for Pi is implemented by a Replay Adapter written by the deployer; see [Replay Adapter](../api/05-replay-branch.md#replay-adapter). Requirements:
 
-See [Replay API](../api/05-replay-branch.md).
+- Each branch creates its own Pi subprocess, session and workspace with identical network, model, tools and initial materials; the only difference is the installed Skill bundle (`context.treatment.skill`).
+- Each branch's Skill bundle is installed into that branch's own workspace, never a shared directory.
+- Tools with external side effects that cannot be replayed deterministically fail directly (raise `ReplayUnsupported`) instead of falling back to real calls.
+- `send()` returns the complete assistant / tool messages of the turn and the actually observed `tool_call_count` and `total_tokens`.
 
-## References
-
-- [Custom Agent integration](./05-custom-agent.md)
-- [Session ingest](../api/03-session-ingest.md)
-- [Context Workspace](../api/04-context-workspace.md)
-- [Skill synchronization](../api/06-skill-sync.md)
+The Adapter can use `TurnBasedReplayAdapter` to call a per-turn HTTP endpoint provided by AgentsHub; the endpoint key is supplied to the TeamEvolver Worker via `TEAMEVOLVER_AGENT_<PROFILE>_REPLAY_API_KEY`.

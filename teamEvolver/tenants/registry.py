@@ -1,18 +1,18 @@
-"""Tenant registry and request-scoped tenant context (multi-tenancy plan Phase 1).
+"""Tenant registry and request-scoped tenant context.
 
 Two operating modes:
 
 - ``postgres``: tenants live in the ``teamevolver.tenants`` table (created by
-  the Phase 0 schema bootstrap). Agent tokens (``tevt_...``) hash-lookup to a
-  tenant; per-tenant config overrides (``tenants.config`` JSONB, flat
-  ``TeamEvolverConfig`` field names) merge over the global config.
+ the schema bootstrap). Agent tokens (``tevt_...``) hash-lookup to a
+ tenant; per-tenant config overrides (``tenants.config`` JSONB, flat
+ ``TeamEvolverConfig`` field names) merge over the global config.
 - ``single``: storage_pg is not enabled — only the implicit ``default``
-  tenant exists and admin mutations are refused, so deployments without PG
-  keep their exact single-tenant behavior (zero-change compatibility). A
-  single machine credential can be configured (``tenant_machine_token`` /
-  ``TEAMEVOLVER_TENANT_TOKEN``) and resolves to that default tenant.
+ tenant exists and admin mutations are refused, so deployments without PG
+ keep their exact single-tenant behavior (zero-change compatibility). A
+ single machine credential can be configured (``tenant_machine_token`` /
+ ``TEAMEVOLVER_TENANT_TOKEN``) and resolves to that default tenant.
 
-Identity rules (plan §1.2): the tenant is always derived server-side from the
+Identity rules : the tenant is always derived server-side from the
 bearer token (or the console operator's explicit switch); a client-supplied
 ``X-Tenant-Id`` that disagrees with the resolved identity is rejected.
 """
@@ -32,10 +32,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..storage.pg_pool import (
+from ..database.pool import (
     _DEFAULT_COMMAND_TIMEOUT,
     dsn_from_env,
-    get_pg_runtime,
+    get_database_pool,
 )
 from ..storage.pg_store import validate_tenant_id
 
@@ -114,7 +114,7 @@ def generate_agent_token() -> str:
 
 
 # tenants.config keys consumed by the scheduler/engine pool rather than
-# applied as TeamEvolverConfig field overrides (multi-tenancy plan Phase 3
+# applied as TeamEvolverConfig field overrides (multi-tenancy plan 
 # per-tenant quotas). 0 or absent = unlimited.
 QUOTA_MAX_CONCURRENT_SESSIONS = "max_concurrent_sessions"
 QUOTA_MAX_EVOLVE_PER_DAY = "max_evolve_per_day"
@@ -253,7 +253,7 @@ class TenantRegistry:
                 control_pool_max = max(
                     1, int(getattr(config, "storage_pg_control_pool_max", 5) or 5)
                 )
-                self._runtime = get_pg_runtime(
+                self._runtime = get_database_pool(
                     dsn=dsn,
                     schema=str(getattr(config, "storage_pg_schema", "") or "teamevolver"),
                     pool_min=1,
@@ -494,17 +494,32 @@ class TenantRegistry:
             )
 
     async def _insert_tenant(self, tid: str, display_name: str, token_hash: str):
+        from ..config_runtime import TENANT_CONFIG_MODULES
+
         schema = self._schema
         async with self._runtime.tenant_conn(DEFAULT_TENANT_ID) as conn:
-            return await conn.fetchrow(
-                f"INSERT INTO {schema}.tenants (tenant_id, display_name, agent_token_hash) "
-                "VALUES ($1, $2, $3) "
-                "ON CONFLICT (tenant_id) DO NOTHING "
-                "RETURNING " + _COLS,
-                tid,
-                str(display_name or "").strip() or "Untitled",
-                token_hash,
-            )
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    f"INSERT INTO {schema}.tenants (tenant_id, display_name, agent_token_hash) "
+                    "VALUES ($1, $2, $3) "
+                    "ON CONFLICT (tenant_id) DO NOTHING "
+                    "RETURNING " + _COLS,
+                    tid,
+                    str(display_name or "").strip() or "Untitled",
+                    token_hash,
+                )
+                if row is None:
+                    return None
+                # Every module row is created with the tenant; module loaders
+                # merge their own defaults over the empty object.
+                await conn.execute("SELECT set_config('app.tenant_id', $1, true)", tid)
+                await conn.execute(
+                    f"INSERT INTO {schema}.tenant_configs (tenant_id, module, revision, config) "
+                    "SELECT $1, module, 1, '{}'::jsonb FROM unnest($2::text[]) AS module",
+                    tid,
+                    list(TENANT_CONFIG_MODULES),
+                )
+                return row
 
     async def _update_token(self, tid: str, token_hash: str):
         schema = self._schema

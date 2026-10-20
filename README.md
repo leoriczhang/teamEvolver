@@ -4,7 +4,7 @@
 
 ### Agent 团队能力进化控制面
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.11-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-Control%20Plane-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/Console-React%20%2B%20TypeScript-149ECA.svg?logo=react&logoColor=white)](https://react.dev/)
 [![OpenViking](https://img.shields.io/badge/Context-OpenViking-0F766E.svg)](https://github.com/volcengine/OpenViking)
@@ -19,246 +19,180 @@
 
 ## 产品定位
 
-KEE R6 将本仓库的控制台统一为知识进化平台，保留 `teamEvolver` 包、CLI、原路由与数据库标识。
-Ontology／方法编制、证据审核和 Wiki 发布由 KEE 管理，OpenViking 提供通用内容、ACL、检索与索引。
-新方法构建使用 KEE 内部隔离 Compile；团队 Memory 保持唯一维护入口，通过 Port 选择内部执行。
-本轮没有修改 UpClaw，也没有业务工具拦截或第二套 Session/Judge。
-配置、兼容边界、验收和未执行事项见 [R6 交付册](docs/kee-r6/HANDOFF.md)
-与 [离线工程说明](docs/kee-r6/architecture.html)。旧方案保留为历史依据。
-
-teamEvolver 位于 Agent 运行时之外，负责团队能力的持续进化与治理。它接收真实 Session 和领域资料，提取可追溯 Evidence，生成 Skill Candidate 或 Memory Change，再经过静态检查、True Replay、按需人工门禁、版本发布和受控分发形成闭环。
-
-它不是另一个 Agent Runtime，也不是文件同步脚本：
+teamEvolver 位于 Agent Runtime 之外，负责团队能力的持续进化与治理。它接收 Agent 上报或数据源拉取的 Session，经强制分析得到 Evidence，生成 Skill Candidate 或 Memory Change，再经过静态检查、True Replay、Candidate Review、版本发布和 pull 分发形成闭环。
 
 - Agent 继续使用自己的模型、工具、工作区和执行循环。
-- teamEvolver 统一负责 Evidence、进化、验证、版本、审计和发布。
-- OpenViking 是团队 Skill、Memory、Session 和快照的上下文存储。
-- Langfuse 可独立承担 Session 拉取与进化链路观测。
+- teamEvolver 负责 Evidence、进化、验证、版本、审计和发布。
+- PostgreSQL 是可变业务状态的唯一权威源；OpenViking 保存个人与团队 Memory、个人 Skill、Wiki 等知识制品。
+- 同一个镜像以 `api` 与 `worker` 两种角色运行，两者都可以水平扩容。
+
 
 ## 进化闭环
 
 ```mermaid
 flowchart LR
-    A["真实 Session / 领域资料"] --> B["Evidence 分类"]
-    B --> C["Skill Candidate"]
-    B --> D["Memory Change"]
-    C --> E["Test Dataset"]
-    E --> F["True Replay<br/>Baseline vs Candidate"]
-    F --> G["Candidate Review"]
-    G --> H["版本发布"]
-    H --> I["Agent Skill Pull"]
-    D --> J["Memory maintenance"]
-    J --> K["Memory True Replay"]
-    K --> L["团队 Memory"]
+    A["Session 上报 / 数据源拉取"] --> B["normalize → analyze → archive"]
+    B --> C["Skill Evolution"]
+    C --> D["Skill Candidate"]
+    D --> E["True Replay<br/>Baseline vs Candidate"]
+    E --> F["Candidate Review"]
+    F --> G["新版本"]
+    G --> H["GET /sync/skills"]
+    I["个人 Memory"] --> J["跨用户聚合 + DreamCycle"]
+    J --> K["团队 Memory"]
+    J --> L["Memory Replay"]
 ```
 
-Checklist 是完成门禁，不是加权分数。通过门禁后，True Replay 按交互轮次、工具调用数、Token 用量依次比较效率。
+Checklist 是完成门禁，不是加权分数。双方都完成 Checklist 后，True Replay 依次比较交互轮次、工具调用数和 Token 用量。
 
 ## 核心能力
 
-| 模块 | 当前能力 |
+| 模块 | 能力 |
 | --- | --- |
-| Session 与 Evidence | agent-session.v2 ingest、Langfuse 拉取、价值分类、近期/历史 Evidence 窗口、过滤审计 |
-| Skill Evolution | 总结、裁判、分组、改进/新建/冲突合并、同源 Test Dataset 生成 |
-| True Replay | 在真实 Agent Runtime 中并行运行 Baseline/Candidate，校验 Checklist、轨迹、产物和效率 |
-| Candidate Governance | 候选评审、强制/按回放发布、版本详情、完整 Bundle Diff、回滚与审计 |
-| Memory Evolution | Memory maintenance 维护、跨 User 团队记忆聚合、可编辑聚合 Skill、增量编译及 Memory Replay |
-| 实验工作台 | 编辑 Skill Bundle，并用数据集对未保存的多文件 Candidate 执行 True Replay |
-| 个人与团队资产 | 分别从 `viking://user` 和 `viking://resources` 浏览、编辑 OpenViking 资产 |
-| Skill 挖掘 | OpenViking Compile 多轮挖掘、人工 Evidence 补证、产物编辑与候选提交 |
-| 知识库编译 | 将上传文档规范化后提交给 OpenViking 异步编译 |
-| Agent Protocol v2 | 租户主体、Context、Session ingest、ReplayAdapterFactory、Skill pull |
-| Observability | Langfuse Session 导入，以及模型、工具、Skill Evolution、Memory maintenance 全链路追踪 |
-
-所有团队 Skill 变更统一经过 `SkillMutationService`，由提交记录、tombstone、持久化 outbox 和 Agent 分发状态共同保证一致性。
+| Session 接入 | v2 协议上报、租户数据源 Adapter 拉取与定时拉取、价值分类与四维评分 |
+| Skill Evolution | 按 Skill 分组规划、团队证据门槛、生成 Candidate 与同源 Test Dataset |
+| True Replay | 通过租户绑定的 Replay Adapter 在真实 Agent 中运行 Baseline 与 Candidate，Checklist 裁判与渐进披露 |
+| 团队 Skill 库 | PostgreSQL 追加式版本链、发布、回滚、tombstone、幂等变更、ETag pull |
+| 团队 Memory | 跨用户聚合、DreamCycle 维护、Memory Change 与 Memory Replay |
+| 成功经验 | 经验与 Pattern 编译、向 OpenViking 投影 |
+| 知识库挖掘 | 上传资料转 Markdown，OpenViking Compile 生成 Wiki |
+| 实验工作台 | 编辑 Skill Bundle，用数据集对未保存的 Candidate 运行 True Replay |
+| 多租户 | 租户、成员、平台 / 租户管理员、RLS 隔离、租户 Key |
 
 ## 控制台
 
 ### 运行总览
 
-完整展示 Session 队列与历史、待发布候选、回放结论和 Skill 版本。
-
 <a href="./docs/assets/teamEvolver-console-dashboard.png">
-  <img src="./docs/assets/teamEvolver-console-dashboard.png" alt="teamEvolver 完整运行总览" width="100%">
+  <img src="./docs/assets/teamEvolver-console-dashboard.png" alt="teamEvolver 运行总览" width="100%">
 </a>
 
-### 白盒进化链路
-
-完整展示 Skill Evolution 阶段、8 个可编辑 Prompt、模型参数、过程参数和真实输入/输出测试。
+### 进化链路
 
 <a href="./docs/assets/teamEvolver-evolution-pipeline.png">
-  <img src="./docs/assets/teamEvolver-evolution-pipeline.png" alt="teamEvolver 完整进化链路" width="100%">
+  <img src="./docs/assets/teamEvolver-evolution-pipeline.png" alt="teamEvolver 进化链路" width="100%">
 </a>
+
+控制台导航分为技能挖掘、工作台、智能体与能力、知识与方法、进化与实验、审查与发布、设置与接入七组，见 [Web 控制台](./docs/zh/guides/03-console.md)。
 
 ## 系统架构
 
 ```mermaid
 flowchart TB
-    subgraph Sources["Evidence Sources"]
-        Pi["Pi Agent"]
-        Generic["Agent Protocol v2"]
-        LFIn["Langfuse Sessions"]
-        Docs["Domain Documents"]
-    end
-
-    subgraph Control["teamEvolver Control Plane :52010"]
-        Console["React Console"]
-        API["FastAPI"]
-        Evolution["Skill Evolution"]
-        Replay["Validation Worker / True Replay"]
-        Memory["Memory maintenance / Team Memory Aggregation"]
-        Mutation["SkillMutationService / Outbox"]
-    end
-
-    subgraph Context["OpenViking"]
-        Sessions["Sessions / Evidence"]
-        Skills["Team Skills / Versions"]
-        Memories["Personal + Team Memory"]
-        Snapshots["Replay Snapshots"]
-    end
-
-    Sources --> API
-    Console --> API
-    API --> Evolution
-    API --> Replay
-    API --> Memory
-    Evolution --> Mutation
-    Mutation <--> Skills
-    API <--> Sessions
-    API <--> Memories
-    Replay <--> Snapshots
-    Mutation --> Pi
-    Mutation --> Generic
+    Agent["Agent Runtime<br/>租户 Key + user_id"] --> LB["负载均衡"]
+    Browser["浏览器控制台"] --> LB
+    LB --> API["teamEvolver api ×N<br/>认证 · 校验 · 短事务 · 202"]
+    API --> PG[("PostgreSQL<br/>RLS · worker_tasks")]
+    Worker["teamEvolver worker ×N<br/>Session 分析 · Evolution · Replay · Memory"] --> PG
+    Worker --> OV[("OpenViking<br/>Memory · Skill · Wiki · Compile")]
+    API --> OV
+    Worker --> Replay["Replay Adapter<br/>客户 Agent"]
 ```
 
-控制台、进化引擎、验证队列、Memory maintenance、知识库编译和 Agent 集成共享同一个 FastAPI 服务与配置源。
+API 只做认证、授权、校验、短事务受理和查询；长任务写入 `worker_tasks` 后返回 `202`，由 Worker 领取执行。详见 [架构总览](./docs/zh/concepts/01-architecture.md)。
 
 ## 快速开始
 
-要求：Python 3.10+。
+要求：Python 3.11、PostgreSQL 14+、OpenViking、OpenAI 兼容模型端点。
 
 ```bash
-git clone https://github.com/leoriczhang/teamEvolver.git
-cd teamEvolver
-
-python3 -m venv .venv
+bash scripts/install_teamEvolver.sh
 source .venv/bin/activate
-python -m pip install -U pip
-python -m pip install -e ".[all]"
 
-teamEvolver config service.port 52010
-teamEvolver start --daemon
-teamEvolver status
+export TEAMEVOLVER_ENV=local
+export TEAMEVOLVER_PG_DSN="postgresql://te_app:...@127.0.0.1:5432/teamevolver"
+export TEAMEVOLVER_ROOT_API_KEY="<random>"
+export TEAMEVOLVER_OV_ENDPOINT="http://127.0.0.1:1933"
+export TEAMEVOLVER_OV_API_KEY="<OpenViking Root Key>"
+export TEAMEVOLVER_LLM_API_KEY="<model key>"
+
+teamEvolver schema apply
+teamEvolver start --role all
 ```
 
-打开 `http://127.0.0.1:52010/`。首次访问会直接进入管理员初始化页，默认表单值为 `admin`，请在生产环境改用强密码。登录后按以下顺序配置：
-
-1. **全局模型**：OpenAI-compatible Base URL、Model 与 API Key。
-2. **运行状态 → OpenViking 部署**：选择火山云或自建服务；远程自建实例通过 Endpoint 覆盖填写，例如 `http://10.0.0.8:1933`。
-3. **用户与权限**：配置控制台用户、角色和个人记忆/团队资源的 Account + Name 绑定；Trusted 模式统一使用服务端 Root Key。
-4. **Agent Integration**：配置租户 Key 与 user_id；需要 True Replay 时绑定运行环境。
-5. **Langfuse 接入**：按需启用 Session 拉取、出站链路追踪或自定义 Trace 映射。
-
-控制台当前按五个区域组织：
-
-| 区域 | 主要入口 |
-| --- | --- |
-| 技能挖掘 | 挖掘总览、知识源、挖掘任务 |
-| 进化闭环 | 运行总览、候选评审、进化审计、过滤审计、Langfuse、Skills/团队 Memory 自进化 |
-| 资产中心 | 实验工作台、个人与团队资产、平台资产 |
-| 平台治理 | 全局模型、用户与权限、运行状态 |
-| 文档 | 内置双语文档阅读与搜索 |
+打开 `http://127.0.0.1:52010/`，首次访问进入管理员初始化页。完整步骤见 [快速开始](./docs/zh/getting-started/02-quickstart.md)。
 
 常用命令：
 
 ```bash
 teamEvolver status
 teamEvolver config show
+teamEvolver schema status
 teamEvolver stop
 ```
 
-源码已包含构建后的控制台；只有修改 `web-ui/` 时才需要执行前端构建。
-
-也可以直接使用 Docker Compose。镜像会构建控制台、安装完整 Python 依赖并捆绑 OpenViking CLI，运行数据保存在仓库的 `runtime/` 目录：
+生产环境分别运行 `api` 与 `worker` 角色，见 [生产部署指南](./docs/zh/guides/02-deployment.md)。仓库根目录的 `compose.yaml` 从同一镜像启动两个角色：
 
 ```bash
-docker compose up -d --build
-docker compose ps
+TARGET_ARCH=x86_64 sh cicd_scripts/build.sh
+docker compose build
+docker compose up -d
 ```
 
 ## Agent 接入
 
-使用 [v2 协议](./docs/zh/agent-integrations/06-protocol-v2.md)：服务地址、租户 Key 与 user_id 即可接入。
-Context 和 Session 归属固定为 tenant/user；Account 由租户有效配置解析。
-Skill 通过认证 pull 获取，True Replay 通过租户绑定的 ReplayAdapterFactory 创建独立会话。
-OpenViking Root Key 与模型 Key 保留在服务端。
+使用 [协议 v2](./docs/zh/agent-integrations/06-protocol-v2.md)：服务地址、租户 Key 与 `user_id` 即可接入，不需要 Agent 注册。
+
+| 用途 | 接口 |
+| --- | --- |
+| 上报 Session | `POST /ingest_session` |
+| 获取上下文 | `/internal/agents/context/*` |
+| 拉取团队 Skill | `GET /sync/skills` |
+
+OpenViking Root Key 与模型 Key 只在服务端使用。True Replay 通过租户绑定的 Replay Adapter 为每个分支创建独立会话。
 
 ## 安全与一致性
 
-- Replay 只物化必要的 Runtime 配置，不复制完整生产数据库。
-- Candidate 进程不直接持有上游模型密钥；模型访问通过短期 Broker。
-- 网络副作用默认 fail-closed；无法确定性重放的外部工具不会回退到真实调用。
-- Context 引用由服务端签发并校验 Tenant、User、Session 和过期时间。
-- 团队 Memory 与团队 Skill 对普通 Agent 只读；个人 Memory 写入受 tenant/user 归属约束。
-- Skill 发布、回滚和删除使用统一 mutation 流程；Agent 固定通过 pull 获取版本。
-- Langfuse 上报 fail-open，不阻塞进化和 Memory 维护。
+- 所有业务表启用 RLS，按 `tenant_id` 隔离；应用角色必须是 NOSUPERUSER、NOBYPASSRLS。
+- 凭证以 Secret Ref 保存，接口只返回是否已配置。
+- Worker 通过租约与 fence 防止重复执行；结果未知的外部写入进入对账，不盲目重试。
+- 团队 Skill 变更在一个事务内写入版本、文件与幂等记录；Agent 固定通过 pull 获取版本。
+- Context 引用由服务端签发，绑定 `(tenant_id, user_id)`，15 分钟后过期。
+- 团队 Memory 与团队 Skill 对 Agent 只读；Agent 只能写个人 Memory。
+- 无法确定性重放的外部副作用工具在 Replay 中直接失败，不回退为真实调用。
 
 ## 项目结构
 
 ```text
-teamEvolver/
-├── teamEvolver/
-│   ├── admin/           # 控制台身份、授权与租户设置
-│   ├── cli/             # 服务、数据源、诊断和存储命令
-│   ├── integrations/    # 租户主体、Context 与 skillopt rollout
-│   ├── proxy/           # FastAPI、控制台与 Workspace 接口
-│   ├── config_store/    # YAML 配置默认值、持久化与运行时桥接
-│   ├── storage/         # PostgreSQL、本地与 OpenViking 存储适配
-│   └── true_replay.py   # Replay 子进程宿主装配入口
-├── session_ingestion/   # Session Push、Pull、共享接入管线与数据源 Adapter
-├── team_memory/         # Memory 聚合、维护、账本与路由
-├── team_replay/         # True Replay Interface、引擎、策略与 Runtime Adapter
-├── web-ui/              # React + TypeScript 控制台源码
-├── tests/               # 单元、集成、协议和回放测试
-└── docs/                # Markdown 文档源（中/英双语，控制台内可阅读和搜索）
+team-evolver/
+├── teamEvolver/          # 平台层：组合根、启动配置、数据库、运行时、存储、OpenViking 客户端、身份、CLI
+├── session_ingestion/    # Session 上报、数据源拉取、强制分析阶段
+├── team_skills/          # Skill 库、Candidate、Evolution、成功经验、导入导出、实验工作台
+├── team_replay/          # True Replay、Test Dataset、Replay Adapter
+├── team_memory/          # 团队 Memory 聚合、DreamCycle 维护、Memory Replay
+├── team_miner/           # 挖掘模块组合入口
+│   ├── knowledge_miner/ # 知识库挖掘：资料 → Wiki
+│   └── skill_miner/     # Skill 挖掘：资料 → Skill 包
+├── web-ui/               # React + TypeScript 控制台源码
+├── tests/                # 单元、集成、架构与文档契约测试
+└── docs/                 # 中英双语 Markdown 文档
 ```
 
 ## 文档
 
-文档以 Markdown 源文件维护在 `docs/` 目录下，提供中/英双语版本。登录控制台后，左侧导航栏"文档 → 使用文档"内置阅读器支持目录树浏览、全文搜索、中英文切换与 Markdown/GFM/代码块/表格渲染：
+文档索引见 [docs/README.md](./docs/README.md)。
 
 | 章节 | 内容 |
 | --- | --- |
 | 开始使用 | [产品简介](./docs/zh/getting-started/01-introduction.md)、[快速开始](./docs/zh/getting-started/02-quickstart.md)、[安装部署](./docs/zh/getting-started/03-installation.md) |
-| 核心概念 | [架构总览](./docs/zh/concepts/01-architecture.md)、[进化闭环](./docs/zh/concepts/02-evolution-loop.md)、[Skill 体系](./docs/zh/concepts/03-skills.md)、[Memory & Memory maintenance](./docs/zh/concepts/04-memory.md)、[True Replay](./docs/zh/concepts/06-true-replay.md) |
+| 核心概念 | [架构总览](./docs/zh/concepts/01-architecture.md)、[进化闭环](./docs/zh/concepts/02-evolution-loop.md)、[Skill 体系](./docs/zh/concepts/03-skills.md)、[Memory 体系](./docs/zh/concepts/04-memory.md)、[True Replay](./docs/zh/concepts/06-true-replay.md)、[存储空间](./docs/zh/concepts/09-storage-layout.md) |
 | 使用指南 | [配置参考](./docs/zh/guides/01-configuration.md)、[生产部署](./docs/zh/guides/02-deployment.md)、[Web 控制台](./docs/zh/guides/03-console.md)、[可观测性](./docs/zh/guides/04-observability.md)、[故障排查](./docs/zh/guides/06-troubleshooting.md) |
-| Agent 接入 | [接入概览](./docs/zh/agent-integrations/01-overview.md)、[Protocol v2 规范](./docs/zh/agent-integrations/06-protocol-v2.md)、[Pi Agent 接入](./docs/zh/agent-integrations/04-pi-agent.md)、[自定义接入](./docs/zh/agent-integrations/05-custom-agent.md) |
-| API 参考 | [API 概览](./docs/zh/api/01-overview.md)、[Session 上报](./docs/zh/api/03-session-ingest.md)、[Context Workspace](./docs/zh/api/04-context-workspace.md)、[Skill 管理](./docs/zh/api/09-skills-admin.md)、[团队记忆聚合](./docs/zh/api/11-team-memory-aggregation.md) |
-| 设计文档 | [Master PRD](./docs/design/01-master-prd.md)、[Memory maintenance 评估](./docs/design/02-dreamcycle-snapshot-evaluation.md)、[OpenViking 能力调研](./docs/design/03-openviking-capabilities.md) |
+| Agent 接入 | [接入概览](./docs/zh/agent-integrations/01-overview.md)、[协议 v2](./docs/zh/agent-integrations/06-protocol-v2.md)、[自定义 Agent](./docs/zh/agent-integrations/05-custom-agent.md) |
+| API 参考 | [API 概览](./docs/zh/api/01-overview.md)、[端点索引](./docs/zh/api/00-endpoints.md) |
+| English | [English Documentation](./docs/en/getting-started/01-introduction.md) |
 
-### 文档同步约定
-
-修改代码后需同步更新文档时，请遵循 [文档维护指南](./docs/zh/api/99-docs-maintenance.md)。提交前运行 `node docs/scripts/check-docs-refs.mjs` 验证所有代码引用和链接有效。
-
-- [Protocol JSON Schemas](./docs/schemas/)
-- [English Documentation](./docs/en/getting-started/01-introduction.md)
+修改代码后按 [文档维护指南](./docs/zh/api/99-docs-maintenance.md) 同步文档，并运行 `node docs/scripts/check-docs-refs.mjs --strict`。
 
 ## 开发验证
 
 ```bash
-python -m pip install -e ".[all,dev]"
+bash scripts/install_teamEvolver.sh
 npm --prefix web-ui ci
 bash scripts/verify_local.sh
 ```
 
-`verify_local.sh` 会执行 Python 编译、测试套件和前端生产构建。
+`verify_local.sh` 执行 Python 编译、测试套件、前端测试与生产构建。
 
 ## License
 
 [MIT](./LICENSE)
-
-Ontology 发布复用 trusted + Root Key，保留人工审批，不再配置发布公私钥。见 [发布与升级说明](docs/ontology-integration/38-trusted-root-publication.md)。
-
-## 服务日志
-
-前台与后台均支持控制台和文件双输出、按天／大小轮转及目录配置。管理员在「运行状态」查看当前日志位置和降级状态，部署与排障步骤见 [服务日志与 Ontology 排障](docs/zh/guides/15-service-logging.md)。

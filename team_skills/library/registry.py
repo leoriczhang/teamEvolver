@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class SkillIDRegistry:
-    """Maintains a persistent mapping: skill_name -> {skill_id, version, ...}."""
+    """Maintains a persistent mapping: skill_name -> {skill_id, version,...}."""
 
     def __init__(self) -> None:
         self._map: dict[str, dict[str, Any]] = {}

@@ -3,7 +3,7 @@
 各 agent adapter 通过 ``extract_meta(converted, session, traces)`` 钩子
 （由用户在 per-agent 文件中实现）返回三个展示字段：
 
-    user_id    —— 业务用户标识（工号 / sender 等，非平台内部 id）
+    user_id    —— 上游用户标识（user_id / sender 等）
     session_id —— 会话标识（缺省取标准 session_id）
     trace_id   —— 用户自定义的链路标识（藏在 trace.metadata / input 里的
                   traceId / trace_id / traceID 等，非平台自增 trace 主键）
@@ -132,7 +132,7 @@ def collect_session_meta(
 ) -> dict[str, str]:
     """通用 meta 提取：遍历 traces，逐个补齐 user_id / session_id / trace_id。
 
-    适配 doris.py 的 ``traces`` 形态（``[{"trace": {...}}, ...]``，亦兼容裸
+    适配 doris.py 的 ``traces`` 形态（``[{"trace": {...}},...]``，亦兼容裸
     trace dict）。优先级：
 
     user_id:    converted.user_alias → user_from_input(input) → input 深搜 →

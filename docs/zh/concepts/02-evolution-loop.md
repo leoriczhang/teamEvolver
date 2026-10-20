@@ -1,133 +1,124 @@
 # 进化闭环
 
-进化闭环是 teamEvolver 的核心运作机制：从 Agent 真实工作中采集 Session → 提取可复用经验 → 生成候选改进 → 在真实隔离环境验证 → 审核发布 → 下发到 Agent，形成持续增强的循环。
+进化闭环把 Agent 的真实工作转化为团队 Skill 版本：Session 接入 → 强制分析 → Skill Evolution 生成 Skill Candidate → True Replay 验证 → Candidate Review 与 Publish → Agent 拉取。每一步都是持久化的 Worker 任务，任何 API 或 Worker 副本都可以接手。
 
 ## 闭环总览
 
-```
-   ┌──────────┐     ┌──────────┐     ┌──────────┐
-   │ Session  │────►│ Evidence │────►│Candidate │
-   │  Ingest  │     │ Extract  │     │ Generate │
-   └──────────┘     └──────────┘     └────┬─────┘
-        ▲                                 │
-        │                                 ▼
-   ┌────┴─────┐     ┌──────────┐     ┌──────────┐
-   │  Publish │◄────│  Review  │◄────│ Validate │
-   │ & Sync   │     │  Gate    │     │(TrueReplay)
-   └──────────┘     └──────────┘     └──────────┘
+```text
+ Agent push / 数据源 pull
+        │ 202 + session.normalize
+        ▼
+ normalize → split → analyze → trace_analyze → archive ──► 正式 Session + Evidence
+                                                     │ POST /api/skill-evolution/trigger
+                                                     ▼
+                                     skill.evolve：按 Skill 分组规划 → Skill Candidate
+                                                     │ auto_evaluate 或手动 evaluate/validate
+                                                     ▼
+                                     skill.validate：静态检查 + True Replay
+                                                     │ accept / reject / inconclusive
+                                                     ▼
+                         Candidate Review ──► Publish（新版本）──► GET /sync/skills
 ```
 
 ## 阶段详解
 
-### 1. Session Ingest（会话采集）
+### 1. Session 接入
 
-Agent 在每次会话结束后通过 `/ingest_session` 上报完整轨迹：
-- 完整消息序列（system/user/assistant/tool）
-- 工具调用和工具结果
-- 注入和使用的 Skill 列表
-- 效率指标（轮次、工具调用数、Token 消耗）
-- 使用的 Context 引用
+Agent 通过 `POST /ingest_session` 推送 v2 Session，或管理员通过数据源拉取。API 在一个事务内写入 `ingestions`、原始 payload 和 `session.normalize`（或 `session.pull`）任务，返回 `202`。相同 `session_id` 的重复推送映射到第一次受理。详见 [Session 体系](./05-sessions.md)。
 
-上报使用租户 Key 与 runtime_context.user_id，服务端绑定租户内主体后写入队列。
+### 2. 强制分析
 
-### 2. Evidence Extraction（证据提取）
+Worker 依次执行 `normalize`、`split`、`analyze`、`trace_analyze`、`archive`，每个阶段写一行 `session_stage_results`。`split` 用一次模型调用识别连续的话题边界；多话题 Session 会先生成带来源元数据的子 ingestion，每个子段再独立执行完整链路。切分计划在 fan-out 前持久化，因此重试会复用同一组边界。只有五个阶段全部成功后，`archive` 才写入正式 `sessions` 行；任何阶段失败都不产生正式 Session 或 Evidence。
 
-证据提取分两层，分别发生在不同阶段：
-
-**会话级分析（Analyze 阶段）**：入库前，合并分析器（`team_skills/evolution/stages/analyze.py:analyze_session`，系统提示词为模块常量 `_ANALYZE_SYSTEM`）在一次模型调用中完成价值分类、摘要和四维评分（0.0-1.0）：
+`analyze` 由 `team_skills/evolution/stages/analyze.py:analyze_session` 在一次模型调用中完成价值分类、摘要和四维评分：
 
 | 维度 | 权重 | 含义 |
 |------|------|------|
 | `task_completion` | 0.55 | 用户目标是否完成 |
 | `response_quality` | 0.30 | 最终结果的正确性、完整性与清晰度 |
-| `efficiency` | 0.05 | 执行路径是否避免了不必要的重试/绕路 |
 | `tool_usage` | 0.10 | 工具使用是否恰当且有效 |
+| `efficiency` | 0.05 | 执行路径是否避免了不必要的重试或绕路 |
 
-加权得到 `overall_score`，输出还包含每个维度的评分要点（`reasons`，中文要点列表）和整体 `rationale`。每个非空 Session 都必须在入库前完成合并分析（分类、摘要、评分）；已有 benchmark/aggregate 分数只作为输入证据，不会跳过分析。只有已持久化完整 `_summary` 与 `_judge_scores` 的 Session 在后续进化周期中复用结果，不重复调用模型。
+系统提示词为 `_ANALYZE_SYSTEM`，可在 Prompt Studio 中按租户覆盖。
 
-**证据路由（进化 Prompt 内）**：不存在独立的"证据分类"阶段。候选生成时，进化 Prompt（`team_skills/evolution/stages/execute.py:evolve_skill_from_sessions`，路由规则为模块常量 `_EVIDENCE_ROUTING_RULES`）要求把每条候选经验归入且只归入一个桶：
+### 3. Skill Evolution
 
-| 桶 | 含义 |
-|----|------|
-| `team_skill` | 可复用的 SOP、稳定环境事实、工具/领域操作规程 |
-| `user_memory` | 可归因于某个用户的偏好或习惯 |
-| `task_requirement` | 仅针对当前交付物的明确要求或纠正 |
-| `agent_runtime` | 中断、上下文丢失、工具故障、编排失败等运行时问题 |
-| `insufficient_evidence` | 与 Skill 没有可论证因果联系的观察 |
+管理员调用 `POST /api/skill-evolution/trigger`（可选 `session_ids`，最多 200 个），API 写入 `skill.evolve` 命令并固定当时的 `skills` 模块配置 revision。Worker 执行 `team_skills/evolution/cycle.py`：
 
-只有 `team_skill` 证据才能修改共享 Skill；若全部观察落在其余桶中，进化选择 `skip`，Session 归档。曾经的 DreamCycle Memory 路由已被取代：ingest 阶段分类结果不为 `valuable` 的会话直接跳过并归档（见 [Sessions](./05-sessions)）。
+- **冻结输入**：首次执行时按 `evolution_max_sessions`（默认 100，上限 200）选出受理时刻之前入库、尚未被消费的 Session，并保存输入集合；中断后续跑使用同一批 Session。
+- **分组**：按关联 Skill 分组，每组是独立分支；无关联 Skill 的 Session 进入新建分支。
+- **团队证据门槛**：每个分支的证据至少覆盖 `min_group_sessions`（默认 2）个 Session 和 `min_group_users`（默认 2）个用户，否则本轮跳过该分支。
+- **规划**：模型基于分组 Session、跨周期 Evidence 和成功经验模式给出 `skip`、修订或新建决策。证据路由规则为 `team_skills/evolution/stages/execute.py` 中的 `_EVIDENCE_ROUTING_RULES`，只有 `team_skill` 证据可以修改共享 Skill。
+- **并行生成测试集**：满足证据门槛后，规划与 Test Dataset 生成同时启动，使用同一批 Evidence；测试集不读取本轮候选内容或候选分类结果。两边完成后才写入 Candidate 并提交验证。规划跳过时取消尚未完成的测试集生成；分支失败不消费本轮 Evidence，重试仍使用冻结输入。
+- **生成 Candidate**：写入 `skill_candidates` 及其文件，记录 Evidence Classification、编辑摘要、文件变更、bundle diff 和静态检查结果；不影响已发布版本。规划期间若有人修改了同一 Skill 的 Candidate，本次提案作废。
 
-### 3. Candidate Generation（候选生成）
+### 4. Test Dataset
 
-每个进化周期，引擎把消费的 Session 按关联 Skill 分组，每个分组是一个独立分支，各自运行一次进化（`team_skills/evolution/runtime/orchestrator.py:_evolve_skill_group`）：基于该 Skill 关联的 Session 与跨周期 Evidence 账本，产出修订、新建或 `skip` 决策。不存在"证据积累到阈值才生成候选"的机制；`evidence_change_debt_threshold` 只影响 Evidence 账本的跨周期引导，不是候选生成阈值。
+Test Dataset 与 Skill 规划并行、独立生成。每个 Candidate 携带由同源 Evidence 归纳的两个 Replay Case，每个 Case 有 `query`、`skill_ids`、6–8 项 `checks`（Checklist）和 `materials`。新 Skill 的名称在规划结束后绑定到 Case；只有两边均完成才进入 True Replay。也可以在「数据集」页面从 Session 选择或合成数据集，见 [True Replay](./06-true-replay.md)。
 
-分支级约束：
+### 5. 验证
 
-- **团队证据最低要求**：每个分支的规划证据必须覆盖至少 `evolve.min_group_sessions`（默认 2）个不同 Session 且 `evolve.min_group_users`（默认 2）个不同 User（`team_skills/evolution/kernel/settings.py:EvolveServerConfig`），不满足则本轮跳过该分支；设为 0 表示关闭对应检查。
-- **并行度上限**：分组分支与无 Skill 新建分支的并行数量由 `evolve.max_parallel_groups` 限制。
-- **部分提交**：某分支失败时，其 Session 保留在队列中等待下轮重试；成功分支的 Session 正常消费并归档，避免持续失败的分组阻塞整个队列（`team_skills/evolution/runtime/orchestrator.py:_run_once`）。
+`skills` 配置的 `auto_evaluate`（默认 `true`）会在 Candidate 生成后自动提交 `evaluate`；管理员也可以调用：
 
-Candidate 创建时不影响已发布的团队资产，仅存在于验证队列。
+| 接口 | mode | 结果 |
+| --- | --- | --- |
+| `POST /api/skill-candidates/{id}/evaluate` | `evaluate` | 只评估，不发布 |
+| `POST /api/skill-candidates/{id}/validate` `{"mode":"auto"}` | `auto` | 静态检查通过、运行时门禁通过且 verdict 为 accept 时发布；reject 时拒绝 |
+| `POST /api/skill-candidates/{id}/validate` `{"mode":"force"}` | `force` | 静态检查和运行时门禁通过时发布，不要求 accept |
 
-### 4. Dataset Synthesis（数据集合成）
+`skill.validate` 固定 Candidate revision、Baseline 版本、`replay` 配置 revision 和租户绑定的 Replay Adapter revision，然后执行静态检查和 True Replay。静态检查不通过时 verdict 一律为 reject；运行时门禁未通过时 accept 降为 inconclusive。
 
-从同源 Evidence 中自动生成测试用例：
-- 从 Session 中提取用户输入作为测试任务
-- 每个 Candidate 生成 `dataset_test_cases=2` 个以上的测试 case
-- 累积到 `dataset_min_requirements=12` 条后启动验证
+### 6. Candidate Review 与 Publish
 
-### 5. True Replay Validation（真实验证）
+管理员在控制台查看 Evidence、diff、静态检查和 True Replay 结果，可以：
 
-在接入方 Agent 的真实 Runtime 中，对每个测试 case 并行执行：
-- **Baseline 分支**：加载当前已发布 Skill
-- **Candidate 分支**：加载待验证的 Skill Candidate
+- 编辑内容：`PUT /api/skill-candidates/{id}/content`（携带 `candidate_revision` 做乐观锁）
+- 标记反馈：`PATCH /api/skill-candidates/{id}/feedback`
+- 拒绝：`POST /api/skill-candidates/{id}/reject`
+- 发布：`validate` 的 `auto` 或 `force` 模式
 
-两者共享相同的冻结 Context（通过 Snapshot Hash 保证一致性），在隔离环境中运行。结果比较：
-1. **Checklist 门禁**：Baseline 和 Candidate 都必须完成所有 Checklist 项，不满足则直接拒绝
-2. **效率对比**：Checklist 通过后，按轮次→工具调用数→总 Token 消耗排序，Candidate 必须不劣于 Baseline
+Publish 在同一事务内写入新的 `skill_versions`、文件和 `skill_mutations`，详见 [发布与回滚](./08-publish-rollback.md)。
 
-### 6. Review Gate（审核门禁）
+### 7. 分发
 
-通过自动验证的 Candidate 进入管理员审核队列：
-- 管理员在控制台查看 Evidence、变更 diff、True Replay 对比结果
-- 可通过、拒绝或要求修改
-- 超时（`human_review_timeout_seconds=86400`）后按配置自动处理
+Agent 在模型调用前请求 `GET /sync/skills?user_id=...`，携带 `If-None-Match` 时未变化返回 `304`。Skill 分发只有这一种 pull 方式，发布不向 Agent 推送。
 
-### 7. Publish & Sync（发布与同步）
+### 8. Rollback
 
-审核通过后：
-1. `SkillMutationService` 事务性提交新版本（记录 commit 历史 + tombstone 旧版本）
-2. 持久化 outbox 写入分发队列
-3. 已注册的 Agent 在下一次 `context/skills` 拉取或 webhook 推送时获得新版本
-4. Skill Sync Adapter 确保至少一次送达，Agent 端收到后确认 `{"ok": true, "results": {...}}`
-
-### 8. Rollback（回滚）
-
-任何时候可回滚到历史版本：
-- 以新版本形式恢复历史内容（保留版本链和审计记录）
-- 不同时删除其他版本
+`POST /api/skills/{name}/rollback` 以新版本恢复历史内容，保留全部旧版本和审计链。
 
 ## 进化触发
 
-| 触发方式 | 说明 |
-|---------|------|
-| 自动周期 | `evolve.interval_seconds=600`（10分钟）扫描队列 |
-| 手动触发 | `POST /trigger` 立即执行一次进化周期 |
-| Session 驱动 | 积累足够 Evidence 时自动唤醒 |
-| 连续排空 | 配置 `evolve.drain_max_per_cycle`（默认 0 = 不设上限）后，若单周期排空达到上限仍有积压，或周期内又有新会话入队，下一周期约 1 秒后自动启动，而不是等待完整间隔（`team_skills/evolution/runtime/orchestrator.py:run_periodic`）；排空本身按批读取会话（`team_skills/evolution/runtime/mixins.py:_drain_sessions`），队列空闲时仍按完整间隔休眠 |
+| 方式 | 说明 |
+|------|------|
+| 手动触发 | 控制台或 `POST /api/skill-evolution/trigger`，可指定 `session_ids` |
+| 自动触发 | `evolution_trigger_mode=automatic` 时，Worker 按 `evolution_interval_seconds` 检查并消费未进化的 Session |
+| 自动评估 | `auto_evaluate=true` 时，每个新 Candidate 自动进入 `evaluate` |
+| 成功经验 | Worker 周期扫描已分析 Session，维护经验库与经验模式，并作为后续规划上下文，见 [成功经验同步](../guides/16-successful-experience-sync.md) |
 
-## 发布模式
+自动触发由 PostgreSQL advisory lock 和持久化任务去重，多 Worker 不会为同一租户重复受理；手动触发始终可用。
 
-`evolve.publish_mode` 只接受两个值：
+## 进化设置
 
-- `validated`：Candidate 进入验证队列；满足结果数、通过数和运行时兼容门禁后可由后台发布，灰区在启用 `human_review_enabled` 时进入人工复核。
-- `direct`：进化结果直接发布，不经过 Candidate 验证队列。
+`GET/PUT /api/skill-evolution/settings` 读写 `skills` 模块配置中的下列字段（`revision` 乐观锁）：
 
-当前没有 `evolve.enabled` 总开关。需要暂停自动扫描时，应停止服务或在部署层暂停进化进程，不要使用未定义的配置项。
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `evolution_max_sessions` | 100 | 单次进化最多消费的 Session 数（上限 200） |
+| `min_group_sessions` | 2 | 分支最少 Session 数，0 表示不检查 |
+| `min_group_users` | 2 | 分支最少用户数，0 表示不检查 |
+| `evolution_trigger_mode` | manual | `manual` 手动触发或 `automatic` 定时自动触发 |
+| `evolution_interval_seconds` | 600 | 自动触发检查间隔，60–604800 秒 |
+| `auto_evaluate` | true | 新 Candidate 是否自动评估 |
+| `publish_mode` | manual | `manual` 验证通过后等待人工审核，`automatic` 验证通过后自动发布 |
+| `bundle_allow_delete` | true | 进化是否允许删除 bundle 文件 |
+| `bundle_edit_max_bytes` | 262144 | 单文件可编辑上限 |
+| `bundle_prompt_max_bytes` | 786432 | 送入模型的 bundle 上限 |
 
 ## 相关文档
 
-- [Skill 体系](./03-skills)：Skill 的结构、版本、生命周期
-- [True Replay](./06-true-replay)：验证机制的详细说明
-- [Checklist 门禁](./07-checklist)：完成性判定规则
-- [发布与回滚](./08-publish-rollback)：版本管理和审计
+- [Skill 体系](./03-skills.md)：Skill 的结构、版本、生命周期
+- [True Replay](./06-true-replay.md)：验证机制
+- [Checklist 门禁](./07-checklist.md)：完成性判定规则
+- [发布与回滚](./08-publish-rollback.md)：版本管理和审计
+- [验证与 Candidate API](../api/10-validation.md)

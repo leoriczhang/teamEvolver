@@ -1,460 +1,117 @@
-# Troubleshooting Guide
+# Troubleshooting
 
-This guide compiles troubleshooting approaches and solutions for common teamEvolver issues.
+Work through "process → database → task → business module". Most problems can be located with `/readyz`, `GET /api/jobs/{job_id}` and the service log.
 
-## Log Locations
-
-First check logs when troubleshooting:
-
-| Runtime Mode | Log Location |
-|--------------|--------------|
-| Foreground mode | stdout/stderr (terminal output) |
-| Daemon mode | `~/.teamEvolver/teamEvolver.log` |
-| systemd mode | `journalctl -u teamevolver -f` |
-| Skill Miner | `team_miner/logs/` |
-| Nginx reverse proxy | `/var/log/nginx/teamevolver.access.log` and `/var/log/nginx/teamevolver.error.log` |
-
-View Daemon log tail:
+## Step 1: Check Processes and Logs
 
 ```bash
-tail -f ~/.teamEvolver/teamEvolver.log
+teamEvolver status
+curl -s http://127.0.0.1:52010/readyz
+curl -s http://127.0.0.1:52011/readyz
 ```
 
-View recent 100 lines systemd logs:
+| Port | Role | Description |
+|------|------|------|
+| 52010 | `api` | Console and HTTP API; `/readyz` 503 means not ready or shutting down |
+| 52011 | `worker` | Health checks only |
+
+The log defaults to `~/.teamEvolver/teamEvolver.log`; containers can set the directory with `TEAMEVOLVER_LOG_DIR`. It is also written to standard error. In background mode without `--log-file`, process output goes to `/tmp/te_runtime.log`. Log fields and degradation behavior are in [Service Logging](./15-service-logging.md).
+
+## Startup Failures
+
+| Output | Cause and fix |
+|------|------------|
+| `runtime requires PostgreSQL; configure TEAMEVOLVER_PG_DSN` | No database connection; set `TEAMEVOLVER_PG_DSN` or the `TEAMEVOLVER_PG_HOST` family |
+| `all runtime is restricted to local development` | `--role all` requires `TEAMEVOLVER_ENV=local`; production starts `api` and `worker` separately |
+| `teamEvolver is already running (PID=...)` | Background mode found a live PID; run `teamEvolver stop` first |
+| `teamevolver_config single row is missing; run schema apply` | Database not initialized; run `teamEvolver schema apply` |
+| `Invalid logging option: ...` | Invalid logging configuration; see [Service Logging](./15-service-logging.md#configuration) |
+| YAML field errors at load | The bootstrap configuration accepts only flat current field names; former section or dot-path forms are rejected; see the [Configuration Reference](./01-configuration.md) |
+
+When `teamEvolver status` reports running but the process is gone, the PID file is stale; `teamEvolver stop` clears it.
+
+## Database
+
+- `/readyz` stays 503: check database address, port, URL-encoded password and network
+- Tenants see each other's data or see nothing: make sure the application role is not SUPERUSER or BYPASSRLS and the schema was created by `teamEvolver schema apply`
+- Connections exhausted: reserve `(storage_pg_pool_max + storage_pg_control_pool_max) × instances` connections
+
+## Tasks Never Finish
+
+Every long task is a `worker_tasks` row, and accepting APIs return a `job_id`:
 
 ```bash
-journalctl -u teamevolver -n 100 --no-pager
+curl -s -H "Authorization: Bearer $TEAMEVOLVER_ROOT_API_KEY" -H 'X-Tenant-Id: demo' \
+  http://127.0.0.1:52010/api/jobs/<job_id>
 ```
 
-## Service Startup Issues
+| Status | Action |
+|------|------|
+| `queued` for a long time | Worker not running, or the tenant status is not `active` |
+| `retry_wait` | Waiting for a backoff retry; `error_code` is the last failure |
+| `waiting_external` | Waiting on upstream (such as OpenViking Compile); check the upstream task `upstream_task_id` |
+| `reconciling` | Outcome unknown, reconciling with upstream; do not resubmit by hand |
+| `failed` | Check `error_code`; after fixing, `POST /api/jobs/{job_id}/retry` |
 
-### Problem: Service cannot start
+When a Worker exits, the leases of its unfinished tasks expire and other Workers take them over. Status details are in [Health and Jobs API](../api/07-health-status.md).
 
-**Symptoms**: Error or immediate exit after executing `teamEvolver start`.
+## Agent Integration
 
-**Troubleshooting steps**:
+| Symptom | Action |
+|------|------|
+| `401 TENANT_TOKEN_REQUIRED` | The Agent did not send a valid tenant Key; rotate it in "Members & Access" and update the Agent |
+| Ingest returns 202 but the Session never shows up | Query the returned `job_id`; `session.analyze` needs a working model |
+| `GET /sync/skills` always 304 | No new version; the ETag changes only after a publish |
+| A Skill is not pulled | Make sure it is published and not deleted; pull returns Skills visible to the `user_id` |
 
-1. Check if configuration file exists:
-   ```bash
-   ls -la ~/.teamEvolver/config.yaml
-   ```
-   If doesn't exist, initialize configuration first:
-   ```bash
-   teamEvolver config llm.api_key "your-key"
-   ```
+Protocol details are in [Agent Protocol](../agent-integrations/06-protocol-v2.md).
 
-2. Check if port occupied:
-   ```bash
-   netstat -tlnp | grep 52010
-   # or
-   lsof -i :52010
-   ```
-   If port occupied, you can:
-   - Stop the process occupying port
-   - Or start with other port: `teamEvolver start --port 52011`
-   - Or modify persistent configuration: `teamEvolver config service.port 52011`
+## Evolution Produces No Candidate
 
-3. Foreground start to view detailed errors:
-   ```bash
-   teamEvolver start
-   ```
-   Foreground mode outputs errors directly to terminal for easier diagnosis.
+1. Check `evolution_trigger_mode`. In manual mode, click "Run Evolution" in the console or call `POST /api/skill-evolution/trigger`; in automatic mode, also allow for the configured interval.
+2. Check whether the Skill group meets `min_group_sessions` and `min_group_users` (both default to 2); see the [Prompt Studio Guide](./08-prompt-studio.md#settings).
+3. Check whether Sessions were classified as chitchat: "Run Overview → Filter Audit".
+4. Check the model: connection test on the "Model Settings" page.
 
-4. Check LLM API configuration:
-   - Confirm `llm.api_key` not empty
-   - Confirm `llm.api_base` accessible:
-     ```bash
-     curl -s -o /dev/null -w "%{http_code}" https://ark.cn-beijing.volces.com/api/v3/models
-     ```
+## True Replay
 
-### Problem: Daemon startup timeout
+| Symptom | Action |
+|------|------|
+| Validation result `inconclusive` | Efficiency metrics (turns, tool calls, tokens) are missing; check the fields returned by the Replay adapter |
+| Both branches give identical results | Make sure the adapter uses a separate workspace per branch |
+| Validation task fails | Check the `skill.validate` task `error_code` and Replay adapter connectivity |
 
-**Symptoms**: `teamEvolver start --daemon` errors "did not become healthy in time".
+The contract is in [Replay Branch API](../api/05-replay-branch.md).
 
-**Troubleshooting steps**:
+## OpenViking
 
-1. View log file:
-   ```bash
-   cat ~/.teamEvolver/teamEvolver.log
-   ```
+| Symptom | Action |
+|------|------|
+| Assets page or knowledge base mining shows "not configured" | Configure Endpoint, Account and Root Key in "Runtime Status → OpenViking Deployment" |
+| Reads and writes return 503 | OpenViking unreachable; check Endpoint and network |
+| Writing team resources returns 403 | Only tenant administrators can write team scopes |
+| Built-in terminal unavailable | OpenViking CLI not installed on the server, or wrong `OPENVIKING_CLI_BIN` path |
 
-2. Increase timeout:
-   ```bash
-   TEAMEVOLVER_DAEMON_READY_TIMEOUT_S=30 teamEvolver start --daemon
-   ```
+## Console
 
-3. Check if port bindable: If `service.host` configured to specific NIC address but NIC doesn't exist, bind fails.
+| Symptom | Action |
+|------|------|
+| `503 console assets are not built` | Frontend not built; run `npm --prefix web-ui run build` |
+| No menu after sign-in | The account has no tenant membership; ask a tenant administrator to add it |
+| Signed out shortly after sign-in | Session Cookie expired or revoked; the reverse proxy must keep cookies and use one domain |
+| Data unchanged after switching tenant | The page reloads fully; if data is still stale, clear the browser cache and retry |
 
-### Problem: PID file exists but process dead
+## Trace Observability and Data Sources
 
-**Symptoms**: `teamEvolver status` shows "not running (stale PID file)".
+- No trace data: see the [Trace Observability Guide](./04-observability.md#troubleshooting)
+- Data source test or pull fails: see the [Data Source Onboarding Guide](./10-datasource-onboarding.md#common-errors)
+- Successful experiences not synced: see the [Successful Experience Sync Guide](./16-successful-experience-sync.md#status-and-troubleshooting)
 
-Typically caused by abnormal process crash (OOM, kill -9) not cleaning PID file. `status` command auto-cleans stale PID file, can restart afterwards.
+## Collecting Information
 
-## OpenViking Connection Issues
+When reporting a problem, include:
 
-### Problem: Skill cloud sync fails
-
-**Symptoms**: `teamEvolver skills pull` or `push` reports connection errors.
-
-**Troubleshooting steps**:
-
-1. Check deployment mode configuration:
-   ```bash
-   teamEvolver config sharing.viking_deployment
-   ```
-   Value should be `cloud` or `local`.
-
-3. Verify the Trusted Root Key:
-   - `sharing.viking_api_key`
-   - Or the compatibility field `sharing.viking_team_api_key`
-
-4. Check endpoint configuration:
-   ```bash
-   teamEvolver config sharing.viking_endpoint
-   ```
-   If `viking_deployment` is `cloud`, endpoint should be Volcengine OpenViking address; if `local`, should be self-hosted openviking-server address.
-
-5. Test network connectivity:
-   ```bash
-   curl -s -o /dev/null -w "%{http_code}" \
-     -H "Authorization: Bearer your-key" \
-     "https://your-viking-endpoint/api/v1/health"
-   ```
-
-6. local mode confirm openviking-server running normally.
-
-### Problem: Pulled skills incomplete or missing
-
-1. Check `push_min_injections` and `push_min_effectiveness` thresholds: low-quality skills not pushed to cloud
-2. Confirm API key in use has access to corresponding space
-3. Check `viking_root_prefix` not accidentally modified (this value should usually be default; modification reads different namespace)
-
-## Agent Integration Issues
-
-### Problem: Agent cannot connect to teamEvolver
-
-**Symptoms**: Agent calls to `/ingest_session` return 401 Unauthorized.
-
-**Troubleshooting steps**:
-
-1. Check if `EVOLVE_INGEST_API_KEY` environment variable set:
-   ```bash
-   echo $EVOLVE_INGEST_API_KEY
-   ```
-   If set, Agent requests must carry correct `Authorization: Bearer <key>` header.
-
-2. If no auth needed, ensure `EVOLVE_INGEST_API_KEY` not set (environment variable not injected at service startup).
-
-3. Check if Agent requests reach correct address and port:
-   ```bash
-   # Test connectivity from Agent machine
-   curl -v http://teamevolver-host:52010/healthz
-   ```
-
-4. If Nginx reverse proxy present, check if Nginx correctly forwards Authorization header.
-
-### Problem: Agent reporting sessions returns 403 Forbidden
-
-**Symptoms**: Returns "subject not mapped" or 403 error.
-
-**Cause**: After Agent registration, its subject (identity identifier) needs mapping to a teamEvolver user.
-
-**Solution**:
-
-1. Access the **Users & Permissions** page in the console
-2. Find corresponding Agent, configure subject-to-user mapping
-3. Or confirm user identifiers like `sharing.viking_personal_user` correct in configuration
-
-### Problem: Agent reporting sessions unresponsive or timeout
-
-1. Check service running: `teamEvolver status`
-2. Check if request body size exceeds limit (default 32MB):
-   - Oversized sessions may trigger 413 errors
-   - Adjustable via `TEAMEVOLVER_MAX_SESSION_BODY_BYTES`
-3. Check if reverse proxy timeout configuration too short
-
-## Session & Evolution Issues
-
-### Problem: Sessions not appearing in console after reporting
-
-**Symptoms**: Agent successfully calls `/ingest_session` returns 200, but not visible in console queue.
-
-**Troubleshooting steps**:
-
-1. Check if session marked skip by value classifier:
-   - Session Filter stage determines whether session high-value
-   - Chitchat, low-quality, duplicate sessions skipped, not entering evolution queue
-   - Check history in console if marked "skipped"
-
-2. Check if judged duplicate:
-   - Duplicate reports for same session_id deduplicated
-   - Using `--force` (when Langfuse pulling) forces reprocessing
-
-3. Confirm ingest endpoint authentication passed: If `EVOLVE_INGEST_API_KEY` configured, requests must carry correct key; otherwise may return 200 but rejected (depending on deployment config).
-
-4. Check value_judge results in logs:
-   ```bash
-   grep -i "value_judge\|skipped\|queued" ~/.teamEvolver/teamEvolver.log | tail -50
-   ```
-
-### Problem: Skill sync not working
-
-**Symptoms**: Evolution produced new skill versions, but not synced to cloud or other local Agents.
-
-**Troubleshooting steps**:
-
-1. Check skill sync outbox: View if any unsuccessfully uploaded change events
-2. Check `skill_reload_mode` configuration:
-   - `off`: No auto-reload, manual trigger needed
-   - `poll`: Polling per `skill_reload_interval_seconds` (default 30 seconds)
-   - `callback`: Callback mode (requires OpenViking webhook support)
-3. Manually trigger sync:
-   ```bash
-   teamEvolver skills sync
-   ```
-5. Check if skills meet push thresholds (injection count, effectiveness):
-   - Skills below thresholds not pushed
-   - Use `--no-filter` to force push: `teamEvolver skills push --no-filter`
-6. Check replay endpoint configuration: Pi Agent URL needs correct configuration for distributed validation
-
-### Problem: Evolution not running automatically
-
-1. Check evolution interval configuration:
-   ```bash
-   teamEvolver config evolve.interval_seconds
-   ```
-   Default 600 seconds (10 minutes). After first startup need to wait one interval before first evolution round starts.
-
-2. Manually trigger one evolution: Call `/trigger` HTTP endpoint (requires API Key if configured).
-
-3. Check if any sessions waiting in queue: evolution cycle may skip certain stages when no sessions.
-
-4. Check logs for evolution errors:
-   ```bash
-   grep -i "evolve\|error\|exception" ~/.teamEvolver/teamEvolver.log | tail -100
-   ```
-
-## Validation & Replay Issues
-
-### Problem: True Replay validation fails
-
-**Symptoms**: Candidate skills stuck in evaluating or marked replay_error.
-
-**Troubleshooting steps**:
-
-1. Check runtime isolation: True Replay requires independent workspace to execute candidate skills
-   - Confirm sufficient disk space and temp directory permissions
-   - Pi Agent distributed mode: confirm worker nodes accessible
-
-2. Context Hash mismatch:
-   - True Replay relies on deterministic context reconstruction
-   - If initial state inconsistent between baseline replay and candidate replay, causes hash mismatch
-   - Check if external state (filesystem, network calls) affects replay
-
-3. Check validation Worker logs:
-   ```bash
-   teamEvolver validation status
-   teamEvolver validation run-once
-   ```
-   Run manually once to view detailed errors.
-
-4. Temporarily switch to lightweight replay mode to verify if True Replay-specific issue:
-   ```bash
-   teamEvolver config validation.mode replay
-   ```
-
-### Problem: Validation never produces results
-
-1. Check if `validation.max_concurrency` too low (default 1)
-2. Check if `validation.max_jobs_per_day` hit cap (default 5)
-3. Confirm Worker started: background validation Worker starts with main service
-4. Check `validation.idle_after_seconds`: Worker may be sleeping; manually trigger run-once to wake
-
-## Performance Issues
-
-### Problem: Evolution runs slowly
-
-**Possible causes and solutions**:
-
-1. **LLM API response slow**:
-   - Check `llm.api_base` network latency
-   - Consider switching to closer API endpoint
-   - Increase timeout configuration (if applicable)
-
-2. **Evolution interval too short, queue backlog**:
-   - Appropriately increase `evolve.interval_seconds` (e.g., 1200 or 1800)
-   - Check session count in queue; consider adding resources for high throughput
-
-3. **True Replay overhead**:
-   - True Replay mode much slower than replay mode due to full workspace isolation and round-by-round replay
-   - For performance-sensitive scenarios consider using `replay` mode (but lower precision)
-
-4. **Too many sessions processed per round**:
-   - Check `evidence_max_entries`; oversized evidence library increases LLM input length
-   - Adjust `dataset_test_cases` and `dataset_min_requirements`, reduce test case count
-
-5. **Token limits causing retries**:
-   - Check `bundle_max_prompt_bytes`; if Prompt too large may cause API error retries
-   - Appropriately adjust `llm.max_tokens`
-
-### Problem: High memory usage
-
-1. Check if large number of pending sessions accumulated in queue
-2. True Replay parallel replay consumes significant memory; reduce `validation.max_concurrency`
-3. Appropriately reduce `evidence_max_entries`
-4. System level: Add swap or upgrade memory
-
-### Problem: Log files too large
-
-Configure logrotate to rotate logs; see log management section in [deployment guide](./02-deployment.md). Manual cleanup:
-
-```bash
-# Truncate log (don't delete file)
-> ~/.teamEvolver/teamEvolver.log
-```
-
-## Langfuse Integration Issues
-
-### Problem: Langfuse tracing data not appearing in Langfuse UI
-
-1. Run status check:
-   ```bash
-   teamEvolver langfuse status
-   ```
-   Confirm `reachable: True`.
-
-2. Confirm `tracing_enabled: true` vs `enabled` distinction:
-   - `enabled = true` controls inbound pull
-   - `tracing_enabled = true` controls outbound tracing
-   - Two independent, can be enabled separately.
-
-3. Check public_key and secret_key correct:
-   - Must be Langfuse Project API Keys, not Account API Keys
-   - Public Key starts with `pk-lf-`, Secret Key starts with `sk-lf-`
-
-4. Check `tracing_sample_rate`: If set to 0.1, only ~10% of calls traced
-
-5. Check `host` accessible from server:
-   - Self-hosted Langfuse confirm URL and port correct
-   - cloud.langfuse.com check firewall allows outbound HTTPS
-
-6. Check logs for `[Langfuse] tracing unavailable` warnings
-
-### Problem: Langfuse pull not finding sessions
-
-1. First use `list` command to confirm match count:
-   ```bash
-   teamEvolver langfuse list --environment production
-   ```
-
-2. Check if filter conditions too strict:
-   - Whether default filters (`default_environment`, `default_tags`, etc.) match your Langfuse data tags
-   - Temporarily clear default filters: set these to empty lists in configuration
-
-3. Langfuse tags are at Trace level not Session level: If your Agent doesn't correctly set trace tags, may not filter by tags/userId.
-
-4. Time range issues: Whether `from_timestamp`/`to_timestamp` cover session times
-
-### Problem: Langfuse pull returns fewer sessions than the preview window
-
-1. Inspect response `total`, `counts.filtered`, and each filtered result's `reason`.
-2. Check the bound adapter's `SOURCE.exclude_session_id_patterns`. Matching uses case-sensitive globs such as `origin-*`.
-3. Pass one explicit `session_id` to inspect a noisy Session; single-Session requests bypass automatic exclusions.
-4. Network errors, timeouts, 408, 429, and 5xx responses are attempted at most three times. Inspect `retry_count` and `[Langfuse] retrying GET` logs. Authentication errors, other 4xx responses, and invalid JSON are not retried.
-
-## Two-Pod and Publication Issues
-
-### Problem: Pods show different Skill counts or candidate state
-
-```bash
-curl -s 'http://POD_A:52010/status?refresh=true'
-curl -s 'http://POD_B:52010/status?refresh=true'
-curl -s http://POD_A:52010/storage/status
-```
-
-1. Both responses must use the same `tenant_id`, and `multi_replica_safe` must be `true`.
-2. Both `skill_storage.effective_backend` and `session_storage.effective_backend` must be `postgres`.
-3. Compare `manifest_hash`, then inspect `local_cache_matches_manifest`. If manifests match but caches differ, wait one `sharing.skill_reload_interval_seconds` and retry.
-4. If manifests differ, stop publication, verify every Pod uses the same PostgreSQL DSN/schema, and run the local control-plane migration. Never overwrite conflicting objects.
-
-### Problem: Publication succeeds but rollout does not reach upclaw
-
-1. Inspect `/storage/status` fields `outbox.backlog`, `dead_letter`, and `last_error`.
-2. Inspect `rollout_supervisor.running` and the tenant state. `lease_acquired=true` means this instance acquired the previous tick's lease; `lease_held` should be `false` after the request returns.
-3. Payload/frontmatter errors dead-letter before any upstream request. HTTP 400/401/403/404/409/422 are non-retryable by default.
-4. HTTP 408, 429, and 5xx retain the workspace and retry. Correlate logs by `event_id`, `workspace`, `skill_name`, and `version`.
-5. A candidate API 503 means durable publication did not complete. Do not treat it as published; repair storage and retry the same revision.
-
-## Web Console Issues
-
-### Problem: Cannot access console
-
-1. Confirm service running: `teamEvolver status`
-2. Check port listening: `netstat -tlnp | grep 52010`
-3. If firewall present, confirm port open (or access via Nginx)
-4. Check `service.host` bound to correct address:
-   - `0.0.0.0` listens on all NICs
-   - `127.0.0.1` local access only (requires Nginx proxy)
-
-### Problem: Logged out immediately after login
-
-1. Check `~/.teamEvolver/console_sessions.json` permissions
-2. Clear browser cookies and retry
-3. Check system time correct (session TTL calculated based on time)
-
-## Diagnostic Tools
-
-### Health Check Endpoints
-
-```bash
-# Basic health check
-curl http://127.0.0.1:52010/healthz
-
-# Detailed status
-curl http://127.0.0.1:52010/status
-```
-
-### Configuration Check
-
-View all currently effective configuration:
-
-```bash
-teamEvolver config show
-```
-
-### Validation Worker Status
-
-```bash
-teamEvolver validation status
-```
-
-## Getting Help
-
-If above methods cannot resolve issue:
-
-1. Collect relevant log snippets (50 lines before/after error)
-2. Record version number: `teamEvolver --version` (if applicable)
-3. Record configuration (redact API keys and other sensitive info)
-4. Describe reproduction steps
-5. Check for related GitHub Issues
-
-
-## Partial historical import or directory conflicts
-
-The Experience Library sync panel distinguishes source gaps, upload retries and unconfirmed indexes. Inspect `manual.import.error_counts` / `errors_sample`, then match source IDs in `experience_sync.import_source_rejected`; the last error alone is insufficient. The default 64 MiB source budget applies to explicit historical import, with 256 KiB per projected record. Other sources continue; unconfirmed pages from changing sources cannot upload.
-
-After upgrading TE, existing delivery records retain their retry schedule: do not clear PG state. Once the old import finishes, repeat historical import to cover previously skipped sources. A mkdir 409 is accepted only after same-identity stat confirms a directory; path-type, stat authentication and network failures still need repair. `OV_INDEX_NOT_READY` is not full success. See [successful experience operations](16-successful-experience-sync.md).
-
-
-### Retry items appear stuck after import preparation
-
-Import preparation means source discovery/merging finished, not delivery. Identical content retains existing backoff (up to 15 minutes); repeated import does not force an immediate retry. Inspect worker state, last delivery-page check, due/deferred counts, earliest eligibility and error timestamps. A displayed CONFLICT can be historical.
-
-`experience_sync.delivery_started` records attempts; `delivery` records outcome, failure stage, attempt count and next eligibility. `delivery_pass` summarizes attempted/deferred items, with unchanged waiting summarized at most once per minute. `blocked` includes a safe error class and stage; lock contention is visible in worker state.
-
-A write returning `504 DEADLINE_EXCEEDED` after about 25 seconds matches TE's OV processing wait budget. This does not establish a stalled TE worker or absent content. TE attempts same-URI readback; `write_reconciled` reports content confirmation separately from unconfirmed indexes. Correlate the OV request ID with its semantic/vector queues and model logs to distinguish backlog, failures and slow processing. A 404 for the next, different URI says nothing about the preceding write. Do not infer successful indexing from file existence or unbounded timeout increases.
-
-No TE tenant ID is appended to the configured directory. Existing tenant-scoped PG advisory locks prevent same-tenant concurrent runs. Directory snapshots are not execution locks; different tenants sharing one OV destination are not serialized by a directory lock.
-
-Local verification of these diagnostics (2026-09-22, baseline `028f36b`): full Python 807 passed, 48 skipped, five pre-existing failures (Dataset Collection history, Skill validation queue, tenant model config, SF Agent title, storage status). This includes real isolated PG and added backoff/timeout-readback contract cases. Frontend 74 passed; build, compilation, Ruff, docs references and isolated foreground/daemon startup passed. The first PG run failed because the test instance restarted on the wrong port; results above come from rerunning on port 55493. No SIT deployment/import was triggered; actual OV queue timeout causes still require service logs.
+- `teamEvolver config` output (redacted)
+- The relevant `job_id` and the `GET /api/jobs/{job_id}` result
+- The request `X-Request-ID` and the log for that time window
+- `GET /api/logging/status` output

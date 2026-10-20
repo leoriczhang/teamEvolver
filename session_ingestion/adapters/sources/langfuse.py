@@ -145,7 +145,7 @@ class LangfuseSource:
         )
 
     def fetch_session(self, session_id):
-        # Doris 同构信封 {"trace": ..., "observations": [...]}：让 per-agent 的
+        # Doris 同构信封 {"trace":..., "observations": [...]}：让 per-agent 的
         # map_session / extract_meta 钩子在 Doris 与 Langfuse 两种 provider 间原样复用。
         session, flat = self._client().fetch_session_with_traces(
             session_id, trace_name=self.trace_name,

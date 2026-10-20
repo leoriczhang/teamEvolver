@@ -1,4 +1,4 @@
-"""Transactional team-Skill mutations with optional Skillopt rollout."""
+"""Transactional team-Skill mutations over OpenViking object storage."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ class SkillMutationCommand:
 
 
 class SkillMutationService:
-    """Own commit records, tombstones, and optional rollout events."""
+    """Own commit records and tombstones."""
 
     def __init__(
         self,
@@ -69,9 +69,6 @@ class SkillMutationService:
 
     def _commit_key(self, mutation_id: str) -> str:
         return f"{self._prefix}skill_mutation_commits/{mutation_id}.json"
-
-    def _event_key(self, event_id: str) -> str:
-        return f"{self._prefix}skill_rollout_outbox/{event_id}.json"
 
     def _tombstone_key(self, name: str, version: int) -> str:
         return f"{self._prefix}skill_tombstones/{name}/v{version}.json"
@@ -152,7 +149,7 @@ class SkillMutationService:
         tenant_ids: list[str] | tuple[str, ...] = (),
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Publish an in-memory bundle and durably enqueue its delivery."""
+        """Publish an in-memory bundle and record its commit."""
         existing = self._read_json(self._commit_key(mutation_id))
         if existing:
             return dict(existing)
@@ -214,26 +211,13 @@ class SkillMutationService:
                 *[str(item) for item in tenant_ids if str(item)],
             }
         )
-        rollout_enabled = bool(
-            getattr(self._config, "skillopt_rollout_enabled", False)
-        )
-        event_id = (
-            str(existing.get("event_id") or "")
-            if rollout_enabled
-            else ""
-        )
-        if rollout_enabled and not event_id:
-            event_id = _stable_id(
-                "skill_rollout_evt",
-                {"action": action, "expected": expected},
-            )
         commit: dict[str, Any] = {
             "schema_version": "teamevolver.skill-mutation-commit.v1",
             "mutation_id": mutation_id,
             "action": action,
             "expected": dict(expected),
             "tenant_ids": merged_tenants,
-            "event_id": event_id,
+            "event_id": "",
             "status": "published",
             "delivery_mode": "pull",
             "result": {**dict(existing.get("result") or {}), **dict(result or {})},
@@ -243,127 +227,29 @@ class SkillMutationService:
             },
             "committed_at": str(existing.get("committed_at") or _now()),
         }
-        event = None
-        if rollout_enabled:
-            event = self._read_json(self._event_key(event_id))
-            if event is None:
-                event = {
-                    "schema_version": "teamevolver.skill-rollout-outbox.v1",
-                    "event_id": event_id,
-                    "action": action,
-                    "mutation_id": mutation_id,
-                    "skills": [dict(expected)],
-                    "tenant_ids": merged_tenants,
-                    "deliveries": {},
-                    "created_at": _now(),
-                    "updated_at": _now(),
-                }
-            elif merged_tenants != list(event.get("tenant_ids") or []):
-                event["tenant_ids"] = merged_tenants
-                event["updated_at"] = _now()
-        if event is not None and bool(getattr(self._bucket, "native_batch_write", False)):
+        if bool(getattr(self._bucket, "native_batch_write", False)):
             commit_key = self._commit_key(mutation_id)
-            event_key = self._event_key(event_id)
-            for attempt in range(3):
-                preconditions = {
-                    commit_key: self._bucket.object_precondition(commit_key),
-                    event_key: self._bucket.object_precondition(event_key),
-                }
-                try:
-                    self._bucket.batch_write(
-                        {
-                            commit_key: json.dumps(
-                                commit,
-                                ensure_ascii=False,
-                                sort_keys=True,
-                            ).encode("utf-8"),
-                            event_key: json.dumps(
-                                event,
-                                ensure_ascii=False,
-                                sort_keys=True,
-                            ).encode("utf-8"),
-                        },
-                        preconditions=preconditions,
-                    )
-                    break
-                except RuntimeError:
-                    persisted = self._read_json(commit_key)
-                    if persisted:
-                        return persisted
-                    if attempt == 2:
-                        raise
-                    event = self._read_json(event_key) or event
-                    event["tenant_ids"] = sorted(
-                        set(event.get("tenant_ids") or []) | set(merged_tenants)
-                    )
-                    event["updated_at"] = _now()
+            try:
+                self._bucket.batch_write(
+                    {
+                        commit_key: json.dumps(
+                            commit,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ).encode("utf-8"),
+                    },
+                    preconditions={
+                        commit_key: self._bucket.object_precondition(commit_key),
+                    },
+                )
+            except RuntimeError:
+                persisted = self._read_json(commit_key)
+                if persisted:
+                    return persisted
+                raise
         else:
             self._write_json(self._commit_key(mutation_id), commit)
-            if event is not None:
-                self._write_json(self._event_key(event_id), event)
         return commit
-
-    def iter_rollout_events(self):
-        """Yield current rollout events."""
-        for item in self._bucket.iter_objects(
-            self._family_prefix("skill_rollout_outbox")
-        ):
-            event = self._read_json(item.key)
-            if event and event.get("event_id"):
-                yield item.key, event
-
-    def record_delivery(self, event_id: str, consumer_id: str, delivery: dict[str, Any]) -> dict[str, Any]:
-        """Merge one consumer's delivery record into its outbox event.
-
-        Re-reads the event before writing so concurrent drain() updates for
-        other consumers are preserved.
-        """
-        key = self._event_key(event_id)
-        attempts = 3 if bool(getattr(self._bucket, "native_batch_write", False)) else 1
-        for attempt in range(attempts):
-            precondition = None
-            if attempts > 1:
-                try:
-                    raw_event = self._bucket.get_object(key).read()
-                    event = json.loads(raw_event.decode("utf-8"))
-                    precondition = {
-                        "kind": "replace_if_hash",
-                        "base_hash": "sha256:" + hashlib.sha256(raw_event).hexdigest(),
-                    }
-                except Exception:
-                    event = None
-            else:
-                event = self._read_json(key)
-            if not event:
-                raise KeyError(event_id)
-            deliveries = dict(event.get("deliveries") or {})
-            current = dict(deliveries.get(consumer_id) or {})
-            current.update(dict(delivery))
-            deliveries[consumer_id] = current
-            event["deliveries"] = deliveries
-            event["updated_at"] = _now()
-            if attempts == 1:
-                self._write_json(key, event)
-            else:
-                try:
-                    self._bucket.batch_write(
-                        {
-                            key: json.dumps(
-                                event,
-                                ensure_ascii=False,
-                                sort_keys=True,
-                            ).encode("utf-8")
-                        },
-                        preconditions={
-                            key: dict(precondition or {})
-                        },
-                    )
-                except RuntimeError:
-                    if attempt + 1 >= attempts:
-                        raise
-                    continue
-            return event
-        raise RuntimeError(f"failed to update outbox event: {event_id}")
 
     def reconcile(self) -> int:
         repaired = 0
@@ -382,23 +268,6 @@ class SkillMutationService:
                     dict(commit.get("expected") or {}),
                 )
             )
-            event_id = str(commit.get("event_id") or "")
-            rollout_enabled = bool(
-                getattr(self._config, "skillopt_rollout_enabled", False)
-            )
-            event_missing = not event_id or (
-                self._read_json(self._event_key(event_id)) is None
-            )
-            if rollout_enabled and event_missing:
-                self.record_committed(
-                    action=str(commit.get("action") or ""),
-                    mutation_id=str(commit.get("mutation_id") or ""),
-                    expected=dict(commit.get("expected") or {}),
-                    tenant_ids=list(commit.get("tenant_ids") or []),
-                    result=dict(commit.get("result") or {}),
-                    metadata=dict(commit.get("metadata") or {}),
-                )
-                repaired += 1
         for item in self._bucket.iter_objects(
             self._family_prefix("skill_tombstones")
         ):

@@ -1,6 +1,8 @@
 """Memory configuration owned by this module."""
 
+import copy
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -65,10 +67,10 @@ MEMORY_DEFAULTS = {
         # prevents an accidental unbounded Account-wide run.
         "account_user_limit": 50_000,
         "account_user_page_size": 1_000,
-        # Phase 1 deterministic snapshot copies run concurrently up to this
+        # deterministic snapshot copies run concurrently up to this
         # many at once.
         "phase1_concurrency": 6,
-        # Tree-reduce fan-in width for Phase 2 merges. Each merge compile takes
+        # Tree-reduce fan-in width for merges. Each merge compile takes
         # at most this many sources; groups of groups cascade until one root
         # remains. Kept < 16 to respect the ov compile source ceiling.
         "merge_fan_in": 4,
@@ -81,7 +83,7 @@ MEMORY_DEFAULTS = {
         # authoritative baseline source so manual edits are preserved and new
         # material is de-duplicated/merged on top instead of overwritten.
         "preserve_manual_edits": False,
-        # When true, Phase 2 publishes in sequential batches directly onto the
+        # When true, publishes in sequential batches directly onto the
         # target (relying on ov compile's upsert + target-checkout to merge onto
         # existing pages) instead of one whole-tree final rewrite. This removes
         # the 128-page directory ceiling: 128 only limits a single batch.
@@ -97,6 +99,51 @@ MEMORY_DEFAULTS = {
         },
     },
 }
+
+DEFAULT_MEMORY_MODULE_CONFIG: dict[str, Any] = {
+    "maintenance": {
+        "trigger_mode": "manual",
+        "interval_seconds": 86400,
+    },
+    "aggregation": copy.deepcopy(MEMORY_DEFAULTS["memory"]["aggregation"]),
+}
+
+
+@dataclass(frozen=True)
+class MemoryModuleConfig:
+    revision: int
+    config: dict[str, Any]
+
+    @property
+    def maintenance(self) -> dict[str, Any]:
+        return self.config["maintenance"]
+
+    @property
+    def aggregation(self) -> dict[str, Any]:
+        return self.config["aggregation"]
+
+
+def resolve_memory_config(module) -> MemoryModuleConfig:
+    """Merge nested Memory defaults without mutating the persisted JSON."""
+    raw = module.config if isinstance(module.config, dict) else {}
+    return MemoryModuleConfig(
+        revision=module.revision,
+        config={
+            **copy.deepcopy(raw),
+            "maintenance": {
+                **DEFAULT_MEMORY_MODULE_CONFIG["maintenance"],
+                **(raw.get("maintenance") if isinstance(raw.get("maintenance"), dict) else {}),
+            },
+            "aggregation": {
+                **DEFAULT_MEMORY_MODULE_CONFIG["aggregation"],
+                **(raw.get("aggregation") if isinstance(raw.get("aggregation"), dict) else {}),
+            },
+        },
+    )
+
+
+async def load_memory_config(config_repo, conn) -> MemoryModuleConfig:
+    return resolve_memory_config(await config_repo.read_tenant_module(conn, "memory"))
 
 
 def memory_config_values(data, _normalize_string_list):

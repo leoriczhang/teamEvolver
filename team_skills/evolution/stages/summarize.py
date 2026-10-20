@@ -11,13 +11,12 @@ Attaches to each session dict:
 from __future__ import annotations
 
 import logging
+from contextvars import ContextVar
 from typing import Any
 
 from team_skills.evolution.kernel.helpers import compact_tool_calls, compact_tool_observations
 
 logger = logging.getLogger(__name__)
-
-from contextvars import ContextVar
 
 _SUMMARIZER_DEBUG_DIR: ContextVar[str] = ContextVar("summarizer_debug_dir", default="")
 

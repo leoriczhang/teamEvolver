@@ -1,133 +1,112 @@
-> Current execution uses two compile stages over one Team Memory directory with a private `cp` snapshot between them. Legacy ReAct Jobs and per-change ledgers below describe historical compatibility only. See [Two-Stage Team Memory](../api/12-team-memory.md).
+# Memory
 
-# Memory System
-
-Memory consists of retrievable long-term facts, context, preferences, and team consensus. It gives an Agent context rather than prescribing a complete workflow as a Skill does. teamEvolver separates personal and team Memory and manages them through distinct aggregation, maintenance, experiment, and audit paths.
+Memory is retrievable long-term facts, background, preferences and team consensus. It gives Agents context and does not prescribe a full task procedure. Both personal and team Memory live in OpenViking; Memory runs, stages, checkpoints, Memory Changes and Replay records live in PostgreSQL.
 
 ## Personal and Team Memory
 
-| Dimension | Personal Memory | Team Memory |
-|-----------|-----------------|-------------|
-| Default path | `viking://user/<user>/memories/` | `viking://resources/shared-knowledge/` |
-| Configuration | Per-user `personal_space.viking_user` | `aggregation.shared_knowledge_prefix` |
-| Agent permission | Write its own Memory through Context Workspace `remember` / `forget` | Read-only |
-| Console permission | The owner can edit personal Memory; administrators can switch users | Administrator-only writes |
-| Main source | Preferences, work habits, personal facts, and Session extraction | Common knowledge aggregated from repeated patterns across users |
-| Evolution | Agent writes and asset-page edits | Cross-user aggregation, administrator batch edits, optional DreamCycle maintenance, and Memory Replay |
+| Aspect | Personal Memory | Team Memory |
+|------|-------------|-------------|
+| Path | `viking://user/<user>/memories/` | `viking://resources/<shared_knowledge_prefix>/`, default `shared-knowledge` |
+| Agent permission | Context `remember` / `forget` write only the caller's own Memory | Read-only |
+| Console | Users edit their own Memory; administrators can switch users | Only tenant administrators edit |
+| Source | Agent writes, user edits | Cross-user aggregation + DreamCycle maintenance |
 
-Team Memory uses an account-shared Resources namespace rather than one user's private `memories/` tree. Authorized users retrieve the same team output while teamEvolver retains write control.
+Team Memory lives in the Account-shared Resources namespace, so every authorized user retrieves the same output, while write permission stays under teamEvolver control.
 
-## Cross-user Team-Memory Aggregation
+## Memory Evolution
 
-The console entry **Evolution Pipeline → Team Memory Evolution** uses `MemoryAggregationService` and `ov compile`:
+A Memory run is accepted by `POST /api/aggregation/run` (`pipeline` is `both`, `aggregation` or `maintenance`) or `POST /api/memory/maintenance/run` (always `maintenance`). The API pins the current `memory` module configuration revision, writes `memory_runs` and a `memory.aggregate` task, and returns `202`. The Worker runs `team_memory/pipeline.py`:
 
-1. The console defaults to the configured Endpoint, Account, and Trusted Root Key; the independent interface also supports API-key mode through `admin_key`.
-2. The service enumerates users with the Root/Admin Key. API-key mode also reads existing plaintext User Keys and excludes the team service user.
-3. The administrator selects users and chooses incremental or full mode.
-4. Phase 1 uses each User identity to read visible Memory text and deterministically copy it into the merge identity's private staging space; it invokes no model or Skill.
-5. Phase 2 uses the pinned Skill revision to tree-reduce groups of at most 15 sources. Large accounts use fixed hash partitions only as private intermediate products, then run a final cross-partition semantic reduction into the configured team-Memory root.
+1. **Exclusivity**: only one Memory run per OpenViking Account at a time, guaranteed by the `memory:account:<account>` lease in `resource_leases`; when it is taken the task retries after 5 seconds.
+2. **Before snapshot**: copy the target directory to the run work root `before/`.
+3. **Aggregation stage** (`aggregation`, `both`):
+   - Pin the aggregation Skill (default `viking://agent/skills/team-memory-okf`) into the work root and record its revision.
+   - Page through Account users (default 1000 per page, safety cap 50000), excluding the merge identity itself.
+   - For each user, read the originals of the selected kinds under `memories/` and write them deterministically to `snapshot.jsonl` in private staging; 20 MiB per user, no model calls.
+   - In incremental mode, reuse the previous snapshot when neither the user's original fingerprint nor the Skill revision changed.
+   - Tree-reduce Compile in groups of `merge_fan_in` (default 4, range 2–15); when the user count reaches `partition_threshold` (default 512), first split into `partition_count` (default 256) partitions by stable hash.
+4. **Maintenance stage DreamCycle** (`maintenance`, `both`): pin the maintenance Skill (default `viking://agent/skills/team-memory-maintenance`), copy current team Memory to a private snapshot as input, then Compile back into the same directory to deduplicate, revise and mark stale entries.
+5. **After snapshot**: copy to `after/` and write one Memory Change (before/after references).
 
-Default paths:
+Each completed stage writes `memory_stages`; each user's snapshot fingerprint goes to `memory_checkpoints`. After a Worker crash or lease expiry another Worker resumes from completed stages without repeating finished user snapshots or Compiles.
+
+Work roots:
 
 ```text
-Personal source  viking://user/<user>/memories/<kind>/
-Work root        viking://user/<merge-user>/resources/teamEvolver/staging/<target-hash>/
-Final root       viking://resources/shared-knowledge/
+personal source   viking://user/<user>/memories/<kind>/
+work root         viking://user/<merge-user>/resources/teamEvolver/staging/<run-id>/
+final root        viking://resources/<shared_knowledge_prefix>/
 ```
 
-`shared_knowledge_prefix` and `staging_dir` are configurable. The work root belongs to the merge identity's private Resources, so raw snapshots and `_merge` intermediates are not exposed through account-shared Resources. The final root contains only aggregated team Memory.
+The work root is in the merge identity's private Resources, so raw snapshots and intermediate output are not exposed in the Account-shared Resources.
 
-### Aggregation Skill
+## Aggregation and Maintenance Skills
 
-The **Team Memory Aggregation Skill** defines the output structure. Administrators edit the complete `SKILL.md` in the console; it is published to the account-shared `viking://agent/skills/team-memory-okf` location with a version snapshot. The Skill executes only during Phase 2 merge.
+Two Skills define the aggregation output structure and maintenance rules and are stored in OpenViking. Administrators read and write them under "Evolution pipeline → Team Memory self-evolution":
 
-Changing the Skill invalidates affected merge output without recopying unchanged users. Incremental mode reuses an unchanged user's existing deterministic snapshot.
+- `GET /api/aggregation/okf-skill?stage=aggregation|maintenance`
+- `PUT /api/aggregation/okf-skill?stage=...`: the Skill `name` must equal the last segment of the configured URI and the body must not exceed 128 KiB; the save is accepted as a `memory.compile` task and returns `202`.
 
-### Scale and Recovery
+A Skill change only makes the next run redo the affected Compiles; snapshots of unchanged users are not copied again.
 
-- Phase 1 snapshot-copy concurrency defaults to 6.
-- User inventory is fetched in stable 1,000-user pages, with a default safety limit of 50,000.
-- `merge_fan_in` defaults to 4 and is constrained to 2–15 to stay below the 16-source compile limit.
-- Accounts above 512 staged users use up to 256 stable private partitions. Adding or changing a user invalidates only that partition and the affected path to the final semantic root.
-- A 10,000-user full run currently plans roughly 3,600 merge compiles. It is resumable, but runtime and model cost remain deployment-dependent.
-- The final shared tree still follows the user-edited Skill's semantic directories. It is a distilled team-memory view; immutable raw snapshots remain private.
-- One user failure does not stop the others; the next incremental run retries failed or changed users.
-- Group checkpoints are appended immediately. Restarting the process clears the live run list but not completed snapshots or merge checkpoints.
+## Memory Change and True Replay
 
-See [Team Memory Aggregation API](../api/11-team-memory-aggregation.md) for the complete contract.
+`GET /api/memory/changes` lists Memory Changes. Administrators can run a change as a Memory Replay:
 
-## Team Memory Maintenance (DreamCycle)
+- `POST /api/memory/changes/{change_id}/true-replay`: reads the before and after snapshots (2 MiB limit); Baseline is the before content, Candidate the after content.
+- `POST /api/openviking/memory/true-replay`: submit `memory_path`, `before_content` and `after_content` directly.
 
-Team Memory maintenance is now handled by cross-user `ov compile` aggregation. `dreamcycle.enabled` / `dreamcycle.auto_start` only start the aggregation maintenance daemon, which is equivalent to calling the aggregation run API with `pipeline=maintain`. No ReAct Job runs, and there is no separate maintenance model configuration. It is disabled by default.
+Both run as `memory.replay` tasks and reuse the Checklist gate and efficiency comparison of [True Replay](./06-true-replay.md). Past results are at `GET /api/memory/changes/{change_id}/true-replays`.
 
-### Schedule Window
+## Asset Page Editing
 
-- `active_start_hour=0`, `active_end_hour=6`: default 00:00–06:00 window
-- `rounds_per_window=3`: at most three rounds per window
-- `round_interval_minutes=90`: 90 minutes between rounds
+"Personal and team assets" browses and edits `viking://user` and `viking://resources` through `/api/openviking/workspace/*`:
 
-The historical ReAct Jobs (`team_overview` / `deduplication` / `cleanup` / `onboarding_check` / `consolidate`) and the old ReAct write scheduler are retired; only the historical ledger and Memory Replay remain readable.
+- Browse directories, files and L0/L1 summaries
+- Administrators or asset owners enter edit mode, keep drafts across files, review one Diff and save in batch
+- Batch writes use content hash preconditions to avoid overwriting concurrent changes
 
-The maintained target is the shared tree under `aggregation.shared_knowledge_prefix`; see [Two-phase Team-Memory Evolution](../api/12-team-memory.md) for the current contract.
+## Configuration
 
-## Memory Changes and True Replay
+The `memory` module configuration is stored in `tenant_configs`; `GET/POST /api/aggregation/settings` reads and writes its `aggregation` object and requires `expected_revision`:
 
-Memory maintenance writes are recorded by `MemoryChangeLedger` with before/after Snapshot OIDs, content hashes, diff hashes, source references, policy reasons, and outcomes. Records use `teamevolver.memory-change.v1` under the platform root's `memory-changes/` path.
-
-`MemoryTrueReplayRunner` can use pre-change content as Baseline and post-change content as Candidate in an A/B Replay with frozen Context. Checklist remains the completion gate, followed by efficiency comparison in order of interaction turns, tool calls, and tokens. Results live under `memory-replays/<change_id>/`.
-
-## Asset Editing
-
-**Asset Center → Personal and Team Assets** exposes accessible content from `viking://user` and `viking://resources` and supports:
-
-- Directory, file, and L0/L1 browsing
-- Edit mode for administrators or asset owners
-- Drafts across multiple files with one Diff review and batch save
-- Content-hash preconditions that prevent overwriting concurrent edits
-
-## Configuration Example
-
-```yaml
-aggregation:
-  enabled: true
-  shared_knowledge_prefix: shared-knowledge
-  staging_dir: staging
-  account_user_limit: 50000
-  account_user_page_size: 1000
-  phase1_concurrency: 6
-  merge_fan_in: 4
-  merge_concurrency: 4
-  partition_threshold: 512
-  partition_count: 256
-
-dreamcycle:
-  enabled: false
-  active_start_hour: 0
-  active_end_hour: 6
-  rounds_per_window: 3
-  round_interval_minutes: 90
-  max_turns_per_job: 25
-  dedup_merge_threshold: 0.86
-  dedup_warn_threshold: 0.72
+```json
+{
+  "expected_revision": 3,
+  "shared_knowledge_prefix": "shared-knowledge",
+  "okf_skill_uri": "viking://agent/skills/team-memory-okf",
+  "maintenance_skill_uri": "viking://agent/skills/team-memory-maintenance",
+  "kinds": [],
+  "account_user_limit": 50000,
+  "account_user_page_size": 1000,
+  "merge_fan_in": 4,
+  "merge_concurrency": 4,
+  "partition_threshold": 512,
+  "partition_count": 256,
+  "preserve_manual_edits": false,
+  "incremental_publish": false,
+  "publish_batch_users": 8
+}
 ```
+
+With `preserve_manual_edits=true` current team Memory joins aggregation as an extra input; with `incremental_publish=true` only changed users are written to the target directory in batches of `publish_batch_users`. Maintenance is manual by default. With `maintenance.trigger_mode=automatic`, the Worker accepts maintenance jobs every `maintenance.interval_seconds`; administrators can still run maintenance manually at any time.
 
 ## Code Entry Points
 
 | Module | Path |
-|--------|------|
-| Cross-user aggregation service | `team_memory/service.py` |
-| Aggregation routes and settings | `team_memory/routes.py` |
-| Aggregation Skill | `team_memory/aggregation/okf_skill.py` |
-| Workspace scopes and batch writes | `teamEvolver/proxy/openviking_workspace.py` |
-| Memory maintenance daemon | `team_memory/maintenance/runtime.py` |
-| Memory Change ledger | `team_memory/memory_changes.py` |
-| Memory Replay | `team_replay/memory.py` |
-| OpenViking storage client | `teamEvolver/storage/viking.py` |
+|------|------|
+| HTTP | [api/](../../../team_memory/api/) |
+| Run acceptance | [runs.py](../../../team_memory/runs.py) |
+| Pipeline | [pipeline.py](../../../team_memory/pipeline.py) |
+| Compile grouping | [merge.py](../../../team_memory/merge.py) |
+| Worker Handler | [handlers.py](../../../team_memory/handlers.py) |
+| Repository | [repository.py](../../../team_memory/repository.py) |
+| OpenViking adapter | [openviking.py](../../../team_memory/openviking.py) |
+| Default maintenance Skill | [maintenance_skill.py](../../../team_memory/maintenance/maintenance_skill.py) |
+| Memory Replay | [replay.py](../../../team_memory/replay.py) |
 
-## Related Documentation
+## Related Docs
 
-- [Storage Spaces and Directory Layout](./09-storage-layout.md)
+- [Storage and Directory Layout](./09-storage-layout.md)
 - [True Replay](./06-true-replay.md)
-- [Configuration Reference](../guides/01-configuration.md)
-- [Web Console](../guides/03-console.md)
 - [Team Memory Aggregation API](../api/11-team-memory-aggregation.md)

@@ -5,6 +5,7 @@ import base64
 import binascii
 import json
 import re
+import time
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
@@ -26,7 +27,7 @@ def http_url(value: Any) -> str:
     parsed = urlsplit(value)
     if (
         parsed.scheme not in {"http", "https"} or not parsed.hostname
-        or parsed.username or parsed.password or parsed.fragment
+        or parsed.username or parsed.password or parsed.fragment or parsed.query
         or any(ord(c) < 32 for c in value)
     ):
         raise TransferError("请提供不含账号密码的 HTTP(S) 地址，凭据请填写在独立字段")
@@ -36,7 +37,8 @@ def http_url(value: Any) -> str:
 def request_bytes(method: str, url: str, *, limit: int = MAX_ARCHIVE_BYTES, **kwargs: Any) -> bytes:
     """Bounded HTTP response, with sanitized errors (no remote body or credentials)."""
     try:
-        with httpx.Client(timeout=httpx.Timeout(90, connect=15), follow_redirects=True) as client:
+        deadline = time.monotonic() + 90
+        with httpx.Client(timeout=httpx.Timeout(90, connect=15), follow_redirects=False) as client:
             with client.stream(method, http_url(url), **kwargs) as response:
                 if not response.is_success:
                     code = response.status_code
@@ -50,6 +52,8 @@ def request_bytes(method: str, url: str, *, limit: int = MAX_ARCHIVE_BYTES, **kw
                     total += len(chunk)
                     if total > limit:
                         raise TransferError("远端响应大小超出限制", 413)
+                    if time.monotonic() >= deadline:
+                        raise TransferError("远端操作超时", 504)
                     chunks.append(chunk)
                 return b"".join(chunks)
     except httpx.HTTPError as exc:
@@ -100,6 +104,7 @@ class MarketplaceAdapter:
 
     def read(self, options: Mapping[str, Any]) -> list[SkillPackage]:
         provider, base, headers = self._settings(options)
+        options.get("_check", lambda: None)()
         slug = str(options.get("slug") or "").strip()
         version = str(options.get("version") or "").strip()
         if provider == "http":
@@ -126,10 +131,14 @@ class MarketplaceAdapter:
             field = str(options.get("file_field") or "file")
             if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_\[\]-]{0,63}", field):
                 raise TransferError("市场上传文件字段名不合法")
+            content = make_zip(packages)
+            options.get("_checkpoint", lambda _: None)({"effect": "marketplace_upload"})
             request_json("POST", url, headers=headers,
-                         files={field: ("skills.zip", make_zip(packages), "application/zip")},
+                         files={field: ("skills.zip", content, "application/zip")},
                          data={"names": json.dumps([p.name for p in packages])})
-            return ExportResult({"channel": "marketplace", "exported": [p.name for p in packages]})
+            metadata = {"channel": "marketplace", "exported": [p.name for p in packages]}
+            options.get("_checkpoint", lambda _: None)({"receipt": metadata})
+            return ExportResult(metadata)
         if len(packages) != 1:
             raise TransferError("ClawHub 每次上传一个 Skill")
         if not headers:
@@ -143,9 +152,12 @@ class MarketplaceAdapter:
                    "displayName": str(options.get("display_name") or item.name),
                    "version": version, "changelog": str(options.get("changelog") or "Export from teamEvolver"),
                    "tags": ["latest"]}
+        options.get("_checkpoint", lambda _: None)({"effect": "marketplace_upload"})
         request_json("POST", f"{base}/api/v1/skills", headers=headers,
                      data={"payload": json.dumps(payload)},
                      files=[("files[]", (path, data, "application/octet-stream"))
                             for path, data in sorted(item.files.items())])
-        return ExportResult({"channel": "marketplace", "exported": [item.name],
-                             "slug": payload["slug"], "version": version})
+        metadata = {"channel": "marketplace", "exported": [item.name],
+                    "slug": payload["slug"], "version": version}
+        options.get("_checkpoint", lambda _: None)({"receipt": metadata})
+        return ExportResult(metadata)

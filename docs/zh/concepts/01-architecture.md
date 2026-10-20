@@ -1,165 +1,144 @@
 # 架构总览
 
-teamEvolver 是一个单体 FastAPI 服务（默认端口 52010），内嵌进化引擎、团队 Memory 聚合、DreamCycle、验证 Worker、SkillMiner 和 React 控制台。Session 队列/索引/审计等自身账本默认存放在内置本地对象存储（`teamEvolver/storage/local.py:LocalObjectStore`）；OpenViking 保存异步镜像的 Skill 库、团队 Memory 与聚合产物。YAML 配置、控制台 Session 和部分运行状态保存在 `~/.teamEvolver/`。
-
-当 OpenViking 不可用时，存储自动回退到本地 `LocalObjectStore`（通过连通性探测 + TTL 缓存判定，回退期间写入仅落本地）；Skill 库以本地为主，通过持久化 spool 由后台 flusher 异步镜像到 OpenViking（`team_skills/library/mirror.py:VikingSkillMirror`）。
+teamEvolver 是一个模块化单体：一份 release、一个镜像，按 `api` 与 `worker` 两种角色运行。API 只做认证、授权、校验、短事务受理和查询；所有长任务以 `202 Accepted + worker_tasks + Worker Handler` 的方式执行。PostgreSQL 是可变业务状态的唯一权威源，OpenViking 是外部知识制品和 Compile Task 的权威源。
 
 ## 系统架构图
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    External Agent Runtimes                   │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐ │
-│  │ Agent    │  │ Pi (AH)  │  │ Codex    │  │ Custom Agent │ │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────┬───────┘ │
-│       │     Hook/SDK│     SDK    │     Protocol V1         │
-└───────┼─────────────┼────────────┼──────────────┼───────────┘
-        │             │            │              │
-        ▼             ▼            ▼              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                  teamEvolver Service (:52010)                │
-│                                                              │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────────┐  │
-│  │ Proxy Server │  │ Agent Proto  │  │ Context Workspace │  │
-│  │ (FastAPI)    │◄─┤ V1 Handler   │◄─┤ (token-scoped)    │  │
-│  └──────┬───────┘  └──────────────┘  └───────────────────┘  │
-│         │                                                    │
-│  ┌──────▼───────┐  ┌──────────────┐  ┌───────────────────┐  │
-│  │ Session      │  │ Evolve Kernel│  │ Skill Mutation    │  │
-│  │ Ingest/Filter│─►│ (11-stage    │─►│ Service (commit/  │  │
-│  │              │  │  pipeline)   │  │  tombstone/outbox)│  │
-│  └──────────────┘  └──────┬───────┘  └─────────┬─────────┘  │
-│                           │                     │            │
-│  ┌──────────────┐  ┌──────▼───────┐  ┌──────────▼────────┐  │
-│  │ DreamCycle   │  │ True Replay  │  │ Validation Worker │  │
-│  │ Scheduler    │  │ (baseline vs │◄─┤ (async, isolated) │  │
-│  │ (Memory job) │  │  candidate)  │  │                   │  │
-│  └──────┬───────┘  └──────────────┘  └───────────────────┘  │
-│         │                                                    │
-│  ┌──────▼───────┐  ┌──────────────┐  ┌───────────────────┐  │
-│  │ Langfuse     │  │ Dataset      │  │ Web Console       │  │
-│  │ (tracing)    │  │ Synthesizer  │  │ (React, embedded) │  │
-│  └──────────────┘  └──────────────┘  └───────────────────┘  │
-│         │                                                    │
-└─────────┼────────────────────────────────────────────────────┘
-          │
+```text
+                 Agent Runtime（v2：租户 Key + user_id）      浏览器控制台（Session Cookie）
+                               │                                       │
+                               ▼                                       ▼
+        ┌──────────────── 负载均衡（无会话粘滞）─────────────────────────────┐
+        ▼                                                                  ▼
+┌──────────────────────┐                                  ┌──────────────────────┐
+│ teamEvolver api ×N   │  create_app()：认证 → 租户上下文 → │ teamEvolver api ×N   │
+│ :52010               │  模块 Router → 短事务 → 202       │                      │
+└─────────┬────────────┘                                  └─────────┬────────────┘
+          │ 写领域记录 + payload + worker_tasks（同一事务）           │
+          ▼                                                         ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ PostgreSQL（RLS，按 tenant_id 隔离）                                         │
+│ teamevolver_config · tenants · tenant_configs · secret_refs · adapters      │
+│ ingestions · sessions · skills · skill_versions · skill_candidates          │
+│ datasets · memory_runs · context_* · worker_tasks · resource_leases         │
+│ tenant_usage · artifacts · storage_objects · audit_log · schema_versions    │
+└─────────────────────────────────────────────────────────────────────────────┘
+          ▲ FOR UPDATE SKIP LOCKED 领取，fence 校验写回                       ▲
+┌─────────┴────────────┐                                  ┌─────────┴────────────┐
+│ teamEvolver worker ×N│ Handler：session.* skill.*        │ teamEvolver worker ×N│
+│ 健康端口 :52011       │ replay.* memory.* miner.*        │                      │
+└─────────┬────────────┘                                  └─────────┬────────────┘
+          │ Compile / Content / Session / Search（Root Key + Account + User）
           ▼
-┌─────────────────────────────────────────────────────────────┐
-│         Local Object Store  +  OpenViking (storage)          │
-│  Sessions/ledgers -> local object store (default)            │
-│  Skills(mirrored) │  Memory  │  Snapshots  │  Resources     │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ OpenViking：Skill · Memory · Wiki · Compile Task                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## 核心组件
+## 模块边界
 
-### Proxy Server ([server.py](../../../teamEvolver/proxy/server.py))
+```text
+teamEvolver/            平台层
+├── app.py              唯一 FastAPI 工厂与业务组合根（create_app、build_role_services）
+├── bootstrap.py        只读启动配置（环境变量 + 可选 YAML）
+├── config_runtime.py   PG 中的全局配置与租户模块配置（revision CAS）
+├── database/           连接池、事务、RLS、schema_runner 与版本 SQL
+├── runtime/            角色入口、生命周期、worker_tasks 仓库、Worker 循环、租约
+├── storage/            ObjectStore（PostgreSQL storage_objects；本地实现仅供开发）
+├── openviking/         唯一的 OpenViking HTTP/Compile 客户端
+├── security/           Secret 加密、AgentPrincipal
+├── admin/ tenants/     控制台身份、RBAC、用户、租户
+├── operations/         /api/jobs 统一任务接口
+├── observability/      健康、就绪、日志状态、Langfuse 出站追踪
+├── platform_docs/      控制台入口、平台资产、OpenViking Workspace
+├── context/            Agent Context 网关
+└── cli/                teamEvolver 命令行
+session_ingestion/      Session 推送、数据源拉取、强制分析阶段
+team_skills/            Skill 库、Candidate、Evolution、Experience、Transfer、Workbench
+team_replay/            True Replay、Test Dataset、ReplayAdapterFactory
+team_memory/            团队 Memory 聚合、DreamCycle 维护、Memory Replay
+team_miner/             挖掘模块组合入口
+├── knowledge_miner/    知识库挖掘（OpenViking Compile 跟踪与 Wiki 索引）
+├── skill_miner/        Skill 挖掘（来源、编译、产物复核与 Candidate 提交）
+└── shared/             两类挖掘共用的文档格式转换
+web-ui/                 React 控制台源码，构建到 teamEvolver/web/dist/
+```
 
-FastAPI 应用组装入口，负责：
-- 注册所有 HTTP 路由（控制台静态文件、健康检查、Agent 协议接口、管理接口）
-- 初始化 Langfuse 追踪、DreamCycle、团队 Memory 聚合和后台验证 Worker
-- 挂载内嵌的静态前端（来自 `teamEvolver/web/dist/`）
+业务模块统一提供 `api/`（`create_router(services, **kwargs)`）、`handlers`、`config.py`、`schemas.py`、`repository.py`。例外：`team_replay/contracts.py` 是跨模块 Replay 契约；`team_miner/knowledge_miner` 通过 PostgreSQL ObjectStore 保存回执、水位与索引，不建专用 `repository.py`。`team_miner/api` 与 `team_miner/handlers.py` 组合两类挖掘，知识库挖掘保留 `miner` 配置和任务标识。
 
-### Session Ingestion ([session_ingestion](../../../session_ingestion/README.md))
+## 依赖规则
 
-统一拥有两种 Session 接入方式：Agent 主动上报与租户数据源拉取。两种方式先分别完成身份校验或上游转换，再进入同一套去重、Evidence Classification、归档、入队和 Evolution 触发管线。
+1. `teamEvolver/database`、`runtime`、`storage`、`openviking`、`llm.py`、`observability` 不导入业务模块。
+2. `teamEvolver/app.py` 是唯一组合根，按固定顺序装配 11 个 `api` 包，并拒绝重复的 `(method, path)`。
+3. 业务模块不导入 `teamEvolver.app` 或其他模块的 Handler；跨模块只通过公开 Contract、只读 Query、持久化任务或组合根注入的 `services.extras`。
+4. Repository 只访问本领域表。
+5. FastAPI 只出现在 `teamEvolver/app.py`、`teamEvolver/runtime/http_runtime.py` 和各模块 `api/`。
+6. 手写生产代码单文件不超过 1000 行。
 
-### Agent Protocol V1 ([agent_protocol.py](../../../teamEvolver/integrations/agent_protocol.py))
+这些规则由 `tests/contracts/test_dependencies.py`、`tests/contracts/test_package_contracts.py` 和 `tests/contracts/test_application_contracts.py` 静态检查。
 
-外部 Agent 的接入协议层，定义能力常量：
+## 请求链路（API 角色）
 
-| 能力常量 | 说明 |
-|---------|------|
-| `session.ingest.v1` | Session 轨迹上报 |
-| `context.workspace.v1` | 上下文读写（Memory/Skill） |
-| `replay.branch.v1` | True Replay 分支执行 |
-| `skill.sync.v1` | 团队 Skill 下发同步 |
+1. `teamEvolver/runtime/http_runtime.py` 生成 `request_id`/`trace_id`，调用注入的 authorizer。
+2. `teamEvolver/admin/authn.py:build_console_authorizer` 解析身份：服务 Root Key、租户 Key（`tevt_`）或控制台 Session Cookie，并绑定 `TenantContext`。
+3. 模块 Router 校验权限、参数、幂等键和资源上限。
+4. 在一个租户事务内写领域记录、不可变 payload 和 `worker_tasks`，返回 `202`、`job_id` 和 `status_url`（`/api/jobs/{job_id}`）。
+5. Router 不直接执行 LLM、Replay、Compile 轮询、批量文件处理或外部投递。
 
-### Context Workspace ([agent_context.py](../../../teamEvolver/proxy/agent_context.py))
+## Worker 执行模型
 
-面向 Agent 的上下文接口，使用租户 Key 与声明的 user_id，返回按 tenant/user 绑定的不透明 context_ref，OpenViking 凭证保留在服务端。
+`teamEvolver/runtime/worker.py:run_worker` 在所有 active 租户之间轮询领取任务：
 
-### Evolve Kernel ([evolve/](../../../team_skills/evolution/))
+- 使用 `FOR UPDATE SKIP LOCKED` 领取；领取时递增 `fence`，写结果必须匹配 tenant、owner、attempt 和 fence，迟到的旧 attempt 写入被拒绝。
+- 默认租约 60 秒，心跳续约；续约失败后不得发起新的外部副作用。
+- 失败重试默认最多 3 次，退避 5/30/120 秒加 jitter。
+- 上游结果未知时进入 `reconciling`，按幂等键对账，不盲目重提交。
+- `resource_leases` 控制租户并发和 Memory 目标树、经验投递等排他资源；`tenant_usage` 按逻辑任务计数。
+- PG 短故障时 Worker 循环按 1、2、4…最多 30 秒退避继续运行，`/readyz` 返回 503；恢复后自动继续。
 
-11 阶段进化管线，从 Session 到发布 Skill：
+状态机：
 
-1. **Ingest** — 接收并校验 Session 载荷
-2. **Filter** — 根据来源、长度、异常值过滤
-3. **Summarize** — 提取轮次摘要和关键决策
-4. **Judge** — 证据分类（Skill/Memory/任务要求/运行时问题/不足）
-5. **Group** — 将同类 Evidence 聚合为变更窗口
-6. **Evolve** — 生成 Skill Candidate 或 Memory Change 提案
-7. **Create** — 创建 Candidate 版本（不影响已发布版本）
-8. **Merge** — 合并上下文依赖
-9. **Dataset Synthesis** — 从同源 Evidence 生成测试数据集
-10. **Validate** — True Replay 验证（Baseline vs Candidate）
-11. **Publish** — 通过门禁后发布新版本，同步给 Agent
+```text
+queued -> running -> succeeded
+                  -> retry_wait -> queued
+                  -> waiting_external -> reconciling -> succeeded/failed
+                  -> failed
+                  -> cancelled
+```
 
-### True Replay ([replay/engine.py](../../../team_replay/engine.py))
+固定 Handler kind 闭集见 `teamEvolver/runtime/tasks.py:TASK_KINDS`：
 
-在隔离的真实 Agent Runtime 中并行执行 Baseline 和 Candidate 分支：
-- Baseline：不加载 Candidate 的对照组
-- Candidate：加载待验证 Skill 的实验组
-- 使用冻结的 Context 投影（Snapshot Hash）
-- Checklist 作为完成性门禁，效率按轮次→工具调用→Token 排序
+| 模块 | kind |
+| --- | --- |
+| session_ingestion | `session.pull`、`session.normalize`、`session.analyze`、`session.archive` |
+| team_skills | `skill.evolve`、`skill.validate`、`skill.transfer`、`experience.sync` |
+| team_replay | `replay.run`、`dataset.run` |
+| team_memory | `memory.aggregate`、`memory.compile`、`memory.replay` |
+| team_miner | `miner.track_compile`、`miner.rebuild_index` |
 
-### Skill Mutation Service ([mutations.py](../../../team_skills/library/mutations.py))
+## 生命周期
 
-所有团队 Skill 的增删改必须经过此服务：
-- 事务性变更：commit 记录 + tombstone
-- 持久化同步 outbox，确保下发可靠性
-- 版本号单调递增，保留完整审计链
-
-### DreamCycle ([dreamcycle/](../../../team_memory/legacy_dreamcycle/))
-
-团队 Memory 持续进化：
-- `team_overview` — 维护团队概况
-- `dedup` — 语义去重
-- `cleanup` — 清理过期和低价值 Memory
-- `consolidate` — 合并相关 Memory 条目
-- `onboarding_check` — 新人可发现性检查
-- 默认在凌晨 0-6 点窗口运行
-
-### 团队 Memory 聚合（[aggregation/](../../../team_memory/)）
-
-管理员从控制台选择 OpenViking Account 用户后，聚合服务以受控并发生成不执行 Skill 的 per-user 确定性快照，再通过有界 tree-reduce compile 写入 `viking://resources/<shared_knowledge_prefix>/`。原始快照与中间产物位于 merge 身份的私有 Resources，并使用指纹状态支持增量跳过。
-
-### Validation Worker ([validation/worker.py](../../../team_skills/candidates/worker.py))
-
-异步验证 Worker，后台消费 Candidate 队列，执行 True Replay 并收集结果。
-
-### Langfuse ([observability/langfuse.py](../../../teamEvolver/observability/langfuse.py))
-
-- **入站**：从 Langfuse 拉取 Agent Session 轨迹
-- **出站**：将进化 Pipeline 中的所有 LLM 调用上报 Langfuse 做可观测性
-- 所有 Prompt 和模型参数均可在控制台白盒配置
+`teamEvolver/runtime/lifecycle.py:RuntimeLifecycle` 固定关闭顺序：撤销 readiness → 停止领取 → 等待在途任务（默认 30 秒）→ 关闭外部客户端和连接池。负载均衡在 `/readyz` 返回 503 后不再分发新请求。
 
 ## 端口约定
 
-teamEvolver 统一使用 **52010** 单端口承载所有能力：
+| 角色 | 默认端口 | 提供 |
+| --- | --- | --- |
+| `api` | 52010（`TEAMEVOLVER_API_PORT` 或 `--port`） | 全部 HTTP API、控制台、`/healthz`、`/readyz`、`/status` |
+| `worker` | 52011（`--port`） | `/healthz`、`/readyz` |
+| `all` | 52010 | 本地开发：API + Worker 同进程 |
 
-| 路径 | 方法 | 说明 |
-|------|------|------|
-| `/health`, `/healthz` | GET | 健康检查 |
-| `/status` | GET | 服务状态、排队数、技能数 |
-| `/console` | GET | Web 控制台 |
-| `/ingest_session` | POST | Agent Session 上报 |
-| `/internal/agents/*` | * | Agent Protocol V1 内部接口 |
-| `/trigger` | POST | 手动触发进化周期 |
-| `/api/aggregation/*` | * | 团队 Memory 聚合、任务与设置 |
-| `/api/*` | * | 其他控制台管理 API |
+完整端点见 [端点索引](../api/00-endpoints.md)。
 
 ## 代码入口
 
 | 组件 | 代码路径 |
 |------|---------|
-| 服务启动 | [launcher.py](../../../teamEvolver/launcher.py) |
-| CLI 入口 | [cli/](../../../teamEvolver/cli/) |
-| HTTP 路由 | [proxy/routes.py](../../../teamEvolver/proxy/routes.py) |
-| 进化核心 | [evolve/](../../../team_skills/evolution/) |
-| Skill 管理 | [skills/](../../../team_skills/library/) |
-| Agent 集成 | [integrations/](../../../teamEvolver/integrations/) |
-| DreamCycle | [dreamcycle/](../../../team_memory/legacy_dreamcycle/) |
-| 团队 Memory 聚合 | [aggregation/](../../../team_memory/) |
-| 配置存储 | [config_store/](../../../teamEvolver/config_store/) |
+| 角色入口 | [entrypoint.py](../../../teamEvolver/runtime/entrypoint.py) |
+| 组合根 | [app.py](../../../teamEvolver/app.py) |
+| CLI | [cli/](../../../teamEvolver/cli/) |
+| Worker 循环 | [worker.py](../../../teamEvolver/runtime/worker.py) |
+| 任务仓库 | [repository.py](../../../teamEvolver/runtime/repository.py) |
+| Schema 版本 | [schema/](../../../teamEvolver/database/schema/) |
+| 配置 | [config_runtime.py](../../../teamEvolver/config_runtime.py)、[bootstrap.py](../../../teamEvolver/bootstrap.py) |
 | 前端源码 | [web-ui/src/](../../../web-ui/src/) |

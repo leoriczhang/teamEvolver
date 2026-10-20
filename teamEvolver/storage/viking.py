@@ -88,7 +88,7 @@ class OpenVikingObjectStore:
     - team-shared object data: ``manifest.json``, registry files ->
       ``viking://resources/{root_prefix}/...``
     - per-person (isolated): ``peers/{customer_id}/sessions/...`` etc. — see
-      :func:`teamEvolver.storage.peer_key_prefix`.
+    :func:`teamEvolver.storage.peer_key_prefix`.
 
     Contract mapping:
 
@@ -362,7 +362,7 @@ class OpenVikingObjectStore:
         payload = {"uri": uri, "content": content}
         # Strategy: replace (handles existing files of any extension) ->
         # create (new files with allowed extensions) -> append (new files
-        # with restricted extensions like .jsonl).
+        # with restricted extensions like.jsonl).
         payload["mode"] = "replace"
         try:
             self._request("POST", "/api/v1/content/write", json=payload)
@@ -390,7 +390,7 @@ class OpenVikingObjectStore:
         except RuntimeError as exc:
             err_msg = str(exc)
             if "INVALID_ARGUMENT" in err_msg or "does not allow" in err_msg:
-                # Extension restricted in create mode (e.g. .html). The old
+                # Extension restricted in create mode (e.g..html). The old
                 # escape hatch was batch-write upsert, but /content/write does
                 # not support upsert mode, and batch_write now routes through
                 # put_object (recursion), so retry the allowed modes directly.

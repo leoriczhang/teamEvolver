@@ -1,106 +1,113 @@
 # 快速开始
 
-本指南帮助你在本地启动 teamEvolver，连接 OpenViking，并进入可执行的 Skill / Memory 进化工作流。
+本指南在本机启动一套 all-in-one 开发环境：同一个进程同时运行 API 与 Worker，连接本机 PostgreSQL 和 OpenViking。生产部署使用分离的 `api`、`worker` 角色，见 [生产部署指南](../guides/02-deployment.md)。
 
 ## 前置条件
 
-- Python 3.10+
-- Node.js 18+（仅在修改前端时需要，普通安装使用预构建产物）
-- 一个可访问的 OpenViking 实例（本地或云端）
-- 一个 LLM API Key（Doubao/OpenAI 兼容接口）
+- Python 3.11（`pyproject.toml` 声明 `>=3.10`，release 镜像使用 3.11）
+- PostgreSQL 14+，以及一个非 SUPERUSER、非 BYPASSRLS 的应用角色
+- 一个可访问的 OpenViking 实例和 Root Key
+- 一个 OpenAI 兼容的 LLM 端点和 Key
+- Node.js 20+（仅修改 `web-ui/` 时需要）
 
 ## 1. 安装
 
 ```bash
-pip install -e ".[all]"
+bash scripts/install_teamEvolver.sh
+source .venv/bin/activate
 ```
 
-安装完成后，`teamEvolver` CLI 可用。
+脚本按 `requirements.lock` 带 hash 安装依赖，再以 `--no-deps -e .` 安装本仓库，最后执行 `pip check`。
 
-## 2. 最小配置
+## 2. 准备数据库
+
+Schema 必须先由数据库管理员创建并交给应用角色，`teamEvolver schema apply` 只在已有 Schema 内建表：
+
+```sql
+CREATE ROLE te_app LOGIN PASSWORD '...' NOSUPERUSER NOBYPASSRLS;
+CREATE DATABASE teamevolver OWNER te_app;
+\c teamevolver
+CREATE SCHEMA teamevolver AUTHORIZATION te_app;
+```
 
 ```bash
-# 设置服务端口
-teamEvolver config service.port 52010
-teamEvolver config service.host 0.0.0.0
-
-# 配置 OpenViking 后端
-teamEvolver config sharing.backend viking
-teamEvolver config sharing.viking_deployment local
-teamEvolver config sharing.viking_endpoint "http://localhost:1933"
-teamEvolver config sharing.viking_account "default"
-teamEvolver config sharing.viking_user "team"
-teamEvolver config sharing.viking_team_api_key "your-service-or-admin-key"
-
-# 配置进化用 LLM
-teamEvolver config llm.api_base "https://ark.cn-beijing.volces.com/api/v3"
-teamEvolver config llm.api_key "your-llm-key"
-teamEvolver config llm.model_id "doubao-seed-evolving"
+export TEAMEVOLVER_PG_DSN="postgresql://te_app:...@127.0.0.1:5432/teamevolver"
+teamEvolver schema apply
+teamEvolver schema status
 ```
 
-配置文件保存在 `~/.teamEvolver/config.yaml`。
+`schema apply` 幂等执行 `teamEvolver/database/schema/` 下的版本脚本，并为每个租户写入 5 个模块的默认配置行。首次安装使用空数据库。
 
-## 3. 启动服务
+## 3. 最小启动配置
+
+启动配置只读，来自环境变量和可选的 YAML 文件（`TEAMEVOLVER_CONFIG_FILE`）。在线配置保存在 PostgreSQL，由控制台修改。
 
 ```bash
-teamEvolver start --daemon
+export TEAMEVOLVER_ENV=local
+export TEAMEVOLVER_ROOT_API_KEY="$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')"
+export TEAMEVOLVER_SECRET_MASTER_KEY="$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')"
+export TEAMEVOLVER_OV_ENDPOINT="http://127.0.0.1:1933"
+export TEAMEVOLVER_OV_API_KEY="<OpenViking Root Key>"
+export TEAMEVOLVER_LLM_BASE_URL="https://ark.cn-beijing.volces.com/api/v3"
+export TEAMEVOLVER_LLM_API_KEY="<LLM Key>"
+export TEAMEVOLVER_LLM_MODEL="<model id>"
 ```
 
-验证服务运行：
+完整的启动字段见 [配置参考](../guides/01-configuration.md)。
+
+## 4. 启动
 
 ```bash
-curl http://localhost:52010/health
-# {"status":"ok"}
-
-curl http://localhost:52010/status
-# {"running":true,...}
+teamEvolver start --role all
 ```
 
-自建 OpenViking 在另一台机器时，将 `sharing.viking_endpoint` 改为该机器可达的 URL，例如 `http://10.0.0.8:1933`。也可以在登录后通过「平台治理 → 运行状态 → OpenViking 部署」保存并热重载这些设置。
+`all` 只允许在 `TEAMEVOLVER_ENV=local` 时使用。验证：
 
-## 4. 初始化并打开控制台
+```bash
+curl http://localhost:52010/healthz
+# {"ok":true,"role":"all"}
+curl -i http://localhost:52010/readyz
+# HTTP/1.1 200 OK  {"ready":true,"role":"all"}
+```
 
-浏览器访问 [http://localhost:52010/](http://localhost:52010/)。首次访问会显示管理员初始化页，默认表单值为 `admin`；生产环境请设置强密码。完成初始化后可以看到：
+## 5. 初始化并打开控制台
 
-- 「技能挖掘」中的知识源和挖掘任务
-- 「进化闭环」中的运行总览、候选评审、Langfuse 和 Skills / 团队 Memory 自进化
-- 「资产中心」中的实验工作台、个人与团队资产和平台资产
-- 「平台治理」中的模型、用户与权限、OpenViking 部署和运行状态
-- 内置中英文文档阅读与搜索
+浏览器访问 `http://localhost:52010/`。首次访问显示管理员初始化页，PostgreSQL 模式下密码至少 12 个字符。初始化完成后，左侧导航包括：
+
+- 工作台：运行总览、实验工作台、运行状态
+- 智能体与能力：个人与团队资产、平台资产、成员与接入
+- 知识与方法：经验库
+- 进化与实验：数据集、进化链路
+- 审查与发布：审查与发布入口、权限审计、链路观测
+- 设置与接入：平台用户、租户管理、模型配置、数据源接入
 
 ![控制台总览](/assets/teamEvolver-console-dashboard.png)
 
-## 5. 接入 Agent（可选）
+## 6. 接入 Agent 并触发一次进化
 
-按 [Agent Protocol v2](../agent-integrations/06-protocol-v2.md) 配置服务 URL、租户 Key 和 user_id。使用 [自定义 Agent 接入](../agent-integrations/05-custom-agent.md) 发送 Session、读取 Context 并拉取 Skill；需要 True Replay 时配置 ReplayAdapterFactory。
-
-## 6. 手动触发进化
-
-```bash
-curl -X POST http://localhost:52010/trigger-dreamcycle
-```
-
-这会触发一次 DreamCycle 内存维护任务：已触发返回 202，未配置 DreamCycle 时返回 503。队列中的 Session 也会按配置间隔自动进入进化周期。
-
-## 7. 停止服务
+1. 在「租户管理」创建租户，复制只展示一次的租户 Key（`tevt_...`）。
+2. 按 [Agent 接入协议 v2](../agent-integrations/06-protocol-v2.md) 上报一条 Session：
 
 ```bash
-teamEvolver stop
+curl -X POST http://localhost:52010/ingest_session \
+  -H "Authorization: Bearer $TEAMEVOLVER_TENANT_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"schema_version":"teamevolver.agent-session.v2","protocol_version":"2.0",
+       "session_id":"demo-001","runtime":{"type":"my-agent"},
+       "runtime_context":{"user_id":"alice"},
+       "turns":[{"turn_num":1,"prompt_text":"分析成本","response_text":"成本报告已完成。"}]}'
+# 202 {"accepted":true,"job_id":"...:session.normalize","status_url":"/api/jobs/..."}
 ```
 
-## Docker Compose
+3. Worker 完成 normalize、split、analyze、trace_analyze、archive 五个阶段后，Session 出现在控制台；多话题 Session 会由 split 阶段生成可追溯的子 Session，再分别完成后续分析。
+4. 在「审查与发布入口」触发 Skill Evolution（`POST /api/skill-evolution/trigger`），生成的 Skill Candidate 进入候选评审。
 
-不需要本机 Python 环境时，可使用仓库自带镜像。镜像会构建控制台、安装完整依赖并捆绑 OpenViking CLI：
+## 7. 停止
 
-```bash
-docker compose up -d --build
-docker compose ps
-```
-
-服务仍通过 `http://localhost:52010/` 访问，配置和 SkillMiner 产物持久化在 `runtime/`。
+前台运行时按 `Ctrl+C`。以 `--daemon` 启动时使用 `teamEvolver stop`。
 
 ## 下一步
 
-- [核心概念](../concepts/01-architecture)：深入理解进化闭环、Skill、Memory、True Replay
-- [配置参考](../guides/01-configuration)：所有配置项的完整说明
-- [Agent 接入](../agent-integrations/01-overview)：将你自己的 Agent 接入 teamEvolver
+- [核心概念](../concepts/01-architecture.md)：API/Worker、权威状态与进化闭环
+- [配置参考](../guides/01-configuration.md)：启动配置与在线配置
+- [Agent 接入](../agent-integrations/01-overview.md)：接入你自己的 Agent

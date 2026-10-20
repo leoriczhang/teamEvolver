@@ -1,59 +1,128 @@
-# 租户数据源接入
+# 数据源接入指南
 
-## 唯一入口
+数据源 Adapter 把上游系统（Doris、Langfuse 等）中的 Agent 会话转换为标准 Session，供 Worker 拉取、分析与进化。Adapter 是 Python 文件，源码按不可变版本保存在 PostgreSQL，租户绑定到一个固定 revision。接口与字段约束见 [Session 接入 API](../api/03-session-ingest.md#数据源-adapter)。
 
-一个租户绑定 `session_ingestion/adapters/` 顶层的一个 `.py` 文件，一个文件只能绑定一个租户。
-文件拥有上游连接、项目选择、筛选、转换逻辑；平台只接收标准 Session。
-共享 Doris/Langfuse 传输在 `session_ingestion/adapters/sources/`，解析和旧版迁移工具在
-`session_ingestion/adapters/_shared/`。平台出站链路观测独立保留，不是上游数据源。
+## 组成
 
-## 文件约定
-
-参考 `session_ingestion/adapters/product-agent.py`。定义字面量字典 `SOURCE`，包含 `label`、
-`provider`、`enabled`、`supported_filters`、`required_filters`、`max_sessions`。
-可选的 `project_id` 只用于显示上游项目，不决定租户身份。
-
-`build_adapter()` 无参数，返回包含以下方法的对象：
-
-| 方法 | 契约 |
+| 位置 | 内容 |
 |------|------|
-| `health()` | 实际检查连接，返回 `{"ok": bool}` |
-| `list_session_ids(filters, *, max_sessions)` | 返回有界 Session ID 列表 |
-| `fetch_session(session_id)` | 返回原始 Session 和 Trace 列表 |
-| `convert_session(session, traces)` | 返回含 `session_id`、`turns` 的标准 Session |
-| `close()` | 释放资源，异常时也会调用 |
-| `preview_sessions(filters, *, max_sessions)` | 可选，返回含标题、用户等的预览列表 |
+| `session_ingestion/adapters/*.py` | 各租户的 Adapter 模板，每个文件定义 `SOURCE` 与 `build_adapter()` |
+| `session_ingestion/adapters/sources/` | 共享传输实现：`doris.py`（`DorisSourceAdapter`）、`langfuse.py`（`LangfuseSource`） |
+| `session_ingestion/adapters/_shared/` | 字段映射、Langfuse 客户端与转换、构建函数 |
+| PostgreSQL `adapter_versions` | 已保存的 Adapter 源码，每次保存生成新 revision |
+| PostgreSQL `adapter_bindings` | 租户绑定，`binding_key='datasource'` 指向 `(adapter_id, revision)` |
 
-单次拉取最多 1000 个 Session，最多 8 路并发。连接必须线程安全。
-缺失文件、非法配置、转换失败均不得静默切换数据源。顶层文件按内容哈希热加载；
-共享模块及环境变量变更需要重启。管理员可上传、新建或编辑 `.py` 运行副本，
-并直接校验、测试连接、预览 Session 或转换单条 Session。草稿测试不写磁盘。
+仓库中的模板不会自动生效，必须先保存到 PostgreSQL 再绑定。运行中的拉取任务固定受理时的 revision，之后保存新版本不影响在途任务。
 
-当前没有适配器持久化托管：点击“保存运行副本”只原子写入当前服务实例，
-重新部署、替换容器或重新安装后可能丢失。验证通过后必须联系项目 Owner，
-将变更合入 `session_ingestion/adapters/<tenant>.py` 并重新发布。保存使用 revision 校验，
-文件已被其他管理员修改时返回 409，避免覆盖他人变更。
+## Adapter 文件约定
 
-## 绑定与验证
+参考 `session_ingestion/adapters/example-doris.py`，使用前配置上游并将 `enabled` 改为 true：
 
-在控制台切换目标租户，打开「数据源接入」，选择文件并保存绑定。
-租户绑定写入 `datasource_adapter`，default 绑定写入当前 YAML 的 `datasource.adapter`。
-绑定不继承、不通过显示名猜测，旧租户须显式绑定后才能拉取。
+```python
+SOURCE = {
+    "label": "Example Doris", "provider": "doris",
+    "host": "doris.example.com", "project_id": "example-project",
+    "enabled": False, "max_sessions": 200,
+    "supported_filters": ["from_timestamp", "to_timestamp", "session_id", "user_id"],
+    "required_filters": ["from_timestamp", "to_timestamp"],
+}
 
-1. 部署完整 adapters 目录和重建后的前端。
-2. 通过环境变量注入 Doris 连接凭据，不在源码或 SOURCE 中存储密码。
-3. 核对四个租户文件中的上游项目。陆网文件目前通过项目名查询映射表，须验证映射。
-4. 保存绑定，测试连接，填写窄时间窗口预览，再拉取少量 Session 对比工具与 Skill 信息。
 
-## 接口
+def build_adapter():
+    from session_ingestion.adapters._shared.builders import build_doris_adapter
+    return build_doris_adapter(SOURCE, "agent-call")
+```
 
-`GET /api/datasource` 返回当前描述与可用文件；`PUT` 接收 `{"file":"product-agent.py"}`。
-空字符串表示解绑。`GET /api/datasource/code` 读取源码，`PUT` 保存运行副本；
-`POST /api/datasource/code/test` 对未保存源码执行 `validate`、`health`、`preview`
-或 `session` 测试；`POST /test` 测试已保存连接；
-`POST /sessions` 预览；`POST /pull` 拉取（后三者均在 `/api/datasource` 下）。
-使用控制台身份或 Root Key 和 `X-Tenant-Id`；租户 Token 只允许调用自己的 pull，且不能访问管理员接口（`/api/*`）与 Agent 注册接口（`/internal/agents/register`）。
-未支持的筛选字段和非法参数返回 400；文件已占用返回 409；并发超限返回 429。
-旧 Langfuse/Converter/Mapper 配置接口返回 410，旧 pull/sessions URL 转入新流程。
+校验规则（`session_ingestion/adapters/_runtime.py:validate_content`）：
 
-旧持久化字段及 Python 导入别名仅保留供离线迁移，不参与在线数据源选择。
+- 文件名以 `.py` 结尾，不以 `_` 开头，不含路径；源码不超过 256 KiB
+- 顶层必须定义 `build_adapter()` 和字面量字典 `SOURCE`
+- `required_filters` 必须是 `supported_filters` 的子集；`max_sessions` 取 1–1000
+- `exclude_session_id_patterns` 是大小写敏感的 glob 列表，在拉取详情前过滤噪声 Session；显式指定 `session_id` 时不生效
+
+`build_adapter()` 返回的对象需提供 `health()`、`iter_session_id_batches(filters, batch_size)`、`fetch_session(session_id)`、`convert_session(session, traces)` 与 `close()`。Worker 每批最多处理 1000 个 Session ID，以 8 路并发拉取详情与转换；单条失败记为 error，不中断整批。
+
+## 凭证
+
+上游凭证从 Worker 进程的环境变量读取，不写入 Adapter 源码或 `SOURCE`：
+
+| 上游 | 环境变量 |
+|------|----------|
+| Doris | `DORIS_HOSTS`、`DORIS_PORT`、`DORIS_USER`、`DORIS_PASSWORD`、`DORIS_DB`；表名为 `DORIS_TRACES_TABLE`、`DORIS_OBSERVATIONS_TABLE`、`DORIS_MAPPING_TABLE`；可选 `DORIS_PROXY_URL`、`DORIS_FORCE_PROXY`、`DORIS_CA_BUNDLE` |
+| Langfuse | `LANGFUSE_PULL_HOST`、`LANGFUSE_PULL_PUBLIC_KEY`、`LANGFUSE_PULL_SECRET_KEY` |
+
+修改环境变量后需要重启 Worker。出站链路观测使用独立的 `langfuse_tracing_*` 配置，与数据源凭证无关，见 [链路观测指南](./04-observability.md)。
+直连 Doris 需安装可选驱动 `pymysql`；HTTP 查询代理只在显式配置 `DORIS_PROXY_URL` 后可用，默认验证 TLS，可用 `DORIS_CA_BUNDLE` 指定证书。
+
+## 接入步骤
+
+### 1. 保存 Adapter 版本
+
+保存与读取源码要求 Root Key。以下命令把仓库模板保存为租户 `demo` 的第一个版本：
+
+```bash
+export TEAMEVOLVER_ROOT_API_KEY=...
+jq -Rs '{file: "example-doris.py", code: ., expected_revision: 0}' \
+  session_ingestion/adapters/example-doris.py |
+curl --fail -X PUT http://127.0.0.1:52010/api/datasource/code \
+  -H "Authorization: Bearer $TEAMEVOLVER_ROOT_API_KEY" -H 'X-Tenant-Id: demo' \
+  -H 'Content-Type: application/json' -d @-
+```
+
+`expected_revision` 必须等于当前最新 revision（首次为 0），否则返回 409。内容与最新版本相同时返回原 revision，不产生新版本。
+
+保存前可用 `POST /api/datasource/code/test` 对草稿执行 `validate`、`health`、`preview` 或 `session` 测试；`validate` 同步返回，其余模式以后台任务执行。
+
+### 2. 绑定
+
+```bash
+teamEvolver datasource --tenant demo bind example-doris.py
+```
+
+绑定默认取最新 revision；通过 `PUT /api/datasource` 传入 `{"file", "revision"}` 可绑定指定版本，`file` 为空串表示解绑。租户管理员也可以在控制台「数据源接入」中选择文件并绑定。
+
+### 3. 验证
+
+```bash
+teamEvolver datasource --tenant demo test
+teamEvolver datasource --tenant demo list --from-timestamp 2026-10-01T00:00:00+08:00 \
+  --to-timestamp 2026-10-01T02:00:00+08:00 --max-sessions 20
+```
+
+两条命令都返回 `job_id`，结果通过 `GET /api/datasource/jobs/{job_id}/result` 读取。先用窄时间窗口预览，核对 Session 分组、用户、工具调用与使用的 Skill。
+
+### 4. 拉取
+
+```bash
+teamEvolver datasource --tenant demo pull \
+  --from-timestamp 2026-10-01T00:00:00+08:00 --to-timestamp 2026-10-02T00:00:00+08:00
+```
+
+拉取遍历整个过滤窗口，按条受理 Session 并入队 `session.normalize`。之后的分析、归档与进化见 [Session](../concepts/05-sessions.md)。
+
+### 5. 定时拉取
+
+```json
+{"enabled": true, "time": "02:00", "timezone": "Asia/Shanghai", "window": "previous_day"}
+```
+
+通过 `PUT /api/datasource/schedule` 或控制台保存。Worker 每轮租户刷新检查一次：本地时间达到 `time` 后按前一自然日窗口受理一次拉取，同一窗口只受理一次。`POST /api/datasource/schedule/run` 立即按该窗口拉取。
+
+## 控制台
+
+「数据源接入」页面（租户管理员）提供绑定、连接测试、预览、拉取与定时配置。源码编辑与上传需要 Root Key 身份；Cookie 登录时 `GET /api/datasource` 返回 `source_editable=false`，页面只显示已保存版本。
+
+## 常见错误
+
+| 状态 | 原因 |
+|------|------|
+| 400 | Adapter 校验失败、过滤字段不受支持、缺少必填过滤、`max_sessions` 越界 |
+| 403 | 读取或保存源码时未使用 Root Key |
+| 404 | 绑定的 revision 不存在 |
+| 409 | 未绑定 Adapter 就测试或拉取；保存时 `expected_revision` 已过期 |
+
+## 相关文档
+
+- [Session 接入 API](../api/03-session-ingest.md)
+- [Session](../concepts/05-sessions.md)
+- [运维 CLI](./05-daemon-cli.md)

@@ -5,19 +5,12 @@ from __future__ import annotations
 import ast
 import fnmatch
 import hashlib
-import os
 import sys
-import tempfile
 import threading
 from pathlib import Path
 from types import ModuleType
-from typing import Any
 
 MAX_CODE_BYTES = 256 * 1024
-PERSISTENCE_WARNING = (
-    "当前修改只写入本实例的运行目录，重新部署、替换容器或重新安装后可能丢失。"
-    "验证通过后请联系项目 Owner，将适配器变更合入源码并重新发布。"
-)
 
 
 class AdapterError(ValueError):
@@ -36,12 +29,6 @@ _cache: dict[Path, tuple[str, ModuleType]] = {}
 _lock = threading.RLock()
 
 
-def directory(config) -> Path:
-    return (
-        Path(config.datasource_adapters_dir).expanduser().resolve()
-        if config.datasource_adapters_dir
-        else Path(__file__).parent
-    )
 
 
 def _safe_filename(filename: str) -> str:
@@ -52,19 +39,8 @@ def _safe_filename(filename: str) -> str:
     return filename
 
 
-def target_path(config, filename: str) -> Path:
-    root = directory(config).resolve()
-    path = root / _safe_filename(filename)
-    if path.is_symlink() or path.resolve().parent != root:
-        raise AdapterError(f"Invalid adapter path: {filename}")
-    return path
 
 
-def adapter_path(config, filename: str) -> Path:
-    path = target_path(config, filename)
-    if not path.is_file():
-        raise AdapterError(f"Adapter file not found: {filename}")
-    return path
 
 
 def validate_content(content: str, filename: str) -> dict:
@@ -121,49 +97,12 @@ def validate_content(content: str, filename: str) -> dict:
     raise AdapterError(f"{filename}: missing literal SOURCE metadata")
 
 
-def metadata(path: Path) -> dict:
-    return validate_content(path.read_text(encoding="utf-8"), path.name)
 
 
-def available(config) -> list[dict]:
-    entries = []
-    for path in sorted(directory(config).glob("*.py")):
-        if path.name.startswith("_") or path.is_symlink():
-            continue
-        try:
-            entries.append({"file": path.name, **metadata(path)})
-        except (ValueError, SyntaxError) as exc:
-            entries.append({"file": path.name, "error": str(exc)})
-    return entries
 
 
-def binding(config, tenant) -> str:
-    # A non-default tenant must NEVER inherit the default tenant's binding.
-    if tenant is not None and (not tenant.is_default() or "datasource_adapter" in tenant.config_overrides):
-        return str((tenant.config_overrides or {}).get("datasource_adapter") or "")
-    return str(getattr(config, "datasource_adapter", "") or "")
 
 
-def describe(config, tenant) -> dict:
-    filename = binding(config, tenant)
-    result = {
-        "tenant_id": tenant.tenant_id if tenant else "default",
-        "file": filename,
-        "configured": False,
-        "enabled": False,
-    }
-    if not filename:
-        result["error"] = "No adapter bound to this tenant"
-        return result
-    try:
-        path = adapter_path(config, filename)
-        source = metadata(path)
-        result.update(source)
-        result.update(configured=True, enabled=source.get("enabled", True))
-        result["revision"] = hashlib.sha256(path.read_bytes()).hexdigest()
-    except (ValueError, SyntaxError) as exc:
-        result["error"] = str(exc)
-    return result
 
 
 def _build_adapter(content: str, filename: str):
@@ -217,82 +156,10 @@ def inspect_content(content: str, filename: str) -> dict:
         adapter.close()
 
 
-def load(config, tenant, *, revision=None):
-    descriptor = describe(config, tenant)
-    if not descriptor["configured"] or not descriptor["enabled"]:
-        raise AdapterError(descriptor.get("error") or "Tenant adapter is disabled")
-    path = adapter_path(config, descriptor["file"])
-    content = path.read_text(encoding="utf-8")
-    expected = revision or descriptor["revision"]
-    current_revision = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    if current_revision != expected:
-        raise AdapterConflict("Adapter changed during the operation; reload and retry")
-    with _lock:
-        cached = _cache.get(path)
-        if cached and cached[0] == current_revision:
-            module = cached[1]
-        else:
-            adapter, _source, _revision, module = _build_adapter(content, path.name)
-            adapter.close()
-            _cache[path] = (current_revision, module)
-    adapter = module.build_adapter()
-    return adapter
 
 
-def read_content(config, filename: str) -> dict:
-    path = adapter_path(config, filename)
-    content = path.read_text(encoding="utf-8")
-    return {
-        "file": filename,
-        "code": content,
-        "revision": hashlib.sha256(content.encode("utf-8")).hexdigest(),
-        "persistence": {"durable": False, "mode": "runtime_only", "warning": PERSISTENCE_WARNING},
-    }
 
 
-def save_content(config, filename: str, content: str, expected_revision: str | None) -> dict:
-    path = target_path(config, filename)
-    inspected = inspect_content(content, filename)
-    root = path.parent
-    if not root.is_dir():
-        raise AdapterStorageError(f"Adapter directory does not exist: {root}")
-    with _lock:
-        if path.exists():
-            current = hashlib.sha256(path.read_bytes()).hexdigest()
-            if expected_revision is None:
-                raise AdapterConflict(f"Adapter already exists: {filename}")
-            if current != expected_revision:
-                raise AdapterConflict("Adapter changed after it was opened; reload before saving")
-            mode = path.stat().st_mode & 0o777
-        else:
-            if expected_revision not in (None, ""):
-                raise AdapterConflict("Adapter no longer exists; reload before saving")
-            mode = 0o640
-        try:
-            fd, temp_name = tempfile.mkstemp(prefix=f".{filename}.", suffix=".tmp", dir=root)
-            try:
-                os.fchmod(fd, mode)
-                with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                    handle.write(content)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temp_name, path)
-            except BaseException:
-                try:
-                    os.unlink(temp_name)
-                except FileNotFoundError:
-                    pass
-                raise
-        except OSError as exc:
-            raise AdapterStorageError(
-                f"Runtime adapter directory is not writable; contact the project Owner: {exc}"
-            ) from exc
-        _cache.pop(path, None)
-    return {
-        **inspected,
-        "revision": hashlib.sha256(content.encode("utf-8")).hexdigest(),
-        "persistence": {"durable": False, "mode": "runtime_only", "warning": PERSISTENCE_WARNING},
-    }
 
 
 def filters_for(descriptor: dict, body: dict) -> tuple[dict, int]:
@@ -354,15 +221,6 @@ def apply_session_id_exclusions(
     return included, excluded
 
 
-def probe(config, tenant) -> dict[str, Any]:
-    adapter = load(config, tenant)
-    try:
-        result = adapter.health()
-        if not isinstance(result, dict) or not isinstance(result.get("ok"), bool):
-            raise AdapterError("health() must return {ok: bool}")
-        return result
-    finally:
-        adapter.close()
 
 
 def test_content(content: str, filename: str, mode: str, body: dict) -> dict:
@@ -409,27 +267,3 @@ def test_content(content: str, filename: str, mode: str, body: dict) -> dict:
         adapter.close()
 
 
-def preview(config, tenant, body: dict) -> dict:
-    descriptor = describe(config, tenant)
-    filters, cap = filters_for(descriptor, body)
-    adapter = (
-        load(config, tenant, revision=descriptor["revision"]) if descriptor["configured"] else load(config, tenant)
-    )
-    try:
-        if callable(getattr(adapter, "preview_sessions", None)):
-            rows = adapter.preview_sessions(filters, max_sessions=cap)
-        else:
-            rows = [{"session_id": sid} for sid in adapter.list_session_ids(filters, max_sessions=cap)]
-        if not isinstance(rows, list) or len(rows) > cap:
-            raise AdapterError("Adapter exceeded the preview limit")
-        total = len(rows)
-        rows, excluded = apply_session_id_exclusions(descriptor, filters, rows)
-        return {
-            "filters": filters,
-            "total": total,
-            "count": len(rows),
-            "counts": {"included": len(rows), "filtered": len(excluded)},
-            "sessions": rows,
-        }
-    finally:
-        adapter.close()

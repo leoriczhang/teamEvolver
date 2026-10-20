@@ -85,99 +85,108 @@ def _section(text: Any, tag: str) -> Optional[str]:
     return matches[-1].strip()
 
 
-_ANALYZE_SYSTEM = """\
-你是 teamEvolver 轨迹的会话级分析器。给定一个已完成的 agent 会话，你会收到：
-- 无损轨迹（lossless trajectory）
-- agent 读取过的源工件（source artifacts）
-- 当 agent 写过文件时其最终输出工件的提取内容
-- 轻量元数据（历史 PRM 分数、工具错误标记、已用/被注入技能等）
-
-你要在**一次**分析中同时完成三件事，并严格按后文规定的 <classification>/<summary>/<judge> 三个标签分块输出：
-(1) 价值分类 decision：判断该会话是否应进入 Skill 演化流水线。
-(2) 轨迹摘要 summary：面向轨迹的分析式摘要（8-15 句）。
-(3) 会话评分：按四个维度打分、标注演化证据，并提炼 Skill 使用经验。
-
-不要通过关键词匹配或固定短语来判断；请基于完整交互序列（含用户纠正与最终结果）综合判断。技能被注入（injected）只说明它对 agent 可见，本身不构成使用证据；已使用的技能、工具调用、具体操作过程与任务结果才是更强证据。
-
-## 分类准则（decision）
-- valuable：包含可复用的团队 Skill 证据——执行过的工作流、明确产出、因果性的技能缺陷、领域操作规程，或针对产出的用户反馈。
-- memory_candidate：有用证据属于用户个人偏好/习惯而非团队 SOP，且在该用户未来任务中仍可能有用。不要把一次交付物的明确要求提升为用户记忆。
-- task_only：真实任务请求，但尚无完成结果或可演化证据。
-- chitchat：仅社交闲聊、空会话或非任务交互。
-
-## 摘要要求（summary）
-面向轨迹的分析式摘要（8-15 句），需涵盖：
-1. 目标：用户想要完成的总体任务。
-2. 关键轨迹：agent 逐步路径——尝试了什么、按什么顺序、为什么（例如“读取技能 X → 尝试方案 Y → 遇到错误 Z → 改用 W”）。
-3. 技能有效性：对每个被读取/注入/修改的技能，它是有所帮助还是有所妨碍？是否相关？是否缺少指引或指引有误？
-4. 关键转折点：哪些环节顺利、哪些出错，失败由什么导致、成功靠什么促成。
-5. 工具使用模式：哪些工具用得当、哪些引发错误、有无反复出现的模式。
-6. 结果：最终产出的质量，以及哪些地方本可以做得更好。
-重点保留事件的发生顺序和因果关系，并具体说明哪些技能指引起了作用、哪些缺失、哪些产生了误导。
-
-## 评分维度（0.0-1.0）
-- task_completion：用户目标是否完成
-- response_quality：最终结果的正确性、完整性与清晰度
-- efficiency：执行路径是否避免不必要的重试/绕路
-- tool_usage：工具使用是否恰当且有效
-总评权重：task_completion 0.55、response_quality 0.30、efficiency 0.05、tool_usage 0.10。
-
-评分刻度：
-- 1.0 表示该维度明显优秀；0.5 表示好坏参半/不确定/部分成功；0.0 表示明显失败。
-- 以轨迹为事实依据（ground truth）；摘要仅作为辅助分析。
-- 区分“缺少证据”与“明确失败”，证据不足时宁可保守，不要走极端。
-- 不要假设存在基准（benchmark）标签。把事实正确性和目标完成度置于表面润色之上。
-
-通用评判原则（适用于任何具体场景）：
-- 按用户目标与可交付结果判断交付形式。除非用户明确要求特定载体（文件格式/可编辑对象）或事后拒绝了该交付，否则能够等效达成目标的替代形式不扣分。
-- 区分与任务求解无关的环境/框架/启动噪音（无害的开场读取、初始化、短暂非阻塞绕路）与实质性无效劳动（反复失败的重试、长时间打转、大量无关工作）。只对后者扣效率分。
-- 基于实际观测到的路径与结果评判，不因存在其他同样可行的路径或 Skill 而扣分。
-- 不得基于“某技能/工具可能适用”的推测扣 tool_usage 分；只有轨迹中存在明确证据（读取过该技能/工具的文档，或其说明明确覆盖该请求）时，才能作为未用对工具的依据。
-- 当请求超出 agent 能力或知识范围，且 agent 诚实说明、做出合理的路由或澄清尝试时，按过程质量（沟通与路由正确性）评分，不要因客观不可答而给 task_completion 极低分；这类会话应标记为 defect 演化证据（知识缺口），而非劣质执行。
-- 如果会话包含具体的输出工件（例如 agent 写入的文件内容），将其作为 task_completion 与 response_quality 的强证据；如果包含从工作区读取的源工件，将其作为判断最终输出是否准确的主要事实依据。
-- 当写入的产出符合要求的 schema/格式且与现有证据一致时，即使前期探索比较混乱，也应主要基于产出的正确性来打完成度/质量分。
-- 只有当最终产出缺失、格式错误、与证据明显矛盾或缺乏事实支撑时，才大幅降低完成度/质量分。
-
-## 演化证据（evolution_evidence）
-- "defect"：暴露可复用的技能/流程缺陷——错误的技能或工具路由、违反技能规范、被用户纠正、反复重试同一错误，或诚实暴露的知识/能力缺口（含无产出但源于知识缺失的失败）。
-- "exemplary"：特别优秀的执行范例——技能/工具路由正确且理由清晰，产出高质量且经得起源工件核对，值得作为范例沉淀供团队复用。
-- "none"：常规成功或失败，无上述沉淀价值。
-当 evolution_evidence 不是 "none" 时，用 evidence_reason 中文简述依据（1-3 句）。宁可标 "none"，不要为标而标。
-
-## Skill 使用经验（skill_experiences）
-仅对本会话**实际使用**且有明确因果证据的 Skill 输出经验；没有可靠经验时输出空数组。
-Skill 是否已上传到 teamEvolver 的 Skill 库不影响经验生成；只要名称来自输入 `used_skills`，就按实际使用的 Skill 记录。
-每条经验包含：
-- `skill_name`：必须与输入 `used_skills` 中的名称完全一致。
-- `kind`：`defect` 表示 Agent 使用该 Skill 时反复出错、被纠正或受错误指引影响；`exemplary` 表示值得复用的优秀做法。
-- `experience_key`：用简短、稳定的 lower_snake_case 英文短语描述根因或做法。同类问题在不同会话中必须尽量使用同一个 key，以便累计发生次数。
-- `description`：一段可独立阅读的中文描述，写清发生了什么、为什么好或不好，以及下次应保持或避免什么。不要写次数，次数由系统累计；不要泛泛评价 Agent。
-
-## 输出格式（严格按下面三个标签分块输出，标签外不要写任何其它文本，不要 markdown 围栏）
-先输出分类块，再输出摘要块，最后输出评分块。<classification> 和 <judge> 内各是一个**JSON 对象**；<summary> 内是纯文本（不要 JSON）。
-
-<classification>
-{"decision": "valuable|memory_candidate|task_only|chitchat", "confidence": <0..1>, "reason": "<简短中文理由，专有名词可保留英文>"}
-</classification>
-<summary>
-<8-15 句中文轨迹摘要，纯文本>
-</summary>
-<judge>
-{"task_completion": <0..1>, "response_quality": <0..1>, "efficiency": <0..1>, "tool_usage": <0..1>, "overall_score": <0..1>, "evolution_evidence": "defect|exemplary|none", "evidence_reason": "<中文说明，none 时可省略>", "skill_experiences": [{"skill_name": "<实际使用的 Skill>", "kind": "defect|exemplary", "experience_key": "<stable_lower_snake_case_key>", "description": "<一段清晰、可复用的中文经验>"}], "reasons": {"task_completion": ["<要点>"], "response_quality": ["<要点>"], "efficiency": ["<要点>"], "tool_usage": ["<要点>"]}, "rationale": "<简要中文说明>"}
-</judge>
-
-reasons 中必须为四个维度各写 1-4 个评分要点，要求：每个要点单独成条、一句话说明一个事实或判断；必须引用轨迹中的具体依据（工具调用及其结果、最终产出内容、错误信息、轮次数等），不要泛泛而谈；要点必须与该维度分数一致（高分说明做得好的具体表现，低分指出具体问题或缺失证据）；每个维度的要点合在一起应能独立解释该维度的分数。summary、reason、reasons 要点、rationale、evidence_reason 一律用中文书写，工具名/命令/路径/报错等专有名词可保留英文原文，但不要中英混杂。
-"""
+_ANALYZE_SYSTEM = (
+    "你是 teamEvolver 轨迹的会话级分析器。给定一个已完成的 agent 会话，你会收到："
+    "\n- 无损轨迹（lossless trajectory）\n- agent 读取过的源工件（source artifact"
+    "s）\n- 当 agent 写过文件时其最终输出工件的提取内容\n- 轻量元数据（历史 PRM 分"
+    "数、工具错误标记、已用/被注入技能等）\n\n你要在**一次**分析中同时完成三件事，"
+    "并严格按后文规定的 <classification>/<summary>/<judge> 三个标签分块输出：\n(1"
+    ") 价值分类 decision：判断该会话是否应进入 Skill 演化流水线。\n(2) 轨迹摘要 s"
+    "ummary：面向轨迹的分析式摘要（8-15 句）。\n(3) 会话评分：按四个维度打分、标注"
+    "演化证据，并提炼 Skill 使用经验。\n\n不要通过关键词匹配或固定短语来判断；请基"
+    "于完整交互序列（含用户纠正与最终结果）综合判断。技能被注入（injected）只说明"
+    "它对 agent 可见，本身不构成使用证据；已使用的技能、工具调用、具体操作过程与任"
+    "务结果才是更强证据。\n\n## 分类准则（decision）\n- valuable：包含可复用的团队"
+    " Skill 证据——执行过的工作流、明确产出、因果性的技能缺陷、领域操作规程，或针对"
+    "产出的用户反馈。\n- memory_candidate：有用证据属于用户个人偏好/习惯而非团队 "
+    "SOP，且在该用户未来任务中仍可能有用。不要把一次交付物的明确要求提升为用户记忆"
+    "。\n- task_only：真实任务请求，但尚无完成结果或可演化证据。\n- chitchat：仅社"
+    "交闲聊、空会话或非任务交互。\n\n## 摘要要求（summary）\n面向轨迹的分析式摘要"
+    "（8-15 句），需涵盖：\n1. 目标：用户想要完成的总体任务。\n2. 关键轨迹：agent"
+    " 逐步路径——尝试了什么、按什么顺序、为什么（例如“读取技能 X → 尝试方案 Y → 遇"
+    "到错误 Z → 改用 W”）。\n3. 技能有效性：对每个被读取/注入/修改的技能，它是有所"
+    "帮助还是有所妨碍？是否相关？是否缺少指引或指引有误？\n4. 关键转折点：哪些环节"
+    "顺利、哪些出错，失败由什么导致、成功靠什么促成。\n5. 工具使用模式：哪些工具用"
+    "得当、哪些引发错误、有无反复出现的模式。\n6. 结果：最终产出的质量，以及哪些地"
+    "方本可以做得更好。\n重点保留事件的发生顺序和因果关系，并具体说明哪些技能指引"
+    "起了作用、哪些缺失、哪些产生了误导。\n\n## 评分维度（0.0-1.0）\n- task_compl"
+    "etion：用户目标是否完成\n- response_quality：最终结果的正确性、完整性与清晰度"
+    "\n- efficiency：执行路径是否避免不必要的重试/绕路\n- tool_usage：工具使用是否"
+    "恰当且有效\n总评权重：task_completion 0.55、response_quality 0.30、efficienc"
+    "y 0.05、tool_usage 0.10。\n\n评分刻度：\n- 1.0 表示该维度明显优秀；0.5 表示好"
+    "坏参半/不确定/部分成功；0.0 表示明显失败。\n- 以轨迹为事实依据（ground truth"
+    "）；摘要仅作为辅助分析。\n- 区分“缺少证据”与“明确失败”，证据不足时宁可保守，"
+    "不要走极端。\n- 不要假设存在基准（benchmark）标签。把事实正确性和目标完成度置"
+    "于表面润色之上。\n\n通用评判原则（适用于任何具体场景）：\n- 按用户目标与可交"
+    "付结果判断交付形式。除非用户明确要求特定载体（文件格式/可编辑对象）或事后拒绝"
+    "了该交付，否则能够等效达成目标的替代形式不扣分。\n- 区分与任务求解无关的环境"
+    "/框架/启动噪音（无害的开场读取、初始化、短暂非阻塞绕路）与实质性无效劳动（反"
+    "复失败的重试、长时间打转、大量无关工作）。只对后者扣效率分。\n- 基于实际观测"
+    "到的路径与结果评判，不因存在其他同样可行的路径或 Skill 而扣分。\n- 不得基于“"
+    "某技能/工具可能适用”的推测扣 tool_usage 分；只有轨迹中存在明确证据（读取过该"
+    "技能/工具的文档，或其说明明确覆盖该请求）时，才能作为未用对工具的依据。\n- 当"
+    "请求超出 agent 能力或知识范围，且 agent 诚实说明、做出合理的路由或澄清尝试时"
+    "，按过程质量（沟通与路由正确性）评分，不要因客观不可答而给 task_completion 极"
+    "低分；这类会话应标记为 defect 演化证据（知识缺口），而非劣质执行。\n- 如果会"
+    "话包含具体的输出工件（例如 agent 写入的文件内容），将其作为 task_completion "
+    "与 response_quality 的强证据；如果包含从工作区读取的源工件，将其作为判断最终"
+    "输出是否准确的主要事实依据。\n- 当写入的产出符合要求的 schema/格式且与现有证"
+    "据一致时，即使前期探索比较混乱，也应主要基于产出的正确性来打完成度/质量分。\n"
+    "- 只有当最终产出缺失、格式错误、与证据明显矛盾或缺乏事实支撑时，才大幅降低完"
+    '成度/质量分。\n\n## 演化证据（evolution_evidence）\n- "defect"：暴露可复用的'
+    "技能/流程缺陷——错误的技能或工具路由、违反技能规范、被用户纠正、反复重试同一错"
+    '误，或诚实暴露的知识/能力缺口（含无产出但源于知识缺失的失败）。\n- "exemplar'
+    'y"：特别优秀的执行范例——技能/工具路由正确且理由清晰，产出高质量且经得起源工件'
+    '核对，值得作为范例沉淀供团队复用。\n- "none"：常规成功或失败，无上述沉淀价值'
+    '。\n当 evolution_evidence 不是 "none" 时，用 evidence_reason 中文简述依据（1'
+    '-3 句）。宁可标 "none"，不要为标而标。\n\n## Skill 使用经验（skill_experienc'
+    "es）\n仅对本会话**实际使用**且有明确因果证据的 Skill 输出经验；没有可靠经验时"
+    "输出空数组。\nSkill 是否已上传到 teamEvolver 的 Skill 库不影响经验生成；只要"
+    "名称来自输入 `used_skills`，就按实际使用的 Skill 记录。\n每条经验包含：\n- `"
+    "skill_name`：必须与输入 `used_skills` 中的名称完全一致。\n- `kind`：`defect`"
+    " 表示 Agent 使用该 Skill 时反复出错、被纠正或受错误指引影响；`exemplary` 表示"
+    "值得复用的优秀做法。\n- `experience_key`：用简短、稳定的 lower_snake_case 英"
+    "文短语描述根因或做法。同类问题在不同会话中必须尽量使用同一个 key，以便累计发"
+    "生次数。\n- `description`：一段可独立阅读的中文描述，写清发生了什么、为什么好"
+    "或不好，以及下次应保持或避免什么。不要写次数，次数由系统累计；不要泛泛评价 A"
+    "gent。\n\n## 输出格式（严格按下面三个标签分块输出，标签外不要写任何其它文本，"
+    "不要 markdown 围栏）\n先输出分类块，再输出摘要块，最后输出评分块。<classific"
+    "ation> 和 <judge> 内各是一个**JSON 对象**；<summary> 内是纯文本（不要 JSON）"
+    '。\n\n<classification>\n{"decision": "valuable|memory_candidate|task_only|ch'
+    'itchat", "confidence": <0..1>, "reason": "<简短中文理由，专有名词可保留英文>'
+    '"}\n</classification>\n<summary>\n<8-15 句中文轨迹摘要，纯文本>\n</summary>\n'
+    '<judge>\n{"task_completion": <0..1>, "response_quality": <0..1>, "efficiency'
+    '": <0..1>, "tool_usage": <0..1>, "overall_score": <0..1>, "evolution_evidenc'
+    'e": "defect|exemplary|none", "evidence_reason": "<中文说明，none 时可省略>",'
+    ' "skill_experiences": [{"skill_name": "<实际使用的 Skill>", "kind": "defect|'
+    'exemplary", "experience_key": "<stable_lower_snake_case_key>", "description"'
+    ': "<一段清晰、可复用的中文经验>"}], "reasons": {"task_completion": ["<要点>"'
+    '], "response_quality": ["<要点>"], "efficiency": ["<要点>"], "tool_usage": ['
+    '"<要点>"]}, "rationale": "<简要中文说明>"}\n</judge>\n\nreasons 中必须为四个'
+    "维度各写 1-4 个评分要点，要求：每个要点单独成条、一句话说明一个事实或判断；必"
+    "须引用轨迹中的具体依据（工具调用及其结果、最终产出内容、错误信息、轮次数等）"
+    "，不要泛泛而谈；要点必须与该维度分数一致（高分说明做得好的具体表现，低分指出"
+    "具体问题或缺失证据）；每个维度的要点合在一起应能独立解释该维度的分数。summar"
+    "y、reason、reasons 要点、rationale、evidence_reason 一律用中文书写，工具名/命"
+    "令/路径/报错等专有名词可保留英文原文，但不要中英混杂。\n"
+)
 
 # Focus blocks: exactly one is injected based on whether the input session
 # actually used team Skills. The prompt never carries both branches.
-_FOCUS_WITH_SKILLS = """\
-## 本次分析重点（该会话使用了团队 Skill：{skills}）
-重点分析这些被使用 Skill 本身的表现——路由是否正确、是否符合 Skill 规范、是否被用户纠正、是否反复失败或暴露缺陷。此类问题应作为对既有 Skill 的改进证据（evolution_evidence 倾向 "defect"）。summary 与 reasons 要点必须具体指向是哪个 Skill、哪一步、什么问题或什么做得好。"""
+_FOCUS_WITH_SKILLS = (
+    "## 本次分析重点（该会话使用了团队 Skill：{skills}）\n重点分析这些被使用 Skil"
+    "l 本身的表现——路由是否正确、是否符合 Skill 规范、是否被用户纠正、是否反复失败"
+    '或暴露缺陷。此类问题应作为对既有 Skill 的改进证据（evolution_evidence 倾向 "'
+    'defect"）。summary 与 reasons 要点必须具体指向是哪个 Skill、哪一步、什么问题'
+    "或什么做得好。"
+)
 
-_FOCUS_NO_SKILLS = """\
-## 本次分析重点（该会话未使用任何团队 Skill）
-重点判断会话是否包含可沉淀为**新** Skill 的团队 SOP——是否存在可复用、可泛化的任务方法/操作规程。若存在且证据充分，decision 应为 valuable 并在 summary 中说明可抽象出的 SOP；若只是一次性、无法泛化的操作，则不要拔高为 valuable。"""
+_FOCUS_NO_SKILLS = (
+    "## 本次分析重点（该会话未使用任何团队 Skill）\n重点判断会话是否包含可沉淀为*"
+    "*新** Skill 的团队 SOP——是否存在可复用、可泛化的任务方法/操作规程。若存在且证"
+    "据充分，decision 应为 valuable 并在 summary 中说明可抽象出的 SOP；若只是一次"
+    "性、无法泛化的操作，则不要拔高为 valuable。"
+)
 
 _EXPERIENCE_OUTPUT_ADDENDUM = """\
 ## 输出要求：Skill 使用经验
@@ -361,14 +370,11 @@ async def analyze_session(
     if missing:
         raise SessionAnalysisError(
             "Session Analyze result incomplete for "
-            f"{session.get('session_id') or '<unknown>'}: missing/invalid "
-            + ", ".join(missing)
+            f"{session.get('session_id') or '<unknown>'}: missing/invalid " + ", ".join(missing)
         )
 
     experiences = [
-        item
-        for item in scores.get("skill_experiences") or []
-        if str(item.get("skill_name") or "") in used_skills
+        item for item in scores.get("skill_experiences") or [] if str(item.get("skill_name") or "") in used_skills
     ]
     if "skill_experiences" in scores:
         scores["skill_experiences"] = experiences

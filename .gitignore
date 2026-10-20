@@ -1,97 +1,22 @@
+
+.env*
+!.env.example
 .venv/
-.test-home/
-/runtime/
+node_modules/
 __pycache__/
 *.py[cod]
-*.tsbuildinfo
-*.egg-info/
 .pytest_cache/
 .ruff_cache/
-.npm-cache/
-.npm-logs/
-.verify-home/
-build/
-dist/
-!teamEvolver/web/dist/
-!teamEvolver/web/dist/**
-.DS_Store
-.env
-.env.*
-!.env.example
-*.log
-*.orig
-records/
-external/LIFT/
-.trae/
-
-# Local runtime state and generated presentation artifacts
-.skillgene-sync.lock
-.skillgene-sync.stamp
-artifacts/
-ppt/
-skillgene/
-
-# Docs site
-docs/node_modules/
-docs/.vitepress/cache/
-docs/.vitepress/dist/
-
-# Confidential internal documents
-docs/design/
-docs/prd/
-docs/research/
-docs/multi-tenancy-plan.md
-客户上下文/
-/adapters/
-DELIVERY_REPORT.md
-进化阶段LLM消耗统计_*.md
-
-# Local runtime
-openviking/
-CLAUDE.local.md
-STATE.md
-
-# Debug artifacts
-.dbg/
-debug-*.md
-
-# CI/CD packaging outputs (cicd_scripts/build.sh)
-release/
-site-packages/
-app.tar
-
-# Docker compose runtime data (compose.yaml mounts ./runtime)
+*.egg-info/
+*.tsbuildinfo
 /runtime/
-/runtime_*/
+/evolve_history.jsonl
+/build/
+/dist/
+/teamEvolver/web/dist/
+/config/skills/
 
-# Claude Code local settings
-.claude/settings.local.json
-
-# SF platform default ignores (repo init)
-.settings/
-.myeclipse/
-.gradle/
-target/
-*/.settings
-*/.classpath
-*/.project
-.classpath
-.project
-.idea/
-.svn/
-.externalToolBuilders/
-gradle/
-.recommenders/
-.metadata/
-*/node_modules
-node_modules
-
-.claude/
-
-docs/knowledge-evolution-platform
-
-# Local source snapshot used for integration
-/team-evolver-extracted/
-
-# Imported project archives remain local
-/team-evolver-extracted.*
+# Release build outputs (cicd_scripts/build.sh)
+/release/
+/.release-stage/
+/app.tar

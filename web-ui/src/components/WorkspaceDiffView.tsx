@@ -1,6 +1,6 @@
-import { useMemo } from "react";
 import { Empty } from "@/components/common";
 import { cn } from "@/lib/utils";
+import { useMemo } from "react";
 
 type DiffLine = {
   type: "equal" | "add" | "del";

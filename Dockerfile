@@ -1,12 +1,9 @@
-FROM node:22-bookworm-slim AS web-builder
-
-WORKDIR /build/web-ui
-COPY web-ui/package.json web-ui/package-lock.json ./
-RUN npm ci
-COPY web-ui/ ./
-COPY team_memory/frontend/ /build/team_memory/frontend/
-COPY team_miner/frontend/ /build/team_miner/frontend/
-RUN npm run build
+# The runtime image installs only a built release (cicd_scripts/build.sh):
+# the application wheel plus the hashed wheelhouse. No source tree is copied
+# and PYTHONPATH is not set, so the process runs exactly the installed release.
+#
+#   TARGET_ARCH=x86_64 cicd_scripts/build.sh
+#   docker build --platform linux/amd64 -t teamevolver:<version> .
 
 # OpenViking's released Linux CLI is linked against glibc >= 2.39.
 FROM debian:trixie-slim AS openviking-cli
@@ -45,33 +42,24 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOME=/var/lib/teamEvolver \
     VIRTUAL_ENV=/opt/teamEvolver-venv \
     PATH=/opt/teamEvolver-venv/bin:$PATH \
-    PYTHONPATH=/app \
     OPENVIKING_CLI_BIN=/usr/local/bin/ov
 
-WORKDIR /app
-
-COPY pyproject.toml README.md README.en.md LICENSE ./
-COPY teamEvolver/ ./teamEvolver/
-COPY team_skills/ ./team_skills/
-COPY team_memory/ ./team_memory/
-COPY team_miner/ ./team_miner/
-COPY team_replay/ ./team_replay/
-COPY team_ontology/ ./team_ontology/
-COPY session_ingestion/ ./session_ingestion/
-COPY --from=web-builder /build/teamEvolver/web/dist ./teamEvolver/web/dist/
 COPY --from=openviking-cli /usr/local/bin/ov /usr/local/bin/ov
-COPY docker/entrypoint.sh /usr/local/bin/teamEvolver-entrypoint
+COPY release/ /tmp/release/
 
+# git is used only by the isolated Skill Git transfer adapter.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates git openssh-client \
     && rm -rf /var/lib/apt/lists/* \
     && python -m venv "$VIRTUAL_ENV" \
-    && "$VIRTUAL_ENV/bin/python" -m pip install --no-cache-dir --upgrade pip \
-    && "$VIRTUAL_ENV/bin/python" -m pip install --no-cache-dir ".[all]" \
+    && PYTHON_BIN="$VIRTUAL_ENV/bin/python" sh /tmp/release/install.sh \
+    && install -m 0755 /tmp/release/container_start.sh /usr/local/bin/teamEvolver-start \
+    && rm -rf /tmp/release \
     && "$OPENVIKING_CLI_BIN" --version >/dev/null \
-    && chmod +x /usr/local/bin/teamEvolver-entrypoint \
+    && git --version >/dev/null \
     && mkdir -p "$HOME/.teamEvolver"
 
-EXPOSE 52010
+WORKDIR /var/lib/teamEvolver
+EXPOSE 52010 52011
 
-ENTRYPOINT ["/usr/local/bin/teamEvolver-entrypoint"]
+ENTRYPOINT ["/usr/local/bin/teamEvolver-start"]

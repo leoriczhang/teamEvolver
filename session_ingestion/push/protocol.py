@@ -19,18 +19,20 @@ def is_current_session_payload(payload: dict[str, Any]) -> bool:
 
 
 def normalize_session_envelope(payload: dict[str, Any]) -> dict[str, Any]:
-    from teamEvolver.integrations.agent_principal import normalize_user_id
+    from teamEvolver.security.agent_principal import normalize_user_id
 
     if not isinstance(payload, dict):
         raise AgentProtocolError("session payload must be an object")
-    if payload.get("schema_version", SESSION_SCHEMA) != SESSION_SCHEMA:
+    if payload.get("schema_version") != SESSION_SCHEMA:
         raise AgentProtocolError("unsupported session schema")
-    if str(payload.get("protocol_version", "2.0")).split(".", 1)[0] != "2":
+    if payload.get("protocol_version") != "2.0":
         raise AgentProtocolError("PROTOCOL_VERSION_UNSUPPORTED")
     runtime = payload.get("runtime") or {}
     context = payload.get("runtime_context") or {}
     if not isinstance(runtime, dict) or not isinstance(context, dict):
         raise AgentProtocolError("runtime and runtime_context must be objects")
+    if "integration_id" in runtime or "external_subject" in context:
+        raise AgentProtocolError("retired Agent identity fields are not accepted")
     runtime_type = str(runtime.get("type") or "").strip().lower()
     if not runtime_type:
         raise AgentProtocolError("V2 session runtime.type is required")

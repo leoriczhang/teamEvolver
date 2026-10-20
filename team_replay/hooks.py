@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Protocol
 
 
@@ -25,6 +25,8 @@ class ReplayContext:
     materials: tuple[Mapping[str, Any], ...]
     context_snapshot: Mapping[str, Any]
     timeout_seconds: int
+    source_session: Mapping[str, Any] = field(default_factory=dict)
+    source_turn_num: int = 1
 
 
 @dataclass(frozen=True)

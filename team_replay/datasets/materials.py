@@ -8,7 +8,6 @@ import tarfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping
 
-
 _MAX_FILE_BYTES = 20 * 1024 * 1024
 _MAX_TOTAL_BYTES = 80 * 1024 * 1024
 _MAX_FILES = 100

@@ -19,10 +19,10 @@ except ImportError:
 
 from .config_cmd import config_cmd
 from .daemon import start, status, stop
-from .diag import validation
 from .datasource_cmd import datasource
+from .diag import validation
+from .schema_cmd import schema
 from .skills_cmd import skills
-from .storage_cmd import storage
 
 
 @click.group()
@@ -37,7 +37,7 @@ main.add_command(status)
 main.add_command(validation)
 main.add_command(skills)
 main.add_command(datasource)
-main.add_command(storage)
+main.add_command(schema)
 
 
 if __name__ == "__main__":

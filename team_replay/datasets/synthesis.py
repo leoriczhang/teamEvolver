@@ -7,25 +7,19 @@ datasets that become the candidate's True Replay contract.
 
 from __future__ import annotations
 
-import base64
-import binascii
-import copy
 import hashlib
 import json
 import re
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional
 
+from team_replay.datasets.integrity import (
+    dataset_material_integrity,
+)
 from team_replay.datasets.materials import collect_session_materials
 from team_replay.datasets.schema import (
-    make_document,
     normalize_case,
     normalize_checks,
-    validate_document,
-)
-from team_replay.datasets.store import (
-    SkillDatasetStore,
-    dataset_material_integrity,
 )
 
 _LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)、]|[（(]\d+[)）])\s*")
@@ -34,15 +28,18 @@ _FENCE_RE = re.compile(r"```(?:json)?\s*|\s*```", re.IGNORECASE)
 _SYNTHESIZE_SYSTEM = """\
 你为 Skill 演化生成留存测试（held-out test）数据集。
 
-同一批积累的会话和团队 SOP 证据已被用于产出一个候选 Skill。请构建 {case_count} 个\
-贴近真实的测试用例，评估该候选是否内化了那些可复用规程，同时初始提问不得泄露完整需求。
+测试集生成与 Skill 进化基于同一批积累的会话和团队 SOP 证据独立进行。请只从这些证据\
+构建 {case_count} 个贴近真实的测试用例，用于检验可复用规程，同时初始提问不得泄露完整需求。\
+不要等待或推测本轮候选 Skill，不得把候选内容或编辑结果当作需求证据。
+每个用例都必须归纳至少 {min_source_sessions} 条不同 Session 共同出现的典型任务模式，\
+不能直接复制某一条 Session 的完整请求，也不能把所有 Session 逐条转换为用例。
 
 对每个测试用例：
 1. query：一个自包含的初始用户请求。绝不能枚举或透露 checklist。
 2. checks：{min_requirements}-{max_requirements} 条扁平、可独立验证的检查项。\
 输出/内容要求使用 kind=output；资料读取、工具操作、计算、校验和产物写入使用\
 kind=trajectory。每条检查都必须有会话或团队 SOP 证据支撑。
-4. source_session_ids：支撑该用例的会话 ID。
+4. source_session_ids：至少 {min_source_sessions} 个支撑该共性模式的不同会话 ID。
 5. evidence_window："recent" 或 "historical"。
 6. name：简洁、人类可读的测试名称。
 
@@ -82,17 +79,6 @@ _PROMPT_PROVIDER: Any = None
 _OPTIONS_PROVIDER: Any = None
 
 
-def configure_prompt_provider(
-    *,
-    effective_prompt: Any = None,
-    stage_call_options: Any = None,
-) -> None:
-    """Register host prompt/option resolvers for dataset synthesis."""
-    global _PROMPT_PROVIDER, _OPTIONS_PROVIDER
-    _PROMPT_PROVIDER = effective_prompt
-    _OPTIONS_PROVIDER = stage_call_options
-
-
 def _effective_synthesize_system() -> str:
     if _PROMPT_PROVIDER is not None:
         try:
@@ -117,12 +103,14 @@ def render_synthesis_prompt(
     case_count: int,
     min_requirements: int,
     max_requirements: int,
+    min_source_sessions: int = 1,
 ) -> str:
     return (
         str(template)
         .replace("{case_count}", str(case_count))
         .replace("{min_requirements}", str(min_requirements))
         .replace("{max_requirements}", str(max_requirements))
+        .replace("{min_source_sessions}", str(min_source_sessions))
     )
 
 
@@ -275,6 +263,7 @@ def _normalize_dataset(
     default_window: str,
     synthesis_mode: str,
     materials: Optional[list[dict[str, Any]]] = None,
+    min_source_sessions: int = 1,
 ) -> Optional[dict[str, Any]]:
     query = str(raw.get("query") or "").strip()
     if not query:
@@ -283,10 +272,8 @@ def _normalize_dataset(
         checks = normalize_checks(raw.get("checks"))
     except ValueError:
         return None
-    output_checks = [item for item in checks if item["kind"] == "output"][:max_requirements]
-    checks = [*output_checks, *(item for item in checks if item["kind"] == "trajectory")]
-    output_count = sum(1 for item in checks if item["kind"] == "output")
-    if synthesis_mode == "model" and output_count < min_requirements:
+    checks = checks[:max_requirements]
+    if len(checks) < min_requirements:
         return None
     source_ids = list(
         dict.fromkeys(
@@ -295,6 +282,8 @@ def _normalize_dataset(
             if str(item or "").strip()
         )
     )
+    if len(source_ids) < max(1, int(min_source_sessions)):
+        return None
     window = str(raw.get("evidence_window") or default_window).strip().lower()
     if window not in {"recent", "historical"}:
         window = default_window
@@ -377,6 +366,7 @@ def _fallback_datasets(
     batch_size: int,
     case_count: int,
     materials: Optional[list[dict[str, Any]]] = None,
+    min_source_sessions: int = 1,
 ) -> list[dict[str, Any]]:
     grounded_requirements: list[str] = []
     for claim in _team_evidence_claims(candidate_skill):
@@ -400,6 +390,10 @@ def _fallback_datasets(
             for session in sessions
             if _first_prompt(session)
         ]
+    all_source_ids = list(dict.fromkeys(
+        str(session.get("session_id") or "") for session in sessions
+        if str(session.get("session_id") or "").strip()
+    ))
     datasets: list[dict[str, Any]] = []
     for index, seed in enumerate(seeds[: max(1, case_count)]):
         dataset = _normalize_dataset(
@@ -407,7 +401,10 @@ def _fallback_datasets(
                 "name": f"{skill_name} test {index + 1}",
                 "query": seed.get("instruction"),
                 "checks": checklist_items(grounded_requirements),
-                "source_session_ids": [seed.get("session_id")],
+                "source_session_ids": (
+                    all_source_ids[:max(1, min_source_sessions)]
+                    if min_source_sessions > 1 else [seed.get("session_id")]
+                ),
                 "evidence_window": seed.get("evidence_window"),
             },
             skill_name=skill_name,
@@ -417,6 +414,7 @@ def _fallback_datasets(
             default_window="recent" if index == 0 else "historical",
             synthesis_mode="grounded_fallback",
             materials=materials,
+            min_source_sessions=min_source_sessions,
         )
         if dataset:
             datasets.append(dataset)
@@ -428,28 +426,26 @@ async def synthesize_evolution_datasets(
     *,
     skill_name: str,
     sessions: list[dict[str, Any]],
-    candidate_skill: Mapping[str, Any],
+    candidate_skill: Optional[Mapping[str, Any]] = None,
     evidence_context: Optional[Mapping[str, Any]] = None,
     replay_windows: Optional[Mapping[str, list[dict[str, Any]]]] = None,
     case_count: int = 2,
     min_requirements: int = 12,
     max_requirements: int = 24,
     batch_size: int = 4,
+    min_source_sessions: int = 1,
 ) -> list[dict[str, Any]]:
     """Create test datasets from the exact evidence used for Skill evolution."""
     case_count = max(1, min(6, int(case_count or 2)))
     min_requirements = max(1, int(min_requirements or 1))
     max_requirements = max(min_requirements, int(max_requirements or 24))
     batch_size = max(1, int(batch_size or 1))
+    min_source_sessions = max(1, int(min_source_sessions or 1))
+    candidate_skill = candidate_skill or {}
     compact_sessions = [_session_payload(session) for session in sessions[:50]]
     source_materials = collect_session_materials(sessions)
     payload = {
         "skill_name": skill_name,
-        "candidate_skill": {
-            "description": str(candidate_skill.get("description") or ""),
-            "content": str(candidate_skill.get("content") or "")[:32_000],
-            "edit_summary": candidate_skill.get("edit_summary") or {},
-        },
         "team_sop_evidence": {
             "context": dict(evidence_context or {}),
             "claims": _team_evidence_claims(candidate_skill),
@@ -457,6 +453,14 @@ async def synthesize_evolution_datasets(
         "sessions": compact_sessions,
         "replay_seeds": _seed_cases(replay_windows),
     }
+    if candidate_skill:
+        # Standalone Dataset synthesis can supply an already frozen Skill.
+        # Evolution passes no proposal, so its held-out Cases remain independent.
+        payload["candidate_skill"] = {
+            "description": str(candidate_skill.get("description") or ""),
+            "content": str(candidate_skill.get("content") or "")[:32_000],
+            "edit_summary": candidate_skill.get("edit_summary") or {},
+        }
     parsed: Optional[dict[str, Any]] = None
     try:
         raw = await llm.chat(
@@ -468,6 +472,7 @@ async def synthesize_evolution_datasets(
                         case_count=case_count,
                         min_requirements=min_requirements,
                         max_requirements=max_requirements,
+                        min_source_sessions=min_source_sessions,
                     ),
                 },
                 {
@@ -511,6 +516,7 @@ async def synthesize_evolution_datasets(
             default_window="recent" if index == 0 else "historical",
             synthesis_mode="model",
             materials=source_materials,
+            min_source_sessions=min_source_sessions,
         )
         if dataset:
             datasets.append(dataset)
@@ -526,221 +532,5 @@ async def synthesize_evolution_datasets(
         batch_size=batch_size,
         case_count=case_count,
         materials=source_materials,
+        min_source_sessions=min_source_sessions,
     )
-
-
-def dataset_to_replay_case(dataset: Mapping[str, Any]) -> dict[str, Any]:
-    """Return one canonical Dataset Case for True Replay."""
-    canonical = normalize_case(
-        dataset,
-        default_case_id=str(dataset.get("case_id") or ""),
-    )
-    source = canonical.get("provenance") or {}
-    source_ids = [
-        str(item or "")
-        for item in source.get("session_ids") or []
-        if str(item or "")
-    ]
-    session_id = str(
-        source.get("session_id")
-        or (source_ids[0] if source_ids else "")
-        or ""
-    )
-    canonical["provenance"] = {
-        **source,
-        "session_id": session_id,
-        "session_ids": source_ids,
-    }
-    return canonical
-
-
-class SynthesizedDatasetStore:
-    """Persist generated datasets independently from validation job indexes."""
-
-    def __init__(self, bucket: Any, *, prefix: str = "") -> None:
-        self._bucket = bucket
-        self._prefix = str(prefix or "")
-
-    def _key(self, skill_name: str, generation_id: str) -> str:
-        digest = hashlib.sha256(skill_name.encode("utf-8")).hexdigest()[:12]
-        safe_generation = re.sub(
-            r"[^A-Za-z0-9._-]+", "-", str(generation_id or "")
-        ).strip("-")
-        return (
-            f"{self._prefix}evolution_datasets/"
-            f"{digest}/{safe_generation or 'generation'}.json"
-        )
-
-    def save_generation(
-        self,
-        *,
-        skill_name: str,
-        generation_id: str,
-        datasets: list[dict[str, Any]],
-        source_session_ids: list[str],
-        candidate_revision: int,
-    ) -> dict[str, Any]:
-        now = _utc_now_iso()
-        canonical_cases: list[dict[str, Any]] = []
-        stored_cases = []
-        for raw in datasets:
-            item = normalize_case(
-                raw,
-                default_case_id=str(raw.get("case_id") or ""),
-            )
-            canonical_cases.append(item)
-            stored_item = copy.deepcopy(item)
-            stored_item["materials"] = [
-                {
-                    key: material.get(key)
-                    for key in (
-                        "path",
-                        "size",
-                        "sha256",
-                        "source_session_id",
-                    )
-                    if material.get(key) is not None
-                }
-                for material in raw.get("materials") or []
-                if isinstance(material, Mapping) and material.get("path")
-            ]
-            stored_cases.append(stored_item)
-        payload = make_document(
-            dataset_id=generation_id,
-            name=f"{skill_name} Test Dataset",
-            skills=[skill_name],
-            source={
-                "kind": "skill_evolution",
-                "session_ids": list(dict.fromkeys(source_session_ids)),
-            },
-            cases=stored_cases,
-            metadata={
-                "generation_id": generation_id,
-                "candidate_revision": int(candidate_revision or 1),
-            },
-            created_at=now,
-            updated_at=now,
-        )
-        errors = validate_document(payload)
-        if errors:
-            raise ValueError("invalid Test Dataset: " + "; ".join(errors))
-        self._bucket.put_object(
-            self._key(skill_name, generation_id),
-            json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
-        )
-        repository = SkillDatasetStore(self._bucket, prefix=self._prefix)
-        for raw in canonical_cases:
-            dataset_id = str(raw.get("case_id") or "")
-            existing = repository.load_dataset(
-                skill_name=skill_name,
-                dataset_id=dataset_id,
-            )
-            existing_source = (
-                existing.get("source")
-                if isinstance((existing or {}).get("source"), Mapping)
-                else {}
-            )
-            # Editable lab datasets may be selected as fixed regressions. The
-            # generation audit references them but must not make them read-only.
-            if existing and (
-                str(existing_source.get("kind") or "") != "evolution"
-                or not bool((existing.get("metadata") or {}).get("read_only", True))
-                or bool(existing_source.get("user_edited"))
-            ):
-                continue
-            generation_ids = list(
-                dict.fromkeys(
-                    [
-                        *(
-                            existing_source.get("generation_ids")
-                            if isinstance(
-                                existing_source.get("generation_ids"),
-                                list,
-                            )
-                            else []
-                        ),
-                        generation_id,
-                    ]
-                )
-            )
-            provenance = (
-                raw.get("provenance")
-                if isinstance(raw.get("provenance"), Mapping)
-                else {}
-            )
-            dataset_source_ids = [
-                str(item or "")
-                for item in provenance.get("session_ids") or []
-                if str(item or "")
-            ]
-            decoded_materials: list[tuple[str, bytes]] = []
-            material_sources: dict[str, str] = {}
-            for material in raw.get("materials") or []:
-                if not isinstance(material, Mapping) or not material.get("path"):
-                    continue
-                rel_path = str(material.get("path") or "")
-                try:
-                    data = base64.b64decode(
-                        str(material.get("content_b64") or ""),
-                        validate=True,
-                    )
-                except (binascii.Error, ValueError):
-                    continue
-                decoded_materials.append((rel_path, data))
-                material_sources[rel_path] = str(
-                    material.get("source_session_id") or ""
-                )
-            material_records = (
-                repository.replace_materials(
-                    skill_name=skill_name,
-                    dataset_id=dataset_id,
-                    files=decoded_materials,
-                )
-                if decoded_materials
-                else list((existing or {}).get("materials") or [])
-            )
-            for record in material_records:
-                source_session_id = material_sources.get(
-                    str(record.get("path") or "")
-                )
-                if source_session_id:
-                    record["source_session_id"] = source_session_id
-            dataset_payload = copy.deepcopy(dict(raw))
-            dataset_payload["materials"] = material_records
-            dataset_payload["provenance"] = {
-                **dict(provenance),
-                "kind": "evolution",
-                "job_id": generation_id,
-                "generation_ids": generation_ids,
-                "session_ids": dataset_source_ids,
-                "session_id": (
-                    dataset_source_ids[0]
-                    if dataset_source_ids
-                    else ""
-                ),
-                "evidence_window": str(
-                    provenance.get("evidence_window") or "recent"
-                ),
-                "candidate_revision": int(candidate_revision or 1),
-            }
-            dataset_payload["metadata"] = {
-                **dict(dataset_payload.get("metadata") or {}),
-                "read_only": True,
-                "enabled_for_evolution": False,
-            }
-            repository.save_dataset(
-                make_document(
-                    dataset_id=dataset_id,
-                    name=str((raw.get("metadata") or {}).get("name") or raw.get("case_id") or ""),
-                    skills=[skill_name],
-                    source=dict(dataset_payload["provenance"]),
-                    cases=[dataset_payload],
-                    metadata={},
-                    created_at=str(
-                        (existing or {}).get("created_at")
-                        or now
-                    ),
-                    updated_at=now,
-                )
-            )
-        return payload

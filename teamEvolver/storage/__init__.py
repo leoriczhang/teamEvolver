@@ -21,6 +21,7 @@ import hashlib
 import logging
 from pathlib import Path
 
+from ..database.pool import dsn_from_env
 from .base import (
     ObjectInfo,
     is_not_found_error,
@@ -33,18 +34,7 @@ from .memory import (
     is_memory_endpoint,
     shared_memory_bucket,
 )
-from .pg_pool import dsn_from_env
 from .pg_store import PgObjectStore
-from .snapshot import (
-    OpenVikingSnapshotClient,
-    SnapshotBlob,
-    SnapshotConflictError,
-    SnapshotError,
-    SnapshotNotFoundError,
-    SnapshotPartialRestoreError,
-    SnapshotProtocolError,
-    SnapshotUnavailableError,
-)
 from .viking import _VIKING_ROOT_PREFIX, OpenVikingObjectStore, probe_viking_availability
 
 logger = logging.getLogger(__name__)
@@ -55,14 +45,6 @@ __all__ = [
     "LocalObjectStore",
     "OpenVikingObjectStore",
     "PgObjectStore",
-    "OpenVikingSnapshotClient",
-    "SnapshotBlob",
-    "SnapshotConflictError",
-    "SnapshotError",
-    "SnapshotNotFoundError",
-    "SnapshotPartialRestoreError",
-    "SnapshotProtocolError",
-    "SnapshotUnavailableError",
     "build_object_store",
     "normalize_backend",
     "peer_key_prefix",
@@ -134,7 +116,7 @@ def build_object_store(
     # state store, used by the shared skill library so every console page reads
     # one source). ``postgres`` is honoured only when a DSN is configured.
     fallback_backend: str = "local",
-    # PostgreSQL local-state backend (multi-tenancy plan §2.4).
+    # PostgreSQL local-state backend.
     pg_dsn: str = "",
     pg_schema: str = "teamevolver",
     pg_pool_min: int = 2,
@@ -166,7 +148,7 @@ def build_object_store(
     object store when a DSN is configured (used by the shared skill library so
     every console page reads one source through an outage). For an in-process
     test/mock double, construct
-    :class:`~teamEvolver.storage.memory.InMemoryObjectStore` directly or use a
+  :class:`~teamEvolver.storage.memory.InMemoryObjectStore` directly or use a
     ``memory://`` endpoint.
     """
     resolved = normalize_backend(backend, endpoint=endpoint)

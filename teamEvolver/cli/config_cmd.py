@@ -1,38 +1,19 @@
-"""Config command: get / set / show configuration values."""
-
-from __future__ import annotations
+"""Inspect process bootstrap; online configuration uses PostgreSQL."""
+import json
 
 import click
 
-from ..config_store import CONFIG_FILE, ConfigStore
+from ..bootstrap import load_bootstrap
+from ..logging_runtime import redact, register_secrets
 
 
 @click.command(name="config")
-@click.argument("key_or_action")
-@click.argument("value", required=False)
-def config_cmd(key_or_action: str, value: str | None):
-    """Get or set a config value.
-
-    Examples:\n
-      teamEvolver config show\n
-      teamEvolver config service.port 30001
-    """
-    cs = ConfigStore()
-    if key_or_action == "show":
-        if not cs.exists():
-            click.echo("No config file found. Run 'teamEvolver config' first.")
-            return
-        click.echo(f"Config file: {CONFIG_FILE}\n")
-        click.echo(cs.describe())
-        return
-
-    if value is None:
-        result = cs.get(key_or_action)
-        if result is None:
-            click.echo(f"{key_or_action}: (not set)")
-        else:
-            click.echo(f"{key_or_action}: {result}")
-        return
-
-    cs.set(key_or_action, value)
-    click.echo(f"Set {key_or_action} = {cs.get(key_or_action)}")
+@click.argument("action", default="show")
+def config_cmd(action):
+    """Show read-only process bootstrap."""
+    if action != "show":
+        raise click.ClickException("dot-path configuration is removed; use tenant configuration API")
+    from dataclasses import asdict
+    data = asdict(load_bootstrap())
+    register_secrets(data)
+    click.echo(redact(json.dumps(data, ensure_ascii=False, indent=2)))

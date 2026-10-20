@@ -1,100 +1,115 @@
 # AGENTS.md
 
-面向 coding agent 的工程指引。项目定位、架构与术语见 [README.md](./README.md) 与 [CONTEXT.md](./CONTEXT.md)（修改文档或代码时必须使用 CONTEXT.md 中的统一术语，遵守各词条的 Avoid 约定）。
+面向 coding agent 的工程指引。项目定位与架构见 [README.md](./README.md) 与 [架构总览](./docs/zh/concepts/01-architecture.md)，术语见 [CONTEXT.md](./CONTEXT.md)（修改文档或代码时使用其中的统一术语，遵守各词条的 Avoid 约定）。
 
 ## 项目速览
 
-teamEvolver 是 Agent 团队能力进化控制面：FastAPI 服务（默认端口 52010）+ React 控制台，Python 3.10+。核心链路：Session/Evidence ingest → Skill Evolution → True Replay 验证 → 候选评审发布 → Agent 分发；另有 DreamCycle 团队 Memory 进化与 SkillMiner 文档挖掘。上下文存储为 OpenViking。
+teamEvolver 是 Agent 团队能力进化控制面：一个模块化单体，同一镜像以 `api`（默认端口 52010）与 `worker`（健康端口 52011）两种角色运行，React 控制台由 `api` 提供，Python 3.11。PostgreSQL 是可变业务状态的唯一权威源，OpenViking 保存知识制品与 Compile Task。核心链路：Session 接入 → 强制分析 → Skill Evolution → True Replay 验证 → Candidate Review 与 Publish → Agent pull；另有团队 Memory 聚合与维护、成功经验、知识库挖掘。
 
 ## 常用命令
 
 ```bash
-# 环境
-python3 -m venv .venv && source .venv/bin/activate
-python -m pip install -e ".[all,dev]"
+# 环境（按 requirements.lock 带 hash 安装，再 --no-deps -e .）
+bash scripts/install_teamEvolver.sh
+source .venv/bin/activate
 npm --prefix web-ui ci
 
-# 一键验证（Python 编译 + pytest + 前端生产构建）
+# 一键验证（Python 编译 + pytest + 前端测试与生产构建）
 bash scripts/verify_local.sh
 
-# 测试（自动收集公共、Memory、Miner 和 Replay 测试）
+# 测试
 python -m pytest
-python -m pytest tests/test_xxx.py::test_case   # 单测
+python -m pytest tests/test_xxx.py::test_case
 
 # Lint（ruff：line-length 120，select E/F/I）
-ruff check teamEvolver team_skills team_memory team_miner team_replay session_ingestion tests
+ruff check teamEvolver session_ingestion team_skills team_replay team_memory team_miner tests
+
+# 数据库 Schema（应用进程不在启动时建表）
+teamEvolver schema apply
+teamEvolver schema status
 
 # 服务
-teamEvolver start --daemon
-teamEvolver status / config show / stop
+teamEvolver start --role all          # 仅 TEAMEVOLVER_ENV=local
+teamEvolver start --role api
+teamEvolver start --role worker
+teamEvolver status
+teamEvolver config show
+teamEvolver stop
 
-# 前端构建（仅改动 web-ui/ 时需要；仓库已含构建产物）
+# 前端构建（改动 web-ui/ 时）
 npm --prefix web-ui run build
 
-# 文档引用检查（改动 docs/ 后必须跑）
-node docs/scripts/check-docs-refs.mjs
+# 文档检查（改动 docs/ 或路由、CLI、环境变量后）
+node docs/scripts/check-docs-refs.mjs --strict
+python -m pytest tests/contracts/test_docs.py
 ```
 
 ## 代码结构
 
 ```text
-teamEvolver/          # Python 包（FastAPI 单服务承载全部模块）
-├── proxy/            # FastAPI 路由、控制台、Workspace 接口与各模块桥接
-├── integrations/    # 租户主体、Context、Skill pull 与迁移期兼容入口
-├── replay.py        # team_replay 虚拟兼容入口（另有 true_replay.py / progressive_replay.py 等别名）
-├── tenants/          # 多租户上下文与配置继承
-├── storage/          # OpenViking / 本地存储与 PG 适配
-├── config_store/     # YAML 配置默认值与持久化
-├── observability/    # Langfuse 追踪运行时
-├── admin/ · cli/     # 管理工具与命令行入口
-└── web/              # 控制台静态产物
-session_ingestion/    # Session 接入：Agent Push、数据源 Pull 与租户 Adapter
-team_skills/          # Skill 库（library/）、候选校验发布（candidates/）与 Skill Evolution 流水线（evolution/）
-team_miner/           # OV Skill 挖掘、知识库挖掘、任务编排、前端、测试与主服务桥接
-team_memory/          # Memory 专属后端、配置、路由、frontend/ 和 tests/
-team_replay/          # True Replay Interface、执行引擎、策略与 Runtime Adapter
-web-ui/               # React + TypeScript 控制台外壳与公共 UI
-tests/                # 单元、集成、协议和回放测试
-docs/                 # 中英双语文档源
+teamEvolver/            平台层
+├── app.py              唯一 FastAPI 工厂与业务组合根
+├── bootstrap.py        只读启动配置（环境变量 + 可选 YAML）
+├── config_runtime.py   PG 全局配置与租户模块配置（revision CAS）
+├── database/           连接池、事务、RLS、schema/ 版本 SQL
+├── runtime/            角色入口、生命周期、worker_tasks、Worker 循环、租约
+├── storage/            ObjectStore（PostgreSQL storage_objects）
+├── openviking/         唯一的 OpenViking HTTP/Compile 客户端
+├── admin/ tenants/     控制台身份、RBAC、租户
+├── context/            Agent Context 网关
+└── cli/                命令行
+session_ingestion/      Session 上报、数据源拉取、强制分析阶段
+team_skills/            Skill 库、Candidate、Evolution、成功经验、导入导出、实验工作台
+team_replay/            True Replay、Test Dataset、Replay Adapter
+team_memory/            团队 Memory 聚合、DreamCycle 维护、Memory Replay
+team_miner/             挖掘模块组合入口
+├── knowledge_miner/    知识库挖掘，资料 → Wiki
+└── skill_miner/        Skill 挖掘，资料 → Skill 包
+web-ui/                 React + TypeScript 控制台，构建到 teamEvolver/web/dist/
+tests/                  按领域组织的单元、集成、架构契约和验收测试
+docs/                   中英双语文档
 ```
+
+业务模块提供 `api/`（`create_router(services, **kwargs)`）、Handler、配置和 Repository，由 `teamEvolver/app.py` 装配。Schema 随实际领域契约组织，不创建空文件占位。
+
+Python 测试只从 `tests/` 收集，按领域归档，命名使用职责而非实施阶段。公共 fixture、fake 和数据工厂放在 `tests/support/`，禁止从 `test_*.py` 相互导入。具体约定见 [测试指南](./tests/README.md)；历史实施证据不作为长期测试的运行依赖。
 
 ## 工程硬约束
 
-存储：
+分层与依赖：
 
-- 高频写路径（session queue、session_index、filter audit、evidence、registry、manifest 等）必须走本地存储，不得直写 OpenViking。
-- OpenViking 不可用时的本地回退走 `LocalObjectStore`（线程安全、原子写、按实例隔离目录）。
+- Router 只做认证、校验和短事务受理；LLM、Replay、Compile 轮询、批量文件处理和外部投递一律写入 `worker_tasks` 返回 `202`，由 Worker Handler 执行。不引入独立 Service 层。
+- `teamEvolver/database`、`runtime`、`storage`、`openviking`、`llm.py`、`observability` 不导入业务模块；业务模块不导入 `teamEvolver.app` 或其他模块的 Handler。
+- FastAPI 只出现在 `teamEvolver/app.py`、`teamEvolver/runtime/http_runtime.py` 和各模块 `api/`。
+- Repository 只访问本领域表。手写生产代码单文件不超过 1000 行。
+- 这些规则由 `tests/contracts/test_dependencies.py`、`tests/contracts/test_package_contracts.py`、`tests/contracts/test_application_contracts.py` 检查。
 
-并发与异步：
+存储与配置：
 
-- 路由中的同步 viking I/O 必须包 `asyncio.to_thread`，不得阻塞事件循环。
-- LLM 调用使用专用 `ThreadPoolExecutor` + 全局 `asyncio.Semaphore(≤8)`，并行度不得超标。
-- 背压必须有界：429 响应、Semaphore、有界队列，禁止无界内存队列。
+- 可变状态只写 PostgreSQL；本机目录只放临时文件、日志、PID 和可重建缓存。PG 或 OpenViking 故障时不回退本机目录。
+- Schema 变更只追加新的版本 SQL 到 `teamEvolver/database/schema/`，已发布的版本文件不改。
+- 租户模块配置缺失时返回 503，不回退 YAML；配置写入使用 `expected_revision`，长任务固定受理时的 revision。
+- 凭证只以 Secret Ref 保存，接口与日志不出现明文。
 
-进程与服务：
+并发：
 
-- OpenViking 是外部依赖，只允许只读排查与使用已有接口；不得修改其代码、配置、部署或重启其服务。修复范围限于 teamEvolver（TE）。
-- 进程操作只用精确 PID 或全路径唯一匹配，禁止 `pgrep -f teamEvolver` 之类宽匹配。
-- 后台任务必须记录 PID 文件（`/tmp/te_*.pid`）；重启前确认端口释放（`lsof -t -iTCP:52010 -sTCP:LISTEN`）。
-- 代码改动后必须重启服务，新配置和修复才生效。
+- 模型调用经 `teamEvolver/llm.py` 的专用线程池与全局并发槽（`TEAMEVOLVER_LLM_CONCURRENCY`，默认 8）；队列有界，背压用 429 或有界队列。
+- 路由中的同步 I/O 用 `asyncio.to_thread`，不阻塞事件循环。
+- 跨副本互斥用 `resource_leases` 或数据库行锁，不依赖进程内锁。
 
-其他：
+Skill 与 Replay：
 
-- 修改 Memory 代码前阅读 `team_memory/README.md` 的维护入口与集成约定；`team_memory.*`
-  是唯一模块接口，不得恢复 `teamEvolver.team_memory`、`teamEvolver.aggregation` 或
-  `teamEvolver.dreamcycle` 等旧导入别名，也不要恢复旧 ReAct 写入调度。
+- 团队 Skill 变更统一经 `team_skills/library/repository.py:SkillLibraryRepository`，在一个事务内写版本、文件与幂等记录；分发只走 `GET /sync/skills` pull，不创建投递 outbox。
+- `team_replay/` 不导入 `team_memory` 或其他模块的 Handler，只使用平台层与其他模块的公开 Query（如 `session_ingestion/queries.py`、`team_skills/library/queries.py`）；纯执行引擎通过 `ReplayHost` 获取宿主能力。
 
-- Skill 发布统一走 `SkillMutationService`；pull 模式保留版本与 tombstone，不创建 delivery outbox。
+进程：
 
-- True Replay 新实现统一放在根目录 `team_replay/`；该包通过 `ReplayHost` Adapter 获取宿主能力，保持对 `teamEvolver`、`team_memory` 和 `team_miner` 的单向依赖。旧 `teamEvolver.replay.*` 只保留虚拟兼容别名。
+- 进程操作只用精确 PID，禁止 `pgrep -f teamEvolver` 之类宽匹配；`--daemon` 的 PID 文件由 `teamEvolver/runtime_state.py:pid_file_path` 决定。
+- 代码改动后重启服务才生效。
 
 ## 提交前验证清单
 
-1. `python -m compileall teamEvolver team_skills team_memory team_miner team_replay session_ingestion tests` 无错误。
+1. 上面的 `ruff check` 无错误。
 2. `python -m pytest` 通过。
-3. 改动了 `web-ui/` → `npm --prefix web-ui run build` 通过。
-4. 改动了 `docs/` → `node docs/scripts/check-docs-refs.mjs` 通过，并遵循 [文档维护指南](./docs/zh/api/99-docs-maintenance.md)。
-
-## Agent 协议迁移
-
-涉及 Agent 身份或迁移发布时，先读 [落地方案](./agent-deregistration-plan.md)。以方案中的租户 Key + 声明 user_id 为准；同名用户按租户隔离。阶段 5 的数据操作需要观察期证据；阶段 6 单独发布。
+3. 改动了 `web-ui/`：`npm --prefix web-ui test` 与 `npm --prefix web-ui run build` 通过。
+4. 改动了 `docs/`、路由、CLI 或环境变量：`node docs/scripts/check-docs-refs.mjs --strict` 与 `python -m pytest tests/contracts/test_docs.py` 通过，并遵循 [文档维护指南](./docs/zh/api/99-docs-maintenance.md)。

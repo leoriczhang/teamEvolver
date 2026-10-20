@@ -1,556 +1,150 @@
 # Production Deployment Guide
 
-This guide covers deploying and operating teamEvolver service in production environments.
+Production runs the same image in two roles, `api` and `worker`, connected to external PostgreSQL and OpenViking. Both roles scale horizontally and the load balancer does not need session affinity. Installation and image builds are covered in [Installation](../getting-started/03-installation.md).
 
 ## Prerequisites
 
-- Python 3.11 or higher
-- Accessible LLM API endpoint (Volcengine Ark, OpenAI-compatible interface, etc.)
-- OpenViking credentials if using cloud skill sync
-- Linux server (Ubuntu 22.04 / Debian 12 recommended)
-- At least 2 CPU cores, 4GB RAM
+| Component | Requirement |
+| --- | --- |
+| PostgreSQL | 14+; database and schema created in advance, the application role owns the schema, `NOSUPERUSER NOBYPASSRLS` |
+| OpenViking | Reachable service address and Root Key; knowledge base mining needs the native Compile Runtime |
+| Model | OpenAI-compatible endpoint and key |
+| Image | `docker build` after `cicd_scripts/build.sh` produces a release |
 
-## Runtime Modes
+## Roles
 
-teamEvolver supports two process management modes:
+| Role | Responsibility | Port | Probes |
+| --- | --- | --- | --- |
+| `api` | Authentication, validation, short accept transactions, queries, console static assets | 52010 | `/healthz`, `/readyz` |
+| `worker` | Claims `worker_tasks`, runs long tasks, scheduled passes (tracing configuration, data source pulls, experience sync) | 52011 (health only) | `/healthz`, `/readyz` |
+| `all` | API and Worker in one process, only for `TEAMEVOLVER_ENV=local` | 52010 | Same as `api` |
 
-### Foreground Mode (for development/debugging)
+Workers coordinate through PostgreSQL leases and fences: a claimed task holds a lease; after a crash or timeout another Worker takes it over, and a late result is rejected because its fence no longer matches.
+
+## Environment File
+
+`deploy/.env` (not committed, mode 0600):
 
 ```bash
-teamEvolver start
+TEAMEVOLVER_PG_DSN=postgresql://te_app:<password>@db:5432/teamevolver
+TEAMEVOLVER_PG_SCHEMA=teamevolver
+TEAMEVOLVER_ROOT_API_KEY=<random 32+ bytes>
+TEAMEVOLVER_SECRET_MASTER_KEY=<random 32+ bytes>
+TEAMEVOLVER_OV_ENDPOINT=http://openviking:1933
+TEAMEVOLVER_OV_API_KEY=<OpenViking Root Key>
+TEAMEVOLVER_LLM_BASE_URL=https://api.openai.com/v1
+TEAMEVOLVER_LLM_API_KEY=<model key>
+TEAMEVOLVER_LLM_MODEL=gpt-4o-mini
+TEAMEVOLVER_TENANT_TOKEN=tevt_<random>
+TEAMEVOLVER_ENV=production
 ```
 
-Foreground mode outputs logs directly to terminal; press Ctrl+C to stop service. Suitable for development and debugging.
+Generate random values with `python3 -c 'import secrets;print(secrets.token_urlsafe(32))'`. Once `TEAMEVOLVER_SECRET_MASTER_KEY` is in use it cannot change, otherwise saved Secret Refs can no longer be decrypted. All fields are listed in [Configuration Reference](./01-configuration.md).
 
-### Daemon Mode (for single-machine deployment)
+An optional read-only YAML goes to `deploy/config/config.yaml`; the container entrypoint sets `TEAMEVOLVER_CONFIG_FILE` automatically.
+
+## Initialize the Database
+
+Run on any instance (or an operations host with the release installed):
 
 ```bash
-teamEvolver start --daemon
+teamEvolver schema apply --dry-run
+teamEvolver schema apply
+teamEvolver schema status
 ```
 
-Daemon mode runs service process in background, logs written to `~/.teamEvolver/teamEvolver.log`, PID file at `~/.teamEvolver/teamEvolver.pid`.
+`schema apply` is idempotent. It runs the scripts under `teamEvolver/database/schema/` in version order, records them in `schema_versions`, and writes default module configuration for each tenant. Application processes do not create tables at startup.
+First installs use an empty database and the new schema baseline.
+
+## Docker Compose
+
+`compose.yaml` at the repository root starts `teamevolver-api` and `teamevolver-worker` from the same image and reads `deploy/.env`:
 
 ```bash
-# Check status
+TARGET_ARCH=x86_64 sh cicd_scripts/build.sh
+docker compose build
+docker compose up -d
+docker compose ps
+```
+
+Both services' health checks call `/readyz` on their own port.
+
+## Container Entrypoint
+
+The image entrypoint `container_start.sh`:
+
+1. Loads `/app/deploy/.env` when it exists.
+2. Uses `config.yaml` under `TEAMEVOLVER_CONFIG_DIR` (default `/app/deploy/config`) when present and `TEAMEVOLVER_CONFIG_FILE` is not set.
+3. Defaults `TEAMEVOLVER_API_HOST` to `0.0.0.0`.
+4. Requires `TEAMEVOLVER_ROLE` to be `api` or `worker`, otherwise exits with 64.
+5. Passes `APP_PORT` or `TEAMEVOLVER_PORT` as `--port` when set.
+
+On Kubernetes, deploy API and Worker as two Deployments with the same image and Secret; only `TEAMEVOLVER_ROLE` and the port differ. Point `readinessProbe` and `livenessProbe` at `/readyz` and `/healthz` respectively.
+
+## Single-Host Processes
+
+```bash
+teamEvolver start --role api --daemon --log-file /var/log/teamevolver/api.log
 teamEvolver status
-
-# Stop service
 teamEvolver stop
 ```
 
-### Docker Compose Mode
-
-The repository `compose.yaml` builds the frontend, installs all Python dependencies, and bundles the OpenViking CLI. It does not run OpenViking Server in the same container; connect a separate cloud or self-hosted instance.
-
-```bash
-docker compose up -d --build
-docker compose ps
-docker compose logs -f teamevolver
-```
-
-Set `TEAMEVOLVER_PORT` to change the host port and `TEAMEVOLVER_IMAGE` to use a versioned image. Configuration and SkillMiner artifacts are mounted under `runtime/`. When connecting OpenViking on the host or another machine, `sharing.viking_endpoint` must be reachable from the container; `localhost:1933` inside the container refers to the container itself.
-
-Stop the service while preserving data:
-
-```bash
-docker compose down
-```
-
-### systemd Mode (recommended for production)
-
-For production environments, systemd is recommended for process management, enabling auto-start on boot, automatic restart, log aggregation, etc.
-
-## systemd Service Configuration
-
-Create systemd service file `/etc/systemd/system/teamevolver.service`:
-
-```ini
-[Unit]
-Description=teamEvolver Skill Evolution Service
-After=network.target
-
-[Service]
-Type=simple
-User=teamevolver
-Group=teamevolver
-WorkingDirectory=/home/teamevolver
-ExecStart=/home/teamevolver/.local/bin/teamEvolver start
-Restart=always
-RestartSec=10
-Environment=PATH=/home/teamevolver/.local/bin:/usr/local/bin:/usr/bin:/bin
-Environment=EVOLVE_INGEST_API_KEY=your-secure-ingest-key-here
-Environment=TEAMEVOLVER_PROXY_API_KEY=your-secure-proxy-key-here
-Environment=ARK_API_KEY=your-volcengine-ark-key-here
-
-# Security hardening
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=/home/teamevolver/.teamEvolver
-ReadWritePaths=/home/teamevolver/.teamEvolver
-
-# Resource limits
-LimitNOFILE=65536
-MemoryMax=8G
-CPUQuota=200%
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Create dedicated user and start service:
-
-```bash
-# Create system user
-sudo useradd -r -m -s /bin/bash teamevolver
-
-# Install teamEvolver to user environment
-sudo -u teamevolver pip install teamEvolver
-
-# Initialize configuration
-sudo -u teamevolver teamEvolver config llm.api_key "your-llm-key"
-sudo -u teamevolver teamEvolver config service.host "127.0.0.1"
-
-# Enable and start service
-sudo systemctl daemon-reload
-sudo systemctl enable teamevolver
-sudo systemctl start teamevolver
-
-# Check status
-sudo systemctl status teamevolver
-
-# View logs
-sudo journalctl -u teamevolver -f
-```
-
-## Nginx Reverse Proxy Configuration
-
-In production, Nginx should be used as reverse proxy providing TLS termination, access control, rate limiting, etc.
-
-Create Nginx config file `/etc/nginx/sites-available/teamevolver`:
-
-```nginx
-upstream teamevolver_backend {
-    server 127.0.0.1:52010;
-    keepalive 32;
-}
-
-server {
-    listen 80;
-    server_name teamevolver.example.com;
-    return 301 https://$host$request_uri;
-}
-
-server {
-    listen 443 ssl http2;
-    server_name teamevolver.example.com;
-
-    ssl_certificate /etc/letsencrypt/live/teamevolver.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/teamevolver.example.com/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers HIGH:!aNULL:!MD5;
-
-    client_max_body_size 64M;
-
-    # Access logs
-    access_log /var/log/nginx/teamevolver.access.log;
-    error_log /var/log/nginx/teamevolver.error.log;
-
-    # Console static assets
-    location / {
-        proxy_pass http://teamevolver_backend;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    # Agent ingest endpoint - recommend enabling API Key auth
-    location /ingest_session {
-        limit_req zone=ingest burst=20 nodelay;
-        proxy_pass http://teamevolver_backend;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-
-        # Optional: Nginx-layer Basic Auth (dual protection with EVOLVE_INGEST_API_KEY)
-        # auth_basic "teamEvolver Ingest";
-        # auth_basic_user_file /etc/nginx/.htpasswd-teamevolver;
-    }
-
-    # Langfuse pull endpoint
-    location /langfuse/ {
-        proxy_pass http://teamevolver_backend;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-
-    # Health check endpoint (internal access only)
-    location /healthz {
-        proxy_pass http://teamevolver_backend;
-        allow 127.0.0.1;
-        allow 10.0.0.0/8;
-        allow 172.16.0.0/12;
-        allow 192.168.0.0/16;
-        deny all;
-    }
-
-    location /status {
-        proxy_pass http://teamevolver_backend;
-        allow 127.0.0.1;
-        allow 10.0.0.0/8;
-        deny all;
-    }
-}
-
-# Rate limiting configuration
-limit_req_zone $binary_remote_addr zone=ingest:10m rate=10r/s;
-```
-
-Enable configuration:
-
-```bash
-sudo ln -s /etc/nginx/sites-available/teamevolver /etc/nginx/sites-enabled/
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-## Firewall Rules
-
-Use `ufw` or `iptables` to restrict network access:
-
-```bash
-# Allow SSH, HTTP, HTTPS only
-sudo ufw allow 22/tcp
-sudo ufw allow 80/tcp
-sudo ufw allow 443/tcp
-
-# Deny external direct access to teamEvolver port
-sudo ufw deny 52010/tcp
-
-sudo ufw enable
-```
-
-Ensure `service.host` configured as `"127.0.0.1"`, preventing service from directly listening on public addresses.
-
-## Health Checks & Monitoring
-
-### Health Check Endpoints
-
-teamEvolver provides HTTP endpoints for monitoring:
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/healthz` | GET | Health check, returns 200 `{"ok": true}` when service healthy |
-| `/status` | GET | Service status details including queue, version, configuration info |
-
-Health check example:
-
-```bash
-curl -s http://127.0.0.1:52010/healthz
-# {"ok": true}
-```
-
-### systemd Monitoring Configuration
-
-Add health check to systemd service file:
+`--daemon` starts one background process and writes a PID file; one host can run only one daemon. To run API and Worker together, start two foreground processes with systemd or another process manager:
 
 ```ini
 [Service]
-# ... previous configuration ...
-WatchdogSec=60
+EnvironmentFile=/etc/teamevolver/env
+ExecStart=/opt/teamEvolver-venv/bin/teamEvolver start --role worker
+Restart=on-failure
+KillSignal=SIGTERM
+TimeoutStopSec=60
 ```
 
-### Prometheus Monitoring (Optional)
+## Reverse Proxy
 
-If using Prometheus, monitor `/healthz` endpoint via blackbox-exporter.
+Nginx or a cloud load balancer can proxy requests to the API:
 
-## Storage and Local Fallback
+- Forward all paths to port 52010 of the API instances; no session affinity is needed.
+- `POST /ingest_session` bodies can reach 32 MiB and Replay and Skill writes 96 MiB; size `client_max_body_size` accordingly.
+- Preserve the `X-Request-ID` and `X-Trace-ID` headers.
+- The console cookie name includes a hash of host, port and root_path; keep the `Host` header consistent through the proxy.
+- Expose the Worker port 52011 only to probes.
 
-teamEvolver configures Session and Skill control-plane storage independently. When `storage_pg.enabled=true`, unspecified Skill and Session backends both resolve to PostgreSQL; tenants cannot override these service-wide storage settings. Multi-replica deployments require both effective backends to be `postgres`. Each Pod's `skills.runtime_cache_dir` is only a rebuildable cache.
+## Shutdown and Upgrade
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `sharing.local_fallback_enabled` | `true` | Automatically fall back to local storage when OpenViking is unavailable (connection error/timeout/HTTP 5xx) |
-| `sharing.local_root` | empty → `~/.teamEvolver/local_store` | Local object store root directory |
-| `sharing.skill_local_root` | empty → inherits `local_root` | Local/NAS Skill-storage root |
-| `sharing.session_backend` | `postgres` with PG enabled; otherwise `local` | Session backend |
-| `sharing.skill_backend` | `postgres` with PG enabled; otherwise `local` | Authoritative backend for Skills, candidates, reviews, versions, mutation commits, and outbox events |
-| `sharing.skill_mirror_enabled` | `true` | Asynchronously mirror the Skill library to OpenViking |
-| `sharing.skill_mirror_spool_dir` | empty → `~/.teamEvolver/skill_mirror_spool` | Mirror spool directory (durable pending push/delete events) |
+After an instance receives SIGTERM:
 
-Explicit `local` is suitable for one instance or a genuinely shared NAS, but lacks PostgreSQL transaction/CAS and cross-Pod leases. Writes made during OpenViking fallback stay local and are not automatically synced back. Inspect `GET /storage/status`: `skill_storage`, `session_storage`, `multi_replica_safe`, `pg`, `skill_cache`, `outbox`, and `rollout_supervisor`.
+1. Readiness is withdrawn and `/readyz` returns 503.
+2. The Worker stops claiming new tasks.
+3. In-flight tasks get up to 30 seconds to finish; unfinished tasks are taken over by other Workers after their lease expires.
+4. The database pools are closed.
 
-## Local Run Scripts
-
-`scripts/` provides three operations scripts that do not require the shared cloud backend:
+Upgrade steps:
 
-| Script | Purpose | Main flags |
-|--------|---------|------------|
-| `scripts/run_local_evolution.py` | Fully local evolution run: ingest → evolve → export, artifacts written to a dedicated run directory | `--max-cycles` (default 30), `--drain-max-per-cycle` (default 40), `--export-only` |
-| `scripts/pull_sessions_local.py` | Bulk-pull Langfuse sessions into the local raw/converted stores | `--reconvert` (re-convert every file in the raw dir, skipping pull), `--workers` (default 4), `--timeout` (override client timeout seconds) |
-| `scripts/replay_turn_server.py` | Agent-side server-driven Replay turn server: `POST /turn/<runtime_type>`, `GET /health` | `--host`, `--port` |
+1. Build the new release, install it offline in pre-production and run `teamEvolver schema apply --dry-run`.
+2. Run `teamEvolver schema apply`. The schema only moves forward.
+3. Replace API and Worker instances one at a time.
 
-## Backup Strategy
+Application rollback can only go to a release compatible with the current schema. Destructive database rollbacks are not performed.
 
-teamEvolver persistent data stored at following locations:
+## Backup
 
-| Data | Path | Backup Frequency |
-|------|------|-----------------|
-| Configuration file | `~/.teamEvolver/config.yaml` | After each change |
-| PID and runtime state | `~/.teamEvolver/teamEvolver.pid` | No backup needed |
-| Logs | `~/.teamEvolver/teamEvolver.log` | No long-term backup needed |
-| Prompt overrides | `~/.teamEvolver/prompt_overrides.json` | Daily |
-| Stage settings | `~/.teamEvolver/stage_settings.json` | Daily |
-| Skill runtime cache | `~/.teamEvolver/runtime/skills/` or configured `skills.runtime_cache_dir` | Daily |
-| Session storage | OpenViking cloud (if sharing used) | Cloud responsibility |
-| OpenViking data | OpenViking data directory (local mode) | Daily |
-| Console sessions | `~/.teamEvolver/console_sessions.json` | No backup needed |
-| User registry | `~/.teamEvolver/users.json` | Daily |
-| Evolution history | `evolve_history.jsonl` | Daily |
-| Validation storage | ValidationStore internal data | Daily |
+PostgreSQL is the only authority for TeamEvolver mutable state; back it up the usual way (`pg_dump` or physical backup + WAL archiving). Knowledge artifacts in OpenViking follow OpenViking's backup procedure. Local directories (`skills_runtime_cache_dir`, logs) can be rebuilt and need no backup.
 
-### Local OpenViking Backup
+Backups contain `secret_refs` ciphertext; restores must use the same `TEAMEVOLVER_SECRET_MASTER_KEY`.
 
-If using `viking_deployment: local` mode, back up OpenViking data directory (typically openviking-server data path).
+## Sizing
 
-### Automatic Backup Script Example
+| Role | CPU | Memory | Notes |
+| --- | --- | --- | --- |
+| API | 1–2 cores | 1–2 GiB | Accept and query are short transactions |
+| Worker | 2–4 cores | 2–4 GiB | Model call concurrency is controlled by `TEAMEVOLVER_LLM_CONCURRENCY`; ZIP / document conversion uses memory |
 
-Create `/usr/local/bin/teamevolver-backup.sh`:
+Reserve PostgreSQL connections as `(storage_pg_pool_max + storage_pg_control_pool_max) × instances`.
 
-```bash
-#!/bin/bash
-set -euo pipefail
+## Security
 
-BACKUP_DIR="/var/backups/teamevolver"
-DATE=$(date +%Y%m%d_%H%M%S)
-TEAMEVOLVER_HOME="/home/teamevolver/.teamEvolver"
-SKILLS_DIR="/home/teamevolver/.teamEvolver/runtime/skills"
-
-mkdir -p "$BACKUP_DIR"
-
-# Backup config and state
-tar -czf "$BACKUP_DIR/teamevolver-config-$DATE.tar.gz" \
-    -C "$TEAMEVOLVER_HOME" \
-    config.yaml prompt_overrides.json stage_settings.json users.json console_sessions.json
-
-# Backup skills library
-if [ -d "$SKILLS_DIR" ]; then
-    tar -czf "$BACKUP_DIR/teamevolver-skills-$DATE.tar.gz" -C "$(dirname $SKILLS_DIR)" skills
-fi
-
-# Keep last 30 days of backups
-find "$BACKUP_DIR" -name "teamevolver-*.tar.gz" -mtime +30 -delete
-
-echo "Backup completed: $BACKUP_DIR/teamevolver-config-$DATE.tar.gz"
-```
-
-Add to crontab:
-
-```bash
-# Daily backup at 3 AM
-0 3 * * * /usr/local/bin/teamevolver-backup.sh >> /var/log/teamevolver-backup.log 2>&1
-```
-
-## Log Management
-
-### Log Locations
-
-| Runtime Mode | Log Location |
-|--------------|--------------|
-| Foreground mode | stdout/stderr |
-| Daemon mode | `~/.teamEvolver/teamEvolver.log` |
-| systemd mode | journald (`journalctl -u teamevolver`) |
-| DreamCycle | Output with main service logs |
-| Skill Miner | `team_miner/logs/` |
-
-### logrotate Configuration
-
-Create `/etc/logrotate.d/teamevolver`:
-
-```
-/home/teamevolver/.teamEvolver/teamEvolver.log {
-    daily
-    rotate 14
-    compress
-    delaycompress
-    missingok
-    notifempty
-    create 0640 teamevolver teamevolver
-    postrotate
-        systemctl kill -s HUP teamevolver.service 2>/dev/null || true
-    endscript
-}
-```
-
-## Security Hardening
-
-### 1. Network Binding
-
-Production must set `service.host` to `127.0.0.1`, exposing service only via Nginx reverse proxy:
-
-```bash
-teamEvolver config service.host 127.0.0.1
-```
-
-### 2. API Key Configuration
-
-Set strong random keys to protect ingest endpoints:
-
-```bash
-# Generate random keys
-INGEST_KEY=$(openssl rand -hex 32)
-PROXY_KEY=$(openssl rand -hex 32)
-
-# Inject via environment variables (recommended, do not write to config.yaml)
-# Set in systemd service file:
-# Environment=EVOLVE_INGEST_API_KEY=$INGEST_KEY
-# Environment=TEAMEVOLVER_PROXY_API_KEY=$PROXY_KEY
-```
-
-Single-tenant deployments (`storage_pg` disabled) also need the **only** machine credential on the Agent data plane—the tenant machine credential. It is supplied via the `TEAMEVOLVER_TENANT_TOKEN` environment variable (or `tenant.machine_token` in config.yaml), must start with `tevt_`, and the server resolves it to the `default` tenant:
-
-```bash
-# Generate the tenant machine credential
-TEAMEVOLVER_TENANT_TOKEN="tevt_$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')"
-
-# Set in systemd service file:
-# Environment=TEAMEVOLVER_TENANT_TOKEN=$TEAMEVOLVER_TENANT_TOKEN
-```
-
-When it is not configured, the console's tenant page shows a hint and the generation command above; rotation means changing the value and restarting the process. Multi-tenant deployments do not need this variable: the credential is issued by the console at tenant creation and rotated on the tenant page.
-
-### 3. API Key Rotation
-
-Rotate API keys periodically:
-
-1. Generate new keys
-2. Update in systemd environment variables
-3. Notify all Agent endpoints to update keys
-4. Rolling restart service: `sudo systemctl restart teamevolver`
-5. After verifying all Agents connect normally, retire old keys
-
-### 4. TLS Configuration
-
-Always use HTTPS; obtain free certificates via Let's Encrypt:
-
-```bash
-sudo certbot --nginx -d teamevolver.example.com
-```
-
-Auto-renewal configured automatically when certbot installs systemd timer.
-
-### 5. Reverse Proxy Authentication
-
-For internal deployments, additional Basic Auth or OAuth2 proxy can be enabled at Nginx layer:
-
-```bash
-# Create htpasswd file
-sudo apt install apache2-utils
-sudo htpasswd -c /etc/nginx/.htpasswd-teamevolver admin
-```
-
-### 6. Filesystem Permissions
-
-```bash
-# Restrict config directory permissions
-chmod 700 /home/teamevolver/.teamEvolver
-chmod 600 /home/teamevolver/.teamEvolver/config.yaml
-
-# Skills directory permissions
-chmod 700 /home/teamevolver/.teamEvolver/runtime/skills
-```
-
-## Resource Requirements
-
-Adjust resource configuration based on team size and usage:
-
-| Scale | Sessions/day | CPU | RAM | Disk | Evolution Interval |
-|-------|--------------|-----|-----|------|-------------------|
-| Small (<10 people) | <100 | 2 cores | 4GB | 20GB | 600s (default) |
-| Medium (10-50 people) | 100-1000 | 4 cores | 8GB | 50GB | 300-600s |
-| Large (50+ people) | >1000 | 8 cores | 16GB | 100GB+ | 120-300s |
-
-Notes:
-
-- LLM calls are main time-consuming component; CPU and memory primarily used for evidence processing and replay validation
-- True Replay mode requires additional workspace isolation resources
-- Enabling DreamCycle increases LLM call volume during night windows
-- For high session volumes, appropriately increase `evolve.interval_seconds` to reduce API costs
-
-## Upgrade Procedure
-
-### Version Upgrade Steps
-
-1. Backup config and data:
-
-```bash
-/usr/local/bin/teamevolver-backup.sh
-```
-
-2. Check current version and changelog:
-
-```bash
-teamEvolver --version
-```
-
-3. Stop service:
-
-```bash
-sudo systemctl stop teamevolver
-```
-
-4. Upgrade package:
-
-```bash
-sudo -u teamevolver pip install --upgrade teamEvolver
-```
-
-5. Check configuration migration:
-
-After startup check whether configuration needs updating; new versions may introduce new configuration sections.
-
-6. Start service:
-
-```bash
-sudo systemctl start teamevolver
-```
-
-7. Verify health:
-
-```bash
-curl -s http://127.0.0.1:52010/healthz
-sudo systemctl status teamevolver
-```
-
-8. Confirm functionality via console: skill list, session ingestion, evolution pipeline.
-
-### Rollback
-
-If upgrade issues occur:
-
-1. Stop service
-2. Install specified old version: `pip install teamEvolver==x.y.z`
-3. Restore config from backup (if needed)
-4. Restart service
-
-## Multi-Instance Deployment (Advanced)
-
-Use this control-plane baseline for two Pods:
-
-```yaml
-storage_pg:
-  enabled: true
-sharing:
-  skill_backend: postgres
-  session_backend: postgres
-  auto_pull_on_start: true
-  skill_reload_mode: poll
-  skill_reload_interval_seconds: 10
-skillopt_rollout:
-  enabled: true
-  endpoint: https://UPCLAW_ENDPOINT
-```
-
-PostgreSQL is authoritative for publication, candidates, versions, and outbox events. Every Pod refreshes its local Skill cache per tenant. The rollout supervisor re-reads tenant settings every tick and uses the PostgreSQL advisory lock `skillopt-rollout-v1:<tenant_id>` for single-consumer delivery. Before scaling out, migrate all Pod-local control-plane roots, require `multi_replica_safe=true`, and compare `manifest_hash` plus cache status through the load balancer.
+- Inject `TEAMEVOLVER_ROOT_API_KEY`, `TEAMEVOLVER_SECRET_MASTER_KEY`, `TEAMEVOLVER_OV_API_KEY` and model keys only through environment variables or Secrets, never YAML or the image.
+- Give tenant keys only to Agent servers. Rotation is described in [Console Identity and Tenant Permissions](../api/20-console-rbac.md#tenants-and-members).
+- The database application role must not be SUPERUSER or BYPASSRLS; tenant isolation relies on RLS.
+- Expose only the API port externally, behind TLS termination.
