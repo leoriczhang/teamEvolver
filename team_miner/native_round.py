@@ -623,6 +623,7 @@ class NativeRoundMixin:
             finished_at=utc_now())
 
     async def _materialize_native_round(self, job: dict) -> dict:
+        from .mining_completion import completion_only
         from .ov_compile_mining import validate_descendant
         from .routes import _content_text
 
@@ -640,7 +641,6 @@ class NativeRoundMixin:
             relative = uri[len(job["output_uri"]) + 1:]
             if any(part.startswith(".") for part in relative.split("/")):
                 continue
-            from .mining_completion import completion_only
             if not completion_only(job) and not relative.startswith(("analysis/", "compiled_skill/")):
                 raise NativeArtifactError("原生编译返回了输出契约之外的文件")
             count += 1

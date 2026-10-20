@@ -73,6 +73,7 @@ docs/                 # 中英双语文档源
 
 进程与服务：
 
+- OpenViking 是外部依赖，只允许只读排查与使用已有接口；不得修改其代码、配置、部署或重启其服务。修复范围限于 teamEvolver（TE）。
 - 进程操作只用精确 PID 或全路径唯一匹配，禁止 `pgrep -f teamEvolver` 之类宽匹配。
 - 后台任务必须记录 PID 文件（`/tmp/te_*.pid`）；重启前确认端口释放（`lsof -t -iTCP:52010 -sTCP:LISTEN`）。
 - 代码改动后必须重启服务，新配置和修复才生效。

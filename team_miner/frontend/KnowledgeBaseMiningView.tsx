@@ -323,14 +323,6 @@ export function resolveKnowledgeHref(
   return null;
 }
 
-function formatBytes(value?: number | null) {
-  if (value == null || !Number.isFinite(Number(value))) return "";
-  const bytes = Number(value);
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
 function taskTone(status = ""): "green" | "amber" | "red" | "blue" | "gray" {
   if (status === "completed") return "green";
   if (status === "failed" || status === "cancelled") return "red";

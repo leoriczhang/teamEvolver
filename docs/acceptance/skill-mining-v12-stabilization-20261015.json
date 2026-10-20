@@ -1,0 +1,211 @@
+{
+  "recorded_at": "2026-10-14T16:49:17.479876+00:00",
+  "说明": "V12 流程成功结束后的通用稳定性修复与清理验收，不等同于五份原文新任务完整复跑或业务质量通过。",
+  "existing_v12": {
+    "job_id": "ovmine-20261014T051145637279Z-v12-20261014-ef321376",
+    "status": "succeeded",
+    "completed_rounds": 2,
+    "skill_bundle_count": 14,
+    "cases_per_skill": 12,
+    "current_case_count": 168,
+    "accepted_native_compiles": 176,
+    "preservation": {
+      "v12_files_verified": 12298,
+      "changed": [],
+      "added": [],
+      "status": "succeeded",
+      "automation_status": "PAUSED"
+    },
+    "原文问题已确认解决": false,
+    "现有产物已重新归并": false
+  },
+  "fixes": [
+    {
+      "问题": "0 个补证问题仍然等待人工结束",
+      "修复": "控制台/API新建任务冻结 te-empty-review-skip.v1。空清单自动推进下一轮，最终轮自动结束；保留独立跳过记录，不伪造人工批准/新Evidence，也不启用需人工批准的产物复用。真实问题（含选答）、缺失或非法复核文件不会跳过。"
+    },
+    {
+      "问题": "旧候选身份阻止合理归并",
+      "修复": "新任务使用 te-candidate-identity-partition.v3 / te-candidate-consolidation.v1。保留所有成员原业务字段和原范围，完整父流程覆盖时允许归并；成员条件传入正文生成，归并后重新生成正文和Case，不直接复用较窄旧产物。"
+    },
+    {
+      "问题": "长正文多次完整输出导致容量失败",
+      "修复": "新任务默认 te-skill-body-patch.v1，有界增量步骤与条件附加，本机确定性整合完整方法；仅缩小未消费原文组，保留全部原文及已验收条件。"
+    },
+    {
+      "问题": "旧题目叙事污染新Case、串客户及误用客户名",
+      "修复": "新Case默认仅使用分配原文、一个来源情境、明确角色，历史题目只作本地去重指纹。无实名执行者保留角色称谓，不代填原文未知事实。"
+    },
+    {
+      "问题": "原文缺少固定拒绝/例外维度导致错误排除",
+      "修复": "覆盖维度为偏好；替换为有来源支持且在候选边界内的不同情境，不编造条件或凑Checklist。"
+    },
+    {
+      "问题": "恢复与清理影响既有产物",
+      "修复": "保持冻结请求/原始输出及修订投影审计；归档一次性辅助脚本及失效PID标记，未删除任务历史、原文或产物。"
+    }
+  ],
+  "validation": {
+    "python_full_pytest": "2556 passed, 45 skipped, 2 warnings",
+    "python_full_pytest_seconds": 370.39,
+    "compileall_passed": true,
+    "owned_ruff_passed": true,
+    "frontend_mining_tests": "40 passed",
+    "frontend_production_build_passed": true,
+    "docs_reference_check_passed": true,
+    "two_round_host_integration_passed": true,
+    "two_round_host_integration_model_outputs": "受控Native结果；真实TE编排、冻结来源、正文和Case验收、自动跳过以及轮次归档均执行。",
+    "real_openviking_protocol_probe": {
+      "real_openviking_compile": true,
+      "scope": "one identity grouping and two incremental body assignments; not a new complete mining job",
+      "accepted_native_tasks": [
+        {
+          "kind": "body-1",
+          "task_id": "cmp_bf62b48dbc3093cd32891eafb3ffdc40e08b48f28d17c5610b2c254c7ea383b0",
+          "status": "completed",
+          "processing_seconds": 60.27418683376163,
+          "output_chars": 782
+        },
+        {
+          "kind": "identity",
+          "task_id": "cmp_ea1883474f7daca2f2600b796aea8392490bb44114a5f187c5af2cf9144e2e26",
+          "status": "completed",
+          "processing_seconds": 60.28461951948702,
+          "output_chars": 949
+        },
+        {
+          "kind": "body-2",
+          "task_id": "cmp_4801feb5302eb1b2f21d408bf6def436d2af21788d7c6cae484e2b95a061b768",
+          "status": "completed",
+          "processing_seconds": 90.19627303630114,
+          "output_chars": 951
+        }
+      ],
+      "identity_groups": [
+        {
+          "candidate_ids": [
+            "candidate-6824cf33520b9dc50bfa39ee",
+            "candidate-6d4bae8f88b4df63e351ddc1",
+            "candidate-29a508af4dda128c365e7932",
+            "candidate-f4ebfc06d1807e148ab0cf12"
+          ],
+          "survivor_candidate_id": "candidate-6824cf33520b9dc50bfa39ee",
+          "reason": "6824cf为面谈接触全流程父工作流，涵盖需求唤起(6d4bae)、问卷收集(29a508)、结束约访(f4ebfc)三个子阶段，子阶段触发与终态均被父工作流覆盖，无独立终态。"
+        },
+        {
+          "candidate_ids": [
+            "candidate-7dc855e8a86d2efa1b7ff883",
+            "candidate-9f85a57c06584b53b3c40e4c",
+            "candidate-f617eeca8b0cce5c5756e2d9"
+          ],
+          "survivor_candidate_id": "candidate-7dc855e8a86d2efa1b7ff883",
+          "reason": "三者同为保单递送签收工作流，触发与终态相同；7dc855最完整，含祝贺权益、利益讲解、重点梳理及95522回访，覆盖9f85a5与f617ee的全部内容。"
+        }
+      ],
+      "body": {
+        "states": 2,
+        "atoms": 7,
+        "receipts": 2,
+        "source_units": 7,
+        "chinese_body": true,
+        "business_quality_passed": false
+      },
+      "v12_modified": false,
+      "real_full_five_document_job_rerun": false
+    },
+    "real_native_group_host_acceptance": {
+      "real_native_identity_groups": 2,
+      "exact_original_members_retained": 7,
+      "host_splits": [],
+      "v12_modified": false,
+      "new_parent_names": [
+        "collect-financial-information",
+        "deliver-policy-and-confirm"
+      ],
+      "member_contracts_preserved": true,
+      "business_quality_passed": false
+    },
+    "body_source_anchor_checks": {
+      "20分钟与额外40分钟及同意": true,
+      "退休费用不是立刻下降": true,
+      "可选经历": true,
+      "未知账户称谓未裁定": true
+    },
+    "original_source_document_sha_count": 5,
+    "complete_source_ranges": 80,
+    "source_business_anchors_verified": 28,
+    "service_restart": {
+      "old_pid": 40412,
+      "new_pid": 49636,
+      "recorded_at": "2026-10-14T16:37:10.104023+00:00",
+      "v12_files_preserved": 12298,
+      "active_mining_jobs_at_restart": 0,
+      "ov_service_or_configuration_changed": false
+    },
+    "web_screenshot": "/tmp/te-skill-mining-stabilization-20261015/empty-review-policy-web.jpg",
+    "full_five_document_fresh_job_rerun": false,
+    "guaranteed_first_attempt_success_for_any_input": false,
+    "true_replay_run": false,
+    "business_quality_passed": false
+  },
+  "cleanup": {
+    "recorded_at": "2026-10-14T16:33:11.553382+00:00",
+    "actions": [
+      {
+        "old_path": "/tmp/te-skill-mining-intent-debug-20261014/apply_case9_revision.py",
+        "archive_path": "/tmp/te-skill-mining-intent-debug-20261014/archive-completed-helpers/apply_case9_revision.py",
+        "sha256": "ee9ffdf8438e2eb86a41745bbf615ad991489c590f2ec09d7e99666a31eb1983"
+      },
+      {
+        "old_path": "/tmp/te-skill-mining-intent-debug-20261014/case9_revision_native.py",
+        "archive_path": "/tmp/te-skill-mining-intent-debug-20261014/archive-completed-helpers/case9_revision_native.py",
+        "sha256": "500c71dcdb31345522b10c0ee6252787015a80fd785e2670d6f9863bcb82649c"
+      },
+      {
+        "old_path": "/tmp/te-skill-mining-intent-debug-20261014/restart_actor_correction.py",
+        "archive_path": "/tmp/te-skill-mining-intent-debug-20261014/archive-completed-helpers/restart_actor_correction.py",
+        "sha256": "43344da5418e0da27e87b3009edec340998fb4cc8b21809f5d496bde57020103"
+      },
+      {
+        "old_path": "/tmp/te-skill-mining-intent-debug-20261014/restart_case_context.py",
+        "archive_path": "/tmp/te-skill-mining-intent-debug-20261014/archive-completed-helpers/restart_case_context.py",
+        "sha256": "96b7372bd9885c7f76dbdf39837bfce5cf2f653828a32ef9298e371473fd1a37"
+      },
+      {
+        "old_path": "/tmp/te-skill-mining-intent-debug-20261014/restart_scenario_scope.py",
+        "archive_path": "/tmp/te-skill-mining-intent-debug-20261014/archive-completed-helpers/restart_scenario_scope.py",
+        "sha256": "3cf1e8e9876c61c1667f49fa8c6f8fa5e4843deb9e9ce9f4198e99976894e92e"
+      },
+      {
+        "old_path": "/tmp/te_case9_revision_native.pid",
+        "archive_path": "/tmp/te-skill-mining-intent-debug-20261014/archive-completed-helpers/te_case9_revision_native.pid",
+        "cleanup": "inactive PID marker archived"
+      },
+      {
+        "old_path": "/tmp/te_case9_pytest.pid",
+        "archive_path": "/tmp/te-skill-mining-intent-debug-20261014/archive-completed-helpers/te_case9_pytest.pid",
+        "cleanup": "inactive PID marker archived"
+      }
+    ],
+    "mining_jobs_and_outputs_modified": false,
+    "original_sources_modified": false,
+    "history_deleted": false,
+    "automatic_monitor_remains_paused": true,
+    "current_completed_probe_launcher_archived": "/tmp/te-skill-mining-stabilization-20261015/archive-completed-helpers/native_probe.py",
+    "current_inactive_pid_markers_archived": [
+      {
+        "path": "/tmp/te_skill_stabilization_pytest.pid",
+        "archive_path": "/tmp/te-skill-mining-stabilization-20261015/archive-completed-helpers/te_skill_stabilization_pytest.pid",
+        "process_finished": true
+      }
+    ]
+  },
+  "remaining": [
+    "五份原文的新任务尚未完整复跑，不能把协议探针或受控回归称为全量一次成功。",
+    "真实生成产物仍需复核粒度、来源事实、Case实质差异及业务边界。",
+    "V12当前14份原产物保持原样；新归并策略作用于后续新任务。"
+  ],
+  "automatic_candidate_submission": false,
+  "automatic_publish": false,
+  "monitor_status": "PAUSED"
+}

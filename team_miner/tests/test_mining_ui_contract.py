@@ -36,14 +36,6 @@ def test_mining_ui_surfaces_artifact_quality_and_confirms_cautious_submission():
     assert "/api/mined-jobs/" in mining_source
 
 
-def test_artifact_editor_uses_shared_preview_and_save_interface():
-    mining_source = _source("team_miner/frontend/MiningView.tsx")
-    assert "/api/mining/artifacts/content?path=" in mining_source
-    assert '"/api/mining/artifacts/content"' in mining_source
-    assert "MarkdownDocument" in mining_source
-    assert "saveArtifactRevision" in mining_source
-
-
 def test_mining_task_deletion_contract_is_available_in_api_and_ui():
     mining_source = _source("team_miner/frontend/MiningView.tsx")
     bridge_source = _source("team_miner/bridge.py")

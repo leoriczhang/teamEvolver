@@ -14,6 +14,7 @@ Execution and synchronization live in the [main-service bridge](../../../team_mi
 | POST | `/api/mining/jobs/{job_id}/supplements` | Stage attachments at the current checkpoint |
 | POST | `/api/mining/jobs/{job_id}/continue` | Save supplements and start the next round |
 | POST | `/api/mining/jobs/{job_id}/finish` | Save final review and finish mining |
+| POST | `/api/mining/jobs/{job_id}/resume` | Recover an identified failure or explicitly authorize one format-fix test |
 
 ## Create a job
 
@@ -26,19 +27,22 @@ The main fields of `POST /api/mining/jobs` are:
 | `input_dir` | string | Selected OpenViking Resources directory URI |
 | `max_rounds` | integer | Actual round limit, 1–5, default 3 |
 | `human_checkpoints` | boolean | Wait for human review after each round, default true |
-| `runtime_timeout_seconds` | integer | Base round deadline, 60–7200 seconds, default 3600; the default compiler scales the effective deadline with input shards and artifact-generation workload |
+| `mining_mode` | string | `auto` discovery (default), `single` one complete Skill, or `target` requested count |
+| `mining_direction` | string | Up to 4000 characters; optional in auto/target, required complete-method goal in single |
+| `target_skill_count` | integer/null | Required integer 1–100 in target, fixed to 1 in single, null or omitted in auto |
+| `runtime_timeout_seconds` | integer | Round execution budget, 60–7200 seconds, default3600; not an ETA |
 
-The first round freezes the original source. Subsequent rounds use that snapshot, accumulated human supplements and previous revision context. Jobs return `rounds_mode: "orchestrated"`; `current_round` represents an actual round.
+Default jobs use `execution_protocol: "te-native-mining.v1"`: one normal Compile per round, full initial construction, then incremental updates of the same `stable_output_uri` using current supplements, implicated originals and changed revision context. `max_rounds` is an upper bound; an empty question list finishes mining without an empty extra round.
 
 The first round determines and saves the primary language of the frozen original sources, using Simplified Chinese when Chinese predominates. Later rounds retain that language rather than deriving it from earlier English artifacts or supplements. The runtime adds the job's language rules to new Compile requests. Human-readable prose, explanations, case Queries, Checklist text, shared analysis and review questions use that language. Field names, IDs, file paths, source URIs, code, fixed enum values, direct source quotations and structural labels such as `Checklist`, `Evidence` and `Materials` remain unchanged. Neither the current API nor the console offers a separate output-language option.
 
 Saved custom business instructions remain unchanged and do not require a reset for a language update. Accepted requests retain their frozen version; completed artifacts are not automatically translated or recompiled.
 
-New jobs using the default compiler Skill use `candidate_contract_version: 2`: the model plans independently executable task methods before compiling a separate Skill Candidate for each method. Candidate count follows triggers, inputs, outputs, task boundaries, and the ability to execute and validate each method through True Replay independently. It does not follow document or chapter count. Each bounded planning task allows at most eight candidates; a round uses more tasks for more supported methods rather than filling a count. Zero candidates is valid when no executable method is supported. Pure facts retain their disposition without requiring a fabricated Evidence gap; methods lacking necessary Evidence retain a deferred reason.
+Default compiler jobs use `candidate_contract_version: 2`. One native Compile plans complete independent methods and generates their artifacts. Counts follow goals and sources rather than files, customer profiles or substeps, without the old host eight-candidate batch limit. Insufficient support remains explicit rather than forcing a count.
 
 When a previously saved custom compiler Skill still uses the single-candidate contract, new jobs retain `candidate_contract_version: 1` with a compatibility warning. Reset to the current default compiler Skill to enable multiple candidates in subsequently created jobs. Existing jobs retain their frozen contracts.
 
-The default flow submits staged tasks through the existing public Compile API. Extraction and generation use bounded original Evidence fragments; planning uses a traceable method ledger with a disposition for every proposal without treating summaries as original facts. Revision context for the previous candidate collection is delivered directly through `instruction` rather than extracted as another source. The default staged flow keeps a local revision ledger and gives each task matching context within its assignment budget, with explicit excerpt or omission flags. Custom single-Compile flows retain a collection revision-context limit of 30000 characters. The full previous artifacts remain in the round archive.
+The new execution lives in [native rounds](../../../team_miner/native_round.py) and the [compiler Skill](../../../team_miner/native_compiler.py). Per-method METHOD.json receipts aggregate into the existing capability plan. Test Dataset Markdown is deterministically rendered from validated JSON. Lost acceptance is reconciled by the original key; only explicit artifact-validation failures or truncated output permit at most two whole-task repairs per round. Dependency, source, authentication, transport and unknown failures retain structured diagnostics without becoming new business instructions, preserving original requests, errors and results.
 
 Proposed deferrals are checked against the relevant original files in bounded tasks before final supplement questions are generated. An omitted rule in a reference summary or an unspecified runtime input is not sufficient evidence of a gap. Later batches and rounds reuse candidate identities; bounded reviews of similar methods retain merge reasons and complete source lineage. Sharing a source, formula or workflow step does not automatically justify merging, and similarity retrieval does not guarantee exhaustive duplicate detection. Each stage compiler carries only its current output contract, with shared business rules kept separate from the full artifact layout. Frozen requests are never rewritten retroactively.
 
@@ -53,6 +57,37 @@ Test Dataset case generation uses the existing public Compile file Map and Final
 An older batch with file-valued `from` sources gets an audited directory request only after an exact submission-key lookup confirms no accepted task. Original assignment files, Case IDs and repair counts remain intact. The older request is unchanged, and accepted tasks recover their existing task identity; network errors and stop requests do not trigger replacement.
 
 ## Capability plan and artifact contract
+
+The job freezes direction and count in `mining_intent`, including subsequent-round dependency checks. Count controls final selection, never splitting or merging. Matching is assessed inside existing workflow metadata calls without an additional Compile. The complete preselection plan and exclusion reasons remain archived; `analysis/mining-intent.json` records selection and final counts. A count shortfall requires human review even when automatic continuation was requested. Structural validation does not establish business correctness.
+
+### Resume an identified repaired failure
+
+For Native jobs, `POST /api/mining/jobs/{job_id}/resume` without a request body lets administrators explicitly recover a confirmed request for an undeclared attachment inside the selected compiler Skill package after TE supplies a different attachment-guidance body and SHA. Changing wrapper markers alone is not a new version, and clearing an error does not permit an unchanged retry. Recovery verifies the exact terminal remote event, frozen inputs, original request and accepted-round hashes. Missing sources or declared dependencies, authentication, network, output-protocol errors, unknown semantic failures and user stops are ineligible for this attachment-recovery path. Each round permits each guidance body once, with at most two upgrades including historical resource recovery; existing repair counts remain intact. Both the first and later recoveries retain the existing round budget start and deadline; recovery cannot extend them, and an expired budget prevents recovery. The original compiler, `from` / `to` and artifacts remain unchanged; guidance and its SHA are frozen before the first POST, and lost acceptance uses the same key.
+
+TE declares the actual frozen attachment inventory and identifies `record_fields` / `scope_fields` as inline fields. It does not invent resources or modify OV. The inventory guides the model; it is not an enforced allowlist for the OV read tool, and the current Compile interface has no option to impose one. TE separates runtime diagnostics from business instructions and does not automatically recompile a whole round for dependency errors. These measures cannot guarantee that the OV model never requests an undeclared path.
+
+The console action “重新实测本轮” uses the same endpoint with an explicit body to authorize one separately budgeted format-fix test:
+
+```json
+{
+  "action": "retry_with_new_budget",
+  "request_id": "653dad9a-4bfd-47ad-9a6c-ec79779b323b",
+  "expected_task_id": "<current failed Native task ID>",
+  "budget_seconds": 3600
+}
+```
+
+`request_id` must be a UUID and remains unchanged when retrying the same operation. `expected_task_id` must match the current failed task; `budget_seconds` must equal the original job's `runtime_timeout_seconds` (3600 seconds in this example). The server records the administrator from the signed-in console identity, not a client-supplied authorizer. Eligibility requires a confirmed `output_protocol` failure and new format guidance that this job has not used. Each TE job permits this authorization once, after verifying the exact terminal remote event, frozen request and inputs. It preserves the same TE job, original `round_started_at` and all history, and starts a new Native task for a whole-round Compile; it does not promise to rerun only the failed Map.
+
+The separate attempt budget is stored in `native_explicit_retry.attempt_budget` with `started_at`, `seconds` and `deadline_at`; `old_budget` retains the previous budget. Lost acceptance is reconciled using the original request ID and submission key without a duplicate Compile. Public `can_retry_native` and `native_retry_context` (`expected_task_id`, `budget_seconds`, `format_guidance_sha256`) determine whether the console offers the action. The UI distinguishes the original round's elapsed time including interruption waits, this attempt's elapsed time and its execution budget. The budget is not an ETA, and a new test does not establish business correctness or True Replay success.
+
+The test also requires a provable raw artifact package from the immediately preceding accepted round, with an unchanged reviewed archive. If the failed Compile changed the remote target, TE archives every partial file before restoring the accepted baseline to the same target and reading back every SHA. Changed file membership, a third content version or an unprovable baseline stops recovery. An accepted submission is reconciled without rolling back its target. The frozen new instruction includes record-format guidance and a review of task-role consistency; it adds no factual Evidence and leaves the old compiler Skill unchanged.
+
+For historical staged jobs, `POST /api/mining/jobs/{job_id}/resume` is admin-only and recovers the identified host failure caused by a previous-round name being reused for changed business scope. The frozen round must be unfinished at `identity_group` with no in-flight child. Other failures and requested stops return 409; full concurrency returns 429. It preserves inputs, accepted requests, reviews and unresolved questions, records the failure in `recovery_history`, and continues the same round without starting a new job or rerunning extraction. It does not submit a Skill Candidate, True Replay or Publish.
+
+The endpoint also handles a confirmed integrated-body capacity failure: the remote task is completed, every sibling has a durable outcome, the failed candidate has an accepted draft, and all three repairs exceeded the 12K whole-output limit. A journal retains the original state and counters. Subsequent assignments use a separately versioned compiler to generate bounded insertions into the complete draft. Originals, accepted requests, old text and valid siblings are retained; the old compiler is never overwritten. Model output remains capped at 12K, while the deterministic local projection preserves every previous byte and validates source IDs, Chinese text and its revision chain within a 60K body bound. This transition is allowed once, rather than repeatedly resetting repairs. Other format, source or business failures require separate diagnosis.
+
+A changed workflow proposal receives a distinct machine identity with an old/new metadata and source-scope audit. The previous identity is preserved, and normal grouping must not discard the conflicting accepted metadata.
 
 Each round produces four shared analysis files and four separate files for each candidate:
 
@@ -87,7 +122,7 @@ Each entry in `skills` contains:
 | `rationale` | string | Reason for splitting or merging this method |
 | `source_refs` | string[] | Original-source or human-supplement URIs supporting this method; must be nonempty |
 
-The default batched flow also writes `analysis/method-dispositions.md` and pages such as `analysis/dispositions/page-0001.md` with matching JSON. They record each method proposal’s retention, merge, factual-information classification or deferral, including sources and reasons. Facts do not automatically request human Evidence.
+Historical batched execution also writes `analysis/method-dispositions.md` and pages such as `analysis/dispositions/page-0001.md` with matching JSON. They record each method proposal’s retention, merge, factual-information classification or deferral, including sources and reasons. Facts do not automatically request human Evidence.
 
 Each `deferred` entry contains nonempty `reason` and `source_refs`. References must belong to this job's source or supplement scope; previous model output cannot serve as Evidence. Candidates may share Evidence, but overlapping methods should be merged. Steps of a complete workflow should stay together when they cannot be used independently.
 
@@ -155,6 +190,10 @@ Job details include status, `current_round`, a `rounds` list, the current `pendi
 
 | Field | Type | Meaning |
 | --- | --- | --- |
+| `execution_protocol` | string | New default `te-native-mining.v1` |
+| `stable_output_uri` | string | The remote target retained across rounds of one job |
+| `native_compile_history` | array | Actual admitted task IDs and rounds, not internal model calls |
+| `native_repairs` | array | Bounded whole-task repair errors and previous task records |
 | `capability_plan` | object | Validated capability plan |
 | `candidate_count` | integer | Number of candidates in this round |
 | `valid_candidate_count` | integer | Candidates passing their own package and Test Dataset structural validation |
@@ -201,3 +240,5 @@ Shared Test Dataset validation checks structure rather than business facts. Evid
 The new default contract saves `round_work_units` (estimated input-shard and artifact-generation workload) and `round_timeout_seconds` (effective round deadline). Each stage task reserves one eighth of the base deadline, with a minimum of 180 seconds per task; the total remains at least the base deadline. Once planning completes, file and case generation tasks enter the estimate. Within a round, the deadline can only increase and its start time stays unchanged; the next round is estimated independently. Retrying the same accepted request does not add work units. Existing frozen requests are unchanged. Original sources are persisted one file at a time, up to 10000 files and 20 MB per file, without the former aggregate 16 MB limit.
 
 Sources are traversed directory by directory through the existing paginated OV file-list API, without a fixed depth or tree-node cutoff. Truncation signals, permission errors, repeated pages and out-of-scope entries are never treated as a complete source. Skill sections are validated and written atomically as a stream; final identity checks and archive hashes read bounded blocks without truncating the body during assembly.
+
+Native failures are stored as `native_failure` with their original diagnostics and fingerprint. Only explicit artifact-validation failures or truncated output permit at most two whole-round repairs. Dependency, source, authentication, transport and unknown failures are not fed back as business instructions. `native_resource_recovery` retains historical resource recovery; `native_contract_recoveries` records bounded explicit guidance upgrades for undeclared-attachment failures and their version hashes. `can_retry_native` and `native_retry_context` expose eligibility for the explicit format-fix test. `native_explicit_retry` retains its administrator authorization summary and separate `attempt_budget` alongside `old_budget`.

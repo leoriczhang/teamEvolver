@@ -9,6 +9,8 @@ Agent 数据面使用 `Authorization: Bearer tevt_...` 和请求中声明的 `us
 持有租户 Key 的调用方可以代表该租户 Account 内任意用户，不需要创建 Agent 注册或用户映射。
 控制台用户注册与 Agent 接入独立。
 
+管理员控制面的 Skill 挖掘支持方向、单 Skill 整合、目标数量和已识别失败恢复。未声明附件错误的指导升级保留原预算；已确认的输出格式失败可另行显式授权一次新预算的整轮实测，保留原任务起点与历史。附件清单是模型指导，不是 OV 工具的强制白名单；TE 不修改 OV。参数与限制见 [Skill 挖掘 API](../api/17-skill-mining.md)。
+
 ## 身份
 
 唯一主体为 `(tenant_id, user_id)`。`user_id` 必须非空，经 NFKC 规范化和去除首尾空白后最长

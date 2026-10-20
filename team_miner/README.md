@@ -56,6 +56,7 @@ Skill正文、附件和脚本；设置返回 `previous_default_prompt`、`task_d
 | --- | --- |
 | `knowledge_compiler.py` | 新默认知识点教官 Skill、任务和多知识点场景关联、分批分段生成 |
 | `knowledge_compiler_v8.py` | 装载当前自包含挖掘 Skill、附件与脚本 |
+| `compiler_assets.py` | 各目录型版本共用的资产读取与摘要装配，保留历史正文及附件字节 |
 | `compiler_skills/knowledge-point-v8/` | 单个或多个知识点构建、材料歧义保留、规则保真和局部修订 |
 | `knowledge_compiler_v7.py` | 保留的非事实目录版及附件 |
 | `skill_router_compiler.py` | 装载已有 Skill 使用入口的独立编译模板与组装脚本 |

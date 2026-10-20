@@ -688,54 +688,6 @@ def compose_skill(candidate: dict, sections: Iterable[dict], *, expected_input_i
     return "".join(iter_skill_chunks(candidate, sections, expected_input_ids=expected_input_ids))
 
 
-def expand_plan_work(plan: dict) -> list[dict]:
-    """Expand fixed work in TE; neither model output nor Evidence text is repeated."""
-    refs = sorted({ref for row in plan["skills"] + plan["deferred"] for ref in row["source_refs"]})
-    tasks = [
-        {
-            "key": f"shared-{role}",
-            "stage": role,
-            "output_path": f"analysis/{path}",
-            "source_refs": refs,
-        }
-        for role, path in (
-            ("evidence", "evidence-map.md"),
-            ("gaps", "gaps.md"),
-            ("review", "review.json"),
-            ("plan", "capability-plan.json"),
-        )
-    ]
-    for candidate in plan["skills"]:
-        name = candidate["name"]
-        for role, path in (
-            ("skill_section", "SKILL.md"),
-            ("evaluation", "EVALUATION.md"),
-            ("benchmark_view", "BENCHMARK.md"),
-        ):
-            tasks.append(
-                {
-                    "key": f"{name}-{role}",
-                    "stage": role,
-                    "skill_name": name,
-                    "output_path": f"compiled_skill/{name}/{path}",
-                    "source_refs": candidate["source_refs"],
-                }
-            )
-        for index in range(1, 13):
-            case_id = f"{name}-case-{index:02d}"
-            tasks.append(
-                {
-                    "key": case_id,
-                    "stage": "case",
-                    "skill_name": name,
-                    "case_id": case_id,
-                    "output_path": f"case-parts/{name}/{case_id}.json",
-                    "source_refs": candidate["source_refs"],
-                }
-            )
-    return tasks
-
-
 def validate_case(value: Any, *, case_id: str, skill_name: str, source_refs: list[str]) -> dict:
     _bounded_output(value)
     if set(value) != CASE_KEYS or value.get("case_id") != case_id or value.get("skill_ids") != [skill_name]:

@@ -9,6 +9,8 @@ The server resolves the tenant from the credential and the OpenViking Account fr
 effective configuration. A tenant Key may act as any user in its Account; no Agent registration
 or global console-user mapping is required. Console users are a separate concern.
 
+Administrator Skill mining supports direction, single-Skill goals, target counts and recovery of the identified identity-review host failure. See [Skill Mining API](../api/17-skill-mining.md).
+
 ## Identity
 
 The principal is `(tenant_id, user_id)`. The user ID is NFKC normalized and trimmed, must be nonempty
@@ -53,3 +55,5 @@ Schemas: [Session v2](../../schemas/agent-session-v2.schema.json),
 
 `identity_mode` is fixed to `tenant_user`; `delivery_mode` defaults to `pull`.
 Session, Context and Skill all use the tenant machine credential plus `user_id`.
+
+Admin Skill Mining recovery keeps the original budget for undeclared-attachment guidance upgrades. A confirmed output-format failure can instead receive one explicitly authorized, separately budgeted whole-round test, retaining the original round start and history. The inventory guides the model rather than enforcing an OV tool allowlist; TE does not modify OV. See the [Skill Mining API](../api/17-skill-mining.md) for parameters and limits.

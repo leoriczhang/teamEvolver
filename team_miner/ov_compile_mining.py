@@ -1296,7 +1296,6 @@ class OvSkillMiningRepository:
         history = list(job.get("checkpoint_history") or [])
         supplements = list(job.get("supplements") or [])
         if submission is not None:
-            submission = {**submission, "action": "continue"}
             history.append(submission)
             supplements.append(submission)
         round_record = next(row for row in job["rounds_history"] if row["round"] == job["current_round"])

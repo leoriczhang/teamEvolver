@@ -103,7 +103,6 @@ export default function SkillSourceWorkspace({
   const [selectedDirectory, setSelectedDirectory] = useState("");
   const [content, setContent] = useState<SourceContent | null>(null);
   const [draft, setDraft] = useState("");
-  const [original, setOriginal] = useState("");
   const [editorMode, setEditorMode] = useState<KnowledgeEditorMode>("preview");
   const [versionPanelOpen, setVersionPanelOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -126,7 +125,7 @@ export default function SkillSourceWorkspace({
   const activeSource = sources.find((source) => source.source_id === activeSourceId)
     || sources.find((source) => source.path === selectedPath)
     || sources[0];
-  const dirty = Boolean(content && draft !== original);
+  const dirty = Boolean(content && draft !== content.content);
   const sourceActions = (
     <div className="flex items-center gap-1.5">
       <Button size="sm" variant="outline" onClick={() => void onRefresh()}>
@@ -201,7 +200,6 @@ export default function SkillSourceWorkspace({
       );
       setContent(next);
       setDraft(next.content);
-      setOriginal(next.content);
       setEditorMode(/\.md$/i.test(next.name) ? "preview" : "edit");
       setVersionPanelOpen(false);
     } catch (error: any) {
@@ -222,10 +220,9 @@ export default function SkillSourceWorkspace({
           source_id: activeSource.source_id,
           uri: content.uri,
           content: draft,
-          original_content: original,
+          original_content: content.content,
         }),
       });
-      setOriginal(result.content);
       setDraft(result.content);
       setContent({ ...content, content: result.content });
       toastOk("文件已保存", content.name);

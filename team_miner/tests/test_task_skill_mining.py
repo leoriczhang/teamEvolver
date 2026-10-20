@@ -99,6 +99,29 @@ async def test_completed_without_benchmark_cases_or_valid_content_succeeds(tmp_p
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("returned_paths", [(), (".metadata.json", "compiled_skill/.staging/SKILL.md")],
+                         ids=["no-files", "hidden-files-only"])
+async def test_empty_visible_output_materializes_without_sync_warning(tmp_path, returned_paths):
+    owner, repo, remote, job = new_owner(tmp_path, compiler=SKILL_BODY, mode="auto")
+    job = await owner._submit_ov_skill_round(job)
+    for relative in returned_paths:
+        remote.content[job["output_uri"] + "/" + relative] = "远端隐藏元数据"
+    remote.tasks[job["ov_task_id"]] = {"status": "completed"}
+
+    await owner._refresh_ov_skill_job(job)
+
+    result = repo.get_job(job["job_id"])
+    assert result["status"] == "succeeded" and result["ov_status"] == "completed"
+    assert result["materialized"] and result["candidate_count"] == 0
+    assert not result.get("materialize_warnings")
+    assert not list(repo.workspace(result).rglob("*"))
+    assert not result["content_validated"] and len(remote.compile_calls) == 1
+    log = (repo.jobs_root / job["job_id"] / "run.log").read_text(encoding="utf-8")
+    assert "原生 Compile 已物化0个文件；原始产物已保留，未执行内容验收" in log
+    assert "候选产物物化失败" not in log
+
+
+@pytest.mark.asyncio
 async def test_local_sync_problem_warns_but_cannot_reject_remote_completion(tmp_path, monkeypatch):
     owner, repo, remote, job = new_owner(tmp_path, compiler=SKILL_BODY, mode="auto")
     job = await owner._submit_ov_skill_round(job)

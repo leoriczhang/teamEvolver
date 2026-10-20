@@ -170,7 +170,6 @@ def test_zero_candidates_remain_a_grounded_result_without_generating_placeholder
     uri = "viking://resources/team/source/facts.md"
     plan = candidate_plan(uri, names=())
     assert staged.validate_plan(plan, source_refs=[uri]) == plan
-    assert len(staged.expand_plan_work(plan)) == 4
     missing_reason = {**plan, "deferred": []}
     with pytest.raises(ValueError):
         staged.validate_plan(missing_reason, source_refs=[uri])

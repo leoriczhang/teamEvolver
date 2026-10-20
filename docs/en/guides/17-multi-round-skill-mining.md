@@ -1,94 +1,68 @@
-# Multi-round Skill Mining and Human Evidence Supplements
+# Multi-round Skill Mining and Human Supplements
 
-The console uses teamEvolver to manage real mining rounds, with bounded batches submitted to the existing OpenViking Compile API. New jobs first plan independently executable task methods and compile them into a Skill Candidate collection. When human checkpoints are enabled, a completed round waits for an administrator to review its candidate collection, answer Evidence gaps and add sources before starting the next round.
+New default jobs use `te-native-mining.v1`. TE manages sources, tasks, human supplements and acceptance. One OV Compile per normal round uses a compiler Skill to discover, consolidate and generate complete methods and Cases. A Compile may contain multiple model calls and internal jobs.
 
-This workflow uses the model and execution environment configured in OpenViking. The console's global model settings do not select the model for Compile. The original source is frozen when the mining job starts; later changes to the source directory do not silently change the job's input.
-
-The first round determines and saves the primary language of the frozen original sources; predominantly Chinese materials use Simplified Chinese. Candidate prose, evaluation notes, case Queries, Checklist text, shared analysis and review questions retain that language across rounds, regardless of earlier English artifacts or the language of later supplements. Field names, IDs, file paths, source URIs, code, fixed enum values and direct source quotations remain unchanged, as do structural labels such as `Checklist`, `Evidence` and `Materials`.
-
-The console has no separate output-language selector. The runtime adds the job's language rules to new Compile requests while preserving saved custom business instructions verbatim, without a reset. Frozen accepted requests and completed artifacts are not changed retroactively, automatically translated or recompiled when the language rules are updated.
+The first round builds complete artifacts. Later rounds incrementally update the same remote target. Original materials and the compiler are frozen; changing the source directory does not alter an existing job.
 
 ## Create a job
 
-Select a directory tagged for Skill use on the source page, then create a Skill mining job.
+Select a registered directory tagged for Skill use.
 
 | Setting | Behavior |
 | --- | --- |
-| Maximum mining rounds | 1–5, default 3; each round retains separate inputs, artifacts and staged Compile records |
-| Human Evidence supplements | When enabled, every completed round requires human review, including the final round |
-| Runtime limit per round | Base deadline 60–7200 seconds, default 3600; the default contract scales it with input shards and artifact-generation workload and excludes human waiting |
+| Maximum rounds | 1–5, default3; an upper bound rather than mandatory empty rounds |
+| Human supplements | Wait for real questions; an empty question list skips supplementation and finishes mining |
+| Round deadline | 60–7200 seconds, default3600; a budget protection, not an ETA |
+| Free discovery | Optional direction; discover complete independent methods supported by sources |
+| Single Skill | Required complete-task direction; integrate steps and scenario parameters |
+| Target count | 1–100, optional direction; explain insufficient support without forced splits or merges |
 
-With human checkpoints disabled, teamEvolver executes the configured number of rounds automatically. Each round still retains separate inputs, artifacts and execution records. At most 8 Compile mining tasks execute concurrently; jobs waiting for human input do not consume an execution slot.
+Compile uses OV's models and runtime. Fewer external Compile requests do not prove fewer model calls or lower latency; output and Case volume matter.
 
-## Capability planning and candidate collections
+## Capability splitting and candidate collections
 
-The model determines candidate count from task triggers, inputs, outputs and boundaries. Each candidate must be independently executable and independently verifiable through True Replay. Document, chapter and topic counts do not determine the number of candidates. One document may support multiple methods, and one method may draw on multiple documents. Merge overlapping methods and keep workflow steps together when they cannot be used independently.
+The compiler uses triggers, complete steps, applicability and independent completion outcomes. People, amounts, channels and scenario numbers are usually parameters. Different customers' values are not automatically source contradictions.
 
-Each bounded planning task may output at most eight candidates; a round can use more tasks for more supported methods. There is no count to fill. Pure facts or insufficient Evidence may produce zero candidates, with reasons. Every method proposal has a recorded disposition; facts do not automatically become requests for human Evidence. The result is a collection of Skill Candidates awaiting validation; individual candidates enter the existing Skill library after passing their own gates.
+Each method produces `compiled_skill/<slug>/SKILL.md`, `EVALUATION.md`, `benchmark.json` and `METHOD.json`. The receipt contains task, trigger, inputs, outputs, boundary, sources and supplement questions. TE deterministically aggregates receipts into `analysis/capability-plan.json` using `skill-miner.plan.v1`.
 
-Start with the shared `analysis/capability-plan.json` (`schema_version: "skill-miner.plan.v1"`). Its `skills` entries describe `name`, `task`, `trigger`, `inputs`, `outputs`, `boundary`, `rationale` and `source_refs`. The `deferred` entries retain `reason` and `source_refs` for deferred content. The plan explains which methods are separated or merged and which sources do not yet support an executable method.
+Each `team-replay.dataset` contains12 Cases with at least12 output conditions and one trajectory condition per Case. TE renders `BENCHMARK.md` from validated JSON without generating duplicate content or inventing conditions.
 
-The default batched flow also writes `analysis/method-dispositions.md` and pages such as `analysis/dispositions/page-0001.md` with matching JSON. They record each method proposal’s retention, merge, factual-information classification or deferral, including sources and reasons. Facts do not automatically request human Evidence.
+Non-method content uses `analysis/notes/*.json` for source-backed dispositions. Facts and out-of-scope content do not automatically create questions. A zero-method result retains explanations and cannot be submitted as a candidate.
 
-Each round has four shared analysis files: `evidence-map.md`, `gaps.md`, `review.json` and `capability-plan.json`. Every candidate has its own `SKILL.md`, `EVALUATION.md`, `BENCHMARK.md` and `benchmark.json` under `compiled_skill/<skill-name>/`. The JSON file is that candidate's Test Dataset. A zero-candidate round retains only shared analysis; continue with supplements or finish without submitting a candidate.
+Incremental consolidation declares existing members in `METHOD.json.supersedes`. TE validates references and cycles without making semantic merging decisions. Original files remain in remote storage, local lineage and round archives. The surviving method must integrate valid steps, conditions and sources.
 
-The console groups artifacts by Skill Candidate. Each card shows the capability description, that candidate's structural validation result and its four files. Shared analysis, deferred content and Evidence questions for the whole job appear separately. Historical rounds use the same grouping and are read-only. Passing structural validation does not confirm that business facts are correct or that True Replay has passed.
+## Review and supplements
 
-Existing jobs retain their original single-candidate, seven-file contract during recovery and continuation. New jobs using the current default compiler Skill use the multiple-candidate contract. If a previously saved custom compiler still uses the single-candidate contract, the system displays a compatibility warning and continues with one candidate. Reset to the current default compiler Skill in mining settings to enable capability planning for subsequently created jobs.
+1. Inspect methods, evaluations and Test Datasets against original conditions and scenario boundaries.
+2. Answer real questions with sources; mark unknown facts unresolved.
+3. Attach materials, provide feedback or edit permitted current artifacts.
+4. Continue to freeze incremental inputs and submit the next Compile.
 
-Each candidate undergoes its own package and Test Dataset structural validation. A missing `SKILL.md` or another mandatory file marks that candidate incomplete and prevents its submission. Other complete candidates that pass structural validation may continue through their own validation workflow.
+An empty question list finishes mining with a separate `skipped_checkpoints` receipt. It fabricates no human approval or Evidence. Missing or invalid receipts are not empty reviews. Skipping supplementation does not replace True Replay or Candidate Review.
 
-## Review and supplement Evidence
-
-After a round finishes, the console presents its artifacts and structured questions from `analysis/review.json`. These questions correspond to the Evidence gaps in `analysis/gaps.md`. A question has its own identifier, question text, explanation, source references and required flag.
-
-1. Review the capability plan and each candidate's `SKILL.md`, `EVALUATION.md`, `BENCHMARK.md` and `benchmark.json`. Each JSON file is a separate Test Dataset in the shared `team-replay.dataset` format, with 12–24 cases for that candidate's True Replay.
-2. Answer the questions and optionally attach references to accessible OpenViking sources. Explicitly mark questions that cannot be answered as unresolved.
-3. Upload supplementary documents and provide review feedback where needed. Attachments are staged in the job's local directory; they are not written to OpenViking until continuation.
-4. Continue to freeze the next round's inputs and start a new Compile task. Once the round limit is reached, complete the final review or finish the job.
-
-During initial artifact synchronization, the system deterministically normalizes the generated `BENCHMARK.md` from a structurally valid `benchmark.json`. Its displayed cases, Checklists and sources match the Test Dataset without introducing new cases or facts. Missing mandatory files still require repair; normalization does not supply them.
-
-An empty question list still requires human confirmation when checkpoints are enabled. The administrator may continue or finish immediately. Browser refreshes and service restarts preserve the waiting state and saved attachments.
+When human supplementation is disabled, finish the current round while preserving unanswered questions. Do not start another round without new Evidence.
 
 ## Inputs to the next round
 
-Each round receives three inputs with distinct roles:
+The same job retains the same `to`. The next `from` contains actual supplements, attachments, implicated frozen originals and changed revision context. Explicit question references select implicated originals; feedback with unknown impact conservatively includes all original material.
 
-- **Original Evidence**: the source snapshot frozen when the job started.
-- **Human supplements**: accumulated answers, sources and supplementary documents, retaining the submitting identity and time.
-- **Revision context**: each previous Skill body, Test Dataset case identifiers, and current review questions and feedback, used to revise the candidate collection.
+Unchanged artifacts are not copied into new sources. Compile recalls related history using `against=target`. Edited artifacts under `revision/` are context, never factual provenance. Old citation identities remain validated. Questions are not answers.
 
-Extraction and generation Compile inputs contain bounded frozen fragments of original Evidence and human supplements. Planning uses a traceable method ledger without treating generated summaries as original facts. Revision context is delivered as quoted text in `instruction`; it is not extracted again as source files and cannot be cited as provenance. The complete previous shared analysis and candidate artifacts remain in the local round archive. The full Test Dataset and duplicate Markdown representations are not added back to extraction inputs.
+Every round archives inputs and complete outputs. The current workspace switches only after deterministic acceptance. Original materials, requests, raw outputs and previous versions remain available.
 
-The default staged flow keeps previous candidate identities, case identifiers and source scopes in a local revision ledger. Each model task receives only matching context that fits its assignment budget, with explicit excerpt or omission flags. Complete content remains archived. Custom single-Compile flows retain the 30000-character revision-context limit. An excerpt does not instruct the model to use tools to find the remaining files.
+## Failures and recovery
 
-When method scope remains stable, the next round explicitly reuses the existing candidate identity and its case identifiers. The host retains identity fields while expanding the associated source scope. Similar but distinct methods remain separate; similar names or shared sources do not justify merging. Proposed deferrals must be checked against the relevant original text before missing necessary rules become supplement questions. Previous artifacts cannot prove that a rule exists.
+- Synchronization failure preserves the task and retries with backoff.
+- A lost acceptance response is reconciled by the original idempotency key; any resubmission uses the identical frozen request.
+- Remote or artifact failures retain the real error, request and result. At most two whole-task repairs per round follow; remaining failures are reported honestly.
+- Chinese, source and Case checks remain enforced. Unknown business facts require human supplements.
 
-Previous model output is not established Evidence. The model must cite original sources or human supplement sources. A human answer that contradicts the original source must retain the conflict rather than silently replace the source's assertion.
-
-Every round uses a separate output directory to prevent files from previous rounds leaking into the result. The console retains the remote task ID, input references, artifacts, validation results and elapsed time for each round, and allows reviewing different rounds.
+The UI reports actual Compile admissions and repairs. Saved workspace versions support switching retries without overwriting history.
 
 ## Finish and validate the result
 
-A job can finish early at a human checkpoint. Its final round also requires final review. Review notes and unresolved questions can be retained when finishing. A final candidate collection with outstanding Evidence gaps remains marked for review.
+Structural acceptance checks language, complete files, provenance, Test Dataset format and count constraints. It does not prove business correctness or True Replay success. Existing candidate selection, True Replay, Candidate Review and Publish gates remain in force. Mining never publishes automatically.
 
-Supplements added after the last round do not automatically change that round's artifacts. To incorporate them, continue while rounds remain or create another mining job. Finishing mining does not automatically Publish. The administrator selects a specific candidate and submits it with its own Test Dataset. Every Skill Candidate separately enters existing True Replay, Candidate Review and Publish, retaining independent state and results.
+## Historical jobs
 
-Test Dataset validation checks the file contract. It does not prove that business facts, numeric comparisons or completion conditions are correct. Multiple rounds provide opportunities to revise the result; administrators must still compare artifacts with their sources.
-
-OpenViking may report `completed` after retaining usable artifacts from a run with failed source processing. Valid shared analysis and complete candidate bundles do not prove that all Evidence was processed. The console preserves these warnings in the checkpoint, round history and final artifact quality, marking the current result for review. For example, two source documents can produce a complete candidate collection even when extracting a third document failed.
-
-When a warning identifies omitted sources, inspect those documents and provide review feedback. Continuing reprocesses the complete original frozen source and accumulated supplements. The previous candidate remains revision context and cannot replace omitted original Evidence. Review the next round's result again; historical warnings remain attached to their original round records.
-
-## Recovery and cancellation
-
-teamEvolver persists rounds, checkpoints and submission state locally. After a restart it resumes observing an existing remote task rather than creating another accepted Compile task. If a network interruption leaves acceptance unknown, the same stage's original idempotency key is used to query or recover its submission.
-
-Initial preparation also freezes each round's compiler Skill body and input archive. The compiler is installed at a separate Skill URI whose name contains the source-body digest. Records include `compiler_source_sha256`, the actual installed body's `compiler_sha256`, and `compiler_uri`. Existing versions are reused only when their contents match; conflicts stop submission rather than overwrite that version.
-
-A stage retry uses the same compiler URI, body, inputs and Compile request; the next stage starts only after its predecessor is validated. If acceptance is unknown and no remote task is recorded, a missing compiler package can be restored from its frozen body. Recorded tasks resume status observation directly. Service updates or other jobs installing new compiler versions do not change the version bound to this round.
-
-Stopping an executing task requests cooperative cancellation from OpenViking and waits for its terminal state. A job waiting for human input can finish directly. Stop executing work before deleting its job.
-
-See [Skill Mining API](../api/17-skill-mining.md) for interfaces and errors. Implementation lives in the [job repository](../../../team_miner/ov_compile_mining.py) and [main-service bridge](../../../team_miner/bridge.py).
+Existing jobs retain their frozen single-candidate or staged protocols without request or artifact migration. Custom compiler Skills retain their content; resetting settings enables native whole-round execution for newly created jobs.

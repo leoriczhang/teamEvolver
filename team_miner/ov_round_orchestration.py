@@ -1033,7 +1033,7 @@ class OvRoundOrchestrationMixin(NativeRoundMixin, OvStagedOrchestrationMixin):
                     return await self._prepare_staged_round(
                         job, compiler_body, entries, language_policy, revision_instruction
                     )
-                payload = job.get("compile_request") or {
+                payload = {
                     "from": [source],
                     "to": output,
                     "skill": compiler_uri,

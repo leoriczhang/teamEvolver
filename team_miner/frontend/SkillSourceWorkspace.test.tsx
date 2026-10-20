@@ -92,3 +92,60 @@ describe("SkillSourceWorkspace source registration", () => {
     expect(screen.getByRole("button", { name: "确认设为知识源" })).toBeEnabled();
   });
 });
+
+describe("SkillSourceWorkspace source editing", () => {
+  beforeEach(() => { mockedApi.mockReset(); });
+  afterEach(cleanup);
+
+  it("uses the loaded and then saved content as the edit baseline", async () => {
+    const source = {
+      source_id: "source-edit", path: sourceUri, document_count: 1,
+      total_bytes: 100, ready: true, tags: ["skill"],
+    };
+    const entry = { uri: `${sourceUri}/rules.md`, name: "rules.md", is_dir: false };
+    const original = "# Original\n";
+    const save = vi.fn(async (body: { content: string }) => ({ content: `${body.content.trim()}\n` }));
+    mockedApi.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === "/api/mining/ov-sources") return config;
+      if (path.startsWith("/api/mining/ov-source-tree?")) {
+        return { root_uri: sourceUri, exists: true, entries: [entry] };
+      }
+      if (path.startsWith("/api/mining/ov-source-content?")) {
+        return { source_id: source.source_id, ...entry, content: original, editable: true };
+      }
+      if (path === "/api/mining/ov-source-content" && init?.method === "POST") {
+        return save(JSON.parse(String(init.body)));
+      }
+      throw new Error(`Unexpected API call: ${path}`);
+    });
+    render(<SkillSourceWorkspace sources={[source]} selectedPath={sourceUri} onSelect={vi.fn()} onRefresh={vi.fn(async () => undefined)} />);
+    fireEvent.click(await screen.findByRole("treeitem", { name: "rules.md" }));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑" }));
+    const editor = screen.getByRole("textbox", { name: "rules.md 文件编辑器" });
+    const saveButton = screen.getByRole("button", { name: "保存" });
+    expect(editor).toHaveValue(original);
+    expect(saveButton).toBeDisabled();
+
+    fireEvent.change(editor, { target: { value: "# Revised" } });
+    expect(screen.getByText("未保存")).toBeInTheDocument();
+    expect(saveButton).toBeEnabled();
+    fireEvent.click(saveButton);
+    await waitFor(() => expect(save).toHaveBeenLastCalledWith({
+      source_id: source.source_id, uri: entry.uri,
+      content: "# Revised", original_content: original,
+    }));
+    await waitFor(() => expect(editor).toHaveValue("# Revised\n"));
+    expect(saveButton).toBeDisabled();
+    expect(screen.queryByText("未保存")).not.toBeInTheDocument();
+
+    fireEvent.change(editor, { target: { value: "# Next revision" } });
+    fireEvent.click(saveButton);
+    await waitFor(() => expect(save).toHaveBeenLastCalledWith({
+      source_id: source.source_id, uri: entry.uri,
+      content: "# Next revision", original_content: "# Revised\n",
+    }));
+    await waitFor(() => expect(editor).toHaveValue("# Next revision\n"));
+    expect(saveButton).toBeDisabled();
+    expect(screen.queryByText("未保存")).not.toBeInTheDocument();
+  });
+});

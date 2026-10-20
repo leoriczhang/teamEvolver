@@ -8,9 +8,7 @@ import pytest
 from team_miner.tests.test_knowledge_skill_preparation import Workspace, identity, put
 
 SCRIPT = Path(__file__).parents[1] / "compiler_skills/knowledge-point-v7/scripts/prepare_point.py"
-SPEC = importlib.util.spec_from_file_location("knowledge_collection", SCRIPT)
-PREP = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(PREP)
+PREP = None
 
 
 @pytest.fixture(params=["v7", "v8"], autouse=True)

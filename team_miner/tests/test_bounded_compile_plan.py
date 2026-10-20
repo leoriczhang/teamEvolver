@@ -10,7 +10,6 @@ from team_miner.bounded_compile_plan import (
     assemble_dataset,
     build_stage_packet,
     compose_skill,
-    expand_plan_work,
     is_deferred,
     iter_skill_chunks,
     planning_items,
@@ -432,21 +431,6 @@ def test_section_cannot_replace_canonical_frontmatter_or_claim_unassigned_chunks
     value["content"] = "原文明确9000小于12000。"
     with pytest.raises(ValueError, match="every exact assigned"):
         validate_section(value, input_ids=["raw-2"])
-
-
-def test_zero_candidates_only_expand_shared_analysis_and_ordinary_plan_has_private_case_parts():
-    zero = {
-        "schema_version": "skill-miner.plan.v1",
-        "skills": [],
-        "deferred": [{"reason": "事实不足以支持独立方法", "source_refs": [URI]}],
-    }
-    assert len(expand_plan_work(zero)) == 4
-    work = expand_plan_work({**zero, "skills": [candidate([URI])], "deferred": []})
-    assert len(work) == 19
-    cases = [item for item in work if item["stage"] == "case"]
-    assert [item["case_id"] for item in cases] == [f"return-check-case-{index:02d}" for index in range(1, 13)]
-    assert all(item["output_path"].startswith("case-parts/") for item in cases)
-    assert not any("content" in item for item in work)
 
 
 def test_explicit_deferred_result_retains_reason_and_exact_source_without_synthetic_conditions():
