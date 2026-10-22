@@ -102,7 +102,8 @@ def _wire_domain_contracts(services):
         from .openviking import OpenVikingClient
         cfg = await openviking_config(services, current_tenant_id())
         return OpenVikingClient(endpoint=cfg.sharing_viking_endpoint, api_key=cfg.sharing_viking_api_key,
-                                 account_id=payload["account_id"], user=user or payload["user_id"])
+                                 account_id=payload["account_id"], user=user or payload["user_id"],
+                                 deployment=cfg.sharing_viking_deployment)
     services.extras.setdefault("compile_client_factory", compile_client)
 
     async def accept_replay(spec, raw, tenant):

@@ -190,13 +190,14 @@ export function uploadJson<T>(
   path: string,
   body: Record<string, unknown>,
   onProgress: (ratio: number) => void,
+  headers?: HeadersInit,
 ): Promise<T> {
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
     request.open("POST", path);
     request.timeout = 15 * 60 * 1000;
     request.withCredentials = true;
-    tenantHeaders(path, { "Content-Type": "application/json" }).forEach((value, key) => {
+    tenantHeaders(path, headers || { "Content-Type": "application/json" }).forEach((value, key) => {
       request.setRequestHeader(key, value);
     });
     request.upload.onprogress = (event) => {

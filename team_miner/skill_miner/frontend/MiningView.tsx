@@ -3,6 +3,7 @@ import { MarkdownDocument } from "@/components/MarkdownWorkspace";
 import { Button } from "@/components/ui/button";
 import { Dialog,DialogContent,DialogHeader,DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { toastErr } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import {
 ChevronDown,
@@ -20,7 +21,7 @@ import { markdownBodyForPreview } from "./markdownFrontmatter";
 
 import MiningWhiteboxPanel from "@skill-miner/MiningWhiteboxPanel";
 import SkillSourceWorkspace from "@skill-miner/SkillSourceWorkspace";
-import { STEP_META,formatBytes,formatDateTime,jobStatusMeta,pipelineStepLabel,sourceStatusMeta } from "./miningHelpers";
+import { STEP_META,formatBytes,formatDateTime,isWaitingForEvidence,jobArtifacts,jobStatusMeta,pipelineStepLabel,sourceStatusMeta } from "./miningHelpers";
 import MiningJobDetail from "./MiningJobDetail";
 import { useMiningController } from "./useMiningController";
 export type { MinePage } from "./types";
@@ -46,6 +47,34 @@ export default function MiningView(props: Parameters<typeof useMiningController>
     stateLabel, stateTone, filteredJobs, selectInputDir,
     verifySelectedInputSource, startRun, deleteMiningJob, saveArtifactRevision,
   } = controller;
+
+  function handleArtifactLink(href: string): boolean {
+    if (!artifactPreview || !selectedJob || href.startsWith("#") || /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(href)) return false;
+    if (artifactSaving) return true;
+    let targetPath: string;
+    try {
+      const base = new URL(artifactPreview.path.split("/").map(encodeURIComponent).join("/"), "https://mining.invalid/");
+      targetPath = decodeURIComponent(new URL(href, base).pathname.slice(1));
+    } catch {
+      toastErr("无法打开产物链接", href);
+      return true;
+    }
+    const currentArtifacts = jobArtifacts(selectedJob);
+    const target = [...currentArtifacts, ...(selectedJob.rounds || []).flatMap((round) => round.artifacts || [])]
+      .find((artifact) => artifact.path === targetPath);
+    if (!target) {
+      toastErr("无法打开产物链接", "当前任务没有该文件：" + href);
+      return true;
+    }
+    if (artifactEditing && artifactDraft !== artifactPreview.content
+      && !window.confirm("当前文档有未保存修改，确定放弃修改并打开链接吗？")) return true;
+    const editable = target.kind !== "resource"
+      && currentArtifacts.some((artifact) => artifact.path === target.path)
+      && (selectedJob.status === "succeeded" || isWaitingForEvidence(selectedJob));
+    void controller.previewArtifact(target, editable);
+    return true;
+  }
+
   if (!props.active) return null;
 
   return (
@@ -613,7 +642,7 @@ export default function MiningView(props: Parameters<typeof useMiningController>
                   />
                 ) : (
                   <div tabIndex={0} role="region" aria-label="Markdown 编辑预览" className="min-h-0 flex-1 overflow-auto overscroll-contain bg-white px-7 py-6">
-                    <MarkdownDocument content={markdownBodyForPreview(artifactDraft)} />
+                    <MarkdownDocument content={markdownBodyForPreview(artifactDraft)} onLinkClick={handleArtifactLink} />
                   </div>
                 )}
               </div>
@@ -625,6 +654,7 @@ export default function MiningView(props: Parameters<typeof useMiningController>
                 <textarea
                   autoFocus
                   spellCheck={false}
+                  disabled={artifactSaving}
                   value={artifactDraft}
                   aria-label="产物源码编辑器"
                   onChange={(event) => setArtifactDraft(event.target.value)}
@@ -654,7 +684,7 @@ export default function MiningView(props: Parameters<typeof useMiningController>
             artifactIsMarkdown ? (
               <div tabIndex={0} role="region" aria-label="Markdown 产物内容" className="min-h-0 flex-1 overflow-auto overscroll-contain bg-[#f6f7f9] px-5 py-8">
                 <div className="mx-auto min-h-full max-w-[820px] bg-white px-12 py-10 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_14px_40px_rgba(15,23,42,0.06)]">
-                  <MarkdownDocument content={markdownBodyForPreview(artifactPreview?.content || "")} />
+                  <MarkdownDocument content={markdownBodyForPreview(artifactPreview?.content || "")} onLinkClick={handleArtifactLink} />
                 </div>
               </div>
             ) : (

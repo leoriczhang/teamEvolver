@@ -97,8 +97,10 @@ export default function SkillSourceWorkspace({
   onRefresh: () => Promise<unknown>;
 }) {
   const [config, setConfig] = useState<SourceConfig | null>(null);
+  const [sourceDetails, setSourceDetails] = useState<SkillSource[]>([]);
   const [activeSourceId, setActiveSourceId] = useState("");
   const [tree, setTree] = useState<TreeResponse | null>(null);
+  const [treeError, setTreeError] = useState("");
   const [selectedEntry, setSelectedEntry] = useState<TreeEntry | null>(null);
   const [selectedDirectory, setSelectedDirectory] = useState("");
   const [content, setContent] = useState<SourceContent | null>(null);
@@ -121,14 +123,21 @@ export default function SkillSourceWorkspace({
   const [treeSearchUnlocked, setTreeSearchUnlocked] = useState(false);
   const fileInput = useRef<HTMLInputElement | null>(null);
   const folderInput = useRef<HTMLInputElement | null>(null);
+  const sourceIdRef = useRef("");
+  const treeRequestRef = useRef(0);
+  const entryRequestRef = useRef(0);
+  const pickerRequestRef = useRef(0);
 
-  const activeSource = sources.find((source) => source.source_id === activeSourceId)
-    || sources.find((source) => source.path === selectedPath)
-    || sources[0];
+  const describedSources = sources.map((source) => sourceDetails.find((detail) => detail.source_id === source.source_id) || source);
+  const activeSource = describedSources.find((source) => source.source_id === activeSourceId)
+    || describedSources.find((source) => source.path === selectedPath)
+    || describedSources[0];
+  sourceIdRef.current = activeSource?.source_id || "";
+  const sourceUnavailable = activeSource?.status === "missing" || activeSource?.status === "unavailable";
   const dirty = Boolean(content && draft !== content.content);
   const sourceActions = (
     <div className="flex items-center gap-1.5">
-      <Button size="sm" variant="outline" onClick={() => void onRefresh()}>
+      <Button size="sm" variant="outline" onClick={() => void refreshWorkspace()}>
         <RefreshCw className="size-3.5" /> 刷新
       </Button>
       <Button size="sm" onClick={() => void openPicker()}>
@@ -138,26 +147,37 @@ export default function SkillSourceWorkspace({
   );
 
   useEffect(() => {
+    let current = true;
     void api<SourceConfig & { sources: SkillSource[] }>("/api/mining/ov-sources")
       .then((next) => {
+        if (!current) return;
         setConfig(next);
+        setSourceDetails(next.sources || []);
         setPickerAccount((previous) => previous || next.current || next.accounts[0] || "");
       })
-      .catch((error) => toastErr("读取 OpenViking 配置失败", error.message));
+      .catch((error) => { if (current) toastErr("读取 OpenViking 配置失败", error.message); });
+    return () => { current = false; };
   }, [sources]);
 
   useEffect(() => {
+    entryRequestRef.current += 1;
+    treeRequestRef.current += 1;
+    setSelectedEntry(null);
+    setContent(null);
+    setDraft("");
+    setSelectedDirectory(activeSource?.path || "");
+    setVersionPanelOpen(false);
+    setTreeError("");
     if (!activeSource?.source_id || activeSource.status === "missing" || activeSource.status === "unavailable") {
       setTree(activeSource?.status === "missing" ? { root_uri: activeSource.path, exists: false, entries: [] } : null);
-      setSelectedEntry(null);
-      setContent(null);
-      setVersionPanelOpen(false);
+      setLoading(false);
       return;
     }
+    setTree(null);
     setActiveSourceId(activeSource.source_id);
     void loadTree(activeSource.source_id, false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSource?.source_id, activeSource?.status]);
+  }, [activeSource?.source_id, sourceUnavailable]);
 
   useEffect(() => {
     if (!versionPanelOpen) return;
@@ -169,25 +189,39 @@ export default function SkillSourceWorkspace({
   }, [versionPanelOpen]);
 
   async function loadTree(sourceId: string, notify = false) {
+    const request = ++treeRequestRef.current;
     setLoading(true);
+    setTreeError("");
     try {
       const next = await api<TreeResponse>(`/api/mining/ov-source-tree?source_id=${encodeURIComponent(sourceId)}`);
+      if (request !== treeRequestRef.current || sourceIdRef.current !== sourceId) return;
       setTree(next);
-      setSelectedDirectory((previous) => previous && previous.startsWith(next.root_uri) ? previous : next.root_uri);
+      setSelectedDirectory((previous) => previous === next.root_uri || previous.startsWith(next.root_uri + "/") ? previous : next.root_uri);
       if (notify) toastOk("目录已刷新", next.root_uri);
     } catch (error: any) {
+      if (request !== treeRequestRef.current || sourceIdRef.current !== sourceId) return;
+      setTreeError(error.message || "目录读取失败，请刷新重试");
       toastErr("读取知识源失败", error.message);
       await onRefresh();
     } finally {
-      setLoading(false);
+      if (request === treeRequestRef.current && sourceIdRef.current === sourceId) setLoading(false);
     }
+  }
+
+  async function refreshWorkspace() {
+    await Promise.all([onRefresh(), activeSource?.source_id ? loadTree(activeSource.source_id, true) : undefined]);
   }
 
   async function openEntry(entry: TreeEntry) {
     if (!activeSource?.source_id) return;
     if (dirty && !window.confirm("当前文件有未保存修改，确定切换吗？")) return;
+    const sourceId = activeSource.source_id;
+    const request = ++entryRequestRef.current;
     setSelectedEntry(entry);
+    setContent(null);
+    setDraft("");
     if (entry.is_dir) {
+      setLoading(false);
       setSelectedDirectory(entry.uri);
       setContent(null);
       setVersionPanelOpen(false);
@@ -196,35 +230,41 @@ export default function SkillSourceWorkspace({
     setLoading(true);
     try {
       const next = await api<SourceContent>(
-        `/api/mining/ov-source-content?source_id=${encodeURIComponent(activeSource.source_id)}&uri=${encodeURIComponent(entry.uri)}`,
+        `/api/mining/ov-source-content?source_id=${encodeURIComponent(sourceId)}&uri=${encodeURIComponent(entry.uri)}`,
       );
+      if (request !== entryRequestRef.current || sourceIdRef.current !== sourceId) return;
       setContent(next);
       setDraft(next.content);
       setEditorMode(/\.md$/i.test(next.name) ? "preview" : "edit");
       setVersionPanelOpen(false);
     } catch (error: any) {
-      toastErr("读取文件失败", error.message);
+      if (request === entryRequestRef.current && sourceIdRef.current === sourceId) toastErr("读取文件失败", error.message);
     } finally {
-      setLoading(false);
+      if (request === entryRequestRef.current && sourceIdRef.current === sourceId) setLoading(false);
     }
   }
 
   async function saveContent() {
     if (!activeSource?.source_id || !content) return;
+    const sourceId = activeSource.source_id;
+    const request = entryRequestRef.current;
+    const submittedDraft = draft;
     setSaving(true);
     try {
       const result = await api<{ content: string }>("/api/mining/ov-source-content", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          source_id: activeSource.source_id,
+          source_id: sourceId,
           uri: content.uri,
           content: draft,
           original_content: content.content,
         }),
       });
-      setDraft(result.content);
-      setContent({ ...content, content: result.content });
+      if (request === entryRequestRef.current && sourceIdRef.current === sourceId) {
+        setDraft((current) => current === submittedDraft ? result.content : current);
+        setContent({ ...content, content: result.content });
+      }
       toastOk("文件已保存", content.name);
     } catch (error: any) {
       toastErr("保存文件失败", error.message);
@@ -266,14 +306,19 @@ export default function SkillSourceWorkspace({
   async function deleteEntry() {
     if (!activeSource?.source_id || !selectedEntry || selectedEntry.uri === activeSource.path) return;
     if (!window.confirm(`确定删除 ${selectedEntry.name}？该操作会删除 OpenViking 中的对应内容。`)) return;
+    const sourceId = activeSource.source_id;
+    const request = entryRequestRef.current;
     try {
       await api("/api/mining/ov-entry", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ source_id: activeSource.source_id, uri: selectedEntry.uri }),
       });
-      setSelectedEntry(null);
-      setContent(null);
+      if (request === entryRequestRef.current && sourceIdRef.current === sourceId) {
+        entryRequestRef.current += 1;
+        setSelectedEntry(null);
+        setContent(null);
+      }
       toastOk("条目已删除", selectedEntry.name);
       await Promise.all([loadTree(activeSource.source_id), onRefresh()]);
     } catch (error: any) {
@@ -286,7 +331,7 @@ export default function SkillSourceWorkspace({
     if (!window.confirm(`移除知识源“${source.name || source.path}”？OpenViking 原目录不会被删除。`)) return;
     try {
       await api(`/api/mining/ov-sources/${encodeURIComponent(source.source_id)}`, { method: "DELETE" });
-      if (activeSourceId === source.source_id) setActiveSourceId("");
+      setActiveSourceId((current) => current === source.source_id ? "" : current);
       toastOk("知识源引用已移除", "OpenViking 原目录仍然保留");
       await onRefresh();
     } catch (error: any) {
@@ -295,6 +340,7 @@ export default function SkillSourceWorkspace({
   }
 
   async function openPicker(sourceId = "") {
+    const request = ++pickerRequestRef.current;
     setPickerUri("");
     setPickerTree(null);
     setPickerError("");
@@ -313,16 +359,19 @@ export default function SkillSourceWorkspace({
       const next = await api<TreeResponse>(
         `/api/mining/ov-tree?account=${encodeURIComponent(account)}&uri=${encodeURIComponent(config?.root_uri || "viking://resources")}`,
       );
+      if (request !== pickerRequestRef.current) return;
       setPickerTree(next);
     } catch (error: any) {
+      if (request !== pickerRequestRef.current) return;
       setPickerError(error.message || "目录列表不可用");
       toastErr("读取 OpenViking 目录失败", error.message);
     } finally {
-      setPickerLoading(false);
+      if (request === pickerRequestRef.current) setPickerLoading(false);
     }
   }
 
   async function reloadPicker(account: string) {
+    const request = ++pickerRequestRef.current;
     setPickerUri("");
     setPickerTree(null);
     setPickerError("");
@@ -333,12 +382,14 @@ export default function SkillSourceWorkspace({
       const next = await api<TreeResponse>(
         `/api/mining/ov-tree?account=${encodeURIComponent(account)}&uri=${encodeURIComponent(config?.root_uri || "viking://resources")}`,
       );
+      if (request !== pickerRequestRef.current) return;
       setPickerTree(next);
     } catch (error: any) {
+      if (request !== pickerRequestRef.current) return;
       setPickerError(error.message || "目录列表不可用");
       toastErr("读取 OpenViking 目录失败", error.message);
     } finally {
-      setPickerLoading(false);
+      if (request === pickerRequestRef.current) setPickerLoading(false);
     }
   }
 
@@ -399,7 +450,7 @@ export default function SkillSourceWorkspace({
         <div className="grid h-[calc(100vh-190px)] min-h-[620px] grid-cols-[190px_minmax(0,1fr)] gap-3 xl:grid-cols-[240px_minmax(0,1fr)]">
           <Panel className="flex min-h-0 flex-col" title="知识源" count={`${sources.length} 个目录引用`}>
             <nav className="min-h-0 flex-1 space-y-1 overflow-auto bg-surface-subtle p-2" aria-label="知识源导航">
-              {sources.map((source) => {
+              {describedSources.map((source) => {
                 const active = activeSource?.path === source.path;
                 return (
                   <div
@@ -413,6 +464,7 @@ export default function SkillSourceWorkspace({
                       type="button"
                       className="w-full text-left"
                       onClick={() => {
+                        if (activeSource?.source_id !== source.source_id && dirty && !window.confirm("当前文件有未保存修改，确定切换吗？")) return;
                         setActiveSourceId(source.source_id || "");
                         onSelect(source.path);
                       }}
@@ -475,7 +527,7 @@ export default function SkillSourceWorkspace({
           </Panel>
 
           <Panel
-            className="!mt-0 flex min-h-0 flex-col"
+            className="knowledge-file-panel !mt-0 flex min-h-0 flex-col"
             title={<span className="flex min-w-0 items-center gap-2"><FolderInput className="size-4 text-accent" /><span className="truncate" title={activeSource?.name || "知识源文件"}>{activeSource?.name || "知识源文件"}</span></span>}
             count={tree?.exists ? `${tree.entries.length} 项` : undefined}
             extra={sourceActions}
@@ -511,8 +563,8 @@ export default function SkillSourceWorkspace({
                 </div>
                 <div className="min-h-0 flex-1">
                   <SourceWorkspaceTree
-                    tree={activeSource?.status === "unavailable" ? { root_uri: activeSource.path, exists: false, entries: [] } : tree}
-                    emptyText={activeSource?.status === "missing"
+                    tree={treeError || activeSource?.status === "unavailable" ? { root_uri: activeSource?.path || "", exists: false, entries: [] } : tree}
+                    emptyText={treeError ? `目录读取失败：${treeError}。请点击刷新重试。` : activeSource?.status === "missing"
                       ? "该知识源路径已从 OpenViking 删除，已禁止用于挖掘。"
                       : activeSource?.status === "unavailable"
                         ? "暂时无法检查该知识源，已禁止用于挖掘。请稍后刷新。"

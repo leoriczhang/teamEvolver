@@ -9,7 +9,8 @@ from starlette.exceptions import HTTPException
 
 from teamEvolver.admin.authorization import require_tenant_admin
 from teamEvolver.config_runtime import TenantConfigMissing
-from teamEvolver.tenants.registry import current_tenant_id, effective_config, get_current_tenant
+from teamEvolver.openviking.settings import effective as openviking_config
+from teamEvolver.tenants.registry import current_tenant_id
 
 from .. import config
 from ..repository import MiningRevisionConflict, make_repository
@@ -50,8 +51,8 @@ class Context:
             raise HTTPException(503, str(exc)) from exc
         miner = dict(value.miner_config)
         cfg = self.services.extras.get("config")
-        if cfg is not None:
-            cfg = effective_config(None, get_current_tenant(), cfg)
+        if cfg is not None and (not miner.get("account_id") or not miner.get("user_id")):
+            cfg = await openviking_config(self.services, self.tenant)
         selected = str(miner.get("account_id") or getattr(cfg, "sharing_viking_account", ""))
         if not selected or (account and account != selected):
             raise HTTPException(403, "TENANT_ACCOUNT_MISMATCH")

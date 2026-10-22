@@ -63,7 +63,7 @@ function installApi(job: FixtureJob | null, onAction?: (path: string, body: Reco
       return { path: artifactPath, name: artifactPath.split("/").pop(), content: "# Example", size_bytes: 9 };
     }
     if (init?.method === "POST") {
-      const result = await onAction?.(path, JSON.parse(String(init.body)));
+      const result = await onAction?.(path, JSON.parse(String(init.body || "{}")));
       if (result && typeof result === "object" && "job" in result) current = (result as { job: FixtureJob }).job;
       return result;
     }
@@ -638,6 +638,139 @@ function candidateFiles(name: string, workspace = "job-1/workspace") {
     ["benchmark.json", "benchmark"], ["BENCHMARK.md", "benchmark"],
   ].map(([file, kind]) => ({ ...artifact, name: file, kind, skill_name: name, path: `${workspace}/compiled_skill/${name}/${file}` }));
 }
+
+/** Model the documented 202 receipt and defer its durable terminal result. */
+function acceptCommand(path: string, result: unknown) {
+  const baseApi = mockedApi.getMockImplementation()!;
+  const statusUrl = "/api/mined-jobs/miner-command:flow";
+  let complete!: (status: unknown) => void;
+  const terminal = new Promise((resolve) => { complete = resolve; });
+  mockedApi.mockImplementation(async (requested: string, init?: RequestInit) => {
+    if (requested === path && init?.method) return { job_id: "miner-command:flow", status_url: statusUrl };
+    if (requested === statusUrl) return terminal;
+    return baseApi(requested, init);
+  });
+  return async () => {
+    await waitFor(() => expect(mockedApi).toHaveBeenCalledWith(statusUrl, expect.any(Object)));
+    await act(async () => complete({ status: "succeeded", result }));
+  };
+}
+
+describe("MiningView accepted Worker operations", () => {
+  beforeEach(() => {
+    mockedApi.mockReset();
+    vi.mocked(toastErr).mockClear();
+    vi.mocked(toastOk).mockClear();
+  });
+  afterEach(cleanup);
+
+  it("keeps creation pending until its Worker receipt contains a business job", async () => {
+    installApi(null);
+    const finish = acceptCommand("/api/mining/jobs", { jobs: [{ ...waitingJob(), status: "preparing" }] });
+    const navigate = vi.fn();
+    render(<MiningView active page="jobs" onNavigate={navigate} />);
+    fireEvent.click(await screen.findByRole("button", { name: "新建 Skill 挖掘" }));
+    fireEvent.click(screen.getByRole("button", { name: "创建任务" }));
+    expect(await screen.findByRole("button", { name: "创建中…" })).toBeDisabled();
+    expect(toastOk).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    await finish();
+    await waitFor(() => expect(toastOk).toHaveBeenCalledWith("挖掘任务已创建", expect.any(String)));
+    expect(navigate).toHaveBeenCalledWith("jobs");
+    expect(mockedApi.mock.calls.filter(([path, init]) => path === "/api/mining/jobs" && init?.method === "POST")).toHaveLength(1);
+  });
+
+  it("hydrates an uncached detail through its accepted projection job", async () => {
+    const initial = waitingJob();
+    installApi(initial);
+    const baseApi = mockedApi.getMockImplementation()!;
+    mockedApi.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === "/api/mining/jobs/job-1") return {
+        job_id: "projection-1", status_url: "/api/mined-jobs/projection-1",
+      };
+      if (path === "/api/mined-jobs/projection-1") return { status: "succeeded", result: { ok: true, job: initial } };
+      return baseApi(path, init);
+    });
+    await openJob();
+    expect(screen.getByText("本轮 Evidence 复核")).toBeVisible();
+    expect(mockedApi).toHaveBeenCalledWith("/api/mined-jobs/projection-1", expect.any(Object));
+    expect(toastErr).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { action: "stop", button: "停止", initial: "running", resulting: "stopped", success: "已发送停止信号" },
+    { action: "resume", button: "从断点恢复", initial: "failed", resulting: "preparing", success: "已从失败断点恢复" },
+  ])("awaits $action and blocks another action while the Worker is pending", async ({ action, button, initial, resulting, success }) => {
+    const current = { ...waitingJob(1, 2, false), status: initial, pending_checkpoint: null, can_resume: action === "resume" };
+    installApi(current);
+    const finish = acceptCommand(`/api/mining/jobs/job-1/${action}`, { job: { ...current, status: resulting, can_resume: false } });
+    render(<MiningView active page="jobs" />);
+    fireEvent.click(await screen.findByRole("button", { name: /真实多轮挖掘/ }));
+    fireEvent.click(await screen.findByRole("button", { name: button }));
+    expect(screen.getByRole("button", { name: button })).toBeDisabled();
+    expect(toastOk).not.toHaveBeenCalled();
+    await finish();
+    await waitFor(() => expect(toastOk).toHaveBeenCalledWith(success, expect.any(String)));
+    expect(mockedApi.mock.calls.filter(([path, init]) => path.endsWith(`/${action}`) && init?.method === "POST")).toHaveLength(1);
+    expect(toastErr).not.toHaveBeenCalled();
+  });
+
+  it("keeps structured artifact bytes fixed until the accepted save result is persisted", async () => {
+    const current = completedCandidateJob(["example"]);
+    current.artifacts = candidateFiles("example");
+    installApi(current);
+    const path = current.artifacts.find((file) => file.name === "benchmark.json")!.path;
+    const finish = acceptCommand("/api/mining/artifacts/content", {
+      path, name: "benchmark.json", content: "{\"version\":2}", size_bytes: 13, edited: true,
+    });
+    render(<MiningView active page="jobs" />);
+    fireEvent.click(await screen.findByRole("button", { name: /真实多轮挖掘/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "example / benchmark.json" }));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑产物" }));
+    const editor = screen.getByRole("textbox", { name: "产物源码编辑器" });
+    fireEvent.change(editor, { target: { value: "{\"version\":2}" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    expect(await screen.findByRole("button", { name: "保存中…" })).toBeDisabled();
+    expect(editor).toBeDisabled();
+    expect(toastOk).not.toHaveBeenCalled();
+    await finish();
+    await waitFor(() => expect(toastOk).toHaveBeenCalledWith("产物修改已保存", expect.any(String)));
+    expect(screen.getByRole("region", { name: "产物源码内容" })).toHaveTextContent("{\"version\":2}");
+    expect(toastErr).not.toHaveBeenCalled();
+  });
+
+  it("waits for candidate persistence before showing a successful submission", async () => {
+    const current = completedCandidateJob(["example"]);
+    installApi(current);
+    const finish = acceptCommand("/api/mined-jobs/job-1/skills/example/submit", {
+      created: true, job_id: "candidate-1", skill_name: "example",
+    });
+    await openCompletedJob();
+    const submit = screen.getByRole("button", { name: "提交 example 到进化" });
+    fireEvent.click(submit);
+    expect(submit).toBeDisabled();
+    expect(screen.queryByText("example：已生成 Skill Candidate")).not.toBeInTheDocument();
+    await finish();
+    expect(await screen.findByText("example：已生成 Skill Candidate")).toBeVisible();
+    expect(mockedApi.mock.calls.filter(([path, init]) => path.endsWith("/skills/example/submit") && init?.method === "POST")).toHaveLength(1);
+    expect(toastErr).not.toHaveBeenCalled();
+  });
+
+  it("deletes a terminal job only after the Worker confirms its files were removed", async () => {
+    installApi(completedCandidateJob(["example"]));
+    const finish = acceptCommand("/api/mining/jobs/job-1", { job_id: "job-1", deleted_files: 7 });
+    await openCompletedJob();
+    fireEvent.click(screen.getByRole("button", { name: "删除任务" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认删除任务" }));
+    expect(await screen.findByRole("button", { name: "删除中…" })).toBeDisabled();
+    expect(toastOk).not.toHaveBeenCalled();
+    await finish();
+    await waitFor(() => expect(toastOk).toHaveBeenCalledWith("挖掘任务已删除", "已一并删除 7 个任务文件和产物"));
+    expect(screen.queryByRole("region", { name: "能力拆分计划" })).not.toBeInTheDocument();
+    expect(mockedApi.mock.calls.filter(([path, init]) => path === "/api/mining/jobs/job-1" && init?.method === "DELETE")).toHaveLength(1);
+    expect(toastErr).not.toHaveBeenCalled();
+  });
+});
 
 function sharedFiles(workspace = "job-1/workspace") {
   return ["capability-plan.json", "evidence-map.md", "gaps.md", "review.json"].map((name) => ({

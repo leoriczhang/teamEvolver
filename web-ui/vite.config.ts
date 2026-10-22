@@ -30,6 +30,7 @@ export default defineConfig({
       'src/**/*.test.tsx',
       '../team_miner/skill_miner/frontend/**/*.test.tsx',
       '../team_miner/knowledge_miner/frontend/**/*.test.tsx',
+      '../team_miner/knowledge_miner/frontend/**/*.test.ts',
     ],
   },
   base: '/',

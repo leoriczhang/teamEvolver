@@ -63,10 +63,10 @@ return (
                 </select>
               </div>
               <div className="min-w-0 text-[11px] leading-5 text-muted-foreground">
-                <div className="truncate">{config?.endpoint || "尚未配置 OpenViking Endpoint"}</div>
+                <div className="truncate">{config?.endpoint || "使用平台统一 OpenViking 连接配置"}</div>
                 <div className="flex items-center gap-2">
                   <Pill tone={config?.account_source === "openviking" ? "green" : "amber"}>
-                    {config?.account_source === "openviking" ? "账号已同步" : "本地配置"}
+                    {config?.account_source === "openviking" ? "账号已同步" : "租户配置"}
                   </Pill>
                   <span>先选账号，再管理来源并启动 Compile</span>
                 </div>
@@ -144,7 +144,7 @@ return (
                   <option value={config?.wiki_root || ""}>当前工作区 · {config?.wiki_root}</option>
                   {wikiRoots.map((item) => (
                     <option key={item.uri} value={item.uri}>
-                      历史产物 · {item.name} · {item.page_count} 页
+                      历史产物 · {item.name}{item.page_count == null ? "" : ` · ${item.page_count} 页`}
                     </option>
                   ))}
                 </select>
@@ -217,7 +217,7 @@ return (
             ) : (
             <div className="grid h-[calc(100vh-245px)] min-h-[560px] grid-cols-[minmax(270px,0.38fr)_minmax(0,1fr)] gap-3">
               <Panel
-                className="flex min-h-0 flex-col"
+                className="knowledge-file-panel flex min-h-0 flex-col"
                 title={(
                   <span className="flex items-center gap-2">
                     {activeKind === "source" ? <FolderInput className="size-4 text-accent" /> : <BookOpenText className="size-4 text-accent" />}
@@ -343,7 +343,7 @@ return (
               </Panel>
 
               <Panel
-                className="flex min-h-0 flex-col"
+                className="knowledge-file-panel flex min-h-0 flex-col"
                 title={(
                   <span className="flex min-w-0 items-center gap-2">
                     <span className="flex shrink-0 items-center rounded-md border border-border bg-surface-subtle p-0.5" role="group" aria-label="文件浏览历史">

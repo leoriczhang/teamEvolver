@@ -34,6 +34,13 @@ import { Textarea } from "@/components/ui/textarea";
 import { fileToB64 } from "@/lib/file";
 import { toastErr, toastOk } from "@/lib/toast";
 import { cn } from "@/lib/utils";
+import {
+  normalizeCompileCapabilities, normalizeKnowledgeContent, normalizeKnowledgeTree, normalizeMiningConfig,
+  normalizeWikiGraph,
+} from "./knowledgeMiningResponses";
+import {
+  cancelKnowledgeTask, loadKnowledgeTask, submitKnowledgeTask, waitForKnowledgeCommand, type KnowledgeMiningReceipt,
+} from "./knowledgeMiningCommands";
 import { MiningConfig, TreeEntry, TreeResponse, CompileCapabilities, CompileProgress, MiningTask, KnowledgeContent, KnowledgeLink, KnowledgeBacklink, WikiGraphResponse, WikiRoot, FileVisit, FileNavigation, UploadProgressState, TreeNode, WorkspaceTab, EditorMode, WikiViewMode, ACTIVE_TASK_STATES, TERMINAL_TASK_STATES, KNOWLEDGE_UPLOAD_ACCEPT, uploadJson, commonVikingRoot, knowledgeWorkspaceRoot, resolveKnowledgeHref, formatBytes, taskTone, taskLabel, formatCompileTime, buildTree, filterTree, TreeList, taskLogLines } from "./KnowledgeBaseMiningViewShared";
 
 export function useKnowledgeBaseMiningView({ active }: { active: boolean }) {
@@ -60,6 +67,8 @@ const [selectedTreeEntry, setSelectedTreeEntry] = useState<TreeEntry | null>(nul
 const [selectedDirectoryUri, setSelectedDirectoryUri] = useState("");
 const [treeQuery, setTreeQuery] = useState("");
 const [selectedContent, setSelectedContent] = useState<KnowledgeContent | null>(null);
+const selectedContentRef = useRef(selectedContent);
+selectedContentRef.current = selectedContent;
 const [editorValue, setEditorValue] = useState("");
 const [originalContent, setOriginalContent] = useState("");
 const [editorMode, setEditorMode] = useState<EditorMode>("preview");
@@ -79,7 +88,7 @@ const folderInputRef = useRef<HTMLInputElement | null>(null);
 const logRef = useRef<HTMLPreElement | null>(null);
 const loadConfig = useCallback(async () => {
     try {
-      const next = await api<MiningConfig>("/api/knowledge-mining/config");
+      const next = normalizeMiningConfig(await api("/api/knowledge-mining/config"));
       setConfig(next);
       setSkillUri((previous) => previous || next.skill_uri);
       setWikiRoot((previous) => previous || next.wiki_root);
@@ -97,7 +106,7 @@ const loadWikiRoots = useCallback(async () => {
       const response = await api<{ default: string; roots: WikiRoot[] }>(
         `/api/knowledge-mining/wiki-roots?account=${encodeURIComponent(account)}`,
       );
-      const roots = response.roots || [];
+      const roots = (response.roots || []).filter((item) => item.uri !== config.wiki_root);
       setWikiRoots(roots);
       setWikiRoot((previous) => {
         if (previous && (previous === config.wiki_root || roots.some((item) => item.uri === previous))) {
@@ -116,12 +125,13 @@ const loadWikiGraph = useCallback(async () => {
     setLoadingWikiGraph(true);
     setWikiGraphError("");
     try {
-      const response = await api<WikiGraphResponse>("/api/knowledge-mining/graph", {
+      const request: RequestInit = {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: tenantHeaders("/api/knowledge-mining/graph", { "Content-Type": "application/json" }),
         body: JSON.stringify({ account, wiki_root: wikiRoot }),
-      });
-      setWikiGraph(response);
+      };
+      const response = await waitForKnowledgeCommand(await api("/api/knowledge-mining/graph", request), request);
+      setWikiGraph(normalizeWikiGraph(response, account, wikiRoot));
     } catch (error: any) {
       setWikiGraph(null);
       setWikiGraphError(error.message);
@@ -130,51 +140,61 @@ const loadWikiGraph = useCallback(async () => {
     }
   }, [account, wikiRoot]);
 const loadWorkspace = useCallback(async (notify = false) => {
-    if (!account || !wikiRoot) return;
+    if (!account || !wikiRoot || !config) return;
     setLoading(true);
     try {
-      const [source, wiki, taskList, compileCapabilities] = await Promise.all([
-        api<TreeResponse>(`/api/knowledge-mining/tree?account=${encodeURIComponent(account)}&kind=source`),
-        api<TreeResponse>(`/api/knowledge-mining/tree?account=${encodeURIComponent(account)}&kind=wiki&wiki_root=${encodeURIComponent(wikiRoot)}`),
-        api<{ tasks: MiningTask[] }>(`/api/knowledge-mining/tasks?account=${encodeURIComponent(account)}`),
-        api<CompileCapabilities>(`/api/knowledge-mining/capabilities?account=${encodeURIComponent(account)}`),
+      const results = await Promise.allSettled([
+        (async () => setSourceTree(normalizeKnowledgeTree(await api(
+          `/api/knowledge-mining/tree?account=${encodeURIComponent(account)}&kind=source`,
+        ), "source", config.source_root, account)))(),
+        (async () => setWikiTree(normalizeKnowledgeTree(await api(
+          `/api/knowledge-mining/tree?account=${encodeURIComponent(account)}&kind=wiki&wiki_root=${encodeURIComponent(wikiRoot)}`,
+        ), "wiki", wikiRoot, account)))(),
+        (async () => {
+          const taskList = await api<{ tasks: MiningTask[] }>(`/api/knowledge-mining/tasks?account=${encodeURIComponent(account)}`);
+          setTasks(taskList.tasks || []);
+          setSelectedTaskId((previous) => previous || taskList.tasks?.[0]?.task_id || "");
+        })(),
+        (async () => setCapabilities(normalizeCompileCapabilities(await api(
+          `/api/knowledge-mining/capabilities?account=${encodeURIComponent(account)}`,
+        ), account)))(),
       ]);
-      setSourceTree(source);
-      setWikiTree(wiki);
-      setTasks(taskList.tasks || []);
-      setCapabilities(compileCapabilities);
-      setSelectedTaskId((previous) => previous || taskList.tasks?.[0]?.task_id || "");
-      if (notify) toastOk("目录已刷新", account);
+      const failures = results.filter((result) => result.status === "rejected");
+      if (failures.length) {
+        if (results[3].status === "rejected") {
+          setCapabilities({ account, configured: null, can_create: false, reason_code: "能力检测失败" });
+        }
+        toastErr("部分工作区信息读取失败", failures.map((result) => String(result.reason?.message || result.reason)).join("；"));
+      } else if (notify) toastOk("目录已刷新", account);
     } catch (error: any) {
       toastErr("读取 OpenViking 目录失败", error.message);
     } finally {
       setLoading(false);
     }
-  }, [account, wikiRoot]);
+  }, [account, wikiRoot, config]);
 const loadTask = useCallback(async () => {
     if (!account || !selectedTaskId) {
       setSelectedTask(null);
       return;
     }
     try {
-      const response = await api<{ task: MiningTask }>(
-        `/api/knowledge-mining/tasks/${encodeURIComponent(selectedTaskId)}?account=${encodeURIComponent(account)}`,
-      );
+      const task = await loadKnowledgeTask(selectedTaskId, account);
+      if (task.task_id !== selectedTaskId) setSelectedTaskId(task.task_id);
       setSelectedTask((previous) => {
-        if (response.task.status === "completed" && previous?.status !== "completed") {
+        if (task.status === "completed" && previous?.status !== "completed") {
           setWikiGraph(null);
         }
-        return response.task;
+        return task;
       });
-      if (response.task.status === "completed") {
+      if (task.status === "completed") {
         const [wiki, compileCapabilities] = await Promise.all([
           api<TreeResponse>(
             `/api/knowledge-mining/tree?account=${encodeURIComponent(account)}&kind=wiki&wiki_root=${encodeURIComponent(wikiRoot)}`,
           ),
           api<CompileCapabilities>(`/api/knowledge-mining/capabilities?account=${encodeURIComponent(account)}`),
         ]);
-        setWikiTree(wiki);
-        setCapabilities(compileCapabilities);
+        setWikiTree(normalizeKnowledgeTree(wiki, "wiki", wikiRoot, account));
+        setCapabilities(normalizeCompileCapabilities(compileCapabilities, account));
       }
     } catch (error: any) {
       toastErr("读取挖掘任务失败", error.message);
@@ -210,15 +230,17 @@ useEffect(() => {
     void loadWorkspace(false);
   }, [active, account, loadWorkspace, wikiRoot]);
 useEffect(() => {
-    if (!active || workspaceTab !== "wiki" || wikiViewMode !== "graph" || wikiGraph || loadingWikiGraph) return;
+    if (!active || workspaceTab !== "wiki" || wikiViewMode !== "graph" || wikiGraph || loadingWikiGraph || wikiGraphError) return;
     void loadWikiGraph();
-  }, [active, loadWikiGraph, loadingWikiGraph, wikiGraph, wikiViewMode, workspaceTab]);
+  }, [active, loadWikiGraph, loadingWikiGraph, wikiGraph, wikiGraphError, wikiViewMode, workspaceTab]);
+const selectedTaskTerminal = selectedTask?.task_id === selectedTaskId
+    && TERMINAL_TASK_STATES.has(String(selectedTask?.status));
 useEffect(() => {
-    if (!active || !selectedTaskId) return;
+    if (!active || !selectedTaskId || selectedTaskTerminal) return;
     void loadTask();
     const timer = window.setInterval(() => void loadTask(), 2500);
     return () => window.clearInterval(timer);
-  }, [active, selectedTaskId, loadTask]);
+  }, [active, selectedTaskId, selectedTaskTerminal, loadTask]);
 useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" });
   }, [selectedTask]);
@@ -266,9 +288,9 @@ async function openFile(
     setVersionPanelOpen(false);
     setLoadingContent(true);
     try {
-      const response = await api<KnowledgeContent>(
+      const response = normalizeKnowledgeContent(await api(
         `/api/knowledge-mining/content?account=${encodeURIComponent(account)}&kind=${kind}&uri=${encodeURIComponent(entry.uri)}&wiki_root=${encodeURIComponent(requestWikiRoot)}`,
-      );
+      ), kind, account);
       if (options.activateWorkspace) {
         setWorkspaceTab(kind);
         setWikiViewMode("files");
@@ -346,27 +368,37 @@ function handleMarkdownLink(href: string): boolean {
   }
 async function saveFile() {
     if (!selectedContent || !selectedContent.editable || !contentDirty) return;
+    const savedFile = selectedContent;
+    const submittedContent = editorValue;
     setSavingContent(true);
     try {
-      const response = await api<{ content: string; link_index?: KnowledgeContent["link_index"] }>("/api/knowledge-mining/content", {
+      const request: RequestInit = {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: tenantHeaders("/api/knowledge-mining/content", { "Content-Type": "application/json" }),
         body: JSON.stringify({
           account,
-          kind: selectedContent.kind,
-          uri: selectedContent.uri,
+          kind: savedFile.kind,
+          uri: savedFile.uri,
           wiki_root: wikiRoot,
-          content: editorValue,
+          content: submittedContent,
           original_content: originalContent,
         }),
-      });
-      setEditorValue(response.content);
-      setOriginalContent(response.content);
-      setSelectedContent((previous) => previous && previous.uri === selectedContent.uri
-        ? { ...previous, content: response.content, link_index: response.link_index ?? previous.link_index }
-        : previous);
-      if (selectedContent.kind === "wiki") setWikiGraph(null);
-      toastOk("文件已保存", selectedContent.name);
+      };
+      await waitForKnowledgeCommand(await api("/api/knowledge-mining/content", request), request);
+      const response = normalizeKnowledgeContent(await api(
+        `/api/knowledge-mining/content?account=${encodeURIComponent(account)}&kind=${savedFile.kind}&uri=${encodeURIComponent(savedFile.uri)}`,
+        { headers: request.headers },
+      ), savedFile.kind, account);
+      const currentFile = selectedContentRef.current;
+      if (currentFile?.uri === savedFile.uri && currentFile.kind === savedFile.kind) {
+        setEditorValue((current) => current === submittedContent ? response.content : current);
+        setOriginalContent(response.content);
+        setSelectedContent((previous) => previous?.uri === savedFile.uri && previous.kind === savedFile.kind
+          ? { ...previous, ...response, links: response.links ?? [], backlinks: response.backlinks ?? [] }
+          : previous);
+      }
+      if (savedFile.kind === "wiki") setWikiGraph(null);
+      toastOk("文件已保存", savedFile.name);
     } catch (error: any) {
       toastErr("保存文件失败", error.message);
     } finally {
@@ -376,6 +408,9 @@ async function saveFile() {
 async function uploadFiles(files: File[]) {
     const parentUri = selectedDirectoryUri || activeRoot || "";
     if (!account || !parentUri || !files.length || (activeKind === "wiki" && !wikiRoot)) return;
+    const request: RequestInit = {
+      headers: tenantHeaders("/api/knowledge-mining/upload", { "Content-Type": "application/json" }),
+    };
     setUploading(true);
     const totalBytes = Math.max(1, files.reduce((total, file) => total + file.size, 0));
     let completedBytes = 0;
@@ -387,7 +422,7 @@ async function uploadFiles(files: File[]) {
       totalFiles: files.length,
     });
     try {
-      const payload: Array<{ name: string; relative_path: string; content_b64: string }> = [];
+      const payload: Array<{ path: string; content_b64: string }> = [];
       for (let index = 0; index < files.length; index += 1) {
         const file = files[index];
         const contentB64 = await fileToB64(file, (loaded) => {
@@ -401,15 +436,14 @@ async function uploadFiles(files: File[]) {
           });
         });
         payload.push({
-          name: file.name,
-          relative_path: (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name,
+          path: (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name,
           content_b64: contentB64,
         });
         completedBytes += file.size;
       }
-      const response = await uploadJson<{ file_count: number; parent_uri: string }>(
+      const accepted = await uploadJson<KnowledgeMiningReceipt | { files?: unknown[]; file_count?: number }>(
         "/api/knowledge-mining/upload",
-        { account, kind: activeKind, wiki_root: wikiRoot, parent_uri: parentUri, files: payload },
+        { account, kind: activeKind, directory_uri: parentUri, files: payload },
         (ratio) => setUploadProgress({
           percent: ratio >= 1 ? 85 : 35 + Math.round(ratio * 45),
           label: ratio >= 1 ? "OpenViking 正在转换并写入" : "正在上传",
@@ -417,16 +451,20 @@ async function uploadFiles(files: File[]) {
           completedFiles: ratio >= 1 ? files.length : 0,
           totalFiles: files.length,
         }),
+        request.headers,
       );
+      const response = await waitForKnowledgeCommand<{ files?: unknown[]; file_count?: number }>(accepted, request);
+      const fileCount = response.files?.length ?? response.file_count;
+      if (typeof fileCount !== "number") throw new Error("上传任务未返回已保存的文件列表");
       setUploadProgress({
         percent: 100,
         label: "上传完成",
         currentFile: "",
-        completedFiles: response.file_count,
-        totalFiles: response.file_count,
+        completedFiles: fileCount,
+        totalFiles: fileCount,
       });
       const targetLabel = activeKind === "source" ? "知识源" : "知识库";
-      toastOk(`${targetLabel}已上传`, `${response.file_count} 个文件已保存到 ${response.parent_uri}`);
+      toastOk(`${targetLabel}已上传`, `${fileCount} 个文件已保存到 ${parentUri}`);
       window.setTimeout(() => void loadWorkspace(false), 1200);
       window.setTimeout(() => setUploadProgress(null), 1800);
     } catch (error: any) {
@@ -445,16 +483,12 @@ async function deleteSelectedEntry() {
     if (!window.confirm(`确认删除${targetType}“${entry.name}”？此操作不可撤销。`)) return;
     setDeleting(true);
     try {
-      await api<{ deleted: boolean }>("/api/knowledge-mining/entry", {
+      const parameters = new URLSearchParams({ account, kind: activeKind, uri: entry.uri });
+      const request: RequestInit = {
         method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          account,
-          kind: activeKind,
-          wiki_root: wikiRoot,
-          uri: entry.uri,
-        }),
-      });
+        headers: tenantHeaders("/api/knowledge-mining/entry"),
+      };
+      await waitForKnowledgeCommand(await api(`/api/knowledge-mining/entry?${parameters}`, request), request, false);
       if (
         selectedContent
         && (selectedContent.uri === entry.uri || selectedContent.uri.startsWith(`${entry.uri}/`))
@@ -480,19 +514,16 @@ async function startMining() {
     if (!account || !config) return;
     setStarting(true);
     try {
-      const response = await api<{ task_id: string }>("/api/knowledge-mining/tasks", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const task = await submitKnowledgeTask({
           account,
           source_uri: config.source_root,
           target_uri: config.wiki_root,
           skill_uri: skillUri,
           instruction: instruction.trim(),
-        }),
       });
-      setSelectedTaskId(response.task_id);
-      toastOk("知识库挖掘已启动", `任务 ${response.task_id}`);
+      setSelectedTaskId(task.task_id);
+      setSelectedTask(task);
+      toastOk("知识库挖掘已受理", `任务 ${task.task_id}`);
       await loadWorkspace(false);
     } catch (error: any) {
       toastErr("启动知识库挖掘失败", error.message);
@@ -504,15 +535,7 @@ async function stopMining() {
     if (!account || !selectedTaskId) return;
     setStopping(true);
     try {
-      const response = await api<{ task: MiningTask }>(
-        `/api/knowledge-mining/tasks/${encodeURIComponent(selectedTaskId)}/cancel`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ account }),
-        },
-      );
-      setSelectedTask(response.task);
+      setSelectedTask(await cancelKnowledgeTask(selectedTaskId, account));
       toastOk("已请求停止任务", selectedTaskId);
     } catch (error: any) {
       toastErr("停止任务失败", error.message);

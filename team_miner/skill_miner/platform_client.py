@@ -11,7 +11,8 @@ import zipfile
 from starlette.exceptions import HTTPException
 
 from teamEvolver.openviking import OpenVikingClient
-from teamEvolver.tenants.registry import effective_config, get_current_tenant
+from teamEvolver.openviking.settings import effective as openviking_config
+from teamEvolver.tenants.registry import current_tenant_id
 
 from .skill_package import (  # noqa: F401
     _skill_content_signature,
@@ -28,12 +29,13 @@ def settings_parts(settings):
 
 async def create_client(services, settings):
     miner, _ = settings_parts(settings)
-    factory = services.extras.get("skill_mining_client_factory") or services.extras.get("miner_client_factory")
+    factory = (services.extras.get("skill_mining_client_factory")
+               or services.extras.get("miner_client_factory")
+               or services.extras.get("compile_client_factory"))
     if factory:
         client = factory(miner)
         return await client if inspect.isawaitable(client) else client
-    cfg = services.extras["config"]
-    cfg = effective_config(None, get_current_tenant(), cfg)
+    cfg = await openviking_config(services, current_tenant_id())
     return OpenVikingClient(endpoint=cfg.sharing_viking_endpoint, api_key=cfg.sharing_viking_api_key,
                             account_id=miner["account_id"], user=miner.get("user_id", ""),
                             deployment=cfg.sharing_viking_deployment)
