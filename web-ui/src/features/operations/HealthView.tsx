@@ -182,7 +182,9 @@ export default function HealthView({
       name: "对象存储",
       ok: !!storage?.reachable,
       detail: storage
-        ? storage.fallback_active
+        ? storage.effective_backend === "postgres" || storage.backend === "postgres"
+          ? `PostgreSQL · ${storage.reachable ? "可达" : "不可达"}`
+          : storage.fallback_active
           ? `内置本地存储（回退）· OpenViking ${storage.deployment === "local" ? "自建" : "火山云"}不可达`
           : storage.effective_backend === "local"
             ? `内置本地存储 · ${storage.mirror_enabled ? `技能镜像到 OpenViking${storage.mirror?.backlog ? `（积压 ${storage.mirror.backlog}）` : ""}` : "OpenViking 仅作技能镜像目标"}`
@@ -192,6 +194,8 @@ export default function HealthView({
         ? `OpenViking 暂不可用，数据正写入本地存储${storage.local_root ? `（${storage.local_root}）` : ""}；恢复后新数据自动回到 OpenViking，停机期间的本地数据不会自动回传`
         : storage?.reachable
           ? undefined
+          : storage?.effective_backend === "postgres" || storage?.backend === "postgres"
+            ? "检查 PostgreSQL 连接与存储池状态"
           : storage?.deployment === "local"
             ? "确认自建 openviking-server 已启动且网络可达（Endpoint 覆盖地址是否正确）"
             : "检查火山云 OpenViking Key 与网络连通",
@@ -211,7 +215,7 @@ export default function HealthView({
               `${storage.pg.reachable ? "可达" : "不可达"} · 延迟 ${storage.pg.ping_ms ?? "—"}ms · 连接 ${storage.pg.pool_idle ?? 0}/${storage.pg.pool_size ?? 0} 空闲 · 池上限 ${storage.pg.pool_max ?? "—"} · 租户 ${storage.pg.tenant_id || "default"}`,
             action: storage.pg.reachable
               ? undefined
-              : "PG 不可达：检查网络与 storage_pg.dsn（注意 .local 域名 mDNS 延迟），期间高频写路径依赖本地回退",
+              : "PG 不可达：检查数据库网络与连接配置",
           } satisfies Check,
         ]
       : []),
@@ -236,12 +240,11 @@ export default function HealthView({
 
   const saveDeployment = useCallback(
     async (settings: SharingUpdate) => {
-      const saved = await api<StorageStatus>("/api/sharing-config", {
+      await api<SharingConfig>("/api/sharing-config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(settings),
       });
-      setStorage(saved);
       toastOk(
         "已保存 OpenViking 设置",
         settings.deployment === "local" ? "本地自建" : "云端"
@@ -299,7 +302,6 @@ export default function HealthView({
 
       <DeploymentPanel
         sharing={sharing}
-        storage={storage}
         isAdmin={isAdmin && user?.platform_role === "platform_admin"}
         onSave={saveDeployment}
       />
@@ -309,7 +311,9 @@ export default function HealthView({
           <Info
             label="存储后端"
             value={
-              storage?.fallback_active
+              storage?.effective_backend === "postgres" || storage?.backend === "postgres"
+                ? "PostgreSQL"
+                : storage?.fallback_active
                 ? "内置存储 · 回退中"
                 : storage?.effective_backend === "local"
                   ? "内置本地存储"
@@ -355,12 +359,10 @@ function Td({ children }: { children: ReactNode }) {
 
 function DeploymentPanel({
   sharing,
-  storage,
   isAdmin,
   onSave,
 }: {
   sharing: SharingConfig | null;
-  storage: StorageStatus | null;
   isAdmin: boolean;
   onSave: (settings: SharingUpdate) => Promise<void>;
 }) {
@@ -379,16 +381,26 @@ function DeploymentPanel({
   useEffect(() => {
     if (dirty || !sharing) return;
     setDeployment((sharing.deployment as VikingDeployment) || "cloud");
-    setOverride(sharing.endpoint_override || "");
+    setOverride(sharing.endpoint ?? sharing.endpoint_override ?? "");
     setAccount(sharing.account || "default");
     setRootKey("");
     setRootKeyDirty(false);
   }, [sharing, dirty]);
 
-  const cloudEndpoint = sharing?.cloud_endpoint || "";
+  const cloudEndpoint = sharing?.cloud_endpoint || "https://api.vikingdb.cn-beijing.volces.com/openviking";
   const localEndpoint = sharing?.local_endpoint || "http://localhost:1933";
   const effectiveEndpoint =
     override.trim() || (deployment === "local" ? localEndpoint : cloudEndpoint);
+  const normalizeEndpoint = (endpoint: string | undefined) => (endpoint || "").trim().replace(/\/+$/, "");
+  const currentReport = !dirty && dirsReport
+    && normalizeEndpoint(dirsReport.endpoint) === normalizeEndpoint(effectiveEndpoint)
+    && dirsReport.account_id === (account.trim() || "default")
+    ? dirsReport : null;
+  const reportOk = currentReport?.action === "ok"
+    && !currentReport.error && !currentReport.errors?.length;
+  const checkStatus = currentReport
+    ? reportOk ? "目录检查通过" : currentReport.action === "partial" ? "部分目录检查失败" : "目录检查失败"
+    : dirty ? "未检查（请先保存设置）" : "未检查";
 
   async function handleSave() {
     setSaving(true);
@@ -399,8 +411,9 @@ function DeploymentPanel({
         account: account.trim() || "default",
         // team_user / root_prefix are no longer user-configurable: the account
         // is the tenant boundary, so the backend keeps its internal defaults.
-        ...(rootKeyDirty ? { api_key: rootKey } : {}),
+        ...(rootKeyDirty && rootKey.trim() ? { api_key: rootKey } : {}),
       });
+      setDirsReport(null);
       setDirty(false);
     } catch (e: any) {
       toastErr("保存失败", e.message);
@@ -414,7 +427,9 @@ function DeploymentPanel({
   // directories are never modified. Mainly used to repair accounts created
   // before the automatic bootstrap existed.
   async function handleBootstrapDirs() {
+    if (dirty || !sharing) return;
     setBootstrapping(true);
+    setDirsReport(null);
     try {
       const result = await runSkillCommand<{ openviking_dirs: VikingDirsReport }>(
         "/api/sharing-config/bootstrap-dirs",
@@ -429,7 +444,10 @@ function DeploymentPanel({
       const summary =
         `新建 ${report.created?.length || 0} 个 · 已存在 ${report.existing?.length || 0} 个` +
         (report.errors?.length ? ` · ${report.errors.length} 个失败` : "");
-      if (report.action === "failed") {
+      if (normalizeEndpoint(report.endpoint) !== normalizeEndpoint(effectiveEndpoint)
+        || report.account_id !== (account.trim() || "default")) {
+        toastErr("目录检查结果与当前设置不一致", `Endpoint=${report.endpoint || "—"}，Account=${report.account_id || "—"}`);
+      } else if (report.action !== "ok" || report.error || report.errors?.length) {
         toastErr("目录检查失败", report.error || report.errors?.[0]?.error || "OpenViking 不可用");
       } else {
         toastOk("OpenViking 目录已就绪", summary);
@@ -490,6 +508,7 @@ function DeploymentPanel({
             Endpoint 覆盖（自建远程地址填这里，如 http://openviking.example.com:1933；留空使用默认地址）
           </div>
           <Input
+            aria-label="OpenViking Endpoint"
             value={override}
             disabled={!isAdmin}
             placeholder={deployment === "local" ? localEndpoint : cloudEndpoint}
@@ -499,13 +518,8 @@ function DeploymentPanel({
             }}
           />
           <div className="mt-1.5 text-[11px] text-muted-soft">
-            生效地址：<span className="mono break-all">{effectiveEndpoint || "—"}</span>
-            {storage ? (
-              <>
-                {" · "}当前{" "}
-                {storage.reachable ? "可达" : "不可达"}
-              </>
-            ) : null}
+            {dirty ? "待保存地址" : "生效地址"}：<span className="mono break-all">{effectiveEndpoint || "—"}</span>
+            {" · "}{checkStatus}
           </div>
         </div>
 
@@ -533,17 +547,18 @@ function DeploymentPanel({
           <div className="flex justify-end gap-2">
             <Button
               variant="outline"
-              disabled={bootstrapping}
+              disabled={bootstrapping || saving || dirty || !sharing}
+              title={dirty ? "请先保存部署设置，再检查目录" : undefined}
               onClick={handleBootstrapDirs}
             >
               {bootstrapping ? "检查中…" : "检查并补齐目录"}
             </Button>
             <Button
               variant="outline"
-              disabled={saving || !dirty}
+              disabled={saving || bootstrapping || !dirty}
               onClick={() => {
                 setDeployment((sharing?.deployment as VikingDeployment) || "cloud");
-                setOverride(sharing?.endpoint_override || "");
+                setOverride(sharing?.endpoint ?? sharing?.endpoint_override ?? "");
                 setAccount(sharing?.account || "default");
                 setRootKey("");
                 setRootKeyDirty(false);
@@ -552,7 +567,7 @@ function DeploymentPanel({
             >
               重置
             </Button>
-            <Button disabled={saving || !dirty} onClick={handleSave}>
+            <Button disabled={saving || bootstrapping || !dirty} onClick={handleSave}>
               {saving ? "保存中…" : "保存部署设置"}
             </Button>
           </div>
@@ -564,7 +579,9 @@ function DeploymentPanel({
 
         {dirsReport ? (
           <div className="rounded-lg border border-border bg-background/60 p-3 text-xs leading-relaxed text-muted-foreground">
-            目录检查（account=<span className="mono break-all">{dirsReport.account_id || "—"}</span>）：
+            {currentReport ? "目录检查" : "上次检查（与当前设置不一致）"}
+            （Endpoint=<span className="mono break-all">{dirsReport.endpoint || "—"}</span>，
+            account=<span className="mono break-all">{dirsReport.account_id || "—"}</span>）：
             新建 <span className="font-semibold">{dirsReport.created?.length || 0}</span> 个 ·
             已存在 <span className="font-semibold">{dirsReport.existing?.length || 0}</span> 个
             {dirsReport.errors?.length ? (
@@ -606,6 +623,7 @@ function ConfigInput({
     <div>
       <div className="mb-1.5 text-xs font-semibold text-muted-foreground">{label}</div>
       <Input
+        aria-label={label}
         type={type}
         value={value}
         disabled={disabled}

@@ -104,6 +104,8 @@ curl -X POST http://localhost:52010/api/auth/register \
 
 全局设置保存在 `teamevolver_config`，租户设置保存在 `tenant_configs`，写入使用 revision 乐观锁。凭证以 Secret Ref 加密保存，需要 `TEAMEVOLVER_SECRET_MASTER_KEY`（未设置时使用 `TEAMEVOLVER_ROOT_API_KEY` 作为主密钥），两者都缺失返回 503。
 
+保存 OpenViking 设置只确认配置已持久化，不表示服务可达。目录检查由 Worker 读取数据库中的生效配置并解析凭证引用后执行；检查结果以任务结果中的 `openviking_dirs.action` 和 `errors` 为准，`endpoint` 表示实际连接的地址。`/api/storage/status` 返回的是 PostgreSQL 状态，不能用于判断 OpenViking 连通性。
+
 ## 个人 Skill 与发布申请
 
 个人 Skill 保存在 OpenViking 个人空间（`personal_skills` 作用域）。

@@ -35,9 +35,6 @@ export interface StorageStatus {
     pool_max?: number;
     tenant_id?: string;
   };
-  // Present on the sharing-config save response: OpenViking directory skeleton
-  // check/create result for the just-saved connection.
-  openviking_dirs?: VikingDirsReport;
 }
 
 export type VikingDeployment = "cloud" | "local";

@@ -104,6 +104,8 @@ Tenant configuration overrides use the flat field names of `TeamEvolverConfig`. 
 
 Global settings are stored in `teamevolver_config` and tenant settings in `tenant_configs`, with revision optimistic locking. Credentials are encrypted as Secret Refs and need `TEAMEVOLVER_SECRET_MASTER_KEY` (falling back to `TEAMEVOLVER_ROOT_API_KEY` as master key when unset); when both are missing the response is 503.
 
+Saving OpenViking settings confirms persistence, not service connectivity. The Worker checks directories using the effective database configuration and resolved credential reference. Inspect `openviking_dirs.action` and `errors` in the task result; `endpoint` identifies the address actually contacted. `/api/storage/status` reports PostgreSQL status and does not establish OpenViking connectivity.
+
 ## Personal Skills and Publish Requests
 
 Personal Skills are stored in the OpenViking personal space (`personal_skills` scope).
