@@ -185,8 +185,8 @@ export interface EvidenceClassification {
   insufficient_evidence?: Array<string | Record<string, unknown>>;
 }
 
-export interface EvolveHistoryCycle {
-  timestamp?: string;
+export interface EvolveHistoryResult {
+  status?: string;
   session_ids?: string[];
   sessions?: number | null;
   skill_groups?: number | null;
@@ -205,10 +205,19 @@ export interface EvolveHistoryCycle {
     evidence_classification?: EvidenceClassification;
     version?: number | null;
     job_id?: string;
+    candidate_id?: string;
+    candidate_revision?: number;
     session_ids?: string[];
     file_changes?: Array<{ path?: string; operation?: string; reason?: string }>;
   }[];
-  [key: string]: any;
+}
+
+export interface EvolveHistoryCycle extends EvolveHistoryResult {
+  command_id?: string;
+  created_at?: string;
+  finished_at?: string | null;
+  result?: EvolveHistoryResult | null;
+  timestamp?: string;
 }
 
 export interface SkillExperience {
