@@ -4,6 +4,7 @@ import { Dialog,DialogContent,DialogFooter,DialogHeader,DialogTitle } from "@/co
 import { Input } from "@/components/ui/input";
 import { runSkillCommand } from "@/features/skills/api/skillJobs";
 import { fileToB64 } from "@/lib/file";
+import { createRequestId } from "@/lib/requestId";
 import { toastErr,toastOk } from "@/lib/toast";
 import { useEffect,useState,type ReactNode } from "react";
 
@@ -93,7 +94,7 @@ export default function SkillTransferModal({ direction, onClose, onImported, sel
       const path = `/api/skills/${direction}`;
       const body = importing ? { channel, options, conflict } : { channel, options, names };
       const value = await runSkillCommand<TransferResult>(path, {
-        method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+        method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": createRequestId() },
         body: JSON.stringify(body),
       }, "/api/skills/transfer");
       if (getActiveTenantId() !== startedTenant) return;
