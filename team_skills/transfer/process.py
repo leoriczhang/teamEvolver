@@ -19,8 +19,13 @@ def check_workspace(root):
     size = count = 0
     for directory, _dirs, files in os.walk(root, followlinks=False):
         for name in files:
+            try:
+                file_size = os.lstat(Path(directory) / name).st_size
+            except FileNotFoundError:
+                # Git can remove temporary lock files while the child is running.
+                continue
             count += 1
-            size += os.lstat(Path(directory) / name).st_size
+            size += file_size
             if count > MAX_GIT_FILES or size > MAX_GIT_BYTES:
                 raise TransferError("Git 工作目录大小或文件数量超出限制", 413)
 

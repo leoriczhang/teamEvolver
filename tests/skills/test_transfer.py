@@ -4,6 +4,7 @@ import io
 import json
 import subprocess
 import zipfile
+from pathlib import Path
 
 import httpx
 import pytest
@@ -200,5 +201,29 @@ def test_git_bounds_and_environment_isolation(tmp_path, monkeypatch):
             run("--version")
     monkeypatch.setattr(process, "MAX_GIT_BYTES", 2)
     (tmp_path / "big").write_bytes(b"abc")
+    with pytest.raises(TransferError, match="大小"):
+        process.check_workspace(tmp_path)
+
+
+def test_git_workspace_scan_tolerates_removed_lock_without_skipping_limits(tmp_path, monkeypatch):
+    from team_skills.transfer import process
+
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    lock = git_dir / "packed-refs.lock"
+    lock.write_bytes(b"temporary")
+    (tmp_path / "SKILL.md").write_bytes(b"x")
+    real_lstat = process.os.lstat
+
+    def remove_lock_before_stat(path, *args, **kwargs):
+        if Path(path) == lock:
+            lock.unlink()
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(process.os, "lstat", remove_lock_before_stat)
+    monkeypatch.setattr(process, "MAX_GIT_FILES", 1)
+    process.check_workspace(tmp_path)
+    assert not lock.exists()
+    monkeypatch.setattr(process, "MAX_GIT_BYTES", 0)
     with pytest.raises(TransferError, match="大小"):
         process.check_workspace(tmp_path)
