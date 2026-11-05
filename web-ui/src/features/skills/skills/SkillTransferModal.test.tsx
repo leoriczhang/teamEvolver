@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { webcrypto } from "node:crypto";
+
 import { api } from "@/api/client";
 import { runSkillCommand } from "@/features/skills/api/skillJobs";
 import SkillTransferModal from "@/features/skills/skills/SkillTransferModal";
@@ -20,6 +22,32 @@ beforeEach(() => {
 });
 
 describe("Skill transfer", () => {
+  it("submits ZIP imports when randomUUID is unavailable", async () => {
+    vi.stubGlobal("crypto", { getRandomValues: webcrypto.getRandomValues.bind(webcrypto) });
+    vi.mocked(runSkillCommand).mockResolvedValue({
+      imported: [{ name: "demo", version: 1, status: "created" }], skipped: [], errors: [],
+    });
+    const imported = vi.fn();
+    render(<SkillTransferModal direction="import" onClose={vi.fn()} onImported={imported} />);
+    fireEvent.change(screen.getByLabelText("ZIP 文件"), {
+      target: { files: [new File(["fixture zip"], "skill.zip", { type: "application/zip" })] },
+    });
+    const submit = screen.getByRole("button", { name: "导入 Skill" });
+    await waitFor(() => expect(submit).toBeEnabled());
+    fireEvent.click(submit);
+    await waitFor(() => expect(imported).toHaveBeenCalledOnce());
+    expect(runSkillCommand).toHaveBeenCalledOnce();
+    const [path, request, resultRoot] = vi.mocked(runSkillCommand).mock.calls[0];
+    expect(path).toBe("/api/skills/import");
+    expect(new Headers(request.headers).get("Idempotency-Key"))
+      .toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(JSON.parse(request.body as string)).toEqual({
+      channel: "zip", conflict: "replace", options: { zip_b64: btoa("fixture zip") },
+    });
+    expect(resultRoot).toBe("/api/skills/transfer");
+    expect(await screen.findByRole("status")).toHaveTextContent("demo · v1 · 新增");
+  });
+
   it("submits Git import options and keeps partial failures visible", async () => {
     vi.mocked(runSkillCommand).mockResolvedValue({
       imported: [{ name: "demo", version: 3, status: "updated" }], skipped: [], errors: [{ name: "bad", error: "存储失败" }],

@@ -45,7 +45,10 @@ async def evolve(task, services):
             import asyncio
 
             from teamEvolver.admin.openviking_dirs import ensure_openviking_dirs
-            result = await asyncio.to_thread(ensure_openviking_dirs, services.extras["config"],
+            from teamEvolver.openviking.settings import effective as openviking_config
+
+            config = await openviking_config(services, task.tenant_id)
+            result = await asyncio.to_thread(ensure_openviking_dirs, config,
                                              account_id=payload["account"])
             async with services.tx.tenant_tx(task.tenant_id) as conn:
                 await services.tasks.require_current(conn, task)

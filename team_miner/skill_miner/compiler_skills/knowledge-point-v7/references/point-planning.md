@@ -1,0 +1,7 @@
+# 从紧凑目录判断本轮范围
+
+只读assignment.json开头80行取得一个实际输入ID，调用inspect_assignment。
+以返回的原知识点目录、本轮真实反馈和mining_intent确定write_set，旧定位不提供事实。
+不要为看全旧文件目录分页读assignment；脚本已经处理完整输入。
+将选定ID和create/revise操作交给plan_collection，脚本只继承六份完整原文和选定旧Markdown。
+直接按next_tool_call.arguments提交emit，result_ref为顶层参数。

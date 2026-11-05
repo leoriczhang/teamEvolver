@@ -29,11 +29,15 @@ import TenantsView from "@/features/tenants/TenantsView";
 import { hasOpenVikingConfiguration } from "@/lib/sharing";
 import { toastErr,toastOk } from "@/lib/toast";
 import { cn } from "@/lib/utils";
-import KnowledgeBaseMiningView from "@miner/KnowledgeBaseMiningView";
-import { Activity,BookMarked,BookOpenText,Building2,ChevronsUpDown,ClipboardCheck,DownloadCloud,Filter,FolderTree,HardDrive,History,LayoutDashboard,ListChecks,LogOut,RefreshCw,SlidersHorizontal,TerminalSquare,Users } from "lucide-react";
+import KnowledgeBaseMiningView from "@knowledge-miner/KnowledgeBaseMiningView";
+import MiningView, { type MinePage } from "@skill-miner/MiningView";
+import { Activity,BookMarked,BookOpenText,Building2,ChevronsUpDown,ClipboardCheck,Database,DownloadCloud,Filter,FolderTree,HardDrive,History,LayoutDashboard,ListChecks,LogOut,RefreshCw,SlidersHorizontal,TerminalSquare,Users } from "lucide-react";
 import { useCallback,useEffect,useState,type ReactNode } from "react";
 
 type ViewKey =
+  | "mine-overview"
+  | "mine-sources"
+  | "mine-jobs"
   | "mine-knowledge-base"
   | "review-center"
   | "dashboard"
@@ -53,7 +57,13 @@ type ViewKey =
   | "identity-audit"
   | "model";
 type DashTab = "overview" | "candidates" | "audit" | "filter";
-type StandaloneViewKey = Exclude<ViewKey, "dashboard">;
+type MiningViewKey = "mine-overview" | "mine-sources" | "mine-jobs";
+type StandaloneViewKey = Exclude<ViewKey, MiningViewKey | "dashboard">;
+const MINE_PAGES: { key: MiningViewKey; page: MinePage }[] = [
+  { key: "mine-overview", page: "overview" },
+  { key: "mine-sources", page: "sources" },
+  { key: "mine-jobs", page: "jobs" },
+];
 
 const NAV_SECTIONS: {
   id: string;
@@ -71,6 +81,9 @@ const NAV_SECTIONS: {
     id: "mining",
     label: "技能挖掘",
     items: [
+      { key: "mine-overview", label: "挖掘总览", icon: LayoutDashboard, adminOnly: true, requiresOpenViking: true },
+      { key: "mine-sources", label: "知识源", icon: Database, adminOnly: true, requiresOpenViking: true },
+      { key: "mine-jobs", label: "Skill 挖掘", icon: ListChecks, adminOnly: true, requiresOpenViking: true },
       { key: "mine-knowledge-base", label: "知识库挖掘", icon: BookOpenText, adminOnly: true, requiresOpenViking: true },
     ],
   },
@@ -314,6 +327,7 @@ const DASH_PAGE_META: Record<DashTab, { title: string; description: string }> = 
 
 export default function App() {
   const [view, setView] = useState<ViewKey>(initialView);
+  const [mineInputDir, setMineInputDir] = useState("");
   const [perspective, setPerspective] = useState("knowledge-manager");
   const [dashTab, setDashTab] = useState<DashTab>(() => {
     const tab = new URLSearchParams(window.location.search).get("tab");
@@ -419,10 +433,12 @@ export default function App() {
   const isAdmin = auth?.user?.role === "admin";
   const isPlatform = auth?.user?.platform_role === "platform_admin";
   const hasTenant = !!auth?.active_tenant_id;
+  const canManageMining = auth?.user?.tenant_role === "tenant_admin" || isPlatform;
   const tenants = auth?.available_tenants || [];
   const canView = (key: ViewKey) => {
     const item = NAV_SECTIONS.flatMap(s => s.items).find(i => i.key === key);
     if (item?.platformOnly) return isPlatform;
+    if (key.startsWith("mine-")) return hasTenant && canManageMining;
     return hasTenant && (!item?.adminOnly || isAdmin);
   };
   // Set the gate DURING RENDER (not in an effect): child view effects fire
@@ -609,6 +625,33 @@ export default function App() {
           <p className="mt-2 text-sm text-muted-foreground">{hasTenant ? "请从左侧选择可用页面。" : "请从左侧选择所属租户；若没有可选租户，请联系租户管理员添加成员关系。你的账号 ID：" + auth.user?.id}</p>
           <Button className="mt-4" variant="outline" onClick={() => void refreshAuth()}>刷新权限</Button>
         </div>}
+        {MINE_PAGES.map(({ key, page }) => canView(key) && (
+          <div key={`${key}:${activeTenantId}:${auth.user?.id}`} className={cn(view !== key && "hidden")}>
+            {openVikingConfigChecked && !openVikingConfigured && view === key ? (
+              <OpenVikingRequiredNotice onConfigure={() => setView("health")} />
+            ) : openVikingConfigured ? (
+              <MiningView
+                active={view === key}
+                page={page}
+                user={auth.user}
+                preferredInputDir={mineInputDir}
+                onInputDirChange={setMineInputDir}
+                onNavigate={(destination) => {
+                  if (destination === "candidates") {
+                    setDashTab("candidates");
+                    setView("dashboard");
+                    return;
+                  }
+                  if (destination === "skills") {
+                    setView("workspace");
+                    return;
+                  }
+                  setView(`mine-${destination}` as MiningViewKey);
+                }}
+              />
+            ) : null}
+          </div>
+        ))}
         {canView("dashboard") && view === "dashboard" && <div>
           <PageHeader
             title={DASH_PAGE_META[dashTab].title}

@@ -1,6 +1,6 @@
 # 知识库挖掘指南
 
-知识库挖掘把 OpenViking 中的原始知识目录编译为结构化 Wiki。编译由 OpenViking 原生 Compile 使用挖掘 Skill 执行；teamEvolver 负责受理、权限、任务持久化、取消与结果核对。代码位于 `team_miner/`，控制台页面位于 `team_miner/frontend/`。接口细节见 [知识库挖掘 API](../api/22-knowledge-mining.md)。
+知识库挖掘把 OpenViking 中的原始知识目录编译为结构化 Wiki。编译由 OpenViking 原生 Compile 使用挖掘 Skill 执行；teamEvolver 负责受理、权限、任务持久化、取消与结果核对。代码位于 `team_miner/knowledge_miner/`，控制台页面位于 `team_miner/knowledge_miner/frontend/`，与 `team_miner/skill_miner/` 中的 Skill 挖掘独立维护。接口细节见 [知识库挖掘 API](../api/22-knowledge-mining.md)。
 
 ## 前置条件
 

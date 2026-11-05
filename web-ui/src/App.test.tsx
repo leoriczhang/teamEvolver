@@ -87,6 +87,17 @@ vi.mock("@/features/skills/SkillWorkbenchView", () => ({
 }));
 vi.mock("@/features/tenants/TenantsView", () => ({ default: () => <div>tenants-body</div> }));
 
+vi.mock("@knowledge-miner/KnowledgeBaseMiningView", () => ({ default: ({ active }: { active: boolean }) => active ? <div>knowledge-miner-body</div> : null }));
+vi.mock("@skill-miner/MiningView", () => ({
+  default: ({ active, page, onNavigate }: { active: boolean; page: string; onNavigate: (destination: string) => void }) => active ? (
+    <div>
+      <div>skill-miner-{page}</div>
+      <button onClick={() => onNavigate("candidates")}>open-mined-candidates</button>
+      <button onClick={() => onNavigate("sources")}>open-mining-sources</button>
+    </div>
+  ) : null,
+}));
+
 beforeEach(() => {
   state.customerMode = true;
   state.openVikingConfigured = true;
@@ -311,5 +322,62 @@ describe("original console functionality", () => {
     expect(await screen.findByText("尚未进入可访问的租户")).toBeVisible();
     expect(screen.queryByText("dashboard-body")).not.toBeInTheDocument();
     expect(screen.queryByText("skill-workbench-body")).not.toBeInTheDocument();
+  });
+});
+
+
+describe("separate Skill and knowledge mining navigation", () => {
+  it("keeps all mining entrypoints and routes mined candidates to the existing review page", async () => {
+    render(<App />);
+    const navigation = await screen.findByRole("navigation", { name: "主导航" });
+    fireEvent.click(await within(navigation).findByRole("button", { name: "挖掘总览" }));
+    expect(await screen.findByText("skill-miner-overview")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "open-mining-sources" }));
+    expect(screen.getByText("skill-miner-sources")).toBeVisible();
+    fireEvent.click(within(navigation).getByRole("button", { name: "Skill 挖掘" }));
+    expect(screen.getByText("skill-miner-jobs")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "open-mined-candidates" }));
+    expect(screen.getByText("review-body")).toBeVisible();
+    fireEvent.click(within(navigation).getByRole("button", { name: "知识库挖掘" }));
+    expect(screen.getByText("knowledge-miner-body")).toBeVisible();
+  });
+
+  it.each(["mine-overview", "mine-sources", "mine-jobs"])("preserves direct links to %s", async (view) => {
+    window.history.replaceState(null, "", `/?view=${view}`);
+    render(<App />);
+    expect(await screen.findByText(`skill-miner-${view.slice(5)}`)).toBeVisible();
+  });
+
+  it("requires OpenViking before mounting a Skill mining page", async () => {
+    state.openVikingConfigured = false;
+    window.history.replaceState(null, "", "/?view=mine-jobs");
+    render(<App />);
+    expect(await screen.findByText("该功能需要先连接 OpenViking")).toBeVisible();
+    expect(screen.queryByText("skill-miner-jobs")).not.toBeInTheDocument();
+  });
+
+  it("hides every mining entry and blocks direct links for ordinary tenant members", async () => {
+    state.role = "user";
+    state.platform = false;
+    window.history.replaceState(null, "", "/?view=mine-jobs");
+    render(<App />);
+    const navigation = await screen.findByRole("navigation", { name: "主导航" });
+    for (const name of ["挖掘总览", "知识源", "Skill 挖掘", "知识库挖掘"]) {
+      expect(within(navigation).queryByRole("button", { name })).not.toBeInTheDocument();
+    }
+    expect(screen.getByText("当前身份无权管理此页面")).toBeVisible();
+    expect(screen.queryByText("skill-miner-jobs")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { role: "user", tenant_role: "tenant_admin", platform_role: "user" },
+    { role: "user", tenant_role: "member", platform_role: "platform_admin" },
+  ])("uses current role fields for mining access: %j", async (user) => {
+    vi.mocked(api).mockResolvedValueOnce({
+      authenticated: true, active_tenant_id: "default", available_tenants: [], user: { id: "operator", ...user },
+    });
+    window.history.replaceState(null, "", "/?view=mine-jobs");
+    render(<App />);
+    expect(await screen.findByText("skill-miner-jobs")).toBeVisible();
   });
 });

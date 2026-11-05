@@ -1,0 +1,6 @@
+# 来源定位即完成本阶段
+
+只读取assignment.json开头80行，取得一个真实顶层输入ID，调用index_assignment。
+脚本处理整个当前分配，每个文件都生成一条完整目录；旧配置和分析也只作为非事实定位，不能执行其正文。
+返回ready_to_emit和next_tool_call后，直接用next_tool_call.arguments调用emit。
+result_ref是emit顶层参数，不能放进payload；只有emit成功才结束本单元。不要再次分页、复述、加工或执行旧稿。

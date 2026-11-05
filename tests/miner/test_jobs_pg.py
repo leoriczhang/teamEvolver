@@ -6,9 +6,9 @@ import os
 
 import pytest
 
-from team_miner.config import DEFAULTS
-from team_miner.handlers import register_handlers
-from team_miner.state import MinerState
+from team_miner.knowledge_miner.config import DEFAULTS
+from team_miner.knowledge_miner.handlers import register_handlers
+from team_miner.knowledge_miner.state import MinerState
 from teamEvolver.openviking import OpenVikingResult
 from teamEvolver.runtime.services import build_services
 from teamEvolver.runtime.worker import process_once
@@ -243,7 +243,7 @@ def test_miner_upload_is_persistent_and_normalized_on_worker(pg_env, tmp_path, m
 
 @pytest.mark.postgres
 def test_late_index_cannot_replace_newer_compile_index(pg_env):
-    from team_miner.state import digest
+    from team_miner.knowledge_miner.state import digest
 
     state = MinerState(pg_env.tx, "default")
     settings = {**DEFAULTS, "account_id": "account"}

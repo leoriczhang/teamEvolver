@@ -308,4 +308,40 @@
 | POST | `/api/knowledge-mining/upload` |
 | GET | `/api/knowledge-mining/wiki-roots` |
 
-共 219
+## Skill 挖掘
+
+详细说明：[17-skill-mining.md](../api/17-skill-mining.md)
+
+| Method | Path |
+| --- | --- |
+| GET | `/api/mined-jobs/{identifier}` |
+| POST | `/api/mined-jobs/{job_id}/skills/{skill_name}/submit` |
+| GET | `/api/mining/artifacts/content` |
+| POST | `/api/mining/artifacts/content` |
+| GET | `/api/mining/config` |
+| GET | `/api/mining/input-sources` |
+| GET | `/api/mining/input-sources/{source_id}` |
+| GET | `/api/mining/jobs` |
+| POST | `/api/mining/jobs` |
+| DELETE | `/api/mining/jobs/{job_id}` |
+| GET | `/api/mining/jobs/{job_id}` |
+| POST | `/api/mining/jobs/{job_id}/continue` |
+| POST | `/api/mining/jobs/{job_id}/finish` |
+| POST | `/api/mining/jobs/{job_id}/resume` |
+| POST | `/api/mining/jobs/{job_id}/stop` |
+| POST | `/api/mining/jobs/{job_id}/supplements` |
+| DELETE | `/api/mining/ov-entry` |
+| GET | `/api/mining/ov-source-content` |
+| POST | `/api/mining/ov-source-content` |
+| GET | `/api/mining/ov-source-tree` |
+| POST | `/api/mining/ov-source-upload` |
+| GET | `/api/mining/ov-sources` |
+| POST | `/api/mining/ov-sources` |
+| DELETE | `/api/mining/ov-sources/{source_id}` |
+| PATCH | `/api/mining/ov-sources/{source_id}` |
+| GET | `/api/mining/ov-tree` |
+| POST | `/api/mining/prompts/{stage_id}/reset` |
+| GET | `/api/mining/settings` |
+| POST | `/api/mining/settings` |
+
+共 248

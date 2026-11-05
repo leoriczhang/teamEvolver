@@ -1,1 +1,1 @@
-"""OpenViking-backed knowledge-base mining routes and console components."""
+"""Independent knowledge and Skill mining businesses, composed by the platform."""

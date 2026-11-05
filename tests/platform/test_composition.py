@@ -101,10 +101,10 @@ def test_worker_applies_console_tracing_config_to_langfuse_runtime(monkeypatch):
 
 def test_new_miner_paths_have_no_other_business_implementation_imports():
     paths = [
-        ROOT / "team_miner" / name
+        ROOT / "team_miner/knowledge_miner" / name
         for name in ("config.py", "schemas.py", "openviking.py", "state.py", "handlers.py", "links.py")
     ]
-    paths.extend((ROOT / "team_miner/api").rglob("*.py"))
+    paths.extend((ROOT / "team_miner/knowledge_miner/api").rglob("*.py"))
     for path in paths:
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):

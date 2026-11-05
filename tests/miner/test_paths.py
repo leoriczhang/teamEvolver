@@ -2,8 +2,8 @@
 
 import pytest
 
-from team_miner.schemas import relative_path, uri
-from team_miner.state import digest
+from team_miner.knowledge_miner.schemas import relative_path, uri
+from team_miner.knowledge_miner.state import digest
 
 
 @pytest.mark.parametrize("path", ["/a.md", "../a.md", ".hidden/a.md", "a/..", "a/%2e%2e/b", "a\\b", "C:/a"])
@@ -33,7 +33,7 @@ def test_receipt_identity_is_deterministic():
 
 def test_memory_and_miner_use_one_compile_implementation():
     import team_memory.openviking as memory
-    import team_miner.openviking as miner
+    import team_miner.knowledge_miner.openviking as miner
     from teamEvolver.openviking.compile import CompileClient
 
     assert memory.CompileClient is miner.CompileClient is CompileClient

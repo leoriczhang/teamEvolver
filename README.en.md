@@ -164,7 +164,9 @@ team-evolver/
 ├── team_replay/          # True Replay, Test Datasets, Replay Adapter
 ├── team_ma/              # MA connections, collection, managed versions and pull consumption
 ├── team_memory/          # team Memory aggregation, DreamCycle maintenance, Memory Replay
-├── team_miner/           # knowledge base mining
+├── team_miner/           # mining composition entrypoints
+│   ├── knowledge_miner/ # knowledge base mining: documents → Wiki
+│   └── skill_miner/     # Skill mining: documents → Skill packages
 ├── web-ui/               # React + TypeScript console sources
 ├── tests/                # unit, integration, architecture and docs contract tests
 └── docs/                 # bilingual Markdown docs

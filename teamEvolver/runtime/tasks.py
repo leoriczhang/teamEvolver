@@ -33,6 +33,8 @@ TASK_KINDS: tuple[str, ...] = (
     # Team Miner 
     "miner.track_compile",
     "miner.rebuild_index",
+    "miner.skill_operation",
+    "miner.skill_compile",
     # Managed Agents connection consumers
     "ma.discover",
     "ma.collect",

@@ -99,7 +99,8 @@ def test_production_line_ceiling_including_frontend():
         *sources(),
         *(ROOT / "web-ui/src").rglob("*.ts"),
         *(ROOT / "web-ui/src").rglob("*.tsx"),
-        *(ROOT / "team_miner/frontend").rglob("*.tsx"),
+        *(ROOT / "team_miner/knowledge_miner/frontend").rglob("*.tsx"),
+        *(ROOT / "team_miner/skill_miner/frontend").rglob("*.tsx"),
     ]
     assert not [
         str(p.relative_to(ROOT)) for p in files if ".test." not in p.name and len(p.read_text().splitlines()) > 1000
@@ -166,15 +167,18 @@ def test_frontend_features_and_single_miner_build():
         "skills",
         "replay",
         "memory",
-        "miner",
         "operations",
         "platform-docs",
         "ma",
     ):
         assert (ROOT / "web-ui/src/features" / domain).is_dir()
     assert not (ROOT / "web-ui/src/views").exists()
-    assert not (ROOT / "team_miner/frontend/package.json").exists()
-    assert "@miner" in (ROOT / "web-ui/vite.config.ts").read_text()
+    assert (ROOT / "team_miner/knowledge_miner/frontend").is_dir()
+    assert (ROOT / "team_miner/skill_miner/frontend").is_dir()
+    assert not list((ROOT / "team_miner").rglob("package.json"))
+    aliases = (ROOT / "web-ui/vite.config.ts").read_text()
+    assert "@skill-miner" in aliases
+    assert "@knowledge-miner" in aliases
 
 
 def test_old_workbench_wire_names_removed_from_frontend():

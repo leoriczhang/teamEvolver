@@ -135,7 +135,7 @@ def create_router(services):
         if raw.get("clear_api_key"):
             value.pop("secret_ref", None)
         await global_write("sharing", value)
-        return {**await sharing_value(), "reachable": True}
+        return await sharing_value()
 
     @router.post("/api/sharing-config/bootstrap-dirs", status_code=202)
     async def bootstrap(request: Request):

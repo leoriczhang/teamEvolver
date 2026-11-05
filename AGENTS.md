@@ -63,7 +63,9 @@ team_skills/            Skill 库、Candidate、Evolution、成功经验、导�
 team_replay/            True Replay、Test Dataset、Replay Adapter
 team_ma/                MA 连接、版本发现、会话采集与已发布 Skill pull 消费
 team_memory/            团队 Memory 聚合、DreamCycle 维护、Memory Replay
-team_miner/             知识库挖掘
+team_miner/             挖掘模块组合入口
+├── knowledge_miner/    知识库挖掘，资料 → Wiki
+└── skill_miner/        Skill 挖掘，资料 → Skill 包
 web-ui/                 React + TypeScript 控制台，构建到 teamEvolver/web/dist/
 tests/                  按领域组织的单元、集成、架构契约和验收测试
 docs/                   中英双语文档

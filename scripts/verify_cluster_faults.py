@@ -225,7 +225,7 @@ class DB:
 
 def miner_state(db, kind, identity):
     """Read a Team Miner ObjectStore record through the installed release."""
-    from team_miner.state import MinerState
+    from team_miner.knowledge_miner.state import MinerState
 
     async def run():
         from teamEvolver.database import get_database_pool

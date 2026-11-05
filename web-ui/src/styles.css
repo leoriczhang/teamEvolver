@@ -1,7 +1,8 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "./shadcn.css";
-@source "../../team_memory/frontend";
+@source "../../team_miner/skill_miner/frontend";
+@source "../../team_miner/knowledge_miner/frontend";
 
 * {
   box-sizing: border-box;
@@ -266,6 +267,34 @@ select,
 
 .ui-panel + .ui-panel {
   margin-top: 18px;
+}
+
+.knowledge-file-panel + .knowledge-file-panel {
+  margin-top: 0;
+}
+
+.knowledge-file-panel > div:first-child {
+  flex-wrap: wrap;
+}
+
+.knowledge-file-panel > div:first-child > h2 {
+  flex: 1 1 180px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.knowledge-file-panel > div:first-child > h2 > span:first-child {
+  min-width: 0;
+}
+
+.knowledge-file-panel > div:first-child > h2 > span:last-child {
+  white-space: nowrap;
+}
+
+.knowledge-file-panel > div:first-child > div {
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .app-main select:not([multiple]) {

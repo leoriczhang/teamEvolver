@@ -29,7 +29,7 @@ teamEvolver 的数据分为四类，归属固定：
 | `012_objects.sql` | `objects` 与租户 RLS |
 | `013_console_identity.sql` | `console_users`、`tenant_memberships`、`console_*` |
 | `014_tenant_module_defaults.sql` | 为已有租户补齐 5 个模块默认配置行 |
-| `017_managed_agents.sql` | `ma_connections`、不可变 revision、资源绑定、Session 游标、操作、release、外部效果账本；全部 FORCE RLS |
+| `018_managed_agents.sql` | `ma_connections`、不可变 revision、资源绑定、Session 游标、操作、release、外部效果账本；全部 FORCE RLS |
 
 MA 原始事件、下载 Bundle、输入材料与回放产物通过既有 PG Artifact / ObjectStore 保存。本机仅放临时文件；配置凭证保存为本租户 Secret Ref。MA 管理范围按非敏感 origin + entry 指纹全局唯一占用，其他读取仍受租户 RLS。详情见 [MA 接入](../agent-integrations/07-managed-agents.md)。
 

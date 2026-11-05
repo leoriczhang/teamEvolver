@@ -120,6 +120,8 @@ def test_worker_task_kinds_are_declared():
         "memory.replay",
         "miner.track_compile",
         "miner.rebuild_index",
+        "miner.skill_operation",
+        "miner.skill_compile",
         "ma.discover",
         "ma.collect",
         "ma.reconcile",

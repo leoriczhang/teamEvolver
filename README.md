@@ -164,7 +164,9 @@ team-evolver/
 ├── team_replay/          # True Replay、Test Dataset、Replay Adapter
 ├── team_ma/              # MA 连接、采集、受管版本与 pull 消费
 ├── team_memory/          # 团队 Memory 聚合、DreamCycle 维护、Memory Replay
-├── team_miner/           # 知识库挖掘
+├── team_miner/           # 挖掘模块组合入口
+│   ├── knowledge_miner/ # 知识库挖掘：资料 → Wiki
+│   └── skill_miner/     # Skill 挖掘：资料 → Skill 包
 ├── web-ui/               # React + TypeScript 控制台源码
 ├── tests/                # 单元、集成、架构与文档契约测试
 └── docs/                 # 中英双语 Markdown 文档

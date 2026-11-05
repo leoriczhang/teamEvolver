@@ -2,7 +2,7 @@
 
 Knowledge base mining compiles raw knowledge directories in OpenViking into a structured Wiki. TeamEvolver handles acceptance, permissions, persisted state and result reconciliation; compilation is performed by OpenViking's native Compile with a mining Skill. Usage is in the [Knowledge Base Mining Guide](../guides/07-skill-miner.md).
 
-Code entry points: `team_miner/api/__init__.py:create_router`, `team_miner/handlers.py`, `team_miner/config.py:load`, `team_miner/schemas.py`.
+Code entry points: `team_miner/knowledge_miner/api/__init__.py:create_router`, `team_miner/knowledge_miner/handlers.py`, `team_miner/knowledge_miner/config.py:load`, `team_miner/knowledge_miner/schemas.py`.
 
 All endpoints require a tenant administrator and use the prefix `/api/knowledge-mining`.
 

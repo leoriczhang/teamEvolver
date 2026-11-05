@@ -54,11 +54,12 @@ teamEvolver = "teamEvolver.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["teamEvolver*", "team_skills*", "session_ingestion*", "team_memory*", "team_miner*", "team_replay*", "team_ma*"]
-exclude = ["tests*", "team_miner.frontend*", "team_skills.frontend*"]
+exclude = ["tests*", "team_miner.*.frontend*", "team_skills.frontend*"]
 
 [tool.setuptools.package-data]
 team_memory = ["README.md"]
 team_replay = ["README.md"]
+"team_miner.skill_miner" = ["compiler_skills/**/*.md", "compiler_skills/**/*.py", "compiler_skills/**/*.json"]
 "session_ingestion" = ["README.md"]
 "session_ingestion.adapters" = ["*.py", "README.md"]
 "session_ingestion.adapters._shared" = ["*.md"]

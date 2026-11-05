@@ -29,7 +29,7 @@ Every business table has a `tenant_id` column with `FORCE ROW LEVEL SECURITY` an
 | `012_objects.sql` | `objects` and tenant RLS |
 | `013_console_identity.sql` | `console_users`, `tenant_memberships`, `console_*` |
 | `014_tenant_module_defaults.sql` | Backfills the 5 default module configuration rows for existing tenants |
-| `017_managed_agents.sql` | `ma_connections`, immutable revisions, bindings, Session cursors, operations, releases and external effects; all FORCE RLS |
+| `018_managed_agents.sql` | `ma_connections`, immutable revisions, bindings, Session cursors, operations, releases and external effects; all FORCE RLS |
 
 MA raw events, Bundles, materials and Replay outputs use existing PG Artifacts / ObjectStore. Local files are temporary; credentials are tenant-owned Secret Refs. A nonsecret origin + entry fingerprint reserves management scope globally while other reads retain tenant RLS. See [MA Integration](../agent-integrations/07-managed-agents.md).
 

@@ -11,42 +11,80 @@ usePagedItems,
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { type EvolveHistoryCycle } from "@/features/skills/api/client";
+import {
+auditAction,auditCycle,auditReason,auditState,needsAuditRefresh,type AuditCycle,type AuditJob,
+} from "@/features/skills/evolutionAudit";
 import { fmtTime } from "@/lib/format";
 import { toastErr } from "@/lib/toast";
 import { useCallback,useEffect,useRef,useState } from "react";
 
 export default function AuditView({ active }: { active: boolean }) {
-  const [cycles, setCycles] = useState<EvolveHistoryCycle[]>([]);
+  const [cycles, setCycles] = useState<AuditCycle[]>([]);
   const [sessionId, setSessionId] = useState("");
   const [limit, setLimit] = useState(50);
   const [loading, setLoading] = useState(false);
-  const loaded = useRef(false);
+  const [query, setQuery] = useState({ sessionId: "", limit: 50 });
+  const requestSequence = useRef(0);
+  const fetching = useRef(false);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
+  const refresh = useCallback(async (filters: typeof query, quiet = false) => {
+    if (quiet && fetching.current) return;
+    const sequence = ++requestSequence.current;
+    fetching.current = true;
+    if (!quiet) setLoading(true);
     try {
       const qs = new URLSearchParams();
-      qs.set("limit", String(limit || 50));
-      if (sessionId.trim()) qs.set("session_id", sessionId.trim());
+      qs.set("limit", String(filters.limit));
+      if (filters.sessionId) qs.set("session_id", filters.sessionId);
       const data = await api<{ cycles: EvolveHistoryCycle[] }>(`/history?${qs.toString()}`);
-      setCycles(data.cycles || []);
+      const next = (data.cycles || []).map(auditCycle).filter((c): c is AuditCycle => c !== null);
+      const unfinished = next.filter(c => !c.hasResult && c.command_id);
+      // Unfinished history rows have no task status. Read it with bounded concurrency.
+      for (let offset = 0; offset < unfinished.length; offset += 4) {
+        if (sequence !== requestSequence.current) return;
+        const batch = unfinished.slice(offset, offset + 4);
+        const jobs = await Promise.allSettled(batch.map(c => api<AuditJob>(
+          `/api/jobs/${encodeURIComponent(c.command_id!)}`,
+        )));
+        jobs.forEach((job, index) => {
+          if (job.status === "fulfilled") {
+            batch[index].taskStatus = job.value.status;
+            batch[index].taskError = job.value.error_code;
+          }
+        });
+      }
+      if (sequence === requestSequence.current) setCycles(next);
     } catch (e: any) {
-      toastErr("加载审计记录失败", e.message);
+      if (sequence === requestSequence.current && !quiet) toastErr("加载审计记录失败", e.message);
     } finally {
-      setLoading(false);
+      if (sequence === requestSequence.current) {
+        fetching.current = false;
+        setLoading(false);
+      }
     }
-  }, [limit, sessionId]);
+  }, []);
 
   useEffect(() => {
-    if (active && !loaded.current) {
-      loaded.current = true;
-      refresh();
-    }
-  }, [active, refresh]);
+    if (active) void refresh(query);
+    return () => { requestSequence.current++; };
+  }, [active, query, refresh]);
+
+  const pending = cycles.some(needsAuditRefresh);
+  useEffect(() => {
+    if (!active || !pending) return;
+    const timer = window.setInterval(() => { void refresh(query, true); }, 5000);
+    return () => window.clearInterval(timer);
+  }, [active, pending, query, refresh]);
+
+  function search() {
+    const next = { sessionId: sessionId.trim(), limit };
+    if (next.sessionId === query.sessionId && next.limit === query.limit) void refresh(query);
+    else setQuery(next);
+  }
 
   const uploaded = cycles.reduce((n, c) => n + Number(c.uploaded_skills || 0), 0);
   const queued = cycles.reduce((n, c) => n + Number(c.candidates_queued || 0), 0);
-  const sessions = cycles.reduce((n, c) => n + Number(c.sessions || (c.session_ids || []).length || 0), 0);
+  const sessions = cycles.reduce((n, c) => n + Number(c.sessions ?? c.session_ids?.length ?? 0), 0);
   const cyclePager = usePagedItems(cycles);
 
   return (
@@ -58,7 +96,7 @@ export default function AuditView({ active }: { active: boolean }) {
             className="h-8 w-[220px]"
             onChange={(e) => setSessionId(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") refresh();
+              if (e.key === "Enter") search();
             }}
         />
         <select
@@ -67,11 +105,14 @@ export default function AuditView({ active }: { active: boolean }) {
             className="h-8 rounded-lg border border-border bg-background px-2 text-xs font-semibold outline-none"
           >
             {[20, 50, 100, 200].map((n) => (
-              <option key={n} value={n}>最近 {n} 条</option>
+              <option key={n} value={n}>最近 {n} 条记录</option>
             ))}
         </select>
-        <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>查询</Button>
+        <Button variant="outline" size="sm" onClick={search} disabled={loading}>查询</Button>
       </div>
+      <p className="mb-4 text-xs text-muted-foreground">
+        仅展示 Skill 进化周期，目录检查和模型测试等辅助任务不计入。未完成任务每 5 秒自动刷新。
+      </p>
 
       <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">
         <StatCard label="周期数" value={cycles.length} />
@@ -91,20 +132,23 @@ export default function AuditView({ active }: { active: boolean }) {
                   const evos = c.evolutions || [];
                   const judge = c.judge || {};
                   const sessionIds = c.session_ids || [];
-                  const noActionNormal = isNoActionNormal(c, evos);
+                  const state = auditState(c);
                   return (
-                    <div key={`${c.timestamp || "cycle"}-${cyclePager.start + i}`} className="p-4">
+                    <div key={c.command_id || `${c.timestamp || "cycle"}-${cyclePager.start + i}`} className="p-4">
                       <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
                         <div>
                           <div className="text-sm font-bold">{fmtTime(c.timestamp)}</div>
+                          {c.command_id && <div className="mono mt-1 break-all text-[11px] text-muted-foreground">任务 ID：{c.command_id}</div>}
+                          {c.finished_at && <div className="mt-1 text-xs text-muted-foreground">完成时间：{fmtTime(c.finished_at)}</div>}
                           <div className="mt-1 text-xs text-muted-foreground">
-                            {Number(c.sessions || sessionIds.length || 0)} 会话 / {c.skill_groups ?? "?"} 技能组 / 上传 {c.uploaded_skills ?? 0} / 候选 {c.candidates_queued ?? 0}
+                            {c.hasResult
+                              ? `${Number(c.sessions ?? sessionIds.length)} 会话 / ${c.skill_groups} 技能组 / 上传 ${c.uploaded_skills ?? 0} / 候选 ${c.candidates_queued ?? 0}`
+                              : "结果尚未生成，处理数量待确认。"}
                           </div>
                         </div>
-                        <Pill tone={Number(c.uploaded_skills || 0) > 0 ? "green" : Number(c.candidates_queued || 0) > 0 ? "amber" : noActionNormal ? "blue" : "gray"}>
-                          {Number(c.uploaded_skills || 0) > 0 ? "已产出" : Number(c.candidates_queued || 0) > 0 ? "待评审" : noActionNormal ? "无需进化" : "无变更"}
-                        </Pill>
+                        <Pill tone={state.tone}>{state.label}</Pill>
                       </div>
+                      {c.taskError && <div className="mb-3 break-all text-xs text-destructive">任务错误：{c.taskError}</div>}
 
                       {judge.overall_score != null || judge.rationale ? (
                         <div className="mb-3 rounded-lg border border-border bg-background/60 p-3 text-sm">
@@ -118,32 +162,24 @@ export default function AuditView({ active }: { active: boolean }) {
                       ) : null}
 
                       {sessionIds.length ? (
-                        <div className="mb-3">
-                          <div className="mb-1.5 text-xs font-semibold text-muted-foreground">消费会话</div>
-                          <div className="flex flex-wrap gap-1.5">
-                            {sessionIds.slice(0, 12).map((sid) => (
-                              <span key={sid} className="mono rounded-md border border-border bg-surface-subtle px-2 py-1 text-[11px]">
+                        <details className="mb-3" open={!c.command_id}>
+                          <summary className="cursor-pointer text-xs font-semibold text-muted-foreground">消费会话（{sessionIds.length}）</summary>
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {sessionIds.map((sid) => (
+                              <span key={sid} className="mono break-all rounded-md border border-border bg-surface-subtle px-2 py-1 text-[11px]">
                                 {sid}
                               </span>
                             ))}
-                            {sessionIds.length > 12 && <span className="text-xs text-muted-foreground">等 {sessionIds.length} 个</span>}
                           </div>
-                        </div>
+                        </details>
                       ) : null}
 
                       <div>
-                        <div className="mb-1.5 text-xs font-semibold text-muted-foreground">技能变更</div>
+                        <div className="mb-1.5 text-xs font-semibold text-muted-foreground">分组结果</div>
                         {!evos.length ? (
-                          noActionNormal ? (
-                            <div className="rounded-lg border border-border bg-background/60 p-3 text-xs leading-relaxed text-muted-foreground">
-                              <Pill tone="blue">流程正常</Pill>
-                              <div className="mt-2">
-                                本周期已完成会话评审和 Skill 分组，但 planner 判断当前 Skill 无需优化，也无需创建新 Skill。
-                              </div>
-                            </div>
-                          ) : (
-                            <div className="text-xs text-muted-foreground">本周期未记录技能变更。</div>
-                          )
+                          <div className="text-xs text-muted-foreground">
+                            {c.hasResult ? "本周期未生成候选，未记录分组原因。" : "任务尚未返回分组结果。"}
+                          </div>
                         ) : (
                           <div className="space-y-2.5">
                             {evos.map((e, k) => {
@@ -152,15 +188,17 @@ export default function AuditView({ active }: { active: boolean }) {
                                 <div key={k} className="rounded-lg border border-line bg-surface-subtle p-3">
                                   <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                                     <div className="flex flex-wrap items-center gap-2">
-                                      <span className="mono text-xs font-semibold">{e.skill_name || "-"}</span>
-                                      <Pill tone="blue">{e.action || "-"}</Pill>
-                                      {e.uploaded ? <Pill tone="green">已上传</Pill> : <Pill tone="gray">未上传</Pill>}
+                                      <span className="mono text-xs font-semibold">{e.skill_name === "__no_skill__" ? "未关联 Skill 的会话组" : e.skill_name || "-"}</span>
+                                      <Pill tone={e.action === "skip" ? "gray" : "blue"}>{auditAction(e.action)}</Pill>
+                                      {e.uploaded && <Pill tone="green">已上传</Pill>}
                                     </div>
                                     {e.version != null && <span className="text-xs text-muted-foreground">v{e.version}</span>}
                                   </div>
                                   {reason ? (
-                                    <div className="mt-2 text-xs leading-relaxed text-muted-foreground">{reason}</div>
+                                    <div className="mt-2 text-xs leading-relaxed text-muted-foreground">{auditReason(reason)}</div>
                                   ) : null}
+                                  {(e.candidate_id || e.job_id) && <div className="mono mt-2 break-all text-[11px] text-muted-foreground">候选 ID：{e.candidate_id || e.job_id}</div>}
+                                  {!!e.session_ids?.length && <div className="mt-2 text-[11px] text-muted-foreground">关联 {e.session_ids.length} 条 Session</div>}
                                   {e.file_changes?.length ? (
                                     <div className="mt-2 flex flex-wrap gap-1.5">
                                       {e.file_changes.map((change, index) => (
@@ -186,17 +224,5 @@ export default function AuditView({ active }: { active: boolean }) {
         )}
       </Panel>
     </div>
-  );
-}
-
-function isNoActionNormal(c: EvolveHistoryCycle, evos: unknown[]) {
-  return (
-    !evos.length &&
-    !c.had_processing_error &&
-    Number(c.sessions || (c.session_ids || []).length || 0) > 0 &&
-    Number(c.skill_groups || 0) > 0 &&
-    Number(c.actions || 0) === 0 &&
-    Number(c.uploaded_skills || 0) === 0 &&
-    Number(c.candidates_queued || 0) === 0
   );
 }

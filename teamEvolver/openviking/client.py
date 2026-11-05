@@ -137,6 +137,7 @@ class OpenVikingClient:
         params: dict[str, Any] | None = None,
         idempotency_key: str = "",
         shared_admin: bool = False,
+        files: dict[str, Any] | None = None,
     ) -> OpenVikingResult:
         """Issue a request and map it to :class:`OpenVikingResult`.
 
@@ -145,6 +146,10 @@ class OpenVikingClient:
         """
         url = f"{self._endpoint}{path}"
         headers = self.headers(shared_admin=shared_admin)
+        if files is not None:
+            if json_body is not None:
+                raise ValueError("multipart requests cannot include a JSON body")
+            headers.pop("Content-Type", None)
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
         client = self._get_client()
@@ -153,7 +158,8 @@ class OpenVikingClient:
         for attempt in range(1, _RETRY_ATTEMPTS + 1):
             try:
                 response = await client.request(
-                    method.upper(), url, headers=headers, json=json_body, params=params
+                    method.upper(), url, headers=headers, json=json_body, params=params,
+                    **({"files": files} if files is not None else {}),
                 )
             except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout):
                 if attempt >= _RETRY_ATTEMPTS:

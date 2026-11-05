@@ -2,7 +2,7 @@
 
 知识库挖掘把 OpenViking 中的原始知识目录编译为结构化 Wiki。TeamEvolver 负责受理、权限、持久化状态与结果核对；编译由 OpenViking 原生 Compile 使用挖掘 Skill 执行。使用方法见 [知识库挖掘指南](../guides/07-skill-miner.md)。
 
-代码入口：`team_miner/api/__init__.py:create_router`、`team_miner/handlers.py`、`team_miner/config.py:load`、`team_miner/schemas.py`。
+代码入口：`team_miner/knowledge_miner/api/__init__.py:create_router`、`team_miner/knowledge_miner/handlers.py`、`team_miner/knowledge_miner/config.py:load`、`team_miner/knowledge_miner/schemas.py`。
 
 所有接口要求租户管理员，前缀 `/api/knowledge-mining`。
 

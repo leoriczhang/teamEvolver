@@ -57,11 +57,14 @@ session_ingestion/      Session 推送、数据源拉取、强制分析阶段
 team_skills/            Skill 库、Candidate、Evolution、Experience、Transfer、Workbench
 team_replay/            True Replay、Test Dataset、ReplayAdapterFactory
 team_memory/            团队 Memory 聚合、DreamCycle 维护、Memory Replay
-team_miner/             知识库挖掘（OpenViking Compile 跟踪与索引）
+team_miner/             挖掘模块组合入口
+├── knowledge_miner/    知识库挖掘（OpenViking Compile 跟踪与 Wiki 索引）
+├── skill_miner/        Skill 挖掘（来源、编译、产物复核与 Candidate 提交）
+└── shared/             两类挖掘共用的文档格式转换
 web-ui/                 React 控制台源码，构建到 teamEvolver/web/dist/
 ```
 
-业务模块统一提供 `api/`（`create_router(services, **kwargs)`）、`handlers`、`config.py`、`schemas.py`、`repository.py`。例外：`team_replay/contracts.py` 是跨模块 Replay 契约；`team_miner` 不建 `repository.py`。
+业务模块统一提供 `api/`（`create_router(services, **kwargs)`）、`handlers`、`config.py`、`schemas.py`、`repository.py`。例外：`team_replay/contracts.py` 是跨模块 Replay 契约；`team_miner/knowledge_miner` 通过 PostgreSQL ObjectStore 保存回执、水位与索引，不建专用 `repository.py`。`team_miner/api` 与 `team_miner/handlers.py` 组合两类挖掘，知识库挖掘保留 `miner` 配置和任务标识。
 
 ## 依赖规则
 

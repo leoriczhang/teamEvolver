@@ -1,6 +1,6 @@
 # Knowledge Base Mining Guide
 
-Knowledge base mining compiles a raw knowledge directory in OpenViking into a structured Wiki. Compilation is performed by OpenViking's native Compile with a mining Skill; teamEvolver handles acceptance, permissions, task persistence, cancellation and result reconciliation. The code is in `team_miner/` and the console page in `team_miner/frontend/`. API details are in [Knowledge Base Mining API](../api/22-knowledge-mining.md).
+Knowledge base mining compiles a raw knowledge directory in OpenViking into a structured Wiki. Compilation is performed by OpenViking's native Compile with a mining Skill; teamEvolver handles acceptance, permissions, task persistence, cancellation and result reconciliation. The code is in `team_miner/knowledge_miner/` and the console page in `team_miner/knowledge_miner/frontend/`, maintained independently from Skill mining in `team_miner/skill_miner/`. API details are in [Knowledge Base Mining API](../api/22-knowledge-mining.md).
 
 ## Prerequisites
 

@@ -42,7 +42,8 @@ MODULES = {
     ),
     "team_ma": ("Managed Agents 接入", "Managed Agents integration", "api/24-managed-agents.md"),
     "team_memory": ("团队 Memory", "Team Memory", "api/11-team-memory-aggregation.md"),
-    "team_miner": ("知识库挖掘", "Knowledge mining", "api/22-knowledge-mining.md"),
+    "team_miner/knowledge_miner": ("知识库挖掘", "Knowledge mining", "api/22-knowledge-mining.md"),
+    "team_miner/skill_miner": ("Skill 挖掘", "Skill mining", "api/17-skill-mining.md"),
 }
 
 HEADER = {

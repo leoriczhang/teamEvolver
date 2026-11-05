@@ -57,11 +57,14 @@ session_ingestion/      Session push, data source pull, mandatory analysis stage
 team_skills/            Skill library, Candidate, Evolution, Experience, Transfer, Workbench
 team_replay/            True Replay, Test Dataset, ReplayAdapterFactory
 team_memory/            team Memory aggregation, DreamCycle maintenance, Memory Replay
-team_miner/             knowledge base mining (OpenViking Compile tracking and indexing)
+team_miner/             mining module composition entrypoints
+├── knowledge_miner/    knowledge base mining (OpenViking Compile tracking and Wiki indexing)
+├── skill_miner/        Skill mining (sources, compilation, artifact review and Candidate submission)
+└── shared/             document format conversion shared by both mining workflows
 web-ui/                 React console sources, built into teamEvolver/web/dist/
 ```
 
-Business modules provide `api/` (`create_router(services, **kwargs)`), `handlers`, `config.py`, `schemas.py` and `repository.py`. Exceptions: `team_replay/contracts.py` is the cross-module Replay contract; `team_miner` has no `repository.py`.
+Business modules provide `api/` (`create_router(services, **kwargs)`), `handlers`, `config.py`, `schemas.py` and `repository.py`. Exceptions: `team_replay/contracts.py` is the cross-module Replay contract; `team_miner/knowledge_miner` stores receipts, watermarks and indexes through the PostgreSQL ObjectStore without a dedicated `repository.py`. `team_miner/api` and `team_miner/handlers.py` compose both mining workflows; knowledge base mining retains its `miner` configuration and task identities.
 
 ## Dependency Rules
 
