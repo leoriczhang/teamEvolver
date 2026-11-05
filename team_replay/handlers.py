@@ -44,7 +44,7 @@ async def run(task, services):
     if payload["operation"] == "synthesis":
         return await synthesize(task, services, repo, payload)
     try:
-        host = await host_for(payload, services, task.tenant_id)
+        host = await host_for(payload, services, task.tenant_id, task=task)
     except ValueError:
         return HandlerResult.fail("replay_adapter_unavailable")
     options = payload["options"]
@@ -52,17 +52,21 @@ async def run(task, services):
     cases = list(spec.cases) if spec else payload["dataset"]["execution_document"]["cases"]
     owner = f"{task.owner_id}:{task.task_id}:{task.fence}"
     slot = None
-    async with services.tx.tenant_tx(task.tenant_id) as conn:
-        await services.tasks.require_current(conn, task)
-        for index in range(int(payload["config"].get("concurrency", 2))):
-            key = f"replay:slot:{index}"
-            fence = await services.leases.acquire(conn, tenant_id=task.tenant_id, resource_key=key,
-                                                  owner_id=owner, lease_seconds=60)
-            if fence is not None:
-                slot = (key, fence)
-                break
-    if slot is None:
-        return HandlerResult.retry("replay_capacity", backoff_seconds=5)
+    while slot is None:
+        if not await current(task, services):
+            return HandlerResult.cancelled()
+        async with services.tx.tenant_tx(task.tenant_id) as conn:
+            await services.tasks.require_current(conn, task)
+            for index in range(int(payload["config"].get("concurrency", 2))):
+                key = f"replay:slot:{index}"
+                fence = await services.leases.acquire(conn, tenant_id=task.tenant_id, resource_key=key,
+                                                      owner_id=owner, lease_seconds=60)
+                if fence is not None:
+                    slot = (key, fence)
+                    break
+        if slot is None:
+            # Capacity waiting is normal scheduling, not a transient failure.
+            await asyncio.sleep(5)
     factory = host.resolve_replay_factory(str((spec.runtime if spec else {}).get("type", "")), {})
     factory = GuardedFactory(factory, task, services, slot, owner)
     judge = services.extras.get("replay_judge")

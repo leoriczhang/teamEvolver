@@ -300,6 +300,7 @@ class CandidateRepository:
         await conn.execute(
             f"UPDATE {self._schema}.skill_candidates SET revision = $2, tree_sha256 = $3, "
             "  detail = $4::jsonb, base_version = $5, status = 'open', verdict = '', "
+            "  proposed_action = CASE WHEN $5>0 THEN 'update' ELSE 'create' END, "
             "  evaluation = '{}'::jsonb, decision = '{}'::jsonb, validate_task_id = '', updated_at = now() "
             "WHERE candidate_id = $1",
             candidate_id,
@@ -407,6 +408,31 @@ class CandidateRepository:
             },
         )
         return await self.require(conn, candidate_id)
+
+    async def record_validation_blocked(
+        self, conn: Any, *, tenant_id: str, candidate_id: str, revision: int, reason: str,
+    ) -> None:
+        """Audit an acceptance failure without inventing a Replay verdict."""
+        item = await self.require(conn, candidate_id, for_update=True)
+        self._check_revision(item, revision)
+        if item["status"] != "open":
+            raise CandidateStateError("blocked validation requires an open candidate")
+        evaluation = {
+            "status": "blocked", "candidate_revision": revision, "recommended_publish": False,
+            "static_validation": item["detail"].get("static_validation") or {},
+            "replay": {"status": "blocked", "reason": reason,
+                       "runtime_gate": {"status": "inconclusive", "reason": reason}},
+        }
+        await conn.execute(
+            f"UPDATE {self._schema}.skill_candidates SET evaluation=$2::jsonb, updated_at=now() "
+            "WHERE candidate_id=$1",
+            candidate_id, json.dumps(evaluation),
+        )
+        await self._event(
+            conn, tenant_id=tenant_id, candidate_id=candidate_id, kind="feedback",
+            from_status="open", to_status="open", revision=revision, actor="evolution",
+            detail={"validation_acceptance": {"status": "blocked", "reason": reason}},
+        )
 
     async def record_verdict(
         self,

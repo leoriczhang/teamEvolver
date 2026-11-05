@@ -46,11 +46,15 @@ States: `open` (awaiting review) → `validating` (evaluation or validation runn
 
 Returns `{"candidates", "total", "limit", "offset", "has_more"}`.
 
+Console lists use `compact=true`. Completed evaluations carry `evaluation.summary_only=true`, retaining verdicts, efficiency metrics, Checklist counts and the first Replay error while omitting Case bodies, Session snapshots, artifacts and repeated Dataset results. Full evidence is loaded through the detail endpoint. Summary polling preserves a loaded full evaluation for the same revision.
+
 Candidates in `validating` include `replay_progress`: `total`, `completed`, `succeeded` and `failed`. Progress comes from individual Case checkpoints. `succeeded` means both branches completed the Checklist; it does not imply an efficiency verdict of `accept`.
 
 ### GET /api/skill-candidates/{candidate_id}/detail
 
 Candidate detail: Skill name, baseline version, revision, bundle, change notes, evidence Sessions, latest evaluation result and event history.
+
+`include_replay` defaults to `true`, returning full Replay evidence. The console initially uses `include_replay=false`, keeping Skill content, diffs, item-level Checklist judgements and the decision while omitting full Replay trajectories. `evaluation.replay_details_omitted=true` indicates that full Replay evidence can be requested separately. Stored detail evaluations carry `cached=true`. Polling reuses detail only when both revision and `updated_at` match; loading and request failures have explicit states.
 
 ### PUT /api/skill-candidates/{candidate_id}/content
 

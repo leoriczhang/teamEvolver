@@ -56,14 +56,16 @@ def aggregate_true_replay_windows(
     for branch in ("baseline", "candidate"):
         for key in unavailable[branch]:
             efficiency_inputs[branch][key] = UNAVAILABLE
-    efficiency = compare_efficiency(
-        efficiency_inputs["baseline"],
-        efficiency_inputs["candidate"],
-    )
     branch_checklists = {
         branch: aggregate_case_checklists(cases, branch=branch)
         for branch in ("baseline", "candidate")
     }
+    if not all_windows_evaluated:
+        for report in branch_checklists.values():
+            report["all_satisfied"] = False
+    efficiency = compare_efficiency(
+        efficiency_inputs["baseline"], efficiency_inputs["candidate"], checklists=branch_checklists,
+    )
     policy = progressive_replay_decision(
         efficiency=efficiency,
         baseline_checklist=branch_checklists["baseline"],

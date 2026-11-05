@@ -98,6 +98,26 @@ async def test_split_segment_is_not_split_recursively():
 
 
 @pytest.mark.asyncio
+async def test_managed_agent_session_keeps_all_rounds_and_child_traces_together():
+    session = {
+        "session_id": "session_ma_fixed",
+        "runtime": {"type": "managed-agents", "connection_id": "codingvideo"},
+        "turns": [{"prompt_text": "first round"}, {"prompt_text": "second round"}],
+    }
+    client = _Client('{"segments":[{"start":1,"end":1},{"start":2,"end":2}]}')
+
+    segments = await split_session(
+        SimpleNamespace(session_split_enabled=True),
+        session,
+        client_factory=client.factory,
+    )
+
+    assert segments == [session]
+    assert client.calls == 0
+    assert client.factory_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_missing_split_model_fails_open_to_original_session():
     session = {
         "session_id": "s1",

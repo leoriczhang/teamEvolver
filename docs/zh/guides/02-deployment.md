@@ -10,6 +10,7 @@
 | OpenViking | 可访问的服务地址与 Root Key；知识库挖掘需要原生 Compile Runtime |
 | 模型 | OpenAI 兼容端点与 Key |
 | 镜像 | 由 `cicd_scripts/build.sh` 产出 release 后 `docker build` |
+| MA / 媒体 Worker | Node.js 用于 `.js/.mjs` 静态检查；ffprobe / ffmpeg 用于真实媒体 Evidence，镜像已包含 |
 
 ## 角色
 

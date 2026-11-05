@@ -20,6 +20,7 @@ import os
 from contextvars import ContextVar
 from typing import Any, Optional
 
+from teamEvolver.evidence import unique_evidence
 from teamEvolver.llm import AsyncLLMClient
 
 # Shared prompt blocks. These are injected into the create/evolve system
@@ -522,7 +523,7 @@ def _build_cross_cycle_context(context: Optional[dict]) -> str:
         "change_debt": debt,
         "active_candidate_job_id": context.get("active_candidate_job_id") or "",
         "active_candidate_feedback": (
-            context.get("active_candidate_feedback")
+            unique_evidence(context.get("active_candidate_feedback"))
             if isinstance(context.get("active_candidate_feedback"), dict)
             else {}
         ),

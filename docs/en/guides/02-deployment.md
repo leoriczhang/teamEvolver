@@ -10,6 +10,7 @@ Production runs the same image in two roles, `api` and `worker`, connected to ex
 | OpenViking | Reachable service address and Root Key; knowledge base mining needs the native Compile Runtime |
 | Model | OpenAI-compatible endpoint and key |
 | Image | `docker build` after `cicd_scripts/build.sh` produces a release |
+| MA / media Worker | Node.js checks `.js/.mjs`; ffprobe / ffmpeg inspect real media Evidence; included in the image |
 
 ## Roles
 

@@ -312,6 +312,54 @@ def test_evolution_worker_creates_candidate_and_consumes_once(pg_env, tmp_path, 
 
 
 @pytest.mark.postgres
+def test_replay_acceptance_failure_preserves_candidate_and_completed_branch(pg_env, tmp_path, monkeypatch):
+    payloads = Payloads()
+    seed_session(pg_env, payloads, "s1", "alice")
+    seed_session(pg_env, payloads, "s2", "bob")
+    calls = []
+
+    async def planner(**kwargs):
+        calls.append(kwargs["name"])
+        return {
+            "action": "create_skill",
+            "skill": {"name": "demo", "description": "Use for testing", "content": "Steps"},
+            "rationale": "shared lesson",
+        }
+
+    async def missing_snapshot(*args):
+        raise ValueError("Recorded MA configuration or input materials are incomplete")
+
+    with _pod(pg_env, tmp_path, monkeypatch, pod="a") as client:
+        _login(client, bootstrap=True)
+        response = client.post("/api/skill-evolution/trigger", headers=H, json={})
+        services = worker(pg_env, skill_planner=planner, session_payloads=payloads,
+                          ma_freeze_replay=missing_snapshot)
+        drive(pg_env, services, kinds=["skill.evolve"])
+        result = command(pg_env, response.json()["job_id"])["result"]
+        rows = client.get("/api/skill-candidates", headers=H).json()["candidates"]
+        assert result["candidates_queued"] == 1
+        assert result["evolutions"][0]["validation_acceptance"]["status"] == "blocked"
+        item = candidate(pg_env, rows[0]["job_id"])
+        assert item["status"] == "open" and not item["verdict"] and not item["validate_task_id"]
+        assert item["evaluation"]["status"] == "blocked"
+        assert item["evaluation"]["recommended_publish"] is False
+        assert "verdict" not in item["evaluation"]["replay"]
+        assert len(item["detail"]["replay_cases"]) == 2
+        events = _run(pg_env, "default", lambda conn: CandidateRepository(pg_env.tx).events(conn, item["candidate_id"]))
+        assert [event["kind"] for event in events] == ["created", "feedback"]
+        assert events[-1]["detail"]["validation_acceptance"]["status"] == "blocked"
+        assert command(pg_env, f"evaluate:{item['candidate_id']}:r1") is None
+        assert len(calls) == 1
+
+        # Fixing infrastructure permits a later acceptance on the same revision.
+        services.extras.pop("ma_freeze_replay")
+        evaluation = client.post(f"/api/skill-candidates/{item['candidate_id']}/evaluate", headers=H)
+        assert evaluation.status_code == 202, evaluation.text
+        drive(pg_env, services, kinds=["skill.validate"])
+        assert candidate(pg_env, item["candidate_id"])["verdict"] == "accept"
+
+
+@pytest.mark.postgres
 def test_automatic_evolution_and_publish_policies(pg_env, tmp_path, monkeypatch):
     payloads = Payloads()
     seed_session(pg_env, payloads, "auto-s1", "alice")

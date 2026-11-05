@@ -43,6 +43,9 @@
 | 设置与接入 | 租户管理 | `tenants` | 平台管理员 |
 | 设置与接入 | 模型配置 | `model` | 租户管理员 |
 | 设置与接入 | 数据源接入 | `datasource` | 租户管理员 |
+| 设置与接入 | MA 接入 | `managed-agents` | 租户管理员 |
+
+「MA 接入」管理连接、发现、补采集、暂停、资源关联和 release 历史。表单只显示凭证是否配置；Candidate Review 显示受管目标，并支持新增 Skill 的成员选择。流程见 [MA 接入指南](../agent-integrations/07-managed-agents.md)。
 
 ## 技能挖掘
 

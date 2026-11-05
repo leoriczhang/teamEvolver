@@ -10,7 +10,7 @@ True Replay 对每个 Test Dataset Case 打开相互隔离的 Baseline 与 Candi
 2. 收集真实 Agent 回复、轨迹、产物和指标（`AgentObservation`）。
 3. 独立裁判（`team_replay/judging.py:judge_checklist`）按 Checklist 给出逐项证据，判定完成门禁。
 4. 未完成时，`team_replay/policy.py:select_disclosure_items` 确定性选择本轮允许披露的未满足项（默认每批 4 项），独立用户模拟器（`render_user_feedback`）生成自然反馈。
-5. 反馈写入 user 历史并继续执行；全部满足或达到 `max_interactions` 后结束并关闭会话。
+5. 反馈写入 user 历史并继续执行，直到所有条目都有满足证据。`max_interactions` 和超时只是执行保护；触发保护时保存未完成证据并关闭会话，不进入效率比较。
 
 客户适配器接触不到 Checklist、裁判状态或未披露要求。反馈只表达当前目标与缺口，不含条目 ID、评分和 A/B 内部用语。裁判不可用时 fail closed。
 
@@ -22,8 +22,9 @@ True Replay 对每个 Test Dataset Case 打开相互隔离的 Baseline 与 Candi
 | --- | --- | --- |
 | 任一分支裁判不可用 | inconclusive | `checklist_judge_unavailable` |
 | 双方 Checklist 都未完成 | inconclusive | `both_checklists_incomplete` |
-| Candidate 未完成 | reject | `candidate_checklist_incomplete` |
-| Candidate 完成、Baseline 未完成 | accept | `candidate_only_completed_checklist` |
+| 任一 Checklist 缺失 | inconclusive | `checklist_missing` |
+| Candidate 未完成 | inconclusive | `candidate_checklist_incomplete` |
+| Candidate 完成、Baseline 未完成 | inconclusive | `baseline_checklist_incomplete` |
 | 双方都完成 | 进入效率比较 | 见下表 |
 
 效率比较（`team_replay/metrics.py:objective_replay_decision`）以交互轮次为主指标，工具调用数和总 Token 为次指标：
@@ -36,7 +37,7 @@ True Replay 对每个 Test Dataset Case 打开相互隔离的 Baseline 与 Candi
 | 轮次持平，次指标有退步 | reject |
 | 全部持平或指标不可用 | inconclusive |
 
-指标缺失记为 `unavailable`，不补 0。每个结论保留证据、对话、披露记录与 Adapter revision。
+指标缺失记为 `unavailable`，不补 0。双方未全部完成时只保存实际指标，`efficiency.comparison_ready=false`，不计算指标差值或胜负。每个结论保留证据、对话、披露记录与 Adapter revision。
 
 ## 运行入口
 
@@ -65,7 +66,7 @@ Candidate 验证使用 2 个当次 Case 和最多 3 个历史 Case。当次 Case
 | --- | --- | --- |
 | `concurrency` | 2 | 每租户同时运行的 Replay 槽位，由 `resource_leases` 控制 |
 | `timeout_seconds` | 600 | 单分支超时 |
-| `max_interactions` | 4 | 单分支最多交互轮次 |
+| `max_interactions` | 20 | 单分支保护上限；完成后立即停止，达到上限未完成则结论未定 |
 | `llm_model_id` | 空 | 裁判与用户模拟器使用的模型，空则用租户模型配置 |
 
 配置中不允许出现 Key 或密码类字段。

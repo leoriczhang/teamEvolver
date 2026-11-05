@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 
+from teamEvolver.storage.json_snapshots import JsonSnapshots
+
 from ._util import stable_hash
 from .datasets.repository import DatasetConflict, DatasetError, DatasetNotFound, lock, safe_id, unpack
 
 DOMAINS = {"skill", "memory", "dataset"}
+MAX_REPLAY_INPUT_BYTES = 96 * 1024 * 1024
 
 
 class ReplayRepository:
@@ -25,7 +28,9 @@ class ReplayRepository:
         if row is None:
             raise DatasetNotFound("Replay run not found")
         result = dict(row)
-        result["input"] = unpack(result["input"])
+        result["input"] = await JsonSnapshots(self.tx, result["tenant_id"]).hydrate(
+            conn, unpack(result["input"]),
+        )
         result["result"] = unpack(result["result"])
         if stable_hash(result["input"]) != result["input_hash"]:
             raise DatasetError("Replay input hash mismatch")
@@ -39,8 +44,9 @@ class ReplayRepository:
             if existing["request_hash"] != stable_hash(request):
                 raise DatasetConflict("Idempotency-Key used for another Replay request")
             return await self.get(conn, domain, run_id), False
-        raw = json.dumps(payload, ensure_ascii=False)
-        if len(raw.encode()) > 96 * 1024 * 1024:
+        packed = await JsonSnapshots(self.tx, tenant_id).pack(conn, payload)
+        raw = json.dumps(packed, ensure_ascii=False)
+        if len(raw.encode()) > MAX_REPLAY_INPUT_BYTES:
             raise DatasetError("Replay input exceeds 96 MiB")
         await conn.execute(
             f"INSERT INTO {self.table(domain)} "

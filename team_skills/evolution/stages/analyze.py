@@ -57,6 +57,7 @@ from team_skills.evolution.stages.summarize import (
     _extract_session_metadata,
     build_session_trajectory,
 )
+from teamEvolver.evidence import bounded_evidence
 from teamEvolver.llm import AsyncLLMClient
 
 _VALID_DECISIONS = {"valuable", "memory_candidate", "task_only", "chitchat"}
@@ -217,7 +218,14 @@ def _compose_system(base: str, used_skills: list[str]) -> str:
     else:
         focus = _FOCUS_NO_SKILLS
     addendum = "" if base == _ANALYZE_SYSTEM else f"\n\n{_EXPERIENCE_OUTPUT_ADDENDUM}"
-    return f"{base}\n\n{focus}{addendum}"
+    child_focus = (
+        "\n\n若输入含 agent_threads，必须逐个分析子 agent 的委派要求、工具调用及结果、实际 used_skills "
+        "和最终输出，并在 summary 中保留 session_thread_id/agent_name 与根因。"
+        "主 agent 的完成宣称不能覆盖子 agent 的报错或缺失产出。"
+        "子 agent 实际使用的 Skill 与主 agent 的 Skill 同样参与 skill_experiences，"
+        "必须指向具体 Skill 和可追溯的线程/工具事件；仅配置可见的 Skill 不算使用。"
+    )
+    return f"{base}\n\n{focus}{addendum}{child_focus}"
 
 
 def _analyze_call_options() -> dict[str, Any]:
@@ -241,6 +249,8 @@ def _session_used_skill_names(session: dict[str, Any]) -> list[str]:
         used = turn.get("used_skills")
         if isinstance(used, list):
             names.extend(str(s) for s in used if s)
+        if turn.get("agent_threads"):
+            names.extend(_session_used_skill_names({"turns": turn["agent_threads"]}))
     seen: set[str] = set()
     return [s for s in names if s and not (s in seen or seen.add(s))]
 
@@ -260,7 +270,8 @@ def build_analysis_payload(session: dict[str, Any]) -> dict[str, Any]:
     payload["has_tool_errors"] = bool(session.get("_has_tool_errors"))
     payload["prior_prm_scores"] = list(session.get("_prm_scores") or [])
     payload["avg_prm_before_judge"] = session.get("_avg_prm")
-    payload["trajectory"] = session.get("_trajectory") or ""
+    # Structured interactions contain every tool and child thread. Sending the
+    # textual trajectory too duplicates that evidence (and its provider cost).
     source_artifacts = _extract_source_artifacts(session)
     if source_artifacts:
         payload["source_artifacts"] = source_artifacts
@@ -328,11 +339,15 @@ async def analyze_session(
     used_skills = _session_used_skill_names(session)
     payload = build_analysis_payload(session)
     system_prompt = _compose_system(_effective_analyze_system(), used_skills)
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-    ]
     try:
+        evidence = await bounded_evidence(
+            llm, payload, call_options=_analyze_call_options(),
+            trace_name="team_skills.evolution.analyze_session",
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(evidence, ensure_ascii=False)},
+        ]
         raw = await llm.chat(
             messages,
             **_analyze_call_options(),

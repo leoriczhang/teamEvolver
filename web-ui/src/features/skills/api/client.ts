@@ -9,12 +9,20 @@ export function hydrateCandidates(
   return items.map((item) => {
     const d = details[item.job_id];
     if (!d) return item;
+    if (d.candidate_revision !== item.candidate_revision
+      || d.updated_at !== item.updated_at) {
+      return d.feedback ? mergeCandidateFeedback(item, d.feedback) : item;
+    }
     const merged: any = { ...item };
     for (const [k, v] of Object.entries(d)) {
       if (v === undefined || v === null) continue;
       if (merged[k] === undefined || merged[k] === null || merged[k] === "") {
         merged[k] = v;
       }
+    }
+    if (item.evaluation?.summary_only && d.evaluation && !d.evaluation.summary_only
+      && d.candidate_revision === item.candidate_revision) {
+      merged.evaluation = d.evaluation;
     }
     return d.feedback ? mergeCandidateFeedback(merged as Candidate, d.feedback) : merged as Candidate;
   });
@@ -87,6 +95,8 @@ export interface CandidateFeedback {
 
 export interface Candidate {
   job_id: string;
+  candidate_revision?: number;
+  updated_at?: string;
   skill_name?: string;
   candidate_skill_name?: string;
   proposed_action?: string;

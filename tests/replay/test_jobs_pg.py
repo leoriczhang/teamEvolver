@@ -336,6 +336,51 @@ def test_two_workers_execute_each_case_once(pg_env, tmp_path, monkeypatch):
 
 
 @pytest.mark.postgres
+def test_capacity_wait_does_not_exhaust_retries_or_execute_before_slot_is_free(pg_env, tmp_path, monkeypatch):
+    import asyncio
+
+    from team_replay import handlers
+
+    save(pg_env)
+    with _pod(pg_env, tmp_path, monkeypatch, pod="capacity") as client:
+        _login(client, bootstrap=True)
+        client.put("/api/replay/settings", headers=H, json={"expected_revision": 1, "config": {"concurrency": 1}})
+        rid = client.post("/api/datasets/ds-test/runs", headers=H, json={}).json()["run_id"]
+    host = Host()
+    services = build_services(role="worker", tx=pg_env.tx, handlers=register_handlers(),
+                              extras={"replay_host_factory": lambda *_: host, "replay_judge": judge})
+    original_sleep = asyncio.sleep
+    waiting = asyncio.Event()
+
+    async def fast_sleep(seconds):
+        if seconds == 5:
+            waiting.set()
+            await original_sleep(0.01)
+        else:
+            await original_sleep(seconds)
+
+    monkeypatch.setattr(handlers.asyncio, "sleep", fast_sleep)
+
+    async def run():
+        async with pg_env.tx.tenant_tx("default") as conn:
+            fence = await services.leases.acquire(conn, tenant_id="default", resource_key="replay:slot:0",
+                                                  owner_id="other", lease_seconds=60)
+        work = asyncio.create_task(process_once(services, owner_id="waiting"))
+        await asyncio.wait_for(waiting.wait(), timeout=2)
+        await original_sleep(0.06)
+        assert not host.contexts and not work.done()
+        async with pg_env.tx.tenant_tx("default") as conn:
+            task = await services.tasks.get(conn, task_id=rid)
+            assert task["status"] == "running" and task["attempt"] == 1
+            await services.leases.release(conn, tenant_id="default", resource_key="replay:slot:0",
+                                           owner_id="other", fence=fence)
+        await asyncio.wait_for(work, timeout=3)
+    pg_env.tx.pool.run(run())
+    row = _run(pg_env, "default", lambda conn: services.tasks.get(conn, task_id=rid))
+    assert row["status"] == "succeeded" and row["attempt"] == 1
+
+
+@pytest.mark.postgres
 def test_current_engine_integrates_with_candidate_validation(pg_env, tmp_path, monkeypatch):
     from team_skills.handlers import register_handlers as skill_handlers
     from tests.support.candidates import candidate, seed_candidate

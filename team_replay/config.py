@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 DEFAULT_REPLAY_CONFIG = {
-    "concurrency": 2, "timeout_seconds": 600, "max_interactions": 4,
+    "concurrency": 2, "timeout_seconds": 600, "max_interactions": 20,
     "account_id": "default", "llm_model_id": "",
 }
 

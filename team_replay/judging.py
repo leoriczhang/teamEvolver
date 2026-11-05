@@ -8,6 +8,7 @@ import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Mapping
+from urllib.parse import urlsplit
 
 from .policy import normalize_checklist_report
 
@@ -23,6 +24,9 @@ FEEDBACK_SYSTEM = (
     "先具体确认 positive_observations 中有证据的已完成内容，再自然表达本次允许提出的要求；"
     "若没有已完成内容，不虚构表扬。只使用 allowed_requirements，不推测其他要求，"
     "不提供实现答案。对重复提出的缺口，结合最新回复重新措辞。"
+    "若最新回复停在立意、分镜或初版的选择/确认关卡，且已提供的选项符合当前任务，"
+    "明确选择一个合适选项或确认可核验的阶段成果，让任务继续；不要只重复最终产物要求。"
+    "缺少关键事实或结果不符合要求时提出具体修改。不得声称自己已收听、查看或检验未提供的媒体。"
     "禁止出现 Checklist、评分、评测、Baseline、Candidate、轮次编号或要求 ID。"
     "输出 JSON {message:string}。"
 )
@@ -80,6 +84,7 @@ def complete_json(
     """Dedicated executor + process-wide semaphore, with at most eight submissions."""
     if not _submission_slots.acquire(timeout=30):
         raise RuntimeError("Replay model capacity exhausted")
+    timeout = max(30, min(600, int(harness.get("timeout_seconds") or 300)))
 
     def call():
         from openai import OpenAI
@@ -88,17 +93,37 @@ def complete_json(
             raise ValueError("Replay model and base URL must be configured")
         with OpenAI(
             api_key=str(harness.get("api_key") or "not-configured"),
-            base_url=str(harness["base_url"]), timeout=120, max_retries=0,
+            base_url=str(harness["base_url"]), timeout=timeout, max_retries=0,
         ) as client:
+            images = []
+            safe_payload = dict(payload)
+            if isinstance(payload.get("artifacts"), list):
+                artifacts = []
+                for artifact in payload["artifacts"]:
+                    if isinstance(artifact, dict):
+                        artifact = dict(artifact)
+                        evidence = dict(artifact.get("evidence") or {})
+                        images.extend(evidence.pop("images", []))
+                        artifact["evidence"] = evidence
+                    artifacts.append(artifact)
+                safe_payload["artifacts"] = artifacts
+            content = [{"type": "text", "text": json.dumps(safe_payload, ensure_ascii=False)}]
+            content.extend({"type": "image_url", "image_url": {"url": url}} for url in images[:12])
+            # Ark's default hidden reasoning can spend the whole bounded judge
+            # deadline on long tool trajectories. This only affects the judge.
+            extra = ({"extra_body": {"thinking": {"type": "disabled"}}}
+                     if (urlsplit(str(harness["base_url"])).hostname or "").endswith(".volces.com")
+                     and str(harness["model"]).startswith("doubao-") else {})
             result = client.chat.completions.create(
                 model=str(harness["model"]),
                 messages=[
                     {"role": "system", "content": system + "\nJSON Schema: " + json.dumps(schema)},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                    {"role": "user", "content": content if images else json.dumps(safe_payload, ensure_ascii=False)},
                 ],
                 temperature=temperature,
                 max_tokens=max(1, int(harness.get("max_tokens") or 8192)),
                 response_format={"type": "json_object"},
+                **extra,
             )
             value = json.loads(result.choices[0].message.content or "{}")
             if not isinstance(value, dict):
@@ -116,7 +141,7 @@ def complete_json(
         raise
     future.add_done_callback(lambda _: _submission_slots.release())
     # Keep the slot until the real network call completes, even if the caller times out.
-    return future.result(timeout=125)
+    return future.result(timeout=timeout + 5)
 
 
 def judge_checklist(

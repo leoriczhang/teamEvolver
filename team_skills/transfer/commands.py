@@ -1,4 +1,5 @@
 """Transfer acceptance, frozen export versions and durable result receipts."""
+import base64
 import hashlib
 from dataclasses import asdict
 
@@ -64,6 +65,29 @@ class TransferCommands:
             config_revision=config.revision,
         )
         return await self.get(conn, command_id)
+
+    async def accept_bundle(self, conn, *, tenant_id, command_id, name, archive, tree_sha256, config, actor="ma"):
+        """Public collector seam: accept a verified complete package, never overwrite."""
+        from team_skills.library.bundle import bundle_tree_sha256
+
+        from .packages import discover, read_zip
+
+        packages = discover(read_zip(archive))
+        if len(packages) != 1 or packages[0].name != name:
+            raise SkillMutationConflict("MA package name does not match its binding")
+        if bundle_tree_sha256(packages[0].files) != tree_sha256:
+            raise SkillMutationConflict("MA package tree hash mismatch")
+        head = await SkillLibraryRepository(self.services.tx).get_skill(conn, name)
+        if head:
+            if head["tree_sha256"] != tree_sha256:
+                raise SkillMutationConflict(f"Different team Skill already exists: {name}; use a separate tenant")
+            return {"already_present": True, "name": name, "version": head["version"]}
+        return await self.accept(
+            conn, tenant_id=tenant_id, command_id=command_id, operation="import", config=config, actor=actor,
+            body={"channel": "zip", "conflict": "error", "options": {
+                "zip_b64": base64.b64encode(archive).decode("ascii"), "single": True,
+            }},
+        )
 
     async def checkpoint(self, conn, command_id, checkpoint):
         await conn.execute(

@@ -113,7 +113,7 @@ PY
 
 echo "[build] application source snapshot"
 for path in pyproject.toml README.md LICENSE teamEvolver team_skills team_memory team_miner \
-  team_replay session_ingestion; do
+  team_replay team_ma session_ingestion; do
   cp -R "$ROOT_DIR/$path" "$STAGE_DIR/src/$path"
 done
 find "$STAGE_DIR/src" -type d -name "__pycache__" -prune -exec rm -rf {} +

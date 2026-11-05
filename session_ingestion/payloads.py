@@ -27,6 +27,28 @@ class SessionPayloads:
         value = self._read(ref)
         return value["session"]
 
+    def get_evidence_summary(self, key):
+        try:
+            return self._read(f"evidence-summary/{key}.json")
+        except FileNotFoundError:
+            return None
+
+    def put_evidence_summary(self, key, document):
+        """First valid batch wins; concurrent retries never replace it."""
+        raw = json.dumps(document, ensure_ascii=False, sort_keys=True).encode()
+        store = self._store()
+        ref = store.key(f"evidence-summary/{key}.json")
+
+        async def put(conn):
+            row = await conn.fetchrow(
+                f"INSERT INTO {store.table}(tenant_id,key,content,content_hash) VALUES($1,$2,$3,$4) "
+                "ON CONFLICT(tenant_id,key) DO UPDATE SET key=EXCLUDED.key RETURNING content",
+                store.tenant_id, ref, raw, hashlib.sha256(raw).hexdigest(),
+            )
+            return json.loads(bytes(row["content"]))
+
+        return self.tx.run_tenant_tx(store.tenant_id, put)
+
     def put_session(self, ingestion_id, session, *, stage):
         digest = session_payload_hash(session)
         identity = hashlib.sha256(ingestion_id.encode()).hexdigest()

@@ -30,3 +30,4 @@ Agent 运行时通过三条数据面接口接入 TeamEvolver，统一使用租�
 
 - [Pi Agent / AgentsHub](./04-pi-agent.md)
 - [自定义 Agent](./05-custom-agent.md)
+- [火山方舟 Managed Agents](./07-managed-agents.md)：控制台集中发现、采集、完整 MA Replay 与发布后 pull，无需业务 Session SDK。

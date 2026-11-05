@@ -55,13 +55,14 @@ def branch(monkeypatch):
     guard = SimpleNamespace(heartbeat=AsyncMock(return_value=True))
     task = SimpleNamespace(tenant_id="default", task_id="evolve")
 
-    async def run(planner, synthesizer):
+    async def run(planner, synthesizer, *, parallel_groups=4):
         return await cycle._cycle(
-            task, services, {}, SkillsModuleConfig(1, {"auto_evaluate": False}),
+            task, services, {}, SkillsModuleConfig(1, {"auto_evaluate": False,
+                                                     "evolution_parallel_groups": parallel_groups}),
             planner, synthesizer, None, guard, None,
         )
 
-    return SimpleNamespace(run=run, candidates=candidates, repo=repo, guard=guard, sessions=sessions)
+    return SimpleNamespace(run=run, candidates=candidates, repo=repo, guard=guard, sessions=sessions, library=library)
 
 
 def proposal():
@@ -70,6 +71,68 @@ def proposal():
         "skill": {"name": "new-skill", "description": "Use for shared tasks", "content": "Reusable steps"},
         "evidence_classification": {"team_skill": [{"claim": "candidate-only claim"}]},
     }
+
+
+@pytest.mark.asyncio
+async def test_group_limit_starts_independent_planners_and_retains_their_checkpoints(branch, monkeypatch):
+    monkeypatch.setattr(cycle, "groups", lambda sessions: {name: sessions for name in ("first", "second", "third")})
+    started, release = set(), asyncio.Event()
+    two_started = asyncio.Event()
+
+    async def planner(**kwargs):
+        name = kwargs["name"]
+        started.add(name)
+        if len(started) == 2:
+            two_started.set()
+        await release.wait()
+        result = proposal()
+        result["skill"]["name"] = name
+        return result
+
+    async def synthesizer(**kwargs):
+        return []
+
+    running = asyncio.create_task(branch.run(planner, synthesizer, parallel_groups=2))
+    try:
+        await asyncio.wait_for(two_started.wait(), timeout=0.5)
+        assert started == {"first", "second"}
+        branch.candidates.create.assert_not_awaited()
+        release.set()
+        await asyncio.wait_for(running, timeout=1)
+        assert started == {"first", "second", "third"}
+        assert branch.repo.save_branch.await_count == 3
+        branch.repo.consume.assert_awaited_once()
+    finally:
+        running.cancel()
+        await asyncio.gather(running, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_create_group_resolves_existing_skill_and_preserves_complete_runtime_bundle(branch):
+    files = {
+        "SKILL.md": b"---\nname: existing\ndescription: Use for runtime tasks\n---\nOriginal steps\n",
+        "runtime/render.mjs": b"export const preserved = true;\n",
+        "config/media.json": b'{"fixed":true}\n',
+    }
+    branch.library.list_skills.return_value = [{"name": "existing"}]
+    branch.library.get_skill.side_effect = lambda conn, name: {"version": 7} if name == "existing" else None
+    branch.library.read_version_bundle = AsyncMock(return_value=files)
+
+    async def planner(**kwargs):
+        return {"action": "create_skill", "skill": {
+            "name": "existing", "description": "Use for runtime tasks", "content": "Improved steps",
+        }}
+
+    async def synthesizer(**kwargs):
+        return []
+
+    await branch.run(planner, synthesizer)
+    written = branch.candidates.create.call_args.kwargs
+    assert written["base_version"] == 7 and written["proposed_action"] == "update"
+    assert written["bundle"]["runtime/render.mjs"] == files["runtime/render.mjs"]
+    assert written["bundle"]["config/media.json"] == files["config/media.json"]
+    assert b"Improved steps" in written["bundle"]["SKILL.md"]
+    assert written["detail"]["bundle_diff"]["before_tree_sha256"]
 
 
 @pytest.mark.asyncio

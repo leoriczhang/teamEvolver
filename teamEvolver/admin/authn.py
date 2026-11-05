@@ -15,7 +15,7 @@ from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import Response
 
-from ..tenants.registry import AGENT_TOKEN_PREFIX, current_tenant_id
+from ..tenants.registry import AGENT_TOKEN_PREFIX
 from .authorization import (
     ADMIN_CAPABILITIES,
     MEMBER_CAPABILITIES,
@@ -91,14 +91,13 @@ def clear_console_cookies(response: Response, request: Request) -> None:
     response.delete_cookie(SESSION_COOKIE, path="/", secure=request.url.scheme == "https")
 
 
-def _bind_platform_service_user(user: dict[str, Any]) -> dict[str, Any]:
+def _bind_platform_service_user(user: dict[str, Any], *, tenant_id: str) -> dict[str, Any]:
     """Capabilities for the Root Key service identity (platform-admin service).
 
-    The service identity has no membership rows, so it keeps the baseline
-    platform branch: operate every tenant by default against the current
-    (default) tenant with the full platform + admin + member capability set.
+    The authorizer has resolved the explicit selector, but the runtime has not
+    bound its tenant ContextVar yet. Use that resolved tenant for the identity
+    so auth/status and business routes describe the same selected project.
     """
-    tenant_id = current_tenant_id()
     capabilities = set(PLATFORM_CAPABILITIES) | set(MEMBER_CAPABILITIES) | set(ADMIN_CAPABILITIES)
     return {
         **user,
@@ -145,7 +144,7 @@ def build_console_authorizer(session_manager: ConsoleSessionManager, *, config, 
             request.state.console_user = _bind_platform_service_user({
                 "id": "service-root", "role": "user",
                 "platform_role": "platform_admin", "service_root": True,
-            })
+            }, tenant_id=ctx.tenant_id)
             return
 
         registry = registry_provider()
@@ -157,7 +156,7 @@ def build_console_authorizer(session_manager: ConsoleSessionManager, *, config, 
             ctx = await asyncio.to_thread(registry.resolve_by_agent_token, bearer)
             if ctx is None or ctx.status != "active":
                 raise HTTPException(status_code=401, detail="invalid tenant token")
-            if path != "/sync/skills" and not any(
+            if path != "/sync/skills" and not path.startswith("/sync/ma/") and not any(
                 path == prefix or path.startswith(prefix + "/") for prefix in _AGENT_MACHINE_PATHS
             ):
                 raise HTTPException(status_code=403, detail="console admin required")

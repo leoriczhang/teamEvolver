@@ -273,7 +273,8 @@ def _build_segment(
     # ``meta`` carries the adapter/push-extracted display identity (user_id /
     # session_id / trace_id); without it every split segment loses the console
     # identity columns the original session had.
-    for key in ("user_alias", "user_id", "runtime", "runtime_context", "agent_id", "meta"):
+    for key in ("user_alias", "user_id", "runtime", "runtime_context", "agent_id", "meta",
+                "source_materials", "schema_version", "protocol_version"):
         if base.get(key) is not None:
             segment[key] = base[key]
 
@@ -322,6 +323,11 @@ async def split_session(
     if not isinstance(session, dict):
         return [session]
     if not _split_enabled(config):
+        return [session]
+    runtime = session.get("runtime") if isinstance(session.get("runtime"), dict) else {}
+    if runtime.get("type") == "managed-agents":
+        # A remote MA Session is the authoritative conversation boundary.
+        # Its root and child traces must remain together across all end_turns.
         return [session]
     metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
     if metadata.get("split_from_session"):

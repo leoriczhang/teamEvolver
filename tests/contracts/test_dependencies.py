@@ -17,6 +17,7 @@ BUSINESS_PACKAGES = {
     "team_replay",
     "team_memory",
     "team_miner",
+    "team_ma",
 }
 
 # Platform infrastructure modules that must never import business packages
@@ -27,6 +28,7 @@ PLATFORM_INFRA_PATHS = [
     "teamEvolver/database",
     "teamEvolver/openviking",
     "teamEvolver/security",
+    "teamEvolver/managed_agents",
 ]
 
 # Old implementations that were deleted in the first cleanup round and must not be

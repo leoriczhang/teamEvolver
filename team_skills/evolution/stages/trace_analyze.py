@@ -34,9 +34,11 @@ from typing import Any, Callable, Optional
 
 from team_skills.evolution.stages.judge import _extract_json_object
 from team_skills.evolution.stages.summarize import (
+    _build_session_payload,
     _extract_session_metadata,
     build_session_trajectory,
 )
+from teamEvolver.evidence import MODEL_EVIDENCE_BYTES, bounded_evidence, byte_size
 from teamEvolver.llm import AsyncLLMClient
 
 logger = logging.getLogger(__name__)
@@ -79,6 +81,8 @@ _TRACE_ANALYZE_SYSTEM = """\
 你是 teamEvolver 的 Trace 级分析器。输入是一个 agent 会话。
 在本系统中一个 Trace 恰好对应一个交互轮次（turn），每个 Trace 带有唯一的 trace_id。
 无论会话整体评分高低，都必须逐个分析输入中的全部 Trace。
+MA 子 agent 线程也有独立 Trace，parent_trace_id 指向父轮次。
+必须依据该线程自己的工具、结果、实际 used_skills 与委派要求分析，不能用主 agent 的成功回复覆盖子线程缺陷。
 
 你的任务：逐个 Trace 判断它是否是问题所在，并对存在问题的 Trace 给出**问题类型**与**问题描述**。
 请基于完整轨迹（用户输入、工具调用及其结果/报错、agent 回复、评分、用户后续纠正）综合判断，
@@ -191,6 +195,22 @@ def _tool_error_signals(turn: dict[str, Any]) -> list[str]:
     return [s for s in signals if s]
 
 
+def _analysis_turns(session):
+    """Analyze child traces without creating independent Evidence Sessions."""
+    output = []
+    for idx, turn in enumerate(session.get("turns") or [], 1):
+        output.append(turn)
+        for thread in turn.get("agent_threads") or []:
+            if not isinstance(thread, dict) or not (thread.get("messages") or thread.get("tool_calls")):
+                continue
+            parent = _turn_trace_id(turn, idx)
+            output.append({
+                **thread, "trace_id": thread.get("trace_id") or parent + ":thread:" + thread["session_thread_id"],
+                "parent_trace_id": parent, "parent_turn_num": idx,
+            })
+    return output
+
+
 def build_trace_payload(
     session: dict[str, Any],
     *,
@@ -204,7 +224,7 @@ def build_trace_payload(
     calls/errors and any per-turn score.
     """
     selected_turns = (
-        [t for t in (session.get("turns") or []) if isinstance(t, dict)]
+        _analysis_turns(session)
         if turns is None
         else turns
     )
@@ -216,6 +236,23 @@ def build_trace_payload(
             "prompt": _clip(turn.get("prompt_text", "")),
             "response": _clip(turn.get("response_text", "")),
         }
+        evidence = _build_session_payload({"turns": [turn]})["interactions"][0]
+        if evidence.get("agent_threads"):
+            # Each child is analyzed as its own Trace below. Keep its identity,
+            # delegation and outcome on the parent, not another copy of every
+            # child tool body.
+            evidence["agent_threads"] = [
+                {key: child[key] for key in (
+                    "trace_id", "session_thread_id", "agent_name", "parent_trace_id",
+                    "prompt", "response", "used_skills",
+                ) if key in child}
+                for child in evidence["agent_threads"]
+            ]
+        for key in ("tool_calls", "tool_results", "tool_observations", "used_skills", "skill_refs",
+                    "agent_threads", "delegation_events", "session_thread_id", "agent_name",
+                    "parent_trace_id", "parent_turn_num", "event_ids"):
+            if evidence.get(key):
+                entry[key] = evidence[key]
         prm = turn.get("prm_score")
         if prm is not None:
             entry["score"] = prm
@@ -257,7 +294,7 @@ def _build_results(
     model_results: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Attach metadata to complete, validated model results in turn order."""
-    turns = session["turns"]
+    turns = _analysis_turns(session)
     identity = _identity(session)
     ingested_at = str(session.get("ingested_at") or "").strip()
     overall = _session_overall_score(session)
@@ -280,6 +317,10 @@ def _build_results(
                 "session_overall_score": overall,
                 "source": "llm",
                 "analyzed_at": analyzed_at,
+                **{key: turn[key] for key in (
+                    "session_thread_id", "agent_name", "parent_trace_id", "parent_turn_num",
+                    "used_skills", "skill_refs",
+                ) if turn.get(key)},
             }
         )
     return results
@@ -454,6 +495,7 @@ async def analyze_session_traces(
     turns = session.get("turns") or []
     if not isinstance(turns, list) or any(not isinstance(turn, dict) for turn in turns):
         raise TraceAnalysisError("Trace Analyze requires a list of turn objects")
+    turns = _analysis_turns(session)
     if not turns:
         return []
     if llm is None:
@@ -466,33 +508,85 @@ async def analyze_session_traces(
         session["_trajectory"] = build_session_trajectory(session)
 
     model_results: list[dict[str, Any]] = []
-    for offset in range(0, len(turns), _TRACE_BATCH_SIZE):
-        batch = turns[offset : offset + _TRACE_BATCH_SIZE]
-        payload = build_trace_payload(session, turns=batch, start_turn_num=offset + 1)
-        messages = [
-            {"role": "system", "content": _effective_trace_analyze_system()},
-            {"role": "user", "content": _json_dumps(payload)},
-        ]
-        try:
-            raw = await llm.chat(
-                messages,
-                **_trace_analyze_call_options(),
-                trace_name="team_skills.evolution.analyze_trace_badcase",
-                trace_tags=["evolve", "trace_badcase"],
-                trace_metadata={
-                    "component": "team_skills.evolution",
-                    "operation": "analyze_trace_badcase",
-                    "source_session_id": str(session.get("session_id") or ""),
-                    "trace_batch_start": offset + 1,
-                    "trace_batch_size": len(batch),
-                },
-            )
-            model_results.extend(_parse_llm_analysis(raw, payload["traces"]))
-        except Exception as exc:  # noqa: BLE001 - fail the whole Session, including overload
-            raise TraceAnalysisError(
-                f"Trace Analyze failed for {session.get('session_id') or '<unknown>'} "
-                f"turns {offset + 1}-{offset + len(batch)}: {exc}"
-            ) from exc
+    prepared: dict[int, dict[str, Any]] = {}
+    offset = 0
+    try:
+        while offset < len(turns):
+            payload = build_trace_payload(session, turns=[], start_turn_num=offset + 1)
+            for idx in range(offset, min(len(turns), offset + _TRACE_BATCH_SIZE)):
+                entry = prepared.get(idx)
+                if entry is None:
+                    entry = build_trace_payload(session, turns=[turns[idx]], start_turn_num=idx + 1)["traces"][0]
+                if idx not in prepared and byte_size(entry) > MODEL_EVIDENCE_BYTES // 2:
+                    reduced = await bounded_evidence(
+                        llm, entry, call_options=_trace_analyze_call_options(),
+                        trace_name="team_skills.evolution.analyze_trace_badcase",
+                        max_bytes=MODEL_EVIDENCE_BYTES // 2,
+                    )
+                    entry = {
+                        **{key: entry[key] for key in (
+                            "trace_id", "turn_num", "session_thread_id", "agent_name", "parent_trace_id",
+                            "parent_turn_num", "used_skills",
+                        ) if key in entry},
+                        "evidence": reduced,
+                    }
+                # A reduced entry that does not fit this batch is reused by
+                # the next batch instead of sending all its chunks twice.
+                prepared[idx] = entry
+                proposed = {**payload, "traces": [*payload["traces"], entry]}
+                proposed["expected_trace_identities"] = [
+                    {key: trace[key] for key in ("trace_id", "turn_num")} for trace in proposed["traces"]
+                ]
+                if payload["traces"] and byte_size(proposed) > MODEL_EVIDENCE_BYTES:
+                    break
+                payload = proposed
+            payload["total_traces"] = len(payload["traces"])
+            payload["expected_trace_identities"] = [
+                {key: trace[key] for key in ("trace_id", "turn_num")} for trace in payload["traces"]
+            ]
+            messages = [
+                {"role": "system", "content": _effective_trace_analyze_system() + (
+                    "\n本次只输出 expected_trace_identities 列表中的 Trace，逐项原样复制 trace_id 与 turn_num。"
+                    "turn_num 是本次分析的全局序号，不是 parent_turn_num，也不要重新从 1 编号。"
+                    "agent_threads/evidence 中的身份仅是关联证据，不要为其中的其他身份额外输出结果。"
+                )},
+                {"role": "user", "content": _json_dumps(payload)},
+            ]
+            for attempt in range(3):
+                raw = await llm.chat(
+                    messages,
+                    **_trace_analyze_call_options(),
+                    trace_name="team_skills.evolution.analyze_trace_badcase",
+                    trace_tags=["evolve", "trace_badcase"],
+                    trace_metadata={
+                        "component": "team_skills.evolution",
+                        "operation": "analyze_trace_badcase",
+                        "source_session_id": str(session.get("session_id") or ""),
+                        "trace_batch_start": offset + 1,
+                        "trace_batch_size": len(payload["traces"]),
+                        "verdict_attempt": attempt + 1,
+                    },
+                )
+                try:
+                    findings = _parse_llm_analysis(raw, payload["traces"])
+                    break
+                except TraceAnalysisError as exc:
+                    if attempt == 2:
+                        raise
+                    messages[0]["content"] += (
+                        f"\n上一回复未通过校验：{exc}。依据同一证据重新分析，"
+                        "严格逐项复制 expected_trace_identities 中的 trace_id/turn_num；"
+                        "每个身份只输出一条完整判断，不要用父线程编号替代子线程编号。"
+                    )
+            model_results.extend(findings)
+            for idx in range(offset, offset + len(payload["traces"])):
+                prepared.pop(idx, None)
+            offset += len(payload["traces"])
+    except Exception as exc:  # noqa: BLE001 - fail the whole Session, including overload
+        raise TraceAnalysisError(
+            f"Trace Analyze failed for {session.get('session_id') or '<unknown>'} "
+            f"from turn {offset + 1}: {exc}"
+        ) from exc
 
     return _build_results(session, model_results)
 

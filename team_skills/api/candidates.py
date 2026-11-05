@@ -64,10 +64,12 @@ def create_router(services, **kwargs):
                 "offset": max(0, offset), "has_more": max(0, offset) + len(page) < total}
 
     @router.get("/api/skill-candidates/{candidate_id}/detail")
-    async def detail(candidate_id: str):
+    async def detail(candidate_id: str, include_replay: bool = True):
         try:
             async with tx.tenant_tx(current_tenant_id()) as conn:
-                return await candidate_payload(conn, tx, await repo.require(conn, candidate_id))
+                return await candidate_payload(
+                    conn, tx, await repo.require(conn, candidate_id), include_replay=include_replay,
+                )
         except SkillLibraryError as exc:
             raise error(exc) from exc
 
@@ -128,6 +130,8 @@ def create_router(services, **kwargs):
             return accepted(command)
         except (SkillLibraryError, TenantConfigMissing) as exc:
             raise error(exc) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
 
     @router.post("/api/skill-candidates/{candidate_id}/evaluate")
     async def evaluate(candidate_id: str, request: Request):

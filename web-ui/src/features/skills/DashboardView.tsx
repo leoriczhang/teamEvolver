@@ -129,11 +129,15 @@ export default function DashboardView({
   const [skillModal, setSkillModal] = useState<{ name: string; version: number } | null>(null);
   const [sessModal, setSessModal] = useState<{ sid: string; tab: SessTab } | null>(null);
   const [candJobId, setCandJobId] = useState<string | null>(null);
+  const [detailLoading, setDetailLoading] = useState<Record<string, boolean>>({});
+  const [detailErrors, setDetailErrors] = useState<Record<string, string>>({});
 
   const loadCandidateDetail = useCallback(async (jobId: string) => {
+    setDetailLoading(m => ({ ...m, [jobId]: true }));
+    setDetailErrors(m => ({ ...m, [jobId]: "" }));
     try {
       const fetched = await api<Candidate>(
-        `/api/skill-candidates/${encodeURIComponent(jobId)}/detail`
+        `/api/skill-candidates/${encodeURIComponent(jobId)}/detail?include_replay=false`
       );
       const savedFeedback = candDetailRef.current[jobId]?.feedback;
       const detail = savedFeedback ? mergeCandidateFeedback(fetched, savedFeedback) : fetched;
@@ -144,8 +148,11 @@ export default function DashboardView({
       }
       return detail;
     } catch (e: any) {
+      setDetailErrors(m => ({ ...m, [jobId]: e.message || "详情请求失败" }));
       toastErr("加载评估详情失败", e.message);
       return null;
+    } finally {
+      setDetailLoading(m => ({ ...m, [jobId]: false }));
     }
   }, []);
 
@@ -285,7 +292,7 @@ export default function DashboardView({
     const msg =
       mode === "force"
         ? "确认强制发布该候选技能？（仍保留 True Replay 三项指标）"
-        : "确认按 True Replay 发布？轮次下降直接正向；轮次持平时再比较工具调用和 Token。";
+        : "确认按 True Replay 发布？双方全部 Checklist 满足后，先比较轮次；轮次持平时再比较工具调用和 Token。";
     if (!window.confirm(msg)) return;
     try {
       const r = await runSkillCommand<{ status?: string; version?: number; feedback?: CandidateFeedback }>(
@@ -540,7 +547,7 @@ export default function DashboardView({
                         评估中{c.replay_progress ? ` ${c.replay_progress.completed}/${c.replay_progress.total}` : "…"}
                       </Pill>
                     ) : ev ? (
-                      <Pill tone="blue">已完成</Pill>
+                      <Pill tone={ev.replay?.error ? "amber" : "blue"}>{ev.replay?.error ? "回放失败" : "评估结束"}</Pill>
                     ) : (
                       <Pill tone="gray">待评估</Pill>
                     )}
@@ -700,6 +707,9 @@ export default function DashboardView({
         cand={openCand}
         ev={candJobId ? evalCache[candJobId] ?? null : null}
         evaluating={candJobId ? !!evaluating[candJobId] : false}
+        detailLoading={candJobId ? !!detailLoading[candJobId] : false}
+        detailError={candJobId ? detailErrors[candJobId] || "" : ""}
+        onRetryDetail={() => candJobId && void loadCandidateDetail(candJobId)}
         open={!!candJobId}
         showFeedback={false}
         onPublish={(mode) => candJobId && validate(candJobId, mode)}

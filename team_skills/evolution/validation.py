@@ -6,6 +6,7 @@ import copy
 from dataclasses import replace
 
 from team_replay._util import stable_hash
+from team_replay.config import DEFAULT_REPLAY_CONFIG
 from team_replay.contracts import skill_replay_spec
 from team_replay.datasets.candidate_selection import dataset_groups
 from team_replay.policy import select_replay_cases
@@ -42,7 +43,9 @@ class TrueReplayValidator:
                             "timeout_seconds", config.get("replay_timeout_seconds", 600),
                         )))),
                         max_interactions=min(20, max(1, int(config.get(
-                            "max_interactions", config.get("replay_max_interactions", 4),
+                            "max_interactions", config.get(
+                                "replay_max_interactions", DEFAULT_REPLAY_CONFIG["max_interactions"],
+                            ),
                         )))),
                     )
                 except Exception as exc:
@@ -53,6 +56,17 @@ class TrueReplayValidator:
                         "runtime_type": case.get("provenance", {}).get("source_runtime", {}).get("type", ""),
                     }
                 provenance = case.get("provenance") or {}
+                target = (job.get("ma_records") or {}).get(case_id)
+                if target:
+                    result["target_validation"] = {
+                        target["connection_id"]: {
+                            "status": result.get("status"), "accepted": result.get("accepted") is True,
+                            "verdict": result.get("verdict"), "config_hash": target["config_hash"],
+                            "connection_revision": target["connection_revision"],
+                            "runtime_hash": target["runtime_hash"],
+                            "binding_hash": target["binding_hash"],
+                        },
+                    }
                 for pair in result.get("cases") or []:
                     pair.update(
                         case_id=case_id, query=case["query"], provenance=copy.deepcopy(provenance),

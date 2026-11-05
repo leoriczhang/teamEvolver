@@ -5,6 +5,7 @@ import pytest
 
 from team_skills.evolution.prompt_studio import build_stage_messages, get_prompt
 from team_skills.evolution.replay_case_synthesis import (
+    SYNTHESIS_ATTEMPTS,
     CrossSessionCaseSynthesisError,
     LLMCrossSessionCaseSynthesizer,
     hydrate_cross_session_cases,
@@ -96,3 +97,54 @@ def test_rejects_a_case_supported_by_only_one_session():
     }] * 2
     with pytest.raises(CrossSessionCaseSynthesisError, match="at least two"):
         hydrate_cross_session_cases(raw, sessions(), skill_name="demo")
+
+
+class CorrectingModel(Model):
+    def __init__(self, *, always_invalid=False, invalid_source=False):
+        super().__init__()
+        self.contexts = []
+        self.always_invalid = always_invalid
+        self.invalid_source = invalid_source
+
+    async def chat(self, messages, **kwargs):
+        result = json.loads(await super().chat(messages, **kwargs))
+        self.contexts.append(self.payload["team_sop_evidence"]["context"])
+        if self.always_invalid or len(self.contexts) == 1:
+            if self.invalid_source:
+                for case in result["test_datasets"]:
+                    case["source_session_ids"] = ["s1", "invented-session"]
+            else:
+                # An unavailable file invalidates one generated Case. The
+                # generic synthesizer still returns the other valid Case.
+                result["test_datasets"][1]["query"] = "Read /missing/source.csv and analyze it"
+        return json.dumps(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_source", [False, True])
+async def test_repairs_incomplete_or_ungrounded_cases_without_changing_evidence(invalid_source):
+    model = CorrectingModel(invalid_source=invalid_source)
+    evidence = {"experience_patterns": "Frozen evidence", "current_session_count": 3}
+    cases = await LLMCrossSessionCaseSynthesizer(model)(
+        skill_name="demo", sessions=sessions(), candidate_skill={}, evidence_context=evidence,
+    )
+    assert len(cases) == 2
+    assert len(model.contexts) == 2
+    feedback = model.contexts[1]["dataset_validation_feedback"]
+    assert feedback["valid_case_count"] == (2 if invalid_source else 1)
+    assert feedback["error"]
+    assert "same evidence" in feedback["instruction"]
+    assert model.contexts[1]["experience_patterns"] == "Frozen evidence"
+    assert "dataset_validation_feedback" not in evidence
+    assert "candidate_skill" not in model.payload
+    assert all(case["provenance"]["session_ids"] == ["s1", "s2", "s3"] for case in cases)
+
+
+@pytest.mark.asyncio
+async def test_exhausted_corrections_fail_without_padding_or_weakening_case_contract():
+    model = CorrectingModel(always_invalid=True)
+    with pytest.raises(CrossSessionCaseSynthesisError, match="received 1"):
+        await LLMCrossSessionCaseSynthesizer(model)(
+            skill_name="demo", sessions=sessions(), candidate_skill={}, evidence_context={},
+        )
+    assert len(model.contexts) == SYNTHESIS_ATTEMPTS

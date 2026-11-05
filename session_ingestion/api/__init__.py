@@ -7,9 +7,7 @@ on Worker dependencies injected by the application root."""
 
 from __future__ import annotations
 
-import asyncio
 import json
-import uuid
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -17,19 +15,14 @@ from starlette.exceptions import HTTPException
 
 from teamEvolver.tenants.registry import current_tenant_id, get_current_tenant
 
-from ..config import load_session_config
 from ..handlers import KIND_NORMALIZE, KIND_PULL
 from ..http import read_limited_json_body
 from ..identifiers import InvalidSessionId, tenant_user_session_id
 from ..queries import SessionQueries
-from ..repository import SessionIngestionRepository
 from ..schemas import (
-    PAYLOAD_SCHEMA_VERSION,
     SOURCE_PULL,
     SOURCE_PUSH,
     AcceptedJob,
-    IngestionTaskPayload,
-    session_payload_hash,
 )
 
 
@@ -43,8 +36,6 @@ def create_router(services=None, **kwargs) -> APIRouter:
         return router
 
     tx = services.tx
-    tasks = services.tasks
-    repo = SessionIngestionRepository(tx)
     queries = SessionQueries(tx)
 
     async def _accept(
@@ -54,77 +45,14 @@ def create_router(services=None, **kwargs) -> APIRouter:
         kind: str = KIND_NORMALIZE,
     ) -> AcceptedJob:
         """Atomic acceptance: ingestion + raw payload + worker task, then 202."""
-        tenant_id = current_tenant_id()
-        ingestion_id = uuid.uuid4().hex
-        payload_hash = session_payload_hash(session)
-        payload_ref = f"ingest/{tenant_id}/{ingestion_id}.json"
-        task_id = f"{ingestion_id}:{kind}"
-        task_payload = IngestionTaskPayload(
-            schema_version=PAYLOAD_SCHEMA_VERSION,
-            source=source,
-            ingestion_id=ingestion_id,
-            tenant_id=tenant_id,
-            external_id=external_id,
-            user_id=user_id,
-            account_id=account_id,
-            adapter_id=adapter_id,
-            adapter_revision=adapter_revision,
-            payload_ref=payload_ref,
-            payload_hash=payload_hash,
-            pull=pull or {},
+        from ..commands import accept
+
+        return await accept(
+            services, tenant_id=current_tenant_id(), source=source, external_id=external_id,
+            user_id=user_id, account_id=account_id, session=session, pull=pull,
+            adapter_id=adapter_id, adapter_revision=adapter_revision, business_time=business_time,
+            kind=kind, dedupe_key=_dedupe_key(source, external_id, pull),
         )
-        # Pin the effective session config revision into the task payload so a
-        # later config edit cannot alter this run.
-        async with tx.tenant_tx(tenant_id) as conn:
-            module_config = await load_session_config(config_repo, conn)
-        task_payload.config_revision = module_config.revision
-
-        # Raw payload goes to the injected store first (it is the pinned source
-        # the worker reads); then the ingestion + task rows commit together.
-        await asyncio.to_thread(payloads.put_payload_json, payload_ref, task_payload.to_json(), session)
-
-        dedupe_key = _dedupe_key(source, external_id, pull)
-        async with tx.tenant_tx(tenant_id) as conn:
-            accepted_id = await repo.accept(
-                conn,
-                tenant_id=tenant_id,
-                ingestion_id=ingestion_id,
-                source=source,
-                external_id=external_id,
-                user_id=user_id,
-                account_id=account_id,
-                dedupe_key=dedupe_key,
-                task_id=task_id,
-                adapter_id=adapter_id,
-                adapter_revision=adapter_revision,
-                config_revision=task_payload.config_revision,
-                payload_ref=payload_ref,
-                payload_hash=payload_hash,
-                business_time=business_time,
-            )
-            if accepted_id != ingestion_id:
-                existing = await repo.get_ingestion(conn, ingestion_id=accepted_id)
-                job_id = str((existing or {}).get("task_id") or f"{accepted_id}:{kind}")
-                return AcceptedJob(
-                    ingestion_id=accepted_id, job_id=job_id,
-                    status=str((existing or {}).get("status") or "accepted"), dedupe=True,
-                )
-            await tasks.enqueue(
-                conn,
-                tenant_id=tenant_id,
-                task_id=task_id,
-                kind=kind,
-                subject_type="ingestion",
-                subject_id=ingestion_id,
-                schema_version=PAYLOAD_SCHEMA_VERSION,
-                dedupe_key=task_id,
-                payload_ref=payload_ref,
-                payload_hash=payload_hash,
-                config_revision=task_payload.config_revision,
-                adapter_revision=adapter_revision,
-                trace_id="",
-            )
-        return AcceptedJob(ingestion_id=ingestion_id, job_id=task_id, status="accepted")
 
     _register_push(router, _accept, services)
     _register_pull(router, _accept, tx)

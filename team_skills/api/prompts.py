@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import re
 
 from fastapi import APIRouter, Request
 from starlette.exceptions import HTTPException
@@ -115,7 +116,7 @@ def create_router(services):
         evolve_keys = (
             "evolution_max_sessions", "min_group_sessions", "min_group_users",
             "evolution_trigger_mode", "evolution_interval_seconds", "bundle_allow_delete",
-            "bundle_prompt_max_bytes", "bundle_edit_max_bytes",
+            "bundle_prompt_max_bytes", "bundle_edit_max_bytes", "bundle_text_extensions",
         )
         validation_keys = ("auto_evaluate", "publish_mode")
         return {
@@ -135,7 +136,7 @@ def create_router(services):
             evolve_allowed = {
                 "evolution_max_sessions", "min_group_sessions", "min_group_users",
                 "evolution_trigger_mode", "evolution_interval_seconds", "bundle_allow_delete",
-                "bundle_prompt_max_bytes", "bundle_edit_max_bytes",
+                "bundle_prompt_max_bytes", "bundle_edit_max_bytes", "bundle_text_extensions",
             }
             validation_allowed = {"auto_evaluate", "publish_mode"}
             evolve = raw.get("evolve", {})
@@ -154,6 +155,16 @@ def create_router(services):
                 raise HTTPException(400, "publish_mode must be manual or automatic")
             if "auto_evaluate" in validation and type(validation["auto_evaluate"]) is not bool:
                 raise HTTPException(400, "auto_evaluate must be boolean")
+            extensions = evolve.get("bundle_text_extensions")
+            if extensions is not None and (
+                not isinstance(extensions, list) or not extensions or len(extensions) > 20
+                or any(not isinstance(v, str) or not re.fullmatch(r"\.[a-z0-9]{1,12}", v)
+                       for v in extensions)
+            ):
+                raise HTTPException(400, "bundle_text_extensions must contain file extensions")
+            for field in ("min_group_sessions", "min_group_users"):
+                if field in evolve and (type(evolve[field]) is not int or not 1 <= evolve[field] <= 100):
+                    raise HTTPException(400, field + " must be 1..100")
             await configs.write_tenant_module(
                 conn,
                 module="skills",

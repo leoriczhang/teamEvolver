@@ -29,6 +29,9 @@ Every business table has a `tenant_id` column with `FORCE ROW LEVEL SECURITY` an
 | `012_objects.sql` | `objects` and tenant RLS |
 | `013_console_identity.sql` | `console_users`, `tenant_memberships`, `console_*` |
 | `014_tenant_module_defaults.sql` | Backfills the 5 default module configuration rows for existing tenants |
+| `017_managed_agents.sql` | `ma_connections`, immutable revisions, bindings, Session cursors, operations, releases and external effects; all FORCE RLS |
+
+MA raw events, Bundles, materials and Replay outputs use existing PG Artifacts / ObjectStore. Local files are temporary; credentials are tenant-owned Secret Refs. A nonsecret origin + entry fingerprint reserves management scope globally while other reads retain tenant RLS. See [MA Integration](../agent-integrations/07-managed-agents.md).
 
 `schema_versions` is maintained by `teamEvolver/database/schema_runner.py`.
 The open-source schema is a fresh-install baseline with gaps in version numbers; initialize it in an empty database.
@@ -48,7 +51,13 @@ The open-source schema is a fresh-install baseline with gaps in version numbers;
 | --- | --- | --- |
 | `ingest/<tenant>/<ingestion>.json` | Raw Session payload | Session intake |
 | `session/<hash>/<stage>/<digest>.json` | Result of each analysis stage | Session Worker |
+| `evidence-summary/<request-hash>.json` | Batch summaries with validated complete input coverage | Session / Skill Worker |
+| `session-snapshots/<sha256>.json` | Complete Session snapshots shared by Datasets, validation commands and Replay histories | Skill / Replay Worker |
 | Team Miner prefixes | Compile watermarks, receipts, link index | Team Miner |
+
+Evidence summaries are tenant scoped. Their keys hash the complete input records, summary protocol, model, and call configuration. Concurrent writes retain the first valid result; retries and process restarts reuse completed batches, and final judging requires complete batch coverage. Model or protocol changes regenerate summaries.
+
+At these storage boundaries, a `session_snapshot` larger than 256 KiB references a tenant-owned object by content hash; each snapshot is limited to 64 MiB. Reads verify its key, byte size and hash, then restore complete, independent JSON for each case. Legacy inline inputs remain readable, and Dataset, command and Replay input hashes still cover the complete logical content. Objects and references commit in the same transaction; no schema migration is required.
 
 The console "Platform assets" page shows these objects read-only as `platform://` URIs; see [Workspace and Platform Assets API](../api/23-workspace-assets.md).
 

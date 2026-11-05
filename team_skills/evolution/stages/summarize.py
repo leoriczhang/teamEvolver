@@ -223,6 +223,9 @@ def _format_step(
 
     if response:
         lines.append(f"  Agent: {response}")
+    for thread in turn.get("agent_threads") or []:
+        lines.append(f"  Child thread: {thread.get('session_thread_id', '')} ({thread.get('agent_name', '')})")
+        lines.append(_format_step(thread, step_num, first_prompt, show_prompt=True))
 
     return "\n".join(lines)
 
@@ -261,6 +264,24 @@ def _build_session_payload(session: dict) -> dict[str, Any]:
             "response": (t.get("response_text") or "")[:_SUMMARY_RESPONSE_MAX_CHARS],
             "prm_score": t.get("prm_score"),
         }
+        for key in ("trace_id", "session_thread_id", "agent_name", "parent_trace_id", "parent_turn_num",
+                    "used_skills"):
+            if t.get(key):
+                interaction[key] = t[key]
+        if t.get("skill_refs"):
+            interaction["skill_refs"] = [
+                {key: value for key, value in ref.items() if key != "event_ids"}
+                for ref in t["skill_refs"] if isinstance(ref, dict)
+            ]
+        threads = t.get("agent_threads") or []
+        if threads:
+            interaction["agent_threads"] = _build_session_payload({"turns": threads})["interactions"]
+        native = [
+            m for m in t.get("messages") or []
+            if "thread_message" in str(m.get("ma_event") or "")
+        ]
+        if native:
+            interaction["delegation_events"] = native
         # Carry rollout metadata so the summarizer can reason per-rollout
         ri = t.get("_rollout_idx")
         if ri is not None:
@@ -285,18 +306,40 @@ def _build_session_payload(session: dict) -> dict[str, Any]:
         injected = t.get("injected_skills") or []
         if injected:
             interaction["injected_skills"] = injected
-        tc = compact_tool_calls(t.get("tool_calls"), max_items=6)
+        # Keep every call. Child bodies already live in agent_threads; the
+        # parent's projection carries identity references instead of duplicate
+        # arguments/results. This does not mutate the stored session.
+        calls = t.get("tool_calls") or []
+        tc = compact_tool_calls(calls, max_items=len(calls))
+        child_ids = {
+            str(call.get("id") or "")
+            for thread in threads for call in thread.get("tool_calls") or []
+            if call.get("id")
+        }
+        for call in tc:
+            if call["id"] in child_ids:
+                call["arguments"] = "(see agent_threads)"
         if tc:
             interaction["tool_calls"] = tc
-        tr = compact_tool_observations(t.get("tool_results"), max_items=6)
+        results = t.get("tool_results") or []
+        tr = compact_tool_observations(results, max_items=len(results))
+        for result in tr:
+            if result["tool_call_id"] in child_ids:
+                for key in ("content", "command", "path"):
+                    result[key] = "(see agent_threads)"
         if tr:
             interaction["tool_results"] = tr
-        to = compact_tool_observations(t.get("tool_observations"), max_items=4)
+        observations = t.get("tool_observations") or []
+        to = compact_tool_observations(observations, max_items=len(observations))
         if to:
             interaction["tool_observations"] = to
         te = t.get("tool_errors") or []
         if te:
-            interaction["tool_errors"] = te
+            interaction["tool_errors"] = [
+                {key: (_clip(value, _TOOL_ERR_MAX) if key == "content" else value)
+                 for key, value in error.items() if key != "event_ids"}
+                for error in te if isinstance(error, dict)
+            ]
         usage = (
             t.get("context_usage")
             if isinstance(t.get("context_usage"), dict)
@@ -371,6 +414,12 @@ def _extract_session_metadata(session: dict) -> None:
     verified_feedback: list[dict[str, Any]] = []
 
     for turn in session.get("turns", []):
+        if turn.get("agent_threads"):
+            child_session = {"turns": turn["agent_threads"]}
+            _extract_session_metadata(child_session)
+            skills.update(child_session["_skills_referenced"])
+            injected_skills.update(child_session["_skills_injected"])
+            has_tool_errors = has_tool_errors or child_session["_has_tool_errors"]
         for item in turn.get("read_skills") or []:
             name = item.get("skill_name", "").strip() if isinstance(item, dict) else str(item or "").strip()
             if name:

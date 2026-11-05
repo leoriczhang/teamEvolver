@@ -79,6 +79,16 @@ async def submit_validation(conn, services, *, tenant_id: str, candidate_id: str
         conn, services.tx, tenant_id=tenant_id, candidate_id=candidate_id, skill_name=item["skill_name"],
         detail=item["detail"], seed=command_id,
     )
+    freeze_ma = services.extras.get("ma_freeze_replay")
+    if freeze_ma:
+        payload["ma_records"] = await freeze_ma(
+            tenant_id, payload["detail"].get("replay_cases") or [], item["skill_name"],
+        )
+        required = await services.extras["ma_required_targets"](tenant_id, item["skill_name"])
+        payload["required_targets"] = required
+        policy = dict(payload["detail"].get("runtime_validation_policy") or {})
+        policy["required_targets"] = required
+        payload["detail"]["runtime_validation_policy"] = policy
     command, _ = await enqueue_command(
         conn, services, tenant_id=tenant_id, command_id=command_id, kind="skill.validate",
         request=request, payload=payload,
@@ -125,6 +135,7 @@ async def run_validation(task, services) -> HandlerResult:
         "candidate_skill": candidate, "current_skill": skill_payload(p["skill_name"], baseline),
         "baseline_ref": {"revision": p["base_version"]}, "skill_ids": [p["skill_name"]],
         "replay_config": p.get("replay_config"), "replay_adapter": p.get("replay_adapter"),
+        "ma_records": p.get("ma_records") or {}, "required_targets": p.get("required_targets") or [],
     }
     replay_history = ReplayRepository(services.tx)
     replay_input = {
@@ -212,7 +223,8 @@ async def evaluate_fixed_job(job, task, services):
     try:
         host = await host_for({
             "config": job["replay_config"]["config"], "adapter": job["replay_adapter"],
-        }, services, task.tenant_id)
+            "ma_records": job.get("ma_records") or {},
+        }, services, task.tenant_id, task=task)
         factory = host.resolve_replay_factory("", {})
         while slot is None:
             async with services.tx.tenant_tx(task.tenant_id) as conn:

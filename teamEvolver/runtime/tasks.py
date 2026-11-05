@@ -33,6 +33,10 @@ TASK_KINDS: tuple[str, ...] = (
     # Team Miner 
     "miner.track_compile",
     "miner.rebuild_index",
+    # Managed Agents connection consumers
+    "ma.discover",
+    "ma.collect",
+    "ma.reconcile",
 )
 
 TASK_KINDS_SET = frozenset(TASK_KINDS)

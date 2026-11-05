@@ -59,6 +59,44 @@ async def test_mandatory_analysis_failure_produces_no_formal_session(tx, db, pay
 
 
 @pytest.mark.asyncio
+async def test_trace_retry_after_worker_restart_reuses_analyzed_session(tx, db, payloads):
+    class Runner(_StageRunner):
+        def __init__(self):
+            super().__init__()
+            self.analysis_calls = 0
+
+        async def analyze(self, session, *, payload):
+            self.analysis_calls += 1
+            session["judge_checkpoint"] = {"score": 8, "used_skills": ["child-skill"]}
+            return await super().analyze(session, payload=payload)
+
+        async def trace_analyze(self, session, *, payload):
+            assert session["judge_checkpoint"]["used_skills"] == ["child-skill"]
+            if self.fail_on == "trace_analyze":
+                raise RuntimeError("trace model unavailable")
+
+    iid, _ = await _accept_push(tx, payloads)
+    first = Runner()
+    first.fail_on = "trace_analyze"
+    services = _worker_services(tx, payloads, runner=first)
+    for kind in (KIND_NORMALIZE, KIND_SPLIT, KIND_ANALYZE):
+        await process_once(services, owner_id="first-worker", tenants=("default",), kinds=(kind,))
+    assert first.analysis_calls == 1
+    assert ("default", f"session_{iid}") not in db.sessions
+
+    # A fresh Worker has no in-memory analysis; the immutable PG checkpoint
+    # must carry the model verdict and child Skill attribution into the retry.
+    second = Runner()
+    db.now += 1000.0
+    await _drain(_worker_services(tx, payloads, runner=second))
+    assert second.analysis_calls == 0
+    assert db.sessions[("default", f"session_{iid}")]["decision"] == "valuable"
+    async with tx.tenant_tx("default") as conn:
+        done = await SessionIngestionRepository(tx).succeeded_stages(conn, ingestion_id=iid)
+    assert done == {"normalize", "split", "analyze", "trace_analyze", "archive"}
+
+
+@pytest.mark.asyncio
 async def test_semantic_split_failure_produces_no_formal_session(tx, db, payloads):
     iid, _ = await _accept_push(tx, payloads)
     services = _worker_services(tx, payloads, runner=_StageRunner(fail_on="split"))

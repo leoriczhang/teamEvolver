@@ -71,6 +71,13 @@ def test_production_composition_routes_and_root_tenant_selection(pg_env, monkeyp
         assert c.get("/api/datasource", headers=ROOT).json()["available"][0]["revision"] == 1
         beta = {**ROOT, "X-Tenant-Id": "beta"}
         assert c.get("/api/datasource", headers=beta).json()["available"] == []
+        # Identity is resolved before the runtime binds its tenant context.
+        # A Root Key browser must keep the selected project after auth/status.
+        for headers, tenant_id in ((ROOT, "alpha"), (beta, "beta"), (ROOT, "alpha")):
+            status = c.get("/api/auth/status", headers=headers)
+            assert status.status_code == 200, status.text
+            assert status.json()["active_tenant_id"] == tenant_id
+            assert status.json()["user"]["tenant_id"] == tenant_id
         assert c.get("/api/datasource", headers={**ROOT, "X-Tenant-Id": "missing"}).status_code == 403
         assert (
             c.put(
@@ -207,10 +214,16 @@ def test_session_payloads_survive_restart_and_all_stages_preserve_analysis(pg_en
     finally:
         reset_current_tenant(identity)
     assert _run(pg_env, "beta", lambda conn: conn.fetchval(f"SELECT count(*) FROM {pg_env.schema}.sessions")) == 0
+    # Historical rows may predate the title projection. The console derives a
+    # useful title from archived content rather than exposing only Session ID.
+    _run(pg_env, "alpha", lambda conn: conn.execute(
+        f"UPDATE {pg_env.schema}.sessions SET meta=meta-'title'",
+    ))
     with client(pg_env, monkeypatch) as c:
         page = c.get("/api/sessions/page?limit=20&offset=0", headers=ROOT)
         assert page.status_code == 200, page.text
         row = page.json()["sessions"][0]
+        assert row["title"] == "Task"
         assert row["num_turns"] == 2
         assert row["meta"]["trace_id"] == "trace-external"
         assert row["used_skills"] == ["demo"]

@@ -1,0 +1,61 @@
+{
+  "tenant": {"id": "codingvideo-ma", "display_name": "CodingVideo MA"},
+  "connection_id": "codingvideo",
+  "environment_files": ["/home/zhangpengkun/CodingVideo/.env"],
+  "secret_env": {
+    "ma_api_key": "CODINGVIDEO_ARK_API_KEY",
+    "tenant_token": "CODINGVIDEO_TEAMEVOLVER_TENANT_KEY",
+    "model_api_key": "CODINGVIDEO_ARK_API_KEY"
+  },
+  "credential_output": {
+    "path": "/home/zhangpengkun/CodingVideo/.env",
+    "values": {
+      "CODINGVIDEO_TEAMEVOLVER_URL": "http://127.0.0.1:52010",
+      "CODINGVIDEO_TEAMEVOLVER_CONNECTION_ID": "codingvideo",
+      "CODINGVIDEO_TEAMEVOLVER_USER_ID": "zhangpengkun"
+    }
+  },
+  "connection": {
+    "provider": "volcengine-managed-agents",
+    "display_name": "CodingVideo",
+    "ma_base_url": "https://ark.cn-beijing.volces.com/api/v3",
+    "entry_agent_id": {"$json": "/home/zhangpengkun/CodingVideo/data/deployment.json", "pointer": "/agents/coordinator/id"},
+    "environment_id": {"$json": "/home/zhangpengkun/CodingVideo/data/deployment.json", "pointer": "/environmentId"},
+    "vault_ids": [{"$json": "/home/zhangpengkun/CodingVideo/data/deployment.json", "pointer": "/vaultId"}],
+    "team_evolver_url": "http://127.0.0.1:52010",
+    "default_user_id": "zhangpengkun",
+    "user_tag_prefix": "te-user:",
+    "poll_interval_seconds": 60,
+    "sync_interval_seconds": 30,
+    "replay_enabled": true,
+    "replay_environment_id": {"$env": "CODINGVIDEO_REPLAY_ENVIRONMENT_ID"},
+    "replay_vault_ids": [{"$env": "CODINGVIDEO_REPLAY_VAULT_ID"}],
+    "replay_isolation": {"vaults": true},
+    "runtime_binding": {
+      "skill_name": "codingvideo-production-core",
+      "source": "skill_mount",
+      "paths": [
+        {"bundle_prefix": "runtime/", "workspace_prefix": "runtime/"},
+        {"bundle_prefix": "config/", "workspace_prefix": "config/"}
+      ],
+      "working_directory": "/workspace/codingvideo",
+      "pre_setup": {"$text": "/home/zhangpengkun/team-evolver-oss/examples/managed-agents/codingvideo-node22.sh"},
+      "replace_setup_script": true,
+      "bootstrap": "env -u BASH_ENV CODINGVIDEO_INSTALL_CHROMIUM=1 CODINGVIDEO_REQUIRE_THREE=1 bash --noprofile --norc runtime/bootstrap.sh",
+      "ready_file": "runtime-state.json",
+      "ready_probe_message": "这是任务开始前的运行时探测，请你直接执行一次只读检查：cat /workspace/codingvideo/runtime-state.json /workspace/codingvideo/.team-evolver-runtime-sha256 /mnt/session/outputs/team-evolver-runtime-ready.json。报告实际文件内容；不要委派子 Agent、安装、修复、创建项目、制作视频或调用媒体模型，也不要读取凭据。检查后结束本轮，等待真正业务任务。"
+    }
+  },
+  "skills": {
+    "min_group_sessions": 2,
+    "min_group_users": 1,
+    "evolution_trigger_mode": "automatic",
+    "evolution_interval_seconds": 600,
+    "auto_evaluate": true,
+    "publish_mode": "manual",
+    "bundle_text_extensions": [".py", ".sh", ".md", ".mjs", ".js", ".json"]
+  },
+  "replay": {"timeout_seconds": 1800, "max_interactions": 20, "concurrency": 1},
+  "model": {"model": "doubao-seed-evolving", "base_url": "https://ark.cn-beijing.volces.com/api/v3"},
+  "expected_resources": {"agents": 1, "custom_skills": 15}
+}

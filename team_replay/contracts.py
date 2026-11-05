@@ -11,6 +11,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping
 
+from .config import DEFAULT_REPLAY_CONFIG
 from .datasets.schema import DATASET_SCHEMA
 
 REPLAY_SPEC_SCHEMA = "team-replay.spec"
@@ -174,7 +175,7 @@ def skill_replay_spec(
             else {}
         ),
         limits={
-            "max_interactions": max(1, int(job.get("max_interactions") or 4)),
+            "max_interactions": max(1, int(job.get("max_interactions") or DEFAULT_REPLAY_CONFIG["max_interactions"])),
         },
         metadata={
             "source": deepcopy(job.get("source") or {}),
@@ -203,7 +204,7 @@ def skill_job_from_spec(spec: ReplaySpec) -> dict[str, Any]:
         "runtime_validation_policy": deepcopy(dict(spec.runtime)),
         "max_interactions": max(
             1,
-            int(spec.limits.get("max_interactions") or 4),
+            int(spec.limits.get("max_interactions") or DEFAULT_REPLAY_CONFIG["max_interactions"]),
         ),
         "source": deepcopy(spec.metadata.get("source") or {}),
     }

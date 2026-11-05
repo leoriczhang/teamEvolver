@@ -40,6 +40,7 @@ MODULES = {
         "Replay, datasets and Replay adapters",
         "api/05-replay-branch.md",
     ),
+    "team_ma": ("Managed Agents 接入", "Managed Agents integration", "api/24-managed-agents.md"),
     "team_memory": ("团队 Memory", "Team Memory", "api/11-team-memory-aggregation.md"),
     "team_miner": ("知识库挖掘", "Knowledge mining", "api/22-knowledge-mining.md"),
 }

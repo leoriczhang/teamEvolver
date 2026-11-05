@@ -47,14 +47,23 @@ def branch_efficiency(branch: dict[str, Any]) -> dict[str, Any]:
 def compare_efficiency(
     baseline: dict[str, Any],
     candidate: dict[str, Any],
+    *,
+    checklists: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     base = branch_efficiency(baseline)
     cand = branch_efficiency(candidate)
+    ready = checklists is None or all(
+        int((checklists.get(branch) or {}).get("total") or 0) > 0
+        and (checklists.get(branch) or {}).get("all_satisfied") is True
+        and (checklists.get(branch) or {}).get("judge") != "unavailable"
+        and baseline.get("ok", True) is not False and candidate.get("ok", True) is not False
+        for branch in ("baseline", "candidate")
+    )
     dimensions: dict[str, dict[str, Any]] = {}
     for key in REPLAY_METRICS:
         baseline_value = metric_number(base[key])
         candidate_value = metric_number(cand[key])
-        if baseline_value is None or candidate_value is None:
+        if not ready or baseline_value is None or candidate_value is None:
             dimensions[key] = {
                 "baseline": base[key], "candidate": cand[key],
                 "delta": None, "reduction_ratio": None, "winner": UNAVAILABLE,
@@ -76,6 +85,7 @@ def compare_efficiency(
             ),
         }
     return {
+        "comparison_ready": ready,
         "baseline": base,
         "candidate": cand,
         "dimensions": dimensions,

@@ -1,11 +1,19 @@
 import type { BundleDiff,Candidate,StaticValidation } from "@/features/skills/api/client";
 
 export interface EvalResult {
+  status?: string;
   skill_name?: string;
   proposed_action?: string;
   recommended_publish?: boolean;
   cached?: boolean;
+  summary_only?: boolean;
+  replay_details_omitted?: boolean;
   replay?: {
+    status?: string;
+    reason?: string;
+    runtime_gate?: { status?: string; target_matrix?: Record<string, {
+      status: string; accepted: boolean; connection_revision?: number; binding_hash?: string;
+    }> };
     verdict?: "accept" | "reject" | "inconclusive";
     no_regression?: boolean;
     error?: string;

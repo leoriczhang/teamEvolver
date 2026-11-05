@@ -46,11 +46,15 @@ Skill 进化支持管理员手动触发或 Worker 定时自动触发：Worker �
 
 返回 `{"candidates", "total", "limit", "offset", "has_more"}`。
 
+控制台列表使用 `compact=true`。已完成评估的 `evaluation.summary_only=true`，保留 verdict、效率指标、Checklist 完成数量和首个回放错误，省略 Case 正文、Session 快照、产物和重复数据集结果；完整证据通过详情接口读取。轮询摘要不会覆盖已加载的同 revision 完整评估。
+
 `validating` 候选包含 `replay_progress`：`total`、`completed`、`succeeded`、`failed`。进度来自逐 Case 检查点；`succeeded` 表示双方完成 Checklist，不等于候选的效率结论为 `accept`。
 
 ### GET /api/skill-candidates/{candidate_id}/detail
 
 Candidate 详情：Skill 名称、基线版本、revision、bundle、变更说明、证据 Session、最近一次评估结果与事件历史。
+
+`include_replay` 默认 `true`，返回完整回放。控制台首次打开使用 `include_replay=false`，保留技能正文、差异、Checklist 逐项判定和客观结论，省略完整回放轨迹；`evaluation.replay_details_omitted=true` 表示可按需加载完整回放。详情中的存量评估标记为 `cached=true`。轮询仅复用 revision 与 `updated_at` 均一致的详情；详情加载中或请求失败时显示明确状态。
 
 ### PUT /api/skill-candidates/{candidate_id}/content
 

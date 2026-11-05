@@ -49,7 +49,7 @@ COPY release/ /tmp/release/
 
 # git is used only by the isolated Skill Git transfer adapter.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git openssh-client \
+    && apt-get install -y --no-install-recommends ca-certificates git openssh-client nodejs ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
     && python -m venv "$VIRTUAL_ENV" \
     && PYTHON_BIN="$VIRTUAL_ENV/bin/python" sh /tmp/release/install.sh \

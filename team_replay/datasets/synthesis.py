@@ -21,6 +21,7 @@ from team_replay.datasets.schema import (
     normalize_case,
     normalize_checks,
 )
+from teamEvolver.evidence import bounded_evidence
 
 _LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)、]|[（(]\d+[)）])\s*")
 _FENCE_RE = re.compile(r"```(?:json)?\s*|\s*```", re.IGNORECASE)
@@ -463,6 +464,10 @@ async def synthesize_evolution_datasets(
         }
     parsed: Optional[dict[str, Any]] = None
     try:
+        model_payload = await bounded_evidence(
+            llm, payload, call_options=_synthesis_call_options(),
+            trace_name=f"team-skill-evolver:dataset_synthesis:{skill_name}",
+        )
         raw = await llm.chat(
             [
                 {
@@ -477,7 +482,7 @@ async def synthesize_evolution_datasets(
                 },
                 {
                     "role": "user",
-                    "content": json.dumps(payload, ensure_ascii=False),
+                    "content": json.dumps(model_payload, ensure_ascii=False),
                 },
             ],
             **_synthesis_call_options(),

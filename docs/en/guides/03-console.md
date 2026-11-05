@@ -43,6 +43,9 @@ A page can be opened directly with `?view=<key>`, for example `/?view=workspace`
 | Settings & Access | Tenant Management | `tenants` | Platform administrator |
 | Settings & Access | Model Settings | `model` | Tenant administrator |
 | Settings & Access | Data Source Onboarding | `datasource` | Tenant administrator |
+| Settings & Access | MA Integration | `managed-agents` | Tenant administrator |
+
+MA Integration manages connections, discovery, collection, pause, resource bindings and release history. Forms show credential presence only. Candidate Review displays managed targets and supports member selection for new Skills. See [MA Integration](../agent-integrations/07-managed-agents.md).
 
 ## Skill Mining
 

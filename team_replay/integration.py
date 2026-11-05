@@ -22,21 +22,30 @@ class FixedHost:
         return copy.deepcopy(self.harness)
 
 
-async def host_for(payload, services, tenant_id):
+async def host_for(payload, services, tenant_id, *, task=None):
     injected = services.extras.get("replay_host_factory")
     if injected:
         return injected(copy.deepcopy(payload), tenant_id)
-    adapter = payload["adapter"]
-    if not adapter:
+    adapter = payload.get("adapter")
+    ma_records = payload.get("ma_records") or {}
+    if not adapter and not ma_records:
         raise ValueError("Replay adapter is not configured")
-    async with services.tx.tenant_tx(tenant_id) as conn:
-        source = await ReplayAdapterRepository(services.tx).source(conn, adapter["adapter_id"], adapter["revision"])
-    if stable_hash(source["source"]) != adapter["source_hash"]:
-        raise ValueError("Replay adapter source hash mismatch")
-    config = SimpleNamespace(**payload["config"])
-    factory = await asyncio.to_thread(
-        build_from_content, source["source"], adapter["adapter_id"], config, tenant_id=tenant_id,
-    )
+    factory = None
+    if adapter:
+        async with services.tx.tenant_tx(tenant_id) as conn:
+            source = await ReplayAdapterRepository(services.tx).source(conn, adapter["adapter_id"], adapter["revision"])
+        if stable_hash(source["source"]) != adapter["source_hash"]:
+            raise ValueError("Replay adapter source hash mismatch")
+        config = SimpleNamespace(**payload["config"])
+        factory = await asyncio.to_thread(
+            build_from_content, source["source"], adapter["adapter_id"], config, tenant_id=tenant_id,
+        )
+    if ma_records:
+        from .adapters.managed_agents import ManagedAgentsFactory
+        provider = services.extras.get("ma_replay_capabilities")
+        if provider is None:
+            raise ValueError("MA Replay capabilities unavailable")
+        factory = ManagedAgentsFactory(ma_records, provider(tenant_id, task), factory)
     provider = services.extras.get("replay_judge_harness")
     if provider:
         harness = provider(payload["config"], tenant_id)

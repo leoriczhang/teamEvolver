@@ -58,6 +58,7 @@ The Checklist is a completion gate, not a weighted score. Once both sides comple
 | Knowledge base mining | Uploaded material converted to Markdown, OpenViking Compile builds the Wiki |
 | Experiment workbench | Edit Skill Bundles and run True Replay on unsaved Candidates against datasets |
 | Multi-tenancy | Tenants, members, platform / tenant administrators, RLS isolation, tenant keys |
+| Managed Agents integration | Generic member/Skill discovery, real Session collection, complete isolated MA Replay and published Skill pull |
 
 ## Console
 
@@ -141,6 +142,8 @@ Use [Protocol v2](./docs/en/agent-integrations/06-protocol-v2.md): a service add
 
 The OpenViking Root Key and model keys are used only on the server. True Replay creates an independent session per branch through the tenant-bound Replay Adapter.
 
+Configure Volcengine MA entries and isolated Replay resources in Console MA Integration for centralized collection and synchronization. A generic script supports `plan / apply / status` with CodingVideo as the example; see [Managed Agents Integration](./docs/en/agent-integrations/07-managed-agents.md).
+
 ## Security and Consistency
 
 - Every business table has RLS isolating by `tenant_id`; the application role must be NOSUPERUSER, NOBYPASSRLS.
@@ -159,6 +162,7 @@ team-evolver/
 ├── session_ingestion/    # Session push, data source pull, mandatory analysis stages
 ├── team_skills/          # Skill library, Candidates, Evolution, successful experiences, import/export, workbench
 ├── team_replay/          # True Replay, Test Datasets, Replay Adapter
+├── team_ma/              # MA connections, collection, managed versions and pull consumption
 ├── team_memory/          # team Memory aggregation, DreamCycle maintenance, Memory Replay
 ├── team_miner/           # knowledge base mining
 ├── web-ui/               # React + TypeScript console sources

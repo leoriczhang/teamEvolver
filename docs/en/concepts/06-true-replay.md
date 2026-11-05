@@ -10,7 +10,7 @@ Each branch is run by `team_replay/execution.py:run_branch`:
 2. Real Agent replies, trajectory, artifacts and metrics are collected (`AgentObservation`).
 3. An independent judge (`team_replay/judging.py:judge_checklist`) gives per-item evidence against the Checklist and decides the completion gate.
 4. When incomplete, `team_replay/policy.py:select_disclosure_items` deterministically selects the unmet items that may be disclosed this round (default 4 per batch), and an independent user simulator (`render_user_feedback`) produces natural feedback.
-5. The feedback is appended to the user history and execution continues; the branch ends and closes its session when everything is met or `max_interactions` is reached.
+5. Feedback is appended to the user history and execution continues until every item has completion evidence. Interaction and timeout limits only protect execution; reaching a limit preserves incomplete evidence and closes the session without comparing efficiency.
 
 Customer adapters never see the Checklist, judge state or undisclosed requirements. Feedback only states the current goal and gaps, with no item IDs, scores or A/B internal wording. When the judge is unavailable the run fails closed.
 
@@ -22,8 +22,9 @@ Customer adapters never see the Checklist, judge state or undisclosed requiremen
 | --- | --- | --- |
 | Judge unavailable on any branch | inconclusive | `checklist_judge_unavailable` |
 | Neither Checklist completed | inconclusive | `both_checklists_incomplete` |
-| Candidate incomplete | reject | `candidate_checklist_incomplete` |
-| Candidate complete, Baseline incomplete | accept | `candidate_only_completed_checklist` |
+| Either Checklist missing | inconclusive | `checklist_missing` |
+| Candidate incomplete | inconclusive | `candidate_checklist_incomplete` |
+| Candidate complete, Baseline incomplete | inconclusive | `baseline_checklist_incomplete` |
 | Both complete | Efficiency comparison | See below |
 
 The efficiency comparison (`team_replay/metrics.py:objective_replay_decision`) uses interaction turns as the primary metric and tool calls and total tokens as secondary metrics:
@@ -36,7 +37,7 @@ The efficiency comparison (`team_replay/metrics.py:objective_replay_decision`) u
 | Turns equal, a secondary metric regresses | reject |
 | Everything equal or metrics unavailable | inconclusive |
 
-Missing metrics are recorded as `unavailable`, never filled with 0. Each verdict keeps the evidence, conversation, disclosure record and Adapter revision.
+Missing metrics are recorded as `unavailable`, never filled with 0. Until both branches complete, actual metrics remain visible with `efficiency.comparison_ready=false`, without deltas or winners. Each verdict keeps the evidence, conversation, disclosure record and Adapter revision.
 
 ## Entry Points
 
@@ -65,7 +66,7 @@ Candidate Review's Dataset evidence section displays each Dataset's verdict, thr
 | --- | --- | --- |
 | `concurrency` | 2 | Concurrent Replay slots per tenant, controlled by `resource_leases` |
 | `timeout_seconds` | 600 | Per-branch timeout |
-| `max_interactions` | 4 | Max interaction turns per branch |
+| `max_interactions` | 20 | Execution guard per branch; stop on completion, remain inconclusive if incomplete at the limit |
 | `llm_model_id` | Empty | Model for the judge and user simulator; empty uses the tenant model configuration |
 
 The configuration must not contain key or password fields.

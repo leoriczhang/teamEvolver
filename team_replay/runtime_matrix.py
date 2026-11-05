@@ -103,6 +103,27 @@ def evaluate_runtime_compatibility(
         if _runtime(runtime)
     }
     statuses = {runtime: entry["status"] for runtime, entry in matrix.items()}
+    targets = policy.get("required_targets") or []
+    target_matrix = {}
+    for target in targets:
+        ident = target["connection_id"] if isinstance(target, dict) else str(target)
+        entries = [(r.get("target_validation") or {}).get(ident) for r in results]
+        entries = [e for e in entries if isinstance(e, dict)]
+        if isinstance(target, dict):
+            entries = [e for e in entries if all(e.get(k) == target[k] for k in
+                       ("connection_revision", "config_hash", "binding_hash", "runtime_hash") if k in target)]
+        if not entries:
+            target_matrix[ident] = {"status": "missing", "accepted": False}
+        elif any(e.get("verdict") == "reject" for e in entries):
+            target_matrix[ident] = {"status": "rejected", "accepted": False}
+        elif all(e.get("accepted") is True and e.get("status") in {"evaluated", "completed"} for e in entries):
+            target_matrix[ident] = {"status": "accepted", "accepted": True}
+        else:
+            target_matrix[ident] = {"status": "inconclusive", "accepted": False}
+        if isinstance(target, dict):
+            target_matrix[ident].update({k: target[k] for k in
+                                        ("connection_revision", "config_hash", "binding_hash", "runtime_hash")
+                                        if k in target})
     if missing_capabilities or incompatible:
         status = "blocked"
         parts = []
@@ -132,9 +153,13 @@ def evaluate_runtime_compatibility(
     else:
         status = "pending"
         reason = "runtime validation results are incomplete"
+    if target_matrix and any(not t["accepted"] for t in target_matrix.values()):
+        status = "rejected" if any(t["status"] == "rejected" for t in target_matrix.values()) else "blocked"
+        reason = "one or more managed MA targets lack independent acceptance"
     return {
         "status": status,
         "required_runtimes": required,
         "matrix": matrix,
         "reason": reason,
+        "required_targets": targets, "target_matrix": target_matrix,
     }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -19,7 +20,7 @@ def validate_candidate_bundle(
     enabled: bool = True,
     timeout_seconds: float = 15.0,
 ) -> dict[str, Any]:
-    """Validate changed Python and Shell files without executing them."""
+    """Parse changed Python, Shell, JavaScript and JSON without executing them."""
     changes = [
         dict(item)
         for item in (skill.get("file_changes") or [])
@@ -98,6 +99,24 @@ def validate_candidate_bundle(
                     continue
                 command = [bash, "-n", "--", str(path)]
                 checker = "bash_n"
+            elif suffix in {".js", ".mjs"}:
+                node = shutil.which("node")
+                if not node:
+                    checks.append({"path": rel_path, "checker": "node_check", "passed": False,
+                                   "detail": "Node.js is unavailable"})
+                    errors.append(f"{rel_path}: Node.js static checker unavailable")
+                    continue
+                command, checker = [node, "--check", str(path)], "node_check"
+            elif suffix == ".json":
+                try:
+                    json.loads(path.read_text(encoding="utf-8"))
+                    passed, detail = True, ""
+                except (ValueError, UnicodeError, OSError) as exc:
+                    passed, detail = False, str(exc)
+                checks.append({"path": rel_path, "checker": "json_parse", "passed": passed, "detail": detail})
+                if not passed:
+                    errors.append(f"{rel_path}: {detail}")
+                continue
             else:
                 checks.append(
                     {

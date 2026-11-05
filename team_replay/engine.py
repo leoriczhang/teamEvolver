@@ -12,6 +12,7 @@ from typing import Any, Mapping, Optional
 
 from .adapters.loader import AdapterError
 from .artifacts import skill_treatment_members, validate_skill_treatment
+from .config import DEFAULT_REPLAY_CONFIG
 from .execution import run_branch
 from .hooks import ReplayAdapterFactory, ReplayContext, ReplayTreatment, ReplayUnsupported
 from .host import current_host
@@ -171,7 +172,8 @@ def execute_pair(
 
 def spawn_native_agent_branch(
     branch: str, instruction: str, skill: dict[str, Any] | None, job: dict[str, Any],
-    case: dict[str, Any], source_session: dict[str, Any], timeout: int, max_interactions: int = 4,
+    case: dict[str, Any], source_session: dict[str, Any], timeout: int,
+    max_interactions: int = DEFAULT_REPLAY_CONFIG["max_interactions"],
     *, factory: ReplayAdapterFactory | None = None,
 ) -> dict[str, Any]:
     """Execute one Replay branch through the tenant-bound factory contract."""
@@ -362,7 +364,7 @@ def _evaluate_case(job_id, job, case, source, factory, timeout, max_interactions
     )
     checklists = {branch: normalize_checklist_report(result, expected_checklist=case["checks"])
                   for branch, result in results.items()}
-    efficiency = compare_efficiency(results["baseline"], results["candidate"])
+    efficiency = compare_efficiency(results["baseline"], results["candidate"], checklists=checklists)
     policy = progressive_replay_decision(efficiency=efficiency, baseline_checklist=checklists["baseline"],
                                          candidate_checklist=checklists["candidate"])
     failures = [
@@ -393,7 +395,8 @@ def _evaluate_case(job_id, job, case, source, factory, timeout, max_interactions
 
 def evaluate_job(
     job_id: str, *, job: dict[str, Any] | None = None, case_index: int | None = None,
-    timeout: int = 600, keep_sandbox: bool = False, max_interactions: int = 4,
+    timeout: int = 600, keep_sandbox: bool = False,
+    max_interactions: int = DEFAULT_REPLAY_CONFIG["max_interactions"],
 ) -> dict[str, Any]:
     del keep_sandbox  # Factory sessions own cleanup, including on failure.
     job = copy.deepcopy(job if job is not None else load_candidate_job(job_id))

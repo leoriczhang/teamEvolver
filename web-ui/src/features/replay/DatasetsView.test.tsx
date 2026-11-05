@@ -68,7 +68,7 @@ describe("dataset console", () => {
     fireEvent.click(await screen.findByRole("button", { name: "批量重回放" }));
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "开始重回放" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-    expect(api).toHaveBeenCalledWith("/api/datasets/ds_test/runs", expect.objectContaining({ method: "POST", body: JSON.stringify({ concurrency: 2, timeout_seconds: 600, max_interactions: 4 }) }));
+    expect(api).toHaveBeenCalledWith("/api/datasets/ds_test/runs", expect.objectContaining({ method: "POST", body: JSON.stringify({ concurrency: 2, timeout_seconds: 600, max_interactions: 20 }) }));
     expect(screen.getByRole("button", { name: "批量重回放" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "停止" })).toBeEnabled();
   });

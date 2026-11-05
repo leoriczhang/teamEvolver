@@ -7,6 +7,12 @@ import json
 from typing import Any
 
 from team_skills.library.repository import SkillLibraryError, SkillMutationConflict
+from teamEvolver.storage.json_snapshots import JsonSnapshots
+from teamEvolver.storage.postgres import PostgresObjectStore
+
+INLINE_COMMAND_BYTES = 8 * 1024 * 1024
+MAX_COMMAND_BYTES = 64 * 1024 * 1024
+PAYLOAD_REFERENCE = "$skill_command_payload"
 
 
 def canonical(value: Any) -> str:
@@ -39,6 +45,16 @@ class EvolutionRepository:
             return None
         item = dict(row)
         item["payload"] = unpack(item["payload"])
+        if PAYLOAD_REFERENCE in item["payload"]:
+            reference = item["payload"][PAYLOAD_REFERENCE]
+            expected_key = f"skill-commands/{item['payload_hash']}.json"
+            if reference != {"key": expected_key, "sha256": item["payload_hash"]}:
+                raise ValueError("skill command payload reference mismatch")
+            raw = await PostgresObjectStore(self.tx, item["tenant_id"]).get(conn, expected_key)
+            item["payload"] = json.loads(raw)
+        item["payload"] = await JsonSnapshots(self.tx, item["tenant_id"]).hydrate(conn, item["payload"])
+        if digest(item["payload"]) != item["payload_hash"]:
+            raise ValueError("skill command payload hash mismatch")
         item["result"] = unpack(item["result"])
         return item
 
@@ -51,13 +67,19 @@ class EvolutionRepository:
             if existing["request_hash"] != request_hash or existing["kind"] != kind:
                 raise SkillMutationConflict("Idempotency-Key was used for a different command")
             return existing, False
-        raw = canonical(payload)
-        if len(raw.encode()) > 8 * 1024 * 1024:
-            raise SkillLibraryError("skill command exceeds 8 MiB")
+        payload_hash = digest(payload)
+        raw = canonical(await JsonSnapshots(self.tx, tenant_id).pack(conn, payload))
+        encoded = raw.encode()
+        if len(encoded) > MAX_COMMAND_BYTES:
+            raise SkillLibraryError("skill command exceeds 64 MiB")
+        if len(encoded) > INLINE_COMMAND_BYTES:
+            key = f"skill-commands/{payload_hash}.json"
+            await PostgresObjectStore(self.tx, tenant_id).put(conn, key, encoded)
+            raw = canonical({PAYLOAD_REFERENCE: {"key": key, "sha256": payload_hash}})
         await conn.execute(
             f"INSERT INTO {self.schema}.skill_commands "
             "(tenant_id,command_id,kind,request_hash,payload_hash,payload) VALUES ($1,$2,$3,$4,$5,$6::jsonb)",
-            tenant_id, command_id, kind, request_hash, digest(payload), raw,
+            tenant_id, command_id, kind, request_hash, payload_hash, raw,
         )
         return await self.command(conn, command_id), True
 

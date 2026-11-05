@@ -16,6 +16,7 @@ BUSINESS_PACKAGES = {
     "team_replay",
     "team_memory",
     "team_miner",
+    "team_ma",
 }
 
 # Required directories contain an importable ``__init__.py``.
@@ -30,6 +31,7 @@ PLATFORM_TARGET_PACKAGES = [
     "teamEvolver/observability/api",
     "teamEvolver/context",
     "teamEvolver/context/api",
+    "teamEvolver/managed_agents",
 ]
 
 # Module API factories installed by the application root.
@@ -45,6 +47,7 @@ MODULE_API_PACKAGES = [
     "team_replay.api",
     "team_memory.api",
     "team_miner.api",
+    "team_ma.api",
 ]
 
 # Runtime is platform infrastructure.
@@ -117,6 +120,9 @@ def test_worker_task_kinds_are_declared():
         "memory.replay",
         "miner.track_compile",
         "miner.rebuild_index",
+        "ma.discover",
+        "ma.collect",
+        "ma.reconcile",
     }
     assert set(TASK_KINDS) == expected, "declared task kinds changed"
     assert len(TASK_KINDS) == len(set(TASK_KINDS)), "duplicate task kind in TASK_KINDS"

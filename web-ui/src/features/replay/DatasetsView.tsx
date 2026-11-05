@@ -327,7 +327,7 @@ function CaseDialog({ datasetCase, revision, path, readOnly, onClose, onSaved }:
 function RunDialog({ path, count, onClose, onStarted }: { path: string; count: number; onClose: () => void; onStarted: (run: DatasetRun) => void }) {
   const [concurrency, setConcurrency] = useState(2);
   const [timeout, setTimeoutValue] = useState(600);
-  const [interactions, setInteractions] = useState(4);
+  const [interactions, setInteractions] = useState(20);
   const [busy, setBusy] = useState(false);
   async function start() {
     setBusy(true);
@@ -336,7 +336,7 @@ function RunDialog({ path, count, onClose, onStarted }: { path: string; count: n
     finally { setBusy(false); }
   }
   return <Dialog open onOpenChange={open => !open && !busy && onClose()}><DialogContent><DialogTitle>批量重回放 · {count} 条</DialogTitle>
-    <DialogDescription>使用当前租户的重回放适配器，逐条在独立会话中执行，由裁判验证 Checklist。运行过程会调用 Agent 和模型。</DialogDescription>
+    <DialogDescription>双方分别持续执行到全部完成条件满足，再比较效率。达到轮数或时间上限仍未完成时，结果为未定。运行过程会调用 Agent 和模型。</DialogDescription>
     <label className="space-y-2">并发数<Input type="number" aria-label="并发数" min={1} max={2} value={concurrency} onChange={e => setConcurrency(Number(e.target.value))} /></label>
     <label className="space-y-2">单条超时（秒）<Input type="number" aria-label="单条超时" min={30} max={1800} value={timeout} onChange={e => setTimeoutValue(Number(e.target.value))} /></label>
     <label className="space-y-2">最多交互轮数<Input type="number" aria-label="最多交互轮数" min={1} max={20} value={interactions} onChange={e => setInteractions(Number(e.target.value))} /></label>

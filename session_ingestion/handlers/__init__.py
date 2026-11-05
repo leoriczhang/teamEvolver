@@ -281,19 +281,34 @@ async def handle_analyze(task: ClaimedTask, services) -> HandlerResult:
     deps = _deps(services)
     repo = SessionIngestionRepository(services.tx)
     payload = await _load_payload(deps, task)
-    session = await asyncio.to_thread(deps.payloads.get_session, task.payload_ref)
-
-    try:
-        analysis = await deps.stage_runner.analyze(session, payload=payload)
-    except Exception as exc:  # noqa: BLE001 - model errors retry; no partial Session
-        await _record_failed(repo, task, "analyze", exc)
-        return HandlerResult.retry(error_code=f"analyze_failed:{type(exc).__name__}")
     async with services.tx.tenant_tx(task.tenant_id) as conn:
-        await repo.record_stage(
-            conn, tenant_id=task.tenant_id, ingestion_id=payload.ingestion_id,
-            stage="analyze", status="succeeded",
-            detail={"decision": analysis.get("decision", "")},
+        stages = {
+            row["stage"]: row for row in await repo.stage_results(conn, ingestion_id=payload.ingestion_id)
+            if row["status"] == "succeeded" and row.get("result_ref")
+        }
+    if "trace_analyze" in stages:
+        await _enqueue_next(services, task, kind=KIND_ARCHIVE, payload=payload)
+        return HandlerResult.succeed(result_ref=stages["trace_analyze"]["result_ref"])
+    if "analyze" in stages:
+        session = await asyncio.to_thread(deps.payloads.get_session, stages["analyze"]["result_ref"])
+    else:
+        session = await asyncio.to_thread(deps.payloads.get_session, task.payload_ref)
+        try:
+            analysis = await deps.stage_runner.analyze(session, payload=payload)
+        except Exception as exc:  # noqa: BLE001 - model errors retry; no partial Session
+            await _record_failed(repo, task, "analyze", exc)
+            return HandlerResult.retry(error_code=f"analyze_failed:{type(exc).__name__}")
+        # Keep the analyzed immutable Session, including judge output. A later
+        # trace failure can resume here instead of re-reading every model chunk.
+        ref, _ = await asyncio.to_thread(
+            deps.payloads.put_session, payload.ingestion_id, session, stage="session-analysis",
         )
+        async with services.tx.tenant_tx(task.tenant_id) as conn:
+            await repo.record_stage(
+                conn, tenant_id=task.tenant_id, ingestion_id=payload.ingestion_id,
+                stage="analyze", status="succeeded", result_ref=ref,
+                detail={"decision": analysis.get("decision", "")},
+            )
 
     try:
         await deps.stage_runner.trace_analyze(session, payload=payload)
@@ -354,13 +369,29 @@ async def handle_archive(task: ClaimedTask, services) -> HandlerResult:
     content_ref, content_hash = await asyncio.to_thread(deps.payloads.put_session, 
         payload.ingestion_id, archived_session, stage="archive"
     )
+    formal_session_id = f"session_{payload.ingestion_id}"
+    runtime = archived_session.get("runtime") if isinstance(archived_session.get("runtime"), dict) else {}
+    runtime_context = (
+        archived_session.get("runtime_context")
+        if isinstance(archived_session.get("runtime_context"), dict) else {}
+    )
+    managed_parent = str(runtime_context.get("source_session_id") or "")
+    managed_connection = str(runtime.get("connection_id") or runtime_context.get("connection_id") or "")
+    managed_formal_id = str(runtime_context.get("formal_session_id") or "")
+    if (
+        runtime.get("type") == "managed-agents"
+        and managed_parent and managed_connection
+        and managed_formal_id.startswith("session_ma_")
+        and len(managed_formal_id) <= 200
+    ):
+        formal_session_id = managed_formal_id
     final_status = "skipped" if decision == "skipped" else "archived"
     async with services.tx.tenant_tx(task.tenant_id) as conn:
         if decision == "valuable" or (decision == "skipped" and archived.get("persist_skipped", True)):
             await repo.write_session(
                 conn,
                 tenant_id=task.tenant_id,
-                session_id=f"session_{payload.ingestion_id}",
+                session_id=formal_session_id,
                 ingestion_id=payload.ingestion_id,
                 source=payload.source,
                 external_id=payload.external_id,
@@ -375,6 +406,11 @@ async def handle_archive(task: ClaimedTask, services) -> HandlerResult:
                 meta=session_list_meta(archived_session, archived.get("meta")),
                 business_time=archived.get("business_time"),
             )
+            if formal_session_id == managed_formal_id:
+                await repo.collapse_managed_session(
+                    conn, session_id=formal_session_id, connection_id=managed_connection,
+                    parent_session_id=managed_parent,
+                )
         await repo.record_stage(
             conn, tenant_id=task.tenant_id, ingestion_id=payload.ingestion_id,
             stage="archive", status="succeeded", result_ref=content_ref,
@@ -501,6 +537,10 @@ async def _accept_and_enqueue_child(services, repo, task, child_payload, session
 
 async def _record_failed(repo: SessionIngestionRepository, task: ClaimedTask, stage: str, exc: Exception) -> None:
     payload = None
+    logger.error(
+        "[session.%s] mandatory stage failed for %s", stage, task.subject_id,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
     try:
         async with repo._tx.tenant_tx(task.tenant_id) as conn:  # noqa: SLF001 - same module helper
             await repo.record_stage(

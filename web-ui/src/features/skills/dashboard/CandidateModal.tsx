@@ -9,13 +9,14 @@ DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import CandidateTargets from "@/features/ma/CandidateTargets";
 import UnifiedDiffView,{ InlineDiffView } from "@/components/UnifiedDiffView";
 import type { EvalResult,ReplaySide,WorkbenchChecklistReport } from "@/features/replay/api/client";
 import type { Candidate,CandidateFeedback } from "@/features/skills/api/client";
 import CandidateFeedbackControls from "@/features/skills/dashboard/CandidateFeedback";
 import CandidateReplayEvidence,{ EfficiencyTable } from "./CandidateReplayEvidence";
 import { toastErr,toastOk } from "@/lib/toast";
-import { useEffect,useState,type ReactNode } from "react";
+import { useEffect,useRef,useState,type ReactNode } from "react";
 
 type SkillDraft = {
   name: string;
@@ -55,6 +56,9 @@ export default function CandidateModal({
   cand,
   ev,
   evaluating,
+  detailLoading = false,
+  detailError = "",
+  onRetryDetail,
   open,
   readOnly = false,
   onClose,
@@ -68,6 +72,9 @@ export default function CandidateModal({
   cand: Candidate | null;
   ev: EvalResult | null;
   evaluating: boolean;
+  detailLoading?: boolean;
+  detailError?: string;
+  onRetryDetail?: () => void;
   open: boolean;
   readOnly?: boolean;
   onClose: () => void;
@@ -83,11 +90,17 @@ export default function CandidateModal({
   // Fresh detail payload returned by the edit endpoint; shadows the parent's
   // (now stale) props until the next evaluation refreshes them.
   const [override, setOverride] = useState<Candidate | null>(null);
+  const [replayLoading, setReplayLoading] = useState(false);
+  const [replayError, setReplayError] = useState("");
+  const replayRequest = useRef(0);
   const [draft, setDraft] = useState<SkillDraft>({ name: "", description: "", category: "general", content: "" });
 
   useEffect(() => {
     setEditing(false);
     setOverride(null);
+    setReplayLoading(false);
+    setReplayError("");
+    replayRequest.current += 1;
   }, [jobId, open]);
 
   const activeCand = override ?? cand;
@@ -97,6 +110,11 @@ export default function CandidateModal({
   const replayCases = rep.cases || [];
   const efficiencyDimensions = rep.efficiency?.dimensions || {};
   const decisionPolicy = rep.decision_policy || {};
+  const checklistPassed = [rep.checklist?.baseline, rep.checklist?.candidate]
+    .every(report => report?.all_satisfied === true && report.judge !== "unavailable" && (report.total || 0) > 0);
+  const runtimePassed = !rep.runtime_gate || rep.runtime_gate.status === "passed";
+  const canPublish = checklistPassed && runtimePassed && !rep.error
+    && rep.verdict === "accept" && activeEv?.recommended_publish === true;
   const replayPager = usePagedItems(replayCases);
   const currentMd =
     activeEv?.current_skill_md ||
@@ -163,8 +181,34 @@ export default function CandidateModal({
     onEvaluate(force);
   }
 
+  async function loadReplay() {
+    if (!jobId || replayLoading) return;
+    const request = ++replayRequest.current;
+    setReplayLoading(true);
+    setReplayError("");
+    try {
+      const detail = await api<Candidate>(`/api/skill-candidates/${encodeURIComponent(jobId)}/detail`);
+      if (request !== replayRequest.current) return;
+      if (detail.candidate_revision !== activeCand?.candidate_revision) {
+        throw new Error("候选版本已变更，请重新打开详情。");
+      }
+      setOverride(detail);
+    } catch (error) {
+      if (request === replayRequest.current) setReplayError(error instanceof Error ? error.message : "加载回放失败");
+    } finally {
+      if (request === replayRequest.current) setReplayLoading(false);
+    }
+  }
+
   let bodyInner: ReactNode;
-  if (!activeEv) {
+  if (detailLoading || activeEv?.summary_only && !detailError) {
+    bodyInner = <Empty>正在加载候选详情…</Empty>;
+  } else if (detailError) {
+    bodyInner = <div role="alert" className="rounded-lg border border-destructive/40 p-3 text-sm">
+      加载候选详情失败：{detailError}
+      {onRetryDetail && <Button variant="outline" size="sm" onClick={onRetryDetail}>重试</Button>}
+    </div>;
+  } else if (!activeEv) {
     bodyInner = evaluating ? (
       <Empty>正在运行 A/B 回放评估，请稍候…（首次评估需调用模型，可能耗时较久）</Empty>
     ) : readOnly ? (
@@ -180,10 +224,14 @@ export default function CandidateModal({
   } else {
     // Replay detail
     let replayHtml: ReactNode;
-    if (rep.error) {
+    if (activeEv.status === "blocked") {
+      replayHtml = <div className="text-xs text-destructive">评估受阻：{rep.reason || "回放输入不完整"}</div>;
+    } else if (rep.error) {
       replayHtml = <div className="text-xs text-destructive">回放失败：{rep.error}</div>;
     } else {
-      if (rep.datasets?.length) {
+      if (activeEv.replay_details_omitted) {
+        replayHtml = <div className="text-xs text-muted-foreground">完整回放按需加载，包含双方的工具调用与回复。</div>;
+      } else if (rep.datasets?.length) {
         replayHtml = <CandidateReplayEvidence datasets={rep.datasets} sampling={rep.sampling} />;
       } else if (!replayCases.length) {
         replayHtml = (
@@ -284,14 +332,17 @@ export default function CandidateModal({
           </div>
           <Pill
             tone={
-              decisionPolicy.verdict === "accept"
+              canPublish
                 ? "green"
                 : decisionPolicy.verdict === "reject"
                 ? "red"
                 : "amber"
             }
           >
-            {decisionPolicy.decision_basis === "interaction_turns_decreased"
+            {rep.error ? "回放失败，无法确定"
+              : !checklistPassed ? "Checklist 未完成判定或未全部满足，无法确定"
+              : !runtimePassed ? "MA 目标验证未通过，无法确定"
+              : decisionPolicy.decision_basis === "interaction_turns_decreased"
               ? "轮次下降，直接判定正向"
               : decisionPolicy.decision_basis === "interaction_turns_increased"
               ? "轮次上升，判定负向"
@@ -304,7 +355,7 @@ export default function CandidateModal({
         </div>
 
         <SecTitle>
-          ✅ Checklist 门禁
+          {checklistPassed ? "✅" : "⚠"} Checklist 门禁
           <InfoTip term="checklist" />
         </SecTitle>
         <ChecklistEvidence
@@ -317,7 +368,7 @@ export default function CandidateModal({
           }
         />
 
-        {Object.keys(efficiencyDimensions).length > 0 && (
+        {Object.keys(efficiencyDimensions).length > 0 && checklistPassed && (
           <>
             <SecTitle>
               ⚡ A/B 效率对比
@@ -331,6 +382,9 @@ export default function CandidateModal({
               <EfficiencyTable efficiency={rep.efficiency} />
             </div>
           </>
+        )}
+        {!checklistPassed && Object.keys(efficiencyDimensions).length > 0 && (
+          <div className="text-xs text-muted-foreground">双方全部 Checklist 满足后才比较效率指标。</div>
         )}
 
         <SecTitle>
@@ -452,6 +506,10 @@ export default function CandidateModal({
         </div>
         <SecTitle>🔁 A/B 回放明细（基线 vs 候选）</SecTitle>
         {replayHtml}
+        {activeEv.replay_details_omitted && <Button variant="outline" size="sm" disabled={replayLoading} onClick={loadReplay}>
+          {replayLoading ? "正在加载完整回放…" : "加载完整回放证据"}
+        </Button>}
+        {replayError && <div role="alert" className="text-xs text-destructive">{replayError}</div>}
 
         <div className="mt-3.5 flex items-center gap-2">
           {!readOnly && (
@@ -465,12 +523,12 @@ export default function CandidateModal({
             </Button>
           )}
           <span className="text-xs text-muted-foreground">
-            {readOnly ? "历史候选只读展示" : activeEv.cached ? "结果来自缓存" : "本次实时评估"}
+            {readOnly ? "历史候选只读展示" : evaluating ? "正在评估" : "已保存的评估结果"}
           </span>
         </div>
         {!readOnly && onPublish && (
           <div className="sticky bottom-0 flex flex-wrap items-center gap-2 border-t border-border bg-background py-3">
-            <Button disabled={evaluating || editing} onClick={() => onPublish("auto")}>按回放发布</Button>
+            <Button disabled={evaluating || editing || !canPublish} onClick={() => onPublish("auto")}>按回放发布</Button>
             <Button variant="outline" disabled={evaluating || editing} onClick={() => onPublish("force")}>强制发布</Button>
             <span className="text-xs text-muted-foreground">发布时按当次数据集与历史采样重新验证。</span>
           </div>
@@ -498,6 +556,8 @@ export default function CandidateModal({
             />
           </div>
         )}
+        {jobId && activeCand && !detailLoading && !detailError && !activeEv?.summary_only && <CandidateTargets skillName={candidateName(activeCand, activeEv, jobId)}
+          canManage={!readOnly} matrix={activeEv?.replay?.runtime_gate?.target_matrix} />}
         {bodyInner}
       </DialogContent>
     </Dialog>
@@ -528,15 +588,19 @@ function AbCol({
         {head}
       </div>
       <div className="mb-2 flex flex-wrap gap-2 text-[11px] text-muted-foreground">
-        <span>轮次 {Number(branch.interaction_turns || 0).toLocaleString()}</span>
-        <span>工具 {Number(branch.tool_call_count || 0).toLocaleString()}</span>
-        <span>Token {Number(branch.total_tokens || 0).toLocaleString()}</span>
+        <span>轮次 {metricText(branch.interaction_turns)}</span>
+        <span>工具 {metricText(branch.tool_call_count)}</span>
+        <span>Token {metricText(branch.total_tokens)}</span>
       </div>
       <div className="max-h-[200px] overflow-auto text-xs leading-normal whitespace-pre-wrap break-words">
         {body || <span className="text-muted-foreground">（无输出）</span>}
       </div>
     </div>
   );
+}
+
+function metricText(value: number | "unavailable" | null | undefined) {
+  return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString() : "不可用";
 }
 
 /** Aggregated reports carry one entry per replay case under reports[]. */
@@ -566,7 +630,7 @@ function ChecklistEvidence({
   if (!reports.length) {
     return (
       <div className="rounded-lg border border-border bg-surface-subtle p-3 text-xs text-muted-foreground">
-        本次评估未包含 Checklist 判定（测试集未生成完成条件），发布门禁仅参考三项效率指标。
+        缺少 Checklist 判定，无法确认任务完成；不能按回放发布。
       </div>
     );
   }
@@ -574,11 +638,14 @@ function ChecklistEvidence({
   const satisfied =
     candidate?.satisfied_count ?? reports.reduce((sum, r) => sum + (r.satisfied_count || 0), 0);
   const allSatisfied = candidate?.all_satisfied ?? reports.every((r) => r.all_satisfied);
+  const judgementComplete = candidate?.judge !== "unavailable"
+    && reports.every(report => report.judge !== "unavailable"
+      && (report.items || []).every(item => typeof item.satisfied === "boolean"));
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-2 text-xs">
-        <Pill tone={allSatisfied ? "green" : "red"}>
-          {allSatisfied ? "全部满足" : `未满足 ${Math.max(total - satisfied, 0)} 项`}
+        <Pill tone={!judgementComplete ? "amber" : allSatisfied ? "green" : "red"}>
+          {!judgementComplete ? "判定不完整" : allSatisfied ? "全部满足" : `未满足 ${Math.max(total - satisfied, 0)} 项`}
         </Pill>
         <span className="text-muted-foreground">
           候选满足 {satisfied}/{total} 项
@@ -609,8 +676,8 @@ function ChecklistEvidence({
                     key={item.id || itemIndex}
                     className="flex items-start gap-2 rounded border border-border px-2.5 py-2 text-[11px]"
                   >
-                    <Pill tone={item.satisfied ? "green" : "amber"}>
-                      {item.satisfied ? "满足" : "未满足"}
+                    <Pill tone={item.satisfied === true ? "green" : item.satisfied === false ? "amber" : "gray"}>
+                      {item.satisfied === true ? "满足" : item.satisfied === false ? "未满足" : "未判定"}
                     </Pill>
                     <div className="min-w-0">
                       <div>

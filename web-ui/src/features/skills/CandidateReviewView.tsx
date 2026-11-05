@@ -31,6 +31,7 @@ function mergeCandidateDetail(items: Candidate[], detail: Candidate): Candidate[
 
 function replayIssue(ev?: EvalResult): string {
   if (!ev) return "";
+  if (ev.status === "blocked") return ev.replay?.reason || "回放输入不完整";
   if (ev.replay?.error) return ev.replay.error;
   for (const item of ev.replay?.cases || []) {
     const err = item.baseline?.error || item.candidate?.error;
@@ -47,7 +48,7 @@ function candidateReviewStatus(c: Candidate): string {
 
 function isProcessedCandidate(c: Candidate | null): boolean {
   if (!c) return false;
-  return candidateReviewStatus(c) !== "open" || !!c.decision;
+  return candidateReviewStatus(c) !== "open";
 }
 
 function candidateStatusBadge(c: Candidate): ReactNode {
@@ -72,6 +73,8 @@ export default function CandidateReviewView({ active, canManage = false }: { act
   const [openJobId, setOpenJobId] = useState<string | null>(null);
   const [scope, setScope] = useState<CandidateScope>("open");
   const [loading, setLoading] = useState(false);
+  const [detailLoading, setDetailLoading] = useState<Record<string, boolean>>({});
+  const [detailErrors, setDetailErrors] = useState<Record<string, string>>({});
   const evaluatingRef = useRef<Record<string, boolean>>({});
   const evalCacheRef = useRef<Record<string, EvalResult>>({});
   // job_id -> last loaded full candidate detail; polled list items are
@@ -81,9 +84,11 @@ export default function CandidateReviewView({ active, canManage = false }: { act
   evalCacheRef.current = evalCache;
 
   const loadCandidateDetail = useCallback(async (jobId: string) => {
+    setDetailLoading(m => ({ ...m, [jobId]: true }));
+    setDetailErrors(m => ({ ...m, [jobId]: "" }));
     try {
       const fetched = await api<Candidate>(
-        `/api/skill-candidates/${encodeURIComponent(jobId)}/detail`
+        `/api/skill-candidates/${encodeURIComponent(jobId)}/detail?include_replay=false`
       );
       const savedFeedback = candDetailRef.current[jobId]?.feedback;
       const detail = savedFeedback ? mergeCandidateFeedback(fetched, savedFeedback) : fetched;
@@ -94,8 +99,11 @@ export default function CandidateReviewView({ active, canManage = false }: { act
       }
       return detail;
     } catch (e: any) {
+      setDetailErrors(m => ({ ...m, [jobId]: e.message || "详情请求失败" }));
       toastErr("加载评估详情失败", e.message);
       return null;
+    } finally {
+      setDetailLoading(m => ({ ...m, [jobId]: false }));
     }
   }, []);
 
@@ -138,6 +146,8 @@ export default function CandidateReviewView({ active, canManage = false }: { act
             "重新评估完成",
             issue
               ? `回放存在问题：${issue}`
+                : r.replay?.verdict === "inconclusive"
+                  ? "回放证据不足，请查看 Checklist 完成情况和评估详情"
               : r.recommended_publish
                 ? "客观指标改善"
                 : "客观指标持平或增加"
@@ -154,7 +164,7 @@ export default function CandidateReviewView({ active, canManage = false }: { act
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const query = scope === "processed" ? "?scope=processed" : "";
+      const query = `?compact=true&scope=${scope}`;
       const data = await api<{ candidates: Candidate[] }>(`/api/skill-candidates${query}`);
       // Under load the backend may briefly fail to read the candidate store
       // and answer 200 with zero items; keep the on-screen list in that case.
@@ -197,7 +207,7 @@ export default function CandidateReviewView({ active, canManage = false }: { act
     const msg =
       mode === "force"
         ? "确认强制发布该候选技能？仍会保留 True Replay 三项指标。"
-        : "确认按 True Replay 发布？轮次下降直接正向；轮次持平时再比较工具调用和 Token。";
+        : "确认按 True Replay 发布？双方全部 Checklist 满足后，先比较轮次；轮次持平时再比较工具调用和 Token。";
     if (!window.confirm(msg)) return;
     try {
       const r = await runSkillCommand<{ status?: string; version?: number; feedback?: CandidateFeedback }>(
@@ -244,11 +254,14 @@ export default function CandidateReviewView({ active, canManage = false }: { act
   }
 
   const isHistory = scope === "processed";
-  const evaluated = cands.filter((c) => evalCache[c.job_id] || c.evaluation).length;
+  const evaluated = cands.filter((c) => {
+    const ev = evalCache[c.job_id] || c.evaluation;
+    return ev && ev.status !== "blocked" && c.review_status !== "validating";
+  }).length;
   const recommended = cands.filter((c) => (evalCache[c.job_id] || c.evaluation)?.recommended_publish).length;
   const risky = cands.filter((c) => {
     const ev = evalCache[c.job_id] || c.evaluation;
-    return ev && !ev.recommended_publish;
+    return ev && ev.status !== "blocked" && c.review_status !== "validating" && !ev.recommended_publish;
   }).length;
   const published = cands.filter((c) => candidateReviewStatus(c) === "published").length;
   const rejected = cands.filter((c) => candidateReviewStatus(c) === "rejected").length;
@@ -344,7 +357,9 @@ export default function CandidateReviewView({ active, canManage = false }: { act
                           <Pill tone="amber">
                             评估中{c.replay_progress ? ` ${c.replay_progress.completed}/${c.replay_progress.total}` : "…"}
                           </Pill>
-                        ) : ev ? <Pill tone="blue">已完成</Pill> : <Pill tone="gray">待评估</Pill>}
+                        ) : ev ? <Pill tone={issue ? "amber" : "blue"}>
+                          {ev.status === "blocked" ? "评估受阻" : issue ? "回放失败" : "评估结束"}
+                        </Pill> : <Pill tone="gray">待评估</Pill>}
                         {(ev?.static_validation || c.static_validation) && (
                           <div className="mt-1">
                             <Pill tone={(ev?.static_validation || c.static_validation)?.passed ? "green" : "red"}>
@@ -359,7 +374,7 @@ export default function CandidateReviewView({ active, canManage = false }: { act
                           verdict === "accept" || ev.recommended_publish ? <Pill tone="green">指标改善</Pill>
                             : verdict === "inconclusive" ? <Pill tone="amber">无法确定</Pill>
                             : verdict === "reject" ? <Pill tone="red">未通过</Pill>
-                            : <Pill tone="amber">持平 / 有增加</Pill>
+                            : <Pill tone="amber">无法确定</Pill>
                         ) : (
                           <span className="text-xs text-muted-foreground">—</span>
                         )}
@@ -405,6 +420,9 @@ export default function CandidateReviewView({ active, canManage = false }: { act
         cand={openCand}
         ev={openJobId ? evalCache[openJobId] ?? openCand?.evaluation ?? null : null}
         evaluating={openJobId ? !!evaluating[openJobId] : false}
+        detailLoading={openJobId ? !!detailLoading[openJobId] : false}
+        detailError={openJobId ? detailErrors[openJobId] || "" : ""}
+        onRetryDetail={() => openJobId && void loadCandidateDetail(openJobId)}
         open={!!openJobId}
         readOnly={isProcessedCandidate(openCand) || !canManage}
         onClose={() => setOpenJobId(null)}

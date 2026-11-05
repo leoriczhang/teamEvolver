@@ -28,6 +28,7 @@ export interface LedgerRow {
   ingested_at?: string;
   timestamp?: string;
   used_skills?: string[];
+  available_skills?: string[] | null;
   value_judge?: {
     decision?: string;
     confidence?: number;

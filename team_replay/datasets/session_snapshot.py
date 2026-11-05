@@ -38,6 +38,8 @@ def snapshot_case(session: dict, row: dict) -> dict:
             "timestamp": row.get("timestamp") or session.get("timestamp") or "",
             "ingested_at": row.get("ingested_at") or session.get("ingested_at") or "",
             "session_snapshot": copy.deepcopy(session),
+            "source_runtime": copy.deepcopy(session.get("runtime") or {"type": session.get("source", "")}),
+            "source_runtime_context": copy.deepcopy(session.get("runtime_context") or {}),
         },
         "replay": {
             "progressive_disclosure": {

@@ -235,6 +235,31 @@ def test_model_all_normal_verdict_is_not_overridden_by_session_score():
     assert all(row["problem_description"] == "" for row in results)
 
 
+def test_child_trace_identity_retry_keeps_parent_and_child_distinct():
+    class _ConfusedClient(_AllGoodClient):
+        async def chat(self, messages, **kwargs):
+            payload = json.loads(messages[-1]["content"])
+            assert payload["expected_trace_identities"] == [
+                {"trace_id": "parent", "turn_num": 1},
+                {"trace_id": "child", "turn_num": 2},
+            ]
+            result = json.loads(await super().chat(messages, **kwargs))
+            if len(self.calls) == 1:
+                result["traces"][1]["turn_num"] = 1
+            return json.dumps(result)
+
+    client = _ConfusedClient()
+    session = _bad_session([_turn("parent", "delegate", agent_threads=[{
+        "trace_id": "child", "session_thread_id": "producer", "agent_name": "Producer",
+        "prompt_text": "Render", "response_text": "Done",
+        "tool_calls": [{"id": "render", "function": {"name": "bash", "arguments": "render"}}],
+    }])])
+    results = asyncio.run(ta.analyze_session_traces(client, session))
+    assert len(client.calls) == 2
+    assert [(r["trace_id"], r["turn_num"]) for r in results] == [("parent", 1), ("child", 2)]
+    assert results[1]["parent_trace_id"] == "parent"
+
+
 @pytest.mark.parametrize(
     "reply",
     [

@@ -8,8 +8,12 @@ import json
 import re
 import uuid
 
+from teamEvolver.storage.json_snapshots import JsonSnapshots, canonical
+
 from .._util import normalize_artifact_rel_path, stable_hash
 from .schema import normalize_document
+
+MAX_DATASET_BYTES = 64 * 1024 * 1024
 
 
 class DatasetError(ValueError):
@@ -81,7 +85,7 @@ class DatasetRepository:
         )
         if row is None:
             raise DatasetNotFound("Dataset revision not found")
-        document = unpack(row["document"])
+        document = await JsonSnapshots(self.tx, head["tenant_id"]).hydrate(conn, unpack(row["document"]))
         if stable_hash(document) != row["document_hash"]:
             raise DatasetError("Dataset hash mismatch")
         return {**document, "revision": version, "document_hash": row["document_hash"],
@@ -108,7 +112,7 @@ class DatasetRepository:
 
     async def historical_cases(self, conn, *, skill_id, before_dataset_id):
         rows = await conn.fetch(
-            f"SELECT d.dataset_id,d.name,d.revision,d.document_hash,c.payload AS case "
+            f"SELECT d.tenant_id,d.dataset_id,d.name,d.revision,d.document_hash,c.payload AS case "
             f"FROM {self.schema}.datasets d JOIN {self.schema}.dataset_revisions r "
             "ON r.tenant_id=d.tenant_id AND r.dataset_id=d.dataset_id AND r.revision=d.revision "
             f"JOIN {self.schema}.dataset_cases c ON c.tenant_id=d.tenant_id "
@@ -122,12 +126,19 @@ class DatasetRepository:
             "ORDER BY d.dataset_id,c.case_id",
             skill_id, safe_id(before_dataset_id),
         )
-        return [{**dict(row), "case": unpack(row["case"])} for row in rows]
+        stores = {}
+        result = []
+        for row in rows:
+            store = stores.setdefault(row["tenant_id"], JsonSnapshots(self.tx, row["tenant_id"]))
+            item = {key: value for key, value in dict(row).items() if key != "tenant_id"}
+            item["case"] = await store.hydrate(conn, unpack(row["case"]))
+            result.append(item)
+        return result
 
     async def save(self, conn, *, tenant_id, document, files=None, expected_revision=None):
         document = normalize_document(document, allow_empty=True)
         dataset_id = safe_id(document["dataset_id"])
-        if len(document["cases"]) > 500 or len(json.dumps(document).encode()) > 64 * 1024 * 1024:
+        if len(document["cases"]) > 500:
             raise DatasetError("Dataset exceeds 500 Cases or 64 MiB")
         if not 1 <= len(document["name"]) <= 120 or len(document["description"]) > 2000:
             raise DatasetError("invalid Dataset name or description")
@@ -165,6 +176,9 @@ class DatasetRepository:
         document["created_at"] = (await self.get(conn, dataset_id))["created_at"] if head else document["created_at"]
         document["updated_at"] = now
         digest = stable_hash(document)
+        packed = await JsonSnapshots(self.tx, tenant_id).pack(conn, document)
+        if len(canonical(packed).encode()) > MAX_DATASET_BYTES:
+            raise DatasetError("Dataset exceeds 500 Cases or 64 MiB")
         await conn.execute(
             f"INSERT INTO {self.schema}.datasets(tenant_id,dataset_id,revision,name,description,document_hash) "
             "VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(tenant_id,dataset_id) DO UPDATE SET "
@@ -174,7 +188,7 @@ class DatasetRepository:
         )
         await conn.execute(
             f"INSERT INTO {self.schema}.dataset_revisions(tenant_id,dataset_id,revision,document,document_hash) "
-            "VALUES($1,$2,$3,$4::jsonb,$5)", tenant_id, dataset_id, revision, json.dumps(document), digest,
+            "VALUES($1,$2,$3,$4::jsonb,$5)", tenant_id, dataset_id, revision, canonical(packed), digest,
         )
         for position, case in enumerate(document["cases"]):
             await conn.execute(
@@ -182,7 +196,7 @@ class DatasetRepository:
                 "(tenant_id,dataset_id,revision,case_id,position,case_hash,payload) "
                 "VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)",
                 tenant_id, dataset_id, revision, safe_id(case["case_id"]),
-                position, stable_hash(case), json.dumps(case),
+                position, stable_hash(case), canonical(packed["cases"][position]),
             )
         return await self.get(conn, dataset_id)
 

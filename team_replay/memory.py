@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Any, Callable, Mapping, Protocol
 
+from .config import DEFAULT_REPLAY_CONFIG
 from .engine import (
     execute_pair,
     load_context_snapshot,
@@ -75,7 +76,7 @@ class MemoryTrueReplayRunner:
         query: str,
         checklist: list[Any],
         source_session_id: str = "",
-        max_interactions: int = 4,
+        max_interactions: int = DEFAULT_REPLAY_CONFIG["max_interactions"],
         timeout_seconds: int = 600,
     ) -> dict[str, Any]:
         change = self._ledger.load_change(change_id)
@@ -118,7 +119,7 @@ class MemoryTrueReplayRunner:
         checklist: list[Any],
         scope: str = "team_memory",
         source_session_id: str = "",
-        max_interactions: int = 4,
+        max_interactions: int = DEFAULT_REPLAY_CONFIG["max_interactions"],
         timeout_seconds: int = 600,
     ) -> dict[str, Any]:
         """Replay an unsaved Memory edit (workspace draft) against its stored version.
@@ -171,7 +172,7 @@ class MemoryTrueReplayRunner:
         query: str,
         checklist: list[Any],
         source_session_id: str = "",
-        max_interactions: int = 4,
+        max_interactions: int = DEFAULT_REPLAY_CONFIG["max_interactions"],
         timeout_seconds: int = 600,
         scope: str = "team_memory",
     ) -> dict[str, Any]:
@@ -183,7 +184,7 @@ class MemoryTrueReplayRunner:
         normalized_checklist = self._normalize_checklist(checklist)
         if not normalized_checklist:
             raise ValueError("at least one checklist item is required")
-        interactions = max(1, min(20, int(max_interactions or 4)))
+        interactions = max(1, min(20, int(max_interactions or DEFAULT_REPLAY_CONFIG["max_interactions"])))
         timeout = max(30, min(1800, int(timeout_seconds or 600)))
 
         session = self._select_source_session(source_session_id)
@@ -304,10 +305,6 @@ class MemoryTrueReplayRunner:
             for branch, result in results.items()
             if not result.get("ok")
         ]
-        efficiency = compare_efficiency(
-            results["baseline"],
-            results["candidate"],
-        )
         branch_checklists = {
             branch: normalize_checklist_report(
                 results[branch],
@@ -315,6 +312,9 @@ class MemoryTrueReplayRunner:
             )
             for branch in ("baseline", "candidate")
         }
+        efficiency = compare_efficiency(
+            results["baseline"], results["candidate"], checklists=branch_checklists,
+        )
         if failures:
             policy = {
                 "accepted": False,

@@ -6,10 +6,13 @@ from collections.abc import Mapping
 
 from team_replay.datasets.synthesis import synthesize_evolution_datasets
 
+from .session_processing import independent_session_id
+
 CURRENT_CASE_COUNT = 2
 MIN_CHECKS = 6
 MAX_CHECKS = 8
 MIN_SOURCE_SESSIONS = 2
+SYNTHESIS_ATTEMPTS = 3
 
 
 class CrossSessionCaseSynthesisError(ValueError):
@@ -21,24 +24,43 @@ class LLMCrossSessionCaseSynthesizer:
         self.llm = llm
 
     async def __call__(self, *, skill_name, sessions, candidate_skill, evidence_context):
-        generated = await synthesize_evolution_datasets(
-            self.llm,
-            skill_name=skill_name,
-            sessions=sessions,
-            candidate_skill=candidate_skill,
-            evidence_context=evidence_context,
-            case_count=CURRENT_CASE_COUNT,
-            min_requirements=MIN_CHECKS,
-            max_requirements=MAX_CHECKS,
-            min_source_sessions=MIN_SOURCE_SESSIONS,
-            batch_size=2,
-        )
-        return hydrate_cross_session_cases(generated, sessions, skill_name=skill_name)
+        context = copy.deepcopy(dict(evidence_context or {}))
+        for attempt in range(SYNTHESIS_ATTEMPTS):
+            generated = await synthesize_evolution_datasets(
+                self.llm,
+                skill_name=skill_name,
+                sessions=sessions,
+                candidate_skill=candidate_skill,
+                evidence_context=context,
+                case_count=CURRENT_CASE_COUNT,
+                min_requirements=MIN_CHECKS,
+                max_requirements=MAX_CHECKS,
+                min_source_sessions=MIN_SOURCE_SESSIONS,
+                batch_size=2,
+            )
+            try:
+                return hydrate_cross_session_cases(generated, sessions, skill_name=skill_name)
+            except CrossSessionCaseSynthesisError as exc:
+                if attempt + 1 == SYNTHESIS_ATTEMPTS:
+                    raise
+                context["dataset_validation_feedback"] = {
+                    "attempt": attempt + 1,
+                    "error": str(exc),
+                    "valid_case_count": len(generated),
+                    "instruction": (
+                        "Regenerate the complete set of exactly two independent cross-Session Cases "
+                        "using the same evidence. Each needs 6..8 grounded checks and at least two "
+                        "actual source Session IDs. Inline all unavailable input materials. "
+                        "Do not duplicate a Case, invent requirements or use this round's Skill proposal."
+                    ),
+                }
 
 
 def hydrate_cross_session_cases(cases, sessions, *, skill_name):
     if len(cases) != CURRENT_CASE_COUNT:
-        raise CrossSessionCaseSynthesisError("Skill Candidate requires exactly two cross-Session Replay Cases")
+        raise CrossSessionCaseSynthesisError(
+            f"Skill Candidate requires exactly two cross-Session Replay Cases; received {len(cases)}",
+        )
     sources = {
         str(session.get("session_id") or ""): session
         for session in sessions if str(session.get("session_id") or "").strip()
@@ -51,7 +73,7 @@ def hydrate_cross_session_cases(cases, sessions, *, skill_name):
             str(value or "").strip() for value in provenance.get("session_ids") or []
             if str(value or "").strip() in sources
         ))
-        if len(source_ids) < MIN_SOURCE_SESSIONS:
+        if len({independent_session_id(sources[ident]) for ident in source_ids}) < MIN_SOURCE_SESSIONS:
             raise CrossSessionCaseSynthesisError("each current Replay Case requires at least two source Sessions")
         representative = next((
             sources[source_id] for source_id in source_ids

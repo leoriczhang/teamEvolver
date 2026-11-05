@@ -34,6 +34,17 @@ def groups(sessions: list[dict]) -> dict[str, list[dict]]:
     return aggregate_sessions_by_skill(sessions)
 
 
+def independent_session_id(session):
+    """MA ranges and semantic splits share one real parent Session identity."""
+    runtime = session.get("runtime") or {}
+    if runtime.get("type") == "managed-agents":
+        context = session.get("runtime_context") or {}
+        parent = context.get("source_session_id") or (session.get("meta") or {}).get("ma_parent_session_id")
+        if parent:
+            return f"ma:{runtime.get('connection_id', '')}:{parent}"
+    return str(session.get("session_id") or "")
+
+
 def evidence_gap(sessions: list[dict], config) -> str:
     if any(
         (s.get("runtime_context") or {}).get("candidate_job_id")
@@ -41,7 +52,7 @@ def evidence_gap(sessions: list[dict], config) -> str:
     ):
         return ""
     users = {s.get("user_alias") for s in sessions if s.get("user_alias")}
-    ids = {s["session_id"] for s in sessions}
+    ids = {independent_session_id(s) for s in sessions}
     if len(ids) < int(config.get("min_group_sessions")):
         return "insufficient distinct Sessions for team evidence"
     if len(users) < int(config.get("min_group_users")):

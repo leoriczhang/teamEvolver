@@ -8,7 +8,7 @@ VERIFY_WORK="$(mktemp -d "${TMPDIR:-/tmp}/te-verify.XXXXXX")"
 trap 'rm -rf "$VERIFY_WORK"' EXIT
 export PYTHONPYCACHEPREFIX="$VERIFY_WORK/pycache"
 
-python -m compileall teamEvolver team_skills team_memory team_miner team_replay session_ingestion tests
+python -m compileall teamEvolver team_skills team_memory team_miner team_replay team_ma session_ingestion tests
 
 if ! python - <<'PY' >/dev/null 2>&1
 import pytest  # noqa: F401

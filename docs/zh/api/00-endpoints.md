@@ -241,9 +241,29 @@
 | GET | `/api/replay-adapter/code` |
 | PUT | `/api/replay-adapter/code` |
 | POST | `/api/replay-adapter/code/test` |
+| GET | `/api/replay/settings` |
+| PUT | `/api/replay/settings` |
 | POST | `/api/replays/{domain}` |
 | GET | `/api/replays/{domain}/{run_id}` |
 | GET | `/api/replays/{domain}/{run_id}/input` |
+
+## Managed Agents 接入
+
+详细说明：[24-managed-agents.md](../api/24-managed-agents.md)
+
+| Method | Path |
+| --- | --- |
+| GET | `/api/ma/connections` |
+| POST | `/api/ma/connections` |
+| GET | `/api/ma/connections/{connection_id}` |
+| PUT | `/api/ma/connections/{connection_id}` |
+| POST | `/api/ma/connections/{connection_id}/collect` |
+| POST | `/api/ma/connections/{connection_id}/discover` |
+| POST | `/api/ma/connections/{connection_id}/reconcile` |
+| GET | `/api/ma/connections/{connection_id}/releases` |
+| GET | `/api/ma/connections/{connection_id}/resources` |
+| PUT | `/api/ma/connections/{connection_id}/resources/{skill_name}/bindings` |
+| GET | `/sync/ma/{connection_id}` |
 
 ## 团队 Memory
 
@@ -288,4 +308,4 @@
 | POST | `/api/knowledge-mining/upload` |
 | GET | `/api/knowledge-mining/wiki-roots` |
 
-共 206
+共 219

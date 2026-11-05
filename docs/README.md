@@ -7,6 +7,7 @@
 3. [架构](./zh/concepts/01-architecture.md) · [Architecture](./en/concepts/01-architecture.md)
 4. [生产部署](./zh/guides/02-deployment.md) · [Deployment](./en/guides/02-deployment.md)
 5. [API 概览](./zh/api/01-overview.md) · [API Overview](./en/api/01-overview.md)
+6. [MA 接入](./zh/agent-integrations/07-managed-agents.md) · [MA Integration](./en/agent-integrations/07-managed-agents.md)
 
 ## 当前文档
 

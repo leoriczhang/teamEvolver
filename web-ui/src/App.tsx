@@ -8,6 +8,7 @@ import IdentityAuditView from "@/features/admin/IdentityAuditView";
 import { LoginGate } from "@/features/admin/LoginGate";
 import ModelSettingsView from "@/features/admin/ModelSettingsView";
 import UsersView from "@/features/admin/UsersView";
+import ManagedAgentsView from "@/features/ma/ManagedAgentsView";
 import { type SharingConfig } from "@/features/operations/api/client";
 import HealthView from "@/features/operations/HealthView";
 import ObservabilityView from "@/features/operations/ObservabilityView";
@@ -38,6 +39,7 @@ type ViewKey =
   | "dashboard"
   | "experiences"
   | "datasource"
+  | "managed-agents"
   | "datasets"
   | "observability"
   | "prompt-studio"
@@ -99,6 +101,7 @@ const NAV_SECTIONS: {
     { key: "tenants", label: "租户管理", icon: Building2, platformOnly: true },
     { key: "model", label: "模型配置", icon: SlidersHorizontal, adminOnly: true },
     { key: "datasource", label: "数据源接入", icon: DownloadCloud, adminOnly: true },
+    { key: "managed-agents", label: "MA 接入", icon: DownloadCloud, adminOnly: true },
   ] },
 ];
 
@@ -139,6 +142,11 @@ type StandalonePageConfig = {
 };
 
 const STANDALONE_PAGES: StandalonePageConfig[] = [
+  {
+    key: "managed-agents", title: "MA 接入", description: "采集真实会话、验证 Skill 进化并同步完整发布版本。",
+    badge: "Managed Agents", scope: "tenant",
+    render: ({ active, user }) => <ManagedAgentsView active={active} canManage={user?.role === "admin"} />,
+  },
   {key: "review-center", title: "审查与发布", description: "按资产类型进入现有审查入口，保留各自的发布规则。", scope: "tenant", badge: "治理",
    render: ({user}) => <div className="space-y-4 rounded border p-5"><p>已发布 Skill 与团队 Memory 各自保留维护入口。</p>
      {user?.role === "admin" ? <a className="block underline" href="?view=dashboard&tab=candidates">Skill Candidate 与 True Replay</a>

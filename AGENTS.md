@@ -22,7 +22,7 @@ python -m pytest
 python -m pytest tests/test_xxx.py::test_case
 
 # Lint（ruff：line-length 120，select E/F/I）
-ruff check teamEvolver session_ingestion team_skills team_replay team_memory team_miner tests
+ruff check teamEvolver session_ingestion team_skills team_replay team_memory team_miner team_ma tests
 
 # 数据库 Schema（应用进程不在启动时建表）
 teamEvolver schema apply
@@ -61,6 +61,7 @@ teamEvolver/            平台层
 session_ingestion/      Session 上报、数据源拉取、强制分析阶段
 team_skills/            Skill 库、Candidate、Evolution、成功经验、导入导出、实验工作台
 team_replay/            True Replay、Test Dataset、Replay Adapter
+team_ma/                MA 连接、版本发现、会话采集与已发布 Skill pull 消费
 team_memory/            团队 Memory 聚合、DreamCycle 维护、Memory Replay
 team_miner/             知识库挖掘
 web-ui/                 React + TypeScript 控制台，构建到 teamEvolver/web/dist/
@@ -98,6 +99,7 @@ Python 测试只从 `tests/` 收集，按领域归档，命名使用职责而非
 Skill 与 Replay：
 
 - 团队 Skill 变更统一经 `team_skills/library/repository.py:SkillLibraryRepository`，在一个事务内写版本、文件与幂等记录；分发只走 `GET /sync/skills` pull，不创建投递 outbox。
+- 修改 MA 发现、采集、回放或同步时先读 [MA 接入](./docs/zh/agent-integrations/07-managed-agents.md)。`team_ma` 从已发布库 pull 后更新 MA；Publish 保持领域内事务。历史 Session 使用实际快照，回放资源按效果账本精确清理。
 - `team_replay/` 不导入 `team_memory` 或其他模块的 Handler，只使用平台层与其他模块的公开 Query（如 `session_ingestion/queries.py`、`team_skills/library/queries.py`）；纯执行引擎通过 `ReplayHost` 获取宿主能力。
 
 进程：

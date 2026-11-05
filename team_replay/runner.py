@@ -6,6 +6,7 @@ import copy
 from ._util import stable_hash
 from .aggregation import aggregate_true_replay_windows
 from .artifacts import validate_skill_treatment
+from .config import DEFAULT_REPLAY_CONFIG
 from .contracts import REPLAY_RUN_RESULT_SCHEMA, ReplaySpec
 from .engine import execute_pair, make_context, render_trajectory, source_runtime_type, treatment_for_case
 from .hooks import ReplayUnsupported
@@ -52,14 +53,15 @@ def evaluate_case(spec: ReplaySpec, case: dict, *, host, factory, judge=None, fe
         raise ReplayUnsupported("Replay runtime.type is required")
     results = execute_pair(
         factory, contexts, case, harness=host.judge_harness(),
-        max_interactions=int(spec.limits.get("max_interactions", 4)), judge=judge, feedback=feedback,
+        max_interactions=int(spec.limits.get("max_interactions", DEFAULT_REPLAY_CONFIG["max_interactions"])),
+        judge=judge, feedback=feedback,
     )
     checklists = {b: normalize_checklist_report(r, expected_checklist=case["checks"]) for b, r in results.items()}
-    efficiency = compare_efficiency(results["baseline"], results["candidate"])
+    efficiency = compare_efficiency(results["baseline"], results["candidate"], checklists=checklists)
     policy = progressive_replay_decision(
         efficiency=efficiency, baseline_checklist=checklists["baseline"], candidate_checklist=checklists["candidate"],
     )
-    if any(
+    if efficiency["comparison_ready"] and any(
         efficiency[branch][metric] == "unavailable"
         for branch in ("baseline", "candidate") for metric in ("tool_call_count", "total_tokens")
     ):

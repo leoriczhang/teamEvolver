@@ -40,7 +40,9 @@ async def evolution_tick(services, *, tenant_id: str) -> dict:
         if latest is not None and (now - latest).total_seconds() < interval:
             return {"state": "waiting"}
         counts = await conn.fetchrow(
-            f"SELECT count(*) AS sessions,count(DISTINCT s.user_id) AS users "
+            "SELECT count(DISTINCT CASE WHEN s.meta->>'ma_parent_session_id' IS NOT NULL "
+            "THEN 'ma:'||(s.meta->>'ma_connection_id')||':'||(s.meta->>'ma_parent_session_id') "
+            "ELSE s.session_id END) AS sessions,count(DISTINCT s.user_id) AS users "
             f"FROM {services.tx.pool.schema}.sessions s WHERE s.decision='valuable' AND NOT EXISTS ("
             f"SELECT 1 FROM {services.tx.pool.schema}.skill_evolution_sessions e "
             "WHERE e.session_id=s.session_id AND e.content_hash=s.content_hash)"

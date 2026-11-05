@@ -17,7 +17,7 @@ from .hooks import (
 )
 from .judging import judge_checklist, render_user_feedback
 from .metrics import UNAVAILABLE, count_tool_calls
-from .policy import normalize_case_checklist, progressive_config, select_disclosure_items
+from .policy import normalize_case_checklist, normalize_checklist_report, progressive_config, select_disclosure_items
 
 
 def run_branch(
@@ -49,6 +49,7 @@ def run_branch(
     disclosed_ids: set[str] = set()
     disclosed_texts: list[str] = []
     batch_size = progressive_config(case)["batch_size"]
+    turn_limit = max(1, min(20, max_interactions))
     try:
         if not query.strip() or not checklist:
             raise ValueError("Replay requires an initial query and a nonempty Checklist")
@@ -56,14 +57,16 @@ def run_branch(
             session = factory.open(copy.deepcopy(context))
         if not callable(getattr(session, "send", None)) or not callable(getattr(session, "close", None)):
             raise TypeError("factory.open(context) must return a ReplaySession with send() and close()")
-        for turn in range(1, max(1, min(20, max_interactions)) + 1):
+        for turn in range(1, turn_limit + 1):
             if time.monotonic() - started >= context.timeout_seconds:
                 raise TimeoutError("Replay branch timeout")
             observation = validate_observation(session.send(current_message))
             if time.monotonic() - started >= context.timeout_seconds:
                 raise TimeoutError("Replay branch timeout")
             round_metrics = dict(observation.metrics or {})
-            if any("tool_calls" in message for message in observation.messages):
+            if "tool_call_count" not in round_metrics and any(
+                "tool_calls" in message for message in observation.messages
+            ):
                 round_metrics["tool_call_count"] = count_tool_calls(list(observation.messages))
             for key in RUNTIME_METRICS:
                 if key not in round_metrics:
@@ -91,6 +94,7 @@ def run_branch(
                 interactions=copy.deepcopy(result["interactions"]), messages=copy.deepcopy(result["messages"]),
                 artifacts=copy.deepcopy(result["artifacts"]),
             )
+            report = normalize_checklist_report({"checklist_report": report}, expected_checklist=checklist)
             report["rounds"] = turn
             result["checklist_report"] = copy.deepcopy(report)
             interaction["checklist_report"] = copy.deepcopy(report)
@@ -100,9 +104,10 @@ def run_branch(
             if time.monotonic() - started >= context.timeout_seconds:
                 raise TimeoutError("Replay branch timeout")
             if report.get("all_satisfied"):
-                result.update(completed=True, status="completed")
+                result.update(completed=True, status="completed", stop_reason="checklist_satisfied")
                 break
-            if turn >= max_interactions:
+            if turn >= turn_limit:
+                result["stop_reason"] = "interaction_limit"
                 break
             if time.monotonic() - started >= context.timeout_seconds:
                 raise TimeoutError("Replay branch timeout")
@@ -110,7 +115,7 @@ def run_branch(
                 checklist=checklist, report=report, disclosed_ids=disclosed_ids, batch_size=batch_size,
             )
             if not selected:
-                break
+                raise RuntimeError("Checklist has unmet items but no continuation requirements")
             current_message = feedback(
                 harness=harness, response=observation.response,
                 positive_observations=list(report.get("positive_observations") or []),
@@ -130,6 +135,7 @@ def run_branch(
     except Exception as exc:
         result.update(status="failed", error=str(exc))
         result.setdefault("error_code", "TIMEOUT" if isinstance(exc, TimeoutError) else "REPLAY_FAILED")
+        result.setdefault("stop_reason", "timeout" if isinstance(exc, TimeoutError) else "branch_failure")
     finally:
         if session is not None and callable(getattr(session, "close", None)):
             try:

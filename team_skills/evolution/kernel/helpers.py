@@ -19,7 +19,8 @@ def _clip_text(value: Any, max_chars: int = _TOOL_SNIPPET_MAX_CHARS) -> str:
     text = str(value or "").strip()
     if len(text) <= max_chars:
         return text
-    return text[:max_chars] + "..."
+    half = max_chars // 2
+    return text[:half] + "\n[...excerpt; full content retained in Session storage...]\n" + text[-half:]
 
 
 def compact_tool_calls(tool_calls: Any, max_items: int = _TOOL_SNIPPET_MAX_ITEMS) -> list[dict]:
@@ -36,6 +37,7 @@ def compact_tool_calls(tool_calls: Any, max_items: int = _TOOL_SNIPPET_MAX_ITEMS
                 "id": str(tc.get("id") or ""),
                 "name": str(func.get("name") or "unknown"),
                 "arguments": _clip_text(func.get("arguments") or ""),
+                **{key: tc[key] for key in ("event_id", "session_thread_id", "agent_name") if tc.get(key)},
             }
         )
     return out
@@ -61,6 +63,7 @@ def compact_tool_observations(
                 "command": _clip_text(item.get("command") or ""),
                 "path": _clip_text(item.get("path") or ""),
                 "content": _clip_text(item.get("content") or ""),
+                **{key: item[key] for key in ("event_id", "session_thread_id", "agent_name") if item.get(key)},
             }
         )
     return out

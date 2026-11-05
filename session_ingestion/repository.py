@@ -246,3 +246,12 @@ class SessionIngestionRepository:
             json.dumps(meta or {}),
             _business_time(business_time),
         )
+
+    async def collapse_managed_session(self, conn, *, session_id: str, connection_id: str,
+                                       parent_session_id: str) -> None:
+        """Remove obsolete per-range rows after the complete MA Session is durable."""
+        await conn.execute(
+            f"DELETE FROM {self._schema}.sessions WHERE session_id<>$1 "
+            "AND meta->>'ma_connection_id'=$2 AND meta->>'ma_parent_session_id'=$3",
+            session_id, connection_id, parent_session_id,
+        )

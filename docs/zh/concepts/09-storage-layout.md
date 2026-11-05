@@ -29,6 +29,9 @@ teamEvolver 的数据分为四类，归属固定：
 | `012_objects.sql` | `objects` 与租户 RLS |
 | `013_console_identity.sql` | `console_users`、`tenant_memberships`、`console_*` |
 | `014_tenant_module_defaults.sql` | 为已有租户补齐 5 个模块默认配置行 |
+| `017_managed_agents.sql` | `ma_connections`、不可变 revision、资源绑定、Session 游标、操作、release、外部效果账本；全部 FORCE RLS |
+
+MA 原始事件、下载 Bundle、输入材料与回放产物通过既有 PG Artifact / ObjectStore 保存。本机仅放临时文件；配置凭证保存为本租户 Secret Ref。MA 管理范围按非敏感 origin + entry 指纹全局唯一占用，其他读取仍受租户 RLS。详情见 [MA 接入](../agent-integrations/07-managed-agents.md)。
 
 `schema_versions` 由 `teamEvolver/database/schema_runner.py` 维护。
 开源版 Schema 是全新安装基线，版本号允许有空缺；只在空数据库中初始化。
@@ -48,7 +51,13 @@ teamEvolver 的数据分为四类，归属固定：
 | --- | --- | --- |
 | `ingest/<tenant>/<ingestion>.json` | Session 原始 payload | Session 接入 |
 | `session/<hash>/<stage>/<digest>.json` | 每个分析阶段的结果 | Session Worker |
+| `evidence-summary/<request-hash>.json` | 已校验覆盖完整输入的批次摘要 | Session / Skill Worker |
+| `session-snapshots/<sha256>.json` | Dataset、验证任务和 Replay 历史复用的完整 Session 快照 | Skill / Replay Worker |
 | Team Miner 前缀 | Compile 水位、回执、链接索引 | Team Miner |
+
+证据批次摘要按租户隔离，键包含完整输入记录、摘要协议、模型及调用配置的 hash。并发写入保留第一个有效结果；任务重试或进程重启复用已完成批次，所有批次覆盖完成后才继续最终评分。模型或协议变更会重新生成摘要。
+
+大于 256 KiB 的 `session_snapshot` 在上述存储边界按内容 hash 引用同租户对象，每份快照最多 64 MiB。读取时校验 key、字节数和 hash，再完整还原为各用例独立的 JSON；旧内嵌格式仍可读取，Dataset、任务与 Replay 的输入 hash 仍覆盖完整逻辑内容。对象与引用在同一事务提交，无需 Schema 迁移。
 
 控制台「平台资产」以 `platform://` URI 只读展示这些对象，见 [平台资产与 Workspace API](../api/23-workspace-assets.md)。
 

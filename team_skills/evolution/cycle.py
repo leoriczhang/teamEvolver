@@ -9,7 +9,7 @@ from team_skills.candidates.repository import CandidateRepository, CandidateStat
 from team_skills.candidates.static_checks import validate_candidate_bundle
 from team_skills.config import SkillsModuleConfig
 from team_skills.evolution.candidate_pipeline import load_command, submit_validation
-from team_skills.evolution.history import skill_payload
+from team_skills.evolution.history import evolution_feedback, skill_payload
 from team_skills.evolution.kernel.bundle_changes import materialize_bundle_changes, select_editable_files
 from team_skills.evolution.kernel.enums import NO_SKILL_KEY, DecisionAction
 from team_skills.evolution.repository import EvolutionRepository
@@ -22,7 +22,7 @@ from teamEvolver.runtime import HandlerResult
 from teamEvolver.runtime.leases import LeaseGuard
 
 PLANNER_TIMEOUT_SECONDS = 1_800
-CASE_SYNTHESIS_TIMEOUT_SECONDS = 300
+CASE_SYNTHESIS_TIMEOUT_SECONDS = 1_800
 RESOURCE_HEARTBEAT_SECONDS = 15
 
 
@@ -43,11 +43,37 @@ async def _prepare_branch(task, services, *, name, planning, current, names, con
             proposed = {**current, **proposed, "name": name}
             if result["action"] == DecisionAction.OPTIMIZE_DESC:
                 proposed["content"] = current["content"]
+        target_bundle, target_editable, target_version, target_revision = working_bundle, editable, None, 0
+        if not current and proposed.get("name") in names:
+            # A create-group planner can select an existing library Skill.
+            # Its complete Bundle remains the baseline, including runtime files.
+            library = SkillLibraryRepository(services.tx)
+            async with services.tx.tenant_tx(task.tenant_id) as conn:
+                target_head = await library.get_skill(conn, proposed["name"])
+                target_bundle = await library.read_version_bundle(conn, proposed["name"], target_head["version"])
+                candidates = CandidateRepository(services.tx)
+                target_live = await candidates.live_for_skill(conn, proposed["name"])
+                if target_live:
+                    if target_live["status"] == "validating":
+                        raise CandidateStateError("selected existing Skill Candidate is validating")
+                    target_revision = target_live["revision"]
+                    target_bundle = await candidates.read_bundle(conn, target_live["candidate_id"])
+            target_version = target_head["version"]
+            target_current = skill_payload(proposed["name"], target_bundle)
+            proposed = {**target_current, **proposed}
+            target_editable = select_editable_files(
+                target_bundle, extensions=config.get("bundle_text_extensions"),
+                max_file_bytes=config.get("bundle_edit_max_bytes"),
+                max_prompt_bytes=config.get("bundle_prompt_max_bytes"),
+            )
         material, diff = materialize_bundle_changes(
-            proposed, current_bundle=working_bundle, file_changes=proposed.get("file_changes") or [],
-            editable_paths=editable, extensions=config.get("bundle_text_extensions"),
+            proposed, current_bundle=target_bundle, file_changes=proposed.get("file_changes") or [],
+            editable_paths=target_editable, extensions=config.get("bundle_text_extensions"),
             max_file_bytes=config.get("bundle_edit_max_bytes"), allow_delete=config.get("bundle_allow_delete"),
         )
+        if target_version is not None:
+            material["_target_base_version"] = target_version
+            material["_target_candidate_revision"] = target_revision
         static = await asyncio.to_thread(validate_candidate_bundle, material)
         return result, material, diff, static
 
@@ -190,8 +216,7 @@ async def _cycle(task, services, p, config, planner, case_synthesizer, payloads,
             _, bundle = await library.read_current_bundle(conn, name)
         return bundle["SKILL.md"].decode()
 
-    records = []
-    for name, group in groups(sessions).items():
+    async def prepare_group(name, group):
         async with services.tx.tenant_tx(task.tenant_id) as conn:
             if not await guard.heartbeat(conn, handle, lease_seconds=600):
                 raise RuntimeError("evolution resource lease lost")
@@ -205,15 +230,14 @@ async def _cycle(task, services, p, config, planner, case_synthesizer, payloads,
                 await ExperienceRepository(services.tx).patterns(conn, name),
             )
         if saved is not None:
-            records.append(saved)
-            continue
+            return saved
         current = skill_payload(name, working_bundle)
         current_ids = {s["session_id"] for s in group}
         planning = group + [s for s in historical if s["session_id"] not in current_ids]
         context = {
             "skill_name": name, "total_evidence_sessions": len(planning),
             "current_session_count": len(group), "active_candidate_job_id": live["candidate_id"] if live else "",
-            "active_candidate_feedback": live["evaluation"] if live else {},
+            "active_candidate_feedback": evolution_feedback(live["evaluation"]) if live else {},
             "experience_patterns": pattern_context,
         }
         editable = select_editable_files(
@@ -244,9 +268,14 @@ async def _cycle(task, services, p, config, planner, case_synthesizer, payloads,
                 raise RuntimeError("evolution resource lease lost")
             await repo.record_evidence(conn, tenant_id=task.tenant_id, name=name, sessions=group)
             if material:
+                if "_target_base_version" in material:
+                    head = await library.get_skill(conn, material["name"])
+                    if not head or head["version"] != material["_target_base_version"]:
+                        raise CandidateStateError("published Skill changed while the planner was running")
                 # A human edit while the model worked invalidates this proposal.
                 latest = await cands.live_for_skill(conn, material["name"])
-                if (latest["revision"] if latest else 0) != (live["revision"] if live else 0):
+                expected_candidate = material.get("_target_candidate_revision", live["revision"] if live else 0)
+                if (latest["revision"] if latest else 0) != expected_candidate:
                     raise CandidateStateError("candidate changed while the planner was running")
                 candidate = await cands.create(
                     conn, tenant_id=task.tenant_id, skill_name=material["name"],
@@ -266,17 +295,49 @@ async def _cycle(task, services, p, config, planner, case_synthesizer, payloads,
                               candidate_revision=candidate["revision"])
                 if config.get("auto_evaluate"):
                     mode = "auto" if config.get("publish_mode") == "automatic" else "evaluate"
-                    await submit_validation(
-                        conn, services, tenant_id=task.tenant_id, candidate_id=candidate["candidate_id"],
-                        command_id=f"evaluate:{candidate['candidate_id']}:r{candidate['revision']}",
-                        config=config, actor="evolution", revision=candidate["revision"],
-                        mode=mode,
-                    )
+                    try:
+                        # Acceptance can fail on unavailable historical Replay
+                        # inputs. Roll it back without discarding the proposal.
+                        async with conn.transaction():
+                            await submit_validation(
+                                conn, services, tenant_id=task.tenant_id, candidate_id=candidate["candidate_id"],
+                                command_id=f"evaluate:{candidate['candidate_id']}:r{candidate['revision']}",
+                                config=config, actor="evolution", revision=candidate["revision"],
+                                mode=mode,
+                            )
+                    except ValueError as exc:
+                        await cands.record_validation_blocked(
+                            conn, tenant_id=task.tenant_id, candidate_id=candidate["candidate_id"],
+                            revision=candidate["revision"], reason=str(exc),
+                        )
+                        record["validation_acceptance"] = {"status": "blocked", "reason": str(exc)}
             await repo.save_branch(
                 conn, tenant_id=task.tenant_id, command_id=task.task_id, key=name,
                 session_ids=record["session_ids"], result=record,
             )
-        records.append(record)
+        return record
+
+    slots = asyncio.Semaphore(min(8, max(1, int(config.get("evolution_parallel_groups")))))
+
+    async def bounded_group(name, group):
+        async with slots:
+            return await prepare_group(name, group)
+
+    pending = [asyncio.create_task(bounded_group(name, group)) for name, group in groups(sessions).items()]
+    try:
+        # Keep successful sibling checkpoints when one group fails. Cancellation
+        # still stops every planner and synthesis branch before releasing leases.
+        outcomes = await asyncio.gather(*pending, return_exceptions=True)
+        records = []
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
+            records.append(outcome)
+    finally:
+        for work in pending:
+            if not work.done():
+                work.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
     async with services.tx.tenant_tx(task.tenant_id) as conn:
         await services.tasks.require_current(conn, task)
         await repo.consume(conn, tenant_id=task.tenant_id, command_id=task.task_id, sessions=descriptors)

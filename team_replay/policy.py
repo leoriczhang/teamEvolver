@@ -134,8 +134,9 @@ def aggregate_case_checklists(
             continue
         side = case.get(branch) if isinstance(case.get(branch), Mapping) else {}
         report = normalize_checklist_report(side)
-        if report["total"] > 0:
-            reports.append(report)
+        if report["total"] == 0:
+            report.update(all_satisfied=False, judge="unavailable")
+        reports.append(report)
     return {
         "all_satisfied": all(
             report.get("all_satisfied") for report in reports
@@ -159,52 +160,34 @@ def progressive_replay_decision(
     baseline_checklist: Mapping[str, Any] | None = None,
     candidate_checklist: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Checklist completion decides first; efficiency decides successful ties."""
-    policy = objective_replay_decision(efficiency=dict(efficiency))
+    """Compare efficiency only after both complete, evidenced Checklists pass."""
     baseline = dict(baseline_checklist or {})
     candidate = dict(candidate_checklist or {})
     candidate_has_checklist = int(candidate.get("total") or 0) > 0
     baseline_has_checklist = int(baseline.get("total") or 0) > 0
-    candidate_passed = bool(candidate.get("all_satisfied", True))
-    baseline_passed = bool(baseline.get("all_satisfied", True))
-
+    candidate_passed = candidate_has_checklist and candidate.get("all_satisfied") is True
+    baseline_passed = baseline_has_checklist and baseline.get("all_satisfied") is True
+    blocked = ""
     if baseline.get("judge") == "unavailable" or candidate.get("judge") == "unavailable":
-        policy.update(
-            accepted=False, verdict="inconclusive", no_regression=False,
-            decision_basis="checklist_judge_unavailable", decisive_metrics=[],
-        )
-    elif candidate_has_checklist and baseline_has_checklist and not candidate_passed and not baseline_passed:
-        policy.update(
-            accepted=False, verdict="inconclusive", no_regression=False,
-            decision_basis="both_checklists_incomplete", decisive_metrics=[],
-        )
-    elif candidate_has_checklist and not candidate_passed:
-        policy.update(
-            {
-                "accepted": False,
-                "verdict": "reject",
-                "no_regression": False,
-                "decision_basis": "candidate_checklist_incomplete",
-                "primary_metric": "checklist_completion",
-                "decisive_metrics": ["checklist_completion"],
-            }
-        )
-    elif candidate_has_checklist and baseline_has_checklist and not baseline_passed:
-        policy.update(
-            {
-                "accepted": True,
-                "verdict": "accept",
-                "no_regression": True,
-                "decision_basis": "candidate_only_completed_checklist",
-                "primary_metric": "checklist_completion",
-                "decisive_metrics": ["checklist_completion"],
-            }
-        )
-    if not (baseline_passed and candidate_passed):
-        policy["metric_changes"] = {}
-        policy["improved_metrics"] = []
-        policy["regressed_metrics"] = []
-        policy["unchanged_metrics"] = []
+        blocked = "checklist_judge_unavailable"
+    elif not candidate_has_checklist or not baseline_has_checklist:
+        blocked = "checklist_missing"
+    elif not candidate_passed and not baseline_passed:
+        blocked = "both_checklists_incomplete"
+    elif not candidate_passed:
+        blocked = "candidate_checklist_incomplete"
+    elif not baseline_passed:
+        blocked = "baseline_checklist_incomplete"
+    if blocked:
+        policy = {
+            "accepted": False, "verdict": "inconclusive", "no_regression": False,
+            "decision_basis": blocked, "primary_metric": "interaction_turns",
+            "secondary_metrics": ["tool_call_count", "total_tokens"], "decisive_metrics": [],
+            "metric_changes": {}, "improved_metrics": [], "regressed_metrics": [],
+            "unchanged_metrics": [], "unavailable_metrics": [],
+        }
+    else:
+        policy = objective_replay_decision(efficiency=dict(efficiency))
     policy["checklist"] = {
         "baseline": baseline,
         "candidate": candidate,

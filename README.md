@@ -58,6 +58,7 @@ Checklist 是完成门禁，不是加权分数。双方都完成 Checklist 后�
 | 知识库挖掘 | 上传资料转 Markdown，OpenViking Compile 生成 Wiki |
 | 实验工作台 | 编辑 Skill Bundle，用数据集对未保存的 Candidate 运行 True Replay |
 | 多租户 | 租户、成员、平台 / 租户管理员、RLS 隔离、租户 Key |
+| Managed Agents 接入 | 通用成员与 Skill 发现、真实 Session 采集、完整隔离 MA Replay、发布后 pull 同步 |
 
 ## 控制台
 
@@ -141,6 +142,8 @@ docker compose up -d
 
 OpenViking Root Key 与模型 Key 只在服务端使用。True Replay 通过租户绑定的 Replay Adapter 为每个分支创建独立会话。
 
+火山方舟 MA 可直接在控制台「MA 接入」配置入口与隔离回放资源，集中采集和同步。通用脚本支持 `plan / apply / status`，以 CodingVideo 为示例，见 [Managed Agents 接入](./docs/zh/agent-integrations/07-managed-agents.md)。
+
 ## 安全与一致性
 
 - 所有业务表启用 RLS，按 `tenant_id` 隔离；应用角色必须是 NOSUPERUSER、NOBYPASSRLS。
@@ -159,6 +162,7 @@ team-evolver/
 ├── session_ingestion/    # Session 上报、数据源拉取、强制分析阶段
 ├── team_skills/          # Skill 库、Candidate、Evolution、成功经验、导入导出、实验工作台
 ├── team_replay/          # True Replay、Test Dataset、Replay Adapter
+├── team_ma/              # MA 连接、采集、受管版本与 pull 消费
 ├── team_memory/          # 团队 Memory 聚合、DreamCycle 维护、Memory Replay
 ├── team_miner/           # 知识库挖掘
 ├── web-ui/               # React + TypeScript 控制台源码

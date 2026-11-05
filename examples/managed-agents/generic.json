@@ -1,0 +1,31 @@
+{
+  "tenant": {"id": {"$env": "MA_TENANT_ID"}, "display_name": "Managed Agent team"},
+  "connection_id": {"$env": "MA_CONNECTION_ID"},
+  "secret_env": {
+    "ma_api_key": "MA_API_KEY",
+    "tenant_token": "MA_TENANT_KEY",
+    "model_api_key": "MA_API_KEY"
+  },
+  "credential_output": {"path": ".env.ma"},
+  "connection": {
+    "provider": "volcengine-managed-agents",
+    "display_name": "Managed Agent",
+    "ma_base_url": "https://ark.cn-beijing.volces.com/api/v3",
+    "entry_agent_id": {"$env": "MA_ENTRY_AGENT_ID"},
+    "environment_id": {"$env": "MA_ENVIRONMENT_ID"},
+    "team_evolver_url": "http://127.0.0.1:52010",
+    "default_user_id": {"$env": "MA_USER_ID"},
+    "replay_enabled": false
+  },
+  "skills": {
+    "min_group_sessions": 2,
+    "min_group_users": 1,
+    "evolution_trigger_mode": "automatic",
+    "auto_evaluate": true,
+    "publish_mode": "manual"
+  },
+  "model": {
+    "model": {"$env": "MA_MODEL_ID"},
+    "base_url": "https://ark.cn-beijing.volces.com/api/v3"
+  }
+}

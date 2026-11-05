@@ -41,7 +41,7 @@ Checklist 来自 Test Dataset Case 的 `checks` 字段（`team_replay/policy.py:
 1. 首轮只发送 Case 的 `query`。
 2. 每轮裁判评估后，`select_disclosure_items` 从未满足且未披露的项中按顺序选一批（`replay.progressive_disclosure.batch_size`，默认 4）。
 3. 用户模拟器只看到这一批要求和已披露的要求，生成自然的用户反馈作为下一轮输入；反馈不含条目 ID 或评分。
-4. 全部满足、无可披露项或达到 `max_interactions` 时结束。
+4. 全部满足时结束；已披露但仍未完成的要求继续反馈。达到轮数/时间保护上限时保存未完成证据，结论未定。
 
 ## 聚合 Case Checklist
 
@@ -57,8 +57,9 @@ Checklist 来自 Test Dataset Case 的 `checks` 字段（`team_replay/policy.py:
 ```text
 任一裁判不可用 ─────────────► inconclusive（checklist_judge_unavailable）
 双方都未完成 ───────────────► inconclusive（both_checklists_incomplete）
-Candidate 未完成 ───────────► reject（candidate_checklist_incomplete）
-Candidate 完成、Baseline 未完成 ► accept（candidate_only_completed_checklist）
+任一 Checklist 缺失 ────────► inconclusive（checklist_missing）
+Candidate 未完成 ───────────► inconclusive（candidate_checklist_incomplete）
+Candidate 完成、Baseline 未完成 ► inconclusive（baseline_checklist_incomplete）
 双方都完成 ─────────────────► 效率比较：轮次 → 工具调用 / Token
 ```
 

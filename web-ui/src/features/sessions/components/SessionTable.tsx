@@ -158,6 +158,13 @@ export default function SessionTable({
           )}
         </Td>
         <Td>
+          <div
+            className="mb-1 text-[11px] text-muted-foreground"
+            title={r.available_skills ? `配置可用：${r.available_skills.join("、")}\n实际使用按主、子 agent 的调用证据统计。` : "实际使用按调用证据统计。"}
+          >
+            实际使用 {(r.used_skills || []).length}
+            {r.available_skills != null && ` / 可用 ${r.available_skills.length}`}
+          </div>
           <div className="flex max-w-[180px] flex-wrap gap-1">
             {(r.used_skills || []).length ? (
               r.used_skills!.map((name) => (

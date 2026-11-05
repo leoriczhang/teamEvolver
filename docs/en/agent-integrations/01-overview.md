@@ -30,3 +30,4 @@ When validating Skill Candidates, TeamEvolver drives the customer Agent through 
 
 - [Pi Agent / AgentsHub](./04-pi-agent.md)
 - [Custom Agent](./05-custom-agent.md)
+- [Volcengine Managed Agents](./07-managed-agents.md): centralized discovery, collection, complete MA Replay and published Skill pull, without a business Session SDK.

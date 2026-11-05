@@ -9,6 +9,8 @@ TeamEvolver configuration has two layers:
 
 Bootstrap configuration is read-only; the CLI has no write command. Write endpoints for online configuration are listed on each API page.
 
+MA connections use separate revision tables without adding a tenant configuration module. Generic `scripts/connect_managed_agent.py` reads `TEAMEVOLVER_URL`, a service Root Key or `TEAMEVOLVER_CONSOLE_USERNAME` / `TEAMEVOLVER_CONSOLE_PASSWORD`; business keys use the example's environment mapping. Formal [MA and Replay settings APIs](../api/24-managed-agents.md) maintain Replay limits and text extensions.
+
 ## Bootstrap Configuration
 
 ### Load Order

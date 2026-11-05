@@ -20,6 +20,7 @@ _PLATFORM_API_MODULES = (
     "team_replay.api",
     "team_memory.api",
     "team_miner.api",
+    "team_ma.api",
 )
 
 
@@ -126,6 +127,72 @@ def _wire_domain_contracts(services):
     services.extras.setdefault("memory_replay_handler", replay_handler)
     services.extras.setdefault("memory_change_reader",
                                lambda change: read_change(services, current_tenant_id(), change))
+    _wire_ma_contracts(services)
+
+
+def _wire_ma_contracts(services):
+    from session_ingestion.commands import accept as accept_session
+    from team_ma.queries import freeze, required_targets
+    from team_ma.replay_support import capabilities
+    from team_skills.config import load_skills_config
+    from team_skills.library.repository import SkillLibraryRepository
+    from team_skills.transfer.commands import TransferCommands
+
+    async def import_bundle(task, **kwargs):
+        async with services.tx.tenant_tx(task.tenant_id) as conn:
+            await services.tasks.require_current(conn, task)
+            config = await load_skills_config(services.extras["config_repo"], conn)
+            return await TransferCommands(services).accept_bundle(conn, tenant_id=task.tenant_id,
+                                                                  config=config, **kwargs)
+
+    async def import_result(tenant, command_id, name, tree):
+        async with services.tx.tenant_tx(tenant) as conn:
+            head = await SkillLibraryRepository(services.tx).get_skill(conn, name)
+            if head and head["tree_sha256"] == tree:
+                return {"version": head["version"]}
+            task = await services.tasks.get(conn, task_id=command_id)
+            return {"failed": bool(task and task["status"] in {"failed", "cancelled"})}
+
+    async def tombstones(tenant, names):
+        async with services.tx.tenant_tx(tenant) as conn:
+            library = SkillLibraryRepository(services.tx)
+            removed = []
+            for name in names:
+                head = await library.get_skill(conn, name, include_deleted=True)
+                if head and head["deleted"]:
+                    removed.append(name)
+            return removed
+
+    async def publication_target(tenant, name, version, connection_id):
+        from team_skills.candidates.repository import CandidateRepository
+
+        current = next((t for t in await required_targets(services, tenant, name)
+                        if t["connection_id"] == connection_id), None)
+        async with services.tx.tenant_tx(tenant) as conn:
+            library = SkillLibraryRepository(services.tx)
+            meta = await library.get_version(conn, name, version)
+            mutation = await library.get_mutation(conn, meta["mutation_id"]) if meta else None
+            metadata = (mutation or {}).get("metadata") or {}
+            if not metadata.get("candidate_id"):
+                # Explicit console edit/rollback is already a direct administrator decision.
+                return True
+            candidate = await CandidateRepository(services.tx).require(conn, metadata["candidate_id"])
+            evaluation = candidate.get("evaluation") or {}
+            target = (((evaluation.get("replay") or {}).get("runtime_gate") or {}).get("target_matrix") or {}).get(
+                connection_id,
+            )
+            return bool(target and current and target.get("accepted") is True and
+                        all(target.get(k) == current[k] for k in
+                            ("connection_revision", "config_hash", "binding_hash", "runtime_hash")))
+
+    services.extras.setdefault("ma_import_bundle", import_bundle)
+    services.extras.setdefault("ma_import_result", import_result)
+    services.extras.setdefault("ma_accept_session", lambda **kwargs: accept_session(services, **kwargs))
+    services.extras.setdefault("ma_freeze_replay", lambda tenant, cases, name="": freeze(services, tenant, cases, name))
+    services.extras.setdefault("ma_required_targets", lambda tenant, name: required_targets(services, tenant, name))
+    services.extras.setdefault("ma_replay_capabilities", lambda tenant, task=None: capabilities(services, tenant, task))
+    services.extras.setdefault("ma_skill_tombstones", tombstones)
+    services.extras.setdefault("ma_publication_target", publication_target)
 
 
 def build_role_services(*, role, tx, config, handlers=None):
@@ -141,11 +208,13 @@ def build_role_services(*, role, tx, config, handlers=None):
     domain_handlers = {}
     if role in ("worker", "all"):
         from session_ingestion.handlers import register_handlers as ingestion_handlers
+        from team_ma.handlers import register_handlers as ma_handlers
         from team_memory.handlers import register_handlers as memory_handlers
         from team_miner.handlers import register_handlers as miner_handlers
         from team_replay.handlers import register_handlers as replay_handlers
         from team_skills.handlers import register_handlers as skill_handlers
-        for factory in (ingestion_handlers, skill_handlers, replay_handlers, memory_handlers, miner_handlers):
+        factories = (ingestion_handlers, skill_handlers, replay_handlers, memory_handlers, miner_handlers, ma_handlers)
+        for factory in factories:
             for kind, handler in factory().items():
                 if kind in domain_handlers:
                     raise RuntimeError(f"duplicate Worker Handler: {kind}")
@@ -171,13 +240,14 @@ def build_role_services(*, role, tx, config, handlers=None):
         from team_skills.evolution.stages.analyze import analyze_session
         from team_skills.evolution.stages.trace_analyze import analyze_session_traces
 
+        from .evidence import evidence_summary_cache
         from .tenants.registry import current_tenant_id
 
         async def analyze(s):
             tenant = current_tenant_id()
             async with tx.tenant_tx(tenant) as conn:
                 row = await extras["config_repo"].read_tenant_module(conn, "skills")
-            with prompt_context(row.config):
+            with evidence_summary_cache(extras["session_payloads"]), prompt_context(row.config):
                 client = await model_for(services, tenant, row.config.get("model", {}))
                 return await analyze_session(client, s)
 
@@ -188,19 +258,25 @@ def build_role_services(*, role, tx, config, handlers=None):
             return await split_session(config, s, client_factory=client)
 
         async def trace(s):
-            client = await model_for(services, current_tenant_id())
-            return await analyze_session_traces(client, s)
+            tenant = current_tenant_id()
+            async with tx.tenant_tx(tenant) as conn:
+                row = await extras["config_repo"].read_tenant_module(conn, "skills")
+            with evidence_summary_cache(extras["session_payloads"]), prompt_context(row.config):
+                client = await model_for(services, tenant, row.config.get("model", {}))
+                return await analyze_session_traces(client, s)
 
         stages = SessionStages(extras["session_payloads"], split, analyze, trace)
         services.extras["session_ingestion"] = SessionIngestionDeps(
             payloads=extras["session_payloads"], stage_runner=stages, adapter_source=AdapterSource())
         async def planner(**kwargs):
             client = await model_for(services, current_tenant_id(), kwargs["config"].config.get("model", {}))
-            return await LLMSkillPlanner(client)(**kwargs)
+            with evidence_summary_cache(extras["session_payloads"]):
+                return await LLMSkillPlanner(client)(**kwargs)
         services.extras["skill_planner"] = planner
         async def replay_case_synthesizer(**kwargs):
             client = await model_for(services, current_tenant_id())
-            return await LLMCrossSessionCaseSynthesizer(client)(**kwargs)
+            with evidence_summary_cache(extras["session_payloads"]):
+                return await LLMCrossSessionCaseSynthesizer(client)(**kwargs)
         services.extras["replay_case_synthesizer"] = replay_case_synthesizer
         from team_skills.experiences.patterns import PatternCompiler
         async def pattern_compiler(**kwargs):
@@ -232,6 +308,7 @@ def _scheduled_tasks(services):
     import logging
 
     from session_ingestion.schedule import enqueue_due
+    from team_ma.schedule import tick as ma_tick
     from team_memory.schedule import memory_tick
     from team_skills.evolution.schedule import evolution_tick
     from team_skills.experiences.supervisor import experience_tick
@@ -242,6 +319,7 @@ def _scheduled_tasks(services):
         ("skill_evolution", lambda tenant: evolution_tick(services, tenant_id=tenant)),
         ("memory_maintenance", lambda tenant: memory_tick(services, tenant_id=tenant)),
         ("experience_sync", lambda tenant: experience_tick(services, tenant_id=tenant)),
+        ("managed_agents", lambda tenant: ma_tick(services, tenant_id=tenant)),
     )
     tracing = _tracing_refresh(services)
 

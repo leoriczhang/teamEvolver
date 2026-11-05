@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from .config import DEFAULT_REPLAY_CONFIG
 from .contracts import (
     REPLAY_RUN_RESULT_SCHEMA,
     ReplaySpec,
@@ -43,7 +44,7 @@ class EmbeddedReplayGateway:
             int(
                 max_interactions
                 or spec.limits.get("max_interactions")
-                or 4
+                or DEFAULT_REPLAY_CONFIG["max_interactions"]
             ),
         )
         result = self.evaluator(
@@ -107,6 +108,8 @@ class HostReplayGateway:
 
         pinned = replace(spec, limits={
             **spec.limits, "timeout_seconds": timeout_seconds,
-            "max_interactions": max_interactions or spec.limits.get("max_interactions", 4),
+            "max_interactions": max_interactions or spec.limits.get(
+                "max_interactions", DEFAULT_REPLAY_CONFIG["max_interactions"],
+            ),
         })
         return evaluate_spec(pinned, host=self.host, case_index=case_index, judge=self.judge, feedback=self.feedback)

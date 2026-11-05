@@ -27,6 +27,7 @@ from team_skills.evolution.agent.contract import (
 )
 from team_skills.evolution.agent.tools import ToolContext, ToolRegistry, build_protocol_appendix
 from team_skills.evolution.kernel.enums import DecisionAction
+from teamEvolver.evidence import MODEL_EVIDENCE_BYTES, bounded_evidence, byte_size, dumps
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +261,27 @@ async def run_skill_agent(
             round_log.append({"round": round_no, "type": kind, **extra})
 
     for round_no in range(1, max_rounds + 1):
+        if byte_size(messages[1:]) > MODEL_EVIDENCE_BYTES:
+            # Preserve the latest observation independently of older rounds.
+            # The original sessions and staged Skill remain available to the
+            # tools, so the agent can read exact edit anchors again.
+            history = await bounded_evidence(
+                llm, messages[1:-1], call_options=call_options,
+                trace_name="team_skills.evolution.agent.history",
+                max_bytes=MODEL_EVIDENCE_BYTES // 3,
+            )
+            latest = await bounded_evidence(
+                llm, messages[-1], call_options=call_options,
+                trace_name="team_skills.evolution.agent.latest",
+                max_bytes=MODEL_EVIDENCE_BYTES // 2,
+            )
+            messages = [
+                messages[0],
+                {"role": "user", "content": dumps({
+                    "history_evidence": history, "latest_observation": latest,
+                    "edit_anchor_note": "摘要不是逐字编辑锚点；编辑前可用 read_skill 重新读取正文。",
+                })},
+            ]
         raw = await llm.chat(messages, **call_options, **_round_trace(trace_kwargs, round_no))
         _dump(
             debug_stem,

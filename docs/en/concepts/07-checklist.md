@@ -41,7 +41,7 @@ The judge system prompt is `JUDGE_SYSTEM` and can be overridden through the Repl
 1. The first turn sends only the Case `query`.
 2. After each judge evaluation, `select_disclosure_items` picks the next batch, in order, from unmet and undisclosed items (`replay.progressive_disclosure.batch_size`, default 4).
 3. The user simulator sees only this batch and already disclosed requirements, and produces natural user feedback as the next turn input; feedback contains no item IDs or scores.
-4. The branch ends when everything is satisfied, nothing is left to disclose, or `max_interactions` is reached.
+4. Stop when all items are satisfied; keep giving feedback on previously disclosed unmet items. Reaching an interaction or timeout guard preserves incomplete evidence and yields an inconclusive verdict.
 
 ## Aggregating Case Checklists
 
@@ -57,8 +57,9 @@ The judge system prompt is `JUDGE_SYSTEM` and can be overridden through the Repl
 ```text
 Any judge unavailable ────────────► inconclusive (checklist_judge_unavailable)
 Neither completed ────────────────► inconclusive (both_checklists_incomplete)
-Candidate incomplete ─────────────► reject (candidate_checklist_incomplete)
-Candidate done, Baseline not ─────► accept (candidate_only_completed_checklist)
+Either Checklist missing ─────────► inconclusive (checklist_missing)
+Candidate incomplete ─────────────► inconclusive (candidate_checklist_incomplete)
+Candidate done, Baseline not ─────► inconclusive (baseline_checklist_incomplete)
 Both completed ───────────────────► efficiency comparison: turns → tool calls / tokens
 ```
 

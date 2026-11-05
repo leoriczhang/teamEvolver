@@ -9,6 +9,8 @@ TeamEvolver 的配置分两层：
 
 启动配置只读，CLI 不提供写入命令。在线配置的写入入口见各 API 页面。
 
+MA 连接在独立 revision 表管理，不新增租户配置模块。通用 `scripts/connect_managed_agent.py` 使用 `TEAMEVOLVER_URL`、服务 Root Key 或 `TEAMEVOLVER_CONSOLE_USERNAME` / `TEAMEVOLVER_CONSOLE_PASSWORD`，业务 Key 来自示例的环境变量映射。Replay 限额和文本扩展通过 [MA API 与回放配置](../api/24-managed-agents.md) 的正式设置接口维护。
+
 ## 启动配置
 
 ### 加载顺序

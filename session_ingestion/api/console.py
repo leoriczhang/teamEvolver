@@ -9,6 +9,7 @@ from starlette.exceptions import HTTPException
 
 from teamEvolver.tenants.registry import current_tenant_id
 
+from ..projections import session_list_meta
 from . import _require_tenant_admin
 
 
@@ -29,20 +30,34 @@ def create_router(services):
         params = (search, decision, skill, start, end)
         async with tx.tenant_tx(current_tenant_id()) as conn:
             rows = await conn.fetch(
-                f"SELECT session_id,user_id,source,decision,judge,meta,business_time,ingested_at "
+                f"SELECT session_id,user_id,source,decision,judge,meta,content_ref,business_time,ingested_at "
                 f"FROM {tx.pool.schema}.sessions {where} ORDER BY ingested_at DESC,session_id DESC "
                 "LIMIT $6 OFFSET $7", *params, limit, offset)
             total = await conn.fetchval(f"SELECT count(*) FROM {tx.pool.schema}.sessions {where}", *params)
-        values = []
-        for row in rows:
+
+        semaphore = asyncio.Semaphore(8)
+
+        async def present(row):
             item = dict(row)
             for key in ("judge", "meta"):
                 item[key] = json.loads(item[key]) if isinstance(item[key], str) else item[key]
-            item.update(title=item["meta"].get("title", item["session_id"]), user_alias=item["user_id"],
+            content_ref = item.pop("content_ref", "")
+            title = str(item["meta"].get("title") or "").strip()
+            if not title and content_ref:
+                try:
+                    async with semaphore:
+                        session = await asyncio.to_thread(services.extras["session_payloads"].get_session, content_ref)
+                    title = str(session_list_meta(session, item["meta"]).get("title") or "").strip()
+                except (FileNotFoundError, KeyError, TypeError, ValueError):
+                    title = ""
+            item.update(title=title or item["session_id"], user_alias=item["user_id"],
                         status="archived", timestamp=item["business_time"],
                         num_turns=item["meta"].get("num_turns"),
-                        used_skills=item["meta"].get("used_skills") or [])
-            values.append(item)
+                        used_skills=item["meta"].get("used_skills") or [],
+                        available_skills=item["meta"].get("available_skills"))
+            return item
+
+        values = await asyncio.gather(*(present(row) for row in rows))
         return {"sessions": values, "total": total, "limit": limit, "offset": offset,
                 "has_more": offset + len(rows) < total}
 

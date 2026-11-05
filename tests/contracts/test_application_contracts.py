@@ -16,6 +16,7 @@ PACKAGES = (
     "team_replay",
     "team_memory",
     "team_miner",
+    "team_ma",
 )
 RETIRED = (
     "teamEvolver/config_store",
@@ -137,6 +138,9 @@ def test_composed_api_contains_current_frontend_routes_once():
         "/api/datasets",
         "/api/platform-assets/content",
         "/api/skills/transfer/skills",
+        "/api/ma/connections",
+        "/sync/ma/{connection_id}",
+        "/api/replay/settings",
     }
     assert not required - set(paths)
     from collections import Counter
@@ -165,6 +169,7 @@ def test_frontend_features_and_single_miner_build():
         "miner",
         "operations",
         "platform-docs",
+        "ma",
     ):
         assert (ROOT / "web-ui/src/features" / domain).is_dir()
     assert not (ROOT / "web-ui/src/views").exists()
