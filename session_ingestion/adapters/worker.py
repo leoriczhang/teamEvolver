@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 
+from ..source_revisions import preserve_requests, source_identity
 from ._runtime import apply_session_id_exclusions, load_from_content
 
 
@@ -34,6 +35,8 @@ class StreamingAdapter:
                         try:
                             raw, traces = await asyncio.to_thread(adapter.fetch_session, sid)
                             session = await asyncio.to_thread(adapter.convert_session, raw, traces)
+                            preserve_requests(session, traces)
+                            session["source_identity"] = source_identity(adapter, metadata, raw, traces)
                             return {"external_id": sid, "session": session}
                         except Exception:
                             return {"external_id": sid, "status": "error"}

@@ -4,7 +4,8 @@ import os
 
 import pytest
 
-from team_replay.datasets.candidate_selection import sample_history
+from team_replay._util import stable_hash
+from team_replay.datasets.candidate_selection import case_fingerprint, sample_history
 from team_replay.gateway import HostReplayGateway
 from team_replay.hooks import AgentObservation
 from team_skills.evolution.validation import TrueReplayValidator
@@ -40,9 +41,57 @@ def test_history_uses_remaining_unique_cases_when_fewer_datasets_exist():
     assert sample_history([], [], seed="fixed") == []
 
 
+def test_larger_history_count_keeps_the_same_unique_dataset_first_sampling():
+    rows = [history(f"dataset-{n}", n) for n in range(8)]
+    rows.extend([history("duplicate", 1), history("current", 100)])
+    old_default = sample_history(rows, [case(100)], seed="fixed")
+    larger = sample_history(rows, [case(100)], seed="fixed", count=6)
+    assert len(larger) == 6
+    assert len({row["dataset_id"] for row in larger}) == 6
+    assert larger[:3] == old_default
+    assert all(row["case"]["query"] != "Task 100" for row in larger)
+    assert larger == sample_history(rows, [case(100)], seed="fixed", count=6)
+
+
+@pytest.mark.parametrize("changed", ["template_refs", "template_variables", "input_messages"])
+def test_history_preserves_same_question_with_different_frozen_template_inputs(changed):
+    current = case(1)
+    current["provenance"]["execution_inputs"] = {
+        "schema_version": "teamevolver.execution-inputs.v1",
+        "source_ref": {"trace_id": "first"},
+        "template_refs": {"prompt": {"template_id": "shared", "revision": "1", "content_hash": "0" * 64}},
+        "template_variables": {"serviceName": "one"},
+        "input_messages": [{"role": "user", "content": "Prior public context"}],
+    }
+    historical = copy.deepcopy(current)
+    inputs = historical["provenance"]["execution_inputs"]
+    if changed == "template_refs":
+        inputs[changed]["prompt"]["revision"] = "2"
+    elif changed == "template_variables":
+        inputs[changed]["serviceName"] = "two"
+    else:
+        inputs[changed][0]["content"] = "Another public context"
+    assert case_fingerprint(current) != case_fingerprint(historical)
+    rows = [{"dataset_id": "historical", "case": historical}]
+    assert sample_history(rows, [current], seed="fixed") == rows
+    historical["provenance"]["execution_inputs"] = copy.deepcopy(current["provenance"]["execution_inputs"])
+    historical["provenance"]["execution_inputs"]["source_ref"]["trace_id"] = "another-trace"
+    assert sample_history(rows, [current], seed="fixed") == []
+
+
+def test_legacy_case_fingerprint_keeps_its_original_fields_and_hash():
+    original = case(1)
+    assert case_fingerprint(original) == stable_hash({
+        "query": original["query"], "checks": original["checks"],
+        "materials": [{key: item.get(key) for key in ("path", "sha256", "size")}
+                      for item in original.get("materials", [])],
+    })
+
+
 @pytest.mark.postgres
 @pytest.mark.skipif(not os.environ.get("TEAMEVOLVER_TEST_PG_DSN"), reason="isolated PostgreSQL required")
-def test_acceptance_pins_history_and_excludes_experiments_and_other_skills(pg_env):
+@pytest.mark.parametrize("historical_count", [3, 6])
+def test_acceptance_pins_history_and_excludes_experiments_and_other_skills(pg_env, historical_count):
     from team_replay.datasets.candidate_selection import freeze_candidate_cases
     from team_replay.datasets.repository import DatasetRepository
     from team_replay.datasets.schema import make_document
@@ -50,7 +99,7 @@ def test_acceptance_pins_history_and_excludes_experiments_and_other_skills(pg_en
 
     async def seed(conn):
         repo = DatasetRepository(pg_env.tx)
-        for number in range(5):
+        for number in range(8):
             item = case(number)
             document = make_document(
                 dataset_id=f"ds-{number}", name=f"Dataset {number}", skills=["demo"], cases=[item],
@@ -64,9 +113,11 @@ def test_acceptance_pins_history_and_excludes_experiments_and_other_skills(pg_en
         frozen = await freeze_candidate_cases(
             conn, pg_env.tx, tenant_id="default", candidate_id="candidate", skill_name="demo",
             detail={"replay_cases": [case(100), case(101)]}, seed="command",
+            historical_count=historical_count,
         )
-        assert frozen["replay_sampling"]["historical_selected"] == 3
-        assert len(frozen["replay_cases"]) == 5
+        assert frozen["replay_sampling"]["historical_requested"] == historical_count
+        assert frozen["replay_sampling"]["historical_selected"] == historical_count
+        assert len(frozen["replay_cases"]) == historical_count + 2
         ids = {c["provenance"]["dataset_id"] for c in frozen["replay_cases"][2:]}
         assert "experiment" not in ids
         old = copy.deepcopy(frozen)

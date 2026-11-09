@@ -89,6 +89,16 @@ Every execution Worker needs an accessible AgentsHub backend and Python environm
 
 `systemd_scope` defaults to user systemd. Setting it to `system` requires permission to run `sudo -n systemd-run/systemctl`; the isolated Agent still runs as the current ordinary user. Isolation failure stops Replay. UTF-8 Skill bundle files are preserved; unsupported binary Skill files produce an error. TeamEvolver owns judging and user feedback. Tool traces and Token usage are reported as turn deltas; missing usage remains unavailable.
 
+### Pure Prompt Replay and the Existing Agent Lab
+
+Pure Prompt candidates require no Skill. The frozen ReplaySpec uses `subject.kind="execution"`, `subject.id=<profile_id>` and `treatment.kind="execution_plan"` in both branches, with Skill payload `{}`. Test Datasets use `skills=[]` and Cases use `skill_ids=[]`; source/metadata binds `execution_profile_id` and `baseline_execution_plan_hash`. Historical regression selects only the same profile and baseline. Candidates use the existing `/api/skill-candidates/{candidate_id}/evaluate` and review workflow without creating a fake Skill.
+
+`team_replay/adapters/examples/agent_lab.py` integrates the existing Agent Lab's `agentscope-java` runtime, declaring `request_observation="remote_attested_dispatch"` and `skill_treatment=false` for `agent_prompt` and `context_fragment`. This integration preserves the real business Agent engine and multi-turn sessions rather than substituting the direct-model `observed_http` reference transport.
+
+The remote observation boundary is a proxy inside the existing Agent Node process. It captures Java's actual final outbound model-request bytes, forwards them unchanged to the provider and signs the evidence with a separate control key. TE verifies HMAC, nonce, the frozen plan and final JSON per branch. Signed RPC parameters, Prompt templates or reported metadata do not replace model-request evidence. Keys use existing credential channels and are excluded from execution profiles and recorded requests.
+
+The contract or Adapter source alone does not establish that a deployment is operational. Verify both branches' final requests, actual responses, usage, session isolation and post-publication loading against the deployed service. Unsupported loading, missing or mismatched evidence must block the workflow; zero candidates do not establish a complete loop. The existing AgentsHub Skill-only entry remains compatible and does not acquire Prompt override capability automatically.
+
 ### Endpoints
 
 | Method | Path | Permission | Description |
@@ -99,7 +109,7 @@ Every execution Worker needs an accessible AgentsHub backend and Python environm
 | PUT | `/api/replay-adapter/code` | Root Key | `{"file", "code", "expected_revision"}`; `expected_revision` is `null` for a new file, conflicts return 409 |
 | POST | `/api/replay-adapter/code/test` | Root Key | `{"file", "code", "context", "query"}`, returns 202 |
 
-In test requests `context` only allows `runtime_type` (required), `skill` (object or null), `materials` (array), `context_snapshot` (object) and `timeout_seconds` (1–120, default 30); `query` is 1–32000 characters. Test drafts are saved as separate Adapters named `test-<sha256>.py`, do not affect the current binding, and read no published data.
+In test requests `context` only allows `runtime_type` (required), `skill` (object or null), `materials` (array), `context_snapshot` (object), optional `execution_plan` and `timeout_seconds` (1–120, default 30); `query` is 1–32000 characters. Pure Prompt tests send `skill=null` and the complete frozen plan. Test drafts are saved as separate Adapters named `test-<sha256>.py`, do not affect the current binding, and read no published data.
 
 ## Datasets
 
@@ -112,7 +122,7 @@ The dataset document format is `team-replay.dataset`:
 | `cases[]` | Replay Cases: `case_id`, `query` (required), `skill_ids`, `checks`, `materials`, `provenance`, `replay`, `metadata` |
 | `source`, `metadata` | Origin (manual or Session selection) and extra information |
 
-Baseline and Candidate must resolve to the same Skill set; an experiment can replace one or more of those Skills.
+For Skill experiments, Baseline and Candidate must resolve to the same Skill set; an experiment can replace one or more of those Skills. Pure Prompt experiments have no Skill set and instead freeze the complete component inventory, placement, dependencies and non-target environment of the same execution profile.
 
 | Method | Path | Description |
 | --- | --- | --- |
@@ -130,6 +140,62 @@ Baseline and Candidate must resolve to the same Skill set; an experiment can rep
 | GET | `/api/datasets/{dataset_id}/runs/{run_id}/cases/{case_id}` | Case as pinned by the run |
 | GET | `/api/datasets/{dataset_id}/runs/{run_id}/results/{case_id}` | Single Case result |
 | POST | `/api/datasets/{dataset_id}/runs/{run_id}/cancel` | Cancel the run |
+
+## Replay Evaluation Settings
+
+`GET /api/replay-evaluation` returns the current `replay` module revision and `evaluation`. Tenant administrators save settings with `PUT /api/replay-evaluation`:
+
+```json
+{
+  "expected_revision": 1,
+  "evaluation": {
+    "mode": "external_agent",
+    "external_agent": {
+      "url": "https://evaluation.example/score",
+      "secret_ref": "",
+      "timeout_seconds": 60,
+      "rubric": "Assess task correctness, role consistency and natural responses with supporting reasons.",
+      "min_score": 60,
+      "min_improvement": 2
+    }
+  }
+}
+```
+
+`mode` is `checklist_efficiency` (default) or `external_agent`. External scores use 0–100, higher is better. Minimum score and improvement both use 0–100 and default to zero; acceptance still requires positive improvement. Timeout is 1–1800 seconds. Credentials use Secret Refs only, resolved to a Bearer header inside the Worker. Embedded URL credentials and plaintext keys are rejected. Saving preserves other Replay settings; stale revisions return 409 and missing tenant configuration returns 503. Switching back to the default mode may retain external settings for reuse.
+
+The external Agent receives POST JSON with `schema_version` equal to `team-replay.external-evaluation.request.v1`, a stable `request_id`, frozen task inputs in `case`, and actual public messages, interactions, artifacts and final responses in `branches.baseline` and `branches.candidate`. `rubric` contains the configured scoring requirements. Original scores, Candidate editing evidence and adoption thresholds are excluded. The `Idempotency-Key` header uses this request identifier. The service must return JSON:
+
+```json
+{
+  "baseline": {"score": 70, "reason": "Completed the task but repeated a question."},
+  "candidate": {"score": 85, "reason": "Preserved correct behavior and removed the repeated question."},
+  "usage": {"input_tokens": 800, "output_tokens": 100, "total_tokens": 900}
+}
+```
+
+`usage` is optional; a returned `request_id` must match the request. Finite numeric scores and nonempty reasons are required for both branches. Timeouts, non-success HTTP status, malformed JSON, missing scores or mismatched identifiers are inconclusive and never fall back to the default evaluation policy. Returned text is never executed as instructions.
+
+External mode uses means over the selected Cases to decide adoption while retaining efficiency displays and execution/loading verification. Settings are frozen when `skill.validate` or an A/B Replay task is accepted; historical results are not rewritten. The UI displays per-Case, per-Dataset and overall scores. See [True Replay](../concepts/06-true-replay.md).
+
+### External evaluator adapter files
+
+Use a Python adapter when a scoring Agent has a different request, authentication or response contract. Direct HTTP and the default evaluation mode remain available. The adapter transforms scoring interactions; it does not create ground truth or change adoption rules.
+
+| Method | Path | Permission and purpose |
+| --- | --- | --- |
+| GET | `/api/replay-evaluator-adapter` | Tenant administrator; latest file versions, source hashes, labels and enabled flags |
+| GET | `/api/replay-evaluator-adapter/example` | Tenant administrator; editable HTTP evaluator example |
+| GET | `/api/replay-evaluator-adapter/code?file=grader.py&revision=1` | Root Key; read the specified source version, or latest when revision is omitted |
+| PUT | `/api/replay-evaluator-adapter/code` | Root Key; `{"file", "code", "expected_revision"}`; use `null` to create, stale revisions return 409 |
+
+Uploaded Python executes as trusted Worker code, with the same authority boundary as Replay adapters. Reading, parsing and saving source do not execute it. Tenant administrators select saved versions; only the service Root Key can read or change source. Source and immutable versions live in PostgreSQL, without local file scanning.
+
+Each file provides literal metadata `EVALUATOR_ADAPTER = {"label": "Business scoring Agent", "enabled": True}` and a synchronous function `def evaluate(request, config, *, secret="")`. The request contains frozen task inputs and actual baseline/candidate replies. Config provides url, timeout_seconds and rubric; secret is resolved from the selected Secret Ref only in Worker. Return `{"baseline": {"score": number, "reason": "basis"}, "candidate": {"score": number, "reason": "basis"}}`, with optional usage and matching request_id. TE uses the same response validation as direct HTTP mode.
+
+Adapters must bound external I/O timeouts and response sizes; the supplied example does both. Ground-truth scoring may associate frozen case_id or explicit task inputs with real external labels, but must not infer expected answers from either reply. Errors or missing scores remain unavailable without falling back to the default policy. Runtime exceptions do not persist provider responses or plaintext credentials.
+
+After saving, set `evaluation.external_agent.adapter` to the returned `{file, revision, source_hash}`. A missing or null adapter retains direct HTTP. With an adapter, url may be empty if unused. Existing thresholds, rubric and timeout settings remain available. Credentials use secret_ref, never source constants or URL parameters. Saving validates the selected tenant, immutable revision, hash and enabled flag. Accepted tasks freeze the entire reference; Worker loads that exact version and verifies its hash again. Later source uploads or configuration changes cannot change an accepted task or reuse a score from another adapter version. A different scoring Agent requires editing its adapter file, without changing TE scoring or evolution code.
 
 ## Replay Runs
 

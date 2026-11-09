@@ -17,8 +17,11 @@ export default function DataSourcesView({
   active: boolean;
   user?: UserProfile | null;
 }) {
-const { uploadRef, source, file, filters, setFilters, previewLimit, setPreviewLimit, health, rows, counts, code, setCode, codeFile, setCodeFile, revision, dirty, setDirty, setDraftMeta, draftResult, setDraftResult, schedule, setSchedule, busy, error, pullSummary, canEditSource, mayDiscard, closeDraft, chooseFile, loadCode, newDraft, uploadDraft, saveBinding, saveSchedule, runScheduleNow, saveCode, runDraft, runSaved, bindingDirty, savedReady, activeMeta, filterMeta, missing, warning, savedSchedule, scheduleStatus, scheduleDirty, scheduleAdapterReady, scheduleLabel, scheduleTone } = useDataSourcesView({ active, user });
+const { uploadRef, source, file, bindingRevision, setBindingRevision, filters, setFilters, previewLimit, setPreviewLimit, health, rows, counts, code, setCode, codeFile, setCodeFile, revision, dirty, setDirty, setDraftMeta, draftResult, setDraftResult, schedule, setSchedule, busy, error, pullSummary, canEditSource, mayDiscard, closeDraft, chooseFile, loadCode, newDraft, uploadDraft, saveBinding, saveSchedule, runScheduleNow, saveCode, runDraft, runSaved, bindingDirty, savedReady, activeMeta, filterMeta, missing, warning, savedSchedule, scheduleStatus, scheduleDirty, scheduleAdapterReady, scheduleLabel, scheduleTone } = useDataSourcesView({ active, user });
 if (user?.role !== "admin") return <Empty>仅管理员可管理数据源。</Empty>;
+const latestBindingRevision = source?.available.find(item => item.file === file)?.revision;
+const bindingVersions = [...new Set([file === source?.file ? source.revision : undefined, latestBindingRevision]
+  .filter((value): value is number => value !== undefined))];
 return (
     <div className="mx-auto w-full max-w-[1200px] space-y-6 p-5">
       <div className="flex gap-3 border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
@@ -77,6 +80,17 @@ return (
               ))}
             </select>
           </label>
+          {file && bindingVersions.length > 0 && <label className="text-xs font-medium">
+            适配器版本
+            <select aria-label="适配器版本" value={bindingRevision ?? ""} disabled={!!busy}
+              className="mt-2 block h-10 rounded-md border border-border bg-background px-2 text-sm"
+              onChange={event => setBindingRevision(Number(event.target.value))}>
+              {bindingVersions.map(value => <option key={value} value={value}>
+                v{value}{file === source?.file && value === source.revision ? "（当前绑定）" : ""}
+                {value === latestBindingRevision ? "（最新登记）" : ""}
+              </option>)}
+            </select>
+          </label>}
           <Button disabled={!bindingDirty || !!busy} onClick={saveBinding}>
             <Save className="size-4" />
             {busy === "binding" ? "保存中" : "保存绑定"}

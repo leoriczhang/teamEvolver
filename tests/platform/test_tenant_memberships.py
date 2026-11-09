@@ -152,6 +152,11 @@ def store(config) -> IdentityStore:
 def app(config, registry, monkeypatch):
     monkeypatch.delenv("TEAMEVOLVER_ROOT_API_KEY", raising=False)
     monkeypatch.delenv("TEAMEVOLVER_PLATFORM_ADMINS", raising=False)
+
+    async def effective_openviking(services, tenant):
+        return config  # This RBAC fixture deliberately has no PG; real resolution has a separate PG test.
+
+    monkeypatch.setattr("teamEvolver.openviking.settings.effective", effective_openviking)
     application = create_app(services=_build_services(config, registry))
 
     # A probe route so RBAC/tenant binding is observable like test_console_rbac.

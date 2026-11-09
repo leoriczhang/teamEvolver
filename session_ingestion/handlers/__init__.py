@@ -16,6 +16,7 @@ from teamEvolver.runtime import HandlerResult
 from teamEvolver.runtime.repository import ClaimedTask
 
 from ..adapters.repository import AdapterRepository
+from ..diagnostics import ingestion_error_code
 from ..projections import session_list_meta
 from ..repository import SessionIngestionRepository
 from ..schemas import (
@@ -283,15 +284,32 @@ async def handle_analyze(task: ClaimedTask, services) -> HandlerResult:
     payload = await _load_payload(deps, task)
     session = await asyncio.to_thread(deps.payloads.get_session, task.payload_ref)
 
+    async with services.tx.tenant_tx(task.tenant_id) as conn:
+        checkpoints = await repo.stage_results(conn, ingestion_id=payload.ingestion_id)
+    checkpoint = next((r for r in checkpoints if r["stage"] == "analyze"
+                       and r["status"] == "succeeded" and r.get("result_ref")), None)
+    if checkpoint:
+        saved = await asyncio.to_thread(deps.payloads.get_session, checkpoint["result_ref"])
+        validator = getattr(deps.stage_runner, "analysis_checkpoint_valid", None)
+        if validator is not None and not await validator(saved):
+            checkpoint = None
+        else:
+            session = saved
     try:
-        analysis = await deps.stage_runner.analyze(session, payload=payload)
+        analysis = (session.get("value_judge") or {}) if checkpoint else await deps.stage_runner.analyze(
+            session, payload=payload,
+        )
     except Exception as exc:  # noqa: BLE001 - model errors retry; no partial Session
-        await _record_failed(repo, task, "analyze", exc)
-        return HandlerResult.retry(error_code=f"analyze_failed:{type(exc).__name__}")
+        code = await _record_failed(repo, task, "analyze", exc)
+        return HandlerResult.retry(error_code=f"analyze_failed:{code}")
+    analysis_ref, _ = await asyncio.to_thread(
+        deps.payloads.put_session, payload.ingestion_id, session, stage="session-analysis",
+    )
     async with services.tx.tenant_tx(task.tenant_id) as conn:
         await repo.record_stage(
             conn, tenant_id=task.tenant_id, ingestion_id=payload.ingestion_id,
             stage="analyze", status="succeeded",
+            result_ref=analysis_ref,
             detail={"decision": analysis.get("decision", "")},
         )
 
@@ -431,6 +449,14 @@ async def handle_pull(task: ClaimedTask, services) -> HandlerResult:
             if not session:
                 counts["empty"] += 1
                 continue
+            if (session.get("source_identity") or {}).get("identity_verified"):
+                from ..source_acceptance import accept_source_item
+
+                enqueued = await accept_source_item(
+                    services, task, payload, session, str(item["external_id"]), deps,
+                )
+                counts["enqueued" if enqueued else "duplicate"] += 1
+                continue
             child_id = f"{payload.ingestion_id}:{item['external_id']}"
             child_payload = IngestionTaskPayload(
                 schema_version=PAYLOAD_SCHEMA_VERSION,
@@ -499,17 +525,19 @@ async def _accept_and_enqueue_child(services, repo, task, child_payload, session
 
 
 
-async def _record_failed(repo: SessionIngestionRepository, task: ClaimedTask, stage: str, exc: Exception) -> None:
+async def _record_failed(repo: SessionIngestionRepository, task: ClaimedTask, stage: str, exc: Exception) -> str:
     payload = None
+    code = ingestion_error_code(exc)
     try:
         async with repo._tx.tenant_tx(task.tenant_id) as conn:  # noqa: SLF001 - same module helper
             await repo.record_stage(
                 conn, tenant_id=task.tenant_id, ingestion_id=task.subject_id,
-                stage=stage, status="failed", error_code=f"{type(exc).__name__}",
+                stage=stage, status="failed", error_code=code,
             )
     except Exception:  # noqa: BLE001 - never let bookkeeping mask the original failure
         logger.warning("[session.%s] failed to record stage failure for %s", stage, task.subject_id)
     del payload
+    return code
 
 
 # --------------------------------------------------------------------------- #

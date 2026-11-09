@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .execution_plan import ExecutionPlanError, normalize_execution_plan
+
 REPLAY_PROTOCOL_VERSION = "1.0"
 REPLAY_TURN_REQUEST_SCHEMA = "teamevolver.replay-turn-request.v1"
 REPLAY_TURN_RESULT_SCHEMA = "teamevolver.replay-turn-result.v1"
@@ -56,6 +58,10 @@ def normalize_replay_turn_request(payload: dict[str, Any]) -> dict[str, Any]:
         raise ReplayProtocolError(
             "replay turn_timeout_seconds must be between 1 and 3600"
         )
+    try:
+        plan = normalize_execution_plan(payload.get("execution_plan"))
+    except ExecutionPlanError as exc:
+        raise ReplayProtocolError(str(exc)) from exc
     return {
         **payload,
         "schema_version": REPLAY_TURN_REQUEST_SCHEMA,
@@ -64,6 +70,7 @@ def normalize_replay_turn_request(payload: dict[str, Any]) -> dict[str, Any]:
         "branch": branch,
         "turn_num": turn_num,
         "prompt": prompt,
+        **({"execution_plan": plan} if plan is not None else {}),
         "limits": {
             **limits,
             "turn_timeout_seconds": turn_timeout,

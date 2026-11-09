@@ -16,7 +16,7 @@ Read endpoints require a tenant member; writes, triggers and Prompt changes requ
 ### POST /api/skill-evolution/trigger
 
 ```json
-{"session_ids": ["session_..."]}
+{"session_ids": ["session_..."], "allowed_modules": ["skill", "prompt"], "execution_profile_id": "business-agent"}
 ```
 
 At most 200 `session_ids`; when omitted, `valuable` Sessions stored before acceptance and not yet consumed by evolution are read, up to `evolution_max_sessions` (cap 200). The request cannot override identity or configuration. It creates a `skill.evolve` task pinned to the current `skills` module configuration revision; the first run freezes the input Session set and resumed runs use the same set.
@@ -72,6 +72,10 @@ Marks whether the Candidate has been reviewed; only `reviewed` is accepted.
 
 Evaluate without publishing: creates a `skill.validate` task that runs static checks and True Replay, writes the verdict (`accept`, `reject`, `inconclusive`), and returns the Candidate to `open`.
 
+Each Checklist judgment uses the `checklist-format-retry-v1` policy, with at most two provider calls for the same interaction. Only a confirmed JSON parsing, schema validation or truncated-output format failure permits one additional call. It uses the same Checklist, evidence, model and request parameters without resending the Agent request. Valid negative judgments, provider errors, timeouts, insufficient budget, invalid input and generic unavailability without evidence of a format failure do not trigger this retry.
+
+Usage from every actual call counts toward cumulative cost; missing usage is never treated as zero. Results still undergo strict validation, without repairing JSON or relaxing Checklist standards. If the additional call fails, the judge remains unavailable and validation fails closed. Historical validation results are not rewritten.
+
 ### POST /api/skill-candidates/{candidate_id}/validate
 
 ```json
@@ -84,6 +88,18 @@ Evaluate without publishing: creates a `skill.validate` task that runs static ch
 | `force` | Publishes when static checks pass and Replay ran normally, without requiring `accept` |
 
 Validation pins the currently bound Replay Adapter revision and the `replay` module configuration. Only Candidates in `open` can be submitted.
+
+The table describes Skill-only Candidates. Execution-aware Candidates first `/evaluate`, then `/validate` publishes from that immutable result without new model calls. New evaluations default to `standard-v1`: existing Skill static, runtime and native primary Replay gates plus actual Prompt loading, composition and dependency checks, without mandatory locked acceptance, A/A, repeat probes or independent review. Explicit `environment.validation.strategy="enhanced-v1"` retains enhanced gates and exact-result v2 independent review; old frozen plans without a strategy marker retain enhanced rules and need a new evaluation to adopt the default. Neither `auto` nor `force` bypasses Prompt primary Replay or frozen-policy gates. Configuration/asset drift conflicts or blocks the Worker after acceptance; historical results and costs are not rewritten. See [composition evolution](../concepts/12-execution-evolution.md).
+
+### POST /api/skill-candidates/{candidate_id}/validation-budget
+
+```json
+{"candidate_revision": 18, "max_total_tokens": null, "reason": "Administrator records explicit authority to remove the cumulative token ceiling"}
+```
+
+Administrators may update only open execution-aware Candidates; success returns the updated detail (200). All three fields are required. `candidate_revision` is the current positive integer revision, guarded by CAS; a conflict returns 409. `max_total_tokens` is a higher finite integer (at most 10000000), or explicit JSON `null` to remove this Candidate's cumulative token ceiling. Booleans, nonpositive numbers, strings, out-of-range amounts and omitted fields return 400. The nonempty `reason` is limited to 2000 characters. Once unlimited, further changes and accidental finite replacements are rejected.
+
+A new revision and audit event (`validation_budget_unlimited` for cancellation) require fresh evaluation and exact-result review where required by the frozen strategy. All incurred costs, execution plans and model parameters remain. Unlimited disables only the cumulative token threshold; unknown historical usage becomes an accounting warning. Checklist, observed loading and frozen-policy publication requirements remain. Explicit finite limits and old command rules are unchanged. See [composition evolution](../concepts/12-execution-evolution.md).
 
 ### POST /api/skill-candidates/{candidate_id}/reject
 
@@ -122,6 +138,8 @@ Fields of `settings.evolve` and `settings.validation`:
 | Field | Default | Description |
 | --- | --- | --- |
 | `evolution_max_sessions` | 100 | Max Sessions read per evolution |
+| `evolution_current_case_count` | 2 | Current Replay Case generation count, integer 1–6, pinned at acceptance; recorded-anchor deduplication may reduce the effective count |
+| `evolution_historical_case_count` | 3 | Historical Replay Case sampling limit, integer 1–30; existing deduplication and cross-Dataset priority apply, pinned at validation acceptance |
 | `min_group_sessions` | 2 | Minimum Sessions per Skill group |
 | `min_group_users` | 2 | Minimum users per Skill group |
 | `evolution_trigger_mode` | manual | Trigger evolution manually or periodically |

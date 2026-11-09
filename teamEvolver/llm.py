@@ -22,6 +22,7 @@ from .config import (
     DEFAULT_LLM_QUEUE_CAPACITY,
     DEFAULT_LLM_TEMPERATURE,
 )
+from .llm_usage import LLMUsageBudgetExceeded, begin_llm_dispatch, provider_attempt
 from .observability import (
     langfuse_observation,
     update_langfuse_observation,
@@ -101,20 +102,38 @@ class _TenantLLMDispatcher:
         self._pending.release()
 
     async def call(self, func, **kwargs):
-        slots = await self.acquire()
+        pending = begin_llm_dispatch()
+        try:
+            slots = await self.acquire()
+        except BaseException:
+            if pending is not None:
+                pending.finish()
+            raise
         loop = asyncio.get_running_loop()
         try:
             context = contextvars.copy_context()
             def invoke():
-                with _GLOBAL_MODEL_SLOTS:
-                    return context.run(partial(func, **kwargs))
+                try:
+                    with _GLOBAL_MODEL_SLOTS:
+                        return context.run(partial(func, **kwargs))
+                finally:
+                    # A cancelled waiter may outlive its event loop. Usage must
+                    # settle in the real thread even when no callback can run.
+                    if pending is not None:
+                        pending.finish()
             future = loop.run_in_executor(self._executor, invoke)
         except BaseException:
             self.release(slots)
+            if pending is not None:
+                pending.finish()
             raise
 
         def finished(_):
-            self.release(slots)
+            try:
+                self.release(slots)
+            finally:
+                if pending is not None:
+                    pending.finish()
 
         future.add_done_callback(finished)
         # Cancellation cannot free a slot while the synchronous HTTP call is alive.
@@ -211,6 +230,31 @@ def _usage_details(response: Any) -> dict[str, int]:
         for key, value in values.items()
         if isinstance(value, (int, float))
     }
+
+
+def _record_provider_usage(attempt: Any, response: Any) -> None:
+    if attempt is not None:
+        usage = getattr(response, "usage", None)
+        # Retain raw counters until the collector validates them: int() would
+        # turn a boolean/fractional provider total into fabricated known usage.
+        attempt.record_usage({
+            "input_tokens": getattr(usage, "prompt_tokens", None),
+            "output_tokens": getattr(usage, "completion_tokens", None),
+            "total_tokens": getattr(usage, "total_tokens", None),
+        })
+
+
+def _create_with_usage(create: Any, **body: Any) -> Any:
+    # This runs in the dispatcher thread, which can outlive its cancelled waiter.
+    with provider_attempt(str(body.get("model", ""))) as attempt:
+        response = create(**body)
+        _record_provider_usage(attempt, response)
+        return response
+
+
+async def create_completion_with_usage(create: Any, **body: Any) -> Any:
+    """Dispatch one provider attempt unchanged through the shared bounded pool."""
+    return await _call_in_pool(partial(_create_with_usage, create), **body)
 
 
 class AsyncLLMClient:
@@ -391,7 +435,7 @@ class AsyncLLMClient:
             ) as observation:
                 try:
                     resp = await _call_in_pool(
-                        client.chat.completions.create,
+                        partial(_create_with_usage, client.chat.completions.create),
                         dispatcher=self._dispatcher,
                         **merged,
                     )
@@ -425,7 +469,7 @@ class AsyncLLMClient:
                             continue
                     return content
                 except Exception as exc:
-                    if isinstance(exc, LLMOverloadedError):
+                    if isinstance(exc, (LLMOverloadedError, LLMUsageBudgetExceeded)):
                         raise
                     body_text = (
                         getattr(getattr(exc, "response", None), "text", "")
@@ -493,12 +537,14 @@ class AsyncLLMClient:
 
         def stream():
             parts = []
-            with client.chat.completions.create(**request_body) as response:
-                for event in response:
-                    for choice in event.choices:
-                        text = choice.delta.content
-                        if text:
-                            parts.append(text)
+            with provider_attempt(str(request_body.get("model", ""))) as attempt:
+                with client.chat.completions.create(**request_body) as response:
+                    for event in response:
+                        _record_provider_usage(attempt, event)
+                        for choice in event.choices:
+                            text = choice.delta.content
+                            if text:
+                                parts.append(text)
             return "".join(parts)
 
         return await _call_in_pool(stream, dispatcher=self._dispatcher)

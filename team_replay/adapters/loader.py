@@ -8,6 +8,8 @@ import re
 from dataclasses import dataclass
 from types import ModuleType
 
+from ..execution_plan import ExecutionPlanError, normalize_capabilities, require_execution_capabilities
+
 
 class AdapterError(ValueError):
     pass
@@ -37,7 +39,14 @@ def validate_content(content, filename):
                 raise AdapterError("REPLAY_ADAPTER.enabled must be boolean")
             if not isinstance(meta.get("label", filename), str):
                 raise AdapterError("REPLAY_ADAPTER.label must be text")
-            return {"enabled": meta.get("enabled", True), "label": meta.get("label", filename)[:160]}
+            try:
+                capabilities = normalize_capabilities(meta.get("capabilities"))
+            except ExecutionPlanError as exc:
+                raise AdapterError(str(exc)) from exc
+            result = {"enabled": meta.get("enabled", True), "label": meta.get("label", filename)[:160]}
+            if capabilities:
+                result["capabilities"] = capabilities
+            return result
     raise AdapterError("REPLAY_ADAPTER metadata is required")
 
 
@@ -46,8 +55,10 @@ class BoundFactory:
     factory: object
     filename: str
     revision: str
+    capabilities: object = None
 
     def open(self, context):
+        require_execution_capabilities(self, context.execution_plan)
         return self.factory.open(context)
 
 
@@ -61,4 +72,4 @@ def build_from_content(content, filename, config, *, tenant_id):
     factory = module.build_replay_adapter(copy.deepcopy(config))
     if not callable(getattr(factory, "open", None)):
         raise AdapterError("factory must implement open(context)")
-    return BoundFactory(factory, filename, sha)
+    return BoundFactory(factory, filename, sha, metadata.get("capabilities", {}))

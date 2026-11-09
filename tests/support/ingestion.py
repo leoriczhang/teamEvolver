@@ -149,12 +149,16 @@ class _Conn:
             return {"revision": top["revision"], "source_hash": top["source_hash"]}
         if op == "adapter_version_get":
             adapter_id, rev = a
+            if self._db.adapters.get((t, adapter_id), {}).get("kind") != "python":
+                return None
             row = self._db.adapter_versions.get((t, adapter_id, int(rev)))
             return dict(row) if row else None
         if op == "adapter_binding_get":
             (key,) = a
             row = self._db.adapter_bindings.get((t, key))
-            return dict(row) if row else None
+            if row and self._db.adapters.get((t, row["adapter_id"]), {}).get("kind") == "python":
+                return dict(row)
+            return None
         if op == "session_get":
             (sid,) = a
             row = self._db.sessions.get((t, sid))
@@ -198,8 +202,12 @@ class _Conn:
             return iid
         if op == "adapter_latest_rev":
             (adapter_id,) = a
+            if self._db.adapters.get((t, adapter_id), {}).get("kind") != "python":
+                return None
             revs = [rev for (tt, aid, rev) in self._db.adapter_versions if tt == t and aid == adapter_id]
             return max(revs) if revs else None
+        if op == "adapter_kind":
+            return self._db.adapters.get((t, a[0]), {}).get("kind")
         if op == "adapter_version_insert":
             tenant_id, adapter_id, rev, digest, source = a
             key = (tenant_id, adapter_id, int(rev))

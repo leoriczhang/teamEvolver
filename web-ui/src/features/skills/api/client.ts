@@ -87,8 +87,25 @@ export interface CandidateFeedback {
 
 export interface Candidate {
   job_id: string;
-  skill_name?: string;
-  candidate_skill_name?: string;
+  candidate_kind?: "skill" | "execution";
+  candidate_revision?: number;
+  allowed_modules?: EvolutionModule[];
+  actual_modules?: EvolutionModule[];
+  session_ids?: string[];
+  current_case_ids?: string[];
+  validation_plan?: ExecutionValidationPlan;
+  execution_profile_id?: string;
+  skill_dependencies?: Array<{ name: string; version: number; tree_sha256: string }>;
+  affected_skill_ids?: string[];
+  skill_changed?: boolean;
+  base_release_id?: string;
+  baseline_execution_plan?: ExecutionPlan;
+  candidate_execution_plan?: ExecutionPlan;
+  component_changes?: ExecutionComponentChange[];
+  independent_validation?: IndependentValidation | null;
+  publication_gate?: ExecutionGate;
+  skill_name?: string | null;
+  candidate_skill_name?: string | null;
   proposed_action?: string;
   review_status?: string;
   replay_progress?: { total: number; completed: number; succeeded: number; failed: number };
@@ -115,7 +132,7 @@ export interface Candidate {
       reason?: string;
     }>;
     static_validation?: StaticValidation;
-  };
+  } | null;
   current_skill?: {
     name?: string;
     description?: string;
@@ -187,8 +204,16 @@ export interface EvidenceClassification {
 
 export interface EvolveHistoryResult {
   status?: string;
+  allowed_modules?: EvolutionModule[];
+  actual_modules?: EvolutionModule[];
+  config_revision?: number;
+  reason?: string;
+  zero_candidate_reason?: string;
   session_ids?: string[];
   sessions?: number | null;
+  received_sessions?: number;
+  effective_source_sessions?: number;
+  excluded_sessions?: number;
   skill_groups?: number | null;
   actions?: number | null;
   skills_evolved?: number | null;
@@ -197,11 +222,15 @@ export interface EvolveHistoryResult {
   had_processing_error?: boolean;
   judge?: SessionJudgeDetail;
   evolutions?: {
-    skill_name?: string;
+    skill_name?: string | null;
+    group_key?: string;
+    candidate_kind?: "skill" | "execution";
+    execution_profile_id?: string;
     action?: string;
     uploaded?: boolean;
     reason?: string;
     rationale?: string;
+    actual_modules?: EvolutionModule[];
     evidence_classification?: EvidenceClassification;
     version?: number | null;
     job_id?: string;
@@ -335,8 +364,179 @@ export interface EvolveModelTestResp {
   response?: string;
 }
 
+export type EvolutionModule = "skill" | "prompt";
+
+export interface ExecutionComponent {
+  component_id: string;
+  kind: "agent_prompt" | "context_fragment";
+  slot: "system" | "developer" | "context";
+  order: number;
+  content: string;
+  content_hash: string;
+  revision: number | string;
+  binding?: {
+    profile_id?: string;
+    affected_skill_ids?: string[];
+    template_id?: string;
+    inline_variable?: {
+      component_id: string;
+      name: string;
+      source_value_hash: string;
+    };
+  };
+}
+
+export type VariableContextEvolutionScope = "context" | "prompt_and_context";
+
+export interface VariableContextRegistrationRequest {
+  profile_id: string;
+  source_release_id: string;
+  managed_variables: string[];
+  variable_samples?: Array<Record<string, unknown>>;
+  variable_values?: Record<string, string[]>;
+  evolution_scope: VariableContextEvolutionScope;
+}
+
+export interface VariableContextRegistrationSummary {
+  sample_count: number;
+  input_mode?: "variable_values" | "variable_samples";
+  managed_variables: Array<{
+    name: string;
+    unique_values: number;
+    blank_samples: number;
+    component_ids: string[];
+  }>;
+  component_count: number;
+}
+
+export interface VariableContextRegistrationPreview {
+  profile_id: string;
+  source_profile_id: string;
+  source_release_id: string;
+  components: Array<Omit<ExecutionComponent, "content_hash"> & { content_hash?: string }>;
+  summary: VariableContextRegistrationSummary;
+  preview_hash: string;
+}
+
+export interface ExecutionPlan {
+  schema_version?: string;
+  binding?: { profile_id?: string; runtime_type?: string; agent_id?: string; user_id?: string };
+  components: ExecutionComponent[];
+  target_component_ids?: string[];
+  environment?: Record<string, unknown>;
+}
+
+export interface ExecutionComponentChange {
+  component_id: string;
+  content: string;
+  reason: string;
+  evidence_refs: string[];
+}
+
+export interface IndependentValidation {
+  candidate_revision: number;
+  status: "passed" | "failed" | "inconclusive";
+  method: "domain_review" | "programmatic";
+  evidence_ref: string;
+  case_ids: string[];
+  notes: string;
+  reviewer?: string;
+  evidence_level?: string;
+}
+
+export interface ExecutionGate {
+  status?: string;
+  passed?: boolean;
+  reasons?: string[];
+  reason?: string;
+}
+
+export interface ExecutionValidationPlan {
+  validation_strategy?: "standard-v1" | "enhanced-v1";
+  case_ids?: string[];
+  required_skill_ids?: string[];
+  attribution?: string;
+  holdout?: {
+    status?: string;
+    reasons?: string[];
+    case_ids?: string[];
+    datasets?: Array<{ dataset_id: string; revision?: number }>;
+  };
+  probe_policy?: Record<string, unknown>;
+}
+
+export function isStandardValidation(plan?: ExecutionValidationPlan): boolean {
+  // A missing marker belongs to the previously frozen enhanced policy.
+  return plan?.validation_strategy === "standard-v1";
+}
+
+export interface ExecutionProbeGate extends ExecutionGate {
+  total_replay_tokens?: number | null;
+  token_budget?: number | null;
+  attribution?: string;
+  runs?: Array<{ kind: string; job_id?: string; verdict?: string; execution_gate?: ExecutionGate }>;
+}
+
+export interface ExecutionCostGate extends ExecutionGate {
+  accounting_status?: "complete" | "incomplete";
+  warnings?: string[];
+  total_tokens?: number | null;
+  replay_te_llm_accounting_complete?: boolean;
+  known_total_tokens?: number;
+  budget_tokens?: number | null;
+  agent_replay_tokens?: number | null;
+  te_llm_usage?: { known_total_tokens?: number; unknown_attempts?: number; complete?: boolean };
+  prior_validation_runs?: number;
+}
+
+export interface ExecutionRelease {
+  release_id: string;
+  composition_hash: string;
+  candidate_id?: string;
+  validation_ref?: string;
+  restored_from?: string;
+  created_at?: string;
+}
+
+export interface ExecutionReceipt {
+  release_id: string;
+  composition_hash: string;
+  state: "downloaded" | "activated";
+  evidence_level?: string;
+  request_id?: string;
+  at?: string;
+}
+
+export interface ExecutionProfile {
+  profile_id: string;
+  runtime_type: string;
+  agent_id: string;
+  user_id: string;
+  affected_skill_ids: string[];
+  environment: Record<string, unknown>;
+  revision: number;
+  current_release_id: string;
+  composition_hash: string;
+  skill_dependencies?: Array<{ name: string; version: number; tree_sha256: string }>;
+  execution_plan: ExecutionPlan;
+  registration_summary?: VariableContextRegistrationSummary;
+  releases?: ExecutionRelease[];
+  receipts?: ExecutionReceipt[];
+}
+
+export function isExecutionCandidate(candidate?: Candidate | null): boolean {
+  return candidate?.candidate_kind === "execution";
+}
+
+export function candidateDisplayName(candidate?: Candidate | null): string {
+  if (!candidate) return "";
+  if (isExecutionCandidate(candidate)) return candidate.execution_profile_id || candidate.job_id;
+  return candidate.skill_name || candidate.candidate_skill_name || candidate.candidate_skill?.name || candidate.job_id;
+}
+
 export interface EvolveProcessSettings {
   revision?: number;
+  available_modules?: EvolutionModule[];
   evolve: Record<string, boolean | number | string | string[]>;
   validation: Record<string, boolean | number | string>;
 }

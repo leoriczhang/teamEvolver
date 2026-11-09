@@ -26,6 +26,7 @@ export function auditCycle(row: EvolveHistoryCycle): AuditCycle | null {
     session_ids: sessionIds,
     skill_groups: result?.skill_groups ?? evolutions.length,
     candidates_queued: result?.candidates_queued ?? evolutions.filter(e => e.action === "candidate_created").length,
+    allowed_modules: result?.allowed_modules ?? row.allowed_modules ?? ["skill"],
     hasResult: Boolean(result),
     taskStatus: result ? "succeeded" : "unknown",
   };
@@ -50,6 +51,9 @@ export function auditState(cycle: AuditCycle): { label: string; tone: PillTone }
     return states[cycle.taskStatus] || { label: "状态待确认", tone: "gray" };
   }
   if (cycle.had_processing_error || cycle.status === "failed") return { label: "处理异常", tone: "red" };
+  if (cycle.reason === "no_verifiable_new_evidence" || cycle.zero_candidate_reason === "no_verifiable_new_evidence") {
+    return { label: "已完成 · 无有效新证据", tone: "gray" };
+  }
   if (Number(cycle.uploaded_skills) > 0) return { label: "已产出", tone: "green" };
   if (Number(cycle.candidates_queued) > 0) return { label: "已完成 · 已生成候选", tone: "amber" };
   if (cycle.evolutions?.length && cycle.evolutions.every(e => e.action === "skip")) {
@@ -62,6 +66,7 @@ export function auditReason(reason: string): string {
   const reasons: Record<string, string> = {
     "insufficient distinct Sessions for team evidence": "不同 Session 数不足，未满足团队 Evidence 门槛。",
     "insufficient distinct users for team evidence": "不同用户数不足，未满足团队 Evidence 门槛。",
+    no_verifiable_new_evidence: "没有可核验的新增来源证据；本次未生成候选，不代表业务效果提升。",
   };
   return reasons[reason] || reason;
 }
@@ -70,4 +75,12 @@ export function auditAction(action?: string): string {
   return ({ skip: "跳过", candidate_created: "已生成候选", create: "新建", update: "更新", merge: "合并" })[
     action as "skip" | "candidate_created" | "create" | "update" | "merge"
   ] || action || "未记录动作";
+}
+
+export function auditGroupName(group: NonNullable<EvolveHistoryCycle["evolutions"]>[number]): string {
+  const key = group.group_key || group.skill_name || "";
+  if (group.candidate_kind === "execution" || key.startsWith("execution:")) {
+    return `业务执行配置：${group.execution_profile_id || key.slice(10) || "未记录"}`;
+  }
+  return group.skill_name === "__no_skill__" ? "未关联 Skill 的会话组" : group.skill_name || "-";
 }

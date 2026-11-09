@@ -177,6 +177,7 @@ team-evolver/
 | 开始使用 | [产品简介](./docs/zh/getting-started/01-introduction.md)、[快速开始](./docs/zh/getting-started/02-quickstart.md)、[安装部署](./docs/zh/getting-started/03-installation.md) |
 | 核心概念 | [架构总览](./docs/zh/concepts/01-architecture.md)、[进化闭环](./docs/zh/concepts/02-evolution-loop.md)、[Skill 体系](./docs/zh/concepts/03-skills.md)、[Memory 体系](./docs/zh/concepts/04-memory.md)、[True Replay](./docs/zh/concepts/06-true-replay.md)、[存储空间](./docs/zh/concepts/09-storage-layout.md) |
 | 使用指南 | [配置参考](./docs/zh/guides/01-configuration.md)、[生产部署](./docs/zh/guides/02-deployment.md)、[Web 控制台](./docs/zh/guides/03-console.md)、[可观测性](./docs/zh/guides/04-observability.md)、[故障排查](./docs/zh/guides/06-troubleshooting.md) |
+| Prompt 进化实操 | [Prompt 进化 README：界面步骤、三类适配器、真实 Agent 接入与发布采用](./PROMPT_EVOLUTION_README.md) |
 | Agent 接入 | [接入概览](./docs/zh/agent-integrations/01-overview.md)、[协议 v2](./docs/zh/agent-integrations/06-protocol-v2.md)、[自定义 Agent](./docs/zh/agent-integrations/05-custom-agent.md) |
 | API 参考 | [API 概览](./docs/zh/api/01-overview.md)、[端点索引](./docs/zh/api/00-endpoints.md) |
 | English | [English Documentation](./docs/en/getting-started/01-introduction.md) |

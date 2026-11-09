@@ -20,6 +20,7 @@ import AuditView from "@/features/skills/AuditView";
 import CandidateReviewView from "@/features/skills/CandidateReviewView";
 import DashboardView from "@/features/skills/DashboardView";
 import EvolutionWorkspaceView from "@/features/skills/EvolutionWorkspaceView";
+import ExecutionAssetsPanel from "@/features/skills/execution/ExecutionAssetsPanel";
 import ExperienceLibraryView from "@/features/skills/ExperienceLibraryView";
 import SkillWorkbenchView from "@/features/skills/SkillWorkbenchView";
 import { type TenantsResp } from "@/features/tenants/api/client";
@@ -54,7 +55,7 @@ type ViewKey =
   | "members"
   | "identity-audit"
   | "model";
-type DashTab = "overview" | "candidates" | "audit" | "filter";
+type DashTab = "overview" | "candidates" | "prompts" | "audit" | "filter";
 type MiningViewKey = "mine-overview" | "mine-sources" | "mine-jobs";
 type StandaloneViewKey = Exclude<ViewKey, MiningViewKey | "dashboard">;
 const MINE_PAGES: { key: MiningViewKey; page: MinePage }[] = [
@@ -129,6 +130,7 @@ function initialView(): ViewKey {
 const DASH_TABS: { key: DashTab; label: string; icon: typeof LayoutDashboard }[] = [
   { key: "overview", label: "总览", icon: LayoutDashboard },
   { key: "candidates", label: "候选评审", icon: ClipboardCheck },
+  { key: "prompts", label: "Prompt 版本", icon: BookOpenText },
   { key: "audit", label: "进化审计", icon: History },
   { key: "filter", label: "过滤审计", icon: Filter },
 ];
@@ -306,6 +308,10 @@ const DASH_PAGE_META: Record<DashTab, { title: string; description: string }> = 
   candidates: {
     title: "候选评审",
     description: "集中处理待发布技能候选，核对 True Replay 证据后再发布。",
+  },
+  prompts: {
+    title: "业务 Prompt 版本",
+    description: "集中查看业务 Agent 的 Prompt、上下文、历史版本、验证指标和采用回执。",
   },
   audit: {
     title: "进化审计",
@@ -653,13 +659,19 @@ export default function App() {
           {/* Operational detail views for the evolution loop. */}
           <div className="section-tabs pt-2.5">
             <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="进化运行页面">
-              {DASH_TABS.map(({ key, label, icon: Icon }) => (
+              {DASH_TABS.filter(item => item.key !== "prompts" || isAdmin).map(({ key, label, icon: Icon }) => (
                 <button
                   key={key}
                   type="button"
                   role="tab"
                   aria-selected={dashTab === key}
-                  onClick={() => setDashTab(key)}
+                  onClick={() => {
+                    setDashTab(key);
+                    const url = new URL(window.location.href);
+                    url.searchParams.set("view", "dashboard");
+                    url.searchParams.set("tab", key);
+                    window.history.replaceState(null, "", url);
+                  }}
                   className={cn(
                     "flex items-center gap-1.5 border-b-2 px-3 py-2 text-[12px] font-[700] transition-colors",
                     dashTab === key
@@ -682,6 +694,11 @@ export default function App() {
           <div className={cn(dashTab !== "candidates" && "hidden")}>
             <CandidateReviewView active={view === "dashboard" && dashTab === "candidates"} canManage={isAdmin} />
           </div>
+          {dashTab === "prompts" && (isAdmin ? (
+            <div className="mx-auto max-w-[1200px] px-[22px] py-[22px]">
+              <ExecutionAssetsPanel active={view === "dashboard"} onManage={() => setView("prompt-studio")} />
+            </div>
+          ) : <p role="alert" className="p-6 text-sm text-muted-foreground">仅租户管理员可查看业务 Prompt 版本。</p>)}
           <div className={cn(dashTab !== "audit" && "hidden")}>
             <AuditView active={view === "dashboard" && dashTab === "audit"} />
           </div>

@@ -20,6 +20,12 @@ async def evolve(task, services):
         return HandlerResult.succeed(task.task_id)
     with prompt_context(payload.get("config", {})):
         operation = payload.get("operation")
+        if operation == "execution_publish_reviewed":
+            from team_skills.execution.reviewed_publication import publish_reviewed_command
+            return await publish_reviewed_command(task, services, payload)
+        if operation == "execution_rollback":
+            from team_skills.execution.publication import rollback_command
+            return await rollback_command(task, services, payload)
         if operation == "tracing_test":
             import os
 

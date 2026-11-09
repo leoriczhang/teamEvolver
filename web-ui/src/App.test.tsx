@@ -39,6 +39,11 @@ vi.mock("@/api/client", () => ({
   ] })),
 }));
 vi.mock("@/features/skills/DashboardView", () => ({ default: () => <div>dashboard-body</div> }));
+vi.mock("@/features/skills/execution/ExecutionAssetsPanel", () => ({
+  default: ({ active, onManage }: { active: boolean; onManage?: () => void }) => active ? (
+    <div>prompt-versions-body<button onClick={onManage}>登记与进化设置</button></div>
+  ) : null,
+}));
 vi.mock("@/features/admin/UsersView", () => ({ default: () => <div>users-body</div> }));
 vi.mock("@/features/tenants/MembersView", () => ({ default: () => <div>members-body</div> }));
 vi.mock("@/features/admin/ModelSettingsView", () => ({ default: () => <div>model-body</div> }));
@@ -203,6 +208,36 @@ describe("original console functionality", () => {
     fireEvent.click(within(navigation).getByRole("button", { name: "经验库" }));
     expect(screen.getByText("experience-library-body")).toBeVisible();
     expect(screen.queryByRole("tab", { name: "经验库" })).not.toBeInTheDocument();
+  });
+
+  it("opens Prompt versions from the dashboard and preserves the tenant in a direct link", async () => {
+    window.history.replaceState(null, "", "/console?tenant=account-a");
+    render(<App />);
+    fireEvent.click(await screen.findByRole("tab", { name: "Prompt 版本" }));
+    expect(await screen.findByText("prompt-versions-body")).toBeVisible();
+    expect(window.location.search).toContain("tenant=account-a");
+    expect(window.location.search).toContain("view=dashboard");
+    expect(window.location.search).toContain("tab=prompts");
+    fireEvent.click(screen.getByRole("button", { name: "登记与进化设置" }));
+    expect(await screen.findByText("evolution-body-true")).toBeVisible();
+  });
+
+  it("restores a direct Prompt version link without requiring OpenViking", async () => {
+    state.openVikingConfigured = false;
+    window.history.replaceState(null, "", "/console?view=dashboard&tab=prompts");
+    render(<App />);
+    expect(await screen.findByText("prompt-versions-body")).toBeVisible();
+    expect(screen.getByRole("tab", { name: "Prompt 版本" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("does not mount Prompt version data for a tenant member following a direct link", async () => {
+    state.role = "user";
+    state.platform = false;
+    window.history.replaceState(null, "", "/console?view=dashboard&tab=prompts");
+    render(<App />);
+    expect(await screen.findByText("仅租户管理员可查看业务 Prompt 版本。")).toBeVisible();
+    expect(screen.queryByText("prompt-versions-body")).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Prompt 版本" })).not.toBeInTheDocument();
   });
 
   it("keeps every project configuration page active after navigation", async () => {

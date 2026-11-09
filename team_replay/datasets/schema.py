@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
+
+from ..execution_inputs import normalize_execution_inputs
+from ..execution_plan import ExecutionPlanError
 
 DATASET_SCHEMA = "team-replay.dataset"
 
@@ -128,7 +132,8 @@ def normalize_case(
         raise DatasetSchemaError("unsupported case fields: " + ", ".join(unknown))
 
     case_id = str(payload.get("case_id") or default_case_id).strip()
-    query = str(payload.get("query") or "").strip()
+    recorded_query = payload.get("query")
+    query = str(recorded_query or "").strip()
     if not case_id:
         raise DatasetSchemaError("case_id is required")
     if not query:
@@ -150,6 +155,20 @@ def normalize_case(
         raise DatasetSchemaError("each material requires a path")
     if not isinstance(provenance, Mapping):
         raise DatasetSchemaError("provenance must be an object")
+    provenance = copy.deepcopy(dict(provenance))
+    if "execution_inputs" in provenance:
+        try:
+            provenance["execution_inputs"] = normalize_execution_inputs(provenance["execution_inputs"])
+        except ExecutionPlanError as exc:
+            raise DatasetSchemaError(str(exc)) from exc
+    anchor = provenance.get("evidence_anchor")
+    if anchor is not None:
+        if (not isinstance(anchor, Mapping) or not isinstance(recorded_query, str)
+                or anchor.get("recorded_query_sha256") != hashlib.sha256(recorded_query.encode()).hexdigest()):
+            raise DatasetSchemaError("anchored Case query must match its recorded source hash")
+        # An anchored request has already been checked against recorded Evidence.
+        # Canonical Dataset freezing must not silently alter its original bytes.
+        query = recorded_query
     if not isinstance(replay, Mapping):
         raise DatasetSchemaError("replay must be an object")
     if not isinstance(metadata, Mapping):

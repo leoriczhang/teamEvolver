@@ -189,10 +189,42 @@ def build_role_services(*, role, tx, config, handlers=None):
             return await split_session(config, s, client_factory=client)
 
         async def trace(s):
-            client = await model_for(services, current_tenant_id())
-            return await analyze_session_traces(client, s)
+            tenant = current_tenant_id()
+            async with tx.tenant_tx(tenant) as conn:
+                row = await extras["config_repo"].read_tenant_module(conn, "skills")
+            with prompt_context(row.config):
+                client = await model_for(services, tenant, row.config.get("model", {}))
+                return await analyze_session_traces(client, s)
 
-        stages = SessionStages(extras["session_payloads"], split, analyze, trace)
+        async def analysis_identity():
+            import hashlib
+            from pathlib import Path
+
+            from team_skills.evolution.repository import digest
+            from team_skills.evolution.stages import analyze as analyze_module
+            from team_skills.evolution.stages import trace_analyze as trace_module
+
+            async with tx.tenant_tx(current_tenant_id()) as conn:
+                row = await extras["config_repo"].read_tenant_module(conn, "skills")
+            # No plaintext credentials leave Worker model resolution.
+            settings = dict(row.config)
+            settings.pop("api_key", None)
+            with prompt_context(row.config):
+                prompts = [analyze_module._effective_analyze_system(), trace_module._effective_trace_analyze_system()]
+            return {
+                "config_revision": row.revision, "settings_hash": digest(settings),
+                "prompt_hash": digest(prompts),
+                "bootstrap_model": {
+                    "base_url": config.llm_api_base, "model": config.llm_model_id,
+                    "temperature": config.llm_temperature, "max_tokens": config.llm_max_tokens,
+                },
+                "implementation_hash": digest([
+                    hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
+                    for module in (analyze_module, trace_module)
+                ]),
+            }
+
+        stages = SessionStages(extras["session_payloads"], split, analyze, trace, analysis_identity=analysis_identity)
         services.extras["session_ingestion"] = SessionIngestionDeps(
             payloads=extras["session_payloads"], stage_runner=stages, adapter_source=AdapterSource())
         async def planner(**kwargs):

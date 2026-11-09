@@ -15,4 +15,5 @@ def spec_from_dict(raw):
         baseline=ReplayTreatment(**branches["baseline"]), candidate=ReplayTreatment(**branches["candidate"]),
         runtime=raw.get("runtime", {}), limits=raw.get("limits", {}), metadata=raw.get("metadata", {}),
         policy_id=raw["policy"]["id"],
+        evaluation=raw.get("evaluation", {}),
     )

@@ -69,6 +69,8 @@ Keyset 分页列表，按 `business_time` 倒序。
 
 ## GET /api/sessions/{session_id}/stages
 
+此接口要求正式 Session 已存在。尚未归档的接入记录用 [接入诊断接口](./03-session-ingest.md#get-apiingestionsingestion_id) 查询。
+
 各处理阶段的结果：
 
 ```json

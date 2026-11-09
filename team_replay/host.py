@@ -40,6 +40,8 @@ class ReplayHost(Protocol):
 
     def judge_harness(self) -> dict[str, Any]: ...
 
+    def evaluate_external(self, request: Mapping[str, Any]) -> dict[str, Any]: ...
+
     def validate_skill_treatment(
         self,
         skill: Mapping[str, Any],

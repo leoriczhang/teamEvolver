@@ -42,14 +42,20 @@ class AdapterRepository:
             adapter_id,
             kind,
         )
+        actual_kind = await conn.fetchval(
+            f"-- te:op=adapter_kind\nSELECT kind FROM {self._schema}.adapters WHERE adapter_id=$1", adapter_id,
+        )
+        if actual_kind != kind:
+            raise AdapterConflict("adapter filename belongs to another adapter type")
 
     # -- immutable versions ---------------------------------------------- #
 
     async def latest_revision(self, conn: Any, *, adapter_id: str) -> int:
         row = await conn.fetchval(
             f"-- te:op=adapter_latest_rev\n"
-            f"SELECT max(revision) FROM {self._schema}.adapter_versions "
-            "WHERE adapter_id = $1",
+            f"SELECT max(v.revision) FROM {self._schema}.adapter_versions v "
+            f"JOIN {self._schema}.adapters a ON a.tenant_id=v.tenant_id AND a.adapter_id=v.adapter_id "
+            "WHERE v.adapter_id = $1 AND a.kind='python'",
             adapter_id,
         )
         return int(row or 0)
@@ -98,8 +104,10 @@ class AdapterRepository:
     ) -> dict[str, Any] | None:
         row = await conn.fetchrow(
             f"-- te:op=adapter_version_get\n"
-            f"SELECT adapter_id, revision, source_hash, source, created_at "
-            f"FROM {self._schema}.adapter_versions WHERE adapter_id = $1 AND revision = $2",
+            f"SELECT v.adapter_id,v.revision,v.source_hash,v.source,v.created_at "
+            f"FROM {self._schema}.adapter_versions v JOIN {self._schema}.adapters a "
+            "ON a.tenant_id=v.tenant_id AND a.adapter_id=v.adapter_id "
+            "WHERE v.adapter_id = $1 AND v.revision = $2 AND a.kind='python'",
             adapter_id,
             int(revision),
         )
@@ -111,6 +119,8 @@ class AdapterRepository:
         self, conn: Any, *, tenant_id: str, binding_key: str, adapter_id: str, revision: int
     ) -> None:
         """Point a binding key at a specific immutable adapter revision."""
+        if await self.get_version(conn, adapter_id=adapter_id, revision=revision) is None:
+            raise AdapterConflict("datasource adapter version not found")
         await conn.execute(
             f"-- te:op=adapter_bind\n"
             f"INSERT INTO {self._schema}.adapter_bindings "
@@ -129,8 +139,9 @@ class AdapterRepository:
         """Resolve the adapter + pinned revision for a binding key."""
         row = await conn.fetchrow(
             f"-- te:op=adapter_binding_get\n"
-            f"SELECT binding_key, adapter_id, revision FROM {self._schema}.adapter_bindings "
-            "WHERE binding_key = $1",
+            f"SELECT b.binding_key,b.adapter_id,b.revision FROM {self._schema}.adapter_bindings b "
+            f"JOIN {self._schema}.adapters a ON a.tenant_id=b.tenant_id AND a.adapter_id=b.adapter_id "
+            "WHERE b.binding_key = $1 AND a.kind='python'",
             binding_key,
         )
         return dict(row) if row is not None else None

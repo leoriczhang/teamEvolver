@@ -26,6 +26,7 @@ hook that raises is logged and never breaks analysis or ingest.
 
 from __future__ import annotations
 
+import copy
 import importlib
 import logging
 import os
@@ -164,12 +165,36 @@ def _turn_business_time(turn: dict[str, Any]) -> str:
 
 
 def _turn_trace_id(turn: dict[str, Any], turn_num: int) -> str:
-    trace_id = str(turn.get("trace_id") or "").strip()
+    trace_id = str(turn.get("source_trace_id") or turn.get("trace_id") or "").strip()
     if trace_id:
         return trace_id
     # Fall back to a synthetic id so a turn without an upstream trace id still
     # gets a stable, addressable result row instead of collapsing onto "".
     return f"{turn_num}"
+
+
+def _context_trace_positions(session: dict[str, Any]) -> Optional[dict[str, int]]:
+    """Keep verified targets at their stable position in the complete source.
+
+    The incremental work list and a split segment can omit earlier turns. Their
+    local list index must not conflict with the full Context seen by the model.
+    Legacy calls without verified source Context retain their batch numbering.
+    """
+    provenance, context = session.get("provenance") or {}, session.get("analysis_context")
+    if (provenance.get("identity_verified") is not True or provenance.get("trace_identity_verified") is not True
+            or not isinstance(context, dict) or context.get("context_only") is not True):
+        return None
+    turns = context.get("turns")
+    if not isinstance(turns, list) or not turns:
+        raise TraceAnalysisError("verified Trace analysis requires complete source Context")
+    positions = {}
+    for position, turn in enumerate(turns, 1):
+        identity = (str(turn.get("source_trace_id") or turn.get("trace_id") or "").strip()
+                    if isinstance(turn, dict) else "")
+        if not identity or identity in positions:
+            raise TraceAnalysisError("source Context contains an unknown or duplicate Trace identity")
+        positions[identity] = position
+    return positions
 
 
 def _tool_error_signals(turn: dict[str, Any]) -> list[str]:
@@ -208,14 +233,22 @@ def build_trace_payload(
         if turns is None
         else turns
     )
+    positions = _context_trace_positions(session)
     traces: list[dict[str, Any]] = []
     for idx, turn in enumerate(selected_turns, start_turn_num):
+        identity = _turn_trace_id(turn, idx)
+        if positions is not None:
+            if identity not in positions:
+                raise TraceAnalysisError("target Trace is missing from the complete source Context")
+            idx = positions[identity]
         entry: dict[str, Any] = {
-            "trace_id": _turn_trace_id(turn, idx),
+            "trace_id": identity,
             "turn_num": idx,
             "prompt": _clip(turn.get("prompt_text", "")),
             "response": _clip(turn.get("response_text", "")),
         }
+        if turn.get("request_context"):
+            entry["request_context"] = copy.deepcopy(turn["request_context"])
         prm = turn.get("prm_score")
         if prm is not None:
             entry["score"] = prm
@@ -223,12 +256,23 @@ def build_trace_payload(
         if errors:
             entry["tool_errors"] = errors[:6]
         traces.append(entry)
-    return {
+    payload = {
         "session_id": str(session.get("session_id") or ""),
         "summary": _clip(session.get("_summary", ""), 4000),
         "total_traces": len(traces),
         "traces": traces,
     }
+    if session.get("analysis_context") or session.get("provenance"):
+        provenance = session.get("provenance") or {}
+        payload["analysis_context"] = copy.deepcopy(session.get("analysis_context") or {})
+        payload["provenance"] = copy.deepcopy(provenance)
+        payload["evidence_scope"] = {
+            "target_trace_refs": copy.deepcopy(provenance.get("target_trace_refs") or []),
+            "context_trace_refs": copy.deepcopy(provenance.get("context_trace_refs") or []),
+            "context_must_not_increase_evidence_count": True,
+            "context_can_explain_corrections": True,
+        }
+    return payload
 
 
 def _identity(session: dict[str, Any]) -> dict[str, str]:

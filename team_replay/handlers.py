@@ -15,6 +15,7 @@ from .execution import run_branch
 from .hooks import validate_observation
 from .integration import host_for
 from .repository import ReplayRepository
+from .request_capture import verify_execution_receipt
 from .runner import aggregate_results, evaluate_case
 from .schemas import spec_from_dict
 
@@ -155,10 +156,17 @@ async def test_adapter(task, services, repo, payload):
             "baseline", context.get("skill"), {"materials": context.get("materials", [])},
             {"runtime": {"type": context["runtime_type"]}}, min(120, int(context.get("timeout_seconds", 30))),
             snapshot=context.get("context_snapshot", {}),
+            execution_plan=context.get("execution_plan"),
         )
         session = guarded.open(replay_context)
         try:
-            return {"observation": asdict(validate_observation(session.send(raw["query"])))}
+            observation = validate_observation(session.send(raw["query"]))
+            result = {"observation": asdict(observation)}
+            if replay_context.execution_plan is not None:
+                result["observed_requests"] = verify_execution_receipt(
+                    replay_context, observation.execution_receipt, turn_num=1, user_message=raw["query"], after=0,
+                )
+            return result
         finally:
             session.close()
     result = await asyncio.to_thread(test)

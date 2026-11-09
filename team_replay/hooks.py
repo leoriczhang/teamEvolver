@@ -27,6 +27,8 @@ class ReplayContext:
     timeout_seconds: int
     source_session: Mapping[str, Any] = field(default_factory=dict)
     source_turn_num: int = 1
+    execution_plan: Mapping[str, Any] | None = None
+    request_observer: Any = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,7 @@ class AgentObservation:
     metrics: Mapping[str, int | float] | None = None
     trace_id: str = ""
     metrics_incomplete_reason: str = ""
+    execution_receipt: Mapping[str, Any] | None = None
 
 
 class ReplaySession(Protocol):
@@ -64,6 +67,8 @@ def validate_observation(value: Any) -> AgentObservation:
         raise ValueError("observation artifacts must be mappings or strings")
     if value.metrics is not None and not isinstance(value.metrics, Mapping):
         raise ValueError("observation metrics must be a mapping")
+    if value.execution_receipt is not None and not isinstance(value.execution_receipt, Mapping):
+        raise ValueError("observation execution_receipt must be a mapping")
     for key, number in (value.metrics or {}).items():
         if key not in RUNTIME_METRICS:
             raise ValueError(f"unsupported runtime metric: {key}")

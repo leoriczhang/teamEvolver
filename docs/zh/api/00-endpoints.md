@@ -141,6 +141,7 @@
 | POST | `/api/datasource/schedule/run` |
 | POST | `/api/datasource/sessions` |
 | POST | `/api/datasource/test` |
+| GET | `/api/ingestions/{ingestion_id}` |
 | GET | `/api/sessions` |
 | GET | `/api/sessions/analysis` |
 | GET | `/api/sessions/export` |
@@ -179,9 +180,23 @@
 | PUT | `/api/skill-candidates/{candidate_id}/content` |
 | GET | `/api/skill-candidates/{candidate_id}/detail` |
 | POST | `/api/skill-candidates/{candidate_id}/evaluate` |
+| PUT | `/api/skill-candidates/{candidate_id}/execution-content` |
 | PATCH | `/api/skill-candidates/{candidate_id}/feedback` |
+| POST | `/api/skill-candidates/{candidate_id}/independent-validation` |
 | POST | `/api/skill-candidates/{candidate_id}/reject` |
+| POST | `/api/skill-candidates/{candidate_id}/resume-after-rollback` |
 | POST | `/api/skill-candidates/{candidate_id}/validate` |
+| POST | `/api/skill-candidates/{candidate_id}/validation-budget` |
+| GET | `/api/skill-evolution/execution-profiles` |
+| POST | `/api/skill-evolution/execution-profiles` |
+| POST | `/api/skill-evolution/execution-profiles/preview` |
+| GET | `/api/skill-evolution/execution-profiles/{profile_id}` |
+| GET | `/api/skill-evolution/execution-profiles/{profile_id}/integration` |
+| GET | `/api/skill-evolution/execution-profiles/{profile_id}/releases/{release_id}` |
+| POST | `/api/skill-evolution/execution-profiles/{profile_id}/rollback` |
+| GET | `/api/skill-evolution/execution-profiles/{profile_id}/session-match` |
+| POST | `/api/skill-evolution/execution-profiles/{profile_id}/variable-contexts` |
+| POST | `/api/skill-evolution/execution-profiles/{profile_id}/variable-contexts/preview` |
 | GET | `/api/skill-evolution/jobs/{job_id}/result` |
 | GET | `/api/skill-evolution/pipeline` |
 | GET | `/api/skill-evolution/prompts` |
@@ -213,6 +228,7 @@
 | GET | `/api/skills/{name}/versions/{version}` |
 | GET | `/history` |
 | GET | `/sync/skills` |
+| POST | `/sync/skills/execution-receipt` |
 
 ## Replay、数据集与 Replay Adapter
 
@@ -241,6 +257,12 @@
 | GET | `/api/replay-adapter/code` |
 | PUT | `/api/replay-adapter/code` |
 | POST | `/api/replay-adapter/code/test` |
+| GET | `/api/replay-evaluation` |
+| PUT | `/api/replay-evaluation` |
+| GET | `/api/replay-evaluator-adapter` |
+| GET | `/api/replay-evaluator-adapter/code` |
+| PUT | `/api/replay-evaluator-adapter/code` |
+| GET | `/api/replay-evaluator-adapter/example` |
 | POST | `/api/replays/{domain}` |
 | GET | `/api/replays/{domain}/{run_id}` |
 | GET | `/api/replays/{domain}/{run_id}/input` |
@@ -324,4 +346,4 @@
 | GET | `/api/mining/settings` |
 | POST | `/api/mining/settings` |
 
-共 235
+共 257

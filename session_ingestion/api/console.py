@@ -9,12 +9,56 @@ from starlette.exceptions import HTTPException
 
 from teamEvolver.tenants.registry import current_tenant_id
 
+from ..repository import SessionIngestionRepository
 from . import _require_tenant_admin
 
 
 def create_router(services):
     router = APIRouter(tags=["sessions"])
     tx = services.tx
+
+    @router.get("/api/ingestions/{ingestion_id}")
+    async def ingestion_diagnostics(ingestion_id: str, request: Request):
+        """Project business checkpoints and authoritative task state without writes."""
+        _require_tenant_admin(request)
+        repo = SessionIngestionRepository(tx)
+        async with tx.tenant_tx(current_tenant_id()) as conn:
+            ingestion = await repo.get_ingestion(conn, ingestion_id=ingestion_id)
+            if ingestion is None:
+                raise HTTPException(404, "Ingestion not found")
+            stages = await repo.stage_results(conn, ingestion_id=ingestion_id)
+            # Acceptance retains the first task ID. Later stage tasks have fixed
+            # IDs; read the bounded pipeline in order, never a Worker-table join.
+            task_ids = [ingestion["task_id"], *(
+                f"{ingestion_id}:session.{stage}" for stage in ("normalize", "split", "analyze", "archive")
+            )]
+            current = None
+            for task_id in dict.fromkeys(task_ids):
+                if task_id:
+                    found = await services.tasks.get(conn, task_id=task_id)
+                    if found is not None:
+                        current = found
+        status = ingestion["status"]
+        effective = status
+        if current and status not in {"archived", "skipped"}:
+            if current["status"] in {"failed", "cancelled"}:
+                effective = current["status"]
+            elif current["status"] in {"queued", "running", "retry_wait", "waiting_external", "reconciling"}:
+                effective = "processing"
+        return {
+            "ingestion_id": ingestion_id,
+            "ingestion_status": status,
+            "effective_status": effective,
+            "current_job": ({
+                "job_id": current["task_id"],
+                **{key: current[key] for key in (
+                    "kind", "status", "attempt", "error_code", "created_at", "updated_at",
+                )},
+            } if current else None),
+            "stages": [{key: stage[key] for key in (
+                "stage", "status", "error_code", "created_at", "updated_at",
+            )} for stage in stages],
+        }
 
     async def listing(request, limit, offset, search="", decision="", skill="", start="", end=""):
         _require_tenant_admin(request)

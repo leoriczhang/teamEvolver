@@ -14,6 +14,13 @@ from team_skills.config import load_skills_config
 from team_skills.evolution.candidate_pipeline import enqueue_command, submit_validation
 from team_skills.evolution.history import candidate_payload, feedback
 from team_skills.evolution.repository import EvolutionRepository
+from team_skills.evolution.scope import (
+    configured_allowed_modules,
+    normalize_allowed_modules,
+    normalize_execution_profile_id,
+)
+from team_skills.execution.evolution import freeze_profile_scope
+from team_skills.execution.holdout import freeze_generation_budget
 from team_skills.experiences.repository import ExperienceRepository
 from team_skills.library import frontmatter
 from team_skills.library.repository import SkillLibraryError
@@ -94,6 +101,8 @@ def create_router(services, **kwargs):
             async with tx.tenant_tx(current_tenant_id()) as conn:
                 config = await load_skills_config(config_repo, conn)
                 item = await repo.require(conn, candidate_id, for_update=True)
+                if item.get("candidate_kind") == "execution":
+                    raise SkillLibraryError("Prompt-only Candidate has no Skill files; edit its execution components")
                 if "name" in body and body["name"] != item["skill_name"]:
                     raise HTTPException(400, "candidate skill cannot be renamed")
                 bundle = await repo.read_bundle(conn, candidate_id)
@@ -165,19 +174,48 @@ def create_router(services, **kwargs):
         reviewer = actor(request)
         body = await read_json(request)
         ids = body.get("session_ids", [])
-        if set(body) - {"session_ids"} or not isinstance(ids, list) or len(ids) > 200:
+        if (set(body) - {"session_ids", "allowed_modules", "execution_profile_id", "generation_budget"}
+                or not isinstance(ids, list) or len(ids) > 200):
             raise HTTPException(400, "trigger accepts at most 200 session_ids; no identity/config overrides")
         if any(not isinstance(value, str) or not value for value in ids):
             raise HTTPException(400, "session_ids must contain nonempty strings")
+        if "allowed_modules" in body:
+            try:
+                normalize_allowed_modules(body["allowed_modules"])
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        if "execution_profile_id" in body:
+            try:
+                normalize_execution_profile_id(body["execution_profile_id"])
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
         try:
             async with tx.tenant_tx(current_tenant_id()) as conn:
                 config = await load_skills_config(config_repo, conn)
+                try:
+                    allowed_modules = (normalize_allowed_modules(body["allowed_modules"])
+                                       if "allowed_modules" in body else configured_allowed_modules(config.config))
+                    execution_profile_id = normalize_execution_profile_id(body.get(
+                        "execution_profile_id", config.get("evolution_execution_profile_id"),
+                    ))
+                except ValueError as exc:
+                    raise HTTPException(503, "invalid configured evolution scope or execution profile") from exc
+                baseline = await freeze_profile_scope(conn, tx, execution_profile_id, allowed_modules)
+                generation_authority = {}
+                if "generation_budget" in body:
+                    generation_authority["generation_budget"] = freeze_generation_budget(
+                        body["generation_budget"], frozen_baseline=baseline, allowed_modules=allowed_modules,
+                    )
                 now = await conn.fetchval("SELECT clock_timestamp()")
                 command, _ = await enqueue_command(
                     conn, services, tenant_id=current_tenant_id(), command_id=command_id(request, "evolve"),
                     kind="skill.evolve", request=body, payload={
                         "session_ids": ids, "actor": reviewer, "config": config.config,
                         "config_revision": config.revision, "accepted_at": now.isoformat(),
+                        "allowed_modules": allowed_modules,
+                        "execution_profile_id": execution_profile_id,
+                        "execution_baseline": baseline,
+                        **generation_authority,
                     },
                 )
             return accepted(command)

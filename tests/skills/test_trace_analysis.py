@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 
 import pytest
@@ -325,6 +326,93 @@ def test_every_trace_is_analyzed_when_session_exceeds_batch_size():
     assert [row["trace_id"] for row in results] == [f"t{idx}" for idx in range(1, 62)]
     assert all(row["source"] == "llm" for row in results)
     assert len(client.calls) == 2
+
+
+def _incremental_session(*, count=2, targets=(2,)):
+    """Original source numbering remains visible in full context after filtering."""
+    turns = [_turn(f"display-{i}", f"Question {i}", source_trace_id=f"upstream-{i}", turn_num=i)
+             for i in range(1, count + 1)]
+    session = _bad_session([copy.deepcopy(turns[i - 1]) for i in targets])
+    session["analysis_context"] = {"turns": copy.deepcopy(turns), "context_only": True}
+    session["provenance"] = {"identity_verified": True, "trace_identity_verified": True,
+                             "target_trace_refs": [{"trace_id": f"upstream-{i}"} for i in targets],
+                             "context_trace_refs": [{"trace_id": f"upstream-{i}"} for i in range(1, count + 1)
+                                                    if i not in targets]}
+    return session
+
+
+def _normal_verdict(identity, number):
+    return {"trace_id": identity, "turn_num": number, "is_badcase": False,
+            "problem_type": "other", "problem_description": ""}
+
+
+def test_incremental_target_keeps_second_source_position_and_complete_context_without_analyzing_old_trace():
+    session = _incremental_session()
+    original = copy.deepcopy(session)
+    client = _FakeClient(json.dumps({"traces": [_normal_verdict("upstream-2", 2)]}))
+    result = asyncio.run(ta.analyze_session_traces(client, session))
+    payload = json.loads(client.calls[0]["messages"][-1]["content"])
+    assert payload["total_traces"] == 1
+    assert [(t["trace_id"], t["turn_num"]) for t in payload["traces"]] == [("upstream-2", 2)]
+    assert payload["analysis_context"] == original["analysis_context"]
+    assert [(t["trace_id"], t["turn_num"]) for t in result] == [("upstream-2", 2)]
+    assert session["turns"] == original["turns"]
+
+
+@pytest.mark.parametrize("returned", [
+    [_normal_verdict("upstream-1", 1)],  # A context-only Trace is not an analysis target.
+    [_normal_verdict("unknown", 2)],
+    [_normal_verdict("upstream-2", 1)],  # Renumbering the correct ID is still rejected.
+    [_normal_verdict("upstream-2", 2), _normal_verdict("upstream-2", 2)],
+    [_normal_verdict("upstream-1", 1), _normal_verdict("upstream-2", 2)],
+])
+def test_incremental_response_still_requires_exact_target_identity_coverage_and_number(returned):
+    with pytest.raises(ta.TraceAnalysisError):
+        asyncio.run(ta.analyze_session_traces(_FakeClient(json.dumps({"traces": returned})), _incremental_session()))
+
+
+def test_sparse_targets_keep_full_source_positions_across_trace_batches(monkeypatch):
+    monkeypatch.setattr(ta, "_TRACE_BATCH_SIZE", 1)
+    client = _AllGoodClient()
+    session = _incremental_session(count=5, targets=(2, 5))
+    results = asyncio.run(ta.analyze_session_traces(client, session))
+    assert [(r["trace_id"], r["turn_num"]) for r in results] == [("upstream-2", 2), ("upstream-5", 5)]
+    assert len(client.calls) == 2
+    assert [json.loads(c["messages"][-1]["content"])["traces"][0]["turn_num"] for c in client.calls] == [2, 5]
+
+
+def test_duplicate_target_reply_is_rejected_even_when_response_count_matches():
+    session = _incremental_session(count=4, targets=(2, 4))
+    duplicated = [_normal_verdict("upstream-2", 2), _normal_verdict("upstream-2", 2)]
+    with pytest.raises(ta.TraceAnalysisError, match="duplicate trace/turn"):
+        asyncio.run(ta.analyze_session_traces(_FakeClient(json.dumps({"traces": duplicated})), session))
+
+
+@pytest.mark.parametrize("mutation", ["missing_target", "duplicate_identity"])
+def test_incomplete_or_ambiguous_verified_context_is_rejected_before_calling_model(mutation):
+    session = _incremental_session()
+    if mutation == "missing_target":
+        session["analysis_context"]["turns"].pop()
+    else:
+        session["analysis_context"]["turns"].append(copy.deepcopy(session["analysis_context"]["turns"][0]))
+    client = _AllGoodClient()
+    with pytest.raises(ta.TraceAnalysisError):
+        asyncio.run(ta.analyze_session_traces(client, session))
+    assert client.calls == []
+
+
+def test_split_segment_retains_full_source_position_and_legacy_partial_batch_retains_existing_numbering():
+    # A second-topic segment can contain only one turn but retain the full source Context.
+    split = _incremental_session(count=4, targets=(4,))
+    split["metadata"] = {"split_from_session": "root", "split_segment": {"turn_range": [4, 4]}}
+    assert ta.build_trace_payload(split)["traces"][0]["turn_num"] == 4
+    legacy = _bad_session([_turn("old-one", "one"), _turn("old-two", "two")])
+    legacy["turns"][1]["turn_num"] = 99  # Legacy numbering has always followed the accepted turn sequence.
+    payload = ta.build_trace_payload(legacy, turns=legacy["turns"][1:], start_turn_num=2)
+    assert [(r["trace_id"], r["turn_num"]) for r in payload["traces"]] == [("old-two", 2)]
+    unverified = _incremental_session()
+    unverified["provenance"]["identity_verified"] = False
+    assert ta.build_trace_payload(unverified)["traces"][0]["turn_num"] == 1
 
 
 def test_empty_session_yields_no_results():

@@ -7,6 +7,8 @@
 3. [架构](./zh/concepts/01-architecture.md) · [Architecture](./en/concepts/01-architecture.md)
 4. [生产部署](./zh/guides/02-deployment.md) · [Deployment](./en/guides/02-deployment.md)
 5. [API 概览](./zh/api/01-overview.md) · [API Overview](./en/api/01-overview.md)
+6. [Skill 与业务 Prompt 组合进化](./zh/concepts/12-execution-evolution.md) · [Execution evolution](./en/concepts/12-execution-evolution.md)
+7. [Prompt 进化实操 README](../PROMPT_EVOLUTION_README.md)：界面逐步操作、适配器文件、真实 Agent 上报与发布采用，以及首次运维准备的边界。
 
 ## 当前文档
 

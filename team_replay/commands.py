@@ -1,8 +1,12 @@
 """Short transactional Replay acceptance and immutable execution configuration."""
 from __future__ import annotations
 
+from dataclasses import replace
+
 from .adapters.repository import ReplayAdapterRepository
 from .config import load_replay_config
+from .contracts import CHECKLIST_FIRST_POLICY
+from .evaluation import EXTERNAL_AGENT_SCORE_POLICY, external_evaluation_enabled
 from .repository import ReplayRepository
 
 
@@ -10,6 +14,11 @@ async def enqueue(conn, services, *, tenant_id, domain, run_id, subject_id, requ
                   dataset=None, options=None, operation="run"):
     repo = ReplayRepository(services.tx)
     config = await load_replay_config(services.extras["config_repo"], conn)
+    if spec is not None:
+        evaluation = config.config["evaluation"]
+        spec = replace(spec, evaluation=evaluation, policy_id=(
+            EXTERNAL_AGENT_SCORE_POLICY if external_evaluation_enabled(evaluation) else CHECKLIST_FIRST_POLICY
+        ))
     binding = await ReplayAdapterRepository(services.tx).binding(conn)
     if binding:
         binding = {key: binding[key] for key in ("adapter_id", "revision", "source_hash")}

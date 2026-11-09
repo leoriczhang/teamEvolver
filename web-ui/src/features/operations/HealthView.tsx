@@ -638,14 +638,21 @@ function ReplayBindingPanel({ info, isAdmin, onSaved }: {
   info: ReplayAdapterInfo | null; isAdmin: boolean; onSaved: () => Promise<void>;
 }) {
   const [file, setFile] = useState("");
+  const [revision, setRevision] = useState("");
   const [saving, setSaving] = useState(false);
-  useEffect(() => { setFile(info?.file || ""); }, [info?.tenant_id, info?.file]);
+  useEffect(() => { setFile(info?.file || ""); setRevision(String(info?.revision ?? "")); },
+    [info?.tenant_id, info?.file, info?.revision]);
+  const latest = info?.available.find(item => item.file === file)?.revision;
+  const versions = [...new Set([file === info?.file ? info?.revision : undefined, latest]
+    .filter(value => value !== undefined).map(String))];
+  const changed = file !== (info?.file || "") || (!!file && revision !== String(info?.revision ?? ""));
   if (!isAdmin) return null;
   async function save() {
     setSaving(true);
     try {
       await api("/api/replay-adapter", {
-        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ file }),
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file, ...(file && revision ? { revision: Number(revision) } : {}) }),
       });
       toastOk("已保存 Replay 运行环境");
       await onSaved();
@@ -658,12 +665,23 @@ function ReplayBindingPanel({ info, isAdmin, onSaved }: {
         <p className="text-xs text-muted-foreground">为当前租户选择部署好的执行适配器。启用 True Replay 时需要配置；Session 和 Context 使用租户凭证与用户 ID 接入。</p>
         <div className="flex items-center gap-3">
           <select aria-label="Replay 适配器" className="h-9 min-w-0 flex-1 rounded-lg border border-border bg-background px-2 text-sm"
-            value={file} disabled={!info || saving} onChange={(event) => setFile(event.target.value)}>
+            value={file} disabled={!info || saving} onChange={(event) => {
+              const value = event.target.value;
+              setFile(value);
+              setRevision(String(value === info?.file ? info?.revision ?? ""
+                : info?.available.find(item => item.file === value)?.revision ?? ""));
+            }}>
             <option value="">未绑定</option>
             {info?.file && !info.available.some((item) => item.file === info.file) && <option value={info.file}>{info.file}（不可用）</option>}
             {(info?.available || []).map((item) => <option key={item.file} value={item.file} disabled={!item.enabled}>{item.label || item.file}</option>)}
           </select>
-          <Button disabled={!info || saving || file === info.file} onClick={save}>{saving ? "保存中…" : "保存"}</Button>
+          {file && versions.length > 0 && <select aria-label="Replay 适配器版本"
+            className="h-9 rounded-lg border border-border bg-background px-2 text-sm"
+            value={revision} disabled={saving} onChange={event => setRevision(event.target.value)}>
+            {versions.map(value => <option key={value} value={value}>v{value}{value === String(info?.revision)
+              && file === info?.file ? "（当前绑定）" : ""}{value === String(latest) ? "（最新登记）" : ""}</option>)}
+          </select>}
+          <Button disabled={!info || saving || !changed} onClick={save}>{saving ? "保存中…" : "保存"}</Button>
         </div>
         <p className="text-xs text-muted-foreground">{!info ? "无法读取运行环境配置" : info.configured && info.enabled ? "已绑定；真实执行结果以 Replay 记录为准。" : "尚未绑定可用的运行环境。"}</p>
       </div>

@@ -28,6 +28,11 @@ def session_list_meta(session: Mapping, meta: Mapping | None = None) -> dict:
         ) if str(value or "").strip()
     ), "")
     result.update(num_turns=len(turns), used_skills=used_skills)
+    provenance = session.get("provenance") or {}
+    for name in ("source_session_key", "snapshot_revision", "target_trace_refs", "context_trace_refs",
+                 "identity_verified", "trace_identity_verified", "revision_conflicts"):
+        if name in provenance:
+            result[name] = copy.deepcopy(provenance[name])
     if trace_id:
         result["trace_id"] = trace_id
     return result

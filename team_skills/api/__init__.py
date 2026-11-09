@@ -61,6 +61,8 @@ def create_router(services=None, **kwargs) -> APIRouter:
     router.include_router(workbench_router(services))
     from .prompts import create_router as prompts_router
     router.include_router(prompts_router(services))
+    from .execution_assets import create_router as execution_router
+    router.include_router(execution_router(services))
     return router
 
 
@@ -486,13 +488,44 @@ def _render_skill_md(name: str, body: dict[str, Any], current: bytes | None) -> 
 
 def _register_agent_pull(router: APIRouter, ctx: _SkillsContext) -> None:
     @router.get("/sync/skills")
-    async def sync_skills(request: Request, user_id: str = ""):  # noqa: ANN202
+    async def sync_skills(request: Request, user_id: str = "", execution_profile_id: str = "",
+                          execution_capability: str = ""):  # noqa: ANN202
         from teamEvolver.security.agent_principal import resolve_agent_principal
 
         principal = resolve_agent_principal(request, ctx.config, user_id)
+        execution = None
         async with ctx.tx.tenant_tx(principal.tenant_id) as conn:
             heads = await ctx.library.list_skills(conn)
-            bundles = await ctx.library.read_current_bundles(conn)
+            # Always read the immutable version named by its head, never a later current bundle.
+            bundles = {head["name"]: await ctx.library.read_version_bundle(conn, head["name"], head["version"])
+                       for head in heads}
+            if execution_profile_id:
+                from team_replay.execution_plan import EXECUTION_PLAN_SCHEMA
+
+                from ..execution.repository import ExecutionRepository
+                if execution_capability != EXECUTION_PLAN_SCHEMA:
+                    raise HTTPException(409, "execution plan capability is required")
+                try:
+                    profile, release = await ExecutionRepository(ctx.tx).current(conn, execution_profile_id)
+                    if profile["user_id"] != principal.user_id:
+                        raise HTTPException(404, "execution profile not found")
+                    dependencies = release["document"]["skill_dependencies"]
+                    pinned = []
+                    for dependency in dependencies:
+                        bundle = await ctx.library.read_version_bundle(
+                            conn, dependency["name"], dependency["version"],
+                        )
+                        if bundle_tree_sha256(bundle) != dependency["tree_sha256"]:
+                            raise SkillLibraryError("released Skill dependency hash mismatch")
+                        pinned.append({**dependency, "files": [
+                            {"path": path, "content_b64": base64.b64encode(data).decode("ascii")}
+                            for path, data in sorted(bundle.items())
+                        ]})
+                    execution = {"release_id": release["release_id"], "composition_hash": release["composition_hash"],
+                                 "profile_id": profile["profile_id"], "document": release["document"],
+                                 "skills": pinned}
+                except SkillLibraryError as exc:
+                    raise _http_error(exc) from exc
         skills = []
         for head in heads:
             bundle = bundles.get(head["name"]) or {}
@@ -511,8 +544,11 @@ def _register_agent_pull(router: APIRouter, ctx: _SkillsContext) -> None:
                 ],
             })
         payload = {"status": "ok", "source": "registry", "skills": skills, "total": len(skills)}
+        if execution is not None:
+            payload["execution"] = execution
         canonical = json.dumps(
-            [principal.tenant_id, principal.account_id, [(s["name"], s["version"], s["tree_sha256"]) for s in skills]],
+            [principal.tenant_id, principal.account_id, [(s["name"], s["version"], s["tree_sha256"]) for s in skills],
+             execution["composition_hash"] if execution else ""],
             ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         ).encode("utf-8")
         etag = '"' + hashlib.sha256(canonical).hexdigest() + '"'
@@ -521,6 +557,25 @@ def _register_agent_pull(router: APIRouter, ctx: _SkillsContext) -> None:
         if etag in validators or "*" in validators:
             return Response(status_code=304, headers=headers)
         return JSONResponse(content=payload, headers=headers)
+
+    @router.post("/sync/skills/execution-receipt")
+    async def execution_receipt(request: Request, user_id: str = ""):
+        from teamEvolver.security.agent_principal import resolve_agent_principal
+
+        from ..execution.repository import ExecutionRepository
+
+        principal = resolve_agent_principal(request, ctx.config, user_id)
+        raw = await _read_json(request)
+        if set(raw) != {"profile_id", "release_id", "composition_hash", "request_id", "state"}:
+            raise HTTPException(400, "invalid execution receipt fields")
+        try:
+            async with ctx.tx.tenant_tx(principal.tenant_id) as conn:
+                return await ExecutionRepository(ctx.tx).record_receipt(
+                    conn, tenant_id=principal.tenant_id, profile_id=raw["profile_id"],
+                    user_id=principal.user_id, receipt=raw,
+                )
+        except SkillLibraryError as exc:
+            raise _http_error(exc) from exc
 
 
 __all__ = ["create_router"]

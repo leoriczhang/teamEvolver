@@ -34,6 +34,11 @@ class EmbeddedReplayGateway:
         timeout_seconds: int = 600,
         max_interactions: int | None = None,
     ) -> dict[str, Any]:
+        from .evaluation import external_evaluation_enabled
+        from .hooks import ReplayUnsupported
+
+        if external_evaluation_enabled(spec.evaluation):
+            raise ReplayUnsupported("external evaluation requires an injected ReplayHost evaluator")
         if spec.subject_kind not in {"skill", "skill_set"}:
             raise ValueError(
                 "Embedded Skill gateway cannot materialize a Memory treatment"

@@ -17,6 +17,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { type UserProfile } from "@/features/admin/api/client";
 import { type WorkbenchRun } from "@/features/replay/api/client";
+import ReplayEvaluationSettings from "@/features/replay/ReplayEvaluationSettings";
 import DropZone from "@/features/skills/skills/DropZone";
 import { fmtTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -64,6 +65,8 @@ return (
         <StatCard label="固定回归集" value={regressionCount} />
         <StatCard label="已完成实验" value={completedCount} />
       </div>}
+
+      {!embedded && <ReplayEvaluationSettings active={active} isAdmin={isAdmin} />}
 
       <Panel
         title={compact ? "运行与调试" : "实验对象"}

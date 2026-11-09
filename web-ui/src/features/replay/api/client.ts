@@ -1,11 +1,51 @@
 import type { BundleDiff,Candidate,StaticValidation } from "@/features/skills/api/client";
 
+export interface ReplayEvaluationConfig {
+  mode: "checklist_efficiency" | "external_agent";
+  external_agent?: {
+    url: string;
+    secret_ref: string;
+    timeout_seconds: number;
+    rubric: string;
+    min_score: number;
+    min_improvement: number;
+    adapter?: EvaluatorAdapterRef;
+  };
+}
+
+export interface EvaluatorAdapterRef {
+  file: string;
+  revision: number;
+  source_hash: string;
+}
+
+export interface ExternalEvaluationReport {
+  policy?: string;
+  status?: "evaluated" | "unavailable";
+  baseline?: { score: number; reason?: string };
+  candidate?: { score: number; reason?: string };
+  delta?: number;
+  baseline_score?: number | null;
+  candidate_score?: number | null;
+  score_delta?: number | null;
+  case_count?: number;
+  evaluated_case_count?: number;
+  decision_basis?: string;
+  min_score?: number;
+  min_improvement?: number;
+  error?: string;
+  error_code?: string;
+  evaluator?: { url?: string; rubric_hash?: string };
+}
+
 export interface EvalResult {
   skill_name?: string;
   proposed_action?: string;
   recommended_publish?: boolean;
   cached?: boolean;
   replay?: {
+    external_evaluation?: ExternalEvaluationReport;
+    evaluation_policy_hash?: string;
     verdict?: "accept" | "reject" | "inconclusive";
     no_regression?: boolean;
     error?: string;
@@ -63,9 +103,22 @@ export interface ReplayDecisionPolicy {
   regressed_metrics?: string[];
   unchanged_metrics?: string[];
   all_windows_evaluated?: boolean;
+  min_score?: number;
+  min_improvement?: number;
 }
 
 export interface ReplaySide {
+  execution_verification?: string;
+  execution_plan_hash?: string;
+  observed_requests?: Array<{
+    dispatch_id?: string;
+    request_hash?: string;
+    request?: Record<string, unknown>;
+    destination?: Record<string, unknown>;
+    succeeded?: boolean;
+    observation?: string;
+    runtime_fingerprint?: unknown;
+  }>;
   response?: string;
   final_response?: string;
   response_text?: string;
@@ -87,6 +140,7 @@ export interface ReplaySide {
 }
 
 export interface ReplayCase {
+  external_evaluation?: ExternalEvaluationReport;
   baseline?: ReplaySide;
   candidate?: ReplaySide;
   case_id?: string;
@@ -106,6 +160,8 @@ export interface ReplayDatasetResult {
   completed: number;
   inputs: WorkbenchDataset["cases"];
   result: {
+    external_evaluation?: ExternalEvaluationReport;
+    decision_policy?: ReplayDecisionPolicy;
     verdict?: "accept" | "reject" | "inconclusive";
     reason?: string;
     cases?: ReplayCase[];
@@ -241,6 +297,7 @@ export interface WorkbenchChecklistReport {
 }
 
 export interface WorkbenchResult {
+  external_evaluation?: ExternalEvaluationReport;
   status?: string;
   verdict?: "accept" | "reject" | "inconclusive";
   accepted?: boolean;
@@ -300,7 +357,7 @@ export interface ReplayAdapterInfo {
   configured: boolean;
   enabled: boolean;
   error?: string;
-  revision?: string;
+  revision?: number | string;
   source_editable?: boolean;
-  available: Array<{ file: string; label?: string; enabled: boolean; error?: string }>;
+  available: Array<{ file: string; label?: string; revision?: number; enabled: boolean; error?: string }>;
 }

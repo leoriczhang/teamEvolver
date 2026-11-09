@@ -27,8 +27,10 @@ def create_router(services, accept):
     async def describe(conn, request=None):
         cfg = await load_session_config(configs, conn)
         rows = await conn.fetch(
-            f"SELECT DISTINCT ON(adapter_id) adapter_id,revision,source FROM {tx.pool.schema}.adapter_versions "
-            "ORDER BY adapter_id,revision DESC"
+            f"SELECT DISTINCT ON(v.adapter_id) v.adapter_id,v.revision,v.source "
+            f"FROM {tx.pool.schema}.adapter_versions v JOIN {tx.pool.schema}.adapters a "
+            "ON a.tenant_id=v.tenant_id AND a.adapter_id=v.adapter_id "
+            "WHERE a.kind='python' ORDER BY v.adapter_id,v.revision DESC"
         )
         bound = await repo.binding(conn, binding_key="datasource")
         entries = [

@@ -216,6 +216,7 @@ class MappedHttpAdapter:
         "context_snapshot",
         "materials",
         "tool_policy",
+        "execution_plan",
     )
 
     def _render_body(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -282,6 +283,7 @@ class MappedHttpAdapter:
             artifacts: list | None = None,
             metrics_incomplete: bool = False,
             error: dict[str, Any] | None = None,
+            execution_receipt: dict | None = None,
         ) -> dict[str, Any]:
             return {
                 "schema_version": REPLAY_TURN_RESULT_SCHEMA,
@@ -298,6 +300,7 @@ class MappedHttpAdapter:
                 "metrics_incomplete": metrics_incomplete,
                 "error": error,
                 "elapsed_seconds": round(time.monotonic() - started, 3),
+                **({"execution_receipt": execution_receipt} if execution_receipt is not None else {}),
             }
 
         try:
@@ -374,4 +377,5 @@ class MappedHttpAdapter:
             artifacts=self._extract(payload, "artifacts", []),
             metrics=metrics,
             metrics_incomplete=metrics_incomplete,
+            execution_receipt=self._extract(payload, "execution_receipt"),
         )

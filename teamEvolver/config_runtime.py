@@ -88,10 +88,11 @@ class ConfigRepository:
 
     # -- per-tenant module config ---------------------------------------- #
 
-    async def read_tenant_module(self, conn: Any, module: str) -> TenantModuleConfig:
+    async def read_tenant_module(self, conn: Any, module: str, *, for_update: bool = False) -> TenantModuleConfig:
         row = await conn.fetchrow(
             f"SELECT tenant_id, module, revision, config FROM {self._schema}.tenant_configs "
-            "WHERE tenant_id = NULLIF(current_setting('app.tenant_id', true), '') AND module = $1",
+            "WHERE tenant_id = NULLIF(current_setting('app.tenant_id', true), '') AND module = $1"
+            + (" FOR UPDATE" if for_update else ""),
             module,
         )
         if row is None:

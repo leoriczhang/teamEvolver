@@ -269,6 +269,11 @@ def _build_segment(
         },
         "metadata": metadata,
     }
+    from .source_revisions import segment_provenance
+
+    if base.get("provenance"):
+        segment["provenance"] = segment_provenance(base, turns)
+        segment["source_identity"] = dict(base.get("source_identity") or {})
 
     # ``meta`` carries the adapter/push-extracted display identity (user_id /
     # session_id / trace_id); without it every split segment loses the console

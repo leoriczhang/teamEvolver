@@ -402,7 +402,10 @@ def convert_trace_to_turn(
     turn = {
         "turn_num": turn_num,
         "trace_id": str(trace.get("id") or ""),
-        "prompt_text": "\n".join(prompts).strip()[:MAX_CHARS],
+        "source_trace_id": str(trace.get("id") or ""),
+        # Current input bytes are also Replay inputs. Trimming them would make
+        # otherwise valid observed shared-template requests fail attribution.
+        "prompt_text": "\n".join(prompts)[:MAX_CHARS],
         "response_text": "\n".join(responses).strip()[:MAX_CHARS],
         "messages": combined_messages,
         "tool_calls": tool_calls,
@@ -431,11 +434,19 @@ def convert_trace_to_turn(
         },
     }
 
+    from session_ingestion.source_revisions import preserve_requests
+
+    preserve_requests({"turns": [turn]}, [{"trace": trace, "observations": observations}])
+
     if mapper is None:
         return turn
-    # The operator-authored mapper owns the final shape; it receives the flat
-    # observation list plus the built-in turn as a deep-merge baseline.
-    return mapper(trace, list(observations), turn_num, turn)
+    # Display mapping must not replace the original upstream event identity or
+    # observed request; both are source facts rather than presentation fields.
+    mapped = mapper(trace, list(observations), turn_num, turn)
+    if isinstance(mapped, dict):
+        mapped["source_trace_id"] = str(trace.get("id") or "")
+        preserve_requests({"turns": [mapped]}, [{"trace": trace, "observations": observations}])
+    return mapped
 
 
 def _dominant(values: list[str]) -> str:

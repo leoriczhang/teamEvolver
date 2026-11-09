@@ -65,6 +65,33 @@ describe("HealthView OpenViking deployment", () => {
   });
   afterEach(cleanup);
 
+  it("keeps the pinned Replay revision until explicitly selecting a newer version of the same file", async () => {
+    const fallback = mockedApi.getMockImplementation()!;
+    let bound = 1;
+    mockedApi.mockImplementation(async (path, init) => {
+      if (path === "/api/replay-adapter") {
+        if (init?.method === "PUT") bound = JSON.parse(String(init.body)).revision;
+        return { tenant_id: "default", file: "business.py", revision: bound, configured: true, enabled: true,
+          available: [{ file: "business.py", revision: 2, label: "Business", enabled: true }] };
+      }
+      return fallback(path, init);
+    });
+    await renderHealth();
+    const selector = await screen.findByLabelText("Replay 适配器版本");
+    expect(selector).toHaveValue("1");
+    const panel = screen.getByLabelText("Replay 适配器").closest("section")
+      || screen.getByLabelText("Replay 适配器").parentElement!.parentElement!;
+    const save = within(panel).getByRole("button", { name: /^保存$/ });
+    expect(save).toBeDisabled();
+    fireEvent.change(selector, { target: { value: "2" } });
+    expect(save).toBeEnabled();
+    fireEvent.click(save);
+    await waitFor(() => expect(mockedApi).toHaveBeenCalledWith("/api/replay-adapter", expect.objectContaining({
+      method: "PUT", body: JSON.stringify({ file: "business.py", revision: 2 }),
+    })));
+    await waitFor(() => expect(save).toBeDisabled());
+  });
+
   it("loads the saved endpoint and keeps PostgreSQL health separate from unchecked OpenViking", async () => {
     await renderHealth();
     expect(endpointStatus()).toHaveTextContent(`生效地址：${endpoint} · 未检查`);

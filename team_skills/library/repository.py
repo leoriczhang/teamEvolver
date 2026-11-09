@@ -269,6 +269,14 @@ class SkillLibraryRepository:
         )
         return [dict(row) for row in rows]
 
+    async def require_versions(self, conn: Any, dependencies: list[dict]) -> None:
+        """Lock an explicit composition's Skill dependencies in stable order."""
+        for dependency in sorted(dependencies, key=lambda item: item["name"]):
+            head = await self._lock_head(conn, dependency["name"])
+            if (head["deleted"] or int(head["current_version"]) != int(dependency["version"])
+                    or head["tree_sha256"] != dependency["tree_sha256"]):
+                raise SkillVersionConflict("composition Skill dependency changed after validation")
+
     async def get_version(self, conn: Any, name: str, version: int) -> dict[str, Any] | None:
         row = await conn.fetchrow(
             "SELECT version, action, deleted, sha256, tree_sha256, file_count, total_bytes, "

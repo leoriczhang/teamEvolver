@@ -1,10 +1,11 @@
 # Session Ingestion and Data Source API
 
-Sessions enter in two ways: Agent push and tenant data source pull. Both share one accept path: the API checks identity and protocol, writes the `ingestions` record, the raw payload and `worker_tasks` in one short transaction, and returns `202`. The Worker runs `session.normalize → session.analyze → session.archive`; a pull first runs `session.pull` and then derives a normalize task for each Session it fetched.
+Sessions enter in two ways: Agent push and tenant data source pull. Both share one accept path: the API checks identity and protocol, writes the `ingestions` record, the raw payload and `worker_tasks` in one short transaction, and returns `202`. The Worker runs `session.normalize → session.split → session.analyze → session.archive`; `session.analyze` includes Session Analyze and Trace Analyze. A pull first runs `session.pull`, then accepts each nonduplicate source snapshot.
 
 Code entry points:
 
 - Acceptance: `session_ingestion/api/__init__.py:create_router`
+- Ingestion diagnostics: `session_ingestion/api/console.py:create_router`
 - Protocol validation: `session_ingestion/push/protocol.py:normalize_session_envelope`
 - Data source control plane: `session_ingestion/api/datasource.py:create_router`
 - Worker stages: `session_ingestion/handlers/__init__.py`
@@ -46,6 +47,8 @@ The envelope is `teamevolver.agent-session.v2`; the schema is [agent-session-v2.
 
 `runtime.integration_id` and `runtime_context.external_subject` belong to the retired Agent registration protocol and return 400 when present. The server determines the tenant from the tenant key and the OpenViking Account from the tenant's effective configuration; clients cannot override either.
 
+Agent-reported `provenance`, `source_identity`, `analysis_context`, and reserved source fields in `meta` are retained under `reported_provenance`. They do not grant server verification or select objects for server-side analysis. Reported turn `request_context` is preserved under `reported_request_context`, with an effective level of `agent_reported` and completeness `unknown`; reporting `final_request` / `complete` does not establish an observed complete model request.
+
 ### context_usage
 
 ```json
@@ -74,13 +77,14 @@ At acceptance `teamEvolver/context/usage.py:verify_usage` checks that snapshots 
 
 Pushing the same `session_id` again within a tenant returns the first `ingestion_id`, `job_id` and current status with `dedupe` set to `true`.
 
-`job_id` refers only to the first stage. The final Session state is visible in the console, or via `/api/sessions/{session_id}/stages` in [Session Queries](./08-sessions-api.md).
+`job_id` refers only to the first stage. Use `/api/ingestions/{ingestion_id}` below to inspect the whole ingestion pipeline, even before a formal Session exists. After archival, `/api/sessions/{session_id}/stages` in [Session Queries](./08-sessions-api.md) remains available for stage results.
 
 ### Processing Stages
 
 | Stage | Worker kind | Content |
 | --- | --- | --- |
 | normalize | `session.normalize` | Normalize the envelope and write the stage result |
+| split | `session.split` | Persist a semantic split plan; retain the full Session if the splitter is unavailable or fails; segments share one source |
 | analyze | `session.analyze` | Two model stages, Session Analyze (value classification) and Trace Analyze; either failing retries |
 | archive | `session.archive` | Writes the formal Session (business time + ingest time) after all required stages succeed |
 
@@ -119,15 +123,73 @@ curl -X POST http://localhost:52010/ingest_session \
   }'
 ```
 
+## GET /api/ingestions/{ingestion_id}
+
+Reads an accepted ingestion, its current pipeline task and stage results without requiring an archived formal Session. Authentication matches Session console queries: a tenant administrator through console login or the service Root Key; tenant keys cannot access it. Root requests can select a tenant with `Authorization: Bearer <TEAMEVOLVER_ROOT_API_KEY>` and `X-Tenant-ID`. Returns 404 when the ingestion is absent or belongs to another tenant.
+
+```bash
+curl http://localhost:52010/api/ingestions/3f0c... \
+  -H "Authorization: Bearer $TEAMEVOLVER_ROOT_API_KEY" \
+  -H 'X-Tenant-ID: default'
+```
+
+```json
+{
+  "ingestion_id": "3f0c...",
+  "ingestion_status": "processing",
+  "effective_status": "failed",
+  "current_job": {
+    "job_id": "3f0c...:session.analyze",
+    "kind": "session.analyze",
+    "status": "failed",
+    "attempt": 3,
+    "error_code": "retries_exhausted",
+    "created_at": "2026-10-28T08:00:00Z",
+    "updated_at": "2026-10-28T08:01:00Z"
+  },
+  "stages": [
+    {
+      "stage": "trace_analyze",
+      "status": "failed",
+      "error_code": "ValueError",
+      "created_at": "2026-10-28T08:00:30Z",
+      "updated_at": "2026-10-28T08:00:59Z"
+    }
+  ]
+}
+```
+
+| Field | Description |
+| --- | --- |
+| `ingestion_id` | Ingestion ID returned at acceptance, not a formal Session ID |
+| `ingestion_status` | Unmodified `ingestions.status`; `processing` alone does not establish that a task is still running |
+| `effective_status` | Display status derived from the current Worker task using the rules below |
+| `current_job` | Task at the furthest pipeline stage that exists; exposes only `job_id`, `kind`, `status`, `attempt`, `error_code`, `created_at`, `updated_at`; `null` if no task is found |
+| `stages` | Recorded stage results; each item exposes only `stage`, `status`, `error_code`, `created_at`, `updated_at`; an empty array if none exist |
+
+Pipeline order is normalize → split → analyze → archive. The query makes a bounded number of reads through the platform task interface, rather than inspecting only the initial `job_id` returned at acceptance. It changes neither business records nor task state.
+
+| Condition | `effective_status` |
+| --- | --- |
+| `ingestion_status` is already `archived` or `skipped` | Preserve that value |
+| Current task is `queued`, `running`, `retry_wait`, `waiting_external` or `reconciling` | `processing` |
+| Current task is `failed` | `failed` |
+| Current task is `cancelled` | `cancelled` |
+| No task is found or the current task has another status | Preserve `ingestion_status` |
+
+Retry failures with the existing [unified job interface](./07-health-status.md#post-apijobsjob_idretry): `POST /api/jobs/{current_job.job_id}/retry`. It reuses the original task and accepted source without fetching the source again. Only `failed` tasks can be retried; other states return 409. After retry, the task returns to `queued` and an unarchived ingestion's `effective_status` returns to `processing`; an old failed stage result does not keep the display in a failed state.
+
 ## Data Source Adapters
 
 A data source Adapter is a tenant-supplied Python file that connects to the upstream (Doris, Langfuse and others), filters records and converts them into standard Sessions. Adapter source is versioned in PostgreSQL `adapter_versions` and the tenant binding is in `adapter_bindings`; running tasks pin the revision current at acceptance. Files under `session_ingestion/adapters/` in the repository are bundled templates and must be written to PG with the Root Key before they can be bound.
+
+Datasource inventory, reads, and bindings only include datasource files; Replay and external evaluator files remain separate. Saving a filename owned by another adapter type returns a conflict: choose another name instead of overwriting the other type.
 
 Adapter file requirements (`session_ingestion/adapters/_runtime.py:validate_content`):
 
 - The file name ends with `.py`, does not start with `_`, and the content is at most 256 KiB.
 - It defines `build_adapter()` at the top level.
-- Optional literal dict `SOURCE`: `enabled` (bool), `supported_filters` / `required_filters` (string lists; required must be contained in supported), `exclude_session_id_patterns`, `max_sessions` (1–1000, default preview count).
+- Required literal dict `SOURCE`: `enabled` (bool), `supported_filters` / `required_filters` (string lists; required must be contained in supported), `exclude_session_id_patterns`, `max_sessions` (1–1000, default preview count). Optional `source_instance_id` and `upstream_namespace` must be nonempty strings and declare the stable source scope.
 - Credentials are read from environment variables, never written in source.
 
 ### Endpoints
@@ -148,6 +210,14 @@ Adapter file requirements (`session_ingestion/adapters/_runtime.py:validate_cont
 | POST | `/api/datasource/schedule/run` | Tenant administrator | Pull once now using the scheduled window (previous calendar day) |
 
 `validate` mode returns `{"ok": true, "metadata": {...}}` synchronously; other tests, previews and pulls run as `session.pull` tasks on the Worker. `max_sessions` ranges 1–1000. A pull walks the full filter window and is not limited by `max_sessions`.
+
+### Manual Rescans and Source Deduplication
+
+Each manual `POST /api/datasource/pull` starts a fresh scan, even for the same window, so late Trace data can be found. A retry may send `Idempotency-Key`: the same tenant, Adapter and key reuse the first acceptance; reusing a key with different windows or filters returns `409`. Use a new key or omit the header to rescan. Scheduled pulls still accept each date window once.
+
+Scanning and item acceptance have separate counts. `fetched` counts fetched items, `enqueued` counts new source snapshots, and `duplicate` counts already accepted snapshots with the same source and facts; duplicate does not mean the original task has finished. The bound Adapter and upstream response must establish source scope; see [Continuous Sessions and Source Revisions](../concepts/05-sessions.md#continuous-sessions-and-source-revisions). Identical facts reuse the existing task and analysis, even if analysis configuration has since changed; this does not trigger automatic bulk reanalysis.
+
+Langfuse conversion preserves original Trace `input` and GENERATION observation `input` in each turn's `request_context`, including original `source_id`, `model_call_id`, model and parameters. The levels are `trace_input` / `generation_input`, both with completeness `unknown`. Original content, including an empty system string, is retained without claiming it is the complete final model request. Without these original inputs, the level is `conversation_only`.
 
 ### Scheduled Pull
 

@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { type WorkbenchBranch,type WorkbenchDataset,type WorkbenchMaterial,type WorkbenchRun,type WorkbenchTraceMessage } from "@/features/replay/api/client";
 import { isActiveRun } from "@/features/replay/api/datasets";
+import ExternalEvaluationResult from "@/features/replay/ExternalEvaluationResult";
 import { cn } from "@/lib/utils";
 import {
 Bot,
@@ -352,7 +353,7 @@ export function RunDetail({ run, onRefresh }: { run: WorkbenchRun; onRefresh: ()
                   metric={dimensions[metric.key]}
                 />
               ))}
-              <StatCard label="客观结论" value={<Verdict value={result.verdict} />} />
+              <StatCard label={result.decision_policy?.policy === "external-agent-score" ? "外部评分结论" : "客观结论"} value={<Verdict value={result.verdict} />} />
               <StatCard label="模型" value={result.harness?.model || "—"} mono />
             </div>
             {result.reason && (
@@ -360,6 +361,7 @@ export function RunDetail({ run, onRefresh }: { run: WorkbenchRun; onRefresh: ()
                 {result.reason}
               </div>
             )}
+            <ExternalEvaluationResult report={result.external_evaluation} policy={result.decision_policy} />
             <div className="grid gap-5 2xl:grid-cols-2">
               <TraceBranch title="Baseline · 当前 Skill" branch={replayCase?.baseline} tone="gray" />
               <TraceBranch title="Candidate · 实验草稿" branch={replayCase?.candidate} tone="blue" />

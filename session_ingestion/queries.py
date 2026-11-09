@@ -94,6 +94,21 @@ class SessionQueries:
         )
         return [dict(r) for r in rows]
 
+    async def source_revisions(self, conn: Any, source_keys: list[str]) -> list[dict]:
+        """Public factual heads; acceptance does not imply completed analysis.
+
+        Callers must freeze these versions for a task rather than reread mutable
+        heads midway through planning. Missing legacy provenance is not inferred.
+        """
+        keys = list(dict.fromkeys(source_keys))
+        if len(keys) > 200:
+            raise ValueError("source revision queries accept at most 200 keys")
+        rows = await conn.fetch(
+            f"SELECT source_session_key,snapshot_revision,document->'provenance' AS provenance,updated_at "
+            f"FROM {self._schema}.session_source_heads WHERE source_session_key=ANY($1::text[])", keys,
+        )
+        return [{**dict(row), "provenance": _loads(row["provenance"])} for row in rows]
+
     async def experience_page(self, conn, *, until, after=None, since=None, limit=100):
         """Public read contract for model-authored lessons in archived Sessions."""
         rows = await conn.fetch(

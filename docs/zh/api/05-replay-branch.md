@@ -89,6 +89,16 @@ Adapter 在 Worker 进程内执行。AST 校验只检查结构，不是沙箱，
 
 `systemd_scope` 默认使用 user systemd；设为 `system` 时需允许执行 `sudo -n systemd-run/systemctl`，隔离 Agent 仍使用当前普通用户身份。隔离失败会停止回放。Skill bundle 的 UTF-8 文件完整注入；不能挂载的二进制 Skill 文件会报错。裁判与用户反馈由 TeamEvolver 执行。工具轨迹和 Token usage 按本轮增量返回，缺失 usage 保持不可用。
 
+### 纯 Prompt Replay 与现有 Agent Lab
+
+纯 Prompt 候选不需要 Skill：冻结的 ReplaySpec 使用 `subject.kind="execution"`、`subject.id=<profile_id>`，两分支使用 `treatment.kind="execution_plan"`，Skill payload 为 `{}`。Test Dataset 的 `skills=[]`、Case 的 `skill_ids=[]`；数据集的来源/metadata 绑定 `execution_profile_id` 与 `baseline_execution_plan_hash`，历史回归只选择同配置、同基线的案例。候选仍通过现有 `/api/skill-candidates/{candidate_id}/evaluate` 与评审链路受理，不创建虚假 Skill。
+
+`team_replay/adapters/examples/agent_lab.py` 对接既有 Agent Lab 的 `agentscope-java` 运行时，声明 `request_observation="remote_attested_dispatch"`、`skill_treatment=false`，支持业务 `agent_prompt` 与 `context_fragment`。这条接入保留真实业务 Agent 引擎和多轮会话，而不以直接调用模型的 `observed_http` 参考传输代替 Agent。
+
+远端观测边界是既有 Agent Node 同进程代理：截获 Java 实际发往模型的最终请求 bytes，原样转发 provider，再用独立 control 密钥签名。TE 逐分支核验 HMAC、nonce、冻结计划和最终 JSON；签名 RPC 参数、Prompt 模板或自报 metadata 不能替代模型请求证据。密钥通过现有凭证渠道提供，不写入执行配置或请求记录。
+
+此契约和 Adapter 源码存在不代表目标部署已经可用；必须在已部署服务上验证基线/候选两分支的最终请求、真实回复、usage、会话隔离和发布后加载。加载能力不足、证据缺失或不匹配时仍应阻断，不能把 0 个候选当作闭环成功。原 AgentsHub Skill-only 入口保持兼容，不因此获得 Prompt 覆盖能力。
+
 ### 接口
 
 | 方法 | 路径 | 权限 | 说明 |
@@ -99,7 +109,7 @@ Adapter 在 Worker 进程内执行。AST 校验只检查结构，不是沙箱，
 | PUT | `/api/replay-adapter/code` | Root Key | `{"file", "code", "expected_revision"}`；新建时 `expected_revision` 为 `null`，冲突返回 409 |
 | POST | `/api/replay-adapter/code/test` | Root Key | `{"file", "code", "context", "query"}`，返回 202 |
 
-测试请求的 `context` 只允许 `runtime_type`（必填）、`skill`（对象或 null）、`materials`（数组）、`context_snapshot`（对象）、`timeout_seconds`（1–120，默认 30）；`query` 为 1–32000 字符。测试草稿以 `test-<sha256>.py` 保存为独立 Adapter，不影响当前绑定，也不读取已发布数据。
+测试请求的 `context` 只允许 `runtime_type`（必填）、`skill`（对象或 null）、`materials`（数组）、`context_snapshot`（对象）、可选 `execution_plan`、`timeout_seconds`（1–120，默认 30）；`query` 为 1–32000 字符。纯 Prompt 传 `skill=null` 与完整冻结计划。测试草稿以 `test-<sha256>.py` 保存为独立 Adapter，不影响当前绑定，也不读取已发布数据。
 
 ## 数据集
 
@@ -112,7 +122,7 @@ Adapter 在 Worker 进程内执行。AST 校验只检查结构，不是沙箱，
 | `cases[]` | Replay Case：`case_id`、`query`（必填）、`skill_ids`、`checks`、`materials`、`provenance`、`replay`、`metadata` |
 | `source`、`metadata` | 来源（手工或 Session 选择）与附加信息 |
 
-Baseline 与 Candidate 必须解析出相同的 Skill 集合；实验可以替换其中一个或多个 Skill。
+Skill 实验的 Baseline 与 Candidate 必须解析出相同的 Skill 集合；实验可以替换其中一个或多个 Skill。纯 Prompt 实验没有 Skill 集合，改为冻结同一执行配置的完整组件清单、位置、依赖和非目标环境。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -130,6 +140,62 @@ Baseline 与 Candidate 必须解析出相同的 Skill 集合；实验可以替�
 | GET | `/api/datasets/{dataset_id}/runs/{run_id}/cases/{case_id}` | 运行时固定的 Case |
 | GET | `/api/datasets/{dataset_id}/runs/{run_id}/results/{case_id}` | 单个 Case 结果 |
 | POST | `/api/datasets/{dataset_id}/runs/{run_id}/cancel` | 取消运行 |
+
+## 回放评价配置
+
+`GET /api/replay-evaluation` 返回当前 `replay` 模块 revision 和 `evaluation`。租户管理员以 `PUT /api/replay-evaluation` 保存：
+
+```json
+{
+  "expected_revision": 1,
+  "evaluation": {
+    "mode": "external_agent",
+    "external_agent": {
+      "url": "https://evaluation.example/score",
+      "secret_ref": "",
+      "timeout_seconds": 60,
+      "rubric": "评价业务正确性、角色一致性和回复的自然程度，并解释依据。",
+      "min_score": 60,
+      "min_improvement": 2
+    }
+  }
+}
+```
+
+`mode` 为 `checklist_efficiency`（默认）或 `external_agent`。外部评分固定 0–100、高分更好；最低分和最小提升均为 0–100，默认 0，但通过仍要求正提升。超时为 1–1800 秒。凭证仅保存 Secret Ref，在 Worker 内解析为 Bearer Header；URL 不允许嵌入账号密码，配置不接受明文 Key。保存保留其余 Replay 配置，revision 冲突返回 409，缺少租户配置返回 503。切回默认模式可保留外部配置供再次选择。
+
+外部 Agent 接收 POST JSON：`schema_version` 为 `team-replay.external-evaluation.request.v1`，`request_id` 为稳定请求标识，`case` 提供冻结任务与输入，`branches.baseline` 和 `branches.candidate` 提供真实公共消息、交互、产物和最终回复，`rubric` 为配置的评分要求。输入不包含原评分、候选编辑证据和采纳阈值。`Idempotency-Key` 使用该请求标识。外部服务须返回 JSON：
+
+```json
+{
+  "baseline": {"score": 70, "reason": "任务已完成，但存在重复提问。"},
+  "candidate": {"score": 85, "reason": "保留正确行为并消除了重复提问。"},
+  "usage": {"input_tokens": 800, "output_tokens": 100, "total_tokens": 900}
+}
+```
+
+`usage` 可省略；若返回 `request_id`，必须与请求相同。两个分支的有限数值分数与非空理由均必填。超时、非成功 HTTP 状态、非法 JSON、缺分或不匹配的请求标识均无法确定，不回退旧评价规则。返回内容不会被当作可执行指令。
+
+外部模式按所选 Case 的分数求均分决定采纳，原效率指标继续展示；执行和实际加载检查保留。模式、规则及接口随 `skill.validate` 或 A/B Replay 任务受理冻结，历史结果不回写。界面展示逐 Case、逐数据集和整体评分，详见 [True Replay](../concepts/06-true-replay.md)。
+
+### 外部评测器适配器文件
+
+评分 Agent 的请求、鉴权或返回格式与上述协议不同时，可以选择 Python 适配器。现有直接 HTTP 接入与默认评价方式继续可用；适配器只转换评分交互，不生成标准答案，也不更改采纳规则。
+
+| 方法 | 路径 | 权限与作用 |
+| --- | --- | --- |
+| GET | `/api/replay-evaluator-adapter` | 租户管理员；列出当前租户文件的最新版本、`source_hash`、标签和启用状态 |
+| GET | `/api/replay-evaluator-adapter/example` | 租户管理员；获取可修改的 HTTP 适配器示例 |
+| GET | `/api/replay-evaluator-adapter/code?file=grader.py&revision=1` | Root Key；读取指定版本源码；省略 revision 取最新版本 |
+| PUT | `/api/replay-evaluator-adapter/code` | Root Key；`{"file", "code", "expected_revision"}`；新建传 `null`，版本冲突返回 409 |
+
+上传 Python 源码等同于允许它在 Worker 中执行，权限与现有 Replay 适配器相同。读取、语法检查和保存不会执行文件。租户管理员可选择已保存版本，只有服务 Root Key 可以读取或修改源码。源码与不可变版本保存在 PostgreSQL；不从本地目录扫描文件。
+
+文件需要字面量元信息 `EVALUATOR_ADAPTER = {"label": "业务评分器", "enabled": True}`，以及同步入口 `def evaluate(request, config, *, secret="")`。`request` 是同一次真实 Replay 的冻结输入和两个分支的真实回复；`config` 提供 url、timeout_seconds、rubric 等；`secret` 仅在 Worker 内从所选 Secret Ref 解析。入口返回 `{"baseline": {"score": 数值, "reason": "依据"}, "candidate": {"score": 数值, "reason": "依据"}}`，可选 `usage` 与匹配的 `request_id`，与直接 HTTP 模式使用相同校验。
+
+入口必须自行为外部 I/O 设置超时并限制响应体；示例已包含这些限制。需要标准答案时，可按 `case_id` 或冻结输入关联外部真实标注，不能从任一分支回复推导答案。异常或缺分显示评分不可用，不回退默认模式；运行错误不将提供方响应或凭证明文写入结果。
+
+保存文件后，在 `evaluation.external_agent.adapter` 选择返回的完整引用 `{"file": "grader.py", "revision": 1, "source_hash": "<文件源码的64位SHA-256>"}`。`adapter` 缺失或为 `null` 时继续直接 HTTP；使用适配器时 `url` 可为空，由适配器决定是否使用。其余外部评价配置保持不变，凭证仍只能通过 `secret_ref`，不可写入源码或 URL。配置保存核对同一租户的版本、hash 和启用状态。任务受理冻结整个引用，Worker 按该版本加载源码并再次核对 hash；之后上传新版本或切换配置不会改变已受理任务，也不会复用其他版本的缓存评分。接入不同评分器只需修改适配器文件，无需修改 TE 的评分或进化代码。
 
 ## Replay 运行
 

@@ -12,6 +12,7 @@ from ..adapters.loader import validate_content
 from ..adapters.repository import ReplayAdapterRepository
 from ..commands import enqueue
 from ..datasets.repository import DatasetNotFound
+from ..execution_plan import normalize_execution_plan
 from .common import ERRORS, accepted, actor, body, error, identity, root
 
 
@@ -86,6 +87,7 @@ def create_router(services):
             context = raw["context"]
             if not isinstance(context, dict) or set(context) - {
                 "runtime_type", "skill", "materials", "context_snapshot", "timeout_seconds",
+                "execution_plan",
             }:
                 raise ValueError("invalid Adapter test context")
             if not isinstance(raw["query"], str) or not 1 <= len(raw["query"].strip()) <= 32000:
@@ -98,6 +100,8 @@ def create_router(services):
                 raise ValueError("materials must be an array")
             if not isinstance(context.get("context_snapshot", {}), dict):
                 raise ValueError("context_snapshot must be an object")
+            if "execution_plan" in context:
+                context["execution_plan"] = normalize_execution_plan(context["execution_plan"])
             timeout = context.get("timeout_seconds", 30)
             if type(timeout) is not int or not 1 <= timeout <= 120:
                 raise ValueError("test timeout_seconds must be 1..120")

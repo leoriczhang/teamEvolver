@@ -85,6 +85,8 @@ def example_handler(req: dict[str, Any]) -> dict[str, Any]:
        "metrics": {"tool_call_count": int, "total_tokens": int,...},
        "artifacts": [...]}  # artifacts optional
     """
+    if req.get("execution_plan") is not None:
+        raise ReplayUnsupportedError("example handler cannot override/observe the business Agent Prompt")
     # >>> Replace this body with your agent call, e.g.:
     # result = my_agent.run(
     #     task=req["prompt"],
@@ -177,12 +179,15 @@ def handle_turn_request(
                     f"unknown replay session {request_id!r}: expired or turn 1 was never executed"
                 ),
             )
-        session = {"history": [], "updated_at": now}
+        session = {"history": [], "updated_at": now, "execution_plan": request.get("execution_plan")}
         sessions[request_id] = session
+    if request.get("execution_plan", session.get("execution_plan")) != session.get("execution_plan"):
+        return _failed_turn(request, code="INVALID_RESPONSE", message="execution_plan changed within Replay Session")
     session["updated_at"] = now
 
     handler_request = {
         **request,
+        **({"execution_plan": session["execution_plan"]} if session.get("execution_plan") is not None else {}),
         "history": [dict(item) for item in session["history"]],
     }
     try:
@@ -201,6 +206,7 @@ def handle_turn_request(
                 "messages": list(raw.get("messages") or []),
                 "artifacts": list(raw.get("artifacts") or []),
                 "metrics": dict(raw.get("metrics") or {}),
+                **({"execution_receipt": raw["execution_receipt"]} if "execution_receipt" in raw else {}),
             },
             expected_request_id=request_id,
             expected_turn_num=turn_num,

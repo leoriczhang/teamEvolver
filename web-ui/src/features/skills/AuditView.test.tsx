@@ -224,6 +224,49 @@ describe("AuditView", () => {
     expect(screen.queryByText(/已完成 ·/)).not.toBeInTheDocument();
   });
 
+  it("shows frozen allowed scope, actual changes and an explicit zero-candidate reason", async () => {
+    mockedApi.mockResolvedValue({ cycles: [{
+      ...completedCycle,
+      result: {
+        status: "completed", sessions: 0, candidates_queued: 0, evolutions: [],
+        allowed_modules: ["prompt"], actual_modules: [], config_revision: 12,
+        zero_candidate_reason: "No eligible frozen Sessions",
+      },
+    }] });
+    render(<AuditView active />);
+    expect(await screen.findByText("允许修改：业务 Agent Prompt／上下文注入")).toBeVisible();
+    expect(screen.getByText("实际修改：无修改")).toBeVisible();
+    expect(screen.getByText("冻结配置版本：12")).toBeVisible();
+    expect(screen.getByText("无候选原因：No eligible frozen Sessions")).toBeVisible();
+  });
+
+  it("distinguishes archived Sessions from independent sources when there is no verifiable new evidence", async () => {
+    mockedApi.mockResolvedValue({ cycles: [{ ...completedCycle, result: {
+      status: "completed", sessions: 0, received_sessions: 7, effective_source_sessions: 0, excluded_sessions: 7,
+      candidates_queued: 0, evolutions: [], reason: "no_verifiable_new_evidence",
+    } }] });
+    render(<AuditView active />);
+    expect(await screen.findByText("已完成 · 无有效新证据")).toBeVisible();
+    expect(screen.getByText("接收归档 Session：7 / 有效独立来源：0 / 排除归档 Session：7")).toBeVisible();
+    expect(screen.getByText(/没有可核验的新增来源证据/)).toBeVisible();
+    expect(screen.getByText(/不代表业务效果提升/)).toBeVisible();
+    expect(screen.queryByText("本周期未生成候选，未记录分组原因。")).not.toBeInTheDocument();
+  });
+
+  it("shows a pure Prompt candidate under its execution profile group", async () => {
+    mockedApi.mockResolvedValue({ cycles: [{ ...completedCycle, result: {
+      status: "completed", sessions: 2, candidates_queued: 1, evolutions: [{
+        group_key: "execution:customer-profile", candidate_kind: "execution", execution_profile_id: "customer-profile",
+        skill_name: null, action: "candidate_created", candidate_id: "execution-candidate", actual_modules: ["prompt"],
+      }],
+    } }] });
+    render(<AuditView active />);
+    expect(await screen.findByText("业务执行配置：customer-profile")).toBeVisible();
+    expect(screen.getByText(/2 会话 \/ 1 执行配置组/)).toBeVisible();
+    expect(screen.getByText("候选 ID：execution-candidate")).toBeVisible();
+    expect(screen.queryByText("未关联 Skill 的会话组")).not.toBeInTheDocument();
+  });
+
   it("does not load while inactive and refreshes when the audit tab is activated again", async () => {
     mockedApi.mockResolvedValue({ cycles: [completedCycle] });
     const view = render(<AuditView active={false} />);

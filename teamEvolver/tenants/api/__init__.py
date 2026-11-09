@@ -58,7 +58,7 @@ def create_router(services=None, *, lifecycle=None, **kwargs) -> APIRouter:
         return router
 
     registry_provider = _registry_provider(extras, config)
-    _register_tenant_routes(router, config, registry_provider)
+    _register_tenant_routes(router, config, registry_provider, services)
     return router
 
 
@@ -138,7 +138,7 @@ def _public_tenant_overrides(overrides) -> tuple[dict, dict[str, bool]]:
     return public, secret_presence
 
 
-def _register_tenant_routes(router: APIRouter, config, registry_provider) -> None:
+def _register_tenant_routes(router: APIRouter, config, registry_provider, services) -> None:
     @router.get("/api/tenants")
     async def list_tenants(request: Request):  # noqa: ANN202
         user = getattr(request.state, "console_user", None)
@@ -171,6 +171,9 @@ def _register_tenant_routes(router: APIRouter, config, registry_provider) -> Non
         registry = registry_provider()
         body = await _read_limited_json_body(request)
         display_name = str((body or {}).get("display_name") or "").strip() or "Untitled tenant"
+        from ...openviking.settings import effective
+
+        openviking_config = await effective(services, DEFAULT_TENANT_ID)
         try:
             ctx, token = await asyncio.to_thread(
                 registry.create_tenant, display_name, str((body or {}).get("account_id") or "")
@@ -186,7 +189,7 @@ def _register_tenant_routes(router: APIRouter, config, registry_provider) -> Non
         from ...admin.openviking_accounts import ensure_openviking_account
 
         viking = await asyncio.to_thread(
-            ensure_openviking_account, config, ctx.tenant_id, "team"
+            ensure_openviking_account, openviking_config, ctx.tenant_id, "team"
         )
         default_account = str(viking.get("account_id") or ctx.tenant_id).strip() or ctx.tenant_id
         try:
@@ -203,7 +206,7 @@ def _register_tenant_routes(router: APIRouter, config, registry_provider) -> Non
         try:
             dirs = await asyncio.to_thread(
                 ensure_openviking_dirs,
-                config,
+                openviking_config,
                 account_id=default_account,
                 extra_users=[str(viking.get("admin_user") or "team")],
             )

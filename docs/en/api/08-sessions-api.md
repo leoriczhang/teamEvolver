@@ -69,6 +69,8 @@ Reads the full archived Session content (the immutable payload referenced by `co
 
 ## GET /api/sessions/{session_id}/stages
 
+This endpoint requires a formal Session to exist. Use the [ingestion diagnostic endpoint](./03-session-ingest.md#get-apiingestionsingestion_id) for ingestions that have not been archived.
+
 Results of each processing stage:
 
 ```json

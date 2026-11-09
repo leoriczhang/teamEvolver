@@ -13,6 +13,12 @@ from typing import Any, Mapping, Optional
 from .adapters.loader import AdapterError
 from .artifacts import skill_treatment_members, validate_skill_treatment
 from .execution import run_branch
+from .execution_inputs import case_execution_plan_pair
+from .execution_plan import (
+    plan_from_job,
+    require_execution_capabilities,
+    validate_execution_plan_pair,
+)
 from .hooks import ReplayAdapterFactory, ReplayContext, ReplayTreatment, ReplayUnsupported
 from .host import current_host
 from .metrics import compare_efficiency
@@ -23,6 +29,7 @@ from .policy import (
     progressive_config,
     progressive_replay_decision,
 )
+from .request_capture import RequestObserver, comparable_requests
 
 
 def load_candidate_job(job_id: str) -> dict[str, Any] | None:
@@ -85,7 +92,11 @@ def _snapshot(case: Mapping[str, Any], source: Mapping[str, Any]) -> dict[str, A
 def make_context(
     branch: str, skill: Mapping[str, Any] | None, case: Mapping[str, Any],
     source: Mapping[str, Any], timeout: int, *, snapshot: Mapping[str, Any] | None = None,
+    execution_plan: Mapping[str, Any] | None = None,
 ) -> ReplayContext:
+    from .execution_plan import normalize_execution_plan
+
+    plan = normalize_execution_plan(execution_plan)
     return ReplayContext(
         request_id="replay_" + uuid.uuid4().hex,
         runtime_type=source_runtime_type(source),
@@ -95,6 +106,8 @@ def make_context(
         timeout_seconds=max(1, min(1800, int(timeout))),
         source_session=copy.deepcopy(dict(source)),
         source_turn_num=max(1, int((case.get("provenance") or {}).get("turn_num") or 1)),
+        execution_plan=plan,
+        request_observer=RequestObserver() if plan is not None else None,
     )
 
 
@@ -103,6 +116,8 @@ def treatment_for_case(
     case: Mapping[str, Any],
 ) -> Mapping[str, Any] | None:
     """Select the peer Skill subset explicitly referenced by a Replay Case."""
+    if treatment is not None:
+        treatment = {key: copy.deepcopy(value) for key, value in treatment.items() if key != "execution_plan"}
     members = skill_treatment_members(treatment)
     requested = {
         str(item or "").strip()
@@ -129,11 +144,22 @@ def treatment_for_case(
 
 def execute_pair(
     factory: ReplayAdapterFactory, contexts: Mapping[str, ReplayContext], case: Mapping[str, Any],
-    *, harness: Mapping[str, Any], max_interactions: int, judge=None, feedback=None,
+    *, harness: Mapping[str, Any], max_interactions: int, judge=None, feedback=None, checklist_required=True,
 ) -> dict[str, dict[str, Any]]:
     """Pin one factory revision and open both independent sessions before execution."""
     sessions = {}
     try:
+        plans = validate_execution_plan_pair(
+            contexts["baseline"].execution_plan, contexts["candidate"].execution_plan,
+        )
+        if plans[0] is not None:
+            left, right = contexts["baseline"], contexts["candidate"]
+            if any(getattr(left, key) != getattr(right, key) for key in (
+                "runtime_type", "materials", "context_snapshot", "source_session", "source_turn_num", "timeout_seconds",
+            )) or (not plans[0]["binding"].get("allow_skill_change") and left.treatment.skill != right.treatment.skill):
+                raise ReplayUnsupported("Prompt/Context Replay must freeze non-target inputs and Skill treatment")
+            for context in contexts.values():
+                require_execution_capabilities(factory, context.execution_plan)
         for branch in ("baseline", "candidate"):
             session = factory.open(copy.deepcopy(contexts[branch]))
             if any(session is existing for existing in sessions.values()):
@@ -149,7 +175,10 @@ def execute_pair(
                 pass
         return {branch: {
             "branch": branch, "ok": False, "status": "unsupported", "error_code": "REPLAY_UNSUPPORTED",
-            "error": str(exc), "checklist_report": {"judge": "unavailable", "all_satisfied": False},
+            "error": str(exc), "checklist_report": {
+                "judge": "not_run" if not checklist_required and max_interactions == 1 else "unavailable",
+                "all_satisfied": False,
+            },
         } for branch in contexts}
     results = {}
     injected = {}
@@ -161,11 +190,23 @@ def execute_pair(
         futures = {
             pool.submit(copy_context().run, run_branch, factory, contexts[branch], copy.deepcopy(case),
                         harness=copy.deepcopy(harness), max_interactions=max_interactions,
-                        session=sessions[branch], **injected): branch
+                        session=sessions[branch], checklist_required=checklist_required, **injected): branch
             for branch in ("baseline", "candidate")
         }
         for future in as_completed(futures):
             results[futures[future]] = future.result()
+    if contexts["baseline"].execution_plan is not None and all(result.get("ok") for result in results.values()):
+        # Output histories can legitimately diverge. Compare the first actual model
+        # request (before either branch has generated a response), masking only targets.
+        observed = {
+            branch: comparable_requests(result["observed_requests"][:1], contexts[branch].execution_plan)
+            for branch, result in results.items()
+        }
+        if observed["baseline"] != observed["candidate"]:
+            for result in results.values():
+                result.update(ok=False, completed=False, status="unsupported", error_code="REPLAY_UNSUPPORTED",
+                              execution_verification="unsupported",
+                              error="actual A/B requests changed non-target model/tool/context inputs")
     return results
 
 
@@ -340,7 +381,12 @@ def render_trajectory(messages: list[dict[str, Any]]) -> str:
 
 
 def _evaluate_case(job_id, job, case, source, factory, timeout, max_interactions):
+    from .evaluation import external_evaluation_enabled
+
+    if external_evaluation_enabled(job.get("evaluation")):
+        raise ReplayUnsupported("external evaluation requires the ReplayHost runner")
     snapshot = _snapshot(case, source)
+    plans = case_execution_plan_pair(plan_from_job(job, "baseline"), plan_from_job(job, "candidate"), case)
     contexts = {
         branch: make_context(
             branch,
@@ -354,6 +400,7 @@ def _evaluate_case(job_id, job, case, source, factory, timeout, max_interactions
             source,
             timeout,
             snapshot=snapshot,
+            execution_plan=plans[0 if branch == "baseline" else 1],
         )
         for branch in ("baseline", "candidate")
     }
@@ -399,9 +446,19 @@ def evaluate_job(
     job = copy.deepcopy(job if job is not None else load_candidate_job(job_id))
     if job is None:
         return {"status": "not_found", "job_id": job_id}
+    from .evaluation import external_evaluation_enabled
+
+    if external_evaluation_enabled(job.get("evaluation")):
+        return {"status": "unsupported", "job_id": job_id, "accepted": False, "verdict": "inconclusive",
+                "no_regression": False, "reason": "external evaluation requires the ReplayHost runner", "cases": []}
     skill = job.get("candidate_skill") or {}
     host = current_host(required=False)
-    validation = host.validate_skill_treatment(skill) if host else validate_skill_treatment(skill)
+    if job.get("candidate_kind") == "execution":
+        plans = validate_execution_plan_pair(plan_from_job(job, "baseline"), plan_from_job(job, "candidate"))
+        validation = {"passed": plans[0] is not None and not skill and not job.get("current_skill"),
+                      "kind": "execution_plan", "errors": []}
+    else:
+        validation = host.validate_skill_treatment(skill) if host else validate_skill_treatment(skill)
     if not validation.get("passed"):
         return {"status": "evaluated", "mode": "true_replay", "job_id": job_id, "accepted": False,
                 "verdict": "reject", "no_regression": False, "static_validation": validation,

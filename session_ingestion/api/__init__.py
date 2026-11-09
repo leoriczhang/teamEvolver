@@ -8,7 +8,6 @@ on Worker dependencies injected by the application root."""
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
 from typing import Any
 
@@ -52,6 +51,7 @@ def create_router(services=None, **kwargs) -> APIRouter:
         session: dict[str, Any], pull: dict[str, Any] | None = None,
         adapter_id: str = "", adapter_revision: int = 0, business_time: Any = None,
         kind: str = KIND_NORMALIZE,
+        request_key: str = "",
     ) -> AcceptedJob:
         """Atomic acceptance: ingestion + raw payload + worker task, then 202."""
         tenant_id = current_tenant_id()
@@ -83,7 +83,8 @@ def create_router(services=None, **kwargs) -> APIRouter:
         # the worker reads); then the ingestion + task rows commit together.
         await asyncio.to_thread(payloads.put_payload_json, payload_ref, task_payload.to_json(), session)
 
-        dedupe_key = _dedupe_key(source, external_id, pull)
+        scoped_request_key = f"{adapter_id}:{request_key}" if request_key else ""
+        dedupe_key = _dedupe_key(source, external_id, pull, request_key=scoped_request_key)
         async with tx.tenant_tx(tenant_id) as conn:
             accepted_id = await repo.accept(
                 conn,
@@ -104,6 +105,8 @@ def create_router(services=None, **kwargs) -> APIRouter:
             )
             if accepted_id != ingestion_id:
                 existing = await repo.get_ingestion(conn, ingestion_id=accepted_id)
+                if source == SOURCE_PULL and existing and existing["payload_hash"] != payload_hash:
+                    raise HTTPException(409, "Idempotency-Key was used for a different pull request")
                 job_id = str((existing or {}).get("task_id") or f"{accepted_id}:{kind}")
                 return AcceptedJob(
                     ingestion_id=accepted_id, job_id=job_id,
@@ -136,13 +139,19 @@ def create_router(services=None, **kwargs) -> APIRouter:
     return router
 
 
-def _dedupe_key(source: str, external_id: str, pull: dict[str, Any] | None) -> str:
-    """Idempotency key: a repeated push of the same session, or an identical
-    pull request window, maps back to the first acceptance."""
+def _dedupe_key(source: str, external_id: str, pull: dict[str, Any] | None, *, request_key: str = "") -> str:
+    """A new pull is a fresh scan; only explicit retries reuse a run.
+
+    Source snapshot identity independently prevents repeated model work across
+    runs. A window must not permanently hide subsequently arriving Trace data.
+    """
     if source == SOURCE_PUSH:
         return f"push:{external_id}" if external_id else ""
-    window = json.dumps(pull or {}, sort_keys=True, separators=(",", ":"))
-    return f"pull:{window}"
+    if request_key:
+        import hashlib
+
+        return "pull-request:" + hashlib.sha256(request_key.encode()).hexdigest()
+    return "pull-run:" + uuid.uuid4().hex
 
 
 def _register_push(router: APIRouter, accept, services) -> None:
@@ -183,6 +192,9 @@ def _register_push(router: APIRouter, accept, services) -> None:
                 session["turns"] = await verifier(principal, body.get("turns") or [])
             except ValueError as exc:
                 raise HTTPException(400, str(exc)) from exc
+        from ..source_revisions import reported_session
+
+        session = reported_session(session)
         job = await accept(
             source=SOURCE_PUSH,
             external_id=external_id,
@@ -223,6 +235,7 @@ def _register_pull(router: APIRouter, accept, tx) -> None:
             adapter_id=binding["adapter_id"],
             adapter_revision=int(binding["revision"]),
             kind=KIND_PULL,
+            request_key=request.headers.get("Idempotency-Key", ""),
         )
         return _accepted_response(job)
 

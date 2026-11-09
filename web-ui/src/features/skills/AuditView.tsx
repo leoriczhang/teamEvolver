@@ -11,8 +11,9 @@ usePagedItems,
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { type EvolveHistoryCycle } from "@/features/skills/api/client";
+import { moduleNames } from "@/features/skills/EvolutionModulePicker";
 import {
-auditAction,auditCycle,auditReason,auditState,needsAuditRefresh,type AuditCycle,type AuditJob,
+auditAction,auditCycle,auditGroupName,auditReason,auditState,needsAuditRefresh,type AuditCycle,type AuditJob,
 } from "@/features/skills/evolutionAudit";
 import { fmtTime } from "@/lib/format";
 import { toastErr } from "@/lib/toast";
@@ -111,7 +112,7 @@ export default function AuditView({ active }: { active: boolean }) {
         <Button variant="outline" size="sm" onClick={search} disabled={loading}>查询</Button>
       </div>
       <p className="mb-4 text-xs text-muted-foreground">
-        仅展示 Skill 进化周期，目录检查和模型测试等辅助任务不计入。未完成任务每 5 秒自动刷新。
+        仅展示进化周期，目录检查和模型测试等辅助任务不计入。未完成任务每 5 秒自动刷新。
       </p>
 
       <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">
@@ -142,13 +143,26 @@ export default function AuditView({ active }: { active: boolean }) {
                           {c.finished_at && <div className="mt-1 text-xs text-muted-foreground">完成时间：{fmtTime(c.finished_at)}</div>}
                           <div className="mt-1 text-xs text-muted-foreground">
                             {c.hasResult
-                              ? `${Number(c.sessions ?? sessionIds.length)} 会话 / ${c.skill_groups} 技能组 / 上传 ${c.uploaded_skills ?? 0} / 候选 ${c.candidates_queued ?? 0}`
+                              ? `${Number(c.sessions ?? sessionIds.length)} 会话 / ${c.skill_groups} ${evos.some(e => e.candidate_kind === "execution" || (e.group_key || e.skill_name)?.startsWith("execution:")) ? "执行配置组" : "技能组"} / 上传 ${c.uploaded_skills ?? 0} / 候选 ${c.candidates_queued ?? 0}`
                               : "结果尚未生成，处理数量待确认。"}
                           </div>
                         </div>
                         <Pill tone={state.tone}>{state.label}</Pill>
                       </div>
                       {c.taskError && <div className="mb-3 break-all text-xs text-destructive">任务错误：{c.taskError}</div>}
+                      <div className="mb-3 space-y-1 text-xs text-muted-foreground">
+                        <div>允许修改：{moduleNames(c.allowed_modules)}</div>
+                        <div>实际修改：{moduleNames(c.actual_modules)}</div>
+                        {c.config_revision != null && <div>冻结配置版本：{c.config_revision}</div>}
+                        {(c.received_sessions != null || c.effective_source_sessions != null || c.excluded_sessions != null) && (
+                          <div>接收归档 Session：{c.received_sessions ?? "未记录"} / 有效独立来源：{c.effective_source_sessions ?? "未记录"} / 排除归档 Session：{c.excluded_sessions ?? "未记录"}</div>
+                        )}
+                      </div>
+                      {c.hasResult && !c.candidates_queued && (c.zero_candidate_reason || c.reason) && (
+                        <div className="mb-3 text-xs text-muted-foreground">
+                          无候选原因：{auditReason(c.zero_candidate_reason || c.reason || "")}
+                        </div>
+                      )}
 
                       {judge.overall_score != null || judge.rationale ? (
                         <div className="mb-3 rounded-lg border border-border bg-background/60 p-3 text-sm">
@@ -178,7 +192,8 @@ export default function AuditView({ active }: { active: boolean }) {
                         <div className="mb-1.5 text-xs font-semibold text-muted-foreground">分组结果</div>
                         {!evos.length ? (
                           <div className="text-xs text-muted-foreground">
-                            {c.hasResult ? "本周期未生成候选，未记录分组原因。" : "任务尚未返回分组结果。"}
+                            {c.hasResult ? (c.zero_candidate_reason || c.reason
+                              ? "本周期未生成候选，原因见上方。" : "本周期未生成候选，未记录分组原因。") : "任务尚未返回分组结果。"}
                           </div>
                         ) : (
                           <div className="space-y-2.5">
@@ -188,7 +203,7 @@ export default function AuditView({ active }: { active: boolean }) {
                                 <div key={k} className="rounded-lg border border-line bg-surface-subtle p-3">
                                   <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                                     <div className="flex flex-wrap items-center gap-2">
-                                      <span className="mono text-xs font-semibold">{e.skill_name === "__no_skill__" ? "未关联 Skill 的会话组" : e.skill_name || "-"}</span>
+                                      <span className="mono text-xs font-semibold">{auditGroupName(e)}</span>
                                       <Pill tone={e.action === "skip" ? "gray" : "blue"}>{auditAction(e.action)}</Pill>
                                       {e.uploaded && <Pill tone="green">已上传</Pill>}
                                     </div>
@@ -197,6 +212,7 @@ export default function AuditView({ active }: { active: boolean }) {
                                   {reason ? (
                                     <div className="mt-2 text-xs leading-relaxed text-muted-foreground">{auditReason(reason)}</div>
                                   ) : null}
+                                  {e.actual_modules && <div className="mt-2 text-xs text-muted-foreground">实际修改：{moduleNames(e.actual_modules)}</div>}
                                   {(e.candidate_id || e.job_id) && <div className="mono mt-2 break-all text-[11px] text-muted-foreground">候选 ID：{e.candidate_id || e.job_id}</div>}
                                   {!!e.session_ids?.length && <div className="mt-2 text-[11px] text-muted-foreground">关联 {e.session_ids.length} 条 Session</div>}
                                   {e.file_changes?.length ? (

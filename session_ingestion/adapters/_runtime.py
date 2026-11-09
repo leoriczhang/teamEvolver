@@ -62,6 +62,9 @@ def validate_content(content: str, filename: str) -> dict:
                 break
             if not isinstance(value.get("enabled", True), bool):
                 raise AdapterError("SOURCE.enabled must be boolean")
+            for field in ("source_instance_id", "upstream_namespace"):
+                if field in value and (not isinstance(value[field], str) or not value[field].strip()):
+                    raise AdapterError(f"SOURCE.{field} must be non-empty text")
             for field in ("supported_filters", "required_filters"):
                 items = value.get(field, [])
                 if not isinstance(items, list) or not all(isinstance(k, str) for k in items):
@@ -86,6 +89,8 @@ def validate_content(content: str, filename: str) -> dict:
                     "provider",
                     "host",
                     "project_id",
+                    "source_instance_id",
+                    "upstream_namespace",
                     "enabled",
                     "supported_filters",
                     "required_filters",

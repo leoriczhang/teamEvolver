@@ -47,7 +47,12 @@ def branch(monkeypatch):
     )
     monkeypatch.setattr(cycle, "_inputs", AsyncMock(return_value=sessions))
     monkeypatch.setattr(cycle, "load_sessions", AsyncMock(return_value=sessions))
-    monkeypatch.setattr(cycle, "groups", lambda value: {cycle.NO_SKILL_KEY: value})
+
+    def legacy_groups(value, *, execution_profile=None, baseline=None):
+        assert execution_profile is None and baseline is None
+        return {cycle.NO_SKILL_KEY: value}
+
+    monkeypatch.setattr(cycle, "groups", legacy_groups)
     services = SimpleNamespace(
         tx=SimpleNamespace(tenant_tx=tenant_tx),
         tasks=SimpleNamespace(require_current=AsyncMock()),
@@ -262,3 +267,17 @@ def test_pipeline_forks_dataset_from_evidence_and_joins_at_validation():
     assert nodes["merge"]["conditional"]
     assert nodes["validate"]["join"] == "all"
     assert not nodes["dataset_synthesis"].get("conditional")
+
+
+def test_pipeline_copy_describes_incremental_evidence_actual_skill_usage_and_agent_pull():
+    nodes = {node["id"]: node for node in pipeline_graph({})["nodes"]}
+    assert "原始会话上下文" in nodes["analyze_session"]["description"]
+    assert "新增或更新" in nodes["analyze_session"]["description"]
+    assert nodes["analyze_trace_badcase"]["label"] == "Trace 级增量分析"
+    assert "重复事实复用已有分析" in nodes["analyze_trace_badcase"]["description"]
+    assert "前文只作上下文" in nodes["analyze_trace_badcase"]["description"]
+    assert "实际使用" in nodes["group"]["description"]
+    assert "可见或注入清单不等于已使用" in nodes["group"]["description"]
+    assert "只修改业务 Prompt／上下文组件" in nodes["evolve_skill"]["description"]
+    assert "由 Agent pull 获取" in nodes["publish"]["description"]
+    assert "同步云端" not in nodes["publish"]["description"]

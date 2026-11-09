@@ -1,9 +1,12 @@
 import { api } from "@/api/client";
 import { runSkillCommand } from "@/features/skills/api/skillJobs";
+import EvolutionModulePicker, { evolutionModules } from "@/features/skills/EvolutionModulePicker";
+import ExecutionProfilePanel from "@/features/skills/ExecutionProfilePanel";
+import ReplayEvaluationSettings from "@/features/replay/ReplayEvaluationSettings";
 import { Empty,Panel,Pill,Term,type PillTone } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { type UserProfile } from "@/features/admin/api/client";
-import { type EvolveProcessSettings,type PipelineGraph,type PipelineNode,type PromptDetail,type PromptStudioSession,type PromptSummary,type PromptTestResult } from "@/features/skills/api/client";
+import { type EvolutionModule,type EvolveProcessSettings,type PipelineGraph,type PipelineNode,type PromptDetail,type PromptStudioSession,type PromptSummary,type PromptTestResult } from "@/features/skills/api/client";
 import { GLOSSARY } from "@/lib/glossary";
 import { toastErr,toastOk } from "@/lib/toast";
 import { cn } from "@/lib/utils";
@@ -63,6 +66,12 @@ export default function PromptStudioView({
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [triggering, setTriggering] = useState(false);
+  const [allowedModules, setAllowedModules] = useState<EvolutionModule[]>(["skill"]);
+  const [savingScope, setSavingScope] = useState(false);
+  const [executionProfileId, setExecutionProfileId] = useState("");
+  const [planModules, setPlanModules] = useState<EvolutionModule[]>(["skill"]);
+  const [planProfileId, setPlanProfileId] = useState("");
+  const scopeLoaded = useRef(false);
   const [showDefault, setShowDefault] = useState(false);
   const loaded = useRef(false);
 
@@ -132,6 +141,13 @@ export default function PromptStudioView({
       if (processResult.status === "fulfilled") {
         setProcessSettings(processResult.value);
         setSavedProcessSettings(JSON.stringify(processResult.value));
+        setPlanModules(evolutionModules(processResult.value.evolve?.evolution_allowed_modules));
+        setPlanProfileId(String(processResult.value.evolve?.evolution_execution_profile_id || ""));
+        if (!scopeLoaded.current) {
+          setAllowedModules(evolutionModules(processResult.value.evolve?.evolution_allowed_modules));
+          setExecutionProfileId(String(processResult.value.evolve?.evolution_execution_profile_id || ""));
+          scopeLoaded.current = true;
+        }
       } else {
         setProcessSettings(null);
         setSavedProcessSettings("");
@@ -176,7 +192,12 @@ export default function PromptStudioView({
       if (processSettings) {
         const savedProcess = await api<EvolveProcessSettings>("/api/skill-evolution/settings", {
           method: "PUT", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ evolve: processSettings.evolve, validation: processSettings.validation }),
+          body: JSON.stringify({
+            evolve: Object.fromEntries(Object.entries(processSettings.evolve).filter(([key]) => (
+              key !== "evolution_allowed_modules" && key !== "evolution_execution_profile_id"
+            ))),
+            validation: processSettings.validation,
+          }),
         });
         setProcessSettings(savedProcess);
         setSavedProcessSettings(JSON.stringify(savedProcess));
@@ -257,17 +278,46 @@ export default function PromptStudioView({
   }
 
   async function triggerEvolution() {
-    if (!isAdmin) return;
+    if (!isAdmin || !allowedModules.length || (allowedModules.includes("prompt") && !executionProfileId)) return;
     setTriggering(true);
     try {
       const accepted = await api<{ job_id: string }>("/api/skill-evolution/trigger", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ allowed_modules: allowedModules, execution_profile_id: executionProfileId }),
       });
       toastOk("进化任务已提交", accepted.job_id);
     } catch (e: any) {
       toastErr("触发进化失败", e.message);
     } finally {
       setTriggering(false);
+    }
+  }
+
+  async function saveScope() {
+    if (!isAdmin || !processSettings) return;
+    const modules = planModules;
+    if (!modules.length) return;
+    setSavingScope(true);
+    try {
+      const saved = await api<EvolveProcessSettings>("/api/skill-evolution/settings", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          revision: processSettings.revision,
+          evolve: {
+            evolution_allowed_modules: modules,
+            evolution_execution_profile_id: planProfileId,
+          },
+        }),
+      });
+      setProcessSettings(saved);
+      setSavedProcessSettings(JSON.stringify(saved));
+      setPlanModules(evolutionModules(saved.evolve?.evolution_allowed_modules));
+      setPlanProfileId(String(saved.evolve?.evolution_execution_profile_id || ""));
+      toastOk("默认修改范围已保存", "仅对后续新任务生效，已有任务和重试沿用原范围");
+    } catch (e: any) {
+      toastErr("保存默认修改范围失败", e.message);
+    } finally {
+      setSavingScope(false);
     }
   }
 
@@ -289,7 +339,8 @@ export default function PromptStudioView({
         title="Skills 自进化链路"
         extra={
           <div className="flex items-center gap-2">
-            <Button size="sm" onClick={triggerEvolution} disabled={!isAdmin || triggering}>
+            <Button size="sm" onClick={triggerEvolution} disabled={!isAdmin || triggering || loading || !allowedModules.length
+              || (allowedModules.includes("prompt") && !executionProfileId)}>
               {triggering ? "提交中…" : "立即进化"}
             </Button>
             <Button variant="ghost" size="sm" onClick={refresh} disabled={loading}>刷新</Button>
@@ -297,6 +348,50 @@ export default function PromptStudioView({
         }
       >
         <div className="p-4">
+          <div className="mb-4 space-y-3 rounded-lg border border-border p-3">
+            <EvolutionModulePicker
+              legend="本次允许修改的模块"
+              value={allowedModules}
+              onChange={setAllowedModules}
+              disabled={!isAdmin || loading || triggering}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              此选择仅用于「立即进化」，不会自动保存。未选模块保持不变，仍可参与诊断和必要回归。
+              Prompt 指业务 Agent 的提示词与受管理的上下文注入，不包含 TE 进化引擎、裁判或原始资料。
+              选中业务 Prompt 时，沿用同一条候选生成与验证路径，可只修改业务 Prompt／上下文组件。
+              仅修改业务组件时，Skill 内容与版本保持不变。
+              纯 Prompt Agent 可登记 0 Skill 依赖的执行配置，不会创建占位 Skill。
+            </p>
+            <ExecutionProfilePanel active={active} isAdmin={isAdmin} profileId={executionProfileId}
+              onChange={setExecutionProfileId} />
+            {allowedModules.includes("prompt") && !executionProfileId && (
+              <p role="alert" className="text-xs text-destructive">修改业务 Prompt 前，请选择或登记业务 Agent 执行配置。</p>
+            )}
+            {processSettings && (
+              <details className="border-t border-border pt-3">
+                <summary className="cursor-pointer text-xs font-semibold">默认修改范围（含自动计划）</summary>
+                <div className="mt-3 space-y-3">
+                  <EvolutionModulePicker
+                    legend="后续任务默认允许修改的模块"
+                    value={planModules}
+                    disabled={!isAdmin || savingScope}
+                    onChange={setPlanModules}
+                  />
+                  <label className="block text-xs font-semibold">后续任务默认执行配置 ID
+                    <input className="mt-1 block w-full rounded-md border border-border bg-background px-2 py-1.5"
+                      disabled={!isAdmin || savingScope}
+                      value={planProfileId}
+                      onChange={event => setPlanProfileId(event.target.value)} />
+                  </label>
+                  <Button size="sm" variant="outline" onClick={saveScope}
+                    disabled={!isAdmin || savingScope || !planModules.length}>
+                    {savingScope ? "保存中…" : "保存默认修改范围"}
+                  </Button>
+                  <p className="text-[11px] text-muted-foreground">须显式保存；已有任务与重试保留原范围，旧计划默认只修改 Skill。</p>
+                </div>
+              </details>
+            )}
+          </div>
           <PipelineChain
             graph={graph}
             selectedPrompt={selectedId}
@@ -310,14 +405,16 @@ export default function PromptStudioView({
                 <Pill tone={KIND_TONE[k]}>{KIND_LABEL[k]}</Pill>
               </span>
             ))}
-            <span className="ml-auto">点击蓝色「LLM 阶段」节点可直接编辑其 prompt。</span>
+            <span className="ml-auto">下方编辑的是 TE 进化引擎 Prompt，不是本次候选的业务 Prompt。</span>
           </div>
         </div>
       </Panel>
 
+      <ReplayEvaluationSettings active={active} isAdmin={isAdmin} />
+
       <div className="grid gap-6 lg:grid-cols-[260px_1fr]">
         {/* ---- Prompt list ---- */}
-        <Panel title="可编辑 Prompt" count={`${prompts.length} 个`}>
+        <Panel title="TE 进化引擎 Prompt" count={`${prompts.length} 个`}>
           <div className="flex flex-col p-2">
             {prompts.map((p) => (
               <button
@@ -665,8 +762,8 @@ function PipelineChain({
     <div className="space-y-3">
       {graph.nodes.some((node) => node.parallel_group) && (
         <div className="rounded-lg border border-blue-200 bg-blue-50/40 px-3 py-2 text-xs text-muted-foreground">
-          <span className="font-semibold text-foreground">技能进化与测试集生成并行。</span>
-          {" "}两者使用同一批 Session 证据，测试集独立生成；候选技能和测试集均完成后汇合验证。
+          <span className="font-semibold text-foreground">候选生成与测试集生成并行。</span>
+          {" "}两者使用同一批 Session 证据，测试集独立生成；Skill 或业务 Prompt 候选和测试集均完成后汇合验证。
         </div>
       )}
     <div className="flex items-stretch gap-1.5 overflow-x-auto pb-1">
@@ -674,7 +771,7 @@ function PipelineChain({
         <div key={colIndex} className="flex items-stretch gap-1.5">
           <div
             role={column.some((node) => node.parallel_group) ? "group" : undefined}
-            aria-label={column.some((node) => node.parallel_group) ? "技能进化与测试集并行" : undefined}
+            aria-label={column.some((node) => node.parallel_group) ? "候选生成与测试集并行" : undefined}
             className={cn(
               "flex flex-col justify-center gap-2",
               column.some((node) => node.parallel_group) && "rounded-xl border border-blue-200 bg-blue-50/20 p-2",
@@ -692,7 +789,7 @@ function PipelineChain({
                 <div key={node.id} className="space-y-1.5">
                   {node.branch && node.branch !== column[nodeIndex - 1]?.branch && (
                     <div className="px-1 text-[10px] font-semibold text-muted-foreground">
-                      {node.branch === "skill" ? "技能进化 · 按分组选择路径" : "测试集 · 独立生成"}
+                      {node.branch === "skill" ? "候选生成 · 按分组选择路径" : "测试集 · 独立生成"}
                     </div>
                   )}
                 <button

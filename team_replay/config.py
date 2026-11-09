@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .evaluation import normalize_evaluation
+
 DEFAULT_REPLAY_CONFIG = {
     "concurrency": 2, "timeout_seconds": 600, "max_interactions": 4,
     "account_id": "default", "llm_model_id": "",
@@ -23,7 +25,9 @@ async def load_replay_config(repo, conn):
         raise ValueError("Replay configuration must use secret refs")
     run_options({key: row.config[key] for key in ("concurrency", "timeout_seconds", "max_interactions")
                  if key in row.config})
-    return ReplayConfig(row.revision, {**DEFAULT_REPLAY_CONFIG, **row.config})
+    value = {**DEFAULT_REPLAY_CONFIG, **row.config}
+    value["evaluation"] = normalize_evaluation(row.config.get("evaluation"))
+    return ReplayConfig(row.revision, value)
 
 
 def run_options(body):

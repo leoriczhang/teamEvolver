@@ -5,19 +5,40 @@ import asyncio
 import copy
 
 from session_ingestion.queries import SessionQueries
+from session_ingestion.schemas import session_payload_hash
 from team_skills.candidates.repository import CandidateRepository, CandidateStateError
 from team_skills.candidates.static_checks import validate_candidate_bundle
-from team_skills.config import SkillsModuleConfig
+from team_skills.config import SkillsModuleConfig, replay_case_counts
 from team_skills.evolution.candidate_pipeline import load_command, submit_validation
 from team_skills.evolution.history import skill_payload
 from team_skills.evolution.kernel.bundle_changes import materialize_bundle_changes, select_editable_files
 from team_skills.evolution.kernel.enums import NO_SKILL_KEY, DecisionAction
-from team_skills.evolution.repository import EvolutionRepository
-from team_skills.evolution.session_processing import evidence_gap, groups, load_sessions
+from team_skills.evolution.repository import EvolutionRepository, lock_key
+from team_skills.evolution.scope import resolved_allowed_modules
+from team_skills.evolution.session_processing import (
+    evidence_gap,
+    evidence_source_key,
+    groups,
+    load_sessions,
+    merge_evidence,
+    project_prompt_session,
+)
+from team_skills.execution.batching import PromptBatchInputTooLarge, shared_template_batch
+from team_skills.execution.evolution import (
+    attach_execution_proposal,
+    fixed_skill_material,
+    planning_context,
+    prompt_evidence_gap,
+    prompt_session_matches,
+)
+from team_skills.execution.holdout import generation_budget_policy
+from team_skills.execution.planning import assert_planning_current, freeze_prompt_planning, synthesis_context
+from team_skills.execution.repository import ExecutionRepository
 from team_skills.experiences.patterns import compact_context
 from team_skills.experiences.repository import ExperienceRepository
-from team_skills.library.bundle import candidate_skill_bundle
+from team_skills.library.bundle import bundle_tree_sha256, candidate_skill_bundle
 from team_skills.library.repository import SkillLibraryRepository
+from teamEvolver.llm_usage import LLMUsageBudgetExceeded, collect_llm_usage
 from teamEvolver.runtime import HandlerResult
 from teamEvolver.runtime.leases import LeaseGuard
 
@@ -26,7 +47,32 @@ CASE_SYNTHESIS_TIMEOUT_SECONDS = 300
 RESOURCE_HEARTBEAT_SECONDS = 15
 
 
-async def _prepare_branch(task, services, *, name, planning, current, names, context,
+async def _prepare_branch(task, services, **kwargs):
+    context = kwargs["context"]
+    if "prompt" not in context.get("allowed_modules", ["skill"]):
+        return await _prepare_branch_work(task, services, **kwargs)
+    budget = generation_budget_policy(
+        context["baseline_execution_plan"], context.get("generation_budget"),
+    )["max_total_tokens"]
+    with collect_llm_usage("evolution:" + task.task_id, budget_tokens=budget) as meter:
+        try:
+            result, material, diff, static, cases = await _prepare_branch_work(task, services, **kwargs)
+        except LLMUsageBudgetExceeded:
+            result, material, diff, static, cases = (
+                {"action": DecisionAction.SKIP, "rationale": "generation_model_cost_budget_exhausted"},
+                None, {}, {}, [],
+            )
+    result["generation_cost"] = meter.snapshot()
+    result["generation_cost"]["unreconciled_worker_attempts"] = max(0, getattr(task, "attempt", 1) - 1)
+    if shared_template_batch(context) and result.get("rationale") == "raw_prompt_evidence_exceeds_budget":
+        raise PromptBatchInputTooLarge(
+            "Prompt editing input exceeded the byte limit; the complete batch remains unconsumed",
+            generation_cost=result["generation_cost"],
+        )
+    return result, material, diff, static, cases
+
+
+async def _prepare_branch_work(task, services, *, name, planning, current, names, context,
                           working_bundle, editable, config, planner, case_synthesizer, library_reader,
                           guard, handle):
     """Fork from frozen Evidence and join before any Candidate write."""
@@ -36,19 +82,29 @@ async def _prepare_branch(task, services, *, name, planning, current, names, con
                     config=config, library_reader=library_reader), timeout=PLANNER_TIMEOUT_SECONDS,
         )
         result = result or {"action": DecisionAction.SKIP, "rationale": "planner returned no proposal"}
-        if result.get("action") == DecisionAction.SKIP or not result.get("skill"):
+        allowed = context.get("allowed_modules", ["skill"])
+        changes = result.get("component_changes") or []
+        if (result.get("action") == DecisionAction.SKIP and not changes) or (not result.get("skill") and not changes):
             return result, None, {}, {}
-        proposed = dict(result["skill"])
-        if current:
-            proposed = {**current, **proposed, "name": name}
-            if result["action"] == DecisionAction.OPTIMIZE_DESC:
-                proposed["content"] = current["content"]
-        material, diff = materialize_bundle_changes(
-            proposed, current_bundle=working_bundle, file_changes=proposed.get("file_changes") or [],
-            editable_paths=editable, extensions=config.get("bundle_text_extensions"),
-            max_file_bytes=config.get("bundle_edit_max_bytes"), allow_delete=config.get("bundle_allow_delete"),
+        if name is None or "skill" not in allowed or (changes and not result.get("skill")):
+            material, diff = fixed_skill_material(name, working_bundle, result)
+        else:
+            proposed = dict(result["skill"])
+            if current:
+                proposed = {**current, **proposed, "name": name}
+                if result["action"] == DecisionAction.OPTIMIZE_DESC:
+                    proposed["content"] = current["content"]
+            material, diff = materialize_bundle_changes(
+                proposed, current_bundle=working_bundle, file_changes=proposed.get("file_changes") or [],
+                editable_paths=editable, extensions=config.get("bundle_text_extensions"),
+                max_file_bytes=config.get("bundle_edit_max_bytes"), allow_delete=config.get("bundle_allow_delete"),
+            )
+        material = attach_execution_proposal(
+            result, material, context=context, allowed_modules=allowed,
+            working_bundle=working_bundle, skill_changed=bool(diff.get("changed_count")),
         )
-        static = await asyncio.to_thread(validate_candidate_bundle, material)
+        static = ({"passed": True, "scope": "execution", "checks": []} if name is None
+                  else await asyncio.to_thread(validate_candidate_bundle, material))
         return result, material, diff, static
 
     # The planner may mutate its working context; synthesis gets the same
@@ -56,7 +112,8 @@ async def _prepare_branch(task, services, *, name, planning, current, names, con
     dataset_work = asyncio.create_task(asyncio.wait_for(
         case_synthesizer(
             skill_name=name, sessions=copy.deepcopy(planning), candidate_skill={},
-            evidence_context=copy.deepcopy(context),
+            evidence_context=(synthesis_context(context) if "prompt" in context.get("allowed_modules", [])
+                              else copy.deepcopy(context)),
         ), timeout=CASE_SYNTHESIS_TIMEOUT_SECONDS,
     ))
     proposal_work = asyncio.create_task(propose())
@@ -84,13 +141,21 @@ async def _prepare_branch(task, services, *, name, planning, current, names, con
         candidate_cases = copy.deepcopy(await wait(dataset_work))
         # New Skill names only become available when planning finishes.
         for case in candidate_cases:
-            case["skill_ids"] = [material["name"]]
+            case["skill_ids"] = [material["name"]] if name is not None else []
         return result, material, diff, static, candidate_cases
     finally:
         for work in (proposal_work, dataset_work):
             if not work.done():
                 work.cancel()
         await asyncio.gather(proposal_work, dataset_work, return_exceptions=True)
+
+
+def _consumption_scope(payload):
+    profile = (payload.get("execution_baseline") or {}).get("profile") or {}
+    if ("prompt" in resolved_allowed_modules(payload) and profile.get("affected_skill_ids") == []
+            and profile.get("profile_id") == payload.get("execution_profile_id") and profile.get("profile_id")):
+        return "execution:" + profile["profile_id"]
+    return ""
 
 
 async def _inputs(task, services, payload, repo):
@@ -100,6 +165,10 @@ async def _inputs(task, services, payload, repo):
     if saved is not None:
         return saved["sessions"]
     selected, cursor = [], None
+    scope = _consumption_scope(payload)
+    baseline = ((payload.get("execution_baseline") or {}).get("release") or {}).get("document", {}).get(
+        "execution_plan",
+    )
     limit = min(200, max(1, int(payload["config"]["evolution_max_sessions"])))
     ids = payload.get("session_ids") or None
     while len(selected) < limit:
@@ -107,7 +176,7 @@ async def _inputs(task, services, payload, repo):
             page = await SessionQueries(services.tx).evolution_page(
                 conn, session_ids=ids, after=cursor, limit=200,
             )
-            consumed = await repo.consumed(conn, page)
+            consumed = await repo.consumed(conn, page, **({"scope": scope} if scope else {}))
         if not page:
             break
         for row in page:
@@ -116,13 +185,20 @@ async def _inputs(task, services, payload, repo):
             # A trigger only includes Sessions that existed at acceptance.
             if row["ingested_at"].isoformat() > payload["accepted_at"]:
                 continue
+            if scope:
+                raw = await asyncio.to_thread(services.extras["session_payloads"].get_session, row["content_ref"])
+                if session_payload_hash(raw) != row["content_hash"]:
+                    raise ValueError("Session content hash changed after acceptance")
+                session = {**raw, "session_id": row["session_id"], "content_hash": row["content_hash"]}
+                if project_prompt_session(session, baseline) is None:
+                    continue
             selected.append({
                 k: v.isoformat() if hasattr(v, "isoformat") else v for k, v in row.items()
             })
             if len(selected) == limit:
                 break
         cursor = page[-1]["ingested_at"], page[-1]["session_id"]
-        if ids or len(page) < 200:
+        if (ids and not scope) or len(page) < 200:
             break
     async with services.tx.tenant_tx(task.tenant_id) as conn:
         await services.tasks.require_current(conn, task)
@@ -141,13 +217,31 @@ class LLMSkillPlanner:
     async def __call__(self, *, name, sessions, current, names, context, config, library_reader):
         from team_skills.evolution.stages.execute import create_skill_from_sessions, evolve_skill_from_sessions
 
+        allowed = context.get("allowed_modules", ["skill"])
+        prompt_proposal = {}
+        if "prompt" in allowed:
+            from team_skills.execution.planner import propose_prompt
+            prompt_proposal = await propose_prompt(
+                self.llm, sessions=sessions, context=context,
+                json_mode=config.get("prompt_editor_json_mode", False),
+                max_rounds=config.get("prompt_editor_max_rounds"),
+            )
+            if "skill" not in allowed or name is None:
+                return prompt_proposal
+
         if name == NO_SKILL_KEY:
             return await create_skill_from_sessions(
                 self.llm, sessions, names, evolution_context=context, library_reader=library_reader,
             )
-        return await evolve_skill_from_sessions(
+        skill_proposal = await evolve_skill_from_sessions(
             self.llm, name, sessions, current, names, evolution_context=context,
         )
+        if prompt_proposal.get("component_changes"):
+            return {**(skill_proposal or {}), "component_changes": prompt_proposal["component_changes"],
+                    "rationale": "\n".join(filter(None, [(skill_proposal or {}).get("rationale"),
+                                                         prompt_proposal.get("rationale")])),
+                    "action": (skill_proposal or {}).get("action") or "change_execution"}
+        return skill_proposal
 
 
 async def run_cycle(task, services) -> HandlerResult:
@@ -171,6 +265,16 @@ async def run_cycle(task, services) -> HandlerResult:
         return HandlerResult.retry("evolution_busy")
     try:
         return await _cycle(task, services, p, config, planner, case_synthesizer, payloads, guard, handle)
+    except PromptBatchInputTooLarge as exc:
+        # A deterministic input failure is not an analysed/consumed batch. Keep
+        # any measured calls in the existing command result for truthful audit.
+        async with services.tx.tenant_tx(task.tenant_id) as conn:
+            await services.tasks.require_current(conn, task)
+            await EvolutionRepository(services.tx).finish(conn, task.task_id, {
+                "status": "failed", "reason": "prompt_batch_input_too_large", "detail": str(exc),
+                "material_consumed": False, "generation_cost": exc.generation_cost,
+            })
+        return HandlerResult.fail("prompt_batch_input_too_large")
     finally:
         async with services.tx.tenant_tx(task.tenant_id) as conn:
             await guard.release(conn, handle)
@@ -191,30 +295,93 @@ async def _cycle(task, services, p, config, planner, case_synthesizer, payloads,
         return bundle["SKILL.md"].decode()
 
     records = []
-    for name, group in groups(sessions).items():
+    sampling_context = ({"replay_case_counts": replay_case_counts(p["config"])} if any(
+        key in p.get("config", {}) for key in ("evolution_current_case_count", "evolution_historical_case_count")
+    ) else {})
+    allowed_modules = resolved_allowed_modules(p)
+    frozen = p.get("execution_baseline") or {}
+    pure_profile = frozen.get("profile") if "prompt" in allowed_modules else None
+    for branch_key, group in groups(
+        sessions, execution_profile=pure_profile,
+        baseline=(frozen.get("release") or {}).get("document", {}).get("execution_plan"),
+    ).items():
+        execution_only = branch_key.startswith("execution:")
+        name = None if execution_only else branch_key
         async with services.tx.tenant_tx(task.tenant_id) as conn:
             if not await guard.heartbeat(conn, handle, lease_seconds=600):
                 raise RuntimeError("evolution resource lease lost")
-            saved = await repo.branch(conn, task.task_id, name)
-            historical = await repo.evidence(conn, name)
-            head = await library.get_skill(conn, name)
+            saved = await repo.branch(conn, task.task_id, branch_key)
+            historical = await repo.evidence(conn, branch_key, include_source="prompt" in allowed_modules)
+            head = await library.get_skill(conn, name) if name is not None else None
             published = await library.read_version_bundle(conn, name, head["version"]) if head else {}
-            live = await cands.live_for_skill(conn, name)
+            live = (await cands.live_for_execution(conn, pure_profile["profile_id"]) if execution_only
+                    else await cands.live_for_skill(conn, name))
             working_bundle = await cands.read_bundle(conn, live["candidate_id"]) if live else published
             pattern_context, pattern_refs = compact_context(
-                await ExperienceRepository(services.tx).patterns(conn, name),
+                await ExperienceRepository(services.tx).patterns(conn, name) if name is not None else [],
             )
+            execution_context, execution_gap = await planning_context(
+                conn, services.tx, profile_id=p.get("execution_profile_id", ""),
+                skill_name=name, allowed_modules=allowed_modules,
+                frozen=p.get("execution_baseline"),
+            )
+            execution_context.update(copy.deepcopy(sampling_context))
+            prompt_snapshot = None
         if saved is not None:
             records.append(saved)
             continue
+        if "prompt" in allowed_modules and not execution_gap:
+            from team_skills.execution.planning import restore_prompt_history
+
+            historical, unavailable = await restore_prompt_history(services, task, historical, payloads)
+            execution_context["unavailable_historical_session_ids"] = unavailable
+            prompt_sessions = merge_evidence(group, historical)
+            if execution_only:
+                prompt_sessions = [s for s in prompt_sessions if prompt_session_matches(
+                    s, execution_context["baseline_execution_plan"],
+                )]
+            excluded = set(execution_context.get("excluded_source_keys") or [])
+            prompt_sessions = [s for s in prompt_sessions if evidence_source_key(s) not in excluded]
+            if shared_template_batch(execution_context):
+                # Freeze the same host metadata whose real request builders
+                # select history. Current Evidence keeps the native limits.
+                execution_context.update(
+                    skill_name=name, current_session_count=len(group), experience_patterns=pattern_context,
+                    active_candidate_job_id=live["candidate_id"] if live else "", allowed_modules=allowed_modules,
+                    **({"generation_budget": copy.deepcopy(p["generation_budget"])}
+                       if "generation_budget" in p else {}),
+                )
+            async with services.tx.tenant_tx(task.tenant_id) as conn:
+                profile = await ExecutionRepository(services.tx).profile(
+                    conn, execution_context["execution_profile_id"],
+                )
+                if profile["current_release_id"] != execution_context["base_release_id"]:
+                    raise CandidateStateError("execution baseline changed before Prompt planning")
+                prompt_snapshot = await freeze_prompt_planning(
+                    conn, repo, task=task, branch_key=branch_key, context=execution_context,
+                    candidate=live, sessions=prompt_sessions,
+                    **({"current_session_ids": [s["session_id"] for s in group]}
+                       if shared_template_batch(execution_context) else {}),
+                )
+                execution_context = prompt_snapshot["execution_context"]
         current = skill_payload(name, working_bundle)
-        current_ids = {s["session_id"] for s in group}
-        planning = group + [s for s in historical if s["session_id"] not in current_ids]
+        planning = merge_evidence(group, historical)
+        if execution_only:
+            planning = [s for s in planning if prompt_session_matches(
+                s, execution_context.get("baseline_execution_plan"),
+            )]
+        reserved = set(execution_context.get("excluded_source_keys") or [])
+        planning = [s for s in planning if evidence_source_key(s) not in reserved]
+        if prompt_snapshot is not None:
+            planning = prompt_snapshot["sessions"]
         context = {
-            "skill_name": name, "total_evidence_sessions": len(planning),
+            "skill_name": name,
+            "total_evidence_sessions": len({evidence_source_key(s) for s in planning}),
             "current_session_count": len(group), "active_candidate_job_id": live["candidate_id"] if live else "",
             "active_candidate_feedback": live["evaluation"] if live else {},
             "experience_patterns": pattern_context,
+            "allowed_modules": allowed_modules, **execution_context,
+            **({"generation_budget": copy.deepcopy(p["generation_budget"])} if "generation_budget" in p else {}),
         }
         editable = select_editable_files(
             working_bundle, extensions=config.get("bundle_text_extensions"),
@@ -223,49 +390,80 @@ async def _cycle(task, services, p, config, planner, case_synthesizer, payloads,
         )
         if current:
             current["_editable_bundle_files"] = editable
-        gap = evidence_gap(planning, config)
+        gap = execution_gap or evidence_gap(planning, config)
+        if (not gap and live and "skill" not in allowed_modules and head
+                and bundle_tree_sha256(working_bundle) != head["tree_sha256"]):
+            gap = "existing_candidate_outside_scope: review the pending Skill change before Prompt-only evolution"
+        if not gap and "prompt" in allowed_modules:
+            gap = prompt_evidence_gap(planning, execution_context.get("baseline_execution_plan"))
         if gap:
             result, material, diff, static, candidate_cases = (
                 {"action": DecisionAction.SKIP, "rationale": gap}, None, {}, {}, [],
             )
         else:
             result, material, diff, static, candidate_cases = await _prepare_branch(
-                task, services, name=name, planning=planning, current=current, names=names, context=context,
+                task, services,
+                name=name, planning=planning, current=current, names=names, context=context,
                 working_bundle=working_bundle, editable=editable, config=config, planner=planner,
                 case_synthesizer=case_synthesizer, library_reader=library_reader, guard=guard, handle=handle,
             )
         record = {
-            "skill_name": name, "session_ids": [s["session_id"] for s in group],
+            "skill_name": name, "group_key": branch_key,
+            "candidate_kind": "execution" if execution_only else "skill",
+            "execution_profile_id": execution_context.get("execution_profile_id", ""),
+            "session_ids": [s["session_id"] for s in group],
             "action": "skip", "rationale": str(result.get("rationale") or ""),
+            "allowed_modules": allowed_modules, "actual_modules": [],
+            "generation_cost": result.get("generation_cost"),
         }
         async with services.tx.tenant_tx(task.tenant_id) as conn:
             await services.tasks.require_current(conn, task)
             if not await guard.heartbeat(conn, handle, lease_seconds=600):
                 raise RuntimeError("evolution resource lease lost")
-            await repo.record_evidence(conn, tenant_id=task.tenant_id, name=name, sessions=group)
+            await repo.record_evidence(conn, tenant_id=task.tenant_id, name=branch_key, sessions=group)
             if material:
                 # A human edit while the model worked invalidates this proposal.
-                latest = await cands.live_for_skill(conn, material["name"])
+                if prompt_snapshot is not None:
+                    subject = (f"candidate-execution:{pure_profile['profile_id']}" if execution_only
+                               else f"candidate-skill:{material['name']}")
+                    await lock_key(conn, task.tenant_id, subject)
+                latest = (await cands.live_for_execution(conn, pure_profile["profile_id"]) if execution_only
+                          else await cands.live_for_skill(conn, material["name"]))
+                if prompt_snapshot is not None:
+                    profile = await ExecutionRepository(services.tx).profile(
+                        conn, execution_context["execution_profile_id"], for_update=True,
+                    )
+                    assert_planning_current(prompt_snapshot, latest, profile["current_release_id"])
                 if (latest["revision"] if latest else 0) != (live["revision"] if live else 0):
                     raise CandidateStateError("candidate changed while the planner was running")
                 candidate = await cands.create(
-                    conn, tenant_id=task.tenant_id, skill_name=material["name"],
-                    bundle=candidate_skill_bundle(material), limits=config.bundle_limits,
-                    proposed_action="update" if head else "create", base_version=head["version"] if head else 0,
+                    conn, tenant_id=task.tenant_id, skill_name=None if execution_only else material["name"],
+                    bundle={} if execution_only else candidate_skill_bundle(material), limits=config.bundle_limits,
+                    proposed_action="update" if head or execution_only else "create",
+                    base_version=head["version"] if head else 0,
                     detail={
                         "rationale": record["rationale"], "session_ids": record["session_ids"],
                         "pattern_refs": pattern_refs,
                         "evidence_classification": result.get("evidence_classification") or {},
                         "evolution_context": context, "replay_cases": candidate_cases,
+                        "session_evidence": [{
+                            "session_id": s["session_id"], "provenance": s.get("provenance") or {},
+                        } for s in planning],
+                        "generation_cost": result.get("generation_cost"),
+                        **({"editor_audit": result["editor_audit"]} if "editor_audit" in result else {}),
                         "edit_summary": material.get("edit_summary") or {},
                         "file_changes": material.get("file_changes") or [], "bundle_diff": diff,
                         "static_validation": static,
+                        "allowed_modules": allowed_modules,
+                        **material.get("_execution_detail", {}),
                     },
                 )
                 record.update(action="candidate_created", candidate_id=candidate["candidate_id"],
-                              candidate_revision=candidate["revision"])
+                              candidate_revision=candidate["revision"],
+                              actual_modules=candidate.get("detail", {}).get("actual_modules", ["skill"]))
                 if config.get("auto_evaluate"):
-                    mode = "auto" if config.get("publish_mode") == "automatic" else "evaluate"
+                    mode = ("auto" if config.get("publish_mode") == "automatic"
+                            and not candidate["detail"].get("candidate_execution_plan") else "evaluate")
                     await submit_validation(
                         conn, services, tenant_id=task.tenant_id, candidate_id=candidate["candidate_id"],
                         command_id=f"evaluate:{candidate['candidate_id']}:r{candidate['revision']}",
@@ -273,15 +471,28 @@ async def _cycle(task, services, p, config, planner, case_synthesizer, payloads,
                         mode=mode,
                     )
             await repo.save_branch(
-                conn, tenant_id=task.tenant_id, command_id=task.task_id, key=name,
+                conn, tenant_id=task.tenant_id, command_id=task.task_id, key=branch_key,
                 session_ids=record["session_ids"], result=record,
             )
         records.append(record)
     async with services.tx.tenant_tx(task.tenant_id) as conn:
         await services.tasks.require_current(conn, task)
-        await repo.consume(conn, tenant_id=task.tenant_id, command_id=task.task_id, sessions=descriptors)
+        scope = _consumption_scope(p)
+        consumed_descriptors = descriptors
+        if scope:
+            matched_ids = {sid for record in records if record.get("group_key") == scope
+                           for sid in record["session_ids"]}
+            consumed_descriptors = [row for row in descriptors if row["session_id"] in matched_ids]
+        await repo.consume(conn, tenant_id=task.tenant_id, command_id=task.task_id, sessions=consumed_descriptors,
+                           **({"scope": scope} if scope else {}))
         await repo.finish(conn, task.task_id, {
             "status": "completed", "sessions": len(sessions), "evolutions": records,
+            "received_sessions": len(descriptors),
+            "effective_source_sessions": len({evidence_source_key(s) for s in sessions}),
+            "excluded_sessions": len(descriptors) - len(sessions),
+            "reason": "no_verifiable_new_evidence" if descriptors and not sessions else "",
             "candidates_queued": sum(r["action"] == "candidate_created" for r in records),
+            "allowed_modules": allowed_modules,
+            "actual_modules": sorted({m for r in records for m in r.get("actual_modules", [])}),
         })
     return HandlerResult.succeed(task.task_id)

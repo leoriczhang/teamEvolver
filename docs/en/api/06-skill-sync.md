@@ -16,6 +16,8 @@ If-None-Match: "<previous ETag>"
 | --- | --- | --- |
 | `user_id` | Yes | User ID within the tenant; rules in [Protocol v2](../agent-integrations/06-protocol-v2.md#identity) |
 | `If-None-Match` | No | `ETag` of the previous response; returns 304 when unchanged |
+| `execution_profile_id` | No | Pull a registered business Agent composition bound to this `user_id` |
+| `execution_capability` | For compositions | `teamevolver.execution-plan.v1`; unsupported clients receive 409 |
 
 ## Response
 
@@ -72,4 +74,10 @@ teamEvolver skills --tenant demo pull --user-id alice
 
 `list` calls `GET /api/skills` with `TEAMEVOLVER_ROOT_API_KEY`. `pull` calls `/sync/skills` with `TEAMEVOLVER_TENANT_TOKEN` and writes the bundles into the rebuildable local cache (`skills_runtime_cache_dir`).
 
-Publishing and rollback of team Skills are covered in [Team Skill Library](./09-skills-admin.md).
+Composition pull adds `execution`, containing `release_id`, `composition_hash`, `profile_id`, `document` and pinned `skills`. New clients must use `execution.skills` together with `execution.document.execution_plan`; outer `skills` retains the latest library view for older clients. Manual Skill changes do not replace a published composition's pinned dependency. ETags also cover composition changes, including Prompt-only releases.
+
+Pure Prompt profiles may have zero Skills: `execution.skills` and `execution.document.skill_dependencies` are both `[]`, while Prompt/Context text remains in `execution.document.execution_plan.components`. An empty Skill list does not mean there is no update to load. Clients must validate the complete composition and load the actual business text without creating a placeholder `SKILL.md` or increasing a Skill version for a Prompt-only release.
+
+`POST /sync/skills/execution-receipt?user_id=...` uses the same tenant Key. Its exact body fields are `profile_id`, `release_id`, `composition_hash`, `request_id`, and `state` (`downloaded` or `activated`). A request ID cannot be reused with different content. Receipts are `agent_reported`, not proof of actual model consumption. Prepare and validate the whole composition before atomically switching its active pointer; ongoing sessions pin the old composition.
+
+See [Skill and business Prompt execution evolution](../concepts/12-execution-evolution.md) for integration and composition rollback. Publishing and rollback of team Skills are covered in [Team Skill Library](./09-skills-admin.md).

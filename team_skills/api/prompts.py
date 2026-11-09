@@ -14,6 +14,7 @@ from teamEvolver.tenants.registry import current_tenant_id
 from ..evolution import prompt_studio as studio
 from ..evolution.candidate_pipeline import enqueue_command
 from ..evolution.prompt_context import prompt_context
+from ..evolution.scope import configured_allowed_modules, normalize_allowed_modules, normalize_execution_profile_id
 from .candidates import accepted, actor, command_id
 from .common import read_json
 
@@ -110,18 +111,34 @@ def create_router(services):
 
     @router.get("/api/skill-evolution/settings")
     async def process():
-        from ..config import DEFAULT_SKILLS_CONFIG
+        from ..config import DEFAULT_SKILLS_CONFIG, replay_case_counts
         row = await read()
         evolve_keys = (
             "evolution_max_sessions", "min_group_sessions", "min_group_users",
             "evolution_trigger_mode", "evolution_interval_seconds", "bundle_allow_delete",
             "bundle_prompt_max_bytes", "bundle_edit_max_bytes",
+            "evolution_allowed_modules",
+            "evolution_execution_profile_id",
+            "evolution_current_case_count", "evolution_historical_case_count",
         )
         validation_keys = ("auto_evaluate", "publish_mode")
+        try:
+            allowed_modules = configured_allowed_modules(row.config)
+            execution_profile_id = normalize_execution_profile_id(row.config.get("evolution_execution_profile_id", ""))
+            replay_case_counts(row.config)
+        except ValueError as exc:
+            raise HTTPException(
+                503, "invalid configured evolution scope, execution profile or Replay sampling",
+            ) from exc
         return {
-            "evolve": {k: row.config.get(k, DEFAULT_SKILLS_CONFIG[k]) for k in evolve_keys},
+            "evolve": {
+                **{k: row.config.get(k, DEFAULT_SKILLS_CONFIG[k]) for k in evolve_keys},
+                "evolution_allowed_modules": allowed_modules,
+                "evolution_execution_profile_id": execution_profile_id,
+            },
             "validation": {k: row.config.get(k, DEFAULT_SKILLS_CONFIG[k]) for k in validation_keys},
             "revision": row.revision,
+            "available_modules": ["skill", "prompt"],
         }
 
     @router.put("/api/skill-evolution/settings")
@@ -136,6 +153,9 @@ def create_router(services):
                 "evolution_max_sessions", "min_group_sessions", "min_group_users",
                 "evolution_trigger_mode", "evolution_interval_seconds", "bundle_allow_delete",
                 "bundle_prompt_max_bytes", "bundle_edit_max_bytes",
+                "evolution_allowed_modules",
+                "evolution_execution_profile_id",
+                "evolution_current_case_count", "evolution_historical_case_count",
             }
             validation_allowed = {"auto_evaluate", "publish_mode"}
             evolve = raw.get("evolve", {})
@@ -154,6 +174,23 @@ def create_router(services):
                 raise HTTPException(400, "publish_mode must be manual or automatic")
             if "auto_evaluate" in validation and type(validation["auto_evaluate"]) is not bool:
                 raise HTTPException(400, "auto_evaluate must be boolean")
+            from ..config import replay_case_counts
+            try:
+                replay_case_counts({**row.config, **evolve})
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            if "evolution_allowed_modules" in evolve:
+                try:
+                    evolve = {**evolve, "evolution_allowed_modules": normalize_allowed_modules(
+                        evolve["evolution_allowed_modules"],
+                    )}
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc)) from exc
+            if "evolution_execution_profile_id" in evolve:
+                try:
+                    normalize_execution_profile_id(evolve["evolution_execution_profile_id"])
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc)) from exc
             await configs.write_tenant_module(
                 conn,
                 module="skills",

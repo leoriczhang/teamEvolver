@@ -12,9 +12,13 @@ def create_router(services=None, **kwargs) -> APIRouter:
         return router
     from .adapters import create_router as adapters
     from .datasets import create_router as datasets
+    from .evaluation import create_router as evaluation
+    from .evaluator_adapters import create_router as evaluator_adapters
     from .runs import create_router as runs
 
     router.include_router(datasets(services))
     router.include_router(adapters(services))
+    router.include_router(evaluation(services))
+    router.include_router(evaluator_adapters(services))
     router.include_router(runs(services))
     return router

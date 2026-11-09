@@ -22,9 +22,9 @@ from typing import Any, Callable, Optional
 from team_skills.evolution.agent.cards import build_merge_card, build_round1_user_msg, render_observation_message
 from team_skills.evolution.agent.contract import (
     normalize_classification,
-    parse_turn,
     validate_final,
 )
+from team_skills.evolution.agent.loop import LoopPlanResult, run_editor_loop
 from team_skills.evolution.agent.tools import ToolContext, ToolRegistry, build_protocol_appendix
 from team_skills.evolution.kernel.enums import DecisionAction
 
@@ -187,6 +187,68 @@ def _plan_correction_message(plan: dict) -> str:
     )
 
 
+class _SkillLoopAdapter:
+    """Keep Skill evidence gates, tools and final materialization asset-owned."""
+
+    final_action_default = "merge"
+
+    def __init__(self, *, stage: str, skill_name: str, ctx: ToolContext, registry: ToolRegistry):
+        self.stage = stage
+        self.skill_name = skill_name
+        self.ctx = ctx
+        self.registry = registry
+        self.plan_record: Optional[dict] = None
+        self.plan_action: Optional[str] = None
+        self.plan_corrected = False
+
+    def plan(self, plan: dict, *, round_no: int, max_rounds: int) -> LoopPlanResult:
+        candidate = str(plan.get("action_candidate") or "").strip()
+        classification = normalize_classification(plan.get("evidence_classification"))
+        if candidate == DecisionAction.SKIP:
+            return LoopPlanResult(done=True, log_kind="plan_skip", result={
+                "action": DecisionAction.SKIP,
+                "rationale": str(plan.get("rationale") or ""),
+                "evidence_classification": classification,
+            })
+        if not classification["team_skill"] and self.stage != "merge":
+            if not self.plan_corrected:
+                self.plan_corrected = True
+                return LoopPlanResult(log_kind="plan_correction", message=_plan_correction_message(plan))
+            return LoopPlanResult(done=True, log_kind="plan_gate_skip", result={
+                "action": DecisionAction.SKIP,
+                "rationale": (
+                    "Plan gate: action_candidate 非空但 team_skill 证据仍为空，终局 skip。"
+                    + str(plan.get("rationale") or "")
+                ).strip(),
+                "evidence_classification": classification,
+            })
+        self.plan_record = plan
+        self.plan_action = candidate or None
+        return LoopPlanResult(log_fields={"action": candidate}, message=self.observe(
+            [{"tool": "(loop)", "ok": True, "message": "计划已确认。现在按计划调用工具，完成后提交 final。"}],
+            round_no=round_no, max_rounds=max_rounds,
+        ))
+
+    async def tools(self, calls: list[dict]) -> list[dict]:
+        return await self.registry.execute(calls)
+
+    def finalize(self, decision: dict) -> tuple[Optional[dict], list[str]]:
+        normalized, errors = validate_final(decision, stage=self.stage)
+        if errors:
+            return None, errors
+        return _accept_final(normalized, self.ctx, self.stage)
+
+    def observe(self, observations: list[dict], *, round_no: int, max_rounds: int,
+                must_submit: bool = False) -> str:
+        return render_observation_message(
+            _loop_state(self.ctx, self.plan_action, round_no, max_rounds),
+            observations, must_submit=must_submit,
+        )
+
+    def fallback(self) -> Optional[dict]:
+        return _best_effort(self.stage, self.skill_name, self.ctx, self.plan_record)
+
+
 async def run_skill_agent(
     llm: Any,
     *,
@@ -245,145 +307,18 @@ async def run_skill_agent(
             evolution_context=evolution_context,
         )
 
-    messages: list[dict] = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": round1_user},
-    ]
-    _dump(debug_stem, "", system, round1_user, None)
+    def dump(round_no: int, system: str, user_msg: str, raw: Optional[str]) -> None:
+        suffix = "" if round_no <= 1 else f"_round{round_no:02d}"
+        _dump(debug_stem, suffix, system, user_msg, raw)
 
-    plan_record: Optional[dict] = None
-    plan_action: Optional[str] = None
-    plan_corrected = False
-
-    def log_round(round_no: int, kind: str, **extra: Any) -> None:
-        if round_log is not None:
-            round_log.append({"round": round_no, "type": kind, **extra})
-
-    for round_no in range(1, max_rounds + 1):
-        raw = await llm.chat(messages, **call_options, **_round_trace(trace_kwargs, round_no))
-        _dump(
-            debug_stem,
-            "" if round_no == 1 else f"_round{round_no:02d}",
-            system,
-            str(messages[-1].get("content") or ""),
-            raw,
-        )
-
-        turn = parse_turn(raw)
-        if not turn.get("ok") and round_no == max_rounds:
-            turn = parse_turn(raw, allow_repair=True)
-        if not turn.get("ok"):
-            log_round(round_no, "parse_error", error=str(turn.get("error")))
-            messages.append(
-                {
-                    "role": "user",
-                    "content": render_observation_message(
-                        _loop_state(ctx, plan_action, round_no, max_rounds),
-                        [
-                            {
-                                "tool": "(protocol)",
-                                "ok": False,
-                                "error": (
-                                    "上一轮无法解析为协议 JSON："
-                                    f"{turn.get('error')}。请重新输出一个合法的 "
-                                    "JSON 对象（plan / tool_calls / final），不要围栏。"
-                                ),
-                            }
-                        ],
-                        must_submit=round_no + 1 >= max_rounds,
-                    ),
-                }
-            )
-            continue
-
-        turn_type = turn["type"]
-
-        if turn_type == "plan":
-            plan = turn["plan"]
-            candidate = str(plan.get("action_candidate") or "").strip()
-            classification = normalize_classification(plan.get("evidence_classification"))
-            if candidate == DecisionAction.SKIP:
-                log_round(round_no, "plan_skip")
-                return {
-                    "action": DecisionAction.SKIP,
-                    "rationale": str(plan.get("rationale") or ""),
-                    "evidence_classification": classification,
-                }
-            if not classification["team_skill"] and stage != "merge":
-                if not plan_corrected:
-                    plan_corrected = True
-                    log_round(round_no, "plan_correction")
-                    messages.append({"role": "user", "content": _plan_correction_message(plan)})
-                    continue
-                log_round(round_no, "plan_gate_skip")
-                return {
-                    "action": DecisionAction.SKIP,
-                    "rationale": (
-                        "Plan gate: action_candidate 非空但 team_skill 证据仍为空，终局 skip。"
-                        + str(plan.get("rationale") or "")
-                    ).strip(),
-                    "evidence_classification": classification,
-                }
-            plan_record = plan
-            plan_action = candidate or None
-            log_round(round_no, "plan_accepted", action=candidate)
-            messages.append(
-                {
-                    "role": "user",
-                    "content": render_observation_message(
-                        _loop_state(ctx, plan_action, round_no, max_rounds),
-                        [
-                            {
-                                "tool": "(loop)",
-                                "ok": True,
-                                "message": "计划已确认。现在按计划调用工具，完成后提交 final。",
-                            }
-                        ],
-                    ),
-                }
-            )
-            continue
-
-        if turn_type == "tool_calls":
-            observations = await registry.execute(turn["calls"])
-            log_round(
-                round_no,
-                "tool_calls",
-                tools=[str(call.get("tool") or "") for call in turn["calls"] if isinstance(call, dict)],
-            )
-            messages.append(
-                {
-                    "role": "user",
-                    "content": render_observation_message(
-                        _loop_state(ctx, plan_action, round_no, max_rounds),
-                        observations,
-                        must_submit=round_no + 1 >= max_rounds,
-                    ),
-                }
-            )
-            continue
-
-        # final
-        decision = turn["decision"]
-        normalized, errors = validate_final(decision, stage=stage)
-        if not errors:
-            finalized, errors = _accept_final(normalized, ctx, stage)
-            if finalized is not None:
-                log_round(round_no, "final", action=str(finalized.get("action") or "merge"))
-                return finalized
-        log_round(round_no, "final_rejected", errors=errors)
-        if round_no < max_rounds:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": render_observation_message(
-                        _loop_state(ctx, plan_action, round_no, max_rounds),
-                        [{"tool": "(validation)", "ok": False, "errors": errors}],
-                        must_submit=round_no + 1 >= max_rounds,
-                    ),
-                }
-            )
-            continue
-        break
-
-    return _best_effort(stage, skill_name, ctx, plan_record)
+    return await run_editor_loop(
+        llm,
+        adapter=_SkillLoopAdapter(stage=stage, skill_name=skill_name, ctx=ctx, registry=registry),
+        system=system,
+        first_user=round1_user,
+        max_rounds=max_rounds,
+        call_options=call_options,
+        trace_kwargs=trace_kwargs,
+        debug_dump=dump,
+        round_log=round_log,
+    )

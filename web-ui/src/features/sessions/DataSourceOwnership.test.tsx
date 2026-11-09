@@ -44,6 +44,29 @@ const source = {
   },
 };
 
+it("keeps the source binding pinned and explicitly rebinds the same filename to a new revision", async () => {
+  const fallback = mocks.api.getMockImplementation()!;
+  let bound = 1;
+  mocks.api.mockImplementation(async (path: string, options?: RequestInit) => {
+    if (path === "/api/datasource") {
+      if (options?.method === "PUT") bound = JSON.parse(String(options.body)).revision;
+      return { ...source, revision: bound, available: [{ file: "a.py", revision: 2 }] };
+    }
+    return fallback(path, options);
+  });
+  render(<DataSourcesView active user={admin} />);
+  const selector = await screen.findByLabelText("适配器版本");
+  expect(selector).toHaveValue("1");
+  const save = screen.getByRole("button", { name: "保存绑定" });
+  expect(save).toBeDisabled();
+  fireEvent.change(selector, { target: { value: "2" } });
+  fireEvent.click(save);
+  await waitFor(() => expect(mocks.api).toHaveBeenCalledWith("/api/datasource", expect.objectContaining({
+    method: "PUT", body: JSON.stringify({ file: "a.py", revision: 2 }),
+  })));
+  await waitFor(() => expect(save).toBeDisabled());
+});
+
 beforeEach(() => {
   mocks.api.mockReset();
   mocks.api.mockImplementation(async (path: string, options?: RequestInit) => {

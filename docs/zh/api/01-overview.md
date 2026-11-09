@@ -24,7 +24,7 @@
 
 `TEAMEVOLVER_ROOT_API_KEY` 是部署级密钥，供运维脚本和 CLI 使用（`teamEvolver datasource` 即通过它调用 API）。它对应平台管理员服务身份，可通过 `X-Tenant-Id` 选择任一 active 租户；租户不存在或已停用时返回 `403 TENANT_ACCESS_DENIED`。
 
-只有 Root Key 能读写租户 Python 源码：`/api/datasource/code`、`/api/replay-adapter/code` 及其 `test` 接口。Root Key 不能下发到浏览器。
+只有 Root Key 能读写租户 Python 源码：`/api/datasource/code`、`/api/replay-adapter/code`、`/api/replay-evaluator-adapter/code`，以及已提供的源码 `test` 接口。Root Key 不能下发到浏览器。
 
 ### 租户 Key
 

@@ -1,6 +1,7 @@
 
 export interface AdapterFile {
   file: string;
+  revision?: number;
   label?: string;
   provider?: string;
   host?: string;

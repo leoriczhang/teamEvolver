@@ -44,7 +44,10 @@ async def candidate_payload(conn, tx, item: dict, *, compact: bool = False) -> d
     events = await repo.events(conn, item["candidate_id"])
     detail = item["detail"]
     payload = {
-        **detail, "job_id": item["candidate_id"], "skill_name": item["skill_name"],
+        **detail,
+        "candidate_kind": item.get("candidate_kind", "skill"),
+        "execution_profile_id": item.get("execution_profile_id") or detail.get("execution_profile_id", ""),
+        "job_id": item["candidate_id"], "skill_name": item["skill_name"],
         "candidate_skill_name": item["skill_name"], "proposed_action": item["proposed_action"],
         "candidate_revision": item["revision"], "review_status": item["status"],
         "replay_verdict": item["verdict"], "recommended_publish": item["verdict"] == "accept",
@@ -52,17 +55,23 @@ async def candidate_payload(conn, tx, item: dict, *, compact: bool = False) -> d
         "decision": item["decision"], "validation_job_id": item["validate_task_id"],
         "created_at": item["created_at"].isoformat(), "updated_at": item["updated_at"].isoformat(),
         "decided_at": item["decided_at"].isoformat() if item["decided_at"] else "",
+        "current_case_ids": [case["case_id"] for case in detail.get("replay_cases", [])],
     }
     for key in ("session_evidence", "replay_cases", "evolution_context"):
         payload.pop(key, None)
-    if item["status"] == "validating":
+    if item["validate_task_id"]:
         from team_skills.evolution.repository import EvolutionRepository
         command = await EvolutionRepository(tx).command(conn, item["validate_task_id"])
-        frozen = command["payload"].get("detail", detail) if command else detail
-        payload["replay_progress"] = {
-            "total": len(frozen.get("replay_cases") or []),
-            **await ReplayRepository(tx).progress(conn, "skill", item["validate_task_id"]),
-        }
+        current = command and command["payload"].get("revision") == item["revision"]
+        frozen = command["payload"].get("detail", detail) if current else detail
+        if current:
+            payload["current_case_ids"] = [case["case_id"] for case in frozen.get("replay_cases", [])]
+            payload["validation_plan"] = frozen.get("validation_plan") or {}
+        if item["status"] == "validating":
+            payload["replay_progress"] = {
+                "total": len(frozen.get("replay_cases") or []),
+                **await ReplayRepository(tx).progress(conn, "skill", item["validate_task_id"]),
+            }
         payload["replay_sampling"] = frozen.get("replay_sampling") or {}
     if not compact:
         bundle = await repo.read_bundle(conn, item["candidate_id"])
@@ -75,7 +84,7 @@ async def candidate_payload(conn, tx, item: dict, *, compact: bool = False) -> d
         payload.update(
             candidate_skill=skill_payload(item["skill_name"], bundle),
             current_skill=skill_payload(item["skill_name"], baseline),
-            candidate_skill_md=bundle["SKILL.md"].decode(),
+            candidate_skill_md=bundle.get("SKILL.md", b"").decode(),
             current_skill_md=baseline.get("SKILL.md", b"").decode(),
             bundle_diff=diff,
             skill_diff=next((f.get("diff", "") for f in diff["files"] if f["path"] == "SKILL.md"), ""),

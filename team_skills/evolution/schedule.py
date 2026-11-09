@@ -5,8 +5,10 @@ from __future__ import annotations
 from uuid import uuid4
 
 from team_skills.config import load_skills_config
+from team_skills.execution.evolution import freeze_profile_scope
 
 from .candidate_pipeline import enqueue_command
+from .scope import configured_allowed_modules, normalize_execution_profile_id
 
 _ACTIVE = ("queued", "running", "retry_wait", "waiting_external", "reconciling")
 
@@ -17,6 +19,8 @@ async def evolution_tick(services, *, tenant_id: str) -> dict:
         config = await load_skills_config(services.extras["config_repo"], conn)
         if config.get("evolution_trigger_mode") != "automatic":
             return {"state": "manual"}
+        allowed_modules = configured_allowed_modules(config.config)
+        execution_profile_id = normalize_execution_profile_id(config.get("evolution_execution_profile_id"))
         interval = max(60, min(604800, int(config.get("evolution_interval_seconds") or 600)))
         await conn.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
@@ -54,7 +58,7 @@ async def evolution_tick(services, *, tenant_id: str) -> dict:
         ):
             return {"state": "insufficient_sessions"}
         command_id = "evolve:auto:" + uuid4().hex
-        request = {"session_ids": []}
+        request = {"session_ids": [], "allowed_modules": allowed_modules, "execution_profile_id": execution_profile_id}
         command, _ = await enqueue_command(
             conn,
             services,
@@ -68,6 +72,11 @@ async def evolution_tick(services, *, tenant_id: str) -> dict:
                 "config": config.config,
                 "config_revision": config.revision,
                 "accepted_at": now.isoformat(),
+                "allowed_modules": allowed_modules,
+                "execution_profile_id": execution_profile_id,
+                "execution_baseline": await freeze_profile_scope(
+                    conn, services.tx, execution_profile_id, allowed_modules,
+                ),
             },
         )
         return {"state": "enqueued", "job_id": command["command_id"]}

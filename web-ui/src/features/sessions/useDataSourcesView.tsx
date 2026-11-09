@@ -16,6 +16,7 @@ const uploadRef = useRef<HTMLInputElement>(null);
 const manualPullJobRef = useRef("");
 const [source, setSource] = useState<Datasource | null>(null);
 const [file, setFile] = useState("");
+const [bindingRevision, setBindingRevision] = useState<number | undefined>();
 const [filters, setFilters] = useState<Record<string, string>>({});
 const [previewLimit, setPreviewLimit] = useState("100");
 const [health, setHealth] = useState<{ ok: boolean; error?: string } | null>(null);
@@ -43,6 +44,8 @@ const refresh = useCallback(async (selected?: string) => {
     const data = await api<Datasource>("/api/datasource");
     setSource(data);
     setFile(selected ?? data.file);
+    setBindingRevision(selected && selected !== data.file
+      ? data.available.find(item => item.file === selected)?.revision : data.revision);
     setHealth(null);
     setRows(null);
     setCounts(null);
@@ -129,6 +132,8 @@ function chooseFile(value: string) {
     if (!mayDiscard()) return;
     closeDraft();
     setFile(value);
+    setBindingRevision(value === source?.file ? source.revision
+      : source?.available.find(item => item.file === value)?.revision);
   }
 function filterBody(meta: AdapterFile | null = source) {
     const body: Record<string, unknown> = {};
@@ -207,7 +212,7 @@ async function saveBinding() {
       await api("/api/datasource", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ file }),
+        body: JSON.stringify({ file, ...(file && bindingRevision !== undefined ? { revision: bindingRevision } : {}) }),
       });
       closeDraft();
       setFilters({});
@@ -432,7 +437,7 @@ async function runSaved(action: "test" | "sessions" | "pull" | "refresh") {
     }
   }
 
-const bindingDirty = file !== (source?.file || "");
+const bindingDirty = file !== (source?.file || "") || (!!file && bindingRevision !== source?.revision);
 const savedReady = !!source?.configured && source.enabled && !bindingDirty && !busy;
 const activeMeta = draftMeta
     || source?.available.find((item) => item.file === codeFile)
@@ -473,5 +478,5 @@ const scheduleTone: "blue" | "red" | "green" | "gray" | "amber" = scheduleStatus
           || scheduleStatus?.last_status === "deferred"
           ? "amber"
           : "gray";
-return { uploadRef, source, file, filters, setFilters, previewLimit, setPreviewLimit, health, rows, counts, code, setCode, codeFile, setCodeFile, revision, dirty, setDirty, setDraftMeta, draftResult, setDraftResult, schedule, setSchedule, busy, error, pullSummary, canEditSource, mayDiscard, closeDraft, chooseFile, loadCode, newDraft, uploadDraft, saveBinding, saveSchedule, runScheduleNow, saveCode, runDraft, runSaved, bindingDirty, savedReady, activeMeta, filterMeta, missing, warning, savedSchedule, scheduleStatus, scheduleDirty, scheduleAdapterReady, scheduleLabel, scheduleTone };
+return { uploadRef, source, file, bindingRevision, setBindingRevision, filters, setFilters, previewLimit, setPreviewLimit, health, rows, counts, code, setCode, codeFile, setCodeFile, revision, dirty, setDirty, setDraftMeta, draftResult, setDraftResult, schedule, setSchedule, busy, error, pullSummary, canEditSource, mayDiscard, closeDraft, chooseFile, loadCode, newDraft, uploadDraft, saveBinding, saveSchedule, runScheduleNow, saveCode, runDraft, runSaved, bindingDirty, savedReady, activeMeta, filterMeta, missing, warning, savedSchedule, scheduleStatus, scheduleDirty, scheduleAdapterReady, scheduleLabel, scheduleTone };
 }

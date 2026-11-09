@@ -36,6 +36,9 @@ class ReplayAdapterRepository:
             f"INSERT INTO {self.schema}.adapters(tenant_id,adapter_id,kind) VALUES($1,$2,'replay') "
             "ON CONFLICT DO NOTHING", tenant_id, filename,
         )
+        kind = await conn.fetchval(f"SELECT kind FROM {self.schema}.adapters WHERE adapter_id=$1", filename)
+        if kind != "replay":
+            raise DatasetConflict("adapter filename belongs to another adapter type")
         await conn.execute(
             f"INSERT INTO {self.schema}.adapter_versions(tenant_id,adapter_id,revision,source_hash,source) "
             "VALUES($1,$2,$3,$4,$5)", tenant_id, filename, current + 1,
@@ -43,13 +46,19 @@ class ReplayAdapterRepository:
         )
         return {"file": filename, "revision": current + 1, **meta}
 
-    async def binding(self, conn):
+    async def binding(self, conn, *, for_update=False, tenant_id=""):
+        if for_update:
+            if not tenant_id:
+                raise ValueError("locking a Replay binding requires a tenant")
+            # The same transaction lock in bind() protects even an absent binding.
+            await lock(conn, tenant_id, "adapter-binding:replay")
         row = await conn.fetchrow(
             f"SELECT adapter_id,revision FROM {self.schema}.adapter_bindings WHERE binding_key='replay'",
         )
         return await self.source(conn, row["adapter_id"], row["revision"]) if row else None
 
     async def bind(self, conn, *, tenant_id, filename, revision=None):
+        await lock(conn, tenant_id, "adapter-binding:replay")
         if not filename:
             await conn.execute(f"DELETE FROM {self.schema}.adapter_bindings WHERE binding_key='replay'")
             return None

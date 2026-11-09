@@ -33,20 +33,26 @@ PIPELINE_STAGES: dict[str, Any] = {
             "label": "会话分析 Analyze（分类+摘要+评分合一）",
             "kind": "llm",
             "prompt_id": "analyze_session",
-            "description": "每个 Session 入库前必须完成一次价值分类、轨迹摘要与会话评分。",
+            "description": "结合原始会话上下文，针对新增或更新的目标完成价值分类、轨迹摘要与会话评分；前文只作上下文。",
         },
         {
             "id": "analyze_trace_badcase",
-            "label": "Trace 级全量分析",
+            "label": "Trace 级增量分析",
             "kind": "llm",
             "prompt_id": "analyze_trace_badcase",
-            "description": "对每个会话的全部 Trace 输出分析结果，并按结果触发上报钩子。",
+            "description": (
+                "以新增或更新的 Trace 为分析目标，前文只作上下文；"
+                "重复事实复用已有分析，并按结果触发上报钩子。"
+            ),
         },
         {
             "id": "group",
             "label": "按技能分组 Group",
             "kind": "logic",
-            "description": "按被引用/注入的技能把会话分组；无技能的会话归入 no-skill 桶。",
+            "description": (
+                "按实际使用的团队 Skill 把会话分组；可见或注入清单不等于已使用，"
+                "无实际 Skill 使用的会话归入 no-skill 桶。"
+            ),
         },
         {
             "id": "evolve_skill",
@@ -56,7 +62,10 @@ PIPELINE_STAGES: dict[str, Any] = {
             "conditional": True,
             "parallel_group": "evidence_generation",
             "branch": "skill",
-            "description": "对已有技能：基于会话证据决定 improve/optimize_description/create/skip。",
+            "description": (
+                "对已有 Skill 组：基于会话证据生成候选；"
+                "选中业务 Prompt 时可沿用同一路径，只修改业务 Prompt／上下文组件。"
+            ),
         },
         {
             "id": "create_skill",
@@ -83,7 +92,7 @@ PIPELINE_STAGES: dict[str, Any] = {
             "prompt_id": "dataset_synthesis",
             "parallel_group": "evidence_generation",
             "branch": "dataset",
-            "description": "与技能进化并行，基于同一批 Session 和跨周期 Evidence 独立生成测试集，不读取本轮候选内容。",
+            "description": "与候选生成并行，基于同一批 Session 和跨周期 Evidence 独立生成测试集，不读取本轮候选内容。",
         },
         {
             "id": "validate",
@@ -91,7 +100,7 @@ PIPELINE_STAGES: dict[str, Any] = {
             "kind": "gate",
             "join": "all",
             "description": (
-                "等待候选技能和测试集均完成后执行 True Replay，校验 Checklist 并比较轮次、工具调用与 Token。"
+                "等待候选组合和测试集均完成后执行 True Replay，校验 Checklist 并比较轮次、工具调用与 Token。"
             ),
         },
         {
@@ -105,7 +114,10 @@ PIPELINE_STAGES: dict[str, Any] = {
             "id": "publish",
             "label": "发布 Publish",
             "kind": "io",
-            "description": "通过校验的候选写入技能库并同步云端；不通过则进入人工复核。",
+            "description": (
+                "按发布门禁提交通过验证的 Skill 或业务 Prompt／上下文组合，由 Agent pull 获取；"
+                "未满足门禁的候选保持待复核。"
+            ),
         },
     ],
     "edges": [
@@ -194,19 +206,19 @@ _STAGE_CATALOG: dict[str, dict[str, Any]] = {
         # tagged output.
         "max_tokens": 32768,
         "variables": [
-            "full session trajectory",
+            "original session context plus new/updated analysis targets",
             "interactions, tool calls, artifacts",
             "used_skills split (existing-skill critique vs new-SOP discovery)",
         ],
         "description": (
-            "每个 Session 入库前必须通过一次 LLM 调用完成价值分类、轨迹摘要与会话评分；"
-            "三段结果缺一则入库失败。prompt 中段按是否使用团队 Skill 分支：用了则关注该 "
+            "结合原始会话上下文，针对新增或更新的目标完成价值分类、轨迹摘要与会话评分；"
+            "前文只作上下文，三段结果缺一则入库失败。prompt 中段按是否实际使用团队 Skill 分支：用了则关注该 "
             "Skill 本身的表现与缺陷，没用则关注是否有可进化为新 Skill 的团队 SOP。"
         ),
     },
     "analyze_trace_badcase": {
         "id": "analyze_trace_badcase",
-        "label": "Trace 级全量分析",
+        "label": "Trace 级增量分析",
         "module": "team_skills.evolution.stages.trace_analyze",
         "symbol": "_TRACE_ANALYZE_SYSTEM",
         "resolver": _analyze_trace_badcase_default,
@@ -216,12 +228,12 @@ _STAGE_CATALOG: dict[str, dict[str, Any]] = {
         # trace; the payload carries per-trace signals, not full artifacts.
         "max_tokens": 8192,
         "variables": [
-            "per-trace prompt/response/score",
+            "new/updated per-trace prompt/response/score; prior turns as context",
             "tool errors per trace",
             "session summary",
         ],
         "description": (
-            "对每个会话逐 Trace 分析：每个 Trace 都产出结果，存在问题时给出受控 "
+            "以新增或更新的 Trace 为分析目标，前文只作上下文，重复事实复用已有分析；存在问题时给出受控 "
             "problem_type 与中文 problem_description，供 Trace 级结果上报（如上传 Doris）。"
         ),
     },
@@ -245,7 +257,8 @@ _STAGE_CATALOG: dict[str, dict[str, Any]] = {
         "description": (
             "对已有技能的多轮 agent 循环：第 1 轮基于会话索引卡输出 plan"
             "（improve / optimize_description / create / skip），再按需用工具加载证据"
-            "并经 propose_edits 暂存编辑，final 提交。未涉及正文逐字节保留。"
+            "并经 propose_edits 暂存编辑，final 提交。选中业务 Prompt 时可在同一路径中仅修改业务组件，"
+            "Skill 内容与版本保持不变；未涉及正文逐字节保留。"
         ),
     },
     "create_skill": {

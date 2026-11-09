@@ -10,7 +10,7 @@ usePagedItems,
 } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { type EvalResult } from "@/features/replay/api/client";
-import { hydrateCandidates,mergeCandidateFeedback,type Candidate,type CandidateFeedback } from "@/features/skills/api/client";
+import { candidateDisplayName,hydrateCandidates,isExecutionCandidate,mergeCandidateFeedback,type Candidate,type CandidateFeedback } from "@/features/skills/api/client";
 import { runSkillCommand } from "@/features/skills/api/skillJobs";
 import CandidateFeedbackControls from "@/features/skills/dashboard/CandidateFeedback";
 import CandidateModal from "@/features/skills/dashboard/CandidateModal";
@@ -18,7 +18,7 @@ import { toastErr,toastOk } from "@/lib/toast";
 import { useCallback,useEffect,useRef,useState,type ReactNode } from "react";
 
 function candidateName(c: Candidate): string {
-  return c.skill_name || c.candidate_skill_name || c.candidate_skill?.name || c.job_id;
+  return candidateDisplayName(c);
 }
 
 function mergeCandidateDetail(items: Candidate[], detail: Candidate): Candidate[] {
@@ -47,7 +47,7 @@ function candidateReviewStatus(c: Candidate): string {
 
 function isProcessedCandidate(c: Candidate | null): boolean {
   if (!c) return false;
-  return candidateReviewStatus(c) !== "open" || !!c.decision;
+  return candidateReviewStatus(c) !== "open" || Object.keys(c.decision || {}).length > 0;
 }
 
 function candidateStatusBadge(c: Candidate): ReactNode {
@@ -194,8 +194,11 @@ export default function CandidateReviewView({ active, canManage = false }: { act
   }, [active, refresh]);
 
   async function validate(jobId: string, mode: "auto" | "force") {
+    const candidate = cands.find(item => item.job_id === jobId);
+    const composition = Boolean(candidate?.candidate_execution_plan);
     const msg =
-      mode === "force"
+      composition ? "确认提交该业务组合的发布验证？实际加载、独立验收、稳定性与成本门禁全部通过后才能发布；force 不会绕过这些检查。"
+      : mode === "force"
         ? "确认强制发布该候选技能？仍会保留 True Replay 三项指标。"
         : "确认按 True Replay 发布？轮次下降直接正向；轮次持平时再比较工具调用和 Token。";
     if (!window.confirm(msg)) return;
@@ -205,7 +208,7 @@ export default function CandidateReviewView({ active, canManage = false }: { act
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode }),
+          body: JSON.stringify({ mode, ...(candidate?.candidate_revision ? { candidate_revision: candidate.candidate_revision } : {}) }),
         }
       );
       if (r.feedback) handleFeedbackSaved(jobId, r.feedback);
@@ -297,7 +300,7 @@ export default function CandidateReviewView({ active, canManage = false }: { act
             <ListViewport>
               <Table
                 headers={[
-                  "技能",
+                  "Skill / 业务执行配置",
                   "动作",
                   "状态",
                   "回放状态",
@@ -318,7 +321,8 @@ export default function CandidateReviewView({ active, canManage = false }: { act
                     <tr key={c.job_id}>
                       <td className="link border-b border-line px-4 py-2.5 align-top" onClick={() => openCandidate(c.job_id)}>
                         <div className="font-semibold">{candidateName(c)}</div>
-                        {(c.bundle_diff?.changed_count || 0) > 0 && (
+                        {isExecutionCandidate(c) && <div className="mt-1 text-xs text-muted-foreground">Prompt-only · 0 Skill 依赖</div>}
+                        {!isExecutionCandidate(c) && (c.bundle_diff?.changed_count || 0) > 0 && (
                           <div className="mt-1">
                             <Pill tone="blue">变更 {c.bundle_diff?.changed_count} 个文件</Pill>
                           </div>
@@ -407,6 +411,7 @@ export default function CandidateReviewView({ active, canManage = false }: { act
         evaluating={openJobId ? !!evaluating[openJobId] : false}
         open={!!openJobId}
         readOnly={isProcessedCandidate(openCand) || !canManage}
+        canManageExecution={canManage}
         onClose={() => setOpenJobId(null)}
         onEvaluate={(force) => {
           if (!openJobId || isProcessedCandidate(openCand)) return;

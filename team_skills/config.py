@@ -27,11 +27,17 @@ DEFAULT_SKILLS_CONFIG: dict[str, Any] = {
     "max_file_bytes": 16 * 1024 * 1024,
     "runtime_cache_enabled": True,
     "evolution_max_sessions": 100,
+    "evolution_current_case_count": 2,
+    "evolution_historical_case_count": 3,
     "evolution_parallel_groups": 4,
     "min_group_sessions": 2,
     "min_group_users": 2,
     "evolution_trigger_mode": "manual",
     "evolution_interval_seconds": 600,
+    "evolution_allowed_modules": ["skill"],
+    "evolution_execution_profile_id": "",
+    "prompt_editor_json_mode": False,
+    "prompt_editor_max_rounds": None,
     "auto_evaluate": True,
     "publish_mode": "manual",
     "bundle_text_extensions": [".py", ".sh", ".md"],
@@ -41,6 +47,18 @@ DEFAULT_SKILLS_CONFIG: dict[str, Any] = {
     "bundle_static_checks_enabled": True,
     "experience_sync": {"enabled": False, "interval_seconds": 30},
 }
+
+
+def replay_case_counts(config: dict[str, Any]) -> dict[str, int]:
+    """Resolve bounded per-tenant sampling counts from a frozen config snapshot."""
+    result = {}
+    for name, maximum in (("current", 6), ("historical", 30)):
+        key = f"evolution_{name}_case_count"
+        value = config.get(key, DEFAULT_SKILLS_CONFIG[key])
+        if type(value) is not int or not 1 <= value <= maximum:
+            raise ValueError(f"{key} must be an integer in 1..{maximum}")
+        result[name] = value
+    return result
 
 
 @dataclass(frozen=True)
@@ -94,4 +112,5 @@ __all__ = [
     "BundleLimits",
     "SkillsModuleConfig",
     "load_skills_config",
+    "replay_case_counts",
 ]

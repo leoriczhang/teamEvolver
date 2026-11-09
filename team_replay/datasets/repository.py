@@ -124,6 +124,27 @@ class DatasetRepository:
         )
         return [{**dict(row), "case": unpack(row["case"])} for row in rows]
 
+    async def execution_history(self, conn, *, profile_id, baseline_hash, before_dataset_id):
+        """Regress only the same business execution surface and frozen baseline."""
+        rows = await conn.fetch(
+            f"SELECT d.dataset_id,d.name,d.revision,d.document_hash,c.payload AS case "
+            f"FROM {self.schema}.datasets d JOIN {self.schema}.dataset_revisions r "
+            "ON r.tenant_id=d.tenant_id AND r.dataset_id=d.dataset_id AND r.revision=d.revision "
+            f"JOIN {self.schema}.dataset_cases c ON c.tenant_id=d.tenant_id "
+            "AND c.dataset_id=d.dataset_id AND c.revision=d.revision "
+            "WHERE NOT d.deleted AND d.dataset_id<>$3 "
+            f"AND d.created_at <= (SELECT created_at FROM {self.schema}.datasets WHERE dataset_id=$3) "
+            "AND r.document #>> '{metadata,execution_profile_id}'=$1 "
+            "AND r.document #>> '{metadata,baseline_execution_plan_hash}'=$2 "
+            "AND r.document->'skills'='[]'::jsonb AND c.payload->'skill_ids'='[]'::jsonb "
+            "AND (r.document #> '{metadata,evolution_history_sampling_disabled}') IS DISTINCT FROM 'true'::jsonb "
+            "AND (r.document #>> '{source,kind}'='evolution' "
+            "OR r.document #>> '{metadata,enabled_for_evolution}'='true') "
+            "ORDER BY d.dataset_id,c.case_id",
+            profile_id, baseline_hash, safe_id(before_dataset_id),
+        )
+        return [{**dict(row), "case": unpack(row["case"])} for row in rows]
+
     async def save(self, conn, *, tenant_id, document, files=None, expected_revision=None):
         document = normalize_document(document, allow_empty=True)
         dataset_id = safe_id(document["dataset_id"])

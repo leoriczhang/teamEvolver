@@ -1,5 +1,7 @@
 import { Pill } from "@/components/common";
 import type { EvalResult, ReplayDatasetResult, ReplaySide } from "@/features/replay/api/client";
+import ReplayExecutionEvidence from "./ReplayExecutionEvidence";
+import ExternalEvaluationResult from "@/features/replay/ExternalEvaluationResult";
 
 const METRICS = [
   ["interaction_turns", "交互轮次"], ["tool_call_count", "工具调用"], ["total_tokens", "Tokens"],
@@ -47,6 +49,7 @@ export function BranchEvidence({ title, branch }: { title: string; branch?: Repl
         {METRICS.map(([key, label]) => <span key={key}>{label} {formatMetric(branch[key])}</span>)}
       </div>
       {branch.error && <div className="mb-2 text-xs text-destructive">{branch.error}</div>}
+      <ReplayExecutionEvidence branch={branch} />
       <details open>
         <summary className="cursor-pointer text-xs font-semibold">完整回放对话</summary>
         <div className="mt-2 space-y-2">
@@ -117,7 +120,10 @@ export default function CandidateReplayEvidence({ datasets, sampling }: {
               {dataset.result.verdict === "accept" ? "通过" : dataset.result.verdict === "reject" ? "未通过" : "无法确定"}
             </Pill>
           </summary>
-          <div className="border-t border-border"><EfficiencyTable efficiency={dataset.result.efficiency} /></div>
+          <div className="border-t border-border">
+            <ExternalEvaluationResult report={dataset.result.external_evaluation} policy={dataset.result.decision_policy} />
+            <EfficiencyTable efficiency={dataset.result.efficiency} />
+          </div>
           <div className="space-y-3 p-3">
             {dataset.inputs.map((input, index) => {
               const pair = dataset.result.cases?.find(caseResult => caseResult.case_id === input.case_id);
@@ -131,6 +137,7 @@ export default function CandidateReplayEvidence({ datasets, sampling }: {
                     材料：{input.materials.map(material => material.path).join("、")}
                   </div>}
                   {!pair && <div className="mb-2 text-xs text-destructive">该 Case 没有完整回放结果。{dataset.result.reason}</div>}
+                  <ExternalEvaluationResult report={pair?.external_evaluation} />
                   <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                     <BranchEvidence title="A · 基线" branch={pair?.baseline} />
                     <BranchEvidence title="B · 候选" branch={pair?.candidate} />

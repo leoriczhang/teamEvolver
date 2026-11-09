@@ -157,7 +157,7 @@ def build_console_authorizer(session_manager: ConsoleSessionManager, *, config, 
             ctx = await asyncio.to_thread(registry.resolve_by_agent_token, bearer)
             if ctx is None or ctx.status != "active":
                 raise HTTPException(status_code=401, detail="invalid tenant token")
-            if path != "/sync/skills" and not any(
+            if path not in {"/sync/skills", "/sync/skills/execution-receipt"} and not any(
                 path == prefix or path.startswith(prefix + "/") for prefix in _AGENT_MACHINE_PATHS
             ):
                 raise HTTPException(status_code=403, detail="console admin required")

@@ -41,6 +41,8 @@ class AgentsHubFactory:
             raise ValueError("replay.agentshub.backend_root is required")
 
     def open(self, context):
+        if context.execution_plan is not None:
+            raise ReplayUnsupported("AgentsHub has no verified independent Prompt/Context override API")
         if context.runtime_type != "agentshub":
             raise ReplayUnsupported(f"AgentsHub adapter cannot run {context.runtime_type!r}")
         return AgentsHubSession(context, self.config)

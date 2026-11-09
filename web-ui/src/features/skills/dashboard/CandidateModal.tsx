@@ -11,9 +11,12 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import UnifiedDiffView,{ InlineDiffView } from "@/components/UnifiedDiffView";
 import type { EvalResult,ReplaySide,WorkbenchChecklistReport } from "@/features/replay/api/client";
-import type { Candidate,CandidateFeedback } from "@/features/skills/api/client";
+import { candidateDisplayName,isExecutionCandidate,isStandardValidation,type Candidate,type CandidateFeedback } from "@/features/skills/api/client";
 import CandidateFeedbackControls from "@/features/skills/dashboard/CandidateFeedback";
+import CandidateExecutionPanel from "./CandidateExecutionPanel";
 import CandidateReplayEvidence,{ EfficiencyTable } from "./CandidateReplayEvidence";
+import ExternalEvaluationResult from "@/features/replay/ExternalEvaluationResult";
+import ReplayExecutionEvidence from "./ReplayExecutionEvidence";
 import { toastErr,toastOk } from "@/lib/toast";
 import { useEffect,useState,type ReactNode } from "react";
 
@@ -29,7 +32,8 @@ function SecTitle({ children }: { children: ReactNode }) {
 }
 
 function candidateName(cand: Candidate | null, ev: EvalResult | null, jobId: string | null): string {
-  return cand?.skill_name || cand?.candidate_skill_name || cand?.candidate_skill?.name || ev?.skill_name || jobId || "-";
+  return (isExecutionCandidate(cand) ? candidateDisplayName(cand)
+    : cand?.skill_name || cand?.candidate_skill_name || cand?.candidate_skill?.name || ev?.skill_name) || jobId || "-";
 }
 
 function skillToMd(skill?: Candidate["candidate_skill"] | Candidate["current_skill"]) {
@@ -62,6 +66,7 @@ export default function CandidateModal({
   onUpdated,
   onFeedbackSaved,
   showFeedback = true,
+  canManageExecution = false,
   onPublish,
 }: {
   jobId: string | null;
@@ -76,10 +81,12 @@ export default function CandidateModal({
   onUpdated?: (detail: Candidate) => void;
   onFeedbackSaved: (jobId: string, feedback: CandidateFeedback) => void;
   showFeedback?: boolean;
+  canManageExecution?: boolean;
   onPublish?: (mode: "auto" | "force") => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [executionEditing, setExecutionEditing] = useState(false);
   // Fresh detail payload returned by the edit endpoint; shadows the parent's
   // (now stale) props until the next evaluation refreshes them.
   const [override, setOverride] = useState<Candidate | null>(null);
@@ -88,21 +95,39 @@ export default function CandidateModal({
   useEffect(() => {
     setEditing(false);
     setOverride(null);
+    setExecutionEditing(false);
   }, [jobId, open]);
+
+  useEffect(() => {
+    if (!override?.candidate_revision || !cand?.candidate_revision) return;
+    if (cand.candidate_revision >= override.candidate_revision && (
+      cand.candidate_revision > override.candidate_revision
+      || cand.review_status !== override.review_status
+      || cand.evaluation !== override.evaluation
+    )) setOverride(null);
+  }, [cand, override]);
 
   const activeCand = override ?? cand;
   const activeEv = override ? (override.evaluation ?? null) : ev;
+  const executionOnly = isExecutionCandidate(activeCand);
+  const canEditSkill = !executionOnly && !readOnly && (activeCand?.review_status || "open") === "open"
+    && (activeCand?.allowed_modules || ["skill"]).includes("skill");
+  const hasExecutionPlan = !!activeCand?.baseline_execution_plan && !!activeCand?.candidate_execution_plan;
+  const independent = activeCand?.independent_validation;
+  const standardValidation = isStandardValidation(activeCand?.validation_plan);
+  const needsIndependentReview = hasExecutionPlan && !standardValidation && (!independent || independent.status !== "passed"
+    || independent.candidate_revision !== activeCand?.candidate_revision);
 
   const rep = activeEv?.replay || {};
   const replayCases = rep.cases || [];
   const efficiencyDimensions = rep.efficiency?.dimensions || {};
   const decisionPolicy = rep.decision_policy || {};
   const replayPager = usePagedItems(replayCases);
-  const currentMd =
+  const currentMd = executionOnly ? "" :
     activeEv?.current_skill_md ||
     activeCand?.current_skill_md ||
     skillToMd(activeCand?.current_skill || activeEv?.current_skill);
-  const candidateMd =
+  const candidateMd = executionOnly ? "" :
     activeEv?.candidate_skill_md ||
     activeCand?.candidate_skill_md ||
     skillToMd(activeCand?.candidate_skill || activeEv?.candidate_skill) ||
@@ -144,6 +169,7 @@ export default function CandidateModal({
             description: draft.description,
             category: draft.category,
             content: draft.content,
+            ...(activeCand?.candidate_revision ? { candidate_revision: activeCand.candidate_revision } : {}),
           }),
         }
       );
@@ -159,6 +185,7 @@ export default function CandidateModal({
   }
 
   function runEvaluate(force: boolean) {
+    if (executionEditing) return;
     setOverride(null);
     onEvaluate(force);
   }
@@ -172,7 +199,7 @@ export default function CandidateModal({
     ) : (
       <Empty>
         尚未评估。{" "}
-        <Button variant="outline" size="sm" onClick={() => runEvaluate(false)}>
+        <Button variant="outline" size="sm" disabled={executionEditing} onClick={() => runEvaluate(false)}>
           开始评估
         </Button>
       </Empty>
@@ -212,14 +239,15 @@ export default function CandidateModal({
                 </div>
                 {instr || <span className="text-muted-foreground">（空）</span>}
               </div>
+              <ExternalEvaluationResult report={cc.external_evaluation} />
               <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
                 <AbCol
-                  head="🅰 基线（当前技能 / 无技能）"
+                  head={executionOnly ? "🅰 基线（当前业务组合）" : "🅰 基线（当前技能 / 无技能）"}
                   branch={b}
                   body={replayOutput(b)}
                 />
                 <AbCol
-                  head="🅱 候选（新技能）"
+                  head={executionOnly ? "🅱 候选（业务 Prompt／上下文）" : "🅱 候选（新技能）"}
                   branch={a}
                   body={replayOutput(a)}
                 />
@@ -238,7 +266,7 @@ export default function CandidateModal({
       <div className="min-w-0 space-y-2 text-sm">
         <div>
           <div className="mb-1.5 text-xs font-semibold text-muted-foreground">
-            技能 / 动作
+            {executionOnly ? "业务执行配置 / 动作" : "技能 / 动作"}
           </div>
           <div className="flex items-center gap-2">
             {candidateName(activeCand, activeEv, jobId)}
@@ -279,7 +307,7 @@ export default function CandidateModal({
 
         <div className="my-4 rounded-lg border border-border bg-surface-subtle p-3 text-xs">
           <div className="mb-1 flex items-center gap-1 font-semibold">
-            True Replay 客观结论
+            {decisionPolicy.policy === "external-agent-score" ? "True Replay 外部评分结论" : "True Replay 客观结论"}
             <InfoTip term="true-replay" />
           </div>
           <Pill
@@ -291,7 +319,9 @@ export default function CandidateModal({
                 : "amber"
             }
           >
-            {decisionPolicy.decision_basis === "interaction_turns_decreased"
+            {decisionPolicy.policy === "external-agent-score"
+              ? "依据外部评价 Agent 的业务评分判定"
+              : decisionPolicy.decision_basis === "interaction_turns_decreased"
               ? "轮次下降，直接判定正向"
               : decisionPolicy.decision_basis === "interaction_turns_increased"
               ? "轮次上升，判定负向"
@@ -303,8 +333,10 @@ export default function CandidateModal({
           </Pill>
         </div>
 
+        <ExternalEvaluationResult report={rep.external_evaluation} policy={decisionPolicy} />
+
         <SecTitle>
-          ✅ Checklist 门禁
+          {decisionPolicy.policy === "external-agent-score" ? "✅ Checklist 执行记录" : "✅ Checklist 门禁"}
           <InfoTip term="checklist" />
         </SecTitle>
         <ChecklistEvidence
@@ -333,6 +365,7 @@ export default function CandidateModal({
           </>
         )}
 
+        {!executionOnly && <>
         <SecTitle>
           技能包变更
           <InfoTip term="bundle" />
@@ -386,7 +419,7 @@ export default function CandidateModal({
                 <span className="text-[#cf222e]">红 = 删除</span>
               </span>
             </div>
-            {!readOnly && !editing && (
+            {canEditSkill && !editing && !executionEditing && (
               <Button variant="outline" size="sm" onClick={startEdit}>
                 编辑
               </Button>
@@ -450,6 +483,7 @@ export default function CandidateModal({
             />
           )}
         </div>
+        </>}
         <SecTitle>🔁 A/B 回放明细（基线 vs 候选）</SecTitle>
         {replayHtml}
 
@@ -458,7 +492,7 @@ export default function CandidateModal({
             <Button
               variant="outline"
               size="sm"
-              disabled={evaluating}
+              disabled={evaluating || executionEditing}
               onClick={() => runEvaluate(true)}
             >
               {evaluating ? "评估中…" : "重新评估（重跑回放）"}
@@ -470,9 +504,15 @@ export default function CandidateModal({
         </div>
         {!readOnly && onPublish && (
           <div className="sticky bottom-0 flex flex-wrap items-center gap-2 border-t border-border bg-background py-3">
-            <Button disabled={evaluating || editing} onClick={() => onPublish("auto")}>按回放发布</Button>
-            <Button variant="outline" disabled={evaluating || editing} onClick={() => onPublish("force")}>强制发布</Button>
-            <span className="text-xs text-muted-foreground">发布时按当次数据集与历史采样重新验证。</span>
+            <Button disabled={evaluating || editing || executionEditing || needsIndependentReview} onClick={() => onPublish("auto")}>按回放发布</Button>
+            <Button variant="outline" disabled={evaluating || editing || executionEditing || needsIndependentReview} onClick={() => onPublish("force")}>强制发布</Button>
+            <span className="text-xs text-muted-foreground">
+              {standardValidation
+                ? "采用 Skill 默认验证策略；须通过原 True Replay、实际加载与版本校验，无需额外外部复核声明。"
+                : needsIndependentReview
+                  ? "当前冻结策略要求独立外部复核；重新评估可采用执行配置中的最新验证策略。"
+                  : "发布时按已完成的验证结果和当前版本执行校验。"}
+            </span>
           </div>
         )}
       </div>
@@ -498,6 +538,15 @@ export default function CandidateModal({
             />
           </div>
         )}
+        {activeCand && hasExecutionPlan && <CandidateExecutionPanel
+          candidate={{ ...activeCand, evaluation: activeEv ?? activeCand.evaluation }}
+          readOnly={readOnly || editing || evaluating || !canManageExecution}
+          onEditingChange={setExecutionEditing}
+          onUpdated={detail => {
+            setOverride(detail);
+            onUpdated?.(detail);
+          }}
+        />}
         {bodyInner}
       </DialogContent>
     </Dialog>
@@ -535,6 +584,7 @@ function AbCol({
       <div className="max-h-[200px] overflow-auto text-xs leading-normal whitespace-pre-wrap break-words">
         {body || <span className="text-muted-foreground">（无输出）</span>}
       </div>
+      <ReplayExecutionEvidence branch={branch} />
     </div>
   );
 }

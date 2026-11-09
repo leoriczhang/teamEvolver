@@ -24,7 +24,7 @@ Authentication is done by `teamEvolver/admin/authn.py:build_console_authorizer`.
 
 `TEAMEVOLVER_ROOT_API_KEY` is a deployment-level secret for operations scripts and the CLI (`teamEvolver datasource` calls the API with it). It maps to the platform administrator service identity and can select any active tenant via `X-Tenant-Id`; a missing or disabled tenant returns `403 TENANT_ACCESS_DENIED`.
 
-Only the Root Key can read and write tenant Python source: `/api/datasource/code`, `/api/replay-adapter/code` and their `test` endpoints. The Root Key must never be sent to a browser.
+Only the Root Key can read and write tenant Python source: `/api/datasource/code`, `/api/replay-adapter/code`, `/api/replay-evaluator-adapter/code`, and available source `test` endpoints. The Root Key must never be sent to a browser.
 
 ### Tenant Key
 

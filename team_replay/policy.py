@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from .datasets.recorded_anchor import QUERY_MODE, recorded_anchor_review_bindings
 from .metrics import objective_replay_decision
 
 
@@ -36,6 +37,13 @@ def progressive_config(case: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def initial_query(case: Mapping[str, Any]) -> str:
+    provenance = case.get("provenance") if isinstance(case.get("provenance"), Mapping) else {}
+    binding = provenance.get("query_materialization")
+    if isinstance(binding, Mapping) and binding.get("query_mode") == QUERY_MODE:
+        # This explicit protocol owns exact source bytes, unlike legacy queries.
+        # Recheck its server binding before an Adapter can receive the first turn.
+        recorded_anchor_review_bindings([case])
+        return case["query"]
     return str(case.get("query") or "").strip()
 
 
@@ -64,6 +72,12 @@ def normalize_checklist_report(
         if isinstance(branch.get("checklist_report"), Mapping)
         else {}
     )
+    if raw.get("judge") == "not_run":
+        return {
+            "all_satisfied": False, "total": 0, "satisfied_count": 0, "unmet_count": 0, "items": [],
+            "satisfied_ids": [], "unmet_ids": [], "rounds": 0, "judge": "not_run", "positive_observations": [],
+            "reason": str(raw.get("reason") or ""),
+        }
     expected = expected_checklist or []
     raw_items = raw.get("items") if isinstance(raw.get("items"), list) else []
     by_id = {
@@ -129,14 +143,17 @@ def aggregate_case_checklists(
     branch: str,
 ) -> dict[str, Any]:
     reports: list[dict[str, Any]] = []
+    not_run: list[dict[str, Any]] = []
     for case in cases:
         if not isinstance(case, Mapping):
             continue
         side = case.get(branch) if isinstance(case.get(branch), Mapping) else {}
         report = normalize_checklist_report(side)
-        if report["total"] > 0:
+        if report["judge"] == "not_run":
+            not_run.append(report)
+        elif report["total"] > 0:
             reports.append(report)
-    return {
+    result = {
         "all_satisfied": all(
             report.get("all_satisfied") for report in reports
         ) if reports else True,
@@ -151,6 +168,11 @@ def aggregate_case_checklists(
         "reports": reports,
         "judge": "unavailable" if any(report.get("judge") == "unavailable" for report in reports) else "model",
     }
+    if not_run:
+        result.update(all_satisfied=False, case_count=len(reports) + len(not_run),
+                      reports=reports + not_run, not_run_case_count=len(not_run),
+                      judge="unavailable" if reports else "not_run")
+    return result
 
 
 def progressive_replay_decision(

@@ -161,11 +161,13 @@ it("loads the skill pipeline and prompts for editing", async () => {
   fireEvent.click(stageNode);
 
   expect(await screen.findByDisplayValue("CURRENT JUDGE PROMPT")).toBeVisible();
+  expect(screen.getByText(/选中业务 Prompt 时，沿用同一条候选生成与验证路径/)).toBeVisible();
+  expect(screen.getByText(/仅修改业务组件时，Skill 内容与版本保持不变/)).toBeVisible();
   expect(screen.queryByText("链路加载中…")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "立即进化" }));
   await waitFor(() => expect(api).toHaveBeenCalledWith(
     "/api/skill-evolution/trigger",
-    expect.objectContaining({ method: "POST", body: "{}" }),
+    expect.objectContaining({ method: "POST", body: JSON.stringify({ allowed_modules: ["skill"], execution_profile_id: "" }) }),
   ));
   await waitFor(() => {
     expect(api).toHaveBeenCalledWith("/api/skill-evolution/prompts/judge");
@@ -218,7 +220,7 @@ it("shows concurrent evidence branches and a required validation join", async ()
   });
 
   render(<PromptStudioView active user={{ id: "admin", role: "admin" }} />);
-  const parallel = await screen.findByRole("group", { name: "技能进化与测试集并行" });
+  const parallel = await screen.findByRole("group", { name: "候选生成与测试集并行" });
   expect(within(parallel).getByRole("button", { name: /改进技能/ })).toBeVisible();
   expect(within(parallel).getByRole("button", { name: /新建技能/ })).toBeVisible();
   const dataset = within(parallel).getByRole("button", { name: /测试集生成/ });
@@ -230,4 +232,71 @@ it("shows concurrent evidence branches and a required validation join", async ()
   expect(screen.queryByText("并行分支")).not.toBeInTheDocument();
   fireEvent.click(dataset);
   expect(await screen.findByDisplayValue("Evidence only")).toBeVisible();
+});
+
+function mockScopeSettings() {
+  const settings = {
+    revision: 8,
+    evolve: { evolution_allowed_modules: ["skill"] },
+    validation: { auto_evaluate: true, publish_mode: "manual" },
+  };
+  vi.mocked(api).mockImplementation(async (path, options) => {
+    if (path === "/api/skill-evolution/execution-profiles") return { profiles: [{
+      profile_id: "profile-one", agent_id: "agent-one", runtime_type: "agentshub", user_id: "alice",
+      revision: 1, affected_skill_ids: ["demo"], composition_hash: "baseline-hash",
+      execution_plan: { components: [] },
+    }] };
+    if (path === "/api/skill-evolution/pipeline") return { nodes: [], edges: [] };
+    if (path === "/api/skill-evolution/prompts") return { prompts: [] };
+    if (path.startsWith("/api/skill-evolution/session-samples")) return { sessions: [] };
+    if (path === "/api/skill-evolution/settings") {
+      if (options?.method === "PUT") {
+        const body = JSON.parse(options.body as string);
+        return { ...settings, revision: 9, evolve: { ...settings.evolve, ...body.evolve } };
+      }
+      return settings;
+    }
+    if (path === "/api/skill-evolution/trigger") return { job_id: "evolve:scope" };
+    throw new Error(`unexpected request: ${path}`);
+  });
+}
+
+it("sends the temporary module selection without saving the plan and prevents an empty scope", async () => {
+  mockScopeSettings();
+  render(<PromptStudioView active user={{ id: "admin", role: "admin" }} />);
+  const scope = await screen.findByRole("group", { name: "本次允许修改的模块" });
+  await waitFor(() => expect(screen.getByRole("button", { name: "立即进化" })).toBeEnabled());
+  fireEvent.click(within(scope).getByRole("checkbox", { name: "业务 Agent Prompt／上下文注入" }));
+  fireEvent.click(within(scope).getByRole("checkbox", { name: "Skill" }));
+  expect(screen.getByRole("button", { name: "立即进化" })).toBeDisabled();
+  fireEvent.change(screen.getByLabelText("本次业务 Agent 执行配置"), { target: { value: "profile-one" } });
+  fireEvent.click(screen.getByRole("button", { name: "立即进化" }));
+  await waitFor(() => expect(api).toHaveBeenCalledWith(
+    "/api/skill-evolution/trigger",
+    expect.objectContaining({ body: JSON.stringify({ allowed_modules: ["prompt"], execution_profile_id: "profile-one" }) }),
+  ));
+  expect(vi.mocked(api).mock.calls.filter(([, options]) => options?.method === "PUT")).toHaveLength(0);
+  await waitFor(() => expect(screen.getByRole("button", { name: "立即进化" })).toBeEnabled());
+  fireEvent.click(within(scope).getByRole("checkbox", { name: "业务 Agent Prompt／上下文注入" }));
+  expect(screen.getByRole("button", { name: "立即进化" })).toBeDisabled();
+  expect(within(scope).getByRole("alert")).toHaveTextContent("请至少选择一个");
+});
+
+it("saves the plan scope explicitly with its revision while retaining the temporary selection", async () => {
+  mockScopeSettings();
+  render(<PromptStudioView active user={{ id: "admin", role: "admin" }} />);
+  await screen.findByText("默认修改范围（含自动计划）");
+  fireEvent.click(screen.getByText("默认修改范围（含自动计划）"));
+  const plan = screen.getByRole("group", { name: "后续任务默认允许修改的模块" });
+  fireEvent.click(within(plan).getByRole("checkbox", { name: "业务 Agent Prompt／上下文注入" }));
+  fireEvent.click(screen.getByRole("button", { name: "保存默认修改范围" }));
+  await waitFor(() => expect(api).toHaveBeenCalledWith(
+    "/api/skill-evolution/settings",
+    expect.objectContaining({ body: JSON.stringify({
+      revision: 8, evolve: { evolution_allowed_modules: ["skill", "prompt"], evolution_execution_profile_id: "" },
+    }) }),
+  ));
+  const temporary = screen.getByRole("group", { name: "本次允许修改的模块" });
+  expect(within(temporary).getByRole("checkbox", { name: "业务 Agent Prompt／上下文注入" })).not.toBeChecked();
+  expect(screen.getByText("TE 进化引擎 Prompt")).toBeVisible();
 });

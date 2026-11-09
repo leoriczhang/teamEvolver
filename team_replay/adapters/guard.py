@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import threading
 
+from ..execution_plan import require_execution_capabilities
+
 
 class GuardedFactory:
     def __init__(self, factory, task, services, slot=None, owner=""):
         self.factory, self.task, self.services = factory, task, services
         self.slot, self.owner = slot, owner
         self.revision = getattr(factory, "revision", "")
+        self.capabilities = getattr(factory, "capabilities", {})
         self.sessions = []
         self.lock = threading.Lock()
 
@@ -27,6 +30,7 @@ class GuardedFactory:
 
     def open(self, context):
         self.guard()
+        require_execution_capabilities(self, context.execution_plan)
         session = self.factory.open(context)
         with self.lock:
             if any(session is prior for prior in self.sessions):
