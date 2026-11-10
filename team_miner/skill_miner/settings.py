@@ -56,8 +56,10 @@ def compiler_contract_version(body: str) -> int:
 
 def settings_payload(store_data: dict[str, Any]) -> dict[str, Any]:
     body = compiler_prompt(store_data)
+    from .dialogue_dimensions import PROTOCOL
+    dialogue = PROTOCOL in body
     contract_version = compiler_contract_version(body)
-    warning = LEGACY_COMPILER_WARNING if contract_version == 1 else ""
+    warning = LEGACY_COMPILER_WARNING if contract_version == 1 and not dialogue else ""
     return {
         "engine": "ov_compile",
         "candidate_contract_version": contract_version,
@@ -70,7 +72,7 @@ def settings_payload(store_data: dict[str, Any]) -> dict[str, Any]:
             "id": COMPILER_PROMPT_ID,
             "label": "Skill 挖掘编译",
             "description": (
-                "OpenViking 每轮使用的编译 Skill；每轮受理前冻结，已有轮次不受后续修改影响。"
+                "新任务使用此处保存的编译 Skill，保留自定义内容，不由后端替换。"
                 + (warning or "默认每轮一次整轮 Compile；按用户方向构建完整方法，后续补证增量更新同一产物目录。")
             ),
             "default_prompt": SKILL_BODY,

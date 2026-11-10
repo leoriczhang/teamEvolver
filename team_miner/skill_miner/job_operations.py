@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
-import re
 
 from .artifacts import save_artifact
 from .cache import persist_cache
@@ -26,22 +25,11 @@ async def restore(engine, job_id):
 
 async def create(engine, body, identifier):
     repository = engine.repository
-    mode = body.get("task_mode", "skill")
-    if mode not in {"skill", "dialogue_dimensions"}:
-        raise ValueError("unknown task_mode")
+    settings = engine.settings.get("settings", engine.settings.get("config", {}))
+    compiler = compiler_prompt(settings)
+    from .dialogue_dimensions import PROTOCOL
+    dialogue = PROTOCOL in compiler
     dialogue_config = None
-    if mode == "dialogue_dimensions":
-        from .dialogue_dimensions.partition import options
-        manifest_uri = validate_resource_uri(body.get("dataset_manifest_ref"))
-        manifest_sha = str(body.get("dataset_manifest_sha256") or "")
-        if not re.fullmatch(r"[a-f0-9]{64}", manifest_sha):
-            raise ValueError("dataset_manifest_sha256 is required")
-        dialogue_config = {"dataset_manifest_ref": manifest_uri, "dataset_manifest_sha256": manifest_sha,
-                           "dialogue_options": options(body.get("dialogue_options"))}
-        if body.get("max_rounds", 1) != 1:
-            raise ValueError("dialogue_dimensions S0 supports one business revision; batches are not rounds")
-        if any(body.get(key) for key in ("target_skill_count", "mining_mode", "mining_direction")):
-            raise ValueError("dialogue_dimensions does not use Skill selection options")
     # The operation identity, rather than a process-local random value, binds
     # recovery after a lost acknowledgement to the same business job.
     job_id = "ovmine-" + hashlib.sha256(identifier.encode()).hexdigest()[:32]
@@ -66,23 +54,29 @@ async def create(engine, body, identifier):
         raise ValueError("TENANT_ACCOUNT_MISMATCH")
     if not source_has_tag(record, SOURCE_TAG_SKILL):
         raise ValueError("所选目录没有“Skill 知识源”标签")
+    if dialogue:
+        from .dialogue_dimensions.orchestration import frozen_read
+        from .dialogue_dimensions.partition import options
+        if not source_uri.endswith("/model_cases"):
+            raise ValueError("对话维度 Skill 需要准备后的 model_cases 知识源")
+        manifest_uri = source_uri.rsplit("/", 1)[0] + "/dataset_manifest.json"
+        raw = await frozen_read(engine, {"account": record["account"]}, manifest_uri)
+        dialogue_config = {"dataset_manifest_ref": manifest_uri,
+                           "dataset_manifest_sha256": hashlib.sha256(raw.encode()).hexdigest(),
+                           "dialogue_options": options()}
     source = await engine._ov_source_detail(record)
     if not source.get("ready"):
         raise ValueError("知识源目录中没有可挖掘文件或目录清单不完整")
     name = str(body.get("name") or f"{source.get('name')} 挖掘任务").strip()
     if len(name) > 120:
         raise ValueError("任务名称不能超过 120 个字符")
-    settings = engine.settings.get("settings", engine.settings.get("config", {}))
     defaults = pipeline_settings(settings)
-    max_rounds = body.get("max_rounds", 1 if dialogue_config else defaults["max_rounds"])
+    max_rounds = 1 if dialogue else body.get("max_rounds", defaults["max_rounds"])
     timeout = body.get("runtime_timeout_seconds", defaults["runtime_timeout_seconds"])
     if isinstance(timeout, bool) or not isinstance(timeout, int):
         raise ValueError("运行期限必须为整数")
-    compiler = compiler_prompt(settings)
     version = compiler_contract_version(compiler)
     if dialogue_config:
-        from .dialogue_dimensions.compiler import SKILL_BODY
-        compiler, version = SKILL_BODY, 2
         output_root = f"{RUNS_ROOT}/{job_id}/output/analysis/dialogue_dimensions"
         dialogue_config["dialogue_output_root"] = validate_resource_uri(output_root)
     # The very first metadata INSERT includes the frozen accepted configuration.
@@ -96,8 +90,9 @@ async def create(engine, body, identifier):
         document_count=int(source.get("document_count") or 0), max_rounds=max_rounds,
         runtime_timeout_seconds=timeout, human_checkpoints=bool(body.get("human_checkpoints", True)),
         skip_empty_checkpoints=True, consolidate_reviewed_candidates=True, candidate_contract_version=version,
-        compiler_body=compiler, mining_mode=body.get("mining_mode", "auto"),
-        mining_direction=body.get("mining_direction", ""), target_skill_count=body.get("target_skill_count"),
+        compiler_body=compiler, mining_mode="auto" if dialogue else body.get("mining_mode", "auto"),
+        mining_direction="" if dialogue else body.get("mining_direction", ""),
+        target_skill_count=None if dialogue else body.get("target_skill_count"),
         **({"dialogue_config": dialogue_config} if dialogue_config else {}))
     finally:
         repository.backend.transform_save = None
@@ -106,7 +101,7 @@ async def create(engine, body, identifier):
     repository.backend.before_save = engine._checkpoint
     engine._loaded_job = job_id
     job = await asyncio.to_thread(repository.update_job, job_id, config_snapshot=engine.settings,
-                                 options_warnings=[LEGACY_COMPILER_WARNING] if version == 1 else [])
+                                 options_warnings=[LEGACY_COMPILER_WARNING] if version == 1 and not dialogue else [])
     await enqueue_compile(engine.services, engine.tenant, job, engine.settings)
     return {"ok": True, "jobs": [await public(repository, job)], "summary": repository.summary([job])}
 

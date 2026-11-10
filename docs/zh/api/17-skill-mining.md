@@ -2,16 +2,19 @@
 
 ## 优秀对话维度提取
 
-`POST /api/mining/jobs` 可使用 `task_mode=dialogue_dimensions`，默认绑定独立编译 Skill，
-不生成 Skill Candidate 或 Test Dataset。全部案例视为已选定的优秀对话，历史评分与评价不进入模型。
-新模式要求 `input_dir` 指向已登记的白名单模型目录，并提供 `source_id`、
-`dataset_manifest_ref` 和 `dataset_manifest_sha256`。清单及逐文件摘要在 Worker 中核验。
-`max_rounds=1` 表示一轮业务分析，提取批次和归并窗口数量独立于轮数。
+先在原有编译指令界面编辑并保存完整 Skill，再通过原有 `POST /api/mining/jobs` 创建任务。
+执行使用保存的 Skill；当正文声明 `te-dialogue-dimensions.v1` 时执行对话维度提取，
+不由后端替换为内置 Skill，不加载隐藏的冻结附件，也不新增任务类型按钮。
+全部案例视为已选定的优秀对话，历史评分与评价不进入模型。
+请求只需已登记的 `input_dir`（准备后的 `model_cases` 目录）、`source_id` 和原有任务参数。
+Worker 从父目录读取数据集清单并校验逐文件摘要，无需用户填写清单 URI 或摘要。
+对话维度提取固定一轮业务分析，提取批次和归并窗口数量独立于轮数，
+不生成 Skill Candidate 或 Test Dataset。协议 v1 是初版编号，不是兼容升级。
 
-`dialogue_options` 默认提取最多 8 条、24,000 字符、96,000 字节，单条对话最多 20,000 字符；
-归并窗口最多 12 个成员、16,000 字符、64,000 字节。`max_inflight_compiles` 可设 1–2，
-当前执行器保守地串行提交，仍使用租户共享 Compile 槽。`repair_attempts_per_unit` 默认 2。
-默认 `quote_mode=none` 使用句子 ID，选择 `sentences` 时引文逐字匹配冻结原文。
+初版运行预算为提取最多 8 条、24,000 字符、96,000 字节，单条对话最多 20,000 字符；
+归并窗口最多 12 个成员、16,000 字符、64,000 字节。
+当前执行器串行提交，使用租户共享 Compile 槽，每单元最多修复 2 次。
+默认使用句子 ID；引文逐字匹配原文。
 完整案例不截断，过大案例标为待处理。
 
 `POST /api/mining/dialogue-datasets` 受理准备任务并返回 202。请求含 `output_uri`、

@@ -390,7 +390,7 @@ class RepositoryCoreMixin:
             (job_dir / "workspace" / "compiled_skill").mkdir(parents=True, exist_ok=False)
             (job_dir / "workspace" / "semantic_reports").mkdir(parents=True, exist_ok=True)
             job["workspace"] = (job_dir / "workspace").relative_to(self.project_root).as_posix()
-            if compiler_body is not None:
+            if compiler_body is not None and dialogue_config is None:
                 job["compiler_body_snapshot"] = compiler_body
                 (job_dir / "compiler-skill.md").write_text(compiler_body, encoding="utf-8")
                 from .native_compiler import freeze_assets

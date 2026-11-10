@@ -24,7 +24,6 @@ from team_miner.skill_miner.dialogue_dimensions.input import (
 from team_miner.skill_miner.dialogue_dimensions.partition import batches, options
 from team_miner.skill_miner.dialogue_dimensions.state import Journal
 from team_miner.skill_miner.dialogue_dimensions.validation import ReceiptError, findings, merge
-from team_miner.skill_miner.native_compiler import freeze_assets, frozen_assets
 from tests.miner.skill_miner.support.dialogue_dimensions import Host, MemoryJournal, case, finding
 
 
@@ -137,12 +136,35 @@ def test_merge_does_not_have_to_reduce_and_never_invents_similar_title_membershi
         merge('{"groups":[]}', window)
 
 
-def test_frozen_skill_assets_reject_mutation(tmp_path):
-    freeze_assets(tmp_path, SKILL_BODY)
-    assert "CONTRACT.yaml" in frozen_assets(tmp_path, SKILL_BODY)
-    (tmp_path / "compiler-assets" / "references/extract.md").write_text("changed")
-    with pytest.raises(ValueError, match="已改变"):
-        frozen_assets(tmp_path, SKILL_BODY)
+@pytest.mark.asyncio
+async def test_provision_uses_user_saved_skill_without_backend_assets():
+    custom = SKILL_BODY + "\n用户规则：保留条件不同的独立维度。\n"
+    calls = []
+
+    async def install(client, name, body):
+        calls.append((client, name, body))
+
+    host = SimpleNamespace(
+        _ov_skill_compiler_body=lambda: custom,
+        _round_client=lambda _: "client",
+        _round_provision_compiler=install,
+    )
+    uri = await orchestration.provision(host, {"job_id": "test"})
+    assert uri == "viking://agent/skills/" + calls[0][1]
+    assert "用户规则：保留条件不同的独立维度。" in calls[0][2]
+    assert "compiler_assets_sha256" not in calls[0][2]
+    host._ov_skill_compiler_body = lambda: "---\nname: custom\ndescription: custom\n---\n其他方法"
+    with pytest.raises(ValueError, match="protocol"):
+        await orchestration.provision(host, {"job_id": "test"})
+    assert len(calls) == 1
+
+
+def test_initial_skill_contains_complete_editable_contract():
+    assert "compiler_assets_sha256" not in SKILL_BODY
+    assert "## stage=extract" in SKILL_BODY
+    assert "## stage=merge" in SKILL_BODY
+    assert "taikang.dialogue-findings.v1" in SKILL_BODY
+    assert "taikang.dimension-merge.v1" in SKILL_BODY
 
 
 @pytest.mark.asyncio
@@ -215,7 +237,7 @@ async def test_full_bounded_pipeline_terminates_with_no_forced_merge_and_survive
     manifest = export(((v, {"row": i}, []) for i, v in enumerate(values)), directory)
     root = "viking://resources/dataset"
     manifest_raw = (directory / "dataset_manifest.json").read_bytes().decode()
-    job = {"job_id": "j", "account": "a", "current_round": 1, "compiler_body_snapshot": SKILL_BODY,
+    job = {"job_id": "j", "account": "a", "current_round": 1,
            "dataset_manifest_ref": root + "/dataset_manifest.json", "dataset_manifest_sha256": sha(manifest_raw),
            "input_dir": root + "/model_cases", "dialogue_options": options(), "status": "preparing",
            "runtime_timeout_seconds": 3600, "dialogue_output_root": "viking://resources/j/analysis/dialogue_dimensions"}

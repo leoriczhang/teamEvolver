@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from starlette.exceptions import HTTPException
 
+from team_miner.skill_miner.dialogue_dimensions.compiler import SKILL_BODY
 from team_miner.skill_miner.dialogue_dimensions.input import canonical, case_key, normalize_case, parse_model, sha
 
 
@@ -60,6 +61,9 @@ class Host:
         self.requests = []
         self.omit_cases = set()
         self.repository = SimpleNamespace(update_job=self.update, get_job=lambda *_: copy.deepcopy(self.job))
+
+    def _ov_skill_compiler_body(self):
+        return SKILL_BODY
 
     def update(self, _, **fields):
         self.job.update(fields)

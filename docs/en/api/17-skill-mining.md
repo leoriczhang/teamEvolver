@@ -2,18 +2,22 @@
 
 ## Excellent dialogue dimensions
 
-`POST /api/mining/jobs` accepts `task_mode=dialogue_dimensions`, using an independent compiler
-without creating Skill Candidates or Test Datasets. All cases are selected excellent dialogues;
-historical scores and evaluations are excluded from model input. Provide a registered whitelist
-`input_dir`, `source_id`, `dataset_manifest_ref`, and `dataset_manifest_sha256`.
-The Worker verifies the manifest and each file. `max_rounds=1` denotes the business analysis,
-independent of extraction batches and merge windows.
+Edit and save the complete Skill in the existing compiler editor, then create a task through
+the existing `POST /api/mining/jobs` flow. Execution uses the saved Skill. A Skill declaring
+`te-dialogue-dimensions.v1` selects dialogue dimension extraction without a backend compiler
+override, hidden frozen attachments, or a new task type button.
+All cases are selected excellent dialogues; historical scores and evaluations are excluded.
+Provide the registered `input_dir` (the prepared `model_cases` directory), `source_id`, and
+existing task parameters. The Worker reads the parent dataset manifest and verifies each file;
+users do not supply manifest URIs or digests. Extraction uses one business round, independent
+of batches and merge windows, and creates no Skill Candidates or Test Datasets.
+Protocol v1 denotes the initial implementation, not a compatibility upgrade.
 
-Default `dialogue_options` cap extraction at 8 cases, 24,000 characters and 96,000 bytes;
+Initial execution budgets cap extraction at 8 cases, 24,000 characters and 96,000 bytes;
 one dialogue is limited to 20,000 characters. Merge windows contain at most 12 members,
-16,000 characters and 64,000 bytes. `max_inflight_compiles` allows 1–2; this executor conservatively
-submits serially through the tenant's shared Compile admission slots. `repair_attempts_per_unit`
-defaults to 2. `quote_mode=none` uses sentence IDs; `sentences` validates quoted text against frozen input.
+16,000 characters and 64,000 bytes. The executor submits serially through the tenant's shared
+Compile admission slots, with at most two repairs per unit. Sentence IDs are used by default;
+quoted text is checked against the original input.
 Whole cases are never truncated. Oversized cases remain pending.
 
 `POST /api/mining/dialogue-datasets` queues preparation and returns 202. Supply `output_uri`,

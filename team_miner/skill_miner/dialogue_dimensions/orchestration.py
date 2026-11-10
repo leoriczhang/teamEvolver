@@ -10,7 +10,6 @@ from starlette.exceptions import HTTPException
 
 from ..compile_admission import TERMINAL_NATIVE_STATES
 from ..mining_contracts import RUNS_ROOT, utc_now
-from ..native_compiler import frozen_assets
 from ..ov_round_orchestration import _compiler_package
 from . import PROTOCOL
 from .assembly import assemble
@@ -120,12 +119,11 @@ async def prepare(engine, job, journal):
 
 
 async def provision(engine, job):
-    body = job["compiler_body_snapshot"]
+    body = engine._ov_skill_compiler_body()
     if PROTOCOL not in body:
         raise ValueError("dialogue_compiler_protocol_changed")
-    assets = await asyncio.to_thread(frozen_assets, engine.repository.jobs_root / job["job_id"], body)
     name, published, _ = _compiler_package(body)
-    await engine._round_provision_compiler(engine._round_client(job), name, published, assets)
+    await engine._round_provision_compiler(engine._round_client(job), name, published)
     return "viking://agent/skills/" + name
 
 
@@ -140,7 +138,7 @@ async def submit(engine, job, journal, unit):
         attempt = unit["attempt"]
         key = "te-dd-" + sha(canonical([engine.tenant, job["job_id"], job["current_round"], unit["stage"],
                                      unit["number"], [f["sha256"] for f in unit["files"]],
-                                     sha(job["compiler_body_snapshot"]),
+                                     sha(engine._ov_skill_compiler_body()),
                                      job.get("dialogue_recovery_epoch", 0), attempt]))
         epoch = job.get("dialogue_recovery_epoch", 0)
         target = (f"{RUNS_ROOT}/{job['job_id']}/dialogue/recovery-{epoch}/units/"
@@ -392,7 +390,7 @@ async def finish(engine, job, journal, state):
     manifest = {"schema_version": "taikang.dialogue-delivery.v1", **validation,
                 "dataset_manifest_ref": job["dataset_manifest_ref"],
                 "dataset_manifest_sha256": job["dataset_manifest_sha256"],
-                "compiler_sha256": sha(job["compiler_body_snapshot"]),
+                "compiler_sha256": sha(engine._ov_skill_compiler_body()),
                 "config_revision": job.get("config_snapshot", {}).get("miner_revision"),
                 "dialogue_options": job["dialogue_options"],
                 "extract_unit_count": state["extract_count"], "merge_unit_count": state["merge_count"],

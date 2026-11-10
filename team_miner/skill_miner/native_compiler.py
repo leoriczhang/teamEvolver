@@ -606,7 +606,6 @@ def freeze_assets(root: Path, body: str) -> None:
     match = re.search(r"(?m)^compiler_assets_sha256: ([a-f0-9]{64})$", body)
     if match is None:
         return
-    from .dialogue_dimensions.compiler import AUXILIARY_FILES as DIALOGUE_FILES
     from .knowledge_compiler import AUXILIARY_FILES as POINT_FILES
     from .knowledge_compiler_v1 import AUXILIARY_FILES as POINT_V1_FILES
     from .knowledge_compiler_v2 import AUXILIARY_FILES as POINT_V2_FILES
@@ -621,7 +620,7 @@ def freeze_assets(root: Path, body: str) -> None:
     files = next((bundle for bundle in
                   (AUXILIARY_FILES, TASK_FILES, POINT_V1_FILES, POINT_V2_FILES,
                    POINT_V3_FILES, POINT_V4_FILES, POINT_V5_FILES, POINT_V6_FILES, POINT_V7_FILES, POINT_FILES,
-                   ROUTER_V3_FILES, ROUTER_FILES, DIALOGUE_FILES)
+                   ROUTER_V3_FILES, ROUTER_FILES)
                   if match[1] == _asset_digest(bundle)), None)
     if files is None:
         raise ValueError("编译Skill引用的附件版本不可用，请保留对应冻结附件或恢复默认模板")

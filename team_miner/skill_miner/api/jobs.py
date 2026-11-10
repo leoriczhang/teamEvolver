@@ -84,12 +84,6 @@ def router(services):
     async def create(request: Request):
         settings = await ctx.settings(request)
         body = await read_body(request, 128 * 1024)
-        if body.get("task_mode") == "dialogue_dimensions":
-            from ..dialogue_dimensions.partition import options
-            try:
-                options(body.get("dialogue_options"))
-            except ValueError as exc:
-                raise HTTPException(400, str(exc)) from exc
         return await accept(request, services, "job.create", body, settings)
 
     @routes.post("/api/mining/dialogue-datasets", status_code=202)
