@@ -104,7 +104,7 @@ The main fields of `POST /api/mining/jobs` are:
 | `mining_mode` | string | `auto` discovery (default), `single` one complete Skill, or `target` requested count |
 | `mining_direction` | string | Up to 4000 characters; optional in auto/target, required complete-method goal in single |
 | `target_skill_count` | integer/null | Required integer 1–100 in target, fixed to 1 in single, null or omitted in auto |
-| `runtime_timeout_seconds` | integer | Round execution budget, 60–7200 seconds, default3600; not an ETA |
+| `runtime_timeout_seconds` | integer | Round execution budget, 60–86400 seconds (up to 24 hours), default3600; editable in web settings or at job creation; not an ETA |
 
 Whole-round jobs use `execution_protocol: "te-native-mining.v1"`: one normal Compile per round, full initial construction, then incremental updates of the same `stable_output_uri` using current supplements, implicated originals and changed revision context. `max_rounds` is an upper bound; an empty question list finishes mining without an empty extra round.
 

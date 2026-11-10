@@ -240,8 +240,10 @@ class RepositoryCoreMixin:
             raise ValueError("Skill Candidate 编译契约版本必须为 1 或 2")
         if isinstance(max_rounds, bool) or not isinstance(max_rounds, int) or not 1 <= max_rounds <= 5:
             raise ValueError("挖掘轮数上限必须在 1 到 5 之间")
-        if not 60 <= runtime_timeout_seconds <= 7200:
-            raise ValueError("运行期限必须在 60 到 7200 秒之间")
+        from .settings import PIPELINE_RANGES
+        minimum_timeout, maximum_timeout = PIPELINE_RANGES["runtime_timeout_seconds"]
+        if not minimum_timeout <= runtime_timeout_seconds <= maximum_timeout:
+            raise ValueError(f"运行期限必须在 {minimum_timeout} 到 {maximum_timeout} 秒之间")
         requested_id = str(job_id or "")
         if requested_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}", requested_id):
             raise ValueError("挖掘任务 ID 无效")

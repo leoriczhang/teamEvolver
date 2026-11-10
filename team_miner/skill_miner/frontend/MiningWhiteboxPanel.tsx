@@ -111,7 +111,7 @@ export default function MiningWhiteboxPanel({ active, user }: { active: boolean;
           <div className="grid gap-3.5 md:grid-cols-2">
             <NumberField label="默认挖掘轮数上限" value={settings?.pipeline.max_rounds ?? 3} min={1} max={5}
               disabled={disabled} onChange={(value) => updatePipeline("max_rounds", value)} />
-            <NumberField label="默认单轮运行期限（秒）" value={settings?.pipeline.runtime_timeout_seconds ?? 3600} min={60} max={7200}
+            <NumberField label="默认单轮运行期限（秒）" value={settings?.pipeline.runtime_timeout_seconds ?? 3600} min={60} max={86400}
               disabled={disabled} onChange={(value) => updatePipeline("runtime_timeout_seconds", value)} />
           </div>
         </div>

@@ -50,7 +50,7 @@ function installApi(job: FixtureJob | null, onAction?: (path: string, body: Reco
   mockedApi.mockImplementation(async (path: string, init?: RequestInit) => {
     if (path === "/api/mining/config") return {
       max_rounds_default: 3, max_rounds_range: [1, 5],
-      runtime_timeout_seconds_default: 3600, runtime_timeout_seconds_range: [60, 7200],
+      runtime_timeout_seconds_default: 3600, runtime_timeout_seconds_range: [60, 86400],
     };
     if (path === "/api/mining/input-sources") return { sources: [source] };
     if (path === `/api/mining/input-sources/${source.source_id}`) return { source };
@@ -216,19 +216,22 @@ describe("MiningView real mining rounds", () => {
     expect(screen.getByRole("button", { name: "保存修改" })).toBeDisabled();
   });
 
-  it("creates an actual round cap and enables human Evidence checkpoints", async () => {
+  it("creates a 24-hour round budget and enables human Evidence checkpoints", async () => {
     const created = vi.fn(() => ({ jobs: [] }));
     installApi(null, created);
     render(<MiningView active page="jobs" />);
     fireEvent.click(await screen.findByRole("button", { name: "新建 Skill 挖掘" }));
     const slider = await screen.findByRole("slider", { name: /挖掘轮数上限/ });
     fireEvent.change(slider, { target: { value: "2" } });
+    const timeout = screen.getByRole("spinbutton", { name: /单轮运行期限/ });
+    expect(timeout).toHaveAttribute("max", "86400");
+    fireEvent.change(timeout, { target: { value: "86400" } });
     expect(screen.getByRole("checkbox", { name: /有补证问题时等待人工补充 Evidence/ })).toBeChecked();
     expect(screen.getByText(/运行期限用于保护预算，不代表预计完成时间/)).toBeInTheDocument();
     expect(screen.queryByText(/内部证据复核次数提示/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "创建任务" }));
     await waitFor(() => expect(created).toHaveBeenCalled());
-    expect(created.mock.calls[0]).toEqual(["/api/mining/jobs", expect.objectContaining({ max_rounds: 2, human_checkpoints: true, runtime_timeout_seconds: 3600 })]);
+    expect(created.mock.calls[0]).toEqual(["/api/mining/jobs", expect.objectContaining({ max_rounds: 2, human_checkpoints: true, runtime_timeout_seconds: 86400 })]);
   });
 
   it("uses saved native defaults with source choices supplied entirely by the OV registry", async () => {
@@ -236,7 +239,7 @@ describe("MiningView real mining rounds", () => {
     installApi(null, created);
     const baseApi = mockedApi.getMockImplementation()!;
     mockedApi.mockImplementation(async (path: string, init?: RequestInit) => path === "/api/mining/config" ? {
-      max_rounds_default: 2, max_rounds_range: [1, 5], runtime_timeout_seconds_default: 600, runtime_timeout_seconds_range: [60, 7200],
+      max_rounds_default: 2, max_rounds_range: [1, 5], runtime_timeout_seconds_default: 600, runtime_timeout_seconds_range: [60, 86400],
     } : baseApi(path, init));
     render(<MiningView active page="jobs" />);
     fireEvent.click(await screen.findByRole("button", { name: "新建 Skill 挖掘" }));
@@ -1200,7 +1203,9 @@ describe("OpenViking mining settings", () => {
     const rounds = await screen.findByRole("spinbutton", { name: "默认挖掘轮数上限" });
     expect(rounds).toHaveAttribute("max", "5");
     fireEvent.change(rounds, { target: { value: "2" } });
-    fireEvent.change(screen.getByRole("spinbutton", { name: "默认单轮运行期限（秒）" }), { target: { value: "600" } });
+    const timeout = screen.getByRole("spinbutton", { name: "默认单轮运行期限（秒）" });
+    expect(timeout).toHaveAttribute("max", "86400");
+    fireEvent.change(timeout, { target: { value: "86400" } });
     fireEvent.change(screen.getByRole("textbox", { name: "Skill 挖掘编译指令" }), { target: { value: "Review source Evidence." } });
     expect(screen.getAllByRole("spinbutton")).toHaveLength(2);
     expect(screen.queryByText("模型瞬时错误重试次数")).not.toBeInTheDocument();
@@ -1209,7 +1214,7 @@ describe("OpenViking mining settings", () => {
     await waitFor(() => expect(requests[0]).toEqual({
       path: "/api/mining/settings", body: {
         expected_revision: 7,
-        pipeline: { max_rounds: 2, runtime_timeout_seconds: 600 },
+        pipeline: { max_rounds: 2, runtime_timeout_seconds: 86400 },
         prompts: [{ id: "ov_compile", prompt: "Review source Evidence." }],
       },
     }));

@@ -21,7 +21,7 @@ Register a directory under Sources, tag it for Skill use, then create a task fro
 | --- | --- |
 | Maximum rounds | 1–5, default3; an upper bound, without mandatory empty rounds |
 | Human supplements | Jobs using the review-question contract wait for real questions; default delivery completion does not depend on human approval |
-| Round deadline | 60–7200 seconds, default3600; a budget protection, not an ETA |
+| Round deadline | 60–86400 seconds (up to 24 hours), default3600; editable in web settings or at job creation; a budget protection, not an ETA |
 | Free discovery | Optional direction; the selected compiler organizes source-supported artifacts |
 | Single Skill | Required direction and a fixed target count of1 |
 | Target count | 1–100, optional direction; report insufficient support without forced splits or merges |

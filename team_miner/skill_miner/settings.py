@@ -18,7 +18,7 @@ from .ov_compile_mining import PLAN_SCHEMA_VERSION
 from .task_compiler import SKILL_BODY as TASK_SKILL_BODY
 
 PIPELINE_DEFAULTS = {"max_rounds": 3, "runtime_timeout_seconds": 3600}
-PIPELINE_RANGES = {"max_rounds": (1, 5), "runtime_timeout_seconds": (60, 7200)}
+PIPELINE_RANGES = {"max_rounds": (1, 5), "runtime_timeout_seconds": (60, 86400)}
 COMPILER_PROMPT_ID = "ov_compile"
 MAX_COMPILER_BYTES = 256 * 1024
 LEGACY_COMPILER_WARNING = (

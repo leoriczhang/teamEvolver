@@ -46,6 +46,13 @@ def test_saved_compiler_is_the_body_used_by_future_rounds():
     assert settings_payload(data)["pipeline"]["max_rounds"] == 2
 
 
+def test_saved_day_budget_is_not_clamped_to_previous_two_hour_limit():
+    data = {}
+    result = update_settings(data, {"pipeline": {"runtime_timeout_seconds": 86400}})
+    assert result["pipeline"]["runtime_timeout_seconds"] == 86400
+    assert settings_payload(data)["pipeline"]["runtime_timeout_seconds"] == 86400
+
+
 @pytest.mark.parametrize(
     "custom", [LEGACY_SKILL_BODY, LEGACY_SKILL_BODY + "\nPreserve custom task boundaries.\n"],
     ids=["legacy-default", "custom-single"],
@@ -82,6 +89,7 @@ def test_saving_custom_single_candidate_compiler_preserves_bytes_and_surfaces_mo
     {"pipeline": {"max_rounds": 6}},
     {"pipeline": {"max_rounds": True}},
     {"pipeline": {"runtime_timeout_seconds": 59}},
+    {"pipeline": {"runtime_timeout_seconds": 86401}},
     {"pipeline": {"max_retries": 1}},
     {"prompts": [{"id": "sample_package", "prompt": "obsolete"}]},
     {"prompts": [{"id": "ov_compile", "prompt": "invalid compiler"}]},

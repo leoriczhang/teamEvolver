@@ -97,7 +97,7 @@ Skill 挖掘任务本身的 `/api/mining/jobs` 列表和详情沿用下文业务
 | `mining_mode` | string | `auto` 自由挖掘（默认）、`single` 单 Skill 整合、`target` 指定数量 |
 | `mining_direction` | string | 最多 4000 字符；自由挖掘和指定数量时选填，单 Skill 整合时必填完整方法目标 |
 | `target_skill_count` | integer/null | 指定数量时必填 1–100；单 Skill 固定为 1；自由挖掘为 null 或省略 |
-| `runtime_timeout_seconds` | integer | 每轮执行保护期限，60–7200，默认3600秒；不是预计完成时间 |
+| `runtime_timeout_seconds` | integer | 每轮执行保护期限，60–86400 秒（最高 24 小时），默认3600秒；可在网页配置或创建任务时调整，不是预计完成时间 |
 
 整轮任务使用 `execution_protocol: "te-native-mining.v1"`，每轮正常提交一次Compile；首轮完整构建，后续轮次使用本次补证、涉及的冻结原文和变更的产物上下文，增量更新相同的 `stable_output_uri`。`max_rounds` 是上限；问题为0时结束，不强制进入下一轮。
 

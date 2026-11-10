@@ -13,7 +13,7 @@ from ..artifacts import MAX_ARTIFACT_BYTES, _artifact_path, _job_metadata, _payl
 from ..presentation import metadata
 from ..presentation import read as read_view
 from ..repository import MiningRevisionConflict
-from ..settings import pipeline_settings, reset_prompt, settings_payload, update_settings
+from ..settings import PIPELINE_RANGES, pipeline_settings, reset_prompt, settings_payload, update_settings
 from ..storage import PgMiningFileStore
 from ..task_io import State, accept
 from .context import Context, read_body, translate
@@ -37,7 +37,8 @@ def router(services):
         defaults = pipeline_settings(settings.config)
         return {"engine": "ov_compile", "max_rounds_default": defaults["max_rounds"], "max_rounds_range": [1, 5],
                 "runtime_timeout_seconds_default": defaults["runtime_timeout_seconds"],
-                "runtime_timeout_seconds_range": [60, 7200], "rounds_mode": "orchestrated",
+                "runtime_timeout_seconds_range": list(PIPELINE_RANGES["runtime_timeout_seconds"]),
+                "rounds_mode": "orchestrated",
                 "human_checkpoints_supported": True,
                 "compile_model": {"configuration_source": "openviking_server", "editable_here": False}}
 

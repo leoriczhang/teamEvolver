@@ -195,17 +195,16 @@ def test_options_truthful_and_timeout_range(tmp_path):
     r, j = job_repo(tmp_path)
     assert j["current_round"] == 1 and j["human_checkpoints_requested"] and j["human_checkpoints_effective"]
     assert j["rounds_mode"] == "orchestrated"
-    with pytest.raises(ValueError):
-        r.create_job(
-            name="bad",
-            account="default",
-            source_uri="viking://resources/test",
-            source_snapshot_uri="viking://resources/snapshot",
-            output_uri="viking://resources/output",
-            document_count=1,
-            max_rounds=3,
-            runtime_timeout_seconds=59,
-        )
+    fields = dict(
+        name="timeout boundary", account="default", source_uri="viking://resources/test",
+        source_snapshot_uri="viking://resources/snapshot", output_uri="viking://resources/output",
+        document_count=1, max_rounds=3,
+    )
+    for timeout in (59, 86401):
+        with pytest.raises(ValueError):
+            r.create_job(**fields, runtime_timeout_seconds=timeout)
+    accepted = r.create_job(**fields, runtime_timeout_seconds=86400)
+    assert accepted["runtime_timeout_seconds"] == 86400
 
 
 def test_missing_reports_cannot_be_success(tmp_path):
