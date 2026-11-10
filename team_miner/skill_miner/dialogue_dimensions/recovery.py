@@ -30,7 +30,8 @@ async def resume(engine, job, body):
             unit["projected"] = False
             if unit["status"] != "accepted":
                 unit.update(attempt=0, status="pending")
-                for field in ("request", "key", "task_id", "cancel_sent", "submitted_at"):
+                for field in ("request", "key", "task_id", "cancel_sent", "submitted_at", "staged_inputs",
+                              "error", "errors", "definitive_failure"):
                     unit.pop(field, None)
             await target.save(**{f"extract/{number}": unit})
         for number in range(1, state["merge_count"] + 1):
@@ -41,6 +42,8 @@ async def resume(engine, job, body):
                    "pending": state["pending"] - missing, "usable": 0, "isolated": 0, "warnings": 0,
                    "dimensions": 0, "blocked_units": 0, "merge_planning_cursor": 1, "merge_buffer": None,
                    "page_count": 0}
+        summary.pop("submission_rejection", None)
+        summary.pop("submission_error", None)
         await target.save(summary=summary)
         root = job["dialogue_output_root"].split("/deliveries/")[0]
         return await update(engine, job, status="preparing", dialogue_recovery_epoch=epoch,

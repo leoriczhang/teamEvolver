@@ -664,6 +664,28 @@ describe("MiningView accepted Worker operations", () => {
   });
   afterEach(cleanup);
 
+  it("reuses a stable request ID when the original dialogue resume button loses its response", async () => {
+    const current = { ...waitingJob(1, 1, false), status: "interrupted", pending_checkpoint: null,
+      can_resume: true, execution_protocol: "te-dialogue-dimensions.v1", dialogue_recovery_epoch: 0,
+      finished_at: "2026-11-10T06:00:00Z" };
+    const action = vi.fn()
+      .mockRejectedValueOnce(new Error("lost response"))
+      .mockResolvedValueOnce({ job: { ...current, status: "preparing", can_resume: false,
+        dialogue_recovery_epoch: 1, finished_at: "" } });
+    installApi(current, action);
+    render(<MiningView active page="jobs" />);
+    fireEvent.click(await screen.findByRole("button", { name: /真实多轮挖掘/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "从断点恢复" }));
+    await waitFor(() => expect(toastErr).toHaveBeenCalledWith("恢复任务失败", "lost response"));
+    fireEvent.click(screen.getByRole("button", { name: "从断点恢复" }));
+    await waitFor(() => expect(toastOk).toHaveBeenCalledWith("已从失败断点恢复", expect.any(String)));
+    expect(action).toHaveBeenCalledTimes(2);
+    const first = action.mock.calls[0][1];
+    expect(first).toEqual({ request_id: expect.any(String) });
+    expect(first.request_id).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(action.mock.calls[1][1]).toEqual(first);
+  });
+
   it("keeps creation pending until its Worker receipt contains a business job", async () => {
     installApi(null);
     const finish = acceptCommand("/api/mining/jobs", { jobs: [{ ...waitingJob(), status: "preparing" }] });

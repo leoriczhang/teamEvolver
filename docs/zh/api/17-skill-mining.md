@@ -17,6 +17,12 @@ Worker 从父目录读取数据集清单并校验逐文件摘要，无需用户�
 默认使用句子 ID；引文逐字匹配原文。
 完整案例不截断，过大案例标为待处理。
 
+Worker 为每次 Compile 建立独立输入目录，逐字复制本批未接受的案例文件或当前归并窗口，
+核对摘要与目录成员后把目录 URI 作为 `from`；OV 不接受单文件 `from`。
+输入位于任务的 `dialogue/recovery-<epoch>/units/<stage>-<number>/attempt-<attempt>-input`，
+输出位于相邻 `attempt-<attempt>`。明确请求拒绝保留脱敏 HTTP 状态与原因，
+停止本任务其他批次自动提交；超时或受理未知继续用原幂等键对账。
+
 `POST /api/mining/dialogue-datasets` 受理准备任务并返回 202。请求含 `output_uri`、
 `format`（`xlsx` 或 `jsonl`），以及原文件 `content_base64`；JSONL 也可提供 `source_uri`。
 原文件上限 20 MiB，请求上限 30 MiB，可选 `filename`、`dataset_namespace`、`dialogue_options`。
@@ -32,7 +38,8 @@ Worker 白名单导入后返回 `prepared_source_uri`、`dataset_manifest_ref`�
 待处理单元补偿耗尽后状态为 `interrupted`，保留已接受结果；结构或来源安全错误为 `failed`。
 结构和定位检查不代表全部业务结论已经独立验证，`content_validated=false`。
 恢复部分交付使用 `POST /api/mining/jobs/{job_id}/resume` 和稳定的 `request_id`，
-成功案例回执复用，新的交付独立归档。容量调整和新数据使用新任务。
+原有恢复按钮自动携带并在丢回包重试时复用该 ID。成功案例回执复用，新的交付独立归档，
+旧拒绝状态清除；恢复仍使用受理时的 Skill 配置。修改 Skill、容量调整和新数据使用新任务。
 
 这些控制台内部接口管理 OpenViking Compile 多轮执行与人工 Evidence 补充。需要有效的控制台 Session Cookie，当前租户身份为 `tenant_admin`，或平台身份为 `platform_admin`；普通成员与租户机器凭据不能调用。Agent 数据面协议保持不变。
 

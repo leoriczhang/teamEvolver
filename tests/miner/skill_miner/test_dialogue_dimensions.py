@@ -273,8 +273,13 @@ async def test_full_bounded_pipeline_terminates_with_no_forced_merge_and_survive
     assert host.job["dimension_count"] == 20  # Keeping every member separate terminates normally.
     assert host.job["pending_case_count"] == 0
     assert len(host.posts) == manifest["extract_unit_count"] + 2
-    assert all(len(request["from"]) <= 8 for request in host.requests)
-    assert all("/model_cases/" in uri for r in host.requests[:3] for uri in r["from"])
+    assert all(len(request["from"]) == 1 for request in host.requests)
+    for request in host.requests:
+        assert request["to"] != request["from"][0]
+        entries = host.entries(request["from"][0])
+        assert 1 <= len(entries) <= 8
+        assert all(not e["isDir"] for e in entries)
+    assert sum(len(host.entries(r["from"][0])) for r in host.requests if "stage=extract;" in r["instruction"]) == 20
     validation = json.loads(projections[job["dialogue_output_root"] + "/validation.json"])
     assert validation["delivery_status"] == "complete" and validation["content_validated"] is False
     assert not host.admission.live
@@ -329,8 +334,83 @@ async def test_partial_delivery_resume_only_runs_missing_case_and_changed_window
     assert host.job["status"] == "succeeded"
     assert host.job["processed_case_count"] == 20 and host.job["pending_case_count"] == 0
     assert len(host.posts) - before == 2  # One missing case and only its changed merge window.
+    assert len(host.entries(host.requests[-2]["from"][0])) == 1
     assert host.job["dimension_count"] == 20
     assert len([key for key in projections if key.endswith("/manifest.json")]) == 2
+
+
+@pytest.mark.asyncio
+async def test_directory_staging_preserves_full_input_and_rejects_extra_files():
+    value = case("HWP：那个个🙂。\r\nC：好……。\n")
+    host = Host({"account": "a"})
+    source = "viking://resources/source/case.md"
+    host.remote[source] = render(value)
+    selected = [{"uri": source, "sha256": sha(render(value))}]
+    directory = "viking://resources/staged/attempt-input"
+    staged = await orchestration.stage_inputs(host, host.job, directory, selected)
+    assert directory in host.directories
+    assert parse_model(host.remote[staged[0]["uri"]]) == value
+    assert await orchestration.stage_inputs(host, host.job, directory, selected) == staged
+    host.remote[directory + "/unselected.md"] = "unexpected source"
+    with pytest.raises(ValueError, match="directory_changed"):
+        await orchestration.stage_inputs(host, host.job, directory, selected)
+
+
+@pytest.mark.asyncio
+async def test_permanent_preflight_rejection_stops_other_batches_and_resume_clears_error(monkeypatch):
+    values = [case(number=i) for i in range(3)]
+    job = {"job_id": "rejected", "account": "a", "current_round": 1, "status": "preparing",
+           "dialogue_options": options(), "dataset_manifest_ref": "viking://resources/source/manifest.json",
+           "dataset_manifest_sha256": sha("{}"), "runtime_timeout_seconds": 3600,
+           "dialogue_output_root": "viking://resources/output/dialogue"}
+    host = Host(job)
+    host.remote[job["dataset_manifest_ref"]] = "{}"
+    host.reject_compile = (400, "Compile source must be a directory; api_key=private-test-secret")
+    journals, projections = {0: MemoryJournal()}, {}
+    state = {"stage": "extract", "cursor": 1, "extract_count": 3, "merge_count": 0, "case_count": 3,
+             "processed": 0, "pending": 0, "usable": 0, "isolated": 0, "warnings": 0, "dimensions": 0,
+             "blocked_units": 0, "merge_planning_cursor": 1, "merge_buffer": None, "page_count": 0}
+    await journals[0].save(summary=state)
+    for number, value in enumerate(values, 1):
+        uri = f"viking://resources/source/{number}.md"
+        host.remote[uri] = render(value)
+        await journals[0].save(**{f"extract/{number}": {
+            "number": number, "stage": "extract", "files": [{"uri": uri, "sha256": sha(render(value)), "case": value}],
+            "attempt": 0, "status": "pending", "accepted": {}}})
+    def journal(_, current):
+        return journals.setdefault(current.get("dialogue_recovery_epoch", 0), MemoryJournal())
+    async def provision(*_):
+        return "viking://agent/skills/saved"
+    async def artifact(_, current, path, text):
+        projections[current["dialogue_output_root"] + "/" + path] = text
+    monkeypatch.setattr(orchestration, "Journal", journal)
+    monkeypatch.setattr(dialogue_recovery, "Journal", journal)
+    monkeypatch.setattr(orchestration, "provision", provision)
+    monkeypatch.setattr(orchestration, "artifact", artifact)
+    for _ in range(30):
+        await orchestration.tick(host, host.job)
+        if host.job["status"] == "interrupted":
+            break
+    assert host.job["delivery_status"] == "partial"
+    assert host.job["processed_case_count"] == 0 and host.job["pending_case_count"] == 3
+    assert len(host.requests) == 1 and not host.posts and not host.admission.live
+    assert "OV HTTP 400: Compile source must be a directory" in host.job["error"]
+    assert "private-test-secret" not in json.dumps(projections)
+    assert "private-test-secret" not in host.job["error"]
+    assert "compile_request_rejected" in projections[job["dialogue_output_root"] + "/issues/extract-000001.jsonl"]
+    host.reject_compile = None
+    await dialogue_recovery.resume(host, host.job, {"request_id": "resume-rejection"})
+    assert "submission_rejection" not in await journals[1].get("summary")
+    assert "definitive_failure" not in await journals[1].get("extract/1")
+    for _ in range(50):
+        await orchestration.tick(host, host.job)
+        if host.job["status"] in {"succeeded", "interrupted"}:
+            break
+    assert host.job["status"] == "succeeded" and host.job["processed_case_count"] == 3
+    assert host.job["error"] == ""
+    before = len(host.requests)
+    await dialogue_recovery.resume(host, host.job, {"request_id": "resume-rejection"})
+    assert len(host.requests) == before and host.job["dialogue_recovery_epoch"] == 1
 
 
 @pytest.mark.postgres

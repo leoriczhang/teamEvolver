@@ -48,6 +48,7 @@ export function useMiningController({
   const [jobActionPending, setJobActionPending] = useState(false);
   const nativeRetryPending = useRef(false);
   const nativeRetryRequest = useRef<{ signature: string; id: string } | null>(null);
+  const dialogueResumeRequest = useRef<{ signature: string; id: string } | null>(null);
   const [deleteJob, setDeleteJob] = useState<MiningJob | null>(null);
   const [jobDeleting, setJobDeleting] = useState(false);
   const [checkpointAnswers, setCheckpointAnswers] = useState<Record<string, string>>({});
@@ -230,10 +231,19 @@ export function useMiningController({
   }
 
   async function resumeJob(job: MiningJob) {
+    if (jobActionPending) return;
     setJobActionPending(true);
     try {
+      let body: string | undefined;
+      if (job.execution_protocol === "te-dialogue-dimensions.v1") {
+        const signature = JSON.stringify([job.job_id, job.dialogue_recovery_epoch ?? 0, job.finished_at]);
+        if (dialogueResumeRequest.current?.signature !== signature) {
+          dialogueResumeRequest.current = { signature, id: createRequestId() };
+        }
+        body = JSON.stringify({ request_id: dialogueResumeRequest.current.id });
+      }
       const response = await api<{ job: MiningJob }>(`/api/mining/jobs/${encodeURIComponent(job.job_id)}/resume`,
-        { method: "POST" });
+        body ? { method: "POST", body } : { method: "POST" });
       setSelectedJob(response.job);
       await mining.refreshJobs(false);
       toastOk("已从失败断点恢复", "保留当前轮输入、已完成产物与未解决问题。");

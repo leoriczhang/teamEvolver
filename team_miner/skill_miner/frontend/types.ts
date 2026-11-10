@@ -118,6 +118,7 @@ export interface MiningJob {
   round_work_units?: number;
   staged_progress?: { phase: string; label: string; completed: number; total: number; subtask_index?: number };
   execution_protocol?: string;
+  dialogue_recovery_epoch?: number;
   native_compile_history?: { round: number; task_id: string }[];
   native_repairs?: { round: number; attempt: number; error: string }[];
   ov_cancel_error?: string;

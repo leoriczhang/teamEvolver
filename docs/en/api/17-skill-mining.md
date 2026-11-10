@@ -20,6 +20,14 @@ Compile admission slots, with at most two repairs per unit. Sentence IDs are use
 quoted text is checked against the original input.
 Whole cases are never truncated. Oversized cases remain pending.
 
+The Worker creates a separate input directory for each Compile, copies complete unaccepted
+case files or the current merge window, and verifies hashes and directory membership.
+`from` contains that directory URI; OV rejects individual file URIs.
+Inputs live at the job's `dialogue/recovery-<epoch>/units/<stage>-<number>/attempt-<attempt>-input`,
+with output in the sibling `attempt-<attempt>` directory. Definitive request rejection preserves
+the redacted HTTP status and reason and stops further automatic submissions for this job.
+Timeouts or uncertain acceptance retain the original idempotency key for reconciliation.
+
 `POST /api/mining/dialogue-datasets` queues preparation and returns 202. Supply `output_uri`,
 `format` (`xlsx` or `jsonl`) and the original file's `content_base64`; JSONL also supports `source_uri`.
 The original file limit is 20 MiB and request limit 30 MiB. Optional fields are `filename`,
@@ -36,7 +44,9 @@ near synonyms do not block delivery. Exhausted pending units yield `interrupted`
 safety failures yield `failed`. Accepted results are preserved. Structural and citation checks do not
 independently verify all business judgments, so `content_validated=false`.
 Resume partial delivery through `POST /api/mining/jobs/{job_id}/resume` with a stable `request_id`;
-accepted findings are reused and each new delivery is archived independently. New data or budgets require a new job.
+the existing resume button supplies and reuses that ID when retrying a lost response.
+Accepted findings are reused, each new delivery is archived independently, and old rejection flags
+are cleared. Recovery uses the accepted Skill configuration. Changed Skills, data or budgets require a new job.
 
 These console-internal interfaces manage OpenViking Compile rounds and human Evidence supplements. They require a valid console Session Cookie and either `tenant_admin` in the selected tenant or `platform_admin`. Ordinary members and tenant machine credentials cannot call these management interfaces. The Agent data-plane protocol is unchanged.
 

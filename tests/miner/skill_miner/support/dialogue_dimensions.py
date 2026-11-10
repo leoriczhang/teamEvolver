@@ -60,7 +60,20 @@ class Host:
         self.lose_response = False
         self.requests = []
         self.omit_cases = set()
+        self.reject_compile = None
+        self.directories = set()
         self.repository = SimpleNamespace(update_job=self.update, get_job=lambda *_: copy.deepcopy(self.job))
+
+    def _round_client(self, _):
+        return self
+
+    async def mkdir(self, uri):
+        self.directories.add(uri)
+
+    def entries(self, root):
+        prefix = root.rstrip("/") + "/"
+        return [{"uri": uri, "isDir": False} for uri in sorted(self.remote)
+                if uri.startswith(prefix) and "/" not in uri[len(prefix):]]
 
     def _ov_skill_compiler_body(self):
         return SKILL_BODY
@@ -77,10 +90,17 @@ class Host:
             return {"task_id": self.posts[key]}
         if path == "/api/v1/compile":
             key = kwargs["extra_headers"]["Idempotency-Key"]
-            self.posts.setdefault(key, "task-" + str(len(self.posts) + 1))
             payload = kwargs["json"]
             self.requests.append(copy.deepcopy(payload))
-            for uri in payload["from"]:
+            if self.reject_compile:
+                raise HTTPException(*self.reject_compile)
+            uris = []
+            for root in payload["from"]:
+                if root in self.remote or (root not in self.directories and not self.entries(root)):
+                    raise HTTPException(400, f"Compile source must be a directory: {root}")
+                uris.extend(e["uri"] for e in self.entries(root))
+            self.posts.setdefault(key, "task-" + str(len(self.posts) + 1))
+            for uri in uris:
                 text = self.remote[uri]
                 if "stage=extract;" in payload["instruction"]:
                     value = parse_model(text)
@@ -104,4 +124,17 @@ class Host:
             if uri not in self.remote:
                 raise HTTPException(404)
             return {"content": self.remote[uri]}
+        if path == "/api/v1/fs/ls":
+            return self.entries(kwargs["params"]["uri"])[:kwargs["params"].get("node_limit", 1000)]
+        if path == "/api/v1/content/batch-write":
+            body = kwargs["json"]
+            assert body["defer_processing"] is True
+            conflicts = []
+            for op in body["operations"]:
+                assert op["mode"] == "create"
+                if op["uri"] in self.remote:
+                    conflicts.append(op["uri"])
+                else:
+                    self.remote[op["uri"]] = op["content"]
+            return {"conflicts": conflicts, "semantic_status": "deferred", "vector_status": "deferred"}
         raise AssertionError(path)

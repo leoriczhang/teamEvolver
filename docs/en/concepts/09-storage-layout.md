@@ -110,6 +110,8 @@ viking://user/<user>/{memories,resources,skills}
 | `viking://resources/agent_knowledge_workspace/output/processed_knowledge` | Team Miner default Wiki output |
 | `viking://resources/agent_knowledge_workspace/input/proven_experiences` | Default successful experience sync directory |
 | `viking://agent/skills/llm-wiki` | Team Miner default Compile Skill |
+| `viking://resources/agent_skill_workspace/runs/<job>/dialogue/recovery-<epoch>/units/<stage>-<number>/attempt-<attempt>-input/` | Complete input files for the current dialogue-dimension submission, containing only unaccepted cases or the current window |
+| `viking://resources/agent_skill_workspace/runs/<job>/dialogue/recovery-<epoch>/units/<stage>-<number>/attempt-<attempt>/` | Dialogue-dimension Compile receipts, separate from the sibling input directory |
 
 ## Local Directories
 

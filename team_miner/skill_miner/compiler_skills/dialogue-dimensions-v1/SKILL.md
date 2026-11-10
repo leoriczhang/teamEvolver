@@ -17,6 +17,8 @@ te-dialogue-dimensions.v1
 stage=extract 只执行提取步骤；stage=merge 只执行归并步骤。
 不要将两个阶段指令全文复制到 Transform。
 当前 assignment 只包含自己的文件及真实输入 ID，不扫描兄弟窗口或整个数据集。
+Compile.from 是宿主为当前批次准备的独立目录，不是文件 URI；extract 目录只含本批未接受的
+完整案例 Markdown，merge 目录只含当前窗口 Markdown。不要扫描父目录、host 清单或其他批次。
 
 ## Entry 与 Planner
 
@@ -50,6 +52,24 @@ extract 是 Transform 名称，不等同于业务 stage；Transform instructions
 完整阅读当前文件所有 ranges 和续行。使用当前 emit 的 FileResponse schema，
 写文件再 emit 或直接按 schema 交付完整文件；不得发明 ready_path 等旧协议字段。
 files[].inputs 只填实际 assignment 顶层输入 ID，禁止用 case_ref、sentence_id 或业务成员 ID 替代。
+文件 Map 的实际 emit 外壳如下（占位符必须换成实际值）：
+
+```json
+{
+  "files": [
+    {
+      "path": "analysis/dialogue_dimensions/receipts/<实际案例或窗口>.json",
+      "content": "<完整业务 JSON 序列化字符串，不加 Markdown 外壳>",
+      "inputs": ["<实际 inputs[].id，列出该文件全部 ranges 的输入 ID>"]
+    }
+  ]
+}
+```
+
+Entry 使用其实际 schema emit `{"needs_pipeline":true,"files":[]}`，随后由 Planner 生成 contract 与 plan。
+上述 FileResponse 用于文件 Map，不能直接 emit 业务 findings / merge 对象。
+使用临时文件时，以 `content_ref` 替代 `content`，保留最终 `path` 和真实 `inputs`；
+临时文件位置不等于 Compile.to，不自行写最终目标。`content_sha256` 不确定时省略。
 成功 emit 后结束，不再扫描来源。每文件对应一个真实回执；读过或上传过不等于分析完成。
 
 ## 字段契约

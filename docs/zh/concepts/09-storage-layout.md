@@ -110,6 +110,8 @@ viking://user/<user>/{memories,resources,skills}
 | `viking://resources/agent_knowledge_workspace/output/processed_knowledge` | Team Miner 默认 Wiki 输出 |
 | `viking://resources/agent_knowledge_workspace/input/proven_experiences` | 成功经验同步默认目录 |
 | `viking://agent/skills/llm-wiki` | Team Miner 默认 Compile Skill |
+| `viking://resources/agent_skill_workspace/runs/<job>/dialogue/recovery-<epoch>/units/<stage>-<number>/attempt-<attempt>-input/` | 对话维度当前提交的完整输入文件目录，仅含本批未接受案例或当前窗口 |
+| `viking://resources/agent_skill_workspace/runs/<job>/dialogue/recovery-<epoch>/units/<stage>-<number>/attempt-<attempt>/` | 对话维度 Compile 回执目录，与输入目录互不嵌套 |
 
 ## 本机目录
 

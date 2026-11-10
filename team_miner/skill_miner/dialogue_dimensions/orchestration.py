@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 
 from starlette.exceptions import HTTPException
 
+from teamEvolver.logging_runtime import redact
+
 from ..compile_admission import TERMINAL_NATIVE_STATES
 from ..mining_contracts import RUNS_ROOT, utc_now
 from ..ov_round_orchestration import _compiler_package
@@ -127,6 +129,29 @@ async def provision(engine, job):
     return "viking://agent/skills/" + name
 
 
+async def stage_inputs(engine, job, directory, selected):
+    """Compile enumerates directories; stage only complete files selected for this attempt."""
+    if not selected:
+        raise ValueError("empty_dialogue_compile_selection")
+    staged = []
+    for item in selected:
+        text = await frozen_read(engine, job, item["uri"])
+        if sha(text) != item["sha256"]:
+            raise ValueError("frozen_unit_input_changed")
+        uri = descendant(directory, sha(item["uri"]) + ".md")
+        await write(engine, job, uri, text)
+        staged.append({"uri": uri, "sha256": item["sha256"]})
+    entries = await engine._knowledge_request(
+        job["account"], "GET", "/api/v1/fs/ls", timeout=30,
+        params={"uri": directory, "output": "original", "recursive": "false",
+                "show_all_hidden": "false", "node_limit": len(staged) + 1})
+    if (not isinstance(entries, list) or len(entries) != len(staged)
+            or any(not isinstance(e, dict) or e.get("isDir") or e.get("access") == "denied" for e in entries)
+            or {e.get("uri") for e in entries} != {e["uri"] for e in staged}):
+        raise ValueError("dialogue_compile_input_directory_changed")
+    return staged
+
+
 async def submit(engine, job, journal, unit):
     """An uncertain POST is always reconciled with the persisted original key."""
     limits = job["dialogue_options"]
@@ -144,8 +169,9 @@ async def submit(engine, job, journal, unit):
         target = (f"{RUNS_ROOT}/{job['job_id']}/dialogue/recovery-{epoch}/units/"
                   f"{unit['stage']}-{unit['number']}/attempt-{attempt}")
         selected = [f for f in unit["files"] if not f.get("case") or case_key(f["case"]) not in unit["accepted"]]
-        unit.update(key=key, submitted_at=utc_now(), request={
-            "from": [f["uri"] for f in selected], "to": target, "skill": skill,
+        staged = await stage_inputs(engine, job, target + "-input", selected)
+        unit.update(key=key, submitted_at=utc_now(), staged_inputs=staged, request={
+            "from": [target + "-input"], "to": target, "skill": skill,
             "instruction": instruction(unit["stage"], limits["quote_mode"])}, status="submitting")
         await journal.save(**{f"{unit['stage']}/{unit['number']}": unit})
     if not await engine.admission.acquire(job, {"key": unit["key"]}):
@@ -170,8 +196,12 @@ async def submit(engine, job, journal, unit):
         except HTTPException as rejection:
             if rejection.status_code in {400, 401, 403, 413, 422}:
                 await engine.admission.release(key=unit["key"])
-                unit.update(status="rejected", error="compile_request_rejected", definitive_failure=True)
+                failure = {"reason": "compile_request_rejected", "http_status": rejection.status_code,
+                           "detail": redact(rejection.detail)[:2000]}
+                unit.update(status="rejected", error=failure["reason"], definitive_failure=True,
+                            errors=[failure])
                 await journal.save(**{f"{unit['stage']}/{unit['number']}": unit})
+                await update(engine, job, error=f"OV HTTP {rejection.status_code}: {failure['detail']}")
                 return unit
             raise
     task_id = str(accepted.get("task_id") or "")
@@ -188,6 +218,9 @@ async def submit(engine, job, journal, unit):
 async def collect(engine, job, journal, unit):
     """Keep valid case receipts when another child failed or returned malformed output."""
     target = unit["request"]["to"]
+    for item in unit.get("staged_inputs", []):
+        if sha(await frozen_read(engine, job, item["uri"])) != item["sha256"]:
+            raise ValueError("staged_unit_input_changed_before_acceptance")
     for item in unit["files"]:
         if item.get("uri") and sha(await frozen_read(engine, job, item["uri"])) != item["sha256"]:
             raise ValueError("frozen_unit_input_changed_before_acceptance")
@@ -285,7 +318,8 @@ async def project(engine, job, unit):
     else:
         await emit(f"issues/merge-{unit['number']:06d}.jsonl",
                    [{"window_id": unit["window"]["window_id"], "reason": "processing_incomplete",
-                     "members": [m["member_ref"] for m in unit["window"]["members"]]}], True)
+                     "members": [m["member_ref"] for m in unit["window"]["members"]]},
+                    *unit.get("errors", [])], True)
     return entries
 
 
@@ -406,6 +440,7 @@ async def finish(engine, job, journal, state):
     await journal.save(summary=state)
     return await update(engine, job, **validation, status=status, materialized=True, ov_task_id="",
                         compile_request=None, finished_at=utc_now(),
+                        error=state.get("submission_error", ""),
                         phase={"step1": "done", "step2": "done", "step3": "done"})
 
 
@@ -431,6 +466,14 @@ async def tick(engine, job, action="poll"):
             return await update(engine, job, status="preparing", ov_task_id="", compile_request=None)
         return await finish(engine, job, journal, state)
     unit = await journal.get(f"{stage}/{cursor}")
+    # A crash after saving the rejection must not resume submissions for later units.
+    if unit.get("definitive_failure") and not state.get("submission_rejection"):
+        failure = unit["errors"][0]
+        state.update(submission_rejection=failure,
+                     submission_error=f"OV HTTP {failure['http_status']}: {failure['detail']}")
+        await journal.save(summary=state)
+    if state.get("submission_rejection") and unit["status"] != "accepted":
+        unit.update(status="rejected", definitive_failure=True, errors=[state["submission_rejection"]])
     if unit.get("projected"):
         raise ValueError("projected_unit_cursor_not_advanced")
     await update(engine, job, dialogue_stage=stage, dialogue_unit=cursor,
@@ -444,9 +487,10 @@ async def tick(engine, job, action="poll"):
         await advance_unit(engine, job, journal, state, unit)
         return await asyncio.to_thread(engine.repository.get_job, job["job_id"])
     if unit["status"] in {"invalid", "rejected"}:
-        if unit["attempt"] < job["dialogue_options"]["repair_attempts_per_unit"] and not cancelling:
+        if (unit["attempt"] < job["dialogue_options"]["repair_attempts_per_unit"]
+                and not cancelling and not unit.get("definitive_failure")):
             unit.update(attempt=unit["attempt"] + 1, status="pending")
-            for key in ("request", "key", "task_id", "cancel_sent", "submitted_at"):
+            for key in ("request", "key", "task_id", "cancel_sent", "submitted_at", "staged_inputs"):
                 unit.pop(key, None)
             await journal.save(**{f"{stage}/{cursor}": unit})
         else:
@@ -454,6 +498,10 @@ async def tick(engine, job, action="poll"):
             return await asyncio.to_thread(engine.repository.get_job, job["job_id"])
     if not unit.get("task_id"):
         unit = await submit(engine, job, journal, unit)
+        if unit.get("definitive_failure"):
+            state.update(submission_rejection=unit["errors"][0],
+                         submission_error=f"OV HTTP {unit['errors'][0]['http_status']}: {unit['errors'][0]['detail']}")
+            await journal.save(summary=state)
         return await asyncio.to_thread(engine.repository.get_job, job["job_id"])
     task = await engine._knowledge_request(job["account"], "GET", "/api/v1/tasks/" + unit["task_id"], timeout=10)
     if str(task.get("task_id", unit["task_id"])) != unit["task_id"]:
