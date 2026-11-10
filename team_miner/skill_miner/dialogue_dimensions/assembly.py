@@ -5,14 +5,8 @@ from .input import canonical, sha
 
 def assemble(window, receipt):
     members = {row["member_ref"]: row for row in window["members"]}
-    groups = list(receipt["groups"])
-    for row in receipt["kept_separate"]:
-        member = members[row["member_ref"]]
-        groups.append({"member_refs": [row["member_ref"]], "name": member["label"],
-                       "definition": member["behavior"], "observable_behaviors": [member["behavior"]],
-                       "applicability": member["applicability"], "notes": [row.get("reason", "")]})
     dimensions, links = [], []
-    for number, group in enumerate(groups, 1):
+    for number, group in enumerate(receipt["groups"], 1):
         identity = [window["window_id"], number, group["member_refs"]]
         dimension_id = "dim_" + sha(canonical(identity))[:32]
         selected = [members[ref] for ref in group["member_refs"]]
@@ -29,3 +23,14 @@ def assemble(window, receipt):
                           "case_ref": member["case_ref"], "case_version": member["case_version"],
                           "sentence_refs": member["sentence_refs"], "source_spans": member["source_spans"]})
     return dimensions, links
+
+
+def dispositions(window, receipt):
+    """Retain method-level findings and their source without inventing capabilities."""
+    members = {row["member_ref"]: row for row in window["members"]}
+    return [
+        {**row, **members[row["member_ref"]], "reason": row.get("reason", ""),
+         "window_id": window["window_id"], "disposition": kind}
+        for kind in ("kept_separate", "deferred")
+        for row in receipt[kind]
+    ]

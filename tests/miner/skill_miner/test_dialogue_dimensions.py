@@ -9,7 +9,7 @@ import pytest
 
 from team_miner.skill_miner.dialogue_dimensions import orchestration
 from team_miner.skill_miner.dialogue_dimensions import recovery as dialogue_recovery
-from team_miner.skill_miner.dialogue_dimensions.assembly import assemble
+from team_miner.skill_miner.dialogue_dimensions.assembly import assemble, dispositions
 from team_miner.skill_miner.dialogue_dimensions.compiler import SKILL_BODY
 from team_miner.skill_miner.dialogue_dimensions.dataset import export
 from team_miner.skill_miner.dialogue_dimensions.input import (
@@ -118,7 +118,7 @@ def test_unknown_jsonl_fields_are_whitelisted_and_missing_rows_remain_pending(tm
     assert "private" not in render(value)
 
 
-def test_merge_does_not_have_to_reduce_and_never_invents_similar_title_membership():
+def test_separate_methods_do_not_become_dimensions_and_retain_provenance():
     value = case()
     members = findings(finding(value, observations=[
         {"behavior": "问候", "sentence_refs": ["s000001"]},
@@ -126,14 +126,58 @@ def test_merge_does_not_have_to_reduce_and_never_invents_similar_title_membershi
     window = {"window_id": "w1", "partition": {"knowledge_point": "点"},
               "members": [{**v, "member_ref": v["observation_ref"]} for v in members]}
     receipt = merge(canonical({"window_id": "w1", "kept_separate": [
-        {"member_ref": m["member_ref"], "reason": "条件不同"} for m in window["members"]]}), window)
+        {"member_ref": m["member_ref"], "reason": "条件不同", "case_ref": "untrusted-extra",
+         "source_spans": []} for m in window["members"]]}), window)
     dimensions, links = assemble(window, receipt)
-    assert len(dimensions) == len(links) == 2
+    assert dimensions == links == []
     assert assemble(window, receipt) == (dimensions, links)
+    retained = dispositions(window, receipt)
+    assert len(retained) == 2
+    for member, row in zip(window["members"], retained):
+        assert row["disposition"] == "kept_separate"
+        assert row["reason"] == "条件不同"
+        assert row["behavior"] == member["behavior"]
+        assert row["case_ref"] == member["case_ref"]
+        assert row["case_version"] == member["case_version"]
+        assert row["source_spans"] == member["source_spans"]
     with pytest.raises(ReceiptError):
         merge(canonical({"groups": [{"definition": "x", "member_refs": ["foreign"]}]}), window)
     with pytest.raises(ReceiptError):
         merge('{"groups":[]}', window)
+
+
+@pytest.mark.parametrize("notes", [
+    ["评分对象：评价开场联系的针对性。", "适用与缺证据：无机会为 N/A；上下文不足为 NE。",
+     "候选0分：有开场机会却未回应客户。", "候选1分：仅作泛化问候。",
+     "候选2分：通过当前情境建立联系。", "候选3分：根据客户反馈恰当调整联系方法。",
+     "评分步骤：定位行为证据；不同方法可以替代。", "证据与校准：所有档位为候选，待校准。"],
+    ["rubric_pending：当前 Evidence 尚不足以拟定有意义的档差。"],
+    [],
+])
+def test_singleton_capability_preserves_candidate_guidance_without_hard_rubric_gate(notes):
+    value = case()
+    members = findings(finding(value, observations=[
+        {"behavior": "根据当前情境问候", "sentence_refs": ["s000001"]},
+        {"behavior": "说明未核实的信息", "sentence_refs": ["s000002"]}]), value)["observations"]
+    window = {"window_id": "w1", "partition": {"knowledge_point": "点"},
+              "members": [{**v, "member_ref": v["observation_ref"]} for v in members]}
+    receipt = merge(canonical({
+        "groups": [{"member_refs": [window["members"][0]["member_ref"]], "name": "开场关系建立",
+                    "definition": "评价通过相关情境建立联系的能力，不评价权益披露。",
+                    "observable_behaviors": ["选择适合当前情境的联系方法"], "notes": notes}],
+        "deferred": [{"member_ref": window["members"][1]["member_ref"], "reason": "业务事实待核实"}],
+    }), window)
+    dimensions, links = assemble(window, receipt)
+    assert len(dimensions) == len(links) == 1
+    assert dimensions[0]["name"] == "开场关系建立"
+    assert dimensions[0]["notes"] == [*notes, "single_support_case"]
+    assert dimensions[0]["support_case_count"] == 1
+    assert links[0]["observation_ref"] == window["members"][0]["member_ref"]
+    assert links[0]["source_spans"] == window["members"][0]["source_spans"]
+    retained = dispositions(window, receipt)
+    assert retained[0]["disposition"] == "deferred"
+    assert retained[0]["reason"] == "业务事实待核实"
+    assert retained[0]["source_spans"] == window["members"][1]["source_spans"]
 
 
 @pytest.mark.asyncio
@@ -270,7 +314,7 @@ async def test_full_bounded_pipeline_terminates_with_no_forced_merge_and_survive
             host = restarted
     assert host.job["status"] == "succeeded", host.job
     assert host.job["processed_case_count"] == manifest["case_count"] == 20
-    assert host.job["dimension_count"] == 20  # Keeping every member separate terminates normally.
+    assert host.job["dimension_count"] == 0  # Method-only findings still complete delivery.
     assert host.job["pending_case_count"] == 0
     assert len(host.posts) == manifest["extract_unit_count"] + 2
     assert all(len(request["from"]) == 1 for request in host.requests)
@@ -282,6 +326,12 @@ async def test_full_bounded_pipeline_terminates_with_no_forced_merge_and_survive
     assert sum(len(host.entries(r["from"][0])) for r in host.requests if "stage=extract;" in r["instruction"]) == 20
     validation = json.loads(projections[job["dialogue_output_root"] + "/validation.json"])
     assert validation["delivery_status"] == "complete" and validation["content_validated"] is False
+    retained = [json.loads(line) for path, text in projections.items() if "/issues/merge-" in path
+                for line in text.splitlines()]
+    assert len(retained) == 20
+    assert {row["case_ref"] for row in retained} == {v["case_ref"] for v in values}
+    assert all(row["disposition"] == "kept_separate" and row["reason"] == "独立保留" for row in retained)
+    assert all(row["sentence_refs"] and row["source_spans"] and row["behavior"] for row in retained)
     assert not host.admission.live
 
 
@@ -335,7 +385,7 @@ async def test_partial_delivery_resume_only_runs_missing_case_and_changed_window
     assert host.job["processed_case_count"] == 20 and host.job["pending_case_count"] == 0
     assert len(host.posts) - before == 2  # One missing case and only its changed merge window.
     assert len(host.entries(host.requests[-2]["from"][0])) == 1
-    assert host.job["dimension_count"] == 20
+    assert host.job["dimension_count"] == 0
     assert len([key for key in projections if key.endswith("/manifest.json")]) == 2
 
 

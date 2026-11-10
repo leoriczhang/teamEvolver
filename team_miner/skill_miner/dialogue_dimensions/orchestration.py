@@ -14,7 +14,7 @@ from ..compile_admission import TERMINAL_NATIVE_STATES
 from ..mining_contracts import RUNS_ROOT, utc_now
 from ..ov_round_orchestration import _compiler_package
 from . import PROTOCOL
-from .assembly import assemble
+from .assembly import assemble, dispositions
 from .compiler import instruction
 from .input import canonical, case_key, parse_model, sha
 from .partition import fits_window, window_text
@@ -314,7 +314,7 @@ async def project(engine, job, unit):
         await emit(f"dimensions/part-{unit['number']:06d}.json", dimensions)
         await emit(f"case_dimension_links/{unit['window']['window_id']}.jsonl", links, True)
         await emit(f"issues/merge-{unit['number']:06d}.jsonl",
-                   [*unit["receipt"]["deferred"], *unit.get("errors", [])], True)
+                   [*dispositions(unit["window"], unit["receipt"]), *unit.get("errors", [])], True)
     else:
         await emit(f"issues/merge-{unit['number']:06d}.jsonl",
                    [{"window_id": unit["window"]["window_id"], "reason": "processing_incomplete",
@@ -340,7 +340,8 @@ async def advance_unit(engine, job, journal, state, unit):
         elif unit.get("receipt"):
             dimensions, _ = assemble(unit["window"], unit["receipt"])
             state["dimensions"] += len(dimensions)
-            state["warnings"] += len(unit["receipt"]["deferred"]) + len(unit["receipt"]["repairs"])
+            state["warnings"] += (len(unit["receipt"]["kept_separate"]) + len(unit["receipt"]["deferred"])
+                                  + len(unit["receipt"]["repairs"]))
         else:
             state["blocked_units"] += 1
         state["cursor"] += 1
