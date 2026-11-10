@@ -228,6 +228,7 @@ class RepositoryCoreMixin:
         mining_direction: str = "",
         target_skill_count: int | None = None,
         job_id: str = "",
+        dialogue_config: dict | None = None,
     ) -> dict[str, Any]:
         from .mining_intent import normalize_intent
         intent = normalize_intent(mining_mode, mining_direction, target_skill_count)
@@ -253,6 +254,7 @@ class RepositoryCoreMixin:
             "consolidate_reviewed_candidates": consolidate_reviewed_candidates,
             "candidate_contract_version": candidate_contract_version, "compiler_body": compiler_body,
             "mining_intent": intent,
+            "dialogue_config": dialogue_config,
         }, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
         with self._lock:
             if requested_id:
@@ -373,6 +375,14 @@ class RepositoryCoreMixin:
                 job["output_uri"] = job["stable_output_uri"]
                 job["native_compile_history"] = []
                 # These flags describe the old host pipeline, not native execution.
+                for key in list(job):
+                    if key.startswith("staged_"):
+                        job.pop(key)
+            if dialogue_config is not None:
+                from .dialogue_dimensions import PROTOCOL as DIALOGUE_PROTOCOL
+                job.update(dialogue_config, task_mode="dialogue_dimensions", execution_protocol=DIALOGUE_PROTOCOL,
+                           benchmark_required=False, candidate_count=0, orchestration_version=1,
+                           human_checkpoints_effective=False, delivery_status="partial")
                 for key in list(job):
                     if key.startswith("staged_"):
                         job.pop(key)

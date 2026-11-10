@@ -1,5 +1,36 @@
 # Skill 挖掘 API
 
+## 优秀对话维度提取
+
+`POST /api/mining/jobs` 可使用 `task_mode=dialogue_dimensions`，默认绑定独立编译 Skill，
+不生成 Skill Candidate 或 Test Dataset。全部案例视为已选定的优秀对话，历史评分与评价不进入模型。
+新模式要求 `input_dir` 指向已登记的白名单模型目录，并提供 `source_id`、
+`dataset_manifest_ref` 和 `dataset_manifest_sha256`。清单及逐文件摘要在 Worker 中核验。
+`max_rounds=1` 表示一轮业务分析，提取批次和归并窗口数量独立于轮数。
+
+`dialogue_options` 默认提取最多 8 条、24,000 字符、96,000 字节，单条对话最多 20,000 字符；
+归并窗口最多 12 个成员、16,000 字符、64,000 字节。`max_inflight_compiles` 可设 1–2，
+当前执行器保守地串行提交，仍使用租户共享 Compile 槽。`repair_attempts_per_unit` 默认 2。
+默认 `quote_mode=none` 使用句子 ID，选择 `sentences` 时引文逐字匹配冻结原文。
+完整案例不截断，过大案例标为待处理。
+
+`POST /api/mining/dialogue-datasets` 受理准备任务并返回 202。请求含 `output_uri`、
+`format`（`xlsx` 或 `jsonl`），以及原文件 `content_base64`；JSONL 也可提供 `source_uri`。
+原文件上限 20 MiB，请求上限 30 MiB，可选 `filename`、`dataset_namespace`、`dialogue_options`。
+Worker 白名单导入后返回 `prepared_source_uri`、`dataset_manifest_ref`、
+`dataset_manifest_sha256` 和计数；随后通过已有知识源登记接口将模型目录标为 Skill 来源。
+原工作簿、评分和评价不挂入 Compile。
+
+结果在 OV 的任务输出下 `analysis/dialogue_dimensions`，投影为
+`semantic_reports/dialogue_dimensions`，可通过已有制品预览接口逐文件读取。
+`delivery_status` 为 `complete` 或 `partial`，`validation_status` 为
+`passed`、`passed_with_warnings` 或 `blocked`。有真实回执才计入 `processed_case_count`。
+引文问题局部隔离，单样本支持、可选字段缺失、跨窗口近义重复允许交付。
+待处理单元补偿耗尽后状态为 `interrupted`，保留已接受结果；结构或来源安全错误为 `failed`。
+结构和定位检查不代表全部业务结论已经独立验证，`content_validated=false`。
+恢复部分交付使用 `POST /api/mining/jobs/{job_id}/resume` 和稳定的 `request_id`，
+成功案例回执复用，新的交付独立归档。容量调整和新数据使用新任务。
+
 这些控制台内部接口管理 OpenViking Compile 多轮执行与人工 Evidence 补充。需要有效的控制台 Session Cookie，当前租户身份为 `tenant_admin`，或平台身份为 `platform_admin`；普通成员与租户机器凭据不能调用。Agent 数据面协议保持不变。
 
 接口由 `team_miner/api/` 统一装配，Skill 挖掘业务位于 `team_miner/skill_miner/`，知识库挖掘位于 `team_miner/knowledge_miner/`。任务、轮次、补证与制品内容通过 [PostgreSQL Repository](../../../team_miner/skill_miner/repository.py) 持久化；临时工作目录只是可重建缓存。操作流程见 [多轮 Skill 挖掘](../guides/17-multi-round-skill-mining.md)。

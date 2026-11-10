@@ -20,3 +20,6 @@ __pycache__/
 /release/
 /.release-stage/
 /app.tar
+
+/tmp/*
+/my-doc/*

@@ -1,0 +1,16 @@
+protocol: te-dialogue-dimensions.v1
+schemas:
+  case: taikang.dialogue-case.v1
+  findings: taikang.dialogue-findings.v1
+  window: taikang.dimension-window.v1
+  merge: taikang.dimension-merge.v1
+roles: [HWP, C, unknown]
+coordinates: unicode_code_points_zero_based_half_open
+quote: optional_exact_contiguous_sentences
+severity:
+  unit_block: [source_changed, unsafe_path, unrecoverable_json, missing_receipt, foreign_member]
+  isolate: [unlocatable_observation, altered_quote, empty_behavior]
+  warn: [optional_field_missing, single_support, duplicate_dimension, unconfirmed_business_fact]
+extract_required: [case_ref, case_version, analysis_status, observations]
+observation_fields: [local_ref, label, behavior, applicability, sentence_refs, interpretation, customer_response_refs, notes]
+merge_fields: [window_id, groups, kept_separate, deferred, notes]

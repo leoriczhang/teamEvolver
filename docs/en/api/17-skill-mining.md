@@ -1,5 +1,39 @@
 # Skill Mining API
 
+## Excellent dialogue dimensions
+
+`POST /api/mining/jobs` accepts `task_mode=dialogue_dimensions`, using an independent compiler
+without creating Skill Candidates or Test Datasets. All cases are selected excellent dialogues;
+historical scores and evaluations are excluded from model input. Provide a registered whitelist
+`input_dir`, `source_id`, `dataset_manifest_ref`, and `dataset_manifest_sha256`.
+The Worker verifies the manifest and each file. `max_rounds=1` denotes the business analysis,
+independent of extraction batches and merge windows.
+
+Default `dialogue_options` cap extraction at 8 cases, 24,000 characters and 96,000 bytes;
+one dialogue is limited to 20,000 characters. Merge windows contain at most 12 members,
+16,000 characters and 64,000 bytes. `max_inflight_compiles` allows 1–2; this executor conservatively
+submits serially through the tenant's shared Compile admission slots. `repair_attempts_per_unit`
+defaults to 2. `quote_mode=none` uses sentence IDs; `sentences` validates quoted text against frozen input.
+Whole cases are never truncated. Oversized cases remain pending.
+
+`POST /api/mining/dialogue-datasets` queues preparation and returns 202. Supply `output_uri`,
+`format` (`xlsx` or `jsonl`) and the original file's `content_base64`; JSONL also supports `source_uri`.
+The original file limit is 20 MiB and request limit 30 MiB. Optional fields are `filename`,
+`dataset_namespace`, and `dialogue_options`. The Worker returns `prepared_source_uri`,
+`dataset_manifest_ref`, `dataset_manifest_sha256`, and counts. Register the model directory through
+the existing source API with a Skill tag. Original workbooks, scores, and evaluations are not attached to Compile.
+
+OV results live under the job output's `analysis/dialogue_dimensions`, projected to
+`semantic_reports/dialogue_dimensions` for individual artifact preview.
+`delivery_status` is `complete` or `partial`; `validation_status` is `passed`,
+`passed_with_warnings`, or `blocked`. Only real accepted receipts count toward `processed_case_count`.
+Citation problems are isolated locally. Single-case support, missing optional fields, and cross-window
+near synonyms do not block delivery. Exhausted pending units yield `interrupted`; structural or source
+safety failures yield `failed`. Accepted results are preserved. Structural and citation checks do not
+independently verify all business judgments, so `content_validated=false`.
+Resume partial delivery through `POST /api/mining/jobs/{job_id}/resume` with a stable `request_id`;
+accepted findings are reused and each new delivery is archived independently. New data or budgets require a new job.
+
 These console-internal interfaces manage OpenViking Compile rounds and human Evidence supplements. They require a valid console Session Cookie and either `tenant_admin` in the selected tenant or `platform_admin`. Ordinary members and tenant machine credentials cannot call these management interfaces. The Agent data-plane protocol is unchanged.
 
 `team_miner/api/` composes the interfaces. Skill mining lives in `team_miner/skill_miner/`, separately from knowledge base mining in `team_miner/knowledge_miner/`. Jobs, rounds, supplements and artifact content persist through the [PostgreSQL Repository](../../../team_miner/skill_miner/repository.py); temporary working directories are rebuildable caches. See [Multi-round Skill Mining](../guides/17-multi-round-skill-mining.md) for the workflow.

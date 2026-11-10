@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import re
 
 from .artifacts import save_artifact
 from .cache import persist_cache
@@ -25,6 +26,22 @@ async def restore(engine, job_id):
 
 async def create(engine, body, identifier):
     repository = engine.repository
+    mode = body.get("task_mode", "skill")
+    if mode not in {"skill", "dialogue_dimensions"}:
+        raise ValueError("unknown task_mode")
+    dialogue_config = None
+    if mode == "dialogue_dimensions":
+        from .dialogue_dimensions.partition import options
+        manifest_uri = validate_resource_uri(body.get("dataset_manifest_ref"))
+        manifest_sha = str(body.get("dataset_manifest_sha256") or "")
+        if not re.fullmatch(r"[a-f0-9]{64}", manifest_sha):
+            raise ValueError("dataset_manifest_sha256 is required")
+        dialogue_config = {"dataset_manifest_ref": manifest_uri, "dataset_manifest_sha256": manifest_sha,
+                           "dialogue_options": options(body.get("dialogue_options"))}
+        if body.get("max_rounds", 1) != 1:
+            raise ValueError("dialogue_dimensions S0 supports one business revision; batches are not rounds")
+        if any(body.get(key) for key in ("target_skill_count", "mining_mode", "mining_direction")):
+            raise ValueError("dialogue_dimensions does not use Skill selection options")
     # The operation identity, rather than a process-local random value, binds
     # recovery after a lost acknowledgement to the same business job.
     job_id = "ovmine-" + hashlib.sha256(identifier.encode()).hexdigest()[:32]
@@ -57,12 +74,17 @@ async def create(engine, body, identifier):
         raise ValueError("任务名称不能超过 120 个字符")
     settings = engine.settings.get("settings", engine.settings.get("config", {}))
     defaults = pipeline_settings(settings)
-    max_rounds = body.get("max_rounds", defaults["max_rounds"])
+    max_rounds = body.get("max_rounds", 1 if dialogue_config else defaults["max_rounds"])
     timeout = body.get("runtime_timeout_seconds", defaults["runtime_timeout_seconds"])
     if isinstance(timeout, bool) or not isinstance(timeout, int):
         raise ValueError("运行期限必须为整数")
     compiler = compiler_prompt(settings)
     version = compiler_contract_version(compiler)
+    if dialogue_config:
+        from .dialogue_dimensions.compiler import SKILL_BODY
+        compiler, version = SKILL_BODY, 2
+        output_root = f"{RUNS_ROOT}/{job_id}/output/analysis/dialogue_dimensions"
+        dialogue_config["dialogue_output_root"] = validate_resource_uri(output_root)
     # The very first metadata INSERT includes the frozen accepted configuration.
     # A crash before the file checkpoint can reconstruct the compiler and queue
     # a monitor using this same snapshot, even after settings change.
@@ -75,7 +97,8 @@ async def create(engine, body, identifier):
         runtime_timeout_seconds=timeout, human_checkpoints=bool(body.get("human_checkpoints", True)),
         skip_empty_checkpoints=True, consolidate_reviewed_candidates=True, candidate_contract_version=version,
         compiler_body=compiler, mining_mode=body.get("mining_mode", "auto"),
-        mining_direction=body.get("mining_direction", ""), target_skill_count=body.get("target_skill_count"))
+        mining_direction=body.get("mining_direction", ""), target_skill_count=body.get("target_skill_count"),
+        **({"dialogue_config": dialogue_config} if dialogue_config else {}))
     finally:
         repository.backend.transform_save = None
     job = await asyncio.to_thread(repository.get_job, job_id)
@@ -89,10 +112,17 @@ async def create(engine, body, identifier):
 
 
 async def execute(operation, body, engine, job_id, *, identifier, submitted_by):
+    if operation == "dialogue.prepare":
+        from .dialogue_dimensions.preparation import execute as prepare_dataset
+        return await prepare_dataset(engine, body, identifier)
     if operation == "job.create":
         return await create(engine, body, identifier)
     repository = engine.repository
     if operation == "candidate.submit":
+        from .dialogue_dimensions import is_dialogue
+        candidate_job = await asyncio.to_thread(engine.repository.backend.load_job, job_id)
+        if candidate_job and is_dialogue(candidate_job):
+            raise ValueError("dialogue_dimensions does not produce Skill Candidates")
         from .candidate_bridge import submit
         return await submit(engine, body, job_id, submitted_by)
     if operation == "job.detail":
@@ -111,6 +141,10 @@ async def execute(operation, body, engine, job_id, *, identifier, submitted_by):
         if prior and prior.get("_deleted") and receipt.get("operation_id") == identifier:
             return dict(receipt["result"])
     job = await restore(engine, job_id)
+    from .dialogue_dimensions import is_dialogue
+    if is_dialogue(job) and operation in {"candidate.submit", "job.supplements", "job.continue", "job.finish",
+                                         "artifact.save"}:
+        raise ValueError("dialogue_dimensions uses immutable analysis receipts and does not publish Skill Candidates")
     if operation == "artifact.save":
         result = await asyncio.to_thread(save_artifact, repository.project_root, body.get("path", ""),
                                         body.get("content"), job=job)
@@ -130,6 +164,11 @@ async def execute(operation, body, engine, job_id, *, identifier, submitted_by):
         if job.get("status") != "stopped":
             job = await engine.stop(job)
     elif operation == "job.resume":
+        if is_dialogue(job):
+            from .dialogue_dimensions.recovery import resume
+            job = await resume(engine, job, body)
+            await enqueue_compile(engine.services, engine.tenant, job, job["config_snapshot"])
+            return {"ok": True, "job": await public(repository, job)}
         authorization = None
         if body:
             if (not is_native(job) or body.get("action") != "retry_with_new_budget"

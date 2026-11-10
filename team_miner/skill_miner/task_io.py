@@ -129,7 +129,9 @@ async def request_stop(conn, services, tenant, job_id, settings):
         raise HTTPException(403, "TENANT_ACCOUNT_MISMATCH")
     active = value.get("status") in _ACTIVE
     if active:
-        if value.get("status") == "preparing" and not value.get("ov_task_id") and not value.get("compile_request"):
+        from .dialogue_dimensions import is_dialogue
+        if (value.get("status") == "preparing" and not value.get("ov_task_id") and not value.get("compile_request")
+                and not is_dialogue(value)):
             value.update(status="stopped", finished_at=utc_now(), stop_reason="用户手动停止")
         else:
             value.update(status="stopping", ov_cancel_reason="用户手动停止",

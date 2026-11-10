@@ -236,7 +236,16 @@ class SkillMiningEngine(MiningAdmissionMixin, MiningPollingMixin, MiningResource
             self._active_job = name
             self.pending_submission = False
             try:
-                if action == "submit":
+                from .dialogue_dimensions import is_dialogue
+                if is_dialogue(current):
+                    from .dialogue_dimensions.orchestration import tick
+                    try:
+                        await tick(self, current, action)
+                    except ValueError as exc:
+                        await asyncio.to_thread(
+                            self.repository.update_job, name, status="failed", error=str(exc)[:1000],
+                            delivery_status="partial", validation_status="blocked", finished_at=utc_now())
+                elif action == "submit":
                     await self._submit_ov_skill_round(current)
                 elif action == "poll":
                     if current.get("remote_terminal_unconfirmed") and current.get("status") == "interrupted":

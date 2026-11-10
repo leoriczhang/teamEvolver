@@ -299,6 +299,7 @@ Details：[17-skill-mining.md](../api/17-skill-mining.md)
 | GET | `/api/mining/artifacts/content` |
 | POST | `/api/mining/artifacts/content` |
 | GET | `/api/mining/config` |
+| POST | `/api/mining/dialogue-datasets` |
 | GET | `/api/mining/input-sources` |
 | GET | `/api/mining/input-sources/{source_id}` |
 | GET | `/api/mining/jobs` |
@@ -324,4 +325,4 @@ Details：[17-skill-mining.md](../api/17-skill-mining.md)
 | GET | `/api/mining/settings` |
 | POST | `/api/mining/settings` |
 
-Total: 235
+Total: 236
