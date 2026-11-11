@@ -23,3 +23,12 @@ __pycache__/
 
 /tmp/*
 /my-doc/*
+
+# Track development documentation for current and future stages.
+!/my-doc/泰康-对话打分优化/
+/my-doc/泰康-对话打分优化/*
+!/my-doc/泰康-对话打分优化/develop/
+/my-doc/泰康-对话打分优化/develop/**
+!/my-doc/泰康-对话打分优化/develop/**/
+!/my-doc/泰康-对话打分优化/develop/**/*.md
+/my-doc/泰康-对话打分优化/develop/data-prepare/
