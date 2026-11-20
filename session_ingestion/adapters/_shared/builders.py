@@ -23,7 +23,7 @@ def build_doris_adapter(
 
 def build_langfuse_adapter(
     source: dict[str, Any],
-    trace_name: str,
+    trace_name: str = "",
     options: dict[str, Any] | None = None,
 ):
     """Langfuse 直连版 build_doris_adapter：字段映射完全一致，仅换传输层。
@@ -36,7 +36,8 @@ def build_langfuse_adapter(
 
     return LangfuseSource(
         None,
-        {"trace_name": trace_name, **(options or {})},
+        {"trace_name": trace_name, **({"trace_names": source["trace_names"]} if "trace_names" in source else {}),
+         **(options or {})},
         mapper=map_trace,
         session_mapper=map_session,
         meta_mapper=extract_meta,

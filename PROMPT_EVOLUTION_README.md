@@ -4,6 +4,10 @@
 
 本文操作顺序是：准备接入 → 登记 Prompt → 登记上下文 → Agent 产生真实会话 → TE 拉取并匹配 → 生成候选 → True Replay → 人工审阅 → 发布 → Agent 拉取采用。
 
+首次手填执行配置，可按字段查找模板、变量、Runtime 和执行身份的来源。[业务执行 Agent 手动接入细则](PROMPT_AGENT_MANUAL_SETUP.md)
+
+同一 Langfuse 项目接入「任务完成判断」和「话术提示」，可直接按第 14 节操作，里面有界面按钮、拉取命令和本地验收结果。[双 Agent 接入与验收](#14-同一-langfuse-项目接入多个业务-agent)
+
 ## 1. 先回答：能不能全部通过界面完成
 
 **首次接入不是从零开始的全界面部署。完成一次性的运维和 Agent 适配以后，日常登记、拉取、进化、评分配置、审阅与发布可以通过界面完成。**
@@ -76,7 +80,7 @@ def build_adapter():
 
 运维在 **Worker 进程环境**中配置 `LANGFUSE_PULL_HOST`、`LANGFUSE_PULL_PUBLIC_KEY`、`LANGFUSE_PULL_SECRET_KEY`。实际连接由这些环境变量决定，`SOURCE.host` 用于描述，单改它不能替代连接配置。Public/Secret Key 必须属于业务会话所在项目。新增或修改进程环境后按部署流程更新 Worker；已有连接可直接复用。
 
-TE 自身的 Langfuse 出站观测与这里的入站拉取相互独立，不要混用两套项目凭证。多项目接入可通过 `build_langfuse_adapter` 的 `options` 参数从各自的受控进程环境读值，参考[数据源指南](docs/zh/guides/10-datasource-onboarding.md)。
+TE 自身的 Langfuse 出站观测与业务会话的入站拉取使用各自项目的凭证。多个项目可以复用共享适配器文件，在 `connection_profiles` 中声明各项目的 Host 和凭证环境变量名，再为每个项目创建命名连接、选择对应的连接配置。[第 14 节](#14-同一-langfuse-项目接入多个业务-agent) · [数据源指南](docs/zh/guides/10-datasource-onboarding.md)
 
 ### 3.2 业务 Agent Replay 文件怎么写
 
@@ -283,6 +287,8 @@ Replay 适配器的特殊配置同样需要运维按其源码契约保存。例�
 
 ## 5. 界面第二步：登记当前业务 Prompt
 
+按[手动接入细则](PROMPT_AGENT_MANUAL_SETUP.md#5-手填业务执行基线)逐项查找和核对 Runtime、Agent ID、执行用户、模型与冻结环境。
+
 1. 打开「进化链路 → Skills 自进化」。名称沿用原链路，业务 Prompt 也从这里进入。
 2. 展开「登记现有业务 Agent 执行基线」。
 3. 填「执行配置 ID」，例如 `support-prompt-base`。它是新基线的稳定标识，重复 ID 会冲突。
@@ -349,6 +355,8 @@ JSON 导入也支持按变量独立提供值：
 
 ## 7. 业务 Agent 怎样上报才能被匹配
 
+按[手动接入细则](PROMPT_AGENT_MANUAL_SETUP.md#7-逐项核对-agent-上报到-langfuse-的字段)逐项查找和核对模板引用、实际变量、历史消息和 Langfuse GENERATION。
+
 ### 7.1 复制当前配置的接入信息
 
 选中最终要使用的配置，展开「接入真实 Agent 的会话」，点击「复制接入元数据」。这里返回的是结构和登记默认值。Agent 必须替换成本次**实际使用**的信息，不能把默认值机械复制到所有请求。
@@ -408,11 +416,13 @@ Trace 的 `input` 记录当前问题，`output` 记录真实回复。对应 GENE
 
 ## 8. 界面第四步：拉取并确认会话归档
 
+按[手动接入细则](PROMPT_AGENT_MANUAL_SETUP.md#8-手填拉取条件验收一条真实-session)逐项查找和核对拉取条件、上游 Session ID 与 TE 归档 ID。
+
 1. 先在业务 Agent 中进行真实任务，产生有结果、纠正或反馈的会话。
-2. 打开「数据源接入」，填覆盖这些 Trace 的开始、结束时间，带明确时区。
-3. 先预览，确认项目、Trace 名称、用户和会话确实是目标业务数据。
-4. 执行正式拉取；根据任务 ID 查看处理状态。
-5. 等待强制分析及归档完成，再在会话列表查看正式 Session。下拉预览的短 ID 不能代替完整归档 Session ID。
+2. 打开「数据源接入」，按浏览器本地时区选择覆盖这些 Trace 的起始和结束时间，界面提交时会转换为 UTC。
+3. 点击「预览已保存」，核对目标会话，并在 Langfuse 确认项目、Trace 名称和用户。
+4. 点击「拉取入库」，根据任务 ID 查看处理状态。
+5. 等待强制分析及归档完成，再从「运行总览」的会话列表复制完整归档 Session ID。上游 Session ID 用于拉取筛选。
 
 `fetched` 是取到的上游数量，`enqueued` 是入队数量，`duplicate` 是相同来源快照已受理；它们都不等于已经归档。进化优先使用分析为 `valuable` 的有效证据，连接正常也不代表所有会话都应进入进化。
 
@@ -455,7 +465,8 @@ Trace 的 `input` 记录当前问题，`output` 记录真实回复。对应 GENE
 curl --fail-with-body --get "$TE_URL/sync/skills" \
   -H "Authorization: Bearer $TE_TENANT_KEY" \
   --data-urlencode 'user_id=实际执行用户ID' \
-  --data-urlencode 'execution_profile_id=最终执行配置ID'
+  --data-urlencode 'execution_profile_id=最终执行配置ID' \
+  --data-urlencode 'execution_capability=teamevolver.execution-plan.v1'
 ```
 
 响应的 `execution.document.execution_plan` 是完整业务组件组合。纯 Prompt 的 `execution.skills` 为空是正常情况。Agent 校验组合和依赖后原子切换，新请求使用新组合，执行中的会话固定原组合；不能只抓 Prompt 新正文而继续混用未验证的上下文。
@@ -482,11 +493,11 @@ Agent 可上报下载/激活回执，接口为 `POST /sync/skills/execution-rece
 | 元数据说加载了，仍验证失败 | 实际最终模型请求没有完整包含该组合；声明不能替代真实传输证据 |
 | 发版了但 Agent 还用旧内容 | Agent 拉取参数、缓存、加载指针和请求中实际 release 是否更新 |
 
-## 13. 本轮复核记录与验收清单
+## 13. 2026-11-09 历史复核与现场验收清单
 
-2026-11-09 对本地现有部署复核：API 健康正常，`default` 已绑定数据源和 Replay 文件，但业务执行配置数量为 0，默认进化范围为 `skill`，外部评测器文件列表为空，当前评价方式为 `checklist_efficiency`。这是当前租户的未完成接入状态，不等于已有 Prompt 已接好。
+2026-11-09 复核本地部署时，API 健康正常，`default` 已绑定数据源和 Replay 文件。当时有 0 个业务执行配置，默认进化范围为 `skill`，外部评测器文件列表为空，评价方式为 `checklist_efficiency`。11 月 20 日双 Agent 接入的验收环境和结果见第 14 节。
 
-现有数据源已通过 Worker 实际连接测试，远程 Agent Lab 健康正常。当前 `default` 绑定的 `agent-lab.py` 是 PG 中的旧版 v1，尚无独立变量上下文的传输投影适配。要在此租户使用这项能力，需要按 3.4 重新登记仓库内当前示例，再在界面明确绑定新版本；本轮没有替用户升级绑定。
+当日数据源通过了 Worker 实际连接测试，远程 Agent Lab 健康正常。PG 记录的 `default` 绑定是旧版 `agent-lab.py` v1，尚无独立变量上下文的传输投影适配。遇到仍使用 v1 的租户，按第 3.4 节登记支持该能力的文件，再在界面选择新版本。
 
 使用仓库内当前 `agent_lab.py` 源码，通过原生适配器测试任务创建了两个独立远程诊断会话：相同模板和原始变量取值，分别加载原上下文和修改后的上下文。最终请求中的 System 内容与各自上下文完全一致，模型分别回复 `TE_CONTEXT_BASE` 和 `TE_CONTEXT_NEXT`，请求观测及加载回执均通过。这是实际模型调用与上下文加载验证，不是一次业务候选进化，也不是业务质量改善证明。此前不符合运行时参数的失败探测，以及因诊断 Token 预算过小而截断的结果，都保留在核查记录中。
 
@@ -504,3 +515,46 @@ Agent 可上报下载/激活回执，接口为 `POST /sync/skills/execution-rece
 - [ ] 正常审阅发布后，Agent 拉取并在后续真实请求中采用，能继续收到真实反馈。
 
 补充参考：[业务组合进化](docs/zh/concepts/12-execution-evolution.md)、[数据源接入](docs/zh/guides/10-datasource-onboarding.md)、[Replay 适配器与外部评分](docs/zh/api/05-replay-branch.md)、[Agent 拉取](docs/zh/api/06-skill-sync.md)。
+
+## 14. 同一 Langfuse 项目接入多个业务 Agent
+
+1. 给每个业务 Agent 登记各自的执行配置和组件。使用 AgentScope preset 的团队可以先运行接入 Skill，按确切版本与一次真实请求生成登记 JSON，再在控制台「登记现有业务 Agent 执行基线 → 从登记 JSON 预览」核对并登记。[接入 Skill](.agents/skills/te-agent-evolution-setup/SKILL.md)
+2. 给业务调用的公共入口接上 Reporter，配置业务 code、租户、Agent ID 和执行配置。上报字段反映本次调用实际加载并执行的 release。换版时由 Reporter 核对实际内容和版本。[Java 接入与验证](examples/prompt-evolution/java/README.md)
+3. 让两个 Agent 各产生一条真实会话。从 Langfuse 各自的 Trace 详情复制 **Trace 名称**，并核对该次模型调用的 GENERATION。运维复制共享适配器示例，将副本里的 `SOURCE["enabled"]` 改为 `True`，用刚才的两个名称替换 `trace_names` 示例值。按第 3.4 节用 Root 源码 API 登记副本。租户管理员在「数据源接入」选择登记的文件和版本，保存绑定并点「测试已保存连接」。[共享适配器示例](session_ingestion/adapters/example-shared-langfuse.py)
+4. 在「数据源接入 → Session 拉取」选择覆盖两条 Trace 的小时间窗，点「预览已保存」，再点「拉取入库」。保留返回的 `job_id`，查看本次读取、新入队、重复、跳过和失败的数量。需要独立项目凭证、过滤规则或拉取计划时，在「数据源接入 → 独立数据源连接」选择文件、固定版本及该版本声明的连接配置，勾选「启用此连接」，点「保存独立连接」。选定时间窗后点「拉取此连接」。[连接与进度接口](docs/zh/api/03-session-ingest.md)
+5. 从「运行总览 → 会话」复制两个完整的 TE Session ID。在「进化链路」分别选中两个执行配置，各自打开「接入真实 Agent 的会话」，对两条 Session 都点一次「检查会话匹配」，按下表核对四个结果。随后用各自的来源会话创建 Case，执行 True Replay，检查两侧最终模型请求、加载的组件和实际执行回执。[字段来源与手工设置](PROMPT_AGENT_MANUAL_SETUP.md)
+
+### 用命令查看同一次拉取
+
+在已按运维流程配置 `TEAMEVOLVER_ROOT_API_KEY` 的终端，将 `TE_URL`、`TE_TENANT` 设为本环境的服务地址和目标租户，`FROM`、`TO` 设为包含两条 Trace 的带时区时间戳。已在界面点过拉取时，复制该次的 `job_id` 到 `JOB_ID`，直接执行最后一行。
+
+```bash
+teamEvolver datasource --tenant "$TE_TENANT" --url "$TE_URL" list --from-timestamp "$FROM" --to-timestamp "$TO"
+teamEvolver datasource --tenant "$TE_TENANT" --url "$TE_URL" pull --from-timestamp "$FROM" --to-timestamp "$TO"
+# 将上一条返回的 job_id 设为 JOB_ID
+teamEvolver datasource --tenant "$TE_TENANT" --url "$TE_URL" watch "$JOB_ID"
+```
+
+命名连接在 `list` 和 `pull` 后加 `--connection "$CONNECTION_ID"`。若 `watch` 等待超时，保留同一个 `JOB_ID` 再查。只有需要验证去重时，才重复提交同一时间窗。
+
+### 本地双 Agent 验收结果（2026-11-20）
+
+本地 TE 的独立租户和 AgentScope 共用一个 Langfuse 项目。首次同窗读取 2 条、新入队 2 条；两份会话均可打开。重拉同一窗口识别重复 2 条、新入队 0 条。
+
+| 用哪个执行配置检查 | 任务完成判断 Session | 话术提示 Session |
+| --- | --- | --- |
+| 任务完成判断 | 匹配 | 不匹配 |
+| 话术提示 | 不匹配 | 匹配 |
+
+两条会话在价值筛选环节均为 `skipped`，进入常规进化的样本为 **0 条**。为单独验证回放，验收从每条已入库会话建立一个 Case，调用 TE 原生 True Replay 引擎。两个 Case 的基线请求都与各自的来源请求逐字段一致，候选各改一个指定的 Prompt 组件，四次模型调用均取得远端签名回执。此次验证了拉取、归属和实际回放，业务质量改善仍需另行评分。
+
+### 接入时如何选择
+
+| 业务需要 | 本分支的做法 | 原因 |
+| --- | --- | --- |
+| 同项目接入多个 Agent | 共用连接，用 trace 名筛选，归档后用实际执行证据匹配各自配置 | 两个 Agent 可以同窗拉取，避免相互切换绑定 |
+| 多个 Langfuse 项目、凭证或独立频率 | 每个命名连接固定适配器版本、连接配置、过滤和计划 | 同一份适配器可以复用；已受理任务按当时的版本执行 |
+| 新 Agent 的上报与换版 | 在公共模型调用入口装一次 Reporter，再按业务身份配置路由 | 归属取决于实际加载的版本，执行中的旧请求仍保留它原来的身份 |
+| 控制分析开销 | 在源端过滤 Trace，并复用未变化的源快照 | 保留 TE 强制分析、价值判定及归档链路，不相关的 Trace 可在入队前排除 |
+| 等待拉取完成 | 看本次 job_id 的成员和分段进度 | 多任务同时排队时仍可区分此次读取、跳过、失败与重复 |
+| 多租户使用相同 Agent 名 | 使用各租户凭证、独立配置及数据库的行级隔离，Reporter 还核对服务端返回的 tenant_id | 租户可以各自管理同名 Agent 和 profile |

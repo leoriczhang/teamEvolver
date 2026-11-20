@@ -12,6 +12,8 @@ from dataclasses import asdict
 import pytest
 
 from session_ingestion.adapters import _runtime
+from session_ingestion.adapters._shared.langfuse_client import SessionFilters
+from session_ingestion.adapters._shared.langfuse_selection import matches_trace
 from session_ingestion.adapters.sources import langfuse as langfuse_source_module
 from session_ingestion.adapters.sources.langfuse import LangfuseSource
 from tests.support.paths import REPO_ROOT
@@ -91,10 +93,17 @@ class FakeClient:
         )
         yield ["s1", "s2"]
 
-    def fetch_session_with_traces(self, session_id, *, trace_name=""):
-        self.calls.append(("fetch_session_with_traces", {"session_id": session_id, "trace_name": trace_name}))
+    def fetch_session_with_traces(self, session_id, *, trace_name="", filters=None):
+        selected = filters or SessionFilters(trace_name=trace_name)
+        self.calls.append(("fetch_session_with_traces", {"session_id": session_id, "trace_name": selected.trace_name}))
         flat = copy.deepcopy(_TRACES_BY_SESSION.get(session_id, []))
-        return {"id": session_id, "createdAt": "2026-09-19T10:00:00Z"}, flat
+        return {"id": session_id, "createdAt": "2026-09-19T10:00:00Z"}, [t for t in flat if matches_trace(t, selected)]
+
+    def iter_matching_traces(self, filters, *, order_by="timestamp.asc", max_items=0):
+        rows = self.iter_traces(name=filters.trace_name, user_id=filters.user_id,
+                                from_timestamp=filters.from_timestamp, to_timestamp=filters.to_timestamp,
+                                order_by=order_by, max_items=max_items)
+        return [trace for trace in rows if matches_trace(trace, filters)]
 
     def iter_traces(
         self,
@@ -397,6 +406,9 @@ def test_pilot_file_validate_mode(monkeypatch):
 
 def test_pilot_file_session_mode_produces_turns(monkeypatch):
     _set_env(monkeypatch)
+    monkeypatch.setitem(_TRACES_BY_SESSION, "s1", [
+        {**trace, "name": "agent-call"} for trace in _TRACES_BY_SESSION["s1"]
+    ])
     result = _runtime.test_content(PILOT_CODE, PILOT_FILE.name, "session", {"session_id": "s1"})
     assert result["ok"] is True
     session = result["session"]

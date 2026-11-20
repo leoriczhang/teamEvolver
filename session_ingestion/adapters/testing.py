@@ -2,8 +2,8 @@
 from ._runtime import load_from_content
 
 
-def execute(source, filename, request):
-    adapter, metadata, _ = load_from_content(source, filename)
+def execute(source, filename, request, config=None):
+    adapter, metadata, _ = load_from_content(source, filename, config)
     mode = request["operation"]
     try:
         result = {"ok": True, "metadata": {"file": filename, **metadata}}

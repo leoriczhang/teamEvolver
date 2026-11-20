@@ -8,16 +8,16 @@ from ._runtime import apply_session_id_exclusions, load_from_content
 
 
 class AdapterSource:
-    def load(self, *, adapter_id, revision, source):
-        return StreamingAdapter(source, adapter_id)
+    def load(self, *, adapter_id, revision, source, config=None):
+        return StreamingAdapter(source, adapter_id, config=config)
 
 
 class StreamingAdapter:
-    def __init__(self, source, filename):
-        self.source, self.filename = source, filename
+    def __init__(self, source, filename, *, config=None):
+        self.source, self.filename, self.config = source, filename, config
 
     async def iter_sessions(self, filters):
-        adapter, metadata, _ = await asyncio.to_thread(load_from_content, self.source, self.filename)
+        adapter, metadata, _ = await asyncio.to_thread(load_from_content, self.source, self.filename, self.config)
         def next_batch(iterator):
             return next(iterator, None)
         try:

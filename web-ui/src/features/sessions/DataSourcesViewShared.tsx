@@ -10,6 +10,8 @@ export interface AdapterFile {
   error?: string;
   supported_filters?: string[];
   required_filters?: string[];
+  connection_profiles?: Record<string, unknown>;
+  connection_options?: string[];
   max_sessions?: number;
 }
 
@@ -80,7 +82,7 @@ export interface DraftResult {
 
 export const LABELS: Record<string, string> = {
   from_timestamp: "起始时间", to_timestamp: "结束时间",
-  session_id: "Session ID", user_id: "用户", environment: "Environment",
+  session_id: "Session ID", user_id: "用户", agent_id: "Agent ID", environment: "Environment",
   tags: "Tags", trace_name: "Trace 名称", release: "Release",
   version: "Version", metadata: "Metadata",
 };

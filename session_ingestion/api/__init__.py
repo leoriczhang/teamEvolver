@@ -83,7 +83,9 @@ def create_router(services=None, **kwargs) -> APIRouter:
         # the worker reads); then the ingestion + task rows commit together.
         await asyncio.to_thread(payloads.put_payload_json, payload_ref, task_payload.to_json(), session)
 
-        scoped_request_key = f"{adapter_id}:{request_key}" if request_key else ""
+        connection = (pull or {}).get("connection") or {}
+        scope = f"{adapter_id}:connection:{connection['connection_id']}" if connection else adapter_id
+        scoped_request_key = f"{scope}:{request_key}" if request_key else ""
         dedupe_key = _dedupe_key(source, external_id, pull, request_key=scoped_request_key)
         async with tx.tenant_tx(tenant_id) as conn:
             accepted_id = await repo.accept(
@@ -112,6 +114,10 @@ def create_router(services=None, **kwargs) -> APIRouter:
                     ingestion_id=accepted_id, job_id=job_id,
                     status=str((existing or {}).get("status") or "accepted"), dedupe=True,
                 )
+            if kind == KIND_PULL and (pull or {}).get("operation", "pull") == "pull":
+                from ..pull_runs import PullRunRepository
+
+                await PullRunRepository(tx).start(conn, tenant_id=tenant_id, run_id=ingestion_id)
             await tasks.enqueue(
                 conn,
                 tenant_id=tenant_id,
@@ -136,6 +142,8 @@ def create_router(services=None, **kwargs) -> APIRouter:
     _register_reads(router, tx, queries)
     from .datasource import create_router as datasource_router
     router.include_router(datasource_router(services, _accept))
+    from .connections import create_router as connections_router
+    router.include_router(connections_router(services, _accept))
     return router
 
 
@@ -147,6 +155,8 @@ def _dedupe_key(source: str, external_id: str, pull: dict[str, Any] | None, *, r
     """
     if source == SOURCE_PUSH:
         return f"push:{external_id}" if external_id else ""
+    if (pull or {}).get("scheduled_now"):
+        return "scheduled-now:" + uuid.uuid4().hex
     if request_key:
         import hashlib
 
@@ -215,6 +225,10 @@ def _register_pull(router: APIRouter, accept, tx) -> None:
         if set(body) - {"adapter_id", "from_timestamp", "to_timestamp", "filters"}:
             raise HTTPException(400, "expected adapter_id, timestamps and filters")
         adapter_id = str(body.get("adapter_id") or "datasource")
+        if adapter_id.startswith("datasource:"):
+            raise HTTPException(400, "named connections require /api/datasource/connections/{id}/pull")
+        if not isinstance(body.get("filters", {}), dict):
+            raise HTTPException(400, "filters must be an object")
         # The adapter must be bound to a pinned, immutable revision before a pull
         # can be enqueued.
         tenant_id = current_tenant_id()

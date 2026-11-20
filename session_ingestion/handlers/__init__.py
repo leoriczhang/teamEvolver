@@ -18,6 +18,7 @@ from teamEvolver.runtime.repository import ClaimedTask
 from ..adapters.repository import AdapterRepository
 from ..diagnostics import ingestion_error_code
 from ..projections import session_list_meta
+from ..pull_runs import PullRunRepository
 from ..repository import SessionIngestionRepository
 from ..schemas import (
     MANDATORY_STAGES,
@@ -426,36 +427,66 @@ async def handle_pull(task: ClaimedTask, services) -> HandlerResult:
     if version is None:
         return HandlerResult.fail(error_code="pull_adapter_revision_not_found")
 
+    connection = payload.pull.get("connection")
+    adapter_config = None
+    if connection:
+        from ..adapters._runtime import validate_content
+        from ..connections import resolve_settings
+
+        if (connection.get("adapter_id") != payload.adapter_id
+                or connection.get("adapter_revision") != payload.adapter_revision):
+            return HandlerResult.fail(error_code="pull_connection_snapshot_mismatch")
+        try:
+            metadata = validate_content(version["source"], payload.adapter_id)
+            adapter_config = await resolve_settings(services, task.tenant_id, connection, metadata)
+        except (ValueError, KeyError):
+            return HandlerResult.fail(error_code="pull_connection_credentials_unavailable")
+
     operation = payload.pull.get("operation", "pull")
     if operation != "pull":
 
         from ..adapters.testing import execute
-        result = await asyncio.to_thread(execute, version["source"], payload.adapter_id, payload.pull)
+        result = await asyncio.to_thread(execute, version["source"], payload.adapter_id, payload.pull, adapter_config)
         ref, _ = await asyncio.to_thread(deps.payloads.put_session, payload.ingestion_id, result, stage="adapter-test")
         return HandlerResult.succeed(result_ref=ref)
+    options = {"config": adapter_config} if connection else {}
     adapter = deps.adapter_source.load(
-        adapter_id=payload.adapter_id, revision=payload.adapter_revision, source=version["source"]
+        adapter_id=payload.adapter_id, revision=payload.adapter_revision, source=version["source"], **options,
     )
-    counts = {"fetched": 0, "enqueued": 0, "empty": 0, "error": 0, "duplicate": 0}
+    runs = PullRunRepository(services.tx)
+    async with services.tx.tenant_tx(task.tenant_id) as conn:
+        await runs.start(conn, tenant_id=task.tenant_id, run_id=payload.ingestion_id)
     try:
         filters = dict(payload.pull.get("filters", {}))
         filters.update({k: payload.pull[k] for k in ("from_timestamp", "to_timestamp") if k in payload.pull})
+        ordinal = 0
         async for item in adapter.iter_sessions(filters):
-            counts["fetched"] += 1
+            ordinal += 1
+            external_id = str(item.get("external_id") or "")
+            if not external_id:
+                external_id = f"invalid-upstream-item:{ordinal}"
+                item = {"status": "error"}
+            async with services.tx.tenant_tx(task.tenant_id) as conn:
+                existing = await runs.member(conn, payload.ingestion_id, external_id)
+            if existing and existing["ingestion_id"]:
+                continue
             if item.get("status") == "error":
-                counts["error"] += 1
+                async with services.tx.tenant_tx(task.tenant_id) as conn:
+                    await runs.record(conn, tenant_id=task.tenant_id, run_id=payload.ingestion_id,
+                                      external_id=external_id, acceptance="error", error_code="upstream_fetch_failed")
                 continue
             session = item.get("session")
             if not session:
-                counts["empty"] += 1
+                async with services.tx.tenant_tx(task.tenant_id) as conn:
+                    await runs.record(conn, tenant_id=task.tenant_id, run_id=payload.ingestion_id,
+                                      external_id=external_id, acceptance="empty")
                 continue
             if (session.get("source_identity") or {}).get("identity_verified"):
                 from ..source_acceptance import accept_source_item
 
-                enqueued = await accept_source_item(
-                    services, task, payload, session, str(item["external_id"]), deps,
+                await accept_source_item(
+                    services, task, payload, session, external_id, deps, pull_run_id=payload.ingestion_id,
                 )
-                counts["enqueued" if enqueued else "duplicate"] += 1
                 continue
             child_id = f"{payload.ingestion_id}:{item['external_id']}"
             child_payload = IngestionTaskPayload(
@@ -473,19 +504,20 @@ async def handle_pull(task: ClaimedTask, services) -> HandlerResult:
             ref, digest = await asyncio.to_thread(deps.payloads.put_session, child_id, session, stage="raw")
             child_payload.payload_ref = f"ingest/{task.tenant_id}/{child_id.replace(':', '-')}.json"
             child_payload.payload_hash = digest
-            enqueued = await _accept_and_enqueue_child(
-                services, repo, task, child_payload, session, deps
+            await _accept_and_enqueue_child(
+                services, repo, task, child_payload, session, deps, pull_run_id=payload.ingestion_id,
             )
-            counts["enqueued" if enqueued else "duplicate"] += 1
     except Exception as exc:  # noqa: BLE001 - a hard pull failure retries the whole task
         logger.warning("[session.pull] tenant=%s pull failed: %s", task.tenant_id, exc)
         return HandlerResult.retry(error_code=f"pull_failed:{type(exc).__name__}")
+    async with services.tx.tenant_tx(task.tenant_id) as conn:
+        counts = await runs.counts(conn, payload.ingestion_id)
     logger.info("[session.pull] tenant=%s counts=%s", task.tenant_id, counts)
     ref, _ = await asyncio.to_thread(deps.payloads.put_session, payload.ingestion_id, counts, stage="pull-result")
     return HandlerResult.succeed(result_ref=ref)
 
 
-async def _accept_and_enqueue_child(services, repo, task, child_payload, session, deps) -> bool:
+async def _accept_and_enqueue_child(services, repo, task, child_payload, session, deps, *, pull_run_id=None) -> bool:
     """Accept one pulled session (ingestion + payload) and enqueue normalize.
 
     Returns ``True`` when a new normalize task was enqueued, ``False`` when the
@@ -512,6 +544,11 @@ async def _accept_and_enqueue_child(services, repo, task, child_payload, session
             business_time=session.get("business_time"),
         )
         if accepted_id != child_payload.ingestion_id:
+            if pull_run_id:
+                await PullRunRepository(services.tx).record(
+                    conn, tenant_id=task.tenant_id, run_id=pull_run_id, external_id=child_payload.external_id,
+                    acceptance="duplicate", ingestion_id=accepted_id,
+                )
             return False
         await services.tasks.enqueue(
             conn, tenant_id=task.tenant_id, task_id=f"{child_payload.ingestion_id}:{KIND_NORMALIZE}",
@@ -520,6 +557,11 @@ async def _accept_and_enqueue_child(services, repo, task, child_payload, session
             payload_ref=child_payload.payload_ref, payload_hash=child_payload.payload_hash,
             config_revision=child_payload.config_revision, adapter_revision=child_payload.adapter_revision,
         )
+        if pull_run_id:
+            await PullRunRepository(services.tx).record(
+                conn, tenant_id=task.tenant_id, run_id=pull_run_id, external_id=child_payload.external_id,
+                acceptance="enqueued", ingestion_id=child_payload.ingestion_id,
+            )
     return True
 
 

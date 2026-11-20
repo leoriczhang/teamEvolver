@@ -242,3 +242,18 @@ teamEvolver datasource --tenant demo pull --from-timestamp 2026-10-01T00:00:00+0
 `--url` 指定服务地址，默认 `http://127.0.0.1:<api_port>`。
 
 操作步骤见 [数据源接入指南](../guides/10-datasource-onboarding.md)。
+
+## 共享项目、独立连接与逐次拉取进度
+
+同租户多个业务 Agent 可以使用同一个 Langfuse 项目和数据源绑定。共享适配器按明确的 trace_names 选择业务 Trace，也支持按上报的 agent_id 缩小范围。归档后，由执行配置用实际 release、组件、请求变量和模型输入核对归属。一个项目中需要分开拉取的业务可以用独立连接配置不同的过滤和时间表。
+
+| 操作 | 方法与路径 | 用途 |
+| --- | --- | --- |
+| 查看连接 | GET /api/datasource/connections | 本租户的独立连接与当前版本 |
+| 查看或保存 | GET、PUT /api/datasource/connections/{identity} | 保存时传 expected_revision、adapter_id、adapter_revision。新增时 expected_revision 为 0，版本冲突返回 409 |
+| 探测、预览、拉取 | POST /api/datasource/connections/{identity}/test、/sessions、/pull | 返回 202 和 job_id。每次运行固定连接配置与适配器源码版本 |
+| 查看本次处理进度 | GET /api/datasource/jobs/{job_id}/progress | 可传 limit、offset。counts 统计源会话，summary.leaf 统计分段后的最终处理项 |
+
+连接设置 settings.profile 选择 Root 适配器声明的连接配置；settings.options 填写它明确允许的非敏感选项。default_filters 指定默认业务过滤；schedule 有 enabled、time、timezone 与 window，window 使用 previous_day。默认连接保留原有 API。应用新增的数据库迁移后使用独立连接和逐条进度。
+
+控制台进入「数据源」展开「独立数据源连接」，选择已登记适配器和版本，填写连接名称、过滤与计划。CLI 也支持 `datasource connections`、`datasource save-connection ID CONFIG.json`，在 `datasource list/pull/test` 加 `--connection ID`。指定业务时在 list 或 pull 加 `--agent-id`。运行 `teamEvolver datasource --tenant TENANT watch JOB_ID` 可等待某一次拉取的全部成员处理完毕。已接收、已入队、分析跳过、处理失败和归档分别显示。旧拉取缺少成员账本时显示记录不完整。

@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import fnmatch
 import hashlib
+import inspect
 import sys
 import threading
 from pathlib import Path
@@ -65,6 +66,22 @@ def validate_content(content: str, filename: str) -> dict:
             for field in ("source_instance_id", "upstream_namespace"):
                 if field in value and (not isinstance(value[field], str) or not value[field].strip()):
                     raise AdapterError(f"SOURCE.{field} must be non-empty text")
+            if "trace_names" in value:
+                from ._shared.langfuse_selection import trace_names
+
+                try:
+                    trace_names(multiple=value["trace_names"])
+                except ValueError as exc:
+                    raise AdapterError(str(exc)) from exc
+            from ._shared.connection_settings import declared_profiles
+
+            try:
+                declared_profiles(value)
+            except ValueError as exc:
+                raise AdapterError(str(exc)) from exc
+            editable = value.get("connection_options", [])
+            if not isinstance(editable, list) or any(not isinstance(key, str) for key in editable):
+                raise AdapterError("connection_options must list editable option names")
             for field in ("supported_filters", "required_filters"):
                 items = value.get(field, [])
                 if not isinstance(items, list) or not all(isinstance(k, str) for k in items):
@@ -91,6 +108,9 @@ def validate_content(content: str, filename: str) -> dict:
                     "project_id",
                     "source_instance_id",
                     "upstream_namespace",
+                    "trace_names",
+                    "connection_profiles",
+                    "connection_options",
                     "enabled",
                     "supported_filters",
                     "required_filters",
@@ -110,7 +130,7 @@ def validate_content(content: str, filename: str) -> dict:
 
 
 
-def _build_adapter(content: str, filename: str):
+def _build_adapter(content: str, filename: str, config=None):
     source = validate_content(content, filename)
     revision = hashlib.sha256(content.encode("utf-8")).hexdigest()
     with _lock:
@@ -131,7 +151,14 @@ def _build_adapter(content: str, filename: str):
     factory = getattr(module, "build_adapter", None)
     if not callable(factory):
         raise AdapterError(f"{filename}: build_adapter() is required")
-    adapter = factory()
+    if config:
+        try:
+            inspect.signature(factory).bind(config)
+        except TypeError as exc:
+            raise AdapterError("adapter build_adapter must accept connection configuration") from exc
+        adapter = factory(config)
+    else:
+        adapter = factory()
     for method in (
         "list_session_ids",
         "iter_session_id_batches",
@@ -148,8 +175,8 @@ def _build_adapter(content: str, filename: str):
     return adapter, source, revision, module
 
 
-def load_from_content(content: str, filename: str):
-    adapter, source, revision, _module = _build_adapter(content, filename)
+def load_from_content(content: str, filename: str, config=None):
+    adapter, source, revision, _module = _build_adapter(content, filename, config)
     return adapter, source, revision
 
 

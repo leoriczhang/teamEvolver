@@ -543,11 +543,13 @@ def _register_agent_pull(router: APIRouter, ctx: _SkillsContext) -> None:
                     for path, data in sorted(bundle.items())
                 ],
             })
-        payload = {"status": "ok", "source": "registry", "skills": skills, "total": len(skills)}
+        payload = {"status": "ok", "source": "registry", "tenant_id": principal.tenant_id,
+                   "skills": skills, "total": len(skills)}
         if execution is not None:
             payload["execution"] = execution
         canonical = json.dumps(
-            [principal.tenant_id, principal.account_id, [(s["name"], s["version"], s["tree_sha256"]) for s in skills],
+            ["sync-skills.tenant.v1", principal.tenant_id, principal.account_id,
+             [(s["name"], s["version"], s["tree_sha256"]) for s in skills],
              execution["composition_hash"] if execution else ""],
             ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         ).encode("utf-8")

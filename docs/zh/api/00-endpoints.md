@@ -134,6 +134,13 @@
 | GET | `/api/datasource/code` |
 | PUT | `/api/datasource/code` |
 | POST | `/api/datasource/code/test` |
+| GET | `/api/datasource/connections` |
+| GET | `/api/datasource/connections/{identity}` |
+| PUT | `/api/datasource/connections/{identity}` |
+| POST | `/api/datasource/connections/{identity}/pull` |
+| POST | `/api/datasource/connections/{identity}/sessions` |
+| POST | `/api/datasource/connections/{identity}/test` |
+| GET | `/api/datasource/jobs/{job_id}/progress` |
 | GET | `/api/datasource/jobs/{job_id}/result` |
 | POST | `/api/datasource/pull` |
 | GET | `/api/datasource/schedule` |
@@ -346,4 +353,4 @@
 | GET | `/api/mining/settings` |
 | POST | `/api/mining/settings` |
 
-共 257
+共 264

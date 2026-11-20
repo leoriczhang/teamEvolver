@@ -13,10 +13,9 @@ Endpoints used (all under ``{host}/api/public``):
 
 Session-attribute filtering: the ``/sessions`` list endpoint only filters by
 time + environment, so when session-scoping trace-level filters (user/tags/
-release/version/metadata) are supplied, session ids are resolved through the
-richer ``/traces`` endpoint. ``trace_name`` alone does NOT trigger the trace
-scan — the sessions list stays the default discovery path and ``trace_name``
-is applied when fetching session details.
+release/version/metadata/name/Agent) are supplied, Session IDs are resolved
+through the richer ``/traces`` endpoint. Trace selection is checked again on
+detail fetches so a mixed Session cannot reintroduce another Agent's Traces.
 """
 
 from __future__ import annotations
@@ -34,6 +33,9 @@ from urllib.parse import quote
 
 import httpx
 
+from .langfuse_selection import matches_trace
+from .langfuse_selection import trace_names as normalize_trace_names
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_HOST = "https://cloud.langfuse.com"
@@ -50,11 +52,8 @@ class SessionFilters:
     """Filter set for selecting Langfuse sessions to pull.
 
     Time + ``environment`` map to native ``/sessions`` query params, and the
-    sessions list endpoint is the DEFAULT discovery path (one paginated list
-    beats per-trace scanning on the slow remote API). Only session-scoping
-    trace-level filters (user/tags/release/version/metadata) fall back to the
-    ``/traces`` endpoint. ``trace_name`` is applied client-side when fetching
-    session details instead of driving the discovery strategy.
+    sessions list endpoint remains the discovery path without Trace constraints.
+    Trace-level filters select through ``/traces`` and are also applied to details.
     """
 
     from_timestamp: str = ""
@@ -65,19 +64,27 @@ class SessionFilters:
     release: str = ""
     version: str = ""
     trace_name: str = ""
+    trace_names: list[str] = field(default_factory=list)
+    agent_id: str = ""
     session_id: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self):
+        normalize_trace_names(self.trace_name, self.trace_names or None)
+        if not isinstance(self.agent_id, str) or len(self.agent_id) > 200:
+            raise ValueError("agent_id must be text of at most 200 characters")
+        self.agent_id = self.agent_id.strip()
+
     def has_trace_level_filter(self) -> bool:
-        # ``trace_name`` is deliberately excluded: it is the project-wide
-        # default label (e.g. "openclaw-turn") and must not force the slow
-        # per-trace discovery scan; it is applied client-side instead.
         return bool(
             self.user_id
             or self.tags
             or self.release
             or self.version
             or self.metadata
+            or self.trace_name
+            or self.trace_names
+            or self.agent_id
         )
 
 def _clean_params(params: dict[str, Any]) -> dict[str, Any]:
@@ -409,6 +416,34 @@ class LangfuseClient:
     # ------------------------------------------------------------------ #
     # Session-id resolution with attribute filtering                     #
     # ------------------------------------------------------------------ #
+    def iter_matching_traces(self, filters: SessionFilters, *, order_by="timestamp.asc", max_items=0):
+        """Stream selected Traces in upstream order across all configured names.
+
+        Langfuse's name parameter accepts one name. Multiple names use one
+        paginated scan plus exact local selection, preserving global ordering
+        and avoiding duplicate fetches for Sessions shared by both Agents.
+        """
+        names = normalize_trace_names(filters.trace_name, filters.trace_names or None)
+        emitted = 0
+        seen = set()
+        for batch in self.iter_trace_pages(
+            session_id=filters.session_id, user_id=filters.user_id,
+            name=names[0] if len(names) == 1 else "",
+            from_timestamp=filters.from_timestamp, to_timestamp=filters.to_timestamp,
+            tags=filters.tags, version=filters.version, release=filters.release,
+            environment=filters.environment, metadata=filters.metadata, order_by=order_by,
+        ):
+            for trace in batch:
+                identity = trace.get("id")
+                if (identity and identity in seen) or not matches_trace(trace, filters):
+                    continue
+                if identity:
+                    seen.add(identity)
+                yield trace
+                emitted += 1
+                if max_items and emitted >= max_items:
+                    return
+
     def list_session_ids(self, filters: SessionFilters, *, max_sessions: int = 0) -> list[str]:
         """Return matching session ids, honoring trace-level attribute filters.
 
@@ -426,18 +461,7 @@ class LangfuseClient:
             # Fetch enough traces to surface up to max_sessions distinct
             # sessions; a session usually has several traces, so scale the cap.
             trace_cap = (max_sessions * 20) if max_sessions else 0
-            traces = self.iter_traces(
-                user_id=filters.user_id,
-                name=filters.trace_name,
-                from_timestamp=filters.from_timestamp,
-                to_timestamp=filters.to_timestamp,
-                tags=filters.tags,
-                version=filters.version,
-                release=filters.release,
-                environment=filters.environment,
-                metadata=filters.metadata,
-                max_items=trace_cap,
-            )
+            traces = self.iter_matching_traces(filters, max_items=trace_cap)
             for trace in traces:
                 sid = str(trace.get("sessionId") or "").strip()
                 if not sid or sid in seen:
@@ -484,17 +508,7 @@ class LangfuseClient:
         batch: list[str] = []
 
         if filters.has_trace_level_filter():
-            pages = self.iter_trace_pages(
-                user_id=filters.user_id,
-                name=filters.trace_name,
-                from_timestamp=filters.from_timestamp,
-                to_timestamp=filters.to_timestamp,
-                tags=filters.tags,
-                version=filters.version,
-                release=filters.release,
-                environment=filters.environment,
-                metadata=filters.metadata,
-            )
+            pages = ([trace] for trace in self.iter_matching_traces(filters))
             id_field = "sessionId"
             seen: set[str] | None = set()
         else:
@@ -527,6 +541,8 @@ class LangfuseClient:
         session_id: str,
         *,
         trace_name: str = "",
+        trace_names: Optional[list[str]] = None,
+        filters: Optional[SessionFilters] = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Return (session, full_traces) with observations resolved per trace.
 
@@ -538,12 +554,14 @@ class LangfuseClient:
         """
         session = self.get_session(session_id)
         raw_traces = session.get("traces") if isinstance(session.get("traces"), list) else []
-        wanted_name = str(trace_name or "").strip()
+        selection = filters or SessionFilters(trace_name=trace_name, trace_names=trace_names or [])
+        wanted_names = set(normalize_trace_names(selection.trace_name, selection.trace_names or None))
         full_traces: list[dict[str, Any]] = []
         for trace in raw_traces:
             if not isinstance(trace, dict):
                 continue
-            if wanted_name and str(trace.get("name") or "").strip() != wanted_name:
+            if (wanted_names and trace.get("name") is not None
+                    and str(trace["name"]).strip() not in wanted_names):
                 continue
             trace_id = str(trace.get("id") or "").strip()
             if not trace_id:
@@ -555,7 +573,11 @@ class LangfuseClient:
                 full = trace
             # Preserve the session id even if the detail response omits it.
             full.setdefault("sessionId", trace.get("sessionId") or session_id)
-            full_traces.append(full)
+            if str(full["sessionId"]) != str(session_id):
+                raise LangfuseError("Trace detail belongs to another Session")
+            detail = {**trace, **full}
+            if matches_trace(detail, selection):
+                full_traces.append(detail)
         return session, full_traces
 
     # ------------------------------------------------------------------ #

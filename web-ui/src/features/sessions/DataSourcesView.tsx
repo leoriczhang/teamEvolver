@@ -1,3 +1,5 @@
+import NamedConnections from "./NamedConnections";
+import { PullProgressPanel } from "./PullProgressPanel";
 import { Empty,Pill } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,7 +19,7 @@ export default function DataSourcesView({
   active: boolean;
   user?: UserProfile | null;
 }) {
-const { uploadRef, source, file, bindingRevision, setBindingRevision, filters, setFilters, previewLimit, setPreviewLimit, health, rows, counts, code, setCode, codeFile, setCodeFile, revision, dirty, setDirty, setDraftMeta, draftResult, setDraftResult, schedule, setSchedule, busy, error, pullSummary, canEditSource, mayDiscard, closeDraft, chooseFile, loadCode, newDraft, uploadDraft, saveBinding, saveSchedule, runScheduleNow, saveCode, runDraft, runSaved, bindingDirty, savedReady, activeMeta, filterMeta, missing, warning, savedSchedule, scheduleStatus, scheduleDirty, scheduleAdapterReady, scheduleLabel, scheduleTone } = useDataSourcesView({ active, user });
+const { uploadRef, source, file, bindingRevision, setBindingRevision, filters, setFilters, previewLimit, setPreviewLimit, health, rows, code, setCode, codeFile, setCodeFile, revision, dirty, setDirty, setDraftMeta, draftResult, setDraftResult, schedule, setSchedule, busy, error, trackedPull, canEditSource, mayDiscard, closeDraft, chooseFile, loadCode, newDraft, uploadDraft, saveBinding, saveSchedule, runScheduleNow, saveCode, runDraft, runSaved, bindingDirty, savedReady, activeMeta, filterMeta, missing, warning, savedSchedule, scheduleStatus, scheduleDirty, scheduleAdapterReady, scheduleLabel, scheduleTone } = useDataSourcesView({ active, user });
 if (user?.role !== "admin") return <Empty>仅管理员可管理数据源。</Empty>;
 const latestBindingRevision = source?.available.find(item => item.file === file)?.revision;
 const bindingVersions = [...new Set([file === source?.file ? source.revision : undefined, latestBindingRevision]
@@ -33,6 +35,7 @@ return (
         </div>
       </div>
 
+      {active && source && <NamedConnections key={source.tenant_id} files={source.available} />}
       <section className="space-y-4 border-b border-border pb-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 className="text-base font-semibold">租户数据源</h2>
@@ -457,23 +460,8 @@ return (
             ) ? "拉取中" : "拉取入库"}
           </Button>
         </div>
-        {counts && (
-          <div className="flex flex-wrap gap-4 text-xs">
-            {Object.entries(counts).map(([key, value]) => (
-              <span key={key}>{key}: {value}</span>
-            ))}
-          </div>
-        )}
-        {pullSummary && (
-          <p className="text-xs text-muted-foreground">
-            {scheduleStatus?.running && scheduleStatus.job_type === "manual"
-              ? `正在拉取，已处理 ${pullSummary.total} 个 Session`
-              : `已处理完整时间窗口内的 ${pullSummary.total} 个 Session${
-                pullSummary.truncated
-                  ? `，下方仅展示前 ${pullSummary.shown} 条明细`
-                  : ""
-              }`}
-          </p>
+        {active && trackedPull && trackedPull.tenant === source?.tenant_id && (
+          <PullProgressPanel key={trackedPull.id} jobId={trackedPull.id} />
         )}
         {rows && (rows.length ? (
           <div className="overflow-auto">

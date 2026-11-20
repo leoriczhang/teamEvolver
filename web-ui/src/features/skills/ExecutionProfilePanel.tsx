@@ -124,12 +124,17 @@ export default function ExecutionProfilePanel({ active, profileId, onChange, isA
       user_id: draft.user_id.trim(), affected_skill_ids: skills, environment, components };
   }
 
-  async function previewRegistration() {
-    if (!canCreate) return;
+  async function previewRegistration(file?: File) {
+    if (!file && !canCreate) return;
     const current = ++previewSequence.current;
     setPreviewing(true); setRegistrationError(""); setPreview(null);
     try {
-      const raw = registrationBody();
+      if (file && file.size > 1024 * 1024) throw new Error("登记文件须小于等于 1 MiB");
+      const raw = file ? JSON.parse(await file.text()) : registrationBody();
+      if (!raw || typeof raw !== "object" || !raw.profile_id || !Array.isArray(raw.components)) {
+        throw new Error("请选择包含 profile_id 和 components 的登记 JSON");
+      }
+      if (current !== previewSequence.current) return;
       const result = await api<{ profile_id: string; preview_hash: string; summary: { component_count: number; affected_skill_count: number } }>(`${URL}/preview`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(raw),
       });
@@ -223,6 +228,11 @@ export default function ExecutionProfilePanel({ active, profileId, onChange, isA
       {isAdmin && <details>
         <summary className="cursor-pointer text-xs font-semibold">登记现有业务 Agent 执行基线</summary>
         <div className="mt-3 space-y-3">
+          <label className="block text-xs font-semibold">从登记 JSON 预览
+            <input type="file" accept="application/json,.json" className={inputClass} disabled={saving}
+              onChange={event => { const file = event.target.files?.[0]; event.target.value = "";
+                if (file) void previewRegistration(file); }} />
+          </label>
           <p className="text-[11px] text-muted-foreground">填写 Agent 当前实际使用的内容及全部受影响 Skill，作为后续对照基线。纯 Prompt Agent 可不关联任何 Skill。登记不触发运行或热更新。</p>
           <div className="grid gap-3 sm:grid-cols-2">
             {([
@@ -286,10 +296,12 @@ export default function ExecutionProfilePanel({ active, profileId, onChange, isA
             <pre className="mt-1 overflow-auto rounded-md bg-muted p-2">{environmentExample}</pre>
           </details>
           {registrationError && <p role="alert" className="text-xs text-destructive">{registrationError}</p>}
-          <Button size="sm" variant="outline" disabled={!canCreate || saving || previewing} onClick={previewRegistration}>
+          <Button size="sm" variant="outline" disabled={!canCreate || saving || previewing} onClick={() => void previewRegistration()}>
             {previewing ? "预览中…" : "预览业务执行基线"}
           </Button>
           {preview && <section aria-label="业务基线登记预览" className="space-y-2 rounded-md border border-border p-3 text-xs">
+            <p>业务 Agent {String(preview.raw.agent_id)} · Runtime {String(preview.raw.runtime_type)}</p>
+            <details><summary>查看待登记内容</summary><pre className="max-h-72 overflow-auto whitespace-pre-wrap">{JSON.stringify(preview.raw, null, 2)}</pre></details>
             <p>执行配置：{String(preview.raw.profile_id)} · {preview.summary.component_count} 个组件 · {preview.summary.affected_skill_count} 个 Skill 依赖</p>
             <p className="text-muted-foreground">本次仅登记真实基线，后续进化使用接入的 Session。登记后可选择需要参与进化的变量取值。</p>
             <p className="text-muted-foreground">预览不会占用配置 ID；提交时会重新检查名称和依赖是否仍可用。</p>

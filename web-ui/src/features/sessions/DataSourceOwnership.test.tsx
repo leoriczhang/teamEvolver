@@ -91,6 +91,11 @@ beforeEach(() => {
     if (path.startsWith("/api/jobs/")) return { status: "succeeded" };
     if (path.includes("/jobs/health/result")) return { result: { health: { ok: true } } };
     if (path.includes("/jobs/preview/result")) return { result: { sessions: [{ session_id: "s1" }] } };
+    if (path === "/api/datasource/jobs/manual-1/progress?limit=1") return {
+      status: "running", complete: false, tracking_available: true,
+      counts: { fetched: 1, enqueued: 1, duplicate: 0, error: 0 },
+      summary: { leaf: { archived: 0, pending: 1, skipped: 0, failed: 0, cancelled: 0 } },
+    };
     if (path === "/api/datasource/pull") {
       return {
         accepted: true, job_id: "manual-1", status_url: "/api/jobs/manual-1",
@@ -257,7 +262,8 @@ it("pulls the complete filtered window without a session limit", async () => {
     const body = JSON.parse(String(call?.[1]?.body));
     expect(body.max_sessions).toBeUndefined();
   });
-  expect(await screen.findByText(/正在拉取/)).toBeVisible();
+  expect(await screen.findByText(/已归档 0 · 已跳过 0 · 处理中 1/)).toBeVisible();
+  expect(mocks.api).toHaveBeenCalledWith("/api/datasource/jobs/manual-1/progress?limit=1");
 });
 
 it("does not request adapter data for non-admins", () => {

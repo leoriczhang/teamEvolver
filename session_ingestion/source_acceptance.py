@@ -3,19 +3,32 @@ from __future__ import annotations
 
 import asyncio
 
+from .pull_runs import PullRunRepository
 from .repository import SessionIngestionRepository
 from .schemas import IngestionTaskPayload, session_payload_hash
 from .source_repository import SourceRevisionRepository
 
 
-async def accept_source_item(services, task, parent, session, external_id, deps) -> bool:
+async def accept_source_item(services, task, parent, session, external_id, deps, *, pull_run_id=None) -> bool:
     sources = SourceRevisionRepository(services.tx)
     repo = SessionIngestionRepository(services.tx)
     async with services.tx.tenant_tx(task.tenant_id) as conn:
+        runs = PullRunRepository(services.tx)
+        if pull_run_id:
+            # Serialize membership acceptance before source locking. A retried
+            # run must not silently select a newer snapshot for the same item.
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+                               f"pull-member:{task.tenant_id}:{pull_run_id}:{external_id}")
+            member = await runs.member(conn, pull_run_id, external_id)
+            if member and member["ingestion_id"]:
+                return False
         planned, identifier, duplicate = await sources.prepare(
             conn, tenant_id=task.tenant_id, external_id=external_id, session=session,
         )
         if duplicate:
+            if pull_run_id:
+                await runs.record(conn, tenant_id=task.tenant_id, run_id=pull_run_id, external_id=external_id,
+                                  acceptance="duplicate", ingestion_id=identifier, provenance=planned["provenance"])
             return False
         if identifier is None:
             raise ValueError("source acceptance requires verified upstream identity")
@@ -43,4 +56,7 @@ async def accept_source_item(services, task, parent, session, external_id, deps)
             config_revision=child.config_revision, adapter_revision=child.adapter_revision,
         )
         await sources.remember(conn, tenant_id=task.tenant_id, session=planned, ingestion_id=identifier)
+        if pull_run_id:
+            await runs.record(conn, tenant_id=task.tenant_id, run_id=pull_run_id, external_id=external_id,
+                              acceptance="enqueued", ingestion_id=identifier, provenance=planned["provenance"])
     return True

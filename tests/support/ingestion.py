@@ -40,6 +40,8 @@ class _DB:
     adapters: dict[tuple[str, str], dict] = field(default_factory=dict)
     adapter_versions: dict[tuple[str, str, int], dict] = field(default_factory=dict)
     adapter_bindings: dict[tuple[str, str], dict] = field(default_factory=dict)
+    pull_runs: set[tuple[str, str]] = field(default_factory=set)
+    pull_members: dict[tuple[str, str, str], dict] = field(default_factory=dict)
 
 
 class _Txn:
@@ -68,6 +70,8 @@ class _Conn:
     async def fetchrow(self, sql: str, *a):
         op = self._op(sql)
         t = self._t
+        if op == "pull_member_get":
+            return self._db.pull_members.get((t, *a))
         if op == "enqueue_dedupe_lookup":
             kind, dedupe = a
             for row in self._db.tasks.values():
@@ -169,6 +173,12 @@ class _Conn:
     async def fetch(self, sql: str, *a):
         op = self._op(sql)
         t = self._t
+        if op == "pull_member_counts":
+            from collections import Counter
+
+            counts = Counter(m["acceptance"] for (tenant, run, _), m in self._db.pull_members.items()
+                             if tenant == t and run == a[0])
+            return [{"acceptance": key, "n": value} for key, value in counts.items()]
         if op == "stage_list":
             (iid,) = a
             rows = [v for (tt, ii, _s), v in self._db.stages.items() if tt == t and ii == iid]
@@ -193,6 +203,8 @@ class _Conn:
     async def fetchval(self, sql: str, *a):
         op = self._op(sql)
         t = self._t
+        if op == "pull_run_exists":
+            return 1 if (t, a[0]) in self._db.pull_runs else None
         if op == "ingest_set_status":
             iid, status = a
             row = self._db.ingestions.get((t, iid))
@@ -265,6 +277,18 @@ class _Conn:
     # ---- execute ---- #
     async def execute(self, sql: str, *a):
         op = self._op(sql)
+        if op == "pull_run_start":
+            self._db.pull_runs.add(tuple(a))
+            return "INSERT 0 1"
+        if op == "pull_member_record":
+            tenant, run, external, acceptance, ingestion, source, revision, error = a
+            key = (tenant, run, external)
+            if not self._db.pull_members.get(key, {}).get("ingestion_id"):
+                self._db.pull_members[key] = dict(tenant_id=tenant, run_id=run, external_id=external,
+                                                  acceptance=acceptance, ingestion_id=ingestion,
+                                                  source_session_key=source, snapshot_revision=revision,
+                                                  error_code=error)
+            return "INSERT 0 1"
         if op == "ingest_lock":
             return None
         if op == "enqueue":

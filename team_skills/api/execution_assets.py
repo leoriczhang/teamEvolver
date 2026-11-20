@@ -116,7 +116,7 @@ def create_router(services):
         try:
             async with tx.tenant_tx(current_tenant_id()) as conn:
                 profile, release = await repo.current(conn, profile_id)
-                return agent_integration_template(profile, release)
+                return {**agent_integration_template(profile, release), "tenant_id": current_tenant_id()}
         except SkillLibraryError as exc:
             raise error(exc) from exc
 

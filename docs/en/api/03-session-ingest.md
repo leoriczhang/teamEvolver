@@ -242,3 +242,18 @@ teamEvolver datasource --tenant demo pull --from-timestamp 2026-10-01T00:00:00+0
 `--url` sets the service address, default `http://127.0.0.1:<api_port>`.
 
 Step-by-step instructions are in [Data Source Onboarding](../guides/10-datasource-onboarding.md).
+
+## Shared projects, named connections and pull progress
+
+Several business Agents in one tenant can use a single Langfuse project and binding. A shared adapter selects explicit trace names and can narrow the selection by the reported agent_id. After ingestion, the execution profile checks the release, components, variables and recorded request for each Session.
+
+| Operation | Method and path | Result |
+| --- | --- | --- |
+| List connections | GET /api/datasource/connections | Tenant-scoped connections and current revisions |
+| Inspect or save a connection | GET or PUT /api/datasource/connections/{identity} | Supply expected_revision, adapter_id and adapter_revision when saving. Creation uses expected_revision 0. Stale writes return 409 |
+| Check, preview or pull | POST /api/datasource/connections/{identity}/test, /sessions or /pull | Returns 202 and a job_id. Work pins the connection and source code revisions |
+| Inspect a pull | GET /api/datasource/jobs/{job_id}/progress | limit and offset page the members. counts describes source Sessions; summary.leaf describes final segments |
+
+The Root-registered adapter declares available connection profiles and supported options. Select one using settings.profile and set its permitted settings.options. default_filters configures source selection. Each daily schedule uses enabled, time, timezone and window (previous_day). Apply the database migrations before use.
+
+The datasource page includes named connections. The CLI supports `datasource connections`, `datasource save-connection ID CONFIG.json` and `--connection ID` on list, test and pull. Use `--agent-id` with list or pull to select a reported business identity. Use `teamEvolver datasource --tenant TENANT watch JOB_ID` to wait for that pull and its descendants. Historical pulls without a membership ledger expose incomplete tracking.

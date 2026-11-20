@@ -1,7 +1,7 @@
 """Langfuse direct REST-API source, contract-aligned with DorisSourceAdapter.
 
 连接配置（options 或环境变量，风格与 Doris 的 DORIS_* 一致）：
-  host / public_key / secret_key / trace_name
+  host / public_key / secret_key / trace_name / trace_names
   环境变量：LANGFUSE_PULL_HOST / LANGFUSE_PULL_PUBLIC_KEY / LANGFUSE_PULL_SECRET_KEY
   （与 self-tracing 用的 LANGFUSE_HOST/PUBLIC_KEY/SECRET_KEY 刻意区分：拉取源 ≠ 上报目标）
 Langfuse 的 Basic 认证密钥是项目级的：默认 env 三元组只覆盖一个项目，
@@ -12,6 +12,7 @@ Langfuse 的 Basic 认证密钥是项目级的：默认 env 三元组只覆盖�
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import threading
@@ -23,6 +24,7 @@ from session_ingestion.adapters._shared.langfuse_client import (
     SessionFilters,
 )
 from session_ingestion.adapters._shared.langfuse_convert import convert_langfuse_session
+from session_ingestion.adapters._shared.langfuse_selection import trace_names as normalize_trace_names
 from session_ingestion.adapters._shared.mapping import merge_mapping
 
 logger = logging.getLogger(__name__)
@@ -83,6 +85,9 @@ class LangfuseSource:
             options.get("secret_key") or os.getenv("LANGFUSE_PULL_SECRET_KEY", "") or ""
         ).strip()
         self.trace_name = str(options.get("trace_name") or "").strip()
+        self.trace_names = (list(normalize_trace_names(multiple=options["trace_names"]))
+                            if "trace_names" in options else [])
+        self._selection = SessionFilters(trace_name=self.trace_name, trace_names=self.trace_names)
         self.mapper = mapper
         self.session_mapper = session_mapper
         # extract_meta(converted, session, traces) -> {user_id, session_id, trace_id}
@@ -126,10 +131,28 @@ class LangfuseSource:
             return {"ok": False, "error": str(exc)}
 
     def list_session_ids(self, filters, *, max_sessions):
+        self._selection = self._filters(filters)
+        selected = self._explicit_session_ids(self._selection)
+        if selected is not None:
+            return selected
         return self._client().list_session_ids(
-            SessionFilters(**{**filters, "trace_name": self.trace_name}),
+            self._selection,
             max_sessions=max_sessions,
         )
+
+    def _filters(self, filters):
+        # One adapter instance belongs to one accepted operation. Preserve its
+        # request selection for the subsequent per-Session fetches on Worker.
+        values = {**filters, "trace_name": self.trace_name, "trace_names": self.trace_names}
+        return SessionFilters(**copy.deepcopy(values))
+
+    def _explicit_session_ids(self, selection):
+        if not selection.session_id:
+            return None
+        if selection.has_trace_level_filter() or selection.environment:
+            _, traces = self.fetch_session(selection.session_id)
+            return [selection.session_id] if traces else []
+        return [selection.session_id]
 
     def iter_session_id_batches(
         self,
@@ -138,7 +161,13 @@ class LangfuseSource:
         batch_size=100,
     ):
         client = self._client()
-        parsed = SessionFilters(**{**filters, "trace_name": self.trace_name})
+        parsed = self._filters(filters)
+        self._selection = parsed
+        selected = self._explicit_session_ids(parsed)
+        if selected is not None:
+            if selected:
+                yield selected
+            return
         yield from client.iter_session_id_batches(
             parsed,
             batch_size=batch_size,
@@ -148,7 +177,7 @@ class LangfuseSource:
         # Doris 同构信封 {"trace":..., "observations": [...]}：让 per-agent 的
         # map_session / extract_meta 钩子在 Doris 与 Langfuse 两种 provider 间原样复用。
         session, flat = self._client().fetch_session_with_traces(
-            session_id, trace_name=self.trace_name,
+            session_id, filters=self._selection,
         )
         traces = [
             {
@@ -161,17 +190,17 @@ class LangfuseSource:
         return session, traces
 
     def preview_sessions(self, filters, *, max_sessions):
+        selection = self._filters(filters)
+        self._selection = selection
         if filters.get("session_id"):
-            return [{"session_id": str(filters["session_id"])}]
-        trace_cap = (max_sessions * 20) if max_sessions else 0
-        traces = self._client().iter_traces(
-            name=self.trace_name,
-            user_id=str(filters.get("user_id") or ""),
-            from_timestamp=str(filters.get("from_timestamp") or ""),
-            to_timestamp=str(filters.get("to_timestamp") or ""),
-            order_by="timestamp.desc",
-            max_items=trace_cap,
-        )
+            if not selection.has_trace_level_filter() and not selection.environment:
+                return [{"session_id": str(filters["session_id"])}]
+            _, envelope = self.fetch_session(str(filters["session_id"]))
+            traces = [item["trace"] for item in envelope]
+        else:
+            traces = self._client().iter_matching_traces(
+                selection, order_by="timestamp.desc", max_items=(max_sessions * 20) if max_sessions else 0,
+            )
         groups: dict[str, list[dict[str, Any]]] = {}
         for trace in traces:
             if not isinstance(trace, dict):

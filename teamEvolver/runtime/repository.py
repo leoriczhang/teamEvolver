@@ -352,10 +352,23 @@ class WorkerTaskRepository:
 
     # -- read ------------------------------------------------------------- #
 
+    async def get_for_subjects(self, conn: Any, *, subject_ids: list[str]) -> list[dict]:
+        """Bounded, tenant-scoped ingestion task states for domain read models."""
+        ids = list(dict.fromkeys(subject_ids))
+        if len(ids) > 1000:
+            raise ValueError("task subject queries accept at most 1000 identifiers")
+        rows = await conn.fetch(
+            f"SELECT task_id,kind,subject_id,status,attempt,error_code FROM {self._schema}.worker_tasks "
+            "WHERE subject_type='ingestion' AND subject_id=ANY($1::text[]) "
+            "AND kind=ANY($2::text[])", ids,
+            ["session.normalize", "session.split", "session.analyze", "session.archive"],
+        )
+        return [dict(row) for row in rows]
+
     async def get(self, conn: Any, *, task_id: str) -> dict[str, Any] | None:
         row = await conn.fetchrow(
             f"-- te:op=get\n"
-            f"SELECT tenant_id, task_id, kind, status, attempt, fence, owner_id, "
+            f"SELECT tenant_id, task_id, kind, subject_type, subject_id, status, attempt, fence, owner_id, "
             "  available_at, lease_until, cancel_requested, upstream_task_id, "
             "  result_ref, error_code, created_at, updated_at "
             f"FROM {self._schema}.worker_tasks WHERE task_id = $1",

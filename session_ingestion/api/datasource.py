@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import uuid
 
 from fastapi import APIRouter, Request
 from starlette.exceptions import HTTPException
@@ -49,15 +48,17 @@ def create_router(services, accept):
             "config_revision": cfg.revision,
         }
         latest = await conn.fetchrow(
-            f"SELECT task_id,status,error_code,created_at,updated_at,result_ref FROM {tx.pool.schema}.worker_tasks "
-            "WHERE kind='session.pull' ORDER BY created_at DESC LIMIT 1"
+            f"SELECT t.task_id,t.status,t.error_code,t.created_at,t.updated_at FROM {tx.pool.schema}.worker_tasks t "
+            f"JOIN {tx.pool.schema}.ingestions i ON i.tenant_id=t.tenant_id AND i.ingestion_id=t.subject_id "
+            "WHERE t.kind='session.pull' AND (i.dedupe_key LIKE 'scheduled:{%' OR i.dedupe_key LIKE 'scheduled-now:%') "
+            "ORDER BY t.created_at DESC LIMIT 1"
         )
         result["schedule_status"] = {
             "running": bool(
                 latest and latest["status"] in {"queued", "running", "retry_wait", "waiting_external", "reconciling"}
             ),
             "job_id": latest["task_id"] if latest else "",
-            "job_type": "manual",
+            "job_type": "scheduled",
             "last_status": latest["status"] if latest else "",
             "last_error": latest["error_code"] if latest else "",
             "last_started_at": latest["created_at"].isoformat() if latest else "",
@@ -204,6 +205,20 @@ def create_router(services, accept):
             return {"result": None}
         return {"result": services.extras["session_payloads"].get_session(task["result_ref"])}
 
+    @router.get("/api/datasource/jobs/{job_id}/progress")
+    async def pull_progress(job_id: str, request: Request, limit: int = 50, offset: int = 0):
+        _require_tenant_admin(request)
+        if not 1 <= limit <= 200 or offset < 0:
+            raise HTTPException(400, "invalid pull member page")
+        from ..pull_progress import progress
+
+        async with tx.tenant_tx(current_tenant_id()) as conn:
+            task = await services.tasks.get(conn, task_id=job_id)
+            if not task or task["kind"] != "session.pull":
+                raise HTTPException(404, "datasource job not found")
+            ingestion_id = task["subject_id"]
+            return await progress(services, conn, job=task, run_id=ingestion_id, limit=limit, offset=offset)
+
     @router.get("/api/datasource/schedule")
     async def schedule(request: Request):
         _require_tenant_admin(request)
@@ -249,7 +264,7 @@ def create_router(services, accept):
             user_id="",
             account_id="",
             session={"_pull": window},
-            pull={**window, "request_id": uuid.uuid4().hex},
+            pull={**window, "scheduled_now": True},
             adapter_id=bound["adapter_id"],
             adapter_revision=bound["revision"],
             kind="session.pull",

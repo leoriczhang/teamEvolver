@@ -13,7 +13,7 @@ export function useDataSourcesView({
   user?: UserProfile | null;
 }) {
 const uploadRef = useRef<HTMLInputElement>(null);
-const manualPullJobRef = useRef("");
+const [trackedPull, setTrackedPull] = useState<{ tenant: string; id: string } | null>(null);
 const [source, setSource] = useState<Datasource | null>(null);
 const [file, setFile] = useState("");
 const [bindingRevision, setBindingRevision] = useState<number | undefined>();
@@ -21,7 +21,6 @@ const [filters, setFilters] = useState<Record<string, string>>({});
 const [previewLimit, setPreviewLimit] = useState("100");
 const [health, setHealth] = useState<{ ok: boolean; error?: string } | null>(null);
 const [rows, setRows] = useState<SessionRow[] | null>(null);
-const [counts, setCounts] = useState<Record<string, number> | null>(null);
 const [code, setCode] = useState<string | null>(null);
 const [codeFile, setCodeFile] = useState("");
 const [openedFile, setOpenedFile] = useState("");
@@ -33,11 +32,6 @@ const [schedule, setSchedule] = useState<DatasourceSchedule>(DEFAULT_SCHEDULE);
 const [schedulePolling, setSchedulePolling] = useState(false);
 const [busy, setBusy] = useState("");
 const [error, setError] = useState("");
-const [pullSummary, setPullSummary] = useState<{
-    total: number;
-    shown: number;
-    truncated: boolean;
-  } | null>(null);
 const isAdmin = user?.role === "admin";
 const canEditSource = Boolean(source?.source_editable);
 const refresh = useCallback(async (selected?: string) => {
@@ -48,8 +42,6 @@ const refresh = useCallback(async (selected?: string) => {
       ? data.available.find(item => item.file === selected)?.revision : data.revision);
     setHealth(null);
     setRows(null);
-    setCounts(null);
-    setPullSummary(null);
     setSchedule(data.schedule || DEFAULT_SCHEDULE);
     setSchedulePolling(Boolean(data.schedule_status?.running));
     setError("");
@@ -67,31 +59,6 @@ const refreshScheduleStatus = useCallback(async () => {
         }
       : current);
     const status = data.schedule_status;
-    if (
-      status.job_type === "manual"
-      && (!manualPullJobRef.current || status.job_id === manualPullJobRef.current)
-    ) {
-      const currentTotal = status.running
-        ? Number(status.current_total || 0)
-        : Number(status.last_total || 0);
-      setCounts(status.running
-        ? status.current_counts || {}
-        : status.last_counts || {});
-      setPullSummary({
-        total: currentTotal,
-        shown: status.running ? 0 : status.last_results?.length || 0,
-        truncated: status.running
-          ? false
-          : Boolean(status.last_results_truncated),
-      });
-      if (!status.running) {
-        setRows(status.last_results || []);
-        manualPullJobRef.current = "";
-        const response = await api<{ result: Record<string, number> | null }>(
-          `/api/datasource/jobs/${encodeURIComponent(status.job_id || "")}/result`);
-        if (response.result) setCounts(response.result);
-      }
-    }
     if (!status.running) setSchedulePolling(false);
   }, []);
 useEffect(() => {
@@ -258,6 +225,7 @@ async function runScheduleNow() {
       const result = await api<{
         job_id: string;
       }>("/api/datasource/schedule/run", { method: "POST" });
+      if (source && result.job_id) setTrackedPull({ tenant: source.tenant_id, id: result.job_id });
       setSource((current) => current
         ? { ...current, schedule_status: { running: true, job_id: result.job_id, job_type: "scheduled" } }
         : current);
@@ -341,7 +309,6 @@ async function runDraft(mode: "validate" | "health" | "preview" | "session") {
       setDraftResult(result);
       if (mode === "preview") {
         setRows(result.sessions || []);
-        setCounts(null);
       }
       toastOk(
         mode === "validate"
@@ -400,32 +367,9 @@ async function runSaved(action: "test" | "sessions" | "pull" | "refresh") {
           : await api<any>(endpoint, options);
         if (action === "sessions") {
           setRows(result.sessions);
-          setCounts(null);
-          setPullSummary(null);
         } else {
-          const status: DatasourceScheduleStatus = {
-            running: true, job_id: result.job_id, job_type: "manual", last_status: "queued",
-          };
-          manualPullJobRef.current = status.job_id || "";
-          const total = status.running
-            ? Number(status.current_total || 0)
-            : Number(status.last_total || 0);
-          const resultRows = status.running ? [] : status.last_results || [];
-          setRows(status.running ? null : resultRows);
-          setCounts(status.running
-            ? status.current_counts || {}
-            : status.last_counts || {});
-          setPullSummary({
-            total,
-            shown: resultRows.length,
-            truncated: status.running
-              ? false
-              : Boolean(status.last_results_truncated),
-          });
-          setSource((current) => current
-            ? { ...current, schedule_status: status }
-            : current);
-          setSchedulePolling(status.running);
+          setRows(null);
+          if (source && result.job_id) setTrackedPull({ tenant: source.tenant_id, id: result.job_id });
           toastOk("Session 拉取已启动", "将处理完整时间窗口");
         }
       }
@@ -478,5 +422,5 @@ const scheduleTone: "blue" | "red" | "green" | "gray" | "amber" = scheduleStatus
           || scheduleStatus?.last_status === "deferred"
           ? "amber"
           : "gray";
-return { uploadRef, source, file, bindingRevision, setBindingRevision, filters, setFilters, previewLimit, setPreviewLimit, health, rows, counts, code, setCode, codeFile, setCodeFile, revision, dirty, setDirty, setDraftMeta, draftResult, setDraftResult, schedule, setSchedule, busy, error, pullSummary, canEditSource, mayDiscard, closeDraft, chooseFile, loadCode, newDraft, uploadDraft, saveBinding, saveSchedule, runScheduleNow, saveCode, runDraft, runSaved, bindingDirty, savedReady, activeMeta, filterMeta, missing, warning, savedSchedule, scheduleStatus, scheduleDirty, scheduleAdapterReady, scheduleLabel, scheduleTone };
+return { uploadRef, source, file, bindingRevision, setBindingRevision, filters, setFilters, previewLimit, setPreviewLimit, health, rows, code, setCode, codeFile, setCodeFile, revision, dirty, setDirty, setDraftMeta, draftResult, setDraftResult, schedule, setSchedule, busy, error, trackedPull, canEditSource, mayDiscard, closeDraft, chooseFile, loadCode, newDraft, uploadDraft, saveBinding, saveSchedule, runScheduleNow, saveCode, runDraft, runSaved, bindingDirty, savedReady, activeMeta, filterMeta, missing, warning, savedSchedule, scheduleStatus, scheduleDirty, scheduleAdapterReady, scheduleLabel, scheduleTone };
 }
