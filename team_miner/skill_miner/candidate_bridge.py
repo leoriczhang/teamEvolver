@@ -17,7 +17,7 @@ from team_skills.config import load_skills_config
 from team_skills.evolution.history import skill_payload
 from team_skills.evolution.repository import lock_key
 from team_skills.library import frontmatter
-from team_skills.library.bundle import bundle_tree_sha256, diff_skill_bundles
+from team_skills.library.bundle import bundle_tree_sha256, diff_skill_bundles, encode_bundle_payload
 from team_skills.library.repository import SkillLibraryRepository, validate_bundle, validate_skill_name
 from teamEvolver.config_runtime import ConfigRepository
 
@@ -266,6 +266,10 @@ async def submit(engine, body, job_id, submitted_by):
                 "replay_cases": prepared["replay_cases"], "runtime_validation_policy": copy.deepcopy(DOCUMENT_POLICY),
                 "file_changes": prepared["file_changes"], "static_validation": prepared["static_validation"],
                 "bundle_diff": diff_skill_bundles(baseline, prepared["bundle"]),
+                **({"baseline_bundle": encode_bundle_payload(baseline), "baseline_identity": {
+                    "backend": "managed-agents", "skill_id": head["skill_id"],
+                    "connection_id": head["connection_id"], "version": head["version"],
+                }} if head and head.get("backend") == "managed-agents" else {}),
             }
             item = await repo.create(
                 conn, tenant_id=tenant, skill_name=name, bundle=prepared["bundle"], limits=config.bundle_limits,

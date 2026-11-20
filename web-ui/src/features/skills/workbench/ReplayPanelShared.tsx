@@ -320,9 +320,8 @@ export function PagedTextWindow({ items, empty }: { items: string[]; empty: stri
 }
 
 export function RunDetail({ run, onRefresh }: { run: WorkbenchRun; onRefresh: () => void }) {
-  const result = run.result;
+  const result = run.result?.replay || run.result;
   const dimensions = result?.efficiency?.dimensions || run.result_summary?.efficiency?.dimensions || {};
-  const replayCase = result?.cases?.[0];
   return (
     <div id="workbench-run-detail">
       <Panel
@@ -338,10 +337,18 @@ export function RunDetail({ run, onRefresh }: { run: WorkbenchRun; onRefresh: ()
           </Button>
         }
       >
+        <div className="flex flex-wrap gap-3 border-b border-line px-4 py-2 text-xs text-muted-foreground">
+          <span>{run.dataset_name || run.dataset_id}</span>
+          {Object.entries(run.skill_versions || {}).map(([name, value]) =>
+            <span key={name}>{name} · v{typeof value === "number" ? value : value.revision}</span>)}
+          {!Object.keys(run.skill_versions || {}).length && <span>历史 Skill 版本未记录</span>}
+          <span>Candidate · 实验草稿</span>
+        </div>
+        {run.error_code && <p role="alert" className="px-4 py-3 text-xs text-destructive">{run.error_code}</p>}
         {isActiveRun(run.status) ? (
           <Empty>True Replay 正在并行执行 baseline / candidate 分支，完成后自动显示完整 Trace。</Empty>
         ) : !result ? (
-          <Empty>运行结果尚未写入。</Empty>
+          <Empty>{run.status === "failed" ? "实验执行失败，请查看错误原因或任务记录。" : "运行结果尚未写入。"}</Empty>
         ) : (
           <div className="space-y-5 p-4">
             <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3.5">
@@ -360,10 +367,13 @@ export function RunDetail({ run, onRefresh }: { run: WorkbenchRun; onRefresh: ()
                 {result.reason}
               </div>
             )}
-            <div className="grid gap-5 2xl:grid-cols-2">
-              <TraceBranch title="Baseline · 当前 Skill" branch={replayCase?.baseline} tone="gray" />
-              <TraceBranch title="Candidate · 实验草稿" branch={replayCase?.candidate} tone="blue" />
-            </div>
+            {result.cases?.map((pair, index) => <section key={index} className="space-y-3">
+              <h3 className="text-xs font-semibold">Case {index + 1}</h3>
+              <div className="grid gap-5 2xl:grid-cols-2">
+                <TraceBranch title={`Baseline · 固定版本${run.baseline_version ? ` v${run.baseline_version}` : ""}`} branch={pair.baseline} tone="gray" />
+                <TraceBranch title="Candidate · 实验草稿" branch={pair.candidate} tone="blue" />
+              </div>
+            </section>)}
           </div>
         )}
       </Panel>

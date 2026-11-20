@@ -179,6 +179,8 @@ def skill_replay_spec(
         },
         metadata={
             "source": deepcopy(job.get("source") or {}),
+            "validation_method": job.get("validation_method", "full_ab"),
+            "validation_scope": job.get("validation_scope", "complete_task"),
         },
     )
 
@@ -207,4 +209,6 @@ def skill_job_from_spec(spec: ReplaySpec) -> dict[str, Any]:
             int(spec.limits.get("max_interactions") or DEFAULT_REPLAY_CONFIG["max_interactions"]),
         ),
         "source": deepcopy(spec.metadata.get("source") or {}),
+        "validation_method": spec.metadata.get("validation_method", "full_ab"),
+        "validation_scope": spec.metadata.get("validation_scope", "complete_task"),
     }

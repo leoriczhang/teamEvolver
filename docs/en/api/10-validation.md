@@ -21,6 +21,12 @@ Read endpoints require a tenant member; writes, triggers and Prompt changes requ
 
 At most 200 `session_ids`; when omitted, `valuable` Sessions stored before acceptance and not yet consumed by evolution are read, up to `evolution_max_sessions` (cap 200). The request cannot override identity or configuration. It creates a `skill.evolve` task pinned to the current `skills` module configuration revision; the first run freezes the input Session set and resumed runs use the same set.
 
+For explicit historical reprocessing, submit `{"session_ids":["session_..."],"reprocess":true}`.
+A nonempty ID list, mandatory analysis, and matching content hashes are required. Only the selected
+Evidence and derived Cases participate in this candidate; archived candidates, Evidence, and automatic
+datasets remain archived. Planning uses the current effective bundle and retains version, reset-boundary,
+and candidate-revision concurrency checks.
+
 ### GET /api/skill-evolution/jobs/{job_id}/result
 
 ```json
@@ -74,20 +80,36 @@ Marks whether the Candidate has been reviewed; only `reviewed` is accepted.
 
 ### POST /api/skill-candidates/{candidate_id}/evaluate
 
-Evaluate without publishing: creates a `skill.validate` task that runs static checks and True Replay, writes the verdict (`accept`, `reject`, `inconclusive`), and returns the Candidate to `open`.
+Evaluate without publishing: creates a `skill.validate` task that runs static checks and Candidate
+Validation, writes the verdict (`accept`, `reject`, `inconclusive`), and returns the Candidate to `open`.
+
+The request can be empty or contain `{"validation_method":"auto"}`. Methods are `auto` (default,
+selected by the Worker LLM from actual differences and current Evidence), `experience_review`,
+`candidate_execution` and `full_ab`. Review cannot pass unsupported behavioral changes. Experience
+review reports Evidence references and scope without asserting Runtime execution. Candidate execution
+runs one relevant Candidate Case with an explicit stage or complete-delivery scope. Full A/B retains
+isolated branches and efficiency comparison. All model and execution work stays in the Worker; acceptance
+still returns 202.
+
+`evaluation.replay` records `validation_method`, `validation_scope`, `basic_validation`,
+`candidate_completed`, `ab_completed`, `ab_verdict` and `assessment`. Candidate completion is independent
+of the legacy `succeeded` count of completed pairs. Basic acceptance never rewrites a historical A/B verdict.
 
 ### POST /api/skill-candidates/{candidate_id}/validate
 
 ```json
-{"mode": "auto", "candidate_revision": 2}
+{"mode": "auto", "candidate_revision": 2, "validation_method": "auto"}
 ```
 
 | mode | Behavior |
 | --- | --- |
-| `auto` | Publishes when static checks pass, Replay ran normally and the verdict is `accept`; rejects on `reject`; returns to `open` on `inconclusive` |
-| `force` | Publishes when static checks pass and Replay ran normally, without requiring `accept` |
+| `auto` | Publishes when static checks and the chosen method's gate pass with verdict `accept`; rejects on `reject`; returns to `open` on `inconclusive` |
+| `force` | Still requires static checks and the chosen method's gate; cannot bypass Evidence, Candidate completion or full A/B Runtime gates |
 
-Validation pins the currently bound Replay Adapter revision and the `replay` module configuration. Only Candidates in `open` can be submitted.
+Validation pins current Evidence, Candidate bytes, Replay Adapter revision and the `replay` module
+configuration. Missing execution configuration does not prevent accepting experience review; only
+execution methods consume MA resource gates. Publication retains the evaluated method by default and
+reuses completion with matching Candidate and execution fingerprints. Only `open` Candidates can be submitted.
 
 ### POST /api/skill-candidates/{candidate_id}/reject
 

@@ -19,6 +19,9 @@ import { type EvidenceClassification } from "@/features/skills/api/client";
 import { fmtTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { useEffect,useState } from "react";
+import SessionToolCalls from "./SessionToolCalls";
+import SessionStages from "./SessionStages";
+import SessionSkillVersions from "./SessionSkillVersions";
 
 export type SessTab = "detail" | "process";
 
@@ -254,7 +257,7 @@ export default function SessionModal({
         ) : tab === "detail" ? (
           <DetailBody d={detail} />
         ) : (
-          <ProcessBody p={process} />
+          <ProcessBody p={process} sid={sid || ""} />
         )}
       </DialogContent>
     </Dialog>
@@ -280,6 +283,7 @@ function DetailBody({ d }: { d: SessionDetail | null }) {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <UserBadge name={summary.user_alias} />
+          {meta.user_attribution === "connection_default" && <span className="text-xs text-muted-foreground">默认归属</span>}
           <span className="text-muted-foreground">·</span>
           <StatusBadge status={summary.status} />
           <span className="text-muted-foreground">·</span>
@@ -314,6 +318,7 @@ function DetailBody({ d }: { d: SessionDetail | null }) {
       </div>
       <SkillPills title="Injected Skills（本轮系统提示词实际暴露）" skills={d.injected_skills || []} />
       <SkillPills title="Used Skills（实际调用 skill_view）" skills={d.used_skills || []} tone="green" />
+      <SessionSkillVersions rows={Array.isArray(d.skill_versions) ? d.skill_versions : []} />
       {d.system_prompt && (
         <details className="rounded-lg border border-border p-3">
           <summary className="cursor-pointer text-xs font-semibold">查看完整 System Prompt</summary>
@@ -372,32 +377,8 @@ function DetailBody({ d }: { d: SessionDetail | null }) {
                     {t.response_text}
                   </div>
                 )}
-                {!!t.tool_calls?.length && (
-                  <div className="mt-2 rounded-lg border border-border bg-background/60 p-2.5">
-                    <div className="mb-1.5 text-[11px] font-semibold text-muted-foreground">
-                      工具调用（{t.tool_calls.length}）
-                    </div>
-                    {t.tool_calls.map((call, callIndex) => (
-                      <div key={call.id || callIndex} className="mb-1 font-mono text-[11px] break-all">
-                        {call.function?.name || (call as { name?: string }).name || "unknown"}(
-                        {String(call.function?.arguments ?? (call as { input?: string }).input ?? "")})
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {!!t.tool_results?.length && (
-                  <details className="mt-2 rounded-lg border border-border p-2.5">
-                    <summary className="cursor-pointer text-[11px] font-semibold">
-                      Tool Results（{t.tool_results.length}）
-                    </summary>
-                    <div className="mt-2 space-y-2">
-                      {t.tool_results.map((result, resultIndex) => (
-                        <pre key={`${result.tool_call_id || "result"}-${resultIndex}`} className={cn("max-h-[180px] overflow-auto whitespace-pre-wrap text-[11px]", result.has_error && "text-destructive")}>
-                          [{result.tool_name || "tool"}] {result.content || ""}
-                        </pre>
-                      ))}
-                    </div>
-                  </details>
+                {!!(t.tool_calls?.length || t.tool_results?.length) && (
+                  <SessionToolCalls calls={t.tool_calls || []} results={t.tool_results || []} />
                 )}
               </div>
             ))}
@@ -433,17 +414,10 @@ function SkillPills({
   );
 }
 
-function ProcessBody({ p }: { p: SessionProcess | null }) {
+function ProcessBody({ p, sid }: { p: SessionProcess | null; sid: string }) {
   const cycles = p?.cycles || [];
   const cyclesPager = usePagedItems(cycles);
-  if (p?.stages?.length) return (
-    <div className="space-y-3">{p.stages.map(stage => (
-      <div key={stage.stage} className="rounded-lg border p-3">
-        <strong>{stage.stage}</strong><span className="ml-3">{stage.status}</span>
-        <div className="mt-1 text-xs text-muted-foreground">{fmtTime(stage.updated_at)} {stage.error_code}</div>
-      </div>
-    ))}</div>
-  );
+  if (p?.stages?.length) return <SessionStages sid={sid} stages={p.stages} />;
   if (!cycles.length) {
     return (
       <Empty>

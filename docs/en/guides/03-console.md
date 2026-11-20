@@ -30,10 +30,11 @@ A page can be opened directly with `?view=<key>`, for example `/?view=workspace`
 | Workbench | Run Overview | `dashboard` | Member |
 | Workbench | Experiment Workbench | `workspace` | Member |
 | Workbench | Runtime Status | `health` | Tenant administrator |
-| Agents & Capabilities | Personal & Team Assets | `agent-assets` | Member |
 | Agents & Capabilities | Platform Assets | `platform` | Tenant administrator |
 | Agents & Capabilities | Members & Access | `members` | Tenant administrator |
-| Knowledge & Methods | Experience Library | `experiences` | Member |
+| Agent Context | Experience Library | `experiences` | Member |
+| Agent Context | Memory Library | `memory-library` | Member |
+| Agent Context | Resource Library | `resource-library` | Member |
 | Evolution & Experiments | Datasets | `datasets` | Member |
 | Evolution & Experiments | Evolution Pipeline | `prompt-studio` | Tenant administrator |
 | Review & Publish | Review & Publish Entry | `review-center` | Member |
@@ -93,26 +94,6 @@ The "OpenViking Deployment" panel selects Volcano Engine OpenViking, local self-
 
 ## Agents & Capabilities
 
-### Personal & Team Assets
-
-The assets page browses two OpenViking root spaces:
-
-| Space | Root URI | Write access |
-|------|--------|--------|
-| Personal memory | `viking://user` | The owner |
-| Team resources | `viking://resources` | Tenant administrator |
-
-The file tree supports search, Markdown/JSON/code preview and directory L0/L1 summaries. When the server has the OpenViking CLI installed, the page shows a built-in terminal; regular users can run read-only commands only.
-
-Multi-file editing:
-
-1. Click "Edit" to enter edit mode.
-2. Edit several text files; switching files keeps drafts.
-3. Click "Finish Editing" to review per-file line diffs.
-4. Click "Confirm Save" to submit the batch.
-
-The server compares each file with its content at the start of editing; if any file was changed by someone else, the whole batch returns 409 and the drafts are kept. A batch holds at most 100 files, each ≤2 MiB and ≤16 MiB in total. The API is in [Workspace and Platform Assets API](../api/23-workspace-assets.md).
-
 ### Platform Assets
 
 Platform assets show, read-only, the task payloads of the current tenant in the PostgreSQL ObjectStore, grouped as ingest originals, Session stage results and Memory Compile results. The page offers a logical key tree, content preview and per-category counts, and does not depend on OpenViking. These objects are never served to Agents.
@@ -127,11 +108,26 @@ On this page a tenant administrator can:
 
 Agents connect with the tenant Key plus a declared `user_id`; console membership and Agent identity are independent. The default tenant's access credential is configured by a platform administrator.
 
-## Knowledge & Methods
+## Agent Context
 
 ### Experience Library
 
 The experience library shows Skill defect experiences and exemplary practices produced by Session analysis, filterable by Skill and keyword. Experiences come from `used_skills` in Sessions; the Skill does not need to be uploaded. Tenant administrators can manage successful experience sync on the same page; see [Successful Experience Sync](./16-successful-experience-sync.md).
+
+### Memory and Resource Libraries
+
+Memory Library switches between personal and team Memory; Resource Library switches between personal and team Resources. Both sit beside Experience Library and read existing scopes without moving files. Legacy `?view=agent-assets` links open Memory Library.
+
+| Page | Space | Root URI |
+|------|------|--------|
+| Memory Library | Personal Memory | `viking://user/<user>/memories` |
+| Memory Library | Team Memory | `viking://resources/<shared_knowledge_prefix>`, default `shared-knowledge` |
+| Resource Library | Personal Resources | `viking://user/<user>/resources` |
+| Resource Library | Team Resources | `viking://resources/team` |
+
+The tree supports search, Markdown/JSON/code preview and directory L0/L1 summaries. Owners edit personal Memory; tenant administrators edit team Memory, while other members read it. Resource Library supports browsing and terminal operations; batch text editing still accepts only Memory and Skill scopes.
+
+Memory editing uses Edit, Finish Editing and Confirm Save to review diffs and submit, preserving drafts when switching files. Concurrent changes return 409 without losing drafts. Batches hold at most 100 files, each ≤2 MiB and ≤16 MiB in total. See [Workspace and Platform Assets API](../api/23-workspace-assets.md).
 
 ## Evolution & Experiments
 

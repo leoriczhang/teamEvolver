@@ -87,6 +87,12 @@ def test_api_restart_worker_and_edit_do_not_change_replay_inputs(pg_env, tmp_pat
         response = client.post("/api/replay-lab/runs", headers={**H, "Idempotency-Key": "once"}, json=request)
         assert response.status_code == 202, response.text
         rid = response.json()["run_id"]
+        assert response.json()["skill_versions"] == {"demo": 1, "helper": 1}
+        wrong = client.post("/api/replay-lab/runs", headers=H, json={**request, "expected_version": 2})
+        assert wrong.status_code == 409, wrong.text
+        wrong_hash = client.post("/api/replay-lab/runs", headers=H,
+                                 json={**request, "expected_version": 1, "expected_tree_sha256": "wrong"})
+        assert wrong_hash.status_code == 409, wrong_hash.text
     repo = DatasetRepository(pg_env.tx)
     changed = document()
     changed["cases"][0]["query"] = "Edited afterwards"
@@ -112,8 +118,50 @@ def test_api_restart_worker_and_edit_do_not_change_replay_inputs(pg_env, tmp_pat
         assert frozen["spec"]["metadata"]["skill_versions"] == {"demo": 1, "helper": 1}
         retry = client.post("/api/replay-lab/runs", headers={**H, "Idempotency-Key": "once"}, json=request)
         assert retry.status_code == 202 and retry.json()["run_id"] == rid
+        from teamEvolver.storage.json_snapshots import JsonSnapshots
+
+        async def no_hydration(*args, **kwargs):
+            raise AssertionError("history must not hydrate full Session snapshots")
+
+        async def cloud_unavailable(*args, **kwargs):
+            raise AssertionError("historical reads must not require the live cloud")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(JsonSnapshots, "hydrate", no_hydration)
+            patch.setattr(client.app.state.services.extras["cloud_skill_provider"], "load", cloud_unavailable)
+            history = client.get("/api/replay-lab/runs?skill_id=demo", headers=H)
+            assert history.status_code == 200, history.text
+            summary = history.json()["runs"][0]
+            assert summary["skill_versions"] == {"demo": 1, "helper": 1}
+            assert summary["result_summary"]["verdict"] == "accept"
+            assert "input" not in summary and "result" not in summary and "cases" not in summary
     assert len(host.contexts) == 2
     assert host.contexts[1].treatment.skill["skills"][0]["bundle"]["files"][1]["path"] == "scripts/run.py"
+
+@pytest.mark.postgres
+def test_history_does_not_expand_large_legacy_inline_payloads(pg_env, monkeypatch):
+    from teamEvolver.storage.json_snapshots import JsonSnapshots
+
+    repo = ReplayRepository(pg_env.tx)
+
+    async def run(conn):
+        await repo.accept(
+            conn, tenant_id="default", domain="skill", run_id="legacy", subject_id="demo", request={},
+            payload={"inline": os.urandom(100_000).hex(), "spec": {"metadata": {"skill_versions": {"demo": 1}}}},
+        )
+        await repo.finish(conn, "skill", "legacy", {"verdict": "accept", "inline": os.urandom(100_000).hex()})
+
+        async def no_hydration(*args, **kwargs):
+            raise AssertionError("summary must not load old inline payloads")
+
+        monkeypatch.setattr(JsonSnapshots, "hydrate", no_hydration)
+        rows = await repo.summaries(conn, "skill", subject_id="demo")
+        assert rows[0]["run_id"] == "legacy"
+        assert rows[0]["skill_versions"] == {}
+        assert rows[0]["result_summary"] is None
+        assert "input" not in rows[0] and "result" not in rows[0]
+
+    _run(pg_env, "default", run)
 
 
 @pytest.mark.postgres
@@ -404,7 +452,8 @@ def test_current_engine_integrates_with_candidate_validation(pg_env, tmp_path, m
     )
     with _pod(pg_env, tmp_path, monkeypatch, pod="a") as client:
         _login(client, bootstrap=True)
-        response = client.post(f"/api/skill-candidates/{cid}/evaluate", headers=H)
+        response = client.post(f"/api/skill-candidates/{cid}/evaluate", headers=H,
+                               json={"validation_method": "full_ab"})
         assert response.status_code == 202
         pg_env.tx.pool.run(process_once(services, owner_id="candidate"))
     row = candidate(pg_env, cid)
@@ -455,7 +504,8 @@ def test_candidate_resume_retains_each_completed_case(pg_env, tmp_path, monkeypa
 
     with _pod(pg_env, tmp_path, monkeypatch, pod="candidate-resume") as client:
         _login(client, bootstrap=True)
-        accepted = client.post(f"/api/skill-candidates/{cid}/evaluate", headers=H).json()
+        accepted = client.post(f"/api/skill-candidates/{cid}/evaluate", headers=H,
+                               json={"validation_method": "full_ab"}).json()
         monkeypatch.setattr(ReplayRepository, "finish", fail_after_checkpoints)
         pg_env.tx.pool.run(process_once(services, owner_id="first"))
         assert len(host.contexts) == 6

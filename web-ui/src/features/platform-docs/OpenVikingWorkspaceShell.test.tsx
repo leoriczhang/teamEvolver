@@ -119,7 +119,14 @@ describe("OpenVikingWorkspaceShell", () => {
   });
   afterEach(cleanup);
 
-  it("exposes only personal memory and team resources at namespace roots", async () => {
+  it.each([
+    { library: "memory" as const, personal: "个人记忆", team: "团队记忆",
+      personalScope: "personal_memory", teamScope: "team_memory" },
+    { library: "resources" as const, personal: "个人资源", team: "团队资源",
+      personalScope: "personal_resources", teamScope: "team_resources" },
+  ])("loads only the selected library's personal and team scopes: $library", async ({
+    library, personal, team, personalScope, teamScope,
+  }) => {
     mockedApi.mockImplementation(async (path: string) => {
       if (path === "/api/users") {
         return { users: [{ id: "alice", display_name: "Alice", role: "admin" }] };
@@ -135,14 +142,21 @@ describe("OpenVikingWorkspaceShell", () => {
     render(
       <OpenVikingWorkspaceShell
         active
-        user={{ id: "alice", display_name: "Alice", role: "admin" }}
+        library={library}
+        user={{ id: "service-root", display_name: "Root", role: "admin" }}
       />,
     );
 
-    expect(await screen.findByRole("button", { name: "个人记忆" })).toBeVisible();
-    expect(screen.getAllByText("viking://user").length).toBeGreaterThan(0);
-    fireEvent.click(screen.getByRole("button", { name: "团队资源" }));
-    await waitFor(() => expect(screen.getAllByText("viking://resources").length).toBeGreaterThan(0));
+    expect(await screen.findByRole("button", { name: personal })).toBeVisible();
+    await waitFor(() => expect(screen.getAllByText(config.scopes[personalScope as ScopeName].root_uri).length)
+      .toBeGreaterThan(0));
+    fireEvent.click(screen.getByRole("button", { name: team }));
+    await waitFor(() => expect(screen.getAllByText(config.scopes[teamScope as ScopeName].root_uri).length)
+      .toBeGreaterThan(0));
+    const requestedScopes = mockedApi.mock.calls.map(([path]) => String(path))
+      .filter(path => path.startsWith("/api/openviking/workspace/tree"))
+      .map(path => new URL(path, "http://localhost").searchParams.get("scope"));
+    expect(new Set(requestedScopes)).toEqual(new Set([personalScope, teamScope]));
     expect(screen.queryByText("Skill Lab")).not.toBeInTheDocument();
     expect(screen.queryByText("Memory Lab")).not.toBeInTheDocument();
   });
@@ -167,10 +181,10 @@ describe("OpenVikingWorkspaceShell", () => {
           await personalRequestsBlocked;
           return treeResponse(scopeName, []);
         }
-        if (scopeName === "team_workspace") {
+        if (scopeName === "team_memory") {
           return treeResponse(scopeName, [
             {
-              uri: "viking://resources/team-memory.md",
+              uri: "viking://resources/shared-knowledge/team-memory.md",
               name: "team-memory.md",
               is_dir: false,
             },
@@ -188,7 +202,7 @@ describe("OpenVikingWorkspaceShell", () => {
       />,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "团队资源" }));
+    fireEvent.click(await screen.findByRole("button", { name: "团队记忆" }));
     await screen.findByText("team-memory.md");
 
     await act(async () => {

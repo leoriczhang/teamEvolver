@@ -10,6 +10,7 @@ import zipfile
 from team_skills.library.bundle import bundle_tree_sha256
 from team_skills.transfer.packages import discover, make_zip, read_zip
 
+from .replay_resources import effective_replay_config, prepare_replay_resources
 from .repository import MARepository
 from .schemas import digest
 
@@ -96,16 +97,18 @@ def skill_archive(item):
 
 
 async def discover_connection(task, services, client, connection, operation):
+    if services.extras.get("cloud_skill_provider"):
+        return await discover_cloud(task, services, client, connection, operation)
     repo, config = MARepository(services.tx), connection["config"]
     checkpoint = operation["checkpoint"]
     graph = checkpoint.get("graph")
     if not graph:
         graph = await agent_graph(client, config["entry_agent_id"])
         environment = await client.request("GET", f"environments/{config['environment_id']}")
-        replay_environment = (await client.request("GET", f"environments/{config['replay_environment_id']}")
-                              if config["replay_enabled"] else None)
+        replay_environment, resources = await prepare_replay_resources(
+            task, services, client, connection, environment)
         checkpoint = {"graph": graph, "environment": environment, "replay_environment": replay_environment,
-                      "skills": {}}
+                      "replay_resources": resources, "skills": {}}
         async with services.tx.tenant_tx(task.tenant_id) as conn:
             await services.tasks.require_current(conn, task)
             await repo.checkpoint(conn, task.task_id, checkpoint)
@@ -180,9 +183,110 @@ async def discover_connection(task, services, client, connection, operation):
                                     release_id=initial_id, manifest_hash=manifest_hash, record=record, status="applied")
         await repo.status(conn, task.subject_id, "ready", {
             "agent_count": len(graph["agents"]), "managed_skill_count": len(skills),
-            "replay_capability": replay_capability(config, graph, checkpoint.get("replay_environment")),
+            "replay_resources": checkpoint.get("replay_resources"),
+            "replay_capability": replay_capability(
+                effective_replay_config(config, checkpoint.get("replay_resources")),
+                graph, checkpoint.get("replay_environment")),
         }, synced=True)
         result = {"agent_count": len(graph["agents"]), "managed_skill_count": len(skills), "release_id": initial_id}
+        await repo.checkpoint(conn, task.task_id, checkpoint, result)
+    return result
+
+
+async def discover_cloud(task, services, client, connection, operation):
+    """Observe the current cloud graph; never import or publish a TE copy."""
+    repo, config = MARepository(services.tx), connection["config"]
+    graph = await agent_graph(client, config["entry_agent_id"])
+    environment = await client.request("GET", f"environments/{config['environment_id']}")
+    replay_environment, resources = await prepare_replay_resources(task, services, client, connection, environment)
+    async with services.tx.tenant_tx(task.tenant_id) as conn:
+        previous = {r["logical_name"]: r["record"]
+                    for r in await repo.all_resources(conn, task.subject_id, kind="skill")}
+    refs = {}
+    for ident, agent in graph["agents"].items():
+        for ref in agent.get("skills") or []:
+            if ref.get("type") == "custom":
+                value = refs.setdefault(ref["skill_id"], {"agents": [], "bound_versions": {}})
+                value["agents"].append(ident)
+                value["bound_versions"][ident] = str(ref["version"])
+    # Retain Skills created from TE and Skills detached in the cloud. Discovery
+    # observes their native heads even when the live graph has no references.
+    for old in previous.values():
+        if old.get("id"):
+            refs.setdefault(old["id"], {"agents": [], "bound_versions": {}})
+    skills = {}
+    provider = services.extras["cloud_skill_provider"]
+    for ident, ref in refs.items():
+        from teamEvolver.managed_agents import MAError
+        try:
+            remote = await client.request("GET", f"skills/{ident}")
+        except MAError as exc:
+            if exc.status != 404 or ref["agents"]:
+                raise
+            old = next((v for v in previous.values() if v.get("id") == ident), {})
+            skills[old["name"]] = {**old, **ref, "deleted": True, "status": "deleted"}
+            continue
+        name, latest = remote["name"], int(remote["latest_version"])
+        if name in skills and skills[name]["id"] != ident:
+            raise ValueError("Same-name cloud Skill IDs are ambiguous in this connection")
+        meta, _ = await provider.fetch_version(task.tenant_id, connection, client, ident, name, latest)
+        old = previous.get(name, {})
+        versions = set(ref["bound_versions"].values())
+        bound = next(iter(versions)) if len(versions) == 1 else None
+        skills[name] = {
+            **ref, "id": ident, "name": name, "version": bound, "source_version": bound,
+            "bound_version": bound, "latest_version": str(latest), "tree_sha256": meta["tree_sha256"],
+            "skill_backend": "managed-agents", "status": "managed", "deleted": False,
+            "evolution_reset_at": old.get("evolution_reset_at"),
+            **({"desired_agents": old["desired_agents"]} if "desired_agents" in old else {}),
+        }
+    checkpoint = {"graph": graph, "environment": environment,
+                  "replay_environment": replay_environment, "replay_resources": resources, "skills": skills}
+    skill_count = sum(not item.get("deleted", False) for item in skills.values())
+    manifest_hash = digest([(n, s["id"], s["latest_version"], s["bound_versions"])
+                            for n, s in sorted(skills.items())])
+    release_id = "ma-cloud:" + digest([connection["config_hash"], graph, skills, environment])[:40]
+    record = {
+        "entry_agent_id": config["entry_agent_id"],
+        "entry_agent_version": str(graph["agents"][config["entry_agent_id"]]["version"]),
+        "agents": {i: {"id": i, "version": str(a["version"]), "name": a.get("name")}
+                   for i, a in graph["agents"].items()},
+        "skills": skills, "environment_id": environment["id"], "environment": environment,
+        "environment_hash": digest(environment["config"]), "agent_graph": graph,
+        "connection_revision": connection["revision"], "release_id": release_id,
+        "manifest_hash": manifest_hash, "skill_backend": "managed-agents", "readback_verified": True,
+    }
+    async with services.tx.tenant_tx(task.tenant_id) as conn:
+        await services.tasks.require_current(conn, task)
+        changed = services.extras.get("cloud_skill_changed")
+        for name, item in skills.items():
+            old = previous.get(name, {})
+            if (old.get("skill_backend") != "managed-agents"
+                    or old.get("latest_version") != item.get("latest_version")
+                    or old.get("deleted", False) != item.get("deleted", False)):
+                item["evolution_reset_at"] = (await conn.fetchval("SELECT clock_timestamp()")).isoformat()
+                if changed:
+                    await changed(conn, task.tenant_id, name, item)
+            await repo.bind(conn, tenant_id=task.tenant_id, connection_id=task.subject_id,
+                            kind="skill", name=name, record=item)
+        for ident, agent in graph["agents"].items():
+            await repo.bind(conn, tenant_id=task.tenant_id, connection_id=task.subject_id, kind="agent",
+                            name=ident, record={"id": ident, "version": str(agent["version"]), "snapshot": agent,
+                                                "name": agent.get("name", ident)})
+        await repo.save_release(conn, tenant_id=task.tenant_id, connection_id=task.subject_id,
+                                release_id=release_id, manifest_hash=manifest_hash, record=record, status="applied")
+        live = await repo.connection(conn, task.subject_id)
+        await repo.status(conn, task.subject_id, live["status"], {
+            **live["detail"],
+            "agent_count": len(graph["agents"]), "managed_skill_count": skill_count,
+            "skill_backend": "managed-agents",
+            "replay_resources": resources,
+            "replay_capability": replay_capability(
+                effective_replay_config(config, resources), graph, replay_environment),
+        }, synced=True)
+        await repo.operation_status(conn, task.subject_id, task.kind)
+        result = {"agent_count": len(graph["agents"]), "managed_skill_count": skill_count,
+                  "release_id": release_id, "skill_backend": "managed-agents"}
         await repo.checkpoint(conn, task.task_id, checkpoint, result)
     return result
 
@@ -190,8 +294,16 @@ async def discover_connection(task, services, client, connection, operation):
 def replay_capability(config, graph, environment):
     if not config.get("replay_enabled"):
         return {"supported": False, "reason": "disabled"}
+    resources = config.get("replay_resources") or {}
+    if resources.get("status") not in {None, "ready"}:
+        return {"supported": False, "reason": resources.get("reason") or
+                "回放凭证待补充：" + "、".join(resources.get("missing_credentials") or [])}
     if not environment or environment.get("config", {}).get("type") != "cloud":
         return {"supported": False, "reason": "isolated cloud replay Environment required"}
+    if environment.get("id") == config.get("environment_id") and environment.get("id"):
+        return {"supported": False, "reason": "Replay must use a separate Environment"}
+    if set(config.get("vault_ids") or []) & set(config.get("replay_vault_ids") or []):
+        return {"supported": False, "reason": "Replay must use separate Vaults"}
     isolation = config.get("replay_isolation") or {}
     for agent in graph["agents"].values():
         if agent.get("memory") or agent.get("memory_store_id"):

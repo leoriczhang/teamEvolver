@@ -1,5 +1,6 @@
 """Transfer domain operations over the authoritative Skill repository."""
 from team_skills.config import BundleLimits
+from team_skills.evolution.reset import retire_manual_commit
 from team_skills.library.bundle import bundle_tree_sha256
 from team_skills.library.repository import SkillLibraryRepository, skill_id_for, validate_bundle
 
@@ -10,6 +11,7 @@ from .packages import MAX_CONTENT_BYTES, MAX_FILES, MAX_SKILLS, TransferError, p
 
 class SkillTransferService:
     def __init__(self, tx, adapters=None):
+        self.tx = tx
         self.library = SkillLibraryRepository(tx)
         self.schema = tx.pool.schema
         self.adapters = adapters if adapters is not None else {
@@ -40,6 +42,12 @@ class SkillTransferService:
         # Conflicts and every version/outbox/result commit share this transaction.
         heads = {}
         for item in packages:
+            if self.library._cloud and (self.library._cloud.managed(item.name) or
+                                       (self.library._cloud.connections and
+                                        await self.library.get_skill(conn, item.name) is None)):
+                head = await self.library.get_skill(conn, item.name)
+                heads[item.name] = {"current_version": head["version"] if head else 0, "deleted": False}
+                continue
             await conn.execute(
                 f"INSERT INTO {self.schema}.skills (tenant_id,name,skill_id) VALUES ($1,$2,$3) "
                 "ON CONFLICT (tenant_id,name) DO NOTHING", tenant_id, item.name, skill_id_for(item.name),
@@ -61,9 +69,12 @@ class SkillTransferService:
                 mutation_id=f"{command_id}:{item.name}", limits=limits, actor=payload["actor"],
                 source="transfer", metadata={"channel": payload["channel"], "origin": item.origin},
             )
+            await retire_manual_commit(conn, self.tx, commit, tenant_id=tenant_id, actor=payload["actor"])
             result["imported"].append({
                 "name": item.name, "version": commit.version,
-                "status": "unchanged" if commit.status == "unchanged" else
+                **({"job_id": commit.record["job"]["job_id"]} if commit.status == "accepted" else {}),
+                "status": "accepted" if commit.status == "accepted" else
+                          "unchanged" if commit.status == "unchanged" else
                           "updated" if item.name in existing else "created",
                 "files": sorted(item.files), "tree_sha256": bundle_tree_sha256(item.files), "origin": item.origin,
             })

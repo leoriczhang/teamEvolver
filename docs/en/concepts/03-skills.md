@@ -1,6 +1,6 @@
 # Skills
 
-A Skill is an **executable, reusable task method** that states when it applies, the steps, constraints and supporting resources. The team Skill version chain is stored in PostgreSQL; new versions come from Candidate Review or administrator changes, and Agents pull them through `GET /sync/skills`.
+A Skill is an **executable, reusable task method** that states when it applies, the steps, constraints and supporting resources. MA Skills use their native cloud version chain; TE reads, edits and publishes through cloud endpoints. Other team Skills are published in PostgreSQL and pulled through `GET /sync/skills`.
 
 ## Skill Structure
 
@@ -38,7 +38,9 @@ The tenant `skills` module configuration limits bundle size, validated before wr
 
 ## Team Skill Library
 
-PostgreSQL is the only authority for the team Skill library (`003_skills.sql`):
+MA Skills use native `latest_version` and cloud packages. TE stores checked immutable historical packages in `ma_skill_snapshots`, keyed by connection, Skill ID and native version, without importing a team-library version chain. Cloud changes retire old Candidates and Evidence from automatic use while retaining history.
+
+PostgreSQL is authoritative for non-MA team Skills (`003_skills.sql`):
 
 | Table | Content |
 | --- | --- |
@@ -61,7 +63,7 @@ The local `skills_runtime_cache_dir` is only a rebuildable cache materialized fr
 
 | Aspect | Personal Skill | Team Skill |
 |------|------------|------------|
-| Storage | OpenViking `viking://resources/<root_prefix>/peers/<user>/skills/` | PostgreSQL version chain |
+| Storage | OpenViking `viking://resources/<root_prefix>/peers/<user>/skills/` | Native MA cloud versions or PostgreSQL for non-MA Skills |
 | Editing | The user or an administrator, via "Personal and team assets" | Tenant administrators, via Candidate Review or `/api/skills` |
 | Agent read | Context `personal_skills` scope | `GET /sync/skills`, and Context `team_skills` scope |
 | Promotion to team | The user submits a publish request, an administrator approves | — |
@@ -71,8 +73,21 @@ The local `skills_runtime_cache_dir` is only a rebuildable cache materialized fr
 | State | Description | Affects Agents |
 |------|------|---------------|
 | Published | Current version in `skills` | Agents pull this version |
-| Candidate | Four states: `open`, `validating`, `published`, `rejected` | Not before publishing |
+| Candidate | Five states: `open`, `validating`, `published`, `rejected`, `archived` | Not before publishing |
 | Historical | Versions in `skill_versions` superseded by newer ones | Restorable by Rollback |
+
+An actual administrator change to a team Skill (editing, file changes, workbench saves, replacement
+imports, rollback or deletion) records an automatic evolution reset time and archives the live
+Candidate. Saving an identical file tree or retrying an idempotent mutation does not reset it.
+Candidate Review publication does not trigger a manual reset.
+
+Evidence, experience Patterns, Sessions and historical Test Datasets from before the reset no longer
+enter that Skill's automatic generation or evaluation. Late Sessions use their business time, falling
+back to ingestion time when unavailable. New candidates start from the current library file tree;
+the old candidate package is not reused. Library changes during planning and late validation results
+cannot overwrite the updated Skill. Historical candidates, versions, Cases, materials and replay
+results remain available, and historical Datasets can still be replayed manually in the workbench.
+The reset affects only the changed Skill.
 
 Version numbers are monotonically increasing integers.
 
@@ -82,12 +97,31 @@ Version numbers are monotonically increasing integers.
 Evidence → skill.evolve → Skill Candidate (open)
                               │ evaluate / validate
                               ▼
-                       validating: static checks + True Replay
+                       validating: static checks + Candidate Validation
                               ├─ accept (auto) or force → published → new version
                               ├─ reject → rejected
                               └─ inconclusive → back to open, awaiting manual handling
 Administrator edits via /api/skills ──────────────► new version
 ```
+
+The Worker chooses experience review or Candidate execution from the actual differences and current
+Evidence. Supported tool routing, applicability and missing-dependency instructions can pass an
+evidence-cited review without claiming Runtime execution. Behavioral changes run one relevant
+Candidate Case with known requirements upfront and at most two interactions. Stage validation states
+its scope; complete delivery requires every requirement. One completed Candidate Case passes basic
+validation, while A/B efficiency remains independent. Explicit full A/B uses both branches and the
+original Runtime matrix.
+
+The console's full A/B action or `validation_method: "full_ab"` on evaluate / validate selects an
+efficiency comparison; `"auto"` is the default. Three historical Cases are no longer appended by
+default. Completion reuse requires matching Candidate revision, file tree, task materials, assessment
+scope and execution configuration. External blocks stop a Case. An unavailable judge preserves
+returned outputs and artifacts; another validation assesses those archived outputs without remaking them.
+
+Changed Agent/tools, Environment or Skill bindings archive automatic Cases and related Evidence with
+a timestamp, reason and original execution fingerprint. Historical inputs, Sessions, artifacts and
+verdicts stay unchanged. Manual workbench replay creates a separate experiment and does not reactivate
+the archived Case.
 
 ## Agent Pull
 
@@ -101,7 +135,7 @@ The response contains each Skill's name, version, `tree_sha256` and base64 file 
 
 ## Distribution to Agents
 
-Skills are distributed only by pull: Agents call `GET /sync/skills` with the tenant credential + `user_id` to fetch a snapshot of all current Skills (with ETag). Publishing writes only versions and tombstones, creates no delivery outbox, and every API replica returns the same result.
+MA Skill publication runs as `ma.skill`: upload a native cloud version, update selected members and ancestors, and verify readback. Rollback creates a new cloud version from historical contents. Discovery/reconcile observe the cloud without pushing old TE versions. Other Agents pull team-library snapshots through `GET /sync/skills` with tenant credentials + `user_id` and ETag; publishing creates no delivery outbox.
 
 ## Skill and Memory Boundary
 
@@ -109,7 +143,7 @@ Skills are distributed only by pull: Agents call `GET /sync/skills` with the ten
 |------|-------|--------|
 | Nature | Executable task method (steps, procedure) | Retrievable facts and background |
 | Prescribes execution | Yes | No |
-| Validation | True Replay comparison | Memory Replay; aggregated content is constrained by the aggregation Skill |
+| Validation | Experience review, Candidate execution or True Replay | Memory Replay; aggregated content is constrained by the aggregation Skill |
 | Writes | Candidate Review, administrator edits, publish requests | Agents write only personal Memory; team Memory is written by aggregation and DreamCycle |
 | Typical example | "How to do Code Review" | "The team uses pnpm" |
 

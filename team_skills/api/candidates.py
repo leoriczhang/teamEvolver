@@ -56,7 +56,7 @@ def create_router(services, **kwargs):
     async def listing(scope: str = "open", limit: int = 20, offset: int = 0, compact: bool = False):
         try:
             async with tx.tenant_tx(current_tenant_id()) as conn:
-                rows, total = await repo.list(conn, scope=scope, limit=limit, offset=offset)
+                rows, total = await repo.list(conn, scope=scope, limit=limit, offset=offset, compact=compact)
                 page = [await candidate_payload(conn, tx, row, compact=compact) for row in rows]
         except SkillLibraryError as exc:
             raise error(exc) from exc
@@ -117,7 +117,7 @@ def create_router(services, **kwargs):
         except (ValueError, TypeError) as exc:
             raise HTTPException(400, str(exc)) from exc
 
-    async def submit(candidate_id, request, mode, revision=None):
+    async def submit(candidate_id, request, mode, revision=None, validation_method="auto"):
         reviewer = actor(request)
         try:
             async with tx.tenant_tx(current_tenant_id()) as conn:
@@ -125,7 +125,7 @@ def create_router(services, **kwargs):
                 command = await submit_validation(
                     conn, services, tenant_id=current_tenant_id(), candidate_id=candidate_id,
                     command_id=command_id(request, "validate"), config=config, actor=reviewer,
-                    revision=revision, mode=mode,
+                    revision=revision, mode=mode, validation_method=validation_method,
                 )
             return accepted(command)
         except (SkillLibraryError, TenantConfigMissing) as exc:
@@ -135,14 +135,19 @@ def create_router(services, **kwargs):
 
     @router.post("/api/skill-candidates/{candidate_id}/evaluate")
     async def evaluate(candidate_id: str, request: Request):
-        return await submit(candidate_id, request, "evaluate")
+        body = await read_json(request)
+        if set(body) - {"validation_method"}:
+            raise HTTPException(400, "evaluate accepts optional validation_method")
+        return await submit(candidate_id, request, "evaluate", validation_method=body.get("validation_method", "auto"))
 
     @router.post("/api/skill-candidates/{candidate_id}/validate")
     async def validate(candidate_id: str, request: Request):
         body = await read_json(request)
-        if set(body) - {"mode", "candidate_revision"} or body.get("mode", "auto") not in {"auto", "force"}:
+        if (set(body) - {"mode", "candidate_revision", "validation_method"}
+                or body.get("mode", "auto") not in {"auto", "force"}):
             raise HTTPException(400, "validation requires mode auto or force and optional candidate_revision")
-        return await submit(candidate_id, request, body.get("mode", "auto"), body.get("candidate_revision"))
+        return await submit(candidate_id, request, body.get("mode", "auto"), body.get("candidate_revision"),
+                            body.get("validation_method", "auto"))
 
     @router.post("/api/skill-candidates/{candidate_id}/reject")
     async def reject(candidate_id: str, request: Request):
@@ -169,19 +174,25 @@ def create_router(services, **kwargs):
         reviewer = actor(request)
         body = await read_json(request)
         ids = body.get("session_ids", [])
-        if set(body) - {"session_ids"} or not isinstance(ids, list) or len(ids) > 200:
+        if set(body) - {"session_ids", "reprocess"} or not isinstance(ids, list) or len(ids) > 200:
             raise HTTPException(400, "trigger accepts at most 200 session_ids; no identity/config overrides")
         if any(not isinstance(value, str) or not value for value in ids):
             raise HTTPException(400, "session_ids must contain nonempty strings")
+        reprocess = body.get("reprocess", False)
+        if type(reprocess) is not bool or (reprocess and not ids):
+            raise HTTPException(400, "reprocess must be boolean and requires explicit session_ids")
         try:
             async with tx.tenant_tx(current_tenant_id()) as conn:
                 config = await load_skills_config(config_repo, conn)
                 now = await conn.fetchval("SELECT clock_timestamp()")
+                from team_skills.library.store import snapshot
+                cloud = snapshot(tx)
                 command, _ = await enqueue_command(
                     conn, services, tenant_id=current_tenant_id(), command_id=command_id(request, "evolve"),
                     kind="skill.evolve", request=body, payload={
-                        "session_ids": ids, "actor": reviewer, "config": config.config,
+                        "session_ids": ids, "reprocess": reprocess, "actor": reviewer, "config": config.config,
                         "config_revision": config.revision, "accepted_at": now.isoformat(),
+                        "connection_id": cloud.selected if cloud is not None else "",
                     },
                 )
             return accepted(command)

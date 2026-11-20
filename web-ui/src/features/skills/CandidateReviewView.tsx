@@ -32,9 +32,12 @@ function mergeCandidateDetail(items: Candidate[], detail: Candidate): Candidate[
 function replayIssue(ev?: EvalResult): string {
   if (!ev) return "";
   if (ev.status === "blocked") return ev.replay?.reason || "回放输入不完整";
+  if (ev.replay?.validation_method === "candidate_execution"
+    && ev.replay?.basic_validation?.status === "passed" && ev.recommended_publish) return "";
   if (ev.replay?.error) return ev.replay.error;
   for (const item of ev.replay?.cases || []) {
-    const err = item.baseline?.error || item.candidate?.error;
+    const err = ev.replay?.validation_method === "candidate_execution"
+      ? item.candidate?.error : item.baseline?.error || item.candidate?.error;
     if (err) return err;
   }
   return "";
@@ -55,6 +58,7 @@ function candidateStatusBadge(c: Candidate): ReactNode {
   const status = candidateReviewStatus(c);
   if (status === "published") return <Pill tone="green">已发布</Pill>;
   if (status === "rejected") return <Pill tone="red">已驳回</Pill>;
+  if (status === "archived") return <Pill tone="gray">已归档</Pill>;
   if (status === "deleted") return <Pill tone="gray">已删除</Pill>;
   if (status === "validating") return <Pill tone="blue">评估中</Pill>;
   if (status === "open") return <Pill tone="amber">待处理</Pill>;
@@ -129,14 +133,15 @@ export default function CandidateReviewView({ active, canManage = false }: { act
     setCands((items) => items.map((item) => item.job_id === jobId ? mergeCandidateFeedback(item, feedback) : item));
   }, []);
 
-  const evaluate = useCallback(async (jobId: string, force: boolean) => {
+  const evaluate = useCallback(async (jobId: string, force: boolean, method: "auto" | "full_ab" = "auto") => {
     if (evaluatingRef.current[jobId]) return;
     setEvaluating((m) => ({ ...m, [jobId]: true }));
-    if (force) toastOk("已开始重新评估", "真实回放可能耗时数分钟，任务会在后台继续执行");
+    if (force) toastOk("已开始重新评估", "将按改动影响选择验证方式，任务在后台执行");
     try {
       const r = await runSkillCommand<EvalResult & { status?: string }>(
         `/api/skill-candidates/${encodeURIComponent(jobId)}/evaluate${force ? "?refresh=true" : ""}`,
-        { method: "POST" }
+        { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ validation_method: method }) }
       );
       if (r && r.status !== "not_found") {
         setEvalCache((m) => ({ ...m, [jobId]: r }));
@@ -149,8 +154,8 @@ export default function CandidateReviewView({ active, canManage = false }: { act
                 : r.replay?.verdict === "inconclusive"
                   ? "回放证据不足，请查看 Checklist 完成情况和评估详情"
               : r.recommended_publish
-                ? "客观指标改善"
-                : "客观指标持平或增加"
+                ? "基础验证通过，可采纳"
+                : "验证未通过或证据不足"
           );
         }
       }
@@ -206,8 +211,8 @@ export default function CandidateReviewView({ active, canManage = false }: { act
   async function validate(jobId: string, mode: "auto" | "force") {
     const msg =
       mode === "force"
-        ? "确认强制发布该候选技能？仍会保留 True Replay 三项指标。"
-        : "确认按 True Replay 发布？双方全部 Checklist 满足后，先比较轮次；轮次持平时再比较工具调用和 Token。";
+        ? "确认发布该候选技能？仍须满足所选验证方式的门禁。"
+        : "确认按当前验证结论发布候选技能？";
     if (!window.confirm(msg)) return;
     try {
       const r = await runSkillCommand<{ status?: string; version?: number; feedback?: CandidateFeedback }>(
@@ -298,8 +303,8 @@ export default function CandidateReviewView({ active, canManage = false }: { act
       <div className="mb-[18px] grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">
         <StatCard label={isHistory ? "历史候选" : "待评审候选"} value={cands.length} />
         <StatCard label={isHistory ? "已发布" : "已完成评估"} value={isHistory ? published : evaluated} />
-        <StatCard label={isHistory ? "已驳回" : "指标改善"} value={isHistory ? rejected : recommended} />
-        <StatCard label={isHistory ? "带回放证据" : "持平或增加"} value={isHistory ? evaluated : risky} />
+        <StatCard label={isHistory ? "已驳回" : "可采纳"} value={isHistory ? rejected : recommended} />
+        <StatCard label={isHistory ? "带验证证据" : "待改善或证据不足"} value={isHistory ? evaluated : risky} />
       </div>
 
       <Panel title={isHistory ? "已处理/历史候选" : "评审队列"} count={`${cands.length} 个`}>
@@ -371,7 +376,7 @@ export default function CandidateReviewView({ active, canManage = false }: { act
                       </Td>
                       <Td>
                         {!busy && ev ? (
-                          verdict === "accept" || ev.recommended_publish ? <Pill tone="green">指标改善</Pill>
+                          verdict === "accept" || ev.recommended_publish ? <Pill tone="green">验证通过</Pill>
                             : verdict === "inconclusive" ? <Pill tone="amber">无法确定</Pill>
                             : verdict === "reject" ? <Pill tone="red">未通过</Pill>
                             : <Pill tone="amber">无法确定</Pill>
@@ -426,9 +431,9 @@ export default function CandidateReviewView({ active, canManage = false }: { act
         open={!!openJobId}
         readOnly={isProcessedCandidate(openCand) || !canManage}
         onClose={() => setOpenJobId(null)}
-        onEvaluate={(force) => {
+        onEvaluate={(force, method) => {
           if (!openJobId || isProcessedCandidate(openCand)) return;
-          evaluate(openJobId, force);
+          evaluate(openJobId, force, method);
         }}
         onUpdated={handleCandidateUpdated}
         onPublish={(mode) => openJobId && validate(openJobId, mode)}

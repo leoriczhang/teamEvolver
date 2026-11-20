@@ -156,7 +156,9 @@ Case 中的材料在受理时读取并固定。带 `Idempotency-Key` 的重复�
 
 ## 实验工作台
 
-实验工作台在控制台中编辑团队 Skill 并对数据集运行 Replay。Skill 读写直接作用于 PostgreSQL 中的团队 Skill 库。
+实验工作台在控制台中编辑团队 Skill 并对数据集运行 Replay。MA Skill 使用云端原生版本，
+写入返回 202，由 Worker 完成上传与关联回读；控制台等待实际完成后更新保存状态。
+其他 Skill 使用 PostgreSQL 团队库。文件树与编辑器显示当前正式版本和编辑基线版本。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -170,11 +172,18 @@ Case 中的材料在受理时读取并固定。带 `Idempotency-Key` 的重复�
 | DELETE | `/api/replay-lab/datasets/{dataset_id}` | 删除数据集 |
 | POST | `/api/replay-lab/datasets/synthesize` | `{"skill_id", "session_ids"?}` 用最多 30 个 Session 合成 Case，返回 202 |
 | GET | `/api/replay-lab/jobs/{job_id}/result` | 合成结果 |
-| POST | `/api/replay-lab/runs` | `{"skill_id", "dataset_id", "candidate_skill_md", "candidate_files"?, "timeout_seconds"?, "max_interactions"?}`，返回 202 |
-| GET | `/api/replay-lab/runs?skill_id=&limit=` | 运行历史 |
+| POST | `/api/replay-lab/runs` | `{"skill_id", "dataset_id", "candidate_skill_md", "candidate_files"?, "timeout_seconds"?, "max_interactions"?, "expected_version"?, "expected_tree_sha256"?}`，返回 202 |
+| GET | `/api/replay-lab/runs?skill_id=&limit=` | 最多 100 条运行摘要，包含 `result_summary` 和固定 `skill_versions`，省略完整输入与轨迹 |
 | GET | `/api/replay-lab/runs/{run_id}` | 运行详情 |
 
 工作台运行以数据集声明的 Skill 版本作为 Baseline，以 `candidate_skill_md` 和 `candidate_files` 替换 `skill_id` 后作为 Candidate。数据集中的 `content_hash` 与版本内容不符时拒绝运行。
+
+控制台提交编辑器的 `expected_version` 与基线树哈希；与受理时固定版本不符返回 409，
+避免将旧编辑稿与新版本比较。运行详情显示固定版本、所有 Case 的分支 Trace 和任务错误。
+数据集与历史实验读取不依赖当前云端 Skill 服务。工作台可搜索并选择历史 Session，
+显示其实际 Skill 版本后生成数据集；编辑数据集第一个 Case 时保留其余 Case 与版本引用。
+包含大型内联制品的历史记录只返回列表基本信息，版本与效果证据通过运行详情读取，
+不在列表请求中展开旧轨迹。
 
 ## 错误
 

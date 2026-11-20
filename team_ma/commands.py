@@ -11,7 +11,7 @@ async def enqueue(conn, services, *, tenant_id, connection_id, kind, body=None, 
     connection = await repo.connection(conn, connection_id)
     if connection is None:
         raise KeyError("MA connection not found")
-    if kind not in {"ma.discover", "ma.collect", "ma.reconcile"}:
+    if kind not in {"ma.discover", "ma.collect", "ma.reconcile", "ma.skill"}:
         raise ValueError("Unknown MA operation")
     operation_id = operation_id or "ma:" + uuid4().hex
     # Idempotent repeats return the already fixed revision, even after config edits.

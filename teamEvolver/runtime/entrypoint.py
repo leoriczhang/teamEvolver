@@ -58,6 +58,30 @@ async def _serve_uvicorn(app, *, host: str, port: int, lifecycle) -> None:
     await server.serve()
 
 
+async def _run_worker_lanes(services, *, owner_id, stop_event, tenant_source, on_health):
+    """Reserve MA capacity so long analysis/replay tasks cannot block ingestion."""
+    kinds = services.registry.kinds()
+    ma = kinds & {"ma.discover", "ma.collect", "ma.reconcile", "ma.skill"}
+    lanes = [tuple(sorted(group)) for group in (kinds - ma, ma) if group]
+    health = [True] * len(lanes)
+
+    def report(index, healthy):
+        health[index] = healthy
+        on_health(all(health))
+
+    tasks = [asyncio.create_task(run_worker(
+        services, owner_id=f"{owner_id}:lane-{index}", stop_event=stop_event, tenant_source=tenant_source,
+        kinds=group, on_health=lambda healthy, index=index: report(index, healthy),
+    )) for index, group in enumerate(lanes)]
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def run_role(
     *,
     role: str,
@@ -80,7 +104,12 @@ def run_role(
         raise RuntimeError(
             "the role runtime requires PostgreSQL (set storage_pg_dsn or TEAMEVOLVER_PG_* env)"
         )
-    pool = get_database_pool(dsn=dsn, schema=schema, ssl=ssl)
+    pool = get_database_pool(
+        dsn=dsn, schema=schema, ssl=ssl,
+        pool_min=int(getattr(config, "storage_pg_pool_min", 2)),
+        pool_max=int(getattr(config, "storage_pg_pool_max", 20)),
+        command_timeout=float(getattr(config, "storage_pg_command_timeout_seconds", 30)),
+    )
     tx = TransactionManager(pool)
 
     from ..app import build_role_services
@@ -103,16 +132,10 @@ def run_role(
         lifecycle_ref[0].set_healthy(healthy)
 
     async def _worker_main(stop_event: asyncio.Event):
-        tasks = [asyncio.create_task(run_worker(
+        await _run_worker_lanes(
             services, owner_id=owner_id, stop_event=stop_event, tenant_source=_active_tenants,
-            on_health=_on_health))]
-        try:
-            await asyncio.gather(*tasks)
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            on_health=_on_health,
+        )
 
     async def _on_close() -> None:
         # Gracefully drain the pool bound to the serving loop, then stop the

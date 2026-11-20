@@ -5,6 +5,8 @@ import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
+import pytest
+
 from team_ma import collection
 from team_skills.evolution.session_processing import groups
 from team_skills.evolution.stages.analyze import build_analysis_payload
@@ -80,7 +82,8 @@ def test_child_gets_its_own_trace_verdict_with_parent_and_skill_attribution():
     assert child["used_skills"] == ["render-quality"]
 
 
-def test_late_child_events_are_collected_and_old_projection_is_reanalyzed(monkeypatch):
+@pytest.mark.parametrize("candidate_binding", [False, True])
+def test_late_child_events_are_collected_and_old_projection_is_reanalyzed(monkeypatch, candidate_binding):
     accepted, state = [], {}
     events = [
         {"id": "u", "type": "user.message", "processed_at": "2026-10-23T10:00:00Z",
@@ -119,7 +122,10 @@ def test_late_child_events_are_collected_and_old_projection_is_reanalyzed(monkey
             state.update(kwargs["record"])
 
         async def all_resources(self, *args, **kwargs):
-            return [{"logical_name": "render-quality", "record": {"id": "skill-quality"}}]
+            rows = [{"logical_name": "render-quality", "record": {"id": "skill-quality"}}]
+            if candidate_binding:
+                rows.append({"logical_name": "candidate-only", "record": {"agents": ["producer"]}})
+            return rows
 
     @asynccontextmanager
     async def tenant_tx(tenant):

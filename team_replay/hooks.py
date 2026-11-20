@@ -37,9 +37,16 @@ class AgentObservation:
     metrics: Mapping[str, int | float] | None = None
     trace_id: str = ""
     metrics_incomplete_reason: str = ""
+    execution_snapshot: Mapping[str, Any] = field(default_factory=dict)
 
 
 class ReplaySession(Protocol):
+    """Adapters may also expose diagnostics() after close(), including on send failure.
+
+    Diagnostics preserve observed usage, snapshots and archive references. They
+    do not establish completion or replace the comparable observation metrics.
+    """
+
     def send(self, user_message: str) -> AgentObservation: ...
 
     def close(self) -> None: ...

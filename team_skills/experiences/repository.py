@@ -9,6 +9,7 @@ from team_skills.library.repository import SkillLibraryError
 
 class ExperienceRepository:
     def __init__(self, tx):
+        self.tx = tx
         self.schema = tx.pool.schema
         self.outbox = ExperienceOutbox(tx)
 
@@ -140,21 +141,56 @@ class ExperienceRepository:
         }
 
     async def compile_inputs(self, conn, skill):
-        rows = await conn.fetch(
-            f"SELECT document FROM {self.schema}.skill_experiences WHERE skill_name=$1 "
-            "ORDER BY experience_id LIMIT 501", skill,
-        )
+        from team_skills.evolution.queries import archived_evidence_sessions
+        from team_skills.library.queries import evolution_boundary
+        boundary = await evolution_boundary(conn, self.tx, skill)
+        archived = await archived_evidence_sessions(conn, self.tx, skill)
+        if boundary is None and not archived:
+            rows = await conn.fetch(
+                f"SELECT document FROM {self.schema}.skill_experiences WHERE skill_name=$1 "
+                "ORDER BY experience_id LIMIT 501", skill,
+            )
+            documents = [unpack(r["document"]) for r in rows]
+        else:
+            rows = await conn.fetch(
+                f"SELECT e.document,jsonb_agg(to_jsonb(o) ORDER BY o.observed_at DESC,o.ingested_at DESC) AS sources "
+                f"FROM {self.schema}.skill_experiences e JOIN {self.schema}.experience_occurrences o "
+                "ON o.tenant_id=e.tenant_id AND o.experience_id=e.experience_id "
+                "WHERE e.skill_name=$1 AND ($2::timestamptz IS NULL OR o.observed_at>$2) "
+                "AND NOT o.session_id=ANY($3::text[]) "
+                "GROUP BY e.experience_id,e.document ORDER BY e.experience_id LIMIT 501", skill, boundary, archived,
+            )
+            documents = []
+            for row in rows:
+                sources = unpack(row["sources"])
+                latest = sources[0]
+                documents.append({
+                    **unpack(row["document"]), "description": latest["description"],
+                    "occurrence_count": len(sources), "session_ids": sorted(s["session_id"] for s in sources),
+                    "user_aliases": sorted({s["user_alias"] for s in sources if s["user_alias"]}),
+                    "first_observed_at": min(s["observed_at"] for s in sources),
+                    "last_observed_at": latest["observed_at"],
+                    "last_ingested_at": max(s["ingested_at"] for s in sources), "latest_score": latest["score"],
+                    "sources_truncated": False,
+                })
         if not rows:
             raise SkillLibraryError("no experiences for this Skill")
         if len(rows) > 500:
             raise SkillLibraryError("pattern compilation exceeds 500 experiences")
-        return [unpack(r["document"]) for r in rows]
+        return documents
 
     async def patterns(self, conn, skill):
+        from team_skills.evolution.queries import archived_evidence_sessions
+        from team_skills.library.queries import evolution_boundary
+        boundary = await evolution_boundary(conn, self.tx, skill)
         rows = await conn.fetch(
-            f"SELECT document FROM {self.schema}.experience_patterns WHERE skill_name=$1 ORDER BY pattern_id", skill,
+            f"SELECT document FROM {self.schema}.experience_patterns WHERE skill_name=$1 "
+            "AND ($2::timestamptz IS NULL OR (document->>'compiled_at')::timestamptz>$2) "
+            "ORDER BY pattern_id", skill, boundary,
         )
-        return [unpack(r["document"]) for r in rows]
+        archived = set(await archived_evidence_sessions(conn, self.tx, skill))
+        documents = [unpack(r["document"]) for r in rows]
+        return [p for p in documents if not archived.intersection(p.get("session_ids") or [])]
 
     async def compilation(self, conn, skill):
         row = await conn.fetchrow(

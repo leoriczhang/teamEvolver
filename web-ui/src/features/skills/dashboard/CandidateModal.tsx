@@ -78,7 +78,7 @@ export default function CandidateModal({
   open: boolean;
   readOnly?: boolean;
   onClose: () => void;
-  onEvaluate: (force: boolean) => void;
+  onEvaluate: (force: boolean, method?: "auto" | "full_ab") => void;
   /** Called after the candidate skill content was edited and saved. */
   onUpdated?: (detail: Candidate) => void;
   onFeedbackSaved: (jobId: string, feedback: CandidateFeedback) => void;
@@ -105,15 +105,20 @@ export default function CandidateModal({
 
   const activeCand = override ?? cand;
   const activeEv = override ? (override.evaluation ?? null) : ev;
+  const evaluationRunning = evaluating || activeCand?.review_status === "validating";
 
   const rep = activeEv?.replay || {};
   const replayCases = rep.cases || [];
   const efficiencyDimensions = rep.efficiency?.dimensions || {};
   const decisionPolicy = rep.decision_policy || {};
-  const checklistPassed = [rep.checklist?.baseline, rep.checklist?.candidate]
+  const lightweight = rep.validation_method === "candidate_execution";
+  const reviewed = rep.validation_method === "experience_review";
+  const checklistPassed = reviewed ? rep.assessment?.verdict === "accept"
+    : lightweight ? rep.basic_validation?.status === "passed" && (rep.candidate_completed || 0) > 0
+    : [rep.checklist?.baseline, rep.checklist?.candidate]
     .every(report => report?.all_satisfied === true && report.judge !== "unavailable" && (report.total || 0) > 0);
-  const runtimePassed = !rep.runtime_gate || rep.runtime_gate.status === "passed";
-  const canPublish = checklistPassed && runtimePassed && !rep.error
+  const runtimePassed = reviewed || !rep.runtime_gate || rep.runtime_gate.status === "passed";
+  const canPublish = !evaluationRunning && checklistPassed && runtimePassed && (reviewed || lightweight || !rep.error)
     && rep.verdict === "accept" && activeEv?.recommended_publish === true;
   const replayPager = usePagedItems(replayCases);
   const currentMd =
@@ -209,7 +214,7 @@ export default function CandidateModal({
       {onRetryDetail && <Button variant="outline" size="sm" onClick={onRetryDetail}>重试</Button>}
     </div>;
   } else if (!activeEv) {
-    bodyInner = evaluating ? (
+    bodyInner = evaluationRunning ? (
       <Empty>正在运行 A/B 回放评估，请稍候…（首次评估需调用模型，可能耗时较久）</Empty>
     ) : readOnly ? (
       <Empty>该历史候选没有可展示的缓存评估结果。</Empty>
@@ -224,17 +229,28 @@ export default function CandidateModal({
   } else {
     // Replay detail
     let replayHtml: ReactNode;
-    if (activeEv.status === "blocked") {
+    if (evaluationRunning) {
+      const progress = activeCand?.replay_progress;
+      replayHtml = <div role="status" className="text-xs text-muted-foreground">
+        正在评估候选
+        {progress && <>：已完成 {progress.completed} / {progress.total} 组用例</>}。
+        完成后自动更新评估结果。
+      </div>;
+    } else if (activeEv.status === "blocked") {
       replayHtml = <div className="text-xs text-destructive">评估受阻：{rep.reason || "回放输入不完整"}</div>;
-    } else if (rep.error) {
-      replayHtml = <div className="text-xs text-destructive">回放失败：{rep.error}</div>;
+    } else if (reviewed) {
+      replayHtml = <div className="space-y-2 text-xs text-muted-foreground">
+        <div>{rep.assessment?.reason || rep.reason}</div>
+        <div>审阅引用：{rep.assessment?.evidence_refs.join("、") || "缺少适用 Evidence"}</div>
+        <div>经验审阅不要求创建业务 Session。</div>
+      </div>;
     } else {
       if (activeEv.replay_details_omitted) {
         replayHtml = <div className="text-xs text-muted-foreground">完整回放按需加载，包含双方的工具调用与回复。</div>;
       } else if (rep.datasets?.length) {
-        replayHtml = <CandidateReplayEvidence datasets={rep.datasets} sampling={rep.sampling} />;
+        replayHtml = <CandidateReplayEvidence datasets={rep.datasets} sampling={rep.sampling} candidateOnly={lightweight} />;
       } else if (!replayCases.length) {
-        replayHtml = (
+        replayHtml = rep.error ? null : (
           <div className="text-xs text-muted-foreground">
             无可回放的案例（该候选未采样到可复现的会话轮次）。
           </div>
@@ -279,6 +295,12 @@ export default function CandidateModal({
             <PaginationControls {...replayPager} onPageChange={replayPager.setPage} />
           </>
         );
+      }
+      if (rep.error) {
+        replayHtml = <>
+          <div className="text-xs text-destructive">回放失败：{rep.error}</div>
+          {replayHtml}
+        </>;
       }
     }
 
@@ -327,7 +349,7 @@ export default function CandidateModal({
 
         <div className="my-4 rounded-lg border border-border bg-surface-subtle p-3 text-xs">
           <div className="mb-1 flex items-center gap-1 font-semibold">
-            True Replay 客观结论
+            {reviewed ? "经验审阅结论" : lightweight ? "候选执行结论" : "True Replay 客观结论"}
             <InfoTip term="true-replay" />
           </div>
           <Pill
@@ -339,7 +361,10 @@ export default function CandidateModal({
                 : "amber"
             }
           >
-            {rep.error ? "回放失败，无法确定"
+            {evaluationRunning ? "正在评估，等待新结果"
+              : reviewed ? rep.assessment?.reason || rep.reason || "经验审阅待完成"
+              : lightweight ? checklistPassed ? "基础验证通过" : "候选尚未完成本次验证范围"
+              : rep.error ? "回放失败，无法确定"
               : !checklistPassed ? "Checklist 未完成判定或未全部满足，无法确定"
               : !runtimePassed ? "MA 目标验证未通过，无法确定"
               : decisionPolicy.decision_basis === "interaction_turns_decreased"
@@ -352,9 +377,15 @@ export default function CandidateModal({
               ? "轮次持平，工具调用 / Token 有增加"
               : "三项持平 / 数据不完整"}
           </Pill>
+          {(reviewed || lightweight) && <div className="mt-2 space-y-1 text-muted-foreground">
+            <div>验证范围：{rep.validation_scope || rep.assessment?.scope || "未声明"}</div>
+            <div>候选已完成 {rep.candidate_completed || 0} 个场景 · A/B 效率：
+              {rep.ab_verdict === "accept" ? "改善" : rep.ab_verdict === "reject" ? "退化" : "未判定"}</div>
+            {rep.assessment?.evidence_refs?.length ? <div>Evidence：{rep.assessment.evidence_refs.join("、")}</div> : null}
+          </div>}
         </div>
 
-        <SecTitle>
+        {!reviewed && <><SecTitle>
           {checklistPassed ? "✅" : "⚠"} Checklist 门禁
           <InfoTip term="checklist" />
         </SecTitle>
@@ -367,6 +398,7 @@ export default function CandidateModal({
               .filter(Boolean) as WorkbenchChecklistReport[]
           }
         />
+        </>}
 
         {Object.keys(efficiencyDimensions).length > 0 && checklistPassed && (
           <>
@@ -504,9 +536,9 @@ export default function CandidateModal({
             />
           )}
         </div>
-        <SecTitle>🔁 A/B 回放明细（基线 vs 候选）</SecTitle>
+        <SecTitle>{reviewed ? "经验审阅明细" : lightweight ? "候选执行明细" : "🔁 A/B 回放明细（基线 vs 候选）"}</SecTitle>
         {replayHtml}
-        {activeEv.replay_details_omitted && <Button variant="outline" size="sm" disabled={replayLoading} onClick={loadReplay}>
+        {!evaluationRunning && activeEv.replay_details_omitted && <Button variant="outline" size="sm" disabled={replayLoading} onClick={loadReplay}>
           {replayLoading ? "正在加载完整回放…" : "加载完整回放证据"}
         </Button>}
         {replayError && <div role="alert" className="text-xs text-destructive">{replayError}</div>}
@@ -516,21 +548,23 @@ export default function CandidateModal({
             <Button
               variant="outline"
               size="sm"
-              disabled={evaluating}
+              disabled={evaluationRunning}
               onClick={() => runEvaluate(true)}
             >
-              {evaluating ? "评估中…" : "重新评估（重跑回放）"}
+              {evaluationRunning ? "评估中…" : "重新评估"}
             </Button>
           )}
+          {!readOnly && <Button variant="outline" size="sm" disabled={evaluationRunning || editing}
+            onClick={() => onEvaluate(true, "full_ab")}>完整 A/B</Button>}
           <span className="text-xs text-muted-foreground">
-            {readOnly ? "历史候选只读展示" : evaluating ? "正在评估" : "已保存的评估结果"}
+            {readOnly ? "历史候选只读展示" : evaluationRunning ? "正在评估" : "已保存的评估结果"}
           </span>
         </div>
         {!readOnly && onPublish && (
           <div className="sticky bottom-0 flex flex-wrap items-center gap-2 border-t border-border bg-background py-3">
-            <Button disabled={evaluating || editing || !canPublish} onClick={() => onPublish("auto")}>按回放发布</Button>
-            <Button variant="outline" disabled={evaluating || editing} onClick={() => onPublish("force")}>强制发布</Button>
-            <span className="text-xs text-muted-foreground">发布时按当次数据集与历史采样重新验证。</span>
+            <Button disabled={evaluationRunning || editing || !canPublish} onClick={() => onPublish("auto")}>按验证结论发布</Button>
+            <Button variant="outline" disabled={evaluationRunning || editing} onClick={() => onPublish("force")}>强制发布</Button>
+            <span className="text-xs text-muted-foreground">发布时复用同版本、同执行配置的完成证据。</span>
           </div>
         )}
       </div>

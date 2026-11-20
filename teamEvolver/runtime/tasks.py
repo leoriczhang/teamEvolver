@@ -39,6 +39,7 @@ TASK_KINDS: tuple[str, ...] = (
     "ma.discover",
     "ma.collect",
     "ma.reconcile",
+    "ma.skill",
 )
 
 TASK_KINDS_SET = frozenset(TASK_KINDS)
@@ -64,6 +65,7 @@ class HandlerOutcome:
     SUCCEED = "succeed"
     FAIL = "fail"
     RETRY = "retry"
+    DEFER = "defer"
     WAIT_EXTERNAL = "wait_external"
     RECONCILE = "reconcile"
     CANCELLED = "cancelled"
@@ -100,6 +102,11 @@ class HandlerResult:
     @classmethod
     def retry(cls, error_code: str = "", backoff_seconds: float = 0.0) -> "HandlerResult":
         return cls(HandlerOutcome.RETRY, error_code=error_code, backoff_seconds=backoff_seconds)
+
+    @classmethod
+    def defer(cls, error_code: str, backoff_seconds: float = 5.0) -> "HandlerResult":
+        """Wait for a prerequisite before execution, without consuming an attempt."""
+        return cls(HandlerOutcome.DEFER, error_code=error_code, backoff_seconds=backoff_seconds)
 
     @classmethod
     def wait_external(cls, upstream_task_id: str) -> "HandlerResult":

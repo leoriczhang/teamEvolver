@@ -50,6 +50,10 @@ def run_branch(
     disclosed_texts: list[str] = []
     batch_size = progressive_config(case)["batch_size"]
     turn_limit = max(1, min(20, max_interactions))
+    lightweight = case.get("validation_method") == "candidate_execution"
+    if lightweight:
+        current_message += "\n\n本次任务的已知要求：\n" + "\n".join(item["text"] for item in checklist)
+        turn_limit = min(2, turn_limit)
     try:
         if not query.strip() or not checklist:
             raise ValueError("Replay requires an initial query and a nonempty Checklist")
@@ -61,6 +65,8 @@ def run_branch(
             if time.monotonic() - started >= context.timeout_seconds:
                 raise TimeoutError("Replay branch timeout")
             observation = validate_observation(session.send(current_message))
+            if observation.execution_snapshot:
+                result["execution_snapshot"] = copy.deepcopy(dict(observation.execution_snapshot))
             if time.monotonic() - started >= context.timeout_seconds:
                 raise TimeoutError("Replay branch timeout")
             round_metrics = dict(observation.metrics or {})
@@ -89,18 +95,36 @@ def run_branch(
             }
             result["interactions"].append(interaction)
             result["final_response"] = observation.response
+            judge_started = time.monotonic()
+            previous_report = copy.deepcopy(result["checklist_report"]) if turn > 1 else None
             report = judge(
-                harness=harness, checklist=copy.deepcopy(checklist),
-                interactions=copy.deepcopy(result["interactions"]), messages=copy.deepcopy(result["messages"]),
-                artifacts=copy.deepcopy(result["artifacts"]),
+                harness={**harness, "timeout_seconds": min(120, int(harness.get("timeout_seconds") or 120)),
+                         "previous_checklist_report": previous_report},
+                checklist=copy.deepcopy(checklist),
+                interactions=copy.deepcopy([interaction]), messages=copy.deepcopy(list(observation.messages)),
+                artifacts=copy.deepcopy(list(observation.artifacts)),
             )
             report = normalize_checklist_report({"checklist_report": report}, expected_checklist=checklist)
+            # Independent assessment has its own budget; do not charge its wait
+            # against the Agent's execution deadline.
+            judge_elapsed = time.monotonic() - judge_started
+            started += judge_elapsed
+            result["assessment_seconds"] = result.get("assessment_seconds", 0) + judge_elapsed
+            accounting = getattr(session, "exclude_assessment_time", None)
+            if accounting:
+                accounting(judge_elapsed)
             report["rounds"] = turn
             result["checklist_report"] = copy.deepcopy(report)
             interaction["checklist_report"] = copy.deepcopy(report)
             if report.get("judge") == "unavailable":
                 result["error_code"] = "REPLAY_JUDGE_UNAVAILABLE"
-                raise RuntimeError("Checklist judge unavailable")
+                result.update(status="assessment_pending", stop_reason="assessment_pending",
+                              execution_status="returned", assessment_status="pending")
+                break
+            if report.get("external_blocked"):
+                result.update(status="external_blocked", stop_reason="external_blocked",
+                              external_blocked=True, blocking_conditions=report.get("blocking_conditions") or [])
+                break
             if time.monotonic() - started >= context.timeout_seconds:
                 raise TimeoutError("Replay branch timeout")
             if report.get("all_satisfied"):
@@ -111,9 +135,11 @@ def run_branch(
                 break
             if time.monotonic() - started >= context.timeout_seconds:
                 raise TimeoutError("Replay branch timeout")
-            selected = select_disclosure_items(
-                checklist=checklist, report=report, disclosed_ids=disclosed_ids, batch_size=batch_size,
-            )
+            selected = ([item for item in checklist
+                         if item["id"] in {r["id"] for r in report.get("items", []) if not r.get("satisfied")}]
+                        if lightweight else select_disclosure_items(
+                            checklist=checklist, report=report, disclosed_ids=disclosed_ids, batch_size=batch_size,
+                        ))
             if not selected:
                 raise RuntimeError("Checklist has unmet items but no continuation requirements")
             current_message = feedback(
@@ -129,7 +155,9 @@ def run_branch(
                 if item["id"] not in disclosed_ids:
                     disclosed_texts.append(item["text"])
                 disclosed_ids.add(item["id"])
-        result.update(ok=True, status="completed" if result["completed"] else "checklist_incomplete")
+        result.update(ok=True)
+        if result.get("status") not in {"external_blocked", "assessment_pending"}:
+            result["status"] = "completed" if result["completed"] else "checklist_incomplete"
     except ReplayUnsupported as exc:
         result.update(status="unsupported", error_code="REPLAY_UNSUPPORTED", error=str(exc))
     except Exception as exc:
@@ -142,6 +170,16 @@ def run_branch(
                 session.close()
             except Exception as exc:
                 result.update(ok=False, status="failed", error_code="REPLAY_CLEANUP_FAILED", error=str(exc))
+            diagnostics = getattr(session, "diagnostics", None)
+            if diagnostics:
+                try:
+                    evidence = diagnostics()
+                    if isinstance(evidence, Mapping) and evidence:
+                        result["runtime_diagnostics"] = copy.deepcopy(dict(evidence))
+                        if evidence.get("execution_snapshot"):
+                            result.setdefault("execution_snapshot", copy.deepcopy(evidence["execution_snapshot"]))
+                except Exception:
+                    result["metrics_incomplete_reasons"].append("Final runtime diagnostics unavailable")
         result.update(
             interaction_turns=len(result["interactions"]), elapsed_seconds=round(time.monotonic() - started, 6),
             **{

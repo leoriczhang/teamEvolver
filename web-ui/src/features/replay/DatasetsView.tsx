@@ -8,6 +8,7 @@ api,datasetPath,downloadDataset,isActiveRun,jsonBody,
 type DatasetCase,type DatasetDetail,type DatasetRun,type SessionDataset,
 } from "@/features/replay/api/datasets";
 import DatasetSelectionDialog from "@/features/replay/datasets/DatasetSelectionDialog";
+import ReplayRunView from "@/features/replay/ReplayRunView";
 import { fmtTime } from "@/lib/format";
 import { toastErr,toastOk } from "@/lib/toast";
 import { ArrowLeft,Download,Eye,FolderOpen,Pencil,Plus,RefreshCw,Repeat2,Search,Square,Trash2 } from "lucide-react";
@@ -45,6 +46,7 @@ function useDebounced(value: string) {
 }
 
 export default function DatasetsView({ active }: { active: boolean }) {
+  const [replayId, setReplayId] = useState(() => new URLSearchParams(window.location.search).get("replay") || "");
   const [datasetId, setDatasetId] = useState(() => new URLSearchParams(window.location.search).get("dataset") || "");
   const [datasets, setDatasets] = useState<SessionDataset[]>([]);
   const [total, setTotal] = useState(0);
@@ -66,7 +68,7 @@ export default function DatasetsView({ active }: { active: boolean }) {
     window.history.replaceState(null, "", url.toString());
   }, [active, datasetId]);
   useEffect(() => {
-    if (!active || datasetId) return;
+    if (!active || datasetId || replayId) return;
     const controller = new AbortController();
     setLoading(true);
     api<{ datasets: SessionDataset[]; total: number }>(`/api/datasets?search=${encodeURIComponent(debounced)}&limit=${SIZE}&offset=${(page - 1) * SIZE}`, { signal: controller.signal })
@@ -74,7 +76,7 @@ export default function DatasetsView({ active }: { active: boolean }) {
       .catch(e => { if (!controller.signal.aborted) setError(e.message); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [active, datasetId, debounced, page, tick]);
+  }, [active, datasetId, replayId, debounced, page, tick]);
 
   async function remove(dataset: SessionDataset) {
     if (!window.confirm(`删除数据集「${dataset.name}」及其重回放记录？来源 Session 会保留。`)) return;
@@ -90,6 +92,12 @@ export default function DatasetsView({ active }: { active: boolean }) {
     finally { setBusy(""); }
   }
 
+  if (replayId) return <ReplayRunView key={replayId} runId={replayId} active={active} onBack={() => {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("replay");
+    window.history.replaceState(null, "", url.toString());
+    setReplayId("");
+  }} />;
   if (datasetId) return <DatasetContents key={datasetId} datasetId={datasetId} active={active} onBack={() => { setDatasetId(""); setTick(t => t + 1); }} />;
   return <div className="space-y-4 px-[22px] pb-8 pt-4">
     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -104,7 +112,9 @@ export default function DatasetsView({ active }: { active: boolean }) {
         <tbody>{datasets.map(dataset => <tr key={dataset.dataset_id} className="hover:bg-muted/20">
           <td className={td}><button className="flex items-center gap-2 font-semibold text-accent hover:underline" onClick={() => setDatasetId(dataset.dataset_id)}><FolderOpen className="size-4" />{dataset.name}</button></td>
           <td className={`${td} max-w-[400px] text-muted-foreground`}><p className="line-clamp-2">{dataset.description || "—"}</p></td>
-          <td className={td}><Pill tone="blue">{dataset.case_count} 条</Pill></td>
+          <td className={td}><Pill tone="blue">{dataset.case_count} 条</Pill>
+            {!!dataset.archived_case_count && <div className="mt-1"><Pill tone="gray">历史归档 {dataset.archived_case_count} 条</Pill></div>}
+          </td>
           <td className={`${td} whitespace-nowrap text-muted-foreground`}>{fmtTime(dataset.created_at)}</td>
           <td className={td}><div className="flex gap-1">
             <Button variant="ghost" size="icon-sm" aria-label={`查看 ${dataset.name}`} onClick={() => setDatasetId(dataset.dataset_id)}><Eye className="size-4" /></Button>

@@ -177,3 +177,26 @@ async def test_readiness_follows_worker_health_and_loop_liveness(tx: _FakeTx):
     await healthy.shutdown()
     assert healthy.ready is False
     await lifecycle.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_busy_tenant_cannot_starve_next_tenant(tx: _FakeTx):
+    import asyncio
+
+    from teamEvolver.runtime.worker import run_worker
+
+    stop, order = asyncio.Event(), []
+
+    async def handler(task, services):
+        order.append(task.tenant_id)
+        if len(order) == 3:
+            stop.set()
+        return HandlerResult.succeed()
+
+    services = _services(tx, {"session.pull": handler})
+    for tenant in ("alpha", "beta"):
+        async with tx.tenant_tx(tenant) as conn:
+            for index in range(3):
+                await services.tasks.enqueue(conn, tenant_id=tenant, task_id=str(index), kind="session.pull")
+    await run_worker(services, owner_id="fair", stop_event=stop, tenants=("alpha", "beta"))
+    assert order == ["alpha", "beta", "alpha"]

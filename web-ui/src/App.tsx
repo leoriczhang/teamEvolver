@@ -49,7 +49,8 @@ type ViewKey =
   | "prompt-studio"
   | "health"
   | "workspace"
-  | "agent-assets"
+  | "memory-library"
+  | "resource-library"
   | "platform"
   | "tenants"
   | "users"
@@ -93,12 +94,13 @@ const NAV_SECTIONS: {
     { key: "health", label: "运行状态", icon: Activity, adminOnly: true },
   ] },
   { id: "agents", label: "智能体与能力", items: [
-    { key: "agent-assets", label: "个人与团队资产", icon: BookMarked },
     { key: "platform", label: "平台资产", icon: HardDrive, adminOnly: true },
     { key: "members", label: "成员与接入", icon: Users, adminOnly: true },
   ] },
-  { id: "knowledge", label: "知识与方法", items: [
+  { id: "knowledge", label: "Agent 上下文", items: [
     { key: "experiences", label: "经验库", icon: BookMarked },
+    { key: "memory-library", label: "记忆库", icon: BookOpenText },
+    { key: "resource-library", label: "资源库", icon: FolderTree },
   ] },
   { id: "evolution", label: "进化与实验", items: [
     { key: "datasets", label: "数据集", icon: FolderTree },
@@ -125,6 +127,7 @@ const VIEW_KEYS = new Set<ViewKey>(
 function initialView(): ViewKey {
   const params = new URLSearchParams(window.location.search);
   const requested = params.get("view") as ViewKey | null;
+  if (params.get("view") === "agent-assets") return "memory-library";
   return requested && VIEW_KEYS.has(requested) ? requested : "dashboard";
 }
 
@@ -250,12 +253,20 @@ const STANDALONE_PAGES: StandalonePageConfig[] = [
     render: ({ active, user }) => <SkillWorkbenchView active={active} user={user} />,
   },
   {
-    key: "agent-assets",
-    title: "个人与团队资产",
-    description: "浏览和维护 OpenViking 中的个人记忆与团队资源。",
+    key: "memory-library",
+    title: "记忆库",
+    description: "浏览和维护 Agent 的个人记忆与团队记忆。",
     badge: "OpenViking",
     scope: "tenant",
-    render: ({ active, user }) => <OpenVikingWorkspaceView active={active} user={user} />,
+    render: ({ active, user }) => <OpenVikingWorkspaceView active={active} user={user} library="memory" />,
+  },
+  {
+    key: "resource-library",
+    title: "资源库",
+    description: "浏览 Agent 的个人资源与团队资源。",
+    badge: "OpenViking",
+    scope: "tenant",
+    render: ({ active, user }) => <OpenVikingWorkspaceView active={active} user={user} library="resources" />,
   },
   {
     key: "platform",
@@ -328,7 +339,6 @@ const DASH_PAGE_META: Record<DashTab, { title: string; description: string }> = 
 export default function App() {
   const [view, setView] = useState<ViewKey>(initialView);
   const [mineInputDir, setMineInputDir] = useState("");
-  const [perspective, setPerspective] = useState("knowledge-manager");
   const [dashTab, setDashTab] = useState<DashTab>(() => {
     const tab = new URLSearchParams(window.location.search).get("tab");
     return DASH_TABS.some(item => item.key === tab) ? tab as DashTab : "overview";
@@ -537,13 +547,6 @@ export default function App() {
             <div className="mt-0.5 text-[9.5px] font-[600] text-muted-soft">团队能力进化平台</div>
           </div>
         </div>
-        <label className="px-4 py-2 text-xs">工作视角（不改变权限）
-          <select aria-label="工作视角" className="mt-1 w-full rounded border p-1" value={perspective} onChange={e => setPerspective(e.target.value)}>
-            <option value="agent-manager">智能体与能力负责人</option>
-            <option value="knowledge-manager">知识运营负责人</option>
-            <option value="research">研究与实验</option>
-          </select>
-        </label>
         {tenants.length > 0 && (
           <TenantSwitcher
             tenants={tenants}
@@ -552,10 +555,7 @@ export default function App() {
           />
         )}
         <nav className="sidebar-nav flex flex-1 flex-col gap-0.5 overflow-auto px-2.5 py-3" aria-label="主导航">
-          {[...NAV_SECTIONS].sort((a, b) => {
-            const focus = perspective === "agent-manager" ? "agents" : perspective === "research" ? "evolution" : "knowledge";
-            return Number(b.id === focus) - Number(a.id === focus);
-          }).map(({ id, label, items }) => {
+          {NAV_SECTIONS.map(({ id, label, items }) => {
             const visibleItems = items.filter(({ key }) => canView(key));
             if (!visibleItems.length) return null;
             return (

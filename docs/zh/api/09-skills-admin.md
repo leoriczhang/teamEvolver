@@ -1,6 +1,8 @@
 # 团队 Skill 库 API
 
-团队 Skill 库保存在 PostgreSQL：`skills` 记录当前版本，`skill_versions` 记录每个不可变版本，bundle 文件按内容寻址存储。每次写入在一个事务内生成新版本，所有 API 副本读取同一份数据。写入提交后会尽力刷新本机运行缓存，缓存失败只在响应的 `runtime_cache` 中报告，不影响已提交版本。
+MA Skill 使用云端原生内容和版本，以下接口直接路由到 MA；`connection_id` 查询参数选择连接，跨连接同名时必须指定。查询返回 `skill_backend: "managed-agents"`、原生 `skill_id`、最新 `version` 和成员实际 `bound_version`。写入返回 `202`、`job_id`、`status_url` 和 `result_url`，只有云端上传和 Agent 引用回读完成后才发布。回滚将历史包创建为新云端版本，删除先解绑再删除；历史 TE 导入不作为当前内容。详见 [MA API](./24-managed-agents.md)。
+
+非 MA 团队 Skill 库保存在 PostgreSQL：`skills` 记录当前版本，`skill_versions` 记录每个不可变版本，bundle 文件按内容寻址存储。写入在一个事务内生成新版本，所有 API 副本读取同一份数据；本机运行缓存失败不影响已提交版本。
 
 代码入口：`team_skills/api/__init__.py:create_router`、`team_skills/library/repository.py:SkillLibraryRepository`。
 

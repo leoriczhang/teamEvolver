@@ -94,7 +94,10 @@ class DatasetRepository:
     async def list(self, conn, *, search="", skill_id="", limit=100, offset=0):
         rows = await conn.fetch(
             f"SELECT d.dataset_id,d.revision,d.document_hash,d.name,d.description,d.created_at,d.updated_at,"
-            f"jsonb_array_length(r.document->'cases') AS case_count FROM {self.schema}.datasets d "
+            f"jsonb_array_length(r.document->'cases') AS case_count, "
+            f"(SELECT count(*) FROM {self.schema}.dataset_case_archives a "
+            "WHERE a.tenant_id=d.tenant_id AND a.dataset_id=d.dataset_id AND a.revision=d.revision) "
+            f"AS archived_case_count FROM {self.schema}.datasets d "
             f"JOIN {self.schema}.dataset_revisions r ON r.tenant_id=d.tenant_id "
             "AND r.dataset_id=d.dataset_id AND r.revision=d.revision "
             "WHERE NOT d.deleted AND ($1='' OR d.name ILIKE '%'||$1||'%' OR d.description ILIKE '%'||$1||'%') "
@@ -111,6 +114,8 @@ class DatasetRepository:
         )
 
     async def historical_cases(self, conn, *, skill_id, before_dataset_id):
+        from team_skills.library.queries import evolution_boundary
+        boundary = await evolution_boundary(conn, self.tx, skill_id)
         rows = await conn.fetch(
             f"SELECT d.tenant_id,d.dataset_id,d.name,d.revision,d.document_hash,c.payload AS case "
             f"FROM {self.schema}.datasets d JOIN {self.schema}.dataset_revisions r "
@@ -118,13 +123,16 @@ class DatasetRepository:
             f"JOIN {self.schema}.dataset_cases c ON c.tenant_id=d.tenant_id "
             "AND c.dataset_id=d.dataset_id AND c.revision=d.revision "
             "WHERE NOT d.deleted AND d.dataset_id<>$2 "
+            "AND ($3::timestamptz IS NULL OR d.created_at>$3) "
             f"AND d.created_at <= (SELECT created_at FROM {self.schema}.datasets WHERE dataset_id=$2) "
             "AND r.document->'skills' @> jsonb_build_array(jsonb_build_object('skill_id',$1::text)) "
             "AND (r.document #>> '{source,kind}'='evolution' "
             "OR r.document #>> '{metadata,enabled_for_evolution}'='true') "
             "AND c.payload->'skill_ids' <@ jsonb_build_array($1::text) "
+            f"AND NOT EXISTS (SELECT 1 FROM {self.schema}.dataset_case_archives a WHERE "
+            "a.tenant_id=c.tenant_id AND a.dataset_id=c.dataset_id AND a.revision=c.revision AND a.case_id=c.case_id) "
             "ORDER BY d.dataset_id,c.case_id",
-            skill_id, safe_id(before_dataset_id),
+            skill_id, safe_id(before_dataset_id), boundary,
         )
         stores = {}
         result = []
@@ -134,6 +142,34 @@ class DatasetRepository:
             item["case"] = await store.hydrate(conn, unpack(row["case"]))
             result.append(item)
         return result
+
+    async def archive_case(self, conn, *, tenant_id, dataset_id, revision, case_id, reason, fingerprint):
+        await conn.execute(
+            f"INSERT INTO {self.schema}.dataset_case_archives "
+            "(tenant_id,dataset_id,revision,case_id,reason,fingerprint) VALUES($1,$2,$3,$4,$5,$6::jsonb) "
+            "ON CONFLICT DO NOTHING", tenant_id, dataset_id, revision, case_id, reason, json.dumps(fingerprint),
+        )
+
+    async def archive_before_boundary(self, conn, *, skill_id, boundary):
+        if boundary is None:
+            return
+        await conn.execute(
+            f"INSERT INTO {self.schema}.dataset_case_archives "
+            "(tenant_id,dataset_id,revision,case_id,reason,fingerprint) "
+            f"SELECT c.tenant_id,c.dataset_id,c.revision,c.case_id,'Skill baseline updated',"
+            "jsonb_build_object('case_hash',c.case_hash,'skill_boundary',($2::timestamptz)::text) "
+            f"FROM {self.schema}.dataset_cases c JOIN {self.schema}.datasets d "
+            "ON d.tenant_id=c.tenant_id AND d.dataset_id=c.dataset_id "
+            "WHERE d.created_at <= $2::timestamptz AND c.payload->'skill_ids' @> jsonb_build_array($1::text) "
+            "ON CONFLICT DO NOTHING", skill_id, boundary,
+        )
+
+    async def archives(self, conn, dataset_id, revision):
+        rows = await conn.fetch(
+            f"SELECT case_id,archived_at,reason,fingerprint FROM {self.schema}.dataset_case_archives "
+            "WHERE dataset_id=$1 AND revision=$2 ORDER BY case_id", dataset_id, revision,
+        )
+        return [{**dict(r), "fingerprint": unpack(r["fingerprint"])} for r in rows]
 
     async def save(self, conn, *, tenant_id, document, files=None, expected_revision=None):
         document = normalize_document(document, allow_empty=True)

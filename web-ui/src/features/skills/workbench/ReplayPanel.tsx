@@ -32,12 +32,14 @@ Trash2
 } from "lucide-react";
 import { Cell,ChecklistEditor,DatasetDetail,datasetForEvolution,datasetMaterials,datasetSkillIds,Field,formatBytes,MetricInline,METRICS,primaryCase,replaceInlineMaterial,RunDetail,RunStatus,Verdict } from "./ReplayPanelShared";
 import { useReplayPanel } from "./useReplayPanel";
+import HistorySessionPicker from "./HistorySessionPicker";
 
 export default function ReplayPanel({
   active,
   user,
   lockedSkillName = "",
   externalDraftMd,
+  externalVersion,
   embedded = false,
   compact = false,
   externalFiles,
@@ -48,13 +50,14 @@ export default function ReplayPanel({
   user?: UserProfile | null;
   lockedSkillName?: string;
   externalDraftMd?: string;
+  externalVersion?: number;
   embedded?: boolean;
   compact?: boolean;
   externalFiles?: Record<string, string>;
   onRunChange?: (run: WorkbenchRun | null) => void;
   runSignal?: number;
 }) {
-const { skills, skillName, skill, draftMd, setDraftMd, datasets, selectedDatasetId, setSelectedDatasetId, runs, activeRun, loading, running, savingSkill, showDatasetForm, setShowDatasetForm, datasetDraft, setDatasetDraft, datasetFiles, existingMaterials, materialRoot, setMaterialRoot, filesTouched, savingDataset, importingDataset, synthesizing, synthesizeSessionIds, setSynthesizeSessionIds, maxInteractions, setMaxInteractions, timeoutSeconds, setTimeoutSeconds, datasetImportRef, dirty, isAdmin, refresh, selectSkill, saveSkill, createDataset, editDataset, uploadDatasetFiles, saveDataset, importDatasetPackage, cloneDataset, deleteDataset, startRun, synthesizeDatasets, openRun, manualCount, evolvedCount, regressionCount, completedCount, selectedDataset, editingDataset, hasInlineMaterial, inlineMaterial } = useReplayPanel({ active, user, lockedSkillName, externalDraftMd, embedded, compact, externalFiles, onRunChange, runSignal });
+const { skills, skillName, skill, draftMd, setDraftMd, datasets, selectedDatasetId, setSelectedDatasetId, runs, activeRun, loading, running, savingSkill, showDatasetForm, setShowDatasetForm, datasetDraft, setDatasetDraft, datasetFiles, existingMaterials, materialRoot, setMaterialRoot, filesTouched, savingDataset, importingDataset, synthesizing, synthesizeSessionIds, setSynthesizeSessionIds, maxInteractions, setMaxInteractions, timeoutSeconds, setTimeoutSeconds, datasetImportRef, dirty, isAdmin, refresh, selectSkill, saveSkill, createDataset, editDataset, uploadDatasetFiles, saveDataset, importDatasetPackage, cloneDataset, deleteDataset, startRun, synthesizeDatasets, openRun, manualCount, evolvedCount, regressionCount, completedCount, selectedDataset, editingDataset, hasInlineMaterial, inlineMaterial, baselineVersion, baselineMismatch } = useReplayPanel({ active, user, lockedSkillName, externalDraftMd, externalVersion, embedded, compact, externalFiles, onRunChange, runSignal });
 return (
     <div className={cn("skill-lab-view min-w-0", compact && "skill-lab-compact", embedded ? "px-1 py-1" : "mx-auto max-w-[1440px] px-[22px] py-[22px]")}>
       {!compact && <div className="mb-5 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3.5">
@@ -75,6 +78,12 @@ return (
         }
       >
         <div className="flex flex-wrap items-end gap-3 p-4">
+          <p className="basis-full text-xs text-muted-foreground">
+            编辑基线 {baselineVersion ? `v${baselineVersion}` : "版本未知"} · Candidate 使用当前未保存修改
+          </p>
+          {baselineMismatch && <p role="alert" className="basis-full text-xs text-destructive">
+            编辑器版本与当前 Skill 或数据集固定版本不一致，请核对后再运行。
+          </p>}
           {!compact && <Field label="Skill">
             <select
               value={skillName}
@@ -137,6 +146,7 @@ return (
               || selectedDataset?.material_integrity?.complete === false
               || running
               || loading
+              || baselineMismatch
               || !draftMd.trim()
             }
             onClick={startRun}
@@ -155,6 +165,7 @@ return (
         <div className="lab-quick-actions">
           <p>当前 Skill 的未保存文件一起参与 Candidate 运行。</p>
           <Button variant="outline" size="sm" disabled={!skillName} onClick={createDataset}><Plus className="size-3.5" />新建数据集</Button>
+          {isAdmin && <HistorySessionPicker skillName={skillName} busy={synthesizing} onGenerate={synthesizeDatasets} />}
           {selectedDataset && <Button variant="ghost" size="sm" onClick={() => editDataset(selectedDataset)}>编辑数据集</Button>}
           {selectedDataset && <p className="lab-query-preview">{primaryCase(selectedDataset)?.query}</p>}
         </div>
@@ -225,7 +236,7 @@ return (
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={synthesizeDatasets}
+                  onClick={() => void synthesizeDatasets()}
                   disabled={!skillName || synthesizing}
                 >
                   <Sparkles className="size-3.5" />
@@ -550,7 +561,9 @@ return (
           <h3>运行记录 <span>{runs.length}</span></h3>
           {!runs.length && <p>选择数据集后点击运行，Trace 将显示在下方控制台。</p>}
           {runs.map((run) => <button type="button" key={run.run_id} className={cn(activeRun?.run_id === run.run_id && "is-active")} onClick={() => void openRun(run.run_id)}>
-            <span><RunStatus run={run} /><span className="truncate">{run.dataset_name || run.dataset_id}</span></span>
+            <span><RunStatus run={run} /><span className="truncate">{run.dataset_name || run.dataset_id || run.subject_id || "Skill 实验"}</span></span>
+            <small>{Object.entries(run.skill_versions || {}).map(([name, value]) =>
+              `${name} · v${typeof value === "number" ? value : value.revision}`).join("、") || "固定版本见详情"}</small>
             <small>{fmtTime(run.created_at)} <Verdict value={run.result_summary?.verdict} /></small>
           </button>)}
         </section>
@@ -576,7 +589,7 @@ return (
                     <tr key={run.run_id} className={cn(activeRun?.run_id === run.run_id && "bg-accent-soft")}>
                       <Cell><RunStatus run={run} /></Cell>
                       <Cell><span className="mono text-xs">{run.run_id}</span></Cell>
-                      <Cell>{run.dataset_name || run.dataset_id}</Cell>
+                      <Cell>{run.dataset_name || run.dataset_id || run.subject_id || "Skill 实验"}</Cell>
                       <Cell><Verdict value={run.result_summary?.verdict} /></Cell>
                       {METRICS.map((metric) => (
                         <Cell key={metric.key}>

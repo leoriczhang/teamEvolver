@@ -9,6 +9,14 @@ export interface EvalResult {
   summary_only?: boolean;
   replay_details_omitted?: boolean;
   replay?: {
+    validation_method?: "experience_review" | "candidate_execution" | "full_ab";
+    validation_scope?: string;
+    candidate_completed?: number;
+    ab_completed?: number;
+    ab_verdict?: string;
+    basic_validation?: { status: string; scope?: string; issues?: string[] };
+    assessment?: { reason: string; evidence_refs: string[]; scope: string; verdict: string; source?: string };
+    issues?: string[];
     status?: string;
     reason?: string;
     runtime_gate?: { status?: string; target_matrix?: Record<string, {
@@ -74,6 +82,15 @@ export interface ReplayDecisionPolicy {
 }
 
 export interface ReplaySide {
+  execution_snapshot?: {
+    session_id: string;
+    agent_id: string;
+    agent_version: string;
+    environment_id: string;
+    environment_config_sha256: string;
+    runtime_tree_sha256: string;
+    agent_override_fields: string[];
+  };
   response?: string;
   final_response?: string;
   response_text?: string;
@@ -114,6 +131,7 @@ export interface ReplayDatasetResult {
   completed: number;
   inputs: WorkbenchDataset["cases"];
   result: {
+    candidate_completed?: number;
     verdict?: "accept" | "reject" | "inconclusive";
     reason?: string;
     cases?: ReplayCase[];
@@ -249,6 +267,7 @@ export interface WorkbenchChecklistReport {
 }
 
 export interface WorkbenchResult {
+  replay?: WorkbenchResult;
   status?: string;
   verdict?: "accept" | "reject" | "inconclusive";
   accepted?: boolean;
@@ -277,6 +296,11 @@ export interface WorkbenchResult {
 }
 
 export interface WorkbenchRun {
+  error_code?: string;
+  skill_versions?: Record<string, number | { revision: number; content_hash?: string }>;
+  baseline_version?: string;
+  baseline_tree_sha256?: string;
+  finished_at?: string;
   run_id: string;
   subject_id?: string;
   job_id?: string;

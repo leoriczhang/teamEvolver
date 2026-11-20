@@ -1,6 +1,6 @@
 # Workspace 与平台资产 API
 
-控制台「个人与团队资产」通过 Workspace 接口浏览和编辑 OpenViking 中的 Memory、Skill 与 Resource；「平台资产」只读浏览 PostgreSQL 中的任务制品。目录布局见 [存储空间与目录布局](../concepts/09-storage-layout.md)。
+控制台「Agent 上下文」下的「记忆库」「资源库」通过 Workspace 接口分别浏览个人／团队 Memory 与 Resource，记忆支持批量编辑；「平台资产」只读浏览 PostgreSQL 中的任务制品。Workspace API 继续支持原有 Memory、Skill、Resource 作用域，目录布局见 [存储空间与目录布局](../concepts/09-storage-layout.md)。
 
 代码入口：`teamEvolver/platform_docs/api/workspace.py:create_router`、`teamEvolver/platform_docs/workspace_core.py:_scope_map`、`teamEvolver/platform_docs/api/assets.py:create_router`、`teamEvolver/platform_docs/api/console.py:create_router`。
 

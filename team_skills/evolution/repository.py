@@ -6,6 +6,7 @@ import hashlib
 import json
 from typing import Any
 
+from team_replay.fingerprints import execution_fingerprint
 from team_skills.library.repository import SkillLibraryError, SkillMutationConflict
 from teamEvolver.storage.json_snapshots import JsonSnapshots
 from teamEvolver.storage.postgres import PostgresObjectStore
@@ -25,6 +26,17 @@ def digest(value: Any) -> str:
 
 def unpack(value: Any) -> Any:
     return json.loads(value) if isinstance(value, str) else value
+
+
+def evidence_projection(session: dict) -> dict:
+    return {
+        "session_id": session["session_id"], "content_hash": session["content_hash"],
+        "user_alias": session.get("user_alias", ""),
+        "_summary": str(session.get("_summary") or "")[:16000],
+        "_judge_scores": session.get("_judge_scores") or {}, "_evidence_window": "historical",
+        "runtime_context": session.get("runtime_context") or {},
+        "execution_fingerprint": execution_fingerprint(session.get("runtime") or {}),
+    }
 
 
 async def lock_key(conn, tenant_id: str, key: str) -> None:
@@ -120,25 +132,48 @@ class EvolutionRepository:
         )
 
     async def evidence(self, conn, name: str, limit: int = 24) -> list[dict]:
+        from team_skills.library.queries import evolution_boundary
+        boundary = await evolution_boundary(conn, self.tx, name)
         rows = await conn.fetch(
             f"SELECT projection FROM {self.schema}.skill_evidence WHERE skill_name=$1 "
-            "ORDER BY captured_at DESC,session_id LIMIT $2", name, min(200, max(1, limit)),
+            "AND archived_at IS NULL AND ($3::timestamptz IS NULL OR captured_at>$3) "
+            "ORDER BY captured_at DESC,session_id LIMIT $2", name, min(200, max(1, limit)), boundary,
         )
         return [unpack(r["projection"]) for r in rows]
 
+    async def archive_evidence(self, conn, name, session_id, reason):
+        await conn.execute(
+            f"UPDATE {self.schema}.skill_evidence SET archived_at=clock_timestamp(),archive_reason=$3 "
+            "WHERE skill_name=$1 AND session_id=$2 AND archived_at IS NULL", name, session_id, reason,
+        )
+
+    async def archived_session_ids(self, conn, name):
+        return [r["session_id"] for r in await conn.fetch(
+            f"SELECT session_id FROM {self.schema}.skill_evidence WHERE skill_name=$1 AND archived_at IS NOT NULL",
+            name,
+        )]
+
+    async def archive_before_boundary(self, conn, name, boundary):
+        await conn.execute(
+            f"UPDATE {self.schema}.skill_evidence SET archived_at=clock_timestamp(),"
+            "archive_reason='Skill baseline updated' WHERE skill_name=$1 AND captured_at<=$2 "
+            "AND archived_at IS NULL", name, boundary,
+        )
+
     async def record_evidence(self, conn, *, tenant_id: str, name: str, sessions: list[dict]) -> None:
+        from team_skills.evolution.session_processing import after_reset
+        from team_skills.library.queries import evolution_boundary
+        boundary = await evolution_boundary(conn, self.tx, name)
         projections = []
         for s in sessions:
-            projection = {
-                "session_id": s["session_id"], "user_alias": s.get("user_alias", ""),
-                "_summary": str(s.get("_summary") or "")[:16000],
-                "_judge_scores": s.get("_judge_scores") or {}, "_evidence_window": "historical",
-                "runtime_context": s.get("runtime_context") or {},
-            }
+            if not after_reset(s, boundary):
+                continue
+            projection = evidence_projection(s)
             projections.append((tenant_id, name, s["session_id"], s["content_hash"], canonical(projection)))
         await conn.executemany(
             f"INSERT INTO {self.schema}.skill_evidence "
-            "(tenant_id,skill_name,session_id,content_hash,projection) VALUES ($1,$2,$3,$4,$5::jsonb) "
+            "(tenant_id,skill_name,session_id,content_hash,projection,captured_at) "
+            "VALUES ($1,$2,$3,$4,$5::jsonb,clock_timestamp()) "
             "ON CONFLICT (tenant_id,skill_name,session_id) DO NOTHING", projections,
         )
 

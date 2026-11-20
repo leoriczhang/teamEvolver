@@ -41,6 +41,8 @@ Keyset 分页列表，按 `business_time` 倒序。
  "total": 120, "limit": 20, "offset": 0, "has_more": true}
 ```
 
+列表提供 `used_skills`、`available_skills` 和对应的 `used_skill_versions`、`available_skill_versions`。版本摘要包含 `name`、`skill_id`、`version`、`agent_id`、`agent_name`、`unknown_reason`，只读取会话归档中的固定版本。实际使用按调用证据统计，可用列表包含已配置的引用，不代表实际调用。控制台直接显示名称与版本，未确认调用的可用项单独显示，超过三项可展开；版本缺失时显示「版本未知」。旧记录按页补充并缓存派生元数据，缓存写入检查源引用、内容哈希与原元数据，不修改归档内容、分析结果或两个时间字段。
+
 ## GET /api/sessions/analysis
 
 按 `decision` 统计：
@@ -67,18 +69,27 @@ Keyset 分页列表，按 `business_time` 倒序。
 
 读取归档后的完整 Session 内容（`content_ref` 指向的不可变 payload），附加 `meta`、`judge`、`summary`（`title`、`user_alias`、`status`、`num_turns`）和两个时间字段。
 
+`skill_versions` 用于详情页的版本表：每项包含 `name`、`skill_id`、`version`、`agent_id`、`agent_name`、`agent_role`（`main/member/unknown`）、`agent_version`、`usage`（`used/configured`）、`unknown_reason` 和归档 `event_ids`。版本只取本会话 Agent 图中的固定引用，名称按同一资源 ID 的受管记录或历史 release 解析；不采用云端当前版本。主、子 Agent 的同名 Skill 分开显示。调用记录重复出现在父轮次和子线程时去重；调用无法唯一对应引用、缺快照或未固定版本时显示未知。此表不声称中途升级而没有分段快照的会话具有逐轮版本记录。
+
 ## GET /api/sessions/{session_id}/stages
 
-各处理阶段的结果：
+按标准化、会话切分、会话分析、Trace 分析、归档的处理顺序返回阶段状态。列表不加载阶段产物；会话详情的「进化过程」以可展开时间线展示：
 
 ```json
 {"stages": [
   {"stage": "normalize", "status": "succeeded", "created_at": "...", "updated_at": "...", "error_code": ""},
+  {"stage": "split", "status": "succeeded", "created_at": "...", "updated_at": "...", "error_code": ""},
   {"stage": "analyze", "status": "succeeded", "created_at": "...", "updated_at": "...", "error_code": ""},
   {"stage": "trace_analyze", "status": "succeeded", "created_at": "...", "updated_at": "...", "error_code": ""},
   {"stage": "archive", "status": "succeeded", "created_at": "...", "updated_at": "...", "error_code": ""}
 ]}
 ```
+
+## GET /api/sessions/{session_id}/stages/{stage}
+
+展开阶段时按需读取其不可变产物，返回 `stage`、`status`、`created_at`、`updated_at`、`error_code`、`detail`（执行记录）与 `result`（阶段结果）。标准化显示轮数与工具调用数；切分显示各会话概况；分析显示摘要、价值判断与评分；Trace 分析显示主、子 Agent 的问题记录；归档显示分析结论与会话概况。
+
+`result_available` 表示实际产物是否可读取；缺少或无法读取产物时保留阶段状态，返回 `result:null` 与 `result_unavailable_reason`。返回结果不包含运行环境凭证、原始对话或完整工具参数。`created_at`、`updated_at` 是阶段记录时间，不能当作执行起止时间计算耗时。会话或阶段不存在返回 404，权限与列表一致。
 
 ## 进化历史
 

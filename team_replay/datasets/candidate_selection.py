@@ -1,4 +1,4 @@
-"""Freeze the current Candidate Dataset and three historical regression Cases."""
+"""Freeze current Candidate inputs; historical sampling is explicitly requested."""
 from __future__ import annotations
 
 import copy
@@ -64,13 +64,28 @@ def attach_dataset(case, dataset, *, selection):
     return result
 
 
-async def freeze_candidate_cases(conn, tx, *, tenant_id, candidate_id, skill_name, detail, seed):
+def eligible_case(case, active_ma_connections):
+    provenance = case.get("provenance") or {}
+    runtime = provenance.get("source_runtime") or (provenance.get("session_snapshot") or {}).get("runtime") or {}
+    return (active_ma_connections is None or runtime.get("type") != "managed-agents"
+            or runtime.get("connection_id") in active_ma_connections)
+
+
+async def freeze_candidate_cases(conn, tx, *, tenant_id, candidate_id, skill_name, detail, seed,
+                                 active_ma_connections=None, historical_count=0, execution_fingerprints=None):
     """Persist the current Dataset and freeze all selected inputs before enqueue."""
     repo = DatasetRepository(tx)
+    manual_ids = set((detail.get("manual_reprocess") or {}).get("session_ids") or [])
+
+    def explicitly_selected(case):
+        provenance = case.get("provenance") or {}
+        ids = provenance.get("session_ids") or [provenance.get("session_id")]
+        return bool(ids) and set(ids) <= manual_ids
+
     current_cases = copy.deepcopy(detail.get("replay_cases") or [])
     if not current_cases:
         return {**detail, "replay_cases": [], "replay_sampling": {
-            "historical_requested": HISTORICAL_CASE_COUNT, "historical_selected": 0,
+            "historical_requested": historical_count, "historical_selected": 0,
         }}
     dataset_id = "evolution-" + stable_hash({"candidate_id": candidate_id, "cases": current_cases})[:32]
     existing = await conn.fetchval(
@@ -79,20 +94,54 @@ async def freeze_candidate_cases(conn, tx, *, tenant_id, candidate_id, skill_nam
     if not existing:
         document = make_document(
             dataset_id=dataset_id, name=f"{skill_name} · 当次进化数据集", skills=[skill_name],
-            cases=current_cases, source={"kind": "evolution", "candidate_id": candidate_id},
-            metadata={"enabled_for_evolution": True, "read_only": True},
+            cases=current_cases, source={
+                "kind": "manual_evolution" if manual_ids else "evolution", "candidate_id": candidate_id,
+            },
+            metadata={"enabled_for_evolution": not bool(manual_ids), "read_only": True},
         )
         files = list({
             material["path"]: {"path": material["path"], "content_b64": material["content_b64"]}
             for case in current_cases for material in case.get("materials", []) if "content_b64" in material
         }.values())
         await repo.save(conn, tenant_id=tenant_id, document=document, files=files or None)
+    from team_skills.library.queries import evolution_boundary
+    await repo.archive_before_boundary(conn, skill_id=skill_name,
+                                       boundary=await evolution_boundary(conn, tx, skill_name))
     current = await repo.freeze(conn, dataset_id, revision=1)
     rows = await repo.historical_cases(conn, skill_id=skill_name, before_dataset_id=dataset_id)
-    sampled = sample_history(rows, current["document"]["cases"], seed=seed)
+    if execution_fingerprints is not None:
+        from ..fingerprints import execution_fingerprint, ineligibility_reason
+        for case in current["execution_document"]["cases"]:
+            if explicitly_selected(case):
+                continue
+            reason = ineligibility_reason(case, execution_fingerprints)
+            if reason:
+                await repo.archive_case(
+                    conn, tenant_id=tenant_id, dataset_id=dataset_id, revision=1, case_id=case["case_id"],
+                    reason=reason, fingerprint=execution_fingerprint((case.get("provenance") or {})
+                                                                   .get("source_runtime") or {}) or {},
+                )
+        eligible_rows = []
+        for row in rows:
+            reason = ineligibility_reason(row["case"], execution_fingerprints)
+            if reason:
+                await repo.archive_case(
+                    conn, tenant_id=tenant_id, dataset_id=row["dataset_id"], revision=row["revision"],
+                    case_id=row["case"]["case_id"], reason=reason,
+                    fingerprint=execution_fingerprint((row["case"].get("provenance") or {})
+                                                       .get("source_runtime") or {}) or {},
+                )
+            else:
+                eligible_rows.append(row)
+        rows = eligible_rows
+    archived = {row["case_id"] for row in await repo.archives(conn, dataset_id, 1)}
+    eligible_current = [case for case in current["execution_document"]["cases"]
+                        if eligible_case(case, active_ma_connections) and case["case_id"] not in archived]
+    eligible_history = [row for row in rows if eligible_case(row["case"], active_ma_connections)]
+    sampled = sample_history(eligible_history, current["document"]["cases"], seed=seed, count=historical_count)
     cases = [
         attach_dataset(case, {**current["document"], **current}, selection="current")
-        for case in current["execution_document"]["cases"]
+        for case in eligible_current
     ]
     for row in sampled:
         case = copy.deepcopy(row["case"])
@@ -101,8 +150,10 @@ async def freeze_candidate_cases(conn, tx, *, tenant_id, candidate_id, skill_nam
     return {
         **detail, "replay_cases": cases,
         "replay_sampling": {
-            "seed": seed, "current_dataset_id": dataset_id, "current_case_count": len(current_cases),
-            "historical_requested": HISTORICAL_CASE_COUNT, "historical_selected": len(sampled),
+            "seed": seed, "current_dataset_id": dataset_id, "current_case_count": len(eligible_current),
+            "excluded_paused_current": len(current_cases) - len(eligible_current),
+            "excluded_paused_history": len(rows) - len(eligible_history),
+            "historical_requested": historical_count, "historical_selected": len(sampled),
             "historical_dataset_count": len({row["dataset_id"] for row in sampled}),
         },
     }

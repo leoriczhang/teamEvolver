@@ -18,7 +18,9 @@ def test_replay_infrastructure_uses_acceptance_revision_but_execution_facts_rema
             return [{"logical_name": "note", "record": {"agents": ["root"]}}]
         async def discovery_snapshot(self, conn, ident, revision):
             assert revision == 3
-            return {"replay_environment": {"id": "new-isolation"}}
+            return {"replay_environment": {"id": "new-isolation"},
+                    "replay_resources": {"status": "ready", "environment_id": "new-isolation",
+                                         "vault_ids": ["auto-vault"], "vaults_automatic": True}}
     @asynccontextmanager
     async def tenant_tx(tenant):
         yield None
@@ -33,3 +35,6 @@ def test_replay_infrastructure_uses_acceptance_revision_but_execution_facts_rema
     assert value["connection_revision"] == 3
     assert value["agent_graph"] == graph and value["environment"] == environment
     assert value["replay_environment"]["id"] == "new-isolation"
+    assert value["config"]["replay_environment_id"] == "new-isolation"
+    assert value["config"]["replay_vault_ids"] == ["auto-vault"]
+    assert value["config"]["replay_isolation"]["vaults"] is True

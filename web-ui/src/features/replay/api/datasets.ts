@@ -6,6 +6,7 @@ export interface SessionDataset {
   name: string;
   description: string;
   case_count: number;
+  archived_case_count?: number;
   created_at: string;
   updated_at: string;
   source?: { filters?: Record<string, string> };
@@ -32,6 +33,7 @@ export interface DatasetCase {
   };
 }
 export interface DatasetDetail extends SessionDataset {
+  archived_cases?: Array<{ case_id: string; reason: string; archived_at: string }>;
   cases: DatasetCase[];
   total: number;
 }

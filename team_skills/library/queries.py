@@ -5,6 +5,17 @@ from .bundle import bundle_tree_sha256, encode_bundle_payload
 from .repository import SkillLibraryRepository
 
 
+async def evolution_boundary(conn, tx, name):
+    """Public automatic-use boundary, including deleted Skill heads."""
+    provider = getattr(tx, "cloud_skill_provider", None)
+    if provider:
+        managed, boundary = await provider.boundary(conn, name)
+        if managed:
+            return boundary
+    head = await SkillLibraryRepository(tx).get_skill(conn, name, include_deleted=True)
+    return head.get("evolution_reset_at") if head else None
+
+
 async def pinned_treatment(conn, tx, refs):
     library = SkillLibraryRepository(tx)
     members, versions = [], {}

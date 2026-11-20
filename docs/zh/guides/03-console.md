@@ -30,10 +30,11 @@
 | 工作台 | 运行总览 | `dashboard` | 成员 |
 | 工作台 | 实验工作台 | `workspace` | 成员 |
 | 工作台 | 运行状态 | `health` | 租户管理员 |
-| 智能体与能力 | 个人与团队资产 | `agent-assets` | 成员 |
 | 智能体与能力 | 平台资产 | `platform` | 租户管理员 |
 | 智能体与能力 | 成员与接入 | `members` | 租户管理员 |
-| 知识与方法 | 经验库 | `experiences` | 成员 |
+| Agent 上下文 | 经验库 | `experiences` | 成员 |
+| Agent 上下文 | 记忆库 | `memory-library` | 成员 |
+| Agent 上下文 | 资源库 | `resource-library` | 成员 |
 | 进化与实验 | 数据集 | `datasets` | 成员 |
 | 进化与实验 | 进化链路 | `prompt-studio` | 租户管理员 |
 | 审查与发布 | 审查与发布入口 | `review-center` | 成员 |
@@ -93,26 +94,6 @@ Candidate 先经过 Checklist 完成门禁，再按交互轮次、工具调用�
 
 ## 智能体与能力
 
-### 个人与团队资产
-
-资产页浏览 OpenViking 中两个根空间：
-
-| 空间 | 根 URI | 写权限 |
-|------|--------|--------|
-| 个人记忆 | `viking://user` | 本人 |
-| 团队资源 | `viking://resources` | 租户管理员 |
-
-文件树支持搜索、Markdown/JSON/代码预览和目录 L0/L1 摘要。服务器安装 OpenViking CLI 时页面显示内置终端，普通用户只能执行只读命令。
-
-多文件编辑流程：
-
-1. 点击「编辑」进入编辑模式。
-2. 依次修改多个文本文件，切换文件不会丢失草稿。
-3. 点击「完成编辑」查看逐文件行级 Diff。
-4. 点击「确认保存」批量提交。
-
-服务端比较每个文件编辑开始时的内容；任一文件已被他人修改时整批返回 409，草稿保留。单次最多 100 个文件，单文件 ≤2 MiB，合计 ≤16 MiB。接口见 [Workspace 与平台资产 API](../api/23-workspace-assets.md)。
-
 ### 平台资产
 
 平台资产只读展示 PostgreSQL ObjectStore 中当前租户的任务 payload，按类别分为接入原文、Session 分阶段结果和 Memory Compile 结果。页面提供逻辑键树、内容预览与分类统计，不依赖 OpenViking。这些对象不会提供给 Agent。
@@ -127,11 +108,26 @@ Candidate 先经过 Checklist 完成门禁，再按交互轮次、工具调用�
 
 Agent 使用租户 Key 加声明的 `user_id` 接入，控制台成员关系与 Agent 身份相互独立。default 租户的接入凭证由平台管理员配置。
 
-## 知识与方法
+## Agent 上下文
 
 ### 经验库
 
 经验库展示 Session 分析生成的 Skill 错误经验和优秀实践，支持按 Skill 与关键词筛选。经验来自 Session 中的 `used_skills`，不要求对应 Skill 已上传。租户管理员可在同页管理成功经验同步，见 [成功经验同步](./16-successful-experience-sync.md)。
+
+### 记忆库与资源库
+
+「记忆库」切换个人记忆与团队记忆；「资源库」切换个人资源与团队资源。它们与「经验库」同级，分别读取现有作用域，不移动文件。旧链接 `?view=agent-assets` 打开记忆库。
+
+| 页面 | 空间 | 根 URI |
+|------|------|--------|
+| 记忆库 | 个人记忆 | `viking://user/<user>/memories` |
+| 记忆库 | 团队记忆 | `viking://resources/<shared_knowledge_prefix>`，默认 `shared-knowledge` |
+| 资源库 | 个人资源 | `viking://user/<user>/resources` |
+| 资源库 | 团队资源 | `viking://resources/team` |
+
+文件树支持搜索、Markdown/JSON/代码预览和目录 L0/L1 摘要。个人记忆由本人编辑，团队记忆由租户管理员编辑；其他成员只读。资源库支持浏览和终端操作，批量文本编辑仍只接受 Memory 与 Skill 作用域。
+
+记忆多文件编辑依次通过「编辑」「完成编辑」「确认保存」查看 Diff 后提交，切换文件保留草稿。任一文件已被他人修改时整批返回 409，草稿保留。单次最多 100 个文件，单文件 ≤2 MiB，合计 ≤16 MiB。接口见 [Workspace 与平台资产 API](../api/23-workspace-assets.md)。
 
 ## 进化与实验
 

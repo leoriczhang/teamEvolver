@@ -7,7 +7,6 @@ from team_ma.commands import enqueue
 from team_ma.discovery import discover_connection
 from team_ma.repository import MARepository
 from team_ma.schemas import validate_config
-from team_skills.transfer.handler import transfer
 from teamEvolver.app import build_role_services
 from teamEvolver.config import TeamEvolverConfig
 from teamEvolver.managed_agents import MAClient
@@ -18,7 +17,7 @@ from tests.support.managed_agents import skill_zip
 pytestmark = pytest.mark.postgres
 
 
-def test_discovery_imports_through_real_worker_and_records_shared_skill_once(pg_env):
+def test_discovery_reads_shared_native_skill_without_import_or_upload(pg_env):
     repo = MARepository(pg_env.tx)
     secret_repo = SecretRepository(pg_env.tx, SecretBox("test-key"))
     services = build_role_services(role="api", tx=pg_env.tx, config=TeamEvolverConfig())
@@ -37,6 +36,10 @@ def test_discovery_imports_through_real_worker_and_records_shared_skill_once(pg_
                                             "skills": [{"type": "custom", "skill_id": "skill-note", "version": "1"}]})
         if path.startswith("environments/"):
             return httpx.Response(200, json={"id": "env", "config": {"type": "cloud"}})
+        if path == "skills/skill-note":
+            return httpx.Response(200, json={"id": "skill-note", "name": "note-craft", "latest_version": "1"})
+        if path == "skills/skill-note/versions/1":
+            return httpx.Response(200, json={"skill_id": "skill-note", "version": "1"})
         if path.endswith("/content"):
             return httpx.Response(302, headers={"Location": "https://files.example/skill"})
         if request.url.host == "files.example":
@@ -61,13 +64,7 @@ def test_discovery_imports_through_real_worker_and_records_shared_skill_once(pg_
                 operation = await repo.operation(conn, "discover")
             async with MAClient("https://ma.example/api/v3", "ark", transport=httpx.MockTransport(respond)) as client:
                 first = await discover_connection(task, services, client, connection, operation)
-                assert first["waiting"]
-                async with pg_env.tx.tenant_tx("alpha") as conn:
-                    transfer_task = await services.tasks.claim(conn, owner_id="worker", lease_seconds=300,
-                                                               kinds=["skill.transfer"])
-                assert (await transfer(transfer_task, services)).outcome == "succeed"
-                async with pg_env.tx.tenant_tx("alpha") as conn:
-                    operation = await repo.operation(conn, "discover")
+                assert first["agent_count"] == 2
                 second = await discover_connection(task, services, client, connection, operation)
                 assert second["agent_count"] == 2
                 assert second["managed_skill_count"] == 1
@@ -75,6 +72,9 @@ def test_discovery_imports_through_real_worker_and_records_shared_skill_once(pg_
                     resource = (await repo.resources(conn, "connection", kind="skill"))[0]
                     assert set(resource["record"]["agents"]) == {"root", "writer"}
                     assert (await repo.applied(conn, "connection"))["status"] == "applied"
+                    assert await conn.fetchval(f"SELECT count(*) FROM {pg_env.schema}.skill_versions") == 0
+                    assert await conn.fetchval(
+                        f"SELECT count(*) FROM {pg_env.schema}.worker_tasks WHERE kind='skill.transfer'") == 0
         finally:
             reset_current_tenant(token)
     asyncio.run(run())

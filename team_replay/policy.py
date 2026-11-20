@@ -120,6 +120,8 @@ def normalize_checklist_report(
             value for value in raw.get("positive_observations") or []
             if isinstance(value, str) and value.strip()
         ],
+        **{key: raw[key] for key in ("external_blocked", "blocking_conditions", "rule_violations", "error")
+           if key in raw},
     }
 
 

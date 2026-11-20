@@ -9,6 +9,7 @@ from .artifacts import validate_skill_treatment
 from .config import DEFAULT_REPLAY_CONFIG
 from .contracts import REPLAY_RUN_RESULT_SCHEMA, ReplaySpec
 from .engine import execute_pair, make_context, render_trajectory, source_runtime_type, treatment_for_case
+from .execution import run_branch
 from .hooks import ReplayUnsupported
 from .metrics import compare_efficiency
 from .policy import normalize_checklist_report, progressive_replay_decision
@@ -51,11 +52,33 @@ def evaluate_case(spec: ReplaySpec, case: dict, *, host, factory, judge=None, fe
         )
     if not source_runtime_type(source):
         raise ReplayUnsupported("Replay runtime.type is required")
-    results = execute_pair(
-        factory, contexts, case, harness=host.judge_harness(),
-        max_interactions=int(spec.limits.get("max_interactions", DEFAULT_REPLAY_CONFIG["max_interactions"])),
-        judge=judge, feedback=feedback,
-    )
+    if spec.metadata.get("validation_method") == "candidate_execution":
+        light_case = {**case, "validation_method": "candidate_execution"}
+        options = {}
+        if judge is not None:
+            options["judge"] = judge
+        if feedback is not None:
+            options["feedback"] = feedback
+        candidate = run_branch(
+            factory, contexts["candidate"], light_case, harness=host.judge_harness(),
+            max_interactions=min(2, int(spec.limits.get("max_interactions", 2))), **options,
+        )
+        results = {"candidate": candidate, "baseline": {
+            "status": "not_run", "completed": False, "ok": False,
+            "checklist_report": {"judge": "not_run", "all_satisfied": False},
+        }}
+    else:
+        results = execute_pair(
+            factory, contexts, case, harness=host.judge_harness(),
+            max_interactions=int(spec.limits.get("max_interactions", DEFAULT_REPLAY_CONFIG["max_interactions"])),
+            judge=judge, feedback=feedback,
+        )
+    return adjudicate_results(spec, case, results, adapter_revision=getattr(factory, "revision", ""),
+                              runtime_type=source_runtime_type(source))
+
+
+def adjudicate_results(spec, case, results, *, adapter_revision="", runtime_type=""):
+    """Assess archived branch results without recreating Agent Sessions."""
     checklists = {b: normalize_checklist_report(r, expected_checklist=case["checks"]) for b, r in results.items()}
     efficiency = compare_efficiency(results["baseline"], results["candidate"], checklists=checklists)
     policy = progressive_replay_decision(
@@ -72,9 +95,9 @@ def evaluate_case(spec: ReplaySpec, case: dict, *, host, factory, judge=None, fe
         "schema_version": REPLAY_RUN_RESULT_SCHEMA, "run_id": spec.run_id, "status": "evaluated",
         "accepted": policy["accepted"], "verdict": policy["verdict"], "no_regression": policy["no_regression"],
         "decision_policy": policy, "efficiency": efficiency, "checklist": checklists,
-        "runtime_type": source_runtime_type(source), "case_count": 1, "case_id": case["case_id"],
+        "runtime_type": runtime_type, "case_count": 1, "case_id": case["case_id"],
         "case_hash": stable_hash(case), "dataset_hash": spec.metadata.get("dataset_hash", ""),
-        "adapter_revision": getattr(factory, "revision", ""), "reason": policy["decision_basis"],
+        "adapter_revision": adapter_revision, "reason": policy["decision_basis"],
         "cases": [{b: {**r, "checklist_report": checklists[b], "trajectory": render_trajectory(r.get("messages", []))}
                    for b, r in results.items()}],
     }

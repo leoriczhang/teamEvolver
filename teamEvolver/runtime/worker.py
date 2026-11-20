@@ -70,6 +70,7 @@ class WorkerStats:
     cancelled: int = 0
     reconciling: int = 0
     waiting_external: int = 0
+    deferred: int = 0
 
 
 async def process_once(
@@ -183,6 +184,10 @@ async def _write(
         elif outcome == HandlerOutcome.RECONCILE:
             if await repo.reconcile(conn, **guard):
                 stats.reconciling += 1
+        elif outcome == HandlerOutcome.DEFER:
+            if await repo.defer(conn, backoff_seconds=result.backoff_seconds,
+                                error_code=result.error_code, **guard):
+                stats.deferred += 1
         elif outcome == HandlerOutcome.RETRY:
             if task.attempt >= max_attempts:
                 if await repo.fail(conn, error_code="retries_exhausted", **guard):
@@ -227,6 +232,7 @@ async def run_worker(
     active = tuple(tenants)
     last_refresh = 0.0
     failures = 0
+    last_tenant = None
     while not stop_event.is_set():
         try:
             now = asyncio.get_running_loop().time()
@@ -243,6 +249,9 @@ async def run_worker(
                         logger.exception("worker.schedule_error", extra={"tenant": tenant})
                     finally:
                         reset_current_tenant(token)
+            if last_tenant in active:
+                offset = active.index(last_tenant) + 1
+                active = active[offset:] + active[:offset]
             claimed = await process_once(
                 services,
                 owner_id=owner_id,
@@ -252,6 +261,8 @@ async def run_worker(
                 kinds=kinds,
                 stats=stats,
             )
+            if claimed is not None:
+                last_tenant = claimed.tenant_id
         except Exception:  # noqa: BLE001 - infrastructure errors must not end the loop
             failures += 1
             logger.exception("worker.loop_error", extra={"consecutive_failures": failures})

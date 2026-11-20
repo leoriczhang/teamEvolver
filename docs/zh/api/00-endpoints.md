@@ -148,6 +148,7 @@
 | GET | `/api/sessions/{session_id}` |
 | GET | `/api/sessions/{session_id}/content` |
 | GET | `/api/sessions/{session_id}/stages` |
+| GET | `/api/sessions/{session_id}/stages/{stage}` |
 | POST | `/ingest_session` |
 
 ## Skill、候选、经验、导入导出与工作台
@@ -263,6 +264,7 @@
 | GET | `/api/ma/connections/{connection_id}/releases` |
 | GET | `/api/ma/connections/{connection_id}/resources` |
 | PUT | `/api/ma/connections/{connection_id}/resources/{skill_name}/bindings` |
+| GET | `/api/ma/skill-jobs/{job_id}` |
 | GET | `/sync/ma/{connection_id}` |
 
 ## 团队 Memory
@@ -344,4 +346,4 @@
 | GET | `/api/mining/settings` |
 | POST | `/api/mining/settings` |
 
-共 248
+共 250

@@ -1,6 +1,6 @@
 # Workspace and Platform Assets API
 
-The console "Personal & Team Assets" page browses and edits Memory, Skills and Resources in OpenViking through the Workspace API; "Platform Assets" browses task artifacts in PostgreSQL read-only. The directory layout is in [Storage Spaces and Layout](../concepts/09-storage-layout.md).
+Under Agent Context, Memory Library and Resource Library use the Workspace API to browse personal/team Memory and Resources respectively; Memory supports batch editing. Platform Assets browses PostgreSQL task artifacts read-only. The API retains its existing Memory, Skill and Resource scopes; see [Storage Spaces and Layout](../concepts/09-storage-layout.md).
 
 Code entry points: `teamEvolver/platform_docs/api/workspace.py:create_router`, `teamEvolver/platform_docs/workspace_core.py:_scope_map`, `teamEvolver/platform_docs/api/assets.py:create_router`, `teamEvolver/platform_docs/api/console.py:create_router`.
 

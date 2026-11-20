@@ -16,7 +16,9 @@ export default function ReleaseHistory({ releases }: { releases: MARelease[] }) 
       </div>
       <div className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
         <span>入口 Agent v{release.record.entry_agent_version || "—"}</span>
-        <span>Environment {release.record.environment_id || "—"}</span>
+        <span>Environment {release.record.environment_alias ? `${release.record.environment_alias} → ` : ""}
+          {release.record.environment_id || "—"}</span>
+        {release.record.environment_name && <span className="break-all">实际名称 {release.record.environment_name}</span>}
         <span>受理时间 {maTime(release.created_at)}</span><span>应用时间 {maTime(release.applied_at)}</span>
       </div>
       {release.record.runtime_tree_sha256 && <p className="mt-2 break-all font-mono text-xs">

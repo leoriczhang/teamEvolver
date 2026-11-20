@@ -156,7 +156,10 @@ Case materials are read and pinned at acceptance. Repeated requests with the sam
 
 ## Experiment Workbench
 
-The experiment workbench edits team Skills in the console and runs Replay against datasets. Skill reads and writes go directly to the team Skill library in PostgreSQL.
+The experiment workbench edits team Skills and runs Replay against datasets. MA Skills use native
+cloud versions; writes return 202 and the Worker uploads and verifies member references. The console
+marks a file saved after completion. Other Skills use the PostgreSQL team library. The file tree and
+editor show the published version and editing baseline.
 
 | Method | Path | Description |
 | --- | --- | --- |
@@ -170,11 +173,20 @@ The experiment workbench edits team Skills in the console and runs Replay agains
 | DELETE | `/api/replay-lab/datasets/{dataset_id}` | Delete a dataset |
 | POST | `/api/replay-lab/datasets/synthesize` | `{"skill_id", "session_ids"?}` synthesizes Cases from up to 30 Sessions, returns 202 |
 | GET | `/api/replay-lab/jobs/{job_id}/result` | Synthesis result |
-| POST | `/api/replay-lab/runs` | `{"skill_id", "dataset_id", "candidate_skill_md", "candidate_files"?, "timeout_seconds"?, "max_interactions"?}`, returns 202 |
-| GET | `/api/replay-lab/runs?skill_id=&limit=` | Run history |
+| POST | `/api/replay-lab/runs` | `{"skill_id", "dataset_id", "candidate_skill_md", "candidate_files"?, "timeout_seconds"?, "max_interactions"?, "expected_version"?, "expected_tree_sha256"?}`, returns 202 |
+| GET | `/api/replay-lab/runs?skill_id=&limit=` | Up to 100 summaries with `result_summary` and pinned `skill_versions`, without full inputs or trajectories |
 | GET | `/api/replay-lab/runs/{run_id}` | Run detail |
 
 A workbench run uses the Skill versions declared by the dataset as Baseline, and as Candidate replaces `skill_id` with `candidate_skill_md` and `candidate_files`. When a `content_hash` in the dataset does not match the version content, the run is refused.
+
+The console submits the editor's `expected_version` and baseline tree hash; a mismatch with the
+pinned acceptance version returns 409. Run details show fixed versions, every Case's branch Trace,
+and task errors. Dataset and historical run reads do not depend on live cloud Skill availability.
+The workbench can search and select historical Sessions with their actual Skill versions for dataset
+synthesis. Editing the first Case preserves all other Cases and their version references.
+Historical records containing large inline artifacts return basic list metadata; their pinned
+versions and outcome evidence are read through run details without expanding old trajectories in
+the history request.
 
 ## Errors
 

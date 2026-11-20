@@ -8,6 +8,7 @@ import { followMAJob, maConnection, maConnections, maReleases, maResources, save
 import ConnectionForm from "./ConnectionForm";
 import ReleaseHistory, { maTime } from "./ReleaseHistory";
 import ResourceBindings from "./ResourceBindings";
+import ReplayResources from "./ReplayResources";
 
 const labels: Record<string, string> = {
   ready: "运行正常", discovering: "发现中", importing: "导入中", syncing: "同步中", error: "需要处理", drift: "版本漂移",
@@ -122,6 +123,7 @@ export default function ManagedAgentsView({ active, canManage = false }: { activ
             </div>
             <p className="mt-3 text-xs text-muted-foreground">MA 凭证{detail.config.ma_credential_configured ? "已配置" : "未配置"}
               · 租户 Key {detail.config.tenant_credential_configured ? "已配置" : "未配置"}</p>
+            {detail.config.replay_enabled && <div className="mt-3"><ReplayResources connection={detail} /></div>}
             {detail.detail.error && <p className="mt-3 text-sm text-destructive">{detail.detail.error}</p>}
           </div>
           {canManage && <div className="flex flex-wrap items-center gap-2">

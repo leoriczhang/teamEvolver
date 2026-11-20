@@ -12,6 +12,7 @@ export interface PageResponse<T> {
 
 export interface SessionMeta {
   user_id?: string;
+  user_attribution?: string;
   session_id?: string;
   trace_id?: string;
 }
@@ -29,6 +30,8 @@ export interface LedgerRow {
   timestamp?: string;
   used_skills?: string[];
   available_skills?: string[] | null;
+  used_skill_versions?: SessionListSkillVersion[];
+  available_skill_versions?: SessionListSkillVersion[];
   value_judge?: {
     decision?: string;
     confidence?: number;
@@ -46,6 +49,42 @@ export interface LedgerRow {
   };
 }
 
+export interface SessionListSkillVersion {
+  name: string;
+  skill_id?: string | null;
+  version: string | null;
+  agent_id?: string | null;
+  agent_name?: string;
+  unknown_reason?: string;
+}
+
+export interface SessionToolCall {
+  id?: string;
+  name?: string;
+  input?: unknown;
+  function?: { name?: string; arguments?: unknown };
+}
+
+export interface SessionToolResult {
+  tool_call_id?: string;
+  tool_name?: string;
+  content?: string;
+  has_error?: boolean;
+}
+
+export interface SessionSkillVersion {
+  name: string;
+  skill_id: string | null;
+  version: string | null;
+  agent_id: string | null;
+  agent_name: string;
+  agent_role: "main" | "member" | "unknown";
+  agent_version?: string | null;
+  usage: "used" | "configured";
+  unknown_reason?: string;
+  event_ids?: string[];
+}
+
 export interface SessionDetail {
   /** Conversation summary (title / submitter / status / turns). */
   summary?: {
@@ -61,6 +100,7 @@ export interface SessionDetail {
   system_prompt?: string;
   injected_skills?: string[];
   used_skills?: string[];
+  skill_versions?: SessionSkillVersion[];
   metrics?: {
     interaction_turns?: number;
     message_count?: number;
@@ -79,16 +119,8 @@ export interface SessionDetail {
     response_text?: string;
     injected_skills?: string[];
     used_skills?: string[];
-    tool_calls?: {
-      id?: string;
-      function?: { name?: string; arguments?: string };
-    }[];
-    tool_results?: {
-      tool_call_id?: string;
-      tool_name?: string;
-      content?: string;
-      has_error?: boolean;
-    }[];
+    tool_calls?: SessionToolCall[];
+    tool_results?: SessionToolResult[];
   }[];
   value_judge?: {
     decision?: string;
@@ -115,8 +147,23 @@ export interface SessionJudgeDetail {
   tool_usage?: number | null;
 }
 
+export interface SessionStage {
+  stage: string;
+  status: string;
+  created_at?: string;
+  updated_at?: string;
+  error_code?: string;
+}
+
+export interface SessionStageDetail extends SessionStage {
+  detail?: Record<string, unknown>;
+  result_available: boolean;
+  result_unavailable_reason?: string;
+  result?: Record<string, unknown> | null;
+}
+
 export interface SessionProcess {
-  stages?: Array<{ stage: string; status: string; created_at?: string; updated_at?: string; error_code?: string }>;
+  stages?: SessionStage[];
   cycles?: {
     timestamp?: string;
     sessions?: number | null;

@@ -1,6 +1,8 @@
 # Team Skill Library API
 
-The team Skill library is stored in PostgreSQL: `skills` holds the current version, `skill_versions` each immutable version, and bundle files are stored content-addressed. Every write creates a new version in one transaction, and every API replica reads the same data. After a write commits the local runtime cache is refreshed on a best-effort basis; a cache failure is only reported in the response's `runtime_cache` and does not affect the committed version.
+MA Skills use native cloud contents and versions through these endpoints. Select a connection with `connection_id`; it is required for same-name Skills across connections. Queries return `skill_backend: "managed-agents"`, native `skill_id`, latest `version` and actual `bound_version`. Writes return `202`, `job_id`, `status_url` and `result_url`; upload and Agent-reference readback must complete before publication. Rollback creates a new native version from historical contents, and deletion detaches before deleting. Old TE imports do not supply current contents. See [MA API](./24-managed-agents.md).
+
+Non-MA team Skills are stored in PostgreSQL: `skills` holds the current version, `skill_versions` each immutable version, and bundle files are content-addressed. Writes create versions in one transaction and API replicas read the same data. A local runtime-cache failure does not affect committed versions.
 
 Code entry points: `team_skills/api/__init__.py:create_router`, `team_skills/library/repository.py:SkillLibraryRepository`.
 

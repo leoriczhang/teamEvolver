@@ -1,4 +1,4 @@
-"""Full isolated MA graph Replay. Runtime execution receives no evaluation rules."""
+"""Pinned MA Skill Replay. Runtime execution receives no evaluation rules."""
 
 from __future__ import annotations
 
@@ -7,8 +7,11 @@ import base64
 import copy
 import hashlib
 import io
+import json
+import re
 import time
 import zipfile
+from collections import Counter
 
 import httpx
 
@@ -18,6 +21,42 @@ from teamEvolver.managed_agents.events import child_threads, complete, metrics, 
 from ..artifacts import skill_treatment_files, skill_treatment_members
 from ..hooks import AgentObservation, ReplayUnsupported
 
+ARTIFACT_REGISTRATION_SECONDS = 60
+
+
+def declared_outputs(events):
+    """Read native Write paths and MA display references, never task requirements."""
+    prefix, paths = "/mnt/session/outputs/", set()
+    for event in events:
+        inputs = event.get("input") or event.get("arguments") or {}
+        candidates = []
+        if event.get("type") == "agent.tool_use" and str(event.get("name", "")).lower() in {"write", "edit"}:
+            if isinstance(inputs, dict):
+                candidates.append(inputs.get("file_path") or inputs.get("path") or "")
+        if event.get("type") == "agent.message":
+            candidates.extend(re.findall(r"<display>(/mnt/session/outputs/[^<]+)</display>", text(event)))
+        for path in candidates:
+            if isinstance(path, str) and path.startswith(prefix):
+                relative = path[len(prefix):]
+                if relative and all(p not in {"", ".", ".."} for p in relative.split("/")):
+                    paths.add(relative)
+    return paths
+
+
+def _raise_session_error(events):
+    for event in events:
+        if event.get("type") != "session.error":
+            continue
+        error = event.get("error") or {}
+        code = error.get("code") or error.get("type") or "unknown"
+        try:
+            detail = json.loads(error.get("message") or "{}")
+            if isinstance(detail, dict) and isinstance(detail.get("error"), dict):
+                code = detail["error"].get("code") or code
+        except (ValueError, TypeError):
+            pass
+        raise RuntimeError("MA session error: " + str(code))
+
 
 class ManagedAgentsFactory:
     """Dispatch recorded MA targets while retaining an optional non-MA factory."""
@@ -25,7 +64,7 @@ class ManagedAgentsFactory:
     def __init__(self, records, capabilities, fallback=None):
         self.records = copy.deepcopy(records)
         self.capabilities, self.fallback = capabilities, fallback
-        self.revision = "managed-agents.v1"
+        self.revision = "managed-agents.skill-only.v2"
 
     def open(self, context):
         if context.runtime_type != "managed-agents":
@@ -89,13 +128,24 @@ class ManagedAgentsSession:
         self.seen, self.turn_num, self.closed = set(), 0, False
         self.deadline = time.monotonic() + context.timeout_seconds
         self.material_blocks, self.runtime_tree = [], ""
+        self.root_thread_id = ""
         self.bootstrap_metrics = {}
+        self.execution_snapshot = {}
+        self.final_diagnostics = {}
+
+    def diagnostics(self):
+        """Failure evidence survives even when send() never returns an observation."""
+        return copy.deepcopy(self.final_diagnostics)
 
     def remaining(self):
         value = self.deadline - time.monotonic()
         if value <= 0:
             raise TimeoutError("MA Replay branch deadline exceeded")
         return value
+
+    def exclude_assessment_time(self, seconds):
+        """Local accounting only: judge waiting is outside MA execution."""
+        self.deadline += max(0.0, float(seconds))
 
     def send(self, user_message):
         if self.closed:
@@ -117,7 +167,7 @@ class ManagedAgentsSession:
         self.client = await self.cap["client"](self.record)
         self.effects = self.cap["effects"](self.record["connection_id"], self.owner)
         members = skill_treatment_members(self.context.treatment.skill)
-        replacement, replacement_files = {}, {}
+        replacement = {}
         for member in members:
             files = skill_treatment_files(member)
             semantic_name = member["name"]
@@ -146,7 +196,6 @@ class ManagedAgentsSession:
             replacement[semantic_name] = {"type": "custom", "skill_id": receipt["id"],
                                           "version": str(receipt.get("version")
                                                          or receipt.get("latest_version") or "1")}
-            replacement_files[semantic_name] = files
         graph, refs = self.record["agent_graph"], {}
         bindings = self.record["skill_bindings"]
         target_name = self.record.get("target_skill_name")
@@ -168,9 +217,10 @@ class ManagedAgentsSession:
             desired = _agent_config(agent)
             skills = copy.deepcopy(agent.get("skills") or [])
             for name, binding in bindings.items():
-                if ident not in binding.get("agents", []):
-                    continue
                 remote = binding.get("id")
+                recorded = any(s.get("skill_id") == remote for s in skills)
+                if not recorded and ident not in binding.get("agents", []):
+                    continue
                 if name in replacement:
                     skills = [s for s in skills if s.get("skill_id") != remote]
                     skills.append(replacement[name])
@@ -182,7 +232,12 @@ class ManagedAgentsSession:
                     if child.get("type") != "self":
                         child.update(refs[child["id"]])
             if ident == entry:
-                root_config = desired
+                root_config = {"skills": skills}
+                if desired.get("multiagent") != agent.get("multiagent"):
+                    root_config["multiagent"] = desired["multiagent"]
+                continue
+            if desired == _agent_config(agent):
+                refs[ident] = {"type": "agent", "id": ident, "version": agent["version"]}
                 continue
             desired["name"] = "te-replay-" + hashlib.sha256((self.owner + ident).encode()).hexdigest()[:32]
             async def find_owned_agent(row, payload=desired):
@@ -204,24 +259,32 @@ class ManagedAgentsSession:
         for field in ("tos", "networking"):
             if field in replay_environment["config"]:
                 environment_config[field] = copy.deepcopy(replay_environment["config"][field])
-        binding = config.get("runtime_binding") or {}
-        if binding and binding["skill_name"] not in replacement_files:
+        binding = copy.deepcopy(config.get("runtime_binding") or {})
+        runtime_files = {}
+        # Runtime is a control variable: never install candidate runtime bytes.
+        # Both branches recover the same version from the frozen source graph.
+        if binding and binding.get("source") != "openviking":
             from team_skills.transfer.packages import discover, read_zip
             bound = bindings.get(binding["skill_name"]) or {}
-            refs = [s for a in graph["agents"].values() for s in a.get("skills") or []
+            runtime_refs = [s for a in graph["agents"].values() for s in a.get("skills") or []
                     if s.get("skill_id") == bound.get("id")]
-            if not refs or len({str(s["version"]) for s in refs}) != 1:
+            if not runtime_refs or len({str(s["version"]) for s in runtime_refs}) != 1:
                 raise ReplayUnsupported("Recorded runtime Skill reference is missing or ambiguous")
-            data = await self.client.download(f"skills/{refs[0]['skill_id']}/versions/{refs[0]['version']}/content")
+            data = await self.client.download(
+                f"skills/{runtime_refs[0]['skill_id']}/versions/{runtime_refs[0]['version']}/content")
             packages = discover(read_zip(data))
             if len(packages) != 1:
                 raise ReplayUnsupported("Recorded runtime Bundle is unavailable")
-            replacement_files[binding["skill_name"]] = packages[0].files
+            runtime_files = packages[0].files
+            # Prompt-only treatments retain the recorded runtime bytes. Their
+            # replacement mount no longer contains those files.
+            if binding.get("source") == "skill_mount":
+                binding.update(source="embedded", archive_compression="xz")
         if binding:
             environment_config, self.runtime_tree = self.cap["runtime_binding"](
-                environment_config, binding, replacement_files[binding["skill_name"]],
+                environment_config, binding, runtime_files,
             )
-        resources = []
+        resources, mounted_paths = [], set()
         for index, material in enumerate(self.context.materials):
             raw = base64.b64decode(material["content_b64"], validate=True)
             if hashlib.sha256(raw).hexdigest() != material["sha256"] or len(raw) > 20 * 1024 * 1024:
@@ -229,6 +292,14 @@ class ManagedAgentsSession:
             path = material["path"]
             if path.startswith("/") or "\\" in path or any(p in {"", ".", ".."} for p in path.split("/")):
                 raise ReplayUnsupported("Unsafe Replay material path")
+            mount_path = path
+            for prefix in ("mnt/session/uploads/", "uploads/"):
+                if path.startswith(prefix):
+                    mount_path = path[len(prefix):]
+                    break
+            if mount_path in mounted_paths:
+                raise ReplayUnsupported("Replay materials resolve to the same mount path")
+            mounted_paths.add(mount_path)
             filename = "te-replay-" + hashlib.sha256((self.owner + str(index)).encode()).hexdigest()[:24]
             receipt = await self.effects.apply(
                 f"{self.owner}:file:{index}", "replay-file",
@@ -238,14 +309,15 @@ class ManagedAgentsSession:
                     files={"file": (p.rsplit("/", 1)[-1], data, "application/octet-stream")},
                 ),
             )
-            resources.append({"type": "file", "file_id": receipt["id"], "mount_path": path})
-            self.material_blocks.append({"type": "document", "source": {"type": "file", "file_id": receipt["id"]}})
+            resources.append({"type": "file", "file_id": receipt["id"], "mount_path": mount_path})
+            # Resources already mount the exact material bytes. Model document
+            # blocks accept PDF only on some pinned MA models; images/audio must
+            # remain available through the sandbox's native file/media tools.
+            self.material_blocks.append({"type": "text", "text":
+                f"Provided material {path} mounted at: /mnt/session/uploads/{mount_path}"})
         payload = {
             "agent": {"type": "agent_with_overrides", "id": entry, "version": graph["agents"][entry]["version"],
-                      # Inherit the exact pinned model/base Agent. Explicit model
-                      # overrides have separate permissions on real MA accounts.
-                      **{k: v for k, v in root_config.items()
-                         if k not in {"name", "metadata", "model", "base_agent"}}},
+                      **root_config},
             "environment": {"type": "environment_with_overrides", "id": replay_environment["id"],
                             "config": environment_config},
             "vault_ids": config.get("replay_vault_ids") or [],
@@ -260,13 +332,33 @@ class ManagedAgentsSession:
                                             lambda: self.client.request("POST", "sessions", json=payload),
                                             find_owned_session)
         self.session_id = receipt["id"]
+        actual = await self.client.request("GET", f"sessions/{self.session_id}")
+        actual_agent, actual_env = actual.get("agent") or {}, actual.get("environment") or {}
+        if (actual_agent.get("id") != entry
+                or str(actual_agent.get("version")) != str(graph["agents"][entry]["version"])
+                or actual_agent.get("skills") != root_config["skills"]
+                or actual_env.get("id") != replay_environment["id"]
+                or actual_env.get("config") != environment_config):
+            raise ReplayUnsupported("MA Session readback differs from the frozen execution target")
+        self.execution_snapshot = {
+            "session_id": self.session_id, "agent_id": entry,
+            "agent_version": str(actual_agent["version"]), "environment_id": actual_env["id"],
+            "environment_config_sha256": hashlib.sha256(
+                json.dumps(actual_env["config"], sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
+            "runtime_tree_sha256": self.runtime_tree,
+            "runtime_ready_verified": False,
+            "agent_override_fields": sorted(root_config),
+            "skills": copy.deepcopy(actual_agent["skills"]),
+            "materials": [{"path": m["path"], "sha256": m["sha256"]} for m in self.context.materials],
+        }
+        await self.cap["save_artifact"](
+            "ma-session-snapshot.json", json.dumps(self.execution_snapshot, sort_keys=True).encode(), self.owner,
+        )
         if binding.get("ready_file") and self.runtime_tree:
             await self._ready()
 
     async def _ready(self):
         """Read a bootstrap proof from real Files bytes before any task message."""
-        import json
-
         from teamEvolver.managed_agents.client import _bounded, validate_url
         probe = (self.record["config"].get("runtime_binding") or {}).get("ready_probe_message")
         if probe:
@@ -293,13 +385,17 @@ class ManagedAgentsSession:
                 value = json.loads(data)
                 if value.get("ready") is not True or value.get("runtime_tree_sha256") != self.runtime_tree:
                     raise ReplayUnsupported("Runtime ready proof/tree hash mismatch")
-                await self.cap["save_artifact"]("team-evolver-runtime-ready.json", data, self.owner)
+                saved = await self.cap["save_artifact"]("team-evolver-runtime-ready.json", data, self.owner)
+                self.execution_snapshot.update(runtime_ready_verified=True, runtime_ready_proof=saved)
                 return
             await asyncio.sleep(min(2, self.remaining()))
         raise ReplayUnsupported("Runtime bootstrap proof unavailable before task execution")
 
     async def _history(self):
         events = await self.client.history(self.session_id)
+        self.root_thread_id = next((e["session_thread_id"] for e in events
+                                    if e.get("type") == "session.thread_status_running"
+                                    and e.get("session_thread_id")), self.root_thread_id)
         threads = await self.client.listing(f"sessions/{self.session_id}/threads", max_pages=10)
         done = True
         for thread in child_threads(events, threads):
@@ -366,6 +462,10 @@ class ManagedAgentsSession:
                     processed = {e["id"] for e in current if e.get("processed_at")}
                     if not accepted_ids <= processed:
                         continue
+                    _raise_session_error(current)
+                    if any(e.get("stop_reason", {}).get("type") == "requires_action" for e in current
+                           if e.get("type") in {"session.status_idle", "session.thread_status_idle"}):
+                        raise ReplayUnsupported("MA requires human tool confirmation; no result is fabricated")
                     last_end = stable_end(current)
                     if last_end:
                         history, children_done = await self._history()
@@ -374,9 +474,6 @@ class ManagedAgentsSession:
                         if children_done and actual_end and actual_end["id"] == last_end["id"]:
                             completed = True
                             break
-                    if any(e.get("stop_reason", {}).get("type") == "requires_action" for e in current
-                           if not e.get("session_thread_id") and e.get("type") == "session.status_idle"):
-                        raise ReplayUnsupported("MA requires human tool confirmation; no result is fabricated")
                 if completed:
                     break
             except MAError as exc:
@@ -391,8 +488,17 @@ class ManagedAgentsSession:
             raise TimeoutError("MA turn did not reach stable end_turn")
         events = complete(collected.values())
         self.seen.update(e["id"] for e in events)
+        _raise_session_error(events)
+        if probe:
+            results = [e for e in events if e.get("type") in {
+                "agent.tool_result", "agent.mcp_tool_result", "user.tool_result", "user.custom_tool_result",
+            }]
+            if results and results[-1].get("is_error") is True:
+                code = ("task_service_unavailable" if "task service unavailable" in text(results[-1]).lower()
+                        else "tool_error")
+                raise ReplayUnsupported("MA runtime readiness probe failed: " + code)
         response = "\n".join(text(e) for e in events if e.get("type") == "agent.message"
-                             and not e.get("session_thread_id"))
+                             and e.get("session_thread_id") in {None, "", self.root_thread_id})
         if not response:
             raise RuntimeError("MA turn produced no complete response")
         if any(e.get("type") in {"session.thread_status_terminated", "session.status_terminated"} or
@@ -404,22 +510,52 @@ class ManagedAgentsSession:
                 if key in observed:
                     observed[key] += value
             self.bootstrap_metrics = {}
-        artifacts = await self._artifacts()
-        import json
+        artifacts = await self._artifacts(expected=declared_outputs(events))
         # Persist the exact protocol events as well as the judge projection.
         # The adapter's transport metrics still count only real tool events.
         await self.cap["save_artifact"](
             f"ma-events-turn-{self.turn_num}.json",
             json.dumps(events, ensure_ascii=False, sort_keys=True).encode(), self.owner,
         )
-        projected = turns(events)
+        projected = turns([
+            {k: v for k, v in e.items() if k != "session_thread_id"}
+            if self.root_thread_id and e.get("session_thread_id") == self.root_thread_id else e
+            for e in events
+        ])
         return AgentObservation(
             response=response, messages=tuple(m for t in projected for m in t["messages"]),
             artifacts=tuple(artifacts), metrics=observed, trace_id=self.session_id + ":" + str(self.turn_num),
             metrics_incomplete_reason="MA model usage unavailable" if "total_tokens" not in observed else "",
+            execution_snapshot=copy.deepcopy(self.execution_snapshot),
         )
 
-    async def _artifacts(self):
+    async def _artifacts(self, *, expected=()):
+        # MA may register Write outputs after the stable end_turn event. Keep
+        # the Session alive until declared output bytes have actually arrived.
+        deadline = min(self.deadline, time.monotonic() + ARTIFACT_REGISTRATION_SECONDS)
+        while True:
+            result = await self._download_artifacts()
+            expected = set(expected)
+            # Files API may return only a basename for an output in a nested
+            # directory. Match it only when both sides identify a unique file;
+            # a supplied directory must still match exactly.
+            expected_names = Counter(path.rsplit("/", 1)[-1] for path in expected)
+            normalized = [item["path"].removeprefix("/mnt/session/outputs/") for item in result]
+            actual_names = Counter(path.rsplit("/", 1)[-1] for path in normalized)
+            for item, path in zip(result, normalized, strict=True):
+                if ("/" not in path and expected_names[path] == 1 and actual_names[path] == 1):
+                    path = next(p for p in expected if p.rsplit("/", 1)[-1] == path)
+                if path != item["path"]:
+                    item["ma_filename"], item["path"] = item["path"], path
+            missing = expected - {item["path"] for item in result}
+            if not missing:
+                return result
+            if time.monotonic() >= deadline:
+                raise ReplayUnsupported("Declared MA outputs unavailable after tool completion: "
+                                        + ", ".join(sorted(missing)))
+            await asyncio.sleep(min(1, deadline - time.monotonic()))
+
+    async def _download_artifacts(self):
         result, after, total = [], None, 0
         for _ in range(20):
             page = await self.client.request("GET", "files", params={
@@ -461,18 +597,25 @@ class ManagedAgentsSession:
         if self.client:
             async def finish():
                 try:
+                    self.final_diagnostics = {"session_id": self.session_id,
+                                              "execution_snapshot": copy.deepcopy(self.execution_snapshot)}
                     if self.session_id:
-                        import json
                         try:
                             events, done = await asyncio.wait_for(self._history(), timeout=20)
                             final = {"events": events, "children_complete": done, "metrics": metrics(events)}
+                            self.final_diagnostics.update(
+                                observed_metrics=final["metrics"], children_complete=done,
+                            )
                         except Exception:
                             final = {"available": False, "reason": "Final MA history unavailable"}
-                        await self.cap["save_artifact"](
+                        saved = await self.cap["save_artifact"](
                             "ma-final-session.json", json.dumps(final, ensure_ascii=False, sort_keys=True).encode(),
                             self.owner,
                         )
-                    await self.cap["cleanup"](self.record["connection_id"], self.owner, self.client)
+                        self.final_diagnostics["final_history"] = saved
                 finally:
-                    await self.client.close()
+                    try:
+                        await self.cap["cleanup"](self.record["connection_id"], self.owner, self.client)
+                    finally:
+                        await self.client.close()
             self.cap["run"](finish(), timeout=60)

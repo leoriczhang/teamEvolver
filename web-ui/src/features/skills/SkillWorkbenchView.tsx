@@ -1,4 +1,4 @@
-import { api } from "@/api/client";
+import { api,getSkillConnectionId,setSkillConnectionId } from "@/api/client";
 import { MarkdownDocument } from "@/components/MarkdownWorkspace";
 import { DiffView } from "@/components/WorkspaceDiffView";
 import { Button } from "@/components/ui/button";
@@ -21,7 +21,7 @@ const CodeEditor = lazy(() => import("@/features/skills/workbench/CodeEditor"));
 
 type SkillFolder = { name: string; relative_path: string; description?: string; files: string[]; version?: number };
 type Workspace = { name: string; root: string; skills: SkillFolder[] };
-type FileResponse = { path: string; content?: string; sha256?: string; editable: boolean; reason?: string; cloud?: CloudResult };
+type FileResponse = { path: string; content?: string; sha256?: string; version?: number; editable: boolean; reason?: string; cloud?: CloudResult };
 type Document = FileResponse & { id: string; skill: string; content: string; saved: string; isNew?: boolean };
 type FileNode = { path: string; name: string; children: FileNode[]; directory: boolean };
 const fileId = (skill: string, path: string) => `${skill}/${path}`;
@@ -47,6 +47,11 @@ export default function SkillWorkbenchView({ active, user }: {
   active: boolean; user?: UserProfile | null;
 }) {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
+  const [connections, setConnections] = useState<{ connection_id: string; config?: { display_name?: string } }[]>([]);
+  const [cloudConnection, setCloudConnection] = useState(getSkillConnectionId);
+  const connectionRef = useRef(cloudConnection);
+  connectionRef.current = cloudConnection;
+  const generation = useRef(0);
   const [documents, setDocuments] = useState<Record<string, Document>>({});
   const docsRef = useRef(documents);
   docsRef.current = documents;
@@ -62,6 +67,8 @@ export default function SkillWorkbenchView({ active, user }: {
   const [loading, setLoading] = useState(false);
   const [opening, setOpening] = useState("");
   const [savingId, setSavingId] = useState("");
+  const savingRef = useRef(savingId);
+  savingRef.current = savingId;
   const [loadError, setLoadError] = useState("");
   const [quickOpen, setQuickOpen] = useState(false);
   const [quickQuery, setQuickQuery] = useState("");
@@ -76,7 +83,6 @@ export default function SkillWorkbenchView({ active, user }: {
   const [explorerWidth, setExplorerWidth] = useState(248);
   const [debugWidth, setDebugWidth] = useState(336);
   const [panelHeight, setPanelHeight] = useState(285);
-  const loaded = useRef(false);
   const openSequence = useRef(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -89,10 +95,36 @@ export default function SkillWorkbenchView({ active, user }: {
     .filter((doc) => doc.skill === skillName && doc.path !== "SKILL.md" && modified(doc))
     .map((doc) => [doc.path, doc.content])), [documents, skillName]);
 
+  const chooseConnection = useCallback((value: string) => {
+    if (value === connectionRef.current) return;
+    if (savingRef.current) {
+      setSkillConnectionId(connectionRef.current);
+      toastErr("文件正在保存，请完成后切换连接");
+      return;
+    }
+    if (Object.values(docsRef.current).some(modified)
+        && !window.confirm("切换 MA 连接会关闭当前文件并放弃未保存修改，是否继续？")) {
+      setSkillConnectionId(connectionRef.current);
+      return;
+    }
+    connectionRef.current = value;
+    ++generation.current;
+    ++openSequence.current;
+    docsRef.current = {};
+    setDocuments({}); setTabs([]); setSelectedId(""); setExpanded(new Set());
+    setOpening(""); setRun(null); setWorkspace(null); setLoadError("");
+    cursors.current = {};
+    setCloudConnection(value);
+    setSkillConnectionId(value);
+  }, []);
+
   const readFile = useCallback(async (skill: string, path: string) => {
+    const epoch = generation.current;
     const id = fileId(skill, path);
     if (docsRef.current[id]) return docsRef.current[id];
-    const response = await api<FileResponse>(`/api/replay-lab/workspace/${encodeURIComponent(skill)}/file?path=${encodeURIComponent(path)}`);
+    const response = await api<FileResponse>(`/api/replay-lab/workspace/${encodeURIComponent(skill)}/file?path=${encodeURIComponent(path)}`,
+      { headers: { "X-MA-Connection-Id": connectionRef.current } });
+    if (epoch !== generation.current) throw new Error("MA 连接已切换");
     const doc: Document = { ...response, id, skill, path, content: response.content ?? "", saved: response.content ?? "" };
     setDocuments((current) => current[id] ? current : { ...current, [id]: doc });
     return doc;
@@ -115,23 +147,51 @@ export default function SkillWorkbenchView({ active, user }: {
         for (let i = 1; i < parts.length; i++) next.add(fileId(skill, parts.slice(0, i).join("/")));
         return next;
       });
-    } catch (error: any) { toastErr("打开文件失败", error.message); }
+    } catch (error: any) { if (sequence === openSequence.current) toastErr("打开文件失败", error.message); }
     finally { if (sequence === openSequence.current) setOpening(""); }
   }, [readFile]);
 
   const refresh = useCallback(async () => {
+    const epoch = generation.current;
     setLoading(true);
     setLoadError("");
     try {
-      const result = await api<Workspace>("/api/replay-lab/workspace");
+      const available = await api<{ connections: typeof connections }>("/api/ma/connections");
+      if (epoch !== generation.current) return;
+      const nextConnections = available.connections || [];
+      setConnections(nextConnections);
+      const requested = getSkillConnectionId();
+      const selected = requested || nextConnections[0]?.connection_id || "";
+      if (selected !== connectionRef.current) { chooseConnection(selected); return; }
+      const headers = { "X-MA-Connection-Id": selected };
+      const result = await api<Workspace>("/api/replay-lab/workspace", { headers });
+      if (epoch !== generation.current) return;
       if (!Array.isArray(result.skills)) throw new Error("工作区文件列表无效，请刷新重试");
       setWorkspace(result);
+      // Reload clean opened files whose cloud head changed; dirty files keep
+      // their original editing baseline and existing conflict protection.
+      const outdated = Object.values(docsRef.current).filter(doc => !modified(doc)
+        && result.skills.some(skill => skill.name === doc.skill && skill.version !== doc.version));
+      await Promise.all(outdated.map(async doc => {
+        const response = await api<FileResponse>(`/api/replay-lab/workspace/${encodeURIComponent(doc.skill)}/file?path=${encodeURIComponent(doc.path)}`, { headers });
+        if (epoch !== generation.current) return;
+        setDocuments(current => current[doc.id] && !modified(current[doc.id])
+          ? { ...current, [doc.id]: { ...current[doc.id], ...response, content: response.content ?? "", saved: response.content ?? "" } }
+          : current);
+      }));
     }
-    catch (error: any) { setLoadError(error.message); }
-    finally { setLoading(false); }
-  }, []);
+    catch (error: any) { if (epoch === generation.current) setLoadError(error.message); }
+    finally { if (epoch === generation.current) setLoading(false); }
+  }, [chooseConnection, cloudConnection]);
 
-  useEffect(() => { if (active && !loaded.current) { loaded.current = true; void refresh(); } }, [active, refresh]);
+  useEffect(() => {
+    if (!active) return;
+    const sync = () => chooseConnection(getSkillConnectionId() || connectionRef.current);
+    sync();
+    window.addEventListener("console-skill-connection-changed", sync);
+    return () => window.removeEventListener("console-skill-connection-changed", sync);
+  }, [active, chooseConnection]);
+  useEffect(() => { if (active) void refresh(); }, [active, refresh]);
   useEffect(() => {
     if (!skillName) return;
     void readFile(skillName, "SKILL.md").catch((error) => toastErr("读取 Skill 入口失败", error.message));
@@ -149,10 +209,10 @@ export default function SkillWorkbenchView({ active, user }: {
     setSavingId(snapshot.id);
     try {
       const response = await api<FileResponse>(`/api/replay-lab/workspace/${encodeURIComponent(snapshot.skill)}/file`, {
-        method: "PUT", headers: { "Content-Type": "application/json" },
+        method: "PUT", headers: { "Content-Type": "application/json", "X-MA-Connection-Id": cloudConnection },
         body: JSON.stringify({ path: snapshot.path, content: snapshot.content, expected_sha256: snapshot.sha256 ?? null }),
       });
-      setDocuments((current) => ({ ...current, [snapshot.id]: { ...current[snapshot.id], sha256: response.sha256, saved: snapshot.content, isNew: false } }));
+      setDocuments((current) => ({ ...current, [snapshot.id]: { ...current[snapshot.id], sha256: response.sha256, version: response.version, saved: snapshot.content, isNew: false } }));
       toastOk("文件已保存", cloudNote(response.cloud) || snapshot.path);
       void refresh();
     } catch (error: any) { toastErr("保存失败，修改已保留", error.message); }
@@ -222,8 +282,11 @@ export default function SkillWorkbenchView({ active, user }: {
     if (!selected || savingId) return;
     if (modified(selected) && !window.confirm("重新读取会放弃此文件的未保存修改，是否继续？")) return;
     const snapshot = selected;
+    const epoch = generation.current;
     try {
-      const response = await api<FileResponse>(`/api/replay-lab/workspace/${encodeURIComponent(snapshot.skill)}/file?path=${encodeURIComponent(snapshot.path)}`);
+      const response = await api<FileResponse>(`/api/replay-lab/workspace/${encodeURIComponent(snapshot.skill)}/file?path=${encodeURIComponent(snapshot.path)}`,
+        { headers: { "X-MA-Connection-Id": cloudConnection } });
+      if (epoch !== generation.current) return;
       setDocuments((current) => {
         // Preserve any typing that happened while the read was in flight.
         if (current[snapshot.id]?.content !== snapshot.content) return current;
@@ -274,6 +337,12 @@ export default function SkillWorkbenchView({ active, user }: {
       style={{ "--explorer-width": `${explorerWidth}px`, "--debug-width": `${debugWidth}px`, "--panel-height": `${panelHeight}px` } as CSSProperties}>
       <header className="wb-titlebar">
         <span className="wb-project"><FolderOpen />{workspace?.name || "Workspace"}<small>代码工作区</small></span>
+        {!!connections.length && <select aria-label="工作台 MA Skill 连接"
+          className="h-8 max-w-48 rounded-md border bg-background px-2 text-xs" value={cloudConnection}
+          disabled={!!savingId} onChange={event => chooseConnection(event.target.value)}>
+          {!connections.some(c => c.connection_id === cloudConnection) && <option value={cloudConnection}>{cloudConnection || "选择连接"}</option>}
+          {connections.map(c => <option key={c.connection_id} value={c.connection_id}>{c.config?.display_name || c.connection_id}</option>)}
+        </select>}
         <button type="button" className="wb-command" onClick={() => { setQuickQuery(""); setQuickOpen(true); }}><Search /><span>搜索并打开文件</span><kbd>Ctrl P</kbd></button>
         <div className="wb-layout-actions">
           {canSave && <>
@@ -302,7 +371,7 @@ export default function SkillWorkbenchView({ active, user }: {
           <div className="wb-filter"><Search /><input ref={searchRef} aria-label="筛选工作区文件" placeholder="筛选文件…" value={filter} onChange={(event) => setFilter(event.target.value)} />{filter && <IconButton label="清除筛选" onClick={() => setFilter("")}><X /></IconButton>}</div>
           <div className="wb-folder-root" title={workspace?.root}><ChevronDown /><FolderOpen /><span>{workspace?.name || "skills"}</span><small>{workspace?.skills.length ?? 0}</small></div>
           <div className="wb-tree">
-            {loading && !workspace && <p className="wb-muted">正在读取团队技能库…</p>}
+            {loading && !workspace && <p className="wb-muted">正在读取 Skills 当前版本…</p>}
             {loadError && <div className="wb-error">{loadError}<button onClick={() => void refresh()}>重试</button></div>}
             {workspace?.skills.map((skill) => {
               const matching = files.filter((file) => file.skill === skill.name && file.id.toLowerCase().includes(filter.toLowerCase()));
@@ -310,7 +379,7 @@ export default function SkillWorkbenchView({ active, user }: {
               const isOpen = !!filter || expanded.has(skill.name);
               return <div key={skill.name}><button type="button" className="wb-tree-row wb-skill-folder" aria-expanded={isOpen} title={skill.description || skill.relative_path} onClick={() => toggleFolder(skill.name)}>
                 {isOpen ? <ChevronDown /> : <ChevronRight />}{isOpen ? <FolderOpen className="wb-folder-icon" /> : <Folder className="wb-folder-icon" />}<span>{skill.name}</span>
-                {!!skill.version && <small className="wb-skill-version" title="团队技能库当前版本">v{skill.version}</small>}
+                {!!skill.version && <small className="wb-skill-version" title="Skill 当前正式版本">v{skill.version}</small>}
               </button>{isOpen && renderNodes(fileTree(matching.map((file) => file.path)), skill.name, 1)}</div>;
             })}
             {workspace && !(filter ? files.filter((file) => file.id.toLowerCase().includes(filter.toLowerCase())) : files).length && <p className="wb-muted">{filter ? "没有匹配的文件" : "团队技能库中暂无 Skill。"}</p>}
@@ -328,7 +397,7 @@ export default function SkillWorkbenchView({ active, user }: {
               </div>)}
             </div>
             <div className="wb-editor-toolbar">
-              <div className="wb-breadcrumb" title={selectedId}>{selected ? <><span>{selected.skill}</span><ChevronRight /><span>{selected.path}</span></> : <span>选择一个 Skill 开始</span>}</div>
+              <div className="wb-breadcrumb" title={selectedId}>{selected ? <><span>{selected.skill}</span><span>{selected.version ? `编辑基线 v${selected.version}` : "编辑基线版本未知"}</span><ChevronRight /><span>{selected.path}</span></> : <span>选择一个 Skill 开始</span>}</div>
               {selected && <div className="wb-editor-actions">
                 <IconButton label="代码" pressed={editorMode === "code"} onClick={() => setEditorMode("code")}><Code2 /></IconButton>
                 {selected.path.endsWith(".md") && <IconButton label="Markdown 预览" pressed={editorMode === "preview"} onClick={() => setEditorMode("preview")}><Files /></IconButton>}
@@ -371,7 +440,7 @@ export default function SkillWorkbenchView({ active, user }: {
         </main>
         <aside className="wb-debug" aria-label="Skill 调试配置">
           <div role="separator" aria-label="调整调试配置宽度" aria-orientation="vertical" className="wb-resize wb-resize-left" onPointerDown={(event) => resize(event, "debug")} />
-          {skillName && skillMd?.editable ? <WorkbenchView key={skillName} active={active} user={user} compact embedded lockedSkillName={skillName} externalDraftMd={skillMd.content} externalFiles={candidateFiles} onRunChange={onRunChange} runSignal={runSignal} />
+          {skillName && skillMd?.editable ? <WorkbenchView key={`${cloudConnection}:${skillName}`} active={active} user={user} compact embedded lockedSkillName={skillName} externalDraftMd={skillMd.content} externalVersion={skillMd.version} externalFiles={candidateFiles} onRunChange={onRunChange} runSignal={runSignal} />
             : <div className="wb-debug-empty"><div className="wb-section-heading">运行与调试</div><FlaskConical /><h3>让修改经过真实验证</h3><p>打开一个 Skill 文件，选择 Test Dataset，即可运行 True Replay。</p><ol><li>打开并编辑代码</li><li>选择或新建数据集</li><li>运行后查看分支 Trace</li></ol></div>}
         </aside>
       </div>

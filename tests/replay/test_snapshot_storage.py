@@ -157,7 +157,7 @@ def test_historical_sampling_hydrates_snapshot_references(pg_env):
         recent.update(case_id="recent", query="New task")
         fixed = await freeze_candidate_cases(
             conn, pg_env.tx, tenant_id="alpha", candidate_id="candidate", skill_name="demo",
-            detail={"replay_cases": [recent]}, seed="fixed",
+            detail={"replay_cases": [recent]}, seed="fixed", historical_count=3,
         )
         assert fixed["replay_sampling"]["historical_selected"] == 3
         assert len(fixed["replay_cases"]) == 4

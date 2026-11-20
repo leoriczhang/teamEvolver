@@ -1,9 +1,9 @@
-"""PostgreSQL Skill library, candidates, experiences, transfer and Workbench APIs.
+"""Skill library, Candidates, transfer and Workbench across MA and PG stores.
 
-All authoritative reads use PostgreSQL. Mutations validate the bundle and write
-immutable versions atomically; an Idempotency-Key replays the first committed
-result. Rebuildable runtime caches refresh after commit and cache failures do
-not invalidate the committed version. Agents obtain snapshots by pull."""
+MA queries read native cloud versions and writes return durable Worker commands.
+Non-MA Skills keep atomic PG versions and pull distribution. Idempotency keys
+preserve the first accepted command; runtime caches are rebuildable.
+"""
 
 from __future__ import annotations
 
@@ -61,6 +61,8 @@ def create_router(services=None, **kwargs) -> APIRouter:
     router.include_router(workbench_router(services))
     from .prompts import create_router as prompts_router
     router.include_router(prompts_router(services))
+    from .store_scope import install
+    install(router, services)
     return router
 
 
@@ -216,6 +218,10 @@ def _register_library_reads(router: APIRouter, ctx: _SkillsContext) -> None:
             {
                 "name": head["name"],
                 "skill_id": head["skill_id"],
+                "backend": head.get("backend", "postgres"),
+                "connection_id": head.get("connection_id"),
+                "bound_version": head.get("bound_version"),
+                "bound_versions": head.get("bound_versions", {}),
                 "version": head["version"],
                 "description": head["description"],
                 "category": head["category"],
@@ -229,7 +235,13 @@ def _register_library_reads(router: APIRouter, ctx: _SkillsContext) -> None:
             }
             for head in heads
         ]
-        return {"skill_backend": "postgres", "delivery_mode": "pull", "skills": skills}
+        backend = "managed-agents" if any(h.get("backend") == "managed-agents" for h in heads) else "postgres"
+        from team_skills.library.store import snapshot
+        cloud = snapshot(ctx.tx)
+        if not heads and cloud is not None and cloud.connections:
+            backend = "managed-agents"
+        return {"skill_backend": backend, "delivery_mode": "cloud" if backend == "managed-agents" else "pull",
+                "skills": skills}
 
     @router.get("/api/skills/{name}")
     async def get_skill(name: str):  # noqa: ANN202
@@ -245,6 +257,9 @@ def _register_library_reads(router: APIRouter, ctx: _SkillsContext) -> None:
         files = sorted(bundle)
         return {
             "name": name,
+            "skill_backend": head.get("backend", "postgres"),
+            "connection_id": head.get("connection_id"),
+            "skill_id": head.get("skill_id"),
             "version": head["version"],
             "description": head["description"],
             "category": head["category"],
@@ -312,6 +327,8 @@ def _register_library_reads(router: APIRouter, ctx: _SkillsContext) -> None:
 
 
 def _register_library_writes(router: APIRouter, ctx: _SkillsContext) -> None:
+    from team_skills.evolution.reset import retire_manual_commit
+
     @router.post("/api/skills")
     async def save_skill(request: Request):  # noqa: ANN202
         """Create or overwrite a skill's SKILL.md from fields (or raw ``skill_md``).
@@ -340,6 +357,7 @@ def _register_library_writes(router: APIRouter, ctx: _SkillsContext) -> None:
                     limits=limits, actor=_actor(request), source="console",
                     base_version=int(base_version) if base_version is not None else None,
                 )
+                await retire_manual_commit(conn, ctx.tx, commit, tenant_id=tenant_id, actor=_actor(request))
         except SkillLibraryError as exc:
             raise _http_error(exc) from exc
         cache = ctx.refresh_cache(tenant_id, name, bundle)
@@ -376,6 +394,7 @@ def _register_library_writes(router: APIRouter, ctx: _SkillsContext) -> None:
                     conn, tenant_id=tenant_id, name=name, bundle=bundle, mutation_id=mutation_id,
                     limits=limits, actor=_actor(request), source="console",
                 )
+                await retire_manual_commit(conn, ctx.tx, commit, tenant_id=tenant_id, actor=_actor(request))
         except SkillLibraryError as exc:
             raise _http_error(exc) from exc
         cache = ctx.refresh_cache(tenant_id, name, bundle)
@@ -404,6 +423,7 @@ def _register_library_writes(router: APIRouter, ctx: _SkillsContext) -> None:
                     conn, tenant_id=tenant_id, name=name, bundle=bundle, mutation_id=mutation_id,
                     limits=limits, actor=_actor(request), source="console",
                 )
+                await retire_manual_commit(conn, ctx.tx, commit, tenant_id=tenant_id, actor=_actor(request))
         except SkillLibraryError as exc:
             raise _http_error(exc) from exc
         cache = ctx.refresh_cache(tenant_id, name, bundle)
@@ -422,6 +442,7 @@ def _register_library_writes(router: APIRouter, ctx: _SkillsContext) -> None:
                     conn, tenant_id=tenant_id, name=name, target_version=int(target_version),
                     mutation_id=mutation_id, actor=_actor(request), source="console",
                 )
+                await retire_manual_commit(conn, ctx.tx, commit, tenant_id=tenant_id, actor=_actor(request))
                 bundle = await ctx.library.read_version_bundle(conn, name, commit.version)
         except SkillLibraryError as exc:
             raise _http_error(exc) from exc
@@ -444,6 +465,7 @@ def _register_library_writes(router: APIRouter, ctx: _SkillsContext) -> None:
                     conn, tenant_id=tenant_id, name=name, mutation_id=mutation_id,
                     actor=_actor(request), source="console",
                 )
+                await retire_manual_commit(conn, ctx.tx, commit, tenant_id=tenant_id, actor=_actor(request))
         except SkillLibraryError as exc:
             raise _http_error(exc) from exc
         cache = ctx.refresh_cache(tenant_id, name, None)

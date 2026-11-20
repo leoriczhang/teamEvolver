@@ -4,9 +4,12 @@ from __future__ import annotations
 import copy
 from collections.abc import Mapping
 
+from .skill_versions import session_skill_versions
+from .submission import request_title
+
 
 def _clean_title(value) -> str:
-    return " ".join(str(value or "").split())[:120]
+    return request_title(value)
 
 
 def _session_title(session: Mapping, meta: Mapping) -> str:
@@ -27,7 +30,7 @@ def _session_title(session: Mapping, meta: Mapping) -> str:
     return ""
 
 
-def session_list_meta(session: Mapping, meta: Mapping | None = None) -> dict:
+def session_list_meta(session: Mapping, meta: Mapping | None = None, *, skill_names=None) -> dict:
     result = copy.deepcopy(dict(meta or session.get("meta") or {}))
     turns = [turn for turn in session.get("turns") or [] if isinstance(turn, Mapping)]
     evidence_turns = [
@@ -74,8 +77,36 @@ def session_list_meta(session: Mapping, meta: Mapping | None = None) -> dict:
     if available_skills:
         result["available_skills"] = available_skills
     title = _session_title(session, result)
+    result["title_projection_empty"] = not bool(title)
     if title:
         result["title"] = title
     if trace_id:
         result["trace_id"] = trace_id
+    versions = session_skill_versions(session, skill_names, meta=result)
+    graph = runtime.get("agent_graph") or {}
+    configured_keys = {
+        (str(ident), ref.get("skill_id"))
+        for ident, agent in (graph.get("agents") or {}).items() if isinstance(agent, Mapping)
+        for ref in agent.get("skills") or [] if isinstance(ref, Mapping) and ref.get("skill_id")
+    }
+    configured = [row for row in versions if (row["agent_id"], row["skill_id"]) in configured_keys]
+    fields = ("name", "skill_id", "version", "agent_id", "agent_name", "unknown_reason")
+    result["used_skill_versions"] = [
+        {key: row[key] for key in fields} for row in versions if row["usage"] == "used"
+    ]
+    result["available_skill_versions"] = [
+        {key: row[key] for key in fields} for row in configured
+    ]
+    # An archive produced without the name reader is enriched once by the list
+    # query. Cache only the compact projection, never the full runtime graph.
+    result["skill_versions_revision"] = int(
+        skill_names is not None or all(row["name"] != row["skill_id"] for row in versions)
+    )
+    result["used_skills"] = list(dict.fromkeys([
+        *used_skills, *(row["name"] for row in versions if row["usage"] == "used"),
+    ]))
+    if available_skills or result["available_skill_versions"]:
+        result["available_skills"] = list(dict.fromkeys([
+            *available_skills, *(row["name"] for row in configured),
+        ]))
     return result

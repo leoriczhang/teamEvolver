@@ -2,21 +2,23 @@ import { api } from "@/api/client";
 import { type UserProfile,type UsersListResp } from "@/features/admin/api/client";
 import { toastErr,toastOk } from "@/lib/toast";
 import { useCallback,useEffect,useMemo,useRef,useState } from "react";
-import { GROUP_URI_PREFIX,ScopeConfig,SpaceConfig,SpaceKey,TreeResponse,WORKSPACE_SPACES,WorkspaceConfig,WorkspaceDraft,WorkspaceEntry,buildSpaceTree,filterTree,groupUri,initialSpace,parentUri } from "./OpenVikingWorkspaceShellShared";
+import { GROUP_URI_PREFIX,LibraryKind,ScopeConfig,SpaceConfig,SpaceKey,TreeResponse,WORKSPACE_LIBRARIES,WorkspaceConfig,WorkspaceDraft,WorkspaceEntry,buildSpaceTree,filterTree,groupUri,initialSpace,parentUri } from "./OpenVikingWorkspaceShellShared";
 
 export function useOpenVikingWorkspaceShell({
   active,
   user,
+  library = "memory",
 }: {
   active: boolean;
   user?: UserProfile | null;
+  library?: LibraryKind;
 }) {
 const [users, setUsers] = useState<UserProfile[]>([]);
 const [activeUserId, setActiveUserId] = useState(
     () => window.localStorage.getItem("teamEvolver.activeUserId") || user?.id || "",
   );
 const [config, setConfig] = useState<WorkspaceConfig | null>(null);
-const spaces = WORKSPACE_SPACES;
+const spaces = WORKSPACE_LIBRARIES[library];
 const [activeSpaceKey, setActiveSpaceKey] = useState<SpaceKey>(spaces[0].key);
 const [entries, setEntries] = useState<WorkspaceEntry[]>([]);
 const [currentUri, setCurrentUri] = useState("");
@@ -159,7 +161,7 @@ const loadConfig = useCallback(
         );
         if (loadId !== configLoadIdRef.current) return;
         setConfig(result);
-        const first = initialSpace();
+        const first = initialSpace(library);
         setActiveSpaceKey(first.key);
         if (result.enabled) {
           await loadSpace(first, userId, result);
@@ -173,7 +175,7 @@ const loadConfig = useCallback(
         }
       }
     },
-    [loadSpace],
+    [loadSpace, library],
   );
 useEffect(() => {
     if (!active) return;
@@ -184,12 +186,14 @@ useEffect(() => {
         const preferred =
           activeUserId && list.some((item) => item.id === activeUserId)
             ? activeUserId
-            : user?.id || list[0]?.id || "";
+            : list.some((item) => item.id === user?.id)
+              ? user!.id
+              : list[0]?.id || user?.id || "";
         setActiveUserId(preferred);
         if (preferred) void loadConfig(preferred);
       })
       .catch((error) => toastErr("加载用户失败", error.message));
-  }, [active]);
+  }, [active, loadConfig]);
 useEffect(() => {
     if (!draftList.length) return;
     const warnBeforeUnload = (event: BeforeUnloadEvent) => {

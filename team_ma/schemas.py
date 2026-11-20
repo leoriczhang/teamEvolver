@@ -14,6 +14,7 @@ DEFAULTS = {
     "team_evolver_url": "http://127.0.0.1:52010", "user_tag_prefix": "te-user:",
     "poll_interval_seconds": 60, "sync_interval_seconds": 30, "vault_ids": [],
     "replay_enabled": False, "replay_environment_id": "", "replay_vault_ids": [], "runtime_binding": {},
+    "default_user_id": "",
 }
 FIELDS = set(DEFAULTS) | {"display_name", "entry_agent_id", "environment_id", "default_user_id",
                          "ma_secret_ref", "tenant_token_ref", "replay_isolation", "enabled"}
@@ -41,13 +42,17 @@ def validate_config(raw):
     result = {**DEFAULTS, **raw}
     if result["provider"] != DEFAULTS["provider"]:
         raise ValueError("Unsupported MA provider")
-    for key in ("display_name", "entry_agent_id", "environment_id", "default_user_id",
+    for key in ("display_name", "entry_agent_id", "environment_id",
                 "ma_secret_ref", "tenant_token_ref"):
         if not isinstance(result.get(key), str) or not result[key].strip() or len(result[key]) > 200:
             raise ValueError(f"{key} is required (1–200 characters)")
         result[key] = result[key].strip()
     result["ma_base_url"] = validate_url(result["ma_base_url"])
-    result["default_user_id"] = normalize_user_id(result["default_user_id"])
+    if not isinstance(result["default_user_id"], str) or len(result["default_user_id"]) > 200:
+        raise ValueError("default_user_id must be a string of at most 200 characters")
+    result["default_user_id"] = result["default_user_id"].strip()
+    if result["default_user_id"]:
+        result["default_user_id"] = normalize_user_id(result["default_user_id"])
     target = urlsplit(result["team_evolver_url"])
     if target.scheme not in {"http", "https"} or not target.hostname or target.username or target.password:
         raise ValueError("Invalid team_evolver_url")
@@ -65,8 +70,10 @@ def validate_config(raw):
         raise ValueError("user_tag_prefix must contain 1–100 characters")
     if not isinstance(result["replay_environment_id"], str) or len(result["replay_environment_id"]) > 200:
         raise ValueError("Invalid replay_environment_id")
-    if result["replay_enabled"] and not result["replay_environment_id"]:
-        raise ValueError("replay_environment_id is required for isolated Replay")
+    if result["replay_environment_id"] == result["environment_id"]:
+        raise ValueError("Replay must use a separate Environment")
+    if set(result["replay_vault_ids"]) & set(result["vault_ids"]):
+        raise ValueError("Replay must use separate Vaults")
     if not isinstance(result["runtime_binding"], dict):
         raise ValueError("runtime_binding must be an object")
     isolation = result.get("replay_isolation") or {}

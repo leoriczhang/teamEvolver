@@ -1,6 +1,6 @@
 # 进化闭环
 
-进化闭环把 Agent 的真实工作转化为团队 Skill 版本：Session 接入 → 强制分析 → Skill Evolution 生成 Skill Candidate → True Replay 验证 → Candidate Review 与 Publish → Agent 拉取。每一步都是持久化的 Worker 任务，任何 API 或 Worker 副本都可以接手。
+进化闭环把 Agent 的真实工作转化为团队 Skill 版本：Session 接入 → 强制分析 → Skill Evolution 生成 Skill Candidate → Candidate Validation → Candidate Review 与 Publish → Agent 拉取。每一步都是持久化的 Worker 任务，任何 API 或 Worker 副本都可以接手。
 
 ## 闭环总览
 
@@ -14,7 +14,7 @@
                                      skill.evolve：按 Skill 分组规划 → Skill Candidate
                                                      │ auto_evaluate 或手动 evaluate/validate
                                                      ▼
-                                     skill.validate：静态检查 + True Replay
+                                     skill.validate：静态检查 + 候选验证
                                                      │ accept / reject / inconclusive
                                                      ▼
                          Candidate Review ──► Publish（新版本）──► GET /sync/skills
@@ -66,11 +66,14 @@ Test Dataset 与 Skill 规划并行、独立生成。每个 Candidate 携带由�
 | `POST /api/skill-candidates/{id}/validate` `{"mode":"auto"}` | `auto` | 静态检查通过、运行时门禁通过且 verdict 为 accept 时发布；reject 时拒绝 |
 | `POST /api/skill-candidates/{id}/validate` `{"mode":"force"}` | `force` | 静态检查和运行时门禁通过时发布，不要求 accept |
 
-`skill.validate` 固定 Candidate revision、Baseline 版本、`replay` 配置 revision 和租户绑定的 Replay Adapter revision，然后执行静态检查和 True Replay。静态检查不通过时 verdict 一律为 reject；运行时门禁未通过时 accept 降为 inconclusive。
+`skill.validate` 固定 Candidate revision、Baseline 版本、当前 Evidence、`replay` 配置 revision
+和租户绑定的 Replay Adapter revision。Worker 根据改动影响选择经验审阅或一个相关 Candidate
+场景执行；完整 A/B 仅显式选择时运行。静态检查不通过时 verdict 为 reject；所选方式的门禁
+未通过时 accept 降为 inconclusive。候选完成事实与 A/B 效率独立保存，历史 Case 不默认追加。
 
 ### 6. Candidate Review 与 Publish
 
-管理员在控制台查看 Evidence、diff、静态检查和 True Replay 结果，可以：
+管理员在控制台查看 Evidence、diff、静态检查和候选验证结果，可以：
 
 - 编辑内容：`PUT /api/skill-candidates/{id}/content`（携带 `candidate_revision` 做乐观锁）
 - 标记反馈：`PATCH /api/skill-candidates/{id}/feedback`

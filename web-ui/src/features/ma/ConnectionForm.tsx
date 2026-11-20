@@ -4,6 +4,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useState } from "react";
 import { saveConnection, type MAConnection, type MAJob } from "./api/client";
+import ReplayResources from "./ReplayResources";
 
 export default function ConnectionForm({ connection, onClose, onSaved }: {
   connection?: MAConnection; onClose: () => void; onSaved: (job?: MAJob) => void;
@@ -33,7 +34,6 @@ export default function ConnectionForm({ connection, onClose, onSaved }: {
       if (!connection && (!draft.ma_api_key.trim() || !draft.tenant_token.trim())) {
         throw new Error("请填写 MA Key 和当前租户 Key");
       }
-      if (draft.replay_enabled && !draft.replay_environment_id.trim()) throw new Error("请指定回放环境");
       const result = await saveConnection({
         ...draft, expected_revision: connection?.revision || 0,
         vault_ids: list(draft.vault_ids), replay_vault_ids: list(draft.replay_vault_ids),
@@ -57,20 +57,18 @@ export default function ConnectionForm({ connection, onClose, onSaved }: {
       <DialogHeader><DialogTitle>{connection ? "编辑 MA 连接" : "接入 Managed Agent"}</DialogTitle></DialogHeader>
       <form onSubmit={submit} className="space-y-5">
         <div className="grid gap-3 sm:grid-cols-2">
-          {field("display_name", "连接名称")}{field("default_user_id", "默认用户 ID")}
+          {field("display_name", "连接名称")}{field("default_user_id", "默认归属用户 ID（可选）", "text", false)}
           {field("entry_agent_id", "入口 Agent ID")}{field("environment_id", "业务 Environment ID")}
           {field("ma_api_key", connection ? "MA Key（留空保留）" : "MA Key", "password", !connection)}
           {field("tenant_token", connection ? "租户 Key（留空保留）" : "当前租户 Key（tevt_）", "password", !connection)}
         </div>
+        <p className="text-xs text-muted-foreground">原会话缺少提交人信息时，默认归属留空会显示“未知提交人”。仅在确认归属时填写。</p>
         <p className="text-xs text-muted-foreground">凭证保存后仅显示配置状态。已有会话保持其固定版本，新会话使用完整应用的发布版本。</p>
         <label className="flex items-center gap-2 text-sm">
           <input type="checkbox" checked={draft.replay_enabled}
             onChange={e => setDraft(v => ({ ...v, replay_enabled: e.target.checked }))} />启用隔离 MA True Replay
         </label>
-        {draft.replay_enabled && <div className="grid gap-3 sm:grid-cols-2">
-          {field("replay_environment_id", "回放 Environment ID")}
-          {field("replay_vault_ids", "回放 Vault ID（逗号分隔）", "text", false)}
-        </div>}
+        {draft.replay_enabled && <ReplayResources connection={connection} />}
         <details className="rounded-lg border p-3">
           <summary className="cursor-pointer text-sm font-semibold">连接、归属与运行时配置</summary>
           <div className="mt-3 grid gap-3 sm:grid-cols-2">

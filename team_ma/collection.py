@@ -6,6 +6,8 @@ import base64
 import hashlib
 from datetime import datetime, timedelta, timezone
 
+from session_ingestion.submission import SUBMISSION_REVISION, apply_submission, submission_metadata
+from teamEvolver.managed_agents import MAError
 from teamEvolver.managed_agents.events import child_threads, complete, metrics, stable_end, tag_values, turns
 from teamEvolver.storage.postgres import PostgresObjectStore
 
@@ -122,7 +124,22 @@ async def collect_one(task, services, client, connection, session_id, excluded):
     repo, config = MARepository(services.tx), connection["config"]
     if session_id in excluded:
         return "replay_excluded"
-    session = await client.request("GET", f"sessions/{session_id}")
+    try:
+        session = await client.request("GET", f"sessions/{session_id}")
+    except MAError as exc:
+        if exc.status != 404:
+            raise
+        # Remote retention/deletion is per Session, not a failed connection.
+        # Keep accepted range provenance and retry on subsequent collections.
+        async with services.tx.tenant_tx(task.tenant_id) as conn:
+            await services.tasks.require_current(conn, task)
+            cursor = await repo.cursor(conn, task.subject_id, session_id)
+            await repo.save_cursor(
+                conn, tenant_id=task.tenant_id, connection_id=task.subject_id, session_id=session_id,
+                record={**((cursor or {}).get("record") or {}), "status": "unavailable",
+                        "last_pulled_at": datetime.now(timezone.utc).isoformat(), "error": "ma_session_not_found"},
+            )
+        return "unavailable"
     tags = tag_values(session.get("tags"))
     if any(str(tag).startswith("te-replay:") for tag in tags):
         return "replay_excluded"
@@ -132,6 +149,7 @@ async def collect_one(task, services, client, connection, session_id, excluded):
         cursor = await repo.cursor(conn, task.subject_id, session_id)
     previous = (cursor or {}).get("record") or {}
     record = {**previous, "status": session.get("status"), "last_pulled_at": datetime.now(timezone.utc).isoformat()}
+    record.pop("error", None)
     formal_session_id = "session_ma_" + digest([task.subject_id, session_id])[:32]
     events_hash = digest(all_events)
     if not end or not children_done or session.get("status") in {"running", "rescheduling", "requires_action"}:
@@ -146,8 +164,25 @@ async def collect_one(task, services, client, connection, session_id, excluded):
     )
     refresh_projection = bool(previous) and previous.get("projection_revision") != PROJECTION_REVISION
     same_boundary = previous.get("end_event_id") == end["id"]
+    attribution = [str(t)[len(config["user_tag_prefix"]):] for t in tags
+                   if str(t).startswith(config["user_tag_prefix"])]
+    if len(set(attribution)) > 1:
+        raise ValueError("Conflicting MA user attribution tags")
+    submission = submission_metadata(
+        {"session_id": formal_session_id, "title": session.get("title"), "turns": turns(main)},
+        tagged_user_id=attribution[0] if attribution else "", default_user_id=config["default_user_id"],
+    )
     if (same_boundary and not migrating_legacy_ranges and not refresh_projection
             and previous.get("events_hash") == events_hash):
+        if (previous.get("submission_revision") != SUBMISSION_REVISION
+                or any(previous.get(key) != value for key, value in submission.items())):
+            from session_ingestion.commands import correct_ma_submission
+            await correct_ma_submission(
+                services, tenant_id=task.tenant_id, connection_id=task.subject_id,
+                parent_session_id=session_id, metadata=submission,
+                ingestion_ids=[str(previous.get("job_id") or "").removesuffix(":session.normalize")],
+            )
+            record.update(submission)
         async with services.tx.tenant_tx(task.tenant_id) as conn:
             await services.tasks.require_current(conn, task)
             await repo.save_cursor(conn, tenant_id=task.tenant_id, connection_id=task.subject_id,
@@ -173,7 +208,8 @@ async def collect_one(task, services, client, connection, session_id, excluded):
     resource_rows = []
     async with services.tx.tenant_tx(task.tenant_id) as conn:
         resource_rows = await repo.all_resources(conn, task.subject_id, kind="skill")
-    skill_names = {r["record"]["id"]: r["logical_name"] for r in resource_rows}
+    # Candidate targets have no remote Skill ID until they are published.
+    skill_names = {r["record"]["id"]: r["logical_name"] for r in resource_rows if r["record"].get("id")}
     runtime = await runtime_snapshot(client, session)
     binding = config.get("runtime_binding") or {}
     working = str(binding.get("working_directory") or "").rstrip("/")
@@ -186,13 +222,7 @@ async def collect_one(task, services, client, connection, session_id, excluded):
     if not new_turns or not any(t.get("response_text") or len(t["messages"]) > 1 for t in new_turns):
         return "empty"
     projected = turns(accepted_events, skill_names, skill_paths)
-    attribution = [str(t)[len(config["user_tag_prefix"]):] for t in tags
-                   if str(t).startswith(config["user_tag_prefix"])]
-    if len(set(attribution)) > 1:
-        raise ValueError("Conflicting MA user attribution tags")
-    user_id = attribution[0] if attribution else config["default_user_id"]
-    from teamEvolver.security.agent_principal import normalize_user_id
-    user_id = normalize_user_id(user_id)
+    user_id = submission["user_id"]
     raw = await save_object(services, task.tenant_id, "events", canonical(accepted_events).encode())
     source_materials, missing = await materials(
         client, accepted_main, services, task.tenant_id, session.get("resources") or [],
@@ -215,16 +245,17 @@ async def collect_one(task, services, client, connection, session_id, excluded):
         "runtime_context": {"user_id": user_id, "account_id": task.tenant_id,
                             "source_session_id": session_id, "connection_id": task.subject_id,
                             "formal_session_id": formal_session_id,
-                            "user_attribution": "tag" if attribution else "connection_default"},
+                            "user_attribution": submission["user_attribution"]},
         "turns": projected, "messages": [m for t in projected for m in t["messages"]],
         "business_time": projected[0]["timestamp"], "timestamp": projected[0]["timestamp"],
         "source_materials": source_materials, "metrics": metrics(accepted_events),
         "meta": {"ma_connection_id": task.subject_id, "ma_parent_session_id": session_id,
                  "ma_range_id": range_id, "ma_end_event_id": end["id"],
                  "business_time": projected[0]["timestamp"], "pulled_at": record["last_pulled_at"],
-                 "user_id": user_id, "user_attribution": "tag" if attribution else "connection_default",
+                 "user_id": user_id, "user_attribution": submission["user_attribution"],
                  "raw_events": raw},
     }
+    envelope = apply_submission(envelope, submission)
     job = await services.extras["ma_accept_session"](
         tenant_id=task.tenant_id, source="pull", external_id=range_id, user_id=user_id, account_id=task.tenant_id,
         session=envelope, business_time=projected[0]["timestamp"],
@@ -233,7 +264,7 @@ async def collect_one(task, services, client, connection, session_id, excluded):
     record.update({"end_event_id": end["id"], "range_id": range_id, "formal_session_id": formal_session_id,
                    "projection_revision": PROJECTION_REVISION, "events_hash": events_hash,
                    "job_id": job.job_id,
-                   "business_time": projected[0]["timestamp"], "user_id": user_id})
+                   "business_time": projected[0]["timestamp"], **submission})
     async with services.tx.tenant_tx(task.tenant_id) as conn:
         await services.tasks.require_current(conn, task)
         await repo.save_cursor(conn, tenant_id=task.tenant_id, connection_id=task.subject_id,
@@ -278,7 +309,7 @@ async def collect_connection(task, services, client, connection, operation):
     async with services.tx.tenant_tx(task.tenant_id) as conn:
         await services.tasks.require_current(conn, task)
         await repo.checkpoint(conn, task.task_id, checkpoint, result)
-        await repo.status(conn, task.subject_id, "ready", connection["detail"], collected=True)
+        await repo.operation_status(conn, task.subject_id, "ma.collect")
         if next_page or more_known:
             from .commands import enqueue
             progress = {"page": next_page, "remote_complete": not next_page,

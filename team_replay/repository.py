@@ -67,23 +67,60 @@ class ReplayRepository:
             results[row["case_id"]] = result
         return results
 
+    async def reusable_candidate_cases(self, conn, job):
+        """Reuse only matching Candidate revision, materials, scope and execution."""
+        from .completion import candidate_complete
+
+        rows = await conn.fetch(
+            f"SELECT run_id FROM {self.table('skill')} WHERE subject_id=$1 "
+            "ORDER BY created_at DESC LIMIT 30", job["skill_ids"][0],
+        )
+        reusable = {}
+        for row in rows:
+            run = await self.get(conn, "skill", row["run_id"])
+            previous = run["input"].get("job") or {}
+            if job.get("validation_method") == "full_ab" and previous.get("validation_method", "full_ab") != "full_ab":
+                continue
+            if any(previous.get(k) != job.get(k) for k in (
+                "job_id", "candidate_revision", "candidate_skill", "current_skill",
+                "replay_config", "replay_adapter", "ma_records",
+            )):
+                continue
+            old_cases = {c["case_id"]: c for c in previous.get("replay_cases") or []}
+            matching = {c["case_id"] for c in job.get("replay_cases") or []
+                        if old_cases.get(c["case_id"]) == c}
+            if not matching:
+                continue
+            for case_id, result in (await self.cases(conn, "skill", row["run_id"])).items():
+                pending = any(p.get("candidate", {}).get("status") == "assessment_pending"
+                              for p in result.get("cases") or [])
+                if case_id in matching and case_id not in reusable and (candidate_complete(result) or pending):
+                    reusable[case_id] = {**result, "reused_from": row["run_id"]}
+        return reusable
+
     async def progress(self, conn, domain, run_id):
         """Count checkpoints without loading full Agent trajectories."""
         row = await conn.fetchrow(
             f"SELECT count(*) AS completed, count(*) FILTER (WHERE "
             "result #>> '{cases,0,baseline,completed}' = 'true' AND "
-            "result #>> '{cases,0,candidate,completed}' = 'true') AS succeeded "
+            "result #>> '{cases,0,candidate,completed}' = 'true') AS succeeded, "
+            "count(*) FILTER (WHERE result #>> '{cases,0,candidate,completed}' = 'true') AS candidate_completed "
             f"FROM {self.table(domain, 'cases')} WHERE run_id=$1",
             safe_id(run_id),
         )
         completed, succeeded = int(row["completed"]), int(row["succeeded"])
-        return {"completed": completed, "succeeded": succeeded, "failed": completed - succeeded}
+        return {"completed": completed, "succeeded": succeeded, "failed": completed - succeeded,
+                "candidate_completed": int(row["candidate_completed"])}
 
     async def save_case(self, conn, *, tenant_id, domain, run_id, case, result):
         await conn.execute(
             f"INSERT INTO {self.table(domain, 'cases')} "
             "(tenant_id,run_id,case_id,input_hash,result,result_hash) VALUES($1,$2,$3,$4,$5::jsonb,$6) "
-            "ON CONFLICT DO NOTHING",
+            "ON CONFLICT (tenant_id,run_id,case_id) DO UPDATE SET "
+            "result=EXCLUDED.result,result_hash=EXCLUDED.result_hash "
+            f"WHERE {self.table(domain, 'cases')}.input_hash=EXCLUDED.input_hash AND "
+            f"({self.table(domain, 'cases')}.result #>> '{{cases,0,candidate,status}}'='assessment_pending' OR "
+            f"{self.table(domain, 'cases')}.result #>> '{{cases,0,baseline,status}}'='assessment_pending')",
             tenant_id, run_id, safe_id(case["case_id"]), stable_hash(case), json.dumps(result), stable_hash(result),
         )
 
@@ -100,6 +137,25 @@ class ReplayRepository:
             subject_id, dataset_id, min(500, max(1, limit)), max(0, offset),
         )
         return [await self.get(conn, domain, row["run_id"]) for row in rows]
+
+    async def summaries(self, conn, domain, *, subject_id="", limit=100):
+        """List metadata without hydrating Session inputs or Agent trajectories."""
+        rows = await conn.fetch(
+            f"SELECT run_id,subject_id,dataset_id,created_at,finished_at,"
+            "CASE WHEN pg_column_size(input)<=65536 THEN input #>> '{dataset,document,name}' END AS dataset_name,"
+            "CASE WHEN pg_column_size(input)<=65536 THEN COALESCE(input #> '{spec,metadata,skill_versions}',"
+            "CASE WHEN input #>> '{job,baseline_ref,revision}' IS NOT NULL THEN "
+            "jsonb_build_object(subject_id,input #> '{job,baseline_ref,revision}') END) END AS skill_versions,"
+            "CASE WHEN pg_column_size(result)<=65536 THEN "
+            "jsonb_build_object('verdict',COALESCE(result->'verdict',result #> '{replay,verdict}'),"
+            "'reason',COALESCE(result->'reason',result #> '{replay,reason}'),"
+            "'efficiency',COALESCE(result->'efficiency',result #> '{replay,efficiency}')) END AS result_summary "
+            f"FROM {self.table(domain)} WHERE ($1='' OR subject_id=$1) "
+            "ORDER BY created_at DESC,run_id LIMIT $2",
+            subject_id, min(100, max(1, limit)),
+        )
+        return [{**dict(row), "skill_versions": unpack(row["skill_versions"]) or {},
+                 "result_summary": unpack(row["result_summary"])} for row in rows]
 
     async def count(self, conn, domain, *, dataset_id=""):
         return await conn.fetchval(f"SELECT count(*) FROM {self.table(domain)} WHERE ($1='' OR dataset_id=$1)",

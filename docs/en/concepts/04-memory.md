@@ -60,7 +60,7 @@ Both run as `memory.replay` tasks and reuse the Checklist gate and efficiency co
 
 ## Asset Page Editing
 
-"Personal and team assets" browses and edits `viking://user` and `viking://resources` through `/api/openviking/workspace/*`:
+Agent Context → Memory Library browses and edits personal `memories` and shared team Memory directories through `/api/openviking/workspace/*`:
 
 - Browse directories, files and L0/L1 summaries
 - Administrators or asset owners enter edit mode, keep drafts across files, review one Diff and save in batch

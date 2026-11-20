@@ -89,6 +89,18 @@ def create_router(services=None, **kwargs):
         return {"connections": [_public(r) for r in rows],
                 "next_after": rows[-1]["connection_id"] if len(rows) == min(limit, 100) else None}
 
+    @router.get("/api/ma/skill-jobs/{job_id}")
+    async def skill_job(job_id: str):
+        async with services.tx.tenant_tx(current_tenant_id()) as conn:
+            operation = await repo.operation(conn, job_id)
+            task = await services.tasks.get(conn, task_id=job_id)
+            if not operation or operation["kind"] != "ma.skill" or not task:
+                raise HTTPException(404, "Cloud Skill job not found")
+            connection = await repo.connection(conn, operation["connection_id"])
+        failure = ((connection or {}).get("detail", {}).get("operation_errors", {}).get("ma.skill") or {})
+        return {"status": task["status"], "result": operation["result"],
+                "error": failure.get("error") if failure.get("job_id") == job_id else task.get("error_code", "")}
+
     @router.get("/api/ma/connections/{connection_id}")
     async def get_connection(connection_id: str):
         async with services.tx.tenant_tx(current_tenant_id()) as conn:
@@ -127,7 +139,20 @@ def create_router(services=None, **kwargs):
                 config = validate_config({**(previous["config"] if previous else {}), **config})
                 row = await repo.save(conn, tenant_id=current_tenant_id(), connection_id=connection_id,
                                       config=config, expected_revision=expected, actor=actor)
-                if not previous:
+                operational = {"display_name", "poll_interval_seconds", "sync_interval_seconds", "enabled"}
+                rediscover = bool(previous and row["enabled"] and config["replay_enabled"] and
+                                  (not previous["enabled"] or
+                                   {k: v for k, v in config.items() if k not in operational} !=
+                                   {k: v for k, v in previous["config"].items() if k not in operational}))
+                if (previous and config["replay_enabled"] != previous["config"]["replay_enabled"]) or rediscover:
+                    await repo.status(conn, connection_id, row["status"], {
+                        **row["detail"],
+                        "replay_resources": {"status": "preparing" if config["replay_enabled"] else "disabled"},
+                        "replay_capability": {"supported": False,
+                                              "reason": "回放资源准备中" if config["replay_enabled"] else "disabled"},
+                    })
+                    row = await repo.connection(conn, connection_id)
+                if not previous or rediscover:
                     job = await enqueue(conn, services, tenant_id=current_tenant_id(), connection_id=connection_id,
                                         kind="ma.discover",
                                         body={"creation_hash": creation_hash}, operation_id=operation_id)
@@ -194,7 +219,8 @@ def create_router(services=None, **kwargs):
         async with services.tx.tenant_tx(current_tenant_id()) as conn:
             await require(conn, connection_id)
             rows = await repo.resources(conn, connection_id, after=after, limit=limit, kind=kind)
-        keys = {"id", "name", "version", "source_version", "team_version", "tree_sha256", "agents", "status", "drift"}
+        keys = {"id", "name", "version", "source_version", "tree_sha256", "agents", "status", "drift",
+                "latest_version", "bound_version", "bound_versions", "skill_backend"}
         return {"resources": [{**row, "record": {k: v for k, v in row["record"].items() if k in keys}}
                               for row in rows],
                 "next_after": rows[-1]["logical_name"] if len(rows) == min(max(limit, 1), 100) else None}
@@ -216,7 +242,8 @@ def create_router(services=None, **kwargs):
                 raise HTTPException(400, "Unknown target Agent")
             rows = await repo.all_resources(conn, connection_id, kind="skill")
             existing = next((r for r in rows if r["logical_name"] == skill_name), None)
-            record = {**(existing["record"] if existing else {}), "name": skill_name, "agents": body["agent_ids"]}
+            record = {**(existing["record"] if existing else {}), "name": skill_name,
+                      "agents": body["agent_ids"], "desired_agents": body["agent_ids"]}
             try:
                 if not existing and body["expected_revision"] == 0:
                     await repo.create_binding(conn, tenant_id=current_tenant_id(), connection_id=connection_id,
@@ -258,4 +285,14 @@ def create_router(services=None, **kwargs):
 def _release_public(record):
     keys = ("release_id", "manifest_hash", "entry_agent_id", "entry_agent_version", "environment_id",
             "environment_hash", "agents", "skills", "connection_revision", "runtime_tree_sha256", "error", "drift")
-    return {k: record[k] for k in keys if k in record}
+    result = {k: record[k] for k in keys if k in record}
+    environment = record.get("environment") or {}
+    base = record.get("base_environment") or {}
+    alias = record.get("environment_alias") or base.get("name")
+    if not alias and environment.get("name") and not environment["name"].startswith("te-release-"):
+        alias = environment["name"]
+    if alias:
+        result["environment_alias"] = alias
+    if environment.get("name"):
+        result["environment_name"] = environment["name"]
+    return result

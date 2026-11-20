@@ -1,4 +1,4 @@
-import { api,tenantHeaders } from "@/api/client";
+import { api,tenantHeaders,waitCloudSkill } from "@/api/client";
 
 /** Submit once, then follow the persisted job using the original tenant. */
 export async function runSkillCommand<T>(
@@ -23,6 +23,18 @@ export async function runSkillCommand<T>(
       );
       const result = response.result;
       if (!result) throw new Error("任务完成但结果尚不可用");
+      if (result.status === "accepted" && String(result.job_id).startsWith("ma-skill:")) {
+        return await waitCloudSkill(result, headers, init.signal || undefined) as T;
+      }
+      if (Array.isArray(result.imported)) {
+        result.imported = await Promise.all(result.imported.map(async item => {
+          if (item.status !== "accepted" || !String(item.job_id).startsWith("ma-skill:")) return item;
+          const written = await waitCloudSkill({
+            job_id: item.job_id, result_url: `/api/ma/skill-jobs/${item.job_id}`,
+          }, headers, init.signal || undefined);
+          return { ...item, ...written, status: "updated" };
+        }));
+      }
       return (result.status === "evaluated" ? result.evaluation : result) as T;
     }
     await new Promise((resolve) => setTimeout(resolve, 2000));

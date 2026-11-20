@@ -67,9 +67,10 @@ def create_router(services):
         try:
             async with tx.tenant_tx(current_tenant_id()) as conn:
                 document = await repo.get(conn, dataset_id)
+                archived = await repo.archives(conn, dataset_id, document["revision"])
             rows = [case for case in document["cases"] if search.casefold() in case["query"].casefold()]
             return {**document, "cases": rows[max(0, offset):max(0, offset) + min(500, max(1, limit))],
-                    "total": len(rows)}
+                    "total": len(rows), "archived_cases": archived}
         except ERRORS as exc:
             raise error(exc) from exc
 

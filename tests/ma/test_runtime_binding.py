@@ -126,3 +126,26 @@ def test_runtime_rejects_unsupported_archive_compression(compression):
                "working_directory": "/workspace/example", "archive_compression": compression}
     with pytest.raises(ValueError, match="archive_compression"):
         bind_runtime({"type": "cloud"}, binding, {"runtime/a": b"data"})
+
+
+def test_runtime_declares_dependencies_to_ma_and_preserves_source_packages():
+    source = {"type": "cloud", "packages": {"apt": ["ffmpeg"], "pip": ["httpx==0.28.1"]}}
+    binding = {"paths": [{"bundle_prefix": "runtime/", "workspace_prefix": "runtime/"}],
+               "working_directory": "/workspace/example",
+               "packages": {"apt": ["fonts-noto-cjk"], "pip": ["httpx==0.28.1", "numpy==2.2.6"]}}
+    files = {"runtime/start.py": b"pass"}
+    desired, tree = bind_runtime(source, binding, files)
+    assert desired["packages"] == {
+        "apt": ["ffmpeg", "fonts-noto-cjk"], "pip": ["httpx==0.28.1", "numpy==2.2.6"],
+    }
+    assert source["packages"] == {"apt": ["ffmpeg"], "pip": ["httpx==0.28.1"]}
+    assert bind_runtime(desired, binding, files)[0]["packages"] == desired["packages"]
+    assert bind_runtime(source, {k: v for k, v in binding.items() if k != "packages"}, files)[1] == tree
+
+
+@pytest.mark.parametrize("packages", [None, [], {"unknown": []}, {"pip": "numpy"}, {"pip": [""]}, {"pip": [1]}])
+def test_runtime_rejects_invalid_dependency_declarations(packages):
+    binding = {"paths": [{"bundle_prefix": "runtime/", "workspace_prefix": "runtime/"}],
+               "working_directory": "/workspace/example", "packages": packages}
+    with pytest.raises(ValueError, match="packages"):
+        bind_runtime({"type": "cloud"}, binding, {"runtime/start.py": b"pass"})

@@ -75,8 +75,8 @@ curl -i http://localhost:52010/readyz
 Open `http://localhost:52010/` in a browser. The first visit shows the administrator initialization page; in PostgreSQL mode the password needs at least 12 characters. After initialization the left navigation contains:
 
 - Workbench: run overview, experiment workbench, run status
-- Agents and capabilities: personal and team assets, platform assets, members and integration
-- Knowledge and methods: experience library
+- Agents and capabilities: platform assets, members and integration
+- Agent Context: experience library, memory library, resource library
 - Evolution and experiments: datasets, evolution pipeline
 - Review and publishing: review and publish entry, permission audit, tracing
 - Settings and integration: platform users, tenant management, model configuration, data source integration

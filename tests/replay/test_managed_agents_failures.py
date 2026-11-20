@@ -49,6 +49,72 @@ def test_missing_usage_is_unavailable_and_self_needs_no_clone():
     assert cleaned == ["run"]
 
 
+def test_model_failure_reports_upstream_error_code_instead_of_missing_response():
+    class Server(FakeMA):
+        def respond(self, request):
+            response = super().respond(request)
+            if request.method == "POST" and request.url.path.endswith("/events"):
+                for events in self.events.values():
+                    events[:] = [e for e in events if e["type"] != "agent.message"]
+                    events.insert(-1, {
+                        "id": "model-error", "type": "session.error",
+                        "processed_at": "2026-10-20T12:00:03Z",
+                        "error": {"code": "model_request_failed_error", "message": json.dumps({
+                            "error": {"code": "InvalidParameter.UnsupportedFileFormat",
+                                      "message": "The file mimetype image/png is not supported."},
+                        })},
+                    })
+                    events[-1]["stop_reason"] = {"type": "retries_exhausted"}
+            return response
+
+    server, cleaned = Server(), []
+    session = session_for(server, cleaned)
+    try:
+        with pytest.raises(RuntimeError, match="InvalidParameter.UnsupportedFileFormat"):
+            session.send("use screenshot")
+    finally:
+        session.close()
+    assert cleaned == ["run"]
+
+
+def test_real_root_thread_id_is_main_response_and_projection_not_a_child():
+    class Server(FakeMA):
+        def respond(self, request):
+            if request.url.path.endswith("/threads"):
+                return httpx.Response(200, json={"data": [
+                    {"id": "root-thread", "status": "idle"}, {"id": "child", "status": "idle"},
+                ]})
+            if "/threads/child/events" in request.url.path:
+                count = sum(len(events) for events in self.events.values())
+                return httpx.Response(200, json={"data": [{
+                    "id": "child-reply-" + str(count), "type": "agent.message", "session_thread_id": "child",
+                    "processed_at": "2026-10-20T12:00:02Z", "content": [{"type": "text", "text": "child output"}],
+                }] if count > 1 else []})
+            response = super().respond(request)
+            if request.method == "POST" and request.url.path.endswith("/sessions"):
+                self.events[response.json()["id"]].append({
+                    "id": "root-running", "type": "session.thread_status_running",
+                    "session_thread_id": "root-thread", "processed_at": "2026-10-20T12:00:00Z",
+                })
+            if request.method == "POST" and request.url.path.endswith("/events"):
+                for events in self.events.values():
+                    for event in events:
+                        if event["type"].startswith(("agent.", "span.")):
+                            event["session_thread_id"] = "root-thread"
+            return response
+    server, cleaned = Server(), []
+    session = session_for(server, cleaned)
+    try:
+        observed = session.send("write a note")
+        assert "completed turn" in observed.response and "child output" not in observed.response
+        main = [m for m in observed.messages if not m.get("session_thread_id") and m["role"] == "assistant"]
+        assert any("completed turn" in m["content"] for m in main)
+        assert any(m.get("session_thread_id") == "child" for m in observed.messages)
+        assert session.send("continue").response
+    finally:
+        session.close()
+
+
 def test_tool_confirmation_is_not_fabricated_and_failure_cleans():
     class Server(FakeMA):
         def respond(self, request):
@@ -123,6 +189,8 @@ def test_runtime_probe_isolated_from_business_response_and_included_in_real_usag
     asyncio.run(start())
     assert session.turn_num == 0
     observed = session.send("perform actual business task")
+    assert observed.execution_snapshot["runtime_ready_verified"] is True
+    assert observed.execution_snapshot["runtime_ready_proof"]["path"] == "team-evolver-runtime-ready.json"
     assert observed.metrics["api_calls"] == 2 and observed.metrics["total_tokens"] == 24
     assert "read runtime ready file" not in observed.response
     assert session.turn_num == 1 and saved
@@ -180,8 +248,9 @@ def test_exact_remote_events_are_archived_before_session_cleanup():
 
     session.cap["save_artifact"] = archive
     observed = session.send("do the task")
-    assert saved[0][0] == "ma-events-turn-1.json"
-    assert saved[0][1] == server.events[session.session_id]
+    assert saved[0][0] == "ma-session-snapshot.json"
+    assert saved[1][0] == "ma-events-turn-1.json"
+    assert saved[1][1] == server.events[session.session_id]
     assert saved[0][2] == "run" and observed.metrics["total_tokens"] == 12
     session.close()
     assert saved[-1][0] == "ma-final-session.json"
@@ -202,3 +271,203 @@ def test_branch_deadline_has_actionable_error_message():
     with pytest.raises(TimeoutError, match="MA Replay branch deadline exceeded"):
         session.send("do the task")
     session.close()
+
+
+@pytest.mark.parametrize("registered", [True, False])
+def test_write_output_must_be_downloaded_before_branch_completion_and_cleanup(registered, monkeypatch):
+    class Server(FakeMA):
+        polls = 0
+
+        def respond(self, request):
+            if request.url.host == "outputs.example":
+                return httpx.Response(200, content=b'{"shots":[1,2,3]}')
+            if request.url.path.endswith("/files") and self.events:
+                self.polls += 1
+                return httpx.Response(200, json={"data": [{
+                    "id": "storyboard", "filename": "storyboard.json",
+                    "download_url": "https://outputs.example/storyboard",
+                }] if registered and self.polls >= 2 else []})
+            result = super().respond(request)
+            if request.method == "POST" and request.url.path.endswith("/events"):
+                for events in self.events.values():
+                    events.insert(-1, {
+                        "id": "native-write", "type": "agent.tool_use", "name": "Write",
+                        "input": {"file_path": "/mnt/session/outputs/storyboard.json"},
+                        "processed_at": "2026-10-20T12:00:03Z",
+                    })
+            return result
+
+    server, cleaned = Server(), []
+    session = session_for(server, cleaned)
+    monkeypatch.setattr("team_replay.adapters.managed_agents.ARTIFACT_REGISTRATION_SECONDS", .05)
+    try:
+        if registered:
+            observed = session.send("create a storyboard")
+            assert server.polls == 2 and not cleaned
+            artifact = next(a for a in observed.artifacts if a["path"] == "storyboard.json")
+            assert artifact["evidence"] == {"kind": "json", "available": True, "content": {"shots": [1, 2, 3]}}
+        else:
+            with pytest.raises(ReplayUnsupported, match="Declared MA outputs unavailable"):
+                session.send("create a storyboard")
+    finally:
+        session.close()
+    assert cleaned == ["run"]
+
+
+@pytest.mark.parametrize("filename", [
+    "storyboard.json",
+    "family-insurance-ch2/reports/storyboard.json",
+    "/mnt/session/outputs/family-insurance-ch2/reports/storyboard.json",
+])
+def test_nested_display_output_matches_downloaded_ma_filename(filename, monkeypatch):
+    expected = "family-insurance-ch2/reports/storyboard.json"
+
+    class Server(FakeMA):
+        def respond(self, request):
+            if request.url.host == "outputs.example":
+                return httpx.Response(200, content=b'{"shots":[1,2,3]}')
+            if request.url.path.endswith("/files") and self.events:
+                return httpx.Response(200, json={"data": [{
+                    "id": "storyboard", "filename": filename,
+                    "download_url": "https://outputs.example/storyboard",
+                }]})
+            response = super().respond(request)
+            if request.method == "POST" and request.url.path.endswith("/events"):
+                for events in self.events.values():
+                    next(e for e in events if e["type"] == "agent.message")["content"] = [{
+                        "type": "text", "text": f"<display>/mnt/session/outputs/{expected}</display>",
+                    }]
+            return response
+
+    session = session_for(Server(), [])
+    monkeypatch.setattr("team_replay.adapters.managed_agents.ARTIFACT_REGISTRATION_SECONDS", .01)
+    try:
+        observation = session.send("create the report")
+        artifact = next(a for a in observation.artifacts if a["path"] == expected)
+        assert artifact["evidence"]["content"] == {"shots": [1, 2, 3]}
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("filenames,declared", [
+    (["storyboard.json"], ["one/storyboard.json", "two/storyboard.json"]),
+    (["storyboard.json", "storyboard.json"], ["one/storyboard.json"]),
+    (["other/storyboard.json"], ["one/storyboard.json"]),
+    (["one/storyboard.json", "storyboard.json"], ["one/storyboard.json", "two/storyboard.json"]),
+])
+def test_nested_output_does_not_accept_ambiguous_or_other_directory_files(filenames, declared, monkeypatch):
+    class Server(FakeMA):
+        def respond(self, request):
+            if request.url.host == "outputs.example":
+                return httpx.Response(200, content=b'{"shots":[1,2,3]}')
+            if request.url.path.endswith("/files") and self.events:
+                return httpx.Response(200, json={"data": [{
+                    "id": str(i), "filename": name, "download_url": f"https://outputs.example/{i}",
+                } for i, name in enumerate(filenames)]})
+            response = super().respond(request)
+            if request.method == "POST" and request.url.path.endswith("/events"):
+                for events in self.events.values():
+                    next(e for e in events if e["type"] == "agent.message")["content"] = [{
+                        "type": "text",
+                        "text": "\n".join(f"<display>/mnt/session/outputs/{p}</display>" for p in declared),
+                    }]
+            return response
+
+    session = session_for(Server(), [])
+    monkeypatch.setattr("team_replay.adapters.managed_agents.ARTIFACT_REGISTRATION_SECONDS", .01)
+    try:
+        with pytest.raises(ReplayUnsupported, match="Declared MA outputs unavailable"):
+            session.send("create the reports")
+    finally:
+        session.close()
+
+
+def test_root_thread_confirmation_is_actionable_without_waiting_for_deadline():
+    class Server(FakeMA):
+        def respond(self, request):
+            response = super().respond(request)
+            if request.method == "POST" and request.url.path.endswith("/sessions"):
+                self.events[response.json()["id"]].append({
+                    "id": "root-running", "type": "session.thread_status_running",
+                    "session_thread_id": "root-thread", "processed_at": "2026-10-20T12:00:00Z",
+                })
+            if request.method == "POST" and request.url.path.endswith("/events"):
+                for events in self.events.values():
+                    events[-1].update(session_thread_id="root-thread", stop_reason={"type": "requires_action"})
+            return response
+
+    session = session_for(Server(), [])
+    try:
+        with pytest.raises(ReplayUnsupported, match="confirmation"):
+            session.send("do the task")
+    finally:
+        session.close()
+
+
+def test_upstream_session_error_without_idle_is_reported():
+    class Server(FakeMA):
+        def respond(self, request):
+            response = super().respond(request)
+            if request.method == "POST" and request.url.path.endswith("/events"):
+                for events in self.events.values():
+                    events[-1] = {"id": "fatal", "type": "session.error",
+                                  "processed_at": "2026-10-20T12:00:09Z",
+                                  "error": {"code": "environment_failed"}}
+            return response
+
+    session = session_for(Server(), [])
+    try:
+        with pytest.raises(RuntimeError, match="environment_failed"):
+            session.send("do the task")
+    finally:
+        session.close()
+
+
+def test_archive_write_failure_still_cleans_remote_resources():
+    cleaned = []
+    session = session_for(FakeMA(), cleaned)
+    session.send("do the task")
+
+    async def broken_archive(*args):
+        raise OSError("object store unavailable")
+
+    session.cap["save_artifact"] = broken_archive
+    with pytest.raises(OSError, match="object store"):
+        session.close()
+    assert cleaned == ["run"]
+
+
+def test_runtime_probe_failure_keeps_snapshot_and_reports_tool_service_error():
+    from types import SimpleNamespace
+
+    from team_replay.adapters.guard import GuardedSession
+    from team_replay.execution import run_branch
+
+    class Server(FakeMA):
+        def respond(self, request):
+            response = super().respond(request)
+            if request.method == "POST" and request.url.path.endswith("/events"):
+                for events in self.events.values():
+                    events.insert(-1, {
+                        "id": "bootstrap-tool-error", "type": "agent.tool_result", "is_error": True,
+                        "processed_at": "2026-10-20T12:00:03Z",
+                        "content": [{"type": "text", "text": "task service unavailable: runtime issue"}],
+                    })
+            return response
+
+    session = session_for(Server(), [])
+    session.deadline = time.monotonic() + .2
+    session.record["config"]["runtime_binding"] = {"ready_file": "state.json", "ready_probe_message": "read ready"}
+    session.cap["runtime_binding"] = lambda env, binding, files: (env, "fixed-tree")
+    session.record["config"]["runtime_binding"]["source"] = "openviking"
+    result = run_branch(
+        SimpleNamespace(open=lambda _: GuardedSession(session, lambda: None)), session.context,
+        {"query": "do the task", "checks": [{"id": "output", "kind": "output", "text": "write the file"}]},
+        harness={}, max_interactions=1,
+    )
+    assert result["completed"] is False
+    assert "task_service_unavailable" in result["error"]
+    assert result["execution_snapshot"]["session_id"] == session.session_id
+    assert result["execution_snapshot"]["runtime_ready_verified"] is False
+    assert result["runtime_diagnostics"]["observed_metrics"]["total_tokens"] == 12
+    assert result["runtime_diagnostics"]["final_history"]["path"] == "ma-final-session.json"

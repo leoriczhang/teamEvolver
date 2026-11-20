@@ -1,6 +1,6 @@
 # Evolution Loop
 
-The evolution loop turns real Agent work into team Skill versions: Session intake → mandatory analysis → Skill Evolution generates Skill Candidates → True Replay validation → Candidate Review and Publish → Agent pull. Every step is a persisted Worker task that any API or Worker replica can pick up.
+The evolution loop turns real Agent work into team Skill versions: Session intake → mandatory analysis → Skill Evolution generates Skill Candidates → Candidate Validation → Candidate Review and Publish → Agent pull. Every step is a persisted Worker task that any API or Worker replica can pick up.
 
 ## Loop Overview
 
@@ -14,7 +14,7 @@ The evolution loop turns real Agent work into team Skill versions: Session intak
                                      skill.evolve: plan per Skill group → Skill Candidate
                                                      │ auto_evaluate or manual evaluate/validate
                                                      ▼
-                                     skill.validate: static checks + True Replay
+                                     skill.validate: static checks + Candidate Validation
                                                      │ accept / reject / inconclusive
                                                      ▼
                          Candidate Review ──► Publish (new version) ──► GET /sync/skills
@@ -66,11 +66,15 @@ With `auto_evaluate` (default `true`) in the `skills` configuration, `evaluate` 
 | `POST /api/skill-candidates/{id}/validate` `{"mode":"auto"}` | `auto` | Publishes when static checks and the runtime gate pass and the verdict is accept; rejects on reject |
 | `POST /api/skill-candidates/{id}/validate` `{"mode":"force"}` | `force` | Publishes when static checks and the runtime gate pass, without requiring accept |
 
-`skill.validate` pins the Candidate revision, the Baseline version, the `replay` configuration revision and the tenant-bound Replay Adapter revision, then runs static checks and True Replay. When static checks fail the verdict is always reject; when the runtime gate fails, accept is downgraded to inconclusive.
+`skill.validate` pins Candidate revision, Baseline version, current Evidence, Replay configuration and
+adapter revision. The Worker chooses experience review or one relevant Candidate execution; full A/B
+runs only when explicitly selected. Failed static checks reject the Candidate. A missing gate for the
+chosen method downgrades acceptance to inconclusive. Candidate completion and A/B efficiency are saved
+independently; historical Cases are no longer appended by default.
 
 ### 6. Candidate Review and Publish
 
-Administrators review Evidence, diff, static checks and True Replay results in the console, and can:
+Administrators review Evidence, diff, static checks and Candidate Validation results in the console, and can:
 
 - Edit content: `PUT /api/skill-candidates/{id}/content` (with `candidate_revision` for optimistic locking)
 - Mark feedback: `PATCH /api/skill-candidates/{id}/feedback`

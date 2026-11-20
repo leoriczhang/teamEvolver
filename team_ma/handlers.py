@@ -7,6 +7,7 @@ from teamEvolver.runtime import HandlerResult
 
 from .collection import collect_connection
 from .discovery import discover_connection
+from .effects import UnknownEffect
 from .repository import MARepository
 from .schemas import digest
 
@@ -19,7 +20,7 @@ async def handle(task, services):
         fence = await services.leases.acquire(conn, tenant_id=task.tenant_id, resource_key=key,
                                               owner_id=owner, lease_seconds=60)
     if fence is None:
-        return HandlerResult.retry("ma_connection_busy", backoff_seconds=5)
+        return HandlerResult.defer("ma_connection_busy", backoff_seconds=5)
     work = asyncio.create_task(_handle(task, services))
     try:
         while not work.done():
@@ -70,6 +71,12 @@ async def _handle(task, services):
                 if result.get("waiting"):
                     # Imports are independent Worker tasks; waiting is not a failed attempt.
                     return HandlerResult.wait_external("ma-import:" + task.task_id)
+            elif task.kind == "ma.skill":
+                from .skill_writes import write_skill
+                await write_skill(task, services, client, connection, operation)
+                async with services.tx.tenant_tx(task.tenant_id) as conn:
+                    await services.tasks.require_current(conn, task)
+                    await repo.operation_status(conn, task.subject_id, task.kind)
             elif task.kind == "ma.collect":
                 await collect_connection(task, services, client, connection, operation)
             else:
@@ -78,15 +85,19 @@ async def _handle(task, services):
             return HandlerResult.succeed(task.task_id)
         except MAError as exc:
             code = "ma_" + exc.code[:100]
-            await _error(repo, services, task, code)
+            retryable = exc.status in {408, 429, 500, 502, 503, 504} or exc.code == "TransportOutcomeUnknown"
+            await _error(repo, services, task, code, retryable=retryable)
             if exc.code == "TransportOutcomeUnknown":
                 return HandlerResult.reconcile()
-            if exc.status in {408, 429, 500, 502, 503, 504}:
+            if retryable:
                 return HandlerResult.retry(code)
             return HandlerResult.fail(code)
+        except UnknownEffect:
+            await _error(repo, services, task, "ma_outcome_unknown")
+            return HandlerResult.reconcile()
         except ValueError as exc:
             # Validation errors are authored here and contain no upstream bodies.
-            await _error(repo, services, task, str(exc)[:400])
+            await _error(repo, services, task, str(exc)[:400], retryable=False)
             return HandlerResult.fail("ma_validation_failed")
         except Exception:
             # Do not propagate transport URLs/credentials through Worker logs.
@@ -94,11 +105,17 @@ async def _handle(task, services):
             return HandlerResult.retry("ma_operation_failed")
 
 
-async def _error(repo, services, task, code):
+async def _error(repo, services, task, code, *, retryable=True):
     async with services.tx.tenant_tx(task.tenant_id) as conn:
         await services.tasks.require_current(conn, task)
-        await repo.status(conn, task.subject_id, "error", {"error": code, "job_id": task.task_id})
+        await repo.operation_status(conn, task.subject_id, task.kind,
+                                    error=code, job_id=task.task_id, retryable=retryable)
+        if task.kind == "ma.skill" and not retryable:
+            callback = services.extras.get("cloud_skill_failed")
+            operation = await repo.operation(conn, task.task_id)
+            if callback and operation:
+                await callback(conn, task, operation["input"]["request"], code)
 
 
 def register_handlers():
-    return {kind: handle for kind in ("ma.discover", "ma.collect", "ma.reconcile")}
+    return {kind: handle for kind in ("ma.discover", "ma.collect", "ma.reconcile", "ma.skill")}

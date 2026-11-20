@@ -281,6 +281,20 @@ class WorkerTaskRepository:
             args=[float(backoff_seconds), error_code], from_states=("running", "reconciling", "waiting_external"),
         )
 
+    async def defer(
+        self, conn: Any, *, task_id: str, owner_id: str, fence: int, backoff_seconds: float, error_code: str = ""
+    ) -> bool:
+        """Release a claim that could not start; fencing is never rolled back."""
+        return await self._transition(
+            conn, op="defer", task_id=task_id, owner_id=owner_id, fence=fence,
+            sets=(
+                "status = 'retry_wait', owner_id = '', lease_until = NULL, "
+                "attempt = GREATEST(0, attempt - 1), error_code = $5, "
+                "available_at = now() + make_interval(secs => $4)"
+            ),
+            args=[max(1.0, float(backoff_seconds)), error_code], from_states=("running", "reconciling"),
+        )
+
     async def wait_external(self, conn: Any, *, task_id: str, owner_id: str, fence: int, upstream_task_id: str) -> bool:
         """Park the task waiting on an external upstream (keeps the lease)."""
         return await self._transition(

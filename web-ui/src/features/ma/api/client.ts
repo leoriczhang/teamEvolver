@@ -11,7 +11,9 @@ export type MAConfig = {
 export type MAConnection = {
   connection_id: string; revision: number; enabled: boolean; status: string; config: MAConfig;
   detail: { error?: string; agent_count?: number; managed_skill_count?: number;
-    replay_capability?: { supported: boolean; reason?: string }; waiting?: string[] };
+    replay_capability?: { supported: boolean; reason?: string }; waiting?: string[];
+    replay_resources?: { status: string; environment_id?: string; vault_ids?: string[];
+      missing_credentials?: string[]; reason?: string } };
   last_collected_at?: string; last_synced_at?: string;
   sessions?: { session_id: string; record: { business_time?: string; last_pulled_at?: string;
     user_id?: string; status?: string; job_id?: string } }[];
@@ -24,7 +26,7 @@ export type MAResource = {
 export type MARelease = {
   release_id: string; status: string; created_at: string; applied_at?: string;
   record: { entry_agent_version?: string; environment_id?: string; manifest_hash?: string;
-    runtime_tree_sha256?: string; error?: string; drift?: string };
+    environment_alias?: string; environment_name?: string; runtime_tree_sha256?: string; error?: string; drift?: string };
 };
 export type MATarget = { status: string; accepted: boolean; connection_revision?: number; binding_hash?: string };
 export type MAJob = { job_id: string; status_url: string; connection?: MAConnection };

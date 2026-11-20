@@ -17,7 +17,7 @@ from .discovery import agent_graph, graph_postorder, read_skill_zip, skill_archi
 from .effects import Effects
 from .recovery import delete_owned, recover_owned
 from .repository import MARepository
-from .runtime_binding import bind_runtime
+from .runtime_binding import bind_runtime, release_environment_name
 from .schemas import digest
 
 
@@ -33,7 +33,8 @@ async def pull(services, tenant_id, config, etag=""):
     async with factory(timeout=60, follow_redirects=False) as client:
         async with client.stream(
             "GET", config["team_evolver_url"].rstrip("/") + "/sync/skills",
-            params={"user_id": config["default_user_id"]},
+            # The connector's read identity is not a Session submitter.
+            params={"user_id": config["default_user_id"] or "ma-sync"},
             headers={"Authorization": "Bearer " + token, **({"If-None-Match": etag} if etag else {})},
         ) as response:
             if response.status_code == 304:
@@ -77,6 +78,33 @@ async def find_skill_version(client, skill_id, tree):
         if bundle_tree_sha256(item.files) == tree:
             return {**version, "id": skill_id, "version": str(version["version"])}
     return None
+
+
+async def ensure_release_environment(client, effects, release_id, connection_id, base, current, runtime_config):
+    if digest(runtime_config) == digest(current["config"]):
+        return current
+    desired = {
+        "name": release_environment_name(base, connection_id, runtime_config),
+        "config": runtime_config,
+    }
+    # MA may add server-managed defaults such as spec/template_id to the
+    # persisted config. Reuse only the current, deterministically named
+    # Environment when every requested field still matches exactly.
+    if (current.get("name") == desired["name"]
+            and {**current["config"], **runtime_config} == current["config"]):
+        return current
+
+    async def reconcile_environment(row):
+        matches = [e for e in await client.listing("environments") if e.get("name") == desired["name"]]
+        if len(matches) != 1:
+            return None
+        actual = await client.request("GET", f"environments/{matches[0]['id']}")
+        return actual if actual.get("config") == runtime_config else None
+
+    return await effects.apply(
+        release_id + ":environment", "release-environment", desired,
+        lambda: client.request("POST", "environments", json=desired), reconcile_environment,
+    )
 
 
 async def update_agent(client, effects, ident, expected, skill_versions, child_versions, removed, release_id,
@@ -186,6 +214,11 @@ async def cleanup(services, client, connection, *, task=None):
 
 
 async def reconcile_connection(task, services, client, connection, operation):
+    if services.extras.get("cloud_skill_provider"):
+        from .discovery import discover_cloud
+        await cleanup(services, client, connection, task=task)
+        await discover_cloud(task, services, client, connection, operation)
+        return
     repo, config = MARepository(services.tx), connection["config"]
     await cleanup(services, client, connection, task=task)
     async with services.tx.tenant_tx(task.tenant_id) as conn:
@@ -200,18 +233,24 @@ async def reconcile_connection(task, services, client, connection, operation):
                        (previous["record"].get("skills") or {}).items()}
     same_revision = previous["record"].get("connection_revision") == connection["revision"]
     etag = (previous["record"].get("pull_etag", "")
-            if not checkpoint and same_revision and binding_targets == applied_targets else "")
+            if not checkpoint and same_revision and binding_targets == applied_targets
+            and connection.get("status") == "ready" else "")
     manifest, new_etag = await pull(services, task.tenant_id, config, etag)
     if manifest is None:
         async with services.tx.tenant_tx(task.tenant_id) as conn:
             await services.tasks.require_current(conn, task)
             await repo.checkpoint(conn, task.task_id, {}, {"status": "unchanged"})
-            await repo.status(conn, task.subject_id, "ready", connection["detail"], synced=True)
+            await repo.operation_status(conn, task.subject_id, "ma.reconcile")
         return
     published = decode_manifest(manifest)
-    bindings = {r["logical_name"]: r["record"] for r in resources}
+    previous_bindings = previous["record"].get("skills") or {}
+    # Candidate target selection creates a binding before publication, without
+    # any remote Skill. It is not evidence of a deleted published Skill.
+    bindings = {r["logical_name"]: r["record"] for r in resources
+                if r["logical_name"] in published or r["record"].get("id")
+                or r["logical_name"] in previous_bindings}
     selected = {n: published[n] for n, b in bindings.items() if b.get("agents") and n in published}
-    removed = {n for n in bindings if n not in published}
+    removed = (set(bindings) | set(previous_bindings)) - set(published)
     if removed:
         confirmed = await services.extras["ma_skill_tombstones"](task.tenant_id, list(removed))
         if set(confirmed) != removed:
@@ -220,7 +259,6 @@ async def reconcile_connection(task, services, client, connection, operation):
     release_id = "ma-release:" + digest([connection["config_hash"], manifest_hash, bindings])[:40]
     effects = Effects(services, task.tenant_id, task.subject_id, release_id, task=task)
     skill_versions = {}
-    previous_bindings = previous["record"].get("skills") or {}
     for name, skill in selected.items():
         binding = bindings[name]
         old = previous_bindings.get(name) or {}
@@ -264,19 +302,9 @@ async def reconcile_connection(task, services, client, connection, operation):
         item = selected[runtime_binding["skill_name"]]
         base = previous["record"].get("base_environment") or environment
         runtime_config, runtime_tree = bind_runtime(base["config"], runtime_binding, item["package"].files)
-        if digest(runtime_config) != digest(environment["config"]):
-            desired = {"name": "te-release-" + digest([task.subject_id, runtime_config])[:32], "config": runtime_config}
-            async def reconcile_environment(row):
-                matches = [e for e in await client.listing("environments")
-                           if e.get("name") == desired["name"]]
-                if len(matches) != 1:
-                    return None
-                actual = await client.request("GET", f"environments/{matches[0]['id']}")
-                return actual if actual.get("config") == runtime_config else None
-            environment = await effects.apply(
-                release_id + ":environment", "release-environment", desired,
-                lambda: client.request("POST", "environments", json=desired), reconcile_environment,
-            )
+        environment = await ensure_release_environment(
+            client, effects, release_id, task.subject_id, base, environment, runtime_config,
+        )
     # Fetch latest graph: preserve unrelated model/system/tool edits when merging.
     graph = await agent_graph(client, config["entry_agent_id"])
     if any(not set(b.get("agents") or []) <= set(graph["agents"]) for b in bindings.values()):
@@ -284,6 +312,7 @@ async def reconcile_connection(task, services, client, connection, operation):
     versions = {}
     record = {"release_id": release_id, "manifest_hash": manifest_hash, "skills": skill_versions,
               "environment": environment, "environment_id": environment["id"],
+              "environment_alias": (previous["record"].get("base_environment") or environment).get("name"),
               "environment_hash": digest(environment["config"]), "connection_revision": connection["revision"],
               "base_environment": previous["record"].get("base_environment") or previous["record"]["environment"],
               "runtime_tree_sha256": runtime_tree, "pull_etag": new_etag,
@@ -333,4 +362,4 @@ async def reconcile_connection(task, services, client, connection, operation):
             await repo.bind(conn, tenant_id=task.tenant_id, connection_id=task.subject_id, kind="agent", name=ident,
                             record={**version, "snapshot": readback["agents"][ident]})
         await repo.checkpoint(conn, task.task_id, checkpoint, {"status": "applied", "release_id": release_id})
-        await repo.status(conn, task.subject_id, "ready", connection["detail"], synced=True)
+        await repo.operation_status(conn, task.subject_id, "ma.reconcile")

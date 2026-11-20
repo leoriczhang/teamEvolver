@@ -1,4 +1,4 @@
-"""Deterministic runtime overlays constructed from the same published Skill bytes."""
+"""Pinned runtime overlays from published Skills or independent execution artifacts."""
 
 import base64
 import copy
@@ -8,9 +8,19 @@ import io
 import lzma
 import shlex
 import tarfile
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
+from .runtime_artifact import artifact_tree, mapped_files
 from .schemas import digest
+
+
+def release_environment_name(base_environment, connection_id, runtime_config):
+    """Build a readable, deterministic MA Environment name for one release."""
+    alias = (base_environment or {}).get("name") or "te-release"
+    suffix = digest([connection_id, runtime_config])[:12]
+    # MA names are immutable, unique per project and at most 64 characters.
+    stem = alias[:51].rstrip("._-") or "te-release"
+    return f"{stem}-{suffix}"
 
 
 def safe_relative(path):
@@ -56,6 +66,18 @@ def bind_runtime(environment_config, binding, files):
         return config, ""
     if config.get("type") != "cloud":
         raise ValueError("runtime_binding requires a cloud Environment")
+    if "packages" in binding:
+        packages = binding["packages"]
+        if (not isinstance(packages, dict) or set(packages) - {"apt", "pip"}
+                or any(not isinstance(items, list) or len(items) > 100
+                       or any(not isinstance(item, str) or not item.strip() or len(item) > 1000 for item in items)
+                       for items in packages.values())):
+            raise ValueError("runtime_binding.packages requires apt/pip lists of package specifications")
+        # Let MA provision and cache dependencies before setup_script runs.
+        # Rebinding a release must not duplicate its already declared packages.
+        configured = config.setdefault("packages", {})
+        for manager, items in packages.items():
+            configured[manager] = list(dict.fromkeys([*(configured.get(manager) or []), *items]))
     mappings = binding.get("paths")
     if not isinstance(mappings, list) or not mappings:
         raise ValueError("runtime_binding.paths is required")
@@ -64,8 +86,8 @@ def bind_runtime(environment_config, binding, files):
             or any(ord(c) < 32 for c in working)):
         raise ValueError("Runtime working_directory must be within /workspace")
     source_type = binding.get("source", "embedded")
-    if source_type not in ("embedded", "skill_mount"):
-        raise ValueError("Runtime source must be embedded or skill_mount")
+    if source_type not in ("embedded", "skill_mount", "openviking"):
+        raise ValueError("Runtime source must be embedded, skill_mount or openviking")
     chosen, origins = {}, {}
     for mapping in mappings:
         source = safe_relative(mapping["bundle_prefix"].rstrip("/")) + "/"
@@ -78,7 +100,7 @@ def bind_runtime(environment_config, binding, files):
                     raise ValueError("Runtime paths overlap")
                 chosen[output] = data
                 origins[output] = path
-    if not chosen:
+    if not chosen and source_type != "openviking":
         raise ValueError("Runtime Bundle contains no files for configured paths")
     compression = binding.get("archive_compression", "gzip")
     if compression not in ("gzip", "xz"):
@@ -99,9 +121,18 @@ def bind_runtime(environment_config, binding, files):
         compressed = gzip.compress(content.getvalue(), mtime=0)
         extract = "tar -xz"
     encoded = base64.b64encode(compressed).decode()
-    tree = digest([(p, hashlib.sha256(b).hexdigest()) for p, b in sorted(chosen.items())])
-    extraction = (mounted_runtime_script(binding, chosen, origins) if source_type == "skill_mount"
-                  else f"printf '%s' '{encoded}' | base64 -d | {extract}\n")
+    if source_type == "openviking":
+        artifact = binding.get("artifact")
+        tree = artifact_tree(mapped_files(artifact, mappings))
+        installer = Path(__file__).with_name("runtime_artifact.py").read_text()
+        extraction = (
+            "python3 - <<'TE_RUNTIME_OPENVIKING'\n" + installer
+            + f"\ninstall_artifact({artifact!r}, {mappings!r}, {working!r})\nTE_RUNTIME_OPENVIKING\n"
+        )
+    else:
+        tree = digest([(p, hashlib.sha256(b).hexdigest()) for p, b in sorted(chosen.items())])
+        extraction = (mounted_runtime_script(binding, chosen, origins) if source_type == "skill_mount"
+                      else f"printf '%s' '{encoded}' | base64 -d | {extract}\n")
     # Prerequisites precede the source setup too: it may call its bootstrap.
     pre_setup = binding.get("pre_setup") or ""
     if not isinstance(pre_setup, str) or len(pre_setup.encode()) > 32768:
@@ -125,6 +156,8 @@ def bind_runtime(environment_config, binding, files):
             + "state = json.loads((root / " + repr(ready) + ").read_text())\n"
             + "assert state.get('ready') is True\n"
             + "proof = {'ready': True, 'runtime_tree_sha256': " + repr(tree) + ", 'state': state}\n"
+            + ("proof['artifact'] = json.loads((root / '.team-evolver-runtime-artifact.json').read_text())\n"
+               if source_type == "openviking" else "")
             + "output = Path('/mnt/session/outputs/team-evolver-runtime-ready.json')\n"
             + "output.parent.mkdir(parents=True, exist_ok=True)\n"
             + "output.write_text(json.dumps(proof))\nTE_RUNTIME_READY\n"

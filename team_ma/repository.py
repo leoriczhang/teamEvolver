@@ -85,6 +85,46 @@ class MARepository:
             connection_id, status, canonical(detail or {}), collected, synced,
         )
 
+    async def operation_errors(self, conn, connection):
+        """Read per-operation failures, including pre-upgrade error records."""
+        detail = connection["detail"]
+        if "operation_errors" in detail:
+            return dict(detail["operation_errors"])
+        if not detail.get("error"):
+            return ({"ma.reconcile": {"error": "drift", "retryable": False}}
+                    if connection["status"] == "drift" else {})
+        operation = await self.operation(conn, detail.get("job_id", ""))
+        kind = operation["kind"] if operation else "ma.discover"
+        retryable = detail["error"] in {"ma_TransportFailed", "ma_TransportOutcomeUnknown", "ma_operation_failed"}
+        return {kind: {"error": detail["error"], "job_id": detail.get("job_id", ""), "retryable": retryable}}
+
+    async def operation_status(self, conn, connection_id, kind, *, error="", job_id="", retryable=False):
+        # Merge the live row rather than the attempt's old connection snapshot.
+        # Collection success must never erase a synchronization failure.
+        row = _row(await conn.fetchrow(
+            f"SELECT * FROM {self.schema}.ma_connections WHERE connection_id=$1 FOR UPDATE", connection_id,
+        ))
+        if row is None:
+            raise KeyError("MA connection not found")
+        detail = dict(row["detail"])
+        errors = await self.operation_errors(conn, row)
+        if error:
+            errors[kind] = {"error": error, "job_id": job_id, "retryable": retryable}
+        else:
+            errors.pop(kind, None)
+        detail.pop("error", None)
+        detail.pop("job_id", None)
+        if errors:
+            detail["operation_errors"] = errors
+            failure = next(iter(errors.values()))
+            detail.update({k: failure[k] for k in ("error", "job_id") if k in failure})
+        else:
+            detail.pop("operation_errors", None)
+        status = ("drift" if any(e["error"].startswith("drift") for e in errors.values())
+                  else "error") if errors else "ready"
+        await self.status(conn, connection_id, status, detail,
+                          collected=not error and kind == "ma.collect", synced=not error and kind == "ma.reconcile")
+
     async def resources(self, conn, connection_id, *, limit=100, after="", kind=None):
         return [_row(r) for r in await conn.fetch(
             f"SELECT * FROM {self.schema}.ma_resource_bindings WHERE connection_id=$1 "
@@ -233,9 +273,11 @@ class MARepository:
         )
 
     async def effects(self, conn, connection_id, *, owner_id=None, status=None):
+        """Operational ledger; retired history must not consume the cleanup window."""
         return [_row(r) for r in await conn.fetch(
             f"SELECT * FROM {self.schema}.ma_external_effects WHERE connection_id=$1 "
             "AND ($2::text IS NULL OR owner_id=$2) AND ($3::text IS NULL OR status=$3) "
+            "AND (status<>'cleaned' OR $3='cleaned') "
             "ORDER BY created_at LIMIT 1000", connection_id, owner_id, status,
         )]
 
@@ -259,9 +301,19 @@ class MARepository:
         )
 
     async def discovery_snapshot(self, conn, connection_id, revision):
+        # Scheduling/labels do not change a discovered execution target.
+        # Auth, endpoint, graph and isolation changes still require discovery.
+        operational = ["display_name", "poll_interval_seconds", "sync_interval_seconds"]
         row = await conn.fetchrow(
-            f"SELECT checkpoint FROM {self.schema}.ma_operations WHERE connection_id=$1 AND kind='ma.discover' "
-            "AND input->>'revision'=$2 AND result IS NOT NULL ORDER BY created_at DESC LIMIT 1",
-            connection_id, str(revision),
+            f"SELECT o.checkpoint FROM {self.schema}.ma_operations o "
+            f"JOIN {self.schema}.ma_connection_revisions old "
+            "ON old.tenant_id=o.tenant_id AND old.connection_id=o.connection_id "
+            "AND old.revision::text=o.input->>'revision' "
+            f"JOIN {self.schema}.ma_connection_revisions current "
+            "ON current.tenant_id=o.tenant_id AND current.connection_id=o.connection_id AND current.revision=$2 "
+            "WHERE o.connection_id=$1 AND o.kind='ma.discover' AND o.result IS NOT NULL "
+            "AND old.revision<=current.revision AND old.config-$3::text[]=current.config-$3::text[] "
+            "ORDER BY o.created_at DESC LIMIT 1",
+            connection_id, int(revision), operational,
         )
         return unpack(row["checkpoint"]) if row else None

@@ -2,7 +2,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { ReplayDatasetResult } from "@/features/replay/api/client";
-import CandidateReplayEvidence,{ EfficiencyTable } from "./CandidateReplayEvidence";
+import CandidateReplayEvidence,{ BranchEvidence,EfficiencyTable } from "./CandidateReplayEvidence";
 
 function dataset(index: number): ReplayDatasetResult {
   const input = {
@@ -46,6 +46,22 @@ describe("Candidate Dataset evidence", () => {
     }} />);
     expect(screen.queryByText("NaN")).toBeNull();
     expect(screen.getAllByText("不可用").length).toBeGreaterThan(0);
+    view.unmount();
+  });
+
+  it("shows actual Session identity and frozen controls without credentials", () => {
+    const view = render(<BranchEvidence title="A · 基线" branch={{
+      execution_snapshot: {
+        session_id: "real-session", agent_id: "fixed-agent", agent_version: "10",
+        environment_id: "fixed-env", environment_config_sha256: "env-hash",
+        runtime_tree_sha256: "runtime-hash", agent_override_fields: ["skills"],
+      },
+    }} />);
+    expect(screen.getByText("实际 MA 执行快照")).toBeTruthy();
+    expect(screen.getByText("real-session")).toBeTruthy();
+    expect(screen.getByText("fixed-agent · v10")).toBeTruthy();
+    expect(screen.getByText("runtime-hash")).toBeTruthy();
+    expect(screen.getByText("skills")).toBeTruthy();
     view.unmount();
   });
 });

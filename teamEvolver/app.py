@@ -71,6 +71,9 @@ def create_app(
     for module_path in _PLATFORM_API_MODULES:
         module = importlib.import_module(module_path)
         router = module.create_router(services, lifecycle=lifecycle)
+        if module_path == "team_replay.api":
+            from team_skills.api.store_scope import install
+            install(router, services)
         _reject_duplicate_routes(router, module_path, seen)
         app.include_router(router)
 
@@ -133,11 +136,27 @@ def _wire_domain_contracts(services):
 
 def _wire_ma_contracts(services):
     from session_ingestion.commands import accept as accept_session
-    from team_ma.queries import freeze, required_targets
+    from team_ma.queries import freeze, required_targets, session_skill_names
     from team_ma.replay_support import capabilities
+    from team_ma.skill_store import CloudSkillProvider
     from team_skills.config import load_skills_config
     from team_skills.library.repository import SkillLibraryRepository
     from team_skills.transfer.commands import TransferCommands
+
+    services.extras.setdefault("cloud_skill_provider", CloudSkillProvider(services))
+    services.tx.cloud_skill_provider = services.extras["cloud_skill_provider"]
+    from team_skills.evolution.reset import retire_cloud_baseline
+    services.extras.setdefault("cloud_skill_changed", lambda conn, tenant, name, item:
+                               retire_cloud_baseline(conn, services.tx, tenant_id=tenant, name=name, item=item))
+    from team_skills.evolution.cloud_publication import failed as cloud_failed
+    from team_skills.evolution.cloud_publication import finalize as cloud_finalize
+    from team_skills.evolution.cloud_publication import guard as cloud_guard
+    services.extras.setdefault("cloud_candidate_guard", lambda conn, task, request:
+                               cloud_guard(conn, services.tx, task, request))
+    services.extras.setdefault("cloud_skill_committed", lambda conn, task, request, result, binding:
+                               cloud_finalize(conn, services.tx, task, request, result, binding))
+    services.extras.setdefault("cloud_skill_failed", lambda conn, task, request, code:
+                               cloud_failed(conn, services.tx, task, request, code))
 
     async def import_bundle(task, **kwargs):
         async with services.tx.tenant_tx(task.tenant_id) as conn:
@@ -179,6 +198,14 @@ def _wire_ma_contracts(services):
                 return True
             candidate = await CandidateRepository(services.tx).require(conn, metadata["candidate_id"])
             evaluation = candidate.get("evaluation") or {}
+            replay = evaluation.get("replay") or {}
+            if replay.get("validation_method") == "experience_review":
+                from team_skills.evolution.assessment import assessment_gate
+                target = next((t for t in replay.get("validation_targets") or []
+                               if t["connection_id"] == connection_id), None)
+                return bool(assessment_gate(replay) and target and current and
+                            all(target.get(k) == current[k] for k in
+                                ("connection_revision", "config_hash", "binding_hash", "runtime_hash")))
             target = (((evaluation.get("replay") or {}).get("runtime_gate") or {}).get("target_matrix") or {}).get(
                 connection_id,
             )
@@ -189,10 +216,15 @@ def _wire_ma_contracts(services):
     services.extras.setdefault("ma_import_bundle", import_bundle)
     services.extras.setdefault("ma_import_result", import_result)
     services.extras.setdefault("ma_accept_session", lambda **kwargs: accept_session(services, **kwargs))
+    from team_ma.queries import active_connections, automatic_fingerprints
+    services.extras.setdefault("ma_active_connections", lambda tenant: active_connections(services, tenant))
+    services.extras.setdefault("ma_automatic_fingerprints", lambda tenant: automatic_fingerprints(services, tenant))
     services.extras.setdefault("ma_freeze_replay", lambda tenant, cases, name="": freeze(services, tenant, cases, name))
     services.extras.setdefault("ma_required_targets", lambda tenant, name: required_targets(services, tenant, name))
     services.extras.setdefault("ma_replay_capabilities", lambda tenant, task=None: capabilities(services, tenant, task))
     services.extras.setdefault("ma_skill_tombstones", tombstones)
+    services.extras.setdefault("ma_session_skill_names", lambda tenant, connection, ids:
+                               session_skill_names(services, tenant, connection, ids))
     services.extras.setdefault("ma_publication_target", publication_target)
 
 

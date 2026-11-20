@@ -1,4 +1,12 @@
 import asyncio
+import base64
+import hashlib
+import io
+import json
+import zipfile
+
+import httpx
+import pytest
 
 from team_replay.adapters.managed_agents import ManagedAgentsFactory
 from team_replay.engine import execute_pair
@@ -8,6 +16,172 @@ from team_replay.policy import progressive_replay_decision
 from team_replay.runtime_matrix import evaluate_runtime_compatibility
 from team_skills.library.bundle import encode_bundle_payload
 from tests.support.managed_agents import FakeEffects, FakeMA, save_artifact
+
+
+def test_mixed_materials_mount_original_bytes_and_send_paths_without_document_coercion():
+    class Server(FakeMA):
+        uploads = []
+
+        def respond(self, request):
+            if request.method == "POST" and request.url.path.endswith("/files"):
+                self.uploads.append(request.content)
+                return httpx.Response(200, json={"id": "file-" + str(len(self.uploads))})
+            return super().respond(request)
+
+    server = Server()
+    graph = {"entry_agent_id": "root", "agents": {
+        "root": {"id": "root", "version": 1, "skills": [], "tools": []},
+    }}
+    record = {
+        "connection_id": "one", "config": {}, "agent_graph": graph, "skill_bindings": {},
+        "environment": {"config": {"type": "cloud"}}, "replay_environment": {"id": "env", "config": {}},
+    }
+
+    async def client(record):
+        return server.client()
+
+    async def cleanup(*args):
+        pass
+
+    cap = {"run": lambda coroutine, timeout=None: asyncio.run(coroutine), "client": client,
+           "effects": lambda *args: FakeEffects(), "cleanup": cleanup,
+           "replay_capability": lambda *args: {"supported": True}, "save_artifact": save_artifact}
+    originals = {"mnt/session/uploads/screenshot.png": b"\x89PNG\r\n\x1a\noriginal pixels",
+                 "uploads/report.pdf": b"%PDF-original", "assets/music.mp3": b"ID3-original"}
+    context = ReplayContext(
+        request_id="materials", runtime_type="managed-agents", treatment=ReplayTreatment("baseline", None),
+        materials=tuple({"path": path, "sha256": hashlib.sha256(raw).hexdigest(),
+                         "content_b64": base64.b64encode(raw).decode()} for path, raw in originals.items()),
+        context_snapshot={}, timeout_seconds=30,
+        source_session={"runtime": {"connection_id": "one", "agent_graph": graph}},
+    )
+    session = ManagedAgentsFactory({"case": record}, cap).open(context)
+    try:
+        session.send("Use the provided materials")
+        session.send("Continue")
+        mounted = next(iter(server.sessions.values()))["resources"]
+        assert [r["mount_path"] for r in mounted] == ["screenshot.png", "report.pdf", "assets/music.mp3"]
+        assert all(raw in uploaded for raw, uploaded in zip(originals.values(), server.uploads, strict=True))
+        writes = [json.loads(r.content)["events"][0]["content"] for r in server.requests
+                  if r.method == "POST" and r.url.path.endswith("/events")]
+        assert all(block["type"] == "text" for block in writes[0])
+        assert all(path in str(writes[0]) for path in originals)
+        assert all("/mnt/session/uploads/" + r["mount_path"] in str(writes[0]) for r in mounted)
+        assert writes[1] == [{"type": "text", "text": "Continue"}]
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("branch", ["baseline", "candidate"])
+def test_treatment_replaces_all_recorded_references_even_when_current_targets_differ(branch):
+    server = FakeMA()
+    graph = {"entry_agent_id": "root", "agents": {
+        "root": {"id": "root", "version": 1, "skills": [], "tools": [],
+                 "multiagent": {"agents": [{"type": "agent", "id": "writer", "version": 1}]}},
+        "writer": {"id": "writer", "version": 1, "skills": [
+            {"type": "custom", "skill_id": "original-core", "version": "1"}], "tools": []},
+    }}
+    record = {
+        "connection_id": "one", "config": {}, "agent_graph": graph,
+        "target_skill_name": "core", "target_agents": ["root"],
+        "skill_bindings": {"core": {"id": "original-core", "agents": ["root"]}},
+        "environment": {"config": {"type": "cloud"}},
+        "replay_environment": {"id": "replay-env", "config": {}},
+    }
+    async def client(record):
+        return server.client()
+    async def cleanup(*args):
+        pass
+    cap = {"run": lambda coroutine, timeout=None: asyncio.run(coroutine), "client": client,
+           "effects": lambda *args: FakeEffects(), "cleanup": cleanup,
+           "replay_capability": lambda *args: {"supported": True}, "save_artifact": save_artifact}
+    skill = {"name": "core", "bundle": encode_bundle_payload({"SKILL.md": b"Core"})}
+    context = ReplayContext(request_id=branch, runtime_type="managed-agents",
+                            treatment=ReplayTreatment(branch, skill), materials=(), context_snapshot={},
+                            timeout_seconds=30, source_session={"runtime": {
+                                "connection_id": "one", "agent_graph": graph}})
+    session = ManagedAgentsFactory({"case": record}, cap).open(context)
+    try:
+        session.send("execute the task")
+        root = next(iter(server.sessions.values()))["agent"]
+        writer = next(iter(server.agents.values()))
+        assert root["skills"] == writer["skills"]
+        assert root["skills"][0]["skill_id"] != "original-core"
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("source", ["embedded", "skill_mount", "openviking"])
+@pytest.mark.parametrize("treatment_runtime", [False, True])
+def test_skill_replay_always_freezes_recorded_runtime_and_independent_artifact(source, treatment_runtime):
+    from team_ma.runtime_binding import bind_runtime
+
+    original = {"SKILL.md": b"---\nname: core\ndescription: Core\n---\nCore",
+                "runtime/bootstrap.sh": b"echo recorded-runtime"}
+    treatment = {"SKILL.md": b"Prompt-only baseline"}
+    if treatment_runtime:
+        treatment["runtime/bootstrap.sh"] = b"echo candidate-runtime"
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zipped:
+        for path, data in original.items():
+            zipped.writestr("core/" + path, data)
+    class Server(FakeMA):
+        def respond(self, request):
+            if request.method == "GET" and request.url.path.endswith("skills/original-core/versions/1/content"):
+                assert source != "openviking"
+                return httpx.Response(200, content=archive.getvalue())
+            return super().respond(request)
+    server = Server()
+    graph = {"entry_agent_id": "root", "agents": {
+        "root": {"id": "root", "version": 1, "tools": [], "skills": [
+            {"type": "custom", "skill_id": "original-core", "version": "1"}]},
+    }}
+    binding = {"skill_name": "core", "source": source, "working_directory": "/workspace/example",
+               "paths": [{"bundle_prefix": "runtime/", "workspace_prefix": "runtime/"}],
+               "bootstrap": "bash runtime/bootstrap.sh"}
+    if source == "openviking":
+        data = b"echo independent-runtime"
+        binding["artifact"] = {
+            "base_url": "https://viking.example", "uri": "viking://user/a/resources/runtime/archive.tar.xz",
+            "sha256": "a" * 64, "bytes": 100,
+            "files": [{"path": "runtime/bootstrap.sh", "bytes": len(data),
+                       "sha256": hashlib.sha256(data).hexdigest()}],
+        }
+    record = {
+        "connection_id": "one", "config": {"runtime_binding": binding},
+        "agent_graph": graph, "target_skill_name": "core",
+        "skill_bindings": {"core": {"id": "original-core", "agents": ["root"]}},
+        "environment": {"config": {"type": "cloud"}},
+        "replay_environment": {"id": "replay-env", "config": {}},
+    }
+    async def client(record):
+        return server.client()
+    async def cleanup(*args):
+        pass
+    cap = {"run": lambda coroutine, timeout=None: asyncio.run(coroutine), "client": client,
+           "effects": lambda *args: FakeEffects(), "cleanup": cleanup,
+           "runtime_binding": bind_runtime, "replay_capability": lambda *args: {"supported": True},
+           "save_artifact": save_artifact}
+    context = ReplayContext(
+        request_id="minimal", runtime_type="managed-agents", treatment=ReplayTreatment("baseline", {
+            "name": "core", "bundle": encode_bundle_payload(treatment)}),
+        materials=(), context_snapshot={}, timeout_seconds=30,
+        source_session={"runtime": {"connection_id": "one", "agent_graph": graph}},
+    )
+    session = ManagedAgentsFactory({"case": record}, cap).open(context)
+    try:
+        session.send("execute the task")
+        actual = next(iter(server.sessions.values()))["environment"]["config"]
+        expected_binding = dict(binding)
+        if source == "skill_mount":
+            expected_binding.update(source="embedded", archive_compression="xz")
+        expected, tree = bind_runtime({"type": "cloud"}, expected_binding,
+                                      original)
+        assert actual == expected and session.runtime_tree == tree
+        assert "/mnt/skills/core" not in actual["setup_script"]
+        assert record["config"]["runtime_binding"]["source"] == source
+    finally:
+        session.close()
 
 
 def test_full_ma_isolated_branches_reuse_each_session_and_real_skill_bundle():
@@ -52,13 +226,58 @@ def test_full_ma_isolated_branches_reuse_each_session_and_real_skill_bundle():
         assert agent["skills"][0]["skill_id"] != "original-skill"
         assert agent["system"] == writer["system"]
     for session in server.sessions.values():
-        assert session["agent"]["system"] == root["system"]
+        assert set(session["agent"]) == {"type", "id", "version", "skills", "multiagent"}
         assert session["agent"]["version"] == 7
         assert "model" not in session["agent"] and "base_agent" not in session["agent"]
         assert session["agent"]["multiagent"]["agents"][0]["id"] in server.agents
         assert "checklist" not in str(session).lower()
     assert len(cleaned) == 2
     assert all(b"Improved" not in data for data in server.skills.values())  # compressed Bundle, not system injection
+
+
+def test_single_agent_pair_only_overrides_skills_and_readbacks_same_environment():
+    server = FakeMA()
+    graph = {"entry_agent_id": "root", "agents": {
+        "root": {"id": "root", "version": 7, "system": "Production instruction",
+                 "model": {"id": "pinned-model"}, "tools": [{"type": "shell"}],
+                 "skills": [{"type": "custom", "skill_id": "original", "version": "1"},
+                            {"type": "custom", "skill_id": "unchanged", "version": "4"}]},
+    }}
+    record = {"connection_id": "one", "config": {}, "agent_graph": graph,
+              "environment": {"config": {"type": "cloud", "setup_script": "echo fixed-runtime"}},
+              "replay_environment": {"id": "env", "config": {}}, "target_skill_name": "demo",
+              "skill_bindings": {"demo": {"id": "original", "agents": ["root"]}}}
+
+    async def client(record):
+        return server.client()
+
+    async def cleanup(*args):
+        pass
+
+    cap = {"run": lambda coroutine, timeout=None: asyncio.run(coroutine), "client": client,
+           "effects": lambda *args: FakeEffects(), "cleanup": cleanup,
+           "replay_capability": lambda *args: {"supported": True}, "save_artifact": save_artifact}
+    snapshots = []
+    for branch in ("baseline", "candidate"):
+        context = ReplayContext(
+            request_id=branch, runtime_type="managed-agents", treatment=ReplayTreatment(branch, {
+                "name": "demo", "bundle": encode_bundle_payload({"SKILL.md": branch.encode()})}),
+            materials=(), context_snapshot={}, timeout_seconds=30,
+            source_session={"runtime": {"connection_id": "one", "agent_graph": graph}},
+        )
+        session = ManagedAgentsFactory({"case": record}, cap).open(context)
+        try:
+            snapshots.append(session.send("execute").execution_snapshot)
+        finally:
+            session.close()
+    assert not server.agents and len(server.sessions) == 2
+    for value in server.sessions.values():
+        assert set(value["agent"]) == {"type", "id", "version", "skills"}
+        assert value["agent"]["skills"][0] == graph["agents"]["root"]["skills"][1]
+    assert snapshots[0]["session_id"] != snapshots[1]["session_id"]
+    assert snapshots[0]["skills"] != snapshots[1]["skills"]
+    assert snapshots[0]["environment_config_sha256"] == snapshots[1]["environment_config_sha256"]
+    assert snapshots[0]["agent_id"] == snapshots[1]["agent_id"] == "root"
 
 
 def test_every_managed_connection_needs_its_own_verdict():
@@ -108,7 +327,8 @@ def test_real_ma_transport_runs_full_nine_and_five_turn_branches_before_comparin
         root_user = next(m["event_id"] for m in messages if m["role"] == "user")
         ident = root_user.split(":")[0]
         branch = next(s["tags"][0]["value"] for key, s in server.sessions.items() if key == ident)
-        done = len(kwargs["interactions"]) >= (9 if branch == "baseline" else 5)
+        round_number = int((kwargs["harness"].get("previous_checklist_report") or {}).get("rounds", 0)) + 1
+        done = round_number >= (9 if branch == "baseline" else 5)
         return {"judge": "model", "items": [
             {"id": "R1", "satisfied": done, "evidence": "Actual video" if done else ""},
         ]}

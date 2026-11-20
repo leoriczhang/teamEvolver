@@ -148,6 +148,7 @@ Details：[03-session-ingest.md](../api/03-session-ingest.md)
 | GET | `/api/sessions/{session_id}` |
 | GET | `/api/sessions/{session_id}/content` |
 | GET | `/api/sessions/{session_id}/stages` |
+| GET | `/api/sessions/{session_id}/stages/{stage}` |
 | POST | `/ingest_session` |
 
 ## Skills, candidates, experiences, transfer and workbench
@@ -263,6 +264,7 @@ Details：[24-managed-agents.md](../api/24-managed-agents.md)
 | GET | `/api/ma/connections/{connection_id}/releases` |
 | GET | `/api/ma/connections/{connection_id}/resources` |
 | PUT | `/api/ma/connections/{connection_id}/resources/{skill_name}/bindings` |
+| GET | `/api/ma/skill-jobs/{job_id}` |
 | GET | `/sync/ma/{connection_id}` |
 
 ## Team Memory
@@ -344,4 +346,4 @@ Details：[17-skill-mining.md](../api/17-skill-mining.md)
 | GET | `/api/mining/settings` |
 | POST | `/api/mining/settings` |
 
-Total: 248
+Total: 250

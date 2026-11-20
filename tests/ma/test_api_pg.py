@@ -55,6 +55,15 @@ def test_console_rbac_secret_redaction_cas_and_data_plane_etag(pg_env):
             assert updated.status_code == 200 and updated.json()["revision"] == 2
             assert (await client.put("/api/ma/connections/generic", headers=headers,
                                      json={"expected_revision": 1, "enabled": True})).status_code == 409
+            auto = await client.put("/api/ma/connections/generic", headers=headers,
+                                    json={"expected_revision": 2, "enabled": True, "replay_enabled": True})
+            assert auto.status_code == 202
+            assert auto.json()["connection"]["config"]["replay_environment_id"] == ""
+            assert auto.json()["connection"]["detail"]["replay_resources"]["status"] == "preparing"
+            async with pg_env.tx.tenant_tx("alpha") as conn:
+                operation = await MARepository(pg_env.tx).operation(conn, auto.json()["job_id"])
+                assert operation["input"]["revision"] == 3
+                assert await conn.fetchval(f"SELECT count(*) FROM {pg_env.schema}.ma_external_effects") == 0
             cross = await client.get("/api/ma/connections/generic", headers={"x-test-tenant": "beta"})
             assert cross.status_code == 404
             assert (await client.post("/api/ma/connections/generic/collect", headers=headers,

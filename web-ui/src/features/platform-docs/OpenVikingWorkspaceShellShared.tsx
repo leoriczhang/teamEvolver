@@ -101,6 +101,7 @@ export type WorkspaceDraft = {
 };
 
 export type SpaceKey = "personal" | "team";
+export type LibraryKind = "memory" | "resources";
 
 export type SpaceConfig = {
   key: SpaceKey;
@@ -108,30 +109,24 @@ export type SpaceConfig = {
   members: { scope: ScopeName; label: string }[];
 };
 
-export const WORKSPACE_SPACES: SpaceConfig[] = [
-  {
-    key: "personal",
-    label: "个人记忆",
-    members: [
-      { scope: "personal_workspace", label: "个人记忆" },
-    ],
-  },
-  {
-    key: "team",
-    label: "团队资源",
-    members: [
-      { scope: "team_workspace", label: "团队资源" },
-    ],
-  },
-];
+export const WORKSPACE_LIBRARIES: Record<LibraryKind, SpaceConfig[]> = {
+  memory: [
+    { key: "personal", label: "个人记忆", members: [{ scope: "personal_memory", label: "个人记忆" }] },
+    { key: "team", label: "团队记忆", members: [{ scope: "team_memory", label: "团队记忆" }] },
+  ],
+  resources: [
+    { key: "personal", label: "个人资源", members: [{ scope: "personal_resources", label: "个人资源" }] },
+    { key: "team", label: "团队资源", members: [{ scope: "team_resources", label: "团队资源" }] },
+  ],
+};
 
 export const SCOPE_LABELS: Record<ScopeName, string> = {
-  personal_memory: "个人 Memory",
-  team_memory: "团队 Memory",
+  personal_memory: "个人记忆",
+  team_memory: "团队记忆",
   personal_skills: "个人 Skill",
   team_skills: "团队 Skill",
-  personal_resources: "个人 Resources",
-  team_resources: "团队 Resources",
+  personal_resources: "个人资源",
+  team_resources: "团队资源",
   personal_workspace: "个人记忆",
   team_workspace: "团队资源",
 };
@@ -142,8 +137,8 @@ export function groupUri(scope: ScopeName): string {
   return `${GROUP_URI_PREFIX}${scope}`;
 }
 
-export function initialSpace(): SpaceConfig {
-  return WORKSPACE_SPACES[0];
+export function initialSpace(library: LibraryKind = "memory"): SpaceConfig {
+  return WORKSPACE_LIBRARIES[library][0];
 }
 
 export const DIRECTORY_PURPOSES: Record<string, string> = {

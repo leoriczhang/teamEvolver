@@ -27,6 +27,11 @@ class TransferCommands:
         options = dict(body["options"])
         token = options.pop("token", "")
         request = {**body, "options": {**options, "credential_hash": secret_fingerprint(token) if token else ""}}
+        from team_skills.library.store import snapshot
+        cloud = snapshot(self.services.tx)
+        selected = cloud.selected if cloud is not None else ""
+        if selected:
+            request["connection_id"] = selected
         await lock_key(conn, tenant_id, f"transfer:{command_id}")
         existing = await self.get(conn, command_id)
         if existing:
@@ -41,6 +46,8 @@ class TransferCommands:
             ref = await secrets.store(conn, tenant_id=tenant_id, plaintext=token, purpose="skill-transfer")
             options["secret_ref"] = ref.ref
         payload = {**body, "options": options, "actor": actor, "limits": asdict(config.bundle_limits)}
+        if selected:
+            payload["connection_id"] = selected
         if operation == "export":
             lib = SkillLibraryRepository(self.services.tx)
             versions = []

@@ -9,7 +9,7 @@ import os
 import pytest
 
 from session_ingestion.schemas import session_payload_hash
-from team_skills.candidates.repository import CandidateRepository
+from team_skills.candidates.repository import CandidateRepository, CandidateStateError
 from team_skills.config import BundleLimits
 from team_skills.evolution.replay_case_synthesis import hydrate_cross_session_cases
 from team_skills.evolution.repository import EvolutionRepository
@@ -154,6 +154,25 @@ def test_edit_while_replay_runs_discards_stale_verdict(pg_env, tmp_path, monkeyp
     row = candidate(pg_env, cid)
     assert (row["revision"], row["status"], row["verdict"]) == (2, "open", "")
     assert command(pg_env, r.json()["job_id"])["result"]["status"] == "stale"
+
+
+@pytest.mark.postgres
+def test_automatic_evolution_cannot_overwrite_a_validating_candidate(pg_env):
+    cid = seed_candidate(pg_env)
+
+    async def verify(conn):
+        repo = CandidateRepository(pg_env.tx)
+        await repo.transition(conn, tenant_id="default", candidate_id=cid, to_status="validating",
+                              actor="human", expected_revision=1, validate_task_id="fixed-replay")
+        with pytest.raises(CandidateStateError, match="validating"):
+            await repo.create(conn, tenant_id="default", skill_name="demo",
+                              bundle={"SKILL.md": _skill_md("demo", "automatic update")},
+                              limits=BundleLimits(), actor="evolution")
+        value = await repo.require(conn, cid)
+        assert value["revision"] == 1 and value["status"] == "validating"
+        assert value["validate_task_id"] == "fixed-replay"
+
+    _run(pg_env, "default", verify)
 
 
 @pytest.mark.postgres
@@ -312,7 +331,7 @@ def test_evolution_worker_creates_candidate_and_consumes_once(pg_env, tmp_path, 
 
 
 @pytest.mark.postgres
-def test_replay_acceptance_failure_preserves_candidate_and_completed_branch(pg_env, tmp_path, monkeypatch):
+def test_missing_execution_snapshot_does_not_prevent_queued_review(pg_env, tmp_path, monkeypatch):
     payloads = Payloads()
     seed_session(pg_env, payloads, "s1", "alice")
     seed_session(pg_env, payloads, "s2", "bob")
@@ -338,25 +357,16 @@ def test_replay_acceptance_failure_preserves_candidate_and_completed_branch(pg_e
         result = command(pg_env, response.json()["job_id"])["result"]
         rows = client.get("/api/skill-candidates", headers=H).json()["candidates"]
         assert result["candidates_queued"] == 1
-        assert result["evolutions"][0]["validation_acceptance"]["status"] == "blocked"
         item = candidate(pg_env, rows[0]["job_id"])
-        assert item["status"] == "open" and not item["verdict"] and not item["validate_task_id"]
-        assert item["evaluation"]["status"] == "blocked"
-        assert item["evaluation"]["recommended_publish"] is False
-        assert "verdict" not in item["evaluation"]["replay"]
+        assert item["status"] == "validating" and not item["verdict"] and item["validate_task_id"]
+        assert not item["evaluation"]
         assert len(item["detail"]["replay_cases"]) == 2
         events = _run(pg_env, "default", lambda conn: CandidateRepository(pg_env.tx).events(conn, item["candidate_id"]))
-        assert [event["kind"] for event in events] == ["created", "feedback"]
-        assert events[-1]["detail"]["validation_acceptance"]["status"] == "blocked"
-        assert command(pg_env, f"evaluate:{item['candidate_id']}:r1") is None
+        assert [event["kind"] for event in events] == ["created", "transition"]
+        accepted = command(pg_env, f"evaluate:{item['candidate_id']}:r1")
+        assert accepted["payload"]["ma_errors"]
+        assert all("incomplete" in reason for reason in accepted["payload"]["ma_errors"].values())
         assert len(calls) == 1
-
-        # Fixing infrastructure permits a later acceptance on the same revision.
-        services.extras.pop("ma_freeze_replay")
-        evaluation = client.post(f"/api/skill-candidates/{item['candidate_id']}/evaluate", headers=H)
-        assert evaluation.status_code == 202, evaluation.text
-        drive(pg_env, services, kinds=["skill.validate"])
-        assert candidate(pg_env, item["candidate_id"])["verdict"] == "accept"
 
 
 @pytest.mark.postgres
@@ -470,9 +480,11 @@ def test_worker_renews_long_attempt_and_second_pod_cannot_claim(pg_env):
 
     _run(pg_env, "default", setup)
     observed = []
+    renewed, finish = asyncio.Event(), asyncio.Event()
+    heartbeats = 0
 
     async def long_handler(task, services):
-        await asyncio.sleep(0.18)
+        await finish.wait()
         async with services.tx.tenant_tx("default") as conn:
             await services.tasks.require_current(conn, task)
         from teamEvolver.runtime import HandlerResult
@@ -480,12 +492,29 @@ def test_worker_renews_long_attempt_and_second_pod_cannot_claim(pg_env):
         return HandlerResult.succeed()
 
     services = build_services(role="worker", tx=pg_env.tx, handlers={"skill.validate": long_handler})
+    original_heartbeat = services.tasks.heartbeat
+
+    async def observe_heartbeat(*args, **kwargs):
+        nonlocal heartbeats
+        alive = await original_heartbeat(*args, **kwargs)
+        if alive:
+            heartbeats += 1
+            if heartbeats >= 4:
+                renewed.set()
+        return alive
+
+    services.tasks.heartbeat = observe_heartbeat
 
     async def run():
-        running = asyncio.create_task(process_once(services, owner_id="a", lease_seconds=0.06))
-        await asyncio.sleep(0.12)
-        observed.append(await process_once(services, owner_id="b", lease_seconds=0.06))
-        await running
+        # Observe real committed renewals beyond the original lease. A 60 ms
+        # lease races connection/transaction latency on a remote PostgreSQL.
+        running = asyncio.create_task(process_once(services, owner_id="a", lease_seconds=1.5))
+        try:
+            await asyncio.wait_for(renewed.wait(), timeout=10)
+            observed.append(await process_once(services, owner_id="b", lease_seconds=1.5))
+        finally:
+            finish.set()
+            await running
 
     pg_env.tx.pool.run(run())
     assert observed == [None]

@@ -2,6 +2,7 @@ import { Empty,Pill,UserBadge } from "@/components/common";
 import type { LedgerRow } from "@/features/sessions/api/client";
 import { fmtTime } from "@/lib/format";
 import type { ReactNode } from "react";
+import SessionSkillChips from "./SessionSkillChips";
 
 export type SessTab = "detail" | "process";
 
@@ -68,7 +69,7 @@ function judgeTooltip(judge?: LedgerRow["judge"]): string | undefined {
 
 function Th({ children }: { children: ReactNode }) {
   return (
-    <th className="border-b border-line px-4 py-2.5 text-left text-xs font-semibold text-muted-foreground">
+    <th className="whitespace-nowrap border-b border-line px-4 py-2.5 text-left text-xs font-semibold text-muted-foreground">
       {children}
     </th>
   );
@@ -135,7 +136,10 @@ export default function SessionTable({
         </Td>
         <Td>
           <UserBadge name={r.user_alias || "anonymous"} />
-          {r.meta?.user_id && r.meta.user_id !== (r.user_alias || "") && (
+          {r.meta?.user_attribution === "connection_default" && (
+            <span className="ml-1 text-[10px] text-muted-foreground" title="原会话未提供提交人，按连接配置归属">默认归属</span>
+          )}
+          {r.meta?.user_id && !r.meta.user_id.startsWith("unknown.") && r.meta.user_id !== (r.user_alias || "") && (
             <div
               className="mono mt-1 max-w-[160px] truncate text-[11px] text-muted-foreground"
               title={"User ID：" + r.meta.user_id}
@@ -158,24 +162,7 @@ export default function SessionTable({
           )}
         </Td>
         <Td>
-          <div
-            className="mb-1 text-[11px] text-muted-foreground"
-            title={r.available_skills ? `配置可用：${r.available_skills.join("、")}\n实际使用按主、子 agent 的调用证据统计。` : "实际使用按调用证据统计。"}
-          >
-            实际使用 {(r.used_skills || []).length}
-            {r.available_skills != null && ` / 可用 ${r.available_skills.length}`}
-          </div>
-          <div className="flex max-w-[180px] flex-wrap gap-1">
-            {(r.used_skills || []).length ? (
-              r.used_skills!.map((name) => (
-                <Pill key={name} tone="blue">
-                  {name}
-                </Pill>
-              ))
-            ) : (
-              <span className="text-xs text-muted-foreground">—</span>
-            )}
-          </div>
+          <SessionSkillChips row={r} />
         </Td>
         <Td>
           <span
@@ -238,7 +225,7 @@ export default function SessionTable({
           <Th>提交人</Th>
           <Th>轮数</Th>
           <Th>Trace ID</Th>
-          <Th>Used Skills</Th>
+          <Th>Skills / 版本</Th>
           <Th>状态</Th>
           <Th>价值判定</Th>
           <Th>评审结论</Th>

@@ -40,6 +40,18 @@ def test_history_uses_remaining_unique_cases_when_fewer_datasets_exist():
     assert sample_history([], [], seed="fixed") == []
 
 
+def test_paused_ma_history_is_ineligible_without_rewriting_source_snapshots():
+    from team_replay.datasets.candidate_selection import eligible_case
+    item = case(1)
+    item["provenance"]["source_runtime"] = {"type": "managed-agents", "connection_id": "paused"}
+    before = copy.deepcopy(item)
+    assert not eligible_case(item, {"active"})
+    assert eligible_case(item, {"paused"})
+    assert eligible_case(item, None)
+    assert eligible_case(case(2), {"active"})
+    assert item == before
+
+
 @pytest.mark.postgres
 @pytest.mark.skipif(not os.environ.get("TEAMEVOLVER_TEST_PG_DSN"), reason="isolated PostgreSQL required")
 def test_acceptance_pins_history_and_excludes_experiments_and_other_skills(pg_env):
@@ -63,7 +75,7 @@ def test_acceptance_pins_history_and_excludes_experiments_and_other_skills(pg_en
         ))
         frozen = await freeze_candidate_cases(
             conn, pg_env.tx, tenant_id="default", candidate_id="candidate", skill_name="demo",
-            detail={"replay_cases": [case(100), case(101)]}, seed="command",
+            detail={"replay_cases": [case(100), case(101)]}, seed="command", historical_count=3,
         )
         assert frozen["replay_sampling"]["historical_selected"] == 3
         assert len(frozen["replay_cases"]) == 5

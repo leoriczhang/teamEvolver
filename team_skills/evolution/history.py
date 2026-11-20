@@ -4,7 +4,7 @@ from __future__ import annotations
 from team_replay.repository import ReplayRepository
 from team_skills.candidates.repository import CandidateRepository
 from team_skills.evolution.kernel.helpers import parse_skill_content
-from team_skills.library.bundle import diff_skill_bundles, encode_bundle_payload
+from team_skills.library.bundle import decode_bundle_payload, diff_skill_bundles, encode_bundle_payload
 from team_skills.library.repository import SkillLibraryRepository
 
 
@@ -47,10 +47,15 @@ def compact_evaluation(evaluation: dict | None) -> dict | None:
     compact = {key: replay[key] for key in (
         "status", "verdict", "accepted", "reason", "error", "runtime_gate", "sampling",
         "efficiency", "no_regression", "total", "completed", "failed", "succeeded", "case_count",
+        "validation_method", "validation_scope", "validation_scope_kind",
+        "candidate_completed", "ab_completed", "ab_verdict",
+        "basic_validation", "assessment", "issues", "validation_targets",
     ) if key in replay}
     if not compact.get("error"):
         for case in replay.get("cases") or []:
-            error = (case.get("baseline") or {}).get("error") or (case.get("candidate") or {}).get("error")
+            error = (case.get("candidate") or {}).get("error")
+            if replay.get("validation_method") != "candidate_execution":
+                error = (case.get("baseline") or {}).get("error") or error
             if error:
                 compact["error"] = error
                 break
@@ -159,8 +164,12 @@ async def candidate_payload(conn, tx, item: dict, *, compact: bool = False, incl
         from team_skills.evolution.repository import EvolutionRepository
         command = await EvolutionRepository(tx).command(conn, item["validate_task_id"])
         frozen = command["payload"].get("detail", detail) if command else detail
+        assessment = await EvolutionRepository(tx).branch(conn, item["validate_task_id"], "assessment")
+        method = (assessment or {}).get("method")
         payload["replay_progress"] = {
-            "total": len(frozen.get("replay_cases") or []),
+            "total": 0 if method == "experience_review" else 1 if method == "candidate_execution"
+            else len(frozen.get("replay_cases") or []),
+            "validation_method": method,
             **await ReplayRepository(tx).progress(conn, "skill", item["validate_task_id"]),
         }
         payload["replay_sampling"] = frozen.get("replay_sampling") or {}
@@ -173,9 +182,10 @@ async def candidate_payload(conn, tx, item: dict, *, compact: bool = False, incl
         bundle = await repo.read_bundle(conn, item["candidate_id"])
         baseline = {}
         if item["base_version"]:
-            baseline = await SkillLibraryRepository(tx).read_version_bundle(
-                conn, item["skill_name"], item["base_version"],
-            )
+            baseline = (decode_bundle_payload(detail["baseline_bundle"]) if detail.get("baseline_bundle")
+                        else await SkillLibraryRepository(tx).read_version_bundle(
+                            conn, item["skill_name"], item["base_version"], local=True,
+                        ))
         diff = diff_skill_bundles(baseline, bundle)
         payload.update(
             candidate_skill=skill_payload(item["skill_name"], bundle, include_bundle=include_replay),
@@ -190,10 +200,14 @@ async def candidate_payload(conn, tx, item: dict, *, compact: bool = False, incl
 
 async def version_context(conn, tx, name: str, version: int) -> dict:
     repo = CandidateRepository(tx)
+    from team_skills.library.store import snapshot
+    cloud = snapshot(tx)
+    remote = cloud.target(name)["record"].get("id", "") if cloud is not None and cloud.managed(name) else ""
     row = await conn.fetchrow(
         f"SELECT candidate_id FROM {tx.pool.schema}.skill_candidates "
         "WHERE skill_name=$1 AND published_version=$2 AND status='published' "
-        "ORDER BY decided_at DESC LIMIT 1", name, version,
+        "AND ($3='' OR decision->>'skill_id'=$3) "
+        "ORDER BY decided_at DESC LIMIT 1", name, version, remote,
     )
     if not row:
         return {}

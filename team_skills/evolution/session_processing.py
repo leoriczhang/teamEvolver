@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from datetime import datetime, timezone
 
 from session_ingestion.schemas import session_payload_hash
 from team_skills.evolution.stages.aggregate import aggregate_sessions_by_skill
@@ -22,12 +23,27 @@ async def load_sessions(descriptors: list[dict], payloads) -> list[dict]:
         session.update({
             "session_id": descriptor["session_id"], "content_hash": descriptor["content_hash"],
             "user_alias": descriptor["user_id"],
+            "business_time": descriptor.get("business_time"), "ingested_at": descriptor.get("ingested_at"),
         })
         _extract_session_metadata(session)
         session["_trajectory"] = build_session_trajectory(session)
         session["_avg_prm"] = session["_judge_scores"]["overall_score"]
         sessions.append(session)
     return sessions
+
+
+def after_reset(session, boundary):
+    """Old business Sessions stay old even when imported/analyzed again later."""
+    if boundary is None:
+        return True
+    value = session.get("business_time") or session.get("ingested_at")
+    if not value:
+        return False
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value > boundary
 
 
 def groups(sessions: list[dict]) -> dict[str, list[dict]]:

@@ -35,6 +35,20 @@ def test_absent_evaluation_does_not_look_evaluated():
     assert compact_evaluation({}) == {}
 
 
+def test_baseline_failure_does_not_replace_candidate_completion_in_compact_review():
+    evaluation = {"recommended_publish": True, "replay": {
+        "validation_method": "candidate_execution", "verdict": "accept", "candidate_completed": 1,
+        "basic_validation": {"status": "passed"}, "ab_verdict": "inconclusive",
+        "cases": [{"baseline": {"completed": False, "error": "Baseline timeout"},
+                   "candidate": {"completed": True}}],
+    }}
+    compact = compact_evaluation(evaluation)
+    assert compact["recommended_publish"]
+    assert compact["replay"]["candidate_completed"] == 1 and "error" not in compact["replay"]
+    assert compact["replay"]["ab_verdict"] == "inconclusive"
+    assert evaluation["replay"]["cases"][0]["baseline"]["error"] == "Baseline timeout"
+
+
 def test_light_detail_preserves_checklist_evidence_without_replay_artifacts():
     report = {"all_satisfied": False, "total": 1, "satisfied_count": 0,
               "items": [{"id": "video", "text": "交付视频", "satisfied": False, "evidence": "未交付"}],

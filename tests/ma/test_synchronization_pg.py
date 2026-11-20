@@ -14,7 +14,7 @@ from team_skills.library.bundle import bundle_tree_sha256
 from team_skills.library.repository import SkillLibraryRepository
 from teamEvolver.app import build_role_services
 from teamEvolver.config import TeamEvolverConfig
-from teamEvolver.managed_agents import MAClient, MAError
+from teamEvolver.managed_agents import MAClient
 from teamEvolver.security import SecretBox, SecretRepository
 from teamEvolver.tenants.registry import TenantContext, reset_current_tenant, set_current_tenant
 from tests.support.managed_agents import skill_zip
@@ -22,7 +22,7 @@ from tests.support.managed_agents import skill_zip
 pytestmark = pytest.mark.postgres
 
 
-def test_partial_external_result_is_reconciled_and_system_edits_survive(pg_env):
+def test_reconcile_observes_cloud_without_pushing_old_team_library_versions(pg_env):
     repo = MARepository(pg_env.tx)
     lib = SkillLibraryRepository(pg_env.tx)
     secrets = SecretRepository(pg_env.tx, SecretBox("test-key"))
@@ -46,6 +46,11 @@ def test_partial_external_result_is_reconciled_and_system_edits_survive(pg_env):
 
     def ma_response(request):
         path = request.url.path.removeprefix("/api/v3/")
+        if path == "skills/skill":
+            return httpx.Response(200, json={"id": "skill", "name": "note-craft",
+                                            "latest_version": versions[-1]})
+        if path.startswith("skills/skill/versions/") and not path.endswith("/content"):
+            return httpx.Response(200, json={"skill_id": "skill", "version": path.split("/")[3]})
         if path == "skills/skill/versions":
             if request.method == "POST":
                 uploads.append(request.content)
@@ -114,17 +119,13 @@ def test_partial_external_result_is_reconciled_and_system_edits_survive(pg_env):
                 operation = await repo.operation(conn, "sync")
             ma_client = MAClient("https://ma.example/api/v3", "ark", transport=httpx.MockTransport(ma_response))
             async with ma_client as client:
-                with pytest.raises(MAError, match="TransportOutcomeUnknown"):
-                    await reconcile_connection(task, services, client, connection, operation)
-                async with pg_env.tx.tenant_tx("alpha") as conn:
-                    assert (await repo.applied(conn, "connection"))["release_id"] == "initial"
-                    operation = await repo.operation(conn, "sync")
                 await reconcile_connection(task, services, client, connection, operation)
                 async with pg_env.tx.tenant_tx("alpha") as conn:
                     release = await repo.applied(conn, "connection")
-                    assert release["record"]["entry_agent_version"] == "2"
+                    assert release["record"]["entry_agent_version"] == "1"
                     assert release["record"]["readback_verified"]
                 rollback[0] = True
+                versions.append("2")  # An external cloud edit is the next current head.
                 async with pg_env.tx.tenant_tx("alpha") as conn:
                     await lib.commit_bundle(conn, tenant_id="alpha", name="note-craft", bundle=old_files,
                                             limits=BundleLimits(), mutation_id="rollback")
@@ -138,9 +139,10 @@ def test_partial_external_result_is_reconciled_and_system_edits_survive(pg_env):
                     restored = await repo.applied(conn, "connection")
                     assert restored["release_id"] != release["release_id"]
                     assert restored["record"]["skills"]["note-craft"]["version"] == "1"
-                    assert restored["record"]["skills"]["note-craft"]["team_version"] == 3
-            assert len(uploads) == 1
-            assert agent_posts == ["writer", "root", "writer", "root"]  # lost POST and rollback never duplicate uploads
+                    assert restored["record"]["skills"]["note-craft"]["latest_version"] == "2"
+                    assert "team_version" not in restored["record"]["skills"]["note-craft"]
+            assert uploads == []
+            assert agent_posts == []
             assert agents["writer"]["system"] == "External edited system"
             assert agents["writer"]["metadata"] == {"owner": "business"}
             assert agents["writer"]["skills"][1] == {"type": "ark", "skill_id": "preset"}

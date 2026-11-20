@@ -61,12 +61,71 @@ describe("CandidateModal feedback placement", () => {
 });
 
 describe("candidate detail completeness", () => {
+  it("allows supported experience review without requiring MA or A/B Checklist", () => {
+    show(candidate, {
+      status: "evaluated", recommended_publish: true,
+      replay: { verdict: "accept", validation_method: "experience_review",
+        runtime_gate: { status: "not_required" }, validation_scope: "权限缺失处理",
+        assessment: { reason: "引用实际依赖错误，补充暂停条件", evidence_refs: ["source-session"],
+          scope: "权限缺失处理", verdict: "accept", source: "model" }, ab_verdict: "not_run" },
+    });
+    expect((screen.getByRole("button", { name: "按验证结论发布" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByText("经验审阅不要求创建业务 Session。")).toBeTruthy();
+    expect(screen.queryByText(/缺少 Checklist 判定/)).toBeNull();
+  });
+
+  it("separates one completed Candidate scope from an undetermined A/B comparison", () => {
+    const onEvaluate = vi.fn();
+    show(candidate, {
+      status: "evaluated", recommended_publish: true,
+      replay: { verdict: "accept", validation_method: "candidate_execution",
+        runtime_gate: { status: "passed" }, validation_scope: "分镜阶段",
+        error: "旧 A/B Baseline 超时",
+        basic_validation: { status: "passed" }, candidate_completed: 1, ab_completed: 0,
+        ab_verdict: "inconclusive",
+        checklist: { candidate: { all_satisfied: true, total: 1, satisfied_count: 1,
+          judge: "model", items: [{ id: "R1", text: "完成分镜", satisfied: true, evidence: "已归档分镜" }] } } },
+    }, { onEvaluate });
+    expect((screen.getByRole("button", { name: "按验证结论发布" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByText("基础验证通过")).toBeTruthy();
+    expect(screen.getByText(/候选已完成 1 个场景/).textContent).toContain("未判定");
+    fireEvent.click(screen.getByRole("button", { name: "完整 A/B" }));
+    expect(onEvaluate).toHaveBeenCalledWith(true, "full_ab");
+  });
+
+  it("shows the active replay progress instead of a cached blocked result after reopening", () => {
+    show({ ...candidate, review_status: "validating",
+      replay_progress: { total: 5, completed: 2, succeeded: 1, failed: 1 } },
+    { ...incomplete, status: "blocked", replay: {
+      reason: "Discover the configured Replay Environment before validation",
+    } });
+    expect(screen.getByRole("status").textContent).toContain("已完成 2 / 5");
+    expect(screen.queryByText(/评估受阻/)).toBeNull();
+    expect(screen.queryByText(/Discover the configured/)).toBeNull();
+    expect((screen.getByRole("button", { name: "评估中…" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "强制发布" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("blocks normal publish when a failed replay has no Checklist evidence", () => {
     show(candidate, incomplete);
     expect(screen.getByText("缺少 Checklist 判定，无法确认任务完成；不能按回放发布。")).toBeTruthy();
     expect(screen.queryByText(/发布门禁仅参考三项效率指标/)).toBeNull();
-    expect((screen.getByRole("button", { name: "按回放发布" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "按验证结论发布" }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText("回放失败，无法确定")).toBeTruthy();
+  });
+
+  it("keeps branch failure evidence visible alongside the aggregate replay error", () => {
+    show(candidate, { ...incomplete, replay: {
+      verdict: "inconclusive", error: "MCP isolation not configured",
+      cases: [{
+        baseline: { error: "Runtime Bundle contains no files for configured paths" },
+        candidate: { error: "MA HTTP 400: InvalidParameter" },
+      }],
+    } });
+    expect(screen.getByText("回放失败：MCP isolation not configured")).toBeTruthy();
+    expect(screen.getByText("Runtime Bundle contains no files for configured paths")).toBeTruthy();
+    expect(screen.getByText("MA HTTP 400: InvalidParameter")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "按验证结论发布" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("shows loading instead of absent Skill content for a compact list evaluation", () => {
@@ -93,7 +152,7 @@ describe("candidate detail completeness", () => {
       replay: { verdict: "accept", checklist: { baseline: report, candidate: report },
         decision_policy: { verdict: "accept", decision_basis: "interaction_turns_decreased" } },
     });
-    expect((screen.getByRole("button", { name: "按回放发布" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "按验证结论发布" }) as HTMLButtonElement).disabled).toBe(false);
     expect(screen.getAllByText("BASELINE CONTENT").length).toBeGreaterThan(0);
   });
 

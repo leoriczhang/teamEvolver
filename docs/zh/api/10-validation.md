@@ -1,6 +1,6 @@
 # 候选与进化 API
 
-Skill 进化支持管理员手动触发或 Worker 定时自动触发：Worker 读取有价值的 Session，按 Skill 分组规划修改并生成 Skill Candidate。Candidate 可自动提交 True Replay；验证通过后按租户策略自动发布，或等待管理员人工审核发布。流程见 [进化循环](../concepts/02-evolution-loop.md)。
+Skill 进化支持管理员手动触发或 Worker 定时自动触发：Worker 读取有价值的 Session，按 Skill 分组规划修改并生成 Skill Candidate。Candidate 可自动提交候选验证；验证通过后按租户策略自动发布，或等待管理员人工审核发布。流程见 [进化循环](../concepts/02-evolution-loop.md)。
 
 代码入口：
 
@@ -20,6 +20,11 @@ Skill 进化支持管理员手动触发或 Worker 定时自动触发：Worker �
 ```
 
 `session_ids` 最多 200 个；省略时读取受理时刻之前入库、尚未被进化消费的 `valuable` Session，最多 `evolution_max_sessions` 个（上限 200）。请求不能覆盖身份或配置。创建 `skill.evolve` 任务，固定当前 `skills` 模块配置 revision；任务首次运行时冻结输入 Session 集合，恢复执行使用同一集合。
+
+显式传入 `{"session_ids":["session_..."],"reprocess":true}` 可重新使用已消费或手动更新前的指定
+Session。必须提供非空 ID 列表，仍要求已有强制分析和内容哈希一致。只为本次候选固定指定
+Evidence 和同源 Case，不恢复已归档的旧候选、Evidence 或自动数据集；新候选使用当前有效
+文件包，规划期间的版本、重置边界和候选 revision 并发保护仍生效。
 
 ### GET /api/skill-evolution/jobs/{job_id}/result
 
@@ -74,20 +79,32 @@ Candidate 详情：Skill 名称、基线版本、revision、bundle、变更说�
 
 ### POST /api/skill-candidates/{candidate_id}/evaluate
 
-只评估不发布：创建 `skill.validate` 任务，运行静态检查与 True Replay，写入 verdict（`accept`、`reject`、`inconclusive`）后 Candidate 回到 `open`。
+只评估不发布：创建 `skill.validate` 任务，运行静态检查与候选验证，写入 verdict（`accept`、`reject`、`inconclusive`）后 Candidate 回到 `open`。
+
+请求可为空，或传 `{"validation_method":"auto"}`。方式为 `auto`（默认，由 Worker 的 LLM 根据
+具体差异与当前 Evidence 选择）、`experience_review`、`candidate_execution`、`full_ab`。
+审阅不足以证明执行行为时不通过。经验审阅返回 Evidence 引用与范围，不要求 Runtime 通过。
+候选执行选择一个相关 Case，仅运行 Candidate；分阶段与完整交付明确区分。
+`full_ab` 保留隔离双分支与效率比较规则。所有模型与执行工作仍在 Worker 中运行，受理返回 202。
+
+`evaluation.replay` 保存 `validation_method`、`validation_scope`、`basic_validation`、
+`candidate_completed`、`ab_completed`、`ab_verdict` 和 `assessment`。
+`candidate_completed` 与原 `succeeded`（双方完成）分开。基础通过不改写历史 A/B 结论。
 
 ### POST /api/skill-candidates/{candidate_id}/validate
 
 ```json
-{"mode": "auto", "candidate_revision": 2}
+{"mode": "auto", "candidate_revision": 2, "validation_method": "auto"}
 ```
 
 | mode | 行为 |
 | --- | --- |
-| `auto` | 静态检查通过、Replay 运行正常且 verdict 为 `accept` 时发布；verdict 为 `reject` 时拒绝；`inconclusive` 时回到 `open` |
-| `force` | 静态检查通过且 Replay 运行正常即发布，不要求 `accept` |
+| `auto` | 静态检查与所选验证方式的门禁通过且 verdict 为 `accept` 时发布；`reject` 时拒绝；`inconclusive` 时回到 `open` |
+| `force` | 仍须静态检查与所选方式的门禁通过；不会绕过证据、候选完成或完整 A/B 的 Runtime 门禁 |
 
-验证固定当前绑定的 Replay Adapter revision 与 `replay` 模块配置。只有 `open` 状态的 Candidate 可以提交。
+验证固定当前 Evidence、候选文件树、Replay Adapter revision 与 `replay` 模块配置。执行配置
+缺失不阻止受理经验审阅，只有执行方式才消费 MA 资源门禁。发布默认沿用已评估的验证方式，
+相同候选与执行指纹的完成记录直接复用。只有 `open` 状态的 Candidate 可以提交。
 
 ### POST /api/skill-candidates/{candidate_id}/reject
 

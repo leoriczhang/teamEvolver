@@ -125,6 +125,7 @@ def test_worker_task_kinds_are_declared():
         "ma.discover",
         "ma.collect",
         "ma.reconcile",
+        "ma.skill",
     }
     assert set(TASK_KINDS) == expected, "declared task kinds changed"
     assert len(TASK_KINDS) == len(set(TASK_KINDS)), "duplicate task kind in TASK_KINDS"

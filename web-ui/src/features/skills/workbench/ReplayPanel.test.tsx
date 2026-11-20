@@ -60,3 +60,46 @@ it("follows synthesis job results and keeps accepted replay queued", async () =>
     skill_id: "demo", candidate_files: { "ref.md": "draft" },
   });
 });
+
+it("preserves other Cases, Skill pins and negative checks while editing the first Case", async () => {
+  const multi = {
+    ...dataset, description: "Keep description",
+    skills: [{ skill_id: "demo", revision: 7 }, { skill_id: "helper", revision: 3 }],
+    cases: [
+      { ...dataset.cases[0], checks: [{ id: "no", kind: "output", text: "No credentials", polarity: "must_not" }] },
+      { ...dataset.cases[0], case_id: "two", skill_ids: ["helper"], query: "Keep second Case",
+        provenance: { session_id: "historical" }, materials: [{ path: "file.txt", sha256: "hash" }] },
+    ],
+  };
+  const old = mocks.api.getMockImplementation()!;
+  mocks.api.mockImplementation((path, init) => path.startsWith("/api/replay-lab/datasets?")
+    ? Promise.resolve({ datasets: [multi] }) : old(path, init));
+  const { result } = renderHook(() => useReplayPanel({ active: true, user }));
+  await waitFor(() => expect(result.current.datasets).toHaveLength(1));
+  act(() => result.current.editDataset(result.current.datasets[0]));
+  act(() => result.current.setDatasetDraft(current => ({ ...current, query: "Edited task" })));
+  await act(() => result.current.saveDataset());
+  const call = mocks.api.mock.calls.find(([path, init]) => path === "/api/replay-lab/datasets" && init?.method === "POST");
+  const saved = JSON.parse(String(call?.[1]?.body));
+  expect(saved.description).toBe("Keep description");
+  expect(saved.skills).toEqual(multi.skills);
+  expect(saved.cases[1]).toEqual(multi.cases[1]);
+  expect(saved.cases[0].checks[0].polarity).toBe("must_not");
+  expect(saved.expected_revision).toBe(3);
+});
+
+it("pins the editor version and refuses a conflicting Dataset revision", async () => {
+  const old = mocks.api.getMockImplementation()!;
+  mocks.api.mockImplementation((path, init) => path === "/api/replay-lab/skills/demo"
+    ? Promise.resolve({ name: "demo", skill_md: "original", version: 7, tree_sha256: "tree" }) : old(path, init));
+  const { result, rerender } = renderHook(({ version }) =>
+    useReplayPanel({ active: true, user, externalVersion: version }), { initialProps: { version: 7 } });
+  await waitFor(() => expect(result.current.skill?.version).toBe(7));
+  await act(() => result.current.startRun());
+  const call = mocks.api.mock.calls.find(([path, init]) => path === "/api/replay-lab/runs" && init?.method === "POST");
+  expect(JSON.parse(String(call?.[1]?.body))).toMatchObject({ expected_version: 7, expected_tree_sha256: "tree" });
+  mocks.api.mockClear();
+  rerender({ version: 6 });
+  await act(() => result.current.startRun());
+  expect(mocks.api.mock.calls.some(([path, init]) => path === "/api/replay-lab/runs" && init?.method === "POST")).toBe(false);
+});

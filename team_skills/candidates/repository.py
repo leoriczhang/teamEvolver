@@ -48,16 +48,17 @@ from team_skills.library.repository import (
 )
 from teamEvolver.database.transaction import TransactionManager
 
-STATUSES = ("open", "validating", "published", "rejected")
-TERMINAL = frozenset({"published", "rejected"})
+STATUSES = ("open", "validating", "published", "rejected", "archived")
+TERMINAL = frozenset({"published", "rejected", "archived"})
 VERDICTS = ("accept", "reject", "inconclusive")
 MARKS = ("reviewed", "adopted", "rejected")
 
 TRANSITIONS: dict[str, frozenset[str]] = {
-    "open": frozenset({"validating", "published", "rejected"}),
-    "validating": frozenset({"open", "published", "rejected"}),
+    "open": frozenset({"validating", "published", "rejected", "archived"}),
+    "validating": frozenset({"open", "published", "rejected", "archived"}),
     "published": frozenset(),
     "rejected": frozenset(),
+    "archived": frozenset(),
 }
 
 
@@ -95,6 +96,15 @@ class CandidateRepository:
         "tree_sha256, reviewed, adopted, rejected, published_version, mutation_id, "
         "validate_task_id, detail, evaluation, decision, created_at, updated_at, decided_at"
     )
+    # Exclude evidence and bundles in PostgreSQL, before asyncpg transfers the
+    # JSON. Removing them from the HTTP payload alone still loads megabytes per
+    # candidate on every queue refresh.
+    _COMPACT_COLUMNS = _COLUMNS.replace(
+        "detail,",
+        "(detail - ARRAY['session_evidence', 'replay_cases', 'evolution_context', "
+        "'bundle_diff', 'skill_diff', 'file_changes', 'candidate_skill', 'current_skill', "
+        "'candidate_skill_md', 'current_skill_md']::text[]) AS detail,",
+    )
 
     @staticmethod
     def _row(row: Any) -> dict[str, Any]:
@@ -120,12 +130,12 @@ class CandidateRepository:
         return item
 
     async def list(
-        self, conn: Any, *, scope: str = "open", limit: int = 20, offset: int = 0
+        self, conn: Any, *, scope: str = "open", limit: int = 20, offset: int = 0, compact: bool = False
     ) -> tuple[list[dict[str, Any]], int]:
         """Bounded page of candidates; ``scope`` is ``open`` / ``processed`` / ``all``."""
         statuses = {
             "open": ["open", "validating"],
-            "processed": ["published", "rejected"],
+            "processed": ["published", "rejected", "archived"],
             "all": list(STATUSES),
         }.get(scope)
         if statuses is None:
@@ -136,8 +146,9 @@ class CandidateRepository:
             f"SELECT count(*) FROM {self._schema}.skill_candidates WHERE status = ANY($1::text[])",
             statuses,
         )
+        columns = self._COMPACT_COLUMNS if compact else self._COLUMNS
         rows = await conn.fetch(
-            f"SELECT {self._COLUMNS} FROM {self._schema}.skill_candidates "
+            f"SELECT {columns} FROM {self._schema}.skill_candidates "
             "WHERE status = ANY($1::text[]) ORDER BY updated_at DESC, candidate_id "
             "LIMIT $2 OFFSET $3",
             statuses,
@@ -230,6 +241,19 @@ class CandidateRepository:
 
     # -- mutations --------------------------------------------------------- #
 
+    async def archive_for_skill(self, conn, *, tenant_id, skill_name, actor, reason):
+        """Retire the live package; retain files, evaluations and event history."""
+        await lock_key(conn, tenant_id, f"candidate-skill:{skill_name}")
+        live = await self.live_for_skill(conn, skill_name)
+        if live is None:
+            return []
+        await self.transition(
+            conn, tenant_id=tenant_id, candidate_id=live["candidate_id"],
+            to_status="archived", actor=actor, reason=reason,
+            decision={"status": "archived", "reason": reason},
+        )
+        return [live["candidate_id"]]
+
     async def create(
         self,
         conn: Any,
@@ -295,6 +319,10 @@ class CandidateRepository:
         actor: str,
     ) -> dict[str, Any]:
         candidate_id = item["candidate_id"]
+        if actor == "evolution" and int(item["base_version"]) != int(base_version):
+            raise CandidateStateError("candidate baseline changed; archive the old package before evolving")
+        if item["status"] == "validating" and actor == "evolution":
+            raise CandidateStateError("candidate is validating; wait for Replay to finish before revising")
         revision = int(item["revision"]) + 1
         merged = {**item["detail"], **(detail or {})}
         await conn.execute(

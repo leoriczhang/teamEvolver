@@ -46,14 +46,48 @@ describe("MA console", () => {
     expect(screen.queryByText("补采会话")).toBeNull();
     view.unmount();
   });
-  it("credential edit has empty password fields and replay environment is required", async () => {
-    const view = render(<ConnectionForm connection={connection as any} onClose={() => {}} onSaved={() => {}} />);
+  it("enables replay without manual resource IDs and follows resource preparation", async () => {
+    const job = { job_id: "prepare", status_url: "/api/jobs/prepare" };
+    mocks.api.mockResolvedValue(job);
+    const saved = vi.fn();
+    const view = render(<ConnectionForm connection={connection as any} onClose={() => {}} onSaved={saved} />);
     expect((screen.getByLabelText("MA Key（留空保留）") as HTMLInputElement).value).toBe("");
     expect((screen.getByLabelText("租户 Key（留空保留）") as HTMLInputElement).value).toBe("");
     fireEvent.click(screen.getByLabelText("启用隔离 MA True Replay"));
+    expect(screen.getByText("保存后自动准备隔离资源")).toBeTruthy();
+    expect(screen.queryByLabelText("回放 Environment ID")).toBeNull();
+    expect(screen.queryByLabelText("回放 Vault ID（逗号分隔）")).toBeNull();
     fireEvent.submit(screen.getByText("保存配置").closest("form")!);
-    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "请指定回放环境");
-    expect(mocks.api).not.toHaveBeenCalled();
+    await waitFor(() => expect(saved).toHaveBeenCalledWith(job));
+    const body = JSON.parse(mocks.api.mock.calls[0][1].body);
+    expect(body.replay_enabled).toBe(true);
+    expect(body.replay_environment_id).toBe("");
+    expect(body.replay_vault_ids).toEqual([]);
+    expect(screen.queryByRole("alert")).toBeNull();
+    view.unmount();
+  });
+  it("shows automatic IDs read only and explains missing credentials", () => {
+    const value = { ...connection, config: { ...connection.config, replay_enabled: true },
+      detail: { replay_resources: { status: "credentials_missing", environment_id: "env-auto",
+        vault_ids: ["vlt-auto"], missing_credentials: ["OPENVIKING_API_KEY"] } } };
+    const view = render(<ConnectionForm connection={value as any} onClose={() => {}} onSaved={() => {}} />);
+    expect(screen.getByText("env-auto")).toBeTruthy();
+    expect(screen.getByText("vlt-auto")).toBeTruthy();
+    expect(screen.getByText(/需要向回放 Vault 补充：OPENVIKING_API_KEY/)).toBeTruthy();
+    expect(screen.queryByDisplayValue("env-auto")).toBeNull();
+    view.unmount();
+  });
+  it("allows clearing an unverified default owner", async () => {
+    mocks.api.mockResolvedValue(connection);
+    const view = render(<ConnectionForm connection={connection as any} onClose={() => {}} onSaved={() => {}} />);
+    const field = screen.getByLabelText("默认归属用户 ID（可选）") as HTMLInputElement;
+    expect(field.required).toBe(false);
+    fireEvent.change(field, { target: { value: "" } });
+    fireEvent.submit(screen.getByText("保存配置").closest("form")!);
+    await waitFor(() => expect(mocks.api).toHaveBeenCalled());
+    const request = JSON.parse(mocks.api.mock.calls[0][1].body);
+    expect(request.default_user_id).toBe("");
+    expect(request.expected_revision).toBe(2);
     view.unmount();
   });
   it("lets a new candidate choose target members and shows target verdict", async () => {

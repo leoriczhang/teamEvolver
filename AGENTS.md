@@ -4,7 +4,7 @@
 
 ## 项目速览
 
-teamEvolver 是 Agent 团队能力进化控制面：一个模块化单体，同一镜像以 `api`（默认端口 52010）与 `worker`（健康端口 52011）两种角色运行，React 控制台由 `api` 提供，Python 3.11。PostgreSQL 是可变业务状态的唯一权威源，OpenViking 保存知识制品与 Compile Task。核心链路：Session 接入 → 强制分析 → Skill Evolution → True Replay 验证 → Candidate Review 与 Publish → Agent pull；另有团队 Memory 聚合与维护、成功经验、知识库挖掘。
+teamEvolver 是 Agent 团队能力进化控制面：一个模块化单体，同一镜像以 `api`（默认端口 52010）与 `worker`（健康端口 52011）两种角色运行，React 控制台由 `api` 提供，Python 3.11。PostgreSQL 管理 TE 的业务状态，MA Skills 的当前内容与版本以 MA 云端为准；OpenViking 保存知识制品与 Compile Task。核心链路：Session 接入 → 强制分析 → Skill Evolution → Candidate Validation → Candidate Review 与 Publish；MA 发布走原生云端接口，其他 Agent 使用团队库 pull。
 
 ## 常用命令
 
@@ -61,7 +61,7 @@ teamEvolver/            平台层
 session_ingestion/      Session 上报、数据源拉取、强制分析阶段
 team_skills/            Skill 库、Candidate、Evolution、成功经验、导入导出、实验工作台
 team_replay/            True Replay、Test Dataset、Replay Adapter
-team_ma/                MA 连接、版本发现、会话采集与已发布 Skill pull 消费
+team_ma/                MA 连接、云端 Skill 版本管理、会话采集与发布回读
 team_memory/            团队 Memory 聚合、DreamCycle 维护、Memory Replay
 team_miner/             挖掘模块组合入口
 ├── knowledge_miner/    知识库挖掘，资料 → Wiki
@@ -87,7 +87,7 @@ Python 测试只从 `tests/` 收集，按领域归档，命名使用职责而非
 
 存储与配置：
 
-- 可变状态只写 PostgreSQL；本机目录只放临时文件、日志、PID 和可重建缓存。PG 或 OpenViking 故障时不回退本机目录。
+- TE 可变状态写 PostgreSQL；MA Skill 变更受理为 Worker 命令并写 MA 云端。本机目录只放临时文件、日志、PID 和可重建缓存。外部存储故障时不回退本机目录。
 - Schema 变更只追加新的版本 SQL 到 `teamEvolver/database/schema/`，已发布的版本文件不改。
 - 租户模块配置缺失时返回 503，不回退 YAML；配置写入使用 `expected_revision`，长任务固定受理时的 revision。
 - 凭证只以 Secret Ref 保存，接口与日志不出现明文。
@@ -100,8 +100,8 @@ Python 测试只从 `tests/` 收集，按领域归档，命名使用职责而非
 
 Skill 与 Replay：
 
-- 团队 Skill 变更统一经 `team_skills/library/repository.py:SkillLibraryRepository`，在一个事务内写版本、文件与幂等记录；分发只走 `GET /sync/skills` pull，不创建投递 outbox。
-- 修改 MA 发现、采集、回放或同步时先读 [MA 接入](./docs/zh/agent-integrations/07-managed-agents.md)。`team_ma` 从已发布库 pull 后更新 MA；Publish 保持领域内事务。历史 Session 使用实际快照，回放资源按效果账本精确清理。
+- Skill 变更统一经 `team_skills/library/repository.py:SkillLibraryRepository`。MA 连接先在 `skill_scope` 中读取云端原生版本与不可变包，再进入短事务；写入受理为 `ma.skill`，Worker 上传、更新成员引用并回读成功后才标记 published。MA 包缓存不写团队库版本链；非 MA Skill 仍在 PG 事务内发布并通过 `GET /sync/skills` 分发。
+- 修改 MA 发现、采集、回放或版本管理时先读 [MA 接入](./docs/zh/agent-integrations/07-managed-agents.md)。discover/reconcile 观察云端最新版本，不上传旧团队库内容。候选固定云端资源身份及基线字节，版本变化使旧候选退出自动流程。原生上传无 CAS，竞争结果保留历史并暂停发布；未知外部结果先按效果账本对账。历史 Session 使用实际快照，回放资源按账本精确清理。
 - `team_replay/` 不导入 `team_memory` 或其他模块的 Handler，只使用平台层与其他模块的公开 Query（如 `session_ingestion/queries.py`、`team_skills/library/queries.py`）；纯执行引擎通过 `ReplayHost` 获取宿主能力。
 
 进程：

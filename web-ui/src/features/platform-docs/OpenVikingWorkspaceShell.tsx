@@ -27,17 +27,19 @@ Search,
 Trash2,
 X
 } from "lucide-react";
-import { DirectoryLevelPreview,FilePreview,OpenVikingTerminal,SCOPE_LABELS,TreeRow,fileKind } from "./OpenVikingWorkspaceShellShared";
+import { DirectoryLevelPreview,FilePreview,LibraryKind,OpenVikingTerminal,SCOPE_LABELS,TreeRow,fileKind } from "./OpenVikingWorkspaceShellShared";
 import { useOpenVikingWorkspaceShell } from "./useOpenVikingWorkspaceShell";
 
 export default function OpenVikingWorkspaceShell({
   active,
   user,
+  library = "memory",
 }: {
   active: boolean;
   user?: UserProfile | null;
+  library?: LibraryKind;
 }) {
-const { users, activeUserId, setActiveUserId, config, spaces, activeSpaceKey, entries, currentUri, setCurrentUri, selected, content, originalContent, viewMode, setViewMode, directoryLevel, setDirectoryLevel, directoryLevels, directoryLevelLoading, filter, setFilter, expanded, loading, saving, editing, reviewOpen, setReviewOpen, transfer, setTransfer, activeSpace, spaceScopes, selectedScope, draftList, dirtyUris, isDirty, canEditSelected, hasEditableScopes, activeWritableScope, terminalScope, filteredTree, loadConfig, chooseSpace, refreshTree, openEntry, updateDraftContent, beginEditing, discardEditing, finishEditing, saveDrafts } = useOpenVikingWorkspaceShell({ active, user });
+const { users, activeUserId, setActiveUserId, config, spaces, activeSpaceKey, entries, currentUri, setCurrentUri, selected, content, originalContent, viewMode, setViewMode, directoryLevel, setDirectoryLevel, directoryLevels, directoryLevelLoading, filter, setFilter, expanded, loading, saving, editing, reviewOpen, setReviewOpen, transfer, setTransfer, activeSpace, spaceScopes, selectedScope, draftList, dirtyUris, isDirty, canEditSelected, hasEditableScopes, activeWritableScope, terminalScope, filteredTree, loadConfig, chooseSpace, refreshTree, openEntry, updateDraftContent, beginEditing, discardEditing, finishEditing, saveDrafts } = useOpenVikingWorkspaceShell({ active, user, library });
 return (
     <div className="w-full px-4 pb-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-surface px-3 py-2">

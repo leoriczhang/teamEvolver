@@ -74,7 +74,8 @@ async def evolve(task, services):
 
 def register_handlers():
     """Fixed code registry; the composition root injects live collaborators."""
+    from team_skills.library.store import scoped_handler
     return {
-        "skill.evolve": evolve, "skill.validate": run_validation,
-        "skill.transfer": transfer, "experience.sync": sync,
+        "skill.evolve": scoped_handler(evolve), "skill.validate": scoped_handler(run_validation),
+        "skill.transfer": scoped_handler(transfer), "experience.sync": scoped_handler(sync),
     }

@@ -169,3 +169,45 @@ def test_child_trajectory_mandatory_stages_restart_dedup_and_old_idle_resume(pg_
             meta = json.loads(formal[0]["meta"]) if isinstance(formal[0]["meta"], str) else formal[0]["meta"]
             assert meta["num_turns"] == 2
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("status", [404, 403, 503])
+def test_one_unavailable_session_does_not_poison_batch_but_auth_errors_propagate(pg_env, status):
+    repo = MARepository(pg_env.tx)
+    services = build_role_services(role="worker", tx=pg_env.tx, config=TeamEvolverConfig())
+    secrets = SecretRepository(pg_env.tx, SecretBox("test-key"))
+    services.extras["secret_repo"] = secrets
+
+    def response(request):
+        if request.url.path.endswith("/sessions/deleted"):
+            return httpx.Response(status, json={"error": {"code": "SessionUnavailable"}})
+        if request.url.path.endswith("/sessions/healthy"):
+            return httpx.Response(200, json={"id": "healthy", "status": "running"})
+        return httpx.Response(200, json={"data": []})
+    services.extras["ma_client_factory"] = lambda url, key: MAClient(
+        url, key, transport=httpx.MockTransport(response))
+
+    async def run():
+        async with pg_env.tx.tenant_tx("alpha") as conn:
+            secret = await secrets.store(conn, tenant_id="alpha", plaintext="test")
+            config = validate_config({
+                "display_name": "Notes", "entry_agent_id": "root", "environment_id": "env",
+                "default_user_id": "operator", "ma_secret_ref": secret.ref, "tenant_token_ref": secret.ref,
+            })
+            await repo.save(conn, tenant_id="alpha", connection_id="one", config=config)
+            await repo.status(conn, "one", "ready")
+            await repo.save_cursor(conn, tenant_id="alpha", connection_id="one", session_id="deleted",
+                                   record={"range_id": "preserved"})
+            await enqueue(conn, services, tenant_id="alpha", connection_id="one", kind="ma.collect",
+                          operation_id="collect", body={"session_ids": ["deleted", "healthy"]})
+        await process_once(services, owner_id="worker", tenants=["alpha"], kinds=["ma.collect"])
+        async with pg_env.tx.tenant_tx("alpha") as conn:
+            row = await services.tasks.get(conn, task_id="collect")
+            if status == 404:
+                assert row["status"] == "succeeded"
+                assert (await repo.operation(conn, "collect"))["result"]["counts"] == {"unavailable": 1, "active": 1}
+                cursor = (await repo.cursor(conn, "one", "deleted"))["record"]
+                assert cursor["range_id"] == "preserved" and cursor["status"] == "unavailable"
+            else:
+                assert row["status"] == ("failed" if status == 403 else "retry_wait")
+    asyncio.run(run())

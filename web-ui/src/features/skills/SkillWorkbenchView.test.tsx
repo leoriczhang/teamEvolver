@@ -5,7 +5,9 @@ import "@testing-library/jest-dom/vitest";
 import { act,cleanup,fireEvent,render,screen,waitFor } from "@testing-library/react";
 import { afterEach,beforeEach,describe,expect,it,vi } from "vitest";
 
-vi.mock("@/api/client", () => ({ api: vi.fn(), cloudNote: () => "", getActiveTenantId: () => "" }));
+vi.mock("@/api/client", async importOriginal => ({
+  ...await importOriginal<typeof import("@/api/client")>(), api: vi.fn(),
+}));
 vi.mock("@/lib/toast", () => ({ toastErr: vi.fn(), toastOk: vi.fn() }));
 vi.mock("@/features/skills/workbench/CodeEditor", () => ({
   languageName: () => "Markdown",
@@ -18,6 +20,7 @@ const user = { id: "alice", display_name: "Alice", role: "admin" as const };
 let runBody: any;
 
 async function mockRequest(path: string, init?: RequestInit): Promise<any> {
+  if (path === "/api/ma/connections") return { connections: [] };
   if (path === "/api/replay-lab/workspace") return index;
   if (path.startsWith("/api/replay-lab/workspace/demo/file")) {
     const file = new URL(path, "http://test").searchParams.get("path");
@@ -58,10 +61,53 @@ async function openSkill() {
   await screen.findByRole("option", { name: /测试数据集/ });
 }
 
-beforeEach(() => { mockApi.mockReset(); mockApi.mockImplementation(mockRequest); runBody = undefined; window.localStorage?.clear(); });
+beforeEach(() => { mockApi.mockReset(); mockApi.mockImplementation(mockRequest); runBody = undefined; window.localStorage?.clear(); window.history.replaceState(null, "", "/"); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("Skill code workbench", () => {
+  it("reads the selected cloud connection and refreshes same-name files when switching", async () => {
+    mockApi.mockImplementation(async (path, init) => {
+      if (path === "/api/ma/connections") return { connections: [
+        { connection_id: "video", config: { display_name: "视频制作" } },
+        { connection_id: "visual", config: { display_name: "视觉制作" } },
+      ] };
+      const connection = new Headers(init?.headers).get("X-MA-Connection-Id");
+      if (path === "/api/replay-lab/workspace") return {
+        ...index, skills: [{ ...index.skills[0], version: connection === "visual" ? 54 : 53 }],
+      };
+      if (path.startsWith("/api/replay-lab/workspace/demo/file")) return {
+        path: "SKILL.md", editable: true, version: connection === "visual" ? 54 : 53,
+        content: connection === "visual" ? md + "\nVisual content" : md + "\nVideo content",
+      };
+      return mockRequest(path, init);
+    });
+    render(<SkillWorkbenchView active user={user} />);
+    await openSkill();
+    expect(screen.getByRole("textbox", { name: "代码编辑器 SKILL.md" })).toHaveValue(md + "\nVideo content");
+    expect(screen.getByText("编辑基线 v53")).toBeVisible();
+    const select = screen.getByRole("combobox", { name: "工作台 MA Skill 连接" });
+    expect(select).toHaveValue("video");
+    fireEvent.change(select, { target: { value: "visual" } });
+    await openSkill();
+    expect(screen.getByRole("textbox", { name: "代码编辑器 SKILL.md" })).toHaveValue(md + "\nVisual content");
+    expect(screen.getByText("编辑基线 v54")).toBeVisible();
+    expect(new URLSearchParams(window.location.search).get("connection_id")).toBe("visual");
+  });
+
+  it("keeps a dirty file and connection when the user cancels switching", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    mockApi.mockImplementation((path, init) => path === "/api/ma/connections"
+      ? Promise.resolve({ connections: [{ connection_id: "video" }, { connection_id: "visual" }] })
+      : mockRequest(path, init));
+    render(<SkillWorkbenchView active user={user} />);
+    await openSkill();
+    fireEvent.change(screen.getByRole("textbox", { name: "代码编辑器 SKILL.md" }), { target: { value: "Unsaved" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "工作台 MA Skill 连接" }), { target: { value: "visual" } });
+    expect(screen.getByRole("textbox", { name: "代码编辑器 SKILL.md" })).toHaveValue("Unsaved");
+    expect(screen.getByRole("combobox", { name: "工作台 MA Skill 连接" })).toHaveValue("video");
+    expect(new URLSearchParams(window.location.search).get("connection_id")).toBe("video");
+  });
+
   it("offers ZIP and Git import when the real code folder is empty", async () => {
     mockApi.mockImplementation((path, init) => path === "/api/replay-lab/workspace"
       ? Promise.resolve({ ...index, skills: [] }) : mockRequest(path, init));

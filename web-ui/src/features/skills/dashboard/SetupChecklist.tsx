@@ -72,7 +72,7 @@ export default function SetupChecklist({
     {
       key: "openviking",
       title: "连接 OpenViking",
-      desc: "个人记忆与团队资源的上下文存储；未连接时“个人与团队资产”不可用。",
+      desc: "Agent 记忆与资源的上下文存储；未连接时“记忆库”和“资源库”不可用。",
       done: hasOpenVikingConfiguration(sharing),
       unknown: sharing === null,
       target: "health",

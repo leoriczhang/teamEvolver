@@ -353,6 +353,10 @@ export interface EvolveProcessSettings {
 
 export interface SkillListItem {
   name: string;
+  backend?: string;
+  connection_id?: string;
+  bound_version?: string | null;
+  bound_versions?: Record<string, string>;
   skill_id?: string;
   version?: number;
   category?: string;
@@ -363,11 +367,14 @@ export interface SkillListItem {
 
 export interface SkillListResp {
   skill_backend?: "postgres" | "viking" | "local" | string;
-  delivery_mode?: "pull";
+  delivery_mode?: "pull" | "cloud";
   skills: SkillListItem[];
 }
 
 export interface SkillDetail {
+  version?: number;
+  tree_sha256?: string;
+  connection_id?: string;
   sha256?: string;
   name: string;
   category?: string;

@@ -39,16 +39,30 @@ export function getActiveTenantId(): string {
 }
 
 export function setActiveTenantId(tenantId: string): void {
+  const changed = tenantId !== getActiveTenantId();
   try {
     if (tenantId) window.localStorage.setItem(TENANT_STORAGE_KEY, tenantId);
     else window.localStorage.removeItem(TENANT_STORAGE_KEY);
     const url = new URL(window.location.href);
     if (tenantId) url.searchParams.set("tenant", tenantId);
     else url.searchParams.delete("tenant");
+    if (changed) url.searchParams.delete("connection_id");
     window.history.replaceState(null, "", url.toString());
   } catch {
     // localStorage/URL unavailable (private mode etc.) — selection is lost.
   }
+}
+
+export function getSkillConnectionId(): string {
+  return new URLSearchParams(window.location.search).get("connection_id") || "";
+}
+
+export function setSkillConnectionId(connectionId: string): void {
+  const url = new URL(window.location.href);
+  if (connectionId) url.searchParams.set("connection_id", connectionId);
+  else url.searchParams.delete("connection_id");
+  window.history.replaceState(null, "", url.toString());
+  window.dispatchEvent(new Event("console-skill-connection-changed"));
 }
 
 // Keep a rejected selector visible until the user chooses an allowed tenant.
@@ -80,6 +94,11 @@ export function tenantHeaders(path: string, init?: HeadersInit): Headers {
     !headers.has("X-Tenant-Id")
   ) {
     headers.set("X-Tenant-Id", tenantId);
+  }
+  const connection = new URLSearchParams(window.location.search).get("connection_id");
+  if (connection && /^\/api\/(skills|skill-candidates|replay-lab|datasets)(\/|\?|$)/.test(path)
+      && !headers.has("X-MA-Connection-Id")) {
+    headers.set("X-MA-Connection-Id", connection);
   }
   return headers;
 }
@@ -166,5 +185,27 @@ export async function api<T = any>(path: string, opts?: RequestInit): Promise<T>
       res.status
     );
   }
+  if (res.status === 202 && data?.job_id?.startsWith("ma-skill:") && data?.result_url) {
+    const fixedHeaders = tenantHeaders(path, opts?.headers);
+    return { ...data, ...await waitCloudSkill(data, fixedHeaders, opts?.signal || undefined) } as T;
+  }
   return data as T;
+}
+
+export async function waitCloudSkill(
+  receipt: Record<string, any>, headers: Headers, signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+    const deadline = Date.now() + 300_000;
+    while (Date.now() < deadline) {
+      if (signal?.aborted) throw new ApiError("操作等待已取消，云端作业仍可在任务列表查看");
+      const job = await api<{ status: string; result?: Record<string, unknown>; error?: string }>(
+        receipt.result_url || `/api/ma/skill-jobs/${receipt.job_id}`, { headers, signal },
+      );
+      if (job.status === "succeeded" && job.result) return job.result;
+      if (["failed", "cancelled"].includes(job.status)) {
+        throw new ApiError(job.error || "云端 Skill 操作未完成，请查看任务详情");
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    throw new ApiError("云端作业仍在执行，请到任务列表查看结果");
 }

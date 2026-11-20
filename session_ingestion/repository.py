@@ -225,6 +225,8 @@ class SessionIngestionRepository:
             " $13::jsonb, $14::jsonb, $15) "
             "ON CONFLICT (tenant_id, session_id) DO UPDATE SET "
             "  ingestion_id = EXCLUDED.ingestion_id, source = EXCLUDED.source, "
+            "  user_id = EXCLUDED.user_id, account_id = EXCLUDED.account_id, "
+            "  external_id = EXCLUDED.external_id, "
             "  decision = EXCLUDED.decision, content_ref = EXCLUDED.content_ref, "
             "  content_hash = EXCLUDED.content_hash, judge = EXCLUDED.judge, "
             "  filter_audit = EXCLUDED.filter_audit, consumption = EXCLUDED.consumption, "
@@ -255,3 +257,36 @@ class SessionIngestionRepository:
             "AND meta->>'ma_connection_id'=$2 AND meta->>'ma_parent_session_id'=$3",
             session_id, connection_id, parent_session_id,
         )
+
+    async def managed_sessions(self, conn, *, connection_id, parent_session_id):
+        rows = await conn.fetch(
+            f"SELECT session_id,ingestion_id,user_id,meta,content_ref FROM {self._schema}.sessions "
+            "WHERE meta->>'ma_connection_id'=$1 AND meta->>'ma_parent_session_id'=$2",
+            connection_id, parent_session_id,
+        )
+        return [{**dict(row), "meta": _loads(row["meta"])} for row in rows]
+
+    async def correct_submission(self, conn, *, row, user_id, meta, content_ref, content_hash):
+        """CAS correction preserves business time, ingest time and stage evidence."""
+        return await conn.fetchval(
+            f"UPDATE {self._schema}.sessions SET user_id=$2,meta=$3::jsonb,content_ref=$4,content_hash=$5 "
+            "WHERE session_id=$1 AND content_ref=$6 AND user_id=$7 AND meta=$8::jsonb RETURNING session_id",
+            row["session_id"], user_id, json.dumps(meta), content_ref, content_hash,
+            row["content_ref"], row["user_id"], json.dumps(row["meta"]),
+        ) is not None
+
+    async def correct_ingestion_user(self, conn, *, ingestion_id, user_id):
+        await conn.execute(
+            f"UPDATE {self._schema}.ingestions SET user_id=$2,updated_at=now() "
+            "WHERE ingestion_id=$1 AND user_id<>$2", ingestion_id, user_id,
+        )
+
+    async def cache_list_meta(self, conn, *, row, meta):
+        """Update derived metadata only if the archived source is still current."""
+        return await conn.fetchval(
+            f"UPDATE {self._schema}.sessions SET meta=$2::jsonb "
+            "WHERE session_id=$1 AND content_ref=$3 AND content_hash=$4 AND meta=$5::jsonb "
+            "RETURNING session_id",
+            row["session_id"], json.dumps(meta), row["content_ref"], row["content_hash"],
+            json.dumps(row["meta"]),
+        ) is not None

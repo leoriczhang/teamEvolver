@@ -1,4 +1,4 @@
-import { api,tenantHeaders } from "@/api/client";
+import { api,getSkillConnectionId,setSkillConnectionId,tenantHeaders } from "@/api/client";
 import {
 Dot,
 Empty,
@@ -63,6 +63,34 @@ export default function DashboardView({
   const [status, setStatus] = useState<StatusResp | null>(null);
   const [storage, setStorage] = useState<StorageStatus | null>(null);
   const [skillList, setSkillList] = useState<SkillListResp | null>(null);
+  const [skillError, setSkillError] = useState("");
+  const [maConnections, setMaConnections] = useState<{ connection_id: string; config?: { display_name?: string } }[]>([]);
+  const [cloudConnection, setCloudConnection] = useState(
+    getSkillConnectionId,
+  );
+  function chooseConnection(value: string) {
+    if (value === cloudConnection) return;
+    setSkillConnectionId(value);
+    setCloudConnection(value);
+    setSkillList(null);
+    setSkillError("");
+  }
+  const currentConnection = useRef(cloudConnection);
+  currentConnection.current = cloudConnection;
+  useEffect(() => {
+    const sync = () => {
+      if (!active) return;
+      const selected = getSkillConnectionId();
+      if (selected === currentConnection.current) return;
+      currentConnection.current = selected;
+      setCloudConnection(selected);
+      setSkillList(null);
+      setSkillError("");
+    };
+    sync();
+    window.addEventListener("console-skill-connection-changed", sync);
+    return () => window.removeEventListener("console-skill-connection-changed", sync);
+  }, [active]);
   const [cands, setCands] = useState<Candidate[]>([]);
   const [candidateTotal, setCandidateTotal] = useState(0);
   const [candidatePage, setCandidatePage] = useState(1);
@@ -117,6 +145,7 @@ export default function DashboardView({
   const [skillEditName, setSkillEditName] = useState<string | null | undefined>(undefined);
 
   const inflight = useRef(false);
+  const refreshSequence = useRef(0);
   const evaluatingRef = useRef<Record<string, boolean>>({});
   const evalCacheRef = useRef<Record<string, EvalResult>>({});
   // job_id -> last loaded full candidate detail; polled compact list items
@@ -224,16 +253,20 @@ export default function DashboardView({
   const refresh = useCallback(
     async (force: boolean) => {
       if (inflight.current && !force) return;
+      const sequence = ++refreshSequence.current;
       inflight.current = true;
       const refreshFlag = force ? "&refresh=true" : "";
-      const [statusResult, storageResult, skillResult, candidateResult] = await Promise.allSettled([
+      const [statusResult, storageResult, skillResult, candidateResult, connectionResult] = await Promise.allSettled([
         api<StatusResp>(`/status${force ? "?refresh=true" : ""}`),
         api<StorageStatus>("/api/storage/status"),
-        api<SkillListResp>("/api/skills"),
+        api<SkillListResp>("/api/skills", { headers: { "X-MA-Connection-Id": cloudConnection } }),
         api<PageResponse<Candidate>>(
           `/api/skill-candidates?compact=true&limit=${PAGE_SIZE}&offset=${(candidatePage - 1) * PAGE_SIZE}${refreshFlag}`
         ),
+        api<{ connections: typeof maConnections }>("/api/ma/connections"),
       ]);
+      if (sequence !== refreshSequence.current) return;
+      if (cloudConnection !== currentConnection.current) { inflight.current = false; return; }
       const st = statusResult.status === "fulfilled" ? statusResult.value : null;
       const sto = storageResult.status === "fulfilled" ? storageResult.value : null;
       const loadedSkills = skillResult.status === "fulfilled" ? skillResult.value : null;
@@ -257,6 +290,9 @@ export default function DashboardView({
       if (st) setStatus(st);
       if (sto) setStorage(sto);
       if (loadedSkills) setSkillList(loadedSkills);
+      setSkillError(skillResult.status === "rejected"
+        ? skillResult.reason?.message || "Skill 列表请求失败" : "");
+      if (connectionResult.status === "fulfilled") setMaConnections(connectionResult.value.connections || []);
       if (cs === null) {
         // request failed — keep previous list
       } else if (cs.length === 0 && cands.length > 0) {
@@ -276,7 +312,7 @@ export default function DashboardView({
         }
       }
     },
-    [candidatePage, cands.length, evaluate]
+    [candidatePage, cands.length, evaluate, cloudConnection]
   );
 
   // poll
@@ -341,8 +377,8 @@ export default function DashboardView({
   const running = status?.running;
   const skills = Object.fromEntries(
     (skillList?.skills || []).map((skill) => [
-      skill.name,
-      { skill_id: skill.skill_id, version: skill.version },
+      skill.connection_id ? `${skill.connection_id}:${skill.name}` : skill.name,
+      skill,
     ])
   );
   const skillNames = Object.keys(skills);
@@ -610,6 +646,14 @@ export default function DashboardView({
               </span>
             </span>
             <div className="flex items-center gap-2">
+              {maConnections.length > 1 && <select aria-label="MA Skill 连接"
+                className="h-8 rounded-md border bg-background px-2 text-xs" value={cloudConnection}
+                onChange={e => chooseConnection(e.target.value)}>
+                <option value="">全部连接</option>
+                {maConnections.map(c => <option key={c.connection_id} value={c.connection_id}>
+                  {c.config?.display_name || c.connection_id}
+                </option>)}
+              </select>}
               <Button
                 variant="outline"
                 size="sm"
@@ -620,25 +664,36 @@ export default function DashboardView({
             </div>
           </div>
         }
-        count={`${skillNames.length} 个`}
+        count={skillList ? `${skillNames.length} 个` : "—"}
       >
-        {!skillNames.length ? (
+        {skillError && <div role="alert" className="flex items-center justify-between gap-3 p-4 text-sm text-destructive">
+          <span>Skills 加载失败：{skillError}{skillList ? "；当前显示上次成功加载的数据。" : ""}</span>
+          <Button variant="outline" size="sm" onClick={() => void refresh(true)}>重试加载 Skills</Button>
+        </div>}
+        {!skillList && !skillError ? <Empty>正在加载 Skills…</Empty>
+        : !skillNames.length && !skillError ? (
           <Empty>注册表为空</Empty>
-        ) : (
+        ) : !!skillNames.length && (
           <>
             <ListViewport>
               <Table headers={["技能名", "Skill ID", "版本", "操作"]}>
                 {skillPager.items.map((n) => {
-                  const s = skills[n] || {};
+                  const s = skills[n];
+                  const name = s.name;
+                  const select = () => {
+                    if (s.connection_id) chooseConnection(s.connection_id);
+                  };
                   const v = s.version || 0;
                   const canRoll = v > 1;
                   return (
                     <tr
                       key={n}
                       className="clickable"
-                      onClick={() => setSkillModal({ name: n, version: v })}
+                      onClick={() => { select(); setSkillModal({ name, version: v }); }}
                     >
-                      <Td>{n}</Td>
+                      <Td>{name}{s.connection_id && <span className="ml-2 text-xs text-muted-foreground">
+                        {s.connection_id}
+                      </span>}</Td>
                       <Td className="mono">{s.skill_id || "-"}</Td>
                       <Td>
                         <Pill tone="green">v{v}</Pill>
@@ -650,7 +705,7 @@ export default function DashboardView({
                             size="sm"
                             onClick={(e) => {
                               e.stopPropagation();
-                              setSkillEditName(n);
+                              select(); setSkillEditName(name);
                             }}
                           >
                             编辑
@@ -661,7 +716,7 @@ export default function DashboardView({
                               size="sm"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                setSkillModal({ name: n, version: v });
+                                select(); setSkillModal({ name, version: v });
                               }}
                             >
                               版本 / 回滚

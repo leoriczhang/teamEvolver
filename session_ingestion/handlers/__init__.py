@@ -366,9 +366,6 @@ async def handle_archive(task: ClaimedTask, services) -> HandlerResult:
 
     decision = str(archived.get("decision") or "")
     archived_session = archived.get("session") or session
-    content_ref, content_hash = await asyncio.to_thread(deps.payloads.put_session, 
-        payload.ingestion_id, archived_session, stage="archive"
-    )
     formal_session_id = f"session_{payload.ingestion_id}"
     runtime = archived_session.get("runtime") if isinstance(archived_session.get("runtime"), dict) else {}
     runtime_context = (
@@ -378,6 +375,29 @@ async def handle_archive(task: ClaimedTask, services) -> HandlerResult:
     managed_parent = str(runtime_context.get("source_session_id") or "")
     managed_connection = str(runtime.get("connection_id") or runtime_context.get("connection_id") or "")
     managed_formal_id = str(runtime_context.get("formal_session_id") or "")
+    if runtime.get("type") == "managed-agents":
+        from ..submission import apply_submission, submission_metadata
+        submission = submission_metadata(
+            archived_session,
+            tagged_user_id=payload.user_id if runtime_context.get("user_attribution") == "tag" else "",
+            default_user_id=payload.user_id,
+        )
+        async with services.tx.tenant_tx(task.tenant_id) as conn:
+            accepted = await repo.get_ingestion(conn, ingestion_id=payload.ingestion_id)
+        if accepted and accepted["user_id"] != payload.user_id:
+            # A later metadata correction is authoritative over immutable stage
+            # envelopes. Retrying archive must not restore the former owner.
+            if accepted["user_id"] != submission["user_id"]:
+                submission.update(user_attribution="ingestion_correction", user_display_name="")
+            submission["user_id"] = accepted["user_id"]
+            if accepted["user_id"].startswith("unknown."):
+                submission.update(user_attribution="identity_unavailable", user_display_name="未知提交人")
+        payload.user_id = submission["user_id"]
+        archived_session = apply_submission(archived_session, submission)
+        archived["meta"] = {**(archived.get("meta") or {}), **archived_session["meta"]}
+    content_ref, content_hash = await asyncio.to_thread(
+        deps.payloads.put_session, payload.ingestion_id, archived_session, stage="archive",
+    )
     if (
         runtime.get("type") == "managed-agents"
         and managed_parent and managed_connection
@@ -387,6 +407,8 @@ async def handle_archive(task: ClaimedTask, services) -> HandlerResult:
         formal_session_id = managed_formal_id
     final_status = "skipped" if decision == "skipped" else "archived"
     async with services.tx.tenant_tx(task.tenant_id) as conn:
+        if runtime.get("type") == "managed-agents":
+            await repo.correct_ingestion_user(conn, ingestion_id=payload.ingestion_id, user_id=payload.user_id)
         if decision == "valuable" or (decision == "skipped" and archived.get("persist_skipped", True)):
             await repo.write_session(
                 conn,

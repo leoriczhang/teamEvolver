@@ -130,4 +130,5 @@ compile_job.reconcile_cancellation = True
 
 
 def register_handlers():
-    return {"miner.skill_operation": operation, "miner.skill_compile": compile_job}
+    from team_skills.library.store import scoped_handler
+    return {"miner.skill_operation": scoped_handler(operation), "miner.skill_compile": compile_job}

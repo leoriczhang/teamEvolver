@@ -104,6 +104,8 @@ async def _compile(task, services, command, commands, repo, current):
     async with services.tx.tenant_tx(task.tenant_id) as conn:
         await current(conn)
         # A delayed compile cannot replace a newer projection of the evidence.
+        from team_skills.library.repository import SkillLibraryRepository
+        await SkillLibraryRepository(services.tx).lock_evolution_head(conn, p["skill"])
         await lock_key(conn, task.tenant_id, f"patterns:{p['skill']}")
         if source_fingerprint(await repo.compile_inputs(conn, p["skill"])) != p["source_hash"]:
             return HandlerResult.fail("experience_source_changed")
@@ -124,6 +126,16 @@ async def _deliver(task, services, command, commands, repo, current):
             return HandlerResult.fail(event["error_code"] or "experience_dead_letter")
         if digest(event["document"]) != event["content_hash"]:
             return HandlerResult.fail("experience_document_hash_mismatch")
+        from team_skills.library.queries import evolution_boundary
+        skill = event["document"].get("skill_name") or event["subject_id"]
+        boundary = await evolution_boundary(conn, services.tx, skill)
+        if boundary and event["created_at"] <= boundary:
+            await repo.outbox.receipt(
+                conn, event["event_id"], status="dead_letter", attempt=task.attempt,
+                error_code="manual_skill_update_archived",
+            )
+            await commands.finish(conn, task.task_id, {"status": "archived", "event_id": event["event_id"]})
+            return HandlerResult.succeed(task.task_id)
 
     async def before_send():
         async with services.tx.tenant_tx(task.tenant_id) as conn:

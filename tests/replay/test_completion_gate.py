@@ -39,7 +39,7 @@ def test_branch_continues_for_every_unmet_item_despite_claimed_completion():
             return Session()
 
     def judge(**kwargs):
-        done = len(kwargs["interactions"]) >= 9
+        done = int((kwargs["harness"].get("previous_checklist_report") or {}).get("rounds", 0)) + 1 >= 9
         return {"judge": "model", "all_satisfied": True, "items": [
             {"id": "R1", "satisfied": done, "evidence": "actual output" if done else ""},
         ]}

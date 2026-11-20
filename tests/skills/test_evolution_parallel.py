@@ -35,6 +35,9 @@ def branch(monkeypatch):
         list_skills=AsyncMock(return_value=[]),
         get_skill=AsyncMock(return_value=None),
     )
+    async def lock_evolution_head(conn, name):
+        return await library.get_skill(conn, name)
+    library.lock_evolution_head = AsyncMock(side_effect=lock_evolution_head)
     candidates = SimpleNamespace(
         live_for_skill=AsyncMock(return_value=None),
         create=AsyncMock(return_value={"candidate_id": "candidate", "revision": 1}),

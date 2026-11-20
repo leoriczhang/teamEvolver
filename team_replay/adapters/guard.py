@@ -45,3 +45,12 @@ class GuardedSession:
 
     def close(self):
         self.session.close()
+
+    def diagnostics(self):
+        callback = getattr(self.session, "diagnostics", None)
+        return callback() if callback else {}
+
+    def exclude_assessment_time(self, seconds):
+        callback = getattr(self.session, "exclude_assessment_time", None)
+        if callback:
+            callback(seconds)

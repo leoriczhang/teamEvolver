@@ -60,12 +60,24 @@ _Avoid_: 旧版本、原始答案
 在隔离的真实 Agent 会话中执行 Baseline 与 Candidate，通过独立裁判确认完成性，并在自然用户反馈中渐进披露要求、比较客观效率。
 _Avoid_: 模拟测试、文本评审、A/B 打分
 
+**Candidate Validation**:
+基于当前适用 Evidence 与改动影响，通过经验审阅、候选执行或 True Replay 判断 Skill Candidate 是否可采纳；候选完成事实与 A/B 效率结论独立保留。
+_Avoid_: 必跑双分支、A/B 成功数量
+
+**Experience Review**:
+以可追溯 Evidence、Skill 差异及现有约束判断流程经验是否可采纳，不宣称运行时执行完成。
+_Avoid_: Runtime 验收、真实业务验证
+
+**Candidate Execution**:
+在隔离真实 Agent Session 中执行候选方法，按明确的 Checklist 范围确认阶段或完整交付的完成事实。
+_Avoid_: 完整 A/B、成片完成（仅阶段验证时）
+
 **Evolution**:
 由 Evidence 驱动，经过候选生成、效果验证、审计记录且可回滚的团队资产变化。
 _Avoid_: 编辑、上传、同步
 
 **Skill Evolution**:
-把可复用的团队级任务经验转化为经过 True Replay 和管理员门禁的团队 Skill 版本。
+把可复用的团队级任务经验转化为经过 Candidate Validation 和管理员门禁的团队 Skill 版本。
 _Avoid_: Skill 生成、Prompt 优化
 
 **Memory Evolution**:
@@ -77,16 +89,20 @@ _Avoid_: Memory 同步、知识整理
 _Avoid_: 定时任务、Memory Agent
 
 **Candidate Review**:
-管理员基于 Evidence、静态检查和 True Replay 结果决定 Skill Candidate 是否发布的门禁。
+管理员基于 Evidence、静态检查和 Candidate Validation 结果决定 Skill Candidate 是否发布的门禁。
 _Avoid_: 审批流、代码审查
 
 **Publish**:
-把通过门禁的 Skill Candidate 固化为新的团队 Skill 版本，供租户内 Agent 拉取使用。
+把通过门禁的 Skill Candidate 固化为新的正式 Skill 版本；MA 使用云端原生版本，其他 Agent 使用团队库版本。
 _Avoid_: 保存、上传、同步
 
 **Rollback**:
 以新版本恢复某个历史团队 Skill 的完整内容，同时保留原有版本和审计链。
 _Avoid_: 降级、撤销发布
+
+**Cloud Skill**:
+MA 云端管理的 Skill，正式内容和版本属于其原生版本链；TE 中的验证快照用于保留历史事实。
+_Avoid_: 同步副本、TE 导入版本
 
 **AgentPrincipal**:
 由租户及其声明的用户组成的 Agent 数据面主体，个人资产归属于该租户内的用户。

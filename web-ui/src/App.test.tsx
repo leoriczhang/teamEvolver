@@ -77,7 +77,7 @@ vi.mock("@/features/skills/EvolutionWorkspaceView", () => ({
   ),
 }));
 vi.mock("@/features/platform-docs/OpenVikingWorkspaceShell", () => ({
-  default: () => <div>agent-assets-body</div>,
+  default: ({ library }: { library: string }) => <div>{library}-library-body</div>,
 }));
 vi.mock("@/features/platform-docs/PlatformAssetsView", () => ({
   default: () => <div>platform-assets-body</div>,
@@ -175,7 +175,7 @@ describe("original console functionality", () => {
     const navigation = await screen.findByRole("navigation", { name: "主导航" });
     await within(navigation).findByRole("button", { name: "实验工作台" });
     for (const name of ["运行总览", "经验库", "数据源接入", "进化链路",
-      "实验工作台", "个人与团队资产", "平台资产", "模型配置", "平台用户", "租户管理", "运行状态"]) {
+      "实验工作台", "记忆库", "资源库", "平台资产", "模型配置", "平台用户", "租户管理", "运行状态"]) {
       expect(within(navigation).getByRole("button", { name })).toBeVisible();
     }
     await screen.findByRole("button", { name: /租户切换/ });
@@ -191,8 +191,10 @@ describe("original console functionality", () => {
     expect(screen.queryByText("skill-lab-body")).toBeNull();
     expect(screen.queryByText("memory-lab-body")).toBeNull();
     expect(screen.queryByText("team-only-replacement")).toBeNull();
-    fireEvent.click(within(navigation).getByRole("button", { name: "个人与团队资产" }));
-    expect(await screen.findByText("agent-assets-body")).toBeVisible();
+    fireEvent.click(within(navigation).getByRole("button", { name: "记忆库" }));
+    expect(await screen.findByText("memory-library-body")).toBeVisible();
+    fireEvent.click(within(navigation).getByRole("button", { name: "资源库" }));
+    expect(await screen.findByText("resources-library-body")).toBeVisible();
     fireEvent.click(within(navigation).getByRole("button", { name: "平台资产" }));
     expect(await screen.findByText("platform-assets-body")).toBeVisible();
   });
@@ -200,6 +202,12 @@ describe("original console functionality", () => {
   it("opens the experience library from the sidebar", async () => {
     render(<App />);
     const navigation = await screen.findByRole("navigation", { name: "主导航" });
+    const context = within(navigation).getByRole("region", { name: "Agent 上下文" });
+    for (const label of ["经验库", "记忆库", "资源库"]) {
+      expect(within(context).getByRole("button", { name: label })).toBeVisible();
+    }
+    expect(within(navigation).queryByText("知识与方法")).not.toBeInTheDocument();
+    expect(within(navigation).queryByRole("button", { name: "个人与团队资产" })).not.toBeInTheDocument();
     fireEvent.click(within(navigation).getByRole("button", { name: "经验库" }));
     expect(screen.getByText("experience-library-body")).toBeVisible();
     expect(screen.queryByRole("tab", { name: "经验库" })).not.toBeInTheDocument();
@@ -290,7 +298,8 @@ describe("original console functionality", () => {
     render(<App />);
     const navigation = await screen.findByRole("navigation", { name: "主导航" });
     expect(within(navigation).getByRole("button", { name: "运行总览" })).toBeVisible();
-    expect(within(navigation).getByRole("button", { name: "个人与团队资产" })).toBeVisible();
+    expect(within(navigation).getByRole("button", { name: "记忆库" })).toBeVisible();
+    expect(within(navigation).getByRole("button", { name: "资源库" })).toBeVisible();
     for (const name of ["链路观测", "平台用户", "租户管理", "模型配置", "进化链路", "数据源接入", "运行状态"]) {
       expect(within(navigation).queryByRole("button", { name })).not.toBeInTheDocument();
     }

@@ -14,6 +14,7 @@ export function useReplayPanel({
   user,
   lockedSkillName = "",
   externalDraftMd,
+  externalVersion,
   embedded = false,
   compact = false,
   externalFiles,
@@ -24,6 +25,7 @@ export function useReplayPanel({
   user?: UserProfile | null;
   lockedSkillName?: string;
   externalDraftMd?: string;
+  externalVersion?: number;
   embedded?: boolean;
   compact?: boolean;
   externalFiles?: Record<string, string>;
@@ -85,7 +87,7 @@ const loadWorkspace = useCallback(async (name: string) => {
         `/api/replay-lab/runs?skill_id=${encodeURIComponent(name)}&limit=100`
       ),
     ]);
-    const nextDatasets = datasetResp.datasets || [];
+    const nextDatasets = (datasetResp.datasets || []).filter(item => datasetSkillIds(item).includes(name));
     setDatasets(nextDatasets);
     setSelectedDatasetId((current) => (
       nextDatasets.some((item) => item.dataset_id === current)
@@ -97,7 +99,9 @@ const loadWorkspace = useCallback(async (name: string) => {
 const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const skillResp = await api<SkillListResp>("/api/replay-lab/skills");
+      const skillResp = lockedSkillName
+        ? { skills: [{ name: lockedSkillName }] }
+        : await api<SkillListResp>("/api/replay-lab/skills");
       const nextSkills = skillResp.skills || [];
       setSkills(nextSkills);
       const nextName = (
@@ -192,7 +196,7 @@ function editDataset(dataset: WorkbenchDataset) {
     const datasetCase = primaryCase(dataset);
     setDatasetDraft({
       dataset_id: dataset.dataset_id,
-      skill_ids: datasetSkillIds(dataset).length ? datasetSkillIds(dataset) : (skillName ? [skillName] : []),
+      skill_ids: datasetCase?.skill_ids.length ? datasetCase.skill_ids : (skillName ? [skillName] : []),
       name: dataset.name || "",
       query: datasetCase?.query || "",
       outputChecks: checkText(dataset, "output"),
@@ -201,8 +205,8 @@ function editDataset(dataset: WorkbenchDataset) {
       enabled_for_evolution: datasetForEvolution(dataset),
     });
     setDatasetFiles([]);
-    setExistingMaterials(datasetMaterials(dataset));
-    setMaterialRoot(commonMaterialRoot(datasetMaterials(dataset)));
+    setExistingMaterials(datasetCase?.materials || []);
+    setMaterialRoot(commonMaterialRoot(datasetCase?.materials || []));
     setFilesTouched(false);
     setShowDatasetForm(true);
   }
@@ -237,8 +241,9 @@ async function saveDataset() {
         schema_version: "team-replay.dataset",
         dataset_id: datasetDraft.dataset_id,
         name: datasetDraft.name,
-        description: "",
-        skills: datasetDraft.skill_ids.map((skill_id) => ({ skill_id })),
+        description: editingDataset?.description || "",
+        skills: datasetDraft.skill_ids.map((skill_id) =>
+          editingDataset?.skills.find(ref => ref.skill_id === skill_id) || { skill_id }),
         source: editingDataset?.source || { kind: "manual" },
         cases: [{
           case_id: primaryCase(editingDataset)?.case_id || `case-${crypto.randomUUID()}`,
@@ -268,6 +273,18 @@ async function saveDataset() {
           enabled_for_evolution: datasetDraft.enabled_for_evolution,
         },
       };
+      // The form edits the first Case. Keep every other Case and its Skill
+      // pins, checks, provenance and material references intact.
+      if (editingDataset) {
+        payload.cases[0].checks = payload.cases[0].checks.map((check: WorkbenchDataset["cases"][number]["checks"][number]) => {
+          const old = primaryCase(editingDataset)?.checks.find(item => item.kind === check.kind && item.text === check.text);
+          return old?.polarity ? { ...check, polarity: old.polarity } : check;
+        });
+        payload.cases.push(...editingDataset.cases.slice(1));
+        const ids = new Set(payload.cases.flatMap((item: WorkbenchDataset["cases"][number]) => item.skill_ids));
+        payload.skills = [...ids].map(id =>
+          editingDataset.skills.find(ref => ref.skill_id === id) || { skill_id: id });
+      }
       if (!payload.dataset_id) delete payload.dataset_id;
       if (!payload.created_at) delete payload.created_at;
       if (editingDataset?.revision) payload.expected_revision = editingDataset.revision;
@@ -376,6 +393,11 @@ async function startRun() {
       );
       return;
     }
+    if (loading || running || !skill || !draftMd.trim()) return;
+    if (baselineMismatch) {
+      toastErr("实验基线版本不一致", "请核对数据集固定版本，或重新读取编辑器中的 Skill");
+      return;
+    }
     setRunning(true);
     try {
       const run = await api<WorkbenchRun>("/api/replay-lab/runs", {
@@ -386,6 +408,8 @@ async function startRun() {
           dataset_id: selectedDatasetId,
           candidate_skill_md: draftMd,
           candidate_files: externalFiles,
+          expected_version: externalVersion ?? skill.version,
+          expected_tree_sha256: skill.tree_sha256,
           timeout_seconds: timeoutSeconds,
           max_interactions: maxInteractions,
         }),
@@ -399,11 +423,11 @@ async function startRun() {
       setRunning(false);
     }
   }
-async function synthesizeDatasets() {
+async function synthesizeDatasets(selectedIds?: string[]) {
     if (!skillName) return;
     setSynthesizing(true);
     try {
-      const sessionIds = synthesizeSessionIds
+      const sessionIds = selectedIds ?? synthesizeSessionIds
         .split(/[\s,，]+/)
         .map((item) => item.trim())
         .filter(Boolean);
@@ -454,10 +478,14 @@ const completedCount = runs.filter((run) => run.status === "succeeded").length;
 const selectedDataset = datasets.find(
     (item) => item.dataset_id === selectedDatasetId
   );
+const baselineVersion = externalVersion ?? skill?.version;
+const pinnedVersion = selectedDataset?.skills.find(ref => ref.skill_id === skillName)?.revision;
+const baselineMismatch = (!!externalVersion && !!skill?.version && externalVersion !== skill.version)
+  || (pinnedVersion != null && baselineVersion != null && Number(pinnedVersion) !== baselineVersion);
 const editingDataset = datasets.find(
     (item) => item.dataset_id === datasetDraft.dataset_id
   );
 const hasInlineMaterial = hasInlineMaterialSection(datasetDraft.query);
 const inlineMaterial = inlineMaterialText(datasetDraft.query);
-return { skills, skillName, skill, draftMd, setDraftMd, datasets, selectedDatasetId, setSelectedDatasetId, runs, activeRun, loading, running, savingSkill, showDatasetForm, setShowDatasetForm, datasetDraft, setDatasetDraft, datasetFiles, existingMaterials, materialRoot, setMaterialRoot, filesTouched, savingDataset, importingDataset, synthesizing, synthesizeSessionIds, setSynthesizeSessionIds, maxInteractions, setMaxInteractions, timeoutSeconds, setTimeoutSeconds, datasetImportRef, dirty, isAdmin, refresh, selectSkill, saveSkill, createDataset, editDataset, uploadDatasetFiles, saveDataset, importDatasetPackage, cloneDataset, deleteDataset, startRun, synthesizeDatasets, openRun, manualCount, evolvedCount, regressionCount, completedCount, selectedDataset, editingDataset, hasInlineMaterial, inlineMaterial };
+return { skills, skillName, skill, draftMd, setDraftMd, datasets, selectedDatasetId, setSelectedDatasetId, runs, activeRun, loading, running, savingSkill, showDatasetForm, setShowDatasetForm, datasetDraft, setDatasetDraft, datasetFiles, existingMaterials, materialRoot, setMaterialRoot, filesTouched, savingDataset, importingDataset, synthesizing, synthesizeSessionIds, setSynthesizeSessionIds, maxInteractions, setMaxInteractions, timeoutSeconds, setTimeoutSeconds, datasetImportRef, dirty, isAdmin, refresh, selectSkill, saveSkill, createDataset, editDataset, uploadDatasetFiles, saveDataset, importDatasetPackage, cloneDataset, deleteDataset, startRun, synthesizeDatasets, openRun, manualCount, evolvedCount, regressionCount, completedCount, selectedDataset, editingDataset, hasInlineMaterial, inlineMaterial, baselineVersion, baselineMismatch };
 }

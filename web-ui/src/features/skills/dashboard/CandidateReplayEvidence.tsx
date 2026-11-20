@@ -46,6 +46,17 @@ export function BranchEvidence({ title, branch }: { title: string; branch?: Repl
       <div className="mb-3 flex flex-wrap gap-3 text-[11px] text-muted-foreground">
         {METRICS.map(([key, label]) => <span key={key}>{label} {formatMetric(branch[key])}</span>)}
       </div>
+      {branch.execution_snapshot && <details className="mb-3 text-[11px]">
+        <summary className="cursor-pointer font-semibold">实际 MA 执行快照</summary>
+        <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 break-all">
+          <dt>Session</dt><dd>{branch.execution_snapshot.session_id}</dd>
+          <dt>Agent</dt><dd>{branch.execution_snapshot.agent_id} · v{branch.execution_snapshot.agent_version}</dd>
+          <dt>Environment</dt><dd>{branch.execution_snapshot.environment_id}</dd>
+          <dt>环境配置 SHA-256</dt><dd>{branch.execution_snapshot.environment_config_sha256}</dd>
+          <dt>Runtime SHA-256</dt><dd>{branch.execution_snapshot.runtime_tree_sha256 || "无独立 Runtime"}</dd>
+          <dt>覆写字段</dt><dd>{branch.execution_snapshot.agent_override_fields.join("、")}</dd>
+        </dl>
+      </details>}
       {branch.error && <div className="mb-2 text-xs text-destructive">{branch.error}</div>}
       <details open>
         <summary className="cursor-pointer text-xs font-semibold">完整回放对话</summary>
@@ -91,9 +102,10 @@ export function BranchEvidence({ title, branch }: { title: string; branch?: Repl
   );
 }
 
-export default function CandidateReplayEvidence({ datasets, sampling }: {
+export default function CandidateReplayEvidence({ datasets, sampling, candidateOnly = false }: {
   datasets: ReplayDatasetResult[];
   sampling?: NonNullable<EvalResult["replay"]>["sampling"];
+  candidateOnly?: boolean;
 }) {
   return (
     <div className="min-w-0 space-y-3 overflow-x-hidden" aria-label="所有数据集回放内容">
@@ -102,7 +114,7 @@ export default function CandidateReplayEvidence({ datasets, sampling }: {
           <span>回放覆盖 {datasets.length} 个数据集 · {datasets.reduce((sum, dataset) => sum + dataset.total, 0)} 个 Case</span>
         </div>
         <div className="mt-1 text-muted-foreground">
-          当次数据集全部回放 · 历史采样 {sampling?.historical_selected ?? datasets.filter(d => d.selection === "historical").reduce((n, d) => n + d.total, 0)}/{sampling?.historical_requested ?? 3} 条
+          本次所选场景 · 历史采样 {sampling?.historical_selected ?? datasets.filter(d => d.selection === "historical").reduce((n, d) => n + d.total, 0)}/{sampling?.historical_requested ?? 0} 条
         </div>
       </div>
       {datasets.map(dataset => (
@@ -113,11 +125,13 @@ export default function CandidateReplayEvidence({ datasets, sampling }: {
             </Pill>
             <span className="font-bold">{dataset.name}</span>
             <span className="text-muted-foreground">v{dataset.revision ?? 1} · {dataset.completed}/{dataset.total} Case</span>
-            <Pill tone={dataset.result.verdict === "accept" ? "green" : dataset.result.verdict === "reject" ? "red" : "amber"}>
-              {dataset.result.verdict === "accept" ? "通过" : dataset.result.verdict === "reject" ? "未通过" : "无法确定"}
+            <Pill tone={candidateOnly && (dataset.result.candidate_completed || 0) > 0 ? "green"
+              : dataset.result.verdict === "accept" ? "green" : dataset.result.verdict === "reject" ? "red" : "amber"}>
+              {candidateOnly ? (dataset.result.candidate_completed || 0) > 0 ? "候选完成" : "候选未完成"
+                : dataset.result.verdict === "accept" ? "通过" : dataset.result.verdict === "reject" ? "未通过" : "无法确定"}
             </Pill>
           </summary>
-          <div className="border-t border-border"><EfficiencyTable efficiency={dataset.result.efficiency} /></div>
+          {!candidateOnly && <div className="border-t border-border"><EfficiencyTable efficiency={dataset.result.efficiency} /></div>}
           <div className="space-y-3 p-3">
             {dataset.inputs.map((input, index) => {
               const pair = dataset.result.cases?.find(caseResult => caseResult.case_id === input.case_id);
@@ -131,8 +145,8 @@ export default function CandidateReplayEvidence({ datasets, sampling }: {
                     材料：{input.materials.map(material => material.path).join("、")}
                   </div>}
                   {!pair && <div className="mb-2 text-xs text-destructive">该 Case 没有完整回放结果。{dataset.result.reason}</div>}
-                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                    <BranchEvidence title="A · 基线" branch={pair?.baseline} />
+                  <div className={`grid grid-cols-1 gap-3 ${candidateOnly ? "" : "md:grid-cols-2"}`}>
+                    {!candidateOnly && <BranchEvidence title="A · 基线" branch={pair?.baseline} />}
                     <BranchEvidence title="B · 候选" branch={pair?.candidate} />
                   </div>
                 </div>

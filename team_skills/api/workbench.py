@@ -135,7 +135,13 @@ def create_router(services):
 
     async def index(conn):
         rows = await library.list_skills(conn)
-        return {"name": "团队 Skill", "root": "团队 Skill", "source": {"backend": "postgres"},
+        backend = "managed-agents" if any(r.get("backend") == "managed-agents" for r in rows) else "postgres"
+        from team_skills.library.store import snapshot
+        cloud = snapshot(tx)
+        if not rows and cloud is not None and cloud.connections:
+            backend = "managed-agents"
+        return {"name": "团队 Skill", "root": "团队 Skill", "source": {"backend": backend},
+                "skill_backend": backend, "delivery_mode": "cloud" if backend == "managed-agents" else "pull",
                 "skills": [{**row, "files": [f["path"] for f in row["files"]],
                             "file_count": len(row["files"])} for row in rows]}
 
@@ -147,7 +153,7 @@ def create_router(services):
     @router.get("/api/replay-lab/skills")
     async def skills():
         async with tx.tenant_tx(current_tenant_id()) as conn:
-            return {**await index(conn), "skill_backend": "postgres", "delivery_mode": "pull"}
+            return await index(conn)
 
     @router.get("/api/replay-lab/skills/{name}")
     async def skill(name: str):
@@ -195,7 +201,10 @@ def create_router(services):
                     mutation_id=identity(request, "file"),
                     limits=config.bundle_limits, actor=reviewer, source="workbench", base_version=head["version"],
                 )
-            return {**file_payload(path, data), "version": commit.version, "cloud": {"synced": True}}
+                from team_skills.evolution.reset import retire_manual_commit
+                await retire_manual_commit(conn, tx, commit, tenant_id=current_tenant_id(), actor=reviewer)
+            return {**file_payload(path, data), **commit.to_response(), "version": commit.version,
+                    "cloud": {"synced": commit.status != "accepted"}}
         except errors as exc:
             raise error(exc) from exc
 
@@ -217,6 +226,8 @@ def create_router(services):
                     mutation_id=identity(request, "save"),
                     limits=config.bundle_limits, actor=actor(request), source="workbench", base_version=head["version"],
                 )
+                from team_skills.evolution.reset import retire_manual_commit
+                await retire_manual_commit(conn, tx, commit, tenant_id=current_tenant_id(), actor=actor(request))
             return commit.to_response()
         except errors as exc:
             raise error(exc) from exc
@@ -228,7 +239,9 @@ def create_router(services):
         # Current request names identify assets explicitly; Dataset documents
         # themselves never accept the former flat skill_name/items format.
         required = {"skill_id", "dataset_id", "candidate_skill_md"}
-        if not required <= set(raw) or set(raw) - required - {"candidate_files", "timeout_seconds", "max_interactions"}:
+        if not required <= set(raw) or set(raw) - required - {
+            "candidate_files", "timeout_seconds", "max_interactions", "expected_version", "expected_tree_sha256",
+        }:
             raise HTTPException(400, "expected skill_id, dataset_id, candidate_skill_md and optional files/limits")
         try:
             options = run_options({k: raw[k] for k in ("timeout_seconds", "max_interactions") if k in raw})
@@ -247,6 +260,16 @@ def create_router(services):
                     if ref.get("content_hash") and ref["content_hash"] != bundle_tree_sha256(bundle):
                         raise ValueError("Dataset Skill content hash does not match its version")
                     bundles[peer], versions[peer] = bundle, version
+                target = raw["skill_id"]
+                if target not in bundles:
+                    raise ValueError("selected Skill must be declared in Dataset skills")
+                if raw.get("expected_version") is not None and (
+                    type(raw["expected_version"]) is not int or raw["expected_version"] != versions[target]
+                ):
+                    raise HTTPException(409, "实验基线版本与编辑器不一致，请重新读取 Skill 或核对数据集固定版本")
+                if (raw.get("expected_tree_sha256") and
+                        raw["expected_tree_sha256"] != bundle_tree_sha256(bundles[target])):
+                    raise HTTPException(409, "实验基线内容已变化，请重新读取 Skill 后运行")
                 spec = prepare_spec(
                     run_id=run_id, skill_id=raw["skill_id"], dataset=frozen["execution_document"],
                     bundles=bundles, versions=versions, candidate_skill_md=raw["candidate_skill_md"],
@@ -263,8 +286,12 @@ def create_router(services):
     @router.get("/api/replay-lab/runs")
     async def history(skill_id: str = "", limit: int = 100):
         async with tx.tenant_tx(current_tenant_id()) as conn:
-            records = await runs.list(conn, "skill", subject_id=skill_id, limit=limit)
-            return {"runs": [await present_run(conn, services, "skill", record) for record in records]}
+            records = await runs.summaries(conn, "skill", subject_id=skill_id, limit=limit)
+            for record in records:
+                task = await services.tasks.get(conn, task_id=record["run_id"])
+                record.update(status=task["status"] if task else "failed",
+                              error_code=task.get("error_code", "") if task else "")
+            return {"runs": records}
 
     @router.get("/api/replay-lab/runs/{run_id}")
     async def result(run_id: str):

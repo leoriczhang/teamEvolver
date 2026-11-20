@@ -1,29 +1,10 @@
-"""Skill library repository.
+"""One Skill interface for native MA cloud Skills and the non-MA PG library.
 
-PostgreSQL is the single authority for the tenant Skill library: the manifest
-head (``skills``), the append-only version history (``skill_versions``), the
-per-version file list (``skill_version_files``), content-addressed file bytes
-(``skill_blobs``) and the mutation idempotency ledger (``skill_mutations``) —
-all defined in ``003_skills.sql``. The local ``skills_dir`` is only a
-rebuildable runtime cache materialised from these rows (see ``cache.py``).
-
-Write discipline :
-
-- Every mutation runs inside the caller's tenant transaction and first takes
- the skill head row lock (``SELECT... FOR UPDATE``), so concurrent mutations of
- one skill serialise across pods without a process-local lock.
-- The mutation id is looked up *after* the lock: a repeated mutation id replays
- its first result (same version) instead of creating a second one; the same id
- with a different request is a :class:`SkillMutationConflict`.
-- Version row, version files, blobs, head update, mutation and delivery outbox
- are written in that one transaction — no publish is visible without its
- durable delivery intent (``005_skill_delivery.sql``).
-- Versions are append-only: rollback and delete add a new version (delete is a
- tombstone), history is never rewritten.
-
-Bundles are validated before any write (SKILL.md wire format, path safety and
-the tenant's ``skills`` bundle limits). Only this domain's tables are touched
-.
+A cloud scope supplies native heads and checked immutable packages before the
+caller enters a short transaction. Cloud writes enqueue durable MA commands.
+Non-MA writes lock a PG head and append versions, files, blobs and idempotency
+records atomically; distribution uses pull. History is never rewritten.
+Bundles validate wire format, paths and tenant limits before acceptance.
 """
 
 from __future__ import annotations
@@ -97,6 +78,8 @@ class SkillCommit:
             "mutation_id": self.mutation_id,
             "replayed": self.replayed,
             **({"restored_from": self.restored_from} if self.restored_from is not None else {}),
+            **(self.record.get("job") or {}),
+            **({"skill_backend": self.record["backend"]} if self.record.get("backend") else {}),
         }
 
 
@@ -211,11 +194,16 @@ class SkillLibraryRepository:
     def _schema(self) -> str:
         return self._tx.pool.schema
 
+    @property
+    def _cloud(self):
+        from .store import snapshot
+        return snapshot(self._tx)
+
     # -- reads ------------------------------------------------------------ #
 
     _HEAD_COLUMNS = (
         "name, skill_id, current_version, deleted, description, category, sha256, "
-        "tree_sha256, runtime_policy, updated_by, created_at, updated_at"
+        "tree_sha256, runtime_policy, updated_by, created_at, updated_at, evolution_reset_at"
     )
 
     @staticmethod
@@ -233,7 +221,7 @@ class SkillLibraryRepository:
         )
         heads = [self._head(row) for row in rows]
         if not heads:
-            return heads
+            return sorted(self._cloud.entries, key=lambda h: h["name"]) if self._cloud else heads
         files = await conn.fetch(
             f"SELECT f.name, f.path, f.sha256, f.size FROM {self._schema}.skill_version_files f "
             f"JOIN {self._schema}.skills s ON s.tenant_id = f.tenant_id AND s.name = f.name "
@@ -247,9 +235,15 @@ class SkillLibraryRepository:
             )
         for head in heads:
             head["files"] = by_name.get(head["name"], [])
+        if self._cloud is not None:
+            heads = [h for h in heads if h["name"] not in self._cloud.bindings]
+            heads.extend(self._cloud.entries)
+            heads.sort(key=lambda h: h["name"])
         return heads
 
     async def get_skill(self, conn: Any, name: str, *, include_deleted: bool = False) -> dict[str, Any] | None:
+        if self._cloud is not None and self._cloud.managed(name):
+            return self._cloud.head(name)
         row = await conn.fetchrow(
             f"SELECT {self._HEAD_COLUMNS} FROM {self._schema}.skills WHERE name = $1", name
         )
@@ -261,6 +255,8 @@ class SkillLibraryRepository:
         return head
 
     async def list_versions(self, conn: Any, name: str) -> list[dict[str, Any]]:
+        if self._cloud is not None and self._cloud.managed(name):
+            return self._cloud.history.get(name, [])
         rows = await conn.fetch(
             "SELECT version, action, deleted, sha256, tree_sha256, file_count, total_bytes, "
             "  description, category, restored_from, mutation_id, actor, created_at "
@@ -269,7 +265,15 @@ class SkillLibraryRepository:
         )
         return [dict(row) for row in rows]
 
-    async def get_version(self, conn: Any, name: str, version: int) -> dict[str, Any] | None:
+    async def get_version(self, conn: Any, name: str, version: int, *, local=False) -> dict[str, Any] | None:
+        if not local and self._cloud is not None and self._cloud.managed(name):
+            bundle = await self._cloud.bundle(conn, name, version)
+            target = self._cloud.target(name)
+            cached = await self._cloud.provider.cached(
+                conn, (target["connection"]["connection_id"], target["record"]["id"], int(version)))
+            return {**(cached[0] if cached else {}), **bundle_metadata(name, bundle),
+                    "version": int(version), "deleted": False, "action": "cloud",
+                    "actor": "", "restored_from": None}
         row = await conn.fetchrow(
             "SELECT version, action, deleted, sha256, tree_sha256, file_count, total_bytes, "
             "  description, category, runtime_policy, restored_from, mutation_id, actor, created_at "
@@ -283,9 +287,11 @@ class SkillLibraryRepository:
         item["runtime_policy"] = _loads(item.get("runtime_policy"))
         return item
 
-    async def read_version_bundle(self, conn: Any, name: str, version: int) -> dict[str, bytes]:
+    async def read_version_bundle(self, conn: Any, name: str, version: int, *, local=False) -> dict[str, bytes]:
         """The immutable bundle of one non-tombstone version."""
-        meta = await self.get_version(conn, name, version)
+        if not local and self._cloud is not None and self._cloud.managed(name):
+            return await self._cloud.bundle(conn, name, version)
+        meta = await self.get_version(conn, name, version, local=local)
         if meta is None or meta["deleted"]:
             raise SkillNotFound(f"version v{int(version)} of {name} not found")
         rows = await conn.fetch(
@@ -308,6 +314,9 @@ class SkillLibraryRepository:
 
     async def read_current_bundles(self, conn: Any) -> dict[str, dict[str, bytes]]:
         """Every live skill's current bundle in one query (Agent pull, cache rebuild)."""
+        if self._cloud is not None:
+            return {h["name"]: await self.read_version_bundle(conn, h["name"], h["version"])
+                    for h in await self.list_skills(conn)}
         rows = await conn.fetch(
             f"SELECT f.name, f.path, f.sha256, b.content FROM {self._schema}.skill_version_files f "
             f"JOIN {self._schema}.skills s ON s.tenant_id = f.tenant_id AND s.name = f.name "
@@ -467,6 +476,27 @@ class SkillLibraryRepository:
 
     # -- mutations (each runs in the caller's tenant transaction) --------- #
 
+    async def reset_evolution(self, conn: Any, name: str) -> dict[str, Any]:
+        """Move the automatic Evidence boundary; do not alter Skill content/history."""
+        if self._cloud is not None and self._cloud.managed(name):
+            return await self._cloud.provider.reset(conn, self._cloud, name)
+        head = await self._lock_head(conn, name)
+        if head is None:
+            raise SkillNotFound(f"skill not found: {name}")
+        await conn.execute(
+            f"UPDATE {self._schema}.skills SET evolution_reset_at=clock_timestamp() WHERE name=$1", name,
+        )
+        return await self.get_skill(conn, name, include_deleted=True)
+
+    async def lock_evolution_head(self, conn: Any, name: str) -> dict[str, Any] | None:
+        """Serialize Candidate writes/publication with manual library changes."""
+        if self._cloud is not None and self._cloud.managed(name):
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+                               f"{self._cloud.tenant}:cloud-skill:{name}")
+            return self._cloud.head(name)
+        await self._lock_head(conn, name)
+        return await self.get_skill(conn, name, include_deleted=True)
+
     async def commit_bundle(
         self,
         conn: Any,
@@ -491,6 +521,13 @@ class SkillLibraryRepository:
         name = validate_skill_name(name)
         clean = validate_bundle(name, bundle, limits)
         meta = bundle_metadata(name, clean)
+        cloud = self._cloud
+        if cloud is not None and (cloud.managed(name) or
+                                 (cloud.connections and await self.get_skill(conn, name) is None)):
+            return await cloud.queue(
+                conn, name=name, action="update" if cloud.head(name) else "publish", bundle=clean,
+                mutation_id=mutation_id, base_version=base_version, actor=actor, source=source, metadata=metadata,
+            )
         request_hash = _request_hash({"op": "bundle", "name": name, "tree": meta["tree_sha256"]})
 
         await conn.execute(
@@ -527,6 +564,8 @@ class SkillLibraryRepository:
             status="published", version=version, previous_version=current,
             request_hash=request_hash, actor=actor, source=source, metadata=metadata,
         )
+        if current and source != "candidate-review":
+            await self.reset_evolution(conn, name)
         return SkillCommit(name, action, "published", version, current, mutation_id,
                            record=await self.get_skill(conn, name) or {})
 
@@ -545,6 +584,9 @@ class SkillLibraryRepository:
         """Republish ``target_version``'s bundle as a new version (history kept)."""
         name = validate_skill_name(name)
         target = int(target_version)
+        if self._cloud is not None and self._cloud.managed(name):
+            return await self._cloud.queue(conn, name=name, action="rollback", target_version=target,
+                                           mutation_id=mutation_id, actor=actor, source=source, metadata=metadata)
         request_hash = _request_hash({"op": "rollback", "name": name, "target": target})
         head = await self._lock_head(conn, name)
         if head is None or int(head["current_version"] or 0) <= 0:
@@ -568,6 +610,7 @@ class SkillLibraryRepository:
             request_hash=request_hash, actor=actor, source=source,
             metadata={**(metadata or {}), "restored_from": target},
         )
+        await self.reset_evolution(conn, name)
         return SkillCommit(name, "rollback", "published", version, current, mutation_id,
                            restored_from=target, record=await self.get_skill(conn, name) or {})
 
@@ -584,6 +627,9 @@ class SkillLibraryRepository:
     ) -> SkillCommit:
         """Record a delete tombstone version; the skill leaves the live manifest."""
         name = validate_skill_name(name)
+        if self._cloud is not None and self._cloud.managed(name):
+            return await self._cloud.queue(conn, name=name, action="delete", mutation_id=mutation_id,
+                                           actor=actor, source=source, metadata=metadata)
         request_hash = _request_hash({"op": "delete", "name": name})
         head = await self._lock_head(conn, name)
         if head is None or int(head["current_version"] or 0) <= 0:
@@ -604,6 +650,7 @@ class SkillLibraryRepository:
             status="published", version=version, previous_version=current,
             request_hash=request_hash, actor=actor, source=source, metadata=metadata,
         )
+        await self.reset_evolution(conn, name)
         return SkillCommit(name, "delete", "published", version, current, mutation_id,
                            record=await self.get_skill(conn, name, include_deleted=True) or {})
 

@@ -60,7 +60,7 @@ Skill 变化只使下一次运行重新执行受影响的 Compile，不重复复
 
 ## 资产页编辑
 
-「个人与团队资产」通过 `/api/openviking/workspace/*` 浏览和编辑 `viking://user` 与 `viking://resources`：
+「Agent 上下文 → 记忆库」通过 `/api/openviking/workspace/*` 浏览和编辑个人 `memories` 与团队共享记忆目录：
 
 - 浏览目录、文件及 L0/L1 摘要
 - 管理员或资产所有者进入编辑模式，跨多个文件保留草稿，统一查看 Diff 后批量保存
