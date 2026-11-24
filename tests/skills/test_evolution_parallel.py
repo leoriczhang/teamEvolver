@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from team_skills.config import SkillsModuleConfig
-from team_skills.evolution import cycle
+from team_skills.evolution import candidate_pipeline, cycle
 from team_skills.evolution.prompt_studio import pipeline_graph
 
 
@@ -46,6 +46,7 @@ def branch(monkeypatch):
     monkeypatch.setattr(cycle, "EvolutionRepository", lambda tx: repo)
     monkeypatch.setattr(cycle, "SkillLibraryRepository", lambda tx: library)
     monkeypatch.setattr(cycle, "CandidateRepository", lambda tx: candidates)
+    monkeypatch.setattr(candidate_pipeline, "CandidateRepository", lambda tx: candidates)
     monkeypatch.setattr(
         cycle, "ExperienceRepository", lambda tx: SimpleNamespace(patterns=AsyncMock(return_value=[])),
     )
