@@ -100,10 +100,22 @@ export interface Candidate {
   skill_name?: string;
   candidate_skill_name?: string;
   proposed_action?: string;
+  base_version?: number;
+  baseline?: SkillBaseline;
+  user_modified?: boolean;
   review_status?: string;
+  publication_pending?: boolean;
   replay_progress?: { total: number; completed: number; succeeded: number; failed: number };
   feedback?: CandidateFeedback;
   rationale?: string;
+  execution_provenance?: Array<{
+    session_id?: string;
+    business_time?: string;
+    ingested_at?: string;
+    agents?: Array<{ id?: string; version?: number; model?: { id?: string; base_url?: string } }>;
+    environment?: { id?: string; name?: string };
+    execution_fingerprint?: { agent_hash?: string; environment_hash?: string };
+  }>;
   evidence_classification?: EvidenceClassification;
   content_preview?: string;
   source?: {
@@ -160,6 +172,25 @@ export interface CandidateDecision {
   [key: string]: any;
 }
 
+export interface SkillBaseline {
+  kind?: "version" | "new" | "unknown";
+  skill_name?: string;
+  version?: number;
+  skill_id?: string;
+  connection_id?: string;
+}
+
+export interface SkillVersionProvenance {
+  kind: "manual" | "te" | "unknown";
+  source?: string;
+  actor?: string;
+  action?: string;
+  base_version?: number | null;
+  candidate_id?: string;
+  candidate_revision?: number;
+  user_modified?: boolean;
+}
+
 export interface SkillVersionResp {
   skill_id?: string;
   category?: string;
@@ -170,11 +201,24 @@ export interface SkillVersionResp {
   current_version: number;
   is_current?: boolean;
   versions?: number[];
+  history?: Array<{
+    version: number;
+    action?: string;
+    timestamp?: string;
+    actor?: string;
+    restored_from?: number;
+    provenance?: SkillVersionProvenance;
+  }>;
+  provenance?: SkillVersionProvenance;
+  created_at?: string;
   tree_sha256?: string;
   files?: Array<{ path: string; sha256?: string; size?: number }>;
   evolution?: {
     job_id?: string;
     proposed_action?: string;
+    base_version?: number;
+    baseline?: SkillBaseline;
+    user_modified?: boolean;
     rationale?: string;
     edit_summary?: Record<string, any>;
     optimization_items?: string[];

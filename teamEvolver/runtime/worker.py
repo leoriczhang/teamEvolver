@@ -212,6 +212,7 @@ async def run_worker(
     idle_sleep: float = 1.0,
     kinds: Sequence[str] | None = None,
     on_health: Callable[[bool], None] | None = None,
+    schedule_tasks: bool = True,
 ) -> WorkerStats:
     """Run the worker claim/execute loop until *stop_event* is set.
 
@@ -240,7 +241,7 @@ async def run_worker(
                 if tenant_source is not None:
                     active = tuple(await tenant_source())
                 last_refresh = now
-                scheduler = services.extras.get("scheduled_tasks")
+                scheduler = services.extras.get("scheduled_tasks") if schedule_tasks else None
                 for tenant in active if scheduler else ():
                     token = set_current_tenant(TenantContext(tenant_id=tenant))
                     try:

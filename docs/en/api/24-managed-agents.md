@@ -24,11 +24,15 @@ Entry point: `team_ma/api/__init__.py:create_router`. Console requests require l
 | POST | `/api/ma/connections/{connection_id}/collect` | `{session_ids? , from_timestamp? , to_timestamp?}`, 202; timestamps require timezone |
 | POST | `/api/ma/connections/{connection_id}/reconcile` | `{}`; observes current cloud Skills, Agents and Environment, reconciles effects and cleans owned resources, 202 |
 | GET | `/api/ma/connections/{connection_id}/resources` | `kind=skill|agent`, `after`, `limit`; members, managed versions and tree hashes |
-| PUT | `/api/ma/connections/{connection_id}/resources/{skill_name}/bindings` | `{expected_revision, agent_ids}`; new bindings use revision zero |
+| PUT | `/api/ma/connections/{connection_id}/resources/{skill_name}/bindings` | `{expected_revision, agent_ids}`; existing cloud Skills return 202 + a `ma.skill` Job to bind the latest version and verify readback without a new Skill version; uncreated Skills only save publication targets, using revision zero for new bindings |
 | GET | `/api/ma/connections/{connection_id}/releases` | `limit`; complete / partial releases, readback and error facts |
 | GET | `/api/ma/skill-jobs/{job_id}` | Actual `ma.skill` status, native write result and error |
 
 Creation and operations support `Idempotency-Key`; reuse with different requests returns 409. Cloud writes, imports, analysis and cleanup run in Workers. Skill queries resolve native metadata and verified snapshots before short business transactions.
+
+New Candidate publication defaults to the selected connection's entry Agent when no explicit targets exist. An explicit empty selection blocks Candidate publication; existing Skills retain their current or explicit associations. Manual cloud resource creation may remain unattached. Results include `deployment_status` (`bound` / `unbound` / `deleted`) and `bound_agents`; attachment requires verified member-reference readback. Unchanged content still verifies and applies bindings without uploading a new version.
+
+The binding endpoint saves `desired_agents` and runs asynchronously. `agents`, `bound_version` and `bound_versions` retain their last observed values until readback succeeds. Clearing all targets detaches the Skill. Failed jobs expose the error without claiming deployment. Binding-only changes do not reset content baselines, historical Evidence or version provenance.
 
 MA Skills use the existing [Skill management endpoints](./09-skills-admin.md) for current contents, native history, edits, creation, files, rollback and deletion. Responses carry `skill_backend: "managed-agents"` and native version numbers. Select a connection with the `connection_id` query parameter; same-name Skills across connections require explicit selection. Writes return `202`, `job_id`, `status_url` and `result_url`; publication requires upload and member-reference readback. Rollback creates a new native version. Unknown uploads reconcile first, and concurrent uploads pause publication. Discovery/reconcile do not pull or push TE library copies.
 
@@ -37,22 +41,28 @@ MA Skills use the existing [Skill management endpoints](./09-skills-admin.md) fo
 | Field | Meaning |
 | --- | --- |
 | `provider` | `volcengine-managed-agents` |
-| `display_name`, `entry_agent_id`, `environment_id` | Required, 1–200 characters |
+| `display_name`, `entry_agent_id` | Required, 1–200 characters |
+| `environment_id` | Optional or empty, at most 200 characters; the Worker observes and updates it from the entry Agent's latest business Session; an explicit value supplies the initial environment when no Session exists |
 | `default_user_id` | Optional, at most 200 characters; an explicit default attribution. Empty defaults show an unknown submitter when tags/channel identity are absent |
 | `ma_base_url` | Default `https://ark.cn-beijing.volces.com/api/v3`; HTTPS in production |
 | `ma_api_key`, `tenant_token` | One-time plaintext input, encrypted storage, presence-only responses |
 | `ma_secret_ref`, `tenant_token_ref` | Existing refs owned by this tenant; omitted credentials remain unchanged |
 | `team_evolver_url` | Compatibility field; native MA Skill management no longer uses TE pull |
-| `vault_ids`, `replay_vault_ids` | Business Vaults; omitted Replay Vaults are created by the Worker; existing separate IDs remain compatible |
+| `vault_ids`, `replay_vault_ids` | Business Vaults; Replay freezes source Session references; legacy Replay IDs no longer control new runs |
 | `user_tag_prefix` | Default `te-user:` |
 | `poll_interval_seconds`, `sync_interval_seconds` | Defaults 60 / 30; range 15–86400 |
-| `replay_enabled`, `replay_environment_id` | Disabled by default; omit Replay Environment ID to let the Worker find or create it |
-| `replay_isolation` | Explicit `{vaults?, mcp?, custom_tools?}` capabilities |
+| `replay_enabled`, `replay_environment_id` | Enabled for new connections; runs freeze the source Session environment, ignoring legacy Replay IDs. Explicit disable and pause remain effective |
+| `replay_readonly_mcp` | Exact MCP Server snapshot SHA-256 to verified read-only tool names; applies only with default deny and a matching effective tool allowlist. Changed server configuration or permissions require re-verification |
+| `replay_isolation` | `{mcp?}` external tool isolation; legacy `vaults/custom_tools` fields do not replace native references or an executor |
 | `runtime_binding` | Optional `{skill_name, paths, working_directory, source?, artifact?, packages?, pre_setup?, replace_setup_script?, bootstrap, ready_file, ready_probe_message?}`; `source` defaults to `embedded`; `skill_mount` verifies pinned Skill files; `openviking` downloads an independent tar.xz pinned by `artifact` (`base_url`, `uri`, `sha256`, `bytes`, `files[{path,sha256,bytes}]`), verifies and caches it before bootstrap; optional `packages.apt/pip` lists merge with source packages for MA provisioning before setup; prerequisites up to 32 KiB; replacing source setup defaults to false; optional read-only probe precedes the business task |
 
 One MA origin + entry Agent can be managed by only one tenant. Revision conflicts and target ownership conflicts return 409. Download, isolation and frozen snapshot gaps fail explicitly; publishing gates are not weakened.
 
-`detail.replay_resources` reports `status` (`preparing/ready/credentials_missing/unsupported/disabled`), `environment_id`, `vault_ids` and `missing_credentials`, without secrets. Automatic resources carry ownership for the tenant, connection and MA origin; the external effect ledger reconciles ambiguous outcomes before retrying POST. The Environment copies business dependencies and setup without the production TOS output location. An automatic Vault can inject this tenant's existing MA Key as an MA-host-limited `ARK_API_KEY`; other services' write-only secrets cannot be read or inferred. Missing credentials leave collection available and Replay unsupported. Existing separate resources remain usable; production Environment/Vault IDs are rejected. Replay acceptance freezes actual discovered IDs without changing the connection revision.
+`detail.replay_resources` reports source configuration `status` (`ready/unsupported/disabled`), `environment_id` and `vault_ids`, without secrets. Discovery only reads source resources; it creates no Environment, Vault or credential. Acceptance freezes the actual environment configuration and Vault references from the source Session snapshot. Missing historical snapshots require recollection and Case refresh. Two independent Sessions receive the same input and differ only in the target Skill, with shared TOS output configuration removed. Readback checks Vault references and execution fields. Previously created infrastructure remains historical and is outside new Replay cleanup.
+
+`detail.environment_observation` includes `session_id`, `created_at`, `environment_id` and `environment_hash`. Discovery, collection and synchronization observe the latest business environment by Session creation time. Changes save a connection revision and queue `ma.discover` in one short transaction, preserving the connection, tenant and Key. An absent environment configuration snapshot still permits ID observation, with an empty hash. Without a Session or explicit initial environment, discovery reports retryable `ma_EnvironmentNotObserved`; the scheduler continues retrying at the collection interval.
+
+Not-yet-started discovery/synchronization tasks for a superseded environment return `environment_superseded`, retaining their accepted configuration without replacing the current release. Historical collection retains its original snapshots. Discovery/publication already in progress resumes from its fixed checkpoint.
 
 ## Data-Plane Release Snapshot
 

@@ -69,12 +69,18 @@ curl -X POST http://localhost:52010/api/auth/register \
 | POST | `/api/tenants` | 平台管理员 | `{"display_name", "account_id"?}` 创建租户 |
 | POST | `/api/tenants/{tenant_id}/status` | 平台管理员 | `{"status": "active"|"disabled"}` |
 | POST | `/api/tenants/{tenant_id}/rotate-token` | 该租户管理员 | 轮换租户 Key，返回新的 `agent_token`；`default` 租户不可轮换 |
+| GET | `/api/tenants/{tenant_id}/token` | 该租户管理员 | 查看当前明文 `agent_token` 与 `available`；禁止缓存；未留存原值时返回 null |
+| PUT | `/api/tenants/{tenant_id}/token` | 该租户管理员 | `{"agent_token":"<原 Key>"}` 留存原 Key，须匹配当前哈希，不轮换 |
 | GET | `/api/tenants/{tenant_id}/config` | 该租户管理员 | 租户配置覆盖（凭证字段只返回是否存在）与可编辑键 |
 | PUT | `/api/tenants/{tenant_id}/config` | 该租户管理员 | `{"overrides": {...}}` 合并写入；值为 `null` 删除该键 |
+| GET | `/api/tenants/{tenant_id}/runtime-config` | 该租户管理员 | 返回独立执行容量 `config` 与 `revision` |
+| PUT | `/api/tenants/{tenant_id}/runtime-config` | 该租户管理员 | `{"expected_revision": 1, "config": {...}}` 合并并 CAS 更新容量 |
 | GET | `/api/tenants/{tenant_id}/members` | 该租户管理员 | 成员列表 |
 | PUT | `/api/tenants/{tenant_id}/members/{user_id}` | 该租户管理员 | `{"role": "tenant_admin"|"member", "status": "active"|"disabled"}` 新增或更新成员 |
 
 路径中的 `tenant_id` 必须等于当前 `X-Tenant-Id`，否则返回 `403 TENANT_MISMATCH`。
+
+控制台切换租户时清除网址中的 MA 连接、数据集与回放详情标识，并保留当前功能页；同租户刷新保留详情链接。不存在、已删除或不属于当前租户的数据集显示不可用状态，可返回当前租户列表，不继续加载 Case 与回放历史。
 
 创建租户时：
 

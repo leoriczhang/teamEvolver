@@ -33,6 +33,7 @@ DEFAULT_SKILLS_CONFIG: dict[str, Any] = {
     "evolution_trigger_mode": "manual",
     "evolution_interval_seconds": 600,
     "auto_evaluate": True,
+    "assessment_timeout_seconds": 600,
     "publish_mode": "manual",
     "bundle_text_extensions": [".py", ".sh", ".md"],
     "bundle_edit_max_bytes": 262144,

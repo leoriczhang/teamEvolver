@@ -9,6 +9,7 @@ DialogTitle,
 } from "@/components/ui/dialog";
 import UnifiedDiffView from "@/components/UnifiedDiffView";
 import { type SkillVersionResp } from "@/features/skills/api/client";
+import { versionOrigin } from "@/features/skills/provenance";
 import { formatMetric } from "./CandidateReplayEvidence";
 import { toastErr,toastOk } from "@/lib/toast";
 import { cn } from "@/lib/utils";
@@ -92,6 +93,8 @@ export default function SkillVersionModal({
     data?.evolution?.evaluation?.replay?.efficiency?.dimensions || {};
   const canRoll =
     data != null && version !== data.current_version && (data.current_version || 0) > 0;
+  const selectedHistory = data?.history?.find(item => item.version === data.version);
+  const provenance = data?.provenance ?? selectedHistory?.provenance;
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
@@ -126,6 +129,7 @@ export default function SkillVersionModal({
                     >
                       v{v}
                       {v === data.current_version ? " ·当前" : ""}
+                      {" · "}{versionOrigin(data.history?.find(item => item.version === v)?.provenance)}
                     </button>
                   ))}
                 </div>
@@ -133,6 +137,21 @@ export default function SkillVersionModal({
               <PaginationControls {...versionPager} onPageChange={versionPager.setPage} />
             </div>
 
+            <Field k="版本来源">
+              {versionOrigin(provenance)}
+              {provenance?.base_version != null && (
+                <span className="ml-2 text-muted-foreground">
+                  {provenance.base_version > 0 ? `基于 Skill v${provenance.base_version}` : "新建技能 · 无基线版本"}
+                </span>
+              )}
+            </Field>
+            {(provenance?.actor || selectedHistory?.actor) && (
+              <Field k="发布操作人">{provenance?.actor || selectedHistory?.actor}</Field>
+            )}
+            {(selectedHistory?.timestamp || data.created_at) && (
+              <Field k="版本发布时间">{selectedHistory?.timestamp || data.created_at}</Field>
+            )}
+            {provenance?.candidate_id && <Field k="发布候选">{provenance.candidate_id}</Field>}
             <Field k="Skill ID">
               <span className="mono">{data.skill_id || "-"}</span>
             </Field>

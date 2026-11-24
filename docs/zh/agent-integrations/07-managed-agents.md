@@ -4,7 +4,7 @@
 
 ## 配置连接
 
-填写 MA API 地址、入口 Agent ID、Environment ID、业务 Vault 以及当前租户 Key；默认归属用户可留空。MA Key 和租户 Key 一次输入后加密保存为 Secret Ref，接口只显示是否配置。生产 MA 地址使用 HTTPS。
+填写 MA API 地址、入口 Agent ID、Environment ID、业务 Vault；默认归属用户可留空。表单自动读取并明文填入当前租户 Key，接入时直接复用。MA Key 和租户 Key 加密保存为 Secret Ref；MA 配置接口只显示是否配置，租户管理员可在 MA 页面点击「查看租户 Key」直接查看、复制，也可在「成员与接入」查看。刷新或重新打开页面后仍读取同一个已保存的 Key。旧 Key 若未留存，可填入原 Key 后保存，无需重新签发。生产 MA 地址使用 HTTPS。
 
 连接会递归发现成员和全部自定义 Skill。预置 Skill 保留引用；自定义 Skill 的最新内容取云端 `latest_version`，成员实际使用的 `bound_version` / `bound_versions` 单独展示。发现不导入 TE 团队库，不上传旧版本，完成回读后状态为 `ready`。跨连接同名 Skill 需指定 `connection_id`。名称、角色和模型不依赖 CodingVideo。
 
@@ -18,6 +18,8 @@ Session 标签传 `{"key":"te-user","value":"<user_id>"}`，归属优先于渠�
 
 Session 列表显示“实际使用 N / 可用 M”。可用数量来自运行快照中配置的技能目录；实际使用来自主、子 Agent 的明确调用证据。配置的 15 个 Skill 不意味着每个 Session 都实际使用了 15 个。
 
+MA 的模型、Agent、工具或 Environment 配置变化不阻止 Skill Evolution，也不因执行指纹不同归档历史 Evidence / Case。每次进化和候选保存来源 Session 的实际 Agent 版本、模型及接口地址、Skill 引用版本、Environment 身份与配置哈希；候选详情同时展示业务时间和入库时间。连接暂停或来源快照缺失仍限制自动使用。技能基线更新继续归档旧候选和旧 Evidence，新候选从最新技能包生成。True Replay 保持来源执行快照固定，只切换目标 Skill；当前连接提供 MA API 访问凭证。
+
 Worker 为 MA 发现、采集与同步保留独立执行槽，避免长时间分析或回放占满接入能力；各槽按租户轮转，健康状态合并判断。同一连接仍通过数据库租约串行执行，等锁使用延后调度，不消耗执行重试次数。单个 Session 回读返回 404 时保留已有范围、记录 `unavailable` 并继续其余采集；认证失败和服务错误仍按连接错误处理。
 
 ## 开启隔离回放
@@ -30,23 +32,37 @@ Skills 管理通过 MA Secret Ref 调用云端接口；连接器身份不作为�
 也不宣称真实 Runtime 执行；候选执行与完整 A/B 才消费以下隔离要求。候选执行只运行
 Candidate，明确阶段或完整交付范围；完整 A/B 保留双分支和效率比较。详见 [候选 API](../api/10-validation.md)。
 
-控制台只需开启「启用隔离 MA True Replay」，无需填写回放 Environment / Vault ID。保存后由 Worker 自动准备独立资源，后续按连接复用，页面显示准备状态与只读 ID。API 中省略 `replay_environment_id` / `replay_vault_ids` 同样自动准备；已有手工配置的独立 ID 保持兼容。业务 Environment / Vault 不可直接用作回放资源。
+新连接默认开启「启用隔离 MA True Replay」，已有连接保留显式开关。Baseline 与 Candidate 创建两个原生 Session，复用来源 Environment 和 Vault 引用；Environment 是配置身份，每个 Session 仍有独立沙箱。无需另建 Environment / Vault 或复制凭证。旧 API 字段 `replay_environment_id` / `replay_vault_ids` 保留读取兼容，但新任务始终固定来源 Session 的引用。
 
-自动环境保留业务依赖与初始化配置，不复制生产 TOS 输出位置；自动 Vault 使用已有可信 MA Key 配置 `ARK_API_KEY`。其他 Vault 密钥无法读出，缺失时页面列出待补凭证，例如独立 OpenViking runtime 所需的 `OPENVIKING_API_KEY`，补入回放 Vault 后点击「发现／重新检查」。系统不会把不同服务的全局 Key 当作 runtime Key。自动资源独立不等于所有外部工具已隔离；MCP、自定义工具宿主仍需确认隔离能力。云环境支持完整配置冻结；长期 Memory 无可复制快照、共享生产可写目录或未隔离工具会阻塞回放。能力不满足时仍可采集，不能据此宣称可比性验证成功。
+Candidate Validation、Skill / Memory Replay 与 Dataset 执行共用 Worker 输入准备。缺失的 URL、File、Base64 或文本附件从原 Session 归档范围补采，按大小与 SHA-256 固定到租户存储；补采结果单独保存，重试不重新选择输入。缺失 Agent / Environment / Vault 快照只从原生 Session 恢复，不用当前配置冒充历史事实。新 Skill 尚无目标绑定时，在来源入口 Agent 上隔离验证；发布目标仍走发布门禁。
 
-Baseline 与 Candidate 使用同一固定版本入口 Agent、相同 Environment 配置与 Runtime、相同任务材料，创建两份独立 Session/沙箱。单 Agent 通过 `agent_with_overrides.skills` 只切换目标 Skill，其余字段继承固定版本；多 Agent 仅克隆受目标 Skill 影响的子成员及祖先，其余成员保留原固定引用。同分支多轮使用同一 Session，保留创意确认；工具确认要求人工介入时明确失败。创建后回读实际 Session，记录 Agent、Environment、覆写字段及配置/运行时哈希，在回放明细查看。真实 usage、工具事件、输入材料和产物保存到 PostgreSQL，媒体通过 ffprobe/ffmpeg 检查并给独立 judge 提供采样图。没有指标或关键产物时返回 unavailable / inconclusive。
+合成 Case 如果明确排除原附件并提供完整替代输入，由模型判定其输入契约并保存原文引用；保留该 Case 的缺素材测试前提，不把不相关视频附入任务。真实附件任务保留原视频、图片或 PDF 模态及视频 fps。禁用的 MCP 工具集无需外部隔离；已核验只读服务用 `replay_readonly_mcp` 固定服务快照及闭合工具名单，新增写工具或服务变化仍须重新核验。
+
+两分支固定相同的来源依赖、初始化脚本、网络配置和 Vault 引用，通过显式 `tos: null` 清除共享输出配置以使用 Session 独立输出位置。仅省略该字段会被 MA 的合并覆写语义重新继承；回读仅兼容已清空字段的省略，继承共享目录仍拒绝执行。凭证由 MA 原生 Vault 注入，TE 不读取或复制凭证值；同一引用不能证明外部服务状态或凭证值从未变化。采集快照保存 `vault_ids`，旧快照缺失时须补采并刷新 Case，不从当前连接推测。长期 Memory 无快照及未隔离 MCP 仍阻塞回放；真实自定义工具调用需要执行器。能力不满足时仍可采集，不能据此宣称验证成功。
+
+Agent 仅声明自定义工具不阻止回放，原始工具定义在两分支中完整保留；只使用 MA 内置工具的 Case 可正常执行。当前适配器尚未接入自定义工具执行器，主线程或子线程实际发出 `agent.custom_tool_use` 时立即返回 unsupported，记录工具名称、事件与线程 ID，并归档最终事件；不伪造工具结果。`replay_isolation.custom_tools` 不能代替执行器，也不能绕过实际调用检查。
+
+连接的 `replay_capability.supported` 仅表示配置前置检查通过，`assessment=configuration_only` 明确此范围；`custom_tool_names` 列出主、子 Agent 尚无执行器的自定义工具。控制台显示「配置检查通过」，不能据此视为真实回放成功。Session 回读兼容 Skill 显示名称省略、空列表省略，以及原生子 Agent 引用展开；展开的执行字段仍与固定成员配置比对，模型、系统指令、Skill ID 和版本变化继续阻塞。
+
+Baseline 与 Candidate 使用同一固定版本入口 Agent、相同 Environment 配置与 Runtime、相同任务材料，创建两份独立 Session/沙箱。入口 Agent 通过 `agent_with_overrides` 固定来源 Session 的 system、model、tools、context_management 等执行字段，两分支之间只切换目标 Skill；同一 Agent 版本上的来源模型覆写也会保留。多 Agent 仅克隆受目标 Skill 影响的子成员及祖先，其余成员保留原固定引用。同分支多轮使用同一 Session，保留创意确认；工具确认要求人工介入时明确失败。创建后回读实际 Session，核验入口执行字段及 Environment 配置，记录 Agent、Environment、覆写字段及配置/运行时哈希，在回放明细查看。真实 usage、工具事件、输入材料和产物保存到 PostgreSQL，媒体通过 ffprobe/ffmpeg 检查并给独立 judge 提供采样图。没有指标或关键产物时返回 unavailable / inconclusive。
 
 替换目标 Skill 时覆盖历史图中的全部原引用，并加入当前显式关联成员，避免主 Agent 与子 Agent 同名 Skill 的版本冲突。Skill 回放的 Runtime 固定为来源连接版本及历史图中的运行时 Skill 字节；Candidate 中的 Runtime 文件不参与安装。Skill 挂载运行时转换为 xz 内嵌相同字节，两分支保持相同树哈希。独立 OpenViking 运行时直接使用来源版本的固定制品，不要求下载历史 Skill。验证期间自动进化不得改写 Candidate，防止长回放结果失效；管理员主动编辑仍递增版本并使旧结果失效。
 
 MA 主线程回复也携带 `session_thread_id`。回放按实际主线程身份提取主回复并构造评估消息，子线程仍单独保留；原始协议事件归档不改写线程身份。
 
-输入素材校验大小与 SHA-256 后，以原始字节和原始路径挂载到隔离 Session，首轮消息提供挂载路径供文件/媒体工具读取。图片、音频等不强制转成模型 `document` 内容块，避免固定模型仅支持 PDF 的格式限制。模型 `session.error` 保留上游错误码，便于在回放明细定位原因。
+输入素材校验大小与 SHA-256 后，以原始字节和原始路径挂载到隔离 Session；原生视频、图片与 PDF 在首轮消息恢复相应内容块，视频保留 fps，其他文件提供挂载路径。图片、音频等不强制转成模型 `document` 内容块，避免固定模型仅支持 PDF 的格式限制。模型 `session.error` 保留上游错误码，便于在回放明细定位原因。
+
+原始 Session 的素材若仍有可用的原生 File，回放先从同租户、同连接的归档中查找引用，再下载核对其字节与固定输入完全一致后复用。两个 Session 各自挂载，快照记录 File ID、SHA-256 和传输方式；复用文件不计入回放清理账本，避免删除业务文件。原文件缺失、过期或字节不匹配时上传归档副本；MA API 鉴权错误仍明确失败。这样可避免每次回放重复占用输入文件配额。
+
+若 MA 创建 Session 时仍因资源复制返回 `OperationDenied.FileQuotaExceeded`，且全部输入均已核实为原文件、来源 Vault 中已有 `ARK_API_KEY`，回放会改用沙箱初始化下载：通过 Vault 获取文件元数据，向下载地址发送不含 MA 凭证的新请求，再次核对大小和 SHA-256 后写入 `/tmp/te-replay-inputs/` 下的对应相对路径（原生 uploads 目录只读）。首轮消息和快照记录原路径与实际路径的映射。两分支使用相同初始化代码，保留原环境设置；不会生成新的原生 File，也不会把密钥或签名 URL 写入配置。其他 API 错误不触发此兜底。
 
 MA 文件登记可能晚于工具完成。回放从原生 Write/Edit 路径和最终回复的 `<display>` 引用识别声明产物，最多等待 60 秒回读实际字节后才进入裁判与清理；仍不可下载时明确失败，不能只用工具的写入成功消息作为交付证据。
 
 临时资源先记外部效果意图，远端结果不明时先对账，完成后按账本精确清理。原业务 Session 与资源保留。
 
 只修改显示名称或采集/同步周期时可复用原发现记录；凭证、运行环境及隔离配置变化仍需重新发现。人工确认按主、子线程事件识别，`session.error` 无需等待 idle 才上报。最终历史归档失败仍执行资源清理，并保留归档失败；已清理的历史账目不占用待清理查询窗口。
+
+业务 `environment_id` 可省略。Worker 在发现、采集和同步任务开始时，按连接的入口 Agent ID 查询创建时间倒序的 Session，再读取最新业务 Session 的实际 `environment.id`；排除 TE 回放账本中的 Session 及 `te-replay:` / `te-test:` 标签会话。环境 ID 或已观测配置哈希变化时，自动保存新连接 revision 并受理重新发现，刷新回放资源，无需手动维护环境 ID。`detail.environment_observation` 保留来源 Session、创建时间、环境 ID 和配置哈希；旧 Session 恢复活动或重新拉取不会覆盖更晚的观测。尚无可用 Session 时保留显式填写的初始环境；未填写则等待并定期重试。已受理任务及历史 Session 保留其固定配置，不改写历史快照。
 
 运行时 ready 探测的最后一个工具明确失败时直接报告探测错误，不再继续空等证明文件。即使首轮 `send` 尚未成功，分支仍保存实际 Session 快照及 `runtime_diagnostics` 中的已观测 usage、子线程状态和最终事件归档引用。这些诊断数据不替代完整回放指标，也不把初始化失败算作任务完成。
 
@@ -55,6 +71,10 @@ MA 文件登记可能晚于工具完成。回放从原生 Write/Edit 路径和�
 ## 发布与运行时
 
 管理员在 Candidate Review 查看验证结果后 Publish。版本列表、文件编辑、导入、新建、发布、回滚和删除走 MA 原生接口。新增 Skill 可先创建为未挂载资源，再选择目标成员；已有 Skill 保留成员关联。写入返回 `202` 和 `ma.skill` Job，Worker 上传新版本、更新关联成员及祖先并回读，成功后才标记 published。回滚将历史完整包上传为新的云端版本；删除先解绑、缓存经校验的历史包，再逐个删除原生版本和 Skill 资源，每一步保存效果回执。历史业务 Session 和 TE 验证快照保留。
+
+新 Candidate 发布未指定成员时默认挂载到所选连接的入口 Agent；明确保存空成员列表时须补选成员才能发布。手工创建资源可保持未挂载，控制台区分“已挂载”“已发布，未挂载”和“已挂载旧版本”。在“成员与 Skill”编辑关联会异步更新方舟引用，并等待回读成功；取消全部成员会卸载。仅调整挂载不增加 Skill 版本；重复提交相同内容通常复用版本，仍须核对实际 Agent 引用。
+
+新建 Skill 及上传版本使用包中的 Skill 名称作为方舟显示名称，并回读校验。已有 `te-<32位摘要>` 内部名称在再次提交内容时通过同内容的新版本修正，随后更新成员引用；仅调整挂载不会改名。新建请求在发送前保存已有资源 ID，网络结果未知时排除这些资源，再按名称与完整文件树对账；没有唯一匹配时暂停，不重复创建。升级前已受理的上传保留原效果账本用于恢复。
 
 候选固定生成时的云端资源身份和基线文件；云端版本变化时拒绝过期发布。MA 上传接口没有 CAS，若上传期间发生竞争，该版本保留在云端历史，发布暂停并要求重新核对；未知网络结果先对账，不重复上传。TE 仅保存不可变验证快照、候选、任务与审计，不维护第二套 MA 当前版本链。普通 System、model 和 tool 修改在引用更新时保留，历史业务 Session 不改变。
 

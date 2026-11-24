@@ -1,6 +1,8 @@
 import { Empty, Pill } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { getActiveTenantId } from "@/api/client";
+import TenantKeyViewer from "@/features/tenants/TenantKeyViewer";
 import { PlugZap, Plus, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { followMAJob, maConnection, maConnections, maReleases, maResources, saveConnection, startMAJob,
@@ -119,10 +121,19 @@ export default function ManagedAgentsView({ active, canManage = false }: { activ
               <div>最近采集<p className="mt-1 font-semibold">{maTime(detail.last_collected_at)}</p></div>
               <div>最近同步<p className="mt-1 font-semibold">{maTime(detail.last_synced_at)}</p></div>
               <div>True Replay<p className="mt-1 font-semibold">{detail.detail.replay_capability?.supported
-                ? "可执行" : detail.detail.replay_capability?.reason || "待检查"}</p></div>
+                ? "配置检查通过" : detail.detail.replay_capability?.reason || "待检查"}</p></div>
             </div>
+            {detail.detail.replay_capability?.supported && <p className="mt-3 text-xs text-muted-foreground">
+              实际可回放范围以具体任务的执行结果为准；配置检查不代表回放验证通过。
+            </p>}
+            {!!detail.detail.replay_capability?.custom_tool_names?.length &&
+              <p className="mt-2 text-xs text-muted-foreground">
+                自定义工具执行器尚未接入：{detail.detail.replay_capability.custom_tool_names.join("、")}。
+                实际调用这些工具的任务会返回不支持回放。
+              </p>}
             <p className="mt-3 text-xs text-muted-foreground">MA 凭证{detail.config.ma_credential_configured ? "已配置" : "未配置"}
               · 租户 Key {detail.config.tenant_credential_configured ? "已配置" : "未配置"}</p>
+            {canManage && <TenantKeyViewer tenantId={getActiveTenantId()} />}
             {detail.config.replay_enabled && <div className="mt-3"><ReplayResources connection={detail} /></div>}
             {detail.detail.error && <p className="mt-3 text-sm text-destructive">{detail.detail.error}</p>}
           </div>

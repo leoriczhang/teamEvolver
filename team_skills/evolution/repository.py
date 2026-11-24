@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import Any
 
-from team_replay.fingerprints import execution_fingerprint
+from team_replay.fingerprints import execution_fingerprint, execution_provenance
 from team_skills.library.repository import SkillLibraryError, SkillMutationConflict
 from teamEvolver.storage.json_snapshots import JsonSnapshots
 from teamEvolver.storage.postgres import PostgresObjectStore
@@ -29,13 +29,18 @@ def unpack(value: Any) -> Any:
 
 
 def evidence_projection(session: dict) -> dict:
+    from team_skills.evolution.source_context import source_contract
     return {
         "session_id": session["session_id"], "content_hash": session["content_hash"],
         "user_alias": session.get("user_alias", ""),
+        **{key: (value.isoformat() if hasattr(value, "isoformat") else value)
+           for key in ("business_time", "ingested_at") if (value := session.get(key)) is not None},
         "_summary": str(session.get("_summary") or "")[:16000],
         "_judge_scores": session.get("_judge_scores") or {}, "_evidence_window": "historical",
         "runtime_context": session.get("runtime_context") or {},
         "execution_fingerprint": execution_fingerprint(session.get("runtime") or {}),
+        "execution_provenance": execution_provenance(session),
+        "_source_contract": source_contract(session),
     }
 
 

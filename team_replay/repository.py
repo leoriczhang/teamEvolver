@@ -18,6 +18,29 @@ class ReplayRepository:
         self.tx = tx
         self.schema = tx.pool.schema
 
+    async def preparation(self, conn, tenant_id, run_id, input_hash):
+        row = await conn.fetchrow(
+            f"SELECT * FROM {self.schema}.replay_preparations WHERE run_id=$1", run_id,
+        )
+        if row is None:
+            return None
+        if row["input_hash"] != input_hash:
+            raise DatasetError("Replay preparation input hash mismatch")
+        result = await JsonSnapshots(self.tx, tenant_id).hydrate(conn, unpack(row["result"]))
+        if stable_hash(result) != row["result_hash"]:
+            raise DatasetError("Replay preparation result hash mismatch")
+        return result
+
+    async def save_preparation(self, conn, *, tenant_id, run_id, input_hash, result):
+        packed = await JsonSnapshots(self.tx, tenant_id).pack(conn, result)
+        await conn.execute(
+            f"INSERT INTO {self.schema}.replay_preparations "
+            "(tenant_id,run_id,input_hash,result,result_hash) VALUES($1,$2,$3,$4::jsonb,$5) "
+            "ON CONFLICT DO NOTHING",
+            tenant_id, run_id, input_hash, json.dumps(packed), stable_hash(result),
+        )
+        return await self.preparation(conn, tenant_id, run_id, input_hash)
+
     def table(self, domain, suffix="runs"):
         if domain not in DOMAINS:
             raise DatasetError("invalid Replay domain")

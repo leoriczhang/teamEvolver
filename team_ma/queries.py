@@ -1,10 +1,21 @@
 """Public immutable MA runtime reads, injected into Replay by the composition root."""
 
 import copy
+from contextlib import asynccontextmanager
 
 from .replay_resources import effective_replay_config
 from .repository import MARepository
 from .schemas import digest
+
+
+@asynccontextmanager
+async def _connection(services, tenant_id, conn):
+    """Acceptance already owns a transaction; never borrow a second pool slot."""
+    if conn is not None:
+        yield conn
+    else:
+        async with services.tx.tenant_tx(tenant_id) as opened:
+            yield opened
 
 
 async def session_skill_names(services, tenant_id, connection_id, skill_ids):
@@ -32,7 +43,7 @@ async def session_skill_names(services, tenant_id, connection_id, skill_ids):
     return {ident: next(iter(values)) for ident, values in found.items() if len(values) == 1}
 
 
-async def freeze(services, tenant_id, cases, skill_name=""):
+async def freeze(services, tenant_id, cases, skill_name="", *, conn=None):
     """Freeze recorded execution facts, never replace them with latest Agents."""
     repo, fixed = MARepository(services.tx), {}
     for case in cases:
@@ -41,43 +52,51 @@ async def freeze(services, tenant_id, cases, skill_name=""):
         if runtime.get("type") != "managed-agents":
             continue
         ident = runtime.get("connection_id")
-        async with services.tx.tenant_tx(tenant_id) as conn:
-            recorded = await repo.connection(conn, ident, runtime.get("connection_revision"))
+        async with _connection(services, tenant_id, conn) as db:
+            recorded = await repo.connection(db, ident, runtime.get("connection_revision"))
             if not recorded:
                 raise ValueError("Recorded MA connection revision is unavailable")
-            # Execution facts stay historical. Replay infrastructure and target
-            # bindings freeze the administrator's configuration at acceptance.
-            connection = await repo.connection(conn, ident)
-            targets = await repo.all_resources(conn, ident, kind="skill")
-            discovered = await repo.discovery_snapshot(conn, ident, connection["revision"])
+            # Execution facts stay historical; credentials for the MA API and
+            # target bindings freeze at acceptance.
+            connection = await repo.connection(db, ident)
+            targets = await repo.all_resources(db, ident, kind="skill")
         graph = runtime.get("agent_graph")
         if not graph or runtime.get("snapshot_missing") or runtime.get("materials_missing"):
             raise ValueError("Recorded MA configuration or input materials are incomplete")
-        config = effective_replay_config(connection["config"], (discovered or {}).get("replay_resources"))
+        environment = runtime.get("environment") or {}
+        vault_ids = runtime.get("vault_ids")
+        if (not environment.get("id") or not isinstance(environment.get("config"), dict)
+                or not isinstance(vault_ids, list)
+                or any(not isinstance(v, str) or not v for v in vault_ids)):
+            raise ValueError("Recorded MA Environment or Vault references are missing; recollect the source Session")
+        config = effective_replay_config(connection["config"], {
+            "status": "ready", "environment_id": environment["id"], "vault_ids": vault_ids,
+        })
         # Runtime installation belongs to the recorded execution configuration.
-        # Current settings provide credentials and isolated replay infrastructure.
+        # Current settings provide only access to the MA API.
         if recorded["config"].get("runtime_binding"):
             config["runtime_binding"] = copy.deepcopy(recorded["config"]["runtime_binding"])
         else:
             config.pop("runtime_binding", None)
         if not config["replay_enabled"] or not connection["enabled"]:
             raise ValueError("MA True Replay is disabled or connection is paused")
-        replay_environment = (discovered or {}).get("replay_environment")
-        if not replay_environment:
-            raise ValueError("Discover the configured Replay Environment before validation")
         members = next((r["record"].get("agents", []) for r in targets
                         if r["logical_name"] == skill_name), []) if skill_name else []
         if skill_name and not members:
-            raise ValueError("Choose target MA members before validation")
+            # A new Skill has no native binding yet. Execute on the recorded
+            # entry Agent; publication still requires its explicit target binding.
+            members = [graph["entry_agent_id"]]
         if not set(members) <= set(graph["agents"]):
             raise ValueError("Target MA members are absent from the recorded Agent graph")
         record = {"connection_id": ident, "connection_revision": connection["revision"],
                   "config": config, "config_hash": connection["config_hash"], "target_skill_name": skill_name,
                   "agent_graph": copy.deepcopy(graph),
-                  "environment": copy.deepcopy(runtime.get("environment") or {}),
-                  "replay_environment": copy.deepcopy(replay_environment),
+                  "environment": copy.deepcopy(environment),
+                  "replay_environment": copy.deepcopy(environment),
                   "skill_bindings": {r["logical_name"]: copy.deepcopy(r["record"]) for r in targets},
                   "target_agents": members, "binding_hash": digest(sorted(members))}
+        if skill_name:
+            record["skill_bindings"].setdefault(skill_name, {})["agents"] = list(members)
         record["runtime_hash"] = digest({"agent_graph": record["agent_graph"],
                                          "environment": record["environment"].get("config"),
                                          "target_agents": sorted(members)})
@@ -85,16 +104,16 @@ async def freeze(services, tenant_id, cases, skill_name=""):
     return fixed
 
 
-async def required_targets(services, tenant_id, skill_name):
+async def required_targets(services, tenant_id, skill_name, *, conn=None):
     repo, targets = MARepository(services.tx), []
-    async with services.tx.tenant_tx(tenant_id) as conn:
-        for connection in await repo.connections(conn):
+    async with _connection(services, tenant_id, conn) as db:
+        for connection in await repo.connections(db):
             if not connection["enabled"]:
                 continue
-            resources = await repo.all_resources(conn, connection["connection_id"], kind="skill")
+            resources = await repo.all_resources(db, connection["connection_id"], kind="skill")
             if any(r["logical_name"] == skill_name and r["record"].get("agents") for r in resources):
                 members = next(r["record"]["agents"] for r in resources if r["logical_name"] == skill_name)
-                applied = await repo.applied(conn, connection["connection_id"])
+                applied = await repo.applied(db, connection["connection_id"])
                 snapshot = (applied or {}).get("record") or {}
                 environment = (snapshot.get("environment") or {}).get("config")
                 targets.append({"connection_id": connection["connection_id"],
@@ -106,28 +125,27 @@ async def required_targets(services, tenant_id, skill_name):
     return targets
 
 
-async def active_connections(services, tenant_id):
+async def active_connections(services, tenant_id, *, conn=None):
     """Connections eligible for new validation; paused history remains archived."""
-    async with services.tx.tenant_tx(tenant_id) as conn:
-        rows = await MARepository(services.tx).connections(conn)
+    async with _connection(services, tenant_id, conn) as db:
+        rows = await MARepository(services.tx).connections(db)
     return {row["connection_id"] for row in rows if row["enabled"]}
 
 
-async def automatic_fingerprints(services, tenant_id):
-    """Current discovered execution identities, without exposing scripts or credentials."""
+async def automatic_fingerprints(services, tenant_id, *, conn=None):
+    """Enabled connections and observed identities; drift is recorded, not an eligibility gate."""
     from team_replay.fingerprints import execution_fingerprint
     result = {}
-    async with services.tx.tenant_tx(tenant_id) as conn:
+    async with _connection(services, tenant_id, conn) as db:
         repo = MARepository(services.tx)
-        for row in await repo.connections(conn):
-            if not row["enabled"] or row["status"] in {"drift", "paused"}:
+        for row in await repo.connections(db):
+            if not row["enabled"] or row["status"] == "paused":
                 continue
-            applied = await repo.applied(conn, row["connection_id"])
+            applied = await repo.applied(db, row["connection_id"])
             record = (applied or {}).get("record") or {}
             fingerprint = execution_fingerprint({
                 "agent_graph": record.get("agent_graph"), "environment": record.get("environment"),
                 "connection_id": row["connection_id"],
             })
-            if fingerprint:
-                result[row["connection_id"]] = fingerprint
+            result[row["connection_id"]] = fingerprint or {}
     return result

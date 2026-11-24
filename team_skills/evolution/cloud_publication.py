@@ -20,9 +20,15 @@ async def finalize(conn, tx, task, request, result, binding):
     boundary = await conn.fetchval("SELECT clock_timestamp()")
     binding["evolution_reset_at"] = boundary.isoformat()
     if metadata.get("candidate_id"):
+        decision = {**result, **{key: metadata[key] for key in (
+            "review_overridden", "validation_overridden", "validation_verdict",
+        )
+                                if key in metadata}}
+        if metadata.get("publish_mode"):
+            decision["mode"] = metadata["publish_mode"]
         await CandidateRepository(tx).transition(
             conn, tenant_id=task.tenant_id, candidate_id=metadata["candidate_id"], to_status="published",
-            actor=request["actor"], expected_revision=metadata["revision"], decision=result,
+            actor=request["actor"], expected_revision=metadata["revision"], decision=decision,
             published_version=result["version"], mutation_id=request["mutation_id"],
         )
     else:

@@ -21,7 +21,13 @@ async def enqueue(conn, services, *, tenant_id, domain, run_id, subject_id, requ
     freeze = services.extras.get("ma_freeze_replay")
     if freeze and operation == "run":
         cases = list(spec.cases) if spec else (dataset or {}).get("execution_document", {}).get("cases", [])
-        payload["ma_records"] = await freeze(tenant_id, cases, subject_id if domain == "skill" else "")
+        payload["ma_records"], payload["ma_errors"] = {}, {}
+        for case in cases:
+            try:
+                payload["ma_records"].update(
+                    await freeze(tenant_id, [case], subject_id if domain == "skill" else "", conn=conn))
+            except ValueError as exc:
+                payload["ma_errors"][case["case_id"]] = str(exc)
     record, created = await repo.accept(
         conn, tenant_id=tenant_id, domain=domain, run_id=run_id, subject_id=subject_id,
         request=request, payload=payload,

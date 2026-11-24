@@ -31,7 +31,11 @@ from teamEvolver.llm import AsyncLLMClient
 #      skill's default conventions.
 
 _GENERALIZATION_RULES = """\
-## 强制要求：让 Skill 保持通用性 —— 这是最高优先级的规则
+## 强制要求：让 Skill 保持通用性
+
+先区分原始系统契约与任务实例。系统契约规定的固定标识、枚举、字段类型、数量限制和命名空间\
+必须原样保留，不能因为它们包含数字或看起来像示例就参数化。只有原始契约明确允许变化的\
+实例取值才能泛化；这条边界优先于以下通用写作建议。
 
 首先理解这里"通用"的含义，因为它决定了这个 Skill 是否有价值。
 
@@ -98,6 +102,9 @@ Skill 编码的是从历史运行中提炼的默认约定——不是不可更�
 - 用户的任何明确要求——不同的输出路径、文件名、章节结构、格式、范围或内容——\
 都优先于（OVERRIDES）Skill 的默认约定；
 - 当用户请求与这里的默认约定冲突时，以用户为准。
+
+该声明只适用于 Skill 自行归纳的默认约定，不得授权用户覆盖来源 Agent 的系统硬约束。\
+原始系统要求的 schema、固定证据标识、枚举及输入模态处理不能被这段通用声明降为可选项。
 
 该声明必须用与 Skill 正文其余部分相同的语言书写（中文正文配中文声明，英文正文配英文声明）。\
 保持简短，只声明一次；不要把这个提示散落在文档各处。"""
@@ -177,14 +184,18 @@ _MERGE_SKILL_SYSTEM = """\
 
 ## 合并原则
 
-- 保留两个版本中所有可操作的指引——不要丢弃有用内容。
+- 先以原始 Agent 系统契约逐项核对两个版本，删除与契约冲突、无证据支持或仅由旧摘要误判的规则。\
+仅保留事实正确且可操作的指引。
 - 消除冗余——对重叠章节去重。
-- 如果两个版本相互矛盾，优先采用更具体、更明确的指引。
+- 如果两个版本相互矛盾，以原始契约和原始可见 Evidence 为准；不能仅因规则更具体就采用。
 - 当一个版本硬编码了任务实例的取值（具体的输入/输出路径、文件名、数据集 ID、日期、\
 实体或任务输入阈值），而另一个版本把它表达为参数/模式时，优先采用参数化形式——\
 绝不能让合并结果重新引入硬编码的实例取值。
 - 如果任一版本包含用户优先级声明段（明确用户要求覆盖 Skill 默认约定），合并后的 Skill\
-必须保留一个这样的段落，并用合并后正文的语言书写。
+必须保留一个这样的段落，并用合并后正文的语言书写；它只覆盖 Skill 默认约定，不能覆盖原始系统硬约束。
+- 原始契约规定的固定标识必须保持字面值；不得改为模板或推广出契约没有允许的命名空间。\
+不要根据单次输入推断标识连续编号或跨观察只能引用一次。视频/图片内容块本身就是视觉输入，\
+没有额外 OCR 文本字段不等于没有画面可读，分析器未拿到视频字节也不等于原 Agent 没有视频。
 - 保留更强的既有结构，除非重组明显更有利。
 - 不要仅仅为了让版本看起来更"标准化"而重写。
 - 保持名称不变。
@@ -195,7 +206,7 @@ _MERGE_SKILL_SYSTEM = """\
 ## 提交前自检
 
 输出 final 之前逐项确认：
-- 每个版本中可操作的指引要么被保留、要么被更优表达取代——没有静默丢失。
+- 每个版本中的指引已核对原始契约：有效内容保留或改进，错误内容删除。
 - 重叠章节已去重，不存在互相矛盾的并行规则。
 - 未重新引入任务实例字面量（路径/文件名/数据集 ID/日期/实体）。
 - 用户优先级声明段恰好保留一份，语言与正文一致。
@@ -478,6 +489,8 @@ async def execute_merge(
     llm: AsyncLLMClient,
     existing_skill: dict,
     incoming_skill: dict,
+    *,
+    evolution_context: Optional[dict] = None,
 ) -> Optional[dict]:
     """Merge two versions of the same skill into one superior version."""
     from team_skills.evolution.agent.runner import run_skill_agent
@@ -486,7 +499,19 @@ async def execute_merge(
     return await run_skill_agent(
         llm,
         stage="merge",
-        system_prompt=_effective_system("merge", _MERGE_SKILL_SYSTEM),
+        skill_name=skill_name,
+        evolution_context=evolution_context,
+        system_prompt=_effective_system("merge", _MERGE_SKILL_SYSTEM) + (
+            "\n\nFor unpublished Candidate consolidation, Version A is the chosen target; Version B may "
+            "contain several proposals for the same capability. Keep A's name. Neither candidate is "
+            "validated truth. Reconcile all proposals against the original execution contracts and "
+            "visibility limits in the evidence card; discard claims contradicted by those contracts. "
+            "Do not infer fabricated visual/OCR content from missing attachment bytes. Preserve the "
+            "original output schema, enums and evidence-ID rules. Return the complete consolidated body. "
+            "Nonconflicting Bundle files are preserved by the host. Resolve every listed file conflict "
+            "explicitly using skill.file_changes with path, operation='upsert', complete UTF-8 content, "
+            "and reason. Never silently discard supporting files."
+        ),
         merge_versions=(existing_skill, incoming_skill),
         max_rounds=_agent_limits()["max_rounds"],
         max_tool_calls_per_round=_agent_limits()["max_tool_calls_per_round"],
@@ -633,6 +658,7 @@ async def evolve_skill_from_sessions(
     existing_skill_names: list[str],
     *,
     evolution_context: Optional[dict] = None,
+    candidate_reader: Optional[Any] = None,
 ) -> Optional[dict]:
     """Agent-loop decision + execution for one existing-skill session group."""
     from team_skills.evolution.agent.runner import run_skill_agent
@@ -646,6 +672,7 @@ async def evolve_skill_from_sessions(
         current_skill=current_skill,
         existing_skill_names=existing_skill_names,
         evolution_context=evolution_context,
+        candidate_reader=candidate_reader,
         max_rounds=_agent_limits()["max_rounds"],
         max_tool_calls_per_round=_agent_limits()["max_tool_calls_per_round"],
         call_options=_stage_call_options(
@@ -668,6 +695,7 @@ async def create_skill_from_sessions(
     *,
     evolution_context: Optional[dict] = None,
     library_reader: Optional[Any] = None,
+    candidate_reader: Optional[Any] = None,
 ) -> Optional[dict]:
     """Agent-loop decision + execution for the no-skill session bucket.
 
@@ -685,6 +713,7 @@ async def create_skill_from_sessions(
         existing_skill_names=existing_skill_names,
         evolution_context=evolution_context,
         library_reader=library_reader,
+        candidate_reader=candidate_reader,
         max_rounds=_agent_limits()["max_rounds"],
         max_tool_calls_per_round=_agent_limits()["max_tool_calls_per_round"],
         call_options=_stage_call_options(

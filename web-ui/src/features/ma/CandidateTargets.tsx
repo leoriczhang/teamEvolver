@@ -1,7 +1,7 @@
 import { Pill } from "@/components/common";
 import { Button } from "@/components/ui/button";
-import { useEffect, useState } from "react";
-import { maConnections, maResources, saveTargets, type MAConnection, type MAResource, type MATarget } from "./api/client";
+import { useEffect, useRef, useState } from "react";
+import { followMAJob, maConnections, maResources, saveTargets, type MAConnection, type MAResource, type MATarget } from "./api/client";
 
 export default function CandidateTargets({ skillName, canManage, matrix = {} }: {
   skillName: string; canManage: boolean; matrix?: Record<string, MATarget>;
@@ -10,8 +10,11 @@ export default function CandidateTargets({ skillName, canManage, matrix = {} }: 
   const [chosen, setChosen] = useState<Record<string, string[]>>({});
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
+  const lifetime = useRef<AbortController | null>(null);
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
+    lifetime.current = controller;
     async function load() {
       try {
         const connections = await maConnections();
@@ -22,30 +25,35 @@ export default function CandidateTargets({ skillName, canManage, matrix = {} }: 
         }
         if (!cancelled) {
           setTargets(items);
-          setChosen(Object.fromEntries(items.map(({ connection, resources }) => [
-            connection.connection_id, resources.find(r => r.kind === "skill" && r.logical_name === skillName)?.record.agents || [],
-          ])));
+          setChosen(Object.fromEntries(items.map(({ connection, resources }) => {
+            const record = resources.find(r => r.kind === "skill" && r.logical_name === skillName)?.record;
+            return [connection.connection_id, record?.desired_agents ?? record?.agents ?? []];
+          })));
         }
       } catch (e) { if (!cancelled) setError(e instanceof Error ? e.message : "加载 MA 目标失败"); }
     }
     void load();
-    return () => { cancelled = true; };
+    return () => { cancelled = true; controller.abort(); };
   }, [skillName]);
   async function save(connection: MAConnection, resources: MAResource[]) {
+    const signal = lifetime.current!.signal;
     setBusy(connection.connection_id); setError("");
     try {
       const existing = resources.find(r => r.kind === "skill" && r.logical_name === skillName);
-      await saveTargets(connection.connection_id, skillName, existing?.revision || 0, chosen[connection.connection_id] || []);
+      const result = await saveTargets(connection.connection_id, skillName, existing?.revision || 0, chosen[connection.connection_id] || []);
+      if ("job_id" in result) await followMAJob(result, signal, () => {});
+      if (signal.aborted) return;
       const updated = await maResources(connection.connection_id);
+      if (signal.aborted) return;
       setTargets(old => old.map(item => item.connection.connection_id === connection.connection_id
         ? { ...item, resources: updated.resources } : item));
-    } catch (e) { setError(e instanceof Error ? e.message : "关联保存失败"); }
-    finally { setBusy(""); }
+    } catch (e) { if (!signal.aborted) setError(e instanceof Error ? e.message : "关联保存失败"); }
+    finally { if (!signal.aborted) setBusy(""); }
   }
   if (!targets.length && !error && !Object.keys(matrix).length) return null;
   return <section aria-label="MA 受管目标" className="rounded-lg border p-4 text-xs">
     <h3 className="mb-2 font-semibold text-sm">MA 受管目标与独立验证</h3>
-    <p className="mb-3 text-muted-foreground">新 Skill 先选择成员并保存，再重新评估。每个受管连接均需验证通过。</p>
+    <p className="mb-3 text-muted-foreground">新候选未指定成员时，发布将挂载到所选连接的入口 Agent。可保存其他目标后重新评估；已发布技能的关联变更会立即应用云端最新版本。</p>
     {error && <p role="alert" className="mb-2 text-destructive">{error}</p>}
     {targets.map(({ connection, resources }) => {
       const id = connection.connection_id;

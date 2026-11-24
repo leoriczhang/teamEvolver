@@ -14,6 +14,7 @@ from teamEvolver.admin.authorization import require_tenant_admin
 from teamEvolver.security.agent_principal import resolve_agent_principal
 from teamEvolver.tenants.registry import current_tenant_id
 
+from ..bindings import accept_bindings
 from ..commands import enqueue
 from ..repository import MARepository
 from ..schemas import MAConflict, digest, public_config, validate_config
@@ -220,7 +221,7 @@ def create_router(services=None, **kwargs):
             await require(conn, connection_id)
             rows = await repo.resources(conn, connection_id, after=after, limit=limit, kind=kind)
         keys = {"id", "name", "version", "source_version", "tree_sha256", "agents", "status", "drift",
-                "latest_version", "bound_version", "bound_versions", "skill_backend"}
+                "latest_version", "bound_version", "bound_versions", "skill_backend", "desired_agents", "deleted"}
         return {"resources": [{**row, "record": {k: v for k, v in row["record"].items() if k in keys}}
                               for row in rows],
                 "next_after": rows[-1]["logical_name"] if len(rows) == min(max(limit, 1), 100) else None}
@@ -237,23 +238,18 @@ def create_router(services=None, **kwargs):
             raise HTTPException(400, "Expected expected_revision and agent_ids")
         async with services.tx.tenant_tx(current_tenant_id()) as conn:
             await require(conn, connection_id)
-            agents = {r["logical_name"] for r in await repo.all_resources(conn, connection_id, kind="agent")}
-            if not set(body["agent_ids"]) <= agents:
-                raise HTTPException(400, "Unknown target Agent")
-            rows = await repo.all_resources(conn, connection_id, kind="skill")
-            existing = next((r for r in rows if r["logical_name"] == skill_name), None)
-            record = {**(existing["record"] if existing else {}), "name": skill_name,
-                      "agents": body["agent_ids"], "desired_agents": body["agent_ids"]}
             try:
-                if not existing and body["expected_revision"] == 0:
-                    await repo.create_binding(conn, tenant_id=current_tenant_id(), connection_id=connection_id,
-                                              name=skill_name, record=record)
-                else:
-                    await repo.bind(conn, tenant_id=current_tenant_id(), connection_id=connection_id, kind="skill",
-                                    name=skill_name, record=record, expected_revision=body["expected_revision"])
+                result = await accept_bindings(
+                    conn, services, tenant_id=current_tenant_id(), connection_id=connection_id, name=skill_name,
+                    body=body, operation_id=_operation_id(request, connection_id, "bind:" + skill_name)
+                    or "ma:" + uuid4().hex,
+                    actor=(getattr(request.state, "console_user", None) or {}).get("id", "admin"),
+                )
             except MAConflict as exc:
                 raise HTTPException(409, str(exc)) from None
-        return {"saved": True}
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from None
+        return JSONResponse(status_code=202 if result.get("accepted") else 200, content=jsonable_encoder(result))
 
     @router.get("/api/ma/connections/{connection_id}/releases")
     async def releases(connection_id: str, limit: int = 50):

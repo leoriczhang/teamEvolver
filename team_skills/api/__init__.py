@@ -25,6 +25,7 @@ from ..evolution.history import version_context
 from ..library import frontmatter
 from ..library.bundle import bundle_tree_sha256, normalize_bundle_rel_path
 from ..library.editor import validate_skill_name
+from ..library.provenance import version_provenance
 from ..library.repository import SkillLibraryError, SkillLibraryRepository, SkillNotFound
 
 _MAX_JSON_BODY_BYTES = 96 * 1024 * 1024
@@ -183,6 +184,7 @@ def _version_payload(name: str, head: dict[str, Any], versions: list[dict[str, A
                 "timestamp": _iso(v["created_at"]),
                 "tree_sha256": str(v["tree_sha256"]),
                 "actor": str(v["actor"]),
+                "provenance": v.get("provenance") or version_provenance(),
                 **({"restored_from": int(v["restored_from"])} if v["restored_from"] is not None else {}),
             }
             for v in versions
@@ -295,7 +297,7 @@ def _register_library_reads(router: APIRouter, ctx: _SkillsContext) -> None:
             except SkillNotFound as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
             meta = await ctx.library.get_version(conn, name, int(version)) or {}
-            evolution = await version_context(conn, ctx.tx, name, int(version))
+            evolution = await version_context(conn, ctx.tx, name, int(version), provenance=meta.get("provenance"))
         raw_md = bundle["SKILL.md"].decode("utf-8", errors="replace")
         body = _skill_md_body(raw_md)
         info = _version_payload(name, head, versions)
@@ -306,6 +308,8 @@ def _register_library_reads(router: APIRouter, ctx: _SkillsContext) -> None:
             "current_version": info["current_version"],
             "is_current": int(version) == info["current_version"] and not head["deleted"],
             "versions": info["versions"],
+            "history": info["history"],
+            "provenance": meta.get("provenance") or version_provenance(),
             "description": str(meta.get("description") or ""),
             "category": str(meta.get("category") or "general"),
             "content": body,

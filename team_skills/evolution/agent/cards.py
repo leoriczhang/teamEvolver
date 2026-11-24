@@ -213,6 +213,17 @@ def build_round1_user_msg(
     )
 
     parts: list[str] = []
+    from team_skills.evolution.source_context import contract_card
+    if contract := contract_card(sessions):
+        parts.append(contract)
+    pending = (evolution_context or {}).get("pending_candidates") or []
+    if pending:
+        parts.append("## Unpublished Candidate catalog (same tenant)\n\n"
+                     "These are existing proposals, not validated truth. Read relevant candidates with "
+                     "read_candidate before deciding. Reuse a matching candidate via improve_skill and "
+                     "target_candidate_id; consolidate duplicates via merge_skill. Do not create another "
+                     "alias for the same capability. Explain distinct scope if a new Skill is necessary.\n"
+                     + json.dumps(pending, ensure_ascii=False))
     if stage == "evolve_skill":
         parts.append(build_skill_outline_card(current_skill))
     cross_cycle = _build_cross_cycle_context(evolution_context)

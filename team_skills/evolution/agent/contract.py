@@ -197,10 +197,11 @@ def validate_final(
         DecisionAction.IMPROVE,
         DecisionAction.OPTIMIZE_DESC,
         DecisionAction.CREATE,
+        DecisionAction.MERGE,
     }:
         return None, [
             "未知 action："
-            f"{action!r}（必须是 improve_skill / optimize_description / create_skill / skip）"
+            f"{action!r}（必须是 improve_skill / optimize_description / create_skill / merge_skill / skip）"
         ]
     if not classification["team_skill"]:
         return None, [
@@ -208,6 +209,17 @@ def validate_final(
             "才能修改共享 Skill；否则应提交 skip"
         ]
 
+    target = str(decision.get("target_candidate_id") or "").strip()
+    if action == DecisionAction.MERGE:
+        sources = decision.get("source_candidate_ids")
+        if (not target or not isinstance(sources, list) or not sources
+                or any(not isinstance(item, str) or not item for item in sources)
+                or len(set([target, *sources])) != len(sources) + 1):
+            return None, ["merge_skill requires target_candidate_id and distinct source_candidate_ids"]
+        return {
+            "action": action, "target_candidate_id": target, "source_candidate_ids": sources,
+            "rationale": str(decision.get("rationale") or ""), "evidence_classification": classification,
+        }, []
     skill_data = decision.get("skill")
     if not isinstance(skill_data, dict):
         return None, [f"action 为 {action} 但缺少 skill 对象"]
@@ -230,4 +242,6 @@ def validate_final(
         "rationale": str(decision.get("rationale") or ""),
         "skill": skill_data,
         "evidence_classification": classification,
+        **({"target_candidate_id": target} if target else {}),
+        "candidate_distinction": str(decision.get("candidate_distinction") or ""),
     }, []

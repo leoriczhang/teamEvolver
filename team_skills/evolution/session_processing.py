@@ -36,7 +36,9 @@ def after_reset(session, boundary):
     """Old business Sessions stay old even when imported/analyzed again later."""
     if boundary is None:
         return True
-    value = session.get("business_time") or session.get("ingested_at")
+    provenance = session.get("execution_provenance") or {}
+    value = (session.get("business_time") or provenance.get("business_time")
+             or session.get("ingested_at") or provenance.get("ingested_at"))
     if not value:
         return False
     if isinstance(value, str):

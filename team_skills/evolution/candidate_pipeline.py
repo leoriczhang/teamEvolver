@@ -36,6 +36,57 @@ async def enqueue_command(conn, services, *, tenant_id, command_id, kind, reques
     return command, created
 
 
+async def validation_evidence(conn, tx, item):
+    repo = EvolutionRepository(tx)
+    evidence = await repo.evidence(conn, item["skill_name"], limit=8)
+    source_name = (item["detail"].get("evolution_context") or {}).get("skill_name")
+    if source_name and source_name != item["skill_name"]:
+        # Creation can rename the no-skill group. Keep the active source
+        # Evidence that produced this Candidate, alongside target history.
+        session_ids = set(item["detail"].get("session_ids") or [])
+        source = [e for e in await repo.evidence(conn, source_name, limit=200)
+                  if e["session_id"] in session_ids]
+        source_ids = {e["session_id"] for e in source}
+        evidence = (source + [e for e in evidence if e["session_id"] not in source_ids])[:8]
+    return evidence
+
+
+async def recover_failed_validation(conn, services, *, tenant_id, candidate_id):
+    """Release a terminal failed command without inventing a validation verdict."""
+    repo = CandidateRepository(services.tx)
+    item = await repo.require(conn, candidate_id, for_update=True)
+    if item["status"] != "validating" or not item["validate_task_id"]:
+        return item
+    task = await services.tasks.get(conn, task_id=item["validate_task_id"])
+    if not task or task["kind"] != "skill.validate" or task["status"] not in {"failed", "cancelled"}:
+        return item
+    reason = f"Validation task {task['task_id']} {task['status']}: {task['error_code']}"
+    evaluation = item["evaluation"] or {
+        "status": "failed", "candidate_revision": item["revision"], "recommended_publish": False,
+        "replay": {"status": "failed", "reason": reason},
+    }
+    return await repo.transition(
+        conn, tenant_id=tenant_id, candidate_id=candidate_id, to_status="open",
+        expected_revision=item["revision"], actor="validation-recovery", reason=reason,
+        validate_task_id="", evaluation=evaluation,
+    )
+
+
+async def recover_failed_validations(services, tenant_id):
+    repo = CandidateRepository(services.tx)
+    ids, offset = [], 0
+    async with services.tx.tenant_tx(tenant_id) as conn:
+        while True:
+            page, total = await repo.list(conn, scope="open", limit=200, offset=offset, compact=True)
+            ids.extend(item["candidate_id"] for item in page if item["status"] == "validating")
+            offset += len(page)
+            if not page or offset >= total:
+                break
+    for candidate_id in ids:
+        async with services.tx.tenant_tx(tenant_id) as conn:
+            await recover_failed_validation(conn, services, tenant_id=tenant_id, candidate_id=candidate_id)
+
+
 async def submit_validation(conn, services, *, tenant_id: str, candidate_id: str,
                             command_id: str, config, actor: str, revision: int | None,
                             mode: str = "evaluate", validation_method: str = "auto") -> dict:
@@ -48,7 +99,7 @@ async def submit_validation(conn, services, *, tenant_id: str, candidate_id: str
     repo = CandidateRepository(services.tx)
     preview = await repo.require(conn, candidate_id)
     await SkillLibraryRepository(services.tx).lock_evolution_head(conn, preview["skill_name"])
-    item = await repo.require(conn, candidate_id, for_update=True)
+    item = await recover_failed_validation(conn, services, tenant_id=tenant_id, candidate_id=candidate_id)
     expected = item["revision"] if revision is None else revision
     requested_method = validation_method
     if mode != "evaluate" and validation_method == "auto":
@@ -90,8 +141,11 @@ async def submit_validation(conn, services, *, tenant_id: str, candidate_id: str
         "detail": item["detail"], "tree_sha256": item["tree_sha256"],
         "validation_method": validation_method,
         "connection_id": cloud.selected if cloud is not None else "",
-        "evidence": await EvolutionRepository(services.tx).evidence(conn, item["skill_name"], limit=8),
     }
+    if mode == "force":
+        # A human publication decision does not submit another validation.
+        return await enqueue_validation(conn, services, tenant_id, command_id, request, payload)
+    payload["evidence"] = await validation_evidence(conn, services.tx, item)
     manual = item["detail"].get("manual_reprocess") or {}
     if manual:
         source = await EvolutionRepository(services.tx).command(conn, manual.get("command_id", ""))
@@ -111,9 +165,9 @@ async def submit_validation(conn, services, *, tenant_id: str, candidate_id: str
         key: adapter[key] for key in ("adapter_id", "revision", "source_hash")
     } if adapter else None
     active = services.extras.get("ma_active_connections")
-    active_connections = await active(tenant_id) if active else None
+    active_connections = await active(tenant_id, conn=conn) if active else None
     fingerprints = services.extras.get("ma_automatic_fingerprints")
-    current_execution = await fingerprints(tenant_id) if fingerprints else None
+    current_execution = await fingerprints(tenant_id, conn=conn) if fingerprints else None
     payload["detail"] = await freeze_candidate_cases(
         conn, services.tx, tenant_id=tenant_id, candidate_id=candidate_id, skill_name=item["skill_name"],
         detail=item["detail"], seed=command_id, active_ma_connections=active_connections,
@@ -124,22 +178,26 @@ async def submit_validation(conn, services, *, tenant_id: str, candidate_id: str
         payload["ma_records"], payload["ma_errors"] = {}, {}
         for case in payload["detail"].get("replay_cases") or []:
             try:
-                payload["ma_records"].update(await freeze_ma(tenant_id, [case], item["skill_name"]))
+                payload["ma_records"].update(await freeze_ma(tenant_id, [case], item["skill_name"], conn=conn))
             except ValueError as exc:
                 payload["ma_errors"][case["case_id"]] = str(exc)
         required_query = services.extras.get("ma_required_targets")
-        required = await required_query(tenant_id, item["skill_name"]) if required_query else []
+        required = await required_query(tenant_id, item["skill_name"], conn=conn) if required_query else []
         payload["required_targets"] = required
         policy = dict(payload["detail"].get("runtime_validation_policy") or {})
         policy["required_targets"] = required
         payload["detail"]["runtime_validation_policy"] = policy
+    return await enqueue_validation(conn, services, tenant_id, command_id, request, payload)
+
+
+async def enqueue_validation(conn, services, tenant_id, command_id, request, payload):
     command, _ = await enqueue_command(
         conn, services, tenant_id=tenant_id, command_id=command_id, kind="skill.validate",
         request=request, payload=payload,
     )
-    await repo.transition(
-        conn, tenant_id=tenant_id, candidate_id=candidate_id, to_status="validating",
-        actor=actor, expected_revision=expected, validate_task_id=command_id,
+    await CandidateRepository(services.tx).transition(
+        conn, tenant_id=tenant_id, candidate_id=payload["candidate_id"], to_status="validating",
+        actor=payload["actor"], expected_revision=payload["revision"], validate_task_id=command_id,
     )
     return command
 
@@ -173,6 +231,34 @@ async def run_validation(task, services) -> HandlerResult:
     candidate = skill_payload(p["skill_name"], bundle)
     candidate["file_changes"] = p["detail"].get("file_changes") or []
     static = await asyncio.to_thread(validate_candidate_bundle, candidate)
+    if p["mode"] == "force":
+        # Also handles already accepted force commands from older Workers.
+        # Preserve the saved evaluation verbatim; no model, Cases or Replay run.
+        async with services.tx.tenant_tx(task.tenant_id) as conn:
+            await services.tasks.require_current(conn, task)
+            await SkillLibraryRepository(services.tx).lock_evolution_head(conn, p["skill_name"])
+            item = await repo.require(conn, p["candidate_id"], for_update=True)
+            if (item["revision"] != p["revision"] or item["validate_task_id"] != task.task_id
+                    or item["status"] != "validating"):
+                result = {"status": "stale"}
+            else:
+                await repo.transition(
+                    conn, tenant_id=task.tenant_id, candidate_id=p["candidate_id"], to_status="open",
+                    actor=p["actor"], expected_revision=p["revision"], reason="manual force publication",
+                )
+                if static["passed"]:
+                    result = await publish_candidate(conn, task, services, p, item, bundle,
+                                                     item["verdict"] or "not_run")
+                else:
+                    result = {"status": "blocked", "accepted": False, "mode": "force",
+                              "reason": "Candidate static validation failed", "static_validation": static}
+                await ExperienceRepository(services.tx).candidate_outcome(
+                    conn, tenant_id=task.tenant_id, refs=p["detail"].get("pattern_refs") or [],
+                    outcome={"job_id": p["candidate_id"], "candidate_revision": p["revision"],
+                             "status": result["status"], "version": result.get("version")},
+                )
+            await history.finish(conn, task.task_id, result)
+        return HandlerResult.succeed(task.task_id)
     replay = services.extras.get("skill_replay")
     job = {
         **p["detail"], "job_id": p["candidate_id"], "candidate_revision": p["revision"],
@@ -182,6 +268,12 @@ async def run_validation(task, services) -> HandlerResult:
         "ma_records": p.get("ma_records") or {}, "required_targets": p.get("required_targets") or [],
         "ma_errors": p.get("ma_errors") or {},
     }
+    from team_replay.preparation import prepare_cases
+    prepared = await prepare_cases(task, services, job.get("replay_cases") or [], p["skill_name"],
+                                   records=job["ma_records"])
+    if prepared is not None:
+        job.update(replay_cases=prepared["cases"], ma_records=prepared["ma_records"],
+                   ma_errors=prepared["ma_errors"], input_recoveries=prepared["recoveries"])
     # The injected validator is retained for embedders. Production strategy work
     # goes through the shared LLM client and is checkpointed before any execution.
     assessment = None
@@ -200,6 +292,9 @@ async def run_validation(task, services) -> HandlerResult:
                 assessment = await assess(
                     job, evidence=p.get("evidence") or [], requested_method=p.get("validation_method", "auto"),
                     client=client,
+                    timeout_seconds=SkillsModuleConfig(p["config_revision"], p["config"]).get(
+                        "assessment_timeout_seconds",
+                    ),
                 )
             async with services.tx.tenant_tx(task.tenant_id) as conn:
                 await services.tasks.require_current(conn, task)
@@ -258,7 +353,6 @@ async def run_validation(task, services) -> HandlerResult:
         "static_validation": static,
         "validation_method": evaluation.get("validation_method", "full_ab"),
     }
-    config = SkillsModuleConfig(p["config_revision"], p["config"])
     async with services.tx.tenant_tx(task.tenant_id) as conn:
         await services.tasks.require_current(conn, task)
         await SkillLibraryRepository(services.tx).lock_evolution_head(conn, p["skill_name"])
@@ -268,23 +362,9 @@ async def run_validation(task, services) -> HandlerResult:
         )
         result = {"status": "stale"} if item is None else {"status": "evaluated", "evaluation": evaluation}
         if item is not None and p["mode"] != "evaluate":
-            publish = static["passed"] and runtime_ok and (verdict == "accept" or p["mode"] == "force")
+            publish = static["passed"] and runtime_ok and verdict == "accept"
             if publish:
-                mutation_id = f"candidate:{p['candidate_id']}:r{p['revision']}:{task.task_id}"
-                commit = await SkillLibraryRepository(services.tx).commit_bundle(
-                    conn, tenant_id=task.tenant_id, name=p["skill_name"], bundle=bundle,
-                    mutation_id=mutation_id, limits=config.bundle_limits, actor=p["actor"],
-                    source="candidate-review", base_version=p["base_version"],
-                    metadata={"candidate_id": p["candidate_id"], "revision": p["revision"]},
-                )
-                result = {**commit.to_response(), "status": commit.status, "accepted": True, "mode": p["mode"]}
-                await repo.transition(
-                    conn, tenant_id=task.tenant_id, candidate_id=p["candidate_id"],
-                    to_status="validating" if commit.status == "accepted" else "published",
-                    actor=p["actor"], expected_revision=p["revision"], decision=result,
-                    published_version=commit.version if commit.status != "accepted" else None,
-                    validate_task_id=result.get("job_id", task.task_id), mutation_id=mutation_id,
-                )
+                result = await publish_candidate(conn, task, services, p, item, bundle, verdict)
             elif verdict == "reject":
                 result = {"status": "rejected", "accepted": False, "mode": p["mode"]}
                 await repo.transition(
@@ -302,6 +382,37 @@ async def run_validation(task, services) -> HandlerResult:
         await history.finish(conn, task.task_id, result)
         await replay_history.finish(conn, "skill", task.task_id, evaluation)
     return HandlerResult.succeed(task.task_id)
+
+
+async def publish_candidate(conn, task, services, p, item, bundle, verdict):
+    """One publication path for validated and explicitly forced Candidates."""
+    repo = CandidateRepository(services.tx)
+    evaluation = item.get("evaluation") or {}
+    overridden = p["mode"] == "force" and not evaluation.get("recommended_publish", False)
+    review_overridden = overridden and (evaluation.get("replay") or {}).get("validation_method") == "experience_review"
+    decision = {"mode": p["mode"], "review_overridden": review_overridden,
+                "validation_overridden": overridden, "validation_verdict": verdict}
+    mutation_id = f"candidate:{p['candidate_id']}:r{p['revision']}:{task.task_id}"
+    commit = await SkillLibraryRepository(services.tx).commit_bundle(
+        conn, tenant_id=task.tenant_id, name=p["skill_name"], bundle=bundle,
+        mutation_id=mutation_id, limits=SkillsModuleConfig(p["config_revision"], p["config"]).bundle_limits,
+        actor=p["actor"], source="candidate-review", base_version=p["base_version"],
+        metadata={"candidate_id": p["candidate_id"], "revision": p["revision"],
+                  "publish_mode": p["mode"], **{k: v for k, v in decision.items() if k != "mode"},
+                  "user_modified": bool(item["detail"].get("user_modified")) or any(
+                      e["kind"] == "revised" and e["actor"] != "evolution"
+                      for e in await repo.events(conn, p["candidate_id"])
+                  )},
+    )
+    result = {**commit.to_response(), "status": commit.status, "accepted": True, **decision}
+    await repo.transition(
+        conn, tenant_id=task.tenant_id, candidate_id=p["candidate_id"],
+        to_status="validating" if commit.status == "accepted" else "published",
+        actor=p["actor"], expected_revision=p["revision"], decision=result,
+        published_version=commit.version if commit.status != "accepted" else None,
+        validate_task_id=result.get("job_id", task.task_id), mutation_id=mutation_id,
+    )
+    return result
 
 
 async def evaluate_fixed_job(job, task, services):

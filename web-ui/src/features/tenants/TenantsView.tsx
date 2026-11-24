@@ -9,15 +9,14 @@ DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { type UserProfile } from "@/features/admin/api/client";
-import { createTenant,getTenantConfig,listTenants,rotateTenantToken,setTenantStatus,updateTenantConfig,type TenantInfo,type TenantsResp } from "@/features/tenants/api/client";
+import { createTenant,getTenantConfig,getTenantRuntimeConfig,listTenants,rotateTenantToken,setTenantStatus,updateTenantConfig,updateTenantRuntimeConfig,type TenantInfo,type TenantsResp,type TenantRuntimeResp } from "@/features/tenants/api/client";
+import { RuntimeCapacityFields,validRuntimeCapacity } from "./RuntimeCapacityFields";
 import { toastErr,toastOk } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { Check,Copy,KeyRound,Plus,RefreshCw,Settings2 } from "lucide-react";
 import { useCallback,useEffect,useRef,useState } from "react";
 
-// Token reveal box: the plaintext machine credential is returned exactly once by
-// the backend (only its sha256 is stored server-side), so it must be
-// presented prominently with a copy action before it is lost.
+// Show the tenant credential with a copy action; it remains available in Members & Access.
 function TokenReveal({
   label,
   token,
@@ -32,7 +31,7 @@ function TokenReveal({
     <div className="rounded-[12px] border border-amber-300 bg-amber-50 p-4">
       <div className="text-[13px] font-bold text-amber-900">{label}</div>
       <div className="mt-1 text-[11px] leading-relaxed text-amber-800">
-        该 token 仅此一次完整展示，服务端只保留其哈希；请立即复制并妥善保管。它是本租户唯一的全权机器凭证，用于
+        该 Key 可在「成员与接入」重复查看、复制，接入 Agent 时直接复用。它是本租户的机器凭证，用于
         Agent 侧 <span className="mono"> Authorization: Bearer </span> 接入：Session 上报、Skill 拉取与
         Context Workspace；请求中需声明
         <span className="mono"> user_id </span>，Account 由租户配置确定。
@@ -79,14 +78,18 @@ function TenantSettingsDialog({
   const [saving, setSaving] = useState(false);
   const [maxConcurrentSessions, setMaxConcurrentSessions] = useState("");
   const [maxEvolvePerDay, setMaxEvolvePerDay] = useState("");
+  const [runtime, setRuntime] = useState<TenantRuntimeResp | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       setLoading(true);
       try {
-        const data = await getTenantConfig(tenant.tenant_id);
+        const [data, execution] = await Promise.all([
+          getTenantConfig(tenant.tenant_id), getTenantRuntimeConfig(tenant.tenant_id),
+        ]);
         if (cancelled) return;
+        setRuntime(execution);
         const ov = data.config_overrides || {};
         const concurrent = Number(ov.max_concurrent_sessions);
         const daily = Number(ov.max_evolve_per_day);
@@ -124,10 +127,15 @@ function TenantSettingsDialog({
       toastErr("配额格式不正确", e.message);
       return;
     }
+    if (!runtime || !validRuntimeCapacity(runtime.config)) {
+      toastErr("执行容量格式不正确", "并发须为范围内的正整数，模型队列容量须不小于模型并发。");
+      return;
+    }
     setSaving(true);
     try {
+      setRuntime(await updateTenantRuntimeConfig(tenant.tenant_id, runtime));
       await updateTenantConfig(tenant.tenant_id, overrides);
-      toastOk("租户配额已保存", `${tenant.display_name} · 新任务按更新后的配额运行`);
+      toastOk("租户配置已保存", `${tenant.display_name} · 独立执行容量约 5 秒内生效`);
       onClose();
     } catch (e: any) {
       toastErr("保存租户配置失败", e.message);
@@ -153,6 +161,8 @@ function TenantSettingsDialog({
           <div className="py-8 text-center text-sm text-muted-foreground">加载配置中…</div>
         ) : (
           <div className="space-y-5">
+            {runtime && <RuntimeCapacityFields value={runtime.config}
+              onChange={(value) => setRuntime({ ...runtime, config: value })} />}
             <section>
               <div className="mb-1 text-[13px] font-bold">运行配额</div>
               <p className="mb-3 text-xs text-muted-foreground">留空或填 0 表示不限制。</p>
@@ -188,7 +198,7 @@ function TenantSettingsDialog({
             取消
           </Button>
           <Button size="sm" onClick={handleSave} disabled={loading || saving}>
-            {saving ? "保存中…" : "保存配额"}
+            {saving ? "保存中…" : "保存设置"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -374,7 +384,7 @@ export default function TenantsView({
       {mode === "postgres" && (
         <Panel
           title="新建项目"
-          count="token 仅创建时展示一次"
+          count="Key 可查看和复用"
           extra={
             <Button size="sm" variant="outline" disabled={creating} onClick={handleCreate}>
               <Plus className="size-3.5" />
@@ -451,7 +461,7 @@ export default function TenantsView({
                           disabled={mode !== "postgres" || !canManage(t.tenant_id)}
                           onClick={() => setConfigTenant(t)}
                           title={
-                            canManage(t.tenant_id) ? "设置租户运行配额" : "请先切换到该租户"
+                            canManage(t.tenant_id) ? "设置租户独立执行容量与配额" : "请先切换到该租户"
                           }
                         >
                           <Settings2 className="size-3.5" />

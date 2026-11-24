@@ -241,6 +241,37 @@ class CandidateRepository:
 
     # -- mutations --------------------------------------------------------- #
 
+    async def lock_merge_inputs(self, conn, *, tenant_id, inputs):
+        """Lock and compare every frozen input before writing anything in the caller's transaction."""
+        if not inputs or len({item["candidate_id"] for item in inputs}) != len(inputs):
+            raise CandidateStateError("merge inputs must be distinct")
+        for name in sorted({item["skill_name"] for item in inputs}):
+            await lock_key(conn, tenant_id, f"candidate-skill:{name}")
+        for expected in sorted(inputs, key=lambda item: item["candidate_id"]):
+            actual = await self.require(conn, expected["candidate_id"], for_update=True)
+            if actual["status"] != "open" or any(
+                actual[key] != expected[key] for key in ("skill_name", "revision", "base_version", "tree_sha256")
+            ):
+                raise CandidateStateError("merge input changed while planning; reload Candidates")
+
+    async def finish_merge(self, conn, *, tenant_id, target, inputs):
+        """Retain source Bundles and evaluations; archive only after target revision succeeds."""
+        if target["candidate_id"] != inputs[0]["candidate_id"] or target["revision"] != inputs[0]["revision"] + 1:
+            raise CandidateStateError("merge target revision does not match frozen input")
+        for source in inputs[1:]:
+            await self.transition(
+                conn, tenant_id=tenant_id, candidate_id=source["candidate_id"], to_status="archived",
+                actor="evolution", expected_revision=source["revision"],
+                reason=f"Merged into {target['candidate_id']} r{target['revision']}",
+                decision={"status": "merged", "merged_into": target["candidate_id"],
+                          "target_revision": target["revision"], "source": source},
+            )
+        await self._event(
+            conn, tenant_id=tenant_id, candidate_id=target["candidate_id"],
+            kind="feedback", from_status="open", to_status="open", revision=target["revision"],
+            actor="evolution", detail={"consolidation": {"inputs": inputs}},
+        )
+
     async def archive_for_skill(self, conn, *, tenant_id, skill_name, actor, reason):
         """Retire the live package; retain files, evaluations and event history."""
         await lock_key(conn, tenant_id, f"candidate-skill:{skill_name}")
@@ -325,6 +356,8 @@ class CandidateRepository:
             raise CandidateStateError("candidate is validating; wait for Replay to finish before revising")
         revision = int(item["revision"]) + 1
         merged = {**item["detail"], **(detail or {})}
+        if actor != "evolution":
+            merged["user_modified"] = True
         await conn.execute(
             f"UPDATE {self._schema}.skill_candidates SET revision = $2, tree_sha256 = $3, "
             "  detail = $4::jsonb, base_version = $5, status = 'open', verdict = '', "

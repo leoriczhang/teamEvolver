@@ -10,7 +10,7 @@ import pytest
 
 from team_replay.adapters.managed_agents import ManagedAgentsFactory
 from team_replay.engine import execute_pair
-from team_replay.hooks import ReplayContext, ReplayTreatment
+from team_replay.hooks import ReplayContext, ReplayTreatment, ReplayUnsupported
 from team_replay.metrics import compare_efficiency
 from team_replay.policy import progressive_replay_decision
 from team_replay.runtime_matrix import evaluate_runtime_compatibility
@@ -175,7 +175,7 @@ def test_skill_replay_always_freezes_recorded_runtime_and_independent_artifact(s
         expected_binding = dict(binding)
         if source == "skill_mount":
             expected_binding.update(source="embedded", archive_compression="xz")
-        expected, tree = bind_runtime({"type": "cloud"}, expected_binding,
+        expected, tree = bind_runtime({"type": "cloud", "tos": None}, expected_binding,
                                       original)
         assert actual == expected and session.runtime_tree == tree
         assert "/mnt/skills/core" not in actual["setup_script"]
@@ -226,16 +226,16 @@ def test_full_ma_isolated_branches_reuse_each_session_and_real_skill_bundle():
         assert agent["skills"][0]["skill_id"] != "original-skill"
         assert agent["system"] == writer["system"]
     for session in server.sessions.values():
-        assert set(session["agent"]) == {"type", "id", "version", "skills", "multiagent"}
+        assert set(session["agent"]) == {"type", "id", "version", "skills", "multiagent", "system", "model", "tools"}
         assert session["agent"]["version"] == 7
-        assert "model" not in session["agent"] and "base_agent" not in session["agent"]
+        assert session["agent"]["model"] == root["model"] and "base_agent" not in session["agent"]
         assert session["agent"]["multiagent"]["agents"][0]["id"] in server.agents
         assert "checklist" not in str(session).lower()
     assert len(cleaned) == 2
     assert all(b"Improved" not in data for data in server.skills.values())  # compressed Bundle, not system injection
 
 
-def test_single_agent_pair_only_overrides_skills_and_readbacks_same_environment():
+def test_single_agent_pair_pins_recorded_execution_and_only_changes_target_skill():
     server = FakeMA()
     graph = {"entry_agent_id": "root", "agents": {
         "root": {"id": "root", "version": 7, "system": "Production instruction",
@@ -243,9 +243,12 @@ def test_single_agent_pair_only_overrides_skills_and_readbacks_same_environment(
                  "skills": [{"type": "custom", "skill_id": "original", "version": "1"},
                             {"type": "custom", "skill_id": "unchanged", "version": "4"}]},
     }}
-    record = {"connection_id": "one", "config": {}, "agent_graph": graph,
-              "environment": {"config": {"type": "cloud", "setup_script": "echo fixed-runtime"}},
-              "replay_environment": {"id": "env", "config": {}}, "target_skill_name": "demo",
+    record = {"connection_id": "one", "config": {"replay_vault_ids": ["source-vault"]}, "agent_graph": graph,
+              "environment": {"id": "env", "config": {
+                  "type": "cloud", "setup_script": "echo fixed-runtime",
+                  "networking": {"type": "unrestricted"}, "tos": {"bucket": "production", "prefix": "shared"}}},
+              "replay_environment": {"id": "env", "config": {
+                  "networking": {"type": "limited"}, "tos": {"bucket": "old-replay"}}}, "target_skill_name": "demo",
               "skill_bindings": {"demo": {"id": "original", "agents": ["root"]}}}
 
     async def client(record):
@@ -272,12 +275,62 @@ def test_single_agent_pair_only_overrides_skills_and_readbacks_same_environment(
             session.close()
     assert not server.agents and len(server.sessions) == 2
     for value in server.sessions.values():
-        assert set(value["agent"]) == {"type", "id", "version", "skills"}
+        assert set(value["agent"]) == {"type", "id", "version", "skills", "system", "model", "tools"}
+        for key in ("system", "model", "tools"):
+            assert value["agent"][key] == graph["agents"]["root"][key]
         assert value["agent"]["skills"][0] == graph["agents"]["root"]["skills"][1]
     assert snapshots[0]["session_id"] != snapshots[1]["session_id"]
     assert snapshots[0]["skills"] != snapshots[1]["skills"]
     assert snapshots[0]["environment_config_sha256"] == snapshots[1]["environment_config_sha256"]
+    assert snapshots[0]["agent_execution_config_sha256"] == snapshots[1]["agent_execution_config_sha256"]
     assert snapshots[0]["agent_id"] == snapshots[1]["agent_id"] == "root"
+    assert snapshots[0]["vault_ids"] == snapshots[1]["vault_ids"] == ["source-vault"]
+    for value in server.sessions.values():
+        assert value["environment"]["id"] == "env"
+        assert value["environment"]["config"]["tos"] is None
+        assert value["environment"]["config"]["networking"] == {"type": "unrestricted"}
+    assert record["environment"]["config"]["tos"]["bucket"] == "production"
+
+
+def test_replay_readback_rejects_cloud_model_instead_of_recorded_session_override():
+    class ChangedModelMA(FakeMA):
+        def respond(self, request):
+            response = super().respond(request)
+            if request.method == "GET" and "/sessions/" in request.url.path:
+                value = response.json()
+                value["agent"]["model"] = {"id": "cloud-model"}
+                return httpx.Response(200, json=value)
+            return response
+
+    server = ChangedModelMA()
+    graph = {"entry_agent_id": "root", "agents": {
+        "root": {"id": "root", "version": 7, "model": {"id": "recorded-model"}, "skills": []},
+    }}
+    record = {"connection_id": "one", "config": {}, "agent_graph": graph,
+              "environment": {"config": {"type": "cloud"}},
+              "replay_environment": {"id": "env", "config": {}}, "skill_bindings": {}}
+
+    async def client(record):
+        return server.client()
+
+    async def cleanup(*args):
+        pass
+
+    cap = {"run": lambda coroutine, timeout=None: asyncio.run(coroutine), "client": client,
+           "effects": lambda *args: FakeEffects(), "cleanup": cleanup,
+           "replay_capability": lambda *args: {"supported": True}, "save_artifact": save_artifact}
+    context = ReplayContext(request_id="drift", runtime_type="managed-agents",
+                            treatment=ReplayTreatment("candidate", None), materials=(), context_snapshot={},
+                            timeout_seconds=30, source_session={"runtime": {
+                                "connection_id": "one", "agent_graph": graph,
+                            }})
+    session = ManagedAgentsFactory({"case": record}, cap).open(context)
+    try:
+        with pytest.raises(ReplayUnsupported, match="readback differs"):
+            session.send("execute")
+        assert server.sessions[next(iter(server.sessions))]["agent"]["model"] == {"id": "recorded-model"}
+    finally:
+        session.close()
 
 
 def test_every_managed_connection_needs_its_own_verdict():

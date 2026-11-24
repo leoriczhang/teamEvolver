@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { type EvalResult } from "@/features/replay/api/client";
 import { hydrateCandidates,mergeCandidateFeedback,type Candidate,type CandidateFeedback } from "@/features/skills/api/client";
 import { runSkillCommand } from "@/features/skills/api/skillJobs";
+import { candidateBaseline } from "@/features/skills/provenance";
 import CandidateFeedbackControls from "@/features/skills/dashboard/CandidateFeedback";
 import CandidateModal from "@/features/skills/dashboard/CandidateModal";
 import { toastErr,toastOk } from "@/lib/toast";
@@ -60,7 +61,7 @@ function candidateStatusBadge(c: Candidate): ReactNode {
   if (status === "rejected") return <Pill tone="red">已驳回</Pill>;
   if (status === "archived") return <Pill tone="gray">已归档</Pill>;
   if (status === "deleted") return <Pill tone="gray">已删除</Pill>;
-  if (status === "validating") return <Pill tone="blue">评估中</Pill>;
+  if (status === "validating") return <Pill tone="blue">{c.publication_pending ? "发布中" : "评估中"}</Pill>;
   if (status === "open") return <Pill tone="amber">待处理</Pill>;
   return <Pill tone="gray">{status || "未知"}</Pill>;
 }
@@ -208,22 +209,29 @@ export default function CandidateReviewView({ active, canManage = false }: { act
     return () => clearInterval(timer);
   }, [active, refresh]);
 
-  async function validate(jobId: string, mode: "auto" | "force") {
+  async function validate(jobId: string, mode: "auto" | "force", revision?: number) {
     const msg =
       mode === "force"
-        ? "确认发布该候选技能？仍须满足所选验证方式的门禁。"
+        ? "确认强制采纳并发布该候选技能？将跳过重新评估和执行验证，保留原结论；仍检查内容与基线版本。"
         : "确认按当前验证结论发布候选技能？";
     if (!window.confirm(msg)) return;
     try {
-      const r = await runSkillCommand<{ status?: string; version?: number; feedback?: CandidateFeedback }>(
+      const r = await runSkillCommand<{
+        status?: string; version?: number; accepted?: boolean; reason?: string;
+        evaluation?: EvalResult; feedback?: CandidateFeedback;
+      }>(
         `/api/skill-candidates/${encodeURIComponent(jobId)}/validate`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode }),
+          body: JSON.stringify({ mode, ...(revision ? { candidate_revision: revision } : {}) }),
         }
       );
+      if (r.accepted === false || ["stale", "rejected", "inconclusive", "blocked"].includes(r.status || "")) {
+        throw new Error(r.reason || r.evaluation?.replay?.reason || `发布未完成：${r.status || "未通过发布门禁"}`);
+      }
       if (r.feedback) handleFeedbackSaved(jobId, r.feedback);
+      setCands(items => items.filter(item => item.job_id !== jobId));
       toastOk("发布结果", (r.status || "done") + (r.version ? ` (v${r.version})` : ""));
       setOpenJobId((cur) => (cur === jobId ? null : cur));
       setEvalCache((m) => {
@@ -234,6 +242,7 @@ export default function CandidateReviewView({ active, canManage = false }: { act
       await refresh();
     } catch (e: any) {
       toastErr("发布失败", e.message);
+      throw e;
     }
   }
 
@@ -336,6 +345,7 @@ export default function CandidateReviewView({ active, canManage = false }: { act
                     <tr key={c.job_id}>
                       <td className="link border-b border-line px-4 py-2.5 align-top" onClick={() => openCandidate(c.job_id)}>
                         <div className="font-semibold">{candidateName(c)}</div>
+                        <div className="mt-1 text-xs text-muted-foreground">{candidateBaseline(c)}</div>
                         {(c.bundle_diff?.changed_count || 0) > 0 && (
                           <div className="mt-1">
                             <Pill tone="blue">变更 {c.bundle_diff?.changed_count} 个文件</Pill>
@@ -360,7 +370,7 @@ export default function CandidateReviewView({ active, canManage = false }: { act
                       <Td>
                         {busy ? (
                           <Pill tone="amber">
-                            评估中{c.replay_progress ? ` ${c.replay_progress.completed}/${c.replay_progress.total}` : "…"}
+                            {c.publication_pending ? "发布中…" : `评估中${c.replay_progress ? ` ${c.replay_progress.completed}/${c.replay_progress.total}` : "…"}`}
                           </Pill>
                         ) : ev ? <Pill tone={issue ? "amber" : "blue"}>
                           {ev.status === "blocked" ? "评估受阻" : issue ? "回放失败" : "评估结束"}
@@ -436,7 +446,7 @@ export default function CandidateReviewView({ active, canManage = false }: { act
           evaluate(openJobId, force, method);
         }}
         onUpdated={handleCandidateUpdated}
-        onPublish={(mode) => openJobId && validate(openJobId, mode)}
+        onPublish={async (mode, revision) => { if (openJobId) await validate(openJobId, mode, revision); }}
       />
     </div>
   );

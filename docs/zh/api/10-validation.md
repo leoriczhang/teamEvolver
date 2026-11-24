@@ -2,6 +2,16 @@
 
 Skill 进化支持管理员手动触发或 Worker 定时自动触发：Worker 读取有价值的 Session，按 Skill 分组规划修改并生成 Skill Candidate。Candidate 可自动提交候选验证；验证通过后按租户策略自动发布，或等待管理员人工审核发布。流程见 [进化循环](../concepts/02-evolution-loop.md)。
 
+进化规划同时读取同租户的待发布 Candidate 目录，包括名称、revision、来源 Agent 范围和验证反馈。规划器通过 `read_candidate` 按需读取完整正文；同能力的新 Evidence 可以续写尚无已发布版本的 Candidate。多个重叠提案可选择 `merge_skill`，指定 `target_candidate_id` 与 `source_candidate_ids`，由独立 Merge 阶段生成合并结果。仅改名不能作为新建同能力 Skill 的理由。
+
+新建前必须成功读取同来源 Agent 范围的现有 Candidate；读取失败只能纠正标识或跳过，不能作为换名新建的理由。上下文压缩后仍保留原样的 Candidate 标识和原始系统契约。规划轮次、Candidate 工具读取结果和决策校验错误保存在 `agent_audit` 中供核查。
+
+合并保持目标名称和 Candidate ID，递增 revision 并清除旧验证结论；成功后来源 Candidate 归档，保留文件、验证结果及 `decision.merged_into`。目标写入与来源归档在同一事务内完成，所有输入的状态、revision、文件树哈希和基线均受并发校验保护。不同来源 Agent 范围、正在验证的 Candidate，以及其他已发布 Skill 的更新候选不能作为合并来源。非冲突配套文件保留，同路径内容冲突必须显式解决。
+
+分析与规划携带原始 Agent 系统契约和输入模态的可见性说明。文本分析未取得视频、图片或音频内容时，不得把未验证的视觉/OCR 事实直接判为编造。Test Dataset 继续独立基于 Session Evidence 合成，不读取待发布候选正文或本轮 Merge 结果。手动 `reprocess` 复用已入库分析；原始契约用于核对历史摘要，不代表重新运行 Session Judge。
+
+验证受理中的 MA 连接、执行指纹、来源快照及目标成员查询复用当前事务连接，避免持有事务时再次借用连接而耗尽连接池。独立调用这些只读查询时仍使用自己的短事务。
+
 代码入口：
 
 - Candidate 与进化：`team_skills/api/candidates.py:create_router`
@@ -100,11 +110,13 @@ Candidate 详情：Skill 名称、基线版本、revision、bundle、变更说�
 | mode | 行为 |
 | --- | --- |
 | `auto` | 静态检查与所选验证方式的门禁通过且 verdict 为 `accept` 时发布；`reject` 时拒绝；`inconclusive` 时回到 `open` |
-| `force` | 仍须静态检查与所选方式的门禁通过；不会绕过证据、候选完成或完整 A/B 的 Runtime 门禁 |
+| `force` | 管理员直接采纳并发布当前候选，不重新调用评估模型、不创建候选执行或 A/B Session，也不要求执行门禁通过。仍检查权限、候选 revision、静态内容及基线版本，并等待云端发布回读。原验证结论保持不变；越过未通过或未运行的验证时记录 `validation_overridden=true`，其中经验审阅同时记录 `review_overridden=true`。界面显示发布进度，不显示回放用例进度 |
 
 验证固定当前 Evidence、候选文件树、Replay Adapter revision 与 `replay` 模块配置。执行配置
 缺失不阻止受理经验审阅，只有执行方式才消费 MA 资源门禁。发布默认沿用已评估的验证方式，
 相同候选与执行指纹的完成记录直接复用。只有 `open` 状态的 Candidate 可以提交。
+
+强制采纳经验审阅时复用当前候选 revision 的已保存审阅，不重复调用模型。发布为独立后台操作，只有版本实际写入并回读后才显示发布成功；受门禁阻止时保留详情并显示原因。
 
 ### POST /api/skill-candidates/{candidate_id}/reject
 
@@ -151,7 +163,15 @@ Prompt 覆盖与阶段模型设置保存在租户 `skills` 模块配置的 `prom
 | `bundle_edit_max_bytes` | 262144 | 单个可编辑文件上限 |
 | `bundle_prompt_max_bytes` | 786432 | 放入 Prompt 的 bundle 上限 |
 | `auto_evaluate` | true | Candidate 生成后自动提交评估 |
+| `assessment_timeout_seconds` | 600 | `validation` 下的模型审阅总时限，整数 30–1800 秒 |
 | `publish_mode` | manual | 验证通过后自动发布或等待人工审核 |
+
+`assessment_timeout_seconds` 按租户保存，随验证命令的配置 revision 固定；修改仅影响新受理任务。
+预算包含模型排队、HTTP 请求和重试。每次 HTTP 请求使用扣除排队与先前尝试后的剩余预算，并预留最多 5 秒清理时间。
+同步 HTTP 线程不能被协程取消强制终止，超时后仍占用并发槽直到请求实际结束；不会提前释放槽位。
+此参数只控制策略选择与经验审阅，不改变 Candidate Execution 或 True Replay 的执行时限。
+审阅输入中的相同原始契约仅保留一份，Evidence 通过 `source_contract_ref` 引用 `source_contracts`；
+各 Evidence 的 ID、摘要、不同契约和素材可见性仍分别保留。
 
 Prompt Studio 的使用方法见 [Prompt Studio 指南](../guides/08-prompt-studio.md)。
 

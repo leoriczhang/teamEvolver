@@ -140,6 +140,10 @@ def collect_session_materials(
             total_bytes += len(data)
             output.append(
                 {
+                    **next(({key: item[key] for key in ("input_type", "media_type", "fps", "original_file_id")
+                             if key in item}
+                            for item in session.get("source_materials") or []
+                            if item.get("path") == raw_path), {}),
                     "path": rel_path,
                     "size": len(data),
                     "sha256": digest,

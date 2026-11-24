@@ -29,37 +29,5 @@ def test_runtime_honors_configured_database_pool_limits(monkeypatch, role):
     )
 
 
-@pytest.mark.asyncio
-async def test_ma_lane_remains_available_while_analysis_is_blocked(monkeypatch):
-    import asyncio
-
-    blocked, connected, stop = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    health, lanes = [], []
-
-    async def worker(services, *, kinds, on_health, **kwargs):
-        lanes.append(set(kinds))
-        if "session.analyze" in kinds:
-            blocked.set()
-            on_health(False)
-            await stop.wait()
-        else:
-            await blocked.wait()
-            on_health(True)
-            connected.set()
-            await stop.wait()
-
-    monkeypatch.setattr(entrypoint, "run_worker", worker)
-    services = SimpleNamespace(registry=SimpleNamespace(kinds=lambda: {
-        "session.analyze", "ma.collect", "ma.discover", "ma.reconcile",
-    }))
-    task = asyncio.create_task(entrypoint._run_worker_lanes(
-        services, owner_id="one", stop_event=stop, tenant_source=AsyncMock(), on_health=health.append,
-    ))
-    try:
-        await asyncio.wait_for(connected.wait(), 1)
-        assert len(lanes) == 2 and not lanes[0] & lanes[1]
-        assert set.union(*lanes) == services.registry.kinds()
-        assert health[-1] is False  # a healthy MA lane cannot mask the other lane's failure
-    finally:
-        stop.set()
-        await task
+# Tenant/lane concurrency is exercised with the task repository in
+# test_tenant_isolation.py rather than mocking away the worker loop here.

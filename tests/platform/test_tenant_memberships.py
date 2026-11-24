@@ -67,6 +67,14 @@ class FakeRegistry:
         self.tokens[token] = tenant_id
         return token
 
+    def get_token(self, tenant_id):
+        return next((token for token, tid in self.tokens.items() if tid == tenant_id), None)
+
+    def import_token(self, tenant_id, token):
+        if self.get_token(tenant_id) != token:
+            raise ValueError("key does not match the current tenant key")
+        return token
+
     def set_status(self, tenant_id, status):
         if status not in {"active", "disabled"}:
             raise ValueError(f"invalid tenant status: {status!r}")
@@ -182,7 +190,7 @@ def _register(app, username: str) -> TestClient:
 # --------------------------------------------------------------------------- #
 
 
-def test_create_tenant_returns_one_time_token(root: TestClient, registry: FakeRegistry):
+def test_create_tenant_returns_retained_token(root: TestClient, registry: FakeRegistry):
     resp = root.post("/api/tenants", json={"display_name": "Acme", "account_id": "acme"})
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -190,6 +198,31 @@ def test_create_tenant_returns_one_time_token(root: TestClient, registry: FakeRe
     assert body["agent_token"].startswith("tevt_")
     # The plaintext token resolves back to its tenant (single Root Key chain).
     assert registry.resolve_by_agent_token(body["agent_token"]).tenant_id == "acme"
+
+
+def test_view_and_import_existing_token_without_rotation(root, registry):
+    created = root.post("/api/tenants", json={"display_name": "Retain", "account_id": "retain"}).json()
+    token = created["agent_token"]
+    h = {"X-Tenant-Id": "retain"}
+    response = root.get("/api/tenants/retain/token", headers=h)
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["agent_token"] == token
+    assert root.put("/api/tenants/retain/token", headers=h, json={"agent_token": token}).status_code == 200
+    assert root.put("/api/tenants/retain/token", headers=h, json={"agent_token": "tevt_wrong"}).status_code == 400
+    assert registry.resolve_by_agent_token(token).tenant_id == "retain"
+    assert root.get("/api/tenants/alpha/token", headers=h).status_code == 403
+
+
+def test_only_target_tenant_admin_can_view_or_import_key(app, root, store):
+    alice = _register(app, "key-reader")
+    store.set_member("alpha", "key-reader", "tenant_admin", "active", "root")
+    store.set_member("beta", "key-reader", "member", "active", "root")
+    assert alice.get("/api/tenants/alpha/token", headers={"X-Tenant-Id": "alpha"}).status_code == 200
+    assert alice.get("/api/tenants/beta/token", headers={"X-Tenant-Id": "beta"}).status_code == 403
+    assert alice.put(
+        "/api/tenants/beta/token", headers={"X-Tenant-Id": "beta"}, json={"agent_token": "tevt_wrong"},
+    ).status_code == 403
 
 
 def test_create_tenant_requires_platform_admin(app, root: TestClient):

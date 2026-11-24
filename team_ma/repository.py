@@ -175,6 +175,21 @@ class MARepository:
             f"SELECT * FROM {self.schema}.ma_operations WHERE operation_id=$1", operation_id,
         ))
 
+    async def skill_version_receipts(self, conn, connection_id, skill_id):
+        """Only verified writes to this native resource can establish a version origin."""
+        rows = await conn.fetch(
+            "SELECT operation_id, input->'request'->>'source' AS source, "
+            "input->'request'->>'actor' AS actor, input->'request'->>'action' AS action, "
+            "input->'request'->>'base_version' AS base_version, "
+            "input->'request'->'metadata' AS metadata, result->>'version' AS version, "
+            "result->>'restored_from' AS restored_from "
+            f"FROM {self.schema}.ma_operations WHERE connection_id=$1 AND kind='ma.skill' "
+            "AND result->>'skill_id'=$2 AND result->>'status'='published' "
+            "AND result->>'readback_verified'='true' ORDER BY created_at, operation_id",
+            connection_id, skill_id,
+        )
+        return [{**dict(row), "metadata": unpack(row["metadata"]) if row["metadata"] else {}} for row in rows]
+
     async def accept(self, conn, *, tenant_id, connection_id, operation_id, kind, payload):
         await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
                            f"{tenant_id}:ma-op:{operation_id}")

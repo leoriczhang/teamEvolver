@@ -43,6 +43,15 @@ async def run(task, services):
         return await test_adapter(task, services, repo, payload)
     if payload["operation"] == "synthesis":
         return await synthesize(task, services, repo, payload)
+    from .preparation import prepare_cases
+    payload = copy.deepcopy(payload)
+    case_container = payload["spec"]["dataset"] if payload["spec"] else payload["dataset"]["execution_document"]
+    prepared = await prepare_cases(task, services, case_container["cases"],
+                                   task.subject_id if domain == "skill" else "",
+                                   records=payload.get("ma_records"))
+    if prepared is not None:
+        case_container["cases"] = prepared["cases"]
+        payload.update(ma_records=prepared["ma_records"], ma_errors=prepared["ma_errors"])
     try:
         host = await host_for(payload, services, task.tenant_id, task=task)
     except ValueError:
@@ -84,6 +93,9 @@ async def run(task, services):
                 return False
             def evaluate():
                 try:
+                    if case["case_id"] in payload.get("ma_errors", {}):
+                        return {"status": "unavailable", "ok": False, "completed": False,
+                                "verdict": "inconclusive", "reason": payload["ma_errors"][case["case_id"]]}
                     if spec:
                         return evaluate_case(spec, copy.deepcopy(case), host=host, factory=factory,
                                              judge=judge, feedback=feedback)

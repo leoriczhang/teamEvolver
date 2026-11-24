@@ -7,6 +7,8 @@ carry ``app.tenant_id``.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 from typing import Any
 
 from ..database.transaction import TransactionManager
@@ -63,3 +65,17 @@ class SecretRepository:
             "fingerprint": row["fingerprint"],
             "created_at": row["created_at"],
         }
+
+    async def find_by_sha256(self, conn: Any, token_hash: str) -> str | None:
+        """Find a retained credential by hash within the connection's RLS scope."""
+        rows = await conn.fetch(
+            f"SELECT secret_ref, ciphertext FROM {self._schema}.secret_refs ORDER BY created_at DESC"
+        )
+        for row in rows:
+            try:
+                token = self._box.decrypt(row["ciphertext"])
+            except ValueError:
+                continue
+            if hmac.compare_digest(hashlib.sha256(token.encode()).hexdigest(), token_hash):
+                return row["secret_ref"]
+        return None

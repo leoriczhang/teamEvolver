@@ -28,7 +28,7 @@
 
 ### 租户 Key
 
-租户 Key 以 `tevt_` 开头，是 Agent 数据面唯一的机器凭证。服务端只保存其 SHA-256 摘要，由 `teamEvolver/tenants/registry.py:TenantRegistry` 反查租户。Key 无效或租户停用返回 `401 invalid tenant token`；携带的 `X-Tenant-Id` 与 Key 所属租户不同返回 `403 tenant mismatch`。
+租户 Key 以 `tevt_` 开头，是 Agent 数据面唯一的机器凭证。服务端使用 SHA-256 摘要反查租户，并以加密 Secret Ref 留存原值供该租户管理员查看、复制。Key 无效或租户停用返回 `401 invalid tenant token`；携带的 `X-Tenant-Id` 与 Key 所属租户不同返回 `403 tenant mismatch`。
 
 租户 Key 只能访问下列路径（`teamEvolver/admin/authn.py` 中的 `_AGENT_MACHINE_PATHS`）：
 
@@ -42,7 +42,8 @@
 
 签发与轮换：
 
-- 平台管理员创建租户时由 `POST /api/tenants` 返回一次明文 Key。
+- 平台管理员创建租户时由 `POST /api/tenants` 返回明文 Key，原值与认证哈希在同一事务中保存。
+- 该租户管理员通过 `GET /api/tenants/{tenant_id}/token` 查看当前 Key，返回 `agent_token`、`available`，响应禁止缓存。旧 Key 若只剩哈希，返回 `available=false`；可用 `PUT` 同一路径提交 `{"agent_token":"<原 Key>"}` 留存，必须匹配当前哈希，不会轮换。已保存在该租户 Secret Ref 中的旧 Key 自动找回。
 - 租户管理员通过 `POST /api/tenants/{tenant_id}/rotate-token` 轮换，旧 Key 立即失效。
 - `default` 租户不由控制台签发，使用环境变量 `TEAMEVOLVER_TENANT_TOKEN` 配置唯一一条 Key（必须以 `tevt_` 开头）；轮换即修改该值后重启。
 

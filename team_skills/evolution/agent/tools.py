@@ -40,6 +40,9 @@ class ToolContext:
     current_skill: Optional[dict] = None
     existing_skill_names: list[str] = field(default_factory=list)
     library_reader: Optional[Callable[[str], Any]] = None
+    candidate_reader: Optional[Callable[[str], Any]] = None
+    read_candidate_ids: list[str] = field(default_factory=list)
+    relevant_candidate_ids: list[str] = field(default_factory=list)
     bundle_contract: dict[str, Any] = field(default_factory=dict)
 
     original_content: str = ""
@@ -91,6 +94,8 @@ async def _tool_read_session(ctx: ToolContext, args: dict) -> dict:
         }
     if session_id not in ctx.read_session_ids:
         ctx.read_session_ids.append(session_id)
+    from team_skills.evolution.source_context import source_contract
+    contract = source_contract(session)
     summary = str(session.get("_summary") or "")
     trajectory = str(session.get("_trajectory") or "")
     if part == "summary":
@@ -112,6 +117,7 @@ async def _tool_read_session(ctx: ToolContext, args: dict) -> dict:
             "part": part,
             "content": "",
             "note": "该会话没有可用的 summary/trajectory 数据",
+            "source_contract": contract,
         }
     return {
         "ok": True,
@@ -119,6 +125,7 @@ async def _tool_read_session(ctx: ToolContext, args: dict) -> dict:
         "part": part,
         "content": text,
         "truncated": truncated,
+        "source_contract": contract,
     }
 
 
@@ -211,6 +218,16 @@ async def _tool_read_library_skill(ctx: ToolContext, args: dict) -> dict:
     }
 
 
+async def _tool_read_candidate(ctx: ToolContext, args: dict) -> dict:
+    candidate_id = str(args.get("candidate_id") or "")
+    if not ctx.candidate_reader:
+        return {"ok": False, "error": "Candidate catalog is unavailable"}
+    result = await ctx.candidate_reader(candidate_id)
+    if candidate_id not in ctx.read_candidate_ids:
+        ctx.read_candidate_ids.append(candidate_id)
+    return {"ok": True, **result}
+
+
 async def _tool_propose_edits(ctx: ToolContext, args: dict) -> dict:
     if not ctx.staged_content:
         return {"ok": False, "error": "没有可编辑的当前正文（read_skill 先确认）"}
@@ -300,6 +317,7 @@ async def _tool_check_name(ctx: ToolContext, args: dict) -> dict:
 
 _STAGE_TOOLS: dict[str, list[str]] = {
     "evolve_skill": [
+        "read_candidate",
         "read_session",
         "search_sessions",
         "read_skill",
@@ -308,6 +326,7 @@ _STAGE_TOOLS: dict[str, list[str]] = {
         "check_generalization",
     ],
     "create_skill": [
+        "read_candidate",
         "read_session",
         "search_sessions",
         "read_library_skill",
@@ -329,6 +348,7 @@ class ToolRegistry:
             "read_skill": _tool_read_skill,
             "read_bundle_file": _tool_read_bundle_file,
             "read_library_skill": _tool_read_library_skill,
+            "read_candidate": _tool_read_candidate,
             "propose_edits": _tool_propose_edits,
             "check_generalization": _tool_check_generalization,
             "check_name": _tool_check_name,
@@ -375,6 +395,8 @@ class ToolRegistry:
             except Exception as exc:  # noqa: BLE001 - one bad tool must not kill the loop
                 observation = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
             observation.setdefault("tool", name)
+            if name == "read_candidate":
+                observation.setdefault("candidate_id", str(args.get("candidate_id") or "")[:200])
             observations.append(observation)
         return observations
 
@@ -384,7 +406,7 @@ class ToolRegistry:
 # ------------------------------------------------------------------ #
 
 _PLAN_SCHEMA = """\
-{"type": "plan", "action_candidate": "improve_skill|optimize_description|create_skill|skip", \
+{"type": "plan", "action_candidate": "improve_skill|optimize_description|create_skill|merge_skill|skip", \
 "evidence_classification": {"team_skill": [{"claim": "...", "supporting_session_ids": ["..."], \
 "causal_link": "..."}], "user_memory": [], "task_requirement": [], "agent_runtime": [], \
 "insufficient_evidence": []}, "plan": ["步骤 1", "步骤 2"], "sessions_to_read": ["会话 id"], \
@@ -463,7 +485,10 @@ def build_protocol_appendix(stage: str, *, max_tool_calls_per_round: int = 8) ->
     if tool_names:
         sections.extend(["", "### 可用工具", ""])
         for name in tool_names:
-            sections.append(_TOOL_DOCS[name])
+            sections.append(
+                '`read_candidate({"candidate_id":"..."})`: read a frozen unpublished Candidate and file manifest.'
+                if name == "read_candidate" else _TOOL_DOCS[name]
+            )
             sections.append("")
 
     if stage == "merge":
@@ -482,6 +507,20 @@ def build_protocol_appendix(stage: str, *, max_tool_calls_per_round: int = 8) ->
             ]
         )
         return "\n".join(sections)
+
+    sections.append(
+        'Existing unpublished Candidates are valid targets even without a published Skill. '
+        'Read them before choosing. To revise one use action="improve_skill", target_candidate_id, '
+        'and skill with its unchanged name and complete updated content. To consolidate duplicates use '
+        'action="merge_skill", target_candidate_id, source_candidate_ids (nonempty, excluding target), '
+        'rationale and evidence_classification. No skill body is needed for merge_skill: '
+        'the host runs the dedicated Merge stage over the selected full Bundles and original contracts. '
+        'Never combine unrelated Agent scopes or retire a different published Skill. '
+        'A new create_skill with pending candidates requires candidate_distinction explaining '
+        'why their capabilities cannot absorb the new evidence; merely changing the name is not a distinction. '
+        'Read every candidate in the same source Agent scope before creating a new capability. '
+        'A read failure is not permission to create an alias: correct the exact candidate_id or skip.'
+    )
 
     if stage == "evolve_skill":
         final_schema = """\

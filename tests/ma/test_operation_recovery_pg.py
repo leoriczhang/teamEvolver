@@ -67,6 +67,8 @@ def test_real_worker_transport_exhaustion_resumes_without_erasing_sync_failure(p
     broken = [True]
 
     def ma_response(request):
+        if request.url.path.endswith("/sessions") and request.url.params.get("order") == "desc":
+            return httpx.Response(200, json={"data": []})
         if request.url.path.endswith("/agents/root"):
             return httpx.Response(200, json={"id": "wrong-root", "version": 1})
         if broken[0]:

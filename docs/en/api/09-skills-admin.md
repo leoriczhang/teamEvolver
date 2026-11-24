@@ -2,6 +2,8 @@
 
 MA Skills use native cloud contents and versions through these endpoints. Select a connection with `connection_id`; it is required for same-name Skills across connections. Queries return `skill_backend: "managed-agents"`, native `skill_id`, latest `version` and actual `bound_version`. Writes return `202`, `job_id`, `status_url` and `result_url`; upload and Agent-reference readback must complete before publication. Rollback creates a new native version from historical contents, and deletion detaches before deleting. Old TE imports do not supply current contents. See [MA API](./24-managed-agents.md).
 
+A cloud version does not by itself mean an Agent has attached it. `bound_versions` records actual member references; an empty mapping means unattached. Job results distinguish deployment using `deployment_status` and `bound_agents`. New Candidates default to the selected connection's entry Agent; manual creation may remain unattached. Identical content reuses the existing version while still checking member references.
+
 Non-MA team Skills are stored in PostgreSQL: `skills` holds the current version, `skill_versions` each immutable version, and bundle files are content-addressed. Writes create versions in one transaction and API replicas read the same data. A local runtime-cache failure does not affect committed versions.
 
 Code entry points: `team_skills/api/__init__.py:create_router`, `team_skills/library/repository.py:SkillLibraryRepository`.
@@ -46,6 +48,10 @@ Current version, with `body`, `skill_md` (full `SKILL.md`), `files`, `file_count
 ### GET /api/skills/{name}/versions/{version}
 
 The given version's `content`, `raw_md`, `files` (`path`, `sha256`, `size`), `tree_sha256`, `is_current`, and `evolution`: which evolution cycle or Candidate produced it.
+
+Each history row includes `provenance`: `kind` is `manual` (user upload, edit, import or rollback), `te` (TE Candidate publication), or `unknown` (origin not recorded). It also provides `source`, `actor`, `action`, `base_version`, `candidate_id` and `user_modified`. A force publication of a TE Candidate remains `te`. MA provenance requires a verified publication receipt for the same tenant, connection and native Skill ID; missing Candidate history does not imply a manual upload.
+
+The selected-version response also includes its `provenance` and full `history`, retaining the numeric `versions` array. Candidate lists and details expose `base_version` and `baseline` (`skill_name`, `version`, `kind`, plus recorded MA resource identity). This identifies the Skill version used during generation and does not follow the latest version; `kind: "new"` identifies a new Skill without a baseline.
 
 ## Writes
 

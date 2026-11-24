@@ -291,27 +291,41 @@ async def discover_cloud(task, services, client, connection, operation):
     return result
 
 
+def mcp_requires_isolation(agent, readonly=None):
+    """Disabled MCP declarations cannot invoke external tools."""
+    for server in agent.get("mcp_servers") or []:
+        name = server.get("name")
+        sets = [tool for tool in agent.get("tools") or []
+                if tool.get("type") == "mcp_toolset" and tool.get("mcp_server_name") == name]
+        if not sets:
+            return True
+        for toolset in sets:
+            if (toolset.get("default_config") or {}).get("enabled") is not False:
+                return True
+            enabled = {tool.get("name") for tool in toolset.get("configs") or []
+                       if tool.get("enabled") is not False}
+            allowed = set((readonly or {}).get(digest(server), []))
+            if not enabled <= allowed:
+                return True
+    return False
+
+
 def replay_capability(config, graph, environment):
     if not config.get("replay_enabled"):
         return {"supported": False, "reason": "disabled"}
     resources = config.get("replay_resources") or {}
     if resources.get("status") not in {None, "ready"}:
-        return {"supported": False, "reason": resources.get("reason") or
-                "回放凭证待补充：" + "、".join(resources.get("missing_credentials") or [])}
+        return {"supported": False, "reason": resources.get("reason") or "请重新发现来源环境"}
     if not environment or environment.get("config", {}).get("type") != "cloud":
-        return {"supported": False, "reason": "isolated cloud replay Environment required"}
-    if environment.get("id") == config.get("environment_id") and environment.get("id"):
-        return {"supported": False, "reason": "Replay must use a separate Environment"}
-    if set(config.get("vault_ids") or []) & set(config.get("replay_vault_ids") or []):
-        return {"supported": False, "reason": "Replay must use separate Vaults"}
+        return {"supported": False, "reason": "cloud replay Environment required"}
     isolation = config.get("replay_isolation") or {}
     for agent in graph["agents"].values():
         if agent.get("memory") or agent.get("memory_store_id"):
             return {"supported": False, "reason": "persistent Memory snapshot unavailable"}
-        if agent.get("mcp_servers") and not isolation.get("mcp"):
+        if mcp_requires_isolation(agent, config.get("replay_readonly_mcp")) and not isolation.get("mcp"):
             return {"supported": False, "reason": "MCP isolation not configured"}
-        if any(t.get("type") == "custom" for t in agent.get("tools", [])) and not isolation.get("custom_tools"):
-            return {"supported": False, "reason": "custom tool host isolation not configured"}
-    if config.get("replay_vault_ids") and not isolation.get("vaults"):
-        return {"supported": False, "reason": "Replay Vault isolation must be explicitly enabled"}
-    return {"supported": True}
+    # Custom tools are client-executed requests, not executable hosts.
+    # Preserve their declarations; the adapter rejects actual invocations.
+    custom_tools = sorted({tool.get("name") or "unknown" for agent in graph["agents"].values()
+                           for tool in agent.get("tools") or [] if tool.get("type") == "custom"})
+    return {"supported": True, "assessment": "configuration_only", "custom_tool_names": custom_tools}

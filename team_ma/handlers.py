@@ -8,6 +8,7 @@ from teamEvolver.runtime import HandlerResult
 from .collection import collect_connection
 from .discovery import discover_connection
 from .effects import UnknownEffect
+from .environment_observation import refresh_environment
 from .repository import MARepository
 from .schemas import digest
 
@@ -61,11 +62,16 @@ async def _handle(task, services):
         if not connection["enabled"]:
             return HandlerResult.cancelled()
         if task.kind != "ma.discover" and connection["status"] not in {"ready", "syncing", "error", "drift"}:
-            return HandlerResult.fail("ma_discovery_required")
+            if task.kind not in {"ma.collect", "ma.reconcile"} or not await repo.applied(conn, task.subject_id):
+                return HandlerResult.fail("ma_discovery_required")
         token = await services.extras["secret_repo"].resolve(conn, secret_ref=connection["config"]["ma_secret_ref"])
     factory = services.extras.get("ma_client_factory") or MAClient
     async with factory(connection["config"]["ma_base_url"], token) as client:
         try:
+            if task.kind != "ma.skill":
+                changed = await refresh_environment(task, services, client, connection, operation)
+                if changed and task.kind != "ma.collect":
+                    return HandlerResult.succeed(task.task_id)
             if task.kind == "ma.discover":
                 result = await discover_connection(task, services, client, connection, operation)
                 if result.get("waiting"):

@@ -13,7 +13,7 @@ from typing import Any
 from .database.transaction import TransactionManager
 
 # Fixed module set written on tenant creation.
-TENANT_CONFIG_MODULES = ("session", "skills", "replay", "memory", "miner")
+TENANT_CONFIG_MODULES = ("session", "skills", "replay", "memory", "miner", "runtime")
 
 
 class ConfigRevisionConflict(RuntimeError):
@@ -126,7 +126,7 @@ class ConfigRepository:
     async def create_tenant_defaults(
         self, conn: Any, *, tenant_id: str, defaults: dict[str, dict[str, Any]]
     ) -> None:
-        """Write all five module default rows for a new tenant in one call.
+        """Write all module default rows for a new tenant in one call.
 
         Caller provides the ``defaults`` map (module -> config). Every module in
       :data:`TENANT_CONFIG_MODULES` must be present; a missing module is a

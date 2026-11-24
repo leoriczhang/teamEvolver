@@ -61,6 +61,8 @@ def test_channel_collection_repairs_legacy_metadata_without_reanalysis(pg_env, w
 
     def respond(request):
         path = request.url.path.removeprefix("/api/v3/")
+        if path == "sessions":
+            return httpx.Response(200, json={"data": []})
         if path.startswith("agents/"):
             return httpx.Response(200, json={"id": "root", "version": 1, "skills": [], "tools": []})
         if path.endswith("/threads"):

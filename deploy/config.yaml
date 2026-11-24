@@ -4,6 +4,6 @@ logging:
   file_enabled: false
 sharing_viking_deployment: local
 storage_pg_pool_min: 1
-storage_pg_pool_max: 3
+storage_pg_pool_max: 2
 storage_pg_control_pool_max: 2
 sharing_viking_account: default

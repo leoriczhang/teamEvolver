@@ -39,6 +39,7 @@ def branch(monkeypatch):
         return await library.get_skill(conn, name)
     library.lock_evolution_head = AsyncMock(side_effect=lock_evolution_head)
     candidates = SimpleNamespace(
+        list=AsyncMock(return_value=([], 0)),
         live_for_skill=AsyncMock(return_value=None),
         create=AsyncMock(return_value={"candidate_id": "candidate", "revision": 1}),
     )
@@ -328,3 +329,67 @@ def test_pipeline_forks_dataset_from_evidence_and_joins_at_validation():
     assert nodes["merge"]["conditional"]
     assert nodes["validate"]["join"] == "all"
     assert not nodes["dataset_synthesis"].get("conditional")
+
+
+@pytest.mark.asyncio
+async def test_pending_merge_calls_merge_stage_then_reuses_same_unpublished_target(branch):
+    items = {
+        name: {"candidate_id": name, "skill_name": name, "revision": 1, "status": "open",
+               "base_version": 0, "tree_sha256": name, "detail": {}}
+        for name in ("first", "second")
+    }
+    bundles = {
+        name: {"SKILL.md": f"---\nname: {name}\ndescription: Same capability\n---\n{name}".encode(),
+               f"{name}.py": name.encode()}
+        for name in items
+    }
+    branch.candidates.list.side_effect = lambda *args, **kw: (
+        [dict(i) for i in items.values() if i["status"] == "open"],
+        sum(i["status"] == "open" for i in items.values()),
+    )
+    branch.candidates.require = AsyncMock(side_effect=lambda conn, ident: dict(items[ident]))
+    branch.candidates.read_bundle = AsyncMock(side_effect=lambda conn, ident: dict(bundles[ident]))
+    branch.candidates.live_for_skill.side_effect = lambda conn, name: items.get(name)
+    branch.candidates.lock_merge_inputs = AsyncMock()
+    seen = []
+
+    async def write(conn, **kwargs):
+        seen.append(kwargs)
+        item = items[kwargs["skill_name"]]
+        item["revision"] += 1
+        bundles[item["candidate_id"]] = kwargs["bundle"]
+        return dict(item)
+
+    async def finish(conn, **kwargs):
+        for source in kwargs["inputs"][1:]:
+            items[source["candidate_id"]]["status"] = "archived"
+
+    branch.candidates.create.side_effect = write
+    branch.candidates.finish_merge = AsyncMock(side_effect=finish)
+
+    class Planner:
+        async def __call__(self, **kwargs):
+            cards = kwargs["context"]["pending_candidates"]
+            if len(cards) == 2:
+                return {"action": "merge_skill", "target_candidate_id": "first",
+                        "source_candidate_ids": ["second"]}
+            return {"action": "improve_skill", "target_candidate_id": "first",
+                    "skill": {"name": "first", "content": "Next refinement"}}
+
+        merge = AsyncMock(return_value={"name": "first", "content": "Consolidated method"})
+
+    async def synthesizer(**kwargs):
+        assert "pending_candidates" not in kwargs["evidence_context"]
+        assert "Consolidated method" not in str(kwargs)
+        return []
+
+    planner = Planner()
+    await branch.run(planner, synthesizer)
+    assert seen[0]["base_version"] == 0
+    assert seen[0]["bundle"]["first.py"] == b"first"
+    assert seen[0]["bundle"]["second.py"] == b"second"
+    assert items["second"]["status"] == "archived" and items["first"]["revision"] == 2
+    await branch.run(planner, synthesizer)
+    assert items["first"]["revision"] == 3 and set(items) == {"first", "second"}
+    assert b"Next refinement" in bundles["first"]["SKILL.md"]
+    planner.merge.assert_awaited_once()

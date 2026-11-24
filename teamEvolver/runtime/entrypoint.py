@@ -19,7 +19,7 @@ from ..database.transaction import TransactionManager
 from .http_runtime import build_health_app
 from .lifecycle import build_lifecycle
 from .services import VALID_ROLES
-from .worker import run_worker
+from .tenant_workers import run_tenant_workers
 
 logger = logging.getLogger(__name__)
 
@@ -59,27 +59,10 @@ async def _serve_uvicorn(app, *, host: str, port: int, lifecycle) -> None:
 
 
 async def _run_worker_lanes(services, *, owner_id, stop_event, tenant_source, on_health):
-    """Reserve MA capacity so long analysis/replay tasks cannot block ingestion."""
-    kinds = services.registry.kinds()
-    ma = kinds & {"ma.discover", "ma.collect", "ma.reconcile", "ma.skill"}
-    lanes = [tuple(sorted(group)) for group in (kinds - ma, ma) if group]
-    health = [True] * len(lanes)
-
-    def report(index, healthy):
-        health[index] = healthy
-        on_health(all(health))
-
-    tasks = [asyncio.create_task(run_worker(
-        services, owner_id=f"{owner_id}:lane-{index}", stop_event=stop_event, tenant_source=tenant_source,
-        kinds=group, on_health=lambda healthy, index=index: report(index, healthy),
-    )) for index, group in enumerate(lanes)]
-    try:
-        await asyncio.gather(*tasks)
-    finally:
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+    await run_tenant_workers(
+        services, owner_id=owner_id, stop_event=stop_event,
+        tenant_source=tenant_source, on_health=on_health,
+    )
 
 
 def run_role(

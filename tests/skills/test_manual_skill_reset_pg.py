@@ -246,6 +246,16 @@ def test_evolution_uses_fresh_library_bundle_and_discards_racing_old_proposal(
 
     if not update_during_planning:
         _run(pg_env, "default", manual_update)
+        async def prior_evidence(conn):
+            now = await conn.fetchval("SELECT clock_timestamp()")
+            await EvolutionRepository(pg_env.tx).record_evidence(
+                conn, tenant_id="default", name="demo", sessions=[{
+                    "session_id": "prior-fresh", "content_hash": "prior", "user_alias": "prior-user",
+                    "business_time": now, "_summary": "Earlier valid Evidence after the Skill update",
+                    "_judge_scores": {"overall_score": .8},
+                }],
+            )
+        _run(pg_env, "default", prior_evidence)
     for sid in ("fresh-1", "fresh-2"):
         payloads[sid] = {
             "session_id": sid, "_summary": "Fresh method after manual update",
@@ -295,7 +305,7 @@ def test_evolution_uses_fresh_library_bundle_and_discards_racing_old_proposal(
         _run(pg_env, "default", verify)
     assert len(seen) == 1
     if not update_during_planning:
-        assert [s["session_id"] for s in seen[0]["sessions"]] == ["fresh-1", "fresh-2"]
+        assert [s["session_id"] for s in seen[0]["sessions"]] == ["fresh-1", "fresh-2", "prior-fresh"]
 
 
 @pytest.mark.parametrize("update_during_planning", [False, True])
@@ -359,7 +369,7 @@ def test_explicit_reprocess_uses_consumed_old_sessions_without_reviving_archived
         } for number in range(2)]
         return hydrate_cross_session_cases(cases, kwargs["sessions"], skill_name="demo")
 
-    async def fingerprints(tenant):
+    async def fingerprints(tenant, *, conn=None):
         return {}  # Automatic inputs cannot use this historical runtime.
 
     services = build_services(role="worker", tx=pg_env.tx, handlers=register_handlers(), extras={

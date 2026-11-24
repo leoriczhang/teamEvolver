@@ -48,7 +48,8 @@ Worker 依次执行 `normalize`、`split`、`analyze`、`trace_analyze`、`archi
 - **冻结输入**：首次执行时按 `evolution_max_sessions`（默认 100，上限 200）选出受理时刻之前入库、尚未被消费的 Session，并保存输入集合；中断后续跑使用同一批 Session。
 - **分组**：按关联 Skill 分组，每组是独立分支；无关联 Skill 的 Session 进入新建分支。
 - **团队证据门槛**：每个分支的证据至少覆盖 `min_group_sessions`（默认 2）个 Session 和 `min_group_users`（默认 2）个用户，否则本轮跳过该分支。
-- **规划**：模型基于分组 Session、跨周期 Evidence 和成功经验模式给出 `skip`、修订或新建决策。证据路由规则为 `team_skills/evolution/stages/execute.py` 中的 `_EVIDENCE_ROUTING_RULES`，只有 `team_skill` 证据可以修改共享 Skill。
+- **规划**：模型基于分组 Session、原始执行契约、跨周期 Evidence、成功经验模式和同租户待发布 Candidate 目录给出 `skip`、修订、新建或 `merge_skill` 决策。没有已发布版本的 Candidate 也可续写；同能力的重叠提案由 Merge 阶段合并到一个目标 Candidate，来源归档并保留历史。输入状态、revision 和文件树受事务校验保护，合并不代表发布。证据路由规则为 `team_skills/evolution/stages/execute.py` 中的 `_EVIDENCE_ROUTING_RULES`，只有 `team_skill` 证据可以修改共享 Skill。
+- **验证失败恢复**：新一轮进化或重新提交验证时，若 Candidate 绑定的 `skill.validate` 任务已失败或取消，将其恢复为 `open` 并记录失败原因，保留内容与 revision，不生成验证 verdict。运行中或等待重试的任务不被释放；MA 发布任务不走此恢复路径。
 - **并行生成测试集**：满足证据门槛后，规划与 Test Dataset 生成同时启动，使用同一批 Evidence；测试集不读取本轮候选内容或候选分类结果。两边完成后才写入 Candidate 并提交验证。规划跳过时取消尚未完成的测试集生成；分支失败不消费本轮 Evidence，重试仍使用冻结输入。
 - **生成 Candidate**：写入 `skill_candidates` 及其文件，记录 Evidence Classification、编辑摘要、文件变更、bundle diff 和静态检查结果；不影响已发布版本。规划期间若有人修改了同一 Skill 的 Candidate，本次提案作废。
 

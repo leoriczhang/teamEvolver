@@ -6,10 +6,11 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import math
 import os
 import re
 import threading
-import weakref
+import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Any
@@ -44,7 +45,6 @@ _DEFAULT_LLM_CONCURRENCY = _env_int(
     minimum=1,
     maximum=8,
 )
-_GLOBAL_MODEL_SLOTS = threading.BoundedSemaphore(8)
 
 
 _DEFAULT_LLM_QUEUE_CAPACITY = _env_int(
@@ -71,54 +71,75 @@ class _TenantLLMDispatcher:
         )
         label = re.sub(r"[^a-zA-Z0-9_-]+", "-", tenant_id).strip("-")[:24]
         self._executor = ThreadPoolExecutor(
-            max_workers=self.concurrency,
+            max_workers=8,
             thread_name_prefix=f"te-llm-{label or 'default'}",
         )
-        self._pending = threading.BoundedSemaphore(self.queue_capacity)
-        self._loop_slots: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
         self._slots_lock = threading.Lock()
+        self._pending_count = 0
+        self._active_count = 0
 
-    async def acquire(self) -> asyncio.Semaphore:
-        if not self._pending.acquire(blocking=False):
-            raise LLMOverloadedError(
-                f"LLM queue full for tenant {self.tenant_id!r}; retry later"
-            )
-        loop = asyncio.get_running_loop()
+    def configure(self, concurrency: int, queue_capacity: int) -> None:
+        """Resize in place; running HTTP calls continue to consume this budget."""
         with self._slots_lock:
-            slots = self._loop_slots.setdefault(
-                loop,
-                asyncio.Semaphore(self.concurrency),
-            )
+            self.concurrency = concurrency
+            self.queue_capacity = queue_capacity
+
+    async def acquire(self) -> None:
+        with self._slots_lock:
+            if self._pending_count >= self.queue_capacity:
+                raise LLMOverloadedError(
+                    f"LLM queue full for tenant {self.tenant_id!r}; retry later"
+                )
+            self._pending_count += 1
         try:
-            await slots.acquire()
+            while True:
+                with self._slots_lock:
+                    if self._active_count < self.concurrency:
+                        self._active_count += 1
+                        return
+                await asyncio.sleep(0.01)
         except BaseException:
-            self._pending.release()
+            with self._slots_lock:
+                self._pending_count -= 1
             raise
-        return slots
 
-    def release(self, slots: asyncio.Semaphore) -> None:
-        slots.release()
-        self._pending.release()
+    def release(self) -> None:
+        with self._slots_lock:
+            self._active_count -= 1
+            self._pending_count -= 1
 
-    async def call(self, func, **kwargs):
-        slots = await self.acquire()
+    async def call(self, func, *, deadline=None, **kwargs):
+        await self.acquire()
         loop = asyncio.get_running_loop()
         try:
             context = contextvars.copy_context()
+            # Release in the thread even if the caller's event loop has closed.
             def invoke():
-                with _GLOBAL_MODEL_SLOTS:
+                try:
+                    if deadline is not None:
+                        import httpx
+
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError("LLM request budget exhausted before HTTP dispatch")
+                        # Queue time and previous attempts have already consumed
+                        # this budget. Never start a fresh 600s request here.
+                        kwargs["timeout"] = httpx.Timeout(remaining, connect=min(30.0, remaining))
                     return context.run(partial(func, **kwargs))
+                finally:
+                    self.release()
+
             future = loop.run_in_executor(self._executor, invoke)
         except BaseException:
-            self.release(slots)
+            self.release()
             raise
-
-        def finished(_):
-            self.release(slots)
-
-        future.add_done_callback(finished)
         # Cancellation cannot free a slot while the synchronous HTTP call is alive.
-        return await asyncio.shield(future)
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            # Observe a late HTTP failure without releasing its occupied slot.
+            future.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+            raise
 
     def shutdown(self) -> None:
         self._executor.shutdown(wait=True, cancel_futures=False)
@@ -150,11 +171,8 @@ def _dispatcher_for(
     )
     with _DISPATCHERS_LOCK:
         current = _DISPATCHERS.get(scope)
-        if (
-            current is not None
-            and current.concurrency == normalized_concurrency
-            and current.queue_capacity == normalized_capacity
-        ):
+        if current is not None:
+            current.configure(normalized_concurrency, normalized_capacity)
             return current
         dispatcher = _TenantLLMDispatcher(
             scope,
@@ -163,6 +181,11 @@ def _dispatcher_for(
         )
         _DISPATCHERS[scope] = dispatcher
         return dispatcher
+
+
+def configure_tenant_model_capacity(tenant_id: str, concurrency: int, queue_capacity: int) -> None:
+    """Apply live limits to existing clients, including long-running jobs."""
+    _dispatcher_for(tenant_id, concurrency, queue_capacity)
 
 
 async def _call_in_pool(func, *, dispatcher=None, **kwargs):
@@ -313,7 +336,20 @@ class AsyncLLMClient:
             return client
 
     async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
-        """Send a chat completion request and return the assistant content."""
+        """Send a completion, optionally budgeting queueing, HTTP and retries."""
+        budget = kwargs.pop("total_timeout_seconds", None)
+        if budget is None:
+            return await self._chat(messages, **kwargs)
+        seconds = float(budget)
+        if not math.isfinite(seconds) or seconds <= 0:
+            raise ValueError("total_timeout_seconds must be finite and positive")
+        # Give the transport a small head start on cleanup. HTTPX timeouts
+        # bound I/O phases, not thread lifetime; cancellation retains the slot.
+        deadline = time.monotonic() + seconds - min(5.0, seconds * 0.1)
+        async with asyncio.timeout(seconds):
+            return await self._chat(messages, deadline=deadline, **kwargs)
+
+    async def _chat(self, messages: list[dict[str, str]], *, deadline=None, **kwargs: Any) -> str:
         stage = kwargs.pop("stage_id", "")
         requested_api_key = str(kwargs.pop("api_key", self._stage_api_keys.get(stage, self._api_key)) or "").strip()
         requested_base_url = str(kwargs.pop("base_url", self._base_url) or "").strip()
@@ -361,6 +397,8 @@ class AsyncLLMClient:
         # Parameter negotiation has its own small allowance; transport retries
         # still obey max_retries below (including max_retries=1 classifiers).
         for attempt in range(self.max_retries + 2):
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("LLM request budget exhausted before retry")
             generation_input: dict[str, Any] = {"messages": messages}
             if merged.get("tools"):
                 generation_input["tools"] = merged["tools"]
@@ -393,6 +431,7 @@ class AsyncLLMClient:
                     resp = await _call_in_pool(
                         client.chat.completions.create,
                         dispatcher=self._dispatcher,
+                        **({"deadline": deadline} if deadline is not None else {}),
                         **merged,
                     )
                     choice = resp.choices[0]
@@ -461,7 +500,7 @@ class AsyncLLMClient:
                         status_code == 400
                         and "Stream must be set to true" in body_text
                     ):
-                        content = await self._chat_via_stream(client, merged)
+                        content = await self._chat_via_stream(client, merged, deadline=deadline)
                         update_langfuse_observation(
                             observation,
                             output=content,
@@ -487,18 +526,21 @@ class AsyncLLMClient:
                     raise
         raise RuntimeError("LLM response remained invalid after retry budget")
 
-    async def _chat_via_stream(self, client: Any, body: dict[str, Any]) -> str:
+    async def _chat_via_stream(self, client: Any, body: dict[str, Any], *, deadline=None) -> str:
         request_body = dict(body)
         request_body["stream"] = True
 
-        def stream():
+        def stream(**request_options):
             parts = []
-            with client.chat.completions.create(**request_body) as response:
+            with client.chat.completions.create(**{**request_body, **request_options}) as response:
                 for event in response:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise TimeoutError("LLM streaming budget exhausted")
                     for choice in event.choices:
                         text = choice.delta.content
                         if text:
                             parts.append(text)
             return "".join(parts)
 
-        return await _call_in_pool(stream, dispatcher=self._dispatcher)
+        return await _call_in_pool(stream, dispatcher=self._dispatcher,
+                                   **({"deadline": deadline} if deadline is not None else {}))

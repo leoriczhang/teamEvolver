@@ -313,6 +313,10 @@ def build_analysis_payload(session: dict[str, Any]) -> dict[str, Any]:
     is made programmatically in :func:`_compose_system`, not by the model.
     """
     payload = _build_session_payload(session)
+    from team_skills.evolution.source_context import GUIDANCE, source_contract
+    if contract := source_contract(session):
+        payload["source_contract"] = contract
+        payload["source_contract_guidance"] = GUIDANCE
     used_skills = _session_used_skill_names(session)
     payload["used_skills"] = used_skills
     payload["skills_referenced"] = sorted(session.get("_skills_referenced") or [])

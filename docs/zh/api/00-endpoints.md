@@ -83,7 +83,11 @@
 | GET | `/api/tenants/{tenant_id}/config` |
 | PUT | `/api/tenants/{tenant_id}/config` |
 | POST | `/api/tenants/{tenant_id}/rotate-token` |
+| GET | `/api/tenants/{tenant_id}/runtime-config` |
+| PUT | `/api/tenants/{tenant_id}/runtime-config` |
 | POST | `/api/tenants/{tenant_id}/status` |
+| GET | `/api/tenants/{tenant_id}/token` |
+| PUT | `/api/tenants/{tenant_id}/token` |
 
 ## 控制台、平台资产与 Workspace
 
@@ -346,4 +350,4 @@
 | GET | `/api/mining/settings` |
 | POST | `/api/mining/settings` |
 
-共 250
+共 254

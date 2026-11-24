@@ -52,7 +52,7 @@ The minimal integration needs neither Replay nor Skill pull.
 
 ### What if the tenant Key leaks?
 
-Rotate the tenant Key in "Members & Access" or call `POST /api/tenants/{tenant_id}/rotate-token`. The new Key is shown once, the old Key stops working immediately, and the server stores only a hash. Rotation affects every Agent of the tenant, so update their configuration.
+View and copy the current tenant Key in "Members & Access" and reuse it when connecting Agents. The original is encrypted and remains available to administrators. If a legacy Key was not retained, import the original; the server verifies that it matches the current hash. Rotate only when replacing the Key, or call `POST /api/tenants/{tenant_id}/rotate-token`; the old Key stops working immediately, so update the tenant's Agent configurations.
 
 ### Can multiple Agent Runtimes connect?
 

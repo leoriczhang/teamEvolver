@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from team_skills.library.bundle import bundle_tree_sha256, decode_bundle_payload, encode_bundle_payload
+from team_skills.library.provenance import version_provenance
 from team_skills.library.repository import (
     SkillCommit,
     SkillMutationConflict,
@@ -95,12 +96,19 @@ class CloudSnapshot:
         expected = previous if base_version is None else int(base_version)
         if expected != previous:
             raise SkillVersionConflict(f"{name} is at cloud v{previous}, not expected v{expected}")
+        record = binding["record"]
+        agents = record.get("desired_agents", record.get("agents")) or []
+        if (metadata or {}).get("candidate_id"):
+            if not record.get("id") and "desired_agents" not in record and not agents:
+                agents = [binding["connection"]["config"]["entry_agent_id"]]
+            if not agents:
+                raise SkillMutationConflict("Choose at least one MA member before publishing a Candidate")
         payload = {
             "name": name, "action": action, "skill_id": binding["record"].get("id", ""),
             "base_version": expected, "bundle": encode_bundle_payload(bundle) if bundle is not None else None,
             "actor": actor, "source": source, "metadata": metadata or {},
             "target_version": target_version, "mutation_id": mutation_id,
-            "agents": binding["record"].get("desired_agents", binding["record"].get("agents")) or [],
+            "agents": agents,
             "no_change": bool(current and bundle is not None
                               and current["tree_sha256"] == bundle_tree_sha256(bundle)),
         }
@@ -232,6 +240,22 @@ class CloudSkillProvider:
                              "restored_from": None, "tree_sha256": ""}
                             for v in sorted(history, key=lambda v: int(v["version"]), reverse=True)
                         ]
+                        async with self.services.tx.tenant_tx(tenant) as conn:
+                            receipts = await self.repo.skill_version_receipts(conn, connection["connection_id"], ident)
+                        by_version = {int(r["version"]): r for r in receipts}
+                        for row in result.history[name]:
+                            receipt = by_version.get(row["version"])
+                            row["provenance"] = version_provenance()
+                            if receipt:
+                                row.update(
+                                    action=receipt["action"] or "cloud", actor=receipt["actor"] or "",
+                                    restored_from=int(receipt["restored_from"]) if receipt["restored_from"] else None,
+                                    provenance=version_provenance(
+                                        source=receipt["source"] or "", actor=receipt["actor"] or "",
+                                        action=receipt["action"] or "", base_version=receipt["base_version"],
+                                        metadata=receipt["metadata"], record_id=receipt["operation_id"],
+                                    ),
+                                )
         await asyncio.gather(*(read(key, binding) for key, binding in bindings.items()))
         return result
 

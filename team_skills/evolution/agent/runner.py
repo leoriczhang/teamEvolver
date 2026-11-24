@@ -16,6 +16,7 @@ schema (see tools.build_protocol_appendix). Round structure:
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Callable, Optional
 
@@ -67,6 +68,7 @@ def _loop_state(ctx: ToolContext, plan_action: Optional[str], round_no: int, max
             "content_chars": len(ctx.staged_content),
         },
         "sessions_read": list(ctx.read_session_ids),
+        "candidates_read": list(ctx.read_candidate_ids),
     }
 
 
@@ -98,10 +100,26 @@ def _accept_final(
     stage: str,
 ) -> tuple[Optional[dict], list[str]]:
     """Turn a validated decision into the final stage result (or errors)."""
-    if stage == "merge" or normalized.get("action") == DecisionAction.SKIP:
+    if stage == "merge":
+        if normalized.get("name") != ctx.skill_name:
+            return None, ["Merge must preserve the target Skill name"]
+        return normalized, []
+    if normalized.get("action") == DecisionAction.SKIP:
         return normalized, []
 
     action = normalized["action"]
+    selected = [normalized["target_candidate_id"]] if normalized.get("target_candidate_id") else []
+    selected.extend(normalized.get("source_candidate_ids") or [])
+    if any(ident not in ctx.read_candidate_ids for ident in selected):
+        return None, ["Read every selected Candidate using read_candidate before submitting"]
+    if action == DecisionAction.MERGE:
+        return normalized, []
+    unread = sorted(set(ctx.relevant_candidate_ids) - set(ctx.read_candidate_ids))
+    if action == DecisionAction.CREATE and unread:
+        return None, [f"Read existing same-scope Candidates before creating a new capability: {unread}. "
+                      "A failed read does not justify creating another alias; correct the ID or skip."]
+    if action == DecisionAction.CREATE and ctx.candidate_reader and not normalized.get("candidate_distinction"):
+        return None, ["Explain candidate_distinction, or reuse/merge an existing unpublished Candidate"]
     skill = dict(normalized.get("skill") or {})
     if action == DecisionAction.IMPROVE:
         if not str(skill.get("content") or "").strip():
@@ -199,6 +217,7 @@ async def run_skill_agent(
     existing_skill_names: Optional[list[str]] = None,
     evolution_context: Optional[dict] = None,
     library_reader: Optional[Callable[[str], Any]] = None,
+    candidate_reader: Optional[Callable[[str], Any]] = None,
     merge_versions: Optional[tuple[dict, dict]] = None,
     max_rounds: int = DEFAULT_MAX_ROUNDS,
     max_tool_calls_per_round: int = DEFAULT_MAX_TOOL_CALLS_PER_ROUND,
@@ -224,8 +243,27 @@ async def run_skill_agent(
         current_skill=current_skill,
         existing_skill_names=existing_skill_names,
         library_reader=library_reader,
+        candidate_reader=candidate_reader,
         bundle_contract=dict(bundle_contract or {}),
     )
+    catalog = (evolution_context or {}).get("pending_candidates") or []
+    source_scope = sorted({
+        (str(item.get("connection_id") or ""), str(item.get("entry_agent_id") or ""))
+        for item in (evolution_context or {}).get("execution_provenance") or []
+        if isinstance(item, dict) and item.get("connection_id")
+    })
+    ctx.relevant_candidate_ids = [
+        item["candidate_id"] for item in catalog
+        if sorted(tuple(scope) for scope in item.get("scope") or []) == source_scope
+    ]
+    from team_skills.evolution.source_context import contract_card
+    exact_context = {
+        "candidate_catalog": [
+            {key: item.get(key) for key in ("candidate_id", "skill_name", "revision", "status", "scope")}
+            for item in catalog
+        ],
+        "source_contracts": contract_card(sessions) or (evolution_context or {}).get("source_contracts", ""),
+    }
     registry = ToolRegistry(ctx, max_calls_per_round=max_tool_calls_per_round)
     appendix = build_protocol_appendix(
         stage, max_tool_calls_per_round=max_tool_calls_per_round
@@ -236,6 +274,8 @@ async def run_skill_agent(
 
     if stage == "merge":
         round1_user = build_merge_card(merge_versions[0], merge_versions[1])
+        if evolution_context:
+            round1_user += "\n\n## Merge evidence and constraints\n" + json.dumps(evolution_context, ensure_ascii=False)
     else:
         round1_user = build_round1_user_msg(
             stage=stage,
@@ -255,10 +295,13 @@ async def run_skill_agent(
     plan_record: Optional[dict] = None
     plan_action: Optional[str] = None
     plan_corrected = False
+    audit = []
 
     def log_round(round_no: int, kind: str, **extra: Any) -> None:
+        event = {"round": round_no, "type": kind, **extra}
+        audit.append(event)
         if round_log is not None:
-            round_log.append({"round": round_no, "type": kind, **extra})
+            round_log.append(event)
 
     for round_no in range(1, max_rounds + 1):
         if byte_size(messages[1:]) > MODEL_EVIDENCE_BYTES:
@@ -279,6 +322,7 @@ async def run_skill_agent(
                 messages[0],
                 {"role": "user", "content": dumps({
                     "history_evidence": history, "latest_observation": latest,
+                    "exact_context": exact_context,
                     "edit_anchor_note": "摘要不是逐字编辑锚点；编辑前可用 read_skill 重新读取正文。",
                 })},
             ]
@@ -330,6 +374,7 @@ async def run_skill_agent(
                     "action": DecisionAction.SKIP,
                     "rationale": str(plan.get("rationale") or ""),
                     "evidence_classification": classification,
+                    "agent_audit": audit,
                 }
             if not classification["team_skill"] and stage != "merge":
                 if not plan_corrected:
@@ -345,6 +390,7 @@ async def run_skill_agent(
                         + str(plan.get("rationale") or "")
                     ).strip(),
                     "evidence_classification": classification,
+                    "agent_audit": audit,
                 }
             plan_record = plan
             plan_action = candidate or None
@@ -372,6 +418,10 @@ async def run_skill_agent(
                 round_no,
                 "tool_calls",
                 tools=[str(call.get("tool") or "") for call in turn["calls"] if isinstance(call, dict)],
+                candidate_reads=[
+                    {key: observation[key] for key in ("candidate_id", "ok", "error") if key in observation}
+                    for observation in observations if observation.get("tool") == "read_candidate"
+                ],
             )
             messages.append(
                 {
@@ -392,7 +442,7 @@ async def run_skill_agent(
             finalized, errors = _accept_final(normalized, ctx, stage)
             if finalized is not None:
                 log_round(round_no, "final", action=str(finalized.get("action") or "merge"))
-                return finalized
+                return {**finalized, "agent_audit": audit}
         log_round(round_no, "final_rejected", errors=errors)
         if round_no < max_rounds:
             messages.append(

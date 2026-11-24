@@ -140,6 +140,8 @@ function DatasetContents({ datasetId, active, onBack }: { datasetId: string; act
   const debounced = useDebounced(search);
   const [tick, setTick] = useState(0);
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [notFound, setNotFound] = useState(false);
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState(false);
   const [running, setRunning] = useState(false);
@@ -158,18 +160,26 @@ function DatasetContents({ datasetId, active, onBack }: { datasetId: string; act
   const [result, setResult] = useState<Record<string, any> | null>(null);
   const [stopping, setStopping] = useState(false);
   const hasActive = runs.some(r => isActiveRun(r.status)) || !!run && isActiveRun(run.status);
+  const datasetAvailable = !!data && !notFound;
 
   useEffect(() => {
     if (!active) return;
     const controller = new AbortController();
+    setLoading(true); setError(""); setNotFound(false);
     api<DatasetDetail>(`${path}?search=${encodeURIComponent(debounced)}&limit=${SIZE}&offset=${(page - 1) * SIZE}`, { signal: controller.signal })
       .then(value => { if (!controller.signal.aborted) { setData(value); setError(""); if (page > 1 && !value.cases.length) setPage(page - 1); } })
-      .catch(e => { if (!controller.signal.aborted) setError(e.message); });
+      .catch(e => { if (!controller.signal.aborted) {
+        setError(e.message);
+        if (e.status === 404) {
+          setNotFound(true); setData(null); setRuns([]); setRun(null); setRunId("");
+        }
+      } })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [active, path, page, debounced, tick]);
 
   useEffect(() => {
-    if (!active) return;
+    if (!active || !datasetAvailable) return;
     const controller = new AbortController();
     api<{ runs: DatasetRun[]; total: number }>(`${path}/runs?limit=${SIZE}&offset=${(runListPage - 1) * SIZE}`, { signal: controller.signal })
       .then(value => { if (!controller.signal.aborted) {
@@ -178,15 +188,15 @@ function DatasetContents({ datasetId, active, onBack }: { datasetId: string; act
       } })
       .catch(e => { if (!controller.signal.aborted) setRunError(e.message); });
     return () => controller.abort();
-  }, [active, path, runListPage, runTick]);
+  }, [active, datasetAvailable, path, runListPage, runTick]);
   useEffect(() => {
-    if (!active || !runId) return;
+    if (!active || !datasetAvailable || !runId) return;
     const controller = new AbortController();
     api<DatasetRun>(`${path}/runs/${encodeURIComponent(runId)}?limit=${SIZE}&offset=${(runPage - 1) * SIZE}`, { signal: controller.signal })
       .then(value => { if (!controller.signal.aborted) { setRun(value); setRunError(""); } })
       .catch(e => { if (!controller.signal.aborted) setRunError(e.message); });
     return () => controller.abort();
-  }, [active, path, runId, runPage, runTick]);
+  }, [active, datasetAvailable, path, runId, runPage, runTick]);
   useEffect(() => {
     if (!active || !hasActive) return;
     const timer = setTimeout(() => setRunTick(t => t + 1), 3000);
@@ -229,6 +239,19 @@ function DatasetContents({ datasetId, active, onBack }: { datasetId: string; act
     catch (e: any) { toastErr("导出失败", e.message); }
     finally { setDownloadBusy(false); }
   }
+  if (!loading && !data && error) return <div className="space-y-4 px-[22px] pb-8 pt-4">
+    <div className="text-sm text-muted-foreground">数据集 / 详情</div>
+    <Box><div className="space-y-4 p-5">
+      <h2 className="text-xl font-bold">{notFound ? "数据集不可用" : "数据集加载失败"}</h2>
+      <p role="alert" className="text-sm text-muted-foreground">{notFound
+        ? "该数据集不存在、已删除，或不属于当前租户。请返回列表查看当前租户的数据集。"
+        : error}</p>
+      <div className="flex gap-2">
+        <Button variant="outline" onClick={onBack}><ArrowLeft className="size-4" />返回数据集列表</Button>
+        <Button variant="outline" onClick={() => setTick(t => t + 1)}><RefreshCw className="size-4" />重试</Button>
+      </div>
+    </div></Box>
+  </div>;
   return <div className="space-y-4 px-[22px] pb-8 pt-4">
     <div className="flex items-center gap-2 text-sm text-muted-foreground"><button className="hover:text-accent" onClick={onBack}>数据集</button><span>/</span><span>{data?.name || "详情"}</span></div>
     <div className="flex flex-wrap items-start justify-between gap-4">

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Candidate } from "@/features/skills/api/client";
 import type { EvalResult } from "@/features/replay/api/client";
@@ -61,6 +61,48 @@ describe("CandidateModal feedback placement", () => {
 });
 
 describe("candidate detail completeness", () => {
+  it("shows the frozen generation version next to its baseline contents", () => {
+    show({ ...candidate, base_version: 12, baseline: { kind: "version", version: 12 } }, incomplete);
+    expect(screen.getByText("基于 Skill v12")).toBeTruthy();
+    expect(screen.getByText("基线 SKILL.md · 基于 Skill v12")).toBeTruthy();
+    expect(screen.getByText("BASELINE CONTENT", { selector: "pre" })).toBeTruthy();
+  });
+
+  it("distinguishes a new skill from a legacy candidate with no recorded base", () => {
+    const view = show({ ...candidate, base_version: 0, proposed_action: "create", current_skill_md: "" }, incomplete);
+    expect(screen.getByText("新建技能 · 无基线版本")).toBeTruthy();
+    view.unmount();
+    show({ ...candidate, current_skill_md: "" }, incomplete);
+    expect(screen.getByText("基线版本未记录")).toBeTruthy();
+  });
+
+  it("shows publishing progress and keeps a failed publication visible", async () => {
+    let reject!: (reason: Error) => void;
+    const onPublish = vi.fn(() => new Promise<void>((_, fail) => { reject = fail; }));
+    show(candidate, incomplete, { onPublish });
+    fireEvent.click(screen.getByRole("button", { name: "强制发布" }));
+    expect((screen.getByRole("button", { name: "发布中…" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(onPublish).toHaveBeenCalledWith("force", 4);
+    reject(new Error("执行验证门禁未通过"));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("执行验证门禁未通过"));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "强制发布" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(onPublish).toHaveBeenCalledTimes(1);
+  });
+  it("shows recorded models and environments alongside business and ingest times", () => {
+    show({ ...candidate, execution_provenance: [{
+      session_id: "source-ma-session", business_time: "2026-11-20T08:46:50Z",
+      ingested_at: "2026-11-20T09:20:26Z",
+      agents: [{ id: "source-agent", version: 30, model: { id: "gpt-6.2-sol" } }],
+      environment: { id: "source-environment", name: "ecommerce-cloud-recovery" },
+    }] }, incomplete);
+    fireEvent.click(screen.getByText("进化来源 · 1 份执行快照"));
+    expect(screen.getByText(/模型：gpt-6.2-sol/)).toBeTruthy();
+    expect(screen.getByText(/ecommerce-cloud-recovery/)).toBeTruthy();
+    expect(screen.getByText(/业务时间：2026-11-20T08:46:50Z/).textContent)
+      .toContain("入库时间：2026-11-20T09:20:26Z");
+  });
+
   it("allows supported experience review without requiring MA or A/B Checklist", () => {
     show(candidate, {
       status: "evaluated", recommended_publish: true,
@@ -104,6 +146,16 @@ describe("candidate detail completeness", () => {
     expect(screen.queryByText(/Discover the configured/)).toBeNull();
     expect((screen.getByRole("button", { name: "评估中…" }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: "强制发布" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("shows pending publication after reopening without claiming to evaluate cases", () => {
+    show({ ...candidate, review_status: "validating", publication_pending: true,
+      replay_progress: { total: 2, completed: 0, succeeded: 0, failed: 0 } }, incomplete);
+    expect(screen.getByRole("status").textContent).toContain("正在发布候选");
+    expect(screen.queryByText(/已完成 0 \/ 2/)).toBeNull();
+    expect(screen.queryByText("正在评估")).toBeNull();
+    expect((screen.getByRole("button", { name: "发布中…" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "完整 A/B" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("blocks normal publish when a failed replay has no Checklist evidence", () => {

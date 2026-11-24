@@ -24,7 +24,9 @@ class LLMCrossSessionCaseSynthesizer:
         self.llm = llm
 
     async def __call__(self, *, skill_name, sessions, candidate_skill, evidence_context):
+        from .source_context import contract_card
         context = copy.deepcopy(dict(evidence_context or {}))
+        context["source_contracts"] = contract_card(sessions)
         for attempt in range(SYNTHESIS_ATTEMPTS):
             generated = await synthesize_evolution_datasets(
                 self.llm,

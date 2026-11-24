@@ -20,6 +20,7 @@ from teamEvolver.managed_agents.events import child_threads, complete, metrics, 
 
 from ..artifacts import skill_treatment_files, skill_treatment_members
 from ..hooks import AgentObservation, ReplayUnsupported
+from .ma_materials import SANDBOX_MATERIAL_ROOT, bootstrap_environment
 
 ARTIFACT_REGISTRATION_SECONDS = 60
 
@@ -43,7 +44,7 @@ def declared_outputs(events):
     return paths
 
 
-def _raise_session_error(events):
+def _raise_replay_error(events):
     for event in events:
         if event.get("type") != "session.error":
             continue
@@ -56,6 +57,18 @@ def _raise_session_error(events):
         except (ValueError, TypeError):
             pass
         raise RuntimeError("MA session error: " + str(code))
+    for event in events:
+        if event.get("type") == "agent.custom_tool_use":
+            name = str(event.get("name") or "unknown")[:200]
+            thread = str(event.get("session_thread_id") or "main")[:200]
+            ident = str(event.get("id") or "unknown")[:200]
+            raise ReplayUnsupported(
+                f"MA custom tool executor unavailable: {name} (event={ident}, thread={thread}); "
+                "no result is fabricated"
+            )
+    if any(e.get("stop_reason", {}).get("type") == "requires_action" for e in events
+           if e.get("type") in {"session.status_idle", "session.thread_status_idle"}):
+        raise ReplayUnsupported("MA requires human tool confirmation; no result is fabricated")
 
 
 class ManagedAgentsFactory:
@@ -64,7 +77,7 @@ class ManagedAgentsFactory:
     def __init__(self, records, capabilities, fallback=None):
         self.records = copy.deepcopy(records)
         self.capabilities, self.fallback = capabilities, fallback
-        self.revision = "managed-agents.skill-only.v2"
+        self.revision = "managed-agents.skill-only.v10"
 
     def open(self, context):
         if context.runtime_type != "managed-agents":
@@ -98,6 +111,46 @@ def _archive(name, files):
 def _agent_config(value):
     return {k: copy.deepcopy(v) for k, v in value.items()
             if k not in {"id", "type", "version", "created_at", "updated_at", "overridden_fields", "scene"}}
+
+
+def _same_agent_fields(actual, desired, members):
+    """Allow native display normalization, while checking expanded execution fields."""
+    for key, wanted in desired.items():
+        observed = actual.get(key)
+        if key == "skills":
+            def references(values):
+                return [{k: v for k, v in item.items() if k != "display_name"} for item in values or []]
+            if references(observed) != references(wanted):
+                return False
+        elif key == "multiagent" and isinstance(wanted, dict) and isinstance(observed, dict):
+            if {k: v for k, v in wanted.items() if k != "agents"} != {
+                    k: v for k, v in observed.items() if k != "agents"}:
+                return False
+            expected_refs, actual_refs = wanted.get("agents") or [], observed.get("agents") or []
+            if len(expected_refs) != len(actual_refs):
+                return False
+            for expected, expanded in zip(expected_refs, actual_refs):
+                if not _same_agent_fields(expanded, expected, members):
+                    return False
+                frozen = members.get((expected.get("id"), str(expected.get("version")))) or {}
+                # The Session API expands pinned references. Verify every extra
+                # execution field against the exact original or cloned member.
+                extra = {k: v for k, v in expanded.items() if k not in expected and k != "name"}
+                if any(k not in frozen for k in extra):
+                    return False
+                if not _same_agent_fields(extra, {k: frozen[k] for k in extra}, members):
+                    return False
+        elif observed != wanted:
+            return False
+    return True
+
+
+def _same_environment(actual, desired):
+    # MA omits explicitly cleared TOS in GET readback. No other execution
+    # field is normalized, and any inherited output destination still fails.
+    def normalized(config):
+        return {k: v for k, v in config.items() if k != "tos" or v is not None}
+    return isinstance(actual, dict) and normalized(actual) == normalized(desired)
 
 
 async def _polled_stream(stream):
@@ -158,6 +211,40 @@ class ManagedAgentsSession:
                 raise TimeoutError("MA Replay branch deadline exceeded") from None
         return self.cap["run"](bounded(), timeout=self.remaining() + 5)
 
+    async def _original_material(self, material, raw):
+        """Verify existing native Files without acquiring cleanup ownership."""
+        from teamEvolver.managed_agents.client import _bounded, validate_url
+
+        lookup = self.cap.get("original_file_id")
+        ident = await lookup(self.record, material) if lookup else ""
+        if not ident:
+            return ""
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", ident):
+            return ""
+        try:
+            native = await self.client.request("GET", f"files/{ident}")
+        except MAError as exc:
+            if exc.status in {404, 410}:
+                return ""
+            raise
+        url = native.get("download_url")
+        if native.get("id") != ident or native.get("status") != "active" or not url:
+            return ""
+        validate_url(url.split("?", 1)[0], allow_loopback=self.client.allow_loopback)
+        async with self.client.download_http.stream("GET", url) as response:
+            # An expired signed URL is not a credential failure on the MA API.
+            if response.status_code in {403, 404, 410}:
+                return ""
+            if response.status_code != 200:
+                raise MAError(response.status_code, "OriginalMaterialDownloadFailed")
+            try:
+                data = await _bounded(response, len(raw))
+            except MAError as exc:
+                if exc.code == "DownloadTooLarge":
+                    return ""
+                raise
+        return ident if data == raw else ""
+
     async def _start(self):
         config = self.record["config"]
         capability = self.cap["replay_capability"](config, self.record["agent_graph"],
@@ -196,7 +283,7 @@ class ManagedAgentsSession:
             replacement[semantic_name] = {"type": "custom", "skill_id": receipt["id"],
                                           "version": str(receipt.get("version")
                                                          or receipt.get("latest_version") or "1")}
-        graph, refs = self.record["agent_graph"], {}
+        graph, refs, member_configs = self.record["agent_graph"], {}, {}
         bindings = self.record["skill_bindings"]
         target_name = self.record.get("target_skill_name")
         entry = graph["entry_agent_id"]
@@ -232,12 +319,16 @@ class ManagedAgentsSession:
                     if child.get("type") != "self":
                         child.update(refs[child["id"]])
             if ident == entry:
-                root_config = {"skills": skills}
-                if desired.get("multiagent") != agent.get("multiagent"):
-                    root_config["multiagent"] = desired["multiagent"]
+                # A source Session can override its native Agent's model or
+                # tools without changing that Agent reference/version. Freeze
+                # these controls on both sides instead of inheriting cloud values.
+                root_config = {key: copy.deepcopy(desired[key]) for key in (
+                    "system", "model", "tools", "skills", "multiagent", "context_management",
+                ) if key in desired}
                 continue
             if desired == _agent_config(agent):
                 refs[ident] = {"type": "agent", "id": ident, "version": agent["version"]}
+                member_configs[(ident, str(agent["version"]))] = desired
                 continue
             desired["name"] = "te-replay-" + hashlib.sha256((self.owner + ident).encode()).hexdigest()[:32]
             async def find_owned_agent(row, payload=desired):
@@ -252,13 +343,12 @@ class ManagedAgentsSession:
                 find_owned_agent,
             )
             refs[ident] = {"type": "agent", "id": receipt["id"], "version": receipt["version"]}
+            member_configs[(receipt["id"], str(receipt["version"]))] = desired
         environment_config = copy.deepcopy(self.record["environment"]["config"])
-        # Isolation infrastructure uses explicitly configured Replay Environment;
-        # execution packages/setup are fixed from source, keeping comparable behavior.
+        # Keep the recorded environment in both native Session sandboxes. Clear
+        # shared output storage so MA allocates per-Session output locations.
         replay_environment = self.record["replay_environment"]
-        for field in ("tos", "networking"):
-            if field in replay_environment["config"]:
-                environment_config[field] = copy.deepcopy(replay_environment["config"][field])
+        environment_config["tos"] = None
         binding = copy.deepcopy(config.get("runtime_binding") or {})
         runtime_files = {}
         # Runtime is a control variable: never install candidate runtime bytes.
@@ -284,7 +374,7 @@ class ManagedAgentsSession:
             environment_config, self.runtime_tree = self.cap["runtime_binding"](
                 environment_config, binding, runtime_files,
             )
-        resources, mounted_paths = [], set()
+        resources, mounted_paths, material_proofs = [], set(), []
         for index, material in enumerate(self.context.materials):
             raw = base64.b64decode(material["content_b64"], validate=True)
             if hashlib.sha256(raw).hexdigest() != material["sha256"] or len(raw) > 20 * 1024 * 1024:
@@ -301,20 +391,34 @@ class ManagedAgentsSession:
                 raise ReplayUnsupported("Replay materials resolve to the same mount path")
             mounted_paths.add(mount_path)
             filename = "te-replay-" + hashlib.sha256((self.owner + str(index)).encode()).hexdigest()[:24]
-            receipt = await self.effects.apply(
-                f"{self.owner}:file:{index}", "replay-file",
-                {"path": path, "filename": filename, "sha256": material["sha256"]},
-                lambda p=filename, data=raw: self.client.request(
-                    "POST", "files", data={"purpose": "agent"},
-                    files={"file": (p.rsplit("/", 1)[-1], data, "application/octet-stream")},
-                ),
-            )
-            resources.append({"type": "file", "file_id": receipt["id"], "mount_path": mount_path})
-            # Resources already mount the exact material bytes. Model document
-            # blocks accept PDF only on some pinned MA models; images/audio must
-            # remain available through the sandbox's native file/media tools.
-            self.material_blocks.append({"type": "text", "text":
-                f"Provided material {path} mounted at: /mnt/session/uploads/{mount_path}"})
+            file_id = await self._original_material(material, raw)
+            transport = "verified_original" if file_id else "uploaded"
+            if not file_id:
+                import mimetypes
+                media_type = material.get("media_type") or "application/octet-stream"
+                filename += mimetypes.guess_extension(media_type) or ""
+                receipt = await self.effects.apply(
+                    f"{self.owner}:file:{index}", "replay-file",
+                    {"path": path, "filename": filename, "sha256": material["sha256"]},
+                    lambda p=filename, data=raw, mime=media_type: self.client.request(
+                        "POST", "files", data={"purpose": "agent"},
+                        files={"file": (p.rsplit("/", 1)[-1], data, mime)},
+                    ),
+                )
+                file_id = receipt["id"]
+            resources.append({"type": "file", "file_id": file_id, "mount_path": mount_path})
+            material_proofs.append({"path": path, "sha256": material["sha256"], "size": len(raw),
+                                    "file_id": file_id, "mount_path": mount_path, "transport": transport})
+            input_type = material.get("input_type")
+            if input_type in {"video", "image"} or (
+                    input_type == "document" and material.get("media_type") == "application/pdf"):
+                source = {"type": "file", "file_id": file_id}
+                if input_type == "video" and material.get("fps") is not None:
+                    source["fps"] = material["fps"]
+                self.material_blocks.append({"type": input_type, "source": source})
+            else:
+                self.material_blocks.append({"type": "text", "text":
+                    f"Provided material {path} mounted at: /mnt/session/uploads/{mount_path}"})
         payload = {
             "agent": {"type": "agent_with_overrides", "id": entry, "version": graph["agents"][entry]["version"],
                       **root_config},
@@ -328,28 +432,60 @@ class ManagedAgentsSession:
             matches = [s for s in await self.client.listing("sessions", agent_id=entry)
                        if "te-replay:" + self.owner in tag_values(s.get("tags"))]
             return matches[0] if len(matches) == 1 else None
-        receipt = await self.effects.apply(self.owner + ":session", "replay-session", payload,
-                                            lambda: self.client.request("POST", "sessions", json=payload),
-                                            find_owned_session)
+        try:
+            receipt = await self.effects.apply(self.owner + ":session", "replay-session", payload,
+                                              lambda: self.client.request("POST", "sessions", json=payload),
+                                              find_owned_session)
+        except MAError as exc:
+            if (exc.status != 403 or exc.code != "OperationDenied.FileQuotaExceeded"
+                    or not material_proofs
+                    or any(m["transport"] != "verified_original" for m in material_proofs)):
+                raise
+            credentials = []
+            for vault_id in config.get("replay_vault_ids") or []:
+                credentials.extend(await self.client.listing(f"vaults/{vault_id}/credentials"))
+            if not any((c.get("auth") or {}).get("type") == "environment_variable"
+                       and (c.get("auth") or {}).get("secret_name") == "ARK_API_KEY" for c in credentials):
+                raise
+            environment_config = bootstrap_environment(environment_config, self.client.base_url, material_proofs)
+            payload["environment"]["config"] = environment_config
+            payload["resources"] = []
+            for index, material in enumerate(material_proofs):
+                material["transport"] = "sandbox_download"
+                material["sandbox_path"] = SANDBOX_MATERIAL_ROOT + "/" + material["mount_path"]
+                if self.material_blocks[index]["type"] == "text":
+                    self.material_blocks[index] = {"type": "text", "text":
+                        f"Provided material {material['path']} available at: {material['sandbox_path']}"}
+            # The rejected intent stays immutable. This distinct, owned intent
+            # copies the same verified inputs without allocating native Files.
+            receipt = await self.effects.apply(self.owner + ":session:material-bootstrap", "replay-session", payload,
+                                              lambda: self.client.request("POST", "sessions", json=payload),
+                                              find_owned_session)
         self.session_id = receipt["id"]
         actual = await self.client.request("GET", f"sessions/{self.session_id}")
         actual_agent, actual_env = actual.get("agent") or {}, actual.get("environment") or {}
         if (actual_agent.get("id") != entry
                 or str(actual_agent.get("version")) != str(graph["agents"][entry]["version"])
-                or actual_agent.get("skills") != root_config["skills"]
+                or not _same_agent_fields(actual_agent, root_config, member_configs)
                 or actual_env.get("id") != replay_environment["id"]
-                or actual_env.get("config") != environment_config):
+                or not _same_environment(actual_env.get("config"), environment_config)
+                or (actual.get("vault_ids") or []) != (config.get("replay_vault_ids") or [])):
             raise ReplayUnsupported("MA Session readback differs from the frozen execution target")
         self.execution_snapshot = {
             "session_id": self.session_id, "agent_id": entry,
             "agent_version": str(actual_agent["version"]), "environment_id": actual_env["id"],
+            "vault_ids": list(actual.get("vault_ids") or []),
             "environment_config_sha256": hashlib.sha256(
                 json.dumps(actual_env["config"], sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
             "runtime_tree_sha256": self.runtime_tree,
             "runtime_ready_verified": False,
             "agent_override_fields": sorted(root_config),
-            "skills": copy.deepcopy(actual_agent["skills"]),
-            "materials": [{"path": m["path"], "sha256": m["sha256"]} for m in self.context.materials],
+            "agent_execution_config_sha256": hashlib.sha256(json.dumps({
+                key: actual_agent[key] for key in ("system", "model", "tools", "context_management")
+                if key in root_config
+            }, sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
+            "skills": copy.deepcopy(actual_agent.get("skills") or []),
+            "materials": material_proofs,
         }
         await self.cap["save_artifact"](
             "ma-session-snapshot.json", json.dumps(self.execution_snapshot, sort_keys=True).encode(), self.owner,
@@ -462,15 +598,14 @@ class ManagedAgentsSession:
                     processed = {e["id"] for e in current if e.get("processed_at")}
                     if not accepted_ids <= processed:
                         continue
-                    _raise_session_error(current)
-                    if any(e.get("stop_reason", {}).get("type") == "requires_action" for e in current
-                           if e.get("type") in {"session.status_idle", "session.thread_status_idle"}):
-                        raise ReplayUnsupported("MA requires human tool confirmation; no result is fabricated")
+                    _raise_replay_error(current)
                     last_end = stable_end(current)
                     if last_end:
                         history, children_done = await self._history()
                         collected.update({e["id"]: e for e in history if e["id"] not in self.seen})
-                        actual_end = stable_end(complete(collected.values()))
+                        final_events = complete(collected.values())
+                        _raise_replay_error(final_events)
+                        actual_end = stable_end(final_events)
                         if children_done and actual_end and actual_end["id"] == last_end["id"]:
                             completed = True
                             break
@@ -488,7 +623,7 @@ class ManagedAgentsSession:
             raise TimeoutError("MA turn did not reach stable end_turn")
         events = complete(collected.values())
         self.seen.update(e["id"] for e in events)
-        _raise_session_error(events)
+        _raise_replay_error(events)
         if probe:
             results = [e for e in events if e.get("type") in {
                 "agent.tool_result", "agent.mcp_tool_result", "user.tool_result", "user.custom_tool_result",

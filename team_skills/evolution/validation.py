@@ -153,6 +153,10 @@ class TrueReplayValidator:
             verdict = summary.get("verdict") or "inconclusive"
         return {
             **summary, "verdict": verdict, "accepted": verdict == "accept", "runtime_gate": gate,
+            "reason": ({"accept": "Selected Candidate checklist satisfied",
+                        "reject": "Selected Candidate violated execution rules",
+                        "inconclusive": "Selected Candidate checklist incomplete"}[verdict]
+                       if lightweight else summary.get("reason", "")),
             "total": len(selected), "completed": len(results), "succeeded": succeeded,
             "failed": len(results) - (completed_candidates if lightweight else succeeded),
             "datasets": datasets, "sampling": copy.deepcopy(job.get("replay_sampling") or {}),

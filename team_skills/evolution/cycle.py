@@ -5,13 +5,15 @@ import asyncio
 import copy
 
 from session_ingestion.queries import SessionQueries
+from team_replay.fingerprints import execution_provenance
 from team_skills.candidates.repository import CandidateRepository, CandidateStateError
 from team_skills.candidates.static_checks import validate_candidate_bundle
 from team_skills.config import SkillsModuleConfig
-from team_skills.evolution.candidate_pipeline import load_command, submit_validation
+from team_skills.evolution.candidate_pipeline import load_command, recover_failed_validations, submit_validation
 from team_skills.evolution.history import evolution_feedback, skill_payload
 from team_skills.evolution.kernel.bundle_changes import materialize_bundle_changes, select_editable_files
 from team_skills.evolution.kernel.enums import NO_SKILL_KEY, DecisionAction
+from team_skills.evolution.pending import PendingCandidates
 from team_skills.evolution.repository import EvolutionRepository, evidence_projection
 from team_skills.evolution.session_processing import after_reset, evidence_gap, groups, load_sessions
 from team_skills.experiences.patterns import compact_context
@@ -28,17 +30,76 @@ RESOURCE_HEARTBEAT_SECONDS = 15
 
 async def _prepare_branch(task, services, *, name, planning, current, names, context,
                           working_bundle, editable, config, planner, case_synthesizer, library_reader,
-                          guard, handle):
+                          guard, handle, pending):
     """Fork from frozen Evidence and join before any Candidate write."""
     async def propose():
         result = await asyncio.wait_for(
             planner(name=name, sessions=planning, current=current, names=names, context=context,
-                    config=config, library_reader=library_reader), timeout=PLANNER_TIMEOUT_SECONDS,
+                    config=config, library_reader=library_reader,
+                    candidate_reader=pending.read if pending.items else None), timeout=PLANNER_TIMEOUT_SECONDS,
         )
         result = result or {"action": DecisionAction.SKIP, "rationale": "planner returned no proposal"}
+        if result.get("target_candidate_id"):
+            target, bundle, sources, conflicts, inputs = await pending.prepare(
+                result, context=context, config=config, current=current,
+            )
+            target_current = skill_payload(target["skill_name"], bundle)
+            target_editable = select_editable_files(
+                bundle, extensions=config.get("bundle_text_extensions"),
+                max_file_bytes=config.get("bundle_edit_max_bytes"),
+                max_prompt_bytes=config.get("bundle_prompt_max_bytes"),
+            )
+            if result.get("action") == DecisionAction.MERGE:
+                from team_skills.evolution.source_context import contract_card
+                merger = getattr(services, "extras", {}).get("skill_merger") or getattr(planner, "merge", None)
+                if merger is None:
+                    raise RuntimeError("skill_merger collaborator is required for merge_skill")
+                merged = await asyncio.wait_for(merger(
+                    target_current, sources, config=config, context={
+                        "source_contracts": contract_card(planning),
+                        "new_evidence": [{"session_id": s["session_id"], "summary": s.get("_summary")}
+                                         for s in planning],
+                        "rationale": result.get("rationale"),
+                        "target_editable_files": target_editable,
+                        "file_conflicts_requiring_explicit_upsert": sorted(conflicts),
+                    },
+                ), timeout=PLANNER_TIMEOUT_SECONDS)
+                if not merged:
+                    raise CandidateStateError("Merge stage returned no consolidated Skill")
+                proposed = {**target_current, **merged}
+            else:
+                proposed = {**target_current, **(result.get("skill") or {})}
+            if proposed.get("name") != target["skill_name"]:
+                raise CandidateStateError("selected Candidate name must be preserved")
+            resolved = {change["path"] for change in proposed.get("file_changes") or []
+                        if change.get("operation") == "upsert" and isinstance(change.get("content"), str)}
+            if conflicts - resolved:
+                raise CandidateStateError(f"unresolved Bundle file conflicts: {sorted(conflicts - resolved)}")
+            material, diff = materialize_bundle_changes(
+                proposed, current_bundle=bundle, file_changes=proposed.get("file_changes") or [],
+                editable_paths=target_editable, extensions=config.get("bundle_text_extensions"),
+                max_file_bytes=config.get("bundle_edit_max_bytes"), allow_delete=config.get("bundle_allow_delete"),
+            )
+            material["_pending_inputs"] = inputs
+            material["_target_base_version"] = target["base_version"]
+            material["_target_candidate_revision"] = target["revision"]
+            async with services.tx.tenant_tx(task.tenant_id) as conn:
+                library = SkillLibraryRepository(services.tx)
+                head = await library.get_skill(conn, target["skill_name"])
+                if head and head.get("backend") == "managed-agents":
+                    material["_baseline_bundle"] = encode_bundle_payload(
+                        await library.read_version_bundle(conn, target["skill_name"], head["version"]),
+                    )
+            if (head["version"] if head else 0) != target["base_version"]:
+                raise CandidateStateError("selected Candidate published baseline changed")
+            material["_target_reset_at"] = head.get("evolution_reset_at") if head else None
+            static = await asyncio.to_thread(validate_candidate_bundle, material)
+            return result, material, diff, static
         if result.get("action") == DecisionAction.SKIP or not result.get("skill"):
             return result, None, {}, {}
         proposed = dict(result["skill"])
+        if not current and any(item["skill_name"] == proposed.get("name") for item in pending.items.values()):
+            raise CandidateStateError("select the existing Candidate explicitly with target_candidate_id")
         if current:
             proposed = {**current, **proposed, "name": name}
             if result["action"] == DecisionAction.OPTIMIZE_DESC:
@@ -88,7 +149,7 @@ async def _prepare_branch(task, services, *, name, planning, current, names, con
     dataset_work = asyncio.create_task(asyncio.wait_for(
         case_synthesizer(
             skill_name=name, sessions=copy.deepcopy(planning), candidate_skill={},
-            evidence_context=copy.deepcopy(context),
+            evidence_context=copy.deepcopy({k: v for k, v in context.items() if k != "pending_candidates"}),
         ), timeout=CASE_SYNTHESIS_TIMEOUT_SECONDS,
     ))
     proposal_work = asyncio.create_task(propose())
@@ -171,15 +232,28 @@ class LLMSkillPlanner:
     def __init__(self, llm):
         self.llm = llm
 
-    async def __call__(self, *, name, sessions, current, names, context, config, library_reader):
+    async def __call__(self, *, name, sessions, current, names, context, config, library_reader,
+                       candidate_reader=None):
         from team_skills.evolution.stages.execute import create_skill_from_sessions, evolve_skill_from_sessions
 
         if name == NO_SKILL_KEY:
             return await create_skill_from_sessions(
                 self.llm, sessions, names, evolution_context=context, library_reader=library_reader,
+                candidate_reader=candidate_reader,
             )
         return await evolve_skill_from_sessions(
             self.llm, name, sessions, current, names, evolution_context=context,
+            candidate_reader=candidate_reader,
+        )
+
+    async def merge(self, target, sources, *, context, config=None):
+        import json
+
+        from team_skills.evolution.stages.execute import execute_merge
+        return await execute_merge(
+            self.llm, target,
+            {"name": target["name"], "content": json.dumps(sources, ensure_ascii=False)},
+            evolution_context=context,
         )
 
 
@@ -213,6 +287,8 @@ async def _cycle(task, services, p, config, planner, case_synthesizer, payloads,
     repo = EvolutionRepository(services.tx)
     library = SkillLibraryRepository(services.tx)
     cands = CandidateRepository(services.tx)
+    await recover_failed_validations(services, task.tenant_id)
+    pending_catalog = await PendingCandidates.load(cands, services.tx, task.tenant_id, config)
     manual_ids = set(p.get("session_ids") or []) if p.get("reprocess") is True else set()
     descriptors = await _inputs(task, services, p, repo)
     sessions = await load_sessions(descriptors, payloads)
@@ -245,6 +321,7 @@ async def _cycle(task, services, p, config, planner, case_synthesizer, payloads,
             )
         boundary = head.get("evolution_reset_at") if head else None
         group = [s for s in group if s["session_id"] in manual_ids or after_reset(s, boundary)]
+        exclusion_reasons = []
         fingerprints = getattr(services, "extras", {}).get("ma_automatic_fingerprints")
         if fingerprints:
             from team_replay.fingerprints import ineligibility_reason
@@ -258,6 +335,8 @@ async def _cycle(task, services, p, config, planner, case_synthesizer, payloads,
                             continue
                         reason = ineligibility_reason(item, current_execution)
                         if reason:
+                            if source is group:
+                                exclusion_reasons.append(reason)
                             await repo.archive_evidence(conn, name, item["session_id"], reason)
                         else:
                             output.append(item)
@@ -268,7 +347,8 @@ async def _cycle(task, services, p, config, planner, case_synthesizer, payloads,
                 )
         if not group:
             return {"skill_name": name, "session_ids": [], "action": "skip",
-                    "rationale": "Previous Skill Evidence archived after manual update"}
+                    "rationale": "; ".join(sorted(set(exclusion_reasons)))
+                    or "Previous Skill Evidence archived after manual update"}
         if saved is not None:
             if boundary and saved.get("evolution_reset_at") != boundary.isoformat():
                 return {"skill_name": name, "session_ids": [], "action": "skip",
@@ -284,10 +364,12 @@ async def _cycle(task, services, p, config, planner, case_synthesizer, payloads,
         current_ids = {s["session_id"] for s in group}
         planning = group + [s for s in historical if s["session_id"] not in current_ids]
         context = {
+            "pending_candidates": pending_catalog.cards(),
             "skill_name": name, "total_evidence_sessions": len(planning),
             "current_session_count": len(group), "active_candidate_job_id": live["candidate_id"] if live else "",
             "active_candidate_feedback": evolution_feedback(live["evaluation"]) if live else {},
             "experience_patterns": pattern_context,
+            "execution_provenance": [provenance for s in planning if (provenance := execution_provenance(s))],
         }
         manual = {
             "command_id": task.task_id, "actor": p.get("actor", ""),
@@ -316,11 +398,14 @@ async def _cycle(task, services, p, config, planner, case_synthesizer, payloads,
                 task, services, name=name, planning=planning, current=current, names=names, context=context,
                 working_bundle=working_bundle, editable=editable, config=config, planner=planner,
                 case_synthesizer=case_synthesizer, library_reader=library_reader, guard=guard, handle=handle,
+                pending=pending_catalog,
             )
         record = {
             "skill_name": name, "session_ids": [s["session_id"] for s in group],
             "action": "skip", "rationale": str(result.get("rationale") or ""),
             "evolution_reset_at": boundary.isoformat() if boundary else None,
+            "execution_provenance": context["execution_provenance"],
+            "agent_audit": result.get("agent_audit") or [],
         }
         if manual:
             record["manual_reprocess"] = context["manual_reprocess"]
@@ -351,9 +436,12 @@ async def _cycle(task, services, p, config, planner, case_synthesizer, payloads,
             if material:
                 if "_target_base_version" in material:
                     head = await library.get_skill(conn, material["name"])
-                    if not head or head["version"] != material["_target_base_version"]:
+                    if (head["version"] if head else 0) != material["_target_base_version"]:
                         raise CandidateStateError("published Skill changed while the planner was running")
                 head = latest_head
+                merge_inputs = material.get("_pending_inputs") or []
+                if merge_inputs:
+                    await cands.lock_merge_inputs(conn, tenant_id=task.tenant_id, inputs=merge_inputs)
                 # A human edit while the model worked invalidates this proposal.
                 latest = await cands.live_for_skill(conn, material["name"])
                 expected_candidate = material.get("_target_candidate_revision", live["revision"] if live else 0)
@@ -367,10 +455,14 @@ async def _cycle(task, services, p, config, planner, case_synthesizer, payloads,
                         "rationale": record["rationale"], "session_ids": record["session_ids"],
                         "pattern_refs": pattern_refs,
                         "evidence_classification": result.get("evidence_classification") or {},
+                        "agent_audit": result.get("agent_audit") or [],
                         "evolution_context": context, "replay_cases": candidate_cases,
+                        "execution_provenance": context["execution_provenance"],
                         "edit_summary": material.get("edit_summary") or {},
                         "file_changes": material.get("file_changes") or [], "bundle_diff": diff,
                         "static_validation": static,
+                        **({"candidate_consolidation": {"inputs": merge_inputs, "action": str(result["action"])}}
+                           if merge_inputs else {}),
                         **({"baseline_bundle": material.get("_baseline_bundle") or encode_bundle_payload(published),
                             "baseline_identity": {
                                 "backend": "managed-agents", "skill_id": head["skill_id"],
@@ -379,8 +471,14 @@ async def _cycle(task, services, p, config, planner, case_synthesizer, payloads,
                         **({"manual_reprocess": manual} if manual else {}),
                     },
                 )
+                if merge_inputs:
+                    await cands.finish_merge(
+                        conn, tenant_id=task.tenant_id, target=candidate, inputs=merge_inputs,
+                    )
                 record.update(action="candidate_created", candidate_id=candidate["candidate_id"],
                               candidate_revision=candidate["revision"])
+                if merge_inputs:
+                    record["merged_candidate_ids"] = [item["candidate_id"] for item in merge_inputs[1:]]
                 if config.get("auto_evaluate"):
                     mode = "auto" if config.get("publish_mode") == "automatic" else "evaluate"
                     try:

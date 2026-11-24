@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
+import mimetypes
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
+
+import httpx
 
 from session_ingestion.submission import SUBMISSION_REVISION, apply_submission, submission_metadata
 from teamEvolver.managed_agents import MAError
@@ -15,7 +20,7 @@ from .discovery import agent_graph
 from .repository import MARepository
 from .schemas import canonical, digest
 
-PROJECTION_REVISION = "ma-child-traces-v3"
+PROJECTION_REVISION = "ma-session-inputs-v5"
 
 
 async def save_object(services, tenant_id, category, data):
@@ -61,7 +66,16 @@ async def runtime_snapshot(client, session):
     if not isinstance(environment, dict) or not isinstance(environment.get("config"), dict):
         return {"agent_graph": graph, "snapshot_missing": True,
                 "snapshot_reason": "Session Environment config snapshot is unavailable"}
-    return {"agent_graph": graph, "environment": environment, "snapshot_missing": False}
+    # Native readback uses null for an explicitly empty Vault list. Absence of
+    # the field still means we have no recorded credential-binding evidence.
+    vault_ids = session.get("vault_ids")
+    if "vault_ids" in session and vault_ids is None:
+        vault_ids = []
+    if not isinstance(vault_ids, list) or any(not isinstance(v, str) or not v for v in vault_ids):
+        return {"agent_graph": graph, "environment": environment, "snapshot_missing": True,
+                "snapshot_reason": "Session Vault references are unavailable"}
+    return {"agent_graph": graph, "environment": environment, "vault_ids": list(vault_ids),
+            "snapshot_missing": False}
 
 
 async def materials(client, events, services, tenant_id, resources=()):
@@ -91,6 +105,8 @@ async def materials(client, events, services, tenant_id, resources=()):
                     if not url:
                         raise ValueError("File download URL is unavailable")
                     data = await download_url(client, url, 20 * 1024 * 1024)
+                elif source.get("type") == "url" and source.get("url"):
+                    data = await download_url(client, source["url"], 20 * 1024 * 1024)
                 else:
                     # URL attachments need explicit archived bytes; do not invent inputs.
                     raise ValueError("External attachment bytes are unavailable")
@@ -102,22 +118,44 @@ async def materials(client, events, services, tenant_id, resources=()):
                 seen.add(sha)
                 total += len(data)
                 saved = await save_object(services, tenant_id, "materials", data)
+                mime = (source.get("media_type")
+                        or mimetypes.guess_type(urlsplit(source.get("url") or "").path)[0]
+                        or "application/octet-stream")
                 output.append({"path": source.get("mount_path") or f"uploads/{ident or sha[:20]}", **saved,
                                "content_b64": base64.b64encode(data).decode(),
-                               "media_type": source.get("media_type", "application/octet-stream"),
+                               "media_type": mime, "input_type": block.get("type"),
+                               **({"fps": source["fps"]} if "fps" in source else {}),
                                "original_file_id": ident})
-            except (ValueError, KeyError, RuntimeError):
-                missing.append({"file_id": ident, "reason": "input bytes unavailable or limit exceeded"})
+            except (ValueError, KeyError, RuntimeError, httpx.HTTPError) as exc:
+                reason = exc.code if isinstance(exc, MAError) else (
+                    "input_download_transport_failed" if isinstance(exc, httpx.HTTPError)
+                    else "input_bytes_unavailable_or_limit_exceeded")
+                missing.append({"file_id": ident, "input_type": block.get("type"), "reason": reason})
     return output, missing
 
 
 async def download_url(client, url, limit):
+    for attempt in range(3):
+        try:
+            return await _download_url(client, url, limit)
+        except (MAError, httpx.HTTPError) as exc:
+            if attempt == 2 or (isinstance(exc, MAError) and exc.status < 500 and exc.status != 429):
+                raise
+            await asyncio.sleep(0.25 * (2 ** attempt))
+
+
+async def _download_url(client, url, limit):
     from teamEvolver.managed_agents.client import MAError, _bounded, validate_url
-    validate_url(url.split("?", 1)[0], allow_loopback=client.allow_loopback)
-    async with client.download_http.stream("GET", url) as response:
-        if response.status_code != 200:
-            raise MAError(response.status_code, "FileDownloadFailed")
-        return await _bounded(response, limit)
+    for _ in range(5):
+        validate_url(url.split("?", 1)[0], allow_loopback=client.allow_loopback)
+        async with client.download_http.stream("GET", url) as response:
+            if response.status_code in (301, 302, 303, 307, 308):
+                url = str(response.url.join(response.headers.get("location", "")))
+                continue
+            if response.status_code != 200:
+                raise MAError(response.status_code, "FileDownloadFailed")
+            return await _bounded(response, limit)
+    raise MAError(502, "DownloadRedirectLimit")
 
 
 async def collect_one(task, services, client, connection, session_id, excluded):
@@ -245,6 +283,7 @@ async def collect_one(task, services, client, connection, session_id, excluded):
         "runtime_context": {"user_id": user_id, "account_id": task.tenant_id,
                             "source_session_id": session_id, "connection_id": task.subject_id,
                             "formal_session_id": formal_session_id,
+                            "resources": session.get("resources") or [],
                             "user_attribution": submission["user_attribution"]},
         "turns": projected, "messages": [m for t in projected for m in t["messages"]],
         "business_time": projected[0]["timestamp"], "timestamp": projected[0]["timestamp"],

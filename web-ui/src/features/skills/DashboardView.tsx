@@ -19,6 +19,8 @@ import SessionTable from "@/features/sessions/components/SessionTable";
 import { useSessionList,type SessionListFilters } from "@/features/sessions/hooks/useSessionList";
 import { hydrateCandidates,mergeCandidateFeedback,type Candidate,type CandidateFeedback,type SkillListResp,type StatusResp } from "@/features/skills/api/client";
 import { runSkillCommand } from "@/features/skills/api/skillJobs";
+import { candidateBaseline } from "@/features/skills/provenance";
+import { bindingStatus } from "@/features/skills/bindingStatus";
 import CandidateModal from "@/features/skills/dashboard/CandidateModal";
 import SessionModal,{ type SessTab } from "@/features/skills/dashboard/SessionModal";
 import SetupChecklist from "@/features/skills/dashboard/SetupChecklist";
@@ -195,13 +197,14 @@ export default function DashboardView({
     setCands((items) => items.map((item) => item.job_id === jobId ? mergeCandidateFeedback(item, feedback) : item));
   }, []);
 
-  const evaluate = useCallback(async (jobId: string, force: boolean) => {
+  const evaluate = useCallback(async (jobId: string, force: boolean, method: "auto" | "full_ab" = "auto") => {
     if (evaluatingRef.current[jobId]) return;
     setEvaluating((m) => ({ ...m, [jobId]: true }));
     try {
       const r = await runSkillCommand<EvalResult & { status?: string }>(
         `/api/skill-candidates/${encodeURIComponent(jobId)}/evaluate${force ? "?refresh=true" : ""}`,
-        { method: "POST" }
+        { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ validation_method: method }) }
       );
       if (r && r.status !== "not_found") {
         setEvalCache((m) => ({ ...m, [jobId]: r }));
@@ -324,32 +327,42 @@ export default function DashboardView({
   }, [active, refresh]);
 
   // ---- actions ---- //
-  async function validate(jobId: string, mode: "auto" | "force") {
+  async function validate(jobId: string, mode: "auto" | "force", revision?: number) {
     const msg =
       mode === "force"
-        ? "确认强制发布该候选技能？（仍保留 True Replay 三项指标）"
-        : "确认按 True Replay 发布？双方全部 Checklist 满足后，先比较轮次；轮次持平时再比较工具调用和 Token。";
+        ? "确认强制采纳并发布该候选技能？将跳过重新评估和执行验证，保留原结论；仍检查内容与基线版本。"
+        : "确认按当前验证结论发布该候选技能？";
     if (!window.confirm(msg)) return;
     try {
-      const r = await runSkillCommand<{ status?: string; version?: number; feedback?: CandidateFeedback }>(
+      const r = await runSkillCommand<{
+        status?: string; version?: number; accepted?: boolean; reason?: string;
+        evaluation?: EvalResult; feedback?: CandidateFeedback; deployment_status?: string;
+      }>(
         `/api/skill-candidates/${encodeURIComponent(jobId)}/validate`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode }),
+          body: JSON.stringify({ mode, ...(revision ? { candidate_revision: revision } : {}) }),
         }
       );
+      if (r.accepted === false || ["stale", "rejected", "inconclusive", "blocked"].includes(r.status || "")) {
+        throw new Error(r.reason || r.evaluation?.replay?.reason || `发布未完成：${r.status || "未通过发布门禁"}`);
+      }
       if (r.feedback) handleFeedbackSaved(jobId, r.feedback);
-      toastOk("发布结果", (r.status || "done") + (r.version ? ` (v${r.version})` : ""));
+      setCands(items => items.filter(item => item.job_id !== jobId));
+      setCandidateTotal(total => Math.max(0, total - 1));
+      toastOk("发布结果", (r.deployment_status === "bound" ? "已发布并挂载"
+        : r.deployment_status === "unbound" ? "已发布，未挂载" : r.status || "done") + (r.version ? ` (v${r.version})` : ""));
       setEvalCache((m) => {
         const n = { ...m };
         delete n[jobId];
         return n;
       });
       if (candJobId === jobId) setCandJobId(null);
-      refresh(true);
+      await refresh(true);
     } catch (e: any) {
       toastErr("发布失败", e.message);
+      throw e;
     }
   }
 
@@ -573,6 +586,7 @@ export default function DashboardView({
                 <tr key={c.job_id}>
                   <td className="link border-b border-line px-4 py-2.5 align-top" onClick={open}>
                     {c.skill_name}
+                    <div className="mt-1 text-xs text-muted-foreground">{candidateBaseline(c)}</div>
                   </td>
                   <Td>
                     <Pill tone="blue">{c.proposed_action || "-"}</Pill>
@@ -580,7 +594,7 @@ export default function DashboardView({
                   <td className="link border-b border-line px-4 py-2.5 align-top" onClick={open}>
                     {busy ? (
                       <Pill tone="amber">
-                        评估中{c.replay_progress ? ` ${c.replay_progress.completed}/${c.replay_progress.total}` : "…"}
+                        {c.publication_pending ? "发布中…" : `评估中${c.replay_progress ? ` ${c.replay_progress.completed}/${c.replay_progress.total}` : "…"}`}
                       </Pill>
                     ) : ev ? (
                       <Pill tone={ev.replay?.error ? "amber" : "blue"}>{ev.replay?.error ? "回放失败" : "评估结束"}</Pill>
@@ -697,6 +711,9 @@ export default function DashboardView({
                       <Td className="mono">{s.skill_id || "-"}</Td>
                       <Td>
                         <Pill tone="green">v{v}</Pill>
+                        {s.connection_id && <span className="ml-2">
+                          <Pill tone={bindingStatus(s).tone}>{bindingStatus(s).label}</Pill>
+                        </span>}
                       </Td>
                       <td className="border-b border-line px-4 py-2.5 align-top">
                         <div className="flex items-center gap-2">
@@ -767,9 +784,9 @@ export default function DashboardView({
         onRetryDetail={() => candJobId && void loadCandidateDetail(candJobId)}
         open={!!candJobId}
         showFeedback={false}
-        onPublish={(mode) => candJobId && validate(candJobId, mode)}
+        onPublish={async (mode, revision) => { if (candJobId) await validate(candJobId, mode, revision); }}
         onClose={() => setCandJobId(null)}
-        onEvaluate={(force) => candJobId && evaluate(candJobId, force)}
+        onEvaluate={(force, method) => candJobId && evaluate(candJobId, force, method)}
       />
     </div>
   );

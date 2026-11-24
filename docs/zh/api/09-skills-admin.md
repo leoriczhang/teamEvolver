@@ -1,6 +1,8 @@
 # 团队 Skill 库 API
 
-MA Skill 使用云端原生内容和版本，以下接口直接路由到 MA；`connection_id` 查询参数选择连接，跨连接同名时必须指定。查询返回 `skill_backend: "managed-agents"`、原生 `skill_id`、最新 `version` 和成员实际 `bound_version`。写入返回 `202`、`job_id`、`status_url` 和 `result_url`，只有云端上传和 Agent 引用回读完成后才发布。回滚将历史包创建为新云端版本，删除先解绑再删除；历史 TE 导入不作为当前内容。详见 [MA API](./24-managed-agents.md)。
+MA Skill 使用云端原生内容和版本，以下接口直接路由到 MA；`connection_id` 查询参数选择连接，跨连接同名时必须指定。查询返回 `skill_backend: "managed-agents"`、原生 `skill_id`、最新 `version` 和成员实际 `bound_version`。写入返回 `202`、`job_id`、`status_url` 和 `result_url`，只有云端上传和 Agent 引用回读完成后才发布。回滚创建新云端版本，删除先解绑再删除；历史 TE 导入不作为当前内容。详见 [MA API](./24-managed-agents.md)。
+
+云端已有版本不等于 Agent 已挂载。`bound_versions` 记录各成员实际引用；空映射表示未挂载。任务结果通过 `deployment_status` 和 `bound_agents` 区分状态。新 Candidate 默认绑定所选连接入口；手工创建未挂载资源仍被允许。内容相同时复用原版本，但不会跳过成员引用核对。
 
 非 MA 团队 Skill 库保存在 PostgreSQL：`skills` 记录当前版本，`skill_versions` 记录每个不可变版本，bundle 文件按内容寻址存储。写入在一个事务内生成新版本，所有 API 副本读取同一份数据；本机运行缓存失败不影响已提交版本。
 
@@ -43,9 +45,13 @@ Agent 拉取见 [Skill 拉取](./06-skill-sync.md)。个人 Skill（`/api/users/
 
 `versions` 不含删除产生的墓碑版本，`history` 包含全部版本。
 
+每条 `history` 记录包含 `provenance`：`kind` 为 `manual`（用户上传、修改、导入或回滚）、`te`（TE 候选发布）或 `unknown`（来源未记录），并提供 `source`、`actor`、`action`、`base_version`、`candidate_id` 和 `user_modified`。来源按该版本对应的发布记录判断；管理员强制发布 TE 候选仍属于 `te`。MA 仅使用同租户、同连接及同原生 Skill ID 的已回读确认发布回执，不能从缺少候选记录推断为用户上传。
+
 ### GET /api/skills/{name}/versions/{version}
 
 指定版本的 `content`、`raw_md`、`files`（`path`、`sha256`、`size`）、`tree_sha256`、`is_current`，以及 `evolution`：该版本由哪个进化周期或 Candidate 产生。
+
+同时返回该版本的 `provenance` 和完整 `history`，保留原有数字数组 `versions`。候选列表与详情返回 `base_version` 及 `baseline`（`skill_name`、`version`、`kind`；MA 基线含已保存的资源身份），记录生成时使用的 Skill 版本，不随最新版本变化；`kind: "new"` 表示新建技能没有基线。
 
 ## 写入
 

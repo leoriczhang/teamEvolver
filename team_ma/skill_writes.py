@@ -1,12 +1,13 @@
 """Fenced cloud Skill edits, native versions, deployment and durable receipts."""
 from __future__ import annotations
 
+import re
+
 from team_skills.library.bundle import bundle_tree_sha256, decode_bundle_payload
 
 from .discovery import agent_graph, graph_postorder, skill_archive
 from .effects import Effects
 from .repository import MARepository
-from .schemas import digest
 from .synchronization import update_agent
 
 
@@ -14,6 +15,9 @@ async def write_skill(task, services, client, connection, operation):
     provider, repo = services.extras["cloud_skill_provider"], MARepository(services.tx)
     request = operation["input"]["request"]
     name, ident, base = request["name"], request["skill_id"], request["base_version"]
+    action = request["action"]
+    if request["metadata"].get("candidate_id") and not request["agents"]:
+        raise ValueError("Candidate publication requires at least one target MA member")
     effect_id = task.task_id + ":skill"
     effects = Effects(services, task.tenant_id, task.subject_id, task.task_id, task=task)
     async with services.tx.tenant_tx(task.tenant_id) as conn:
@@ -22,6 +26,12 @@ async def write_skill(task, services, client, connection, operation):
         validator = services.extras.get("cloud_candidate_guard")
         if validator:
             await validator(conn, task, request)
+        if action == "bind":
+            current = next((r["record"] for r in await repo.all_resources(conn, task.subject_id, kind="skill")
+                            if r["logical_name"] == name), {})
+            if set(current.get("desired_agents") or []) != set(request["agents"]):
+                raise ValueError("MA target members changed after acceptance; reload before binding")
+    reuse_version = action == "bind" or request.get("no_change")
     # A confirmed upload can be resumed even though it already advanced the head.
     if not prior_effect or prior_effect["status"] == "failed":
         if ident:
@@ -29,28 +39,23 @@ async def write_skill(task, services, client, connection, operation):
             latest = int(remote.get("latest_version") or 0)
             if latest != base and not (request["action"] == "delete" and latest == 0):
                 raise ValueError("Cloud Skill changed after acceptance; reload before publishing")
+            # MA titles belong to native versions. Identical bytes still need
+            # a new version to replace an old internal recovery label.
+            if action != "bind" and re.fullmatch(r"te-[0-9a-f]{32}", remote.get("display_title") or ""):
+                reuse_version = False
         elif base:
             raise ValueError("New cloud Skill cannot have an existing base version")
-    action = request["action"]
-    if request.get("no_change"):
+    if prior_effect and prior_effect["kind"] == "cloud-skill-version":
+        reuse_version = False
+    if reuse_version:
         meta, bundle = await provider.fetch_version(task.tenant_id, connection, client, ident, name, base)
-        if meta["tree_sha256"] != bundle_tree_sha256(decode_bundle_payload(request["bundle"])):
+        if request.get("bundle") is not None and (
+            meta["tree_sha256"] != bundle_tree_sha256(decode_bundle_payload(request["bundle"]))
+        ):
             raise ValueError("Cloud unchanged package readback mismatch")
-        result = {
-            "name": name, "skill_id": ident, "version": base, "previous_version": base,
-            "action": action, "status": "unchanged", "skill_backend": "managed-agents",
-            "mutation_id": request["mutation_id"], "files": sorted(bundle), "written": [],
-            "cloud": {"synced": True}, "readback_verified": True,
-        }
-        async with services.tx.tenant_tx(task.tenant_id) as conn:
-            await services.tasks.require_current(conn, task)
-            if request["metadata"].get("candidate_id"):
-                await services.extras["cloud_skill_committed"](
-                    conn, task, request, result, {"latest_version": str(base)},
-                )
-            await repo.checkpoint(conn, task.task_id, {}, result)
-        return result
-    if action == "delete":
+        version, tree = base, meta["tree_sha256"]
+        receipt = {"id": ident, "version": str(base), "reused": True}
+    elif action == "delete":
         async def remove():
             from teamEvolver.managed_agents import MAError
             versions = await client.listing(f"skills/{ident}/versions")
@@ -108,35 +113,45 @@ async def write_skill(task, services, client, connection, operation):
         from team_skills.transfer.packages import package
         archive = skill_archive(package(name, bundle))
         tree = bundle_tree_sha256(bundle)
-        title = "te-" + digest([task.tenant_id, task.task_id])[:32]
+        intent = {"skill_id": ident, "name": name, "base_version": base, "tree_sha256": tree}
+        if prior_effect:
+            # In-flight effects retain their immutable intent and legacy
+            # recovery title across upgrades.
+            if any(prior_effect["intent"].get(k) != v for k, v in intent.items()):
+                raise ValueError("Cloud Skill upload intent changed")
+            intent = prior_effect["intent"]
+        else:
+            intent["title"] = name
+            if not ident:
+                intent["existing_skill_ids"] = sorted(s["id"] for s in await client.listing("skills", source="custom"))
+        title = intent["title"] if not ident else name
 
         async def recover(row):
-            sid = ident
-            if not sid:
-                matches = [s for s in await client.listing("skills", source="custom")
-                           if s.get("display_title") == title and s.get("name") == name]
-                if len(matches) != 1:
-                    return None
-                sid = matches[0]["id"]
+            frozen = row["intent"]
+            ids = [ident] if ident else [
+                s["id"] for s in await client.listing("skills", source="custom")
+                if s.get("display_title") == frozen["title"] and s.get("name") == name
+                and s["id"] not in frozen.get("existing_skill_ids", [])
+            ]
             matches = []
-            for item in await client.listing(f"skills/{sid}/versions"):
-                native = int(item["version"])
-                if native <= base:
-                    continue
-                meta, _ = await provider.fetch_version(task.tenant_id, connection, client, sid, name, native)
-                if meta["tree_sha256"] == tree:
-                    matches.append({"id": sid, "version": str(native)})
+            for sid in ids:
+                for item in await client.listing(f"skills/{sid}/versions"):
+                    native = int(item["version"])
+                    if native <= base:
+                        continue
+                    meta, _ = await provider.fetch_version(task.tenant_id, connection, client, sid, name, native)
+                    if meta["tree_sha256"] == tree:
+                        matches.append({"id": sid, "version": str(native)})
             return matches[0] if len(matches) == 1 else None
 
         async def upload():
-            result = await client.upload_skill(name, archive, skill_id=ident,
-                                               display_title=title if not ident else name)
+            result = await client.upload_skill(name, archive, skill_id=ident, display_title=title)
             return {**result, "id": ident or result.get("skill_id") or result["id"],
                     "version": str(result.get("version") or result["latest_version"])}
 
         receipt = await effects.apply(
             effect_id, "cloud-skill-version",
-            {"skill_id": ident, "name": name, "base_version": base, "tree_sha256": tree, "title": title},
+            intent,
             upload, recover,
         )
         ident, version = receipt["id"], int(receipt["version"])
@@ -148,6 +163,9 @@ async def write_skill(task, services, client, connection, operation):
             raise ValueError("Concurrent cloud Skill update; uploaded version retained, deployment paused")
         if meta["tree_sha256"] != tree:
             raise ValueError("Cloud Skill file tree readback mismatch")
+        native = await client.request("GET", f"skills/{ident}/versions/{version}")
+        if native.get("display_title") != title:
+            raise ValueError("Cloud Skill display title readback mismatch")
 
     graph = await agent_graph(client, connection["config"]["entry_agent_id"])
     targets = set(request["agents"])
@@ -188,11 +206,15 @@ async def write_skill(task, services, client, connection, operation):
             raise ValueError("Cloud Skill advanced during deployment; publication requires review")
     result = {
         "name": name, "skill_id": ident, "version": version, "previous_version": base,
-        "action": action, "status": "published", "skill_backend": "managed-agents",
+        "action": action,
+        "status": "bindings_updated" if action == "bind" else "unchanged" if reuse_version else "published",
+        "skill_backend": "managed-agents",
+        "deployment_status": "deleted" if action == "delete" else "bound" if targets else "unbound",
+        "bound_agents": sorted(targets) if action != "delete" else [],
         "mutation_id": request["mutation_id"], "deleted": action == "delete",
         "restored_from": request["target_version"], "files": sorted(bundle) if action != "delete" else [],
         **({"new_version": version} if action == "rollback" else {}),
-        "written": sorted(bundle) if action != "delete" else [],
+        "written": sorted(bundle) if action != "delete" and not reuse_version else [],
         "cloud": {"synced": True}, "readback_verified": True,
     }
     async with services.tx.tenant_tx(task.tenant_id) as conn:
@@ -206,7 +228,7 @@ async def write_skill(task, services, client, connection, operation):
             "tree_sha256": tree, "skill_backend": "managed-agents", "deleted": action == "delete",
         }
         finalize = services.extras.get("cloud_skill_committed")
-        if finalize:
+        if finalize and (not reuse_version or request["metadata"].get("candidate_id")):
             await finalize(conn, task, request, result, binding)
         await repo.bind(conn, tenant_id=task.tenant_id, connection_id=task.subject_id,
                         kind="skill", name=name, record=binding)

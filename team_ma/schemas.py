@@ -13,8 +13,10 @@ DEFAULTS = {
     "provider": "volcengine-managed-agents", "ma_base_url": "https://ark.cn-beijing.volces.com/api/v3",
     "team_evolver_url": "http://127.0.0.1:52010", "user_tag_prefix": "te-user:",
     "poll_interval_seconds": 60, "sync_interval_seconds": 30, "vault_ids": [],
-    "replay_enabled": False, "replay_environment_id": "", "replay_vault_ids": [], "runtime_binding": {},
+    "replay_enabled": True, "replay_environment_id": "", "replay_vault_ids": [], "runtime_binding": {},
+    "replay_readonly_mcp": {},
     "default_user_id": "",
+    "environment_id": "",
 }
 FIELDS = set(DEFAULTS) | {"display_name", "entry_agent_id", "environment_id", "default_user_id",
                          "ma_secret_ref", "tenant_token_ref", "replay_isolation", "enabled"}
@@ -42,11 +44,14 @@ def validate_config(raw):
     result = {**DEFAULTS, **raw}
     if result["provider"] != DEFAULTS["provider"]:
         raise ValueError("Unsupported MA provider")
-    for key in ("display_name", "entry_agent_id", "environment_id",
+    for key in ("display_name", "entry_agent_id",
                 "ma_secret_ref", "tenant_token_ref"):
         if not isinstance(result.get(key), str) or not result[key].strip() or len(result[key]) > 200:
             raise ValueError(f"{key} is required (1–200 characters)")
         result[key] = result[key].strip()
+    if not isinstance(result["environment_id"], str) or len(result["environment_id"]) > 200:
+        raise ValueError("environment_id must be a string of at most 200 characters")
+    result["environment_id"] = result["environment_id"].strip()
     result["ma_base_url"] = validate_url(result["ma_base_url"])
     if not isinstance(result["default_user_id"], str) or len(result["default_user_id"]) > 200:
         raise ValueError("default_user_id must be a string of at most 200 characters")
@@ -70,12 +75,15 @@ def validate_config(raw):
         raise ValueError("user_tag_prefix must contain 1–100 characters")
     if not isinstance(result["replay_environment_id"], str) or len(result["replay_environment_id"]) > 200:
         raise ValueError("Invalid replay_environment_id")
-    if result["replay_environment_id"] == result["environment_id"]:
-        raise ValueError("Replay must use a separate Environment")
-    if set(result["replay_vault_ids"]) & set(result["vault_ids"]):
-        raise ValueError("Replay must use separate Vaults")
     if not isinstance(result["runtime_binding"], dict):
         raise ValueError("runtime_binding must be an object")
+    readonly = result["replay_readonly_mcp"]
+    if (not isinstance(readonly, dict) or len(readonly) > 50
+            or any(not isinstance(key, str) or len(key) != 64
+                   or not isinstance(names, list) or len(names) > 100
+                   or any(not isinstance(name, str) or not name or len(name) > 200 for name in names)
+                   for key, names in readonly.items())):
+        raise ValueError("replay_readonly_mcp must map exact server snapshot hashes to read-only tool names")
     isolation = result.get("replay_isolation") or {}
     if (not isinstance(isolation, dict) or set(isolation) - {"mcp", "custom_tools", "vaults"}
             or any(type(v) is not bool for v in isolation.values())):

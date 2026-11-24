@@ -5,6 +5,7 @@ import time
 import httpx
 import pytest
 
+from team_ma.discovery import replay_capability
 from team_replay.adapters.managed_agents import ManagedAgentsFactory
 from team_replay.hooks import ReplayContext, ReplayTreatment, ReplayUnsupported
 from team_replay.runtime_matrix import evaluate_runtime_compatibility
@@ -132,6 +133,91 @@ def test_tool_confirmation_is_not_fabricated_and_failure_cleans():
         session.close()
     assert cleaned == ["run"]
     assert not any(b"tool_result" in request.content for request in server.requests if request.method == "POST")
+
+
+def test_declared_custom_tools_preserve_snapshot_and_allow_builtin_execution():
+    class Server(FakeMA):
+        def respond(self, request):
+            response = super().respond(request)
+            if request.method == "POST" and request.url.path.endswith("/events"):
+                for events in self.events.values():
+                    events.insert(-1, {
+                        "id": "builtin", "type": "agent.tool_use", "name": "Bash",
+                        "input": {"command": "ffprobe -version"},
+                        "processed_at": "2026-10-20T12:00:03Z",
+                    })
+            return response
+
+    server, cleaned = Server(), []
+    session = session_for(server, cleaned)
+    tools = [{"type": "builtin", "name": "Bash"},
+             {"type": "custom", "name": "render_video", "description": "Render video",
+              "input_schema": {"type": "object", "properties": {}}}]
+    session.record["agent_graph"]["agents"]["root"]["tools"] = tools
+    session.record["config"] = {"replay_enabled": True, "environment_id": "production"}
+    session.record["replay_environment"]["config"]["type"] = "cloud"
+    session.cap["replay_capability"] = replay_capability
+    try:
+        observed = session.send("check ffprobe with Bash")
+        assert observed.response and observed.metrics["tool_call_count"] == 1
+        assert observed.metrics["total_tokens"] == 12
+        actual = next(iter(server.sessions.values()))
+        assert actual["agent"]["type"] == "agent_with_overrides"
+        assert actual["agent"]["tools"] == tools
+    finally:
+        session.close()
+    assert cleaned == ["run"]
+
+
+@pytest.mark.parametrize("thread_id", [None, "child"])
+@pytest.mark.parametrize("requires_action", [False, True])
+def test_custom_tool_request_fails_with_identity_and_archives_events(thread_id, requires_action):
+    call = {"id": "custom-call", "type": "agent.custom_tool_use", "name": "render_video",
+            "input": {"prompt": "private task content"}, "processed_at": "2026-10-20T12:00:03Z"}
+    if thread_id:
+        call["session_thread_id"] = thread_id
+
+    class Server(FakeMA):
+        def respond(self, request):
+            if request.url.path.endswith("/threads"):
+                return httpx.Response(200, json={"data": [{"id": "child", "status": "idle"}] if thread_id else []})
+            if "/threads/child/events" in request.url.path:
+                # Only the history read after root end_turn reveals the child call.
+                history = [call]
+                if requires_action:
+                    history.append({"id": "child-idle", "type": "session.thread_status_idle",
+                                    "session_thread_id": thread_id, "stop_reason": {"type": "requires_action"}})
+                return httpx.Response(200, json={"data": history if any(self.events.values()) else []})
+            response = super().respond(request)
+            if request.method == "POST" and request.url.path.endswith("/events"):
+                for events in self.events.values():
+                    if not thread_id:
+                        events.insert(-1, call)
+                    if requires_action and not thread_id:
+                        events[-1]["stop_reason"] = {"type": "requires_action"}
+            return response
+
+    server, cleaned, archived = Server(), [], {}
+    session = session_for(server, cleaned)
+
+    async def archive(name, data, owner):
+        archived[name] = json.loads(data)
+        return await save_artifact(name, data, owner)
+
+    session.cap["save_artifact"] = archive
+    error_pattern = "custom tool executor unavailable.*render_video.*custom-call"
+    try:
+        with pytest.raises(ReplayUnsupported, match=error_pattern) as exc:
+            session.send("do the task")
+        assert "private task content" not in str(exc.value)
+        if thread_id:
+            assert "child" in str(exc.value)
+    finally:
+        session.close()
+    assert cleaned == ["run"]
+    assert call in archived["ma-final-session.json"]["events"]
+    assert session.diagnostics()["final_history"]["path"] == "ma-final-session.json"
+    assert not any(b"tool_result" in r.content for r in server.requests if r.method == "POST")
 
 
 def test_sse_disconnect_recovers_history_without_resending():

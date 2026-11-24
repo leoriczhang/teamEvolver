@@ -3,6 +3,19 @@ import { afterEach,expect,it,vi } from "vitest";
 import { api,ApiError,setActiveTenantId } from "./client";
 vi.mock("@/lib/toast", () => ({ toastErr: vi.fn() }));
 afterEach(() => vi.unstubAllGlobals());
+it("clears dataset and replay details when switching tenants", () => {
+  window.history.replaceState(null, "", "/?tenant=notes&view=datasets&dataset=notes-dataset&replay=notes-replay");
+  setActiveTenantId("notes");
+  expect(new URLSearchParams(window.location.search).get("dataset")).toBe("notes-dataset");
+  expect(new URLSearchParams(window.location.search).get("replay")).toBe("notes-replay");
+  setActiveTenantId("a2v");
+  const params = new URLSearchParams(window.location.search);
+  expect(params.get("view")).toBe("datasets");
+  expect(params.has("dataset")).toBe(false);
+  expect(params.has("replay")).toBe(false);
+  window.history.replaceState(null, "", "/");
+  window.localStorage.clear();
+});
 it("clears a connection belonging to the old tenant while preserving a shared link in the same tenant", () => {
   window.history.replaceState(null, "", "/?tenant=video&connection_id=video-ma");
   setActiveTenantId("video");

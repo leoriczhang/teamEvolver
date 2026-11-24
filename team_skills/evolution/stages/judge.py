@@ -39,6 +39,40 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _complete_json_containers(text: str) -> Optional[dict[str, Any]]:
+    """Append only omitted closing containers; never supply a value or string."""
+    if not text.startswith("{"):
+        return None
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append("}" if char == "{" else "]")
+        elif char in "}]":
+            if not stack or stack.pop() != char:
+                return None
+    if in_string or not stack or len(stack) > 8:
+        return None
+    try:
+        obj = json.loads(text + "".join(reversed(stack)))
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if isinstance(obj, dict):
+        logger.info("judge.json_completed_containers count=%d", len(stack))
+        return obj
+    return None
+
+
 def _extract_json_object(text: str) -> Optional[dict[str, Any]]:
     raw = str(text or "")
     raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
@@ -54,11 +88,11 @@ def _extract_json_object(text: str) -> Optional[dict[str, Any]]:
 
     match = _JSON_BLOCK_RE.search(clean)
     if not match:
-        return None
+        return _complete_json_containers(clean)
     try:
         obj = json.loads(match.group(0))
     except (json.JSONDecodeError, ValueError):
-        return None
+        return _complete_json_containers(clean)
     return obj if isinstance(obj, dict) else None
 
 

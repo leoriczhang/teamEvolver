@@ -1,4 +1,4 @@
-"""Obsolete Case fingerprints leave immutable historical replay available."""
+"""Runtime changes retain pinned Cases; disabled sources remain unavailable."""
 import copy
 import os
 
@@ -16,14 +16,20 @@ pytestmark = [pytest.mark.postgres, pytest.mark.skipif(
 )]
 
 
-def test_environment_change_archives_case_without_changing_historical_document(pg_env):
+@pytest.mark.parametrize("change", ["environment", "model", "skills"])
+def test_runtime_change_retains_case_and_historical_snapshot(pg_env, change):
     runtime = {
         "type": "managed-agents", "connection_id": "ma",
         "agent_graph": {"agents": {"agent": {"id": "agent", "model": {"id": "old"}, "skills": []}}},
         "environment": {"config": {"type": "cloud", "setup_script": "old"}},
     }
     current = copy.deepcopy(runtime)
-    current["environment"]["config"]["setup_script"] = "new"
+    if change == "environment":
+        current["environment"]["config"]["setup_script"] = "new"
+    elif change == "model":
+        current["agent_graph"]["agents"]["agent"]["model"]["id"] = "new"
+    else:
+        current["agent_graph"]["agents"]["agent"]["skills"] = [{"id": "another", "version": 2}]
     case = copy.deepcopy(document()["cases"][0])
     case.update(skill_ids=["demo"])
     case["provenance"]["source_runtime"] = runtime
@@ -39,14 +45,14 @@ def test_environment_change_archives_case_without_changing_historical_document(p
             detail={"replay_cases": [case]}, seed="command", active_ma_connections={"ma"},
             execution_fingerprints={"ma": execution_fingerprint(current)},
         )
-        assert frozen["replay_cases"] == []
+        assert len(frozen["replay_cases"]) == 1
+        assert frozen["replay_cases"][0]["provenance"]["source_runtime"] == runtime
         archives = await repo.archives(conn, "historical", 1)
-        assert archives[0]["reason"] == "Agent, tools, Environment or Skill binding changed"
-        assert archives[0]["archived_at"] and archives[0]["fingerprint"]["environment_hash"]
+        assert archives == []
         manual = await repo.freeze(conn, "historical")
         assert manual["document_hash"] == saved["document_hash"]
         assert manual["execution_document"]["cases"][0]["provenance"]["source_runtime"] == runtime
-        assert await repo.historical_cases(
+        assert len(await repo.historical_cases(
             conn, skill_id="demo", before_dataset_id=frozen["replay_sampling"]["current_dataset_id"],
-        ) == []
+        )) == 1
     _run(pg_env, "default", check)

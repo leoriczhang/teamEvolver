@@ -2,7 +2,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { useState } from "react";
+import { getActiveTenantId } from "@/api/client";
+import { getTenantToken } from "@/features/tenants/api/client";
+import { useEffect, useState } from "react";
 import { saveConnection, type MAConnection, type MAJob } from "./api/client";
 import ReplayResources from "./ReplayResources";
 
@@ -15,7 +17,7 @@ export default function ConnectionForm({ connection, onClose, onSaved }: {
     ma_base_url: connection?.config.ma_base_url || "https://ark.cn-beijing.volces.com/api/v3",
     team_evolver_url: connection?.config.team_evolver_url || "http://127.0.0.1:52010",
     ma_api_key: "", tenant_token: "", vault_ids: (connection?.config.vault_ids || []).join(","),
-    replay_enabled: connection?.config.replay_enabled || false,
+    replay_enabled: connection?.config.replay_enabled ?? true,
     replay_environment_id: connection?.config.replay_environment_id || "",
     replay_vault_ids: (connection?.config.replay_vault_ids || []).join(","),
     poll_interval_seconds: connection?.config.poll_interval_seconds || 60,
@@ -26,6 +28,24 @@ export default function ConnectionForm({ connection, onClose, onSaved }: {
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [tokenNotice, setTokenNotice] = useState("");
+  const tenantId = getActiveTenantId();
+  useEffect(() => {
+    if (!tenantId || connection) return;
+    let cancelled = false;
+    getTenantToken(tenantId).then(result => {
+      if (cancelled) return;
+      if (result.agent_token) {
+        setDraft(value => ({ ...value, tenant_token: value.tenant_token || result.agent_token! }));
+        setTokenNotice("已填入当前租户 Key，可直接复用。");
+      } else {
+        setTokenNotice("旧 Key 尚未留存，请填写原 Key；保存后可继续查看和复用。");
+      }
+    }).catch(() => {
+      if (!cancelled) setTokenNotice("未能读取当前租户 Key，可填写原 Key。");
+    });
+    return () => { cancelled = true; };
+  }, [tenantId, connection]);
   const list = (text: string) => text.split(",").map(v => v.trim()).filter(Boolean);
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -58,12 +78,14 @@ export default function ConnectionForm({ connection, onClose, onSaved }: {
       <form onSubmit={submit} className="space-y-5">
         <div className="grid gap-3 sm:grid-cols-2">
           {field("display_name", "连接名称")}{field("default_user_id", "默认归属用户 ID（可选）", "text", false)}
-          {field("entry_agent_id", "入口 Agent ID")}{field("environment_id", "业务 Environment ID")}
+          {field("entry_agent_id", "入口 Agent ID")}{field("environment_id", "业务 Environment ID", "text", false)}
           {field("ma_api_key", connection ? "MA Key（留空保留）" : "MA Key", "password", !connection)}
-          {field("tenant_token", connection ? "租户 Key（留空保留）" : "当前租户 Key（tevt_）", "password", !connection)}
+          {field("tenant_token", connection ? "租户 Key（留空保留）" : "当前租户 Key（tevt_）", "text", !connection)}
         </div>
+        {tokenNotice && <p className="text-xs text-muted-foreground">{tokenNotice}</p>}
+        <p className="text-xs text-muted-foreground">业务环境自动从该 Agent 的最新业务会话识别并更新。Environment ID 可留空；尚无会话时可填写初始环境。</p>
         <p className="text-xs text-muted-foreground">原会话缺少提交人信息时，默认归属留空会显示“未知提交人”。仅在确认归属时填写。</p>
-        <p className="text-xs text-muted-foreground">凭证保存后仅显示配置状态。已有会话保持其固定版本，新会话使用完整应用的发布版本。</p>
+        <p className="text-xs text-muted-foreground">租户 Key 可在“成员与接入”查看、复制。已有会话保持其固定版本，新会话使用完整应用的发布版本。</p>
         <label className="flex items-center gap-2 text-sm">
           <input type="checkbox" checked={draft.replay_enabled}
             onChange={e => setDraft(v => ({ ...v, replay_enabled: e.target.checked }))} />启用隔离 MA True Replay

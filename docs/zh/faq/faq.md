@@ -52,7 +52,7 @@ PostgreSQL 是 teamEvolver 可变状态的唯一权威存储：Session、Skill �
 
 ### 租户 Key 泄露了怎么办？
 
-在「成员与接入」轮换租户 Key，或调用 `POST /api/tenants/{tenant_id}/rotate-token`。新 Key 只展示一次，旧 Key 立即失效，服务端只保存哈希。轮换影响该租户下所有 Agent，需同步更新 Agent 配置。
+在「成员与接入」查看、复制当前租户 Key，接入 Agent 时直接复用。原值加密保存，管理员可重复查看。旧 Key 若尚未留存，填入原 Key 保存，服务端校验它匹配当前哈希。确需更换时再轮换，或调用 `POST /api/tenants/{tenant_id}/rotate-token`；旧 Key 立即失效，需同步更新该租户下的 Agent 配置。
 
 ### 可以接入多个 Agent Runtime 吗？
 

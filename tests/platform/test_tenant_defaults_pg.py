@@ -52,7 +52,8 @@ def test_schema_apply_creates_default_tenant_module_rows(empty_schema):
 
 
 @pytest.mark.postgres
-def test_created_tenant_has_every_module_row_and_is_isolated(empty_schema):
+def test_created_tenant_has_every_module_row_and_is_isolated(empty_schema, monkeypatch):
+    monkeypatch.setenv("TEAMEVOLVER_SECRET_MASTER_KEY", "tenant-defaults-test-master")
     pool, tx = empty_schema
     registry = TenantRegistry(runtime=pool)
     ctx, _token = registry.create_tenant("tenant", "new-tenant")

@@ -118,7 +118,7 @@ def create_router(services):
             "evolution_trigger_mode", "evolution_interval_seconds", "bundle_allow_delete",
             "bundle_prompt_max_bytes", "bundle_edit_max_bytes", "bundle_text_extensions",
         )
-        validation_keys = ("auto_evaluate", "publish_mode")
+        validation_keys = ("auto_evaluate", "publish_mode", "assessment_timeout_seconds")
         return {
             "evolve": {k: row.config.get(k, DEFAULT_SKILLS_CONFIG[k]) for k in evolve_keys},
             "validation": {k: row.config.get(k, DEFAULT_SKILLS_CONFIG[k]) for k in validation_keys},
@@ -138,7 +138,7 @@ def create_router(services):
                 "evolution_trigger_mode", "evolution_interval_seconds", "bundle_allow_delete",
                 "bundle_prompt_max_bytes", "bundle_edit_max_bytes", "bundle_text_extensions",
             }
-            validation_allowed = {"auto_evaluate", "publish_mode"}
+            validation_allowed = {"auto_evaluate", "publish_mode", "assessment_timeout_seconds"}
             evolve = raw.get("evolve", {})
             validation = raw.get("validation", {})
             if (
@@ -155,6 +155,10 @@ def create_router(services):
                 raise HTTPException(400, "publish_mode must be manual or automatic")
             if "auto_evaluate" in validation and type(validation["auto_evaluate"]) is not bool:
                 raise HTTPException(400, "auto_evaluate must be boolean")
+            if "assessment_timeout_seconds" in validation:
+                timeout = validation["assessment_timeout_seconds"]
+                if type(timeout) is not int or not 30 <= timeout <= 1800:
+                    raise HTTPException(400, "assessment_timeout_seconds must be 30..1800")
             extensions = evolve.get("bundle_text_extensions")
             if extensions is not None and (
                 not isinstance(extensions, list) or not extensions or len(extensions) > 20

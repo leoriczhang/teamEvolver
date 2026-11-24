@@ -2,7 +2,8 @@
 
 Platform administrators create tenants, rotate their machine token and change
 status. Configuration writes validate types and use revision compare-and-swap.
-Tokens are returned only when issued; persisted records contain hashes."""
+Tenant administrators can retrieve retained keys; persisted records contain
+authentication hashes and encrypted secret references."""
 
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 from starlette.exceptions import HTTPException
+from starlette.responses import JSONResponse, Response
 
 from ...admin.authorization import (
     authorize_target,
@@ -22,6 +24,8 @@ from ...admin.authorization import (
     require_platform_admin,
 )
 from ...admin.identity_store import IdentityStore
+from ...config_runtime import ConfigRevisionConflict, TenantConfigMissing
+from ...runtime.capacity import TenantCapacity, read_capacity
 from ..registry import (
     DEFAULT_TENANT_ID,
     QUOTA_KEYS,
@@ -58,7 +62,7 @@ def create_router(services=None, *, lifecycle=None, **kwargs) -> APIRouter:
         return router
 
     registry_provider = _registry_provider(extras, config)
-    _register_tenant_routes(router, config, registry_provider)
+    _register_tenant_routes(router, config, registry_provider, services)
     return router
 
 
@@ -138,7 +142,7 @@ def _public_tenant_overrides(overrides) -> tuple[dict, dict[str, bool]]:
     return public, secret_presence
 
 
-def _register_tenant_routes(router: APIRouter, config, registry_provider) -> None:
+def _register_tenant_routes(router: APIRouter, config, registry_provider, services) -> None:
     @router.get("/api/tenants")
     async def list_tenants(request: Request):  # noqa: ANN202
         user = getattr(request.state, "console_user", None)
@@ -166,7 +170,7 @@ def _register_tenant_routes(router: APIRouter, config, registry_provider) -> Non
         }
 
     @router.post("/api/tenants")
-    async def create_tenant(request: Request):  # noqa: ANN202
+    async def create_tenant(request: Request, response: Response):  # noqa: ANN202
         require_platform_admin(getattr(request.state, "console_user", None))
         registry = registry_provider()
         body = await _read_limited_json_body(request)
@@ -179,6 +183,7 @@ def _register_tenant_routes(router: APIRouter, config, registry_provider) -> Non
             raise HTTPException(status_code=409, detail=str(exc))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+        response.headers["Cache-Control"] = "no-store"
         logger.info("[Tenants] created tenant %s", ctx.tenant_id)
         # Best-effort OpenViking account provisioning: an account named after
         # the tenant_id is created as the default binding (fail-open — errors do
@@ -210,8 +215,6 @@ def _register_tenant_routes(router: APIRouter, config, registry_provider) -> Non
         except Exception as exc:  # noqa: BLE001 - bootstrap is best-effort
             logger.warning("[Tenants] OpenViking dir bootstrap failed for %s: %s", ctx.tenant_id, exc)
             dirs = {"action": "failed", "error": str(exc), "created": [], "existing": [], "errors": []}
-        # The plaintext token is returned exactly once; only its SHA-256 hash is
-        # persisted in the tenant registry.
         return {
             "tenant": {
                 "tenant_id": ctx.tenant_id,
@@ -246,7 +249,41 @@ def _register_tenant_routes(router: APIRouter, config, registry_provider) -> Non
             raise HTTPException(status_code=400, detail=str(exc))
         if token is None:
             raise HTTPException(status_code=404, detail=f"unknown tenant: {tenant_id}")
-        return {"agent_token": token}
+        return JSONResponse({"agent_token": token}, headers={"Cache-Control": "no-store"})
+
+    @router.get("/api/tenants/{tenant_id}/token")
+    async def get_tenant_token(tenant_id: str, request: Request):  # noqa: ANN202
+        authorize_target(request, tenant_id)
+        registry = registry_provider()
+        if await asyncio.to_thread(registry.get, tenant_id) is None:
+            raise HTTPException(404, "unknown tenant")
+        try:
+            token = await asyncio.to_thread(registry.get_token, tenant_id)
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        return JSONResponse(
+            {"tenant_id": tenant_id, "agent_token": token, "available": bool(token)},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @router.put("/api/tenants/{tenant_id}/token")
+    async def import_tenant_token(tenant_id: str, request: Request):  # noqa: ANN202
+        authorize_target(request, tenant_id)
+        body = await _read_limited_json_body(request)
+        try:
+            token = await asyncio.to_thread(
+                registry_provider().import_token, tenant_id, str(body.get("agent_token") or ""),
+            )
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        return JSONResponse(
+            {"tenant_id": tenant_id, "agent_token": token, "available": True},
+            headers={"Cache-Control": "no-store"},
+        )
 
     @router.post("/api/tenants/{tenant_id}/status")
     async def set_tenant_status(tenant_id: str, request: Request):  # noqa: ANN202
@@ -263,6 +300,46 @@ def _register_tenant_routes(router: APIRouter, config, registry_provider) -> Non
         if not changed:
             raise HTTPException(status_code=404, detail=f"unknown tenant: {tenant_id}")
         return {"tenant_id": tenant_id, "status": status}
+
+    @router.get("/api/tenants/{tenant_id}/runtime-config")
+    async def get_runtime_config(tenant_id: str, request: Request):
+        authorize_target(request, tenant_id)
+        registry = registry_provider()
+        if await asyncio.to_thread(registry.get, tenant_id) is None:
+            raise HTTPException(404, "unknown tenant")
+        try:
+            row, capacity = await read_capacity(services, tenant_id)
+        except TenantConfigMissing as exc:
+            raise HTTPException(503, str(exc))
+        return {"tenant_id": tenant_id, "revision": row.revision, "config": dataclasses.asdict(capacity)}
+
+    @router.put("/api/tenants/{tenant_id}/runtime-config")
+    async def put_runtime_config(tenant_id: str, request: Request):
+        authorize_target(request, tenant_id)
+        registry = registry_provider()
+        if await asyncio.to_thread(registry.get, tenant_id) is None:
+            raise HTTPException(404, "unknown tenant")
+        body = await _read_limited_json_body(request)
+        if not isinstance(body, dict) or not isinstance(body.get("config"), dict):
+            raise HTTPException(400, "config must be an object")
+        revision = body.get("expected_revision")
+        if type(revision) is not int or revision < 1:
+            raise HTTPException(400, "expected_revision must be a positive integer")
+        try:
+            async with services.tx.tenant_tx(tenant_id) as conn:
+                repo = services.extras["config_repo"]
+                current = await repo.read_tenant_module(conn, "runtime")
+                capacity = TenantCapacity.parse({**current.config, **body["config"]})
+                new_revision = await repo.write_tenant_module(
+                    conn, module="runtime", expected_revision=revision, config=dataclasses.asdict(capacity),
+                )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except TenantConfigMissing as exc:
+            raise HTTPException(503, str(exc))
+        except ConfigRevisionConflict as exc:
+            raise HTTPException(409, str(exc))
+        return {"tenant_id": tenant_id, "revision": new_revision, "config": dataclasses.asdict(capacity)}
 
     @router.get("/api/tenants/{tenant_id}/config")
     async def get_tenant_config(tenant_id: str, request: Request):  # noqa: ANN202

@@ -1,4 +1,5 @@
 import { api, tenantHeaders } from "@/api/client";
+import { createRequestId } from "@/lib/requestId";
 
 export type MAConfig = {
   display_name: string; entry_agent_id: string; environment_id: string; default_user_id: string;
@@ -11,7 +12,8 @@ export type MAConfig = {
 export type MAConnection = {
   connection_id: string; revision: number; enabled: boolean; status: string; config: MAConfig;
   detail: { error?: string; agent_count?: number; managed_skill_count?: number;
-    replay_capability?: { supported: boolean; reason?: string }; waiting?: string[];
+    replay_capability?: { supported: boolean; reason?: string; assessment?: "configuration_only";
+      custom_tool_names?: string[] }; waiting?: string[];
     replay_resources?: { status: string; environment_id?: string; vault_ids?: string[];
       missing_credentials?: string[]; reason?: string } };
   last_collected_at?: string; last_synced_at?: string;
@@ -21,7 +23,8 @@ export type MAConnection = {
 export type MAResource = {
   kind: "agent" | "skill"; logical_name: string; revision: number;
   record: { id?: string; name?: string; version?: string; source_version?: string; team_version?: number;
-    tree_sha256?: string; agents?: string[]; status?: string; drift?: string };
+    tree_sha256?: string; agents?: string[]; desired_agents?: string[]; status?: string; drift?: string;
+    latest_version?: string; bound_version?: string | null; bound_versions?: Record<string, string>; deleted?: boolean };
 };
 export type MARelease = {
   release_id: string; status: string; created_at: string; applied_at?: string;
@@ -53,19 +56,19 @@ export async function maResources(id: string) {
 export const maReleases = (id: string) => api<{ releases: MARelease[] }>(`${path(id)}/releases`);
 export const saveConnection = (body: Record<string, unknown>, id?: string) =>
   api<MAJob | MAConnection>(id ? path(id) : root, {
-    method: id ? "PUT" : "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+    method: id ? "PUT" : "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": createRequestId() },
     body: JSON.stringify(body),
   });
 export const saveTargets = (id: string, name: string, revision: number, agents: string[]) =>
-  api(`${path(id)}/resources/${encodeURIComponent(name)}/bindings`, {
-    method: "PUT", headers: { "Content-Type": "application/json" },
+  api<MAJob | { saved: true }>(`${path(id)}/resources/${encodeURIComponent(name)}/bindings`, {
+    method: "PUT", headers: { "Content-Type": "application/json", "Idempotency-Key": createRequestId() },
     body: JSON.stringify({ expected_revision: revision, agent_ids: agents }),
   });
 
 export async function startMAJob(id: string, kind: "discover" | "collect" | "reconcile",
   body: Record<string, unknown> = {}): Promise<MAJob> {
   return api<MAJob>(`${path(id)}/${kind}`, {
-    method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+    method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": createRequestId() },
     body: JSON.stringify(body),
   });
 }

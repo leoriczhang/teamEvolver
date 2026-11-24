@@ -28,7 +28,7 @@ Only the Root Key can read and write tenant Python source: `/api/datasource/code
 
 ### Tenant Key
 
-Tenant keys start with `tevt_` and are the only machine credential of the Agent data plane. The server stores only their SHA-256 digest and resolves the tenant through `teamEvolver/tenants/registry.py:TenantRegistry`. An invalid key or disabled tenant returns `401 invalid tenant token`; an `X-Tenant-Id` that differs from the key's tenant returns `403 tenant mismatch`.
+Tenant keys start with `tevt_` and are the only machine credential of the Agent data plane. The server resolves tenants using a SHA-256 digest and retains the original key as an encrypted Secret Ref for that tenant's administrators to view and copy. An invalid key or disabled tenant returns `401 invalid tenant token`; an `X-Tenant-Id` that differs from the key's tenant returns `403 tenant mismatch`.
 
 Tenant keys can only access these paths (`_AGENT_MACHINE_PATHS` in `teamEvolver/admin/authn.py`):
 
@@ -42,7 +42,8 @@ Other paths return `403 console admin required`. The caller declares `user_id` i
 
 Issuing and rotation:
 
-- `POST /api/tenants` returns the plaintext key once when a platform administrator creates a tenant.
+- `POST /api/tenants` returns the plaintext key when a platform administrator creates a tenant; the original and authentication hash are saved in one transaction.
+- Tenant administrators retrieve it with `GET /api/tenants/{tenant_id}/token`, returning `agent_token` and `available` with caching disabled. Legacy keys with only a hash return `available=false`. Import the original with `PUT` on the same path and `{"agent_token":"<original key>"}`; it must match the current hash and does not rotate the key. Existing Secret Refs in the same tenant are recovered automatically.
 - Tenant administrators rotate it with `POST /api/tenants/{tenant_id}/rotate-token`; the old key stops working immediately.
 - The `default` tenant's key is not issued by the console. It is the single key configured in `TEAMEVOLVER_TENANT_TOKEN` (must start with `tevt_`); rotate it by changing the value and restarting.
 

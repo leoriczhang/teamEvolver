@@ -26,6 +26,9 @@ async def model_settings(services, tenant, model=None):
 
 
 async def model_for(services, tenant, model=None):
+    from teamEvolver.runtime.capacity import read_capacity
+
+    _, capacity = await read_capacity(services, tenant)
     settings = await model_settings(services, tenant, model)
     from .prompt_context import settings as prompt_settings
     stage_settings = (prompt_settings() or {}).get("stage_settings", {})
@@ -36,4 +39,5 @@ async def model_for(services, tenant, model=None):
             resolved[stage_id] = value["api_key"]
     return AsyncLLMClient(
         **settings, tenant_id=tenant, stage_api_keys=resolved,
+        max_concurrency=capacity.llm_max_concurrency, queue_capacity=capacity.llm_queue_capacity,
     )

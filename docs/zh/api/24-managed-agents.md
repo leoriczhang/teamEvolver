@@ -14,11 +14,15 @@
 | POST | `/api/ma/connections/{connection_id}/collect` | `{session_ids? , from_timestamp? , to_timestamp?}`，202；时间需带时区 |
 | POST | `/api/ma/connections/{connection_id}/reconcile` | `{}`，观察云端最新 Skill / Agent / Environment，外部效果对账与拥有资源清理，202 |
 | GET | `/api/ma/connections/{connection_id}/resources` | `kind=skill|agent`、`after`、`limit`，成员 / 托管版本与树哈希 |
-| PUT | `/api/ma/connections/{connection_id}/resources/{skill_name}/bindings` | `{expected_revision, agent_ids}`，新增关联 revision=0 |
+| PUT | `/api/ma/connections/{connection_id}/resources/{skill_name}/bindings` | `{expected_revision, agent_ids}`；已有云端 Skill 返回 202 + `ma.skill` Job，挂载最新版本并回读，不新增 Skill 版本；未创建 Skill 只保存发布目标，新增关联 revision=0 |
 | GET | `/api/ma/connections/{connection_id}/releases` | `limit`，完整 / 部分 release 及回读与错误事实 |
 | GET | `/api/ma/skill-jobs/{job_id}` | `ma.skill` 的实际任务状态、原生版本写入结果与错误 |
 
 创建与操作支持 `Idempotency-Key`；重用不同请求返回 409。云端写入、导入、分析与资源清理由 Worker 执行，返回统一 Jobs URL。Skill 查询在短业务事务前解析云端原生元数据与校验快照。
+
+新建 Candidate 发布时，未显式指定目标则绑定所选连接的入口 Agent；显式空目标会阻止 Candidate 发布，已有 Skill 保留当前或显式关联。手工创建云端资源仍允许未挂载。发布结果提供 `deployment_status`（`bound` / `unbound` / `deleted`）和 `bound_agents`，只有成员引用回读成功后才能报告已挂载。内容未变时也执行绑定核对，但不上传新版本。
+
+关联接口保存 `desired_agents` 并异步执行；`agents`、`bound_version` 和 `bound_versions` 在成功回读前保持最后观测值。取消全部目标会卸载 Skill。任务失败显示实际错误，不宣称已生效；仅变更关联不重置技能内容基线、历史 Evidence 或版本来源。
 
 MA Skill 沿用 [Skill 管理 API](./09-skills-admin.md) 的查看、历史版本、编辑、新建、文件操作、回滚与删除路径，响应带 `skill_backend: "managed-agents"`，版本号为云端原生版本。可用 `connection_id` 查询参数选择连接；跨连接同名时要求显式选择。写入返回 `202`、`job_id`、`status_url`、`result_url`；上传与成员引用回读成功后才返回 published。回滚创建新云端版本，未知上传结果先对账，竞争上传暂停发布。发现 / reconcile 不从 TE 库拉取或回推 Skill。
 
@@ -29,22 +33,28 @@ MA Skill 沿用 [Skill 管理 API](./09-skills-admin.md) 的查看、历史版�
 | 字段 | 说明 |
 | --- | --- |
 | `provider` | `volcengine-managed-agents` |
-| `display_name`、`entry_agent_id`、`environment_id` | 必填，1–200 字符 |
+| `display_name`、`entry_agent_id` | 必填，1–200 字符 |
+| `environment_id` | 可省略或留空，最多 200 字符；Worker 从入口 Agent 的最新业务 Session 自动识别并持续更新；显式值用于尚无 Session 时的初始环境 |
 | `default_user_id` | 可选，最多 200 字符；明确默认归属。留空时，缺少标签或渠道身份的会话显示“未知提交人” |
 | `ma_base_url` | 默认 `https://ark.cn-beijing.volces.com/api/v3`，生产 HTTPS |
 | `ma_api_key`、`tenant_token` | 一次明文输入，加密保存，回显只返回配置是否存在 |
 | `ma_secret_ref`、`tenant_token_ref` | 可提供本租户已有 Secret Ref；更新省略凭证时保留 |
 | `team_evolver_url` | 兼容字段，MA Skills 管理不再使用 TE pull 地址 |
-| `vault_ids`、`replay_vault_ids` | 业务 Vault 列表；回放 Vault 可省略，由 Worker 自动创建；已有独立 ID 保持兼容 |
+| `vault_ids`、`replay_vault_ids` | 业务 Vault 列表；回放固定来源 Session 的引用；旧 `replay_vault_ids` 不再控制新任务 |
 | `user_tag_prefix` | 默认 `te-user:` |
 | `poll_interval_seconds`、`sync_interval_seconds` | 默认 60 / 30；范围 15–86400 |
-| `replay_enabled`、`replay_environment_id` | 默认关闭；开启后回放 Environment ID 可省略，由 Worker 自动获取或创建 |
-| `replay_isolation` | `{vaults?, mcp?, custom_tools?}` 显式能力声明 |
+| `replay_enabled`、`replay_environment_id` | 新连接默认开启；固定来源 Session 环境，旧回放环境 ID 不再控制新任务；显式关闭和暂停仍生效 |
+| `replay_readonly_mcp` | 精确 MCP Server 快照 SHA-256 → 已核验只读工具名数组；仅默认拒绝且实际启用工具全部在名单内时适用，服务配置或工具权限变化后重新核验 |
+| `replay_isolation` | `{mcp?}` 外部工具隔离声明；旧 `vaults/custom_tools` 字段兼容读取，不代替原生引用或工具执行器 |
 | `runtime_binding` | `{skill_name, paths, working_directory, source?, artifact?, packages?, pre_setup?, replace_setup_script?, bootstrap, ready_file, ready_probe_message?}`；`source` 默认 `embedded`，`skill_mount` 核验固定 Skill 文件；`openviking` 下载 `artifact`（`base_url/uri/sha256/bytes/files[{path,sha256,bytes}]`）固定的独立 tar.xz，校验并缓存后 bootstrap；`packages` 可声明 `apt/pip` 数组，与来源环境去重合并，交由 MA 在初始化脚本前准备；前置脚本最多 32 KiB，替换原脚本默认 false；可选只读探测先于业务任务 |
 
 同 MA origin + entry Agent 只能被一个租户托管。配置 CAS 冲突或目标占用返回 409。下载、隔离或固定快照缺失记录为失败，不能自动放宽发布门禁。
 
-`detail.replay_resources` 展示 `status`（`preparing/ready/credentials_missing/unsupported/disabled`）、`environment_id`、`vault_ids` 和 `missing_credentials`；仅回显非敏感状态。自动资源按租户、连接和 MA 地址标记归属，由外部效果账本对账后复用，未知创建结果不重复 POST。自动环境复制业务依赖与初始化配置，但不复制生产 TOS 输出位置。自动 Vault 可注入本租户已有的 MA Key 为限制 MA 主机的 `ARK_API_KEY`；无法读出或推断其他服务的密钥。缺失凭证时可继续采集，但回放能力保持不可执行。已配置的独立资源继续复用，生产环境或生产 Vault ID 不可用作回放资源。受理回放时固定发现记录中的实际 ID，不修改连接配置 revision。
+`detail.replay_resources` 展示来源配置的 `status`（`ready/unsupported/disabled`）、`environment_id`、`vault_ids`，不包含秘密。发现流程只读取来源，不创建环境、Vault 或凭证。受理回放时从来源 Session 快照固定实际环境配置与 Vault 引用；缺失项由 Worker 补采原 Session，并单独冻结恢复结果供重试复用，不改写受理请求。两分支在独立 Session 中执行相同输入，仅替换目标 Skill，共享 TOS 输出配置被移除。创建后回读核对 Vault 引用和执行配置。旧自动资源保留历史，不属于新回放清理范围。
+
+`detail.environment_observation` 包含 `session_id`、`created_at`、`environment_id`、`environment_hash`。发现、采集和同步任务自动按 Session 创建时间识别最新业务环境；环境变化在短事务中保存连接 revision 并受理 `ma.discover`，不更换连接、租户或 Key。环境配置快照缺失时仍可识别 ID，但哈希为空。尚无 Session 且未填写初始环境时，发现任务返回可重试的 `ma_EnvironmentNotObserved`，调度器持续按采集周期重试。
+
+尚未执行的旧环境发现／同步任务返回 `environment_superseded`，保留原受理配置并停止更新当前发布记录；历史采集继续使用原固定快照。已开始执行的发现／发布流程仍按其 checkpoint 恢复。
 
 ## 数据面发布快照
 

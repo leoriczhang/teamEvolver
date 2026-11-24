@@ -41,6 +41,35 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("dataset console", () => {
+  it("shows an unavailable state instead of loading forever when a dataset link returns 404", async () => {
+    window.history.replaceState(null, "", "/?view=datasets&dataset=missing");
+    vi.mocked(api).mockRejectedValue(Object.assign(new Error("Dataset not found"), { status: 404 }));
+    render(<DatasetsView active />);
+    expect(await screen.findByRole("heading", { name: "数据集不可用" })).toBeInTheDocument();
+    expect(screen.queryByText("加载 Case 中…")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "批量重回放验证" })).not.toBeInTheDocument();
+    expect(vi.mocked(api).mock.calls.some(([path]) => path.includes("/runs"))).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "返回数据集列表" }));
+    await waitFor(() => expect(new URLSearchParams(window.location.search).has("dataset")).toBe(false));
+  });
+  it("retries a failed detail link and then loads its Cases and replay history", async () => {
+    window.history.replaceState(null, "", "/?view=datasets&dataset=ds_test");
+    const original = vi.mocked(api).getMockImplementation()!;
+    let first = true;
+    vi.mocked(api).mockImplementation(async (path, options) => {
+      if (path.startsWith("/api/datasets/ds_test?") && first) {
+        first = false;
+        throw Object.assign(new Error("Dataset not found"), { status: 404 });
+      }
+      return original(path, options);
+    });
+    render(<DatasetsView active />);
+    await screen.findByRole("heading", { name: "数据集不可用" });
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    expect(await screen.findByRole("heading", { name: "测试数据集" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "整理客户报告" })).toBeInTheDocument();
+    expect(await screen.findByText("未通过")).toBeInTheDocument();
+  });
   it("opens the saved collection and distinguishes completed execution from passing Checklist", async () => {
     render(<DatasetsView active />);
     fireEvent.click(await screen.findByRole("button", { name: "测试数据集" }));

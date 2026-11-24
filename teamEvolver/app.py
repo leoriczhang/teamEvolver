@@ -217,10 +217,19 @@ def _wire_ma_contracts(services):
     services.extras.setdefault("ma_import_result", import_result)
     services.extras.setdefault("ma_accept_session", lambda **kwargs: accept_session(services, **kwargs))
     from team_ma.queries import active_connections, automatic_fingerprints
-    services.extras.setdefault("ma_active_connections", lambda tenant: active_connections(services, tenant))
-    services.extras.setdefault("ma_automatic_fingerprints", lambda tenant: automatic_fingerprints(services, tenant))
-    services.extras.setdefault("ma_freeze_replay", lambda tenant, cases, name="": freeze(services, tenant, cases, name))
-    services.extras.setdefault("ma_required_targets", lambda tenant, name: required_targets(services, tenant, name))
+    services.extras.setdefault(
+        "ma_active_connections", lambda tenant, **kw: active_connections(services, tenant, **kw))
+    services.extras.setdefault(
+        "ma_automatic_fingerprints", lambda tenant, **kw: automatic_fingerprints(services, tenant, **kw))
+    services.extras.setdefault(
+        "ma_freeze_replay", lambda tenant, cases, name="", **kw: freeze(services, tenant, cases, name, **kw))
+    from team_ma.replay_preparation import prepare
+    services.extras.setdefault(
+        "ma_prepare_replay", lambda task, cases, name="", **kw: prepare(services, task, cases, name, **kw))
+    from team_skills.evolution.model import model_for
+    services.extras.setdefault("replay_input_model", lambda tenant: model_for(services, tenant))
+    services.extras.setdefault(
+        "ma_required_targets", lambda tenant, name, **kw: required_targets(services, tenant, name, **kw))
     services.extras.setdefault("ma_replay_capabilities", lambda tenant, task=None: capabilities(services, tenant, task))
     services.extras.setdefault("ma_skill_tombstones", tombstones)
     services.extras.setdefault("ma_session_skill_names", lambda tenant, connection, ids:
@@ -306,6 +315,11 @@ def build_role_services(*, role, tx, config, handlers=None):
             with evidence_summary_cache(extras["session_payloads"]):
                 return await LLMSkillPlanner(client)(**kwargs)
         services.extras["skill_planner"] = planner
+        async def merger(target, sources, *, context, config):
+            client = await model_for(services, current_tenant_id(), config.config.get("model", {}))
+            with evidence_summary_cache(extras["session_payloads"]):
+                return await LLMSkillPlanner(client).merge(target, sources, context=context)
+        services.extras["skill_merger"] = merger
         async def replay_case_synthesizer(**kwargs):
             client = await model_for(services, current_tenant_id())
             with evidence_summary_cache(extras["session_payloads"]):

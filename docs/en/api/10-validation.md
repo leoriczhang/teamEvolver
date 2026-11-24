@@ -2,6 +2,16 @@
 
 Skill evolution can be triggered manually by administrators or automatically by the Worker. The Worker reads valuable Sessions, plans changes per Skill group and generates Skill Candidates. Candidates may enter True Replay automatically; after validation, tenant policy either publishes an accepted Candidate automatically or waits for human review. The flow is described in [Evolution Loop](../concepts/02-evolution-loop.md).
 
+Planning also reads the same tenant's unpublished Candidate catalog: names, revisions, source Agent scopes and validation feedback. The `read_candidate` tool loads a selected proposal's complete body. New Evidence can revise a Candidate that has no published version. For overlapping proposals, `merge_skill` selects `target_candidate_id` and `source_candidate_ids`; a dedicated Merge stage produces the consolidated Skill. Renaming an existing capability is not a reason to create another Skill.
+
+Before creating a new capability, the planner must successfully read existing Candidates in the same source Agent scope. A read failure requires correcting the identifier or skipping; it cannot justify another alias. Context compaction retains exact Candidate identifiers and original system contracts. Planning rounds, Candidate read results and decision validation errors are recorded in `agent_audit`.
+
+Consolidation preserves the target name and Candidate ID, increments its revision and clears stale validation. Sources are archived with their files, evaluations and `decision.merged_into` retained. Target revision and source archival commit in one transaction, guarded by every input's status, revision, tree hash and baseline. Candidates from unrelated Agent scopes, those undergoing validation, and updates to other published Skills cannot be retired as merge sources. Nonconflicting auxiliary files survive; conflicting file contents require explicit resolution.
+
+Analysis and planning include original Agent system contracts and input modality visibility. Text-only analysis cannot treat unverified visual/OCR claims as fabricated merely because video, image or audio bytes are unavailable. Test Dataset synthesis remains independent, using Session Evidence without unpublished Candidate bodies or the current Merge output. Manual `reprocess` reuses existing ingest analysis; checking historical summaries against the original contract does not rerun the Session Judge.
+
+MA connection, execution fingerprint, source snapshot and target-member reads during validation acceptance reuse the caller's transaction connection. This avoids exhausting the pool by borrowing another connection while holding a transaction. Standalone calls still use their own short transactions.
+
 Code entry points:
 
 - Candidates and evolution: `team_skills/api/candidates.py:create_router`
@@ -104,12 +114,14 @@ of the legacy `succeeded` count of completed pairs. Basic acceptance never rewri
 | mode | Behavior |
 | --- | --- |
 | `auto` | Publishes when static checks and the chosen method's gate pass with verdict `accept`; rejects on `reject`; returns to `open` on `inconclusive` |
-| `force` | Still requires static checks and the chosen method's gate; cannot bypass Evidence, Candidate completion or full A/B Runtime gates |
+| `force` | An administrator directly adopts and publishes the current Candidate without rerunning assessment, creating Candidate Execution or A/B Sessions, or requiring execution gates to pass. Authorization, Candidate revision, static content, baseline version, and cloud publication readback still apply. The original validation remains unchanged; overriding failed or absent validation records `validation_overridden=true`, with `review_overridden=true` additionally recorded for Experience Review. The console shows publication progress instead of Replay Case progress |
 
 Validation pins current Evidence, Candidate bytes, Replay Adapter revision and the `replay` module
 configuration. Missing execution configuration does not prevent accepting experience review; only
 execution methods consume MA resource gates. Publication retains the evaluated method by default and
 reuses completion with matching Candidate and execution fingerprints. Only `open` Candidates can be submitted.
+
+Forced experience-review adoption reuses the saved review for the current Candidate revision without another model call. Publication runs in the background and reports success only after the version is written and read back. A blocked publication keeps its details open and shows the reason.
 
 ### POST /api/skill-candidates/{candidate_id}/reject
 
@@ -156,7 +168,16 @@ Fields of `settings.evolve` and `settings.validation`:
 | `bundle_edit_max_bytes` | 262144 | Per editable file limit |
 | `bundle_prompt_max_bytes` | 786432 | Bundle limit placed in the Prompt |
 | `auto_evaluate` | true | Submit evaluation automatically after a Candidate is generated |
+| `assessment_timeout_seconds` | 600 | Total model assessment budget under `validation`, integer 30–1800 seconds |
 | `publish_mode` | manual | Publish automatically after accepted validation or wait for human review |
+
+`assessment_timeout_seconds` is tenant scoped and pinned with the validation command's configuration revision;
+updates affect newly accepted tasks only. The budget includes model queueing, HTTP requests and retries.
+Each HTTP request uses the remaining budget after queueing and previous attempts, reserving up to 5 seconds for cleanup.
+Coroutine cancellation cannot forcibly stop a synchronous HTTP thread; its concurrency slot stays occupied until the request ends.
+This setting controls strategy selection and Experience Review only, not Candidate Execution or True Replay execution timeouts.
+Identical source contracts appear once in the assessment input's `source_contracts` table, referenced by each Evidence's
+`source_contract_ref`. Evidence IDs, summaries, distinct contracts and material visibility remain separate.
 
 Prompt Studio usage is in the [Prompt Studio Guide](../guides/08-prompt-studio.md).
 

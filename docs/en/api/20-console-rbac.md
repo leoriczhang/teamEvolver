@@ -69,12 +69,18 @@ Removing the last active platform administrator returns `409 LAST_PLATFORM_ADMIN
 | POST | `/api/tenants` | Platform administrator | `{"display_name", "account_id"?}` creates a tenant |
 | POST | `/api/tenants/{tenant_id}/status` | Platform administrator | `{"status": "active"|"disabled"}` |
 | POST | `/api/tenants/{tenant_id}/rotate-token` | That tenant's administrator | Rotates the tenant key and returns the new `agent_token`; the `default` tenant cannot be rotated |
+| GET | `/api/tenants/{tenant_id}/token` | That tenant's administrator | Retrieves the current plaintext `agent_token` and `available`; caching disabled; null when the original was not retained |
+| PUT | `/api/tenants/{tenant_id}/token` | That tenant's administrator | `{"agent_token":"<original key>"}` retains a key matching the current hash without rotation |
 | GET | `/api/tenants/{tenant_id}/config` | That tenant's administrator | Tenant configuration overrides (credential fields only report presence) and editable keys |
 | PUT | `/api/tenants/{tenant_id}/config` | That tenant's administrator | `{"overrides": {...}}` merges; a `null` value deletes the key |
+| GET | `/api/tenants/{tenant_id}/runtime-config` | That tenant's administrator | Independent execution capacity `config` and `revision` |
+| PUT | `/api/tenants/{tenant_id}/runtime-config` | That tenant's administrator | Merge capacity using `{"expected_revision": 1, "config": {...}}`; CAS conflicts return 409 |
 | GET | `/api/tenants/{tenant_id}/members` | That tenant's administrator | Member list |
 | PUT | `/api/tenants/{tenant_id}/members/{user_id}` | That tenant's administrator | `{"role": "tenant_admin"|"member", "status": "active"|"disabled"}` adds or updates a member |
 
 The `tenant_id` in the path must equal the current `X-Tenant-Id`, otherwise `403 TENANT_MISMATCH`.
+
+Switching tenants clears MA connection, dataset and replay detail selectors from the console URL while retaining the current page. Reloading within the same tenant preserves detail links. Missing, deleted or out-of-tenant datasets show an unavailable state with a return to the current tenant's list, without continuing Case or replay-history requests.
 
 When a tenant is created:
 

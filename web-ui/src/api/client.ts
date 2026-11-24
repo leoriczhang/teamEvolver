@@ -46,7 +46,9 @@ export function setActiveTenantId(tenantId: string): void {
     const url = new URL(window.location.href);
     if (tenantId) url.searchParams.set("tenant", tenantId);
     else url.searchParams.delete("tenant");
-    if (changed) url.searchParams.delete("connection_id");
+    if (changed) {
+      for (const key of ["connection_id", "dataset", "replay"]) url.searchParams.delete(key);
+    }
     window.history.replaceState(null, "", url.toString());
   } catch {
     // localStorage/URL unavailable (private mode etc.) — selection is lost.

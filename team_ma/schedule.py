@@ -14,6 +14,26 @@ async def tick(services, *, tenant_id):
                 continue
             errors = await repo.operation_errors(conn, connection)
             if "ma.discover" in errors:
+                if errors["ma.discover"]["error"] == "ma_EnvironmentNotObserved":
+                    active = await conn.fetchval(
+                        f"SELECT 1 FROM {repo.schema}.worker_tasks WHERE subject_id=$1 AND kind='ma.discover' "
+                        "AND status IN ('queued','running','retry_wait','waiting_external','reconciling') LIMIT 1",
+                        connection["connection_id"],
+                    )
+                    last = await conn.fetchval(
+                        f"SELECT max(created_at) FROM {repo.schema}.ma_operations "
+                        "WHERE connection_id=$1 AND kind='ma.discover'", connection["connection_id"],
+                    )
+                    if not active and (not last or (now - last).total_seconds()
+                                       >= connection["config"]["poll_interval_seconds"]):
+                        await enqueue(conn, services, tenant_id=tenant_id,
+                                      connection_id=connection["connection_id"], kind="ma.discover")
+                continue
+            if await conn.fetchval(
+                f"SELECT 1 FROM {repo.schema}.worker_tasks WHERE subject_id=$1 AND kind='ma.discover' "
+                "AND status IN ('queued','running','retry_wait','waiting_external','reconciling') LIMIT 1",
+                connection["connection_id"],
+            ):
                 continue
             if connection["status"] != "ready" and not await repo.applied(conn, connection["connection_id"]):
                 continue

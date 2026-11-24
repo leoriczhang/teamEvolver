@@ -94,7 +94,7 @@ Python 测试只从 `tests/` 收集，按领域归档，命名使用职责而非
 
 并发：
 
-- 模型调用经 `teamEvolver/llm.py` 的专用线程池与全局并发槽（`TEAMEVOLVER_LLM_CONCURRENCY`，默认 8）；队列有界，背压用 429 或有界队列。
+- 模型调用经 `teamEvolver/llm.py` 的租户专用线程池与有界队列；Worker 使用租户独立容量及跨副本所有权租约。容量变更和排空规则见 [架构总览](./docs/zh/concepts/01-architecture.md)，验证一个租户满载时其他租户与入库阶段仍能推进。
 - 路由中的同步 I/O 用 `asyncio.to_thread`，不阻塞事件循环。
 - 跨副本互斥用 `resource_leases` 或数据库行锁，不依赖进程内锁。
 

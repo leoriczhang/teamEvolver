@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import CandidateReviewView from "./CandidateReviewView";
 
 const mocks = vi.hoisted(() => ({ api: vi.fn() }));
-vi.mock("@/api/client", () => ({ api: mocks.api }));
+vi.mock("@/api/client", () => ({ api: mocks.api, tenantHeaders: () => new Headers() }));
 vi.mock("@/features/ma/CandidateTargets", () => ({ default: () => null }));
 vi.stubGlobal("ResizeObserver", class {
   observe() {}
@@ -14,11 +14,39 @@ vi.stubGlobal("ResizeObserver", class {
 vi.mock("@/features/skills/dashboard/CandidateFeedback", () => ({
   default: ({ readOnly }: { readOnly: boolean }) => <span data-testid="feedback-mode">{String(readOnly)}</span>,
 }));
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("candidate replay state", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("keeps review details open when publication does not write a version", async () => {
+    const candidate = {
+      job_id: "candidate", candidate_revision: 4, skill_name: "demo", review_status: "open",
+      candidate_skill_md: "CANDIDATE", current_skill_md: "CURRENT",
+      evaluation: { recommended_publish: false, replay: { verdict: "inconclusive" } },
+    };
+    mocks.api.mockImplementation(async (path: string) => {
+      if (path.endsWith("/detail?include_replay=false")) return candidate;
+      if (path === "/api/skill-candidates/candidate/validate") {
+        return { job_id: "publish-check", status_url: "/api/jobs/publish-check" };
+      }
+      if (path === "/api/jobs/publish-check") return { status: "succeeded" };
+      if (path === "/api/skill-evolution/jobs/publish-check/result") return {
+        result: { status: "inconclusive", evaluation: { replay: { reason: "执行门禁不满足" } } },
+      };
+      return { candidates: [candidate] };
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<CandidateReviewView active canManage />);
+    fireEvent.click(await screen.findByRole("button", { name: "查看回放并发布" }));
+    fireEvent.click(await screen.findByRole("button", { name: "强制发布" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("执行门禁不满足");
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(mocks.api).toHaveBeenCalledWith("/api/skill-candidates/candidate/validate", expect.objectContaining({
+      body: JSON.stringify({ mode: "force", candidate_revision: 4 }),
+    }));
   });
 
   it("shows active server progress even when an older evaluation is cached", async () => {
@@ -48,6 +76,16 @@ describe("candidate replay state", () => {
     await waitFor(() => expect(screen.getByText("无法确定")).toBeTruthy());
     expect(screen.queryByText("持平 / 有增加")).toBeNull();
     view.unmount();
+  });
+
+  it("labels a queued force publication as publishing instead of evaluating", async () => {
+    mocks.api.mockResolvedValue({ candidates: [{
+      job_id: "candidate", skill_name: "demo", review_status: "validating", publication_pending: true,
+      evaluation: { recommended_publish: false, replay: { verdict: "inconclusive" } },
+    }] });
+    render(<CandidateReviewView active />);
+    expect(await screen.findByText("发布中…")).toBeTruthy();
+    expect(screen.queryByText(/评估中/)).toBeNull();
   });
 
   it("keeps open candidates actionable when the API returns an empty decision object", async () => {

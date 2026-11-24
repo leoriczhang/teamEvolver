@@ -83,7 +83,11 @@ Details：[20-console-rbac.md](../api/20-console-rbac.md)
 | GET | `/api/tenants/{tenant_id}/config` |
 | PUT | `/api/tenants/{tenant_id}/config` |
 | POST | `/api/tenants/{tenant_id}/rotate-token` |
+| GET | `/api/tenants/{tenant_id}/runtime-config` |
+| PUT | `/api/tenants/{tenant_id}/runtime-config` |
 | POST | `/api/tenants/{tenant_id}/status` |
+| GET | `/api/tenants/{tenant_id}/token` |
+| PUT | `/api/tenants/{tenant_id}/token` |
 
 ## Console, platform assets and workspace
 
@@ -346,4 +350,4 @@ Details：[17-skill-mining.md](../api/17-skill-mining.md)
 | GET | `/api/mining/settings` |
 | POST | `/api/mining/settings` |
 
-Total: 250
+Total: 254

@@ -13,7 +13,9 @@ import CandidateTargets from "@/features/ma/CandidateTargets";
 import UnifiedDiffView,{ InlineDiffView } from "@/components/UnifiedDiffView";
 import type { EvalResult,ReplaySide,WorkbenchChecklistReport } from "@/features/replay/api/client";
 import type { Candidate,CandidateFeedback } from "@/features/skills/api/client";
+import { candidateBaseline } from "@/features/skills/provenance";
 import CandidateFeedbackControls from "@/features/skills/dashboard/CandidateFeedback";
+import CandidateExecutionSources from "./CandidateExecutionSources";
 import CandidateReplayEvidence,{ EfficiencyTable } from "./CandidateReplayEvidence";
 import { toastErr,toastOk } from "@/lib/toast";
 import { useEffect,useRef,useState,type ReactNode } from "react";
@@ -83,7 +85,7 @@ export default function CandidateModal({
   onUpdated?: (detail: Candidate) => void;
   onFeedbackSaved: (jobId: string, feedback: CandidateFeedback) => void;
   showFeedback?: boolean;
-  onPublish?: (mode: "auto" | "force") => void;
+  onPublish?: (mode: "auto" | "force", revision?: number) => void | Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -92,6 +94,9 @@ export default function CandidateModal({
   const [override, setOverride] = useState<Candidate | null>(null);
   const [replayLoading, setReplayLoading] = useState(false);
   const [replayError, setReplayError] = useState("");
+  const [publishing, setPublishing] = useState(false);
+  const [publishError, setPublishError] = useState("");
+  const publicationRequest = useRef(0);
   const replayRequest = useRef(0);
   const [draft, setDraft] = useState<SkillDraft>({ name: "", description: "", category: "general", content: "" });
 
@@ -100,12 +105,29 @@ export default function CandidateModal({
     setOverride(null);
     setReplayLoading(false);
     setReplayError("");
+    setPublishing(false);
+    setPublishError("");
+    publicationRequest.current += 1;
     replayRequest.current += 1;
   }, [jobId, open]);
 
   const activeCand = override ?? cand;
   const activeEv = override ? (override.evaluation ?? null) : ev;
-  const evaluationRunning = evaluating || activeCand?.review_status === "validating";
+  const publicationPending = publishing || activeCand?.publication_pending === true;
+  const evaluationRunning = evaluating || activeCand?.review_status === "validating" && !publicationPending;
+
+  async function publish(mode: "auto" | "force") {
+    if (!onPublish || publishing) return;
+    const request = ++publicationRequest.current;
+    setPublishing(true); setPublishError("");
+    try {
+      await onPublish(mode, activeCand?.candidate_revision);
+    } catch (e) {
+      if (request === publicationRequest.current) setPublishError(e instanceof Error ? e.message : "发布失败");
+    } finally {
+      if (request === publicationRequest.current) setPublishing(false);
+    }
+  }
 
   const rep = activeEv?.replay || {};
   const replayCases = rep.cases || [];
@@ -118,7 +140,8 @@ export default function CandidateModal({
     : [rep.checklist?.baseline, rep.checklist?.candidate]
     .every(report => report?.all_satisfied === true && report.judge !== "unavailable" && (report.total || 0) > 0);
   const runtimePassed = reviewed || !rep.runtime_gate || rep.runtime_gate.status === "passed";
-  const canPublish = !evaluationRunning && checklistPassed && runtimePassed && (reviewed || lightweight || !rep.error)
+  const canPublish = !evaluationRunning && !publicationPending
+    && checklistPassed && runtimePassed && (reviewed || lightweight || !rep.error)
     && rep.verdict === "accept" && activeEv?.recommended_publish === true;
   const replayPager = usePagedItems(replayCases);
   const currentMd =
@@ -138,9 +161,10 @@ export default function CandidateModal({
     activeCand?.static_validation ||
     activeCand?.candidate_skill?.static_validation;
   const action = activeEv?.proposed_action || activeCand?.proposed_action || "";
-  const missingCurrentText = action === "create_skill"
-    ? "（新建技能，无当前版本）"
-    : "（候选 Job 未携带当前版本，且当前技能库未找到对应 SKILL.md）";
+  const baselineLabel = candidateBaseline(activeCand);
+  const missingCurrentText = baselineLabel === "新建技能 · 无基线版本"
+    ? "（新建技能，无基线版本）"
+    : "（未记录生成候选时的基线 SKILL.md）";
 
   function startEdit() {
     const skill = activeCand?.candidate_skill || activeEv?.candidate_skill;
@@ -214,7 +238,9 @@ export default function CandidateModal({
       {onRetryDetail && <Button variant="outline" size="sm" onClick={onRetryDetail}>重试</Button>}
     </div>;
   } else if (!activeEv) {
-    bodyInner = evaluationRunning ? (
+    bodyInner = publicationPending ? (
+      <div role="status" className="text-sm text-muted-foreground">正在发布候选，完成后自动更新发布结果。</div>
+    ) : evaluationRunning ? (
       <Empty>正在运行 A/B 回放评估，请稍候…（首次评估需调用模型，可能耗时较久）</Empty>
     ) : readOnly ? (
       <Empty>该历史候选没有可展示的缓存评估结果。</Empty>
@@ -229,7 +255,11 @@ export default function CandidateModal({
   } else {
     // Replay detail
     let replayHtml: ReactNode;
-    if (evaluationRunning) {
+    if (publicationPending) {
+      replayHtml = <div role="status" className="text-xs text-muted-foreground">
+        正在发布候选，完成后自动更新发布结果。
+      </div>;
+    } else if (evaluationRunning) {
       const progress = activeCand?.replay_progress;
       replayHtml = <div role="status" className="text-xs text-muted-foreground">
         正在评估候选
@@ -315,6 +345,7 @@ export default function CandidateModal({
             <span className="text-muted-foreground">·</span>
             <Pill tone="blue">{action || "-"}</Pill>
           </div>
+          <div className="mt-2 text-xs text-muted-foreground">{baselineLabel}</div>
         </div>
         {activeCand?.rationale && (
           <div>
@@ -322,6 +353,7 @@ export default function CandidateModal({
             <div>{activeCand.rationale}</div>
           </div>
         )}
+        <CandidateExecutionSources sources={activeCand?.execution_provenance} />
         {activeCand?.evidence_classification && (
           <div>
             <div className="mb-1.5 text-xs font-semibold text-muted-foreground">证据归属</div>
@@ -361,7 +393,7 @@ export default function CandidateModal({
                 : "amber"
             }
           >
-            {evaluationRunning ? "正在评估，等待新结果"
+            {publicationPending ? "正在发布，保留原验证结论" : evaluationRunning ? "正在评估，等待新结果"
               : reviewed ? rep.assessment?.reason || rep.reason || "经验审阅待完成"
               : lightweight ? checklistPassed ? "基础验证通过" : "候选尚未完成本次验证范围"
               : rep.error ? "回放失败，无法确定"
@@ -461,19 +493,19 @@ export default function CandidateModal({
             ))}
           </div>
         )}
-        <SkillMdBlock title="当前 SKILL.md" body={currentMd || missingCurrentText} />
+        <SkillMdBlock title={`基线 SKILL.md · ${baselineLabel}`} body={currentMd || missingCurrentText} />
         <div className="rounded-lg border border-border bg-surface-subtle p-3">
           <div className="mb-2 flex items-center justify-between gap-2">
             <div className="text-xs font-semibold text-muted-foreground">
               候选 SKILL.md
               <span className="ml-2 font-normal">
-                相对当前版本的改动已高亮：<span className="text-[#1a7f37]">绿 = 新增</span>
+                相对基线版本的改动已高亮：<span className="text-[#1a7f37]">绿 = 新增</span>
                 {" / "}
                 <span className="text-[#cf222e]">红 = 删除</span>
               </span>
             </div>
             {!readOnly && !editing && (
-              <Button variant="outline" size="sm" onClick={startEdit}>
+              <Button variant="outline" size="sm" disabled={publishing} onClick={startEdit}>
                 编辑
               </Button>
             )}
@@ -548,23 +580,26 @@ export default function CandidateModal({
             <Button
               variant="outline"
               size="sm"
-              disabled={evaluationRunning}
+              disabled={evaluationRunning || publicationPending}
               onClick={() => runEvaluate(true)}
             >
               {evaluationRunning ? "评估中…" : "重新评估"}
             </Button>
           )}
-          {!readOnly && <Button variant="outline" size="sm" disabled={evaluationRunning || editing}
+          {!readOnly && <Button variant="outline" size="sm" disabled={evaluationRunning || publicationPending || editing}
             onClick={() => onEvaluate(true, "full_ab")}>完整 A/B</Button>}
           <span className="text-xs text-muted-foreground">
-            {readOnly ? "历史候选只读展示" : evaluationRunning ? "正在评估" : "已保存的评估结果"}
+            {readOnly ? "历史候选只读展示" : publicationPending ? "正在发布" : evaluationRunning ? "正在评估" : "已保存的评估结果"}
           </span>
         </div>
         {!readOnly && onPublish && (
           <div className="sticky bottom-0 flex flex-wrap items-center gap-2 border-t border-border bg-background py-3">
-            <Button disabled={evaluationRunning || editing || !canPublish} onClick={() => onPublish("auto")}>按验证结论发布</Button>
-            <Button variant="outline" disabled={evaluationRunning || editing} onClick={() => onPublish("force")}>强制发布</Button>
-            <span className="text-xs text-muted-foreground">发布时复用同版本、同执行配置的完成证据。</span>
+            <Button disabled={evaluationRunning || publicationPending || editing || !canPublish} onClick={() => publish("auto")}>按验证结论发布</Button>
+            <Button variant="outline" disabled={evaluationRunning || publicationPending || editing} onClick={() => publish("force")}>
+              {publicationPending ? "发布中…" : "强制发布"}
+            </Button>
+            <span className="text-xs text-muted-foreground">强制发布直接采纳候选，不重新评估；原验证结论保留，仍检查内容与版本。</span>
+            {publishError && <p role="alert" className="w-full text-sm text-destructive">{publishError}</p>}
           </div>
         )}
       </div>

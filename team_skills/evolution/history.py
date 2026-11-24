@@ -141,8 +141,19 @@ async def candidate_payload(conn, tx, item: dict, *, compact: bool = False, incl
     detail = item["detail"]
     payload = {
         **detail, "job_id": item["candidate_id"], "skill_name": item["skill_name"],
+        "base_version": item["base_version"],
+        "baseline": {
+            **(detail.get("baseline_identity") or {}),
+            "skill_name": item["skill_name"], "version": item["base_version"],
+            "kind": "version" if item["base_version"] > 0 else
+            "new" if item["proposed_action"] in {"create", "create_skill"} else "unknown",
+        },
+        "user_modified": bool(detail.get("user_modified")) or any(
+            event["kind"] == "revised" and event["actor"] != "evolution" for event in events
+        ),
         "candidate_skill_name": item["skill_name"], "proposed_action": item["proposed_action"],
         "candidate_revision": item["revision"], "review_status": item["status"],
+        "publication_pending": False,
         "replay_verdict": item["verdict"], "recommended_publish": item["verdict"] == "accept",
         "feedback": feedback(item, events), "evaluation": item["evaluation"],
         "decision": item["decision"], "validation_job_id": item["validate_task_id"],
@@ -163,16 +174,21 @@ async def candidate_payload(conn, tx, item: dict, *, compact: bool = False, incl
     if item["status"] == "validating":
         from team_skills.evolution.repository import EvolutionRepository
         command = await EvolutionRepository(tx).command(conn, item["validate_task_id"])
-        frozen = command["payload"].get("detail", detail) if command else detail
-        assessment = await EvolutionRepository(tx).branch(conn, item["validate_task_id"], "assessment")
-        method = (assessment or {}).get("method")
-        payload["replay_progress"] = {
-            "total": 0 if method == "experience_review" else 1 if method == "candidate_execution"
-            else len(frozen.get("replay_cases") or []),
-            "validation_method": method,
-            **await ReplayRepository(tx).progress(conn, "skill", item["validate_task_id"]),
-        }
-        payload["replay_sampling"] = frozen.get("replay_sampling") or {}
+        payload["publication_pending"] = (
+            (command is not None and command["payload"].get("mode") == "force")
+            or item["decision"].get("status") == "accepted"
+        )
+        if not payload["publication_pending"]:
+            frozen = command["payload"].get("detail", detail) if command else detail
+            assessment = await EvolutionRepository(tx).branch(conn, item["validate_task_id"], "assessment")
+            method = (assessment or {}).get("method")
+            payload["replay_progress"] = {
+                "total": 0 if method == "experience_review" else 1 if method == "candidate_execution"
+                else len(frozen.get("replay_cases") or []),
+                "validation_method": method,
+                **await ReplayRepository(tx).progress(conn, "skill", item["validate_task_id"]),
+            }
+            payload["replay_sampling"] = frozen.get("replay_sampling") or {}
     if compact:
         for key in ("bundle_diff", "skill_diff", "file_changes", "candidate_skill", "current_skill",
                     "candidate_skill_md", "current_skill_md"):
@@ -198,23 +214,23 @@ async def candidate_payload(conn, tx, item: dict, *, compact: bool = False, incl
     return payload
 
 
-async def version_context(conn, tx, name: str, version: int) -> dict:
+async def version_context(conn, tx, name: str, version: int, *, provenance: dict | None = None) -> dict:
     repo = CandidateRepository(tx)
-    from team_skills.library.store import snapshot
-    cloud = snapshot(tx)
-    remote = cloud.target(name)["record"].get("id", "") if cloud is not None and cloud.managed(name) else ""
+    candidate_id = (provenance or {}).get("candidate_id")
+    if not candidate_id:
+        return {}
     row = await conn.fetchrow(
         f"SELECT candidate_id FROM {tx.pool.schema}.skill_candidates "
         "WHERE skill_name=$1 AND published_version=$2 AND status='published' "
-        "AND ($3='' OR decision->>'skill_id'=$3) "
-        "ORDER BY decided_at DESC LIMIT 1", name, version, remote,
+        "AND candidate_id=$3", name, version, candidate_id,
     )
     if not row:
         return {}
     payload = await candidate_payload(conn, tx, await repo.require(conn, row["candidate_id"]))
     return {
         key: payload.get(key) for key in (
-            "job_id", "candidate_revision", "proposed_action", "rationale", "edit_summary",
+            "job_id", "candidate_revision", "proposed_action", "base_version", "baseline", "user_modified",
+            "rationale", "edit_summary",
             "evidence_classification", "decision", "evaluation", "skill_diff", "bundle_diff", "static_validation",
         )
     }

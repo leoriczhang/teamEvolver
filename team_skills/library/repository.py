@@ -258,12 +258,15 @@ class SkillLibraryRepository:
         if self._cloud is not None and self._cloud.managed(name):
             return self._cloud.history.get(name, [])
         rows = await conn.fetch(
-            "SELECT version, action, deleted, sha256, tree_sha256, file_count, total_bytes, "
-            "  description, category, restored_from, mutation_id, actor, created_at "
-            f"FROM {self._schema}.skill_versions WHERE name = $1 ORDER BY version DESC",
+            "SELECT v.*, m.source AS mutation_source, m.metadata AS mutation_metadata, m.previous_version "
+            f"FROM {self._schema}.skill_versions v LEFT JOIN {self._schema}.skill_mutations m "
+            "ON m.tenant_id=v.tenant_id AND m.name=v.name AND m.mutation_id=v.mutation_id "
+            "AND m.status='published' AND m.version=v.version "
+            "WHERE v.name = $1 ORDER BY v.version DESC",
             name,
         )
-        return [dict(row) for row in rows]
+        from .provenance import recorded_version
+        return [recorded_version({**dict(row), "mutation_metadata": _loads(row["mutation_metadata"])}) for row in rows]
 
     async def get_version(self, conn: Any, name: str, version: int, *, local=False) -> dict[str, Any] | None:
         if not local and self._cloud is not None and self._cloud.managed(name):
@@ -271,13 +274,15 @@ class SkillLibraryRepository:
             target = self._cloud.target(name)
             cached = await self._cloud.provider.cached(
                 conn, (target["connection"]["connection_id"], target["record"]["id"], int(version)))
+            history = next((v for v in self._cloud.history.get(name, []) if v["version"] == int(version)), {})
             return {**(cached[0] if cached else {}), **bundle_metadata(name, bundle),
                     "version": int(version), "deleted": False, "action": "cloud",
-                    "actor": "", "restored_from": None}
+                    "actor": "", "restored_from": None, **history}
         row = await conn.fetchrow(
-            "SELECT version, action, deleted, sha256, tree_sha256, file_count, total_bytes, "
-            "  description, category, runtime_policy, restored_from, mutation_id, actor, created_at "
-            f"FROM {self._schema}.skill_versions WHERE name = $1 AND version = $2",
+            "SELECT v.*, m.source AS mutation_source, m.metadata AS mutation_metadata, m.previous_version "
+            f"FROM {self._schema}.skill_versions v LEFT JOIN {self._schema}.skill_mutations m "
+            "ON m.tenant_id=v.tenant_id AND m.name=v.name AND m.mutation_id=v.mutation_id "
+            "AND m.status='published' AND m.version=v.version WHERE v.name=$1 AND v.version=$2",
             name,
             int(version),
         )
@@ -285,7 +290,9 @@ class SkillLibraryRepository:
             return None
         item = dict(row)
         item["runtime_policy"] = _loads(item.get("runtime_policy"))
-        return item
+        item["mutation_metadata"] = _loads(item.get("mutation_metadata"))
+        from .provenance import recorded_version
+        return recorded_version(item)
 
     async def read_version_bundle(self, conn: Any, name: str, version: int, *, local=False) -> dict[str, bytes]:
         """The immutable bundle of one non-tombstone version."""

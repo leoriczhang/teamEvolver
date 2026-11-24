@@ -191,8 +191,7 @@ def test_publish_and_version_provenance_are_atomic(pg_env, tmp_path, monkeypatch
 
 
 @pytest.mark.postgres
-@pytest.mark.parametrize("mode", ["auto", "force"])
-def test_runtime_failure_never_publishes_even_in_force_mode(pg_env, tmp_path, monkeypatch, mode):
+def test_runtime_failure_blocks_automatic_publication(pg_env, tmp_path, monkeypatch):
     cid = seed_candidate(pg_env)
 
     async def replay(job, config):
@@ -200,7 +199,7 @@ def test_runtime_failure_never_publishes_even_in_force_mode(pg_env, tmp_path, mo
 
     with _pod(pg_env, tmp_path, monkeypatch, pod="a") as client:
         _login(client, bootstrap=True)
-        r = client.post(f"/api/skill-candidates/{cid}/validate", headers=H, json={"mode": mode})
+        r = client.post(f"/api/skill-candidates/{cid}/validate", headers=H, json={"mode": "auto"})
         drive(pg_env, worker(pg_env, skill_replay=replay))
     assert candidate(pg_env, cid)["status"] == "open"
     assert command(pg_env, r.json()["job_id"])["result"]["status"] == "inconclusive"
@@ -244,7 +243,7 @@ class Payloads:
         return copy.deepcopy(self.data[ref])
 
 
-def seed_session(env, payloads, sid, user, skill=""):
+def seed_session(env, payloads, sid, user, skill="", runtime=None):
     session = {
         "session_id": sid,
         "_summary": "A reusable lesson.",
@@ -271,6 +270,8 @@ def seed_session(env, payloads, sid, user, skill=""):
         },
         "value_judge": {"mode": "merged", "decision": "valuable", "confidence": 0.9, "reason": "Reusable"},
     }
+    if runtime:
+        session["runtime"] = copy.deepcopy(runtime)
     payloads.data[sid] = session
 
     async def seed(conn):
@@ -287,10 +288,27 @@ def seed_session(env, payloads, sid, user, skill=""):
 
 
 @pytest.mark.postgres
-def test_evolution_worker_creates_candidate_and_consumes_once(pg_env, tmp_path, monkeypatch):
+@pytest.mark.parametrize("runtime_change", [None, "model", "environment"])
+def test_evolution_worker_creates_candidate_and_consumes_once(pg_env, tmp_path, monkeypatch, runtime_change):
+    from team_replay.fingerprints import execution_fingerprint
+
+    runtime = {
+        "type": "managed-agents", "connection_id": "ma",
+        "agent_graph": {"agents": {"agent": {"id": "agent", "version": 7,
+                                           "model": {"id": "source-model"}, "skills": []}}},
+        "environment": {"id": "source-env", "name": "source", "config": {"setup_script": "source setup"}},
+    } if runtime_change else None
+    current_runtime = copy.deepcopy(runtime)
+    if runtime_change == "model":
+        current_runtime["agent_graph"]["agents"]["agent"]["model"]["id"] = "current-model"
+    elif runtime_change == "environment":
+        current_runtime["environment"]["config"]["setup_script"] = "current setup"
+    async def fingerprints(tenant, *, conn=None):
+        return {"ma": execution_fingerprint(current_runtime)} if current_runtime else {}
+
     payloads = Payloads()
-    seed_session(pg_env, payloads, "s1", "alice")
-    seed_session(pg_env, payloads, "s2", "bob")
+    seed_session(pg_env, payloads, "s1", "alice", runtime=runtime)
+    seed_session(pg_env, payloads, "s2", "bob", runtime=runtime)
     calls = []
 
     async def planner(**kwargs):
@@ -309,13 +327,22 @@ def test_evolution_worker_creates_candidate_and_consumes_once(pg_env, tmp_path, 
         _login(client, bootstrap=True)
         first = client.post("/api/skill-evolution/trigger", headers=H, json={})
         assert first.status_code == 202, first.text
-        services = worker(pg_env, skill_planner=planner, session_payloads=payloads)
+        services = worker(pg_env, skill_planner=planner, session_payloads=payloads,
+                          ma_automatic_fingerprints=fingerprints)
         drive(pg_env, services, kinds=["skill.evolve"])
         result = command(pg_env, first.json()["job_id"])["result"]
         assert result["sessions"] == 2 and result["candidates_queued"] == 1
         rows = client.get("/api/skill-candidates", headers=H).json()["candidates"]
         assert len(rows) == 1 and rows[0]["review_status"] == "validating"
         item = candidate(pg_env, rows[0]["job_id"])
+        if runtime:
+            sources = item["detail"]["execution_provenance"]
+            assert {s["session_id"] for s in sources} == {"s1", "s2"}
+            assert all(s["agents"][0]["model"]["id"] == "source-model" for s in sources)
+            assert all(s["environment"]["id"] == "source-env" for s in sources)
+            detail = client.get(f"/api/skill-candidates/{item['candidate_id']}/detail", headers=H).json()
+            assert detail["execution_provenance"] == sources
+            assert result["evolutions"][0]["execution_provenance"] == sources
         assert len(item["detail"]["replay_cases"]) == 2
         assert all(
             len(case["provenance"]["session_ids"]) >= 2
@@ -345,7 +372,7 @@ def test_missing_execution_snapshot_does_not_prevent_queued_review(pg_env, tmp_p
             "rationale": "shared lesson",
         }
 
-    async def missing_snapshot(*args):
+    async def missing_snapshot(*args, **kwargs):
         raise ValueError("Recorded MA configuration or input materials are incomplete")
 
     with _pod(pg_env, tmp_path, monkeypatch, pod="a") as client:

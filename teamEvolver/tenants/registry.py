@@ -280,6 +280,7 @@ class TenantRegistry:
             )
             configured = ""
         self._single_token_hash = hash_agent_token(configured) if configured else ""
+        self._single_token = configured
 
     # -- mode --------------------------------------------------------------- #
 
@@ -356,7 +357,7 @@ class TenantRegistry:
                     f"(tenant_id={existing['tenant_id']})"
                 )
             token = generate_agent_token()
-            row = self._run(self._insert_tenant(tid, display_name, hash_agent_token(token)))
+            row = self._run(self._insert_tenant(tid, display_name, hash_agent_token(token), token))
             if row is None:
                 raise ValueError("tenant account already exists")
             ctx = self._row_to_ctx(row)
@@ -373,11 +374,29 @@ class TenantRegistry:
             # deployment and widen the machine-path surface.
             raise ValueError("default is reserved")
         token = generate_agent_token()
-        row = self._run(self._update_token(tid, hash_agent_token(token)))
+        row = self._run(self._update_token(tid, hash_agent_token(token), token))
         if row is None:
             return None
         self._invalidate()
         return token
+
+    def get_token(self, tenant_id: str) -> str | None:
+        """Read the existing key without issuing or rotating a credential."""
+        tid = validate_tenant_id(tenant_id)
+        if not self._pg_enabled:
+            return self._single_token if tid == DEFAULT_TENANT_ID else None
+        return self._run(self._retained_token(tid))
+
+    def import_token(self, tenant_id: str, token: str) -> str:
+        """Retain an original key only when it matches the current tenant hash."""
+        self._require_pg()
+        tid = validate_tenant_id(tenant_id)
+        if tid == DEFAULT_TENANT_ID:
+            raise ValueError("default is reserved")
+        token = str(token or "").strip()
+        if not token.startswith(AGENT_TOKEN_PREFIX):
+            raise ValueError("tenant key must start with tevt_")
+        return self._run(self._retained_token(tid, token))
 
     def set_status(self, tenant_id: str, status: str) -> bool:
         self._require_pg()
@@ -493,10 +512,15 @@ class TenantRegistry:
                 display_name,
             )
 
-    async def _insert_tenant(self, tid: str, display_name: str, token_hash: str):
+    async def _insert_tenant(self, tid: str, display_name: str, token_hash: str, token: str):
+        from dataclasses import asdict
+
         from ..config_runtime import TENANT_CONFIG_MODULES
+        from ..runtime.capacity import TenantCapacity
+        from .credentials import TenantCredentials
 
         schema = self._schema
+        credentials = TenantCredentials(self._runtime, tid)
         async with self._runtime.tenant_conn(DEFAULT_TENANT_ID) as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(
@@ -519,18 +543,56 @@ class TenantRegistry:
                     tid,
                     list(TENANT_CONFIG_MODULES),
                 )
+                await conn.execute(
+                    f"UPDATE {schema}.tenant_configs SET config=$2::jsonb WHERE tenant_id=$1 AND module='runtime'",
+                    tid, json.dumps(asdict(TenantCapacity())),
+                )
+                await credentials.retain(conn, token, token_hash)
                 return row
 
-    async def _update_token(self, tid: str, token_hash: str):
+    async def _update_token(self, tid: str, token_hash: str, token: str):
+        from .credentials import TenantCredentials
+
         schema = self._schema
+        credentials = TenantCredentials(self._runtime, tid)
         async with self._runtime.tenant_conn(DEFAULT_TENANT_ID) as conn:
-            return await conn.fetchrow(
-                f"UPDATE {schema}.tenants SET agent_token_hash = $2 "
-                "WHERE tenant_id = $1 AND status = 'active' "
-                "RETURNING " + _COLS,
-                tid,
-                token_hash,
-            )
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    f"UPDATE {schema}.tenants SET agent_token_hash = $2 "
+                    "WHERE tenant_id = $1 AND status = 'active' "
+                    "RETURNING " + _COLS,
+                    tid,
+                    token_hash,
+                )
+                if row is not None:
+                    await conn.execute("SELECT set_config('app.tenant_id', $1, true)", tid)
+                    await credentials.retain(conn, token, token_hash)
+                return row
+
+    async def _retained_token(self, tid: str, token: str | None = None):
+        from .credentials import TenantCredentials
+
+        async with self._runtime.tenant_conn(DEFAULT_TENANT_ID) as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    f"SELECT agent_token_hash FROM {self._schema}.tenants "
+                    "WHERE tenant_id=$1 FOR UPDATE", tid,
+                )
+                if row is None:
+                    if token is not None:
+                        raise ValueError("unknown tenant")
+                    return None
+                token_hash = str(row["agent_token_hash"] or "")
+                if token is not None and not hmac.compare_digest(hash_agent_token(token), token_hash):
+                    raise ValueError("key does not match the current tenant key")
+                if not token_hash:
+                    return None
+                await conn.execute("SELECT set_config('app.tenant_id', $1, true)", tid)
+                credentials = TenantCredentials(self._runtime, tid)
+                if token is not None:
+                    await credentials.retain(conn, token, token_hash)
+                    return token
+                return await credentials.read(conn, token_hash)
 
     async def _update_status(self, tid: str, status: str):
         schema = self._schema
